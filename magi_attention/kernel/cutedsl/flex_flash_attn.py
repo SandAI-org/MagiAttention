@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Optional, Tuple
 
-import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass import Float32, Int32
@@ -33,6 +32,7 @@ from quack.compile_utils import make_fake_tensor as fake_tensor
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.kernel.cutedsl.legacy.cache_utils import get_jit_cache
 from magi_attention.kernel.cutedsl.legacy.testing import is_fake_mode
+from magi_attention.utils import to_cute_dtype
 
 if os.environ.get("CUTE_DSL_PTXAS_PATH", None) is not None:
     from magi_attention.kernel.cutedsl.legacy import cute_dsl_ptxas  # noqa: F401
@@ -46,7 +46,7 @@ from magi_attention.kernel.cutedsl.ffa_bwd_sm90 import FFABwdSm90
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
 from magi_attention.kernel.cutedsl.ffa_fwd_sm80 import FFAFwdSm80
 from magi_attention.kernel.cutedsl.ffa_fwd_sm90 import FFAFwdSm90
-from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import DescaleTensors, FFAFwdSm100
+from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
 from magi_attention.kernel.cutedsl.legacy import fa_logging, utils
 from magi_attention.kernel.cutedsl.legacy.block_sparsity import (
     BlockSparseTensorsTorch,
@@ -326,15 +326,6 @@ def _validate_tensor(t, name, expected_shape, expected_dtype, expected_device):
         assert t.is_cuda, f"{name} must be on CUDA"
 
 
-torch2cute_dtype_map = {
-    torch.float16: cutlass.Float16,
-    torch.bfloat16: cutlass.BFloat16,
-    torch.float32: cutlass.Float32,
-    torch.float8_e4m3fn: cutlass.Float8E4M3FN,
-    torch.float8_e5m2: cutlass.Float8E5M2,
-}
-
-
 def _resolve_causal_local_window(
     causal, window_size_left, window_size_right, mask_mod=None
 ):
@@ -372,7 +363,6 @@ def _flash_attn_fwd(
     cu_seqlens_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
-    min_seqlen_k: Optional[int] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
     softcap: Optional[float] = None,
@@ -392,9 +382,6 @@ def _flash_attn_fwd(
     out: Optional[torch.Tensor] = None,
     lse: Optional[torch.Tensor] = None,
     aux_tensors: Optional[list[torch.Tensor]] = None,
-    q_descale: Optional[torch.Tensor] = None,
-    k_descale: Optional[torch.Tensor] = None,
-    v_descale: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlashAttention.
 
@@ -411,9 +398,6 @@ def _flash_attn_fwd(
             This is how we thread them through to the inner kernel.
     """
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
-    q_descale, k_descale, v_descale = [
-        maybe_contiguous(t) for t in (q_descale, k_descale, v_descale)
-    ]
     num_head, head_dim = q.shape[-2:]
     if cu_seqlens_q is None:
         batch_size, seqlen_q = q.shape[:2]
@@ -442,9 +426,7 @@ def _flash_attn_fwd(
     assert q.dtype in [
         torch.float16,
         torch.bfloat16,
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-    ], "inputs must be float16, bfloat16, fp8 e4m3fn, or fp8 e5m2"
+    ], "inputs must be float16 or bfloat16"
     assert q.dtype == k.dtype == v.dtype, "inputs must have the same dtype"
     for t in [cu_seqlens_q, cu_seqlens_k]:
         if t is not None:
@@ -461,9 +443,6 @@ def _flash_attn_fwd(
                 q,
                 k,
                 v,
-                q_descale,
-                k_descale,
-                v_descale,
                 cu_seqlens_q,
                 cu_seqlens_k,
                 learnable_sink,
@@ -495,12 +474,7 @@ def _flash_attn_fwd(
     if arch // 10 == 8:
         pack_gqa = False
 
-    is_fp8 = q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
-    if is_fp8 and (q.requires_grad or k.requires_grad or v.requires_grad):
-        raise NotImplementedError(
-            "FA4 CuTe FP8 backward is not supported yet (forward-only)."
-        )
-    out_torch_dtype = torch.bfloat16 if is_fp8 else q.dtype
+    out_torch_dtype = q.dtype
     device = q.device
     q_batch_seqlen_shape = (
         (batch_size, seqlen_q) if cu_seqlens_q is None else (total_q,)
@@ -544,26 +518,7 @@ def _flash_attn_fwd(
             lse.fill_(float("-inf"))
         return out, lse
 
-    if is_fp8:
-        for t, name in (
-            (q_descale, "q_descale"),
-            (k_descale, "k_descale"),
-            (v_descale, "v_descale"),
-        ):
-            if t is not None:
-                _validate_tensor(
-                    t, name, (batch_size, num_head_kv), torch.float32, device
-                )
-    else:
-        assert (
-            q_descale is None and k_descale is None and v_descale is None
-        ), "q_descale/k_descale/v_descale are only supported for FP8 inputs"
-
-    dtype = torch2cute_dtype_map[q.dtype]
-    if is_fp8:
-        assert (
-            arch // 10 == 10
-        ), "FP8 is only supported on SM100 (compute capability 10.x) for FA4 CuTe."
+    dtype = to_cute_dtype(q.dtype)
     use_block_sparsity = block_sparse_tensors is not None
 
     causal, local, window_size_left, window_size_right = _resolve_causal_local_window(
@@ -610,8 +565,6 @@ def _flash_attn_fwd(
         max_seqlen_q = seqlen_q if cu_seqlens_q is None else total_q
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
-    if cu_seqlens_k is None:
-        min_seqlen_k = seqlen_k
     seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
     if arch // 10 == 10:
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
@@ -711,9 +664,6 @@ def _flash_attn_fwd(
         window_size_left is not None,
         window_size_right is not None,
         learnable_sink is not None,
-        q_descale is not None,
-        k_descale is not None,
-        v_descale is not None,
         block_sparse_tensors is None or block_sparse_tensors.cu_total_m_blocks is None,
         block_sparse_tensors is None
         or block_sparse_tensors.cu_block_idx_offsets is None,
@@ -750,33 +700,6 @@ def _flash_attn_fwd(
             lse_tensor = to_cute_tensor(lse, assumed_align=4)
         else:
             lse_tensor = None
-
-        q_descale_tensor = (
-            to_cute_tensor(q_descale, assumed_align=4, leading_dim=1)
-            if q_descale is not None
-            else None
-        )
-        k_descale_tensor = (
-            to_cute_tensor(k_descale, assumed_align=4, leading_dim=1)
-            if k_descale is not None
-            else None
-        )
-        v_descale_tensor = (
-            to_cute_tensor(v_descale, assumed_align=4, leading_dim=1)
-            if v_descale is not None
-            else None
-        )
-        descale_tensors_tensor = (
-            DescaleTensors(
-                q_descale=q_descale_tensor,
-                k_descale=k_descale_tensor,
-                v_descale=v_descale_tensor,
-            )
-            if q_descale_tensor is not None
-            or k_descale_tensor is not None
-            or v_descale_tensor is not None
-            else None
-        )
 
         sparse_tensors = None
         if normalized_block_sparse_tensors is not None:
@@ -924,7 +847,8 @@ def _flash_attn_fwd(
             learnable_sink_tensor,
         ]
         if arch // 10 in [10, 11]:
-            compile_args.append(descale_tensors_tensor)
+            # FP8 descale tensors removed; SM100 kernel descale slot is always None.
+            compile_args.append(None)
         compile_args.extend(
             [
                 sparse_tensors,
@@ -938,18 +862,6 @@ def _flash_attn_fwd(
 
     if not is_fake_mode():
         q_call, k_call, v_call = q.detach(), k.detach(), v.detach()
-        if is_fp8:
-            # need uint8 workaround until we pin torch >= 2.11.0 where fp8 export is supported
-            q_call = q_call.view(torch.uint8)
-            k_call = k_call.view(torch.uint8)
-            v_call = v_call.view(torch.uint8)
-        descale_tensors = (
-            DescaleTensors(
-                q_descale=q_descale, k_descale=k_descale, v_descale=v_descale
-            )
-            if q_descale is not None or k_descale is not None or v_descale is not None
-            else None
-        )
         call_args = [
             q_call,
             k_call,
@@ -967,7 +879,8 @@ def _flash_attn_fwd(
             learnable_sink,
         ]
         if arch // 10 in [10, 11]:
-            call_args.append(descale_tensors)
+            # FP8 descale tensors removed; SM100 kernel descale slot is always None.
+            call_args.append(None)
         call_args.extend(
             [
                 (
@@ -1651,7 +1564,7 @@ def _flash_attn_bwd(
                 device=device,
             )
 
-    dtype = torch2cute_dtype_map[q.dtype]
+    dtype = to_cute_dtype(q.dtype)
     current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
 
     if deterministic:
@@ -2139,7 +2052,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         cu_seqlens_k: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_k: Optional[int] = None,
-        min_seqlen_k: Optional[int] = None,
         softmax_scale: Optional[float] = None,
         causal: bool = False,
         window_size: Tuple[Optional[int], Optional[int]] = (None, None),
@@ -2163,7 +2075,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
-            min_seqlen_k=min_seqlen_k,
             softmax_scale=softmax_scale,
             causal=causal,
             window_size_left=window_size[0],
@@ -2254,7 +2165,6 @@ def flex_flash_attn_func(
     cu_seqlens_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
-    min_seqlen_k: Optional[int] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
     window_size: Tuple[Optional[int], Optional[int]] = (None, None),
@@ -2279,8 +2189,6 @@ def flex_flash_attn_func(
         more general flex q/k ranges that ffa targets.
 
     max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
-
-    min_seqlen_k: for varlen, the minimum kv sequence length for any batch.
     """
     return FlexFlashAttnFunc.apply(
         q,
@@ -2290,7 +2198,6 @@ def flex_flash_attn_func(
         cu_seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
-        min_seqlen_k,
         softmax_scale,
         causal,
         window_size,
