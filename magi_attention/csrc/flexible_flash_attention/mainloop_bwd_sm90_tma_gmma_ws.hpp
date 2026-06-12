@@ -1394,8 +1394,8 @@ struct CollectiveMainloopBwdSm90 {
         // dPsum scatter: distribute tokens round-robin across group threads (16B per token)
         for (int i = idx_in_group; i < NumRowsPerGroupQ; i += GroupSize) {
           float* dpsum_dst = &sdPsum(_0{}, group_idx * NumRowsPerGroupQ + i, smem_pipe_write_do_cur.index());
-          auto gdPsum_src = make_tensor(
-              make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdPsum_base + dpsum_row_offset(block_meta.token_indices[i]))), Layout<_1>{});
+          auto gdPsum_src =
+              make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdPsum_base + dpsum_row_offset(block_meta.token_indices[i]))), Layout<_1>{});
           auto sdPsum_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dpsum_dst)), Layout<_1>{});
           cute::copy(cp_async_cg, gdPsum_src, sdPsum_dst);
         }

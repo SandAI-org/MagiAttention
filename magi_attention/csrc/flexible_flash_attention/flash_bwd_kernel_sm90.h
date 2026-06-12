@@ -106,11 +106,9 @@ class FlashAttnBwdSm90 {
   // (S=64K/256K TFLOPS): producer 24→149/158, 40→223/220, 56→227/221, 72→186, 88→177,
   // 104+→monotonically worse; 56 is the sweet spot, below 40 the loader itself starves.
   // LoopK measured flat between 56 and 88 (RED-throughput-bound), so one setting serves both.
-  static constexpr uint32_t LoadRegisterRequirement =
-      ProducerRegs_ != 0 ? ProducerRegs_ : (!InnerUseScatter ? 40 : (ScatterScalarDxStore ? 104 : 56));
-  static constexpr uint32_t MmaRegisterRequirement = ProducerRegs_ != 0 || InnerUseScatter
-      ? ((kRegBudgetTotal - LoadRegisterRequirement) / NumMmaWarpGroups) / 8 * 8
-      : (NumMmaWarpGroups == 2 ? 232 : 152);
+  static constexpr uint32_t LoadRegisterRequirement = ProducerRegs_ != 0 ? ProducerRegs_ : (!InnerUseScatter ? 40 : (ScatterScalarDxStore ? 104 : 56));
+  static constexpr uint32_t MmaRegisterRequirement =
+      ProducerRegs_ != 0 || InnerUseScatter ? ((kRegBudgetTotal - LoadRegisterRequirement) / NumMmaWarpGroups) / 8 * 8 : (NumMmaWarpGroups == 2 ? 232 : 152);
   // setmaxnreg constraints: multiples of 8, within [24, 256], weighted sum within budget
   static_assert(LoadRegisterRequirement % 8 == 0 && LoadRegisterRequirement >= 24 && LoadRegisterRequirement <= 256);
   static_assert(MmaRegisterRequirement % 8 == 0 && MmaRegisterRequirement >= 24 && MmaRegisterRequirement <= 256);
