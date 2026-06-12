@@ -208,6 +208,25 @@ struct SparseLoadBlockMeta {
     }
   }
 
+  // LoopQ + PackGQA: Q heads are folded into the row dimension, so the scatter
+  // walk operates in PACKED-ROW space — every q_range endpoint is scaled by
+  // QheadPerKhead. token_indices then hold packed rows p = token * G + g, where
+  // g is the q-head index within the kv group (packed coordinate (g, token) with
+  // g fastest, matching shape ((qhead_per_khead, seqlen), ...)). LoopK scatters
+  // KV rows, which are never head-packed, so the scale is 1 there.
+  static constexpr int kScatterScale = (IsLoopQ_ && PackGQA) ? QheadPerKhead : 1;
+
+  // Read scatter range i with endpoints scaled to packed-row space.
+  CUTLASS_DEVICE
+  int2 scatter_range(int i) const {
+    int2 r = scatter_ranges()[i];
+    if constexpr (kScatterScale != 1) {
+      r.x *= kScatterScale;
+      r.y *= kScatterScale;
+    }
+    return r;
+  }
+
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE SparseLoadBlockMeta(
       ParamsT const& params,
@@ -262,14 +281,15 @@ struct SparseLoadBlockMeta {
       num_invalid_k_token = k_block_end > seqlen_k ? k_block_end - seqlen_k : 0;
     }
 
-    auto const* ranges = scatter_ranges();
     int total_tokens;
     if (is_equal_range_size) {
-      total_tokens = (end_batches - bidb) * (ranges[bidb].y - ranges[bidb].x);
+      int2 const r0 = scatter_range(bidb);
+      total_tokens = (end_batches - bidb) * (r0.y - r0.x);
     } else {
       total_tokens = 0;
       for (int i = bidb; i < end_batches; ++i) {
-        total_tokens += ranges[i].y - ranges[i].x;
+        int2 const r = scatter_range(i);
+        total_tokens += r.y - r.x;
       }
     }
     inner_block_max = (total_tokens + InnerBlockSize - 1) / InnerBlockSize;
@@ -278,7 +298,8 @@ struct SparseLoadBlockMeta {
 
     if constexpr (IsProducer) {
       if (is_equal_range_size) {
-        range_size = ranges[bidb].y - ranges[bidb].x;
+        int2 const r0 = scatter_range(bidb);
+        range_size = r0.y - r0.x;
       }
 
       int idx_in_warpgroup = thread_idx % 128;
@@ -290,8 +311,9 @@ struct SparseLoadBlockMeta {
 
         if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
           constexpr int last_idx = NumRowsPerGroup_ - 1;
+          int2 const r_last = scatter_range(end_batches - 1);
           cur_range_indices[last_idx] = end_batches - 1;
-          cur_range_inner_indices[last_idx] = ranges[end_batches - 1].y - ranges[end_batches - 1].x - 1;
+          cur_range_inner_indices[last_idx] = r_last.y - r_last.x - 1;
 
           int num_steps = kBlockN_ - (group_idx + 1) * NumRowsPerGroup_;
           advance_and_fill(num_steps);
@@ -317,7 +339,6 @@ struct SparseLoadBlockMeta {
   // their attention scores to -inf so they contribute zero after softmax.
   CUTLASS_DEVICE
   void clamp_to_boundary(int idx) {
-    auto const* ranges = scatter_ranges();
     if constexpr (InnerDirMaxToMin_) {
       if (cur_range_indices[idx] < bidb) {
         cur_range_indices[idx] = bidb;
@@ -326,7 +347,7 @@ struct SparseLoadBlockMeta {
     } else {
       if (cur_range_indices[idx] >= end_batches) {
         cur_range_indices[idx] = end_batches - 1;
-        int2 last = ranges[end_batches - 1];
+        int2 last = scatter_range(end_batches - 1);
         cur_range_inner_indices[idx] = last.y - last.x - 1;
       }
     }
@@ -336,9 +357,8 @@ struct SparseLoadBlockMeta {
   // Clamps dst to boundary if it overflows (see clamp_to_boundary).
   CUTLASS_DEVICE
   void step_one_token(int dst, int src) {
-    auto const* ranges = scatter_ranges();
     if constexpr (!InnerDirMaxToMin_) {
-      int2 r = ranges[cur_range_indices[src]];
+      int2 r = scatter_range(cur_range_indices[src]);
       if (cur_range_inner_indices[src] + 1 < r.y - r.x) {
         cur_range_indices[dst] = cur_range_indices[src];
         cur_range_inner_indices[dst] = cur_range_inner_indices[src] + 1;
@@ -355,7 +375,7 @@ struct SparseLoadBlockMeta {
         cur_range_inner_indices[dst] = 0;
         // Read range size only if index is still valid (clamp handles OOB below)
         if (cur_range_indices[dst] >= bidb) {
-          int2 r = ranges[cur_range_indices[dst]];
+          int2 r = scatter_range(cur_range_indices[dst]);
           cur_range_inner_indices[dst] = r.y - r.x - 1;
         }
       }
@@ -368,7 +388,6 @@ struct SparseLoadBlockMeta {
   CUTLASS_DEVICE
   void advance_and_fill(int num_steps) {
     static_assert(IsProducer, "advance_and_fill() is producer-only");
-    auto const* ranges = scatter_ranges();
 
     // Anchor index: MaxToMin starts from the high end, MinToMax from the low end
     constexpr int anchor = InnerDirMaxToMin_ ? NumRowsPerGroup_ - 1 : 0;
@@ -410,13 +429,13 @@ struct SparseLoadBlockMeta {
           cur_range_indices[anchor] -= 1;
           if (cur_range_indices[anchor] < bidb)
             break;
-          int2 r = ranges[cur_range_indices[anchor]];
+          int2 r = scatter_range(cur_range_indices[anchor]);
           cur_range_inner_indices[anchor] = r.y - r.x - 1;
         }
       } else {
         while (cnt < num_steps && cur_range_indices[anchor] < end_batches) {
           int rest = num_steps - cnt;
-          int2 r = ranges[cur_range_indices[anchor]];
+          int2 r = scatter_range(cur_range_indices[anchor]);
           int remaining = r.y - r.x - 1 - cur_range_inner_indices[anchor];
           if (remaining >= rest) {
             cur_range_inner_indices[anchor] += rest;
@@ -432,7 +451,7 @@ struct SparseLoadBlockMeta {
     // Clamp anchor to valid range [bidb, end_batches) if it overflowed
     clamp_to_boundary(anchor);
 
-    token_indices[anchor] = ranges[cur_range_indices[anchor]].x + cur_range_inner_indices[anchor];
+    token_indices[anchor] = scatter_range(cur_range_indices[anchor]).x + cur_range_inner_indices[anchor];
 
     // Fill remaining positions: each is one token away from the previous
     CUTE_UNROLL
@@ -440,7 +459,7 @@ struct SparseLoadBlockMeta {
       int dst = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - 1 - j) : j;
       int src = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - j) : (j - 1);
       step_one_token(dst, src);
-      token_indices[dst] = ranges[cur_range_indices[dst]].x + cur_range_inner_indices[dst];
+      token_indices[dst] = scatter_range(cur_range_indices[dst]).x + cur_range_inner_indices[dst];
     }
   }
 
