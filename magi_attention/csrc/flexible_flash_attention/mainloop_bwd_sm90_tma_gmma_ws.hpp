@@ -1041,20 +1041,31 @@ struct CollectiveMainloopBwdSm90 {
   //
   // SparseInnerDxUseTmaReduce=false: original scalar geometry — GroupSize threads per row, each
   // covering kStoreVecWidth floats per store tile via per-4B atomicAdd.
-  template <int kRows, int kNumThreads, typename SmemAccT>
+  //
+  // kRowPackScale > 1 (LoopQ + PackGQA dQ store): smem_token_indices hold PACKED rows
+  // p = token * G + g; the gmem row decomposes as token*stride_row + g*stride_head
+  // (q heads within a token are stride_head apart, not row-contiguous when nheads_kv > 1).
+  template <int kRows, int kNumThreads, int kRowPackScale = 1, typename SmemAccT = void>
   CUTLASS_DEVICE static void scatter_reduce_store_rows(
       SmemAccT const& s_acc, // Store-layout accum view, indexed at (row_offset + row, col)
       int const* smem_token_indices, // kRows ints, indexed at [row]
       ElementAccum* gmem_base, // dX base pointer for this head
       int const stride_row, // gmem row stride in elements
       int const thread_idx, // flat issuer index in [0, kNumThreads)
-      int const row_offset = 0) {
+      int const row_offset = 0,
+      int const stride_head = 0) { // gmem head stride in elements (kRowPackScale > 1 only)
+    auto gmem_row = [&](int token_idx) -> ElementAccum* {
+      if constexpr (kRowPackScale != 1) {
+        return gmem_base + static_cast<int64_t>(token_idx / kRowPackScale) * stride_row + static_cast<int64_t>(token_idx % kRowPackScale) * stride_head;
+      } else {
+        return gmem_base + static_cast<int64_t>(token_idx) * stride_row;
+      }
+    };
     if constexpr (SparseInnerDxUseTmaReduce) {
       static constexpr int32_t kRowBytes = kHeadDim * sizeof(ElementAccum);
       bool issued = false;
       for (int row = thread_idx; row < kRows; row += kNumThreads) {
-        int const token_idx = smem_token_indices[row];
-        ElementAccum* const dst = gmem_base + static_cast<int64_t>(token_idx) * stride_row;
+        ElementAccum* const dst = gmem_row(smem_token_indices[row]);
         cute::SM90_BULK_REDUCE_ADD::copy(&s_acc(row_offset + row, _0{}), dst, kRowBytes);
         issued = true;
       }
@@ -1072,8 +1083,7 @@ struct CollectiveMainloopBwdSm90 {
       CUTE_UNROLL
       for (int local_row = 0; local_row < kRowsPerGroup_; ++local_row) {
         int const row = group_idx * kRowsPerGroup_ + local_row;
-        int const token_idx = smem_token_indices[row];
-        ElementAccum* const dst = gmem_base + static_cast<int64_t>(token_idx) * stride_row;
+        ElementAccum* const dst = gmem_row(smem_token_indices[row]);
         CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < kNumStoreTiles; ++tile_idx) {
           int const col_base = idx_in_group * kStoreVecWidth + tile_idx * GroupSize * kStoreVecWidth;
@@ -1100,7 +1110,10 @@ struct CollectiveMainloopBwdSm90 {
       BlockMetaT& block_meta) {
     // Compile Guard Clause
     static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
-    static_assert(!(SparseLoad && (PackGQA || CatGQA)), "SparseLoad LoopQ does not yet support PackGQA/CatGQA");
+    // The SparseLoad scatter loader has no per-q-head (bidh_kv_cat) loop, so CatGQA cannot
+    // be expressed on this path yet. PackGQA is supported by walking q_ranges in packed-row
+    // space instead (see SparseLoadBlockMeta::kScatterScale).
+    static_assert(!(SparseLoad && CatGQA), "SparseLoad LoopQ does not support CatGQA");
 
     // BlockMeta: fixed per function call
     int const n_block = block_meta.outer_block;
@@ -1266,15 +1279,44 @@ struct CollectiveMainloopBwdSm90 {
     int const thread_idx = threadIdx.x % NumSparseLoadThreads;
     int const idx_in_group = thread_idx % GroupSize;
     int const group_idx = thread_idx / GroupSize;
-    int const stride_q_row = get<0>(params.stride_Q);
-    int const stride_do_row = get<0>(params.stride_dO);
-    Element const* const ptr_gQ_base = params.ptr_Q + bidh * get<2>(params.stride_Q) + idx_in_group * 8;
-    Element const* const ptr_gdO_base = params.ptr_dO + bidh * get<2>(params.stride_dO) + idx_in_group * 8;
-    // LSE/dPsum per-token stride is always 4 floats (non-PackGQA)
-    int const lse_head_stride = get<2>(params.stride_LSE);
-    float const* const ptr_gLSE_base = params.ptr_LSE_log2 + bidh * lse_head_stride;
-    int const dpsum_head_stride = get<2>(params.stride_dPsum);
-    float const* const ptr_gdPsum_base = params.ptr_dPsum + bidh * dpsum_head_stride;
+    // PackGQA: block_meta.token_indices hold PACKED rows p = token * G + g (g = q-head
+    // within the kv group, G = QheadPerKhead); bidh is then the kv head index, so head
+    // bases are scaled by G. Q/dO/dQ rows decompose as token*row_stride + g*head_stride
+    // (heads within a token are head_stride apart, NOT row-contiguous when nheads_kv > 1).
+    static constexpr int kQPackScale = PackGQA ? QheadPerKhead : 1;
+    int64_t const stride_q_row = get<0>(params.stride_Q);
+    int64_t const stride_do_row = get<0>(params.stride_dO);
+    int64_t const stride_q_head = get<2>(params.stride_Q);
+    int64_t const stride_do_head = get<2>(params.stride_dO);
+    Element const* const ptr_gQ_base = params.ptr_Q + bidh * kQPackScale * stride_q_head + idx_in_group * 8;
+    Element const* const ptr_gdO_base = params.ptr_dO + bidh * kQPackScale * stride_do_head + idx_in_group * 8;
+    // Decompose a packed row into a gmem element offset (plain token * row_stride when !PackGQA)
+    auto packed_row_offset = [&](int p, int64_t stride_token, int64_t stride_head) -> int64_t {
+      if constexpr (PackGQA) {
+        return (p / kQPackScale) * stride_token + (p % kQPackScale) * stride_head;
+      } else {
+        return p * stride_token;
+      }
+    };
+    // LSE/dPsum per-token row is always 4 floats. PackGQA: params.stride_LSE/stride_dPsum
+    // are the packed nested strides (1, (head_stride, 4), G*head_stride), so get<2> already
+    // contains the G factor for the kv-head base, and get<1,0> is the raw per-head stride.
+    float const* const ptr_gLSE_base = params.ptr_LSE_log2 + bidh * get<2>(params.stride_LSE);
+    float const* const ptr_gdPsum_base = params.ptr_dPsum + bidh * get<2>(params.stride_dPsum);
+    auto lse_row_offset = [&](int p) -> int64_t {
+      if constexpr (PackGQA) {
+        return (p % kQPackScale) * get<1, 0>(params.stride_LSE) + (p / kQPackScale) * 4;
+      } else {
+        return p * 4;
+      }
+    };
+    auto dpsum_row_offset = [&](int p) -> int64_t {
+      if constexpr (PackGQA) {
+        return (p % kQPackScale) * get<1, 0>(params.stride_dPsum) + (p / kQPackScale) * 4;
+      } else {
+        return p * 4;
+      }
+    };
 
     // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
     // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy (dense)
@@ -1289,7 +1331,7 @@ struct CollectiveMainloopBwdSm90 {
         int const q_idx_slot = smem_pipe_write_q.count() % kTokenIdxSlots;
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroupQ; ++local_row) {
-          int token_offset = block_meta.token_indices[local_row] * stride_q_row;
+          int64_t token_offset = packed_row_offset(block_meta.token_indices[local_row], stride_q_row, stride_q_head);
           int smem_row = group_idx * NumRowsPerGroupQ + local_row;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
@@ -1306,9 +1348,9 @@ struct CollectiveMainloopBwdSm90 {
         }
         // LSE scatter: distribute tokens round-robin across group threads (16B per token)
         for (int i = idx_in_group; i < NumRowsPerGroupQ; i += GroupSize) {
-          int token_idx = block_meta.token_indices[i];
           float* lse_dst = &sLSE(_0{}, group_idx * NumRowsPerGroupQ + i, stage);
-          auto gLSE_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gLSE_base + token_idx * 4)), Layout<_1>{});
+          auto gLSE_src =
+              make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gLSE_base + lse_row_offset(block_meta.token_indices[i]))), Layout<_1>{});
           auto sLSE_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(lse_dst)), Layout<_1>{});
           cute::copy(cp_async_cg, gLSE_src, sLSE_dst);
         }
@@ -1340,7 +1382,7 @@ struct CollectiveMainloopBwdSm90 {
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroupQ; ++local_row) {
-          int token_offset = block_meta.token_indices[local_row] * stride_do_row;
+          int64_t token_offset = packed_row_offset(block_meta.token_indices[local_row], stride_do_row, stride_do_head);
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
             Element* dst_ptr = &sdO(group_idx * NumRowsPerGroupQ + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_do_cur.index());
@@ -1351,9 +1393,9 @@ struct CollectiveMainloopBwdSm90 {
         }
         // dPsum scatter: distribute tokens round-robin across group threads (16B per token)
         for (int i = idx_in_group; i < NumRowsPerGroupQ; i += GroupSize) {
-          int token_idx = block_meta.token_indices[i];
           float* dpsum_dst = &sdPsum(_0{}, group_idx * NumRowsPerGroupQ + i, smem_pipe_write_do_cur.index());
-          auto gdPsum_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdPsum_base + token_idx * 4)), Layout<_1>{});
+          auto gdPsum_src = make_tensor(
+              make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdPsum_base + dpsum_row_offset(block_meta.token_indices[i]))), Layout<_1>{});
           auto sdPsum_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dpsum_dst)), Layout<_1>{});
           cute::copy(cp_async_cg, gdPsum_src, sdPsum_dst);
         }
@@ -1813,10 +1855,14 @@ struct CollectiveMainloopBwdSm90 {
     auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ);
 
-    // Scatter store addressing for producer store warp (32 threads)
+    // Scatter store addressing for producer store warp (32 threads).
+    // PackGQA: smem_token_indices hold packed rows p = token*G + g; bidh is the kv head,
+    // so the head base and the per-row decompose are scaled by G (see scatter_reduce_store_rows).
+    static constexpr int kdQPackScale = PackGQA ? QheadPerKhead : 1;
     [[maybe_unused]] int const store_thread_idx = threadIdx.x % cutlass::NumThreadsPerWarp;
     [[maybe_unused]] int const stride_dq_row = get<0>(params.stride_dQ);
-    [[maybe_unused]] ElementAccum* const ptr_dQ_base = params.ptr_dQ + bidh * get<2>(params.stride_dQ);
+    [[maybe_unused]] int const stride_dq_head = get<2>(params.stride_dQ);
+    [[maybe_unused]] ElementAccum* const ptr_dQ_base = params.ptr_dQ + bidh * kdQPackScale * static_cast<int64_t>(get<2>(params.stride_dQ));
 
     auto store_dQ_this_m_block = [&](int const m_block, int const bidh_kv_cat, int const off_q) {
 #pragma unroll
@@ -1829,8 +1875,14 @@ struct CollectiveMainloopBwdSm90 {
         // Scatter reduce-add dQ from SMEM to scattered global token rows
         int const slot = store_pipe_iter % kTokenIdxSlots;
         ++store_pipe_iter;
-        scatter_reduce_store_rows<kBlockM, cutlass::NumThreadsPerWarp>(
-            sdQ_store, &shared_storage.tensors.mainloop.smem_token_indices[slot * kBlockM], ptr_dQ_base, stride_dq_row, store_thread_idx);
+        scatter_reduce_store_rows<kBlockM, cutlass::NumThreadsPerWarp, kdQPackScale>(
+            sdQ_store,
+            &shared_storage.tensors.mainloop.smem_token_indices[slot * kBlockM],
+            ptr_dQ_base,
+            stride_dq_row,
+            store_thread_idx,
+            /*row_offset=*/0,
+            stride_dq_head);
       } else {
         // TMA copy from smem dQ to gmem dQ
         if (lane_predicate) {
@@ -2602,13 +2654,22 @@ struct CollectiveMainloopBwdSm90 {
 
             {
               Tensor sdQ_acc = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumStore{});
+              // PackGQA: token indices are packed rows, bidh is the kv head (see store_dq)
+              static constexpr int kdQPackScale = PackGQA ? QheadPerKhead : 1;
               int const stride_dq_row = get<0>(params.stride_dQ);
-              ElementAccum* const ptr_dQ_base = params.ptr_dQ + block_meta.bidh * get<2>(params.stride_dQ);
+              int const stride_dq_head = get<2>(params.stride_dQ);
+              ElementAccum* const ptr_dQ_base = params.ptr_dQ + block_meta.bidh * kdQPackScale * static_cast<int64_t>(get<2>(params.stride_dQ));
               int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
               int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
               int const slot = smem_pipe_read_q.count() % kTokenIdxSlots;
-              scatter_reduce_store_rows<kBlockM, NumMmaThreads>(
-                  sdQ_acc, &shared_storage.tensors.mainloop.smem_token_indices[slot * kBlockM], ptr_dQ_base, stride_dq_row, flat_thread_idx);
+              scatter_reduce_store_rows<kBlockM, NumMmaThreads, kdQPackScale>(
+                  sdQ_acc,
+                  &shared_storage.tensors.mainloop.smem_token_indices[slot * kBlockM],
+                  ptr_dQ_base,
+                  stride_dq_row,
+                  flat_thread_idx,
+                  /*row_offset=*/0,
+                  stride_dq_head);
             }
 
             // Cross-WG sync: all scatter reads done before the next iteration's r2s overwrites sdQ
