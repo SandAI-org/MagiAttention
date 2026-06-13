@@ -935,6 +935,170 @@ class TestSimpleAttn(unittest.TestCase):
         )
         print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
 
+    # ─── SparseLoad BWD scatter-path 对拍 tests ───
+    # Methodology: test per code path, not per flag cartesian product.
+    # Tier-0: test_block_sparse_loopq_packgqa (canonical LoopQ+PackGQA path).
+    # Tier-1: test_consumer_dkv_store (InnerDxStoreInProducer=false) and
+    #         test_scalar_dx_store (SparseInnerDxReduceUseTma=false) — one
+    #         orthogonal test function per independent code path.
+
+    def _check_block_sparse_vs_dense_ref(
+        self,
+        *,
+        S: int,
+        n_attend: int,
+        k_block: int,
+        swap_bwd_qk_loop_cases: tuple[bool, ...],
+        test_case: str,
+        tol: float = 2e-2,
+    ):
+        """对拍 helper: sparse_load variants vs the dense-TMA ffa reference.
+
+        Builds a canonical MQA uniform block mask (nhq=128, nhk=1, hd=128,
+        q_block=1), runs the dense (sparse_load=False) kernel as the reference,
+        then each requested sparse variant (swap_bwd_qk_loop=True is LoopK,
+        False is LoopQ), comparing out/dq/dk/dv max-relative error.
+        """
+        from magi_attention.utils.sparse_utils import (
+            generate_ranges_from_block_mask_triton,
+        )
+
+        device = self.device
+        nhq, nhk, head_dim = 128, 1, 128
+        dtype = torch.bfloat16
+        torch.manual_seed(42)
+
+        n_q_blocks, n_k_blocks = S, S // k_block
+        sel = torch.rand(n_q_blocks, n_k_blocks, device=device).argsort(dim=1)[
+            :, : min(n_attend, n_k_blocks)
+        ]
+        block_mask = torch.zeros(
+            1, nhk, n_q_blocks, n_k_blocks, dtype=torch.bool, device=device
+        )
+        block_mask[0, 0].scatter_(1, sel, True)
+        q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
+            block_mask, 1, k_block
+        )
+        attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device=device)
+
+        q0 = torch.randn(S, nhq, head_dim, device=device, dtype=dtype)
+        k0 = torch.randn(S, nhk, head_dim, device=device, dtype=dtype)
+        v0 = torch.randn(S, nhk, head_dim, device=device, dtype=dtype)
+        do = torch.randn(S, nhq, head_dim, device=device, dtype=dtype)
+
+        def run(sparse_load: bool, swap_bwd_qk_loop: bool):
+            q = q0.clone().requires_grad_(True)
+            k = k0.clone().requires_grad_(True)
+            v = v0.clone().requires_grad_(True)
+            out, _ = flex_flash_attn_func(
+                q,
+                k,
+                v,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=attn_type_map,
+                sparse_load=sparse_load,
+                auto_range_merge=True,
+                pack_gqa=True,
+                swap_bwd_qk_loop=swap_bwd_qk_loop,
+            )
+            out.backward(do)
+            return out.detach(), q.grad, k.grad, v.grad
+
+        ref = run(sparse_load=False, swap_bwd_qk_loop=True)
+        for swap in swap_bwd_qk_loop_cases:
+            got = run(sparse_load=True, swap_bwd_qk_loop=swap)
+            loop_name = "loopk" if swap else "loopq"
+            for name, a, b in zip(("out", "dq", "dk", "dv"), got, ref):
+                err = (
+                    (a.float() - b.float()).abs().max()
+                    / b.float().abs().max().clamp_min(1e-6)
+                ).item()
+                # atomic reduce-add ordering makes the comparison inexact;
+                # 2e-2 matches the standalone 对拍 script threshold
+                assert (
+                    err < tol
+                ), f"{test_case}[{loop_name}] {name} max_rel_err={err:.3e} >= {tol}"
+
+    LOOPQ_PACKGQA_CONFIGS = [
+        {"name": "kblk128", "S": 2048, "n_attend": 8, "k_block": 128},
+        # K window not a multiple of kBlockN=128: exercises the LoopQ residual
+        # K-column padding mask (num_invalid_k_token computed in the mainloop)
+        {"name": "kblk96_residual_cols", "S": 2304, "n_attend": 8, "k_block": 96},
+    ]
+
+    @parameterize("cfg", LOOPQ_PACKGQA_CONFIGS)
+    def test_block_sparse_loopq_packgqa(self, cfg):
+        """Tier-0: SparseLoad BWD LoopQ + PackGQA (canonical MQA, q_block=1)
+        against the dense-TMA reference kernel."""
+        test_case = f"[block_sparse_loopq_packgqa][{cfg['name']}]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        self._check_block_sparse_vs_dense_ref(
+            S=cfg["S"],
+            n_attend=cfg["n_attend"],
+            k_block=cfg["k_block"],
+            swap_bwd_qk_loop_cases=(False,),
+            test_case=test_case,
+        )
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
+
+    def test_consumer_dkv_store(self):
+        """Tier-1: consumer-side scatter dX store
+        (MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER=false) for both
+        LoopK (dKV from consumer WGs) and LoopQ (dQ from consumer WGs)."""
+        import os
+
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
+
+        test_case = "[consumer_dkv_store]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        os.environ["MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER"] = "false"
+        if hasattr(get_ffa_jit_mod, "cache_clear"):
+            get_ffa_jit_mod.cache_clear()
+        try:
+            self._check_block_sparse_vs_dense_ref(
+                S=2048,
+                n_attend=8,
+                k_block=128,
+                swap_bwd_qk_loop_cases=(True, False),
+                test_case=test_case,
+            )
+        finally:
+            del os.environ["MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER"]
+            if hasattr(get_ffa_jit_mod, "cache_clear"):
+                get_ffa_jit_mod.cache_clear()
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
+
+    def test_scalar_dx_store(self):
+        """Tier-1: scalar atomicAdd dX store fallback
+        (MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE=false, i.e.
+        SparseInnerDxReduceUseTma=false) for both LoopK and LoopQ."""
+        import os
+
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
+
+        test_case = "[scalar_dx_store]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        os.environ["MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"] = "false"
+        if hasattr(get_ffa_jit_mod, "cache_clear"):
+            get_ffa_jit_mod.cache_clear()
+        try:
+            self._check_block_sparse_vs_dense_ref(
+                S=2048,
+                n_attend=8,
+                k_block=128,
+                swap_bwd_qk_loop_cases=(True, False),
+                test_case=test_case,
+            )
+        finally:
+            del os.environ["MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"]
+            if hasattr(get_ffa_jit_mod, "cache_clear"):
+                get_ffa_jit_mod.cache_clear()
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
+
     # ─── Mask build performance: vectorized vs python-loop ───
 
     def test_sdpa_mask_build_vectorized(self):
