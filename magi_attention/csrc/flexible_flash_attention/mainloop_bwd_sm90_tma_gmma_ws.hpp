@@ -153,6 +153,13 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
+  // Per-token 2D TMA reduce for scatter dQ: when all kBlockM rows in a tile belong to
+  // one physical token (PackGQA with QheadPerKhead >= kBlockM), replace 128 × per-row
+  // 1D cp.reduce.async.bulk with 1 × 2D cp.reduce.async.bulk.tensor via tma_add_dQ.
+  // Requires swizzled SmemLayoutdQaccumTMA (not Scatter), reuses the existing dense TMA
+  // reduce infrastructure with runtime-computed token coordinates.
+  static constexpr bool ScatterDqUseTma2D = InnerUseScatter && !SwapBwdQKLoop && PackGQA && (QheadPerKhead >= kBlockM) && SparseInnerDxReduceUseTma;
+
   using SeqlenInfo_t = flash::SeqlenInfo;
   using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, QheadPerKhead>;
 
@@ -398,14 +405,15 @@ struct CollectiveMainloopBwdSm90 {
   using SmemLayoutdKVaccumtTMA =
       decltype(cute::composition(SmemLayoutdKVaccumTMA{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
 
-  // ─── Scatter dX store smem layouts (SparseInnerDxReduceUseTma) ───
-  // cp.reduce.async.bulk needs each token row to be one LINEAR smem span. The swizzled
+  // ─── Scatter dX store smem layouts ───
+  // 1D cp.reduce.async.bulk needs each token row to be one LINEAR smem span. The swizzled
   // *accumTMA layouts cannot provide that: their SW128 atom (8 rows x 32 floats, column-major
   // tiled) physically interleaves one logical row into kHeadDim/32 separate 128B chunks that
-  // are 8*128B apart. So the bulk-reduce path swaps the accum buffer to a row-contiguous
-  // layout. A 4-float (16B) row pad keeps rows 16B-aligned (bulk reduce requirement) while
-  // breaking the worst r2s store bank conflicts (8-way unpadded -> <=2-way padded; the
-  // swizzled layout is conflict-free, accepted cost of the linear-row requirement).
+  // are 8*128B apart. So the 1D bulk-reduce path uses a row-contiguous layout.
+  // A 4-float (16B) row pad keeps rows 16B-aligned (bulk reduce requirement) while breaking
+  // the worst r2s store bank conflicts (8-way unpadded -> <=2-way padded).
+  // Exception: ScatterDqUseTma2D bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
+  // keeping the swizzled TMA layout → no bank conflicts, no padding needed.
   static constexpr int kScatterAccRowPad = 4; // floats
   using SmemLayoutdKVaccumScatter = Layout<Shape<Int<kBlockN>, Int<kHeadDim>>, Stride<Int<kHeadDim + kScatterAccRowPad>, _1>>;
   using SmemLayoutdQaccumScatter = Layout<Shape<Int<kBlockM>, Int<kHeadDim>>, Stride<Int<kHeadDim + kScatterAccRowPad>, _1>>;
@@ -415,7 +423,9 @@ struct CollectiveMainloopBwdSm90 {
   // (LoopK: dKV, LoopQ: dQ); the other tensor keeps the swizzled TMA layout so its dense
   // store path stays intact and no extra padded smem is allocated for it.
   using SmemLayoutdKVaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && SwapBwdQKLoop, SmemLayoutdKVaccumScatter, SmemLayoutdKVaccumTMA>;
-  using SmemLayoutdQaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && !SwapBwdQKLoop, SmemLayoutdQaccumScatter, SmemLayoutdQaccumTMA>;
+  // ScatterDqUseTma2D: keep swizzled TMA layout (2D TMA reduce reads it natively).
+  // 1D per-row bulk reduce fallback: use Scatter row-contiguous layout.
+  using SmemLayoutdQaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && !SwapBwdQKLoop && !ScatterDqUseTma2D, SmemLayoutdQaccumScatter, SmemLayoutdQaccumTMA>;
   using SmemLayoutdKVaccumtStore =
       decltype(cute::composition(SmemLayoutdKVaccumStore{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
   using SmemLayoutdQaccumtStore =
@@ -753,27 +763,27 @@ struct CollectiveMainloopBwdSm90 {
 
   // SparseLoad LoopK producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
   using SparseLoadLoopKBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
-                                                         RangeMerge,
-                                                         PackGQA,
-                                                         QheadPerKhead,
-                                                         NumRowsPerGroup,
-                                                         GroupSize,
-                                                         NumProducerThreads,
-                                                         kBlockN,
-                                                         InnerDirMaxToMin,
-                                                         /*IsLoopQ=*/false>;
+                                                              RangeMerge,
+                                                              PackGQA,
+                                                              QheadPerKhead,
+                                                              NumRowsPerGroup,
+                                                              GroupSize,
+                                                              NumProducerThreads,
+                                                              kBlockN,
+                                                              InnerDirMaxToMin,
+                                                              /*IsLoopQ=*/false>;
 
   // SparseLoad LoopK consumer (used by mma), no token_indices arrays
   using SparseMmaLoopKBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
-                                                        RangeMerge,
-                                                        PackGQA,
-                                                        QheadPerKhead,
-                                                        NumRowsPerGroup,
-                                                        GroupSize,
-                                                        NumProducerThreads,
-                                                        kBlockN,
-                                                        InnerDirMaxToMin,
-                                                        /*IsLoopQ=*/false>;
+                                                             RangeMerge,
+                                                             PackGQA,
+                                                             QheadPerKhead,
+                                                             NumRowsPerGroup,
+                                                             GroupSize,
+                                                             NumProducerThreads,
+                                                             kBlockN,
+                                                             InnerDirMaxToMin,
+                                                             /*IsLoopQ=*/false>;
 
   // SparseLoad LoopQ producer: scatter Q/dO, token_indices = Q positions
   using SparseLoadLoopQBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
@@ -1894,9 +1904,20 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
 
-      if constexpr (InnerUseScatter) {
-        // Scatter reduce-add dQ from SMEM to scattered global token rows;
-        // indices come from the staging area (valid between dQFull and dQEmpty)
+      if constexpr (ScatterDqUseTma2D) {
+        // Per-token 2D TMA reduce: all kBlockM packed rows belong to one physical token
+        // (QheadPerKhead >= kBlockM). Reuse tma_add_dQ with absolute token coordinates.
+        if (lane_predicate) {
+          int const packed_first_row = shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockM];
+          int const m_block_abs = packed_first_row / kBlockM;
+          Tensor gdQaccum_abs = local_tile(mdQaccum, TileShape_dQaccum{}, gQdOdQ_coord);
+          Tensor tdQgdQ_abs = block_tma_dQ.partition_D(gdQaccum_abs);
+          cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ_abs(_, _, _, m_block_abs));
+          tma_store_arrive();
+          tma_store_wait<0>();
+        }
+      } else if constexpr (InnerUseScatter) {
+        // Per-row 1D bulk reduce fallback for non-MQA scatter
         scatter_reduce_store_rows<kBlockM, cutlass::NumThreadsPerWarp, kdQPackScale>(
             sdQ_store,
             &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockM],
@@ -1906,7 +1927,7 @@ struct CollectiveMainloopBwdSm90 {
             /*row_offset=*/0,
             stride_dq_head);
       } else {
-        // TMA copy from smem dQ to gmem dQ
+        // Dense TMA reduce
         if (lane_predicate) {
           if constexpr (Deterministic) {
             if (!CatGQA || bidh_kv_cat == 0) {
@@ -2685,23 +2706,38 @@ struct CollectiveMainloopBwdSm90 {
             // dQFull/dQEmpty barriers are NOT sufficient.
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
 
-            Tensor sdQ_acc = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumStore{});
-            // PackGQA: token indices are packed rows, bidh is the kv head (see store_dq)
-            static constexpr int kdQPackScale = PackGQA ? QheadPerKhead : 1;
-            int const stride_dq_row = get<0>(params.stride_dQ);
-            int const stride_dq_head = get<2>(params.stride_dQ);
-            ElementAccum* const ptr_dQ_base = params.ptr_dQ + block_meta.bidh * kdQPackScale * static_cast<int64_t>(get<2>(params.stride_dQ));
-            int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
-            int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
-            // Stage-indexed slot: the Q stage is still held here (released after MMA5)
-            scatter_reduce_store_rows<kBlockM, NumMmaThreads, kdQPackScale>(
-                sdQ_acc,
-                &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_q.index() * kBlockM],
-                ptr_dQ_base,
-                stride_dq_row,
-                flat_thread_idx,
-                /*row_offset=*/0,
-                stride_dq_head);
+            if constexpr (ScatterDqUseTma2D) {
+              // Per-token 2D TMA reduce: single thread issues one 2D TMA reduce-add
+              if (thread_idx == 0) {
+                Tensor sdQ_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
+                auto block_tma_dQ_c = params.tma_add_dQ.get_slice(_0{});
+                Tensor tdQsdQ_c = block_tma_dQ_c.partition_S(sdQ_tma);
+
+                int const packed_first_row = shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_q.index() * kBlockM];
+                int const m_block_abs = packed_first_row / kBlockM;
+                Tensor gdQaccum_abs = local_tile(mdQaccum, TileShape_dQaccum{}, gQdOdQ_coord);
+                Tensor tdQgdQ_abs = block_tma_dQ_c.partition_D(gdQaccum_abs);
+                cute::copy(params.tma_add_dQ, tdQsdQ_c, tdQgdQ_abs(_, _, _, m_block_abs));
+                tma_store_arrive();
+                tma_store_wait<0>();
+              }
+            } else {
+              Tensor sdQ_acc = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumStore{});
+              static constexpr int kdQPackScale = PackGQA ? QheadPerKhead : 1;
+              int const stride_dq_row = get<0>(params.stride_dQ);
+              int const stride_dq_head = get<2>(params.stride_dQ);
+              ElementAccum* const ptr_dQ_base = params.ptr_dQ + block_meta.bidh * kdQPackScale * static_cast<int64_t>(get<2>(params.stride_dQ));
+              int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
+              int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
+              scatter_reduce_store_rows<kBlockM, NumMmaThreads, kdQPackScale>(
+                  sdQ_acc,
+                  &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_q.index() * kBlockM],
+                  ptr_dQ_base,
+                  stride_dq_row,
+                  flat_thread_idx,
+                  /*row_offset=*/0,
+                  stride_dq_head);
+            }
 
             // Cross-WG sync: all scatter reads done before the next iteration's r2s overwrites sdQ
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
