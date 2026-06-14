@@ -199,31 +199,17 @@ struct SparseLoadBlockMeta {
   // This is what makes the O(1) div/mod cursor arithmetic in advance_token_idx valid.
   int range_size;
 
-  // The ranges for the scatter dimension: k_ranges for LoopK, q_ranges for LoopQ
-  CUTLASS_DEVICE
-  int2 const* scatter_ranges() const {
-    if constexpr (IsLoopQ) {
-      return q_ranges;
-    } else {
-      return k_ranges;
-    }
-  }
-
-  // LoopQ + PackGQA: Q heads are folded into the row dimension, so the scatter
-  // walk operates in PACKED-ROW space — every q_range endpoint is scaled by
-  // QheadPerKhead. token_indices then hold packed rows p = token * G + g, where
-  // g is the q-head index within the kv group (packed coordinate (g, token) with
-  // g fastest, matching shape ((qhead_per_khead, seqlen), ...)). LoopK scatters
-  // KV rows, which are never head-packed, so the scale is 1 there.
-  static constexpr int kScatterScale = (IsLoopQ_ && PackGQA) ? QheadPerKhead : 1;
-
   // Read scatter range i with endpoints scaled to packed-row space.
+  // LoopQ + PackGQA: Q heads are folded into the row dimension, so the scatter
+  // walk operates in PACKED-ROW space — every endpoint is scaled by QheadPerKhead.
+  // token_indices then hold packed rows p = token * G + g, where g is the q-head
+  // index within the kv group. LoopK scatters KV rows (never head-packed, scale 1).
   CUTLASS_DEVICE
-  int2 scatter_range(int i) const {
-    int2 r = scatter_ranges()[i];
-    if constexpr (kScatterScale != 1) {
-      r.x *= kScatterScale;
-      r.y *= kScatterScale;
+  int2 packed_range(int i) const {
+    int2 r = (IsLoopQ ? q_ranges : k_ranges)[i];
+    if constexpr (IsLoopQ_ && PackGQA) {
+      r.x *= QheadPerKhead;
+      r.y *= QheadPerKhead;
     }
     return r;
   }
@@ -262,7 +248,7 @@ struct SparseLoadBlockMeta {
     // in range. The K residual-column mask is computed at the use site in the
     // mainloop from seqlen_info (symmetric with LoopK's Q residual mask).
 
-    int2 const r0 = scatter_range(bidb);
+    int2 const r0 = packed_range(bidb);
     range_size = r0.y - r0.x;
     int const total_tokens = (end_batches - bidb) * range_size;
     inner_block_max = (total_tokens + InnerBlockSize - 1) / InnerBlockSize;
@@ -280,7 +266,7 @@ struct SparseLoadBlockMeta {
         // Position the anchor at this group's first row of the first tile.
         // MaxToMin: anchor = HIGH end of the group's rows; MinToMax: LOW end.
         if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          int2 const r_last = scatter_range(end_batches - 1);
+          int2 const r_last = packed_range(end_batches - 1);
           cur_range_idx = end_batches - 1;
           cur_range_inner_idx = r_last.y - r_last.x - 1;
           advance_token_idx(cur_range_idx, cur_range_inner_idx, kBlockN_ - (group_idx + 1) * NumRowsPerGroup_);
@@ -336,7 +322,7 @@ struct SparseLoadBlockMeta {
     } else {
       if (range_idx >= end_batches) {
         range_idx = end_batches - 1;
-        int2 last = scatter_range(end_batches - 1);
+        int2 last = packed_range(end_batches - 1);
         inner_idx = last.y - last.x - 1;
       }
     }
@@ -358,8 +344,16 @@ struct SparseLoadBlockMeta {
       advance_token_idx(range_idx, inner_idx, j);
       // MaxToMin walks backward from the high-end anchor: j steps back = row (last - j)
       int const dst = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - 1 - j) : j;
-      group_rows[dst] = scatter_range(range_idx).x + inner_idx;
+      group_rows[dst] = packed_range(range_idx).x + inner_idx;
     }
+  }
+
+  // Return the absolute packed row index for the first row of the current tile.
+  // Used by InnerLoadMode::kTma (scatter) to compute TMA tile coordinates.
+  CUTLASS_DEVICE
+  int get_packed_first_row() const {
+    static_assert(IsProducer, "get_packed_first_row() is producer-only");
+    return packed_range(cur_range_idx).x + cur_range_inner_idx;
   }
 
   CUTLASS_DEVICE

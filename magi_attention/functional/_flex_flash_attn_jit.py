@@ -140,8 +140,6 @@ def _ffa_register_quota(
         if _bpr is not None and int(_bpr) != 0:
             producer_regs = int(_bpr)
             consumer_regs = ((budget - producer_regs) // num_mma_wgs) // 8 * 8
-        # the 168-per-thread weighted budget is a bwd-only constraint (1 CTA/SM occupancy);
-        # fwd configs (e.g. hd64 scatter at 3 MMA WGs) may legitimately exceed it
         assert (
             producer_regs + num_mma_wgs * consumer_regs <= budget
         ), f"bwd register quota {producer_regs}+{num_mma_wgs}x{consumer_regs} exceeds budget {budget}"
@@ -463,9 +461,7 @@ def get_ffa_jit_spec(
     )
     extra_template_args[f"{direction}_producer_regs"] = str(_producer_regs)
     extra_template_args[f"{direction}_consumer_regs"] = str(_consumer_regs)
-    _bpr = os.environ.get("MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS")
-    if _bpr is not None and int(_bpr) != 0 and direction == "bwd":
-        uri += f"_bpr{int(_bpr)}"
+    uri += f"_pr{_producer_regs}_cr{_consumer_regs}"
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
     logger.info("Generated source directory: %s", gen_directory)

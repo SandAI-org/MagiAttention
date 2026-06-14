@@ -113,7 +113,7 @@ def bench_fwd(S):
         return BENCH_CASE_OOM
 
 
-def bench_bwd(S):
+def bench_bwd(S, swap_bwd_qk_loop=True):
     device = torch.cuda.current_device()
     n_k_blocks = S // k_block_size
     actual_attend = min(n_attend, n_k_blocks)
@@ -136,7 +136,7 @@ def bench_bwd(S):
             sparse_load=True,
             auto_range_merge=True,
             pack_gqa=True,
-            swap_bwd_qk_loop=True,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
         do = torch.randn_like(out)
 
@@ -162,10 +162,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SparseLoad Block-Sparse Benchmark")
     parser.add_argument("--bwd", action="store_true", help="Also run BWD benchmark")
     parser.add_argument("--bwd-only", action="store_true", help="Only BWD")
+    parser.add_argument(
+        "--loopq", action="store_true", help="BWD uses LoopQ (swap_bwd_qk_loop=False)"
+    )
     args = parser.parse_args()
 
     run_fwd = not args.bwd_only
     run_bwd = args.bwd or args.bwd_only
+    swap_bwd_qk_loop = not args.loopq
 
     print(
         f"Config: nhq={nhq}, nhk={nhk}, hd={hd}, qblk={q_block_size}, kblk={k_block_size}, "
@@ -185,12 +189,13 @@ if __name__ == "__main__":
             torch.cuda.empty_cache()
 
     if run_bwd:
+        loop_tag = "LoopQ" if args.loopq else "LoopK"
         print("\n" + "=" * 50)
-        print("BWD Benchmark (SparseLoad block-sparse)")
+        print(f"BWD Benchmark (SparseLoad block-sparse, {loop_tag})")
         print("=" * 50)
         print(f"{'seqlen':>10} {'TFLOPS':>10}")
         print("-" * 22)
         for S in seqlen_vals:
-            t = bench_bwd(S)
+            t = bench_bwd(S, swap_bwd_qk_loop=swap_bwd_qk_loop)
             print(f"{S:>10} {t:>10.2f}")
             torch.cuda.empty_cache()
