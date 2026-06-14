@@ -138,27 +138,36 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool SparseInnerDxReduceUseTma = SparseInnerDxReduceUseTma_;
   static_assert(!SparseInnerDxReduceUseTma_ || InnerUseScatter, "SparseInnerDxReduceUseTma requires a scatter path (SparseLoad / IndexAttn)");
 
-  using MainloopPipeline = std::conditional_t<!InnerUseScatter, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
+  static constexpr int kBlockM = get<0>(TileShape_MNK{});
+  static constexpr int kBlockN = get<1>(TileShape_MNK{});
+  static constexpr int kHeadDim = get<2>(TileShape_MNK{});
+
+  static constexpr bool ScatterInnerStoreUseTma2D = InnerUseScatter && !SwapBwdQKLoop && PackGQA && (QheadPerKhead >= kBlockM) && SparseInnerDxReduceUseTma;
+
+  // How the inner-loop loads (Q/dO for LoopQ, K/V for LoopK) are performed:
+  //   kTma     — 2D TMA tile load (1 instr/tile). Dense uses sequential m_block;
+  //              scatter uses runtime absolute coordinates from block_meta. Same mechanism.
+  //   kTma1D   — per-row bulk copy (SM90_BULK_COPY_G2S), 1 thread, kBlockM instrs (future)
+  //   kCpAsync — per-row cp.async.cg scatter, all 64 loader threads (scatter fallback)
+  // Pipeline: kCpAsync → PipelineAsync (arrive-count);
+  //           kTma/kTma1D → PipelineTmaAsync (transaction-bytes).
+  // kTma is used for dense (always) and scatter when the tile is physically contiguous
+  // (PackGQA + QheadPerKhead >= kBlockM for LoopQ; kblocksize >= kBlockN for LoopK future).
+  enum class InnerLoadMode { kCpAsync, kTma1D, kTma };
+  static constexpr InnerLoadMode kInnerLoadMode =
+      !InnerUseScatter ? InnerLoadMode::kTma : ((!SwapBwdQKLoop && PackGQA && (QheadPerKhead >= kBlockM)) ? InnerLoadMode::kTma : InnerLoadMode::kCpAsync);
+
+  static constexpr bool InnerLoadUseTma = (kInnerLoadMode == InnerLoadMode::kTma);
+  static constexpr bool InnerLoadUseTmaPipeline = (kInnerLoadMode != InnerLoadMode::kCpAsync);
+
+  using MainloopPipeline = std::conditional_t<InnerLoadUseTmaPipeline, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = typename MainloopPipeline::PipelineState;
-  // LoopQ scatter (Q/dO gathered via cp.async) needs PipelineAsync for dO as well.
-  using MainloopPipeline_dO =
-      std::conditional_t<!(InnerUseScatter && !SwapBwdQKLoop), typename cutlass::PipelineTmaAsync<kStages_dO>, typename cutlass::PipelineAsync<kStages_dO>>;
+  using MainloopPipeline_dO = std::conditional_t<InnerLoadUseTmaPipeline, typename cutlass::PipelineTmaAsync<kStages_dO>, typename cutlass::PipelineAsync<kStages_dO>>;
   using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
   using TMAClusterBarrier_t = cutlass::arch::ClusterTransactionBarrier::ValueType;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
-
-  static constexpr int kBlockM = get<0>(TileShape_MNK{});
-  static constexpr int kBlockN = get<1>(TileShape_MNK{});
-  static constexpr int kHeadDim = get<2>(TileShape_MNK{});
-
-  // Per-token 2D TMA reduce for scatter dQ: when all kBlockM rows in a tile belong to
-  // one physical token (PackGQA with QheadPerKhead >= kBlockM), replace 128 × per-row
-  // 1D cp.reduce.async.bulk with 1 × 2D cp.reduce.async.bulk.tensor via tma_add_dQ.
-  // Requires swizzled SmemLayoutdQaccumTMA (not Scatter), reuses the existing dense TMA
-  // reduce infrastructure with runtime-computed token coordinates.
-  static constexpr bool ScatterDqUseTma2D = InnerUseScatter && !SwapBwdQKLoop && PackGQA && (QheadPerKhead >= kBlockM) && SparseInnerDxReduceUseTma;
 
   using SeqlenInfo_t = flash::SeqlenInfo;
   using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, QheadPerKhead>;
@@ -412,7 +421,7 @@ struct CollectiveMainloopBwdSm90 {
   // are 8*128B apart. So the 1D bulk-reduce path uses a row-contiguous layout.
   // A 4-float (16B) row pad keeps rows 16B-aligned (bulk reduce requirement) while breaking
   // the worst r2s store bank conflicts (8-way unpadded -> <=2-way padded).
-  // Exception: ScatterDqUseTma2D bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
+  // Exception: ScatterInnerStoreUseTma2D bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
   // keeping the swizzled TMA layout → no bank conflicts, no padding needed.
   static constexpr int kScatterAccRowPad = 4; // floats
   using SmemLayoutdKVaccumScatter = Layout<Shape<Int<kBlockN>, Int<kHeadDim>>, Stride<Int<kHeadDim + kScatterAccRowPad>, _1>>;
@@ -423,9 +432,10 @@ struct CollectiveMainloopBwdSm90 {
   // (LoopK: dKV, LoopQ: dQ); the other tensor keeps the swizzled TMA layout so its dense
   // store path stays intact and no extra padded smem is allocated for it.
   using SmemLayoutdKVaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && SwapBwdQKLoop, SmemLayoutdKVaccumScatter, SmemLayoutdKVaccumTMA>;
-  // ScatterDqUseTma2D: keep swizzled TMA layout (2D TMA reduce reads it natively).
+  // ScatterInnerStoreUseTma2D: keep swizzled TMA layout (2D TMA reduce reads it natively).
   // 1D per-row bulk reduce fallback: use Scatter row-contiguous layout.
-  using SmemLayoutdQaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && !SwapBwdQKLoop && !ScatterDqUseTma2D, SmemLayoutdQaccumScatter, SmemLayoutdQaccumTMA>;
+  using SmemLayoutdQaccumStore =
+      std::conditional_t<SparseInnerDxReduceUseTma && !SwapBwdQKLoop && !ScatterInnerStoreUseTma2D, SmemLayoutdQaccumScatter, SmemLayoutdQaccumTMA>;
   using SmemLayoutdKVaccumtStore =
       decltype(cute::composition(SmemLayoutdKVaccumStore{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
   using SmemLayoutdQaccumtStore =
@@ -1241,6 +1251,39 @@ struct CollectiveMainloopBwdSm90 {
       gdPsum = local_tile(cute::domain_offset(lse_off, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
     };
 
+    // InnerLoadUseTma && InnerUseScatter: absolute-coordinate TMA tensors (no domain_offset by offset_q)
+    // for issuing TMA loads at runtime-computed token positions.
+    auto tQgQ_abs = [&]() {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        auto gQ_abs = local_tile(mQ, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+        return group_modes<0, 3>(block_tma_Q.partition_S(gQ_abs));
+      } else {
+        return cute::make_tuple(); // DCE placeholder
+      }
+    }();
+    auto tdOgdO_abs = [&]() {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        auto gdO_abs = local_tile(mdO, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
+        return group_modes<0, 3>(block_tma_dO.partition_S(gdO_abs));
+      } else {
+        return cute::make_tuple();
+      }
+    }();
+    auto gLSE_abs = [&]() {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        return local_tile(mLSE, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+      } else {
+        return cute::make_tuple();
+      }
+    }();
+    auto gdPsum_abs = [&]() {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        return local_tile(mdPsum, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
+      } else {
+        return cute::make_tuple();
+      }
+    }();
+
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
     Tensor sV_x = make_tensor(sV.data(), make_layout(sV.layout(), Layout<_1>{}));
@@ -1353,11 +1396,26 @@ struct CollectiveMainloopBwdSm90 {
     // Q and dO share the same pipe slot when Q_dO_same_stages=true, so pipe advance
     // happens in load_dO_dPsum (the second of each pair) to keep the slot index in sync.
     auto load_Q_LSE = [&]() {
-      if constexpr (SparseLoad) {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        // All elected threads (lane_predicate) participate in pipe state advance,
+        // but only thread 0 has the correct block_meta cursor and issues TMA.
+        // (Each thread's block_meta.cur_range_inner_idx is group-offset-shifted
+        // during construction; only thread 0's group_idx=0 → correct first row.)
+        if (!lane_predicate)
+          return;
+        pipeline_q.producer_acquire(smem_pipe_write_q);
+        if (thread_idx == 0) {
+          int const stage = smem_pipe_write_q.index();
+          int const packed_first_row = block_meta.get_packed_first_row();
+          shared_storage.tensors.mainloop.smem_token_indices[stage * kBlockM] = packed_first_row;
+          int const m_block_abs = packed_first_row / kBlockM;
+          auto tma_Q_desc = params.tma_load_Q_packed.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+          copy(tma_Q_desc, tQgQ_abs(_, m_block_abs), tQsQ(_, stage));
+          copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE_abs(_, _, m_block_abs), sLSE(_, _, stage));
+        }
+      } else if constexpr (SparseLoad) {
         pipeline_q.producer_acquire(smem_pipe_write_q);
         int const stage = smem_pipe_write_q.index();
-        // Fill this tile's token indices straight into the stage slot (held via acquire),
-        // then read row offsets back from smem — no per-row register array.
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[stage * kBlockM];
         block_meta.fill_token_indices(idx_slot, idx_in_group, group_idx);
         __syncwarp();
@@ -1373,7 +1431,6 @@ struct CollectiveMainloopBwdSm90 {
             cute::copy(cp_async_cg, gQ_src, sQ_dst);
           }
         }
-        // LSE scatter: distribute tokens round-robin across group threads (16B per token)
         for (int i = idx_in_group; i < NumRowsPerGroup; i += GroupSize) {
           float* lse_dst = &sLSE(_0{}, group_idx * NumRowsPerGroup + i, stage);
           auto gLSE_src = make_tensor(
@@ -1404,11 +1461,25 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_dO_dPsum = [&]() {
-      if constexpr (SparseLoad) {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        if (!lane_predicate)
+          return;
         PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
-        // dO/dPsum reuse the token indices load_Q_LSE wrote to the Q stage slot this same
-        // iteration (same-warp program order; smem_pipe_write_q not yet advanced).
+        if (thread_idx == 0) {
+          int const packed_first_row = shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_write_q.index() * kBlockM];
+          int const m_block_abs = packed_first_row / kBlockM;
+          auto tma_dO_desc = params.tma_load_dO_packed.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+          copy(tma_dO_desc, tdOgdO_abs(_, m_block_abs), tdOsdO(_, smem_pipe_write_do_cur.index()));
+          copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum_abs(_, _, m_block_abs), sdPsum(_, _, smem_pipe_write_do_cur.index()));
+        }
+        if constexpr (!Q_dO_same_stages) {
+          ++smem_pipe_write_do;
+        }
+        ++smem_pipe_write_q;
+      } else if constexpr (SparseLoad) {
+        PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
+        pipeline_do.producer_acquire(smem_pipe_write_do_cur);
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_write_q.index() * kBlockM];
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
@@ -1422,7 +1493,6 @@ struct CollectiveMainloopBwdSm90 {
             cute::copy(cp_async_cg, gdO_src, sdO_dst);
           }
         }
-        // dPsum scatter: distribute tokens round-robin across group threads (16B per token)
         for (int i = idx_in_group; i < NumRowsPerGroup; i += GroupSize) {
           float* dpsum_dst = &sdPsum(_0{}, group_idx * NumRowsPerGroup + i, smem_pipe_write_do_cur.index());
           auto gdPsum_src = make_tensor(
@@ -1779,9 +1849,9 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState_dO& smem_pipe_write_do) {
     static_assert(!SwapBwdQKLoop, "load_tail_with_loop_q() must be called when SwapBwdQKLoop is false");
 
-    // PipelineAsync (SparseLoad): all threads must arrive.
-    // PipelineTmaAsync (Dense): single-thread arrive suffices.
-    if (SparseLoad || cute::elect_one_sync()) {
+    // PipelineAsync (kCpAsync): all threads must arrive.
+    // PipelineTmaAsync (kTmaDense/kTma2D): single-thread arrive suffices.
+    if (!InnerLoadUseTmaPipeline || cute::elect_one_sync()) {
       pipeline_q.producer_tail(smem_pipe_write_q);
       pipeline_do.producer_tail(smem_pipe_write_do);
     }
@@ -1904,7 +1974,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
 
-      if constexpr (ScatterDqUseTma2D) {
+      if constexpr (ScatterInnerStoreUseTma2D) {
         // Per-token 2D TMA reduce: all kBlockM packed rows belong to one physical token
         // (QheadPerKhead >= kBlockM). Reuse tma_add_dQ with absolute token coordinates.
         if (lane_predicate) {
@@ -2706,7 +2776,7 @@ struct CollectiveMainloopBwdSm90 {
             // dQFull/dQEmpty barriers are NOT sufficient.
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
 
-            if constexpr (ScatterDqUseTma2D) {
+            if constexpr (ScatterInnerStoreUseTma2D) {
               // Per-token 2D TMA reduce: single thread issues one 2D TMA reduce-add
               if (thread_idx == 0) {
                 Tensor sdQ_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
