@@ -133,10 +133,8 @@ struct CollectiveEpilogueFwd {
   using SmemLayoutAtomO = decltype(composition(Swizzle<kSwizzle, kSwizzleBase, kSwizzleShift>{}, Layout<Shape<_8, Int<kBlockKGmem>>, Stride<Int<kBlockKGmem>, _1>>{}));
   using SmemLayoutOSTS = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 1>(TileShape_MNK_PV{})));
 
-  // now we don't use TMA
-  // using SmemLayoutO = std::conditional_t<ArchTag::kMinComputeCapability >= 90, SmemLayoutOTMA, SmemLayoutOSTS>;
-  // when SwapAB is true, SmemLayoutOTMA has no bank conflict
-  using SmemLayoutO = std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>;
+  static constexpr bool Use_TMA_O = (ArchTag::kMinComputeCapability >= 90);
+  using SmemLayoutO = std::conditional_t<Use_TMA_O, SmemLayoutOTMA, SmemLayoutOSTS>;
 
   // Define ShapeO and StrideO based on PackGQA
   using ShapeO = std::conditional_t<
@@ -264,7 +262,9 @@ struct CollectiveEpilogueFwd {
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
-    // cute::prefetch_tma_descriptor(params.tma_store_O.get_tma_descriptor());
+    if constexpr (Use_TMA_O) {
+      cute::prefetch_tma_descriptor(params.tma_store_O.get_tma_descriptor());
+    }
   }
 
   CUTLASS_DEVICE
@@ -575,20 +575,18 @@ struct CollectiveEpilogueFwd {
       correct_output(tOrPrevO_rowcol, tOrO_rowcol, lse_prev, lse, lse_final);
     }
 
-    // Initialize gmem_tiled_copy_O
-    GmemTiledCopyO gmem_tiled_copy_O;
-    auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
-
-    // Initialize tOcO and tOpO to predict OOB access
-    Tensor tOcO = gmem_thr_copy_O.partition_D(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})));
-    Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOcO)));
+    // Per-thread gmem copy infrastructure (only used in non-TMA path)
+    [[maybe_unused]] GmemTiledCopyO gmem_tiled_copy_O;
+    [[maybe_unused]] auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
+    [[maybe_unused]] Tensor tOcO = gmem_thr_copy_O.partition_D(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})));
+    [[maybe_unused]] Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOcO)));
+    if constexpr (!Use_TMA_O) {
 #pragma unroll
-    for (int k = 0; k < size(tOpO); ++k) {
-      tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O);
+      for (int k = 0; k < size(tOpO); ++k) {
+        tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O);
+      }
     }
-
-    // Initialize tOgO to store O to gmem
-    Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
+    [[maybe_unused]] Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
 
     // Convert tOrO to Element type and copy to smem
     {
@@ -613,36 +611,30 @@ struct CollectiveEpilogueFwd {
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     }
 
-    // Copy tOsO to tOrFinalO
-    Tensor tOsO = gmem_thr_copy_O.partition_S(sO);
-    Tensor tOrFinalO = make_fragment_like(tOsO);
-    cute::copy(gmem_tiled_copy_O, tOsO, tOrFinalO);
-
-    // Signal producer threads that smem_v is released
-    if constexpr (ArchTag::kMinComputeCapability >= 90) {
+    if constexpr (Use_TMA_O) {
       cutlass::arch::fence_view_async_shared();
+      if (cute::elect_one_sync()) {
+        Tensor mdO_tma = params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh);
+        Tensor gdO_tma = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mdO_tma), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
+        auto block_tma = params.tma_store_O.get_slice(_0{});
+        Tensor tOsO_tma = block_tma.partition_S(sO);
+        Tensor tOgO_tma = block_tma.partition_D(gdO_tma);
+        cute::copy(params.tma_store_O, tOsO_tma, tOgO_tma);
+        tma_store_arrive();
+      }
+      tma_store_wait<0>();
 #pragma unroll
       for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
         shared_storage.pipelines.barrier_O.arrive(cta_id);
       }
+    } else {
+      // Non-TMA path: smem → registers → gmem with per-thread vectorized stores
+      Tensor tOsO = gmem_thr_copy_O.partition_S(sO);
+      Tensor tOrFinalO = make_fragment_like(tOsO);
+      cute::copy(gmem_tiled_copy_O, tOsO, tOrFinalO);
+      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+          gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
     }
-
-    // cutlass::arch::fence_view_async_shared();
-    // BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
-    // int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
-    // if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-    //    // BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-    //     if (cute::elect_one_sync()) {
-    //         #pragma unroll
-    //         for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-    //             shared_storage.pipelines.barrier_O.arrive(cta_id);
-    //         }
-    //     }
-    // }
-
-    // Clear_OOB_K must be false since we don't want to write zeros to gmem
-    flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
-        gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
 
     if constexpr (!DisableFwdAtomicReduction) {
       // Make sure all writes to global memory before this point are completed

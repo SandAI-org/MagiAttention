@@ -295,7 +295,7 @@ class FlashAttnFwdSm90 {
       // Currently, SingleProducerWarp is always true
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // Dense/IndexAttn: only the first warp issues TMA; SparseLoad: entire warpgroup participates
+      // Dense/SparseLoad: only thread 0 issues TMA; IndexAttn: entire warpgroup does cp.async
       if constexpr (SingleProducerWarp) {
         if (warp_idx_in_warpgroup != 0) {
           return;
