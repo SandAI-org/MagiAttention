@@ -151,11 +151,14 @@ struct CollectiveMainloopBwdSm90 {
   //   kCpAsync — per-row cp.async.cg scatter, all 64 loader threads (scatter fallback)
   // Pipeline: kCpAsync → PipelineAsync (arrive-count);
   //           kTma/kTma1D → PipelineTmaAsync (transaction-bytes).
-  // kTma is used for dense (always) and scatter when the tile is physically contiguous
-  // (PackGQA + QheadPerKhead >= kBlockM for LoopQ; kblocksize >= kBlockN for LoopK future).
+  // kTma is used for dense (always) and scatter when the tile is physically contiguous:
+  //   LoopQ scatter: PackGQA + QheadPerKhead >= kBlockM → Q tile = one token, contiguous
+  //   LoopK scatter: SparseLoad (not IndexAttn) → K tiles within a range are contiguous
   enum class InnerLoadMode { kCpAsync, kTma1D, kTma };
-  static constexpr InnerLoadMode kInnerLoadMode =
-      !InnerUseScatter ? InnerLoadMode::kTma : ((!SwapBwdQKLoop && PackGQA && (QheadPerKhead >= kBlockM)) ? InnerLoadMode::kTma : InnerLoadMode::kCpAsync);
+  static constexpr InnerLoadMode kInnerLoadMode = !InnerUseScatter ? InnerLoadMode::kTma
+                                                                   : ((!SwapBwdQKLoop && PackGQA && (QheadPerKhead >= kBlockM)) ? InnerLoadMode::kTma
+                                                                          : (SwapBwdQKLoop && SparseLoad && !IndexAttn)         ? InnerLoadMode::kTma
+                                                                                                                                : InnerLoadMode::kCpAsync);
 
   static constexpr bool InnerLoadUseTma = (kInnerLoadMode == InnerLoadMode::kTma);
   static constexpr bool InnerLoadUseTmaPipeline = (kInnerLoadMode != InnerLoadMode::kCpAsync);
@@ -1058,10 +1061,9 @@ struct CollectiveMainloopBwdSm90 {
       cute::prefetch_tma_descriptor(params.tma_load_Q_packed.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_dO_packed.get_tma_descriptor());
     }
-    // K/V are loaded via TMA only for dense; SparseLoad/IndexAttn use cp.async
-    // scatter loads (MainloopPipeline = PipelineAsync), so their K/V TMA
-    // descriptors are unused — skip the prefetch (mirrors FWD's Use_TMA_KV).
-    if constexpr (!InnerUseScatter) {
+    // K/V TMA descriptors needed for dense and scatter-TMA paths (InnerLoadUseTma).
+    // Only cp.async-only scatter (IndexAttn etc) skips the prefetch.
+    if constexpr (!InnerUseScatter || InnerLoadUseTma) {
       cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
     }
@@ -1719,7 +1721,7 @@ struct CollectiveMainloopBwdSm90 {
       copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
     };
 
-    // ─── Dense TMA setup (unused & DCE'd on sparse path) ───
+    // ─── TMA setup for K/V (dense and scatter-TMA paths) ───
     auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
     Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK)); // (TMA, k)
     Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
@@ -1728,9 +1730,50 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
+    // InnerLoadUseTma && InnerUseScatter (LoopK scatter TMA): absolute-coordinate
+    // K/V tensors for issuing TMA at runtime-computed positions from block_meta.
+    auto tKgK_abs = [&]() {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        auto gK_abs = local_tile(mK, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+        return group_modes<0, 3>(block_tma_K.partition_S(gK_abs));
+      } else {
+        return cute::make_tuple();
+      }
+    }();
+    auto tVgV_abs = [&]() {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        auto gV_abs = local_tile(mV, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+        return group_modes<0, 3>(block_tma_V.partition_S(gV_abs));
+      } else {
+        return cute::make_tuple();
+      }
+    }();
+
     // ─── Unified load_K / load_V: scatter vs TMA ───
     auto load_K = [&]() {
-      if constexpr (InnerUseScatter) {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        // Scatter TMA: SparseLoad K tiles are contiguous within each k_range.
+        // All elected threads participate in pipe state; only thread 0 issues TMA.
+        if (!lane_predicate)
+          return;
+        pipeline_k.producer_acquire(smem_pipe_write_k);
+        if (thread_idx == 0) {
+          int const stage = smem_pipe_write_k.index();
+          int const packed_first_row = block_meta.get_packed_first_row();
+          // Fill contiguous token indices (needed by consumer's dKV scatter store)
+          int* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[stage * kBlockN];
+          CUTE_UNROLL
+          for (int r = 0; r < kBlockN; ++r) {
+            idx_slot[r] = packed_first_row + r;
+          }
+          int const n_block_abs = packed_first_row / kBlockN;
+          copy(
+              params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+              tKgK_abs(_, n_block_abs),
+              tKsK(_, stage));
+        }
+        ++smem_pipe_write_k;
+      } else if constexpr (InnerUseScatter) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         // Fill this tile's token indices straight into the stage slot (held via acquire),
         // then read row offsets back from smem — no per-row register array.
@@ -1766,7 +1809,22 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_V = [&]() {
-      if constexpr (InnerUseScatter) {
+      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+        if (!lane_predicate)
+          return;
+        pipeline_v.producer_acquire(smem_pipe_write_v);
+        if (thread_idx == 0) {
+          int const stage = smem_pipe_write_v.index();
+          // K and V pipelines advance 1:1; V's stage matches the slot K just wrote to
+          int const packed_first_row = shared_storage.tensors.mainloop.smem_token_indices[stage * kBlockN];
+          int const n_block_abs = packed_first_row / kBlockN;
+          copy(
+              params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+              tVgV_abs(_, n_block_abs),
+              tVsV(_, stage));
+        }
+        ++smem_pipe_write_v;
+      } else if constexpr (InnerUseScatter) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         // V reuses the indices load_K wrote this same iteration. K/V pipelines have the
         // same depth and advance 1:1, so V's own index() addresses exactly K's slot;
@@ -1866,9 +1924,9 @@ struct CollectiveMainloopBwdSm90 {
       PipelineState& smem_pipe_write_v) {
     static_assert(SwapBwdQKLoop, "load_tail_with_loop_k() must be called when SwapBwdQKLoop is true");
 
-    // PipelineAsync (InnerUseScatter): all threads must arrive.
-    // PipelineTmaAsync (Dense): single-thread arrive suffices.
-    if (InnerUseScatter || cute::elect_one_sync()) {
+    // PipelineAsync (kCpAsync): all threads must arrive.
+    // PipelineTmaAsync (kTma): single-thread arrive suffices.
+    if (!InnerLoadUseTmaPipeline || cute::elect_one_sync()) {
       pipeline_k.producer_tail(smem_pipe_write_k);
       pipeline_v.producer_tail(smem_pipe_write_v);
     }
