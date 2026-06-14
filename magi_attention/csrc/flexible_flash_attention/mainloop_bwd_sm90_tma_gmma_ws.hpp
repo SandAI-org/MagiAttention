@@ -146,10 +146,10 @@ struct CollectiveMainloopBwdSm90 {
   // store on the scatter path. When true, loads use TMA 2D tile copy (1 instruction per tile)
   // and stores use TMA 2D reduce-add (1 instruction per tile), bypassing per-row bulk reduce.
   // Requires tiles to be physically contiguous in global memory:
-  //   LoopQ: PackGQA + QheadPerKhead >= kBlockM → Q tile = one physical token, contiguous
+  //   LoopQ: PackGQA → consecutive Q tokens have contiguous packed rows
+  //          (tile = kBlockM/QheadPerKhead tokens × QheadPerKhead heads, all contiguous)
   //   LoopK: SparseLoad (not IndexAttn) → K tiles within a range are contiguous
-  static constexpr bool ScatterInnerLoadStoreTMA =
-      InnerUseScatter && ((!SwapBwdQKLoop && PackGQA && (QheadPerKhead >= kBlockM)) || (SwapBwdQKLoop && SparseLoad && !IndexAttn));
+  static constexpr bool ScatterInnerLoadStoreTMA = InnerUseScatter && ((!SwapBwdQKLoop && PackGQA) || (SwapBwdQKLoop && SparseLoad && !IndexAttn));
 
   // How the inner-loop loads (Q/dO for LoopQ, K/V for LoopK) are performed:
   //   kTma     — 2D TMA tile load (1 instr/tile). Dense uses sequential m_block;
