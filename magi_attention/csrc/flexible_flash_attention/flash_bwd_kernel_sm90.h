@@ -465,9 +465,7 @@ class FlashAttnBwdSm90 {
     // NOTE: we're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParams pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
-    // Dense: PipelineTmaAsync with transaction_bytes
-    // InnerUseScatter: PipelineAsync with arrive counts
-    if constexpr (!InnerUseScatter) {
+    if constexpr (InnerLoadUseTmaPipeline) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
       pipeline_params_k.num_consumers = NumMmaThreads;
