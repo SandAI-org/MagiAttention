@@ -54,7 +54,12 @@ from magi_attention.benchmarking import (
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func as ffa_func
-from magi_attention.utils import get_dev_cap_str, is_ampere, is_blackwell, is_hopper
+from magi_attention.utils.arch import (
+    get_dev_cap_str,
+    is_ampere,
+    is_blackwell,
+    is_hopper,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config

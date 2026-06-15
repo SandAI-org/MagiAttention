@@ -34,7 +34,8 @@ from magi_attention.common.enum import (
 )
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
-from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
+from magi_attention.utils import is_same_process_group, nvtx
+from magi_attention.utils.dtype import max_fp_dtype
 
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward

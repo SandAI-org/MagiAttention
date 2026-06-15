@@ -19,7 +19,7 @@ import torch.distributed as dist
 from packaging import version
 
 from magi_attention.functional.utils import safe_subtract
-from magi_attention.utils import max_fp_dtype
+from magi_attention.utils.dtype import max_fp_dtype
 
 if version.parse(torch.__version__) > version.parse("2.4"):
     # NOTE: in testing, we should explicitly allow bf16/fp16 reduction for sdpa

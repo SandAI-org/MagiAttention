@@ -28,9 +28,8 @@ from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import (
     make_attn_mask_from_ffa_args,
     make_slice_mask_from_ffa_attn_type,
-    max_fp_dtype,
-    to_higher_fp_dtype,
 )
+from magi_attention.utils.dtype import max_fp_dtype, to_higher_fp_dtype
 
 from .sdpa import sdpa_bwd_dqdkdv_rearrange, sdpa_bwd_qkvodo_lse_rearrange
 from .utils import (

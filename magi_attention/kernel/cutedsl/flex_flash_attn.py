@@ -32,7 +32,7 @@ from quack.compile_utils import make_fake_tensor as fake_tensor
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.kernel.cutedsl.legacy.cache_utils import get_jit_cache
 from magi_attention.kernel.cutedsl.legacy.testing import is_fake_mode
-from magi_attention.utils import to_cute_dtype
+from magi_attention.utils.dtype import to_cute_dtype
 
 if os.environ.get("CUTE_DSL_PTXAS_PATH", None) is not None:
     from magi_attention.kernel.cutedsl.legacy import cute_dsl_ptxas  # noqa: F401
