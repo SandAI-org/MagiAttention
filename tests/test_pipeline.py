@@ -79,6 +79,16 @@ from magi_attention.utils import (
 # (omitted or empty means all backends)
 BACKENDS = "backends"
 
+# Targeted Blackwell FA4 arbitrary-mask coverage for Q/K head_dim=192 with V=128.
+# On SM100, FA4AttnArg resolves mask tiles to (128, 128), so these cases exercise
+# the d192/k128 arbitrary path without expanding the full backend/config matrix.
+FA4_D192_K128_ARBITRARY_CONFIGS = {
+    "sdpa_uneven_varlen_900",
+    "sdpa_varlen_full_attn_1050",
+    "sdpa_varlen_block_causal_960",
+}
+FA4_D192_K128_VALUE_HEAD_DIM = 128
+
 
 # TODO: rewrite the specific function for unitest profiling mode
 class TestPipelineBaseWithWorldSize1(DistTestBase):
@@ -886,7 +896,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "head_dim",
-        [64, 128, 256],
+        [64, 128, 192, 256],
     )
     @parameterize(
         "dtype",
@@ -972,6 +982,20 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ):
             return
 
+        # Keep d192 coverage scoped to the Blackwell FA4 arbitrary-mask path.
+        if head_dim == 192:
+            is_sm100 = (
+                torch.cuda.is_available()
+                and torch.cuda.get_device_capability()[0] == 10
+            )
+            if (
+                backend != MagiAttentionKernelBackend.FA4
+                or not is_sm100
+                or attn_config[NAME] not in FA4_D192_K128_ARBITRARY_CONFIGS
+            ):
+                return
+        head_dim_v = FA4_D192_K128_VALUE_HEAD_DIM if head_dim == 192 else head_dim
+
         # -----    get flag combo (includes overlap_config & random_type_mapping)   ---- #
 
         flag_comb_test_case = ""
@@ -981,6 +1005,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "backend": backend,
                 "num_heads": num_heads,
                 "head_dim": head_dim,
+                "head_dim_v": head_dim_v,
             }
             flag_comb = self.flag_generator.get_next_valid_comb(
                 test_config=test_config,
@@ -1025,7 +1050,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"world_size=[{self.world_size}] x "
             f"backend=[{backend.value}] x "
             f"attn_config=[{attn_config[NAME]}] x "
-            f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
+            f"dtype=[{dtype}] x (nh,hd,hdv)=[({num_heads},{head_dim},{head_dim_v})] x "
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
             + flag_comb_test_case
         )
@@ -1143,6 +1168,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 cp_group=self.nccl_group,
                 cp_mesh=self.device_mesh,
                 dist_attn_config=dist_attn_config,
+                head_dim_v=head_dim_v if head_dim_v != head_dim else None,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
@@ -1168,7 +1194,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             total_v = torch.randn(
                 total_seqlen_k,
                 num_heads_kv,
-                head_dim,
+                head_dim_v,
                 device=self.device,
                 dtype=dtype,
                 requires_grad=run_bwd,

@@ -68,6 +68,7 @@ class DistAttnRuntimeKey:
     num_heads_q: int
     num_heads_kv: int
     head_dim: int
+    head_dim_v: int | None
     pad_size: int
     chunk_size: int
     cp_group: dist.ProcessGroup
@@ -99,6 +100,7 @@ class DistAttnRuntimeKey:
                     self.num_heads_q,
                     self.num_heads_kv,
                     self.head_dim,
+                    self.head_dim_v,
                     self.pad_size,
                     self.chunk_size,
                     self.cp_group,
@@ -495,11 +497,21 @@ def init_dist_attn_runtime_key(
     cp_group: dist.ProcessGroup,
     cp_mesh: DeviceMesh | None,
     dist_attn_config: DistAttnConfig,
+    head_dim_v: int | None = None,
 ) -> DistAttnRuntimeKey:
     """Initialize DistAttnRuntimeKey"""
 
     # Check if flag combinations are valid
     check_flag_comb()
+
+    # Canonicalise head_dim_v: symmetric K/V is represented by `None` (the
+    # default), so that cache hits work regardless of whether the caller
+    # passed `head_dim_v=None` (no-op default) or `head_dim_v=head_dim`
+    # (explicit-but-symmetric). Without this, both would produce distinct
+    # DistAttnRuntimeKey hashes for the same logical config and waste LRU
+    # slots.
+    if head_dim_v == head_dim:
+        head_dim_v = None
 
     return DistAttnRuntimeKey(
         q_ranges=q_ranges,
@@ -510,6 +522,7 @@ def init_dist_attn_runtime_key(
         num_heads_q=num_heads_q,
         num_heads_kv=num_heads_kv,
         head_dim=head_dim,
+        head_dim_v=head_dim_v,
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group=cp_group,
@@ -560,6 +573,7 @@ def init_dist_attn_runtime_mgr(
     is_k_permutable: bool = True,
     ref_dispatch_meta_q: DispatchMeta | None = None,
     ref_dispatch_meta_k: DispatchMeta | None = None,
+    head_dim_v: int | None = None,
 ) -> DistAttnRuntimeMgr:
     """
 
@@ -648,6 +662,10 @@ def init_dist_attn_runtime_mgr(
     """
 
     uneven_shard: bool = dist_attn_config.dispatch_config.uneven_shard
+
+    # Canonicalise head_dim_v: see `init_dist_attn_runtime_key` for rationale.
+    if head_dim_v == head_dim:
+        head_dim_v = None
 
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
@@ -855,6 +873,7 @@ def init_dist_attn_runtime_mgr(
         overlap_config=overlap_config,
         cp_group=cp_group,
         cp_mesh=cp_mesh,
+        head_dim_v=head_dim_v,
     )
 
     logger.info(

@@ -65,6 +65,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         cp_size: int | None = None,
         cp_mesh: DeviceMesh | None = None,
         calc_local_range: bool = True,
+        head_dim_v: int | None = None,
     ):
         self.algorithm = algorithm
         self.cp_group = cp_group
@@ -108,6 +109,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self.num_heads_kv = num_heads_kv
         self.num_heads_group = 1
         self.head_dim = head_dim
+        self.head_dim_v = head_dim_v
 
         # set some attributes that might be fetched from outside
         self.host_q_ranges_global = self.host_ranges_q[self.cp_rank]
@@ -537,6 +539,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             num_heads_q=self.org_num_heads_q,
             num_heads_kv=self.org_num_heads_kv,
             head_dim=self.head_dim,
+            head_dim_v=self.head_dim_v,
         )
 
         return comm_meta

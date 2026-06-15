@@ -55,13 +55,13 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
         # fetch meta info
         # q.shape = [nhq, sq, d]
         # kt.shape = [nhq, d, sk]
-        # v.shape = [nhq, sk, d]
+        # v.shape = [nhq, sk, dv]
         sq, sk, nhq = q.size(-2), kt.size(-1), q.size(0)
         lse_dtype = max_fp_dtype(q.dtype, torch.float32)
 
         # init out buffer
-        # out.shape = [nhq, sq, d]
-        out = torch.zeros_like(q)
+        # out.shape = [nhq, sq, dv]
+        out = q.new_zeros((*q.shape[:-1], v.shape[-1]))
 
         # init max_logits per head only when needed
         if return_max_logits:

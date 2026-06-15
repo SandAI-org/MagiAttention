@@ -279,9 +279,9 @@ class AttnArg:
 def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
     """Resolve the correct **mask** tile sizes for the current GPU architecture.
 
-    On SM100 (Blackwell) the mask tile is always 128x128; the kernel
-    internally doubles the M dimension (``sparse_tile_m = 2 * tile_m``)
-    in ``_make_fa4_args_dict``.
+    On SM100 (Blackwell) the base mask tile is 128x128. Forward uses a
+    2CTA Q2K block with doubled M; backward 2CTA linear CSR expects doubled
+    M and N for the K2Q block.
 
     On SM80/SM90, the tile sizes depend on ``headdim`` and are queried
     from the C++ (hopper) backend via ``get_tile_sizes_by_backend``.
@@ -345,7 +345,7 @@ class FA4AttnArg(AttnArg):
                 f"FA4 mask tile size on SM {COMPUTE_CAPABILITY}.0 must be "
                 f"{_DEFAULT_FA4_TILE_SIZE}, got fwd=({self.tile_m}, {self.tile_n}), "
                 f"bwd=({self.tile_m_bwd}, {self.tile_n_bwd}). "
-                f"The kernel internally doubles tile_m via sparse_tile_m."
+                f"The SM100 kernel internally expands the linear CSR block size."
             )
 
         super().__post_init__()
@@ -373,6 +373,8 @@ class FA4AttnArg(AttnArg):
         else:
             q_stage_fwd = 1
         sparse_tile_m = q_stage_fwd * tile_m
+        bwd_sparse_tile_m = 2 * tile_m if COMPUTE_CAPABILITY == 10 else tile_m
+        bwd_sparse_tile_n = 2 * tile_n if COMPUTE_CAPABILITY == 10 else tile_n
 
         if is_magi_to_hstu_installed:
             with nvtx.add_nvtx_event(
@@ -432,8 +434,8 @@ class FA4AttnArg(AttnArg):
                     hstu_func,
                     self.seqlen_q,
                     self.seqlen_k,
-                    Q_BLOCK_SIZE=tile_m,
-                    KV_BLOCK_SIZE=tile_n,
+                    Q_BLOCK_SIZE=bwd_sparse_tile_m,
+                    KV_BLOCK_SIZE=bwd_sparse_tile_n,
                 )
 
                 linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
@@ -443,8 +445,9 @@ class FA4AttnArg(AttnArg):
                     full_block_cnt=cuda_q_full_cnt,
                     full_block_offset=cuda_q_full_offset,
                     full_block_idx=cuda_q_full_idx,
-                    # K2Q (dk/dv) keeps q_stage=1, so base_m_block == tile_m.
-                    block_size=(tile_m, tile_n),
+                    # SM100 2CTA bwd expects the K2Q linear CSR block size
+                    # to be doubled in both M and N relative to the base kernel tile.
+                    block_size=(bwd_sparse_tile_m, bwd_sparse_tile_n),
                 )
         else:
             # Prepare mask_mod
@@ -480,7 +483,7 @@ class FA4AttnArg(AttnArg):
                 self.seqlen_q,
                 self.seqlen_k,
                 device="cuda",
-                BLOCK_SIZE=(tile_m, tile_n),
+                BLOCK_SIZE=(bwd_sparse_tile_m, bwd_sparse_tile_n),
             )
             (
                 _,
