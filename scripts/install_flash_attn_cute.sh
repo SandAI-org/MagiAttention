@@ -58,21 +58,28 @@ fi
 echo "[magiattn] Installing create_block_mask_cuda"
 pip install -e csrc/utils/create_block_mask --no-build-isolation
 
+# 3) Install magi_to_hstu_cuda (CUDA helper that converts MagiAttention masks
+#    into the HSTU format consumed by the FA4 backend).
+#
+#    setup.py hard-codes -gencode for sm_80/90/100, so it builds fine without
+#    a GPU exposed at docker-build time — no patching needed.
+echo "[magiattn] Installing magi_to_hstu_cuda"
+pip install -e csrc/utils/magi_to_hstu --no-build-isolation
+
 cd "$REPO_ROOT"
 
-# 3) Sanity check: magi_attention's FA4 path also depends on magi_to_hstu_cuda.
-#    Its source no longer ships with this flash-attention fork; it must be
-#    supplied by the docker base image (or built from a separate source repo).
+# 4) Sanity check: magi_attention's FA4 path depends on magi_to_hstu_cuda
+#    being importable. The install above should have made it available; warn
+#    loudly if not (e.g. the build silently failed).
 if ! python -c "import magi_to_hstu_cuda" 2>/dev/null; then
 	echo ""
-	echo "[magiattn] WARNING: magi_to_hstu_cuda is not importable."
+	echo "[magiattn] WARNING: magi_to_hstu_cuda is not importable after install."
 	echo "  The FA4 backend will fail at FA4AttnArg.__post_init__ without it."
-	echo "  Source no longer lives in flash-attention; install from your"
-	echo "  docker base image or a separate source repo."
+	echo "  Check the pip install output above for build errors."
 	echo ""
 fi
 
-# 4) Optional: collect sub-package wheels for SCM distribution.
+# 5) Optional: collect sub-package wheels for SCM distribution.
 if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 	echo "[magiattn] Collecting sub-package wheels into $MAGI_WHEEL_DIR..."
 
@@ -83,6 +90,7 @@ if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 
 	for src_dir in \
 		"${FA_DIR}/csrc/utils/create_block_mask" \
+		"${FA_DIR}/csrc/utils/magi_to_hstu" \
 		"${FA_DIR}/flash_attn/cute"; do
 		if [[ -d "${REPO_ROOT}/${src_dir}" ]]; then
 			echo "[magiattn] Building wheel from ${src_dir}..."
