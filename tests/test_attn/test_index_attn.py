@@ -214,13 +214,24 @@ class TestIndexAttnIndicesAttn(DistTestBase):
 
         device = self.device
 
-        index_attn_indices = _build_index_attn_indices(
-            B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=k_block_size
-        )
-
         q = torch.randn(B, S_q, NHQ, D, dtype=dtype, device=device)
         k = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
         v = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
+
+        if NHK > 1:
+            # View trick: fold NHK into the token dimension so the kernel
+            # sees nhk=1.  Indices must be built in this flat space.
+            q = rearrange(q, "b s (h1 h2) d -> b (s h1) h2 d", h1=NHK)
+            k = rearrange(k, "b s h d -> b (s h) 1 d")
+            v = rearrange(v, "b s h d -> b (s h) 1 d")
+            S_q = S_q * NHK
+            S_kv = S_kv * NHK
+            NHQ = NHQ // NHK
+            NHK = 1
+
+        index_attn_indices = _build_index_attn_indices(
+            B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=k_block_size
+        )
 
         result = _run_sparse_attn_and_get_output(
             q,
@@ -256,9 +267,10 @@ class TestIndexAttnIndicesAttn(DistTestBase):
         )
 
         test_case = (
-            f"[NHQ={NHQ},NHK={NHK},S_q={S_q},S_kv={S_kv},B={B},D={D},"
-            f"topk={topk},max_topk={max_topk},pack_gqa={pack_gqa},"
-            f"swap_ab={swap_ab},k_block_size={k_block_size},dtype={dtype}]"
+            f"[NHQ={cfg['NHQ']},NHK={cfg['NHK']},S_q={cfg.get('S_q', cfg.get('S'))},S_kv={cfg.get('S_kv', cfg.get('S'))},"
+            f"B={B},D={D},topk={topk},max_topk={max_topk},pack_gqa={pack_gqa},"
+            f"swap_ab={swap_ab},k_block_size={k_block_size},dtype={dtype},"
+            f"flat:NHQ_eff={NHQ},S_q_eff={S_q},S_kv_eff={S_kv}]"
         )
 
         _compare_against_sdpa(o_ffa, q, k, v, sdpa_mask, B, NHQ, NHK, atol, test_case)
