@@ -53,7 +53,8 @@ template <
     bool SwapBwdQKLoop_,
     bool PackGQA_,
     bool CatGQA_,
-    int QheadPerKhead_>
+    int QheadPerKhead_,
+    bool IndexAttn_ = false>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using ElementDq = ElementDq_;
@@ -80,6 +81,9 @@ struct CollectiveEpilogueBwd {
   static constexpr bool CatGQA = CatGQA_;
   static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
   static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
+  static constexpr bool IndexAttn = IndexAttn_;
+  // IndexAttn LoopQ: outer block = 1 K token in a kBlockN tile; only row 0 is valid.
+  static constexpr bool IndexAttnInvLoopQ = IndexAttn && !SwapBwdQKLoop;
 
   static constexpr int NumEpilogueThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
   static constexpr int AtomLayoutMdKV = NumMmaWarpGroups * (Use_TMA ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV;
@@ -395,7 +399,9 @@ struct CollectiveEpilogueBwd {
     int2 k_range = get_batch_range(params.k_ranges, bidb);
     int offset_k = k_range.x;
 
-    if constexpr (!DisableBwdDkvAtomicReduction) {
+    // IndexAttn LoopQ: outer tile has 1 valid K token in kBlockN rows; TMA full-tile store
+    // would corrupt neighboring K positions. Use per-element path with residual_n=1 guard.
+    if constexpr (!DisableBwdDkvAtomicReduction && !IndexAttnInvLoopQ) {
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
       cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
 

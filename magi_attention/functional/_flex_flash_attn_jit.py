@@ -127,9 +127,7 @@ def _ffa_register_quota(
     else:
         # mirrors NumMmaWarpGroups in run_mha_bwd_ (flash_bwd_launch_template.h)
         num_mma_wgs = 2 if swap_bwd_qk_loop else (3 if head_dim == 192 else 2)
-        inner_use_scatter = (
-            (sparse_load or index_attn) if swap_bwd_qk_loop else sparse_load
-        )
+        inner_use_scatter = sparse_load or index_attn
         budget = 168 * (1 + num_mma_wgs)
         if inner_use_scatter:
             producer_regs = 56 if sparse_dx_tma_reduce else 104
@@ -413,10 +411,9 @@ def get_ffa_jit_spec(
         extra_template_args["mask_mode_int"] = _mask_mode_map[_mm_lower]
         uri += f"_mm{_mm_lower}"
     # inner_use_scatter mirrors the mainloop predicate (mainloop_bwd_sm90_tma_gmma_ws.hpp):
-    # LoopK scatters K/V when sparse_load or index_attn, LoopQ scatters Q/dO when sparse_load.
-    _inner_use_scatter = (
-        (sparse_load or index_attn) if swap_bwd_qk_loop else sparse_load
-    )
+    # LoopK scatters K/V when sparse_load or index_attn, LoopQ scatters Q/dO when sparse_load
+    # or index_attn (inv_indices).
+    _inner_use_scatter = sparse_load or index_attn
     _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER")
     # DEVIATION: env toggle is ignored for non-scatter (dense) bwd configs.
     # Reason: the dense consumer-store combination is untested and currently trips an

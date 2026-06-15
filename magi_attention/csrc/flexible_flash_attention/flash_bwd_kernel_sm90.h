@@ -275,8 +275,13 @@ class FlashAttnBwdSm90 {
     using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
     using BlockMetaConsumerT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>;
 
-    // SparseLoad LoopQ: producer uses SparseLoadLoopQBlockMeta and needs thread_idx
-    using ProducerBlockMetaT = std::conditional_t<InnerUseScatter, typename CollectiveMainloop::SparseLoadLoopQBlockMeta, BlockMetaT>;
+    // Scatter LoopQ producer: SparseLoad uses SparseLoadLoopQBlockMeta, IndexAttn uses IndexAttnInvLoadBlockMeta
+    using ProducerBlockMetaT = std::conditional_t<
+        InnerUseScatter,
+        std::conditional_t<IndexAttn,
+                           typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/true>,
+                           typename CollectiveMainloop::SparseLoadLoopQBlockMeta>,
+        BlockMetaT>;
 
     using Roles = typename CollectiveMainloop::ProducerWarpRoles;
     static constexpr int NumLoaderWarps = Roles::kNumLoaderWarps;
@@ -347,8 +352,13 @@ class FlashAttnBwdSm90 {
             // BlockMeta iterates per merged sub-range instead, which over-counts store
             // handshakes whenever a sub-range length is not a multiple of kBlockM
             // (e.g. hd64 LoopQ: kBlockM=128 with 64-token sparse blocks) → barrier deadlock.
-            typename CollectiveMainloop::SparseMmaLoopQBlockMeta block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
+            if constexpr (IndexAttn) {
+              typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/false> block_meta{params.mainloop, block_coord, shared_storage};
+              mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
+            } else {
+              typename CollectiveMainloop::SparseMmaLoopQBlockMeta block_meta{params.mainloop, block_coord, shared_storage};
+              mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
+            }
           } else {
             BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
             mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
@@ -389,8 +399,13 @@ class FlashAttnBwdSm90 {
         clear(tdVrdV);
 
         // Run the mma to compute partial dQ,dK,dV
-        // SparseLoad LoopQ uses SparseMmaLoopQBlockMeta; Dense uses DenseBlockMeta
-        using ConsumerBlockMetaT = std::conditional_t<InnerUseScatter, typename CollectiveMainloop::SparseMmaLoopQBlockMeta, BlockMetaConsumerT>;
+        // SparseLoad LoopQ uses SparseMmaLoopQBlockMeta; IndexAttn LoopQ uses IndexAttnInvLoadBlockMeta; Dense uses DenseBlockMeta
+        using ConsumerBlockMetaT = std::conditional_t<
+            InnerUseScatter,
+            std::conditional_t<IndexAttn,
+                               typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/false>,
+                               typename CollectiveMainloop::SparseMmaLoopQBlockMeta>,
+            BlockMetaConsumerT>;
         ConsumerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
 
         auto epilogue_block_coord = block_meta.get_epilogue_coord();
