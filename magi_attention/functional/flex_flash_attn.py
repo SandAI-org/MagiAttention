@@ -999,16 +999,46 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ) = ctx.saved_tensors
 
         if ctx.index_attn:
-            # IndexAttn BWD: force LoopK, no ranges needed (scheduler synthesizes
-            # per-token ranges at compile time, same as FWD)
-            swap_bwd_qk_loop = True
-            bwd_q_ranges = None
-            bwd_k_ranges = None
-            bwd_attn_type_map = None
-            merge_k_ranges = None
-            bwd_kq_map = None
-            bwd_unique_count = None
-            bwd_auto_range_merge = False
+            # IndexAttn uses indices, not ranges — ranges must not be provided
+            assert q_ranges is None and k_ranges is None, \
+                "IndexAttn BWD does not use q_ranges/k_ranges; they should be None"
+            import os
+            _use_loopq = os.environ.get("MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q", "0") == "1"
+            if _use_loopq:
+                # IndexAttn BWD LoopQ: outer=K, inner=Q from inv_indices
+                swap_bwd_qk_loop = False
+                bwd_q_ranges = None
+                bwd_k_ranges = None
+                bwd_attn_type_map = None
+                merge_k_ranges = None
+                bwd_kq_map = None
+                bwd_unique_count = None
+                bwd_auto_range_merge = False
+                # Build inv_indices from forward indices
+                from magi_attention.utils.sparse_utils import build_inv_indices
+                nhk = k.size(1)
+                # index_attn_indices_2d is (seqlen_q * nhk, topk) for LoopK;
+                # reshape to 3D (seqlen_q, nhk, topk) for build_inv_indices
+                _fwd_3d = index_attn_indices_2d.reshape(-1, nhk, index_attn_indices_2d.size(-1))
+                _inv_indices, _inv_topk = build_inv_indices(
+                    _fwd_3d,
+                    seqlen_k=v.size(0),
+                    pad_multiple=64,
+                )
+                # Kernel layout: (seqlen_k, nhk * inv_topk) so batch_size = seqlen_k
+                # index_attn_max_topk = nhk * inv_topk (full stride for each K token)
+                index_attn_indices_2d = _inv_indices.reshape(v.size(0), nhk * _inv_topk).contiguous()
+                ctx.index_attn_max_topk = nhk * _inv_topk
+            else:
+                # IndexAttn BWD LoopK (default): outer=Q, inner=K from topk_indices
+                swap_bwd_qk_loop = True
+                bwd_q_ranges = None
+                bwd_k_ranges = None
+                bwd_attn_type_map = None
+                merge_k_ranges = None
+                bwd_kq_map = None
+                bwd_unique_count = None
+                bwd_auto_range_merge = False
         elif ctx.auto_range_merge:
             swap_bwd_qk_loop = ctx.swap_bwd_qk_loop
             bwd_auto_range_merge = True
@@ -1473,6 +1503,12 @@ def flex_flash_attn_func(
             f"of tile_size={tile_size}. Pad with -1 if needed."
         )
         index_attn_indices_2d = index_attn_indices.view(-1, max_topk)
+
+        # IndexAttn uses indices, not ranges — assert ranges are not provided
+        assert q_ranges is None and k_ranges is None, (
+            "IndexAttn path requires index_attn_indices only; "
+            "q_ranges/k_ranges must not be provided simultaneously."
+        )
 
         auto_range_merge = False
         index_attn = True

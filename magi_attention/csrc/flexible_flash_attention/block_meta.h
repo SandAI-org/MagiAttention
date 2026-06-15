@@ -570,4 +570,187 @@ struct IndexAttnBlockMeta {
   }
 };
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// IndexAttnInvBlockMeta: BWD LoopQ with inverse indices (outer=K token, inner=Q from inv_indices).
+//
+// Mirrors IndexAttnBlockMeta but with Q/K roles swapped. For each K token, inv_indices
+// stores which Q tokens attend it. The inner loop iterates Q tiles; with PackGQA each
+// Q token fills QheadPerKhead packed rows, so inner_block_max = actual_inv_topk × QheadPerKhead / kBlockM.
+//
+// fill_token_indices() fills Q/dO smem slots with packed Q row indices (like the LoopK
+// IndexAttnBlockMeta fills K/V slots with physical K row indices).
+////////////////////////////////////////////////////////////////////////////////////////////////////
+template <
+    bool IsProducer,
+    bool PackGQA,
+    int QheadPerKhead,
+    int NumRowsPerGroup_,
+    int NumProducerThreads_,
+    int GroupSize_,
+    int kBlockM_,
+    bool InnerDirMaxToMin_>
+struct IndexAttnInvBlockMeta {
+  static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
+  static constexpr bool NeedsBatchLoop = true;
+
+  int const outer_block;
+  int const bidh;
+  int const bidh_kv;
+  int bidb;
+
+  flash::SeqlenInfo seqlen_info;
+
+  flash::AttnType attn_type = flash::AttnType::Full;
+  int end_batches;
+
+  int inner_block_cur;
+  int inner_block_max;
+  int num_invalid_token;
+  static constexpr int inner_block_min = 0;
+
+  int const* group_token_ptr;
+  int nhk;
+  int qh_head_local;
+
+  template <typename ParamsT, typename SharedStorage>
+  CUTLASS_DEVICE IndexAttnInvBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
+      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidh_kv(bidh), group_token_ptr(nullptr) {
+    bidb = get<2>(block_coord);
+
+    // bidb = k_token, bidh = kv_head (scheduler dispatches over seqlen_k × nhk)
+    nhk = detail::nhk_of<ParamsT>::get(params);
+    int k_token = bidb;
+    qh_head_local = bidh;
+
+    // K-side seqlen: this K token occupies 1 row
+    seqlen_info.offset_k = k_token;
+    seqlen_info.seqlen_k = 1;
+
+    // inv_indices layout: (seqlen_k, nhk * inv_topk_per_head) flattened as (seqlen_k * nhk * inv_topk_per_head)
+    // params.index_attn_max_topk = nhk * inv_topk_per_head
+    int max_inv_topk_total = params.index_attn_max_topk;
+    int inv_topk_per_head = max_inv_topk_total / nhk;
+    int const* row_ptr = params.index_attn_indices + static_cast<int64_t>(bidb) * max_inv_topk_total
+                         + static_cast<int64_t>(bidh) * inv_topk_per_head;
+    int max_inv_topk = inv_topk_per_head;
+
+    int actual_inv_topk = max_inv_topk;
+    for (int i = max_inv_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
+      --actual_inv_topk;
+
+    // Q-side: total packed rows = actual_inv_topk × QheadPerKhead (PackGQA)
+    int total_q_packed_rows = actual_inv_topk * QheadPerKhead;
+    seqlen_info.offset_q = 0;
+    seqlen_info.seqlen_q = total_q_packed_rows;
+
+    inner_block_max = (total_q_packed_rows + kBlockM_ - 1) / kBlockM_;
+    num_invalid_token = inner_block_max * kBlockM_ - total_q_packed_rows;
+    inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
+    end_batches = bidb + 1;
+
+    if constexpr (IsProducer) {
+      int aligned_total = inner_block_max * kBlockM_;
+      int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
+      int group_offset;
+      if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
+        group_offset = (aligned_total - kBlockM_) + group_idx * NumRowsPerGroup_;
+      } else {
+        group_offset = group_idx * NumRowsPerGroup_;
+      }
+      // group_token_ptr points into the inv_indices flat Q-token list;
+      // fill_token_indices expands each Q token to QheadPerKhead packed rows.
+      group_token_ptr = row_ptr;
+      // Store group_offset for the fill_token_indices expansion
+      // (we compute the packed row from the Q token on the fly)
+    }
+  }
+
+  // Fill Q/dO smem slot with packed Q row indices for the CURRENT tile.
+  // Each Q token in inv_indices expands to QheadPerKhead packed rows.
+  // The slot covers NumRowsPerGroup_ rows starting at group_idx * NumRowsPerGroup_.
+  CUTLASS_DEVICE
+  void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
+    static_assert(IsProducer, "fill_token_indices() is producer-only");
+    int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
+    // Current tile's first packed row in the virtual packed-Q space
+    int tile_first_packed_row;
+    if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
+      tile_first_packed_row = inner_block_cur * kBlockM_;
+    } else {
+      tile_first_packed_row = inner_block_cur * kBlockM_;
+    }
+    int base = tile_first_packed_row + group_idx * NumRowsPerGroup_;
+
+    int total_q_packed = seqlen_info.seqlen_q;
+    int max_inv_topk_val = [&]() {
+      // Recover from constructor: actual_inv_topk = seqlen_q / QheadPerKhead
+      return total_q_packed / QheadPerKhead;
+    }();
+
+    for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+      int packed_row = base + j;
+      if (packed_row < total_q_packed) {
+        // Map packed row to Q token index and sub-head offset
+        int q_token_local_idx = packed_row / QheadPerKhead;
+        int sub_head = packed_row % QheadPerKhead;
+        int q_token = (q_token_local_idx < max_inv_topk_val) ? group_token_ptr[q_token_local_idx] : -1;
+        // packed physical row = q_token * QheadPerKhead + sub_head
+        group_rows[j] = (q_token >= 0) ? q_token * QheadPerKhead + sub_head : 0;
+      } else {
+        group_rows[j] = 0;
+      }
+    }
+  }
+
+  CUTLASS_DEVICE
+  int get_packed_first_row() const {
+    static_assert(IsProducer, "get_packed_first_row() is producer-only");
+    int packed_row = inner_block_cur * kBlockM_;
+    int q_token_local_idx = packed_row / QheadPerKhead;
+    int sub_head_offset = packed_row % QheadPerKhead;
+    int q_token = (q_token_local_idx < seqlen_info.seqlen_q / QheadPerKhead)
+                      ? group_token_ptr[q_token_local_idx] : -1;
+    return (q_token >= 0) ? q_token * QheadPerKhead + sub_head_offset : 0;
+  }
+
+  CUTLASS_DEVICE
+  auto get_epilogue_coord() const {
+    return cute::make_tuple(outer_block, bidh, bidb);
+  }
+
+  CUTLASS_DEVICE
+  void prefetch() {
+    flash::advance_block_cur<kDir>(inner_block_cur);
+  }
+
+  CUTLASS_DEVICE
+  bool is_finish() {
+    if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
+      return inner_block_cur < inner_block_min;
+    } else {
+      return inner_block_cur >= inner_block_max;
+    }
+  }
+
+  CUTLASS_DEVICE
+  int padding_block() const {
+    return inner_block_max - 1;
+  }
+
+  template <flash::DispatchDirection>
+  CUTLASS_DEVICE void update_block_cur() {}
+
+  CUTLASS_DEVICE bool is_valid() {
+    return true;
+  }
+
+  CUTLASS_DEVICE
+  bool skip_to_first_valid() {
+    while (!is_valid() && !is_finish()) {
+      prefetch();
+    }
+    return is_finish();
+  }
+};
+
 } // namespace flash

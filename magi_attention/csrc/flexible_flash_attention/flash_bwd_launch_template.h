@@ -221,7 +221,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       SwapBwdQKLoop,
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
-      /*QheadPerKhead=*/QheadPerKhead>;
+      /*QheadPerKhead=*/QheadPerKhead,
+      /*IndexAttn=*/IndexAttn>;
   using AttnKernel = flash::enable_sm90_or_later<
       flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, BwdProducerRegs, BwdConsumerRegs>>;
 
@@ -368,8 +369,9 @@ template <
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
-  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+  static constexpr bool IndexAttnInvLoopQ = IndexAttn && !SwapBwdQKLoop;
+  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexAttnInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexAttnInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
 
   // TODO: Add a specific tuning function for different kHeadDim
   static constexpr int Stages = 2;

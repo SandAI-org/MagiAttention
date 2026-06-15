@@ -76,10 +76,21 @@ constexpr std::tuple<int, int, bool> tile_size_fwd_sm90(int headdim, int element
  * so the total shared memory usage may increase `(2 * kBlockN - kBlockM) * kHeadDim * ElementSize` bytes,
  * which might be unacceptable for some cases like `kBlockM=64, kBlockN=128, kHeadDim=128, ElementSize=2`.
  */
-template <bool SwapBwdQKLoop>
+template <bool SwapBwdQKLoop, bool IndexAttnInvLoopQ = false>
 constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size = 2, bool softcap = false) {
   // Currently only support FP16/BF16
   assert(element_size == 2);
+
+  // IndexAttn LoopQ (inv-indices): outer=K token (1 valid row), inner=Q tiles.
+  // K can't be packed → minimize kBlockN. Use {64, 64} which satisfies all WGMMA
+  // constraints with the default hd=128 swapAB flags (SdP_swapAB=true → M=kBlockN=64≥64).
+  if constexpr (IndexAttnInvLoopQ) {
+    static_assert(!SwapBwdQKLoop, "IndexAttnInvLoopQ requires SwapBwdQKLoop=false (LoopQ)");
+    if (headdim <= 128)
+      return {64, 64};
+    else
+      return {64, 64};
+  }
 
   if (headdim <= 64) {
     if constexpr (SwapBwdQKLoop)

@@ -1250,3 +1250,73 @@ def choose_ref_block(
         "sparse_load": sparse_load,
         "index_attn": index_attn,
     }
+
+
+def build_inv_indices(
+    index_attn_indices: torch.Tensor,
+    seqlen_k: int,
+    pad_multiple: int = 64,
+) -> tuple[torch.Tensor, int]:
+    """Build inverse indices from forward IndexAttn indices (Q→K to K→Q).
+
+    Args:
+        index_attn_indices: (seqlen_q, nhk, topk) int32.
+            Forward Q→K mapping. Trailing -1 entries are padding.
+        seqlen_k: total number of K tokens.
+        pad_multiple: pad inv_topk to this multiple (matches kBlockM).
+
+    Returns:
+        inv_indices: (seqlen_k, nhk, inv_topk) int32.
+            Inverse K→Q mapping. Each entry is a Q token position.
+            Trailing -1 entries are padding.
+        inv_topk: int — padded max Q count.
+    """
+    if index_attn_indices.dim() == 2:
+        raise ValueError(
+            "build_inv_indices expects 3D input (seqlen_q, nhk, topk). "
+            "Got 2D — reshape before calling."
+        )
+    assert index_attn_indices.dim() == 3
+    seqlen_q, nhk, topk = index_attn_indices.shape
+    device = index_attn_indices.device
+
+    valid_mask = index_attn_indices >= 0  # (sq, nhk, topk)
+    kv_positions = index_attn_indices.clamp(min=0)
+
+    q_ids = torch.arange(seqlen_q, device=device, dtype=torch.int32)
+    q_ids = q_ids[:, None, None].expand_as(index_attn_indices)
+    head_ids = torch.arange(nhk, device=device, dtype=torch.int32)
+    head_ids = head_ids[None, :, None].expand_as(index_attn_indices)
+
+    flat_q = q_ids[valid_mask]
+    flat_k = kv_positions[valid_mask]
+    flat_h = head_ids[valid_mask]
+
+    # Count Q tokens per (k_pos, head)
+    flat_kh = flat_k.long() * nhk + flat_h.long()
+    total_kh = seqlen_k * nhk
+    counts = torch.zeros(total_kh, device=device, dtype=torch.int32)
+    counts.scatter_add_(0, flat_kh.int().long(), torch.ones_like(flat_kh, dtype=torch.int32))
+
+    max_inv_topk = int(counts.max().item())
+    inv_topk = ((max_inv_topk + pad_multiple - 1) // pad_multiple) * pad_multiple
+
+    # Sort by (k_pos, head) to group entries
+    sorted_order = flat_kh.argsort(stable=True)
+    sorted_q = flat_q[sorted_order]
+    sorted_kh = flat_kh[sorted_order]
+
+    # Within-group offset via cumulative start positions
+    group_starts = torch.zeros(total_kh + 1, device=device, dtype=torch.int64)
+    group_starts[1:] = counts.cumsum(0).long()
+
+    offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
+    offsets = offsets - group_starts[sorted_kh.long()]
+
+    # Fill inv_indices
+    inv_indices = torch.full((seqlen_k, nhk, inv_topk), -1, device=device, dtype=torch.int32)
+    inv_indices_flat = inv_indices.reshape(total_kh, inv_topk)
+
+    inv_indices_flat[sorted_kh.long(), offsets.long()] = sorted_q
+
+    return inv_indices, inv_topk

@@ -109,14 +109,13 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool IndexAttn = IndexAttn_;
   static_assert(!SparseLoad || RangeMerge); // If SparseLoad, we need RangeMerge
   static_assert(!(SparseLoad && IndexAttn));
-  static_assert(!IndexAttn || SwapBwdQKLoop);
 
   static constexpr bool UseMaskDispatch = UseMaskDispatch_;
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
   // InnerUseScatter: inner-loop direction data uses scatter load/store (vs TMA):
-  // KV scatter for LoopK, Q/dO scatter for LoopQ. IndexAttn implies LoopK (asserted
-  // above), so the same expression covers both loops.
+  // LoopK (SwapBwdQKLoop=true):  KV scatter when SparseLoad or IndexAttn
+  // LoopQ (SwapBwdQKLoop=false): Q/dO scatter when SparseLoad or IndexAttn (inv_indices)
   static constexpr bool InnerUseScatter = SparseLoad || IndexAttn;
   // LoopQ scatter does not support CatGQA (the dense LoopQ load iterates bidh_kv_cat
   // per merged sub-range; the scatter load path has no such loop).
@@ -146,10 +145,14 @@ struct CollectiveMainloopBwdSm90 {
   // store on the scatter path. When true, loads use TMA 2D tile copy (1 instruction per tile)
   // and stores use TMA 2D reduce-add (1 instruction per tile), bypassing per-row bulk reduce.
   // Requires tiles to be physically contiguous in global memory:
-  //   LoopQ: PackGQA → consecutive Q tokens have contiguous packed rows
+  //   LoopQ SparseLoad: PackGQA → consecutive Q tokens have contiguous packed rows
   //          (tile = kBlockM/QheadPerKhead tokens × QheadPerKhead heads, all contiguous)
+  //   LoopQ IndexAttn:  PackGQA + QheadPerKhead >= kBlockM → each tile fits within one Q
+  //          token's packed rows (inv_indices Q tokens are scattered but each has qhpkh
+  //          contiguous packed rows; when qhpkh >= kBlockM the entire tile is contiguous).
+  //          Fallback: qhpkh < kBlockM → kTma1D (future) or kCpAsync.
   //   LoopK: SparseLoad (not IndexAttn) → K tiles within a range are contiguous
-  static constexpr bool ScatterInnerLoadStoreTMA = InnerUseScatter && ((!SwapBwdQKLoop && PackGQA) || (SwapBwdQKLoop && SparseLoad && !IndexAttn));
+  static constexpr bool ScatterInnerLoadStoreTMA = InnerUseScatter && ((!SwapBwdQKLoop && PackGQA && (!IndexAttn || QheadPerKhead >= kBlockM)) || (SwapBwdQKLoop && SparseLoad && !IndexAttn));
 
   // How the inner-loop loads (Q/dO for LoopQ, K/V for LoopK) are performed:
   //   kTma     — 2D TMA tile load (1 instr/tile). Dense uses sequential m_block;
@@ -1051,6 +1054,11 @@ struct CollectiveMainloopBwdSm90 {
   using IndexAttnLoadBlockMeta =
       flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin>;
 
+  // IndexAttn LoopQ: outer=K token, inner=Q from inv_indices (SwapBwdQKLoop=false)
+  template <bool IsProducer>
+  using IndexAttnInvLoadBlockMeta =
+      flash::IndexAttnInvBlockMeta<IsProducer, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockM, InnerDirMaxToMin>;
+
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
@@ -1415,7 +1423,7 @@ struct CollectiveMainloopBwdSm90 {
           copy(tma_Q_desc, tQgQ_abs(_, m_block_abs), tQsQ(_, stage));
           copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE_abs(_, _, m_block_abs), sLSE(_, _, stage));
         }
-      } else if constexpr (SparseLoad) {
+      } else if constexpr (InnerUseScatter) {
         pipeline_q.producer_acquire(smem_pipe_write_q);
         int const stage = smem_pipe_write_q.index();
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[stage * kBlockM];
@@ -1479,7 +1487,7 @@ struct CollectiveMainloopBwdSm90 {
           ++smem_pipe_write_do;
         }
         ++smem_pipe_write_q;
-      } else if constexpr (SparseLoad) {
+      } else if constexpr (InnerUseScatter) {
         PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_write_q.index() * kBlockM];
@@ -1549,8 +1557,8 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_body = [&]() {
-      if constexpr (SparseLoad) {
-        // SparseLoad: one block per call, block_meta drives iteration
+      if constexpr (InnerUseScatter) {
+        // Scatter (SparseLoad / IndexAttn LoopQ): one block per call, block_meta drives iteration
         load_Q_LSE();
         load_dO_dPsum();
       } else {
@@ -2982,8 +2990,8 @@ struct CollectiveMainloopBwdSm90 {
 
     // Unified MMA body: iterates over all m_blocks in the range with a single bwd_step instantiation.
     auto mma_body = [&]() {
-      if constexpr (SparseLoad) {
-        // SparseLoad: one Q block per call, block_meta drives iteration.
+      if constexpr (InnerUseScatter) {
+        // Scatter (SparseLoad / IndexAttn LoopQ): one Q block per call, block_meta drives iteration.
         // LoopQ needs both padding masks: rows are the scattered Q tokens
         // (last tile may hold fewer than kBlockM valid tokens) and columns are
         // the contiguous K window (last n_block may overhang seqlen_k) —
