@@ -178,6 +178,10 @@ struct Flash_bwd_params : public Flash_fwd_params {
   // Performance tuning params
   bool disable_bwd_dkv_atomic_reduction;
 
+  // dKV pool params: split dK/dV accum into pool_count slices to reduce L2 contention
+  int pool_count = 1; // 1 = no pooling (default), >1 = pool_count slices
+  int pool_seqlen_k = 0; // original total_k (for computing pool offset = pool_idx * pool_seqlen_k)
+
   // Deterministic params
   int* __restrict__ dq_determin_conflict_state;
   int* __restrict__ dq_determin_range_locks;

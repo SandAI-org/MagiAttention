@@ -257,6 +257,10 @@ void set_params_dgrad(
   params.dk_head_stride = dk.stride(-2);
   params.dv_head_stride = dv.stride(-2);
 
+  // dKV pool: default to no pooling (pool_count=1, pool_seqlen_k=total_k)
+  params.pool_count = 1;
+  params.pool_seqlen_k = params.total_k;
+
   // Set softmax_lse_log2_ptr and dsoftmax_sum
   params.softmax_lse_log2_ptr = softmax_lse_log2_d;
   params.dsoftmax_sum = dsoftmax_sum_d;

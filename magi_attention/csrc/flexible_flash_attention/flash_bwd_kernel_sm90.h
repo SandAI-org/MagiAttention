@@ -278,9 +278,10 @@ class FlashAttnBwdSm90 {
     // Scatter LoopQ producer: SparseLoad uses SparseLoadLoopQBlockMeta, IndexAttn uses IndexAttnInvLoadBlockMeta
     using ProducerBlockMetaT = std::conditional_t<
         InnerUseScatter,
-        std::conditional_t<IndexAttn,
-                           typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/true>,
-                           typename CollectiveMainloop::SparseLoadLoopQBlockMeta>,
+        std::conditional_t<
+            IndexAttn,
+            typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/true>,
+            typename CollectiveMainloop::SparseLoadLoopQBlockMeta>,
         BlockMetaT>;
 
     using Roles = typename CollectiveMainloop::ProducerWarpRoles;
@@ -402,9 +403,10 @@ class FlashAttnBwdSm90 {
         // SparseLoad LoopQ uses SparseMmaLoopQBlockMeta; IndexAttn LoopQ uses IndexAttnInvLoadBlockMeta; Dense uses DenseBlockMeta
         using ConsumerBlockMetaT = std::conditional_t<
             InnerUseScatter,
-            std::conditional_t<IndexAttn,
-                               typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/false>,
-                               typename CollectiveMainloop::SparseMmaLoopQBlockMeta>,
+            std::conditional_t<
+                IndexAttn,
+                typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/false>,
+                typename CollectiveMainloop::SparseMmaLoopQBlockMeta>,
             BlockMetaConsumerT>;
         ConsumerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
 

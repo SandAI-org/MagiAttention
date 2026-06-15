@@ -580,15 +580,7 @@ struct IndexAttnBlockMeta {
 // fill_token_indices() fills Q/dO smem slots with packed Q row indices (like the LoopK
 // IndexAttnBlockMeta fills K/V slots with physical K row indices).
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-template <
-    bool IsProducer,
-    bool PackGQA,
-    int QheadPerKhead,
-    int NumRowsPerGroup_,
-    int NumProducerThreads_,
-    int GroupSize_,
-    int kBlockM_,
-    bool InnerDirMaxToMin_>
+template <bool IsProducer, bool PackGQA, int QheadPerKhead, int NumRowsPerGroup_, int NumProducerThreads_, int GroupSize_, int kBlockM_, bool InnerDirMaxToMin_>
 struct IndexAttnInvBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr bool NeedsBatchLoop = true;
@@ -613,7 +605,11 @@ struct IndexAttnInvBlockMeta {
   int qh_head_local;
 
   template <typename ParamsT, typename SharedStorage>
-  CUTLASS_DEVICE IndexAttnInvBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
+  CUTLASS_DEVICE IndexAttnInvBlockMeta(
+      ParamsT const& params,
+      cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
+      SharedStorage& shared_storage,
+      int thread_idx = 0)
       : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidh_kv(bidh), group_token_ptr(nullptr) {
     bidb = get<2>(block_coord);
 
@@ -630,8 +626,7 @@ struct IndexAttnInvBlockMeta {
     // params.index_attn_max_topk = nhk * inv_topk_per_head
     int max_inv_topk_total = params.index_attn_max_topk;
     int inv_topk_per_head = max_inv_topk_total / nhk;
-    int const* row_ptr = params.index_attn_indices + static_cast<int64_t>(bidb) * max_inv_topk_total
-                         + static_cast<int64_t>(bidh) * inv_topk_per_head;
+    int const* row_ptr = params.index_attn_indices + static_cast<int64_t>(bidb) * max_inv_topk_total + static_cast<int64_t>(bidh) * inv_topk_per_head;
     int max_inv_topk = inv_topk_per_head;
 
     int actual_inv_topk = max_inv_topk;
@@ -708,8 +703,7 @@ struct IndexAttnInvBlockMeta {
     int packed_row = inner_block_cur * kBlockM_;
     int q_token_local_idx = packed_row / QheadPerKhead;
     int sub_head_offset = packed_row % QheadPerKhead;
-    int q_token = (q_token_local_idx < seqlen_info.seqlen_q / QheadPerKhead)
-                      ? group_token_ptr[q_token_local_idx] : -1;
+    int q_token = (q_token_local_idx < seqlen_info.seqlen_q / QheadPerKhead) ? group_token_ptr[q_token_local_idx] : -1;
     return (q_token >= 0) ? q_token * QheadPerKhead + sub_head_offset : 0;
   }
 
