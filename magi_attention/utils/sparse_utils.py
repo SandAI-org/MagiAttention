@@ -1296,7 +1296,9 @@ def build_inv_indices(
     flat_kh = flat_k.long() * nhk + flat_h.long()
     total_kh = seqlen_k * nhk
     counts = torch.zeros(total_kh, device=device, dtype=torch.int32)
-    counts.scatter_add_(0, flat_kh.int().long(), torch.ones_like(flat_kh, dtype=torch.int32))
+    counts.scatter_add_(
+        0, flat_kh.int().long(), torch.ones_like(flat_kh, dtype=torch.int32)
+    )
 
     max_inv_topk = int(counts.max().item())
     inv_topk = ((max_inv_topk + pad_multiple - 1) // pad_multiple) * pad_multiple
@@ -1314,7 +1316,9 @@ def build_inv_indices(
     offsets = offsets - group_starts[sorted_kh.long()]
 
     # Fill inv_indices
-    inv_indices = torch.full((seqlen_k, nhk, inv_topk), -1, device=device, dtype=torch.int32)
+    inv_indices = torch.full(
+        (seqlen_k, nhk, inv_topk), -1, device=device, dtype=torch.int32
+    )
     inv_indices_flat = inv_indices.reshape(total_kh, inv_topk)
 
     inv_indices_flat[sorted_kh.long(), offsets.long()] = sorted_q

@@ -1000,10 +1000,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if ctx.index_attn:
             # IndexAttn uses indices, not ranges — ranges must not be provided
-            assert q_ranges is None and k_ranges is None, \
-                "IndexAttn BWD does not use q_ranges/k_ranges; they should be None"
+            assert (
+                q_ranges is None and k_ranges is None
+            ), "IndexAttn BWD does not use q_ranges/k_ranges; they should be None"
             import os
-            _use_loopq = os.environ.get("MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q", "0") == "1"
+
+            _use_loopq = (
+                os.environ.get("MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q", "0") == "1"
+            )
             if _use_loopq:
                 # IndexAttn BWD LoopQ: outer=K, inner=Q from inv_indices
                 swap_bwd_qk_loop = False
@@ -1016,10 +1020,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 bwd_auto_range_merge = False
                 # Build inv_indices from forward indices
                 from magi_attention.utils.sparse_utils import build_inv_indices
+
                 nhk = k.size(1)
                 # index_attn_indices_2d is (seqlen_q * nhk, topk) for LoopK;
                 # reshape to 3D (seqlen_q, nhk, topk) for build_inv_indices
-                _fwd_3d = index_attn_indices_2d.reshape(-1, nhk, index_attn_indices_2d.size(-1))
+                _fwd_3d = index_attn_indices_2d.reshape(
+                    -1, nhk, index_attn_indices_2d.size(-1)
+                )
                 _inv_indices, _inv_topk = build_inv_indices(
                     _fwd_3d,
                     seqlen_k=v.size(0),
@@ -1027,7 +1034,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 )
                 # Kernel layout: (seqlen_k, nhk * inv_topk) so batch_size = seqlen_k
                 # index_attn_max_topk = nhk * inv_topk (full stride for each K token)
-                index_attn_indices_2d = _inv_indices.reshape(v.size(0), nhk * _inv_topk).contiguous()
+                index_attn_indices_2d = _inv_indices.reshape(
+                    v.size(0), nhk * _inv_topk
+                ).contiguous()
                 ctx.index_attn_max_topk = nhk * _inv_topk
             else:
                 # IndexAttn BWD LoopK (default): outer=Q, inner=K from topk_indices

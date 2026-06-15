@@ -239,6 +239,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       static_cast<ElementAccum*>(params.dk_ptr),
       static_cast<ElementAccum*>(params.dv_ptr),
       {params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_KVdKdV
+      {params.pool_count > 1 ? params.pool_count * params.pool_seqlen_k : params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_dKdV (pooled)
       {params.k_row_stride, _1{}, Int<kHeadDim>{}}, // stride_K
       {params.v_row_stride, _1{}, Int<kHeadDim>{}}, // stride_V
       {params.dk_row_stride, _1{}, Int<kHeadDim>{}}, // stride_dK
@@ -257,7 +258,9 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.dq_determin_conflict_state,
       params.dq_determin_range_locks,
       params.index_attn_indices,
-      params.index_attn_max_topk};
+      params.index_attn_max_topk,
+      params.pool_count,
+      params.pool_seqlen_k};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop

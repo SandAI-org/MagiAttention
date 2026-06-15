@@ -152,7 +152,8 @@ struct CollectiveMainloopBwdSm90 {
   //          contiguous packed rows; when qhpkh >= kBlockM the entire tile is contiguous).
   //          Fallback: qhpkh < kBlockM → kTma1D (future) or kCpAsync.
   //   LoopK: SparseLoad (not IndexAttn) → K tiles within a range are contiguous
-  static constexpr bool ScatterInnerLoadStoreTMA = InnerUseScatter && ((!SwapBwdQKLoop && PackGQA && (!IndexAttn || QheadPerKhead >= kBlockM)) || (SwapBwdQKLoop && SparseLoad && !IndexAttn));
+  static constexpr bool ScatterInnerLoadStoreTMA =
+      InnerUseScatter && ((!SwapBwdQKLoop && PackGQA && (!IndexAttn || QheadPerKhead >= kBlockM)) || (SwapBwdQKLoop && SparseLoad && !IndexAttn));
 
   // How the inner-loop loads (Q/dO for LoopQ, K/V for LoopK) are performed:
   //   kTma     — 2D TMA tile load (1 instr/tile). Dense uses sequential m_block;
@@ -693,8 +694,9 @@ struct CollectiveMainloopBwdSm90 {
     Element const* const ptr_V;
     ElementAccum* const ptr_dK;
     ElementAccum* const ptr_dV;
-    /* K, V, dK and dV use same shape */
+    /* K, V use shape_KVdKdV; dK, dV use shape_dKdV (may differ when pool_count > 1) */
     ShapeQKV const shape_KVdKdV;
+    ShapeQKV const shape_dKdV;
     /* K, V, dK and dV can use different stride */
     StrideQKV const stride_K;
     StrideQKV const stride_V;
@@ -721,6 +723,9 @@ struct CollectiveMainloopBwdSm90 {
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
+    /* dKV pool: reduce L2 contention by splitting dK/dV into pool_count slices */
+    int pool_count;
+    int pool_seqlen_k;
   };
 
   // Device side kernel params
@@ -735,6 +740,7 @@ struct CollectiveMainloopBwdSm90 {
     ElementAccum* const ptr_dK;
     ElementAccum* const ptr_dV;
     ShapeQKV const shape_KVdKdV;
+    ShapeQKV const shape_dKdV;
     StrideQKV const stride_dK;
     StrideQKV const stride_dV;
     /* */
@@ -775,6 +781,9 @@ struct CollectiveMainloopBwdSm90 {
     /* index_attn */
     int const* const index_attn_indices;
     int index_attn_max_topk;
+    /* dKV pool */
+    int pool_count;
+    int pool_seqlen_k;
   };
 
   // SparseLoad LoopK producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
@@ -926,14 +935,15 @@ struct CollectiveMainloopBwdSm90 {
     // printf("\n====================== mdQ: ======================\n");
     // cute::print(mdQ.layout());
 
-    // Create TMA for loading K and V, and for adding to dK and dV
+    // Create TMA for loading K and V (use shape_KVdKdV = original K/V shape)
     Tensor mK = make_tensor(make_gmem_ptr(args.ptr_K), make_layout(args.shape_KVdKdV, args.stride_K));
     TMA_K tma_load_K = make_tma_copy_B_sm90(GmemTiledCopyKV{}, mK, take<0, 2>(SmemLayoutK{}), TileShape_MNK{}, ClusterShape{});
     Tensor mV = make_tensor(make_gmem_ptr(args.ptr_V), make_layout(args.shape_KVdKdV, args.stride_V));
     TMA_V tma_load_V = make_tma_copy_B_sm90(GmemTiledCopyKV{}, mV, take<0, 2>(SmemLayoutV{}), TileShape_MNK{}, ClusterShape{});
-    Tensor mdK = make_tensor(make_gmem_ptr(args.ptr_dK), make_layout(args.shape_KVdKdV, args.stride_dK));
+    // dK/dV TMA use shape_dKdV (= pool_count * seqlen_k when pool > 1)
+    Tensor mdK = make_tensor(make_gmem_ptr(args.ptr_dK), make_layout(args.shape_dKdV, args.stride_dK));
     TMA_add_dKV tma_add_dK = make_tma_copy(GmemTiledCopydKVaccum{}, mdK, SmemLayoutdKVaccumTMA{}, TileShape_dKVaccum{}, _1{});
-    Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), make_layout(args.shape_KVdKdV, args.stride_dV));
+    Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), make_layout(args.shape_dKdV, args.stride_dV));
     TMA_add_dKV tma_add_dV = make_tma_copy(GmemTiledCopydKVaccum{}, mdV, SmemLayoutdKVaccumTMA{}, TileShape_dKVaccum{}, _1{});
 
     /* DEBUG */
@@ -1005,6 +1015,7 @@ struct CollectiveMainloopBwdSm90 {
         args.ptr_dK,
         args.ptr_dV,
         args.shape_KVdKdV,
+        args.shape_dKdV,
         args.stride_dK,
         args.stride_dV,
         tma_load_Q,
@@ -1039,7 +1050,9 @@ struct CollectiveMainloopBwdSm90 {
         /*ptr_dQ=*/args.ptr_dQ,
         /*stride_dQ=*/args.stride_dQ,
         /*index_attn_indices=*/args.index_attn_indices,
-        /*index_attn_max_topk=*/args.index_attn_max_topk};
+        /*index_attn_max_topk=*/args.index_attn_max_topk,
+        /*pool_count=*/args.pool_count,
+        /*pool_seqlen_k=*/args.pool_seqlen_k};
   }
 
   // BlockMeta type alias — definition lives in block_meta.h
@@ -2216,6 +2229,9 @@ struct CollectiveMainloopBwdSm90 {
     // BlockMeta: fixed per function call
     int const bidh_kv = block_meta.bidh_kv;
 
+    // dKV pool offset: each CTA writes to its own pool slice to reduce L2 contention
+    int const pool_offset = params.pool_count > 1 ? (blockIdx.x % params.pool_count) * params.pool_seqlen_k : 0;
+
     bool const lane_predicate = cute::elect_one_sync();
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
@@ -2225,20 +2241,20 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdK_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumTMA{});
     Tensor sdV_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumTMA{});
 
-    // Dense TMA reduce-add setup (unused & DCE'd on the scatter path)
-    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
+    // Dense TMA reduce-add setup (uses shape_dKdV which includes pool dimension)
+    Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_dKdV)(_, _, bidh_kv);
+    Tensor mdVaccum = params.tma_add_dV.get_tma_tensor(params.shape_dKdV)(_, _, bidh_kv);
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
     Tensor tdKsdK = block_tma_dK.partition_S(sdK_tma); // (TMA, TMA_N, TMA_K)
     auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
     Tensor tdVsdV = block_tma_dV.partition_S(sdV_tma); // (TMA, TMA_N, TMA_K)
 
-    // SparseLoad / IndexAttn scatter-store addressing (computed once; unused & DCE'd on dense path)
+    // SparseLoad / IndexAttn scatter-store addressing (pool_offset applied to base pointers)
     int const thread_idx = threadIdx.x % NumSparseLoadThreads;
     int const stride_dV_row = get<0>(params.stride_dV);
     int const stride_dK_row = get<0>(params.stride_dK);
-    ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
-    ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
+    ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV) + pool_offset * stride_dV_row;
+    ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK) + pool_offset * stride_dK_row;
     int const* const idx_staging = [&]() -> int const* {
       if constexpr (InnerUseScatter) {
         // [staging_dv][staging_dk] right after the kStages stage slots
@@ -2262,10 +2278,10 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (ScatterInnerLoadStoreTMA) {
-        // 2D TMA reduce: entire dV tile in one reduce-add instruction (absolute coordinates)
+        // 2D TMA reduce: entire dV tile (absolute coordinates + pool offset)
         if (lane_predicate) {
           int const packed_first_row = idx_staging[0];
-          int const n_block_abs = packed_first_row / kBlockN;
+          int const n_block_abs = (pool_offset + packed_first_row) / kBlockN;
           Tensor gdVaccum_abs = local_tile(mdVaccum, TileShape_dKVaccum{}, make_coord(_, _0{}));
           Tensor tdVgdV_abs = block_tma_dV.partition_D(gdVaccum_abs);
           cute::copy(params.tma_add_dV, tdVsdV, tdVgdV_abs(_, _, _, n_block_abs));
@@ -2276,7 +2292,8 @@ struct CollectiveMainloopBwdSm90 {
         scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads, /*kRowPackScale=*/1>(sdV, &idx_staging[0 * kBlockN], ptr_gdV_base, stride_dV_row, thread_idx);
       } else {
         if (lane_predicate) {
-          Tensor gdVaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+          Tensor gdVaccum =
+              local_tile(domain_offset(make_coord(pool_offset + block_meta.seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
           Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum);
           cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, block_meta.inner_block_cur));
           tma_store_arrive();
@@ -2298,10 +2315,10 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (ScatterInnerLoadStoreTMA) {
-        // 2D TMA reduce: entire dK tile in one reduce-add instruction (absolute coordinates)
+        // 2D TMA reduce: entire dK tile (absolute coordinates + pool offset)
         if (lane_predicate) {
           int const packed_first_row = idx_staging[kBlockN];
-          int const n_block_abs = packed_first_row / kBlockN;
+          int const n_block_abs = (pool_offset + packed_first_row) / kBlockN;
           Tensor gdKaccum_abs = local_tile(mdKaccum, TileShape_dKVaccum{}, make_coord(_, _0{}));
           Tensor tdKgdK_abs = block_tma_dK.partition_D(gdKaccum_abs);
           cute::copy(params.tma_add_dK, tdKsdK, tdKgdK_abs(_, _, _, n_block_abs));
@@ -2312,7 +2329,8 @@ struct CollectiveMainloopBwdSm90 {
         scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads, /*kRowPackScale=*/1>(sdK, &idx_staging[1 * kBlockN], ptr_gdK_base, stride_dK_row, thread_idx);
       } else {
         if (lane_predicate) {
-          Tensor gdKaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+          Tensor gdKaccum =
+              local_tile(domain_offset(make_coord(pool_offset + block_meta.seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
           Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum);
           cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, block_meta.inner_block_cur));
           tma_store_arrive();
@@ -3233,15 +3251,16 @@ struct CollectiveMainloopBwdSm90 {
 
     int const offset_k = block_meta.seqlen_info.offset_k;
 
+    // dKV pool offset: each CTA writes to its own pool slice
+    int const pool_offset = params.pool_count > 1 ? (blockIdx.x % params.pool_count) * params.pool_seqlen_k : 0;
+
     // For the case where we do atomicAdd directly to gdKaccum,gdVaccum instead of using TMA
-    Tensor mdKaccum =
-        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_KVdKdV, params.stride_dK)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor gdKaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    Tensor mdKaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_dKdV, params.stride_dK)(_, _, bidh_kv);
+    Tensor gdKaccum_ = local_tile(domain_offset(make_coord(pool_offset + offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
-    Tensor mdVaccum =
-        make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_KVdKdV, params.stride_dV)(_, _, bidh_kv); // (seqlen_kv, head_dim)
-    Tensor gdVaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
+    Tensor mdVaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_dKdV, params.stride_dV)(_, _, bidh_kv);
+    Tensor gdVaccum_ = local_tile(domain_offset(make_coord(pool_offset + offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
     Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
     // TMA partitions go through the swizzled TMA-layout views (dense path only; the r2s
@@ -3266,9 +3285,9 @@ struct CollectiveMainloopBwdSm90 {
       }
       int const new_offset_k = block_meta.seqlen_info.offset_k;
       if constexpr (!dKVacc_use_TMA) {
-        gdKaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+        gdKaccum_ = local_tile(domain_offset(make_coord(pool_offset + new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
         gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
-        gdVaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
+        gdVaccum_ = local_tile(domain_offset(make_coord(pool_offset + new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
         gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
         tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
         tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
@@ -3558,8 +3577,8 @@ struct CollectiveMainloopBwdSm90 {
               Tensor tdVsdV_c = block_tma_dV_c.partition_S(sdV_tma);
 
               int const packed_first_row = shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
-              int const n_block_abs = packed_first_row / kBlockN;
-              Tensor mdVaccum_c = params.tma_add_dV.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
+              int const n_block_abs = (pool_offset + packed_first_row) / kBlockN;
+              Tensor mdVaccum_c = params.tma_add_dV.get_tma_tensor(params.shape_dKdV)(_, _, bidh_kv);
               Tensor gdVaccum_abs = local_tile(mdVaccum_c, TileShape_dKVaccum{}, make_coord(_, _0{}));
               Tensor tdVgdV_abs = block_tma_dV_c.partition_D(gdVaccum_abs);
               cute::copy(params.tma_add_dV, tdVsdV_c, tdVgdV_abs(_, _, _, n_block_abs));
@@ -3582,7 +3601,7 @@ struct CollectiveMainloopBwdSm90 {
             int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
             int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
             int const stride_dV_row = get<0>(params.stride_dV);
-            ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
+            ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV) + pool_offset * stride_dV_row;
             Tensor sdV_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumStore{});
             scatter_reduce_store_rows<kBlockN, NumMmaThreads, /*kRowPackScale=*/1>(
                 sdV_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdV_base, stride_dV_row, flat_thread_idx);
@@ -3660,8 +3679,8 @@ struct CollectiveMainloopBwdSm90 {
               Tensor tdKsdK_c = block_tma_dK_c.partition_S(sdK_tma);
 
               int const packed_first_row = shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
-              int const n_block_abs = packed_first_row / kBlockN;
-              Tensor mdKaccum_c = params.tma_add_dK.get_tma_tensor(params.shape_KVdKdV)(_, _, bidh_kv);
+              int const n_block_abs = (pool_offset + packed_first_row) / kBlockN;
+              Tensor mdKaccum_c = params.tma_add_dK.get_tma_tensor(params.shape_dKdV)(_, _, bidh_kv);
               Tensor gdKaccum_abs = local_tile(mdKaccum_c, TileShape_dKVaccum{}, make_coord(_, _0{}));
               Tensor tdKgdK_abs = block_tma_dK_c.partition_D(gdKaccum_abs);
               cute::copy(params.tma_add_dK, tdKsdK_c, tdKgdK_abs(_, _, _, n_block_abs));
@@ -3687,7 +3706,7 @@ struct CollectiveMainloopBwdSm90 {
             int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
             int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
             int const stride_dK_row = get<0>(params.stride_dK);
-            ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
+            ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK) + pool_offset * stride_dK_row;
             Tensor sdK_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dkacc.data()), SmemLayoutdKVaccumStore{});
             scatter_reduce_store_rows<kBlockN, NumMmaThreads, /*kRowPackScale=*/1>(
                 sdK_store, &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN], ptr_gdK_base, stride_dK_row, flat_thread_idx);
