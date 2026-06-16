@@ -33,6 +33,9 @@ from quack import copy_utils, layout_utils, sm90_utils
 from quack.cute_dsl_utils import ParamsBase
 from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 
+from .cutedsl_utils import assume_tensor_aligned
+
+# isort: split
 from .legacy import barrier, pipeline, utils
 from .legacy.block_info import BlockInfo
 from .legacy.block_sparse_utils import (
@@ -42,7 +45,6 @@ from .legacy.block_sparse_utils import (
     produce_block_sparse_q_loads_bwd_sm90,
 )
 from .legacy.block_sparsity import BlockSparseTensors
-from .legacy.cute_dsl_utils import assume_tensor_aligned
 from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierBwd
 from .legacy.seqlen_info import SeqlenInfoQK

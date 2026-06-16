@@ -31,11 +31,13 @@ from cutlass import Float32, Int32, const_expr
 from cutlass.cute.nvgpu import warp
 from quack import layout_utils
 
+from .cutedsl_utils import assume_tensor_aligned
+
+# isort: split
 from .legacy import ampere_helpers as sm80_utils
 from .legacy import utils
 from .legacy.block_info import BlockInfo
 from .legacy.block_sparsity import BlockSparseTensors
-from .legacy.cute_dsl_utils import assume_tensor_aligned
 from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.mask import AttentionMask
 from .legacy.seqlen_info import SeqlenInfoQK

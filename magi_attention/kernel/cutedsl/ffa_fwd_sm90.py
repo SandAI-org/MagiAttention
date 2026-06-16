@@ -38,6 +38,9 @@ from cutlass.utils import LayoutEnum
 from quack import copy_utils, layout_utils, sm90_utils
 from quack.cute_dsl_utils import ParamsBase
 
+from .cutedsl_utils import assume_tensor_aligned
+
+# isort: split
 from .legacy import pipeline as pipeline_custom
 from .legacy import utils
 from .legacy.block_info import BlockInfo
@@ -46,7 +49,6 @@ from .legacy.block_sparse_utils import (
     produce_block_sparse_loads,
 )
 from .legacy.block_sparsity import BlockSparseTensors
-from .legacy.cute_dsl_utils import assume_tensor_aligned
 from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierFwd

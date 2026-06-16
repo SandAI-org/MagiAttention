@@ -28,6 +28,13 @@ import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.common import AttnForwardMeta
 from magi_attention.utils.dtype import to_cute_dtype
 
+from .cache_utils import get_jit_cache
+from .cutedsl_utils import (
+    get_aux_tensor_metadata,
+    get_broadcast_dims,
+    to_cute_aux_tensor,
+    to_cute_tensor,
+)
 from .ffa_bwd_sm80 import FFABwdSm80
 from .ffa_bwd_sm90 import FFABwdSm90
 from .ffa_bwd_sm100 import FFABwdSm100
@@ -53,13 +60,6 @@ from .legacy.block_sparsity import (
     normalize_block_sparse_config,
     normalize_block_sparse_config_bwd,
     to_cute_block_sparse_tensors,
-)
-from .legacy.cache_utils import get_jit_cache
-from .legacy.cute_dsl_utils import (
-    get_aux_tensor_metadata,
-    get_broadcast_dims,
-    to_cute_aux_tensor,
-    to_cute_tensor,
 )
 from .legacy.flash_bwd_postprocess import FlashAttentionBackwardPostprocess
 from .legacy.flash_bwd_preprocess import FlashAttentionBackwardPreprocess

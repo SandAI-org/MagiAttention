@@ -31,13 +31,17 @@ import cutlass.cute as cute
 import cutlass.utils as utils_basic
 from cutlass import Int32
 from cutlass.cute.nvgpu import cpasync, warp
+
+# isort: split
 from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
+from .cutedsl_utils import assume_tensor_aligned
+
+# isort: split
 from .legacy import ampere_helpers as sm80_utils
 from .legacy import utils
 from .legacy.block_sparsity import BlockSparseTensors
-from .legacy.cute_dsl_utils import assume_tensor_aligned
 from .legacy.mask import AttentionMask
 from .legacy.seqlen_info import SeqlenInfoQK
 from .legacy.tile_scheduler import (

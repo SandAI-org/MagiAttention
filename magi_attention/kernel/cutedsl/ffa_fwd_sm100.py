@@ -53,6 +53,9 @@ from cutlass.utils import ClcDynamicPersistentTileScheduler
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
+from .cutedsl_utils import assume_tensor_aligned
+
+# isort: split
 from .legacy import blackwell_helpers as sm100_utils
 from .legacy import mma_sm100_desc as sm100_desc
 from .legacy import pipeline as pipeline_custom
@@ -65,7 +68,6 @@ from .legacy.block_sparse_utils import (
     softmax_block_sparse_sm100,
 )
 from .legacy.block_sparsity import BlockSparseTensors
-from .legacy.cute_dsl_utils import assume_tensor_aligned
 from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierFwdSm100
 from .legacy.pack_gqa import PackGQA, pack_gqa_layout

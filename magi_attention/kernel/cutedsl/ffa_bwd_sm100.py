@@ -36,6 +36,8 @@ import quack.activation
 from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
+from .cutedsl_utils import assume_tensor_aligned
+
 # isort: split
 from .legacy import barrier, copy_utils
 from .legacy import pipeline as pipeline_custom
@@ -49,7 +51,6 @@ from .legacy.block_sparse_utils import (
     produce_block_sparse_q_loads_bwd_sm100,
 )
 from .legacy.block_sparsity import BlockSparseTensors
-from .legacy.cute_dsl_utils import assume_tensor_aligned
 from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierBwdSm100
 from .legacy.seqlen_info import SeqlenInfoQK
