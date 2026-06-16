@@ -72,6 +72,8 @@ def _flex_flash_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    out: torch.Tensor | None = None,
+    lse: torch.Tensor | None = None,
     cu_seqlens_q: torch.Tensor | None = None,
     cu_seqlens_k: torch.Tensor | None = None,
     max_seqlen_q: int | None = None,
@@ -84,8 +86,6 @@ def _flex_flash_attn_fwd(
     score_mod: Callable | None = None,
     mask_mod: Callable | None = None,
     block_sparse_tensors: BlockSparseTensorsTorch | None = None,
-    out: torch.Tensor | None = None,
-    lse: torch.Tensor | None = None,
     aux_tensors: list[torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
@@ -785,8 +785,11 @@ def _flex_flash_attn_bwd(
     k: torch.Tensor,
     v: torch.Tensor,
     out: torch.Tensor,
-    dout: torch.Tensor,
     lse: torch.Tensor,
+    dout: torch.Tensor,
+    dq: torch.Tensor | None = None,
+    dk: torch.Tensor | None = None,
+    dv: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     causal: bool = False,
     softcap: float = 0.0,
@@ -796,9 +799,6 @@ def _flex_flash_attn_bwd(
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     deterministic: bool = False,
-    dq: torch.Tensor | None = None,
-    dk: torch.Tensor | None = None,
-    dv: torch.Tensor | None = None,
     score_mod: Callable | None = None,
     score_mod_bwd: Callable | None = None,
     mask_mod: Callable | None = None,
@@ -1595,9 +1595,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         block_sparse_tensors_bwd: BlockSparseTensorsTorch | None = None,
     ):
         out, lse = _flex_flash_attn_fwd(
-            q,
-            k,
-            v,
+            q=q,
+            k=k,
+            v=v,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=max_seqlen_q,
@@ -1612,6 +1612,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             aux_tensors=aux_tensors,
             block_sparse_tensors=block_sparse_tensors,
         )
+
         ctx.save_for_backward(
             q,
             k,
@@ -1633,6 +1634,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.mask_mod = mask_mod
         ctx.block_sparse_tensors_bwd = block_sparse_tensors_bwd
         ctx.set_materialize_grads(False)
+
         return out, lse
 
     @staticmethod
@@ -1650,16 +1652,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         aux_tensors = aux if aux else None
         if dout is None:
             dout = torch.zeros_like(out)
+
         dq, dk, dv = _flex_flash_attn_bwd(
-            q,
-            k,
-            v,
-            out,
-            dout,
-            lse,
-            ctx.softmax_scale,
-            ctx.causal,
-            ctx.softcap,
+            q=q,
+            k=k,
+            v=v,
+            out=out,
+            lse=lse,
+            dout=dout,
+            softmax_scale=ctx.softmax_scale,
+            causal=ctx.causal,
+            softcap=ctx.softcap,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=ctx.max_seqlen_q,
@@ -1671,6 +1674,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             aux_tensors=aux_tensors,
             block_sparse_tensors=ctx.block_sparse_tensors_bwd,
         )
+
         return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
 
 
