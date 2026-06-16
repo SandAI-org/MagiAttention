@@ -15,16 +15,22 @@
 # limitations under the License.
 
 # Example:
-#   bash scripts/install_flash_attn_cute.sh
+#   bash scripts/install_flash_attn_cute.sh                    # sm100-only (default)
+#   bash scripts/install_flash_attn_cute.sh "sm80,sm90,sm100"  # also build cutlass FA for Ampere/Hopper
 #
-# Installs the JIT-compiled cute FA-4 backend (Blackwell / sm100) used by the
-# magi_attention FA4 kernel path. head_dim 64/128/192/256 are all supported
-# automatically by the JIT cute kernel (no compile-time flag needed).
+# Always installs the JIT-compiled cute FA-4 backend (Blackwell / sm100) used
+# by the magi_attention FA4 kernel path. head_dim 64/128/192/256 are all
+# supported automatically by the JIT cute kernel (no compile-time flag needed).
 #
-# Only the sm100 path is installed here; sm80/sm90 cutlass C++ builds are not
-# part of this script.
+# If the optional first arg contains "sm80" or "sm90", this script also
+# builds the cutlass ffa-fa4 C++ kernels under flash-attention/hopper for the
+# matching architectures (mirrors the v1.1.1 behaviour). The default empty
+# arg installs sm100 only, keeping docker build time low for Blackwell
+# images.
 
 set -e
+
+ARCH_ARG="${1:-}"
 
 REPO_ROOT="$(pwd)"
 FA_DIR="magi_attention/functional/flash-attention"
@@ -65,6 +71,29 @@ pip install -e csrc/utils/create_block_mask --no-build-isolation
 #    a GPU exposed at docker-build time — no patching needed.
 echo "[magiattn] Installing magi_to_hstu_cuda"
 pip install -e csrc/utils/magi_to_hstu --no-build-isolation
+
+# 3b) Install cutlass ffa-fa4 for Ampere/Hopper if explicitly requested via
+#     the ARCH_ARG (mirrors the v1.1.1 install_flash_attn_cute.sh behaviour).
+#     Skipped when ARCH_ARG is empty or only requests sm100 — keeping the
+#     default docker build time low for Blackwell-only images.
+if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
+	cd hopper/
+
+	# NOTE: see `Makefile` under this directory for required build options/flags
+	# for example, NUM_FUNC=1,3 can only support the standard masks including full,causal,varlen-full,varlen-casual,sliding-window, etc
+	if [[ "$ARCH_ARG" == *sm80* ]]; then
+		echo "[magiattn] Installing cutlass ffa-fa4 for Ampere (SM8X=1)"
+		make install ARBITRARY=1 NUM_FUNC=1,3,5,7 HDIM128=1 SM8X=1
+	fi
+	if [[ "$ARCH_ARG" == *sm90* ]]; then
+		SM8X_FLAG=1
+		[[ "$ARCH_ARG" != *sm80* ]] && SM8X_FLAG=0
+		echo "[magiattn] Installing cutlass ffa-fa4 for Hopper (SM90=1, SM8X=${SM8X_FLAG})"
+		make install ARBITRARY=1 NUM_FUNC=1,3,5,7 HDIM128=1 SM90=1 SM8X=${SM8X_FLAG}
+	fi
+
+	cd ..
+fi
 
 cd "$REPO_ROOT"
 
