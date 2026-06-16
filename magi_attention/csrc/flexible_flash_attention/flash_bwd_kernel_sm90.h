@@ -126,7 +126,7 @@ class FlashAttnBwdSm90 {
     struct PipelineStorageLoopK : cute::aligned_struct<16> {
       alignas(16) cutlass::arch::ClusterTransactionBarrier barrier_QdO;
       alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_k;
-      alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_v;
+      alignas(16) typename CollectiveMainloop::MainloopPipeline_V::SharedStorage pipeline_v;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
     };
 
@@ -455,6 +455,8 @@ class FlashAttnBwdSm90 {
 
     using MainloopPipeline = typename CollectiveMainloop::MainloopPipeline;
     using PipelineState = typename CollectiveMainloop::PipelineState;
+    using MainloopPipeline_V = typename CollectiveMainloop::MainloopPipeline_V;
+    using PipelineState_V = typename CollectiveMainloop::PipelineState_V;
     using PipelineParams = typename MainloopPipeline::Params;
 
     SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(smem_buf);
@@ -490,10 +492,20 @@ class FlashAttnBwdSm90 {
       pipeline_params_k.consumer_arv_count = NumMmaThreads;
       pipeline_params_k.producer_arv_count = NumSparseLoadThreads;
     }
-    PipelineParams pipeline_params_v = pipeline_params_k; // K,V share the same pipeline params
+    using PipelineParams_V = typename CollectiveMainloop::MainloopPipeline_V::Params;
+    PipelineParams_V pipeline_params_v;
+    pipeline_params_v.role = warp_group_idx == 0 ? MainloopPipeline_V::ThreadCategory::Producer : MainloopPipeline_V::ThreadCategory::Consumer;
+    if constexpr (InnerLoadUseTmaPipeline) {
+      pipeline_params_v.transaction_bytes = CollectiveMainloop::TmaTransactionBytesV;
+      pipeline_params_v.is_leader = warp_group_thread_idx == 0;
+      pipeline_params_v.num_consumers = NumMmaThreads;
+    } else {
+      pipeline_params_v.consumer_arv_count = NumMmaThreads;
+      pipeline_params_v.producer_arv_count = NumSparseLoadThreads;
+    }
 
     MainloopPipeline pipeline_k = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_k, pipeline_params_k);
-    MainloopPipeline pipeline_v = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_v, pipeline_params_v);
+    MainloopPipeline_V pipeline_v = make_inner_pipeline<MainloopPipeline_V>(shared_storage.pipelines.pipeline_v, pipeline_params_v);
 
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
@@ -535,7 +547,7 @@ class FlashAttnBwdSm90 {
       if (is_loader) { // Load Q,dO and pipeline K,V
         // Initialize producer write pipeline states of K,V
         PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
-        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
+        PipelineState_V smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline_V>();
 
         // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
         BarrierManager::sync<NumMmaThreads + NumProducerSyncThreads>(BwdNamedBarriers::QdOEmpty);
@@ -602,7 +614,7 @@ class FlashAttnBwdSm90 {
 
       // Initialize consumer read pipeline states of K,V
       PipelineState smem_pipe_read_k;
-      PipelineState smem_pipe_read_v;
+      PipelineState_V smem_pipe_read_v;
 
       // Initialize mma consumers
       mainloop.mma_init();
