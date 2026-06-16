@@ -30,16 +30,16 @@ from cutlass import Float32, Int32, const_expr
 from cutlass.cute.nvgpu import warp
 from quack import layout_utils
 
-from magi_attention.kernel.cutedsl.legacy import ampere_helpers as sm80_utils
-from magi_attention.kernel.cutedsl.legacy import utils
-from magi_attention.kernel.cutedsl.legacy.block_info import BlockInfo
-from magi_attention.kernel.cutedsl.legacy.block_sparsity import BlockSparseTensors
-from magi_attention.kernel.cutedsl.legacy.cute_dsl_utils import assume_tensor_aligned
-from magi_attention.kernel.cutedsl.legacy.flash_fwd import FlashAttentionForwardBase
-from magi_attention.kernel.cutedsl.legacy.mask import AttentionMask
-from magi_attention.kernel.cutedsl.legacy.seqlen_info import SeqlenInfoQK
-from magi_attention.kernel.cutedsl.legacy.softmax import Softmax, apply_score_mod_inner
-from magi_attention.kernel.cutedsl.legacy.tile_scheduler import (
+from .legacy import ampere_helpers as sm80_utils
+from .legacy import utils
+from .legacy.block_info import BlockInfo
+from .legacy.block_sparsity import BlockSparseTensors
+from .legacy.cute_dsl_utils import assume_tensor_aligned
+from .legacy.flash_fwd import FlashAttentionForwardBase
+from .legacy.mask import AttentionMask
+from .legacy.seqlen_info import SeqlenInfoQK
+from .legacy.softmax import Softmax, apply_score_mod_inner
+from .legacy.tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,

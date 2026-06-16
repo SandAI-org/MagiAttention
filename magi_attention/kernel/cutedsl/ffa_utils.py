@@ -21,10 +21,13 @@ from functools import lru_cache
 
 import cutlass.cute as cute
 from cutlass import Float32
+
+# isort: split
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
-from magi_attention.kernel.cutedsl.legacy.testing import is_fake_mode
 from magi_attention.utils.arch import get_dev_cap_num
+
+from .legacy.testing import is_fake_mode
 
 # ---------------------------------------------------------------------------
 # Arch helpers

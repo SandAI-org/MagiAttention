@@ -33,13 +33,13 @@ from cutlass.cute.nvgpu import cpasync, warp
 from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from magi_attention.kernel.cutedsl.legacy import ampere_helpers as sm80_utils
-from magi_attention.kernel.cutedsl.legacy import utils
-from magi_attention.kernel.cutedsl.legacy.block_sparsity import BlockSparseTensors
-from magi_attention.kernel.cutedsl.legacy.cute_dsl_utils import assume_tensor_aligned
-from magi_attention.kernel.cutedsl.legacy.mask import AttentionMask
-from magi_attention.kernel.cutedsl.legacy.seqlen_info import SeqlenInfoQK
-from magi_attention.kernel.cutedsl.legacy.tile_scheduler import (
+from .legacy import ampere_helpers as sm80_utils
+from .legacy import utils
+from .legacy.block_sparsity import BlockSparseTensors
+from .legacy.cute_dsl_utils import assume_tensor_aligned
+from .legacy.mask import AttentionMask
+from .legacy.seqlen_info import SeqlenInfoQK
+from .legacy.tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
@@ -473,26 +473,26 @@ class FFABwdSm80:
 
         @cute.struct
         class SharedStorageSeparateQV:
-            sK: sK_struct
-            sV: sV_struct
-            sQ: sQ_struct
-            sdO: sdO_struct
-            sLSE: sLSE_struct
-            sdPsum: sdPsum_struct
-            sP: sP_struct
-            sdS: sdS_struct
+            sK: sK_struct  # type: ignore
+            sV: sV_struct  # type: ignore
+            sQ: sQ_struct  # type: ignore
+            sdO: sdO_struct  # type: ignore
+            sLSE: sLSE_struct  # type: ignore
+            sdPsum: sdPsum_struct  # type: ignore
+            sP: sP_struct  # type: ignore
+            sdS: sdS_struct  # type: ignore
             # TODO: the case where there's no sP
 
         @cute.struct
         class SharedStorageSharedQV:
-            sK: sK_struct
-            sV: sV_struct
-            sQ: sQV_struct
-            sdO: sdO_struct
-            sLSE: sLSE_struct
-            sdPsum: sdPsum_struct
-            sP: sP_struct
-            sdS: sdS_struct
+            sK: sK_struct  # type: ignore
+            sV: sV_struct  # type: ignore
+            sQ: sQV_struct  # type: ignore
+            sdO: sdO_struct  # type: ignore
+            sLSE: sLSE_struct  # type: ignore
+            sdPsum: sdPsum_struct  # type: ignore
+            sP: sP_struct  # type: ignore
+            sdS: sdS_struct  # type: ignore
 
         return (
             SharedStorageSeparateQV

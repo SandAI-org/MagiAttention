@@ -52,30 +52,26 @@ from cutlass.utils import ClcDynamicPersistentTileScheduler
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-# isort: split
-import magi_attention.kernel.cutedsl.legacy.pipeline as pipeline_custom
-from magi_attention.kernel.cutedsl.legacy import blackwell_helpers as sm100_utils
-from magi_attention.kernel.cutedsl.legacy import mma_sm100_desc as sm100_desc
-from magi_attention.kernel.cutedsl.legacy import utils
-from magi_attention.kernel.cutedsl.legacy.block_info import BlockInfo
-from magi_attention.kernel.cutedsl.legacy.block_sparse_utils import (
+from .legacy import blackwell_helpers as sm100_utils
+from .legacy import mma_sm100_desc as sm100_desc
+from .legacy import pipeline as pipeline_custom
+from .legacy import utils
+from .legacy.block_info import BlockInfo
+from .legacy.block_sparse_utils import (
     get_total_block_count,
     handle_block_sparse_empty_tile_correction_sm100,
     produce_block_sparse_loads_sm100,
     softmax_block_sparse_sm100,
 )
-from magi_attention.kernel.cutedsl.legacy.block_sparsity import BlockSparseTensors
-from magi_attention.kernel.cutedsl.legacy.cute_dsl_utils import assume_tensor_aligned
-from magi_attention.kernel.cutedsl.legacy.mask import AttentionMask
-from magi_attention.kernel.cutedsl.legacy.named_barrier import NamedBarrierFwdSm100
-from magi_attention.kernel.cutedsl.legacy.pack_gqa import PackGQA, pack_gqa_layout
-from magi_attention.kernel.cutedsl.legacy.paged_kv import PagedKVManager
-from magi_attention.kernel.cutedsl.legacy.seqlen_info import SeqlenInfoQK
-from magi_attention.kernel.cutedsl.legacy.softmax import (
-    SoftmaxSm100,
-    apply_score_mod_inner,
-)
-from magi_attention.kernel.cutedsl.legacy.tile_scheduler import (
+from .legacy.block_sparsity import BlockSparseTensors
+from .legacy.cute_dsl_utils import assume_tensor_aligned
+from .legacy.mask import AttentionMask
+from .legacy.named_barrier import NamedBarrierFwdSm100
+from .legacy.pack_gqa import PackGQA, pack_gqa_layout
+from .legacy.paged_kv import PagedKVManager
+from .legacy.seqlen_info import SeqlenInfoQK
+from .legacy.softmax import SoftmaxSm100, apply_score_mod_inner
+from .legacy.tile_scheduler import (
     ClcState,
     SchedulingMode,
     SingleTileLPTScheduler,

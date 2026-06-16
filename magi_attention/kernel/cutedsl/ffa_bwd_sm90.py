@@ -32,24 +32,21 @@ from quack import copy_utils, layout_utils, sm90_utils
 from quack.cute_dsl_utils import ParamsBase
 from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 
-from magi_attention.kernel.cutedsl.legacy import barrier, pipeline, utils
-from magi_attention.kernel.cutedsl.legacy.block_info import BlockInfo
-from magi_attention.kernel.cutedsl.legacy.block_sparse_utils import (
+from .legacy import barrier, pipeline, utils
+from .legacy.block_info import BlockInfo
+from .legacy.block_sparse_utils import (
     consume_block_sparse_mma_bwd_sm90,
     dQaccum_store_block_sparse_bwd_sm90,
     get_total_q_block_count_bwd,
     produce_block_sparse_q_loads_bwd_sm90,
 )
-from magi_attention.kernel.cutedsl.legacy.block_sparsity import BlockSparseTensors
-from magi_attention.kernel.cutedsl.legacy.cute_dsl_utils import assume_tensor_aligned
-from magi_attention.kernel.cutedsl.legacy.mask import AttentionMask
-from magi_attention.kernel.cutedsl.legacy.named_barrier import NamedBarrierBwd
-from magi_attention.kernel.cutedsl.legacy.seqlen_info import SeqlenInfoQK
-from magi_attention.kernel.cutedsl.legacy.softmax import (
-    apply_score_mod_bwd_inner,
-    apply_score_mod_inner,
-)
-from magi_attention.kernel.cutedsl.legacy.tile_scheduler import (
+from .legacy.block_sparsity import BlockSparseTensors
+from .legacy.cute_dsl_utils import assume_tensor_aligned
+from .legacy.mask import AttentionMask
+from .legacy.named_barrier import NamedBarrierBwd
+from .legacy.seqlen_info import SeqlenInfoQK
+from .legacy.softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
+from .legacy.tile_scheduler import (
     SingleTileLPTBwdScheduler,
     SingleTileScheduler,
     SingleTileVarlenScheduler,
