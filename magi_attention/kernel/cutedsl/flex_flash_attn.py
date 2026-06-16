@@ -80,14 +80,6 @@ from magi_attention.kernel.cutedsl.legacy.flash_bwd_sm120 import (
 from magi_attention.kernel.cutedsl.legacy.flash_fwd_sm120 import (
     FlashAttentionForwardSm120,
 )
-from magi_attention.kernel.cutedsl.legacy.sm100_hd256_2cta_fmha_backward import (
-    BlackwellFusedMultiHeadAttentionBackward,
-)
-
-# SM100 head_dim=256 2CTA kernel imports
-from magi_attention.kernel.cutedsl.legacy.sm100_hd256_2cta_fmha_forward import (
-    BlackwellFusedMultiHeadAttentionForward,
-)
 
 
 def _flex_flash_attn_fwd(
@@ -107,7 +99,6 @@ def _flex_flash_attn_fwd(
     tile_mn: Optional[Tuple[int, int]] = None,
     mma_pv_is_rs: Optional[bool] = None,
     intra_wg_overlap: Optional[bool] = None,
-    num_threads: int = 384,
     pack_gqa: Optional[bool] = None,
     score_mod: Optional[Callable] = None,
     mask_mod: Optional[Callable] = None,
@@ -117,7 +108,7 @@ def _flex_flash_attn_fwd(
     lse: Optional[torch.Tensor] = None,
     aux_tensors: Optional[list[torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Forward pass for FlashAttention.
+    """Forward pass for FlexFlashAttention.
 
     Args:
         ...
@@ -130,6 +121,13 @@ def _flex_flash_attn_fwd(
         lse: Optional pre-allocated log-sum-exp tensor. If None, will be allocated when needed.
         aux_tensors: Some score_mods will want to read from global aux_tensors.
             This is how we thread them through to the inner kernel.
+
+    Returns:
+        A tuple of (output, lse) where:
+        - output is the result of the attention operation, with shape (batch_size, seqlen_q, num_head, head_dim_v) or
+          (total_q, num_head, head_dim_v) if cu_seqlens_q is provided.
+        - lse is the log-sum-exp of the attention scores, with shape (batch_size, num_head, seqlen_q) or
+          (num_head, total_q) if cu_seqlens_q is provided. Will be None if return_lse is False and lse input is None.
     """
     arch, major_arch = get_device_arch()
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
@@ -265,10 +263,6 @@ def _flex_flash_attn_fwd(
 
     current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
 
-    # SM80/SM120: uses SM80 MMA, 128 threads (4 warps)
-    if major_arch in [8, 12]:
-        num_threads = 128
-
     fwd_cfg = FwdConfig(128, 128, True, True)  # default
     if tile_mn is None:
         if major_arch == 12:
@@ -318,12 +312,6 @@ def _flex_flash_attn_fwd(
         and seqlen_q_packgqa > 2 * tile_m
         and (tile_m % qhead_per_kvhead == 0 or not pack_gqa)
     )
-
-    # hd=256 2CTA forward uses dedicated kernel (SM100 only)
-    use_dedicated_hd256_kernel = (
-        major_arch == 10 and head_dim == 256 and head_dim_v == 256
-    )
-    use_2cta_instrs = use_2cta_instrs or use_dedicated_hd256_kernel
 
     if softcap is not None:
         assert score_mod is None, "softcap and score_mod cannot be used together"
@@ -405,7 +393,6 @@ def _flex_flash_attn_fwd(
         tile_m,
         tile_n,
         q_stage,
-        num_threads,
         pack_gqa,
         arch,
         use_2cta_instrs,
@@ -459,7 +446,7 @@ def _flex_flash_attn_fwd(
                 tile_m=tile_m,
                 tile_n=tile_n,
                 num_stages=1,
-                num_threads=num_threads,
+                num_threads=128,
                 Q_in_regs=False,
                 score_mod=score_mod,
                 mask_mod=mask_mod,
@@ -478,7 +465,7 @@ def _flex_flash_attn_fwd(
                 tile_m=tile_m,
                 tile_n=tile_n,
                 num_stages=2,
-                num_threads=num_threads,
+                num_threads=384,
                 Q_in_regs=False,
                 intra_wg_overlap=intra_wg_overlap,
                 mma_pv_is_rs=mma_pv_is_rs,
@@ -490,27 +477,7 @@ def _flex_flash_attn_fwd(
                 debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
         elif major_arch in [10, 11]:
-            if use_dedicated_hd256_kernel:
-                # hd=256 2CTA forward: check for currently unsupported features
-                assert (
-                    softcap is None
-                ), "SM100 forward with head_dim=256 does not support softcap"
-                assert (
-                    not use_block_sparsity
-                ), "SM100 forward with head_dim=256 does not support block sparsity"
-                assert (
-                    learnable_sink is None
-                ), "SM100 forward with head_dim=256 does not support learnable_sink"
-                # pack_gqa is an auto-selected optimization; disable it for hd256 kernel
-                pack_gqa = False
-
-            flash_fwd_obj_cls = (
-                BlackwellFusedMultiHeadAttentionForward
-                if use_dedicated_hd256_kernel
-                else FFAFwdSm100
-            )
-
-            cls_init_kwargs = dict(
+            fa_fwd = FFAFwdSm100(
                 head_dim=head_dim,
                 head_dim_v=head_dim_v,
                 qhead_per_kvhead=qhead_per_kvhead,
@@ -530,14 +497,8 @@ def _flex_flash_attn_fwd(
                 q_subtile_factor=q_subtile_factor,
                 use_2cta_instrs=use_2cta_instrs,
                 use_clc_scheduler=use_clc_scheduler,
+                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
-
-            if flash_fwd_obj_cls == FFAFwdSm100:
-                cls_init_kwargs.update(
-                    dict(debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled())
-                )
-
-            fa_fwd = flash_fwd_obj_cls(**cls_init_kwargs)
         elif major_arch == 12:
             # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
             assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
@@ -552,7 +513,7 @@ def _flex_flash_attn_fwd(
                 tile_m=tile_m,
                 tile_n=tile_n,
                 num_stages=1,
-                num_threads=num_threads,
+                num_threads=128,
                 Q_in_regs=False,
                 score_mod=score_mod,
                 mask_mod=mask_mod,
@@ -887,6 +848,11 @@ def _flex_flash_attn_bwd(
     block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
     dlse: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Backward pass for FlexFlashAttention.
+
+    Returns:
+        A tuple of (dQ, dK, dV) gradients with the same shapes and dtypes as the input q, k, v tensors.
+    """
     arch, major_arch = get_device_arch()
     assert major_arch in [
         8,
@@ -1012,11 +978,6 @@ def _flex_flash_attn_bwd(
         )
         cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
         use_2cta_instrs = cluster_size == 2
-
-    use_dedicated_hd256_kernel = (
-        major_arch == 10 and head_dim == 256 and head_dim_v == 256
-    )
-    use_2cta_instrs = use_2cta_instrs or use_dedicated_hd256_kernel
 
     q, k, v, out, dout, lse, cu_seqlens_q, cu_seqlens_k = [
         maybe_contiguous(t)
@@ -1156,16 +1117,12 @@ def _flex_flash_attn_bwd(
     head_dim_rounded = (head_dim + 32 - 1) // 32 * 32
 
     if cu_seqlens_q is None:
-        dq_accum = (
-            None
-            if use_dedicated_hd256_kernel
-            else torch.empty(
-                batch_size,
-                num_head,
-                seqlen_q_rounded * head_dim_rounded,
-                dtype=torch.float32,
-                device=device,
-            )
+        dq_accum = torch.empty(
+            batch_size,
+            num_head,
+            seqlen_q_rounded * head_dim_rounded,
+            dtype=torch.float32,
+            device=device,
         )
         dpsum = torch.empty(
             batch_size, num_head, seqlen_q_rounded, dtype=torch.float32, device=device
@@ -1179,15 +1136,11 @@ def _flex_flash_attn_bwd(
             // m_block_size
             * m_block_size
         )
-        dq_accum = (
-            None
-            if use_dedicated_hd256_kernel
-            else torch.empty(
-                num_head,
-                total_q_rounded_padded * head_dim_rounded,
-                dtype=torch.float32,
-                device=device,
-            )
+        dq_accum = torch.empty(
+            num_head,
+            total_q_rounded_padded * head_dim_rounded,
+            dtype=torch.float32,
+            device=device,
         )
         dpsum = torch.empty(
             num_head, total_q_rounded_padded, dtype=torch.float32, device=device
@@ -1199,8 +1152,7 @@ def _flex_flash_attn_bwd(
     # GQA (qhead_per_kvhead > 1) needs dK/dV accum+postprocess since multiple Q heads
     # accumulate into the same dK/dV. SM90 varlen_k with qhead_per_kvhead==1 now uses
     # ragged TMA tensors for direct store, so no longer needs accum+postprocess.
-    # hd=256 2CTA backward has its own internal postprocess for dK/dV.
-    dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel
+    dKV_postprocess = qhead_per_kvhead > 1
     if dKV_postprocess:
         head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
         if cu_seqlens_k is None:
@@ -1275,7 +1227,6 @@ def _flex_flash_attn_bwd(
         dV_semaphore = None
 
     # Preprocess kernel: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum.
-    # For hd=256 dedicated path, dq_accum is None so preprocess only fills dpsum/lse_log2.
     _bwd_preprocess(
         out,
         dout,
@@ -1290,7 +1241,7 @@ def _flex_flash_attn_bwd(
         head_dim,
         head_dim_v,
         m_block_size,
-        use_padded_offsets=use_dedicated_hd256_kernel,
+        use_padded_offsets=False,
     )
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
     # BwdConfig.num_wg, SM100/SM110 uses default from function signature (384).
@@ -1514,59 +1465,25 @@ def _flex_flash_attn_bwd(
                 debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
         else:
-            if use_dedicated_hd256_kernel:
-                assert (
-                    softcap == 0.0
-                ), "SM100 backward with head_dim=256 does not support softcap"
-                assert (
-                    block_sparse_tensors is None
-                ), "SM100 backward with head_dim=256 does not support block sparsity"
-                assert (
-                    dlse is None
-                ), "SM100 backward with head_dim=256 does not support dlse"
-
-                dq_tile_mn = (128, 128)
-                dkdv_tile_mn = (128, 64)
-                fa_bwd_obj = BlackwellFusedMultiHeadAttentionBackward(
-                    head_dim,
-                    head_dim_v,
-                    is_causal=causal,
-                    is_local=local,
-                    qhead_per_kvhead=qhead_per_kvhead,
-                    is_persistent=False,
-                    deterministic=deterministic,
-                    cluster_size=cluster_size,
-                    use_2cta_instrs=use_2cta_instrs,
-                    score_mod=score_mod,
-                    score_mod_bwd=score_mod_bwd,
-                    mask_mod=mask_mod,
-                    has_aux_tensors=aux_tensors is not None,
-                    subtile_factor=subtile_factor,
-                    tile_m_dq=dq_tile_mn[0],
-                    tile_n_dq=dq_tile_mn[1],
-                    tile_m_dkdv=dkdv_tile_mn[0],
-                    tile_n_dkdv=dkdv_tile_mn[1],
-                )
-            else:
-                fa_bwd_obj = FFABwdSm100(
-                    head_dim,
-                    head_dim_v,
-                    is_causal=causal,
-                    is_local=local,
-                    qhead_per_kvhead=qhead_per_kvhead,
-                    tile_m=m_block_size,
-                    tile_n=n_block_size,
-                    cluster_size=cluster_size,
-                    use_2cta_instrs=use_2cta_instrs,
-                    deterministic=deterministic,
-                    spt=spt,
-                    score_mod=score_mod,
-                    score_mod_bwd=score_mod_bwd,
-                    mask_mod=mask_mod,
-                    has_aux_tensors=aux_tensors is not None,
-                    subtile_factor=subtile_factor,
-                    debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
-                )
+            fa_bwd_obj = FFABwdSm100(
+                head_dim,
+                head_dim_v,
+                is_causal=causal,
+                is_local=local,
+                qhead_per_kvhead=qhead_per_kvhead,
+                tile_m=m_block_size,
+                tile_n=n_block_size,
+                cluster_size=cluster_size,
+                use_2cta_instrs=use_2cta_instrs,
+                deterministic=deterministic,
+                spt=spt,
+                score_mod=score_mod,
+                score_mod_bwd=score_mod_bwd,
+                mask_mod=mask_mod,
+                has_aux_tensors=aux_tensors is not None,
+                subtile_factor=subtile_factor,
+                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+            )
 
         # Block sparse tensors for backward use Q-direction indexing (transposed from forward).
         sparse_tensors_compile = None
@@ -1574,7 +1491,6 @@ def _flex_flash_attn_bwd(
             sparse_tensors_compile = to_cute_block_sparse_tensors(
                 normalized_block_sparse_tensors
             )
-        dq_accum_tensor = dq_tensor if use_dedicated_hd256_kernel else dq_accum_tensor
 
         # TODO: check @can_implement
         _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
@@ -1604,7 +1520,6 @@ def _flex_flash_attn_bwd(
             options="--enable-tvm-ffi",
         )
     if not is_fake_mode():
-        dq_accum = dq if use_dedicated_hd256_kernel else dq_accum
         _flex_flash_attn_bwd.compile_cache[compile_key](
             q.detach(),
             k.detach(),
@@ -1641,73 +1556,71 @@ def _flex_flash_attn_bwd(
         )
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
-    # hd=256 2CTA backward has its own internal postprocess, skip here.
-    if not use_dedicated_hd256_kernel:
-        if major_arch == 9:
-            # dQ postprocess: match main kernel's MMA WG count, unless dQ_single_wg
-            num_threads_post_dQ = 128 if dQ_single_wg else cfg.num_wg * 128
-            num_threads_post_dKV = cfg.num_wg * 128
-        elif major_arch == 8:
-            # SM80: the postprocess MMA layout is (AtomLayout, num_warps // AtomLayout, 1),
-            # which requires num_warps to be a multiple of AtomLayout. The dKV
-            # postprocess uses AtomLayoutNdKV=8, so it needs >= 8 warps (256 threads,
-            # matching the main kernel). dQ uses AtomLayoutMdQ=1 and is fine with 4 warps.
-            num_threads_post_dQ = 128
-            num_threads_post_dKV = 256
-        else:
-            num_threads_post_dQ = 128
-            num_threads_post_dKV = 128
+    if major_arch == 9:
+        # dQ postprocess: match main kernel's MMA WG count, unless dQ_single_wg
+        num_threads_post_dQ = 128 if dQ_single_wg else cfg.num_wg * 128
+        num_threads_post_dKV = cfg.num_wg * 128
+    elif major_arch == 8:
+        # SM80: the postprocess MMA layout is (AtomLayout, num_warps // AtomLayout, 1),
+        # which requires num_warps to be a multiple of AtomLayout. The dKV
+        # postprocess uses AtomLayoutNdKV=8, so it needs >= 8 warps (256 threads,
+        # matching the main kernel). dQ uses AtomLayoutMdQ=1 and is fine with 4 warps.
+        num_threads_post_dQ = 128
+        num_threads_post_dKV = 256
+    else:
+        num_threads_post_dQ = 128
+        num_threads_post_dKV = 128
 
+    _bwd_postprocess_convert(
+        dq_accum,
+        dq,
+        softmax_scale,
+        cu_seqlens_q,
+        None,
+        arch,
+        dtype,
+        head_dim,
+        m_block_size,
+        num_threads_post_dQ,
+        AtomLayoutMdQ,
+        dQ_swapAB,
+        use_2cta_instrs=use_2cta_instrs,
+        cluster_size=1,
+    )
+
+    if dKV_postprocess:
+        # Postprocess: convert dk_accum from float32 to dk in bf16/fp16
         _bwd_postprocess_convert(
-            dq_accum,
-            dq,
+            dk_accum,
+            dk,
             softmax_scale,
-            cu_seqlens_q,
+            cu_seqlens_k,
             None,
             arch,
             dtype,
             head_dim,
-            m_block_size,
-            num_threads_post_dQ,
-            AtomLayoutMdQ,
-            dQ_swapAB,
-            use_2cta_instrs=use_2cta_instrs,
-            cluster_size=1,
+            n_block_size,
+            num_threads_post_dKV,
+            AtomLayoutNdKV,
+            dKV_swapAB,
+            cluster_size=cluster_size,
         )
-
-        if dKV_postprocess:
-            # Postprocess: convert dk_accum from float32 to dk in bf16/fp16
-            _bwd_postprocess_convert(
-                dk_accum,
-                dk,
-                softmax_scale,
-                cu_seqlens_k,
-                None,
-                arch,
-                dtype,
-                head_dim,
-                n_block_size,
-                num_threads_post_dKV,
-                AtomLayoutNdKV,
-                dKV_swapAB,
-                cluster_size=cluster_size,
-            )
-            # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
-            _bwd_postprocess_convert(
-                dv_accum,
-                dv,
-                1.0,
-                cu_seqlens_k,
-                None,
-                arch,
-                dtype,
-                head_dim_v,
-                n_block_size,
-                num_threads_post_dKV,
-                AtomLayoutNdKV,
-                dKV_swapAB,
-                cluster_size=cluster_size,
-            )
+        # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
+        _bwd_postprocess_convert(
+            dv_accum,
+            dv,
+            1.0,
+            cu_seqlens_k,
+            None,
+            arch,
+            dtype,
+            head_dim_v,
+            n_block_size,
+            num_threads_post_dKV,
+            AtomLayoutNdKV,
+            dKV_swapAB,
+            cluster_size=cluster_size,
+        )
 
     return dq, dk, dv
 

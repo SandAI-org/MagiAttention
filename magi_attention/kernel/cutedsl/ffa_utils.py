@@ -55,8 +55,9 @@ def get_device_arch() -> tuple[int, int]:
       CUTE_DSL_ARCH=sm_80         (compilation target)
 
     Returns:
-        arch: int (e.g. 80, 90, 100, 120)
-        major_arch: int (e.g. 8 for 80, 9 for 90, 10 for 100/103/120)
+        A tuple of (arch, major_arch) where:
+        - arch: int (e.g. 80, 90, 100, 120)
+        - major_arch: int (e.g. 8 for 80, 9 for 90, 10 for 100/103/120)
     """
     arch_override = os.environ.get("FLASH_ATTENTION_ARCH", None)
 
