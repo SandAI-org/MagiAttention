@@ -445,20 +445,21 @@ def get_ffa_jit_spec(
     # Tile/stage overrides for A/B benchmarking (BWD only).
     # Each distinct combo produces a separate JIT URI → separate .so cache.
     if direction == "bwd":
-        for _env_name, _tpl_key in [
-            ("MAGI_BWD_TILE_M", "bwd_tile_m"),
-            ("MAGI_BWD_TILE_N", "bwd_tile_n"),
-            ("MAGI_BWD_STAGES", "bwd_stages"),
-            ("MAGI_BWD_STAGES_DS", "bwd_stages_ds"),
-            ("MAGI_BWD_STAGES_V", "bwd_stages_v"),
-            ("MAGI_BWD_SCATTER_PAD", "bwd_scatter_pad"),
-            ("MAGI_BWD_LSE_UNION", "bwd_lse_union"),
+        for _env_name, _tpl_key, _uri_key in [
+            ("MAGI_BWD_TILE_M", "bwd_tile_m", "tm"),
+            ("MAGI_BWD_TILE_N", "bwd_tile_n", "tn"),
+            ("MAGI_BWD_STAGES", "bwd_stages", "stg"),
+            ("MAGI_BWD_STAGES_DS", "bwd_stages_ds", "stds"),
+            ("MAGI_BWD_STAGES_V", "bwd_stages_v", "stv"),
+            ("MAGI_BWD_SCATTER_PAD", "bwd_scatter_pad", "sp"),
+            ("MAGI_BWD_LSE_UNION", "bwd_lse_union", "lu"),
+            ("MAGI_BWD_DKVACC_BYPASS", "bwd_dkvacc_bypass", "db"),
         ]:
             _val = os.environ.get(_env_name)
             if _val is not None:
                 extra_template_args[_tpl_key] = str(int(_val))
                 _uri_val = _val.replace("-", "n")
-                uri += f"_{_tpl_key}{_uri_val}"
+                uri += f"_{_uri_key}{_uri_val}"
 
     # Register quota selection (single source of truth, kernels only assert)
     _producer_regs, _consumer_regs = _ffa_register_quota(

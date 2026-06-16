@@ -79,7 +79,8 @@ template <
     bool Mma_dP_is_RS,
     int Stages_V_ = Stages,
     int ScatterPad_ = -1,
-    bool LseDpsumUnionDKVacc_ = false>
+    bool LseDpsumUnionDKVacc_ = false,
+    bool DkvaccBypassSmem_ = false>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -100,6 +101,7 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(!Mma_dP_is_RS || SdP_swapAB_); // If Mma_dP_is_RS, we need SdP_SwapAB
 
   static constexpr bool LseDpsumUnionDKVacc = LseDpsumUnionDKVacc_;
+  static constexpr bool DkvaccBypassSmem = DkvaccBypassSmem_;
 
   static constexpr bool Has_softcap = Has_softcap_;
   static constexpr bool SdP_swapAB = SdP_swapAB_;
@@ -628,7 +630,7 @@ struct CollectiveMainloopBwdSm90 {
       cute::array<ElementAccum, 0>,
       cute::array_aligned<ElementAccum, cute::max(cute::cosize_v<SmemLayoutdQaccumTMA>, cute::cosize_v<SmemLayoutdQaccumStore>)>>;
   using SmemdKVacc_t = std::conditional_t<
-      !dKVacc_use_TMA,
+      DkvaccBypassSmem || !dKVacc_use_TMA,
       cute::array<ElementAccum, 0>,
       cute::array_aligned<ElementAccum, cute::max(cute::cosize_v<SmemLayoutdKVaccumTMA>, cute::cosize_v<SmemLayoutdKVaccumStore>)>>;
   using SmemP_t = std::conditional_t<Mma_dKV_is_RS, cute::array<Element, 0>, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
@@ -682,8 +684,10 @@ struct CollectiveMainloopBwdSm90 {
     }
   };
 
-  using SmemLSE_t = std::conditional_t<LseDpsumUnionDKVacc, SmemLSE_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentLSE>>;
-  using SmemDPsum_t = std::conditional_t<LseDpsumUnionDKVacc, SmemDPsum_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum>>;
+  static constexpr bool LseDpsumUnionEffective = LseDpsumUnionDKVacc && !DkvaccBypassSmem;
+  using SmemLSE_t = std::conditional_t<LseDpsumUnionEffective, SmemLSE_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentLSE>>;
+  using SmemDPsum_t =
+      std::conditional_t<LseDpsumUnionEffective, SmemDPsum_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum>>;
   using SmemP_LoopK_t = std::conditional_t<Mma_dKV_is_RS, SmemP_Empty_, SmemP_t>;
 
   struct TensorStorageLoopK : cute::aligned_struct<maxSmemAlignment> {
@@ -1687,7 +1691,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutV{});
     ElementAccum* lse_smem_ptr;
     ElementAccum* dpsum_smem_ptr;
-    if constexpr (LseDpsumUnionDKVacc) {
+    if constexpr (LseDpsumUnionEffective) {
       lse_smem_ptr = reinterpret_cast<ElementAccum*>(shared_storage.tensors.mainloop.smem_dkacc.data());
       dpsum_smem_ptr = lse_smem_ptr + cute::cosize_v<SmemLayoutLSE>;
     } else {
@@ -2274,7 +2278,7 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(SwapBwdQKLoop, "store_dkv() must be called when SwapBwdQKLoop is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
-    if constexpr (!dKVacc_use_TMA) {
+    if constexpr (!dKVacc_use_TMA || DkvaccBypassSmem) {
       return;
     }
 
@@ -2447,7 +2451,7 @@ struct CollectiveMainloopBwdSm90 {
       int warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-      if constexpr (dKVacc_use_TMA && InnerDxStoreInProducer) {
+      if constexpr (dKVacc_use_TMA && InnerDxStoreInProducer && !DkvaccBypassSmem) {
         // Initial arrive on behalf of store warps: smem_dkvacc is initially empty.
         // Only dVEmpty gets initial arrive — the first r2s dV can proceed immediately.
         // dKEmpty is NOT pre-arrived: the first r2s dK must wait for the producer's
@@ -3221,7 +3225,7 @@ struct CollectiveMainloopBwdSm90 {
 
     ElementAccum* lse_smem_ptr_c;
     ElementAccum* dpsum_smem_ptr_c;
-    if constexpr (LseDpsumUnionDKVacc) {
+    if constexpr (LseDpsumUnionEffective) {
       lse_smem_ptr_c = reinterpret_cast<ElementAccum*>(shared_storage.tensors.mainloop.smem_dkacc.data());
       dpsum_smem_ptr_c = lse_smem_ptr_c + cute::cosize_v<SmemLayoutLSE>;
     } else {
@@ -3354,7 +3358,7 @@ struct CollectiveMainloopBwdSm90 {
         return;
       }
       int const new_offset_k = block_meta.seqlen_info.offset_k;
-      if constexpr (!dKVacc_use_TMA) {
+      if constexpr (!dKVacc_use_TMA || (DkvaccBypassSmem && !InnerUseScatter)) {
         gdKaccum_ = local_tile(domain_offset(make_coord(pool_offset + new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
         gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
         gdVaccum_ = local_tile(domain_offset(make_coord(pool_offset + new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
@@ -3604,16 +3608,40 @@ struct CollectiveMainloopBwdSm90 {
 
         // Atomic reduce-add partial dV
         // after MMA3 finished (wg_wait<1> in MMA4)
-        if constexpr (dKVacc_use_TMA && InnerDxStoreInProducer) {
+        if constexpr (DkvaccBypassSmem) {
+          // F6 bypass: atomicAdd from registers directly to global (no SMEM roundtrip)
+          static_assert(!DkvaccBypassSmem || !dKV_swapAB, "DkvaccBypassSmem scatter requires !dKV_swapAB (kHeadDim<=128)");
+          Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
+          if constexpr (InnerUseScatter) {
+            int const* const tidx = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
+            int const stride_dV_row = get<0>(params.stride_dV);
+            auto* ptr_gdV = reinterpret_cast<ElementAccum*>(params.ptr_dV) + bidh_kv * get<2>(params.stride_dV);
+            Tensor cdKV = make_identity_tensor(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}));
+            Tensor cdKV_div = cute::flat_divide(cdKV, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+            Tensor thr_cdKV = r2s_thr_copy_dKVaccum.partition_D(cdKV_div);
+#pragma unroll
+            for (int i = 0; i < size(taccdVrdV); ++i) {
+              auto coord = thr_cdKV(i);
+              int row = get<0>(coord);
+              int col = get<1>(coord);
+              int token_idx = tidx[row];
+              atomicAdd(ptr_gdV + (pool_offset + token_idx) * stride_dV_row + col, taccdVrdV(i));
+            }
+          } else {
+            Tensor tdVrdV_atomic = recast<float4>(taccdVrdV);
+            Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
+#pragma unroll
+            for (int i = 0; i < size(tdVrdV_atomic); ++i) {
+              atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
+            }
+          }
+        } else if constexpr (dKVacc_use_TMA && InnerDxStoreInProducer) {
           // Write to smem, signal producer store warp for TMA/scatter reduce-add
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
           BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
           if constexpr (InnerUseScatter) {
-            // Copy this tile's token indices from the stage slot (still held — K is
-            // released only after MMA5) into the dV staging area for the store warps.
-            // Protected by the dVEmpty/dVFull handshake; WG0 alone suffices.
             if (warp_group_idx == 0) {
               int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
               int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockN];
@@ -3631,7 +3659,6 @@ struct CollectiveMainloopBwdSm90 {
         } else {
           // Consumer store path: dispatch on the store mechanism
           if constexpr (ScatterInnerLoadStoreTMA) {
-            // Consumer scatter TMA 2D: write to smem → cross-WG sync → single-thread TMA reduce
             static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
             Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
@@ -3657,7 +3684,6 @@ struct CollectiveMainloopBwdSm90 {
 
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
           } else if constexpr (InnerUseScatter) {
-            // Consumer scatter 1D: write to smem → cross-WG sync → per-row bulk reduce from smem
             static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
             Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
@@ -3677,7 +3703,6 @@ struct CollectiveMainloopBwdSm90 {
 
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
           } else {
-            // Contiguous atomicAdd from registers (no smem roundtrip)
             Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
             Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
             static_assert(CUTE_STATIC_V(size(tdVrdV_atomic)) == CUTE_STATIC_V(size(tdVgdVaccum_atomic)));
@@ -3700,16 +3725,43 @@ struct CollectiveMainloopBwdSm90 {
 
         // Atomic reduce-add partial dK
         // after MMA4 finished (wg_wait<1> in MMA5)
-        if constexpr (dKVacc_use_TMA && InnerDxStoreInProducer) {
+        if constexpr (DkvaccBypassSmem) {
+          // F6 bypass: atomicAdd dK from registers directly to global
+          Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
+#pragma unroll
+          for (int dki = 0; dki < size(taccdKrdK); ++dki) {
+            taccdKrdK(dki) *= params.softmax_scale;
+          }
+          if constexpr (InnerUseScatter) {
+            int const* const tidx = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
+            int const stride_dK_row = get<0>(params.stride_dK);
+            auto* ptr_gdK = reinterpret_cast<ElementAccum*>(params.ptr_dK) + bidh_kv * get<2>(params.stride_dK);
+            Tensor cdKV = make_identity_tensor(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}));
+            Tensor cdKV_div = cute::flat_divide(cdKV, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+            Tensor thr_cdKV = r2s_thr_copy_dKVaccum.partition_D(cdKV_div);
+#pragma unroll
+            for (int i = 0; i < size(taccdKrdK); ++i) {
+              auto coord = thr_cdKV(i);
+              int row = get<0>(coord);
+              int col = get<1>(coord);
+              int token_idx = tidx[row];
+              atomicAdd(ptr_gdK + (pool_offset + token_idx) * stride_dK_row + col, taccdKrdK(i));
+            }
+          } else {
+            Tensor tdKrdK_atomic = recast<float4>(taccdKrdK);
+            Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
+#pragma unroll
+            for (int i = 0; i < size(tdKrdK_atomic); ++i) {
+              atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
+            }
+          }
+        } else if constexpr (dKVacc_use_TMA && InnerDxStoreInProducer) {
           // Write to smem, signal producer store warp for TMA/scatter reduce-add
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
           BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
           if constexpr (InnerUseScatter) {
-            // dK staging copy — must be separate from dV staging: after store_dV's
-            // dVEmpty arrive, the consumer's next-iteration dV r2s may overwrite a
-            // shared area while store_dK is still reading it. Protected by dKEmpty/dKFull.
             if (warp_group_idx == 0) {
               int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
               int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[(kStages + 1) * kBlockN];
@@ -3730,7 +3782,6 @@ struct CollectiveMainloopBwdSm90 {
         } else {
           // Consumer store path: dispatch on the store mechanism
           if constexpr (ScatterInnerLoadStoreTMA) {
-            // Consumer scatter TMA 2D: write to smem → cross-WG sync → single-thread TMA reduce
             static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
             Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
@@ -3759,7 +3810,6 @@ struct CollectiveMainloopBwdSm90 {
 
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
           } else if constexpr (InnerUseScatter) {
-            // Consumer scatter 1D: write to smem → cross-WG sync → per-row bulk reduce from smem
             static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
             Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
@@ -3782,7 +3832,6 @@ struct CollectiveMainloopBwdSm90 {
 
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
           } else {
-            // Contiguous atomicAdd from registers (no smem roundtrip)
             Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
             Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
             static_assert(CUTE_STATIC_V(size(tdKrdK_atomic)) == CUTE_STATIC_V(size(tdKgdKaccum_atomic)));
@@ -3961,7 +4010,7 @@ struct CollectiveMainloopBwdSm90 {
     // drains the last pending arrive. We then re-arrive on behalf of the
     // store warp so the next tile's first dVEmpty sync is pre-satisfied
     // (mirroring mma_init).
-    if constexpr (LseDpsumUnionDKVacc && dKVacc_use_TMA && InnerDxStoreInProducer) {
+    if constexpr (LseDpsumUnionEffective && dKVacc_use_TMA && InnerDxStoreInProducer) {
       int const warp_idx_in_wg = canonical_warp_idx_in_warpgroup_sync();
       BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
       if (warp_idx_in_wg == 0 || (InnerUseScatter && warp_idx_in_wg == 1)) {

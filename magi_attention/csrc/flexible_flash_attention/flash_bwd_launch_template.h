@@ -137,6 +137,7 @@ template <
     int Stages_V,
     int ScatterPad,
     bool LseDpsumUnionDKVacc,
+    bool DkvaccBypassSmem,
     bool ProfileMode>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
@@ -198,7 +199,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       V_in_regs,
       Stages_V,
       ScatterPad,
-      LseDpsumUnionDKVacc>;
+      LseDpsumUnionDKVacc,
+      DkvaccBypassSmem>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       SwapBwdQKLoop ? kBlockM : kBlockN,
@@ -336,7 +338,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
           sz_dkacc,
           sz_tidx);
       printf(
-          "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d lseU=%d SwapQK=%d\n",
+          "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d lseU=%d dkvByp=%d SwapQK=%d\n",
           kBlockM,
           kBlockN,
           kHeadDim,
@@ -345,6 +347,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
           Stages_dS,
           ScatterPad,
           (int)LseDpsumUnionDKVacc,
+          (int)DkvaccBypassSmem,
           (int)SwapBwdQKLoop);
       cudaFuncAttributes func_attrs;
       cudaFuncGetAttributes(&func_attrs, (void*)cutlass::device_kernel<AttnKernel>);
@@ -410,6 +413,7 @@ template <
     int BwdStagesV,
     int BwdScatterPad,
     int BwdLseUnion,
+    int BwdDkvaccBypass,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -426,6 +430,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int Stages_V = BwdStagesV > 0 ? BwdStagesV : Stages;
   static constexpr int ScatterPad = BwdScatterPad;
   static constexpr bool LseDpsumUnionDKVacc = BwdLseUnion != 0;
+  static constexpr bool DkvaccBypassSmem = BwdDkvaccBypass != 0;
 
   static constexpr bool SdP_swapAB = kHeadDim <= 128 ? true : false;
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
@@ -490,5 +495,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*Stages_V=*/Stages_V,
       /*ScatterPad=*/ScatterPad,
       /*LseDpsumUnionDKVacc=*/LseDpsumUnionDKVacc,
+      /*DkvaccBypassSmem=*/DkvaccBypassSmem,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }
