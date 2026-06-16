@@ -20,11 +20,11 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import cutlass.cute as cute
-import torch
 from cutlass import Float32
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
 from magi_attention.kernel.cutedsl.legacy.testing import is_fake_mode
+from magi_attention.utils.arch import get_dev_cap_num
 
 # ---------------------------------------------------------------------------
 # Arch helpers
@@ -43,7 +43,7 @@ def parse_arch_str(arch_str):
 
 
 @lru_cache(maxsize=None)
-def get_device_arch():
+def get_device_arch() -> tuple[int, int]:
     """Cached device arch check.
 
     Override with FLASH_ATTENTION_ARCH (e.g. 'sm_80' or '80') to select which
@@ -53,12 +53,22 @@ def get_device_arch():
     For CPU-only compilation (no GPU), set both:
       FLASH_ATTENTION_ARCH=sm_80  (kernel selection)
       CUTE_DSL_ARCH=sm_80         (compilation target)
+
+    Returns:
+        arch: int (e.g. 80, 90, 100, 120)
+        major_arch: int (e.g. 8 for 80, 9 for 90, 10 for 100/103/120)
     """
     arch_override = os.environ.get("FLASH_ATTENTION_ARCH", None)
-    if arch_override is not None:
-        return parse_arch_str(arch_override)
-    major, minor = torch.cuda.get_device_capability()
-    return major * 10 + int(minor)
+
+    arch = (
+        parse_arch_str(arch_override)
+        if arch_override is not None
+        else get_dev_cap_num()
+    )
+
+    major_arch = arch // 10
+
+    return arch, major_arch
 
 
 # ---------------------------------------------------------------------------

@@ -70,7 +70,7 @@ from magi_attention.utils.arch import (
 # targets the real device so the cubin actually runs. The compared baseline is fa2.
 FORCE_SM80 = os.environ.get("BENCH_FORCE_SM80", "0") == "1"
 if FORCE_SM80:
-    # must be set before the first ffa kernel call so _get_device_arch() picks it up
+    # must be set before the first ffa kernel call so get_device_arch() picks it up
     os.environ["FLASH_ATTENTION_ARCH"] = "sm_80"
 
 IS_SM80 = is_ampere() or FORCE_SM80

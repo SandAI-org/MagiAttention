@@ -16,8 +16,6 @@
 
 # mypy: disable-error-code="arg-type,union-attr,attr-defined,unreachable,assignment"
 
-# [2025-07-04] Version in Cute-DSL, for Hopper and Blackwell. You'll need install nvidia-cutlass-dsl==4.2.0.
-
 import math
 import os
 from typing import Callable, Optional, Tuple
@@ -92,7 +90,7 @@ from magi_attention.kernel.cutedsl.legacy.sm100_hd256_2cta_fmha_forward import (
 )
 
 
-def _flash_attn_fwd(
+def _flex_flash_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -111,7 +109,6 @@ def _flash_attn_fwd(
     intra_wg_overlap: Optional[bool] = None,
     num_threads: int = 384,
     pack_gqa: Optional[bool] = None,
-    _arch: Optional[int] = None,
     score_mod: Optional[Callable] = None,
     mask_mod: Optional[Callable] = None,
     block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
@@ -134,6 +131,7 @@ def _flash_attn_fwd(
         aux_tensors: Some score_mods will want to read from global aux_tensors.
             This is how we thread them through to the inner kernel.
     """
+    arch, major_arch = get_device_arch()
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
     num_head, head_dim = q.shape[-2:]
     if cu_seqlens_q is None:
@@ -185,8 +183,7 @@ def _flash_attn_fwd(
                 learnable_sink,
             )
         ), "inputs must be on CUDA device"
-    arch = get_device_arch() if _arch is None else _arch
-    assert arch // 10 in [
+    assert major_arch in [
         8,
         9,
         10,
@@ -195,8 +192,8 @@ def _flash_attn_fwd(
     ], "Unsupported compute capability. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
-    if arch // 10 not in [8, 12]:
-        validate_head_dims(head_dim, head_dim_v, arch // 10, alignment)
+    if major_arch not in [8, 12]:
+        validate_head_dims(head_dim, head_dim_v, major_arch, alignment)
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
     if softcap == 0.0:
@@ -204,11 +201,12 @@ def _flash_attn_fwd(
     qhead_per_kvhead = num_head // num_head_kv
     if pack_gqa is None:
         pack_gqa = qhead_per_kvhead > 1
+
     # The forked SM80 fwd kernel handles GQA in unpacked mode (one work-tile per
     # query head, indexing mQ by query head directly), so the packed-GQA epilogue
     # path (pack_gqa.store_O) is unsupported. Force it off so the unpacked store
     # path is used consistently with the unpacked mainloop.
-    if arch // 10 == 8:
+    if major_arch == 8:
         pack_gqa = False
 
     out_torch_dtype = q.dtype
@@ -268,12 +266,12 @@ def _flash_attn_fwd(
     current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
 
     # SM80/SM120: uses SM80 MMA, 128 threads (4 warps)
-    if arch // 10 in [8, 12]:
+    if major_arch in [8, 12]:
         num_threads = 128
 
     fwd_cfg = FwdConfig(128, 128, True, True)  # default
     if tile_mn is None:
-        if arch // 10 == 12:
+        if major_arch == 12:
             # SM120 tile sizes tuned for 99 KB SMEM capacity:
             # D<=64:  128x128 → 48 KB (good occupancy)
             # D>64:   128x64  → 64 KB (128x128 would use 96 KB, hurting occupancy)
@@ -281,9 +279,9 @@ def _flash_attn_fwd(
                 fwd_cfg = FwdConfig(128, 128, True, True)
             else:
                 fwd_cfg = FwdConfig(128, 64, True, True)
-        elif arch // 10 == 8:
+        elif major_arch == 8:
             fwd_cfg = FwdConfig(128, 64, True, True)  # SM80, should tune
-        elif arch // 10 == 9:
+        elif major_arch == 9:
             sparse_q = get_sparse_q_block_size(block_sparse_tensors, seqlen_q)
             fwd_cfg = tile_size_fwd_sm90(
                 head_dim, head_dim_v, causal, local, sparse_block_size_q=sparse_q
@@ -303,13 +301,13 @@ def _flash_attn_fwd(
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
     seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
-    if arch // 10 == 10:
+    if major_arch == 10:
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
         q_stage = 1
 
     use_2cta_instrs = (
-        arch // 10 in [10, 11]
+        major_arch in [10, 11]
         and not requested_disable_2cta
         and not causal
         and not local
@@ -323,7 +321,7 @@ def _flash_attn_fwd(
 
     # hd=256 2CTA forward uses dedicated kernel (SM100 only)
     use_dedicated_hd256_kernel = (
-        arch // 10 == 10 and head_dim == 256 and head_dim_v == 256
+        major_arch == 10 and head_dim == 256 and head_dim_v == 256
     )
     use_2cta_instrs = use_2cta_instrs or use_dedicated_hd256_kernel
 
@@ -331,7 +329,7 @@ def _flash_attn_fwd(
         assert score_mod is None, "softcap and score_mod cannot be used together"
         score_mod = utils.create_softcap_scoremod(softcap)
     elif score_mod is not None:
-        if arch // 10 == 8:
+        if major_arch == 8:
             raise NotImplementedError(
                 "Custom user-provided score_mod is not supported on SM8x architectures."
             )
@@ -419,7 +417,7 @@ def _flash_attn_fwd(
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
 
-    if compile_key not in _flash_attn_fwd.compile_cache:
+    if compile_key not in _flex_flash_attn_fwd.compile_cache:
         (
             cu_seqlens_q_tensor,
             cu_seqlens_k_tensor,
@@ -449,7 +447,7 @@ def _flash_attn_fwd(
         if aux_tensors is not None:
             cute_aux_tensors = [to_cute_aux_tensor(buf) for buf in aux_tensors]
 
-        if arch // 10 == 8:
+        if major_arch == 8:
             fa_fwd = FFAFwdSm80(
                 dtype,
                 head_dim,
@@ -468,7 +466,7 @@ def _flash_attn_fwd(
                 has_aux_tensors=aux_tensors is not None,
                 debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
-        elif arch // 10 == 9:
+        elif major_arch == 9:
             fa_fwd = FFAFwdSm90(
                 dtype,
                 head_dim,
@@ -479,7 +477,6 @@ def _flash_attn_fwd(
                 pack_gqa=pack_gqa,
                 tile_m=tile_m,
                 tile_n=tile_n,
-                # num_stages=1,
                 num_stages=2,
                 num_threads=num_threads,
                 Q_in_regs=False,
@@ -492,7 +489,7 @@ def _flash_attn_fwd(
                 paged_kv_non_tma=False,
                 debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
-        elif arch // 10 in [10, 11]:
+        elif major_arch in [10, 11]:
             if use_dedicated_hd256_kernel:
                 # hd=256 2CTA forward: check for currently unsupported features
                 assert (
@@ -541,7 +538,7 @@ def _flash_attn_fwd(
                 )
 
             fa_fwd = flash_fwd_obj_cls(**cls_init_kwargs)
-        elif arch // 10 == 12:
+        elif major_arch == 12:
             # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
             assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
             fa_fwd = FlashAttentionForwardSm120(
@@ -583,7 +580,7 @@ def _flash_attn_fwd(
             window_size_right,
             learnable_sink_tensor,
         ]
-        if arch // 10 in [10, 11]:
+        if major_arch in [10, 11]:
             # FP8 descale tensors removed; SM100 kernel descale slot is always None.
             compile_args.append(None)
         compile_args.extend(
@@ -593,7 +590,8 @@ def _flash_attn_fwd(
             ]
         )
         compile_args.append(current_stream)
-        _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+
+        _flex_flash_attn_fwd.compile_cache[compile_key] = cute.compile(
             *compile_args, options="--enable-tvm-ffi"
         )
 
@@ -615,7 +613,7 @@ def _flash_attn_fwd(
             window_size_right,
             learnable_sink,
         ]
-        if arch // 10 in [10, 11]:
+        if major_arch in [10, 11]:
             # FP8 descale tensors removed; SM100 kernel descale slot is always None.
             call_args.append(None)
         call_args.extend(
@@ -635,11 +633,11 @@ def _flash_attn_fwd(
                 aux_tensors,
             ]
         )
-        _flash_attn_fwd.compile_cache[compile_key](*call_args)
+        _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
     return out, lse
 
 
-_flash_attn_fwd.compile_cache = get_jit_cache("fwd")
+_flex_flash_attn_fwd.compile_cache = get_jit_cache("fwd")
 
 
 def _compile_bwd_preprocess(
@@ -849,7 +847,7 @@ def _bwd_postprocess_convert(
 _bwd_postprocess_convert.compile_cache = get_jit_cache("bwd_post")
 
 
-def _flash_attn_bwd(
+def _flex_flash_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -889,8 +887,8 @@ def _flash_attn_bwd(
     block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
     dlse: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    arch = get_device_arch()
-    assert arch // 10 in [
+    arch, major_arch = get_device_arch()
+    assert major_arch in [
         8,
         9,
         10,
@@ -898,7 +896,7 @@ def _flash_attn_bwd(
         12,
     ], "Unsupported compute capability. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
     sparse_q = None
-    if block_sparse_tensors is not None and arch // 10 == 9:
+    if block_sparse_tensors is not None and major_arch == 9:
         sparse_q = (
             block_sparse_tensors.block_size[0]
             if block_sparse_tensors.block_size is not None
@@ -913,7 +911,7 @@ def _flash_attn_bwd(
         causal, window_size_left, window_size_right
     )
 
-    if arch // 10 == 8:
+    if major_arch == 8:
         # SM80 (Ampere): uses the dedicated FFABwdSm80 kernel (SM80 MMA, 256
         # threads / 8 warps). Its tiled-MMA expects AtomLayout 1/8/1 with
         # n_block_size == permutation_M (n_block_size = AtomLayoutNdKV * 16 = 128).
@@ -944,7 +942,7 @@ def _flash_attn_bwd(
         ), "score_mod backward not supported on SM 8.0"
         assert mask_mod is None, "mask_mod backward not supported on SM 8.0"
         assert deterministic is False, "deterministic backward not supported on SM 8.0"
-    elif arch // 10 == 12:
+    elif major_arch == 12:
         # SM120: uses SM80 MMA with 99 KB SMEM, 128 threads (4 warps).
         m_block_size = 64
         n_block_size = 64
@@ -973,7 +971,7 @@ def _flash_attn_bwd(
         ), "score_mod backward not supported on SM 12.0"
         assert mask_mod is None, "mask_mod backward not supported on SM 12.0"
         assert deterministic is False, "deterministic backward not supported on SM 12.0"
-    elif arch // 10 == 9:
+    elif major_arch == 9:
         cfg = tile_size_bwd_sm90(
             head_dim,
             head_dim_v,
@@ -1016,7 +1014,7 @@ def _flash_attn_bwd(
         use_2cta_instrs = cluster_size == 2
 
     use_dedicated_hd256_kernel = (
-        arch // 10 == 10 and head_dim == 256 and head_dim_v == 256
+        major_arch == 10 and head_dim == 256 and head_dim_v == 256
     )
     use_2cta_instrs = use_2cta_instrs or use_dedicated_hd256_kernel
 
@@ -1109,8 +1107,8 @@ def _flash_attn_bwd(
         ), "inputs must be on CUDA device"
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
-    if arch // 10 not in [8, 12]:
-        validate_head_dims(head_dim, head_dim_v, arch // 10, alignment)
+    if major_arch not in [8, 12]:
+        validate_head_dims(head_dim, head_dim_v, major_arch, alignment)
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
     qhead_per_kvhead = num_head // num_head_kv
@@ -1132,7 +1130,7 @@ def _flash_attn_bwd(
         assert (
             cu_seqlens_q is None and cu_seqlens_k is None
         ), "varlen + score_mod not supported in bwd yet"
-        if arch // 10 == 8:
+        if major_arch == 8:
             raise NotImplementedError(
                 "Custom user-provided score_mod is not supported on SM8x architectures."
             )
@@ -1296,7 +1294,7 @@ def _flash_attn_bwd(
     )
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
     # BwdConfig.num_wg, SM100/SM110 uses default from function signature (384).
-    if arch // 10 not in [8, 9, 12]:
+    if major_arch not in [8, 9, 12]:
         num_threads = 384
 
     # Backward kernel: compute dk, dv, dq_accum.
@@ -1351,7 +1349,7 @@ def _flash_attn_bwd(
     else:
         spt = (causal or local) and deterministic
 
-    if arch // 10 in [8, 9, 12]:
+    if major_arch in [8, 9, 12]:
         compile_key = (
             arch,
             dtype,
@@ -1429,7 +1427,7 @@ def _flash_attn_bwd(
             magiattn_cutedsl.is_ffa_debug_mode_enabled(),
         )
 
-    if compile_key not in _flash_attn_bwd.compile_cache:
+    if compile_key not in _flex_flash_attn_bwd.compile_cache:
         q_tensor, k_tensor, v_tensor, do_tensor, dq_tensor, dk_tensor, dv_tensor = [
             to_cute_tensor(t) for t in (q, k, v, dout, dq, dk, dv)
         ]
@@ -1452,16 +1450,16 @@ def _flash_attn_bwd(
             else None
             for t in (dQ_semaphore, dK_semaphore, dV_semaphore)
         ]
-        if arch // 10 in [8, 12]:
+        if major_arch in [8, 12]:
             flash_bwd_obj_cls = (
-                FlashAttentionBackwardSm120 if arch // 10 == 12 else FFABwdSm80
+                FlashAttentionBackwardSm120 if major_arch == 12 else FFABwdSm80
             )
             bwd_obj_kwargs = dict(
                 V_in_regs=V_in_regs,
                 score_mod=score_mod,
                 score_mod_bwd=score_mod_bwd,
             )
-            if arch // 10 == 8:
+            if major_arch == 8:
                 bwd_obj_kwargs[
                     "debug_print"
                 ] = magiattn_cutedsl.is_ffa_debug_mode_enabled()
@@ -1485,7 +1483,7 @@ def _flash_attn_bwd(
                 AtomLayoutMdQ,
                 **bwd_obj_kwargs,
             )
-        elif arch // 10 == 9:
+        elif major_arch == 9:
             fa_bwd_obj = FFABwdSm90(
                 dtype,
                 head_dim,
@@ -1579,7 +1577,7 @@ def _flash_attn_bwd(
         dq_accum_tensor = dq_tensor if use_dedicated_hd256_kernel else dq_accum_tensor
 
         # TODO: check @can_implement
-        _flash_attn_bwd.compile_cache[compile_key] = cute.compile(
+        _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
             fa_bwd_obj,
             q_tensor,
             k_tensor,
@@ -1607,7 +1605,7 @@ def _flash_attn_bwd(
         )
     if not is_fake_mode():
         dq_accum = dq if use_dedicated_hd256_kernel else dq_accum
-        _flash_attn_bwd.compile_cache[compile_key](
+        _flex_flash_attn_bwd.compile_cache[compile_key](
             q.detach(),
             k.detach(),
             v.detach(),
@@ -1645,11 +1643,11 @@ def _flash_attn_bwd(
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
     # hd=256 2CTA backward has its own internal postprocess, skip here.
     if not use_dedicated_hd256_kernel:
-        if arch // 10 == 9:
+        if major_arch == 9:
             # dQ postprocess: match main kernel's MMA WG count, unless dQ_single_wg
             num_threads_post_dQ = 128 if dQ_single_wg else cfg.num_wg * 128
             num_threads_post_dKV = cfg.num_wg * 128
-        elif arch // 10 == 8:
+        elif major_arch == 8:
             # SM80: the postprocess MMA layout is (AtomLayout, num_warps // AtomLayout, 1),
             # which requires num_warps to be a multiple of AtomLayout. The dKV
             # postprocess uses AtomLayoutNdKV=8, so it needs >= 8 warps (256 threads,
@@ -1714,7 +1712,7 @@ def _flash_attn_bwd(
     return dq, dk, dv
 
 
-_flash_attn_bwd.compile_cache = get_jit_cache("bwd")
+_flex_flash_attn_bwd.compile_cache = get_jit_cache("bwd")
 
 
 class FlexFlashAttnFunc(torch.autograd.Function):
@@ -1743,7 +1741,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         block_sparse_tensors_bwd: Optional[BlockSparseTensorsTorch] = None,
         return_lse: bool = False,
     ):
-        out, lse = _flash_attn_fwd(
+        out, lse = _flex_flash_attn_fwd(
             q,
             k,
             v,
@@ -1806,7 +1804,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dlse = None
         if dout is None:
             dout = torch.zeros_like(out)
-        dq, dk, dv = _flash_attn_bwd(
+        dq, dk, dv = _flex_flash_attn_bwd(
             q,
             k,
             v,
