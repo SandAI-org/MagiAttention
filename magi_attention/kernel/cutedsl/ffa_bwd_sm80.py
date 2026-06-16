@@ -15,6 +15,7 @@
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
 # mypy: disable-error-code="assignment,arg-type,union-attr,misc"
+# pyright: reportInvalidTypeForm=false
 
 # SM80 (Ampere) backward pass for flash attention, extracted from flash_bwd.py.
 
@@ -473,26 +474,26 @@ class FFABwdSm80:
 
         @cute.struct
         class SharedStorageSeparateQV:
-            sK: sK_struct  # type: ignore
-            sV: sV_struct  # type: ignore
-            sQ: sQ_struct  # type: ignore
-            sdO: sdO_struct  # type: ignore
-            sLSE: sLSE_struct  # type: ignore
-            sdPsum: sdPsum_struct  # type: ignore
-            sP: sP_struct  # type: ignore
-            sdS: sdS_struct  # type: ignore
+            sK: sK_struct
+            sV: sV_struct
+            sQ: sQ_struct
+            sdO: sdO_struct
+            sLSE: sLSE_struct
+            sdPsum: sdPsum_struct
+            sP: sP_struct
+            sdS: sdS_struct
             # TODO: the case where there's no sP
 
         @cute.struct
         class SharedStorageSharedQV:
-            sK: sK_struct  # type: ignore
-            sV: sV_struct  # type: ignore
-            sQ: sQV_struct  # type: ignore
-            sdO: sdO_struct  # type: ignore
-            sLSE: sLSE_struct  # type: ignore
-            sdPsum: sdPsum_struct  # type: ignore
-            sP: sP_struct  # type: ignore
-            sdS: sdS_struct  # type: ignore
+            sK: sK_struct
+            sV: sV_struct
+            sQ: sQV_struct
+            sdO: sdO_struct
+            sLSE: sLSE_struct
+            sdPsum: sdPsum_struct
+            sP: sP_struct
+            sdS: sdS_struct
 
         return (
             SharedStorageSeparateQV
