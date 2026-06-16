@@ -17,7 +17,6 @@
 # mypy: disable-error-code="arg-type,union-attr,attr-defined,unreachable,assignment"
 
 import math
-import os
 from typing import Callable, Optional, Tuple
 
 import cutlass.cute as cute
@@ -26,7 +25,15 @@ from cutlass import Float32, Int32
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
-from magi_attention.kernel.cutedsl.ffa_utils import (
+from magi_attention.utils.dtype import to_cute_dtype
+
+from .ffa_bwd_sm80 import FFABwdSm80
+from .ffa_bwd_sm90 import FFABwdSm90
+from .ffa_bwd_sm100 import FFABwdSm100
+from .ffa_fwd_sm80 import FFAFwdSm80
+from .ffa_fwd_sm90 import FFAFwdSm90
+from .ffa_fwd_sm100 import FFAFwdSm100
+from .ffa_utils import (
     get_device_arch,
     make_fake_bwd_tensors,
     maybe_contiguous,
@@ -36,49 +43,28 @@ from magi_attention.kernel.cutedsl.ffa_utils import (
     validate_head_dims,
     validate_tensor,
 )
-from magi_attention.kernel.cutedsl.legacy.cache_utils import get_jit_cache
-from magi_attention.kernel.cutedsl.legacy.flash_bwd_postprocess import (
-    FlashAttentionBackwardPostprocess,
-)
-from magi_attention.kernel.cutedsl.legacy.flash_bwd_preprocess import (
-    FlashAttentionBackwardPreprocess,
-)
-from magi_attention.kernel.cutedsl.legacy.testing import is_fake_mode
-from magi_attention.utils.dtype import to_cute_dtype
 
-if os.environ.get("CUTE_DSL_PTXAS_PATH", None) is not None:
-    from magi_attention.kernel.cutedsl.legacy import cute_dsl_ptxas  # noqa: F401
-
-    # Patch to dump ptx and then use system ptxas to compile to cubin
-    cute_dsl_ptxas.patch()
-
-
-from magi_attention.kernel.cutedsl.ffa_bwd_sm80 import FFABwdSm80
-from magi_attention.kernel.cutedsl.ffa_bwd_sm90 import FFABwdSm90
-from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
-from magi_attention.kernel.cutedsl.ffa_fwd_sm80 import FFAFwdSm80
-from magi_attention.kernel.cutedsl.ffa_fwd_sm90 import FFAFwdSm90
-from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
-from magi_attention.kernel.cutedsl.legacy import fa_logging, utils
-from magi_attention.kernel.cutedsl.legacy.block_sparsity import (
+# isort: split
+from .legacy import fa_logging, utils
+from .legacy.block_sparsity import (
     BlockSparseTensorsTorch,
     get_sparse_q_block_size,
     normalize_block_sparse_config,
     normalize_block_sparse_config_bwd,
     to_cute_block_sparse_tensors,
 )
-from magi_attention.kernel.cutedsl.legacy.cute_dsl_utils import (
+from .legacy.cache_utils import get_jit_cache
+from .legacy.cute_dsl_utils import (
     get_aux_tensor_metadata,
     get_broadcast_dims,
     to_cute_aux_tensor,
     to_cute_tensor,
 )
-from magi_attention.kernel.cutedsl.legacy.flash_bwd_sm120 import (
-    FlashAttentionBackwardSm120,
-)
-from magi_attention.kernel.cutedsl.legacy.flash_fwd_sm120 import (
-    FlashAttentionForwardSm120,
-)
+from .legacy.flash_bwd_postprocess import FlashAttentionBackwardPostprocess
+from .legacy.flash_bwd_preprocess import FlashAttentionBackwardPreprocess
+from .legacy.flash_bwd_sm120 import FlashAttentionBackwardSm120
+from .legacy.flash_fwd_sm120 import FlashAttentionForwardSm120
+from .legacy.testing import is_fake_mode
 
 
 def _flex_flash_attn_fwd(
