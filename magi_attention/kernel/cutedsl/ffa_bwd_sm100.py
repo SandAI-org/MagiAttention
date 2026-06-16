@@ -36,12 +36,11 @@ import quack.activation
 from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from .cutedsl_utils import assume_tensor_aligned
+from . import cutedsl_utils
 
 # isort: split
 from .legacy import barrier, copy_utils
 from .legacy import pipeline as pipeline_custom
-from .legacy import utils
 from .legacy.blackwell_helpers import gemm_ptx_w_idx, gemm_w_idx  # noqa
 from .legacy.block_info import BlockInfo
 from .legacy.block_sparse_utils import (
@@ -688,7 +687,9 @@ class FFABwdSm100:
                 self.dv_dtype.width == 32
             ), "Must accumulate dV in float precision for GQA"
 
-        mdQacc, mdK, mdV = [assume_tensor_aligned(t) for t in (mdQacc, mdK, mdV)]
+        mdQacc, mdK, mdV = [
+            cutedsl_utils.assume_tensor_aligned(t) for t in (mdQacc, mdK, mdV)
+        ]
 
         # --- Make mQ/mdO ---
 
@@ -4565,8 +4566,8 @@ class FFABwdSm100:
                             lse_pair = (tSrLSE[2 * v], tSrLSE[2 * v + 1])
                         else:
                             lse_pair = (
-                                utils.shuffle_sync(tSrLSE, offset=2 * v),
-                                utils.shuffle_sync(tSrLSE, offset=2 * v + 1),
+                                cutedsl_utils.shuffle_sync(tSrLSE, offset=2 * v),
+                                cutedsl_utils.shuffle_sync(tSrLSE, offset=2 * v + 1),
                             )
 
                         # Apply F = rS * scale - rLSE = fma(rS, scale, -rLSE)
@@ -4586,7 +4587,7 @@ class FFABwdSm100:
                         )
 
                     # Type cast from rS to rP
-                    utils.cvt_f16(tSrS_cur, tSrP_r2t[None, stage, 0, 0])
+                    cutedsl_utils.cvt_f16(tSrS_cur, tSrP_r2t[None, stage, 0, 0])
 
                     # Fence and sync before R2T store
                     # TODO(REVIEW): why only the first stage needs this
@@ -4667,8 +4668,8 @@ class FFABwdSm100:
                             dPsum_pair = (tSrdPsum[2 * v], tSrdPsum[2 * v + 1])
                         else:
                             dPsum_pair = (
-                                utils.shuffle_sync(tSrdPsum, offset=2 * v),
-                                utils.shuffle_sync(tSrdPsum, offset=2 * v + 1),
+                                cutedsl_utils.shuffle_sync(tSrdPsum, offset=2 * v),
+                                cutedsl_utils.shuffle_sync(tSrdPsum, offset=2 * v + 1),
                             )
                         (
                             tdPrdP_cur[2 * v],
@@ -4714,7 +4715,7 @@ class FFABwdSm100:
 
                     # Type convert from rdP to rdS
                     tdPrdS_cvt = cute.make_fragment_like(tdPrdP_cur, self.ds_dtype)
-                    utils.cvt_f16(tdPrdP_cur, tdPrdS_cvt)
+                    cutedsl_utils.cvt_f16(tdPrdP_cur, tdPrdS_cvt)
 
                     if const_expr(stage == 0):
                         pipeline_dS.producer_acquire(producer_state_dS)

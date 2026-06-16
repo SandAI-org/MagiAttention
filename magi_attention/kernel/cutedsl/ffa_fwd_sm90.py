@@ -38,11 +38,10 @@ from cutlass.utils import LayoutEnum
 from quack import copy_utils, layout_utils, sm90_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from .cutedsl_utils import assume_tensor_aligned
+from . import cutedsl_utils
 
 # isort: split
 from .legacy import pipeline as pipeline_custom
-from .legacy import utils
 from .legacy.block_info import BlockInfo
 from .legacy.block_sparse_utils import (
     consume_block_sparse_loads,
@@ -263,7 +262,9 @@ class FFAFwdSm90(FlashAttentionForwardBase):
 
         self.varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
 
-        mQ, mK, mV, mO = [assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)]
+        mQ, mK, mV, mO = [
+            cutedsl_utils.assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)
+        ]
         QO_layout_transpose = (
             [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
         )
@@ -457,7 +458,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
-        softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(
+        softmax_scale_log2, softmax_scale = cutedsl_utils.compute_softmax_scale_log2(
             softmax_scale, self.score_mod
         )
         window_size_left = (
@@ -466,7 +467,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         window_size_right = (
             Int32(window_size_right) if window_size_right is not None else None
         )
-        fastdiv_mods = utils.compute_fastdiv_mods(
+        fastdiv_mods = cutedsl_utils.compute_fastdiv_mods(
             mQ, mK, self.qhead_per_kvhead, self.pack_gqa, aux_tensors, mPageTable
         )
 
@@ -1263,7 +1264,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         # ///////////////////////////////////////////////////////////////////////////////
         # Smem copy atom tiling
         # ///////////////////////////////////////////////////////////////////////////////
-        smem_copy_atom_P = utils.get_smem_store_atom(
+        smem_copy_atom_P = cutedsl_utils.get_smem_store_atom(
             self.arch.major * 10 + self.arch.minor, self.dtype
         )
         smem_thr_copy_P = cute.make_tiled_copy_C(
@@ -1840,7 +1841,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         # the "to(self.dtype)" conversion fails to vectorize for block sizes other
         # than 128 x 128, i.e. it calls convert on 1 fp32 element at a time instead of
         # 2 elements. So we just call ptx directly.
-        utils.cvt_f16(tOrP_acc, tOrP_cur)
+        cutedsl_utils.cvt_f16(tOrP_acc, tOrP_cur)
         if const_expr(not self.mma_pv_is_rs):
             tPrP = smem_copy_params.smem_thr_copy_P.retile(tOrP_cur)
             cute.copy(smem_copy_params.smem_thr_copy_P, tPrP, smem_copy_params.tPsP)
@@ -1962,7 +1963,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         # the "to(self.dtype)" conversion fails to vectorize for block sizes other
         # than 128 x 128, i.e. it calls convert on 1 fp32 element at a time instead of
         # 2 elements. So we just call ptx directly.
-        utils.cvt_f16(tOrP_acc, tOrP_cur)
+        cutedsl_utils.cvt_f16(tOrP_acc, tOrP_cur)
         if const_expr(not self.mma_pv_is_rs):
             tPrP = smem_copy_params.smem_thr_copy_P.retile(tOrP_cur)
             cute.copy(smem_copy_params.smem_thr_copy_P, tPrP, smem_copy_params.tPsP)
@@ -1978,7 +1979,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
 
     @cute.jit
     def mma_init(self):
-        warp_group_idx = utils.canonical_warp_group_idx(sync=False)
+        warp_group_idx = cutedsl_utils.canonical_warp_group_idx(sync=False)
         if const_expr(self.use_scheduler_barrier):
             if warp_group_idx == 1:
                 cute.arch.barrier_arrive(
@@ -2026,14 +2027,14 @@ class FFAFwdSm90(FlashAttentionForwardBase):
             cute.arch.barrier(
                 barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1)
                 - 1
-                + utils.canonical_warp_group_idx(sync=False),
+                + cutedsl_utils.canonical_warp_group_idx(sync=False),
                 number_of_threads=2 * self.num_threads_per_warp_group,
             )
 
     def warp_scheduler_barrier_arrive(self):
         if const_expr(self.use_scheduler_barrier):
             assert self.num_wg_mma in [2, 3]
-            cur_wg = utils.canonical_warp_group_idx(sync=False) - 1
+            cur_wg = cutedsl_utils.canonical_warp_group_idx(sync=False) - 1
             if const_expr(self.num_wg_mma == 2):
                 next_wg = 1 - cur_wg
             else:

@@ -33,10 +33,10 @@ from quack import copy_utils, layout_utils, sm90_utils
 from quack.cute_dsl_utils import ParamsBase
 from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 
-from .cutedsl_utils import assume_tensor_aligned
+from . import cutedsl_utils
 
 # isort: split
-from .legacy import barrier, pipeline, utils
+from .legacy import barrier, pipeline
 from .legacy.block_info import BlockInfo
 from .legacy.block_sparse_utils import (
     consume_block_sparse_mma_bwd_sm90,
@@ -487,7 +487,7 @@ class FFABwdSm90:
         self.is_varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
 
         mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV = [
-            assume_tensor_aligned(t)
+            cutedsl_utils.assume_tensor_aligned(t)
             for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV)
         ]
 
@@ -1805,7 +1805,7 @@ class FFABwdSm90:
         vecsize = cute.size(tSrS, mode=[0, 0])  # 2
         idx0, off, idx1 = cute.idx2crd(row, (vecsize, 8, cute.shape(tSrS, mode=[0, 1])))
         # register index: 0, 1, 0, 1, ..., 2, 3, 2, 3, ...
-        return utils.shuffle_sync(
+        return cutedsl_utils.shuffle_sync(
             tSrS[idx0 + idx1 * vecsize], offset=off * 4 + (lane % 4)
         )
 
@@ -1906,7 +1906,9 @@ class FFABwdSm90:
         tLSErdPsum = copy_utils.load_s2r(tLSEsdPsum[None, smem_idx_dO])
 
         # Convert P from f32 -> f16
-        tdVrP = utils.cvt_f16(layout_utils.reshape_acc_to_frgA(acc_S), self.dtype)
+        tdVrP = cutedsl_utils.cvt_f16(
+            layout_utils.reshape_acc_to_frgA(acc_S), self.dtype
+        )
         # R2S for P
         if const_expr(not self.mma_dkv_is_rs):
             # sync to ensure P has already been used in the previous iteration before overwriting
@@ -1928,7 +1930,9 @@ class FFABwdSm90:
             score_mod_bwd_fn(acc_dP, acc_S_pre, m_block=m_block)
 
         # Convert dS from f32 -> f16
-        tdKrdS = utils.cvt_f16(layout_utils.reshape_acc_to_frgA(acc_dP), self.dtype)
+        tdKrdS = cutedsl_utils.cvt_f16(
+            layout_utils.reshape_acc_to_frgA(acc_dP), self.dtype
+        )
 
         # If there's double buffering on dS, we don't need to sync here.
         # Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.

@@ -53,13 +53,12 @@ from cutlass.utils import ClcDynamicPersistentTileScheduler
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from .cutedsl_utils import assume_tensor_aligned
+from . import cutedsl_utils
 
 # isort: split
 from .legacy import blackwell_helpers as sm100_utils
 from .legacy import mma_sm100_desc as sm100_desc
 from .legacy import pipeline as pipeline_custom
-from .legacy import utils
 from .legacy.block_info import BlockInfo
 from .legacy.block_sparse_utils import (
     get_total_block_count,
@@ -641,7 +640,9 @@ class FFAFwdSm100:
         self.k_dtype = mK.element_type
         self.v_dtype = mV.element_type
         self.o_dtype = mO.element_type
-        mQ, mK, mV, mO = [assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)]
+        mQ, mK, mV, mO = [
+            cutedsl_utils.assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)
+        ]
 
         # --- Make mQ ---
 
@@ -1122,7 +1123,7 @@ class FFAFwdSm100:
 
         # --- Make others ---
 
-        softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(
+        softmax_scale_log2, softmax_scale = cutedsl_utils.compute_softmax_scale_log2(
             softmax_scale, self.score_mod
         )
         window_size_left = (
@@ -1131,7 +1132,7 @@ class FFAFwdSm100:
         window_size_right = (
             Int32(window_size_right) if window_size_right is not None else None
         )
-        fastdiv_mods = utils.compute_fastdiv_mods(
+        fastdiv_mods = cutedsl_utils.compute_fastdiv_mods(
             mQ, mK, self.qhead_per_kvhead, self.pack_gqa, aux_tensors, mPageTable
         )
 
@@ -4233,7 +4234,7 @@ class FFAFwdSm100:
                         if idx < seqlen_q:
                             m_idx = idx // self.qhead_per_kvhead
                             h_idx = idx - m_idx * self.qhead_per_kvhead
-                            lse_ptr_i64 = utils.elem_pointer(
+                            lse_ptr_i64 = cutedsl_utils.elem_pointer(
                                 mLSE_cur, ((h_idx, m_idx),)
                             ).toint()
                             lse_gmem_ptr = cute.make_ptr(

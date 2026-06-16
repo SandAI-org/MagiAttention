@@ -31,11 +31,10 @@ from cutlass import Float32, Int32, const_expr
 from cutlass.cute.nvgpu import warp
 from quack import layout_utils
 
-from .cutedsl_utils import assume_tensor_aligned
+from . import cutedsl_utils
 
 # isort: split
 from .legacy import ampere_helpers as sm80_utils
-from .legacy import utils
 from .legacy.block_info import BlockInfo
 from .legacy.block_sparsity import BlockSparseTensors
 from .legacy.flash_fwd import FlashAttentionForwardBase
@@ -185,7 +184,9 @@ class FFAFwdSm80(FlashAttentionForwardBase):
         self.use_tma_O = False
         self._setup_attributes()
         SharedStorage = self._get_shared_storage_cls()
-        mQ, mK, mV, mO = [assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)]
+        mQ, mK, mV, mO = [
+            cutedsl_utils.assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)
+        ]
         # Layout permutation: 4D non-varlen vs 3D varlen
         QO_layout_transpose = (
             [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
@@ -242,10 +243,10 @@ class FFAFwdSm80(FlashAttentionForwardBase):
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
-        softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(
+        softmax_scale_log2, softmax_scale = cutedsl_utils.compute_softmax_scale_log2(
             softmax_scale, self.score_mod
         )
-        fastdiv_mods = utils.compute_fastdiv_mods(
+        fastdiv_mods = cutedsl_utils.compute_fastdiv_mods(
             mQ, mK, self.qhead_per_kvhead, self.pack_gqa, aux_tensors
         )
 
@@ -461,13 +462,13 @@ class FFAFwdSm80(FlashAttentionForwardBase):
             warp.LdMatrix8x8x16bOp(transpose=True, num_matrices=4),
             self.dtype,
         )
-        smem_thr_copy_Q = utils.make_tiled_copy_A(
+        smem_thr_copy_Q = cutedsl_utils.make_tiled_copy_A(
             smem_copy_atom_QK, tiled_mma_qk
         ).get_slice(tidx)
-        smem_thr_copy_K = utils.make_tiled_copy_B(
+        smem_thr_copy_K = cutedsl_utils.make_tiled_copy_B(
             smem_copy_atom_QK, tiled_mma_qk
         ).get_slice(tidx)
-        smem_thr_copy_V = utils.make_tiled_copy_B(
+        smem_thr_copy_V = cutedsl_utils.make_tiled_copy_B(
             smem_copy_atom_V, tiled_mma_pv
         ).get_slice(tidx)
 
@@ -493,11 +494,11 @@ class FFAFwdSm80(FlashAttentionForwardBase):
         # Allocate predicate tensors for m and n, here we only allocate the tile of k, and
         # use "if" on the mn dimension.
         # This is to reduce register pressure and gets 2-3% performance gain.
-        tKpK = utils.predicate_k(tKcK, limit=mK.shape[1])
+        tKpK = cutedsl_utils.predicate_k(tKcK, limit=mK.shape[1])
         if const_expr(self.same_hdim_kv):
             tVpV = tKpK
         else:
-            tVpV = utils.predicate_k(tVcV, limit=mV.shape[1])
+            tVpV = cutedsl_utils.predicate_k(tVcV, limit=mV.shape[1])
 
         # shape: (atom_v_m * rest_m)
         softmax = Softmax.create(

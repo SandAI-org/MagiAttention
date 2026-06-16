@@ -36,11 +36,10 @@ from cutlass.cute.nvgpu import cpasync, warp
 from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from .cutedsl_utils import assume_tensor_aligned
+from . import cutedsl_utils
 
 # isort: split
 from .legacy import ampere_helpers as sm80_utils
-from .legacy import utils
 from .legacy.block_sparsity import BlockSparseTensors
 from .legacy.mask import AttentionMask
 from .legacy.seqlen_info import SeqlenInfoQK
@@ -557,7 +556,7 @@ class FFABwdSm80:
             )
         )
         mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV = [
-            assume_tensor_aligned(t)
+            cutedsl_utils.assume_tensor_aligned(t)
             for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV)
         ]
         self.varlen_q = mCuSeqlensQ is not None
@@ -870,26 +869,36 @@ class FFABwdSm80:
             acc_dK.fill(0.0)
             acc_dV.fill(0.0)
 
-            tSrQ = utils.mma_make_fragment_A(
+            tSrQ = cutedsl_utils.mma_make_fragment_A(
                 sQ[None, None, 0], thr_mma_sdp, swapAB=self.SdP_swapAB
             )
-            tSrK = utils.mma_make_fragment_B(sK, thr_mma_sdp, swapAB=self.SdP_swapAB)
-            tdPrdO = utils.mma_make_fragment_A(
+            tSrK = cutedsl_utils.mma_make_fragment_B(
+                sK, thr_mma_sdp, swapAB=self.SdP_swapAB
+            )
+            tdPrdO = cutedsl_utils.mma_make_fragment_A(
                 sdO[None, None, 0], thr_mma_sdp, swapAB=self.SdP_swapAB
             )
-            tdPrV = utils.mma_make_fragment_B(sV, thr_mma_sdp, swapAB=self.SdP_swapAB)
-            tdVrP = utils.mma_make_fragment_A(sPt, thr_mma_dkv, swapAB=self.dKV_swapAB)
-            tdVrdO = utils.mma_make_fragment_B(
+            tdPrV = cutedsl_utils.mma_make_fragment_B(
+                sV, thr_mma_sdp, swapAB=self.SdP_swapAB
+            )
+            tdVrP = cutedsl_utils.mma_make_fragment_A(
+                sPt, thr_mma_dkv, swapAB=self.dKV_swapAB
+            )
+            tdVrdO = cutedsl_utils.mma_make_fragment_B(
                 sdOt[None, None, 0], thr_mma_dkv, swapAB=self.dKV_swapAB
             )
-            tdKrdS = utils.mma_make_fragment_A(
+            tdKrdS = cutedsl_utils.mma_make_fragment_A(
                 sdSt, thr_mma_dkv, swapAB=self.dKV_swapAB
             )
-            tdKrQ = utils.mma_make_fragment_B(
+            tdKrQ = cutedsl_utils.mma_make_fragment_B(
                 sQt[None, None, 0], thr_mma_dkv, swapAB=self.dKV_swapAB
             )
-            tdQrdS = utils.mma_make_fragment_A(sdS, thr_mma_dq, swapAB=self.dQ_swapAB)
-            tdQrK = utils.mma_make_fragment_B(sKt, thr_mma_dq, swapAB=self.dQ_swapAB)
+            tdQrdS = cutedsl_utils.mma_make_fragment_A(
+                sdS, thr_mma_dq, swapAB=self.dQ_swapAB
+            )
+            tdQrK = cutedsl_utils.mma_make_fragment_B(
+                sKt, thr_mma_dq, swapAB=self.dQ_swapAB
+            )
 
             LSEslice = (
                 (None, 0, None)
@@ -914,23 +923,23 @@ class FFABwdSm80:
                 warp.LdMatrix8x8x16bOp(transpose=True, num_matrices=4),
                 self.dtype,
             )
-            smem_thr_copy_QdO = utils.make_tiled_copy_A(
+            smem_thr_copy_QdO = cutedsl_utils.make_tiled_copy_A(
                 smem_copy_atom, tiled_mma_sdp, swapAB=self.SdP_swapAB
             ).get_slice(tidx)
-            smem_thr_copy_KV = utils.make_tiled_copy_B(
+            smem_thr_copy_KV = cutedsl_utils.make_tiled_copy_B(
                 smem_copy_atom, tiled_mma_sdp, swapAB=self.SdP_swapAB
             ).get_slice(tidx)
             # TODO: should this be smem_copy_atom_transposed?
-            smem_thr_copy_PdSt = utils.make_tiled_copy_A(
+            smem_thr_copy_PdSt = cutedsl_utils.make_tiled_copy_A(
                 smem_copy_atom_transposed, tiled_mma_dkv, swapAB=self.dKV_swapAB
             ).get_slice(tidx)
-            smem_thr_copy_QdOt = utils.make_tiled_copy_B(
+            smem_thr_copy_QdOt = cutedsl_utils.make_tiled_copy_B(
                 smem_copy_atom_transposed, tiled_mma_dkv, swapAB=self.dKV_swapAB
             ).get_slice(tidx)
-            smem_thr_copy_dS = utils.make_tiled_copy_A(
+            smem_thr_copy_dS = cutedsl_utils.make_tiled_copy_A(
                 smem_copy_atom, tiled_mma_dq, swapAB=self.dQ_swapAB
             ).get_slice(tidx)
-            smem_thr_copy_Kt = utils.make_tiled_copy_B(
+            smem_thr_copy_Kt = cutedsl_utils.make_tiled_copy_B(
                 smem_copy_atom_transposed, tiled_mma_dq, swapAB=self.dQ_swapAB
             ).get_slice(tidx)
             # TODO: what's the number of bits? What if SdP_swapAB
@@ -983,11 +992,11 @@ class FFABwdSm80:
             d_head = mQ.shape[cute.rank(mQ) - 1]
             d_head_v = mdO.shape[cute.rank(mdO) - 1]
 
-            tQpQ = utils.predicate_k(tQcQ, limit=d_head)
+            tQpQ = cutedsl_utils.predicate_k(tQcQ, limit=d_head)
             if cutlass.const_expr(self.same_hdim_kv):
                 tdOpdO = tQpQ
             else:
-                tdOpdO = utils.predicate_k(tdOcdO, limit=d_head_v)
+                tdOpdO = cutedsl_utils.predicate_k(tdOcdO, limit=d_head_v)
 
             # group parameters for compute_one_m_block
             mma_params = SimpleNamespace(
@@ -1409,10 +1418,10 @@ class FFABwdSm80:
             tdQgdQaccum_atomic = gmem_copy_params.tdQgdQaccum[None, None, m_block]
             assert cute.size(acc_dQ_atomic) == cute.size(tdQgdQaccum_atomic)
             for i in cutlass.range(cute.size(acc_dQ_atomic), unroll_full=True):
-                utils.atomic_add_fp32(
-                    acc_dQ_atomic[i], utils.elem_pointer(tdQgdQaccum_atomic, i)
+                cutedsl_utils.atomic_add_fp32(
+                    acc_dQ_atomic[i], cutedsl_utils.elem_pointer(tdQgdQaccum_atomic, i)
                 )
-                # utils.atomic_add_fp32(acc_dQ[i], tdQgdQaccum_atomic.iterator + i * tdQgdQaccum_atomic.stride[1])
+                # cutedsl_utils.atomic_add_fp32(acc_dQ[i], tdQgdQaccum_atomic.iterator + i * tdQgdQaccum_atomic.stride[1])
             # if cute.arch.thread_idx()[0] == 64 and cute.arch.block_idx()[0] == bidx: cute.print_tensor(acc_dQ)
 
         # If num_stages_Q == 1, we want to do Mma_dK first so we can start loading Q for the next iteration
@@ -1544,11 +1553,11 @@ class FFABwdSm80:
                 )
                 tdVcdV = gmem_thr_copy_dV.partition_S(cdV)
                 t0dVcdV = gmem_tiled_copy_dV.get_slice(0).partition_S(cdV)
-            tdKpdK = utils.predicate_k(tdKcdK, limit=d_head)
+            tdKpdK = cutedsl_utils.predicate_k(tdKcdK, limit=d_head)
             if cutlass.const_expr(self.same_hdim_kv):
                 tdVpdV = tdKpdK
             else:
-                tdVpdV = utils.predicate_k(tdVcdV, limit=d_head_v)
+                tdVpdV = cutedsl_utils.predicate_k(tdVcdV, limit=d_head_v)
             # copy acc dK and acc_dV from rmem to gmem
             for rest_m in cutlass.range_constexpr(cute.size(tdKrdK.shape[1])):
                 if (
@@ -1610,12 +1619,12 @@ class FFABwdSm80:
             assert cute.size(acc_dV_atomic) == cute.size(tdVgdVaccum)
             assert cute.size(acc_dK_atomic) == cute.size(tdKgdKaccum)
             for i in cutlass.range(cute.size(acc_dV_atomic), unroll_full=True):
-                utils.atomic_add_fp32(
-                    acc_dV_atomic[i], utils.elem_pointer(tdVgdVaccum, i)
+                cutedsl_utils.atomic_add_fp32(
+                    acc_dV_atomic[i], cutedsl_utils.elem_pointer(tdVgdVaccum, i)
                 )
             for i in cutlass.range(cute.size(acc_dK_atomic), unroll_full=True):
-                utils.atomic_add_fp32(
-                    acc_dK_atomic[i], utils.elem_pointer(tdKgdKaccum, i)
+                cutedsl_utils.atomic_add_fp32(
+                    acc_dK_atomic[i], cutedsl_utils.elem_pointer(tdKgdKaccum, i)
                 )
 
     @cute.jit
@@ -1635,7 +1644,7 @@ class FFABwdSm80:
         cK = cute.make_identity_tensor((self.n_block_size, self.head_dim_padded))
         tKcK = gmem_thr_copy.partition_S(cK)
         t0KcK = gmem_thr_copy.get_slice(0).partition_S(cK)
-        tKpK = utils.predicate_k(tKcK, limit=headdim)
+        tKpK = cutedsl_utils.predicate_k(tKcK, limit=headdim)
         for n in cutlass.range_constexpr(cute.size(tKsK.shape[1])):
             # If kBlockN doesn't evenly divide the tiled copy, only the last `n` needs to be checked
             if (
@@ -1677,7 +1686,7 @@ class FFABwdSm80:
         cV = cute.make_identity_tensor((self.n_block_size, self.head_dim_v_padded))
         tVcV = gmem_thr_copy.partition_S(cV)
         t0VcV = gmem_thr_copy.get_slice(0).partition_S(cV)
-        tVpV = utils.predicate_k(tVcV, limit=headdim)
+        tVpV = cutedsl_utils.predicate_k(tVcV, limit=headdim)
         for n in cutlass.range_constexpr(cute.size(tVsV.shape[1])):
             # If kBlockN doesn't evenly divide the tiled copy, only the last `n` needs to be checked
             if (

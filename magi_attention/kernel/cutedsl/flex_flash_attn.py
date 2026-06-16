@@ -42,7 +42,13 @@ from .ffa_fwd_sm80 import FFAFwdSm80
 from .ffa_fwd_sm90 import FFAFwdSm90
 from .ffa_fwd_sm100 import FFAFwdSm100
 from .ffa_utils import (
+    _get_disable_2cta_default,
+    _get_use_clc_scheduler_default,
+    convert_from_dlpack_leading_static,
+    create_softcap_scoremod,
+    create_softcap_scoremod_bwd,
     get_device_arch,
+    hash_callable,
     make_fake_bwd_tensors,
     maybe_contiguous,
     tile_size_bwd_sm90,
@@ -53,7 +59,6 @@ from .ffa_utils import (
 )
 
 # isort: split
-from .legacy import utils
 from .legacy.block_sparsity import (
     BlockSparseTensorsTorch,
     get_sparse_q_block_size,
@@ -226,8 +231,8 @@ def _flex_flash_attn_fwd(
     if mask_mod is not None:
         causal = False
 
-    requested_use_clc_scheduler = utils._get_use_clc_scheduler_default()
-    requested_disable_2cta = utils._get_disable_2cta_default(is_fwd=True)
+    requested_use_clc_scheduler = _get_use_clc_scheduler_default()
+    requested_disable_2cta = _get_disable_2cta_default(is_fwd=True)
 
     current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
 
@@ -279,7 +284,7 @@ def _flex_flash_attn_fwd(
 
     if softcap is not None:
         assert score_mod is None, "softcap and score_mod cannot be used together"
-        score_mod = utils.create_softcap_scoremod(softcap)
+        score_mod = create_softcap_scoremod(softcap)
     elif score_mod is not None:
         if major_arch == 8:
             raise NotImplementedError(
@@ -287,8 +292,8 @@ def _flex_flash_attn_fwd(
             )
 
     # hash score and mask mods for compile cache
-    score_mod_hash = utils.hash_callable(score_mod) if score_mod is not None else False
-    mask_mod_hash = utils.hash_callable(mask_mod) if mask_mod is not None else False
+    score_mod_hash = hash_callable(score_mod) if score_mod is not None else False
+    mask_mod_hash = hash_callable(mask_mod) if mask_mod is not None else False
 
     is_varlen = cu_seqlens_q is not None or cu_seqlens_k is not None
 
@@ -914,7 +919,7 @@ def _flex_flash_attn_bwd(
         dKV_swapAB = False
         AtomLayoutMdQ = 1
         AtomLayoutNdKV = 1
-        requested_disable_2cta = utils._get_disable_2cta_default()
+        requested_disable_2cta = _get_disable_2cta_default()
         disable_2cta = (
             requested_disable_2cta
             or score_mod is not None
@@ -1026,8 +1031,8 @@ def _flex_flash_attn_bwd(
         assert (
             score_mod is None and score_mod_bwd is None
         ), "softcap and score_mod/score_mod_bwd cannot be used together"
-        score_mod = utils.create_softcap_scoremod(softcap)
-        score_mod_bwd = utils.create_softcap_scoremod_bwd(softcap)
+        score_mod = create_softcap_scoremod(softcap)
+        score_mod_bwd = create_softcap_scoremod_bwd(softcap)
     if score_mod is not None:
         assert (
             score_mod_bwd is not None
@@ -1194,9 +1199,9 @@ def _flex_flash_attn_bwd(
         num_threads = 384
 
     # Backward kernel: compute dk, dv, dq_accum.
-    score_mod_hash = utils.hash_callable(score_mod) if score_mod else False
-    score_mod_bwd_hash = utils.hash_callable(score_mod_bwd) if score_mod_bwd else False
-    mask_mod_hash = utils.hash_callable(mask_mod) if mask_mod else False
+    score_mod_hash = hash_callable(score_mod) if score_mod else False
+    score_mod_bwd_hash = hash_callable(score_mod_bwd) if score_mod_bwd else False
+    mask_mod_hash = hash_callable(mask_mod) if mask_mod else False
     num_aux_tensors = len(aux_tensors) if aux_tensors else 0
     cute_aux_tensors = None
     if aux_tensors is not None:
@@ -1335,7 +1340,7 @@ def _flex_flash_attn_bwd(
         ]
         seqused_q_tensor = seqused_k_tensor = None
         dQ_semaphore_tensor, dK_semaphore_tensor, dV_semaphore_tensor = [
-            utils.convert_from_dlpack_leading_static(
+            convert_from_dlpack_leading_static(
                 t.detach(), leading_dim=3, alignment=4, stride_order=t.dim_order()
             )
             if t is not None

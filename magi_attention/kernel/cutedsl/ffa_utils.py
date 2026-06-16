@@ -15,12 +15,16 @@
 """Utility helpers for flex_flash_attn: arch detection, tile configs, tensor helpers,
 and fake-tensor builders for bwd kernels."""
 
+import hashlib
+import inspect
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Callable, Tuple
 
 import cutlass.cute as cute
 from cutlass import Float32
+from cutlass.cute.runtime import from_dlpack
 
 # isort: split
 from quack.compile_utils import make_fake_tensor as fake_tensor
@@ -372,3 +376,144 @@ def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k):
         mdKaccum,
         mdVaccum,
     )
+
+
+# ---------------------------------------------------------------------------
+# Host-side orchestration helpers (config flags, callable hashing, score mods)
+# ---------------------------------------------------------------------------
+
+_MIXER_ATTRS = ("__vec_size__",)
+
+_fa_clc_enabled: bool = os.environ.get("FA_CLC", "0") == "1"
+_fa_disable_2cta_enabled: bool = os.environ.get("FA_DISABLE_2CTA", "0") == "1"
+
+
+def _is_cuda_12() -> bool:
+    """Check if the CUDA toolkit version is 12.x.
+
+    2CTA forward non-causal has a codegen regression on CUDA 12 that causes
+    ~18% slowdown compared to 1CTA. This is fixed in CUDA 13.x.
+    """
+    try:
+        import torch
+
+        cuda_version = torch.version.cuda
+        if cuda_version is not None:
+            major = cuda_version.split(".")[0]
+            return int(major) == 12
+    except Exception:
+        pass
+    return False
+
+
+_fa_disable_2cta_cuda12: bool = _is_cuda_12()
+
+
+def _get_use_clc_scheduler_default() -> bool:
+    return _fa_clc_enabled
+
+
+def _get_disable_2cta_default(is_fwd: bool = False) -> bool:
+    if is_fwd:
+        return _fa_disable_2cta_enabled or _fa_disable_2cta_cuda12
+    else:
+        return _fa_disable_2cta_enabled
+
+
+def _compute_base_hash(func: Callable) -> str:
+    """Compute hash from source code or bytecode and closure values."""
+    try:
+        data = inspect.getsource(func).encode()
+    except (OSError, TypeError):
+        if hasattr(func, "__code__") and func.__code__ is not None:
+            data = func.__code__.co_code
+        else:
+            data = repr(func).encode()
+
+    hasher = hashlib.sha256(data)
+
+    if hasattr(func, "__closure__") and func.__closure__ is not None:
+        for cell in func.__closure__:
+            hasher.update(repr(cell.cell_contents).encode())
+
+    return hasher.hexdigest()
+
+
+def hash_callable(
+    func: Callable, mixer_attrs: Tuple[str] = _MIXER_ATTRS, set_cute_hash: bool = True
+) -> str:
+    """Hash a callable based on the source code or bytecode and closure values.
+    Fast-path: if the callable (or its __wrapped__ base) has a ``__cute_hash__``
+    attribute, that value is returned immediately as the base hash, then
+    metadata dunders are mixed in to produce the final dict-key hash.
+    set_cute_hash: whether or not to set func.__cute_hash__
+    """
+    # Resolve base hash
+    if hasattr(func, "__cute_hash__"):
+        base_hash = func.__cute_hash__
+    else:
+        # Unwrap decorated functions (e.g., cute.jit wrappers).
+        base_func = getattr(func, "__wrapped__", func)
+
+        if hasattr(base_func, "__cute_hash__"):
+            base_hash = base_func.__cute_hash__
+        else:
+            base_hash = _compute_base_hash(base_func)
+
+            if set_cute_hash:
+                base_func.__cute_hash__ = base_hash  # type: ignore[union-attr]
+
+    # Mix in mutable metadata dunders
+    mixer_values = tuple(getattr(func, attr, None) for attr in mixer_attrs)
+
+    if all(v is None for v in mixer_values):
+        return base_hash
+
+    hasher = hashlib.sha256(base_hash.encode())
+
+    for attr, val in zip(_MIXER_ATTRS, mixer_values):
+        hasher.update(f"{attr}={val!r}".encode())
+
+    return hasher.hexdigest()
+
+
+def create_softcap_scoremod(softcap_val):
+    @cute.jit
+    def scoremod_premask_fn(
+        acc_S_SSA, batch_idx, head_idx, q_idx, kv_idx, seqlen_info, aux_tensors
+    ):
+        scores = acc_S_SSA / softcap_val
+        return softcap_val * cute.math.tanh(scores, fastmath=True)
+
+    return scoremod_premask_fn
+
+
+def create_softcap_scoremod_bwd(softcap_val):
+    @cute.jit
+    def scoremod_bwd_fn(
+        grad_out_SSA,
+        score_SSA,
+        batch_idx,
+        head_idx,
+        q_idx,
+        kv_idx,
+        seqlen_info,
+        aux_tensors,
+    ):
+        scores = score_SSA / softcap_val
+        tanh_scores = cute.math.tanh(scores, fastmath=True)
+        return grad_out_SSA * (1.0 - tanh_scores * tanh_scores)
+
+    return scoremod_bwd_fn
+
+
+def convert_from_dlpack_leading_static(
+    x, leading_dim, alignment=16, static_modes=None, stride_order=None
+) -> cute.Tensor:
+    if stride_order is None:
+        stride_order = x.dim_order()
+    x_ = from_dlpack(x, assumed_align=alignment)
+    for i in range(x.ndim):
+        if i != leading_dim and (static_modes is None or i not in static_modes):
+            x_ = x_.mark_compact_shape_dynamic(mode=i, stride_order=stride_order)
+    return x_
