@@ -46,7 +46,7 @@ from .ffa_utils import (
 )
 
 # isort: split
-from .legacy import fa_logging, utils
+from .legacy import utils
 from .legacy.block_sparsity import (
     BlockSparseTensorsTorch,
     get_sparse_q_block_size,
@@ -362,7 +362,6 @@ def _flex_flash_attn_fwd(
         mma_pv_is_rs,
         intra_wg_overlap,
         use_clc_scheduler,
-        fa_logging.get_fa_log_level(),
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
 

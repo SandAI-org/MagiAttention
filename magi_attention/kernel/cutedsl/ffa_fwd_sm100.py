@@ -66,7 +66,6 @@ from magi_attention.kernel.cutedsl.legacy.block_sparse_utils import (
 )
 from magi_attention.kernel.cutedsl.legacy.block_sparsity import BlockSparseTensors
 from magi_attention.kernel.cutedsl.legacy.cute_dsl_utils import assume_tensor_aligned
-from magi_attention.kernel.cutedsl.legacy.fa_logging import fa_log, fa_printf
 from magi_attention.kernel.cutedsl.legacy.mask import AttentionMask
 from magi_attention.kernel.cutedsl.legacy.named_barrier import NamedBarrierFwdSm100
 from magi_attention.kernel.cutedsl.legacy.pack_gqa import PackGQA, pack_gqa_layout
@@ -86,7 +85,6 @@ from magi_attention.kernel.cutedsl.legacy.tile_scheduler import (
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
-from magi_attention.kernel.cutedsl.legacy.utils import smid
 
 # === TUNING KNOBS (agent-editable) ===
 # Keys: (use_2cta_instrs: bool, is_causal: bool, head_dim_padded: int, is_sm103: bool)
@@ -369,12 +367,6 @@ class FFAFwdSm100:
             self.TileScheduler = StaticPersistentTileScheduler
         else:
             self.TileScheduler = SingleTileScheduler
-
-        fa_log(
-            1,
-            f"TileScheduler={self.TileScheduler.__name__}, "
-            f"scheduling_mode={self.scheduling_mode.name}, USE_2CTA={self.use_2cta_instrs}",
-        )
 
         self.softmax0_warp_ids = (0, 1, 2, 3)
         self.softmax1_warp_ids = (4, 5, 6, 7)
@@ -4913,21 +4905,6 @@ class FFAFwdSm100:
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
 
-            if (
-                cute.arch.thread_idx()[0]
-                == self.clc_scheduler_warp_id * cute.arch.WARP_SIZE
-            ):
-                fa_printf(
-                    3,
-                    "[CLC] query sm={} cta={} (m_blk={},h={},b={},s={}) valid={}\n",
-                    smid(),
-                    cute.arch.block_idx()[0],
-                    work_tile.tile_idx[0],
-                    work_tile.tile_idx[1],
-                    work_tile.tile_idx[2],
-                    work_tile.tile_idx[3],
-                    work_tile.is_valid_tile,
-                )
         tile_scheduler.producer_tail()
 
     @cute.jit
