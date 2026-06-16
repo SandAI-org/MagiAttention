@@ -33,7 +33,8 @@ import pytest
 import torch
 from einops import rearrange
 
-from magi_attention.kernel.cutedsl import flex_flash_attn, flex_flash_attn_func
+from magi_attention.kernel.cutedsl import flex_flash_attn_func
+from magi_attention.kernel.cutedsl.ffa_utils import get_device_arch
 from magi_attention.kernel.cutedsl.legacy.testing import attention_ref
 from magi_attention.testing import assert_close
 from magi_attention.testing.utils import switch_envvars
@@ -93,12 +94,12 @@ def _maybe_force_sm80(enabled: bool):
         ["FLASH_ATTENTION_ARCH"],
         enable_value_dict={"FLASH_ATTENTION_ARCH": "sm_80"},
     )
-    flex_flash_attn._get_device_arch.cache_clear()
+    get_device_arch.cache_clear()
     try:
         yield
     finally:
         switch_back()
-        flex_flash_attn._get_device_arch.cache_clear()
+        get_device_arch.cache_clear()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
