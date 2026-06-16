@@ -99,7 +99,7 @@ constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size 
       return {128, 128};
   } else if (headdim <= 128) {
     if constexpr (SwapBwdQKLoop)
-      return {64, 64}; // {64, 128, 128} => {64, 64, 128}
+      return {128, 64}; // dK_acc/dV_acc union + kStages_dS=1 → 196 KB fits 228 KB SMEM limit
     else
       return {64, 128};
   } else if (headdim <= 192) {

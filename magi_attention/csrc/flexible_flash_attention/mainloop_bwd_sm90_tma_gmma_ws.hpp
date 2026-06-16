@@ -670,8 +670,13 @@ struct CollectiveMainloopBwdSm90 {
     cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum> smem_dpsum;
     SmemP_t smem_p;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
-    SmemdKVacc_t smem_dkacc;
-    SmemdKVacc_t smem_dvacc;
+    // dK and dV accumulators share SMEM via union: stores are serialized (dV r2s→TMA
+    // completes before dK r2s starts), enforced by the swapped dVEmpty/dKEmpty barrier
+    // protocol in store_dkv(). Saves 32 KB for larger kBlockM tiles.
+    union {
+      SmemdKVacc_t smem_dkacc;
+      SmemdKVacc_t smem_dvacc;
+    };
     SmemTokenIndices_t smem_token_indices;
   };
 
@@ -2300,8 +2305,11 @@ struct CollectiveMainloopBwdSm90 {
           tma_store_wait<0>();
         }
       }
+      // Signal dKEmpty (not dVEmpty): smem_dkacc/dvacc are unioned — after TMA dV
+      // finishes reading, the consumer can safely r2s dK into the shared buffer.
+      // The consumer's dV r2s is gated by dVEmpty (signaled after TMA dK below).
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+        BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
       }
     };
 
@@ -2337,8 +2345,10 @@ struct CollectiveMainloopBwdSm90 {
           tma_store_wait<0>();
         }
       }
+      // Signal dVEmpty (not dKEmpty): after TMA dK finishes reading, the consumer
+      // can safely r2s dV of the next iteration into the shared buffer.
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+        BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
       }
     };
 
@@ -2388,12 +2398,13 @@ struct CollectiveMainloopBwdSm90 {
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
       if constexpr (dKVacc_use_TMA && InnerDxStoreInProducer) {
-        // Initial arrive on behalf of store warps: sdV/sdK are initially empty.
-        // InnerUseScatter: both scatter warps (warp 0,1) arrive for 64 threads.
-        // Dense: 1 warp (warp 0) arrives for 32 threads.
+        // Initial arrive on behalf of store warps: smem_dkvacc is initially empty.
+        // Only dVEmpty gets initial arrive — the first r2s dV can proceed immediately.
+        // dKEmpty is NOT pre-arrived: the first r2s dK must wait for the producer's
+        // TMA dV to finish (store_dV signals dKEmpty), because smem_dkacc and
+        // smem_dvacc share memory via union.
         if (warp_idx_in_warpgroup == 0 || (InnerUseScatter && warp_idx_in_warpgroup == 1)) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
         }
       }
     } else { // k for outer-loop and q for inner-loop

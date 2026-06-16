@@ -379,7 +379,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   // TODO: Add a specific tuning function for different kHeadDim
   static constexpr int Stages = 2;
   static constexpr int Stages_dO = kHeadDim <= 128 ? 2 : 1;
-  static constexpr int Stages_dS = kHeadDim <= 128 ? 2 : 1;
+  static constexpr int Stages_dS = kHeadDim <= 128 ? (kBlockM <= 64 ? 2 : 1) : 1;
 
   static constexpr bool SdP_swapAB = kHeadDim <= 128 ? true : false;
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
