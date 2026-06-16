@@ -147,7 +147,7 @@ def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, force_sm80, d, causal, mha_type,
     )
 
     with _maybe_force_sm80(force_sm80):
-        out, _lse = flex_flash_attn_func(q, k, v, causal=causal)
+        out, _ = flex_flash_attn_func(q, k, v, causal=causal)
 
         atol = _fwd_atol(out_ref, out_pt)
         assert_close(
@@ -249,7 +249,7 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, causal, mha_type, dtype):
     v_v = rearrange(v_ref.detach(), "b s h d -> (b s) h d").requires_grad_()
 
     with _maybe_force_sm80(force_sm80):
-        out_v, _lse = flex_flash_attn_func(
+        out_v, _ = flex_flash_attn_func(
             q_v,
             k_v,
             v_v,

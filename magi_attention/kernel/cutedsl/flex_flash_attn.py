@@ -25,6 +25,7 @@ from cutlass import Float32, Int32
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
+from magi_attention.common import AttnForwardMeta
 from magi_attention.utils.dtype import to_cute_dtype
 
 from .ffa_bwd_sm80 import FFABwdSm80
@@ -82,7 +83,6 @@ def _flex_flash_attn_fwd(
     score_mod: Optional[Callable] = None,
     mask_mod: Optional[Callable] = None,
     block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
-    return_lse: bool = False,
     out: Optional[torch.Tensor] = None,
     lse: Optional[torch.Tensor] = None,
     aux_tensors: Optional[list[torch.Tensor]] = None,
@@ -94,8 +94,6 @@ def _flex_flash_attn_fwd(
         score_mod: A callable that takes the attention scores and applies a modification.
         mask_mod: A callable that takes token position information and selectively masks
         block_sparse_tensors: A tuple of tensors used for block sparsity.
-        return_lse: Whether to return the log softmax of the attention scores. If set to True will always calculate
-            The returned LSE supports taking gradient.
         out: Optional pre-allocated output tensor. If None, will be allocated internally.
         lse: Optional pre-allocated log-sum-exp tensor. If None, will be allocated when needed.
         aux_tensors: Some score_mods will want to read from global aux_tensors.
@@ -106,7 +104,7 @@ def _flex_flash_attn_fwd(
         - output is the result of the attention operation, with shape (batch_size, seqlen_q, num_head, head_dim_v) or
           (total_q, num_head, head_dim_v) if cu_seqlens_q is provided.
         - lse is the log-sum-exp of the attention scores, with shape (batch_size, num_head, seqlen_q) or
-          (num_head, total_q) if cu_seqlens_q is provided. Will be None if return_lse is False and lse input is None.
+          (num_head, total_q) if cu_seqlens_q is provided.
     """
     arch, major_arch = get_device_arch()
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
@@ -196,7 +194,6 @@ def _flex_flash_attn_fwd(
         if cu_seqlens_q is None
         else (num_head, total_q)
     )
-    requires_grad = q.requires_grad or k.requires_grad or v.requires_grad
 
     if out is None:
         out = torch.empty(
@@ -216,12 +213,8 @@ def _flex_flash_attn_fwd(
         )
 
     if lse is None:
-        lse = (
-            torch.empty(lse_shape, dtype=torch.float32, device=device)
-            if requires_grad or return_lse
-            else None
-        )
-    elif lse is not None:
+        lse = torch.empty(lse_shape, dtype=torch.float32, device=device)
+    else:
         validate_tensor(lse, "lse", lse_shape, torch.float32, device)
 
     if seqlen_k == 0 or total_q == 0:
@@ -1615,7 +1608,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         aux_tensors: Optional[list] = None,
         block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
         block_sparse_tensors_bwd: Optional[BlockSparseTensorsTorch] = None,
-        return_lse: bool = False,
     ):
         out, lse = _flex_flash_attn_fwd(
             q,
@@ -1634,7 +1626,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             mask_mod=mask_mod,
             aux_tensors=aux_tensors,
             block_sparse_tensors=block_sparse_tensors,
-            return_lse=return_lse,
         )
         ctx.save_for_backward(
             q,
@@ -1652,7 +1643,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
-        ctx.return_lse = return_lse
         ctx.score_mod = score_mod
         ctx.score_mod_bwd = score_mod_bwd
         ctx.mask_mod = mask_mod
@@ -1673,8 +1663,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             *aux,
         ) = ctx.saved_tensors
         aux_tensors = aux if aux else None
-        if not ctx.return_lse:
-            dlse = None
         if dout is None:
             dout = torch.zeros_like(out)
         dq, dk, dv = _flex_flash_attn_bwd(
@@ -1722,8 +1710,7 @@ def flex_flash_attn_func(
     aux_tensors: Optional[list] = None,
     block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
     block_sparse_tensors_bwd: Optional[BlockSparseTensorsTorch] = None,
-    return_lse: bool = False,
-):
+) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Explanation of some optional arguments:
 
@@ -1734,7 +1721,7 @@ def flex_flash_attn_func(
 
     max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
     """
-    return FlexFlashAttnFunc.apply(
+    out, lse = FlexFlashAttnFunc.apply(
         q,
         k,
         v,
@@ -1754,5 +1741,5 @@ def flex_flash_attn_func(
         aux_tensors,
         block_sparse_tensors,
         block_sparse_tensors_bwd,
-        return_lse,
     )
+    return out, AttnForwardMeta(lse=lse, max_logits=None)
