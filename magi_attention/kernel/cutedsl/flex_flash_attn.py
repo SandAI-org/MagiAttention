@@ -17,11 +17,11 @@
 # mypy: disable-error-code="arg-type,union-attr,attr-defined,unreachable,assignment"
 
 import math
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
+import cutlass
 import cutlass.cute as cute
 import torch
-from cutlass import Float32, Int32
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
@@ -86,7 +86,7 @@ def _flex_flash_attn_fwd(
     out: Optional[torch.Tensor] = None,
     lse: Optional[torch.Tensor] = None,
     aux_tensors: Optional[list[torch.Tensor]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
     Args:
@@ -600,10 +600,16 @@ def _compile_bwd_preprocess(
     batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
     batchp1 = cute.sym_int()
     mCuSeqlensQ = (
-        fake_tensor(Int32, (batchp1,), divisibility=1) if has_cuseqlens_q else None
+        fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
+        if has_cuseqlens_q
+        else None
     )
-    mSequsedQ = fake_tensor(Int32, (batch,), divisibility=1) if has_seqused_q else None
-    mdLSE = fake_tensor(Float32, mLSE.shape, divisibility=1) if has_dlse else None
+    mSequsedQ = (
+        fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
+    )
+    mdLSE = (
+        fake_tensor(cutlass.Float32, mLSE.shape, divisibility=1) if has_dlse else None
+    )
     mdQaccum = mdQaccum if has_dq_accum else None
     fa_bwd_pre = FlashAttentionBackwardPreprocess(
         dtype, head_dim, head_dim_v, m_block_size, use_padded_offsets=use_padded_offsets
@@ -625,20 +631,20 @@ def _compile_bwd_preprocess(
 
 
 def _bwd_preprocess(
-    out,
-    dout,
-    dpsum,
-    lse,
-    lse_log2,
-    dq_accum,
-    cu_seqlens_q,
-    seqused_q,
-    dlse,
-    dtype,
-    head_dim,
-    head_dim_v,
-    m_block_size,
-    use_padded_offsets=True,
+    out: torch.Tensor,
+    dout: torch.Tensor,
+    dpsum: torch.Tensor,
+    lse: torch.Tensor,
+    lse_log2: torch.Tensor,
+    dq_accum: torch.Tensor,
+    cu_seqlens_q: torch.Tensor | None,
+    seqused_q: torch.Tensor | None,
+    dlse: torch.Tensor | None,
+    dtype: torch.dtype,
+    head_dim: int,
+    head_dim_v: int,
+    m_block_size: int,
+    use_padded_offsets: bool = True,
 ):
     """Backward preprocess: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum."""
     is_varlen = cu_seqlens_q is not None
@@ -701,9 +707,13 @@ def _compile_bwd_postprocess(
     batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
     batchp1 = cute.sym_int()
     mCuSeqlensQ = (
-        fake_tensor(Int32, (batchp1,), divisibility=1) if has_cuseqlens_q else None
+        fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
+        if has_cuseqlens_q
+        else None
     )
-    mSeqUsedQ = fake_tensor(Int32, (batch,), divisibility=1) if has_seqused_q else None
+    mSeqUsedQ = (
+        fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
+    )
     fa_bwd_post = FlashAttentionBackwardPostprocess(
         dtype,
         hdim,
@@ -719,7 +729,7 @@ def _compile_bwd_postprocess(
         fa_bwd_post,
         mdQaccum,
         mdQ,
-        Float32(0.0),
+        cutlass.Float32(0.0),
         mCuSeqlensQ,
         mSeqUsedQ,
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
@@ -810,8 +820,7 @@ def _flex_flash_attn_bwd(
     mask_mod: Optional[Callable] = None,
     aux_tensors: Optional[list[torch.Tensor]] = None,
     block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
-    dlse: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
     Returns:
@@ -1020,8 +1029,6 @@ def _flex_flash_attn_bwd(
         if t is not None:
             assert t.dtype == torch.int32, "cu_seqlens_q, cu_seqlens_k must be int32"
     assert lse.dtype == torch.float32, "lse must be float32"
-    if dlse is not None:
-        dlse = maybe_contiguous(dlse)
     if not is_fake_mode():
         assert all(
             t is None or t.is_cuda
@@ -1196,14 +1203,15 @@ def _flex_flash_attn_bwd(
         lse_log2,
         dq_accum,
         cu_seqlens_q,
-        None,
-        dlse,
+        None,  # seqused_q
+        None,  # dlse
         dtype,
         head_dim,
         head_dim_v,
         m_block_size,
         use_padded_offsets=False,
     )
+
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
     # BwdConfig.num_wg, SM100/SM110 uses default from function signature (384).
     if major_arch not in [8, 9, 12]:
@@ -1651,7 +1659,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         return out, lse
 
     @staticmethod
-    def backward(ctx, dout, dlse):
+    def backward(ctx, dout, *args):  # pragma: no cover
         (
             q,
             k,
@@ -1685,7 +1693,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             mask_mod=ctx.mask_mod,
             aux_tensors=aux_tensors,
             block_sparse_tensors=ctx.block_sparse_tensors_bwd,
-            dlse=dlse,
         )
         return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
 
