@@ -26,7 +26,7 @@ from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.utils import nvtx
-from magi_attention.utils._utils import missing_dependency
+from magi_attention.utils.general import missing_dependency
 
 # fa3
 try:

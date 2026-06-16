@@ -57,7 +57,7 @@ from magi_attention.utils import (
     nvtx,
     transpose_matrix,
 )
-from magi_attention.utils._utils import (
+from magi_attention.utils.general import (
     argsort,
     find_factors_in_range,
     flatten_nested_list,

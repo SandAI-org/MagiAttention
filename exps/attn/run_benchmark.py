@@ -59,7 +59,7 @@ from magi_attention.benchmarking import (
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.utils._utils import make_attn_mask_from_ffa_args
+from magi_attention.utils.general import make_attn_mask_from_ffa_args
 
 # impls = ["ffa", "fa3", "fa4", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
 # impls = ["cudnn", "fa4", "ffa_fa4"] # for blackwell

@@ -69,7 +69,7 @@ from magi_attention.benchmarking import (
     perf_report,
 )
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.utils._utils import make_attn_mask_from_ffa_args
+from magi_attention.utils.general import make_attn_mask_from_ffa_args
 
 _ENABLE_GC = False  # whether to gc.collect when running bench
 

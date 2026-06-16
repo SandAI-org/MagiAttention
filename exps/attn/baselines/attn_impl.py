@@ -23,7 +23,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBacken
 
 from magi_attention.functional import ffa_fa4_func
 from magi_attention.functional import flex_flash_attn_func as ffa_func
-from magi_attention.utils._utils import missing_dependency
+from magi_attention.utils.general import missing_dependency
 
 try:
     from flash_attn import flash_attn_func as fa2_func
