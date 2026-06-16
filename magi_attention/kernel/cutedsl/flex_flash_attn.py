@@ -27,7 +27,6 @@ from quack.compile_utils import make_fake_tensor as fake_tensor
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.kernel.cutedsl.ffa_utils import (
-    FwdConfig,
     get_device_arch,
     make_fake_bwd_tensors,
     maybe_contiguous,
@@ -96,9 +95,6 @@ def _flex_flash_attn_fwd(
     window_size_left: Optional[int] = None,
     window_size_right: Optional[int] = None,
     learnable_sink: Optional[torch.Tensor] = None,
-    tile_mn: Optional[Tuple[int, int]] = None,
-    mma_pv_is_rs: Optional[bool] = None,
-    intra_wg_overlap: Optional[bool] = None,
     pack_gqa: Optional[bool] = None,
     score_mod: Optional[Callable] = None,
     mask_mod: Optional[Callable] = None,
@@ -263,31 +259,27 @@ def _flex_flash_attn_fwd(
 
     current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
 
-    fwd_cfg = FwdConfig(128, 128, True, True)  # default
-    if tile_mn is None:
-        if major_arch == 12:
-            # SM120 tile sizes tuned for 99 KB SMEM capacity:
-            # D<=64:  128x128 → 48 KB (good occupancy)
-            # D>64:   128x64  → 64 KB (128x128 would use 96 KB, hurting occupancy)
-            if head_dim <= 64:
-                fwd_cfg = FwdConfig(128, 128, True, True)
-            else:
-                fwd_cfg = FwdConfig(128, 64, True, True)
-        elif major_arch == 8:
-            fwd_cfg = FwdConfig(128, 64, True, True)  # SM80, should tune
-        elif major_arch == 9:
-            sparse_q = get_sparse_q_block_size(block_sparse_tensors, seqlen_q)
-            fwd_cfg = tile_size_fwd_sm90(
-                head_dim, head_dim_v, causal, local, sparse_block_size_q=sparse_q
-            )
-    else:
-        fwd_cfg = FwdConfig(
-            tile_mn[0], tile_mn[1], fwd_cfg.mma_pv_is_rs, fwd_cfg.intra_wg_overlap
+    # default
+    tile_m, tile_n = 128, 128
+    mma_pv_is_rs = True
+    intra_wg_overlap = True
+    if major_arch == 12:
+        # SM120 tile sizes tuned for 99 KB SMEM capacity:
+        # D<=64:  128x128 → 48 KB (good occupancy)
+        # D>64:   128x64  → 64 KB (128x128 would use 96 KB, hurting occupancy)
+        if head_dim <= 64:
+            tile_m, tile_n = 128, 128
+        else:
+            tile_m, tile_n = 128, 64
+    elif major_arch == 8:
+        tile_m, tile_n = 128, 64  # SM80, should tune
+    elif major_arch == 9:
+        sparse_q = get_sparse_q_block_size(block_sparse_tensors, seqlen_q)
+        fwd_cfg = tile_size_fwd_sm90(
+            head_dim, head_dim_v, causal, local, sparse_block_size_q=sparse_q
         )
-    tile_m, tile_n = fwd_cfg.m_block_size, fwd_cfg.n_block_size
-    if mma_pv_is_rs is None:
+        tile_m, tile_n = fwd_cfg.m_block_size, fwd_cfg.n_block_size
         mma_pv_is_rs = fwd_cfg.mma_pv_is_rs
-    if intra_wg_overlap is None:
         intra_wg_overlap = fwd_cfg.intra_wg_overlap
 
     if max_seqlen_q is None:
