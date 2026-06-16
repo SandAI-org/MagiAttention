@@ -72,6 +72,11 @@ def get_device_arch() -> tuple[int, int]:
     return arch, major_arch
 
 
+def validate_arch(arch: int, major_arch: int) -> None:
+    """Validate supported architectures."""
+    assert major_arch in range(8, 13), f"Unsupported compute capability: {arch}"
+
+
 # ---------------------------------------------------------------------------
 # Head-dim validation
 # ---------------------------------------------------------------------------

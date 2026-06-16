@@ -40,6 +40,7 @@ from .ffa_utils import (
     maybe_contiguous,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
+    validate_arch,
     validate_head_dims,
     validate_tensor,
 )
@@ -107,6 +108,8 @@ def _flex_flash_attn_fwd(
           (num_head, total_q) if cu_seqlens_q is provided.
     """
     arch, major_arch = get_device_arch()
+    validate_arch(arch, major_arch)
+
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
     num_head, head_dim = q.shape[-2:]
     if cu_seqlens_q is None:
@@ -158,13 +161,6 @@ def _flex_flash_attn_fwd(
                 learnable_sink,
             )
         ), "inputs must be on CUDA device"
-    assert major_arch in [
-        8,
-        9,
-        10,
-        11,
-        12,
-    ], "Unsupported compute capability. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
     if major_arch not in [8, 12]:
@@ -794,19 +790,7 @@ def _flex_flash_attn_bwd(
     softmax_scale: Optional[float] = None,
     causal: bool = False,
     softcap: float = 0.0,
-    m_block_size: int = 64,
-    n_block_size: int = 128,
-    num_threads: int = 256,
     pack_gqa: bool = False,
-    num_stages_Q: int = 2,
-    num_stages_dO: int = 2,
-    SdP_swapAB: bool = False,
-    dKV_swapAB: bool = False,
-    dQ_swapAB: bool = False,
-    AtomLayoutMSdP: int = 2,
-    AtomLayoutNdKV: int = 2,
-    AtomLayoutMdQ: int = 2,
-    V_in_regs: bool = False,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
@@ -827,13 +811,9 @@ def _flex_flash_attn_bwd(
         A tuple of (dQ, dK, dV) gradients with the same shapes and dtypes as the input q, k, v tensors.
     """
     arch, major_arch = get_device_arch()
-    assert major_arch in [
-        8,
-        9,
-        10,
-        11,
-        12,
-    ], "Unsupported compute capability. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
+    validate_arch(arch, major_arch)
+
+    local = False
     sparse_q = None
     if block_sparse_tensors is not None and major_arch == 9:
         sparse_q = (
@@ -844,8 +824,6 @@ def _flex_flash_attn_bwd(
 
     num_head, head_dim = q.shape[-2:]
     head_dim_v = v.shape[-1]
-
-    local = False
 
     if major_arch == 8:
         # SM80 (Ampere): uses the dedicated FFABwdSm80 kernel (SM80 MMA, 256
@@ -930,7 +908,6 @@ def _flex_flash_attn_bwd(
         dQ_single_wg = cfg.dQ_single_wg
         cluster_size = 1
         use_2cta_instrs = False
-        is_varlen = cu_seqlens_q is not None or cu_seqlens_k is not None
     else:
         m_block_size = 128
         n_block_size = 128
