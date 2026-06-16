@@ -52,6 +52,8 @@ static constexpr int kBwdStagesV = {{ bwd_stages_v | default(0) }};
 // lse_union: 0 = separate smem_lse/smem_dpsum, 1 = union with dKVacc buffer.
 static constexpr int kBwdScatterPad = {{ bwd_scatter_pad | default(-1) }};
 static constexpr int kBwdLseUnion = {{ bwd_lse_union | default(0) }};
+// dKVacc bypass: 0 = normal SMEM roundtrip, 1 = consumer register atomicAdd (bypass SMEM)
+static constexpr int kBwdDkvaccBypass = {{ bwd_dkvacc_bypass | default(0) }};
 
 static_assert(!kSwapBwdQKLoop || !kDeterministic, "Deterministic mode is not supported when SwapBwdQKLoop is enabled.");
 static_assert(!(kSparseLoad && kIndexAttn), "SparseLoad and IndexAttn are mutually exclusive.");
@@ -149,7 +151,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kSparseInnerDxReduceUseTma, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kSparseInnerDxReduceUseTma, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kProfileMode>(params, stream);
 
   // Pool reduction: sum pool slices and convert to output dtype
   if (pool_count > 1 && kSwapBwdQKLoop) {
