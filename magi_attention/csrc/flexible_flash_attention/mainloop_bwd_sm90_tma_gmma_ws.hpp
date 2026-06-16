@@ -76,7 +76,10 @@ template <
     int AtomLayoutMSdP,
     int AtomLayoutNdKV,
     int AtomLayoutMdQ,
-    bool Mma_dP_is_RS>
+    bool Mma_dP_is_RS,
+    int Stages_V_ = Stages,
+    int ScatterPad_ = -1,
+    bool LseDpsumUnionDKVacc_ = false>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -90,9 +93,13 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int kStages = Stages;
   static constexpr int kStages_dO = Stages_dO;
   static constexpr int kStages_dS = Stages_dS;
+  static constexpr int kStages_V = Stages_V_;
   static_assert(kStages >= kStages_dO);
   static_assert(Stages_dS == 1 || Stages_dS == kStages);
+  static_assert(kStages_V >= 1 && kStages_V <= kStages);
   static_assert(!Mma_dP_is_RS || SdP_swapAB_); // If Mma_dP_is_RS, we need SdP_SwapAB
+
+  static constexpr bool LseDpsumUnionDKVacc = LseDpsumUnionDKVacc_;
 
   static constexpr bool Has_softcap = Has_softcap_;
   static constexpr bool SdP_swapAB = SdP_swapAB_;
@@ -172,6 +179,8 @@ struct CollectiveMainloopBwdSm90 {
   using PipelineState = typename MainloopPipeline::PipelineState;
   using MainloopPipeline_dO = std::conditional_t<InnerLoadUseTmaPipeline, typename cutlass::PipelineTmaAsync<kStages_dO>, typename cutlass::PipelineAsync<kStages_dO>>;
   using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
+  using MainloopPipeline_V = std::conditional_t<InnerLoadUseTmaPipeline, typename cutlass::PipelineTmaAsync<kStages_V>, typename cutlass::PipelineAsync<kStages_V>>;
+  using PipelineState_V = typename MainloopPipeline_V::PipelineState;
   using TMAClusterBarrier_t = cutlass::arch::ClusterTransactionBarrier::ValueType;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
@@ -336,7 +345,7 @@ struct CollectiveMainloopBwdSm90 {
   using SmemLayoutAtomV = decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
   using SmemLayoutV = std::conditional_t<
       SwapBwdQKLoop,
-      decltype(tile_to_shape(SmemLayoutAtomV{}, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}, Int<kStages>{}))), // (kBlockN, kHeadDim, kStages)
+      decltype(tile_to_shape(SmemLayoutAtomV{}, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}, Int<kStages_V>{}))), // (kBlockN, kHeadDim, kStages_V)
       decltype(tile_to_shape(SmemLayoutAtomV{}, select<1, 2>(TileShape_MNK{})))>; // (kBlockN, kHeadDim)
 
   using SmemLayoutAtomPdS = decltype(gcd::ss_smem_selector<PdS_Major, Element, Int<kBlockM / AtomLayoutMSdP>, Int<kBlockN / AtomLayoutNSdP>>());
@@ -431,7 +440,7 @@ struct CollectiveMainloopBwdSm90 {
   // the worst r2s store bank conflicts (8-way unpadded -> <=2-way padded).
   // ScatterInnerLoadStoreTMA bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
   // keeping the swizzled TMA layout → no bank conflicts, no padding needed.
-  static constexpr int kScatterAccRowPad = 4; // floats
+  static constexpr int kScatterAccRowPad = ScatterPad_ >= 0 ? ScatterPad_ : 4; // floats; -1 = auto (default 4)
   using SmemLayoutdKVaccumScatter = Layout<Shape<Int<kBlockN>, Int<kHeadDim>>, Stride<Int<kHeadDim + kScatterAccRowPad>, _1>>;
   using SmemLayoutdQaccumScatter = Layout<Shape<Int<kBlockM>, Int<kHeadDim>>, Stride<Int<kHeadDim + kScatterAccRowPad>, _1>>;
   // Store-side accum layouts: r2s writes and scatter-store reads go through these.
@@ -661,23 +670,51 @@ struct CollectiveMainloopBwdSm90 {
     SmemTokenIndices_t smem_token_indices;
   };
 
+  // Empty placeholders for zero-sized SMEM fields (used with [[no_unique_address]])
+  struct SmemLSE_Empty_ {};
+  struct SmemDPsum_Empty_ {};
+  struct SmemP_Empty_ {
+    CUTLASS_HOST_DEVICE Element* data() {
+      return nullptr;
+    }
+    CUTLASS_HOST_DEVICE const Element* data() const {
+      return nullptr;
+    }
+  };
+
+  using SmemLSE_t = std::conditional_t<LseDpsumUnionDKVacc, SmemLSE_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentLSE>>;
+  using SmemDPsum_t = std::conditional_t<LseDpsumUnionDKVacc, SmemDPsum_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum>>;
+  using SmemP_LoopK_t = std::conditional_t<Mma_dKV_is_RS, SmemP_Empty_, SmemP_t>;
+
   struct TensorStorageLoopK : cute::aligned_struct<maxSmemAlignment> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
-    cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
+    // V and dS share SMEM: within each inner iteration V is consumed by MMA2 before dS is
+    // written (r2s after softmax backward), and dS is consumed by MMA4/MMA5 before V[j+1]
+    // is loaded (V release is delayed to after MMA5). Saves kBlockN*kHeadDim*sizeof(Element)
+    // or kBlockM*kBlockN*sizeof(Element) (whichever is smaller) per stage.
+    union {
+      cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
+      cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
+    };
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQKVdO> smem_q;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutdO>, SmemAlignmentQKVdO> smem_do;
-    cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentLSE> smem_lse;
-    cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum> smem_dpsum;
-    SmemP_t smem_p;
-    cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
     // dK and dV accumulators share SMEM via union: stores are serialized (dV r2s→TMA
     // completes before dK r2s starts), enforced by the swapped dVEmpty/dKEmpty barrier
     // protocol in store_dkv(). Saves 32 KB for larger kBlockM tiles.
+    // When LseDpsumUnionDKVacc: the first bytes of smem_dkacc are also aliased as
+    // smem_lse (512B) + smem_dpsum (512B) during outer-loop LSE/dPsum TMA loads.
     union {
       SmemdKVacc_t smem_dkacc;
       SmemdKVacc_t smem_dvacc;
     };
     SmemTokenIndices_t smem_token_indices;
+    // Zero-sized fields placed AFTER all data buffers so they fall in struct tail padding
+    // (struct alignment from PdS swizzle is 1024B; core data sums to exactly N*1024).
+    // [[no_unique_address]] on truly-empty types lets the compiler overlap them with
+    // tail padding, avoiding a 1KB bump to the next alignment boundary.
+    [[no_unique_address]] SmemLSE_t smem_lse;
+    [[no_unique_address]] SmemDPsum_t smem_dpsum;
+    [[no_unique_address]] SmemP_LoopK_t smem_p;
   };
 
   using TensorStorage = std::conditional_t<SwapBwdQKLoop, TensorStorageLoopK, TensorStorageLoopQ>;
@@ -1628,9 +1665,9 @@ struct CollectiveMainloopBwdSm90 {
   CUTLASS_DEVICE bool load_with_loop_k(
       Params const& params,
       MainloopPipeline pipeline_k,
-      MainloopPipeline pipeline_v,
+      MainloopPipeline_V pipeline_v,
       PipelineState& smem_pipe_write_k,
-      PipelineState& smem_pipe_write_v,
+      PipelineState_V& smem_pipe_write_v,
       SharedStorage& shared_storage,
       BlockMetaT& block_meta) {
     // Compile Guard Clause
@@ -1648,8 +1685,17 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
     Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
     Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutV{});
-    Tensor sLSE = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSE{});
-    Tensor sdPsum = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSE{});
+    ElementAccum* lse_smem_ptr;
+    ElementAccum* dpsum_smem_ptr;
+    if constexpr (LseDpsumUnionDKVacc) {
+      lse_smem_ptr = reinterpret_cast<ElementAccum*>(shared_storage.tensors.mainloop.smem_dkacc.data());
+      dpsum_smem_ptr = lse_smem_ptr + cute::cosize_v<SmemLayoutLSE>;
+    } else {
+      lse_smem_ptr = shared_storage.tensors.mainloop.smem_lse.data();
+      dpsum_smem_ptr = shared_storage.tensors.mainloop.smem_dpsum.data();
+    }
+    Tensor sLSE = make_tensor(make_smem_ptr(lse_smem_ptr), SmemLayoutLSE{});
+    Tensor sdPsum = make_tensor(make_smem_ptr(dpsum_smem_ptr), SmemLayoutLSE{});
 
     // prepare for TMA multicast meta
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
@@ -1776,6 +1822,10 @@ struct CollectiveMainloopBwdSm90 {
     }();
 
     // ─── Unified load_K / load_V: scatter vs TMA ───
+    // When kStages_V != kStages, V pipeline's stage index differs from K's.
+    // V needs K's stage to read smem_token_indices (populated by load_K).
+    int last_k_write_stage = 0;
+
     auto load_K = [&]() {
       if constexpr (InnerLoadUseTma && InnerUseScatter) {
         // Scatter TMA: SparseLoad K tiles are contiguous within each k_range.
@@ -1798,6 +1848,7 @@ struct CollectiveMainloopBwdSm90 {
               tKgK_abs(_, n_block_abs),
               tKsK(_, stage));
         }
+        last_k_write_stage = smem_pipe_write_k.index();
         ++smem_pipe_write_k;
       } else if constexpr (InnerUseScatter) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
@@ -1818,6 +1869,7 @@ struct CollectiveMainloopBwdSm90 {
             cute::copy(cp_async_cg, gK_src, sK_dst);
           }
         }
+        last_k_write_stage = smem_pipe_write_k.index();
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_k;
       } else {
@@ -1840,22 +1892,20 @@ struct CollectiveMainloopBwdSm90 {
           return;
         pipeline_v.producer_acquire(smem_pipe_write_v);
         if (thread_idx == 0) {
-          int const stage = smem_pipe_write_v.index();
-          // K and V pipelines advance 1:1; V's stage matches the slot K just wrote to
-          int const packed_first_row = shared_storage.tensors.mainloop.smem_token_indices[stage * kBlockN];
+          int const v_stage = smem_pipe_write_v.index();
+          // V reads token indices from K's stage slot (they may differ when kStages_V < kStages)
+          int const packed_first_row = shared_storage.tensors.mainloop.smem_token_indices[last_k_write_stage * kBlockN];
           int const n_block_abs = packed_first_row / kBlockN;
           copy(
               params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
               tVgV_abs(_, n_block_abs),
-              tVsV(_, stage));
+              tVsV(_, v_stage));
         }
         ++smem_pipe_write_v;
       } else if constexpr (InnerUseScatter) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
-        // V reuses the indices load_K wrote this same iteration. K/V pipelines have the
-        // same depth and advance 1:1, so V's own index() addresses exactly K's slot;
-        // same-warp program order makes the read race-free.
-        int const* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_write_v.index() * kBlockN];
+        // V reads token indices from K's stage slot (they may differ when kStages_V < kStages)
+        int const* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[last_k_write_stage * kBlockN];
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
           int token_idx = idx_slot[group_idx * NumRowsPerGroup + local_row] * stride_kv_row_v;
@@ -1945,9 +1995,9 @@ struct CollectiveMainloopBwdSm90 {
   // q for outer-loop and k for inner-loop
   CUTLASS_DEVICE void load_tail_with_loop_k(
       MainloopPipeline pipeline_k,
-      MainloopPipeline pipeline_v,
+      MainloopPipeline_V pipeline_v,
       PipelineState& smem_pipe_write_k,
-      PipelineState& smem_pipe_write_v) {
+      PipelineState_V& smem_pipe_write_v) {
     static_assert(SwapBwdQKLoop, "load_tail_with_loop_k() must be called when SwapBwdQKLoop is true");
 
     // PipelineAsync (kCpAsync): all threads must arrive.
@@ -3117,9 +3167,9 @@ struct CollectiveMainloopBwdSm90 {
   CUTLASS_DEVICE bool mma_with_loop_k(
       Params const& params,
       MainloopPipeline pipeline_k,
-      MainloopPipeline pipeline_v,
+      MainloopPipeline_V pipeline_v,
       PipelineState& smem_pipe_read_k,
-      PipelineState& smem_pipe_read_v,
+      PipelineState_V& smem_pipe_read_v,
       FrgTensordQ& tdQrdQ,
       int thread_idx,
       int& work_idx,
@@ -3169,8 +3219,17 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdVt =
         cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dvacc.data()), SmemLayoutdKVaccumtStore{}));
 
-    Tensor sdPsumMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
-    Tensor sLSEMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
+    ElementAccum* lse_smem_ptr_c;
+    ElementAccum* dpsum_smem_ptr_c;
+    if constexpr (LseDpsumUnionDKVacc) {
+      lse_smem_ptr_c = reinterpret_cast<ElementAccum*>(shared_storage.tensors.mainloop.smem_dkacc.data());
+      dpsum_smem_ptr_c = lse_smem_ptr_c + cute::cosize_v<SmemLayoutLSE>;
+    } else {
+      lse_smem_ptr_c = shared_storage.tensors.mainloop.smem_lse.data();
+      dpsum_smem_ptr_c = shared_storage.tensors.mainloop.smem_dpsum.data();
+    }
+    Tensor sdPsumMma_full = make_tensor(make_smem_ptr(dpsum_smem_ptr_c), SmemLayoutLSEMma{});
+    Tensor sLSEMma_full = make_tensor(make_smem_ptr(lse_smem_ptr_c), SmemLayoutLSEMma{});
     Tensor sLSEMma = sLSEMma_full(_0{}, _, _); // slice dummy dim 0 with size of 4
     Tensor sdPsumMma = sdPsumMma_full(_0{}, _, _); // slice dummy dim 0 with size of 4
 
@@ -3452,11 +3511,10 @@ struct CollectiveMainloopBwdSm90 {
       // and rename the view as `dS`, storing dP (or dP^T if SdP_swapAB)
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
 
-      // Release V after MMA2 finished
-      // NOTE: this is different from loop-q settings, whose pipelined Q/dO are required at MMA5/MMA4 resp.
-      // while pipelined V is only required at MMA2 in loop-k settings, thus can be released earlier
+      // Wait for MMA2 to finish (V consumed). V release is deferred to after MMA5
+      // because smem_v and smem_ds are unioned — dS r2s overwrites the V buffer,
+      // and dS must remain readable through MMA5 before the producer can load V[j+1].
       warpgroup_wait<0>();
-      pipeline_v.consumer_release(smem_pipe_read_v);
 
 #pragma unroll
       // Apply softmax backward on `dS`, storing dS (or dS^T if SdP_swapAB)
@@ -3805,8 +3863,10 @@ struct CollectiveMainloopBwdSm90 {
             tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
       }
 
-      // Release K after MMA5 finished
+      // Release K,V after MMA5 finished. V release is deferred from MMA2 because
+      // smem_v/smem_ds are unioned — producer must not overwrite dS until MMA5 consumes it.
       warpgroup_wait<0>();
+      pipeline_v.consumer_release(smem_pipe_read_v);
       pipeline_k.consumer_release(smem_pipe_read_k);
 
       // Update pipeline read state of K,V
@@ -3891,6 +3951,22 @@ struct CollectiveMainloopBwdSm90 {
       }
     } else {
       mma_body();
+    }
+
+    // When LSE/dPsum are unioned with dKVacc, the loader will TMA-load new
+    // LSE/dPsum into smem_dkacc for the next work tile. We must ensure the
+    // store warp has finished TMA-storing the last dK (which also lives in
+    // smem_dkacc) before the loader overwrites it. dVEmpty is signaled by
+    // the store warp after each dK TMA completes, so an extra sync here
+    // drains the last pending arrive. We then re-arrive on behalf of the
+    // store warp so the next tile's first dVEmpty sync is pre-satisfied
+    // (mirroring mma_init).
+    if constexpr (LseDpsumUnionDKVacc && dKVacc_use_TMA && InnerDxStoreInProducer) {
+      int const warp_idx_in_wg = canonical_warp_idx_in_warpgroup_sync();
+      BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+      if (warp_idx_in_wg == 0 || (InnerUseScatter && warp_idx_in_wg == 1)) {
+        BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+      }
     }
 
     return true;

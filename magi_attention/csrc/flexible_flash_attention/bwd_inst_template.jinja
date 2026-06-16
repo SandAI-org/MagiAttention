@@ -40,6 +40,18 @@ static constexpr int kBwdConsumerRegs = {{ bwd_consumer_regs }};
 // The python JIT entry emits 'true' for scatter configs by default and never emits it for
 // dense configs (jinja default 'false' keeps dense on the swizzled TMA accum layouts).
 static constexpr bool kSparseInnerDxReduceUseTma = {{ sparse_inner_dx_reduce_use_tma | default('false') }};
+// Tile/stage overrides for A/B benchmarking (env: MAGI_BWD_TILE_M/N, MAGI_BWD_STAGES/DS/V).
+// 0 = use default from tile_size_bwd_sm90(); >0 = override.
+static constexpr int kBwdTileM = {{ bwd_tile_m | default(0) }};
+static constexpr int kBwdTileN = {{ bwd_tile_n | default(0) }};
+static constexpr int kBwdStages = {{ bwd_stages | default(0) }};
+static constexpr int kBwdStagesDs = {{ bwd_stages_ds | default(0) }};
+static constexpr int kBwdStagesV = {{ bwd_stages_v | default(0) }};
+// SMEM-saving overrides (env: MAGI_BWD_SCATTER_PAD, MAGI_BWD_LSE_UNION).
+// scatter_pad: -1 = auto (4 for kBlockN<=64, 0 for kBlockN>=128), >=0 = override.
+// lse_union: 0 = separate smem_lse/smem_dpsum, 1 = union with dKVacc buffer.
+static constexpr int kBwdScatterPad = {{ bwd_scatter_pad | default(-1) }};
+static constexpr int kBwdLseUnion = {{ bwd_lse_union | default(0) }};
 
 static_assert(!kSwapBwdQKLoop || !kDeterministic, "Deterministic mode is not supported when SwapBwdQKLoop is enabled.");
 static_assert(!(kSparseLoad && kIndexAttn), "SparseLoad and IndexAttn are mutually exclusive.");
@@ -137,7 +149,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kSparseInnerDxReduceUseTma, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kSparseInnerDxReduceUseTma, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kProfileMode>(params, stream);
 
   // Pool reduction: sum pool slices and convert to output dtype
   if (pool_count > 1 && kSwapBwdQKLoop) {

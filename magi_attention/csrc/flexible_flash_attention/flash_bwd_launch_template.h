@@ -134,6 +134,9 @@ template <
     int BwdConsumerRegs,
     bool SparseInnerDxReduceUseTma,
     bool DisableBwdDkvAtomicReduction,
+    int Stages_V,
+    int ScatterPad,
+    bool LseDpsumUnionDKVacc,
     bool ProfileMode>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
@@ -192,7 +195,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutMSdP,
       AtomLayoutNdKV,
       AtomLayoutMdQ,
-      V_in_regs>;
+      V_in_regs,
+      Stages_V,
+      ScatterPad,
+      LseDpsumUnionDKVacc>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       SwapBwdQKLoop ? kBlockM : kBlockN,
@@ -299,24 +305,52 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   dim3 block_dims = AttnKernel::get_block_shape();
   int smem_size = AttnKernel::SharedStorageSize;
 
-  /* DEBUG */
-  // int smem_size_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
-  // int smem_size_do = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_do));
-  // int smem_size_ds = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_ds));
-  // int smem_size_dqacc = [&] {
-  //     if constexpr (Arch >= 90) {
-  //         return sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_dqacc));
-  //     } else {
-  //         return 0;
-  //     }
-  // }();
-  // int smem_size_k = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_k));
-  // int smem_size_v = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v));
-  // int smem_size_lse = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_lse));
-  // int smem_size_dpsum = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_dpsum));
-  // printf("smem_size = %d, q = %d, k = %d, v = %d, do = %d, ds = %d, dqacc = %d, lse = %d, dpsum = %d\n", smem_size,
-  // smem_size_q, smem_size_k, smem_size_v, smem_size_do, smem_size_ds, smem_size_dqacc, smem_size_lse,
-  // smem_size_dpsum);
+  {
+    static bool printed = false;
+    if (!printed) {
+      printed = true;
+      int sz_k = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_k));
+      int sz_v = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v));
+      int sz_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
+      int sz_do = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_do));
+      int sz_lse = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_lse));
+      int sz_dpsum = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_dpsum));
+      int sz_p = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_p));
+      int sz_dkacc = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_dkacc));
+      int sz_tidx = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_token_indices));
+      int sz_tensor = sizeof(typename CollectiveMainloop::TensorStorage);
+      int sz_pipe = sizeof(typename AttnKernel::SharedStorage) - sz_tensor;
+      printf(
+          "[BWD] total=%d(%.1fKB) tensor=%d pipe=%d | k=%d v=%d q=%d do=%d lse=%d dpsum=%d p=%d dkacc=%d tidx=%d\n",
+          smem_size,
+          smem_size / 1024.0f,
+          sz_tensor,
+          sz_pipe,
+          sz_k,
+          sz_v,
+          sz_q,
+          sz_do,
+          sz_lse,
+          sz_dpsum,
+          sz_p,
+          sz_dkacc,
+          sz_tidx);
+      printf(
+          "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d lseU=%d SwapQK=%d\n",
+          kBlockM,
+          kBlockN,
+          kHeadDim,
+          Stages,
+          Stages_V,
+          Stages_dS,
+          ScatterPad,
+          (int)LseDpsumUnionDKVacc,
+          (int)SwapBwdQKLoop);
+      cudaFuncAttributes func_attrs;
+      cudaFuncGetAttributes(&func_attrs, (void*)cutlass::device_kernel<AttnKernel>);
+      printf("[BWD] static_smem=%zu regs=%d\n", func_attrs.sharedSizeBytes, func_attrs.numRegs);
+    }
+  }
 
   if constexpr (size(ClusterShape{}) > 1) {
     void const* kernel = (void const*)cutlass::device_kernel<AttnKernel>;
@@ -369,17 +403,29 @@ template <
     int BwdProducerRegs,
     int BwdConsumerRegs,
     bool SparseInnerDxReduceUseTma,
+    int BwdTileM,
+    int BwdTileN,
+    int BwdStages,
+    int BwdStagesDs,
+    int BwdStagesV,
+    int BwdScatterPad,
+    int BwdLseUnion,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr bool IndexAttnInvLoopQ = IndexAttn && !SwapBwdQKLoop;
-  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexAttnInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
-  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexAttnInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+  // BwdTileM/N, BwdStages/Ds: 0 = use default, >0 = override (env: MAGI_BWD_TILE_M/N, MAGI_BWD_STAGES/DS).
+  static constexpr int kBlockM =
+      BwdTileM > 0 ? BwdTileM : std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexAttnInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+  static constexpr int kBlockN =
+      BwdTileN > 0 ? BwdTileN : std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexAttnInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
 
-  // TODO: Add a specific tuning function for different kHeadDim
-  static constexpr int Stages = 2;
-  static constexpr int Stages_dO = kHeadDim <= 128 ? 2 : 1;
-  static constexpr int Stages_dS = kHeadDim <= 128 ? (kBlockM <= 64 ? 2 : 1) : 1;
+  static constexpr int Stages = BwdStages > 0 ? BwdStages : 2;
+  static constexpr int Stages_dO = Stages >= 2 ? (kHeadDim <= 128 ? 2 : 1) : 1;
+  static constexpr int Stages_dS = BwdStagesDs > 0 ? BwdStagesDs : (kHeadDim <= 128 ? (kBlockM <= 64 ? 2 : 1) : 1);
+  static constexpr int Stages_V = BwdStagesV > 0 ? BwdStagesV : Stages;
+  static constexpr int ScatterPad = BwdScatterPad;
+  static constexpr bool LseDpsumUnionDKVacc = BwdLseUnion != 0;
 
   static constexpr bool SdP_swapAB = kHeadDim <= 128 ? true : false;
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
@@ -441,5 +487,8 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*BwdConsumerRegs=*/BwdConsumerRegs,
       /*SparseInnerDxReduceUseTma=*/SparseInnerDxReduceUseTma,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
+      /*Stages_V=*/Stages_V,
+      /*ScatterPad=*/ScatterPad,
+      /*LseDpsumUnionDKVacc=*/LseDpsumUnionDKVacc,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

@@ -442,6 +442,24 @@ def get_ffa_jit_spec(
             uri += f"_sdxtma{_sdxtma_lower}"
         else:
             extra_template_args["sparse_inner_dx_reduce_use_tma"] = "true"
+    # Tile/stage overrides for A/B benchmarking (BWD only).
+    # Each distinct combo produces a separate JIT URI → separate .so cache.
+    if direction == "bwd":
+        for _env_name, _tpl_key in [
+            ("MAGI_BWD_TILE_M", "bwd_tile_m"),
+            ("MAGI_BWD_TILE_N", "bwd_tile_n"),
+            ("MAGI_BWD_STAGES", "bwd_stages"),
+            ("MAGI_BWD_STAGES_DS", "bwd_stages_ds"),
+            ("MAGI_BWD_STAGES_V", "bwd_stages_v"),
+            ("MAGI_BWD_SCATTER_PAD", "bwd_scatter_pad"),
+            ("MAGI_BWD_LSE_UNION", "bwd_lse_union"),
+        ]:
+            _val = os.environ.get(_env_name)
+            if _val is not None:
+                extra_template_args[_tpl_key] = str(int(_val))
+                _uri_val = _val.replace("-", "n")
+                uri += f"_{_tpl_key}{_uri_val}"
+
     # Register quota selection (single source of truth, kernels only assert)
     _producer_regs, _consumer_regs = _ffa_register_quota(
         direction=direction,
