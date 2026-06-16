@@ -300,35 +300,6 @@ def validate_tensor(t, name, expected_shape, expected_dtype, expected_device):
         assert t.is_cuda, f"{name} must be on CUDA"
 
 
-def resolve_causal_local_window(
-    causal, window_size_left, window_size_right, mask_mod=None
-):
-    """Resolve causal/local/window settings into canonical form.
-
-    Returns (causal, local, window_size_left, window_size_right).
-    """
-    if mask_mod is not None:
-        return False, False, window_size_left, window_size_right
-    if causal:
-        window_size_right = 0
-    if (
-        window_size_left is not None
-        and window_size_right is not None
-        and window_size_left + window_size_right < 0
-    ):
-        window_size_left = None
-        window_size_right = None
-    if window_size_left is not None or window_size_right is not None:
-        if window_size_left is None and window_size_right == 0:
-            causal, local = True, False
-            window_size_right = None
-        else:
-            causal, local = False, True
-    else:
-        local = False
-    return causal, local, window_size_left, window_size_right
-
-
 # ---------------------------------------------------------------------------
 # Backward fake-tensor builder
 # ---------------------------------------------------------------------------

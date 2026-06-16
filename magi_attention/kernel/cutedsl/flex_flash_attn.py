@@ -37,7 +37,6 @@ from .ffa_utils import (
     get_device_arch,
     make_fake_bwd_tensors,
     maybe_contiguous,
-    resolve_causal_local_window,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_head_dims,
@@ -78,8 +77,6 @@ def _flex_flash_attn_fwd(
     softmax_scale: Optional[float] = None,
     causal: bool = False,
     softcap: Optional[float] = None,
-    window_size_left: Optional[int] = None,
-    window_size_right: Optional[int] = None,
     learnable_sink: Optional[torch.Tensor] = None,
     pack_gqa: Optional[bool] = None,
     score_mod: Optional[Callable] = None,
@@ -236,9 +233,9 @@ def _flex_flash_attn_fwd(
     dtype = to_cute_dtype(q.dtype)
     use_block_sparsity = block_sparse_tensors is not None
 
-    causal, local, window_size_left, window_size_right = resolve_causal_local_window(
-        causal, window_size_left, window_size_right, mask_mod
-    )
+    local = False
+    if mask_mod is not None:
+        causal = False
 
     requested_use_clc_scheduler = utils._get_use_clc_scheduler_default()
     requested_disable_2cta = utils._get_disable_2cta_default(is_fwd=True)
@@ -362,8 +359,6 @@ def _flex_flash_attn_fwd(
         lse is None,
         cu_seqlens_q is None,
         cu_seqlens_k is None,
-        window_size_left is not None,
-        window_size_right is not None,
         learnable_sink is not None,
         block_sparse_tensors is None or block_sparse_tensors.cu_total_m_blocks is None,
         block_sparse_tensors is None
@@ -515,8 +510,8 @@ def _flex_flash_attn_fwd(
             seqused_q_tensor,
             seqused_k_tensor,
             page_table_tensor,
-            window_size_left,
-            window_size_right,
+            None,  # window_size_left
+            None,  # window_size_right
             learnable_sink_tensor,
         ]
         if major_arch in [10, 11]:
@@ -548,8 +543,8 @@ def _flex_flash_attn_fwd(
             None,
             None,
             None,
-            window_size_left,
-            window_size_right,
+            None,  # window_size_left
+            None,  # window_size_right
             learnable_sink,
         ]
         if major_arch in [10, 11]:
@@ -796,8 +791,6 @@ def _flex_flash_attn_bwd(
     softmax_scale: Optional[float] = None,
     causal: bool = False,
     softcap: float = 0.0,
-    window_size_left: Optional[int] = None,
-    window_size_right: Optional[int] = None,
     m_block_size: int = 64,
     n_block_size: int = 128,
     num_threads: int = 256,
@@ -850,10 +843,7 @@ def _flex_flash_attn_bwd(
     num_head, head_dim = q.shape[-2:]
     head_dim_v = v.shape[-1]
 
-    window_size = [window_size_left, window_size_right]
-    causal, local, window_size_left, window_size_right = resolve_causal_local_window(
-        causal, window_size_left, window_size_right
-    )
+    local = False
 
     if major_arch == 8:
         # SM80 (Ampere): uses the dedicated FFABwdSm80 kernel (SM80 MMA, 256
@@ -1286,8 +1276,6 @@ def _flex_flash_attn_bwd(
             head_dim_v,
             qhead_per_kvhead,
             causal,
-            window_size_left is not None,
-            window_size_right is not None,
             m_block_size,
             n_block_size,
             num_threads,
@@ -1328,8 +1316,6 @@ def _flex_flash_attn_bwd(
             head_dim_v,
             qhead_per_kvhead,
             causal,
-            window_size_left is not None,
-            window_size_right is not None,
             m_block_size,
             n_block_size,
             num_threads,
@@ -1487,8 +1473,8 @@ def _flex_flash_attn_bwd(
             cu_seqlens_k_tensor,
             seqused_q_tensor,
             seqused_k_tensor,
-            window_size_left,
-            window_size_right,
+            None,  # window_size_left
+            None,  # window_size_right
             dQ_semaphore_tensor,
             dK_semaphore_tensor,
             dV_semaphore_tensor,
@@ -1513,8 +1499,8 @@ def _flex_flash_attn_bwd(
             cu_seqlens_k,
             None,
             None,
-            window_size_left,
-            window_size_right,
+            None,  # window_size_left
+            None,  # window_size_right
             dQ_semaphore,
             dK_semaphore,
             dV_semaphore,
@@ -1619,7 +1605,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         max_seqlen_k: Optional[int] = None,
         softmax_scale: Optional[float] = None,
         causal: bool = False,
-        window_size: Tuple[Optional[int], Optional[int]] = (None, None),
         learnable_sink: Optional[torch.Tensor] = None,
         softcap: float = 0.0,
         pack_gqa: Optional[bool] = None,
@@ -1642,8 +1627,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_k=max_seqlen_k,
             softmax_scale=softmax_scale,
             causal=causal,
-            window_size_left=window_size[0],
-            window_size_right=window_size[1],
             learnable_sink=learnable_sink,
             softcap=softcap,
             pack_gqa=pack_gqa,
@@ -1665,7 +1648,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         )
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
-        ctx.window_size = window_size
         ctx.softcap = softcap
         ctx.deterministic = deterministic
         ctx.max_seqlen_q = max_seqlen_q
@@ -1705,8 +1687,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ctx.softmax_scale,
             ctx.causal,
             ctx.softcap,
-            window_size_left=ctx.window_size[0],
-            window_size_right=ctx.window_size[1],
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=ctx.max_seqlen_q,
@@ -1732,7 +1712,6 @@ def flex_flash_attn_func(
     max_seqlen_k: Optional[int] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
-    window_size: Tuple[Optional[int], Optional[int]] = (None, None),
     learnable_sink: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
     pack_gqa: Optional[bool] = None,
@@ -1765,7 +1744,6 @@ def flex_flash_attn_func(
         max_seqlen_k,
         softmax_scale,
         causal,
-        window_size,
         learnable_sink,
         softcap,
         pack_gqa,
