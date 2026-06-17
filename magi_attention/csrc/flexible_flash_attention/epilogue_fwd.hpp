@@ -133,7 +133,8 @@ struct CollectiveEpilogueFwd {
   using SmemLayoutAtomO = decltype(composition(Swizzle<kSwizzle, kSwizzleBase, kSwizzleShift>{}, Layout<Shape<_8, Int<kBlockKGmem>>, Stride<Int<kBlockKGmem>, _1>>{}));
   using SmemLayoutOSTS = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 1>(TileShape_MNK_PV{})));
 
-  static constexpr bool Use_TMA_O = (ArchTag::kMinComputeCapability >= 90);
+  static constexpr bool Use_TMA_O = (ArchTag::kMinComputeCapability >= 90)
+      && (!PackGQA || kBlockM % QheadPerKhead == 0);
   using SmemLayoutO = std::conditional_t<Use_TMA_O, SmemLayoutOTMA, SmemLayoutOSTS>;
 
   // Define ShapeO and StrideO based on PackGQA
@@ -177,9 +178,17 @@ struct CollectiveEpilogueFwd {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutO>> smem_o;
   };
 
+  // When Use_TMA_O is false (e.g. PackGQA with QheadPerKhead not dividing kBlockM),
+  // the PackGQA-reshaped ShapeO is TMA-incompatible. Use a non-PackGQA shape for the
+  // type alias so make_tma_copy compiles; the TMA descriptor is never created at runtime.
+  using TMA_O_ShapeForType = std::conditional_t<Use_TMA_O, ShapeO,
+      cute::Shape<int32_t, int32_t, int32_t>>;
+  using TMA_O_StrideForType = std::conditional_t<Use_TMA_O, StrideO,
+      cute::Stride<int64_t, _1, int64_t>>;
   using TMA_O = decltype(make_tma_copy(
       GmemTiledCopyOTMA{},
-      make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), ShapeO{}, StrideO{}),
+      make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)),
+                  TMA_O_ShapeForType{}, TMA_O_StrideForType{}),
       SmemLayoutOTMA{},
       select<0, 1>(TileShape_MNK_PV{}),
       _1{})); // no mcast for O
@@ -237,8 +246,14 @@ struct CollectiveEpilogueFwd {
 
     auto const stride_LSE = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), QheadPerKhead));
 
-    Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), shape_O, stride_O);
-    TMA_O tma_store_O = make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutOTMA{}, select<0, 1>(TileShape_MNK_PV{}), _1{}); // no mcast
+    TMA_O tma_store_O = [&]() {
+      if constexpr (Use_TMA_O) {
+        Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), shape_O, stride_O);
+        return make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutOTMA{}, select<0, 1>(TileShape_MNK_PV{}), _1{});
+      } else {
+        return TMA_O{};
+      }
+    }();
 
     return {
         args.ptr_O,

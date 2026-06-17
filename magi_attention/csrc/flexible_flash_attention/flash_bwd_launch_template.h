@@ -311,32 +311,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
     static bool printed = false;
     if (!printed) {
       printed = true;
-      int sz_k = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_k));
-      int sz_v = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v));
-      int sz_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
-      int sz_do = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_do));
-      int sz_lse = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_lse));
-      int sz_dpsum = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_dpsum));
-      int sz_p = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_p));
-      int sz_dkacc = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_dkacc));
-      int sz_tidx = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_token_indices));
       int sz_tensor = sizeof(typename CollectiveMainloop::TensorStorage);
       int sz_pipe = sizeof(typename AttnKernel::SharedStorage) - sz_tensor;
-      printf(
-          "[BWD] total=%d(%.1fKB) tensor=%d pipe=%d | k=%d v=%d q=%d do=%d lse=%d dpsum=%d p=%d dkacc=%d tidx=%d\n",
-          smem_size,
-          smem_size / 1024.0f,
-          sz_tensor,
-          sz_pipe,
-          sz_k,
-          sz_v,
-          sz_q,
-          sz_do,
-          sz_lse,
-          sz_dpsum,
-          sz_p,
-          sz_dkacc,
-          sz_tidx);
+      printf("[BWD] total=%d(%.1fKB) tensor=%d pipe=%d\n",
+          smem_size, smem_size / 1024.0f, sz_tensor, sz_pipe);
       printf(
           "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d lseU=%d dkvByp=%d SwapQK=%d\n",
           kBlockM,
