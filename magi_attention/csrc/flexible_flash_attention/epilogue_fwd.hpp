@@ -133,9 +133,11 @@ struct CollectiveEpilogueFwd {
   using SmemLayoutAtomO = decltype(composition(Swizzle<kSwizzle, kSwizzleBase, kSwizzleShift>{}, Layout<Shape<_8, Int<kBlockKGmem>>, Stride<Int<kBlockKGmem>, _1>>{}));
   using SmemLayoutOSTS = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 1>(TileShape_MNK_PV{})));
 
-  static constexpr bool Use_TMA_O = (ArchTag::kMinComputeCapability >= 90)
-      && (!PackGQA || kBlockM % QheadPerKhead == 0);
-  using SmemLayoutO = std::conditional_t<Use_TMA_O, SmemLayoutOTMA, SmemLayoutOSTS>;
+  // TMA O store only when SwapAB=true (SmemLayoutOTMA has no bank conflict with
+  // transposed WGMMA output). When SwapAB=false, per-thread STG.128 via SmemLayoutOSTS
+  // is faster because SmemLayoutOTMA causes SMEM bank conflicts during R2S copy.
+  static constexpr bool Use_TMA_O = SwapAB && (ArchTag::kMinComputeCapability >= 90) && (!PackGQA || kBlockM % QheadPerKhead == 0);
+  using SmemLayoutO = std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>;
 
   // Define ShapeO and StrideO based on PackGQA
   using ShapeO = std::conditional_t<
@@ -181,14 +183,11 @@ struct CollectiveEpilogueFwd {
   // When Use_TMA_O is false (e.g. PackGQA with QheadPerKhead not dividing kBlockM),
   // the PackGQA-reshaped ShapeO is TMA-incompatible. Use a non-PackGQA shape for the
   // type alias so make_tma_copy compiles; the TMA descriptor is never created at runtime.
-  using TMA_O_ShapeForType = std::conditional_t<Use_TMA_O, ShapeO,
-      cute::Shape<int32_t, int32_t, int32_t>>;
-  using TMA_O_StrideForType = std::conditional_t<Use_TMA_O, StrideO,
-      cute::Stride<int64_t, _1, int64_t>>;
+  using TMA_O_ShapeForType = std::conditional_t<Use_TMA_O, ShapeO, cute::Shape<int32_t, int32_t, int32_t>>;
+  using TMA_O_StrideForType = std::conditional_t<Use_TMA_O, StrideO, cute::Stride<int64_t, _1, int64_t>>;
   using TMA_O = decltype(make_tma_copy(
       GmemTiledCopyOTMA{},
-      make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)),
-                  TMA_O_ShapeForType{}, TMA_O_StrideForType{}),
+      make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), TMA_O_ShapeForType{}, TMA_O_StrideForType{}),
       SmemLayoutOTMA{},
       select<0, 1>(TileShape_MNK_PV{}),
       _1{})); // no mcast for O
@@ -638,10 +637,6 @@ struct CollectiveEpilogueFwd {
         tma_store_arrive();
       }
       tma_store_wait<0>();
-#pragma unroll
-      for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-        shared_storage.pipelines.barrier_O.arrive(cta_id);
-      }
     } else {
       // Non-TMA path: smem → registers → gmem with per-thread vectorized stores
       Tensor tOsO = gmem_thr_copy_O.partition_S(sO);
@@ -649,6 +644,12 @@ struct CollectiveEpilogueFwd {
       cute::copy(gmem_tiled_copy_O, tOsO, tOrFinalO);
       flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
           gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
+    }
+
+    // Signal barrier_O to allow V load for next tile (smem_o and smem_v are unioned)
+#pragma unroll
+    for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
+      shared_storage.pipelines.barrier_O.arrive(cta_id);
     }
 
     if constexpr (!DisableFwdAtomicReduction) {
