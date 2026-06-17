@@ -41,6 +41,7 @@ from quack.cute_dsl_utils import ParamsBase
 from . import cutedsl_utils
 from .block_info import BlockInfo
 from .mask import AttentionMask
+from .named_barrier import NamedBarrierFwdSm90
 from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
 
@@ -51,7 +52,6 @@ from .legacy.block_sparse_utils import (
     produce_block_sparse_loads,
 )
 from .legacy.flash_fwd import FlashAttentionForwardBase
-from .legacy.named_barrier import NamedBarrierFwd
 from .legacy.pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
 from .legacy.softmax import Softmax, apply_score_mod_inner
@@ -1983,7 +1983,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         if const_expr(self.use_scheduler_barrier):
             if warp_group_idx == 1:
                 cute.arch.barrier_arrive(
-                    barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1),
+                    barrier_id=int(NamedBarrierFwdSm90.WarpSchedulerWG1),
                     number_of_threads=2 * self.num_threads_per_warp_group,
                 )
 
@@ -2025,7 +2025,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
     def warp_scheduler_barrier_sync(self):
         if const_expr(self.use_scheduler_barrier):
             cute.arch.barrier(
-                barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1)
+                barrier_id=int(NamedBarrierFwdSm90.WarpSchedulerWG1)
                 - 1
                 + cutedsl_utils.canonical_warp_group_idx(sync=False),
                 number_of_threads=2 * self.num_threads_per_warp_group,
@@ -2041,6 +2041,6 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                 t = cur_wg + 1
                 next_wg = t % self.num_wg_mma
             cute.arch.barrier_arrive(
-                barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1) + next_wg,
+                barrier_id=int(NamedBarrierFwdSm90.WarpSchedulerWG1) + next_wg,
                 number_of_threads=2 * self.num_threads_per_warp_group,
             )

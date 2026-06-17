@@ -56,6 +56,7 @@ from quack.cute_dsl_utils import ParamsBase
 from . import cutedsl_utils, sm100_utils
 from .block_info import BlockInfo
 from .mask import AttentionMask
+from .named_barrier import NamedBarrierFwdSm100
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
@@ -66,7 +67,6 @@ from .legacy.block_sparse_utils import (
     produce_block_sparse_loads_sm100,
     softmax_block_sparse_sm100,
 )
-from .legacy.named_barrier import NamedBarrierFwdSm100
 from .legacy.pack_gqa import PackGQA, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
 from .legacy.seqlen_info import SeqlenInfoQK
