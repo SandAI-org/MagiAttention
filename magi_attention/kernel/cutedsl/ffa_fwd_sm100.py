@@ -60,7 +60,13 @@ from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm100
 from .seqlen_info import SeqlenInfoQK
 from .softmax import SoftmaxSm100, apply_score_mod_inner
-from .sparse_utils import BlockSparseTensors
+from .sparse_utils import (
+    BlockSparseTensors,
+    get_total_block_count,
+    handle_block_sparse_empty_tile_correction_sm100,
+    produce_block_sparse_loads_sm100,
+    softmax_block_sparse_sm100,
+)
 from .tile_scheduler import (
     ClcState,
     SchedulingMode,
@@ -74,12 +80,6 @@ from .tile_scheduler import (
 
 # isort: split
 from .legacy import pipeline as pipeline_custom
-from .legacy.block_sparse_utils import (
-    get_total_block_count,
-    handle_block_sparse_empty_tile_correction_sm100,
-    produce_block_sparse_loads_sm100,
-    softmax_block_sparse_sm100,
-)
 from .legacy.pack_gqa import PackGQA, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
 

@@ -43,7 +43,13 @@ from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwdSm100
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
-from .sparse_utils import BlockSparseTensors
+from .sparse_utils import (
+    BlockSparseTensors,
+    get_block_sparse_iteration_info_bwd,
+    get_m_block_from_iter_bwd,
+    get_total_q_block_count_bwd,
+    produce_block_sparse_q_loads_bwd_sm100,
+)
 from .tile_scheduler import (
     SingleTileLPTBwdScheduler,
     SingleTileScheduler,
@@ -55,12 +61,6 @@ from .tile_scheduler import (
 # isort: split
 from .legacy import barrier, copy_utils
 from .legacy import pipeline as pipeline_custom
-from .legacy.block_sparse_utils import (
-    get_block_sparse_iteration_info_bwd,
-    get_m_block_from_iter_bwd,
-    get_total_q_block_count_bwd,
-    produce_block_sparse_q_loads_bwd_sm100,
-)
 
 
 class FFABwdSm100:

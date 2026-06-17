@@ -45,7 +45,11 @@ from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm90
 from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
-from .sparse_utils import BlockSparseTensors
+from .sparse_utils import (
+    BlockSparseTensors,
+    consume_block_sparse_loads,
+    produce_block_sparse_loads,
+)
 from .tile_scheduler import (
     SingleTileLPTScheduler,
     SingleTileScheduler,
@@ -55,10 +59,6 @@ from .tile_scheduler import (
 
 # isort: split
 from .legacy import pipeline as pipeline_custom
-from .legacy.block_sparse_utils import (
-    consume_block_sparse_loads,
-    produce_block_sparse_loads,
-)
 from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager

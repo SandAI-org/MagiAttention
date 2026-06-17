@@ -39,7 +39,13 @@ from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwdSm90
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
-from .sparse_utils import BlockSparseTensors
+from .sparse_utils import (
+    BlockSparseTensors,
+    consume_block_sparse_mma_bwd_sm90,
+    dQaccum_store_block_sparse_bwd_sm90,
+    get_total_q_block_count_bwd,
+    produce_block_sparse_q_loads_bwd_sm90,
+)
 from .tile_scheduler import (
     SingleTileLPTBwdScheduler,
     SingleTileScheduler,
@@ -49,12 +55,6 @@ from .tile_scheduler import (
 
 # isort: split
 from .legacy import barrier, pipeline
-from .legacy.block_sparse_utils import (
-    consume_block_sparse_mma_bwd_sm90,
-    dQaccum_store_block_sparse_bwd_sm90,
-    get_total_q_block_count_bwd,
-    produce_block_sparse_q_loads_bwd_sm90,
-)
 
 
 class FFABwdSm90:
