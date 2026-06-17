@@ -40,6 +40,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
 from .block_info import BlockInfo
+from .cutedsl_utils import ThreadCooperativeGroup
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm90
 from .seqlen_info import SeqlenInfoQK
@@ -621,10 +622,6 @@ class FFAFwdSm90(FlashAttentionForwardBase):
 
         # Mbarrier / pipeline init
         mbar_ptr_Q = storage.mbar_ptr_Q.data_ptr()
-
-        ThreadCooperativeGroup = partial(
-            pipeline.CooperativeGroup, pipeline.Agent.Thread
-        )
         tma_warp = ThreadCooperativeGroup(1)
         load_threads = ThreadCooperativeGroup(self.num_threads_per_warp_group)
         mma_warps = ThreadCooperativeGroup(self.num_mma_threads // cute.arch.WARP_SIZE)

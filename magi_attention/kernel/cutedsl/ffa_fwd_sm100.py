@@ -55,6 +55,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm100_utils
 from .block_info import BlockInfo
+from .cutedsl_utils import ThreadCooperativeGroup
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm100
 from .seqlen_info import SeqlenInfoQK
@@ -170,9 +171,6 @@ _FP8_SMALL_HDIM_REGS = {
     True: {"num_regs_softmax": 152, "num_regs_correction": 96, "num_regs_other": 112},
 }
 # === END TUNING KNOBS ===
-
-
-ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
 
 
 class DescaleTensors(NamedTuple):

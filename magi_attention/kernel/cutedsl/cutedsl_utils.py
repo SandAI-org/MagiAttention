@@ -15,19 +15,20 @@
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
 import math
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Callable, Optional, Tuple, Type, overload
 
 import cutlass
 import cutlass.cute as cute
 import torch
-from cutlass import const_expr
+from cutlass import const_expr, pipeline
 from cutlass._mlir.dialects import llvm, nvvm
 from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.runtime import from_dlpack
 from cutlass.cutlass_dsl import NumericMeta, T, dsl_user_op
 
 StaticTypes = (cutlass.Constexpr, NumericMeta, int, bool, str, float, type(None))
+ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
 
 load_cubin_module_data_og = cutlass.base_dsl.runtime.cuda.load_cubin_module_data
 cute_compile_og = cute.compile

@@ -38,6 +38,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm100_utils
 from .block_info import BlockInfo
+from .cutedsl_utils import ThreadCooperativeGroup
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwdSm100
 from .seqlen_info import SeqlenInfoQK
@@ -60,8 +61,6 @@ from .legacy.block_sparse_utils import (
     produce_block_sparse_q_loads_bwd_sm100,
 )
 from .legacy.softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
-
-ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
 
 
 class FFABwdSm100:
