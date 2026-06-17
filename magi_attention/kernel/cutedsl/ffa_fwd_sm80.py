@@ -30,13 +30,13 @@ from cutlass.cute.nvgpu import warp
 from quack import layout_utils
 
 from . import cutedsl_utils, sm80_utils
+from .block_info import BlockInfo
+from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
-from .legacy.block_info import BlockInfo
 from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.mask import AttentionMask
-from .legacy.seqlen_info import SeqlenInfoQK
 from .legacy.softmax import Softmax, apply_score_mod_inner
 from .legacy.tile_scheduler import (
     SingleTileScheduler,

@@ -39,11 +39,12 @@ from quack import copy_utils, layout_utils, sm90_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .block_info import BlockInfo
+from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
 from .legacy import pipeline as pipeline_custom
-from .legacy.block_info import BlockInfo
 from .legacy.block_sparse_utils import (
     consume_block_sparse_loads,
     produce_block_sparse_loads,
@@ -53,7 +54,6 @@ from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierFwd
 from .legacy.pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
-from .legacy.seqlen_info import SeqlenInfoQK
 from .legacy.softmax import Softmax, apply_score_mod_inner
 from .legacy.tile_scheduler import (
     SingleTileLPTScheduler,

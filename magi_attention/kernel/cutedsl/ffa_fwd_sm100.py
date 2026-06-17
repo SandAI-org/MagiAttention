@@ -54,13 +54,13 @@ from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .block_info import BlockInfo
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
 from .legacy import blackwell_helpers as sm100_utils
 from .legacy import mma_sm100_desc as sm100_desc
 from .legacy import pipeline as pipeline_custom
-from .legacy.block_info import BlockInfo
 from .legacy.block_sparse_utils import (
     get_total_block_count,
     handle_block_sparse_empty_tile_correction_sm100,

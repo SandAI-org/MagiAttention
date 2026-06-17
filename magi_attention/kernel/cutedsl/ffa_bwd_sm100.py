@@ -37,13 +37,14 @@ from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .block_info import BlockInfo
+from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
 from .legacy import barrier, copy_utils
 from .legacy import pipeline as pipeline_custom
 from .legacy.blackwell_helpers import gemm_ptx_w_idx, gemm_w_idx  # noqa
-from .legacy.block_info import BlockInfo
 from .legacy.block_sparse_utils import (
     get_block_sparse_iteration_info_bwd,
     get_m_block_from_iter_bwd,
@@ -52,7 +53,6 @@ from .legacy.block_sparse_utils import (
 )
 from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierBwdSm100
-from .legacy.seqlen_info import SeqlenInfoQK
 from .legacy.softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .legacy.tile_scheduler import (  # noqa
     SingleTileLPTBwdScheduler,

@@ -35,11 +35,11 @@ from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
+from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
 from .legacy.mask import AttentionMask
-from .legacy.seqlen_info import SeqlenInfoQK
 from .legacy.tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
