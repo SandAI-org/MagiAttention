@@ -33,6 +33,7 @@ from . import cutedsl_utils, sm80_utils
 from .block_info import BlockInfo
 from .mask import AttentionMask
 from .seqlen_info import SeqlenInfoQK
+from .softmax import Softmax, apply_score_mod_inner
 from .sparse_utils import BlockSparseTensors
 from .tile_scheduler import (
     SingleTileScheduler,
@@ -42,7 +43,6 @@ from .tile_scheduler import (
 
 # isort: split
 from .legacy.flash_fwd import FlashAttentionForwardBase
-from .legacy.softmax import Softmax, apply_score_mod_inner
 
 
 class FFAFwdSm80(FlashAttentionForwardBase):

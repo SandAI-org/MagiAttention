@@ -44,6 +44,7 @@ from .cutedsl_utils import ThreadCooperativeGroup
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm90
 from .seqlen_info import SeqlenInfoQK
+from .softmax import Softmax, apply_score_mod_inner
 from .sparse_utils import BlockSparseTensors
 from .tile_scheduler import (
     SingleTileLPTScheduler,
@@ -61,7 +62,6 @@ from .legacy.block_sparse_utils import (
 from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
-from .legacy.softmax import Softmax, apply_score_mod_inner
 
 
 class FFAFwdSm90(FlashAttentionForwardBase):
