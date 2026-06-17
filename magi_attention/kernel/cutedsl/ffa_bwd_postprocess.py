@@ -34,11 +34,10 @@ from cutlass.utils import LayoutEnum
 from quack import copy_utils, layout_utils, sm90_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from . import cutedsl_utils
+from . import cutedsl_utils, sm80_utils
+from .seqlen_info import SeqlenInfoQK
 
 # isort: split
-from .legacy import ampere_helpers as sm80_utils
-from .legacy.seqlen_info import SeqlenInfoQK
 from .legacy.tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,

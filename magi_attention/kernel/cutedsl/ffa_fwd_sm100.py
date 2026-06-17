@@ -57,6 +57,7 @@ from . import cutedsl_utils, sm100_utils
 from .block_info import BlockInfo
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm100
+from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
@@ -69,7 +70,6 @@ from .legacy.block_sparse_utils import (
 )
 from .legacy.pack_gqa import PackGQA, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
-from .legacy.seqlen_info import SeqlenInfoQK
 from .legacy.softmax import SoftmaxSm100, apply_score_mod_inner
 from .legacy.tile_scheduler import (
     ClcState,

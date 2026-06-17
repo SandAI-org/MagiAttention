@@ -45,9 +45,9 @@ from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .seqlen_info import SeqlenInfo
 
 # isort: split
-from .legacy.seqlen_info import SeqlenInfo
 from .legacy.tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
