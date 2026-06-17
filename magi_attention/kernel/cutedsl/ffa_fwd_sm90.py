@@ -40,6 +40,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
 from .block_info import BlockInfo
+from .mask import AttentionMask
 from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
 
@@ -50,7 +51,6 @@ from .legacy.block_sparse_utils import (
     produce_block_sparse_loads,
 )
 from .legacy.flash_fwd import FlashAttentionForwardBase
-from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierFwd
 from .legacy.pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager

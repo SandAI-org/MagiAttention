@@ -16,7 +16,7 @@
 
 import math
 from functools import lru_cache
-from typing import Callable, Tuple, Type, overload
+from typing import Callable, Optional, Tuple, Type, overload
 
 import cutlass
 import cutlass.cute as cute
@@ -367,6 +367,85 @@ def shuffle_sync(
 
 
 @dsl_user_op
+def shl_u32(
+    val: cutlass.Uint32, shift: cutlass.Uint32, *, loc=None, ip=None
+) -> cutlass.Uint32:
+    """
+    Left-shift val by shift bits using PTX shl.b32 (sign-agnostic).
+
+    Named ``shl_u32`` (not ``shl_b32``) because python type annotations
+    distinguish signed/unsigned.
+
+    PTX semantics (§9.7.8.8): "Shift amounts greater than the register width N
+    are clamped to N."  So ``shl.b32 d, a, 32`` is well-defined and yields 0.
+
+    This differs from C/C++ and LLVM IR, where shifting by >= the type width is
+    undefined behavior.  CuTeDSL compiles through MLIR -> LLVM IR, so a plain
+    Python-level ``Uint32(x) << Uint32(n)`` inherits LLVM's UB: the optimizer
+    may treat the result as poison and eliminate dependent code.  Inline PTX
+    bypasses the LLVM IR shift entirely — the instruction is emitted verbatim
+    into PTX where clamping makes it safe for all shift amounts.
+    """
+    return cutlass.Uint32(
+        llvm.inline_asm(
+            T.i32(),
+            [
+                cutlass.Uint32(val).ir_value(loc=loc, ip=ip),
+                cutlass.Uint32(shift).ir_value(loc=loc, ip=ip),
+            ],
+            "shl.b32 $0, $1, $2;",
+            "=r,r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    )
+
+
+@dsl_user_op
+def shr_u32(
+    val: cutlass.Uint32, shift: cutlass.Uint32, *, loc=None, ip=None
+) -> cutlass.Uint32:
+    """
+    Unsigned right-shift val by shift bits using PTX shr.u32 (zero-fills).
+
+    See ``shl_u32`` docstring for why inline PTX is used instead of plain
+    CuTeDSL shift operators (LLVM shift-by-type-width UB).
+    """
+    return cutlass.Uint32(
+        llvm.inline_asm(
+            T.i32(),
+            [
+                cutlass.Uint32(val).ir_value(loc=loc, ip=ip),
+                cutlass.Uint32(shift).ir_value(loc=loc, ip=ip),
+            ],
+            "shr.u32 $0, $1, $2;",
+            "=r,r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    )
+
+
+@cute.jit
+def warp_prefix_sum(
+    val: cutlass.Int32, lane: Optional[cutlass.Int32] = None
+) -> cutlass.Int32:
+    if const_expr(lane is None):
+        lane = cute.arch.lane_idx()
+    # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, val = %d", cute.arch.thread_idx()[0] % 32, val)  # noqa: E501
+    for i in cutlass.range_constexpr(int(math.log2(cute.arch.WARP_SIZE))):
+        offset = 1 << i
+        # Very important that we set mask_and_clamp to 0
+        partial_sum = cute.arch.shuffle_sync_up(val, offset=offset, mask_and_clamp=0)
+        if lane >= offset:
+            val += partial_sum
+        # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, partial_sum = %d, val = %d", cute.arch.thread_idx()[0] % 32, partial_sum, val)  # noqa: E501
+    return val
+
+
+@dsl_user_op
 def cvt_f16x2_f32(
     a: float | Float32, b: float | Float32, to_dtype: Type, *, loc=None, ip=None
 ) -> cutlass.Int32:
@@ -430,3 +509,16 @@ def cvt_f16(src: cute.Tensor, dst_or_dtype):
         assert cute.size(dst_i32.shape) * 2 == cute.size(src.shape)
         for i in cutlass.range_constexpr(cute.size(dst_i32)):
             dst_i32[i] = cvt_f16x2_f32(src[2 * i], src[2 * i + 1], dst.element_type)
+
+
+@cute.jit
+def scalar_to_ssa(a: cute.Numeric, dtype) -> cute.TensorSSA:
+    """Convert a scalar to a cute TensorSSA of shape (1,) and given dtype"""
+    vec = cute.make_rmem_tensor(1, dtype)
+    vec[0] = a
+    return vec.load()
+
+
+def ssa_to_scalar(val):
+    """Could inline but nice for reflecting the above api"""
+    return val[0]

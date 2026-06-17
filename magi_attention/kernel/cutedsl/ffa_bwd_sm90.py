@@ -35,6 +35,7 @@ from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 
 from . import cutedsl_utils
 from .block_info import BlockInfo
+from .mask import AttentionMask
 from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
 
@@ -46,7 +47,6 @@ from .legacy.block_sparse_utils import (
     get_total_q_block_count_bwd,
     produce_block_sparse_q_loads_bwd_sm90,
 )
-from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierBwd
 from .legacy.softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .legacy.tile_scheduler import (
