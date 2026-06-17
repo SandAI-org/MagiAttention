@@ -35,6 +35,8 @@ from .cutedsl_utils import (
     to_cute_aux_tensor,
     to_cute_tensor,
 )
+from .ffa_bwd_postprocess import FFABwdPostProcess
+from .ffa_bwd_preprocess import FFABwdPreProcess
 from .ffa_bwd_sm80 import FFABwdSm80
 from .ffa_bwd_sm90 import FFABwdSm90
 from .ffa_bwd_sm100 import FFABwdSm100
@@ -66,8 +68,6 @@ from .sparse_utils import (
 )
 
 # isort: split
-from .legacy.flash_bwd_postprocess import FlashAttentionBackwardPostprocess
-from .legacy.flash_bwd_preprocess import FlashAttentionBackwardPreprocess
 from .legacy.flash_bwd_sm120 import FlashAttentionBackwardSm120
 from .legacy.flash_fwd_sm120 import FlashAttentionForwardSm120
 from .legacy.testing import is_fake_mode
@@ -611,7 +611,7 @@ def _compile_bwd_preprocess(
         fake_tensor(cutlass.Float32, mLSE.shape, divisibility=1) if has_dlse else None
     )
     mdQaccum = mdQaccum if has_dq_accum else None
-    fa_bwd_pre = FlashAttentionBackwardPreprocess(
+    fa_bwd_pre = FFABwdPreProcess(
         dtype, head_dim, head_dim_v, m_block_size, use_padded_offsets=use_padded_offsets
     )
     return cute.compile(
@@ -714,7 +714,7 @@ def _compile_bwd_postprocess(
     mSeqUsedQ = (
         fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
     )
-    fa_bwd_post = FlashAttentionBackwardPostprocess(
+    fa_bwd_post = FFABwdPostProcess(
         dtype,
         hdim,
         arch,
