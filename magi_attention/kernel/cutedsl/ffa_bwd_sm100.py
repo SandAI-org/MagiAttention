@@ -36,7 +36,7 @@ import quack.activation
 from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from . import cutedsl_utils
+from . import cutedsl_utils, sm100_utils
 from .block_info import BlockInfo
 from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
@@ -44,7 +44,6 @@ from .sparse_utils import BlockSparseTensors
 # isort: split
 from .legacy import barrier, copy_utils
 from .legacy import pipeline as pipeline_custom
-from .legacy.blackwell_helpers import gemm_ptx_w_idx, gemm_w_idx  # noqa
 from .legacy.block_sparse_utils import (
     get_block_sparse_iteration_info_bwd,
     get_m_block_from_iter_bwd,
@@ -3143,7 +3142,7 @@ class FFABwdSm100:
         tSrK = tiled_mma_S.make_fragment_A(sK)
         tSrQ = tiled_mma_S.make_fragment_B(sQ)
         mma_s_qk_fn = partial(
-            gemm_ptx_w_idx,
+            sm100_utils.gemm_ptx_w_idx,
             tiled_mma_S,
             tStS,
             tSrK,
@@ -3161,7 +3160,7 @@ class FFABwdSm100:
         tdPrV = tiled_mma_dP.make_fragment_A(sV)
         tdPrdOt = tiled_mma_dP.make_fragment_B(sdOt)
         mma_dp_vdo_fn = partial(
-            gemm_ptx_w_idx,
+            sm100_utils.gemm_ptx_w_idx,
             tiled_mma_dP,
             tdPtdP,
             tdPrV,
@@ -3180,12 +3179,14 @@ class FFABwdSm100:
         if const_expr(self.use_smem_dS_for_mma_dK and not self.use_2cta_instrs):
             # NOTE: For 2-CTA, dS (dK mma) MUST come from TMEM (cannot use SMEM)
             tdKrdS = tiled_mma_dK.make_fragment_A(sdSt)  # From SMEM
-            mma_dk_dsq_fn = partial(gemm_w_idx, tiled_mma_dK, tdKtdK, tdKrdS, tdKrQ)
+            mma_dk_dsq_fn = partial(
+                sm100_utils.gemm_w_idx, tiled_mma_dK, tdKtdK, tdKrdS, tdKrQ
+            )
         else:
             tdKrdS = tiled_mma_dK.make_fragment_A(tdS)  # From TMEM
             # Need to explicitly pass in tA_addr for correctness
             mma_dk_dsq_fn = partial(
-                gemm_ptx_w_idx,
+                sm100_utils.gemm_ptx_w_idx,
                 tiled_mma_dK,
                 tdKtdK,
                 tdKrdS,
@@ -3203,7 +3204,7 @@ class FFABwdSm100:
         tdQrdS = tiled_mma_dQ.make_fragment_A(sdS)
         tdQrK = tiled_mma_dQ.make_fragment_B(sKt)
         mma_dq_dsk_fn = partial(
-            gemm_w_idx,
+            sm100_utils.gemm_w_idx,
             tiled_mma_dQ,
             tdQtdQ,
             tdQrdS,
@@ -3219,7 +3220,7 @@ class FFABwdSm100:
         tdVrP = tiled_mma_dV.make_fragment_A(tP)
         tdVrdO = tiled_mma_dV.make_fragment_B(sdO)
         mma_dv_pdo_fn = partial(
-            gemm_ptx_w_idx,
+            sm100_utils.gemm_ptx_w_idx,
             tiled_mma_dV,
             tdVtdV,
             tdVrP,

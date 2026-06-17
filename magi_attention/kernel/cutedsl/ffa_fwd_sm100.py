@@ -53,13 +53,11 @@ from cutlass.utils import ClcDynamicPersistentTileScheduler
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from . import cutedsl_utils
+from . import cutedsl_utils, sm100_utils
 from .block_info import BlockInfo
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
-from .legacy import blackwell_helpers as sm100_utils
-from .legacy import mma_sm100_desc as sm100_desc
 from .legacy import pipeline as pipeline_custom
 from .legacy.block_sparse_utils import (
     get_total_block_count,
@@ -2552,13 +2550,13 @@ class FFAFwdSm100:
         # Compute the static base portion of the smem descriptor for Q and K.
         # base encodes: layout_type (swizzle pattern), leading_byte_offset, stride_byte_offset.
         # This is purely compile-time and does NOT change across stages or KV-blocks.
-        q_smem_base = sm100_desc.smem_desc_base_from_tensor(sQ, sm100_desc.Major.K)
-        k_smem_base = sm100_desc.smem_desc_base_from_tensor(sK, sm100_desc.Major.K)
+        q_smem_base = sm100_utils.smem_desc_base_from_tensor(sQ, sm100_utils.Major.K)
+        k_smem_base = sm100_utils.smem_desc_base_from_tensor(sK, sm100_utils.Major.K)
 
         # Compute the dynamic start_addr portion for each Q stage.
         # start_addr = (smem_byte_offset & 0x3FFFF) >> 4  (14-bit, 16-byte granule).
         q_smem_start = [
-            sm100_desc.make_smem_desc_start_addr(sQ[None, None, None, stage].iterator)
+            sm100_utils.make_smem_desc_start_addr(sQ[None, None, None, stage].iterator)
             for stage in range(self.q_stage)
         ]
 
@@ -2746,7 +2744,7 @@ class FFAFwdSm100:
                     if const_expr(self.uneven_kv_smem):
                         sK_cur = self.offset_kv_smem(sK_cur, Ki_index, Ki_phase)
                     gemm_Si[stage](
-                        smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(
+                        smem_desc_start_b=sm100_utils.make_smem_desc_start_addr(
                             sK_cur.iterator
                         )
                     )
@@ -2844,7 +2842,7 @@ class FFAFwdSm100:
                         if const_expr(self.uneven_kv_smem):
                             sK_cur = self.offset_kv_smem(sK_cur, Ki_index, Ki_phase)
                         gemm_Si[stage](
-                            smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(
+                            smem_desc_start_b=sm100_utils.make_smem_desc_start_addr(
                                 sK_cur.iterator
                             )
                         )

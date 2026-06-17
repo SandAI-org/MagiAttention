@@ -22,6 +22,8 @@ from typing import Callable
 import cutlass
 import cutlass.cute as cute
 import torch
+
+# isort: split
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
