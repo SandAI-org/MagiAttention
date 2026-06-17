@@ -40,9 +40,11 @@ from .ffa_bwd_preprocess import FFABwdPreProcess
 from .ffa_bwd_sm80 import FFABwdSm80
 from .ffa_bwd_sm90 import FFABwdSm90
 from .ffa_bwd_sm100 import FFABwdSm100
+from .ffa_bwd_sm120 import FFABwdSm120
 from .ffa_fwd_sm80 import FFAFwdSm80
 from .ffa_fwd_sm90 import FFAFwdSm90
 from .ffa_fwd_sm100 import FFAFwdSm100
+from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     _get_disable_2cta_default,
     _get_use_clc_scheduler_default,
@@ -66,10 +68,6 @@ from .sparse_utils import (
     normalize_block_sparse_config_bwd,
     to_cute_block_sparse_tensors,
 )
-
-# isort: split
-from .legacy.flash_bwd_sm120 import FlashAttentionBackwardSm120
-from .legacy.flash_fwd_sm120 import FlashAttentionForwardSm120
 
 
 def _flex_flash_attn_fwd(
@@ -455,7 +453,7 @@ def _flex_flash_attn_fwd(
         elif major_arch == 12:
             # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
             assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
-            fa_fwd = FlashAttentionForwardSm120(
+            fa_fwd = FFAFwdSm120(
                 dtype,
                 head_dim,
                 head_dim_v,
@@ -471,6 +469,7 @@ def _flex_flash_attn_fwd(
                 score_mod=score_mod,
                 mask_mod=mask_mod,
                 has_aux_tensors=aux_tensors is not None,
+                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
         else:
             raise ValueError(
@@ -1329,18 +1328,14 @@ def _flex_flash_attn_bwd(
             for t in (dQ_semaphore, dK_semaphore, dV_semaphore)
         ]
         if major_arch in [8, 12]:
-            flash_bwd_obj_cls = (
-                FlashAttentionBackwardSm120 if major_arch == 12 else FFABwdSm80
-            )
+            flash_bwd_obj_cls = FFABwdSm120 if major_arch == 12 else FFABwdSm80
             bwd_obj_kwargs = dict(
                 V_in_regs=V_in_regs,
                 score_mod=score_mod,
                 score_mod_bwd=score_mod_bwd,
+                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             )
-            if major_arch == 8:
-                bwd_obj_kwargs[
-                    "debug_print"
-                ] = magiattn_cutedsl.is_ffa_debug_mode_enabled()
+
             fa_bwd_obj = flash_bwd_obj_cls(
                 dtype,
                 head_dim,
