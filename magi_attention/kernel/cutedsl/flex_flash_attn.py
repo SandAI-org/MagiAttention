@@ -57,15 +57,15 @@ from .ffa_utils import (
     validate_head_dims,
     validate_tensor,
 )
-
-# isort: split
-from .legacy.block_sparsity import (
+from .sparse_utils import (
     BlockSparseTensorsTorch,
     get_sparse_q_block_size,
     normalize_block_sparse_config,
     normalize_block_sparse_config_bwd,
     to_cute_block_sparse_tensors,
 )
+
+# isort: split
 from .legacy.flash_bwd_postprocess import FlashAttentionBackwardPostprocess
 from .legacy.flash_bwd_preprocess import FlashAttentionBackwardPreprocess
 from .legacy.flash_bwd_sm120 import FlashAttentionBackwardSm120

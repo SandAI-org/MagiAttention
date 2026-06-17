@@ -49,7 +49,6 @@ from .legacy.block_sparse_utils import (
     get_total_q_block_count_bwd,
     produce_block_sparse_q_loads_bwd_sm100,
 )
-from .legacy.block_sparsity import BlockSparseTensors
 from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierBwdSm100
 from .legacy.seqlen_info import SeqlenInfoQK
@@ -61,6 +60,7 @@ from .legacy.tile_scheduler import (  # noqa
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
+from .sparse_utils import BlockSparseTensors
 
 ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
 

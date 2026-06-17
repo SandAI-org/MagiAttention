@@ -36,7 +36,6 @@ from . import cutedsl_utils
 # isort: split
 from .legacy import ampere_helpers as sm80_utils
 from .legacy.block_info import BlockInfo
-from .legacy.block_sparsity import BlockSparseTensors
 from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.mask import AttentionMask
 from .legacy.seqlen_info import SeqlenInfoQK
@@ -46,6 +45,7 @@ from .legacy.tile_scheduler import (
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
+from .sparse_utils import BlockSparseTensors
 
 
 class FFAFwdSm80(FlashAttentionForwardBase):

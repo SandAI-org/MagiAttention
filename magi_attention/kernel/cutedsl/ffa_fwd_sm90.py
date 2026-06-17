@@ -47,7 +47,6 @@ from .legacy.block_sparse_utils import (
     consume_block_sparse_loads,
     produce_block_sparse_loads,
 )
-from .legacy.block_sparsity import BlockSparseTensors
 from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierFwd
@@ -61,6 +60,7 @@ from .legacy.tile_scheduler import (
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
+from .sparse_utils import BlockSparseTensors
 
 
 class FFAFwdSm90(FlashAttentionForwardBase):

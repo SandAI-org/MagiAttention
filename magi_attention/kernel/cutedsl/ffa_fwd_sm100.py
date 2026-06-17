@@ -66,7 +66,6 @@ from .legacy.block_sparse_utils import (
     produce_block_sparse_loads_sm100,
     softmax_block_sparse_sm100,
 )
-from .legacy.block_sparsity import BlockSparseTensors
 from .legacy.mask import AttentionMask
 from .legacy.named_barrier import NamedBarrierFwdSm100
 from .legacy.pack_gqa import PackGQA, pack_gqa_layout
@@ -83,6 +82,7 @@ from .legacy.tile_scheduler import (
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
+from .sparse_utils import BlockSparseTensors
 
 # === TUNING KNOBS (agent-editable) ===
 # Keys: (use_2cta_instrs: bool, is_causal: bool, head_dim_padded: int, is_sm103: bool)
