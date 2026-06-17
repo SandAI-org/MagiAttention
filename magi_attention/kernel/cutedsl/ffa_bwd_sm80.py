@@ -17,8 +17,6 @@
 # mypy: disable-error-code="assignment,arg-type,union-attr,misc"
 # pyright: reportInvalidTypeForm=false
 
-# SM80 (Ampere) backward pass for flash attention, extracted from flash_bwd.py.
-
 
 import math
 from functools import partial
@@ -36,11 +34,10 @@ from cutlass.cute.nvgpu import cpasync, warp
 from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from . import cutedsl_utils
+from . import cutedsl_utils, sm80_utils
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
-from .legacy import ampere_helpers as sm80_utils
 from .legacy.mask import AttentionMask
 from .legacy.seqlen_info import SeqlenInfoQK
 from .legacy.tile_scheduler import (

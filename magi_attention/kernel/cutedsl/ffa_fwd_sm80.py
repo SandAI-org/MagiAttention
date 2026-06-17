@@ -17,8 +17,6 @@
 # mypy: disable-error-code="union-attr,arg-type,no-redef,attr-defined,misc,assignment"
 # pyright: reportInvalidTypeForm=false
 
-# SM80 (Ampere) forward pass for flash attention, extracted from flash_fwd.py.
-
 
 from functools import partial
 from types import SimpleNamespace
@@ -31,11 +29,10 @@ from cutlass import Float32, Int32, const_expr
 from cutlass.cute.nvgpu import warp
 from quack import layout_utils
 
-from . import cutedsl_utils
+from . import cutedsl_utils, sm80_utils
 from .sparse_utils import BlockSparseTensors
 
 # isort: split
-from .legacy import ampere_helpers as sm80_utils
 from .legacy.block_info import BlockInfo
 from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.mask import AttentionMask
