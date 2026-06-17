@@ -21,7 +21,7 @@ from typing import Callable, Optional, Tuple, Type, overload
 import cutlass
 import cutlass.cute as cute
 import torch
-from cutlass import Float32, const_expr
+from cutlass import const_expr
 from cutlass._mlir.dialects import llvm, nvvm
 from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.runtime import from_dlpack
@@ -298,13 +298,13 @@ def warp_reduce(
 
 @dsl_user_op
 def atomic_add_fp32(
-    a: float | Float32, gmem_ptr: cute.Pointer, *, loc=None, ip=None
+    a: float | cutlass.Float32, gmem_ptr: cute.Pointer, *, loc=None, ip=None
 ) -> None:
     nvvm.atomicrmw(
         res=T.f32(),
         op=nvvm.AtomicOpKind.FADD,
         ptr=gmem_ptr.llvm_ptr,
-        a=Float32(a).ir_value(),
+        a=cutlass.Float32(a).ir_value(),
     )
 
 
@@ -447,7 +447,12 @@ def warp_prefix_sum(
 
 @dsl_user_op
 def cvt_f16x2_f32(
-    a: float | Float32, b: float | Float32, to_dtype: Type, *, loc=None, ip=None
+    a: float | cutlass.Float32,
+    b: float | cutlass.Float32,
+    to_dtype: Type,
+    *,
+    loc=None,
+    ip=None,
 ) -> cutlass.Int32:
     assert to_dtype in [
         cutlass.BFloat16,
@@ -456,7 +461,10 @@ def cvt_f16x2_f32(
     return cutlass.Int32(
         llvm.inline_asm(
             T.i32(),
-            [Float32(a).ir_value(loc=loc, ip=ip), Float32(b).ir_value(loc=loc, ip=ip)],
+            [
+                cutlass.Float32(a).ir_value(loc=loc, ip=ip),
+                cutlass.Float32(b).ir_value(loc=loc, ip=ip),
+            ],
             f"cvt.rn.{'bf16x2' if to_dtype is cutlass.BFloat16 else 'f16x2'}.f32 $0, $2, $1;",
             "=r,f,f",
             has_side_effects=False,
@@ -504,7 +512,7 @@ def cvt_f16(src: cute.Tensor, dst_or_dtype):
             cutlass.BFloat16,
             cutlass.Float16,
         ], "dst must be BFloat16 or Float16"
-        assert src.element_type is Float32, "src must be Float32"
+        assert src.element_type is cutlass.Float32, "src must be Float32"
         dst_i32 = cute.recast_tensor(dst, cutlass.Int32)
         assert cute.size(dst_i32.shape) * 2 == cute.size(src.shape)
         for i in cutlass.range_constexpr(cute.size(dst_i32)):
@@ -522,3 +530,14 @@ def scalar_to_ssa(a: cute.Numeric, dtype) -> cute.TensorSSA:
 def ssa_to_scalar(val):
     """Could inline but nice for reflecting the above api"""
     return val[0]
+
+
+@cute.jit
+def clz(x: cutlass.Int32) -> cutlass.Int32:
+    res = cutlass.Int32(32)
+    done = False
+    for i in cutlass.range(32):
+        if ((1 << (31 - i)) & x) and not done:
+            res = cutlass.Int32(i)
+            done = True
+    return res

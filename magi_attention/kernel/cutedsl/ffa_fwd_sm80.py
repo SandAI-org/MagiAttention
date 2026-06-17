@@ -34,15 +34,15 @@ from .block_info import BlockInfo
 from .mask import AttentionMask
 from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
-
-# isort: split
-from .legacy.flash_fwd import FlashAttentionForwardBase
-from .legacy.softmax import Softmax, apply_score_mod_inner
-from .legacy.tile_scheduler import (
+from .tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
+
+# isort: split
+from .legacy.flash_fwd import FlashAttentionForwardBase
+from .legacy.softmax import Softmax, apply_score_mod_inner
 
 
 class FFAFwdSm80(FlashAttentionForwardBase):

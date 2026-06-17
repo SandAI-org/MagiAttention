@@ -42,6 +42,13 @@ from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwdSm100
 from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
+from .tile_scheduler import (
+    SingleTileLPTBwdScheduler,
+    SingleTileScheduler,
+    SingleTileVarlenScheduler,
+    TileSchedulerArguments,
+    TileSchedulerProtocol,
+)
 
 # isort: split
 from .legacy import barrier, copy_utils
@@ -53,13 +60,6 @@ from .legacy.block_sparse_utils import (
     produce_block_sparse_q_loads_bwd_sm100,
 )
 from .legacy.softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
-from .legacy.tile_scheduler import (  # noqa
-    SingleTileLPTBwdScheduler,
-    SingleTileScheduler,
-    SingleTileVarlenScheduler,
-    TileSchedulerArguments,
-    TileSchedulerProtocol,
-)
 
 ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
 

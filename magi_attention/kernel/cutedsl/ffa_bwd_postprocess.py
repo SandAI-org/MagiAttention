@@ -36,9 +36,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
 from .seqlen_info import SeqlenInfoQK
-
-# isort: split
-from .legacy.tile_scheduler import (
+from .tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,

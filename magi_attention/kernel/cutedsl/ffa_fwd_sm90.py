@@ -44,6 +44,12 @@ from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm90
 from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
+from .tile_scheduler import (
+    SingleTileLPTScheduler,
+    SingleTileScheduler,
+    SingleTileVarlenScheduler,
+    TileSchedulerArguments,
+)
 
 # isort: split
 from .legacy import pipeline as pipeline_custom
@@ -55,12 +61,6 @@ from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
 from .legacy.softmax import Softmax, apply_score_mod_inner
-from .legacy.tile_scheduler import (
-    SingleTileLPTScheduler,
-    SingleTileScheduler,
-    SingleTileVarlenScheduler,
-    TileSchedulerArguments,
-)
 
 
 class FFAFwdSm90(FlashAttentionForwardBase):
