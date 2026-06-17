@@ -17,7 +17,7 @@
 # mypy: disable-error-code="assignment,arg-type"
 
 """
-Block-sparsity utilities for FlexAttention
+Block-sparsity utilities for FlexFlashAttention
 """
 
 from typing import Callable, NamedTuple, Tuple

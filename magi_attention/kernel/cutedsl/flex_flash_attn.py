@@ -70,7 +70,6 @@ from .sparse_utils import (
 # isort: split
 from .legacy.flash_bwd_sm120 import FlashAttentionBackwardSm120
 from .legacy.flash_fwd_sm120 import FlashAttentionForwardSm120
-from .legacy.testing import is_fake_mode
 
 
 def _flex_flash_attn_fwd(
@@ -154,18 +153,6 @@ def _flex_flash_attn_fwd(
         assert learnable_sink.shape == (num_head,)
         assert learnable_sink.dtype == torch.bfloat16, "learnable_sink must be bfloat16"
 
-    if not is_fake_mode():
-        assert all(
-            t is None or t.is_cuda
-            for t in (
-                q,
-                k,
-                v,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                learnable_sink,
-            )
-        ), "inputs must be on CUDA device"
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
     if major_arch not in [8, 12]:
@@ -522,45 +509,46 @@ def _flex_flash_attn_fwd(
             *compile_args, options="--enable-tvm-ffi"
         )
 
-    if not is_fake_mode():
-        q_call, k_call, v_call = q.detach(), k.detach(), v.detach()
-        call_args = [
-            q_call,
-            k_call,
-            v_call,
-            out.detach(),
-            lse,
-            softmax_scale,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            None,
-            None,
-            None,
-            None,  # window_size_left
-            None,  # window_size_right
-            learnable_sink,
+    q_call, k_call, v_call = q.detach(), k.detach(), v.detach()
+    call_args = [
+        q_call,
+        k_call,
+        v_call,
+        out.detach(),
+        lse,
+        softmax_scale,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        None,
+        None,
+        None,
+        None,  # window_size_left
+        None,  # window_size_right
+        learnable_sink,
+    ]
+    if major_arch in [10, 11]:
+        # FP8 descale tensors removed; SM100 kernel descale slot is always None.
+        call_args.append(None)
+    call_args.extend(
+        [
+            (
+                normalized_block_sparse_tensors.mask_block_cnt,
+                normalized_block_sparse_tensors.mask_block_idx,
+                normalized_block_sparse_tensors.full_block_cnt,
+                normalized_block_sparse_tensors.full_block_idx,
+                normalized_block_sparse_tensors.cu_total_m_blocks,
+                normalized_block_sparse_tensors.cu_block_idx_offsets,
+                normalized_block_sparse_tensors.dq_write_order,
+                normalized_block_sparse_tensors.dq_write_order_full,
+            )
+            if normalized_block_sparse_tensors is not None
+            else None,
+            aux_tensors,
         ]
-        if major_arch in [10, 11]:
-            # FP8 descale tensors removed; SM100 kernel descale slot is always None.
-            call_args.append(None)
-        call_args.extend(
-            [
-                (
-                    normalized_block_sparse_tensors.mask_block_cnt,
-                    normalized_block_sparse_tensors.mask_block_idx,
-                    normalized_block_sparse_tensors.full_block_cnt,
-                    normalized_block_sparse_tensors.full_block_idx,
-                    normalized_block_sparse_tensors.cu_total_m_blocks,
-                    normalized_block_sparse_tensors.cu_block_idx_offsets,
-                    normalized_block_sparse_tensors.dq_write_order,
-                    normalized_block_sparse_tensors.dq_write_order_full,
-                )
-                if normalized_block_sparse_tensors is not None
-                else None,
-                aux_tensors,
-            ]
-        )
-        _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
+    )
+
+    _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
+
     return out, lse
 
 
@@ -663,10 +651,9 @@ def _bwd_preprocess(
         _bwd_preprocess.compile_cache[compile_key] = _compile_bwd_preprocess(
             *compile_key
         )
-    if not is_fake_mode():
-        _bwd_preprocess.compile_cache[compile_key](
-            out, dout, dpsum, lse, lse_log2, dq_accum, cu_seqlens_q, seqused_q, dlse
-        )
+    _bwd_preprocess.compile_cache[compile_key](
+        out, dout, dpsum, lse, lse_log2, dq_accum, cu_seqlens_q, seqused_q, dlse
+    )
 
 
 _bwd_preprocess.compile_cache = get_jit_cache("bwd_pre")
@@ -771,14 +758,13 @@ def _bwd_postprocess_convert(
         _bwd_postprocess_convert.compile_cache[compile_key] = _compile_bwd_postprocess(
             *compile_key
         )
-    if not is_fake_mode():
-        _bwd_postprocess_convert.compile_cache[compile_key](
-            accum,
-            output,
-            scale,
-            cu_seqlens,
-            seqused,
-        )
+    _bwd_postprocess_convert.compile_cache[compile_key](
+        accum,
+        output,
+        scale,
+        cu_seqlens,
+        seqused,
+    )
 
 
 _bwd_postprocess_convert.compile_cache = get_jit_cache("bwd_post")
@@ -1010,11 +996,6 @@ def _flex_flash_attn_bwd(
         if t is not None:
             assert t.dtype == torch.int32, "cu_seqlens_q, cu_seqlens_k must be int32"
     assert lse.dtype == torch.float32, "lse must be float32"
-    if not is_fake_mode():
-        assert all(
-            t is None or t.is_cuda
-            for t in (q, k, v, out, dout, lse, cu_seqlens_q, cu_seqlens_k)
-        ), "inputs must be on CUDA device"
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
     if major_arch not in [8, 12]:
@@ -1465,41 +1446,40 @@ def _flex_flash_attn_bwd(
             current_stream,
             options="--enable-tvm-ffi",
         )
-    if not is_fake_mode():
-        _flex_flash_attn_bwd.compile_cache[compile_key](
-            q.detach(),
-            k.detach(),
-            v.detach(),
-            dout,
-            lse_log2,
-            dpsum,
-            dq_accum,
-            dk if not dKV_postprocess else dk_accum,
-            dv if not dKV_postprocess else dv_accum,
-            softmax_scale,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            None,
-            None,
-            None,  # window_size_left
-            None,  # window_size_right
-            dQ_semaphore,
-            dK_semaphore,
-            dV_semaphore,
-            aux_tensors,
-            (
-                normalized_block_sparse_tensors.mask_block_cnt,
-                normalized_block_sparse_tensors.mask_block_idx,
-                normalized_block_sparse_tensors.full_block_cnt,
-                normalized_block_sparse_tensors.full_block_idx,
-                normalized_block_sparse_tensors.cu_total_m_blocks,
-                normalized_block_sparse_tensors.cu_block_idx_offsets,
-                normalized_block_sparse_tensors.dq_write_order,
-                normalized_block_sparse_tensors.dq_write_order_full,
-            )
-            if normalized_block_sparse_tensors is not None
-            else None,
+    _flex_flash_attn_bwd.compile_cache[compile_key](
+        q.detach(),
+        k.detach(),
+        v.detach(),
+        dout,
+        lse_log2,
+        dpsum,
+        dq_accum,
+        dk if not dKV_postprocess else dk_accum,
+        dv if not dKV_postprocess else dv_accum,
+        softmax_scale,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        None,
+        None,
+        None,  # window_size_left
+        None,  # window_size_right
+        dQ_semaphore,
+        dK_semaphore,
+        dV_semaphore,
+        aux_tensors,
+        (
+            normalized_block_sparse_tensors.mask_block_cnt,
+            normalized_block_sparse_tensors.mask_block_idx,
+            normalized_block_sparse_tensors.full_block_cnt,
+            normalized_block_sparse_tensors.full_block_idx,
+            normalized_block_sparse_tensors.cu_total_m_blocks,
+            normalized_block_sparse_tensors.cu_block_idx_offsets,
+            normalized_block_sparse_tensors.dq_write_order,
+            normalized_block_sparse_tensors.dq_write_order_full,
         )
+        if normalized_block_sparse_tensors is not None
+        else None,
+    )
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
     if major_arch == 9:

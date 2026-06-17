@@ -31,8 +31,6 @@ from quack.compile_utils import make_fake_tensor as fake_tensor
 
 from magi_attention.utils.arch import get_dev_cap_num
 
-from .legacy.testing import is_fake_mode
-
 # ---------------------------------------------------------------------------
 # Arch helpers
 # ---------------------------------------------------------------------------
@@ -308,8 +306,7 @@ def validate_tensor(t, name, expected_shape, expected_dtype, expected_device):
     assert (
         t.device == expected_device
     ), f"{name} device {t.device} != expected {expected_device}"
-    if not is_fake_mode():
-        assert t.is_cuda, f"{name} must be on CUDA"
+    assert t.is_cuda, f"{name} must be on CUDA"
 
 
 # ---------------------------------------------------------------------------
