@@ -37,6 +37,7 @@ from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .sparse_utils import BlockSparseTensors
 
 # isort: split
 from .legacy import barrier, copy_utils
@@ -60,7 +61,6 @@ from .legacy.tile_scheduler import (  # noqa
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
-from .sparse_utils import BlockSparseTensors
 
 ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
 

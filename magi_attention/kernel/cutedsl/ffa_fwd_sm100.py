@@ -54,6 +54,7 @@ from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .sparse_utils import BlockSparseTensors
 
 # isort: split
 from .legacy import blackwell_helpers as sm100_utils
@@ -82,7 +83,6 @@ from .legacy.tile_scheduler import (
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
-from .sparse_utils import BlockSparseTensors
 
 # === TUNING KNOBS (agent-editable) ===
 # Keys: (use_2cta_instrs: bool, is_causal: bool, head_dim_padded: int, is_sm103: bool)

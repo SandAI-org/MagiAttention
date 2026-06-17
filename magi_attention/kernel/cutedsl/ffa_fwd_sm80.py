@@ -32,6 +32,7 @@ from cutlass.cute.nvgpu import warp
 from quack import layout_utils
 
 from . import cutedsl_utils
+from .sparse_utils import BlockSparseTensors
 
 # isort: split
 from .legacy import ampere_helpers as sm80_utils
@@ -45,7 +46,6 @@ from .legacy.tile_scheduler import (
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-from .sparse_utils import BlockSparseTensors
 
 
 class FFAFwdSm80(FlashAttentionForwardBase):

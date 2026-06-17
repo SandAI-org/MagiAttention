@@ -17,8 +17,6 @@
 # mypy: disable-error-code="assignment"
 
 import ctypes
-
-# Manage Ahead-of-Time (AOT) compiled kernels
 import fcntl
 import hashlib
 import logging
@@ -32,9 +30,11 @@ from getpass import getuser
 from pathlib import Path
 from typing import Hashable, TypeAlias
 
+import tvm_ffi
+
+# isort: split
 import cutlass
 import cutlass.cute as cute
-import tvm_ffi
 from cutlass.cutlass_dsl import JitCompiledFunction
 
 logger = logging.getLogger(__name__)

@@ -34,6 +34,7 @@ from quack.cute_dsl_utils import ParamsBase
 from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 
 from . import cutedsl_utils
+from .sparse_utils import BlockSparseTensors
 
 # isort: split
 from .legacy import barrier, pipeline
@@ -54,7 +55,6 @@ from .legacy.tile_scheduler import (
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-from .sparse_utils import BlockSparseTensors
 
 
 class FFABwdSm90:

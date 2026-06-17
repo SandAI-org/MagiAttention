@@ -37,6 +37,7 @@ from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .sparse_utils import BlockSparseTensors
 
 # isort: split
 from .legacy import ampere_helpers as sm80_utils
@@ -47,7 +48,6 @@ from .legacy.tile_scheduler import (
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-from .sparse_utils import BlockSparseTensors
 
 
 class FFABwdSm80:
