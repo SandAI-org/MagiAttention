@@ -33,7 +33,7 @@ from cutlass.utils import LayoutEnum
 
 # isort: split
 import quack.activation
-from quack import layout_utils
+from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm100_utils
@@ -59,7 +59,6 @@ from .tile_scheduler import (
 )
 
 # isort: split
-from .legacy import copy_utils
 from .legacy import pipeline as pipeline_custom
 
 
@@ -4135,7 +4134,9 @@ class FFABwdSm100:
         #   => 4 x (row32,col32) cells in tmem per warp group
         # layout_dst_tv_tiled=((32,4,numWG2),(32,1)):((256,1,128),(4,0))
         #   => still 32 fp32 elems in rmem per thread, but tiled in 2 warp groups
-        thr_copy_t2r = copy_utils.make_tmem_copy(tmem_load_atom, num_wg).get_slice(tidx)
+        thr_copy_t2r = sm100_utils.make_tmem_copy(tmem_load_atom, num_wg).get_slice(
+            tidx
+        )
 
         # tStS_t2r: (T2R_CPY_ATOM=((32,32),1),CPY_Q2,MMA_K1,MMA_Q1):(((1,65536),0),64,0,0)
         # tdPtdP_t2r: (T2R_CPY_ATOM=((32,32),1),CPY_Q2,MMA_K1,MMA_Q1):(((1,65536),0),64,0,0)
@@ -4167,7 +4168,7 @@ class FFABwdSm100:
         #   => still 16 fp32 elems in rmem per thread, but tiled in 2 warp groups
         # layout_dst_tv_tiled=((32,4,numWG2),((16,32),1)):((0,1,64),((4,128),0))
         #   => 4 x (row32,col16) cells in tmem per warp group
-        thr_copy_r2t = copy_utils.make_tmem_copy(tmem_store_atom, num_wg).get_slice(
+        thr_copy_r2t = sm100_utils.make_tmem_copy(tmem_store_atom, num_wg).get_slice(
             tidx
         )
 
@@ -4799,7 +4800,7 @@ class FFABwdSm100:
                             stage_copy_bytes,
                             peer_cta_rank_in_cluster=peer_cta_rank_in_cluster,
                         )
-                        copy_utils.cpasync_bulk_s2cluster(
+                        sm100_utils.cpasync_bulk_s2cluster(
                             smem_src_ptr,
                             smem_dst_ptr,
                             dS_cluster_full_mbar_ptr,
@@ -4900,12 +4901,12 @@ class FFABwdSm100:
                     # For 2-CTA: use cluster-wide tile size (cta_group_size * tile_n)
                     cluster_tile_n = self.tile_n * self.cta_group_size
                     n_block_for_tile = n_block // self.cta_group_size
-                    gmem_tiled_copy_zero_dK = copy_utils.tiled_copy_2d(
+                    gmem_tiled_copy_zero_dK = sm100_utils.tiled_copy_2d(
                         self.dk_dtype,
                         math.gcd(64, self.tile_hdim),
                         128,  # num_threads
                     )
-                    gmem_tiled_copy_zero_dV = copy_utils.tiled_copy_2d(
+                    gmem_tiled_copy_zero_dV = sm100_utils.tiled_copy_2d(
                         self.dv_dtype,
                         math.gcd(64, self.tile_hdimv),
                         128,  # num_threads

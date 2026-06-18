@@ -16,14 +16,17 @@
 
 # mypy: disable-error-code="index,union-attr,assignment,arg-type"
 
+import math
 from enum import IntEnum
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Type
 
 import cutlass
 import cutlass.cute as cute
+import cutlass.utils.blackwell_helpers as blackwell_helpers
 from cutlass import Boolean, Int32, const_expr
 from cutlass._mlir.dialects import llvm
-from cutlass.cute.nvgpu import tcgen05
+from cutlass.cute.nvgpu import cpasync, tcgen05
+from cutlass.cutlass_dsl import T, dsl_user_op
 
 # ---------------------------------------------------------------------------
 # Enumerations that match the HW encodings (values MUST stay identical)
@@ -1502,3 +1505,97 @@ def gemm_ptx_precomputed_varname(
             is_align_stack=False,
             asm_dialect=llvm.AsmDialect.AD_ATT,
         )
+
+
+# ---------------------------------------------------------------------------
+# Copy helpers (SM100-specific tiled / tmem / cluster copies)
+# ---------------------------------------------------------------------------
+
+
+def tiled_copy_2d(
+    dtype: Type[cutlass.Numeric],
+    major_mode_size: int,
+    num_threads: int,
+    is_async: bool = False,
+) -> cute.TiledCopy:
+    num_copy_bits = math.gcd(major_mode_size, 128 // dtype.width) * dtype.width
+    copy_elems = num_copy_bits // dtype.width
+    copy_op = cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
+    copy_atom = cute.make_copy_atom(copy_op, dtype, num_bits_per_copy=num_copy_bits)
+    gmem_threads_per_row = major_mode_size // copy_elems
+    assert num_threads % gmem_threads_per_row == 0
+    thr_layout = cute.make_ordered_layout(
+        (num_threads // gmem_threads_per_row, gmem_threads_per_row),
+        order=(1, 0),
+    )
+    val_layout = cute.make_layout((1, copy_elems))
+    return cute.make_tiled_copy_tv(copy_atom, thr_layout, val_layout)
+
+
+def make_tmem_copy(
+    tmem_copy_atom: cute.CopyAtom, num_wg: int = 1, *, loc=None, ip=None
+) -> cute.CopyAtom:
+    num_dp, num_bits, num_rep, _ = blackwell_helpers.get_tmem_copy_properties(
+        tmem_copy_atom
+    )
+    assert num_dp == 32
+    assert num_bits == 32
+    tiler_mn = (cute.make_layout((128 * num_rep * num_wg // 32, 32), stride=(32, 1)),)
+    layout_tv = cute.make_layout(
+        ((32, 4, num_wg), (num_rep, 32)),
+        stride=((0, 1, 4 * num_rep), (4, 4 * num_rep * num_wg)),
+    )
+    return cute.make_tiled_copy(tmem_copy_atom, layout_tv, tiler_mn)
+
+
+@dsl_user_op
+def set_block_rank(
+    smem_ptr: cute.Pointer, peer_cta_rank_in_cluster: Int32, *, loc=None, ip=None
+) -> Int32:
+    """Map the given smem pointer to the address at another CTA rank in the cluster."""
+    smem_ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
+    return Int32(
+        llvm.inline_asm(
+            T.i32(),
+            [smem_ptr_i32, peer_cta_rank_in_cluster.ir_value()],
+            "mapa.shared::cluster.u32 $0, $1, $2;",
+            "=r,r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    )
+
+
+@dsl_user_op
+def cpasync_bulk_s2cluster(
+    smem_src_ptr: cute.Pointer,
+    smem_dst_ptr: cute.Pointer,
+    mbar_ptr: cute.Pointer,
+    size: int | Int32,
+    peer_cta_rank_in_cluster: Int32,
+    *,
+    loc=None,
+    ip=None,
+):
+    smem_src_ptr_i32 = smem_src_ptr.toint(loc=loc, ip=ip).ir_value()
+    smem_dst_ptr_i32 = set_block_rank(
+        smem_dst_ptr, peer_cta_rank_in_cluster, loc=loc, ip=ip
+    ).ir_value()
+    mbar_ptr_i32 = set_block_rank(
+        mbar_ptr, peer_cta_rank_in_cluster, loc=loc, ip=ip
+    ).ir_value()
+    llvm.inline_asm(
+        None,
+        [
+            smem_dst_ptr_i32,
+            smem_src_ptr_i32,
+            mbar_ptr_i32,
+            Int32(size).ir_value(loc=loc, ip=ip),
+        ],
+        "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes [$0], [$1], $3, [$2];",
+        "r,r,r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )
