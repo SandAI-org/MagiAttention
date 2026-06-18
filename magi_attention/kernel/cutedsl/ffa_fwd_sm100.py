@@ -53,7 +53,9 @@ from cutlass.utils import ClcDynamicPersistentTileScheduler
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from . import cutedsl_utils, sm100_utils
+from . import cutedsl_utils
+from . import pipeline as ffa_pipeline
+from . import sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .mask import AttentionMask
@@ -79,9 +81,6 @@ from .tile_scheduler import (
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
-
-# isort: split
-from .legacy import pipeline as pipeline_custom
 
 # === TUNING KNOBS (agent-editable) ===
 # Keys: (use_2cta_instrs: bool, is_causal: bool, head_dim_padded: int, is_sm103: bool)
@@ -1455,7 +1454,7 @@ class FFAFwdSm100:
         #   full  = sQ[stage] written by TMA
         #   empty = mma warp released after all KV-blocks for this Q-tile are done
         if const_expr(self.use_tma_Q):
-            pipeline_q = pipeline_custom.PipelineTmaUmma.create(
+            pipeline_q = ffa_pipeline.PipelineTmaUmma.create(
                 barrier_storage=mbar_load_Q,
                 num_stages=self.q_stage,
                 producer_group=load_warp,
@@ -1465,7 +1464,7 @@ class FFAFwdSm100:
                 defer_sync=True,  # sync later by our own
             )
         else:
-            pipeline_q = pipeline_custom.PipelineAsyncUmma.create(
+            pipeline_q = ffa_pipeline.PipelineAsyncUmma.create(
                 barrier_storage=mbar_load_Q,
                 num_stages=self.q_stage,
                 producer_group=load_threads,
@@ -1485,7 +1484,7 @@ class FFAFwdSm100:
         #   full  = sK[stage]/sV[stage] written by TMA
         #   empty = mma warp finished QK GEMM (K) or PV GEMM (V)
         if const_expr(self.use_tma_KV):
-            pipeline_kv = pipeline_custom.PipelineTmaUmma.create(
+            pipeline_kv = ffa_pipeline.PipelineTmaUmma.create(
                 barrier_storage=mbar_load_KV,
                 num_stages=self.kv_stage,
                 producer_group=load_warp,
@@ -1524,7 +1523,7 @@ class FFAFwdSm100:
         #     release: pipeline_s_p_o.consumer_release_w_index(stage)             [after rescale O → O ready]
         #              (in prologue: skip rescale, still release to unblock MMA)
         #              (in epilogue: after correction_epilogue)
-        pipeline_s_p_o = pipeline_custom.PipelineUmmaAsync.create(  # MMA(P) -> Async(C)
+        pipeline_s_p_o = ffa_pipeline.PipelineUmmaAsync.create(  # MMA(P) -> Async(C)
             barrier_storage=mbar_S_full_P_full_O_rescaled,
             num_stages=self.q_stage,
             producer_group=mma_warp,
@@ -1550,7 +1549,7 @@ class FFAFwdSm100:
         #   empty = PV GEMM consumed P (UMMA hardware done)
 
         pipeline_p_lastsplit = (
-            pipeline_custom.PipelineAsyncUmma.create(  # Async(P) -> MMA(C)
+            ffa_pipeline.PipelineAsyncUmma.create(  # Async(P) -> MMA(C)
                 barrier_storage=mbar_P_full_lastsplit,
                 num_stages=self.q_stage,
                 producer_group=softmax_warps_cluster,
@@ -1577,7 +1576,7 @@ class FFAFwdSm100:
         #     (no release: correction owns O until end of tile; MMA is already done)
         #   full  = final O[stage] written to tmem by last PV GEMM
         #   empty = (never explicitly released; O data consumed by correction_epilogue into smem)
-        pipeline_o_acc = pipeline_custom.PipelineUmmaAsync.create(
+        pipeline_o_acc = ffa_pipeline.PipelineUmmaAsync.create(
             barrier_storage=mbar_O_full,
             num_stages=self.q_stage,
             producer_group=mma_warp,
@@ -1599,7 +1598,7 @@ class FFAFwdSm100:
             # This is not a typical producer-consumer pipeline. We will directly use
             # pipeline_s0_s1_sequence.sync_object_full and will not use
             # pipeline_s0_s1_sequence.sync_object_empty.
-            pipeline_s0_s1_sequence = pipeline_custom.PipelineAsync.create(
+            pipeline_s0_s1_sequence = ffa_pipeline.PipelineAsync.create(
                 barrier_storage=mbar_s0_s1_sequence,
                 num_stages=2,
                 producer_group=softmax_threads,
@@ -1625,7 +1624,7 @@ class FFAFwdSm100:
         #   turning this WAR backpressure into round-robin traffic control: a single correction
         #   warp group serves two softmax warp groups (one per q_stage), staggering them so only
         #   one softmax wg overlaps with correction at a time while the other parks on its acquire.
-        pipeline_sm_stats = pipeline_custom.PipelineAsync.create(
+        pipeline_sm_stats = ffa_pipeline.PipelineAsync.create(
             barrier_storage=mbar_softmax_stats,
             num_stages=self.q_stage,
             producer_group=softmax_threads,
@@ -1642,7 +1641,7 @@ class FFAFwdSm100:
         #
         #   softmax warp (after writing sScale): arrive_w_index(stage * num_softmax_warps + warp_idx)
         #   correction warp (before reading):    arrive_and_wait_w_index(stage * num_corr_warps + warp_idx)
-        sm_stats_barrier = pipeline_custom.NamedBarrier(
+        sm_stats_barrier = ffa_pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierFwdSm100.SoftmaxStatsW0),
             num_threads=cute.arch.WARP_SIZE * 2,
         )
@@ -1666,7 +1665,7 @@ class FFAFwdSm100:
         #   empty = epilogue warp finished TMA store, sO slot can be reused by next correction_epilogue
         pipeline_o_epi = None
         if const_expr(not self.use_correction_warps_for_epi):
-            pipeline_o_epi = pipeline_custom.PipelineAsync.create(
+            pipeline_o_epi = ffa_pipeline.PipelineAsync.create(
                 barrier_storage=mbar_O_epi,
                 num_stages=self.q_stage,
                 producer_group=correction_threads,
@@ -2500,8 +2499,8 @@ class FFAFwdSm100:
         tOrP: cute.Tensor,
         pipeline_q: pipeline.PipelineAsync,
         pipeline_kv: pipeline.PipelineAsync,
-        pipeline_s_p_o: pipeline_custom.PipelineUmmaAsync,
-        pipeline_p_lastsplit: pipeline_custom.PipelineAsyncUmma,
+        pipeline_s_p_o: ffa_pipeline.PipelineUmmaAsync,
+        pipeline_p_lastsplit: ffa_pipeline.PipelineAsyncUmma,
         pipeline_o_acc: pipeline.PipelineAsync,
         is_leader_cta: Boolean,
         block_info: BlockInfo,
@@ -2966,11 +2965,11 @@ class FFAFwdSm100:
         tStS: cute.Tensor,  # ((TILE_M, TILE_N), 1, 1, q_stage)
         sScale: cute.Tensor,
         mLSE: Optional[cute.Tensor],
-        pipeline_s_p_o: pipeline_custom.PipelineUmmaAsync,
-        pipeline_p_lastsplit: pipeline_custom.PipelineAsyncUmma,
-        pipeline_sm_stats: pipeline_custom.PipelineAsync,
-        sm_stats_barrier: pipeline_custom.NamedBarrier,
-        pipeline_s0_s1_sequence: Optional[pipeline_custom.PipelineAsync],
+        pipeline_s_p_o: ffa_pipeline.PipelineUmmaAsync,
+        pipeline_p_lastsplit: ffa_pipeline.PipelineAsyncUmma,
+        pipeline_sm_stats: ffa_pipeline.PipelineAsync,
+        sm_stats_barrier: ffa_pipeline.NamedBarrier,
+        pipeline_s0_s1_sequence: Optional[ffa_pipeline.PipelineAsync],
         learnable_sink: Optional[cute.Tensor],
         block_info: BlockInfo,
         num_splits: Int32,
@@ -3523,11 +3522,11 @@ class FFAFwdSm100:
         n_block: Int32,
         softmax: SoftmaxSm100,
         thr_mma_qk: cute.ThrMma,
-        pipeline_s_p_o: pipeline_custom.PipelineUmmaAsync,
-        pipeline_p_lastsplit: pipeline_custom.PipelineAsyncUmma,
-        pipeline_sm_stats: pipeline_custom.PipelineAsync,
-        sm_stats_barrier: pipeline_custom.NamedBarrier,
-        pipeline_s0_s1_sequence: Optional[pipeline_custom.PipelineAsync],
+        pipeline_s_p_o: ffa_pipeline.PipelineUmmaAsync,
+        pipeline_p_lastsplit: ffa_pipeline.PipelineAsyncUmma,
+        pipeline_sm_stats: ffa_pipeline.PipelineAsync,
+        sm_stats_barrier: ffa_pipeline.NamedBarrier,
+        pipeline_s0_s1_sequence: Optional[ffa_pipeline.PipelineAsync],
         thr_tmem_load: cute.CopyAtom,
         thr_tmem_store: cute.CopyAtom,
         thr_tmem_store_scale: cute.CopyAtom,
@@ -3754,9 +3753,9 @@ class FFAFwdSm100:
         sO: cute.Tensor,
         pipeline_s_p_o: pipeline.PipelineAsync,
         pipeline_o_acc: pipeline.PipelineAsync,
-        pipeline_sm_stats: pipeline_custom.PipelineAsync,
-        sm_stats_barrier: pipeline_custom.NamedBarrier,
-        pipeline_o_epi: Optional[pipeline_custom.PipelineAsync],
+        pipeline_sm_stats: ffa_pipeline.PipelineAsync,
+        sm_stats_barrier: ffa_pipeline.NamedBarrier,
+        pipeline_o_epi: Optional[ffa_pipeline.PipelineAsync],
         learnable_sink: Optional[cute.Tensor],
         descale_tensors: Optional[DescaleTensors],
         gmem_tiled_copy_O: cute.TiledCopy,
@@ -4727,7 +4726,7 @@ class FFAFwdSm100:
         sO: cute.Tensor,
         gmem_tiled_copy_O: cute.TiledCopy,
         tma_atom_O: Optional[cute.CopyAtom],
-        pipeline_o_epi: Optional[pipeline_custom.PipelineAsync],
+        pipeline_o_epi: Optional[ffa_pipeline.PipelineAsync],
         block_info: BlockInfo,
         num_splits: int,
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],

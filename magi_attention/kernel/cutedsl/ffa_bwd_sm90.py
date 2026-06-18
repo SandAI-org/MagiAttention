@@ -25,7 +25,7 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import cutlass.utils.hopper_helpers as sm90_utils_basic
-from cutlass import Boolean, Float32, Int32, const_expr
+from cutlass import Boolean, Float32, Int32, const_expr, pipeline
 from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync, warpgroup
 from cutlass.utils import LayoutEnum
@@ -34,6 +34,7 @@ from quack.cute_dsl_utils import ParamsBase
 from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 
 from . import cutedsl_utils
+from . import pipeline as ffa_pipeline
 from .block_info import BlockInfo
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwd
@@ -52,9 +53,6 @@ from .tile_scheduler import (
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-
-# isort: split
-from .legacy import pipeline
 
 
 class FFABwdSm90:
@@ -879,13 +877,11 @@ class FFABwdSm90:
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
-        pipeline_producer_group = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread
+        pipeline_producer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
+        pipeline_consumer_group = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread, self.num_mma_threads // cute.arch.WARP_SIZE
         )
-        pipeline_consumer_group = cutlass.pipeline.CooperativeGroup(
-            cutlass.pipeline.Agent.Thread, self.num_mma_threads // cute.arch.WARP_SIZE
-        )
-        pipeline_Q = pipeline.PipelineTmaAsync.create(
+        pipeline_Q = ffa_pipeline.PipelineTmaAsync.create(
             barrier_storage=storage.mbar_ptr_Q.data_ptr(),
             num_stages=self.Q_stage,
             producer_group=pipeline_producer_group,
@@ -893,7 +889,7 @@ class FFABwdSm90:
             tx_count=self.tma_copy_bytes["Q"] + self.tma_copy_bytes["LSE"],
             defer_sync=True,
         )
-        pipeline_dO = pipeline.PipelineTmaAsync.create(
+        pipeline_dO = ffa_pipeline.PipelineTmaAsync.create(
             barrier_storage=storage.mbar_ptr_dO.data_ptr(),
             num_stages=self.dO_stage,
             producer_group=pipeline_producer_group,
@@ -1067,8 +1063,8 @@ class FFABwdSm90:
         tma_atom_K: cute.CopyAtom,
         tma_atom_V: cute.CopyAtom,
         tma_atom_dO: cute.CopyAtom,
-        pipeline_Q: cutlass.pipeline.PipelineAsync,
-        pipeline_dO: cutlass.pipeline.PipelineAsync,
+        pipeline_Q: pipeline.PipelineAsync,
+        pipeline_dO: pipeline.PipelineAsync,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         TileSchedulerCls: Callable,
@@ -1079,11 +1075,11 @@ class FFABwdSm90:
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
 
         if warp_idx_in_wg == 0:
-            producer_state_Q = cutlass.pipeline.make_pipeline_state(
-                cutlass.pipeline.PipelineUserType.Producer, self.Q_stage
+            producer_state_Q = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Producer, self.Q_stage
             )
-            producer_state_dO = cutlass.pipeline.make_pipeline_state(
-                cutlass.pipeline.PipelineUserType.Producer, self.dO_stage
+            producer_state_dO = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Producer, self.dO_stage
             )
 
             # ///////////////////////////////////////////////////////////////////////////////
@@ -1391,8 +1387,8 @@ class FFABwdSm90:
         sLSE: cute.Tensor,
         sdPsum: cute.Tensor,
         sdQaccum: cute.Tensor,
-        pipeline_Q: cutlass.pipeline.PipelineAsync,
-        pipeline_dO: cutlass.pipeline.PipelineAsync,
+        pipeline_Q: pipeline.PipelineAsync,
+        pipeline_dO: pipeline.PipelineAsync,
         tidx: Int32,
         tma_atom_dK: cute.CopyAtom,
         tma_atom_dV: cute.CopyAtom,
@@ -1554,7 +1550,7 @@ class FFABwdSm90:
             smem_thr_copy_dQaccum = r2s_tiled_copy_dQaccum.get_slice(tidx)
             tdQsdQaccum = smem_thr_copy_dQaccum.partition_D(sdQaccum)
 
-        PdS_barrier = cutlass.pipeline.NamedBarrier(
+        PdS_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwd.PdS), num_threads=self.num_mma_threads
         )
         score_mod_fn = partial(
@@ -1594,11 +1590,11 @@ class FFABwdSm90:
             is_dQ_wg=is_dQ_wg,
         )
 
-        consumer_state_Q = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, self.Q_stage
+        consumer_state_Q = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.Q_stage
         )
-        consumer_state_dO = cutlass.pipeline.make_pipeline_state(
-            cutlass.pipeline.PipelineUserType.Consumer, self.dO_stage
+        consumer_state_dO = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.dO_stage
         )
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1813,9 +1809,8 @@ class FFABwdSm90:
     def mma_one_m_block(
         self,
         m_block: Int32,
-        consumer_state_Q: cutlass.pipeline.PipelineState | pipeline.PipelineStateSimple,
-        consumer_state_dO: cutlass.pipeline.PipelineState
-        | pipeline.PipelineStateSimple,
+        consumer_state_Q: pipeline.PipelineState | ffa_pipeline.PipelineStateSimple,
+        consumer_state_dO: pipeline.PipelineState | ffa_pipeline.PipelineStateSimple,
         warp_group_idx: Int32,
         mma_qk_fn: Callable,
         mma_dov_fn: Callable,
@@ -1824,13 +1819,13 @@ class FFABwdSm90:
         mma_dsk_fn: Callable,
         copy_P_r2s: Optional[Callable],
         copy_dS_r2s: Callable,
-        pipeline_Q: cutlass.pipeline.PipelineAsync,
-        pipeline_dO: cutlass.pipeline.PipelineAsync,
+        pipeline_Q: pipeline.PipelineAsync,
+        pipeline_dO: pipeline.PipelineAsync,
         tLSEsLSE: cute.Tensor,
         tLSEsdPsum: cute.Tensor,
         tdQsdQaccum: Optional[cute.Tensor],
         softmax_scale_log2: Float32,
-        PdS_barrier: cutlass.pipeline.NamedBarrier,
+        PdS_barrier: pipeline.NamedBarrier,
         is_dQ_wg: cutlass.Constexpr[bool] = True,
         mask_fn: Optional[Callable] = None,
         score_mod_fn: Optional[Callable] = None,
@@ -2055,7 +2050,7 @@ class FFABwdSm90:
         mdV_semaphore: Optional[cute.Tensor] = None,
         is_print_thread_and_tile: bool = False,
     ):
-        epi_barrier = cutlass.pipeline.NamedBarrier(
+        epi_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwd.Epilogue),
             num_threads=self.num_mma_threads,
         )

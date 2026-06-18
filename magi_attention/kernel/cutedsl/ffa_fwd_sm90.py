@@ -39,6 +39,7 @@ from quack import copy_utils, layout_utils, sm90_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from . import pipeline as ffa_pipeline
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_fwd_sm80 import FFAFwdSm80
@@ -59,9 +60,6 @@ from .tile_scheduler import (
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-
-# isort: split
-from .legacy import pipeline as pipeline_custom
 
 
 class FFAFwdSm90(FFAFwdSm80):
@@ -626,7 +624,7 @@ class FFAFwdSm90(FFAFwdSm80):
         load_threads = ThreadCooperativeGroup(self.num_threads_per_warp_group)
         mma_warps = ThreadCooperativeGroup(self.num_mma_threads // cute.arch.WARP_SIZE)
         if const_expr(self.use_tma_Q):
-            pipeline_q = pipeline_custom.PipelineTmaAsync.create(
+            pipeline_q = ffa_pipeline.PipelineTmaAsync.create(
                 barrier_storage=mbar_ptr_Q,
                 num_stages=1,
                 producer_group=tma_warp,
@@ -635,7 +633,7 @@ class FFAFwdSm90(FFAFwdSm80):
                 defer_sync=True,
             )
         else:
-            pipeline_q = pipeline_custom.PipelineCpAsync.create(
+            pipeline_q = ffa_pipeline.PipelineCpAsync.create(
                 barrier_storage=mbar_ptr_Q,
                 num_stages=1,
                 producer_group=load_threads,
@@ -646,7 +644,7 @@ class FFAFwdSm90(FFAFwdSm80):
             )
 
         if const_expr(self.use_tma_KV):
-            pipeline_k = pipeline_custom.PipelineTmaAsync.create(
+            pipeline_k = ffa_pipeline.PipelineTmaAsync.create(
                 barrier_storage=storage.mbar_ptr_K.data_ptr(),
                 num_stages=self.num_stages,
                 producer_group=tma_warp,
@@ -654,7 +652,7 @@ class FFAFwdSm90(FFAFwdSm80):
                 tx_count=self.tma_copy_bytes["K"],
                 defer_sync=True,
             )
-            pipeline_v = pipeline_custom.PipelineTmaAsync.create(
+            pipeline_v = ffa_pipeline.PipelineTmaAsync.create(
                 barrier_storage=storage.mbar_ptr_V.data_ptr(),
                 num_stages=self.num_stages,
                 producer_group=tma_warp,
@@ -663,7 +661,7 @@ class FFAFwdSm90(FFAFwdSm80):
                 defer_sync=True,
             )
         else:
-            pipeline_k = pipeline_custom.PipelineCpAsync.create(
+            pipeline_k = ffa_pipeline.PipelineCpAsync.create(
                 barrier_storage=storage.mbar_ptr_K.data_ptr(),
                 num_stages=self.num_stages,
                 producer_group=load_threads,
@@ -672,7 +670,7 @@ class FFAFwdSm90(FFAFwdSm80):
                 elect_one_release=True,
                 syncwarp_before_release=False,
             )
-            pipeline_v = pipeline_custom.PipelineCpAsync.create(
+            pipeline_v = ffa_pipeline.PipelineCpAsync.create(
                 barrier_storage=storage.mbar_ptr_V.data_ptr(),
                 num_stages=self.num_stages,
                 producer_group=load_threads,
@@ -1759,7 +1757,7 @@ class FFAFwdSm90(FFAFwdSm80):
     @cute.jit
     def mma_one_n_block(
         self,
-        smem_pipe_read: pipeline.PipelineState | pipeline_custom.PipelineStateSimple,
+        smem_pipe_read: pipeline.PipelineState | ffa_pipeline.PipelineStateSimple,
         n_block: Int32,
         mma_qk_fn: Callable,
         mma_pv_fn: Callable,
@@ -1866,7 +1864,7 @@ class FFAFwdSm90(FFAFwdSm80):
     @cute.jit
     def mma_one_n_block_intrawg_overlap(
         self,
-        smem_pipe_read: pipeline.PipelineState | pipeline_custom.PipelineStateSimple,
+        smem_pipe_read: pipeline.PipelineState | ffa_pipeline.PipelineStateSimple,
         n_block: Int32,
         mma_qk_fn: Callable,
         mma_pv_fn: Callable,

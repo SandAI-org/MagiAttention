@@ -36,7 +36,9 @@ import quack.activation
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
-from . import cutedsl_utils, sm100_utils
+from . import cutedsl_utils
+from . import pipeline as ffa_pipeline
+from . import sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .mask import AttentionMask
@@ -57,9 +59,6 @@ from .tile_scheduler import (
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
-
-# isort: split
-from .legacy import pipeline as pipeline_custom
 
 
 class FFABwdSm100:
@@ -1683,7 +1682,7 @@ class FFABwdSm100:
         )
 
         # Load Q pipeline (load -> MMA)
-        pipeline_Q = pipeline_custom.PipelineTmaUmma.create(
+        pipeline_Q = ffa_pipeline.PipelineTmaUmma.create(
             barrier_storage=Q_mbar_ptr,
             num_stages=self.Q_stage,
             producer_group=load_warp,
@@ -1698,7 +1697,7 @@ class FFABwdSm100:
             if const_expr(self.tile_hdim == 192):
                 pipeline_Qt = pipeline_Q
             else:
-                pipeline_Qt = pipeline_custom.PipelineTmaUmma.create(
+                pipeline_Qt = ffa_pipeline.PipelineTmaUmma.create(
                     barrier_storage=Qt_mbar_ptr,
                     num_stages=self.Q_stage,
                     producer_group=load_warp,
@@ -1707,7 +1706,7 @@ class FFABwdSm100:
                     cta_layout_vmnk=cta_layout_vmnk,
                     defer_sync=True,
                 )
-            pipeline_Kt = pipeline_custom.PipelineTmaUmma.create(
+            pipeline_Kt = ffa_pipeline.PipelineTmaUmma.create(
                 barrier_storage=Kt_mbar_ptr,
                 num_stages=self.single_stage,
                 producer_group=load_warp,
@@ -1720,7 +1719,7 @@ class FFABwdSm100:
             pipeline_Qt = pipeline_Kt = pipeline_Q
 
         # Load dO pipeline (load -> MMA)
-        pipeline_dO = pipeline_custom.PipelineTmaUmma.create(
+        pipeline_dO = ffa_pipeline.PipelineTmaUmma.create(
             barrier_storage=dO_mbar_ptr,
             num_stages=self.dO_stage,
             producer_group=load_warp,
@@ -2336,10 +2335,10 @@ class FFABwdSm100:
         tma_atom_dO: cute.CopyAtom,
         tma_atom_Qt: Optional[cute.CopyAtom],
         tma_atom_dOt: Optional[cute.CopyAtom],  # 2-CTA only
-        pipeline_Q: pipeline_custom.PipelineTmaUmma,
-        pipeline_Qt: pipeline_custom.PipelineTmaUmma,
-        pipeline_Kt: pipeline_custom.PipelineTmaUmma,
-        pipeline_dO: pipeline_custom.PipelineTmaUmma,
+        pipeline_Q: ffa_pipeline.PipelineTmaUmma,
+        pipeline_Qt: ffa_pipeline.PipelineTmaUmma,
+        pipeline_Kt: ffa_pipeline.PipelineTmaUmma,
+        pipeline_dO: ffa_pipeline.PipelineTmaUmma,
         pipeline_LSE: pipeline.PipelineTmaAsync,
         pipeline_dPsum: pipeline.PipelineTmaAsync,
         cta_layout_vmnk: cute.Layout,
@@ -3109,10 +3108,10 @@ class FFABwdSm100:
         tdKtdK: cute.Tensor,
         tdQtdQ: cute.Tensor,
         dS_cluster_leader_mbar_ptr: cute.Pointer,
-        pipeline_Q: pipeline_custom.PipelineTmaUmma,
-        pipeline_Qt: pipeline_custom.PipelineTmaUmma,
-        pipeline_Kt: pipeline_custom.PipelineTmaUmma,
-        pipeline_dO: pipeline_custom.PipelineTmaUmma,
+        pipeline_Q: ffa_pipeline.PipelineTmaUmma,
+        pipeline_Qt: ffa_pipeline.PipelineTmaUmma,
+        pipeline_Kt: ffa_pipeline.PipelineTmaUmma,
+        pipeline_dO: ffa_pipeline.PipelineTmaUmma,
         pipeline_S_P: pipeline.PipelineUmmaAsync,
         pipeline_dS: pipeline.PipelineAsyncUmma,
         pipeline_dKV: pipeline.PipelineUmmaAsync,
@@ -4237,12 +4236,12 @@ class FFABwdSm100:
         # --- Init consumer / producer pipeline states ---
 
         consumer_state_S_P_dP = (
-            pipeline_custom.make_pipeline_state(  # Our impl has shortcut for stage==1
+            ffa_pipeline.make_pipeline_state(  # Our impl has shortcut for stage==1
                 pipeline.PipelineUserType.Consumer, 1
             )
         )
         producer_state_dS = (
-            pipeline_custom.make_pipeline_state(  # Our impl has shortcut for stage==1
+            ffa_pipeline.make_pipeline_state(  # Our impl has shortcut for stage==1
                 pipeline.PipelineUserType.Producer, 1
             )
         )
@@ -4252,7 +4251,7 @@ class FFABwdSm100:
         consumer_state_LSE = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.Q_stage
         )
-        consumer_state_dPsum = pipeline_custom.make_pipeline_state(
+        consumer_state_dPsum = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.dO_stage
         )
 
@@ -5086,11 +5085,11 @@ class FFABwdSm100:
 
         # --- Init pipeline states ---
 
-        dQ_consumer_state = pipeline_custom.make_pipeline_state(
+        dQ_consumer_state = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, 1
         )
-        dQ_tma_store_producer_state = pipeline_custom.make_pipeline_state(
-            pipeline_custom.PipelineUserType.Producer, self.sdQacc_stage
+        dQ_tma_store_producer_state = ffa_pipeline.make_pipeline_state(
+            ffa_pipeline.PipelineUserType.Producer, self.sdQacc_stage
         )
         read_flag = const_expr(not self.deterministic)
 
