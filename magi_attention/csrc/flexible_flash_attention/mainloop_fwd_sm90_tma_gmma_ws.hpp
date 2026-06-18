@@ -123,10 +123,12 @@ struct CollectiveMainloopFwdSm90 {
 
   // By default, we use TMA for Q and KV to get better performance.
   // SparseLoad K/V tiles are physically contiguous within each range, so TMA 2D
-  // applies with absolute coordinates. Only IndexAttn (discrete rows) falls back
-  // to per-row cp.async scatter.
+  // applies with absolute coordinates. IndexAttn with KBlockSize >= kBlockN also
+  // has contiguous K/V blocks (each block = one tile), enabling TMA 2D.
+  // IndexAttn with KBlockSize < kBlockN falls back to per-row cp.async scatter.
+  static constexpr bool IndexAttnUseTma = IndexAttn && KBlockSize >= kBlockN;
   static constexpr bool Use_TMA_Q = true;
-  static constexpr bool Use_TMA_KV = !IndexAttn;
+  static constexpr bool Use_TMA_KV = !IndexAttn || IndexAttnUseTma;
   static_assert(Use_TMA_KV || CUTE_STATIC_V(size(ClusterShape{})) == 1, "If not using TMA for KV, ClusterShape must be 1");
   // NOTE: SwapAB + IndexAttn is now allowed; small kBlockM (8/16) uses SwapAB
   // while IndexAttn handles indirect KV loading via cp.async.
@@ -336,11 +338,13 @@ struct CollectiveMainloopFwdSm90 {
   // smem size to go from 227KB to 228KB and we get "invalid argument".
 
   // Scatter-load index slots, 1:1 with the K pipeline buffers.
-  // IndexAttn: kBlockN per-row token indices per stage (cp.async scatter).
-  // SparseLoad: 1 absolute block index per stage (TMA — communicated K→V).
+  // IndexAttn (scatter): kBlockN per-row token indices per stage (cp.async scatter).
+  // IndexAttn (TMA) / SparseLoad: 1 absolute block index per stage (TMA — communicated K→V).
   // Dense: nothing.
-  using KVTokenIndices_t =
-      std::conditional_t<IndexAttn, cute::array<int, kBlockN * kStages>, std::conditional_t<SparseLoad, cute::array<int, kStages>, cute::array<int, 0>>>;
+  using KVTokenIndices_t = std::conditional_t<
+      IndexAttn && !IndexAttnUseTma,
+      cute::array<int, kBlockN * kStages>,
+      std::conditional_t<SparseLoad || IndexAttnUseTma, cute::array<int, kStages>, cute::array<int, 0>>>;
 
   struct TensorStorageWithoutP : cute::aligned_struct<maxSmemAlignmentWithoutP, _0> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutVt>, SmemAlignmentVtNoTranspose> smem_v;
@@ -665,11 +669,11 @@ struct CollectiveMainloopFwdSm90 {
     bool first_v_loaded = false;
 
     // Unified K load.
-    // IndexAttn: per-row cp.async scatter via token indices in smem.
-    // SparseLoad: TMA 2D tile at absolute block coordinate from block_meta.
+    // IndexAttn (scatter): per-row cp.async scatter via token indices in smem.
+    // IndexAttn (TMA) / SparseLoad: TMA 2D tile at absolute block coordinate from block_meta.
     // Dense: TMA 2D tile at relative n_block within batch.
     auto load_K = [&]() {
-      if constexpr (IndexAttn) {
+      if constexpr (IndexAttn && !IndexAttnUseTma) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
@@ -690,12 +694,15 @@ struct CollectiveMainloopFwdSm90 {
         }
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_k;
-      } else if constexpr (SparseLoad) {
-        // SparseLoad TMA: tiles are contiguous within ranges → use absolute coords.
-        // get_packed_first_row() is only valid on thread 0 (group_idx=0, no cursor advance).
+      } else if constexpr (SparseLoad || IndexAttnUseTma) {
+        // SparseLoad / IndexAttn TMA: tiles are contiguous → use absolute coords.
         if (is_tma_issue_thread()) {
-          int const n_block_abs = block_meta.get_packed_first_row() / kBlockN;
-          // Store n_block_abs for the matching (possibly staggered) V load.
+          int const n_block_abs = [&]() {
+            if constexpr (SparseLoad)
+              return block_meta.get_packed_first_row() / kBlockN;
+            else
+              return block_meta.get_n_block_abs();
+          }();
           shared_storage.tensors.mainloop.smem_kv_token_indices[smem_pipe_write_k.index()] = n_block_abs;
 
           Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
@@ -734,15 +741,15 @@ struct CollectiveMainloopFwdSm90 {
     };
 
     // Unified V load with lazy barrier_O.
-    // IndexAttn: token indices come from the smem stage slot written by the matching load_K.
-    // SparseLoad: TMA 2D at absolute block read from smem (written by matching load_K).
+    // IndexAttn (scatter): token indices come from the smem stage slot written by the matching load_K.
+    // IndexAttn (TMA) / SparseLoad: TMA 2D at absolute block read from smem (written by matching load_K).
     // Dense: use_prev derives V block from n_block ± stagger offset.
     auto load_V = [&](auto use_prev) {
       if (!first_v_loaded) {
         shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
         first_v_loaded = true;
       }
-      if constexpr (IndexAttn) {
+      if constexpr (IndexAttn && !IndexAttnUseTma) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
@@ -760,8 +767,8 @@ struct CollectiveMainloopFwdSm90 {
         }
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
-      } else if constexpr (SparseLoad) {
-        // SparseLoad TMA: read n_block_abs written by the matching load_K.
+      } else if constexpr (SparseLoad || IndexAttnUseTma) {
+        // SparseLoad / IndexAttn TMA: read n_block_abs written by the matching load_K.
         if (is_tma_issue_thread()) {
           int const n_block_abs = shared_storage.tensors.mainloop.smem_kv_token_indices[smem_pipe_write_v.index()];
           auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
