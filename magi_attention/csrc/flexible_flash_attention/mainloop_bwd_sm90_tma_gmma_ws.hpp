@@ -695,14 +695,8 @@ struct CollectiveMainloopBwdSm90 {
 
   struct TensorStorageLoopK : cute::aligned_struct<maxSmemAlignment> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
-    // V and dS share SMEM: within each inner iteration V is consumed by MMA2 before dS is
-    // written (r2s after softmax backward), and dS is consumed by MMA4/MMA5 before V[j+1]
-    // is loaded (V release is delayed to after MMA5). Saves kBlockN*kHeadDim*sizeof(Element)
-    // or kBlockM*kBlockN*sizeof(Element) (whichever is smaller) per stage.
-    union {
-      cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
-      cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
-    };
+    cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
+    cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQKVdO> smem_q;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutdO>, SmemAlignmentQKVdO> smem_do;
     // dK and dV accumulators share SMEM via union: stores are serialized (dV r2s→TMA
@@ -3535,10 +3529,10 @@ struct CollectiveMainloopBwdSm90 {
       // and rename the view as `dS`, storing dP (or dP^T if SdP_swapAB)
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
 
-      // Wait for MMA2 to finish (V consumed). V release is deferred to after MMA5
-      // because smem_v and smem_ds are unioned — dS r2s overwrites the V buffer,
-      // and dS must remain readable through MMA5 before the producer can load V[j+1].
+      // Wait for MMA2 to finish (V consumed). Release V immediately — V and dS
+      // have separate SMEM buffers, so the producer can load V[j+1] while dS is used.
       warpgroup_wait<0>();
+      pipeline_v.consumer_release(smem_pipe_read_v);
 
 #pragma unroll
       // Apply softmax backward on `dS`, storing dS (or dS^T if SdP_swapAB)
@@ -3932,10 +3926,8 @@ struct CollectiveMainloopBwdSm90 {
             tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
       }
 
-      // Release K,V after MMA5 finished. V release is deferred from MMA2 because
-      // smem_v/smem_ds are unioned — producer must not overwrite dS until MMA5 consumes it.
+      // Release K after MMA5 finished (V already released after MMA2).
       warpgroup_wait<0>();
-      pipeline_v.consumer_release(smem_pipe_read_v);
       pipeline_k.consumer_release(smem_pipe_read_k);
 
       // Update pipeline read state of K,V
