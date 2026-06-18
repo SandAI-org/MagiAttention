@@ -99,17 +99,15 @@ def _ffa_register_quota(
 
     bwd (producer, consumer) by mode:
       - dense: (40, 232) at 2 MMA WGs, (40, 152) at 3 (kHeadDim=192).
-      - scatter (LoopK: sparse_load/index_attn; LoopQ: sparse_load): producer gets 56
-        (104 for the scalar-atomicAdd dX store fallback) and the consumer takes the rest
-        of the 168-per-thread weighted budget, rounded down to a multiple of 8 (224 at
-        2 MMA WGs). Rationale: the MMA WGs are the register-critical side (dKV/dQ
-        accumulators live across the whole inner loop) while producer spill traffic is
-        latency-hidden behind cp.async. Canonical MQA LoopQ sweep (S=64K/256K TFLOPS):
-        producer 24->149/158, 40->223/220, 56->227/221, 72->186, 88->177, 104+ worse;
-        56 is the sweet spot, below 40 the loader itself starves. LoopK measured flat
-        between 56 and 88 (RED-throughput-bound), so one setting serves both. The
-        scalar-store fallback needs 104: the store-warp code spills at 88 (STACK 3272B,
-        ~65M local loads, indexattn 59->28 TF).
+      - scatter + TMA inner (sparse_dx_tma_reduce=True): (40, 232). Inner Q/dO are
+        loaded via TMA (1 warp, minimal regs), so producer matches Dense quota.
+        cuobjdump verified: pr=56→STACK=32 (consumer spills), pr=40→STACK=0.
+      - scatter + cp.async inner (sparse_dx_tma_reduce=False, scalar-atomicAdd dX
+        store fallback): (104, ...). The store-warp code spills at 88 (STACK 3272B).
+      Historical note: the sweep that found pr=56 as sweet spot was done with cp.async
+      (SparseLoad LoopQ, S=64K/256K), not TMA. With TMA inner loads, the producer
+      needs far fewer live variables, and pr=40 gives consumer enough regs to avoid
+      MMA accumulator spills.
 
     Env override MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS (bwd only): producer is forced to
     the given value and the consumer is rederived from the weighted budget.
@@ -130,7 +128,13 @@ def _ffa_register_quota(
         inner_use_scatter = sparse_load or index_attn
         budget = 168 * (1 + num_mma_wgs)
         if inner_use_scatter:
-            producer_regs = 56 if sparse_dx_tma_reduce else 104
+            if sparse_dx_tma_reduce:
+                # TMA path: inner Q/dO loaded via TMA (1 warp), producer needs
+                # minimal regs — match Dense quota so consumer gets 232 for MMA
+                # accumulators. cuobjdump: pr=56→STACK=32 (spills), pr=40→STACK=0.
+                producer_regs = 40
+            else:
+                producer_regs = 104
             consumer_regs = ((budget - producer_regs) // num_mma_wgs) // 8 * 8
         else:
             producer_regs, consumer_regs = 40, (232 if num_mma_wgs == 2 else 152)
