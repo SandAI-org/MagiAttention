@@ -935,7 +935,7 @@ class TestSimpleAttn(unittest.TestCase):
         )
         print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
 
-    # ─── SparseLoad BWD scatter-path 对拍 tests ───
+    # ─── SparseLoad BWD scatter-path comparison tests ───
     # Methodology: test per code path, not per flag cartesian product.
     # Tier-0: test_block_sparse_loopq_packgqa (canonical LoopQ+PackGQA path).
     # Tier-1: test_consumer_dkv_store (InnerDxStoreInProducer=false) and
@@ -952,7 +952,7 @@ class TestSimpleAttn(unittest.TestCase):
         test_case: str,
         tol: float = 2e-2,
     ):
-        """对拍 helper: sparse_load variants vs the dense-TMA ffa reference.
+        """Comparison helper: sparse_load variants vs the dense-TMA ffa reference.
 
         Builds a canonical MQA uniform block mask (nhq=128, nhk=1, hd=128,
         q_block=1), runs the dense (sparse_load=False) kernel as the reference,
@@ -1015,7 +1015,7 @@ class TestSimpleAttn(unittest.TestCase):
                     / b.float().abs().max().clamp_min(1e-6)
                 ).item()
                 # atomic reduce-add ordering makes the comparison inexact;
-                # 2e-2 matches the standalone 对拍 script threshold
+                # 2e-2 matches the standalone comparison script threshold
                 assert (
                     err < tol
                 ), f"{test_case}[{loop_name}] {name} max_rel_err={err:.3e} >= {tol}"
