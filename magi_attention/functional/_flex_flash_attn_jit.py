@@ -85,6 +85,7 @@ def _ffa_register_quota(
     sparse_load: bool,
     index_attn: bool,
     sparse_dx_tma_reduce: bool,
+    k_block_size: int = 1,
 ) -> tuple[int, int]:
     """Select the setmaxnreg quotas (producer/load WG, consumer/mma WG) for one variant.
 
@@ -92,8 +93,10 @@ def _ffa_register_quota(
     (flash_{fwd,bwd}_kernel_sm90.h) only static_assert the constraints.
 
     fwd (producer, consumer) by mode:
-      - scatter load (sparse_load/index_attn): (64, 216) — cp.async producer warpgroup
-        needs more registers than the TMA producer warp.
+      - scatter load (index_attn kbs<kBlockN, or sparse_load without TMA): (64, 216)
+        cp.async producer warpgroup needs more registers than the TMA producer warp.
+      - SparseLoad (always TMA) or IndexAttn kbs>=kBlockN (TMA KV): use Dense quota
+        since only thread 0 issues TMA, minimal producer reg pressure.
       - dense, by MMA warpgroup count (1/2/3 from kBlockM/64, or 1 when SwapAB): (56, 256),
         (40, 232), (32, 160).
 
@@ -112,11 +115,16 @@ def _ffa_register_quota(
     Env override MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS (bwd only): producer is forced to
     the given value and the consumer is rederived from the weighted budget.
     """
+    kblock_n_fwd = 128  # Default FWD tile N
     if direction == "fwd":
         assert kblock_m is not None
-        if sparse_load or index_attn:
+        # IndexAttn kbs>=kBlockN and SparseLoad both use TMA for KV → Dense-like quota
+        index_attn_uses_tma = index_attn and k_block_size >= kblock_n_fwd
+        uses_scatter = index_attn and not index_attn_uses_tma
+        if uses_scatter:
             producer_regs, consumer_regs = 64, 216
         else:
+            # TMA KV paths (Dense, SparseLoad, IndexAttn kbs>=kBlockN): same quota
             # mirrors NumMmaWarpGroups = size(TiledMmaPV)/128 (AtomLayoutQK in mainloop_fwd)
             num_mma_wgs = 1 if swap_ab else kblock_m // 64
             producer_regs, consumer_regs = {1: (56, 256), 2: (40, 232), 3: (32, 160)}[
@@ -495,6 +503,7 @@ def get_ffa_jit_spec(
             "sparse_inner_dx_reduce_use_tma", "false"
         )
         == "true",
+        k_block_size=k_block_size,
     )
     extra_template_args[f"{direction}_producer_regs"] = str(_producer_regs)
     extra_template_args[f"{direction}_consumer_regs"] = str(_consumer_regs)

@@ -608,6 +608,19 @@ struct IndexAttnBlockMeta {
     return (q_token >= 0) ? q_token * QheadPerKhead + sub_head_offset : 0;
   }
 
+  // LoopK block-level only: absolute K block index for TMA tile load.
+  // When kbs >= kBlockN, each inner_block_cur maps to exactly one K block index
+  // from index_attn_indices, and the tile is physically contiguous.
+  CUTLASS_DEVICE
+  int get_n_block_abs() const {
+    static_assert(IsProducer && !IsLoopQ && kKBlockSize >= kInnerBlockSize_, "get_n_block_abs() requires block-level LoopK with kbs >= kBlockN");
+    int tiles_per_kblock = kKBlockSize / kInnerBlockSize_;
+    int kblock_idx = inner_block_cur / tiles_per_kblock;
+    int tile_within_kblock = inner_block_cur % tiles_per_kblock;
+    int block_id = group_token_ptr[kblock_idx];
+    return (block_id >= 0) ? block_id * tiles_per_kblock + tile_within_kblock : 0;
+  }
+
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
     return cute::make_tuple(outer_block, bidh, bidb);
