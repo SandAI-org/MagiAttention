@@ -54,7 +54,8 @@ template <
     bool PackGQA_,
     bool CatGQA_,
     int QheadPerKhead_,
-    bool IndexAttn_ = false>
+    bool IndexAttn_ = false,
+    int KBlockSize_ = 1>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using ElementDq = ElementDq_;
@@ -82,6 +83,7 @@ struct CollectiveEpilogueBwd {
   static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
   static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
   static constexpr bool IndexAttn = IndexAttn_;
+  static constexpr int KBlockSize = KBlockSize_;
   // IndexAttn LoopQ: outer block = 1 K token in a kBlockN tile; only row 0 is valid.
   static constexpr bool IndexAttnInvLoopQ = IndexAttn && !SwapBwdQKLoop;
 
@@ -396,11 +398,16 @@ struct CollectiveEpilogueBwd {
     // Make sure all WGs have finished reading K and V
     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
-    int2 k_range = get_batch_range(params.k_ranges, bidb);
-    int offset_k = k_range.x;
+    int offset_k;
+    if constexpr (IndexAttnInvLoopQ) {
+      offset_k = bidb * KBlockSize;
+    } else {
+      offset_k = get_batch_range(params.k_ranges, bidb).x;
+    }
 
-    // IndexAttn LoopQ: outer tile has 1 valid K token in kBlockN rows; TMA full-tile store
-    // would corrupt neighboring K positions. Use per-element path with residual_n=1 guard.
+    // IndexAttn LoopQ with KBlockSize < kBlockN: only partial rows valid in the tile,
+    // TMA full-tile store would corrupt neighbors. Use per-element path with residual guard.
+    // When KBlockSize >= kBlockN the full tile is valid and can use TMA store.
     if constexpr (!DisableBwdDkvAtomicReduction && !IndexAttnInvLoopQ) {
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
       cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
@@ -486,7 +493,12 @@ struct CollectiveEpilogueBwd {
       Tensor tdKsdK = gmem_thr_copy_dKV.partition_S(sdK);
       Tensor tdVgdV = gmem_thr_copy_dKV.partition_D(gdV);
       Tensor tdVsdV = gmem_thr_copy_dKV.partition_S(sdV);
-      const int residual_n = (k_range.y - k_range.x) - n_block * kBlockN;
+      int residual_n;
+      if constexpr (IndexAttnInvLoopQ) {
+        residual_n = KBlockSize - n_block * kBlockN;
+      } else {
+        residual_n = get_batch_range(params.k_ranges, bidb).y - offset_k - n_block * kBlockN;
+      }
 
       flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
           gmem_tiled_copy_dKV,

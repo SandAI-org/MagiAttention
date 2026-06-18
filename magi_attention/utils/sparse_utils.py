@@ -567,8 +567,11 @@ def build_index_attn_indices(
         rand_keys = torch.rand(n_rows, num_kv_blocks, device=device)
         _, perm_all = rand_keys.topk(tk, dim=1, largest=False, sorted=True)
         perm_all = perm_all.reshape(S_q, NHK, tk)
-        # logical token position: batch offset + token index (no head encoding)
-        global_ids = b_idx * S_kv + perm_all
+        # Global block index: perm_all selects among num_kv_blocks blocks within
+        # the batch; offset by b_idx * num_kv_blocks to get the global block id
+        # across all batches.  When k_block_size == 1, num_kv_blocks == S_kv so
+        # this is equivalent to the token-level encoding.
+        global_ids = b_idx * num_kv_blocks + perm_all
         row_start = b_idx * S_q
         indices[row_start : row_start + S_q, :, :tk] = global_ids.int()
     return indices
@@ -598,8 +601,10 @@ def get_sdpa_mask_from_index_attn_indices(
     valid_mask = idx >= 0
 
     b_indices = torch.arange(B, device=device).repeat_interleave(S_q)  # (total_q,)
-    # logical position → local token: subtract batch offset (no NHK division needed)
-    local_ids = idx - b_indices[:, None, None] * S_kv
+    # Global index = b * num_kv_blocks + local_block_id (block-level encoding).
+    # Recover local block id by subtracting b * num_kv_blocks.
+    num_kv_blocks = S_kv // k_block_size
+    local_ids = idx - b_indices[:, None, None] * num_kv_blocks
 
     if k_block_size == 1:
         kv_col = local_ids
@@ -1324,3 +1329,86 @@ def build_inv_indices(
     inv_indices_flat[sorted_kh.long(), offsets.long()] = sorted_q
 
     return inv_indices, inv_topk
+
+
+def build_inv_indices_block(
+    index_attn_indices: torch.Tensor,
+    seqlen_k: int,
+    k_block_size: int = 128,
+    pad_multiple: int = 64,
+) -> tuple[torch.Tensor, int]:
+    """Build block-level inverse indices (Q->K to K_block->Q).
+
+    Groups K tokens into blocks of ``k_block_size`` and collects the unique
+    Q tokens that attend to any K token within each block.
+
+    Args:
+        index_attn_indices: (seqlen_q, nhk, topk) int32 forward Q->K mapping.
+        seqlen_k: total number of K tokens.
+        k_block_size: K block granularity (must divide seqlen_k).
+        pad_multiple: pad inv_topk to this multiple.
+
+    Returns:
+        inv_indices_block: (num_k_blocks, nhk, inv_topk_block) int32.
+        inv_topk_block: padded max Q count per block.
+    """
+    assert index_attn_indices.dim() == 3
+    seqlen_q, nhk, topk = index_attn_indices.shape
+    device = index_attn_indices.device
+    assert (
+        seqlen_k % k_block_size == 0
+    ), f"seqlen_k ({seqlen_k}) must be divisible by k_block_size ({k_block_size})"
+    num_k_blocks = seqlen_k // k_block_size
+
+    valid_mask = index_attn_indices >= 0
+    kv_positions = index_attn_indices.clamp(min=0)
+
+    q_ids = torch.arange(seqlen_q, device=device, dtype=torch.int32)
+    q_ids = q_ids[:, None, None].expand_as(index_attn_indices)
+    head_ids = torch.arange(nhk, device=device, dtype=torch.int32)
+    head_ids = head_ids[None, :, None].expand_as(index_attn_indices)
+
+    flat_q = q_ids[valid_mask]
+    flat_k = kv_positions[valid_mask]
+    flat_h = head_ids[valid_mask]
+
+    # build_index_attn_indices stores block-level indices when k_block_size > 1,
+    # so the values are already K block indices — no division needed.
+    flat_k_block = flat_k.long()
+
+    # Deduplicate (k_block, head, q) triples
+    flat_bh = flat_k_block * nhk + flat_h.long()
+    # Encode (block_head, q) as a single int64 for uniqueness
+    combo = flat_bh * seqlen_q + flat_q.long()
+    combo_unique, inv = combo.unique(return_inverse=True)
+    flat_bh_unique = combo_unique // seqlen_q
+    flat_q_unique = (combo_unique % seqlen_q).int()
+
+    total_bh = num_k_blocks * nhk
+    counts = torch.zeros(total_bh, device=device, dtype=torch.int32)
+    counts.scatter_add_(
+        0,
+        flat_bh_unique.int().long(),
+        torch.ones(flat_bh_unique.shape[0], device=device, dtype=torch.int32),
+    )
+
+    max_inv_topk = int(counts.max().item())
+    inv_topk_block = ((max_inv_topk + pad_multiple - 1) // pad_multiple) * pad_multiple
+
+    sorted_order = flat_bh_unique.argsort(stable=True)
+    sorted_q = flat_q_unique[sorted_order]
+    sorted_bh = flat_bh_unique[sorted_order]
+
+    group_starts = torch.zeros(total_bh + 1, device=device, dtype=torch.int64)
+    group_starts[1:] = counts.cumsum(0).long()
+
+    offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
+    offsets = offsets - group_starts[sorted_bh.long()]
+
+    inv_indices_block = torch.full(
+        (num_k_blocks, nhk, inv_topk_block), -1, device=device, dtype=torch.int32
+    )
+    inv_flat = inv_indices_block.reshape(total_bh, inv_topk_block)
+    inv_flat[sorted_bh.long(), offsets.long()] = sorted_q
+
+    return inv_indices_block, inv_topk_block

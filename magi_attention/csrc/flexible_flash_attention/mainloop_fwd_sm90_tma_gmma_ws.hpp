@@ -60,7 +60,8 @@ template <
     bool SparseLoad_,
     bool IndexAttn_,
     bool InnerDirMaxToMin_,
-    int MaskMode_>
+    int MaskMode_,
+    int KBlockSize_ = 1>
 struct CollectiveMainloopFwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -82,6 +83,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int QheadPerKhead = QheadPerKhead_;
   static constexpr bool SparseLoad = SparseLoad_;
   static constexpr bool IndexAttn = IndexAttn_;
+  static constexpr int KBlockSize = KBlockSize_;
   static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
@@ -449,7 +451,7 @@ struct CollectiveMainloopFwdSm90 {
 
   template <bool IsProducer>
   using IndexAttnBlockMeta =
-      flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin>;
+      flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin, KBlockSize>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);

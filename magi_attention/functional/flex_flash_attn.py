@@ -65,6 +65,11 @@ else:
     _torch_custom_op_wrapper = noop_custom_op_wrapper
     _torch_register_fake_wrapper = noop_register_fake_wrapper
 
+# k_block_size is a compile-time constant for JIT kernel selection.
+# Passed via module-level var to avoid adding it to the custom_op schema
+# (PyTorch custom_op has issues with extra int params shifting mutated tensor indices).
+_ffa_k_block_size: int = 1
+
 profile_mode = is_profile_mode_enable()
 if profile_mode:
     assert (
@@ -260,6 +265,7 @@ def _flex_flash_attn_forward_compilable(
         index_attn=index_attn,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
+        k_block_size=_ffa_k_block_size,
     )
     # Call for side effects: out_, lse, max_logits are mutated in place (mutates_args).
     mod.fwd(
@@ -281,6 +287,7 @@ def _flex_flash_attn_forward_compilable(
         # for IndexAttn direct path
         index_attn_indices_2d,
         index_attn_max_topk,
+        _ffa_k_block_size if index_attn else 1,
         # for others
         softmax_scale,
         softcap,
@@ -357,6 +364,7 @@ def _flex_flash_attn_forward(
     index_attn: bool = False,
     index_attn_indices_2d: torch.Tensor | None = None,
     index_attn_max_topk: int = 0,
+    k_block_size: int = 1,
     return_max_logits: bool = False,
     max_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
@@ -410,6 +418,8 @@ def _flex_flash_attn_forward(
 
     # NOTE: we can not directly compile `_flex_flash_attn_forward`
     # since torch.compile does not allow returning the mutated args (out, lse)
+    global _ffa_k_block_size
+    _ffa_k_block_size = k_block_size
     _flex_flash_attn_forward_compilable(
         q=q,
         k=k,
@@ -511,6 +521,7 @@ def _flex_flash_attn_backward_compilable(
         dq_dtype=dq_type or torch.float32,
         dkv_dtype=dk_type
         or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
+        k_block_size=_ffa_k_block_size,
     )
 
     (
@@ -543,6 +554,7 @@ def _flex_flash_attn_backward_compilable(
         # for index attn
         index_attn_indices_2d,
         index_attn_max_topk,
+        _ffa_k_block_size,
         # for others
         softmax_scale,
         softcap,
@@ -630,6 +642,7 @@ def _flex_flash_attn_backward(
     index_attn: bool = False,
     index_attn_indices_2d: torch.Tensor | None = None,
     index_attn_max_topk: int = 0,
+    k_block_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         magi_attn_ext.start_event("bwd_prepare")
@@ -677,6 +690,8 @@ def _flex_flash_attn_backward(
 
     # NOTE: we can not directly compile `_flex_flash_attn_backward`
     # since torch.compile does not allow returning the mutated args (dq, dk, dv, dsink)
+    global _ffa_k_block_size
+    _ffa_k_block_size = k_block_size
     _flex_flash_attn_backward_compilable(
         dout=dout,
         q=q,
@@ -750,6 +765,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         return_max_logits: bool = False,
         index_attn_indices_2d: torch.Tensor | None = None,
         index_attn_max_topk: int = 0,
+        k_block_size: int = 1,
     ):
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
@@ -877,6 +893,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             index_attn=index_attn,
             index_attn_indices_2d=index_attn_indices_2d,
             index_attn_max_topk=index_attn_max_topk,
+            k_block_size=k_block_size,
             return_max_logits=return_max_logits,
             max_logits=None,
         )
@@ -921,6 +938,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.sparse_load = sparse_load
         ctx.index_attn = index_attn
         ctx.index_attn_max_topk = index_attn_max_topk
+        ctx.k_block_size = k_block_size
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
         ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
         ctx.pack_gqa = pack_gqa
@@ -975,6 +993,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # return_max_logits
                 None,  # index_attn_indices_2d
                 None,  # index_attn_max_topk
+                None,  # k_block_size
             )
 
         # ---- FFA (native) backend backward ---- #
@@ -1008,8 +1027,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             _use_loopq = (
                 os.environ.get("MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q", "0") == "1"
             )
+            _loopq_kbs = int(
+                os.environ.get("MAGI_ATTENTION_INDEX_ATTN_BWD_K_BLOCK_SIZE", "1")
+            )
             if _use_loopq:
-                # IndexAttn BWD LoopQ: outer=K, inner=Q from inv_indices
+                # IndexAttn BWD LoopQ: outer=K block, inner=Q from inv_indices
                 swap_bwd_qk_loop = False
                 bwd_q_ranges = None
                 bwd_k_ranges = None
@@ -1018,26 +1040,41 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 bwd_kq_map = None
                 bwd_unique_count = None
                 bwd_auto_range_merge = False
-                # Build inv_indices from forward indices
-                from magi_attention.utils.sparse_utils import build_inv_indices
 
                 nhk = k.size(1)
-                # index_attn_indices_2d is (seqlen_q * nhk, topk) for LoopK;
-                # reshape to 3D (seqlen_q, nhk, topk) for build_inv_indices
+                seqlen_k = v.size(0)
                 _fwd_3d = index_attn_indices_2d.reshape(
                     -1, nhk, index_attn_indices_2d.size(-1)
                 )
-                _inv_indices, _inv_topk = build_inv_indices(
-                    _fwd_3d,
-                    seqlen_k=v.size(0),
-                    pad_multiple=64,
-                )
-                # Kernel layout: (seqlen_k, nhk * inv_topk) so batch_size = seqlen_k
-                # index_attn_max_topk = nhk * inv_topk (full stride for each K token)
-                index_attn_indices_2d = _inv_indices.reshape(
-                    v.size(0), nhk * _inv_topk
-                ).contiguous()
-                ctx.index_attn_max_topk = nhk * _inv_topk
+
+                if _loopq_kbs > 1:
+                    from magi_attention.utils.sparse_utils import (
+                        build_inv_indices_block,
+                    )
+
+                    _inv_indices, _inv_topk = build_inv_indices_block(
+                        _fwd_3d,
+                        seqlen_k=seqlen_k,
+                        k_block_size=_loopq_kbs,
+                        pad_multiple=64,
+                    )
+                    num_k_blocks = seqlen_k // _loopq_kbs
+                    index_attn_indices_2d = _inv_indices.reshape(
+                        num_k_blocks, nhk * _inv_topk
+                    ).contiguous()
+                    ctx.index_attn_max_topk = nhk * _inv_topk
+                else:
+                    from magi_attention.utils.sparse_utils import build_inv_indices
+
+                    _inv_indices, _inv_topk = build_inv_indices(
+                        _fwd_3d,
+                        seqlen_k=seqlen_k,
+                        pad_multiple=64,
+                    )
+                    index_attn_indices_2d = _inv_indices.reshape(
+                        seqlen_k, nhk * _inv_topk
+                    ).contiguous()
+                    ctx.index_attn_max_topk = nhk * _inv_topk
             else:
                 # IndexAttn BWD LoopK (default): outer=Q, inner=K from topk_indices
                 swap_bwd_qk_loop = True
@@ -1137,6 +1174,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             index_attn=ctx.index_attn,
             index_attn_indices_2d=index_attn_indices_2d,
             index_attn_max_topk=ctx.index_attn_max_topk,
+            k_block_size=_loopq_kbs if ctx.index_attn else 1,
         )
 
         # Cast gradients to the same dtype as inputs
@@ -1163,9 +1201,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
             None,  # disable_bwd_dkv_atomic_reduction
-            None,  # auto_range_merge
             None,  # ref_block_size
             None,  # max_seqlen_q
+            None,  # auto_range_merge
             None,  # swap_ab
             None,  # pack_gqa
             None,  # cat_gqa
@@ -1175,6 +1213,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # return_max_logits
             None,  # index_attn_indices_2d
             None,  # index_attn_max_topk
+            None,  # k_block_size
         )
 
 
@@ -1501,16 +1540,21 @@ def flex_flash_attn_func(
             "Currently only q_block_size=1 (per-token Q granularity) is supported "
             f"for index_attn_indices input, got q_block_size={q_block_size}"
         )
-        assert (
-            k_block_size == 1
-        ), f"Currently only k_block_size=1 (token-level KV) is supported, got k_block_size={k_block_size}"
-
         tile_size = 64 if swap_ab else 128
         max_topk = index_attn_indices.shape[2]
-        assert max_topk % tile_size == 0, (
-            f"index_attn_indices last dim (max_topk={max_topk}) must be a multiple "
-            f"of tile_size={tile_size}. Pad with -1 if needed."
-        )
+        if k_block_size > 1:
+            # Block-level indices: each value is a K block id.
+            # Effective topk in tokens = max_topk * k_block_size.
+            effective_topk = max_topk * k_block_size
+            assert effective_topk % tile_size == 0, (
+                f"effective topk (max_topk={max_topk} * k_block_size={k_block_size} "
+                f"= {effective_topk}) must be a multiple of tile_size={tile_size}."
+            )
+        else:
+            assert max_topk % tile_size == 0, (
+                f"index_attn_indices last dim (max_topk={max_topk}) must be a multiple "
+                f"of tile_size={tile_size}. Pad with -1 if needed."
+            )
         index_attn_indices_2d = index_attn_indices.view(-1, max_topk)
 
         # IndexAttn uses indices, not ranges — assert ranges are not provided
@@ -1592,5 +1636,6 @@ def flex_flash_attn_func(
         # for IndexAttn direct path
         index_attn_indices_2d,
         index_attn_max_topk,
+        k_block_size,
     )
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)

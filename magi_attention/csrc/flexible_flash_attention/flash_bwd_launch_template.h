@@ -138,6 +138,7 @@ template <
     int ScatterPad,
     bool LseDpsumUnionDKVacc,
     bool DkvaccBypassSmem,
+    int KBlockSize,
     bool ProfileMode>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
@@ -200,7 +201,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       Stages_V,
       ScatterPad,
       LseDpsumUnionDKVacc,
-      DkvaccBypassSmem>;
+      DkvaccBypassSmem,
+      KBlockSize>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       SwapBwdQKLoop ? kBlockM : kBlockN,
@@ -230,7 +232,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
       /*QheadPerKhead=*/QheadPerKhead,
-      /*IndexAttn=*/IndexAttn>;
+      /*IndexAttn=*/IndexAttn,
+      /*KBlockSize=*/KBlockSize>;
   using AttnKernel = flash::enable_sm90_or_later<
       flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, BwdProducerRegs, BwdConsumerRegs>>;
 
@@ -313,8 +316,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       printed = true;
       int sz_tensor = sizeof(typename CollectiveMainloop::TensorStorage);
       int sz_pipe = sizeof(typename AttnKernel::SharedStorage) - sz_tensor;
-      printf("[BWD] total=%d(%.1fKB) tensor=%d pipe=%d\n",
-          smem_size, smem_size / 1024.0f, sz_tensor, sz_pipe);
+      printf("[BWD] total=%d(%.1fKB) tensor=%d pipe=%d\n", smem_size, smem_size / 1024.0f, sz_tensor, sz_pipe);
       printf(
           "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d lseU=%d dkvByp=%d SwapQK=%d\n",
           kBlockM,
@@ -351,6 +353,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   if constexpr (DisableBwdDkvAtomicReduction) {
     if constexpr (ProfileMode)
       MagiEvents::start("bwd_postprocess");
+
     run_flash_bwd_dkv_postprocess_<ElementDkv, kHeadDim>(params, stream);
     CHECK_CUDA_KERNEL_LAUNCH();
     if constexpr (ProfileMode)
@@ -392,6 +395,7 @@ template <
     int BwdScatterPad,
     int BwdLseUnion,
     int BwdDkvaccBypass,
+    int KBlockSize,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -474,5 +478,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*ScatterPad=*/ScatterPad,
       /*LseDpsumUnionDKVacc=*/LseDpsumUnionDKVacc,
       /*DkvaccBypassSmem=*/DkvaccBypassSmem,
+      /*KBlockSize=*/KBlockSize,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

@@ -422,9 +422,13 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 } // namespace detail
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// IndexAttnBlockMeta: Sparse block metadata for index-based attention.
-// Producer-only state (group_token_ptr) is unused when !IsProducer; token indices are
-// written straight into the smem stage slot by fill_token_indices() (no register array).
+// IndexAttnBlockMeta: Unified sparse block metadata for index-based attention.
+// Handles both LoopK and LoopQ via the IsLoopQ_ template parameter (like SparseLoadBlockMeta).
+//
+// IsLoopQ_=false (LoopK): outer=Q token (bidb), inner=K from forward topk indices
+//   fill_token_indices fills K physical rows: id * nhk + kv_head_local
+// IsLoopQ_=true  (LoopQ): outer=K block (bidb), inner=Q from inv_indices
+//   fill_token_indices fills Q packed rows: q_token * QheadPerKhead + sub_head
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -435,11 +439,14 @@ template <
     int NumRowsPerGroup_,
     int NumProducerThreads_,
     int GroupSize_,
-    int kBlockN_,
-    bool InnerDirMaxToMin_>
+    int kInnerBlockSize_,
+    bool InnerDirMaxToMin_,
+    int KBlockSize_ = 1,
+    bool IsLoopQ_ = false>
 struct IndexAttnBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
-  // IndexAttn always iterates multiple blocks; batch loop is always needed.
+  static constexpr int kKBlockSize = KBlockSize_;
+  static constexpr bool IsLoopQ = IsLoopQ_;
   static constexpr bool NeedsBatchLoop = true;
 
   int const outer_block;
@@ -458,249 +465,143 @@ struct IndexAttnBlockMeta {
   static constexpr int inner_block_min = 0;
 
   int const* group_token_ptr;
-  // NHK and kv_head for logical→physical index conversion
   int nhk;
-  int kv_head_local;
+  // LoopK: kv_head for K physical row conversion; LoopQ: unused (Q packed rows are head-agnostic)
+  int head_local;
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexAttnBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh), group_token_ptr(nullptr) {
+      : outer_block(get<0>(block_coord)),
+        bidh(get<1>(block_coord)),
+        bidh_kv(IsLoopQ ? bidh : (!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh)),
+        group_token_ptr(nullptr) {
     bidb = [&]() {
-      if constexpr (RangeMerge) {
+      if constexpr (RangeMerge && !IsLoopQ) {
         return params.cu_batches[get<2>(block_coord)];
       } else {
         return get<2>(block_coord);
       }
     }();
 
-    seqlen_info.offset_q = bidb;
-    seqlen_info.seqlen_q = 1;
-
-    int unique_idx = get<2>(block_coord);
-    // indices store logical token positions; recover physical row in-kernel
     nhk = detail::nhk_of<ParamsT>::get(params);
-    kv_head_local = unique_idx % nhk;
 
     int max_topk = params.index_attn_max_topk;
-    int const* row_ptr = params.index_attn_indices + static_cast<int64_t>(unique_idx) * max_topk;
+    int const* row_ptr;
+    int actual_topk;
 
-    int actual_topk = max_topk;
-    for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
-      --actual_topk;
+    if constexpr (!IsLoopQ) {
+      // ── LoopK: bidb = Q token, indices = forward topk (Q→K) ──
+      seqlen_info.offset_q = bidb;
+      seqlen_info.seqlen_q = 1;
 
-    seqlen_info.seqlen_k = actual_topk;
-    inner_block_max = (actual_topk + kBlockN_ - 1) / kBlockN_;
-    num_invalid_token = inner_block_max * kBlockN_ - actual_topk;
+      int unique_idx = get<2>(block_coord);
+      head_local = unique_idx % nhk;
+      row_ptr = params.index_attn_indices + static_cast<int64_t>(unique_idx) * max_topk;
+
+      actual_topk = max_topk;
+      for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
+        --actual_topk;
+
+      int effective_k = actual_topk * kKBlockSize;
+      seqlen_info.seqlen_k = effective_k;
+      inner_block_max = (effective_k + kInnerBlockSize_ - 1) / kInnerBlockSize_;
+      num_invalid_token = inner_block_max * kInnerBlockSize_ - effective_k;
+    } else {
+      // ── LoopQ: bidb = K block, indices = inv_indices (K→Q) ──
+      seqlen_info.offset_k = bidb * kKBlockSize;
+      seqlen_info.seqlen_k = kKBlockSize;
+      head_local = bidh;
+
+      // inv_indices layout: (num_k_blocks, nhk * inv_topk_per_head)
+      int inv_topk_per_head = max_topk / nhk;
+      row_ptr = params.index_attn_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh) * inv_topk_per_head;
+      int max_inv_topk = inv_topk_per_head;
+
+      actual_topk = max_inv_topk;
+      for (int i = max_inv_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
+        --actual_topk;
+
+      int total_q_packed_rows = actual_topk * QheadPerKhead;
+      seqlen_info.offset_q = 0;
+      seqlen_info.seqlen_q = total_q_packed_rows;
+      inner_block_max = (total_q_packed_rows + kInnerBlockSize_ - 1) / kInnerBlockSize_;
+      num_invalid_token = inner_block_max * kInnerBlockSize_ - total_q_packed_rows;
+    }
+
     inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
     end_batches = bidb + 1;
 
     if constexpr (IsProducer) {
-      int aligned_total = inner_block_max * kBlockN_;
-      int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
-      int group_offset;
-      if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-        group_offset = (aligned_total - kBlockN_) + group_idx * NumRowsPerGroup_;
+      if constexpr (!IsLoopQ && kKBlockSize <= 1) {
+        // Token-level LoopK: pointer walks kInnerBlockSize_ entries per tile
+        int aligned_total = inner_block_max * kInnerBlockSize_;
+        int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
+        int group_offset;
+        if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
+          group_offset = (aligned_total - kInnerBlockSize_) + group_idx * NumRowsPerGroup_;
+        } else {
+          group_offset = group_idx * NumRowsPerGroup_;
+        }
+        group_token_ptr = row_ptr + group_offset;
       } else {
-        group_offset = group_idx * NumRowsPerGroup_;
+        // Block-level LoopK or any LoopQ: absolute indexing from row_ptr
+        group_token_ptr = row_ptr;
       }
-      group_token_ptr = row_ptr + group_offset;
     }
   }
 
-  // Write this group's NumRowsPerGroup_ token indices for the CURRENT tile into the
-  // smem stage slot. Same contract as SparseLoadBlockMeta::fill_token_indices():
-  // called after producer_acquire; caller must __syncwarp() before reading back.
+  // Fill token indices into the smem stage slot for the CURRENT tile.
+  // LoopK: fills K physical rows (id * nhk + kv_head_local)
+  // LoopQ: fills Q packed rows (q_token * QheadPerKhead + sub_head)
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
     int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
-    for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
-      int const id = group_token_ptr[j];
-      // logical position → physical row: pos * NHK + kv_head
-      group_rows[j] = (id >= 0) ? id * nhk + kv_head_local : 0;
-    }
-  }
 
-  CUTLASS_DEVICE
-  auto get_epilogue_coord() const {
-    return cute::make_tuple(outer_block, bidh, bidb);
-  }
+    if constexpr (!IsLoopQ) {
+      // ── LoopK: fill K positions ──
+      if constexpr (kKBlockSize <= 1) {
+        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+          int const id = group_token_ptr[j];
+          group_rows[j] = (id >= 0) ? id * nhk + head_local : 0;
+        }
+      } else {
+        int tile_base = inner_block_cur * kInnerBlockSize_;
+        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+          int token_pos = tile_base + group_idx * NumRowsPerGroup_ + j;
+          int block_idx = token_pos / kKBlockSize;
+          int offset_in_block = token_pos % kKBlockSize;
+          int block_id = (block_idx < seqlen_info.seqlen_k / kKBlockSize) ? group_token_ptr[block_idx] : -1;
+          int logical_k = block_id * kKBlockSize + offset_in_block;
+          group_rows[j] = (block_id >= 0) ? logical_k * nhk + head_local : 0;
+        }
+      }
+    } else {
+      // ── LoopQ: fill Q packed rows ──
+      int tile_first_packed_row = inner_block_cur * kInnerBlockSize_;
+      int base = tile_first_packed_row + group_idx * NumRowsPerGroup_;
+      int total_q_packed = seqlen_info.seqlen_q;
+      int max_inv_topk_val = total_q_packed / QheadPerKhead;
 
-  CUTLASS_DEVICE
-  void prefetch() {
-    flash::advance_block_cur<kDir>(inner_block_cur);
-    if constexpr (IsProducer) {
-      if (!is_finish()) {
-        if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          group_token_ptr -= kBlockN_;
+      for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+        int packed_row = base + j;
+        if (packed_row < total_q_packed) {
+          int q_token_local_idx = packed_row / QheadPerKhead;
+          int sub_head = packed_row % QheadPerKhead;
+          int q_token = (q_token_local_idx < max_inv_topk_val) ? group_token_ptr[q_token_local_idx] : -1;
+          group_rows[j] = (q_token >= 0) ? q_token * QheadPerKhead + sub_head : 0;
         } else {
-          group_token_ptr += kBlockN_;
+          group_rows[j] = 0;
         }
       }
     }
   }
 
-  CUTLASS_DEVICE
-  bool is_finish() {
-    if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-      return inner_block_cur < inner_block_min;
-    } else {
-      return inner_block_cur >= inner_block_max;
-    }
-  }
-
-  CUTLASS_DEVICE
-  int padding_block() const {
-    return inner_block_max - 1;
-  }
-
-  template <flash::DispatchDirection>
-  CUTLASS_DEVICE void update_block_cur() {}
-
-  CUTLASS_DEVICE bool is_valid() {
-    return true;
-  }
-
-  CUTLASS_DEVICE
-  bool skip_to_first_valid() {
-    while (!is_valid() && !is_finish()) {
-      prefetch();
-    }
-    return is_finish();
-  }
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// IndexAttnInvBlockMeta: BWD LoopQ with inverse indices (outer=K token, inner=Q from inv_indices).
-//
-// Mirrors IndexAttnBlockMeta but with Q/K roles swapped. For each K token, inv_indices
-// stores which Q tokens attend it. The inner loop iterates Q tiles; with PackGQA each
-// Q token fills QheadPerKhead packed rows, so inner_block_max = actual_inv_topk × QheadPerKhead / kBlockM.
-//
-// fill_token_indices() fills Q/dO smem slots with packed Q row indices (like the LoopK
-// IndexAttnBlockMeta fills K/V slots with physical K row indices).
-////////////////////////////////////////////////////////////////////////////////////////////////////
-template <bool IsProducer, bool PackGQA, int QheadPerKhead, int NumRowsPerGroup_, int NumProducerThreads_, int GroupSize_, int kBlockM_, bool InnerDirMaxToMin_>
-struct IndexAttnInvBlockMeta {
-  static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
-  static constexpr bool NeedsBatchLoop = true;
-
-  int const outer_block;
-  int const bidh;
-  int const bidh_kv;
-  int bidb;
-
-  flash::SeqlenInfo seqlen_info;
-
-  flash::AttnType attn_type = flash::AttnType::Full;
-  int end_batches;
-
-  int inner_block_cur;
-  int inner_block_max;
-  int num_invalid_token;
-  static constexpr int inner_block_min = 0;
-
-  int const* group_token_ptr;
-  int nhk;
-  int qh_head_local;
-
-  template <typename ParamsT, typename SharedStorage>
-  CUTLASS_DEVICE IndexAttnInvBlockMeta(
-      ParamsT const& params,
-      cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
-      SharedStorage& shared_storage,
-      int thread_idx = 0)
-      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidh_kv(bidh), group_token_ptr(nullptr) {
-    bidb = get<2>(block_coord);
-
-    // bidb = k_token, bidh = kv_head (scheduler dispatches over seqlen_k × nhk)
-    nhk = detail::nhk_of<ParamsT>::get(params);
-    int k_token = bidb;
-    qh_head_local = bidh;
-
-    // K-side seqlen: this K token occupies 1 row
-    seqlen_info.offset_k = k_token;
-    seqlen_info.seqlen_k = 1;
-
-    // inv_indices layout: (seqlen_k, nhk * inv_topk_per_head) flattened as (seqlen_k * nhk * inv_topk_per_head)
-    // params.index_attn_max_topk = nhk * inv_topk_per_head
-    int max_inv_topk_total = params.index_attn_max_topk;
-    int inv_topk_per_head = max_inv_topk_total / nhk;
-    int const* row_ptr = params.index_attn_indices + static_cast<int64_t>(bidb) * max_inv_topk_total + static_cast<int64_t>(bidh) * inv_topk_per_head;
-    int max_inv_topk = inv_topk_per_head;
-
-    int actual_inv_topk = max_inv_topk;
-    for (int i = max_inv_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
-      --actual_inv_topk;
-
-    // Q-side: total packed rows = actual_inv_topk × QheadPerKhead (PackGQA)
-    int total_q_packed_rows = actual_inv_topk * QheadPerKhead;
-    seqlen_info.offset_q = 0;
-    seqlen_info.seqlen_q = total_q_packed_rows;
-
-    inner_block_max = (total_q_packed_rows + kBlockM_ - 1) / kBlockM_;
-    num_invalid_token = inner_block_max * kBlockM_ - total_q_packed_rows;
-    inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
-    end_batches = bidb + 1;
-
-    if constexpr (IsProducer) {
-      int aligned_total = inner_block_max * kBlockM_;
-      int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
-      int group_offset;
-      if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-        group_offset = (aligned_total - kBlockM_) + group_idx * NumRowsPerGroup_;
-      } else {
-        group_offset = group_idx * NumRowsPerGroup_;
-      }
-      // group_token_ptr points into the inv_indices flat Q-token list;
-      // fill_token_indices expands each Q token to QheadPerKhead packed rows.
-      group_token_ptr = row_ptr;
-      // Store group_offset for the fill_token_indices expansion
-      // (we compute the packed row from the Q token on the fly)
-    }
-  }
-
-  // Fill Q/dO smem slot with packed Q row indices for the CURRENT tile.
-  // Each Q token in inv_indices expands to QheadPerKhead packed rows.
-  // The slot covers NumRowsPerGroup_ rows starting at group_idx * NumRowsPerGroup_.
-  CUTLASS_DEVICE
-  void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
-    static_assert(IsProducer, "fill_token_indices() is producer-only");
-    int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
-    // Current tile's first packed row in the virtual packed-Q space
-    int tile_first_packed_row;
-    if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-      tile_first_packed_row = inner_block_cur * kBlockM_;
-    } else {
-      tile_first_packed_row = inner_block_cur * kBlockM_;
-    }
-    int base = tile_first_packed_row + group_idx * NumRowsPerGroup_;
-
-    int total_q_packed = seqlen_info.seqlen_q;
-    int max_inv_topk_val = [&]() {
-      // Recover from constructor: actual_inv_topk = seqlen_q / QheadPerKhead
-      return total_q_packed / QheadPerKhead;
-    }();
-
-    for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
-      int packed_row = base + j;
-      if (packed_row < total_q_packed) {
-        // Map packed row to Q token index and sub-head offset
-        int q_token_local_idx = packed_row / QheadPerKhead;
-        int sub_head = packed_row % QheadPerKhead;
-        int q_token = (q_token_local_idx < max_inv_topk_val) ? group_token_ptr[q_token_local_idx] : -1;
-        // packed physical row = q_token * QheadPerKhead + sub_head
-        group_rows[j] = (q_token >= 0) ? q_token * QheadPerKhead + sub_head : 0;
-      } else {
-        group_rows[j] = 0;
-      }
-    }
-  }
-
+  // LoopQ only: absolute packed row for TMA coordinate computation
   CUTLASS_DEVICE
   int get_packed_first_row() const {
-    static_assert(IsProducer, "get_packed_first_row() is producer-only");
-    int packed_row = inner_block_cur * kBlockM_;
+    static_assert(IsProducer && IsLoopQ, "get_packed_first_row() is LoopQ producer-only");
+    int packed_row = inner_block_cur * kInnerBlockSize_;
     int q_token_local_idx = packed_row / QheadPerKhead;
     int sub_head_offset = packed_row % QheadPerKhead;
     int q_token = (q_token_local_idx < seqlen_info.seqlen_q / QheadPerKhead) ? group_token_ptr[q_token_local_idx] : -1;
@@ -715,6 +616,16 @@ struct IndexAttnInvBlockMeta {
   CUTLASS_DEVICE
   void prefetch() {
     flash::advance_block_cur<kDir>(inner_block_cur);
+    if constexpr (IsProducer && !IsLoopQ && kKBlockSize <= 1) {
+      // Token-level LoopK: sliding window — advance pointer
+      if (!is_finish()) {
+        if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
+          group_token_ptr -= kInnerBlockSize_;
+        } else {
+          group_token_ptr += kInnerBlockSize_;
+        }
+      }
+    }
   }
 
   CUTLASS_DEVICE
