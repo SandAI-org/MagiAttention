@@ -1048,6 +1048,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 )
 
                 if _loopq_kbs > 1:
+                    assert nhk == 1, (
+                        f"IndexAttn BWD LoopQ with k_block_size>1 currently only supports nhk=1, "
+                        f"got nhk={nhk}. NHK>1 + kbs>1 has a flat-layout mismatch (P8-BUG-NHK)."
+                    )
                     from magi_attention.utils.sparse_utils import (
                         build_inv_indices_block,
                     )
