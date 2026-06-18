@@ -67,7 +67,7 @@ def _bwd_atol(grad_ref, grad_pt):
 # SM80 kernel selection
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# The SM80 (Ampere) kernel path is selected via the FLASH_ATTENTION_ARCH override
+# The SM80 kernel path is selected via the MAGI_ATTENTION_FFA_CUTEDSL_ARCH override
 # rather than the real device capability, so it can be exercised on newer GPUs
 # (the compiled SM80 SASS runs fine on sm90/sm100). get_device_arch() is
 # lru_cached, so we must clear the cache whenever we toggle the override.
@@ -81,8 +81,8 @@ def _maybe_force_sm80(enabled: bool):
         return
 
     switch_back = switch_envvars(
-        ["FLASH_ATTENTION_ARCH"],
-        enable_value_dict={"FLASH_ATTENTION_ARCH": "sm_80"},
+        ["MAGI_ATTENTION_FFA_CUTEDSL_ARCH"],
+        enable_value_dict={"MAGI_ATTENTION_FFA_CUTEDSL_ARCH": "sm_80"},
     )
     get_device_arch.cache_clear()
     try:

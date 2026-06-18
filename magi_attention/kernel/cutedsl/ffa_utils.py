@@ -51,12 +51,12 @@ def parse_arch_str(arch_str):
 def get_device_arch() -> tuple[int, int]:
     """Cached device arch check.
 
-    Override with FLASH_ATTENTION_ARCH (e.g. 'sm_80' or '80') to select which
+    Override with MAGI_ATTENTION_FFA_CUTEDSL_ARCH (e.g. 'sm_80' or '80') to select which
     kernel path to use (SM80/SM90/SM100/SM120) independently of the compilation
     target (CUTE_DSL_ARCH).
 
     For CPU-only compilation (no GPU), set both:
-      FLASH_ATTENTION_ARCH=sm_80  (kernel selection)
+      MAGI_ATTENTION_FFA_CUTEDSL_ARCH=sm_80  (kernel selection)
       CUTE_DSL_ARCH=sm_80         (compilation target)
 
     Returns:
@@ -64,7 +64,7 @@ def get_device_arch() -> tuple[int, int]:
         - arch: int (e.g. 80, 90, 100, 120)
         - major_arch: int (e.g. 8 for 80, 9 for 90, 10 for 100/103/120)
     """
-    arch_override = os.environ.get("FLASH_ATTENTION_ARCH", None)
+    arch_override = os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_ARCH", None)
 
     arch = (
         parse_arch_str(arch_override)
@@ -381,8 +381,10 @@ def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k):
 
 _MIXER_ATTRS = ("__vec_size__",)
 
-_fa_clc_enabled: bool = os.environ.get("FA_CLC", "0") == "1"
-_fa_disable_2cta_enabled: bool = os.environ.get("FA_DISABLE_2CTA", "0") == "1"
+_ffa_clc_enabled: bool = os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_CLC", "0") == "1"
+_ffa_disable_2cta_enabled: bool = (
+    os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA", "0") == "1"
+)
 
 
 def _is_cuda_12() -> bool:
@@ -403,18 +405,18 @@ def _is_cuda_12() -> bool:
     return False
 
 
-_fa_disable_2cta_cuda12: bool = _is_cuda_12()
+_ffa_disable_2cta_cuda12: bool = _is_cuda_12()
 
 
 def _get_use_clc_scheduler_default() -> bool:
-    return _fa_clc_enabled
+    return _ffa_clc_enabled
 
 
 def _get_disable_2cta_default(is_fwd: bool = False) -> bool:
     if is_fwd:
-        return _fa_disable_2cta_enabled or _fa_disable_2cta_cuda12
+        return _ffa_disable_2cta_enabled or _ffa_disable_2cta_cuda12
     else:
-        return _fa_disable_2cta_enabled
+        return _ffa_disable_2cta_enabled
 
 
 def _compute_base_hash(func: Callable) -> str:

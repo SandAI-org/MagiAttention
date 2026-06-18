@@ -54,7 +54,7 @@ class SchedulingMode(IntEnum):
 class ClcState(ParamsBase):
     """Owns the runtime state shared by CLC-capable tile schedulers.
 
-    `FlashAttentionForwardSm100` constructs this state because it owns the CLC
+    `FFAFwdSm100` constructs this state because it owns the CLC
     response buffer, mbarrier storage, and launch geometry needed to initialize
     the hardware scheduler and async pipeline. Individual tile schedulers then
     consume this state and map the returned hardware work tiles into their own

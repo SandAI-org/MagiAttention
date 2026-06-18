@@ -50,15 +50,15 @@ for _lib_path in cute.runtime.find_runtime_libraries(enable_tvm_ffi=False):
 CompileKeyType: TypeAlias = tuple[Hashable, ...]
 CallableFunction: TypeAlias = JitCompiledFunction | tvm_ffi.Function
 
-# Enable cache via `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1`
+# Enable cache via `MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED=1`
 CUTE_DSL_CACHE_ENABLED: bool = (
-    os.getenv("FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED", "0") == "1"
+    os.getenv("MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED", "0") == "1"
 )
 
 
-# Customize cache dir via `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR`, default is
-# `/tmp/${USER}/flash_attention_cute_dsl_cache``
-CUTE_DSL_CACHE_DIR: str | None = os.getenv("FLASH_ATTENTION_CUTE_DSL_CACHE_DIR", None)
+# Customize cache dir via `MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR`, default is
+# `/tmp/${USER}/magi_attention_ffa_cutedsl_cache`
+CUTE_DSL_CACHE_DIR: str | None = os.getenv("MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR", None)
 
 
 def get_cache_path() -> Path:
@@ -66,7 +66,7 @@ def get_cache_path() -> Path:
         cache_dir = Path(CUTE_DSL_CACHE_DIR)
     else:
         cache_dir = (
-            Path(tempfile.gettempdir()) / getuser() / "flash_attention_cute_dsl_cache"
+            Path(tempfile.gettempdir()) / getuser() / "magi_attention_ffa_cutedsl_cache"
         )
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
@@ -78,7 +78,7 @@ def _compute_source_fingerprint() -> str:
     Hash all CuTe Python sources plus runtime ABI stamps into a short fingerprint.
 
     The fingerprint changes whenever:
-    - Any .py file under flash_attn/cute is added, removed, renamed, or modified.
+    - Any .py file under magi_attention/kernel/cutedsl is added, removed, renamed, or modified.
     - The Python minor version changes (e.g. 3.13 -> 3.14).
     - The cutlass or tvm_ffi package version changes.
 

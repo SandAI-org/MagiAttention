@@ -66,12 +66,12 @@ from magi_attention.utils.arch import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Force the forked SM80 ffa kernel path even on newer GPUs (sm90/sm100).
-# This only changes kernel *selection* via FLASH_ATTENTION_ARCH; compilation still
+# This only changes kernel *selection* via MAGI_ATTENTION_FFA_CUTEDSL_ARCH; compilation still
 # targets the real device so the cubin actually runs. The compared baseline is fa2.
 FORCE_SM80 = os.environ.get("BENCH_FORCE_SM80", "0") == "1"
 if FORCE_SM80:
     # must be set before the first ffa kernel call so get_device_arch() picks it up
-    os.environ["FLASH_ATTENTION_ARCH"] = "sm_80"
+    os.environ["MAGI_ATTENTION_FFA_CUTEDSL_ARCH"] = "sm_80"
 
 IS_SM80 = is_ampere() or FORCE_SM80
 IS_SM90 = is_hopper()
