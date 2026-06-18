@@ -54,7 +54,7 @@ from .tile_scheduler import (
 )
 
 # isort: split
-from .legacy import barrier, pipeline
+from .legacy import pipeline
 
 
 class FFABwdSm90:
@@ -2174,7 +2174,7 @@ class FFABwdSm90:
             read_flag = const_expr(not deterministic_KV)
             cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
             if const_expr(deterministic_KV):
-                barrier.wait_eq(mdK_semaphore_cur.iterator, tidx, 0, lock_value)
+                cutedsl_utils.wait_eq(mdK_semaphore_cur.iterator, tidx, 0, lock_value)
             epi_barrier.arrive_and_wait()
             tdKrdKaccum_flat = cute.make_tensor(acc_dK.iterator, tdKsdKaccum.shape)
             cute.autovec_copy(tdKrdKaccum_flat, tdKsdKaccum)
@@ -2192,8 +2192,8 @@ class FFABwdSm90:
 
             cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
             if const_expr(deterministic_KV):
-                barrier.arrive_inc(mdK_semaphore_cur.iterator, tidx, 0, 1)
-                barrier.wait_eq(mdV_semaphore_cur.iterator, tidx, 0, lock_value)
+                cutedsl_utils.arrive_inc(mdK_semaphore_cur.iterator, tidx, 0, 1)
+                cutedsl_utils.wait_eq(mdV_semaphore_cur.iterator, tidx, 0, lock_value)
             epi_barrier.arrive_and_wait()
             tdVrdVaccum_flat = cute.make_tensor(acc_dV.iterator, tdVsdVaccum.shape)
             cute.autovec_copy(tdVrdVaccum_flat, tdVsdVaccum)
@@ -2210,7 +2210,7 @@ class FFABwdSm90:
                 cute.arch.cp_async_bulk_commit_group()
             if const_expr(deterministic_KV):
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
-                barrier.arrive_inc(mdV_semaphore_cur.iterator, tidx, 0, 1)
+                cutedsl_utils.arrive_inc(mdV_semaphore_cur.iterator, tidx, 0, 1)
 
     @cute.jit
     def dQaccum_store(
@@ -2330,7 +2330,7 @@ class FFABwdSm90:
                                 lock_value = n_block_max_for_m_block - 1 - n_block
                             else:
                                 lock_value = n_block
-                            barrier.wait_eq(
+                            cutedsl_utils.wait_eq(
                                 mdQ_semaphore_cur[(m_block_safe, None)].iterator,
                                 warp_local_tidx,
                                 0,  # flag_offset
@@ -2357,7 +2357,7 @@ class FFABwdSm90:
                         # Semaphore release: signal that this n_block is done with this m_block
                         if const_expr(self.deterministic):
                             cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
-                            barrier.arrive_inc(
+                            cutedsl_utils.arrive_inc(
                                 mdQ_semaphore_cur[(m_block_safe, None)].iterator,
                                 warp_local_tidx,
                                 0,  # flag_offset
@@ -2390,7 +2390,7 @@ class FFABwdSm90:
             ):
                 m_block_global_max = cute.ceil_div(seqlen.seqlen_q, self.tile_m)
                 for m_block in cutlass.range(m_block_max, m_block_global_max, unroll=1):
-                    barrier.arrive_inc(
+                    cutedsl_utils.arrive_inc(
                         mdQ_semaphore_cur[(m_block, None)].iterator,
                         warp_local_tidx,
                         0,  # flag_offset

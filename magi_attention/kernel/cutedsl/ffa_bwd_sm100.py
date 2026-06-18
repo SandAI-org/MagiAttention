@@ -59,7 +59,7 @@ from .tile_scheduler import (
 )
 
 # isort: split
-from .legacy import barrier, copy_utils
+from .legacy import copy_utils
 from .legacy import pipeline as pipeline_custom
 
 
@@ -5342,7 +5342,7 @@ class FFABwdSm100:
                                 m_block,
                                 n_block_cta_group,
                             )
-                            barrier.wait_eq(
+                            cutedsl_utils.wait_eq(
                                 mdQ_semaphore_cur[(m_block, None)].iterator,
                                 tidx,
                                 cta_rank_in_cluster,
@@ -5377,7 +5377,7 @@ class FFABwdSm100:
                         self.deterministic and stage == 0 and delay_semaphore_release
                     ):
                         if m_block > m_block_min:
-                            barrier.arrive_inc(
+                            cutedsl_utils.arrive_inc(
                                 mdQ_semaphore_cur[(m_block - 1, None)].iterator,
                                 tidx,
                                 cta_rank_in_cluster,
@@ -5402,7 +5402,7 @@ class FFABwdSm100:
                             cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
                         self.reduce_sync_barrier.arrive_and_wait()
                     if not m_block_oob_upper:
-                        barrier.arrive_inc(
+                        cutedsl_utils.arrive_inc(
                             mdQ_semaphore_cur[m_block, None].iterator,
                             tidx,
                             cta_rank_in_cluster,
@@ -5415,7 +5415,7 @@ class FFABwdSm100:
                 self.reduce_sync_barrier.arrive_and_wait()
                 # final semaphore release
                 if const_expr(self.deterministic and delay_semaphore_release):
-                    barrier.arrive_inc(
+                    cutedsl_utils.arrive_inc(
                         mdQ_semaphore_cur[(m_block_max - 1, None)].iterator,
                         tidx,
                         cta_rank_in_cluster,
@@ -5430,7 +5430,7 @@ class FFABwdSm100:
             ):
                 m_block_global_max = cute.ceil_div(seqlen.seqlen_q, self.tile_m)
                 for m_block in cutlass.range(m_block_max, m_block_global_max, unroll=1):
-                    barrier.arrive_inc(
+                    cutedsl_utils.arrive_inc(
                         mdQ_semaphore_cur[(m_block, None)].iterator,
                         tidx,
                         cta_rank_in_cluster,
@@ -5804,7 +5804,7 @@ class FFABwdSm100:
 
         # Semaphore acquire
         if const_expr(deterministic_KV):
-            barrier.wait_eq(
+            cutedsl_utils.wait_eq(
                 mdKV_semaphore_cur.iterator,
                 tidx,
                 wg_idx,
@@ -5905,7 +5905,7 @@ class FFABwdSm100:
                 cute.arch.cp_async_bulk_commit_group()
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
-            barrier.arrive_inc(mdKV_semaphore_cur.iterator, tidx, wg_idx, 1)
+            cutedsl_utils.arrive_inc(mdKV_semaphore_cur.iterator, tidx, wg_idx, 1)
 
         cute.arch.sync_warp()
         with cute.arch.elect_one():
