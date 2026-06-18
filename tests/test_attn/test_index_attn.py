@@ -42,6 +42,7 @@ Known limitations:
   - Q/K/V are packed in (b, s, h) order to match index_attn_indices view layout
 """
 
+import os
 from typing import Any
 
 import pytest
@@ -651,37 +652,64 @@ class TestIndexAttnIndicesAttn(DistTestBase):
     def test_sparse_mha(self, config: dict[str, Any]):
         self._run_config(config)
 
-    # ─── Tier 3e: k_block_size > 1 (WIP, commented out) ───
+    # ─── Tier 3e: k_block_size > 1 (block-level K indexing) ───
 
-    # @pytest.mark.slow
-    # @with_run_in_mp
-    # @parameterize(
-    #     "config",
-    #     [
-    #         {
-    #             "name": "mqa128_kblock32",
-    #             "B": 1,
-    #             "S": 256,
-    #             "NHQ": 128,
-    #             "NHK": 1,
-    #             "topk": 4,
-    #             "pack_gqa": True,
-    #             "k_block_size": 32,
-    #         },
-    #         {
-    #             "name": "mqa128_kblock128",
-    #             "B": 1,
-    #             "S": 256,
-    #             "NHQ": 128,
-    #             "NHK": 1,
-    #             "topk": 2,
-    #             "pack_gqa": True,
-    #             "k_block_size": 128,
-    #         },
-    #     ],
-    # )
-    # def test_sparse_k_block_size(self, config: dict[str, Any]):
-    #     self._run_config(config)
+    @pytest.mark.slow
+    @with_run_in_mp
+    @parameterize(
+        "config",
+        [
+            # kbs=128: canonical 128×128 block — topk=2, S=256 → 2 K blocks (full)
+            {
+                "name": "mqa128_kblock128",
+                "B": 1,
+                "S": 256,
+                "NHQ": 128,
+                "NHK": 1,
+                "topk": 2,
+                "pack_gqa": True,
+                "k_block_size": 128,
+            },
+            # kbs=128: larger S — topk=4 out of 8 K blocks, partial coverage
+            {
+                "name": "mqa128_kblock128_s1024",
+                "B": 1,
+                "S": 1024,
+                "NHQ": 128,
+                "NHK": 1,
+                "topk": 4,
+                "pack_gqa": True,
+                "k_block_size": 128,
+            },
+            # kbs=128: smaller GQA ratio (32×)
+            {
+                "name": "mqa32_kblock128",
+                "B": 1,
+                "S": 256,
+                "NHQ": 32,
+                "NHK": 1,
+                "topk": 2,
+                "pack_gqa": True,
+                "k_block_size": 128,
+            },
+        ],
+    )
+    def test_sparse_k_block_size(self, config: dict[str, Any]):
+        kbs = config.get("k_block_size", 1)
+        if kbs > 1:
+            # LoopK BWD misinterprets block-level indices as token-level;
+            # use LoopQ BWD for kbs>1 (requires env vars).
+            # NHK>1 + kbs>1 not yet supported in LoopQ BWD (flat-layout mismatch).
+            os.environ["MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q"] = "1"
+            os.environ["MAGI_ATTENTION_INDEX_ATTN_BWD_K_BLOCK_SIZE"] = str(kbs)
+            test_bwd = config.get("NHK", 1) == 1
+        else:
+            test_bwd = True
+        try:
+            self._run_config(config, test_bwd=test_bwd)
+        finally:
+            os.environ.pop("MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q", None)
+            os.environ.pop("MAGI_ATTENTION_INDEX_ATTN_BWD_K_BLOCK_SIZE", None)
 
 
 if __name__ == "__main__":

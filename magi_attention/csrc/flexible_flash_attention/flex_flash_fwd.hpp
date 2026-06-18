@@ -60,6 +60,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     std::optional<const at::Tensor>& unique_count_,
     std::optional<const at::Tensor>& index_attn_indices_,
     int const index_attn_max_topk,
+    int const index_attn_k_block_size,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> out_type_,

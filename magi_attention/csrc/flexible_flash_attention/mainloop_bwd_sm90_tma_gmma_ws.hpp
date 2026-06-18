@@ -80,7 +80,8 @@ template <
     int Stages_V_ = Stages,
     int ScatterPad_ = -1,
     bool LseDpsumUnionDKVacc_ = false,
-    bool DkvaccBypassSmem_ = false>
+    bool DkvaccBypassSmem_ = false,
+    int KBlockSize_ = 1>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -116,8 +117,10 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
   static constexpr bool SparseLoad = SparseLoad_;
   static constexpr bool IndexAttn = IndexAttn_;
+  static constexpr int KBlockSize = KBlockSize_;
   static_assert(!SparseLoad || RangeMerge); // If SparseLoad, we need RangeMerge
   static_assert(!(SparseLoad && IndexAttn));
+  static_assert(!IndexAttn || KBlockSize >= 1, "KBlockSize must be >= 1 for IndexAttn");
 
   static constexpr bool UseMaskDispatch = UseMaskDispatch_;
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
@@ -1109,14 +1112,35 @@ struct CollectiveMainloopBwdSm90 {
   template <bool IsProducer>
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
+  // IndexAttn LoopK: outer=Q token, inner=K from forward topk indices
   template <bool IsProducer>
-  using IndexAttnLoadBlockMeta =
-      flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin>;
+  using IndexAttnLoadBlockMeta = flash::IndexAttnBlockMeta<
+      IsProducer,
+      RangeMerge,
+      PackGQA,
+      QheadPerKhead,
+      NumRowsPerGroup,
+      NumProducerThreads,
+      GroupSize,
+      kBlockN,
+      InnerDirMaxToMin,
+      KBlockSize,
+      /*IsLoopQ=*/false>;
 
-  // IndexAttn LoopQ: outer=K token, inner=Q from inv_indices (SwapBwdQKLoop=false)
+  // IndexAttn LoopQ: outer=K block, inner=Q from inv_indices
   template <bool IsProducer>
-  using IndexAttnInvLoadBlockMeta =
-      flash::IndexAttnInvBlockMeta<IsProducer, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockM, InnerDirMaxToMin>;
+  using IndexAttnInvLoadBlockMeta = flash::IndexAttnBlockMeta<
+      IsProducer,
+      /*RangeMerge=*/false,
+      PackGQA,
+      QheadPerKhead,
+      NumRowsPerGroup,
+      NumProducerThreads,
+      GroupSize,
+      kBlockM,
+      InnerDirMaxToMin,
+      KBlockSize,
+      /*IsLoopQ=*/true>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -2670,10 +2694,6 @@ struct CollectiveMainloopBwdSm90 {
       }();
 
       // MMA1 (SS): apply S = QK^T or S^T = KQ^T if SdP_swapAB
-      // after current m block of Q,LSE loaded
-      // note that `tSrQ` stores Q and `tSrK` stores K, so:
-      // case1. if SdP_swapAB, we apply S^T = KQ^T (passing Q,K to gemm, it swaps AB to K,Q and then transposes operand B to Q^T)
-      // case2. if not SdP_swapAB, we apply S = QK^T (passing Q,K to gemm, it transposes operand B to K^T)
       consumer_wait(pipeline_q, smem_pipe_read_q);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read_q.index()), tSrK, tSrS);
 
@@ -3140,7 +3160,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // ─── Unified MMA control flow ───
+    // ─── Unified MMA control flow ─── (mma_with_loop_q)
     if (block_meta.skip_to_first_valid())
       return false;
 

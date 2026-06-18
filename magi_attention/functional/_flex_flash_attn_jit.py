@@ -306,6 +306,7 @@ def get_ffa_jit_spec(
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
+    k_block_size: int = 1,
 ) -> tuple[JitSpec, str]:
     # TODO: add more sanity checks for the combinations of options
     sanity_check(
@@ -386,8 +387,13 @@ def get_ffa_jit_spec(
         return_max_logits,
     )
 
+    # k_block_size is a compile-time constant baked into the kernel.
+    # Different values produce separate JIT cache entries.
+    if k_block_size > 1:
+        uri += f"_kbs{k_block_size}"
+
     # Optional compile-time overrides for internal kernel tuning knobs (test/bench only)
-    extra_template_args: dict[str, str] = {}
+    extra_template_args: dict[str, str] = {"k_block_size": str(k_block_size)}
     _iwg = os.environ.get("MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP")
     if _iwg is not None and direction == "fwd":
         extra_template_args["intra_wg_overlap"] = _iwg.lower()
@@ -460,6 +466,17 @@ def get_ffa_jit_spec(
                 extra_template_args[_tpl_key] = str(int(_val))
                 _uri_val = _val.replace("-", "n")
                 uri += f"_{_uri_key}{_uri_val}"
+
+        # IndexAttn LoopQ with block-level K: override tile_n to match k_block_size
+        # so that kBlockN = k_block_size (full-tile outer K, no waste).
+        if (
+            index_attn
+            and not swap_bwd_qk_loop
+            and "bwd_tile_n" not in extra_template_args
+        ):
+            if k_block_size >= 128:
+                extra_template_args["bwd_tile_n"] = str(k_block_size)
+                uri += f"_tn{k_block_size}"
 
     # Register quota selection (single source of truth, kernels only assert)
     _producer_regs, _consumer_regs = _ffa_register_quota(
@@ -637,6 +654,7 @@ def get_ffa_jit_mod(
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
+    k_block_size: int = 1,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -676,6 +694,7 @@ def get_ffa_jit_mod(
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
+        k_block_size=k_block_size,
     )
 
     logger.info(

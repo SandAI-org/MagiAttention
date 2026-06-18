@@ -61,6 +61,7 @@ template <
     bool ReturnMaxLogits,
     int ProducerRegs,
     int ConsumerRegs,
+    int KBlockSize,
     bool ProfileMode>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
@@ -94,7 +95,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       SparseLoad,
       IndexAttn,
       InnerDirMaxToMin,
-      MaskMode>;
+      MaskMode,
+      KBlockSize>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
@@ -229,6 +231,7 @@ template <
     bool kReturnMaxLogits,
     int kProducerRegs,
     int kConsumerRegs,
+    int kKBlockSize,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only fp16/bf16 dtype are supported");
@@ -263,6 +266,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*ReturnMaxLogits=*/kReturnMaxLogits,
         /*ProducerRegs=*/kProducerRegs,
         /*ConsumerRegs=*/kConsumerRegs,
+        /*KBlockSize=*/kKBlockSize,
         /*ProfileMode=*/kProfileMode>(params, stream);
   });
 }

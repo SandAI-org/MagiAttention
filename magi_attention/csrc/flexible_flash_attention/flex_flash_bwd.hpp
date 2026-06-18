@@ -101,6 +101,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& bwd_unique_count_,
     std::optional<const at::Tensor>& index_attn_indices_,
     int index_attn_max_topk,
+    int index_attn_k_block_size,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> dq_type_,
