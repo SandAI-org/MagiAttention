@@ -34,7 +34,7 @@ import torch
 from einops import rearrange
 
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.ffa_utils import get_device_arch
+from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
 from magi_attention.kernel.cutedsl.legacy.testing import attention_ref
 from magi_attention.testing import assert_close
 from magi_attention.testing.utils import switch_envvars
@@ -99,7 +99,7 @@ def _maybe_force_sm80(enabled: bool):
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("mha_type", ["mha", "gqa", "mqa"])
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("attn_type_map", [MT_MAP.full, MT_MAP.causal])
 @pytest.mark.parametrize("d", [64, 128])
 @pytest.mark.parametrize("force_sm80", [False, True])
 @pytest.mark.parametrize(
@@ -110,7 +110,9 @@ def _maybe_force_sm80(enabled: bool):
         (113, 203),  # non-aligned
     ],
 )
-def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, force_sm80, d, causal, mha_type, dtype):
+def test_non_varlen_fwd_bwd(
+    seqlen_q, seqlen_k, force_sm80, d, attn_type_map, mha_type, dtype
+):
     """Non-varlen flex_flash_attn_func: fwd + bwd for full/causal x MHA/GQA/MQA."""
     # FIXME(sm80): the forced SM80 path has a numerical bug (fwd output is wrong
     # in the high 8 of every 16 head_dim_v lanes, ~40% mismatch). Skip until the
@@ -119,7 +121,8 @@ def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, force_sm80, d, causal, mha_type,
         return
 
     device = "cuda"
-    seed = seqlen_q + seqlen_k + d + int(causal) * 3
+    causal = attn_type_map == MT_MAP.causal
+    seed = seqlen_q + seqlen_k + d + attn_type_map * 3
     torch.random.manual_seed(seed)
     random.seed(seed)
 
@@ -147,7 +150,7 @@ def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, force_sm80, d, causal, mha_type,
     )
 
     with _maybe_force_sm80(force_sm80):
-        out, _ = flex_flash_attn_func(q, k, v, causal=causal)
+        out, _ = flex_flash_attn_func(q, k, v, attn_type_map=attn_type_map)
 
         atol = _fwd_atol(out_ref, out_pt)
         assert_close(
@@ -156,7 +159,7 @@ def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, force_sm80, d, causal, mha_type,
             atol=atol,
             rtol=0,
             mismatch_threshold=1e-5,
-            test_case=f"{force_sm80=},{seqlen_q=},{seqlen_k=},{d=},{causal=},{mha_type=},{dtype=} => fwd",
+            test_case=f"{force_sm80=},{seqlen_q=},{seqlen_k=},{d=},{attn_type_map=},{mha_type=},{dtype=} => fwd",
         )
 
         # ── backward ──
@@ -186,7 +189,7 @@ def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, force_sm80, d, causal, mha_type,
                 atol=_bwd_atol(ref, pt),
                 rtol=0,
                 mismatch_threshold=1e-5,
-                test_case=f"{force_sm80=},{seqlen_q=},{seqlen_k=},{d=},{causal=},{mha_type=},{dtype=} => {name}",
+                test_case=f"{force_sm80=},{seqlen_q=},{seqlen_k=},{d=},{attn_type_map=},{mha_type=},{dtype=} => {name}",
             )
         except AssertionError as e:
             errors.append(str(e))
@@ -201,11 +204,11 @@ def test_non_varlen_fwd_bwd(seqlen_q, seqlen_k, force_sm80, d, causal, mha_type,
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("mha_type", ["mha", "gqa", "mqa"])
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("attn_type_map", [MT_MAP.full, MT_MAP.causal])
 @pytest.mark.parametrize("d", [64, 128])
 @pytest.mark.parametrize("force_sm80", [False, True])
 @pytest.mark.parametrize("seqlen", [128, 512, 1024])
-def test_varlen_fwd_bwd(seqlen, force_sm80, d, causal, mha_type, dtype):
+def test_varlen_fwd_bwd(seqlen, force_sm80, d, attn_type_map, mha_type, dtype):
     """Varlen flex_flash_attn_func (packed cu_seqlens): fwd + bwd."""
     # FIXME(sm80): the forced SM80 path has a numerical bug (fwd output is wrong
     # in the high 8 of every 16 head_dim_v lanes, ~40% mismatch). Skip until the
@@ -217,8 +220,9 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, causal, mha_type, dtype):
     if IS_SM90:
         pytest.skip("SM90 varlen bwd not supported")
 
+    causal = attn_type_map == MT_MAP.causal
     device = "cuda"
-    seed = seqlen + d + int(causal) * 5
+    seed = seqlen + d + attn_type_map * 5
     torch.random.manual_seed(seed)
     random.seed(seed)
 
@@ -257,7 +261,7 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, causal, mha_type, dtype):
             cu_seqlens_k=cu_seqlens,
             max_seqlen_q=seqlen,
             max_seqlen_k=seqlen,
-            causal=causal,
+            attn_type_map=attn_type_map,
         )
 
         out_reshaped = rearrange(out_v, "(b s) h d -> b s h d", b=batch_size)
@@ -268,7 +272,7 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, causal, mha_type, dtype):
             atol=atol,
             rtol=0,
             mismatch_threshold=1e-5,
-            test_case=f"{force_sm80=},{seqlen=},{d=},{causal=},{mha_type=},{dtype=} => varlen fwd",
+            test_case=f"{force_sm80=},{seqlen=},{d=},{attn_type_map=},{mha_type=},{dtype=} => varlen fwd",
         )
 
         # ── backward ──

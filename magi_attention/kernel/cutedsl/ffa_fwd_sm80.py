@@ -34,6 +34,7 @@ from quack import copy_utils, layout_utils
 
 from . import cutedsl_utils, sm80_utils
 from .block_info import BlockInfo
+from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwd
 from .pack_gqa import PackGQA
@@ -54,7 +55,7 @@ class FFAFwdSm80:
         head_dim: int,
         head_dim_v: Optional[int] = None,
         qhead_per_kvhead: int = 1,
-        is_causal: bool = False,
+        mask_type: int = MT_MAP.full,
         is_local: bool = False,
         pack_gqa: bool = True,
         tile_m: int = 128,
@@ -81,7 +82,7 @@ class FFAFwdSm80:
         :type tile_n: int
         :param num_threads: number of threads
         :type num_threads: int
-        :param is_causal: is causal
+        :param mask_type: attention mask type int key (see ``MT_MAP``)
         :param score_mod: A callable that takes the attention scores and applies a modification.
             Callable signature: ``score_mod(scores, batch_idx, head_idx, q_idx, kv_idx, aux_tensors) -> Any``
         :param mask_mod: A callable that takes the attention scores and returns a boolean
@@ -101,7 +102,7 @@ class FFAFwdSm80:
         self.check_hdim_oob = head_dim != self.tile_hdim
         self.check_hdim_v_oob = head_dim_v != self.tile_hdimv
         self.qhead_per_kvhead = qhead_per_kvhead
-        self.is_causal = is_causal
+        self.mask_type = mask_type
         self.is_local = is_local
         self.pack_gqa = pack_gqa
         self.tile_m = tile_m
@@ -132,7 +133,9 @@ class FFAFwdSm80:
             print(
                 f"{prefix}{self.dtype=} | {self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}"
             )
-            print(f"{prefix}{self.is_causal=} | {self.is_local=} | {self.pack_gqa=}")
+            print(
+                f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | {self.pack_gqa=}"
+            )
             print(
                 f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_stages=} | {self.num_threads=}"
             )
@@ -140,6 +143,10 @@ class FFAFwdSm80:
             print(f"{prefix}{self.score_mod=} | {self.mask_mod=}")
             print(f"{prefix}{self.arch=}")
             print()
+
+    @property
+    def is_causal(self) -> bool:
+        return self.mask_type == MT_MAP.causal
 
     @staticmethod
     def can_implement(

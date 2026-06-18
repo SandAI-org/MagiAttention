@@ -94,7 +94,9 @@ class FFAFwdSm90(FFAFwdSm80):
             print(
                 f"{prefix}{self.dtype=} | {self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}"
             )
-            print(f"{prefix}{self.is_causal=} | {self.is_local=} | {self.pack_gqa=}")
+            print(
+                f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | {self.pack_gqa=}"
+            )
             print(
                 f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_stages=} | {self.num_threads=}"
             )

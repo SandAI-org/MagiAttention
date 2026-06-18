@@ -41,6 +41,7 @@ from . import pipeline as ffa_pipeline
 from . import sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
+from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwdSm100
 from .seqlen_info import SeqlenInfoQK
@@ -68,7 +69,7 @@ class FFABwdSm100:
         self,
         head_dim: int,
         head_dim_v: Optional[int] = None,
-        is_causal: bool = False,
+        mask_type: int = MT_MAP.full,
         is_local: bool = False,
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
         tile_m: int = 128,
@@ -137,7 +138,7 @@ class FFABwdSm100:
         assert cluster_size in (1, 2), "Only cluster_size=1 or 2 is supported"
         self.cluster_shape_mn = (cluster_size, 1)
         self.is_persistent = is_persistent
-        self.is_causal = is_causal
+        self.mask_type = mask_type
         self.is_local = is_local
         self.qhead_per_kvhead = qhead_per_kvhead
         self.pack_gqa = False
@@ -226,7 +227,7 @@ class FFABwdSm100:
 
             self.tmem_dK_offset = self.tmem_dP_offset + self.tile_m
 
-        if (not is_causal and not is_local) or deterministic:
+        if (not self.is_causal and not is_local) or deterministic:
             self.num_regs_reduce = 136 if self.use_2cta_instrs else 152
             self.num_regs_compute = 136
             self.num_regs_load = 104 if self.use_2cta_instrs else 96 - 8
@@ -239,7 +240,7 @@ class FFABwdSm100:
         self.num_regs_empty = 24
 
         if const_expr(self.tile_hdim == 192):
-            if not is_causal and not is_local:
+            if not self.is_causal and not is_local:
                 self.num_regs_reduce = 128 + 8
                 self.num_regs_compute = 128 + 8
                 self.num_regs_load = 128 - 24
@@ -269,7 +270,8 @@ class FFABwdSm100:
                 f"{prefix}{self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}"
             )
             print(
-                f"{prefix}{self.is_causal=} | {self.is_local=} | {self.is_persistent=} | {self.deterministic=}"
+                f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | "
+                f"{self.is_persistent=} | {self.deterministic=}"
             )
             print(
                 f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.use_2cta_instrs=} | {self.cta_group_size=}"
@@ -296,6 +298,10 @@ class FFABwdSm100:
                 f"{prefix}{self.score_mod=} | {self.score_mod_bwd=} | {self.mask_mod=}"
             )
             print()
+
+    @property
+    def is_causal(self) -> bool:
+        return self.mask_type == MT_MAP.causal
 
     def _setup_attributes(self):
         self.Q_stage = 1 if self.use_2cta_instrs else 2

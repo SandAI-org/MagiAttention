@@ -44,6 +44,7 @@ from .ffa_fwd_sm90 import FFAFwdSm90
 from .ffa_fwd_sm100 import FFAFwdSm100
 from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
+    MT_MAP,
     _get_disable_2cta_default,
     _get_use_clc_scheduler_default,
     convert_from_dlpack_leading_static,
@@ -52,6 +53,7 @@ from .ffa_utils import (
     get_device_arch,
     hash_callable,
     maybe_contiguous,
+    normalize_attn_type_map,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
@@ -78,7 +80,7 @@ def _flex_flash_attn_fwd(
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
-    causal: bool = False,
+    mask_type: int = MT_MAP.full,
     softcap: float | None = None,
     learnable_sink: torch.Tensor | None = None,
     pack_gqa: bool | None = None,
@@ -210,8 +212,13 @@ def _flex_flash_attn_fwd(
     use_block_sparsity = block_sparse_tensors is not None
 
     local = False
+    # NOTE: only a single mask type shared by all q/k ranges is supported for now,
+    # so collapse mask_type down to the legacy causal bool for the host-side
+    # heuristics and for the kernels that still take is_causal (all but SM100).
+    causal = mask_type == MT_MAP.causal
     if mask_mod is not None:
         causal = False
+        mask_type = MT_MAP.full
 
     requested_use_clc_scheduler = _get_use_clc_scheduler_default()
     requested_disable_2cta = _get_disable_2cta_default(is_fwd=True)
@@ -326,7 +333,7 @@ def _flex_flash_attn_fwd(
         head_dim,
         head_dim_v,
         qhead_per_kvhead,
-        causal,
+        mask_type,
         score_mod_hash,
         mask_mod_hash,
         use_block_sparsity,
@@ -388,7 +395,7 @@ def _flex_flash_attn_fwd(
                 head_dim,
                 head_dim_v,
                 qhead_per_kvhead,
-                is_causal=causal,
+                mask_type=mask_type,
                 is_local=local,
                 pack_gqa=pack_gqa,
                 tile_m=tile_m,
@@ -407,7 +414,7 @@ def _flex_flash_attn_fwd(
                 head_dim,
                 head_dim_v,
                 qhead_per_kvhead,
-                is_causal=causal,
+                mask_type=mask_type,
                 is_local=local,
                 pack_gqa=pack_gqa,
                 tile_m=tile_m,
@@ -429,7 +436,7 @@ def _flex_flash_attn_fwd(
                 head_dim=head_dim,
                 head_dim_v=head_dim_v,
                 qhead_per_kvhead=qhead_per_kvhead,
-                is_causal=causal,
+                mask_type=mask_type,
                 is_local=local,
                 is_split_kv=False,
                 pack_gqa=pack_gqa,
@@ -455,7 +462,7 @@ def _flex_flash_attn_fwd(
                 head_dim,
                 head_dim_v,
                 qhead_per_kvhead,
-                is_causal=causal,
+                mask_type=mask_type,
                 is_local=local,
                 pack_gqa=pack_gqa,
                 tile_m=tile_m,
@@ -562,7 +569,7 @@ def _flex_flash_attn_bwd(
     dk: torch.Tensor | None = None,
     dv: torch.Tensor | None = None,
     softmax_scale: float | None = None,
-    causal: bool = False,
+    mask_type: int = MT_MAP.full,
     softcap: float = 0.0,
     pack_gqa: bool = False,
     cu_seqlens_q: torch.Tensor | None = None,
@@ -585,6 +592,10 @@ def _flex_flash_attn_bwd(
     validate_arch(arch, major_arch)
 
     local = False
+    # NOTE: only a single mask type shared by all q/k ranges is supported for now,
+    # so collapse mask_type down to the legacy causal bool for the host-side
+    # heuristics and for the kernels that still take is_causal (all but SM100).
+    causal = mask_type == MT_MAP.causal
     sparse_q = None
     if block_sparse_tensors is not None and major_arch == 9:
         sparse_q = (
@@ -1020,7 +1031,7 @@ def _flex_flash_attn_bwd(
             head_dim,
             head_dim_v,
             qhead_per_kvhead,
-            causal,
+            mask_type,
             m_block_size,
             n_block_size,
             num_threads,
@@ -1060,7 +1071,7 @@ def _flex_flash_attn_bwd(
             head_dim,
             head_dim_v,
             qhead_per_kvhead,
-            causal,
+            mask_type,
             m_block_size,
             n_block_size,
             num_threads,
@@ -1130,7 +1141,7 @@ def _flex_flash_attn_bwd(
                 num_stages_dO,
                 num_threads,
                 pack_gqa,
-                causal,
+                mask_type,
                 SdP_swapAB,
                 dKV_swapAB,
                 dQ_swapAB,
@@ -1145,7 +1156,7 @@ def _flex_flash_attn_bwd(
                 head_dim,
                 head_dim_v,
                 qhead_per_kvhead,
-                causal,
+                mask_type,
                 is_local=local,
                 deterministic=deterministic,
                 tile_m=m_block_size,
@@ -1173,7 +1184,7 @@ def _flex_flash_attn_bwd(
             fa_bwd_obj = FFABwdSm100(
                 head_dim,
                 head_dim_v,
-                is_causal=causal,
+                mask_type=mask_type,
                 is_local=local,
                 qhead_per_kvhead=qhead_per_kvhead,
                 tile_m=m_block_size,
@@ -1349,7 +1360,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         max_seqlen_q: int | None = None,
         max_seqlen_k: int | None = None,
         softmax_scale: float | None = None,
-        causal: bool = False,
+        attn_type_map: torch.Tensor | int | None = None,
         learnable_sink: torch.Tensor | None = None,
         softcap: float = 0.0,
         pack_gqa: bool | None = None,
@@ -1361,6 +1372,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         block_sparse_tensors: BlockSparseTensorsTorch | None = None,
         block_sparse_tensors_bwd: BlockSparseTensorsTorch | None = None,
     ):
+        mask_type = normalize_attn_type_map(attn_type_map)
         out, lse = _flex_flash_attn_fwd(
             q=q,
             k=k,
@@ -1370,7 +1382,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=softmax_scale,
-            causal=causal,
+            mask_type=mask_type,
             learnable_sink=learnable_sink,
             softcap=softcap,
             pack_gqa=pack_gqa,
@@ -1391,7 +1403,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             *(aux_tensors or ()),
         )
         ctx.softmax_scale = softmax_scale
-        ctx.causal = causal
+        ctx.mask_type = mask_type
         ctx.softcap = softcap
         ctx.deterministic = deterministic
         ctx.max_seqlen_q = max_seqlen_q
@@ -1428,7 +1440,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse=lse,
             dout=dout,
             softmax_scale=ctx.softmax_scale,
-            causal=ctx.causal,
+            mask_type=ctx.mask_type,
             softcap=ctx.softcap,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
@@ -1454,7 +1466,7 @@ def flex_flash_attn_func(
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
-    causal: bool = False,
+    attn_type_map: torch.Tensor | int | None = None,
     learnable_sink: torch.Tensor | None = None,
     softcap: float = 0.0,
     pack_gqa: bool | None = None,
@@ -1475,6 +1487,13 @@ def flex_flash_attn_func(
         more general flex q/k ranges that ffa targets.
 
     max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
+
+    attn_type_map: the attention mask type applied to the q/k ranges, using the
+        int keys from ``MT_MAP`` (0=full, 1=causal). It may be:
+        - ``None``: all ranges use full attention (the default).
+        - ``int``: all ranges share the same mask type.
+        - ``torch.Tensor`` (cuda int32): a distinct mask type per q/k range
+          (not supported yet).
     """
     out, lse = FlexFlashAttnFunc.apply(
         q,
@@ -1485,7 +1504,7 @@ def flex_flash_attn_func(
         max_seqlen_q,
         max_seqlen_k,
         softmax_scale,
-        causal,
+        attn_type_map,
         learnable_sink,
         softcap,
         pack_gqa,

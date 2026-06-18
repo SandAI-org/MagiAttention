@@ -53,6 +53,7 @@ from magi_attention.benchmarking import (
 )
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
+from magi_attention.kernel.cutedsl import MT_MAP
 from magi_attention.kernel.cutedsl import flex_flash_attn_func as ffa_func
 from magi_attention.utils.arch import (
     get_dev_cap_str,
@@ -176,6 +177,9 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
     device = torch.cuda.current_device()
     sq = sk = seqlen
     causal = "causal" in mask_type
+    # ffa takes an attn_type_map int (single mask type shared by all ranges) while
+    # the other baselines keep using the legacy `causal` bool.
+    ffa_attn_type_map = MT_MAP.causal if causal else MT_MAP.full
     is_varlen = "varlen" in mask_type
     window_size_tuple = (-1, -1)
 
@@ -256,13 +260,13 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
                     cu_seqlens_k=cu_seqlens_k,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_k=max_seqlen_k,
-                    causal=causal,
+                    attn_type_map=ffa_attn_type_map,
                 )
 
         else:
 
             def fn():
-                return ffa_func(q, k, v, causal=causal)
+                return ffa_func(q, k, v, attn_type_map=ffa_attn_type_map)
 
         if wd == "bwd":
             try:

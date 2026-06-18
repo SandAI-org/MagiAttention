@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .ffa_utils import MT_MAP
 from .flex_flash_attn import flex_flash_attn_func
 
-__all__ = ["flex_flash_attn_func"]
+__all__ = [
+    "flex_flash_attn_func",
+    "MT_MAP",
+]
 
 
 def is_ffa_debug_mode_enabled() -> bool:

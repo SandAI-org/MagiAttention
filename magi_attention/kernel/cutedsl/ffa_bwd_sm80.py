@@ -35,6 +35,7 @@ from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
+from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .seqlen_info import SeqlenInfoQK
 from .sparse_utils import BlockSparseTensors
@@ -58,7 +59,7 @@ class FFABwdSm80:
         num_stages_dO: int = 2,
         num_threads: int = 256,
         pack_gqa: bool = False,
-        is_causal: bool = False,
+        mask_type: int = MT_MAP.full,
         SdP_swapAB: bool = False,
         dKV_swapAB: bool = False,
         dQ_swapAB: bool = False,
@@ -83,7 +84,7 @@ class FFABwdSm80:
         :type n_block_size: int
         :param num_threads: number of threads
         :type num_threads: int
-        :param is_causal: is causal
+        :param mask_type: attention mask type int key (see ``MT_MAP``)
         """
         self.dtype = dtype
         # padding head_dim to a multiple of 32 (stricter than fwd's 16) due to
@@ -105,7 +106,7 @@ class FFABwdSm80:
         self.n_block_size = n_block_size
         self.num_threads = num_threads
         self.pack_gqa = pack_gqa
-        self.is_causal = is_causal
+        self.mask_type = mask_type
         self.num_stages_Q = num_stages_Q
         self.num_stages_dO = num_stages_dO
         self.SdP_swapAB = SdP_swapAB
@@ -135,7 +136,7 @@ class FFABwdSm80:
             print(
                 f"{prefix}{self.dtype=} | {self.head_dim_padded=} | {self.head_dim_v_padded=} | {self.qhead_per_kvhead=}"
             )
-            print(f"{prefix}{self.is_causal=} | {self.pack_gqa=}")
+            print(f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.pack_gqa=}")
             print(
                 f"{prefix}{self.m_block_size=} | {self.n_block_size=} | {self.num_threads=}"
             )
@@ -149,6 +150,10 @@ class FFABwdSm80:
             print(f"{prefix}{self.Mma_dKV_is_RS=} | {self.V_in_regs=}")
             print(f"{prefix}{self.score_mod=} | {self.score_mod_bwd=}")
             print()
+
+    @property
+    def is_causal(self) -> bool:
+        return self.mask_type == MT_MAP.causal
 
     @staticmethod
     def can_implement(

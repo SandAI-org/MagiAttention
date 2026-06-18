@@ -36,6 +36,7 @@ from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
 from .block_info import BlockInfo
+from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwd
 from .seqlen_info import SeqlenInfoQK
@@ -64,7 +65,7 @@ class FFABwdSm90:
         head_dim: int,
         head_dim_v: Optional[int] = None,
         qhead_per_kvhead: int = 1,
-        is_causal: bool = False,
+        mask_type: int = MT_MAP.full,
         is_local: bool = False,
         deterministic: bool = False,
         tile_m: int = 64,
@@ -101,7 +102,7 @@ class FFABwdSm90:
         self.check_hdim_oob = head_dim != self.tile_hdim
         self.check_hdim_v_oob = head_dim_v != self.tile_hdimv
         self.qhead_per_kvhead = qhead_per_kvhead
-        self.is_causal = is_causal
+        self.mask_type = mask_type
         self.is_local = is_local
         self.deterministic = deterministic
         self.tile_m = tile_m
@@ -167,7 +168,7 @@ class FFABwdSm90:
                 f"{prefix}{self.dtype=} | {self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}"
             )
             print(
-                f"{prefix}{self.is_causal=} | {self.is_local=} | {self.deterministic=}"
+                f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | {self.deterministic=}"
             )
             print(f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_threads=}")
             print(f"{prefix}{self.Q_stage=} | {self.dO_stage=} | {self.PdS_stage=}")
@@ -185,6 +186,10 @@ class FFABwdSm90:
                 f"{prefix}{self.score_mod=} | {self.score_mod_bwd=} | {self.mask_mod=}"
             )
             print()
+
+    @property
+    def is_causal(self) -> bool:
+        return self.mask_type == MT_MAP.causal
 
     @staticmethod
     def can_implement(

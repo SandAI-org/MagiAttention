@@ -20,9 +20,10 @@ import inspect
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Callable, Tuple
+from typing import Callable, ClassVar, Tuple
 
 import cutlass.cute as cute
+import torch
 from cutlass import Float32
 from cutlass.cute.runtime import from_dlpack
 
@@ -30,6 +31,62 @@ from cutlass.cute.runtime import from_dlpack
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
 from magi_attention.utils.arch import get_dev_cap_num
+
+# ---------------------------------------------------------------------------
+# Mask Type Map helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _MaskTypeMap:
+    """Immutable int keys identifying the attention mask types.
+
+    Uses an empty ``__slots__`` so instances carry no
+    per-instance state; the keys live as class-level constants and the frozen
+    dataclass guarantees they cannot be reassigned on an instance.
+    """
+
+    __slots__ = ()
+
+    full: ClassVar[int] = 0
+    causal: ClassVar[int] = 1
+
+    # TODO: support inv_causal and bi_causal
+    # inv_causal: ClassVar[int] = 2
+    # bi_causal: ClassVar[int] = 3
+
+    def is_valid(self, mask_type: int) -> bool:
+        """Check if the given mask type is valid."""
+        return mask_type in range(2)  # Update if more mask types are added
+
+
+MT_MAP = _MaskTypeMap()
+
+
+def normalize_attn_type_map(attn_type_map: torch.Tensor | int | None) -> int:
+    """Translate the public ``attn_type_map`` argument into a single mask-type int.
+
+    The full q/k ranges semantics allow a distinct mask type per range, but the
+    current kernels only support a single mask type shared by all ranges. So this
+    helper collapses the supported cases down to one ``MT_MAP`` int:
+
+    - ``None``  -> all ranges use full attention (``MT_MAP.full``).
+    - ``int``   -> all ranges share the same mask type (validated against ``MT_MAP``).
+    - ``Tensor``-> per-range mask types (not yet supported by the kernel).
+    """
+    if attn_type_map is None:
+        return MT_MAP.full
+    if isinstance(attn_type_map, int):
+        if not MT_MAP.is_valid(attn_type_map):
+            raise ValueError(f"Invalid mask type: {attn_type_map}")
+        return attn_type_map
+
+    # TODO: support per-range attn_type_map (a cuda int32 tensor) once the kernel
+    # can read a distinct mask type for each q/k range.
+    raise NotImplementedError(
+        "Per-range attn_type_map (torch.Tensor) is not supported yet."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Arch helpers

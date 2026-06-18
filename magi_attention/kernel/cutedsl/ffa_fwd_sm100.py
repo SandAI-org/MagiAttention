@@ -58,6 +58,7 @@ from . import pipeline as ffa_pipeline
 from . import sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
+from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm100
 from .pack_gqa import PackGQA, pack_gqa_layout
@@ -184,11 +185,10 @@ class DescaleTensors(NamedTuple):
 class FFAFwdSm100:
     def __init__(
         self,
-        # dtype: Type[cutlass.Numeric],
         head_dim: int,
         head_dim_v: Optional[int] = None,
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
-        is_causal: bool = False,
+        mask_type: int = MT_MAP.full,
         is_local: bool = False,
         is_split_kv: bool = False,
         pack_gqa: bool = False,
@@ -281,7 +281,7 @@ class FFAFwdSm100:
         )
 
         self.is_persistent = is_persistent
-        self.is_causal = is_causal
+        self.mask_type = mask_type
         self.is_local = is_local
         self.is_varlen_q = is_varlen_q
         self.use_correction_warps_for_epi = is_varlen_q
@@ -471,7 +471,10 @@ class FFAFwdSm100:
             print()
             print(f"{prefix}Initialized FFAFwdSm100 with: ")
             print(f"{prefix}{head_dim=} | {head_dim_v=} | {qhead_per_kvhead=}")
-            print(f"{prefix}{is_causal=} | {is_local=} | {is_split_kv=} | {pack_gqa=}")
+            print(
+                f"{prefix}{mask_type=} | {self.is_causal=} | {is_local=} | "
+                f"{is_split_kv=} | {pack_gqa=}"
+            )
             print(
                 f"{prefix}{q_subtile_factor=} | {m_block_size=} | {n_block_size=} | {q_stage=}"
             )
@@ -511,6 +514,10 @@ class FFAFwdSm100:
                 f"{prefix}{self.split_P_arrive=} | {self.s0_s1_barrier=} | {self.overlap_sO_sQ=}"
             )
             print()
+
+    @property
+    def is_causal(self) -> bool:
+        return self.mask_type == MT_MAP.causal
 
     def _setup_attributes(self):
         """Set up configurations and parameters for the FMHA kernel operation.
