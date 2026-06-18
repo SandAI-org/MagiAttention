@@ -36,7 +36,7 @@ from cutlass import Float32, Int32, const_expr
 from quack import copy_utils
 
 from .cutedsl_utils import get_broadcast_dims, to_cute_tensor
-from .named_barrier import NamedBarrierBwdSm90
+from .named_barrier import NamedBarrierBwd
 from .seqlen_info import SeqlenInfoQK
 
 # =============================================================================
@@ -2093,12 +2093,12 @@ def _store_one_dQaccum_sm90(
             num_dQ_warp_groups - 1 - warp_group_idx, read=True
         )
         cute.arch.barrier_arrive(
-            barrier_id=int(NamedBarrierBwdSm90.dQEmptyWG0) + warp_group_idx,
+            barrier_id=int(NamedBarrierBwd.dQEmptyWG0) + warp_group_idx,
             number_of_threads=num_threads_per_warp_group + cute.arch.WARP_SIZE,
         )
     for warp_group_idx in cutlass.range_constexpr(num_dQ_warp_groups):
         cute.arch.barrier(
-            barrier_id=int(NamedBarrierBwdSm90.dQFullWG0) + warp_group_idx,
+            barrier_id=int(NamedBarrierBwd.dQFullWG0) + warp_group_idx,
             number_of_threads=num_threads_per_warp_group + cute.arch.WARP_SIZE,
         )
         with cute.arch.elect_one():

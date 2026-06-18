@@ -895,6 +895,7 @@ def _flex_flash_attn_bwd(
         AtomLayoutMSdP = cfg.AtomLayoutMSdP
         AtomLayoutNdKV = cfg.AtomLayoutNdKV
         AtomLayoutMdQ = cfg.AtomLayoutMdQ
+        V_in_regs = False
         num_threads = (cfg.num_wg + 1) * 128
         dQ_single_wg = cfg.dQ_single_wg
         cluster_size = 1

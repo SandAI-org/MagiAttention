@@ -17,7 +17,7 @@
 import enum
 
 
-class NamedBarrierFwdSm90(enum.IntEnum):
+class NamedBarrierFwd(enum.IntEnum):
     Epilogue = enum.auto()  # starts from 1 as barrier 0 is reserved for sync_threads()
     WarpSchedulerWG1 = enum.auto()
     WarpSchedulerWG2 = enum.auto()
@@ -39,7 +39,7 @@ class NamedBarrierFwdSm100(enum.IntEnum):
     SoftmaxStatsW7 = enum.auto()
 
 
-class NamedBarrierBwdSm90(enum.IntEnum):
+class NamedBarrierBwd(enum.IntEnum):
     Epilogue = enum.auto()
     WarpSchedulerWG1 = enum.auto()
     WarpSchedulerWG2 = enum.auto()

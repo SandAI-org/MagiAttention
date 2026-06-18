@@ -41,8 +41,9 @@ from quack.cute_dsl_utils import ParamsBase
 from . import cutedsl_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
+from .ffa_fwd_sm80 import FFAFwdSm80
 from .mask import AttentionMask
-from .named_barrier import NamedBarrierFwdSm90
+from .named_barrier import NamedBarrierFwd
 from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
 from .sparse_utils import (
@@ -59,12 +60,11 @@ from .tile_scheduler import (
 
 # isort: split
 from .legacy import pipeline as pipeline_custom
-from .legacy.flash_fwd import FlashAttentionForwardBase
 from .legacy.pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
 
 
-class FFAFwdSm90(FlashAttentionForwardBase):
+class FFAFwdSm90(FFAFwdSm80):
     def __init__(
         self,
         *args,
@@ -1980,7 +1980,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
         if const_expr(self.use_scheduler_barrier):
             if warp_group_idx == 1:
                 cute.arch.barrier_arrive(
-                    barrier_id=int(NamedBarrierFwdSm90.WarpSchedulerWG1),
+                    barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1),
                     number_of_threads=2 * self.num_threads_per_warp_group,
                 )
 
@@ -2022,7 +2022,7 @@ class FFAFwdSm90(FlashAttentionForwardBase):
     def warp_scheduler_barrier_sync(self):
         if const_expr(self.use_scheduler_barrier):
             cute.arch.barrier(
-                barrier_id=int(NamedBarrierFwdSm90.WarpSchedulerWG1)
+                barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1)
                 - 1
                 + cutedsl_utils.canonical_warp_group_idx(sync=False),
                 number_of_threads=2 * self.num_threads_per_warp_group,
@@ -2038,6 +2038,6 @@ class FFAFwdSm90(FlashAttentionForwardBase):
                 t = cur_wg + 1
                 next_wg = t % self.num_wg_mma
             cute.arch.barrier_arrive(
-                barrier_id=int(NamedBarrierFwdSm90.WarpSchedulerWG1) + next_wg,
+                barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1) + next_wg,
                 number_of_threads=2 * self.num_threads_per_warp_group,
             )

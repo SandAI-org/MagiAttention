@@ -36,7 +36,7 @@ from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 from . import cutedsl_utils
 from .block_info import BlockInfo
 from .mask import AttentionMask
-from .named_barrier import NamedBarrierBwdSm90
+from .named_barrier import NamedBarrierBwd
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_utils import (
@@ -1555,7 +1555,7 @@ class FFABwdSm90:
             tdQsdQaccum = smem_thr_copy_dQaccum.partition_D(sdQaccum)
 
         PdS_barrier = cutlass.pipeline.NamedBarrier(
-            barrier_id=int(NamedBarrierBwdSm90.PdS), num_threads=self.num_mma_threads
+            barrier_id=int(NamedBarrierBwd.PdS), num_threads=self.num_mma_threads
         )
         score_mod_fn = partial(
             self.apply_score_mod,
@@ -1992,7 +1992,7 @@ class FFABwdSm90:
             # dQ R2S: wait for dQaccum_store to free the smem buffer, then write dQ to smem
             # When dQ_single_wg, only WG0 enters here so warp_group_idx == 0
             cute.arch.barrier(
-                barrier_id=int(NamedBarrierBwdSm90.dQEmptyWG0) + warp_group_idx,
+                barrier_id=int(NamedBarrierBwd.dQEmptyWG0) + warp_group_idx,
                 number_of_threads=self.num_threads_per_warp_group + cute.arch.WARP_SIZE,
             )
             tdQrdQaccum_flat = cute.make_tensor(
@@ -2001,7 +2001,7 @@ class FFABwdSm90:
             cute.autovec_copy(tdQrdQaccum_flat, tdQsdQaccum)
             cute.arch.fence_view_async_shared()
             cute.arch.barrier_arrive(
-                barrier_id=int(NamedBarrierBwdSm90.dQFullWG0) + warp_group_idx,
+                barrier_id=int(NamedBarrierBwd.dQFullWG0) + warp_group_idx,
                 number_of_threads=self.num_threads_per_warp_group + cute.arch.WARP_SIZE,
             )
 
@@ -2056,7 +2056,7 @@ class FFABwdSm90:
         is_print_thread_and_tile: bool = False,
     ):
         epi_barrier = cutlass.pipeline.NamedBarrier(
-            barrier_id=int(NamedBarrierBwdSm90.Epilogue),
+            barrier_id=int(NamedBarrierBwd.Epilogue),
             num_threads=self.num_mma_threads,
         )
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
@@ -2314,7 +2314,7 @@ class FFABwdSm90:
                                     num_dQ_chunks - 1 - warp_group_idx, read=read_flag
                                 )
                             cute.arch.barrier_arrive(
-                                barrier_id=int(NamedBarrierBwdSm90.dQEmptyWG0)
+                                barrier_id=int(NamedBarrierBwd.dQEmptyWG0)
                                 + warp_group_idx,
                                 number_of_threads=self.num_threads_per_warp_group
                                 + cute.arch.WARP_SIZE,
@@ -2339,7 +2339,7 @@ class FFABwdSm90:
 
                         for warp_group_idx in cutlass.range_constexpr(num_dQ_chunks):
                             cute.arch.barrier(
-                                barrier_id=int(NamedBarrierBwdSm90.dQFullWG0)
+                                barrier_id=int(NamedBarrierBwd.dQFullWG0)
                                 + warp_group_idx,
                                 number_of_threads=self.num_threads_per_warp_group
                                 + cute.arch.WARP_SIZE,
