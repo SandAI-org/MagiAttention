@@ -36,6 +36,7 @@ from . import cutedsl_utils, sm80_utils
 from .block_info import BlockInfo
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwd
+from .pack_gqa import PackGQA
 from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
 from .sparse_utils import BlockSparseTensors
@@ -44,9 +45,6 @@ from .tile_scheduler import (
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
 )
-
-# isort: split
-from .legacy.pack_gqa import PackGQA
 
 
 class FFAFwdSm80:

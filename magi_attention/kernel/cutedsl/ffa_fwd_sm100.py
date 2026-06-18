@@ -58,6 +58,7 @@ from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm100
+from .pack_gqa import PackGQA, pack_gqa_layout
 from .seqlen_info import SeqlenInfoQK
 from .softmax import SoftmaxSm100, apply_score_mod_inner
 from .sparse_utils import (
@@ -80,7 +81,6 @@ from .tile_scheduler import (
 
 # isort: split
 from .legacy import pipeline as pipeline_custom
-from .legacy.pack_gqa import PackGQA, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
 
 # === TUNING KNOBS (agent-editable) ===

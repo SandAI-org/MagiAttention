@@ -44,6 +44,7 @@ from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_fwd_sm80 import FFAFwdSm80
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwd
+from .pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
 from .sparse_utils import (
@@ -60,7 +61,6 @@ from .tile_scheduler import (
 
 # isort: split
 from .legacy import pipeline as pipeline_custom
-from .legacy.pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .legacy.paged_kv import PagedKVManager
 
 
