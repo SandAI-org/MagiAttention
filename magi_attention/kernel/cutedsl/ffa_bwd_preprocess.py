@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,index,operator,assignment"
+# mypy: disable-error-code="union-attr,index,operator,assignment,attr-defined"
 
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_bwd_preprocess_kernel.h
 # from Cutlass C++ to Cute-DSL.
@@ -37,14 +37,18 @@ from typing import Callable, Optional, Type
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
+import torch
 from cutlass import Float32, const_expr
 from cutlass.cutlass_dsl import Arch, BaseDSL
 
 # isort: split
 from quack import copy_utils, layout_utils
+from quack.compile_utils import make_fake_tensor as fake_tensor
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .cache_utils import get_jit_cache
+from .ffa_utils import make_fake_bwd_tensors
 from .seqlen_info import SeqlenInfo
 from .tile_scheduler import (
     SingleTileScheduler,
@@ -394,3 +398,107 @@ class FFABwdPreProcess:
                 LOG2_E = math.log2(math.e)
                 if tidx < seqlen_q_rounded - m_block * self.tile_m:
                     gLSElog2[tidx] = lse * LOG2_E if lse != -Float32.inf else 0.0
+
+
+def _compile_bwd_preprocess(
+    dtype,
+    head_dim,
+    head_dim_v,
+    m_block_size,
+    has_cuseqlens_q,
+    has_seqused_q,
+    has_dlse,
+    has_dq_accum,
+    use_padded_offsets,
+):
+    """Compile bwd preprocess kernel using cute fake tensors (no real GPU tensors needed)."""
+    (
+        mQ,
+        mK,
+        mV,
+        mO,
+        mdO,
+        mdQ,
+        mdK,
+        mdV,
+        mLSE,
+        mLSElog2,
+        mPdPsum,
+        mdQaccum,
+        mdKaccum,
+        mdVaccum,
+    ) = make_fake_bwd_tensors(
+        dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False
+    )
+    batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
+    batchp1 = cute.sym_int()
+    mCuSeqlensQ = (
+        fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
+        if has_cuseqlens_q
+        else None
+    )
+    mSequsedQ = (
+        fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
+    )
+    mdLSE = (
+        fake_tensor(cutlass.Float32, mLSE.shape, divisibility=1) if has_dlse else None
+    )
+    mdQaccum = mdQaccum if has_dq_accum else None
+    fa_bwd_pre = FFABwdPreProcess(
+        dtype, head_dim, head_dim_v, m_block_size, use_padded_offsets=use_padded_offsets
+    )
+    return cute.compile(
+        fa_bwd_pre,
+        mO,
+        mdO,
+        mPdPsum,
+        mLSE,
+        mLSElog2,
+        mdQaccum,
+        mCuSeqlensQ,
+        mSequsedQ,
+        mdLSE,
+        cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+        options="--enable-tvm-ffi",
+    )
+
+
+def bwd_preprocess(
+    out: torch.Tensor,
+    dout: torch.Tensor,
+    dpsum: torch.Tensor,
+    lse: torch.Tensor,
+    lse_log2: torch.Tensor,
+    dq_accum: torch.Tensor,
+    cu_seqlens_q: torch.Tensor | None,
+    seqused_q: torch.Tensor | None,
+    dlse: torch.Tensor | None,
+    dtype: torch.dtype,
+    head_dim: int,
+    head_dim_v: int,
+    m_block_size: int,
+    use_padded_offsets: bool = True,
+):
+    """Backward preprocess: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum."""
+    is_varlen = cu_seqlens_q is not None
+    compile_key = (
+        dtype,
+        head_dim,
+        head_dim_v,
+        m_block_size,
+        is_varlen,
+        seqused_q is not None,
+        dlse is not None,
+        dq_accum is not None,
+        use_padded_offsets,
+    )
+    if compile_key not in bwd_preprocess.compile_cache:
+        bwd_preprocess.compile_cache[compile_key] = _compile_bwd_preprocess(
+            *compile_key
+        )
+    bwd_preprocess.compile_cache[compile_key](
+        out, dout, dpsum, lse, lse_log2, dq_accum, cu_seqlens_q, seqused_q, dlse
+    )
+
+
+bwd_preprocess.compile_cache = get_jit_cache("bwd_pre")

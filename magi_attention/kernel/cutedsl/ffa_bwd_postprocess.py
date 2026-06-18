@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,operator,assignment"
+# mypy: disable-error-code="union-attr,operator,assignment,attr-defined"
 
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_bwd_postprocess_kernel.h
 # from Cutlass C++ to Cute-DSL.
@@ -31,10 +31,15 @@ import cutlass.utils.hopper_helpers as sm90_utils_basic
 from cutlass import Float32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp, warpgroup
 from cutlass.utils import LayoutEnum
+
+# isort: split
 from quack import copy_utils, layout_utils, sm90_utils
+from quack.compile_utils import make_fake_tensor as fake_tensor
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
+from .cache_utils import get_jit_cache
+from .ffa_utils import make_fake_bwd_tensors
 from .seqlen_info import SeqlenInfoQK
 from .tile_scheduler import (
     SingleTileScheduler,
@@ -651,3 +656,114 @@ class FFABwdPostProcess:
                         tdQgdQ[None, rest_m, None],
                         pred=tdQpdQ[None, rest_m, None],
                     )
+
+
+def _compile_bwd_postprocess(
+    dtype,
+    hdim,
+    block_size,
+    num_threads,
+    atom_layout,
+    swap_ab,
+    has_cuseqlens_q,
+    has_seqused_q,
+    use_2cta_instrs,
+    cluster_size,
+    arch,
+):
+    """Compile bwd postprocess kernel using cute fake tensors."""
+    (
+        mQ,
+        mK,
+        mV,
+        mO,
+        mdO,
+        mdQ,
+        mdK,
+        mdV,
+        mLSE,
+        mLSElog2,
+        mPdPsum,
+        mdQaccum,
+        mdKaccum,
+        mdVaccum,
+    ) = make_fake_bwd_tensors(
+        dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False
+    )
+    batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
+    batchp1 = cute.sym_int()
+    mCuSeqlensQ = (
+        fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
+        if has_cuseqlens_q
+        else None
+    )
+    mSeqUsedQ = (
+        fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
+    )
+    fa_bwd_post = FFABwdPostProcess(
+        dtype,
+        hdim,
+        arch,
+        block_size,
+        num_threads,
+        atom_layout,
+        swap_ab,
+        use_2cta_instrs=use_2cta_instrs,
+        cluster_size=cluster_size,
+    )
+    return cute.compile(
+        fa_bwd_post,
+        mdQaccum,
+        mdQ,
+        cutlass.Float32(0.0),
+        mCuSeqlensQ,
+        mSeqUsedQ,
+        cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+        options="--enable-tvm-ffi",
+    )
+
+
+def bwd_postprocess(
+    accum,
+    output,
+    scale,
+    cu_seqlens,
+    seqused,
+    arch,
+    dtype,
+    hdim,
+    block_size,
+    num_threads,
+    atom_layout,
+    swap_ab,
+    use_2cta_instrs=False,
+    cluster_size=1,
+):
+    """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
+    compile_key = (
+        dtype,
+        hdim,
+        block_size,
+        num_threads,
+        atom_layout,
+        swap_ab,
+        cu_seqlens is not None,
+        seqused is not None,
+        use_2cta_instrs,
+        cluster_size,
+        arch,
+    )
+    if compile_key not in bwd_postprocess.compile_cache:
+        bwd_postprocess.compile_cache[compile_key] = _compile_bwd_postprocess(
+            *compile_key
+        )
+    bwd_postprocess.compile_cache[compile_key](
+        accum,
+        output,
+        scale,
+        cu_seqlens,
+        seqused,
+    )
+
+
+bwd_postprocess.compile_cache = get_jit_cache("bwd_post")

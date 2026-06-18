@@ -19,12 +19,8 @@
 import math
 from typing import Callable
 
-import cutlass
 import cutlass.cute as cute
 import torch
-
-# isort: split
-from quack.compile_utils import make_fake_tensor as fake_tensor
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.common import AttnForwardMeta
@@ -37,8 +33,8 @@ from .cutedsl_utils import (
     to_cute_aux_tensor,
     to_cute_tensor,
 )
-from .ffa_bwd_postprocess import FFABwdPostProcess
-from .ffa_bwd_preprocess import FFABwdPreProcess
+from .ffa_bwd_postprocess import bwd_postprocess
+from .ffa_bwd_preprocess import bwd_preprocess
 from .ffa_bwd_sm80 import FFABwdSm80
 from .ffa_bwd_sm90 import FFABwdSm90
 from .ffa_bwd_sm100 import FFABwdSm100
@@ -55,7 +51,6 @@ from .ffa_utils import (
     create_softcap_scoremod_bwd,
     get_device_arch,
     hash_callable,
-    make_fake_bwd_tensors,
     maybe_contiguous,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
@@ -556,221 +551,6 @@ def _flex_flash_attn_fwd(
 _flex_flash_attn_fwd.compile_cache = get_jit_cache("fwd")
 
 
-def _compile_bwd_preprocess(
-    dtype,
-    head_dim,
-    head_dim_v,
-    m_block_size,
-    has_cuseqlens_q,
-    has_seqused_q,
-    has_dlse,
-    has_dq_accum,
-    use_padded_offsets,
-):
-    """Compile bwd preprocess kernel using cute fake tensors (no real GPU tensors needed)."""
-    (
-        mQ,
-        mK,
-        mV,
-        mO,
-        mdO,
-        mdQ,
-        mdK,
-        mdV,
-        mLSE,
-        mLSElog2,
-        mPdPsum,
-        mdQaccum,
-        mdKaccum,
-        mdVaccum,
-    ) = make_fake_bwd_tensors(
-        dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False
-    )
-    batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
-    batchp1 = cute.sym_int()
-    mCuSeqlensQ = (
-        fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
-        if has_cuseqlens_q
-        else None
-    )
-    mSequsedQ = (
-        fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
-    )
-    mdLSE = (
-        fake_tensor(cutlass.Float32, mLSE.shape, divisibility=1) if has_dlse else None
-    )
-    mdQaccum = mdQaccum if has_dq_accum else None
-    fa_bwd_pre = FFABwdPreProcess(
-        dtype, head_dim, head_dim_v, m_block_size, use_padded_offsets=use_padded_offsets
-    )
-    return cute.compile(
-        fa_bwd_pre,
-        mO,
-        mdO,
-        mPdPsum,
-        mLSE,
-        mLSElog2,
-        mdQaccum,
-        mCuSeqlensQ,
-        mSequsedQ,
-        mdLSE,
-        cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-        options="--enable-tvm-ffi",
-    )
-
-
-def _bwd_preprocess(
-    out: torch.Tensor,
-    dout: torch.Tensor,
-    dpsum: torch.Tensor,
-    lse: torch.Tensor,
-    lse_log2: torch.Tensor,
-    dq_accum: torch.Tensor,
-    cu_seqlens_q: torch.Tensor | None,
-    seqused_q: torch.Tensor | None,
-    dlse: torch.Tensor | None,
-    dtype: torch.dtype,
-    head_dim: int,
-    head_dim_v: int,
-    m_block_size: int,
-    use_padded_offsets: bool = True,
-):
-    """Backward preprocess: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum."""
-    is_varlen = cu_seqlens_q is not None
-    compile_key = (
-        dtype,
-        head_dim,
-        head_dim_v,
-        m_block_size,
-        is_varlen,
-        seqused_q is not None,
-        dlse is not None,
-        dq_accum is not None,
-        use_padded_offsets,
-    )
-    if compile_key not in _bwd_preprocess.compile_cache:
-        _bwd_preprocess.compile_cache[compile_key] = _compile_bwd_preprocess(
-            *compile_key
-        )
-    _bwd_preprocess.compile_cache[compile_key](
-        out, dout, dpsum, lse, lse_log2, dq_accum, cu_seqlens_q, seqused_q, dlse
-    )
-
-
-_bwd_preprocess.compile_cache = get_jit_cache("bwd_pre")
-
-
-def _compile_bwd_postprocess(
-    dtype,
-    hdim,
-    block_size,
-    num_threads,
-    atom_layout,
-    swap_ab,
-    has_cuseqlens_q,
-    has_seqused_q,
-    use_2cta_instrs,
-    cluster_size,
-    arch,
-):
-    """Compile bwd postprocess kernel using cute fake tensors."""
-    (
-        mQ,
-        mK,
-        mV,
-        mO,
-        mdO,
-        mdQ,
-        mdK,
-        mdV,
-        mLSE,
-        mLSElog2,
-        mPdPsum,
-        mdQaccum,
-        mdKaccum,
-        mdVaccum,
-    ) = make_fake_bwd_tensors(
-        dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False
-    )
-    batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
-    batchp1 = cute.sym_int()
-    mCuSeqlensQ = (
-        fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
-        if has_cuseqlens_q
-        else None
-    )
-    mSeqUsedQ = (
-        fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
-    )
-    fa_bwd_post = FFABwdPostProcess(
-        dtype,
-        hdim,
-        arch,
-        block_size,
-        num_threads,
-        atom_layout,
-        swap_ab,
-        use_2cta_instrs=use_2cta_instrs,
-        cluster_size=cluster_size,
-    )
-    return cute.compile(
-        fa_bwd_post,
-        mdQaccum,
-        mdQ,
-        cutlass.Float32(0.0),
-        mCuSeqlensQ,
-        mSeqUsedQ,
-        cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-        options="--enable-tvm-ffi",
-    )
-
-
-def _bwd_postprocess_convert(
-    accum,
-    output,
-    scale,
-    cu_seqlens,
-    seqused,
-    arch,
-    dtype,
-    hdim,
-    block_size,
-    num_threads,
-    atom_layout,
-    swap_ab,
-    use_2cta_instrs=False,
-    cluster_size=1,
-):
-    """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
-    compile_key = (
-        dtype,
-        hdim,
-        block_size,
-        num_threads,
-        atom_layout,
-        swap_ab,
-        cu_seqlens is not None,
-        seqused is not None,
-        use_2cta_instrs,
-        cluster_size,
-        arch,
-    )
-    if compile_key not in _bwd_postprocess_convert.compile_cache:
-        _bwd_postprocess_convert.compile_cache[compile_key] = _compile_bwd_postprocess(
-            *compile_key
-        )
-    _bwd_postprocess_convert.compile_cache[compile_key](
-        accum,
-        output,
-        scale,
-        cu_seqlens,
-        seqused,
-    )
-
-
-_bwd_postprocess_convert.compile_cache = get_jit_cache("bwd_post")
-
-
 def _flex_flash_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1159,7 +939,7 @@ def _flex_flash_attn_bwd(
         dV_semaphore = None
 
     # Preprocess kernel: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum.
-    _bwd_preprocess(
+    bwd_preprocess(
         out,
         dout,
         dpsum,
@@ -1495,7 +1275,7 @@ def _flex_flash_attn_bwd(
         num_threads_post_dQ = 128
         num_threads_post_dKV = 128
 
-    _bwd_postprocess_convert(
+    bwd_postprocess(
         dq_accum,
         dq,
         softmax_scale,
@@ -1514,7 +1294,7 @@ def _flex_flash_attn_bwd(
 
     if dKV_postprocess:
         # Postprocess: convert dk_accum from float32 to dk in bf16/fp16
-        _bwd_postprocess_convert(
+        bwd_postprocess(
             dk_accum,
             dk,
             softmax_scale,
@@ -1530,7 +1310,7 @@ def _flex_flash_attn_bwd(
             cluster_size=cluster_size,
         )
         # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
-        _bwd_postprocess_convert(
+        bwd_postprocess(
             dv_accum,
             dv,
             1.0,
@@ -1550,6 +1330,11 @@ def _flex_flash_attn_bwd(
 
 
 _flex_flash_attn_bwd.compile_cache = get_jit_cache("bwd")
+
+
+# ---------------------------------------------------------------------------
+# FFA autograd function and interface
+# ---------------------------------------------------------------------------
 
 
 class FlexFlashAttnFunc(torch.autograd.Function):
