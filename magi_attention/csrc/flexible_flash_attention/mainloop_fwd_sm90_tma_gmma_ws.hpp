@@ -902,6 +902,12 @@ struct CollectiveMainloopFwdSm90 {
     // If we don't wait for barrier_O here, when using Cluster, CTA0 might exit early and CTA1 will
     // try to arrive on barrier_O of CTA0, causing "unspecified launch failure".
     shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
+    // Idle CTAs (work_idx == 0) never had consumers release the pipeline
+    // stages, so producer_tail would deadlock on the empty_barrier. Skip it;
+    // barrier_O.wait above already provides the necessary cluster sync.
+    if (work_idx == 0) {
+      return;
+    }
     if (!(SparseLoad || IndexAttn)) {
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       // Issue the epilogue waits

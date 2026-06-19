@@ -376,6 +376,7 @@ class FlashAttnFwdSm90 {
       ) {
         auto block_coord = work_tile_info.get_block_coord();
         auto det_msg = work_tile_info.get_det_msg();
+
         BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
         auto epilogue_block_coord = block_meta.get_epilogue_coord();
@@ -441,6 +442,14 @@ class FlashAttnFwdSm90 {
           }
         } else {
           epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, epilogue_block_coord, block_meta.seqlen_info, det_msg);
+        }
+      }
+      // Idle CTAs (no tiles processed) must still signal barrier_O so the
+      // producer's load_tail doesn't deadlock waiting for phase advancement.
+      if (work_idx == 0) {
+#pragma unroll
+        for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
+          shared_storage.pipelines.barrier_O.arrive(cta_id);
         }
       }
       // epilogue tail only contains ReturnMaxLogits logic so we skip it if not needed
