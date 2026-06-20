@@ -346,11 +346,17 @@ struct CollectiveMainloopFwdSm90 {
       cute::array<int, kBlockN * kStages>,
       std::conditional_t<SparseLoad || IndexAttnUseTma, cute::array<int, kStages>, cute::array<int, 0>>>;
 
+  // OPT-5: SMEM cache for K block indices. IndexAttn TMA prefetches group_token_ptr
+  // here once per outer tile so inner loop reads from SMEM (L1) instead of GMEM.
+  static constexpr int MaxKBlockIdxPrefetch = IndexAttnUseTma ? 1024 : 0;
+  using KBlockIdxPrefetch_t = cute::array<int, MaxKBlockIdxPrefetch>;
+
   struct TensorStorageWithoutP : cute::aligned_struct<maxSmemAlignmentWithoutP, _0> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutVt>, SmemAlignmentVtNoTranspose> smem_v;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
     KVTokenIndices_t smem_kv_token_indices;
+    KBlockIdxPrefetch_t smem_kblock_idx_cache;
   };
 
   struct TensorStorageWithP : cute::aligned_struct<maxSmemAlignmentWithP, _0> {
@@ -359,6 +365,7 @@ struct CollectiveMainloopFwdSm90 {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
     SmemP_t smem_p;
     KVTokenIndices_t smem_kv_token_indices;
+    KBlockIdxPrefetch_t smem_kblock_idx_cache;
   };
 
   using TensorStorage = std::conditional_t<MmaPV_is_RS, TensorStorageWithoutP, TensorStorageWithP>;
@@ -868,6 +875,24 @@ struct CollectiveMainloopFwdSm90 {
       return false;
 
     block_meta.template update_block_cur<kInnerDir>();
+
+    // OPT-5: Prefetch all K block indices from GMEM to SMEM once per outer tile.
+    // The TMA issue thread reads group_token_ptr[kblock_idx] every inner iteration
+    // via get_n_block_abs(); redirecting that pointer to SMEM eliminates per-tile
+    // GMEM latency on the producer critical path.
+    if constexpr (IndexAttnUseTma) {
+      int const num_kblocks = block_meta.seqlen_info.seqlen_k / KBlockSize;
+      if (num_kblocks <= MaxKBlockIdxPrefetch) {
+        int* const cache = shared_storage.tensors.mainloop.smem_kblock_idx_cache.data();
+        if (idx_in_warpgroup == 0) {
+          for (int i = 0; i < num_kblocks; ++i) {
+            cache[i] = block_meta.group_token_ptr[i];
+          }
+        }
+        block_meta.group_token_ptr = cache;
+      }
+    }
+
     load_head();
     load_Q();
 
