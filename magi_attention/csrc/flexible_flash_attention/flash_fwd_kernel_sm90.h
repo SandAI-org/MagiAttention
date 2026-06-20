@@ -292,10 +292,10 @@ class FlashAttnFwdSm90 {
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       int thread_idx = threadIdx.x % NumProducerThreads;
 
-      // Currently, SingleProducerWarp is always true
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // Dense/SparseLoad: only thread 0 issues TMA; IndexAttn: entire warpgroup does cp.async
+      // TMA paths (Dense/SparseLoad/IndexAttn kbs>=kBlockN): SingleProducerWarp=true → warps 1-3 exit.
+      // Scatter path (IndexAttn kbs<kBlockN): full warp group needed for cp.async loads.
       if constexpr (SingleProducerWarp) {
         if (warp_idx_in_warpgroup != 0) {
           return;
