@@ -144,10 +144,12 @@ struct CollectiveMainloopFwdSm90 {
   // Leaving this option here for reference.
   static constexpr bool MmaQK_is_RS = false;
 
-  // Dense: one warp (TMA for KV, 1 thread issues).
-  // SparseLoad: one warpgroup for block_meta + barriers; only thread 0 issues TMA for KV.
-  // IndexAttn: one warpgroup for cp.async scatter KV loads.
-  static constexpr int NumProducerThreads = !(SparseLoad || IndexAttn) ? cutlass::NumThreadsPerWarp : cutlass::NumThreadsPerWarpGroup;
+  // OPT-6: Only the scatter path (IndexAttn without TMA) needs a full warp group for
+  // cp.async KV loads.  TMA paths (Dense, SparseLoad, IndexAttn with kbs>=kBlockN)
+  // issue loads from a single thread, so a single warp suffices — matching Dense and
+  // eliminating ~96 idle producer threads that only add barrier/instruction overhead.
+  static constexpr bool ScatterKV = IndexAttn && !IndexAttnUseTma;
+  static constexpr int NumProducerThreads = ScatterKV ? cutlass::NumThreadsPerWarpGroup : cutlass::NumThreadsPerWarp;
 
   // Const parameters for IndexAttn
   // SMEM bank row width: 32 banks * 4 bytes = 128 bytes
@@ -626,11 +628,7 @@ struct CollectiveMainloopFwdSm90 {
 
       if constexpr (Use_TMA_Q) {
         // Wait for the MMA warpgroups to signal that smem_q is ready
-        if constexpr (!SparseLoad && !IndexAttn) {
-          if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
-            BarrierManager::sync<NumMmaThreadsQK + cutlass::NumThreadsPerWarp>(FwdNamedBarriers::QueryEmpty);
-          }
-        } else {
+        if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
           BarrierManager::sync<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
         }
 
@@ -988,11 +986,7 @@ struct CollectiveMainloopFwdSm90 {
     int warp_group_idx = flash::canonical_warp_group_idx_nosync();
 
     // Tell producers that smem_q is ready to be loaded
-    if constexpr (!(SparseLoad || IndexAttn)) {
-      BarrierManager::arrive<NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads)>(FwdNamedBarriers::QueryEmpty);
-    } else {
-      BarrierManager::arrive<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
-    }
+    BarrierManager::arrive<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
 
     if constexpr (UseSchedulerBarrier) {
       // We have NamedBarrier for up to 3 WGs (why 3 WGs ?)
@@ -1170,10 +1164,7 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    // QueryEmpty barrier thread count: scatter-load uses full producer warpgroup,
-    // TMA uses only one warp.
-    constexpr int QueryEmptyThreads =
-        NumMmaThreadsQK + ((SparseLoad || IndexAttn) ? NumProducerThreads : (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads));
+    constexpr int QueryEmptyThreads = NumMmaThreadsQK + NumProducerThreads;
 
     Tensor tOrP = [&]() {
       if constexpr (TileSize_kBlockM == 8) {
