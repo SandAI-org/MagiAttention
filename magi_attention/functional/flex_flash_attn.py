@@ -761,7 +761,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         cat_gqa: bool = False,
         sparse_load: bool = False,
         index_attn: bool = False,
-        swap_bwd_qk_loop: bool = False,
+        swap_bwd_qk_loop: bool | None = None,
         return_max_logits: bool = False,
         index_attn_indices_2d: torch.Tensor | None = None,
         index_attn_max_topk: int = 0,
@@ -790,9 +790,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if sparse_load and not auto_range_merge:
             raise RuntimeError("When using sparse load, range merge must be enabled.")
 
-        if disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
+        if disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop is True:
             raise RuntimeError(
-                "When disable_bwd_dkv_atomic_reduction is true, swap_bwd_qk_loop must be false."
+                "When disable_bwd_dkv_atomic_reduction is true, swap_bwd_qk_loop must not be True."
             )
 
         # ---- FA4 backend fast path ---- #
@@ -904,7 +904,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         with maybe_profile_ffa_ctx("fwd_cast"):
             out = out.to(q.dtype)
 
-        save_merge_info = swap_bwd_qk_loop and auto_range_merge
+        save_merge_info = (swap_bwd_qk_loop is True) and auto_range_merge
 
         tensors_to_save = [
             # 1. Base Tensors
@@ -1017,28 +1017,40 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             index_attn_indices_2d,
         ) = ctx.saved_tensors
 
+        # Resolve swap_bwd_qk_loop: None → auto-infer, True/False → explicit override
+        _INDEX_ATTN_LOOPQ_KBS_THRESHOLD = 8
+        if ctx.swap_bwd_qk_loop is not None:
+            swap_bwd_qk_loop = ctx.swap_bwd_qk_loop
+        elif ctx.index_attn and ctx.k_block_size >= _INDEX_ATTN_LOOPQ_KBS_THRESHOLD:
+            swap_bwd_qk_loop = False  # LoopQ: block-level K → good outer parallelism
+        elif ctx.index_attn:
+            swap_bwd_qk_loop = True  # LoopK: token-level K
+        else:
+            swap_bwd_qk_loop = False  # Dense/SparseLoad default: LoopQ
+
+        if ctx.disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
+            raise RuntimeError(
+                "disable_bwd_dkv_atomic_reduction is incompatible with swap_bwd_qk_loop=True (LoopK). "
+                f"Auto-inferred swap_bwd_qk_loop={swap_bwd_qk_loop} for index_attn={ctx.index_attn}, "
+                f"k_block_size={ctx.k_block_size}. Pass swap_bwd_qk_loop=False to override."
+            )
+
         if ctx.index_attn:
-            # IndexAttn uses indices, not ranges — ranges must not be provided
             assert (
                 q_ranges is None and k_ranges is None
             ), "IndexAttn BWD does not use q_ranges/k_ranges; they should be None"
-            import os
 
-            _use_loopq = (
-                os.environ.get("MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q", "0") == "1"
-            )
-            _loopq_kbs = ctx.k_block_size
-            if _use_loopq:
+            bwd_q_ranges = None
+            bwd_k_ranges = None
+            bwd_attn_type_map = None
+            merge_k_ranges = None
+            bwd_kq_map = None
+            bwd_unique_count = None
+            bwd_auto_range_merge = False
+
+            if not swap_bwd_qk_loop:
                 # IndexAttn BWD LoopQ: outer=K block, inner=Q from inv_indices
-                swap_bwd_qk_loop = False
-                bwd_q_ranges = None
-                bwd_k_ranges = None
-                bwd_attn_type_map = None
-                merge_k_ranges = None
-                bwd_kq_map = None
-                bwd_unique_count = None
-                bwd_auto_range_merge = False
-
+                _loopq_kbs = ctx.k_block_size
                 nhk = k.size(1)
                 seqlen_k = v.size(0)
                 _fwd_3d = index_attn_indices_2d.reshape(
@@ -1077,21 +1089,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         seqlen_k, nhk * _inv_topk
                     ).contiguous()
                     ctx.index_attn_max_topk = nhk * _inv_topk
-            else:
-                # IndexAttn BWD LoopK (default): outer=Q, inner=K from topk_indices
-                swap_bwd_qk_loop = True
-                bwd_q_ranges = None
-                bwd_k_ranges = None
-                bwd_attn_type_map = None
-                merge_k_ranges = None
-                bwd_kq_map = None
-                bwd_unique_count = None
-                bwd_auto_range_merge = False
+            # else: IndexAttn BWD LoopK — use forward's topk_indices directly
         elif ctx.auto_range_merge:
-            swap_bwd_qk_loop = ctx.swap_bwd_qk_loop
             bwd_auto_range_merge = True
             with maybe_profile_ffa_ctx("bwd_range_merge"):
-                if ctx.swap_bwd_qk_loop:
+                if swap_bwd_qk_loop:
                     if merge_q_ranges is not None:
                         # Reuse the forward range merge results directly
                         (
@@ -1132,7 +1134,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         bwd_unique_count,
                     ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
         else:
-            swap_bwd_qk_loop = ctx.swap_bwd_qk_loop
             bwd_auto_range_merge = False
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,
@@ -1176,7 +1177,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             index_attn=ctx.index_attn,
             index_attn_indices_2d=index_attn_indices_2d,
             index_attn_max_topk=ctx.index_attn_max_topk,
-            k_block_size=_loopq_kbs if ctx.index_attn else 1,
+            k_block_size=ctx.k_block_size,
         )
 
         # Cast gradients to the same dtype as inputs
@@ -1249,7 +1250,7 @@ def flex_flash_attn_func(
     cat_gqa: bool = False,
     sparse_load: bool = False,
     index_attn: bool = False,
-    swap_bwd_qk_loop: bool = False,
+    swap_bwd_qk_loop: bool | None = None,
     return_max_logits: bool = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
@@ -1377,9 +1378,10 @@ def flex_flash_attn_func(
             ``index_attn_indices`` instead of using q/k ranges. Automatically set to ``True``
             when ``index_attn_indices`` is provided. Defaults to ``False``.
 
-        swap_bwd_qk_loop (bool, optional): Whether to swap the order of Q and K double-loops
-            (i.e. from the default `K for outer-loop and Q for inner-loop` to `Q for outer-loop and K for inner-loop`)
-            in the attention backward pass. Defaults to ``False``.
+        swap_bwd_qk_loop (bool | None, optional): Controls backward double-loop order.
+            ``False`` = LoopQ (outer K, inner Q), ``True`` = LoopK (outer Q, inner K).
+            ``None`` (default) = auto-infer: IndexAttn with ``k_block_size >= 8`` uses LoopQ,
+            IndexAttn with ``k_block_size < 8`` uses LoopK, Dense/SparseLoad uses LoopQ.
             **Note:** This flag is useful for sparse attention scenarios but still under development.
 
         return_max_logits (bool, optional): Whether to return the maximum attention logits,
@@ -1575,8 +1577,8 @@ def flex_flash_attn_func(
             ref_block_size = (64 if swap_ab else 128, tile_size)
 
     assert not (
-        swap_bwd_qk_loop and deterministic
-    ), "Deterministic mode is not supported when swap_bwd_qk_loop is enabled."
+        swap_bwd_qk_loop is True and deterministic
+    ), "Deterministic mode is not supported when swap_bwd_qk_loop is True."
 
     if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert is_fa4_installed, (
