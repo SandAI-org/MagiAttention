@@ -1027,9 +1027,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             _use_loopq = (
                 os.environ.get("MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q", "0") == "1"
             )
-            _loopq_kbs = int(
-                os.environ.get("MAGI_ATTENTION_INDEX_ATTN_BWD_K_BLOCK_SIZE", "1")
-            )
+            _loopq_kbs = ctx.k_block_size
             if _use_loopq:
                 # IndexAttn BWD LoopQ: outer=K block, inner=Q from inv_indices
                 swap_bwd_qk_loop = False
