@@ -270,7 +270,7 @@ struct CollectiveMainloopBwdSm90 {
 
   static_assert(!InnerUseScatter || kInnerScatterRows % NumGroups == 0, "Scatter requires the inner tile rows divisible by NumGroups");
 
-  static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB; // if dKV_swapAB, we can't use RS
+  static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB;
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
 
   static constexpr GMMA::Major PdS_Major = GMMA::Major::K;
@@ -2962,7 +2962,7 @@ struct CollectiveMainloopBwdSm90 {
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
 
             if constexpr (ScatterInnerLoadStoreTMA) {
-              // 2D TMA reduce: single thread issues one TMA reduce-add instruction
+              // IndexAttn TMA reduce: single thread issues one 2D TMA reduce-add instruction
               if (thread_idx == 0) {
                 Tensor sdQ_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
                 auto block_tma_dQ_c = params.tma_add_dQ.get_slice(_0{});
@@ -2976,7 +2976,8 @@ struct CollectiveMainloopBwdSm90 {
                 tma_store_arrive();
                 tma_store_wait<0>();
               }
-            } else {
+            } else if constexpr (InnerUseScatter) {
+              // SparseLoad scatter reduce: per-row 1D bulk reduce
               Tensor sdQ_acc = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumStore{});
               static constexpr int kdQPackScale = PackGQA ? QheadPerKhead : 1;
               int const stride_dq_row = get<0>(params.stride_dQ);
@@ -2992,6 +2993,20 @@ struct CollectiveMainloopBwdSm90 {
                   flat_thread_idx,
                   /*row_offset=*/0,
                   stride_dq_head);
+            } else {
+              // Dense TMA reduce: consumer-side dQ store via TMA reduce-add
+              static_assert(!CatGQA, "Consumer dQ TMA store for CatGQA not yet implemented; use InnerDxStoreInProducer");
+              if (thread_idx == 0) {
+                Tensor sdQ_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
+                auto block_tma_dQ_c = params.tma_add_dQ.get_slice(_0{});
+                Tensor tdQsdQ_c = block_tma_dQ_c.partition_S(sdQ_tma);
+                auto const gQdO_off = make_coord(offset_q, _0{});
+                Tensor gdQaccum_c = local_tile(domain_offset(gQdO_off, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
+                Tensor tdQgdQ_c = block_tma_dQ_c.partition_D(gdQaccum_c);
+                cute::copy(params.tma_add_dQ, tdQsdQ_c, tdQgdQ_c(_, _, _, m_block));
+                tma_store_arrive();
+                tma_store_wait<0>();
+              }
             }
 
             // Cross-WG sync: all scatter reads done before the next iteration's r2s overwrites sdQ

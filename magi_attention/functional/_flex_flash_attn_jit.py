@@ -419,6 +419,8 @@ def get_ffa_jit_spec(
         extra_template_args["inner_dir_max_to_min"] = _idm.lower()
         uri += f"_idm{_idm}"
     # mask_mode: "regular"=0 (direct apply), "dispatch"=1 (3-lambda), "unified"=2
+    # BWD default: unified (avoids 3-lambda code bloat that causes register spill).
+    # FWD default: dispatch (template default '1' in jinja).
     _mask_mode_map = {"regular": "0", "dispatch": "1", "unified": "2"}
     _mm = os.environ.get("MAGI_ATTENTION_FFA_MASK_MODE")
     if _mm is not None:
@@ -428,16 +430,19 @@ def get_ffa_jit_spec(
         ), f"MAGI_ATTENTION_FFA_MASK_MODE must be regular/dispatch/unified, got {_mm}"
         extra_template_args["mask_mode_int"] = _mask_mode_map[_mm_lower]
         uri += f"_mm{_mm_lower}"
+    elif direction == "bwd":
+        extra_template_args["mask_mode_int"] = _mask_mode_map["unified"]
+        uri += "_mmunified"
     # inner_use_scatter mirrors the mainloop predicate (mainloop_bwd_sm90_tma_gmma_ws.hpp):
     # LoopK scatters K/V when sparse_load or index_attn, LoopQ scatters Q/dO when sparse_load
     # or index_attn (inv_indices).
     _inner_use_scatter = sparse_load or index_attn
     _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER")
-    # DEVIATION: env toggle is ignored for non-scatter (dense) bwd configs.
-    # Reason: the dense consumer-store combination is untested and currently trips an
-    #         nvcc ICE; filtering here keeps the kernel-side flag a pure pass-through.
-    # Recovery: instantiate run_mha_bwd_ directly with InnerDxStoreInProducer=false.
-    if _dxp is not None and direction == "bwd" and _inner_use_scatter:
+    # Applies to ALL bwd configs (Dense, IndexAttn, SparseLoad).
+    # Default is true (producer store warp handles dX reduce-add to GMEM).
+    # false → consumer WGs handle dX store directly; frees one producer warp but
+    # shifts code pressure to the consumer (Dense: cr needs ~232 to avoid spill).
+    if _dxp is not None and direction == "bwd":
         _dxp_lower = _dxp.lower()
         assert _dxp_lower in (
             "true",
