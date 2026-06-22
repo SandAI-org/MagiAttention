@@ -99,7 +99,7 @@ def _maybe_force_sm80(enabled: bool):
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("mha_type", ["mha", "gqa", "mqa"])
-@pytest.mark.parametrize("attn_type_map", [MT_MAP.full, MT_MAP.causal])
+@pytest.mark.parametrize("mask_types", [MT_MAP.full, MT_MAP.causal])
 @pytest.mark.parametrize("d", [64, 128])
 @pytest.mark.parametrize("force_sm80", [False, True])
 @pytest.mark.parametrize(
@@ -111,7 +111,7 @@ def _maybe_force_sm80(enabled: bool):
     ],
 )
 def test_non_varlen_fwd_bwd(
-    seqlen_q, seqlen_k, force_sm80, d, attn_type_map, mha_type, dtype
+    seqlen_q, seqlen_k, force_sm80, d, mask_types, mha_type, dtype
 ):
     """Non-varlen flex_flash_attn_func: fwd + bwd for full/causal x MHA/GQA/MQA."""
     # FIXME(sm80): the forced SM80 path has a numerical bug (fwd output is wrong
@@ -121,8 +121,8 @@ def test_non_varlen_fwd_bwd(
         return
 
     device = "cuda"
-    causal = attn_type_map == MT_MAP.causal
-    seed = seqlen_q + seqlen_k + d + attn_type_map * 3
+    causal = mask_types == MT_MAP.causal
+    seed = seqlen_q + seqlen_k + d + mask_types * 3
     torch.random.manual_seed(seed)
     random.seed(seed)
 
@@ -150,7 +150,7 @@ def test_non_varlen_fwd_bwd(
     )
 
     with _maybe_force_sm80(force_sm80):
-        out, _ = flex_flash_attn_func(q, k, v, attn_type_map=attn_type_map)
+        out, _ = flex_flash_attn_func(q, k, v, mask_types=mask_types)
 
         atol = _fwd_atol(out_ref, out_pt)
         assert_close(
@@ -159,7 +159,7 @@ def test_non_varlen_fwd_bwd(
             atol=atol,
             rtol=0,
             mismatch_threshold=1e-5,
-            test_case=f"{force_sm80=},{seqlen_q=},{seqlen_k=},{d=},{attn_type_map=},{mha_type=},{dtype=} => fwd",
+            test_case=f"{force_sm80=},{seqlen_q=},{seqlen_k=},{d=},{mask_types=},{mha_type=},{dtype=} => fwd",
         )
 
         # ── backward ──
@@ -189,7 +189,7 @@ def test_non_varlen_fwd_bwd(
                 atol=_bwd_atol(ref, pt),
                 rtol=0,
                 mismatch_threshold=1e-5,
-                test_case=f"{force_sm80=},{seqlen_q=},{seqlen_k=},{d=},{attn_type_map=},{mha_type=},{dtype=} => {name}",
+                test_case=f"{force_sm80=},{seqlen_q=},{seqlen_k=},{d=},{mask_types=},{mha_type=},{dtype=} => {name}",
             )
         except AssertionError as e:
             errors.append(str(e))
@@ -204,11 +204,11 @@ def test_non_varlen_fwd_bwd(
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("mha_type", ["mha", "gqa", "mqa"])
-@pytest.mark.parametrize("attn_type_map", [MT_MAP.full, MT_MAP.causal])
+@pytest.mark.parametrize("mask_types", [MT_MAP.full, MT_MAP.causal])
 @pytest.mark.parametrize("d", [64, 128])
 @pytest.mark.parametrize("force_sm80", [False, True])
 @pytest.mark.parametrize("seqlen", [128, 512, 1024])
-def test_varlen_fwd_bwd(seqlen, force_sm80, d, attn_type_map, mha_type, dtype):
+def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
     """Varlen flex_flash_attn_func (packed cu_seqlens): fwd + bwd."""
     # FIXME(sm80): the forced SM80 path has a numerical bug (fwd output is wrong
     # in the high 8 of every 16 head_dim_v lanes, ~40% mismatch). Skip until the
@@ -220,9 +220,9 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, attn_type_map, mha_type, dtype):
     if IS_SM90:
         pytest.skip("SM90 varlen bwd not supported")
 
-    causal = attn_type_map == MT_MAP.causal
+    causal = mask_types == MT_MAP.causal
     device = "cuda"
-    seed = seqlen + d + attn_type_map * 5
+    seed = seqlen + d + mask_types * 5
     torch.random.manual_seed(seed)
     random.seed(seed)
 
@@ -261,7 +261,7 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, attn_type_map, mha_type, dtype):
             cu_seqlens_k=cu_seqlens,
             max_seqlen_q=seqlen,
             max_seqlen_k=seqlen,
-            attn_type_map=attn_type_map,
+            mask_types=mask_types,
         )
 
         out_reshaped = rearrange(out_v, "(b s) h d -> b s h d", b=batch_size)
@@ -272,7 +272,7 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, attn_type_map, mha_type, dtype):
             atol=atol,
             rtol=0,
             mismatch_threshold=1e-5,
-            test_case=f"{force_sm80=},{seqlen=},{d=},{attn_type_map=},{mha_type=},{dtype=} => varlen fwd",
+            test_case=f"{force_sm80=},{seqlen=},{d=},{mask_types=},{mha_type=},{dtype=} => varlen fwd",
         )
 
         # ── backward ──

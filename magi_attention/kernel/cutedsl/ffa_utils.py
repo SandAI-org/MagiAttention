@@ -63,8 +63,8 @@ class _MaskTypeMap:
 MT_MAP = _MaskTypeMap()
 
 
-def normalize_attn_type_map(attn_type_map: torch.Tensor | int | None) -> int:
-    """Translate the public ``attn_type_map`` argument into a single mask-type int.
+def normalize_mask_types(mask_types: torch.Tensor | int | None) -> int:
+    """Translate the public ``mask_types`` argument into a single mask-type int.
 
     The full q/k ranges semantics allow a distinct mask type per range, but the
     current kernels only support a single mask type shared by all ranges. So this
@@ -74,17 +74,17 @@ def normalize_attn_type_map(attn_type_map: torch.Tensor | int | None) -> int:
     - ``int``   -> all ranges share the same mask type (validated against ``MT_MAP``).
     - ``Tensor``-> per-range mask types (not yet supported by the kernel).
     """
-    if attn_type_map is None:
+    if mask_types is None:
         return MT_MAP.full
-    if isinstance(attn_type_map, int):
-        if not MT_MAP.is_valid(attn_type_map):
-            raise ValueError(f"Invalid mask type: {attn_type_map}")
-        return attn_type_map
+    if isinstance(mask_types, int):
+        if not MT_MAP.is_valid(mask_types):
+            raise ValueError(f"Invalid mask type: {mask_types}")
+        return mask_types
 
-    # TODO: support per-range attn_type_map (a cuda int32 tensor) once the kernel
+    # TODO: support per-range mask_types (a cuda int32 tensor) once the kernel
     # can read a distinct mask type for each q/k range.
     raise NotImplementedError(
-        "Per-range attn_type_map (torch.Tensor) is not supported yet."
+        "Per-range mask_types (torch.Tensor) is not supported yet."
     )
 
 

@@ -53,7 +53,7 @@ from .ffa_utils import (
     get_device_arch,
     hash_callable,
     maybe_contiguous,
-    normalize_attn_type_map,
+    normalize_mask_types,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
@@ -1360,7 +1360,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         max_seqlen_q: int | None = None,
         max_seqlen_k: int | None = None,
         softmax_scale: float | None = None,
-        attn_type_map: torch.Tensor | int | None = None,
+        mask_types: torch.Tensor | int | None = None,
         learnable_sink: torch.Tensor | None = None,
         softcap: float = 0.0,
         pack_gqa: bool | None = None,
@@ -1372,7 +1372,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         block_sparse_tensors: BlockSparseTensorsTorch | None = None,
         block_sparse_tensors_bwd: BlockSparseTensorsTorch | None = None,
     ):
-        mask_type = normalize_attn_type_map(attn_type_map)
+        mask_type = normalize_mask_types(mask_types)
         out, lse = _flex_flash_attn_fwd(
             q=q,
             k=k,
@@ -1466,7 +1466,7 @@ def flex_flash_attn_func(
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
-    attn_type_map: torch.Tensor | int | None = None,
+    mask_types: torch.Tensor | int | None = None,
     learnable_sink: torch.Tensor | None = None,
     softcap: float = 0.0,
     pack_gqa: bool | None = None,
@@ -1488,7 +1488,7 @@ def flex_flash_attn_func(
 
     max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
 
-    attn_type_map: the attention mask type applied to the q/k ranges, using the
+    mask_types: the attention mask type applied to the q/k ranges, using the
         int keys from ``MT_MAP`` (0=full, 1=causal). It may be:
         - ``None``: all ranges use full attention (the default).
         - ``int``: all ranges share the same mask type.
@@ -1504,7 +1504,7 @@ def flex_flash_attn_func(
         max_seqlen_q,
         max_seqlen_k,
         softmax_scale,
-        attn_type_map,
+        mask_types,
         learnable_sink,
         softcap,
         pack_gqa,
