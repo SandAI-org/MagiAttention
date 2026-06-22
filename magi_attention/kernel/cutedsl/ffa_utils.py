@@ -31,6 +31,7 @@ from cutlass.cute.runtime import from_dlpack
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
 from magi_attention.utils.arch import get_dev_cap_num
+from magi_attention.utils.version import is_cuda_version_ge, is_cuda_version_lt
 
 if TYPE_CHECKING:
     from .sparse_utils import BlockSparseTensorsTorch
@@ -525,23 +526,12 @@ _ffa_disable_2cta_enabled: bool = (
 
 
 def _is_cuda_12() -> bool:
-    """Check if the CUDA toolkit version is 12.x.
-
-    2CTA forward non-causal has a codegen regression on CUDA 12 that causes
-    ~18% slowdown compared to 1CTA. This is fixed in CUDA 13.x.
-    """
-    try:
-        import torch
-
-        cuda_version = torch.version.cuda
-        if cuda_version is not None:
-            major = cuda_version.split(".")[0]
-            return int(major) == 12
-    except Exception:
-        pass
-    return False
+    """Check if the CUDA toolkit version is 12.x."""
+    return is_cuda_version_ge("12") and is_cuda_version_lt("13")
 
 
+# 2CTA forward non-causal has a codegen regression on CUDA 12.x that causes
+# ~18% slowdown compared to 1CTA. This is fixed in CUDA 13.x.
 _ffa_disable_2cta_cuda12: bool = _is_cuda_12()
 
 
