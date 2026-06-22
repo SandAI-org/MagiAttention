@@ -484,6 +484,12 @@ def get_ffa_jit_spec(
                 _uri_val = _val.replace("-", "n")
                 uri += f"_{_uri_key}{_uri_val}"
 
+        # Force Mma_dKV to SS mode (SMEM-SMEM) for benchmarking register pressure
+        _force_ss = os.environ.get("MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS")
+        if _force_ss is not None and _force_ss == "1":
+            extra_template_args["force_mma_dkv_ss"] = "true"
+            uri += "_fss1"
+
         # IndexAttn LoopQ with block-level K: override tile_n to match k_block_size
         # so that kBlockN = k_block_size (full-tile outer K, no waste).
         if (

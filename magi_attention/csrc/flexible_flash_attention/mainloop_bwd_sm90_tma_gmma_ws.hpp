@@ -81,7 +81,8 @@ template <
     int ScatterPad_ = -1,
     bool LseDpsumUnionDKVacc_ = false,
     bool DkvaccBypassSmem_ = false,
-    int KBlockSize_ = 1>
+    int KBlockSize_ = 1,
+    bool ForceMmaDkvSS_ = false>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -270,7 +271,7 @@ struct CollectiveMainloopBwdSm90 {
 
   static_assert(!InnerUseScatter || kInnerScatterRows % NumGroups == 0, "Scatter requires the inner tile rows divisible by NumGroups");
 
-  static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB;
+  static constexpr bool Mma_dKV_is_RS = !ForceMmaDkvSS_ && AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB;
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
 
   static constexpr GMMA::Major PdS_Major = GMMA::Major::K;
@@ -405,6 +406,15 @@ struct CollectiveMainloopBwdSm90 {
   using SmemLayoutPdSt_ =
       decltype(make_layout(make_shape(Int<kBlockN>{}, Int<kBlockM>{}, Int<kStages_dS>{}), make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kBlockN>{})));
   using SmemLayoutPdSt = decltype(cute::composition(SmemLayoutPdS{}, SmemLayoutPdSt_{}));
+
+  // P only needs 1 stage (produced and consumed within the same inner iteration),
+  // unlike dS which needs kStages_dS stages for cross-WG double buffering.
+  using SmemLayoutP1 = decltype(tile_to_shape(
+      SmemLayoutAtomPdS{},
+      make_shape(Int<kBlockM>{}, Int<kBlockN>{}, _1{}),
+      std::conditional_t<PdS_Major == GMMA::Major::K, cute::Step<_1, _2, _3>, cute::Step<_2, _1, _3>>{}));
+  using SmemLayoutP1t_ = decltype(make_layout(make_shape(Int<kBlockN>{}, Int<kBlockM>{}, _1{}), make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kBlockN>{})));
+  using SmemLayoutP1t = decltype(cute::composition(SmemLayoutP1{}, SmemLayoutP1t_{}));
 
   // k for outer-loop and q for inner-loop
   // Thread layout, 256 or 384 threads per row
@@ -636,7 +646,7 @@ struct CollectiveMainloopBwdSm90 {
       DkvaccBypassSmem || !dKVacc_use_TMA,
       cute::array<ElementAccum, 0>,
       cute::array_aligned<ElementAccum, cute::max(cute::cosize_v<SmemLayoutdKVaccumTMA>, cute::cosize_v<SmemLayoutdKVaccumStore>)>>;
-  using SmemP_t = std::conditional_t<Mma_dKV_is_RS, cute::array<Element, 0>, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
+  using SmemP_t = std::conditional_t<Mma_dKV_is_RS, cute::array<Element, 0>, cute::array_aligned<Element, cute::cosize_v<SmemLayoutP1>, SmemAlignmentP>>;
 
   // ─── Per-iteration token-index slots in smem (single source of truth for scatter paths) ───
   // kStages stage-indexed slots, 1:1 with the inner-tensor pipeline buffers (pipeline_q on
@@ -691,7 +701,8 @@ struct CollectiveMainloopBwdSm90 {
   using SmemLSE_t = std::conditional_t<LseDpsumUnionEffective, SmemLSE_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentLSE>>;
   using SmemDPsum_t =
       std::conditional_t<LseDpsumUnionEffective, SmemDPsum_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum>>;
-  using SmemP_LoopK_t = std::conditional_t<Mma_dKV_is_RS, SmemP_Empty_, SmemP_t>;
+  // LoopK keeps P with kStages_dS stages (same as dS), unlike LoopQ which uses 1-stage P.
+  using SmemP_LoopK_t = std::conditional_t<Mma_dKV_is_RS, SmemP_Empty_, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
 
   struct TensorStorageLoopK : cute::aligned_struct<maxSmemAlignment> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
@@ -2538,9 +2549,10 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdOt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdOt{});
     Tensor sKt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutKt{});
 
-    Tensor sP = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_p.data()), SmemLayoutPdS{});
+    // P uses 1-stage layout (produced+consumed within same iter); dS uses kStages_dS for double buffering
+    Tensor sP = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_p.data()), SmemLayoutP1{});
     Tensor sP_pi = cute::as_position_independent_swizzle_tensor(sP);
-    Tensor sPt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_p.data()), SmemLayoutPdSt{});
+    Tensor sPt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_p.data()), SmemLayoutP1t{});
     Tensor sPt_pi = cute::as_position_independent_swizzle_tensor(sPt);
     Tensor sdS = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data()), SmemLayoutPdS{});
     Tensor sdS_pi = cute::as_position_independent_swizzle_tensor(sdS);
@@ -2844,12 +2856,10 @@ struct CollectiveMainloopBwdSm90 {
       Tensor rP = make_tensor_like<Element>(tSrS);
       flash::convert_type_out(tSrS, rP);
       if constexpr (!Mma_dKV_is_RS) {
-        if constexpr (kStages_dS == 1) {
-          // NOTE: we need to sync to make sure P has already been used in the previous iteration before writing new values
-          BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
-        }
+        // P uses 1-stage buffer: always sync to ensure prev iter's MMA3 consumed P
+        BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
         Tensor tPaP = smem_thr_copy_PdS.retile_S(rP); // ((Atom,AtomNum), MMA_N, MMA_N)
-        cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_q.index())));
+        cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, _0{}));
       }
 
       // Downcast `tdPrdP` from ElementAccum to Element `rdS`
@@ -2859,12 +2869,9 @@ struct CollectiveMainloopBwdSm90 {
       Tensor rdS = make_tensor_like<Element>(tdPrdP);
       flash::convert_type_out(tdPrdP, rdS);
       if constexpr (!Mma_dKV_is_RS || (kStages_dS == 1 && Mma_dKV_is_RS)) {
-        // NOTE: if there's double buffering on dS, we don't need to sync here.
-        // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
-        // But because both WGs have to sync at the end of the loop and double buffering,
-        // this race condition is not possible.
-        // This sync is to ensure (1) P is written in case of !Mma_dKV_is_RS and
-        // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
+        // SS mode: fence+barrier to make P writes visible before MMA3 reads P from SMEM.
+        // RS mode + single-stage dS: protect dS from prev-iter MMA4/5 overlap.
+        // RS mode + multi-stage dS: both P (in regs) and dS (double-buffered) need no sync.
         sync_dS_r2s();
       }
       // For hdim 64, It's faster to write to smem_dS first before the dV gemm
@@ -2886,7 +2893,7 @@ struct CollectiveMainloopBwdSm90 {
           // case1. if dKV_swapAB, we apply dV^T = dO^TP (passing P^T,dO^T to gemm, it swaps AB to dO^T,P^T and then transposes operand B to P)
           // case2. if not dKV_swapAB, we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
-          Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_q.index()));
+          Tensor tdVrP_cur = tdVrP(_, _, _, _0{}); // P is 1-stage
           flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
         }
 
@@ -3036,7 +3043,7 @@ struct CollectiveMainloopBwdSm90 {
         // case1. if dKV_swapAB, we apply dV^T = dO^TP (passing P^T,dO^T to gemm, it swaps AB to dO^T,P^T and then transposes operand B to P)
         // case2. if not dKV_swapAB, we apply dV = P^TdO (passing P^T,dO^T to gemm, it transposes operand B to dO)
         Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
-        Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_q.index()));
+        Tensor tdVrP_cur = tdVrP(_, _, _, _0{}); // P is 1-stage
         flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(
             tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
 
