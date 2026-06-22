@@ -1458,6 +1458,7 @@ def flex_flash_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    *,
     q_ranges: torch.Tensor | None = None,
     k_ranges: torch.Tensor | None = None,
     mask_types: torch.Tensor | int | None = None,

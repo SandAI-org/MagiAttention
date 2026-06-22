@@ -315,9 +315,9 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
             v_v,
             q_ranges=q_ranges,
             k_ranges=k_ranges,
+            mask_types=mask_types,
             max_seqlen_q=seqlen,
             max_seqlen_k=seqlen,
-            mask_types=mask_types,
         )
 
         out_reshaped = rearrange(out_v, "(b s) h d -> b s h d", b=batch_size)

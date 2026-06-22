@@ -258,9 +258,9 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
                     v,
                     q_ranges=q_ranges_t,
                     k_ranges=k_ranges_t,
+                    mask_types=ffa_mask_types,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_k=max_seqlen_k,
-                    mask_types=ffa_mask_types,
                 )
 
         else:
