@@ -139,6 +139,7 @@ template <
     bool LseDpsumUnionDKVacc,
     bool DkvaccBypassSmem,
     int KBlockSize,
+    bool ForceMmaDkvSS,
     bool ProfileMode>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
@@ -202,7 +203,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       ScatterPad,
       LseDpsumUnionDKVacc,
       DkvaccBypassSmem,
-      KBlockSize>;
+      KBlockSize,
+      ForceMmaDkvSS>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       SwapBwdQKLoop ? kBlockM : kBlockN,
@@ -396,6 +398,7 @@ template <
     int BwdLseUnion,
     int BwdDkvaccBypass,
     int KBlockSize,
+    bool ForceMmaDkvSS,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -479,5 +482,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*LseDpsumUnionDKVacc=*/LseDpsumUnionDKVacc,
       /*DkvaccBypassSmem=*/DkvaccBypassSmem,
       /*KBlockSize=*/KBlockSize,
+      /*ForceMmaDkvSS=*/ForceMmaDkvSS,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }

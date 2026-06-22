@@ -56,6 +56,8 @@ static constexpr int kBwdLseUnion = {{ bwd_lse_union | default(0) }};
 static constexpr int kBwdDkvaccBypass = {{ bwd_dkvacc_bypass | default(0) }};
 // IndexAttn K block size: 1 = token-level indices, >1 = block-level (each index covers KBlockSize tokens)
 static constexpr int kKBlockSize = {{ k_block_size | default(1) }};
+// Force Mma_dKV to SS mode (SMEM-SMEM) instead of RS for benchmarking register pressure.
+static constexpr bool kForceMmaDkvSS = {{ force_mma_dkv_ss | default('false') }};
 
 static_assert(!kSwapBwdQKLoop || !kDeterministic, "Deterministic mode is not supported when SwapBwdQKLoop is enabled.");
 static_assert(!(kSparseLoad && kIndexAttn), "SparseLoad and IndexAttn are mutually exclusive.");
@@ -154,7 +156,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kSparseInnerDxReduceUseTma, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kSparseLoad, kIndexAttn, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kSparseInnerDxReduceUseTma, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kForceMmaDkvSS, kProfileMode>(params, stream);
 
   // Pool reduction: sum pool slices and convert to output dtype
   if (pool_count > 1 && kSwapBwdQKLoop) {
