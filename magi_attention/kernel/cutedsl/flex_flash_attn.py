@@ -17,7 +17,6 @@
 # mypy: disable-error-code="arg-type,union-attr,attr-defined,unreachable,assignment"
 
 import math
-from typing import Callable
 
 import cutlass.cute as cute
 import torch
@@ -46,6 +45,7 @@ from .ffa_fwd_sm100 import FFAFwdSm100
 from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
+    TorchFlexAttnArgs,
     _get_disable_2cta_default,
     _get_use_clc_scheduler_default,
     convert_from_dlpack_leading_static,
@@ -62,10 +62,10 @@ from .ffa_utils import (
     validate_tensor,
 )
 from .sparse_utils import (
-    BlockSparseTensorsTorch,
+    block_sparse_call_tuple,
     get_sparse_q_block_size,
-    normalize_block_sparse_config,
-    normalize_block_sparse_config_bwd,
+    prepare_block_sparse_bwd,
+    prepare_block_sparse_fwd,
     to_cute_block_sparse_tensors,
 )
 
@@ -86,22 +86,17 @@ def _flex_flash_attn_fwd(
     sink: torch.Tensor | None = None,
     sink_layout: AttnSinkLayout = "sh",
     pack_gqa: bool | None = None,
-    score_mod: Callable | None = None,
-    mask_mod: Callable | None = None,
-    block_sparse_tensors: BlockSparseTensorsTorch | None = None,
-    aux_tensors: list[torch.Tensor] | None = None,
+    flex_attn_args: TorchFlexAttnArgs | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
     Args:
         ...
-        score_mod: A callable that takes the attention scores and applies a modification.
-        mask_mod: A callable that takes token position information and selectively masks
-        block_sparse_tensors: A tuple of tensors used for block sparsity.
+        flex_attn_args: optional torch FlexAttention-style / block-sparse args
+            (``score_mod`` / ``mask_mod`` / ``aux_tensors`` /
+            ``block_sparse_tensors``). See :class:`TorchFlexAttnArgs`.
         out: Optional pre-allocated output tensor. If None, will be allocated internally.
         lse: Optional pre-allocated log-sum-exp tensor. If None, will be allocated when needed.
-        aux_tensors: Some score_mods will want to read from global aux_tensors.
-            This is how we thread them through to the inner kernel.
 
     Returns:
         A tuple of (output, lse) where:
@@ -116,6 +111,13 @@ def _flex_flash_attn_fwd(
     assert (
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
+
+    # Unpack the torch FlexAttention-style / block-sparse args (fwd uses these).
+    flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
+    score_mod = flex_attn_args.score_mod
+    mask_mod = flex_attn_args.mask_mod
+    aux_tensors = flex_attn_args.aux_tensors
+    block_sparse_tensors = flex_attn_args.block_sparse_tensors
 
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
     num_head, head_dim = q.shape[-2:]
@@ -301,34 +303,25 @@ def _flex_flash_attn_fwd(
         requested_use_clc_scheduler and not is_varlen_mha and not is_dense_noncausal
     )
 
-    if use_block_sparsity:
-        # NB: pack_gqa requires block sparse head dim == 1 (broadcasted)
-        head_dim_idx = 0 if block_sparse_tensors.mask_block_cnt.ndim == 2 else 1
-        if pack_gqa and block_sparse_tensors.mask_block_cnt.shape[head_dim_idx] != 1:
-            pack_gqa = False
-        if cu_seqlens_q is not None:
-            assert (
-                block_sparse_tensors.cu_total_m_blocks is not None
-            ), "Varlen block sparsity requires block_sparse_tensors.cu_total_m_blocks."
+    # Prepare block sparse for forward
+    (
+        normalized_block_sparse_tensors,
+        block_sparse_broadcast_pattern,
+        q_subtile_factor,
+        pack_gqa,
+    ) = prepare_block_sparse_fwd(
+        block_sparse_tensors,
+        pack_gqa=pack_gqa,
+        cu_seqlens_q=cu_seqlens_q,
+        batch_size=batch_size,
+        num_head=num_head,
+        seqlen_q=seqlen_q,
+        seqlen_k=seqlen_k,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        q_stage=q_stage,
+    )
 
-    # See get_broadcast_dims for why this is needed in compile key
-    block_sparse_broadcast_pattern = None
-    normalized_block_sparse_tensors = None
-    q_subtile_factor = None
-    if block_sparse_tensors is not None:
-        (
-            normalized_block_sparse_tensors,
-            block_sparse_broadcast_pattern,
-            q_subtile_factor,
-        ) = normalize_block_sparse_config(
-            block_sparse_tensors,
-            batch_size=batch_size,
-            num_head=num_head,
-            seqlen_q=seqlen_q,
-            seqlen_k=seqlen_k,
-            block_size=(tile_m, tile_n),
-            q_stage=q_stage,
-        )
     if aux_tensors is not None:
         aux_tensor_metadata = get_aux_tensor_metadata(aux_tensors)
     else:
@@ -384,11 +377,11 @@ def _flex_flash_attn_fwd(
         else:
             lse_tensor = None
 
-        sparse_tensors = None
-        if normalized_block_sparse_tensors is not None:
-            sparse_tensors = to_cute_block_sparse_tensors(
-                normalized_block_sparse_tensors
-            )
+        sparse_tensors = (
+            to_cute_block_sparse_tensors(normalized_block_sparse_tensors)
+            if normalized_block_sparse_tensors is not None
+            else None
+        )
 
         cute_aux_tensors = None
         aux_tensor_metadata = None
@@ -540,18 +533,7 @@ def _flex_flash_attn_fwd(
         call_args.append(None)
     call_args.extend(
         [
-            (
-                normalized_block_sparse_tensors.mask_block_cnt,
-                normalized_block_sparse_tensors.mask_block_idx,
-                normalized_block_sparse_tensors.full_block_cnt,
-                normalized_block_sparse_tensors.full_block_idx,
-                normalized_block_sparse_tensors.cu_total_m_blocks,
-                normalized_block_sparse_tensors.cu_block_idx_offsets,
-                normalized_block_sparse_tensors.dq_write_order,
-                normalized_block_sparse_tensors.dq_write_order_full,
-            )
-            if normalized_block_sparse_tensors is not None
-            else None,
+            block_sparse_call_tuple(normalized_block_sparse_tensors),
             aux_tensors,
         ]
     )
@@ -585,11 +567,7 @@ def _flex_flash_attn_bwd(
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     deterministic: bool = False,
-    score_mod: Callable | None = None,
-    score_mod_bwd: Callable | None = None,
-    mask_mod: Callable | None = None,
-    aux_tensors: list[torch.Tensor] | None = None,
-    block_sparse_tensors: BlockSparseTensorsTorch | None = None,
+    flex_attn_args: TorchFlexAttnArgs | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
@@ -602,6 +580,15 @@ def _flex_flash_attn_bwd(
     assert (
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
+
+    # Unpack the torch FlexAttention-style / block-sparse args (bwd uses these;
+    # note block sparsity reads the bwd-specific tensors).
+    flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
+    score_mod = flex_attn_args.score_mod
+    score_mod_bwd = flex_attn_args.score_mod_bwd
+    mask_mod = flex_attn_args.mask_mod
+    aux_tensors = flex_attn_args.aux_tensors
+    block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
 
     local = False
     # NOTE: only a single mask type shared by all q/k ranges is supported for now,
@@ -984,7 +971,7 @@ def _flex_flash_attn_bwd(
     if major_arch not in [8, 9, 12]:
         num_threads = 384
 
-    # Backward kernel: compute dk, dv, dq_accum.
+    # Prepare block sparse for backward.
     score_mod_hash = hash_callable(score_mod) if score_mod else False
     score_mod_bwd_hash = hash_callable(score_mod_bwd) if score_mod_bwd else False
     mask_mod_hash = hash_callable(mask_mod) if mask_mod else False
@@ -995,47 +982,25 @@ def _flex_flash_attn_bwd(
             to_cute_tensor(buf, assumed_align=None, fully_dynamic=True)
             for buf in aux_tensors
         ]
+    (
+        normalized_block_sparse_tensors,
+        block_sparse_broadcast_pattern,
+        spt,
+    ) = prepare_block_sparse_bwd(
+        block_sparse_tensors,
+        deterministic=deterministic,
+        causal=causal,
+        local=local,
+        batch_size=batch_size,
+        num_head=num_head,
+        seqlen_q=seqlen_q,
+        seqlen_k=seqlen_k,
+        m_block_size=m_block_size,
+        n_block_size=n_block_size,
+        subtile_factor=subtile_factor,
+    )
 
-    block_sparse_broadcast_pattern = None
-    normalized_block_sparse_tensors = None
-    if block_sparse_tensors is not None:
-        (
-            normalized_block_sparse_tensors,
-            block_sparse_broadcast_pattern,
-        ) = normalize_block_sparse_config_bwd(
-            block_sparse_tensors,
-            batch_size=batch_size,
-            num_head=num_head,
-            seqlen_q=seqlen_q,
-            seqlen_k=seqlen_k,
-            block_size=(m_block_size, n_block_size),
-            subtile_factor=subtile_factor,
-        )
-        if deterministic:
-            if normalized_block_sparse_tensors.dq_write_order is None:
-                raise ValueError(
-                    "deterministic block-sparse backward requires dq_write_order in block_sparse_tensors"
-                )
-            if (
-                normalized_block_sparse_tensors.full_block_cnt is not None
-                and normalized_block_sparse_tensors.dq_write_order_full is None
-            ):
-                raise ValueError(
-                    "deterministic block-sparse backward requires dq_write_order_full when full blocks are present"
-                )
-            if normalized_block_sparse_tensors.spt is None:
-                raise ValueError(
-                    "deterministic block-sparse backward requires block_sparse_tensors.spt "
-                    "to match dq_write_order direction"
-                )
-    if (
-        normalized_block_sparse_tensors is not None
-        and normalized_block_sparse_tensors.spt is not None
-    ):
-        spt = normalized_block_sparse_tensors.spt and deterministic
-    else:
-        spt = (causal or local) and deterministic
-
+    # Backward kernel: compute dk, dv, dq_accum.
     if major_arch in [8, 9, 12]:
         compile_key = (
             arch,
@@ -1214,11 +1179,11 @@ def _flex_flash_attn_bwd(
             )
 
         # Block sparse tensors for backward use Q-direction indexing (transposed from forward).
-        sparse_tensors_compile = None
-        if normalized_block_sparse_tensors is not None:
-            sparse_tensors_compile = to_cute_block_sparse_tensors(
-                normalized_block_sparse_tensors
-            )
+        sparse_tensors_compile = (
+            to_cute_block_sparse_tensors(normalized_block_sparse_tensors)
+            if normalized_block_sparse_tensors is not None
+            else None
+        )
 
         # TODO: check @can_implement
         _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
@@ -1268,18 +1233,7 @@ def _flex_flash_attn_bwd(
         dK_semaphore,
         dV_semaphore,
         aux_tensors,
-        (
-            normalized_block_sparse_tensors.mask_block_cnt,
-            normalized_block_sparse_tensors.mask_block_idx,
-            normalized_block_sparse_tensors.full_block_cnt,
-            normalized_block_sparse_tensors.full_block_idx,
-            normalized_block_sparse_tensors.cu_total_m_blocks,
-            normalized_block_sparse_tensors.cu_block_idx_offsets,
-            normalized_block_sparse_tensors.dq_write_order,
-            normalized_block_sparse_tensors.dq_write_order_full,
-        )
-        if normalized_block_sparse_tensors is not None
-        else None,
+        block_sparse_call_tuple(normalized_block_sparse_tensors),
     )
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
@@ -1361,6 +1315,18 @@ _flex_flash_attn_bwd.compile_cache = get_jit_cache("bwd")
 
 
 class FlexFlashAttnFunc(torch.autograd.Function):
+    """Autograd function for FFA (dense / varlen).
+
+    The optional torch FlexAttention-style / block-sparse capabilities
+    (``score_mod`` / ``score_mod_bwd`` / ``mask_mod`` / ``aux_tensors`` /
+    ``block_sparse_tensors[_bwd]``) are bundled into a single
+    :class:`TorchFlexAttnArgs` (``flex_attn_args``) to keep the common
+    signature clean.
+
+    NOTE: ``softcap`` is implemented internally via the score_mod machinery
+    (see ``_flex_flash_attn_fwd``), and is exposed here as a plain scalar.
+    """
+
     @staticmethod
     def forward(
         ctx,
@@ -1378,12 +1344,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         softcap: float = 0.0,
         pack_gqa: bool | None = None,
         deterministic: bool = False,
-        score_mod: Callable | None = None,
-        score_mod_bwd: Callable | None = None,
-        mask_mod: Callable | None = None,
-        aux_tensors: list | None = None,
-        block_sparse_tensors: BlockSparseTensorsTorch | None = None,
-        block_sparse_tensors_bwd: BlockSparseTensorsTorch | None = None,
+        flex_attn_args: TorchFlexAttnArgs | None = None,
     ):
         mask_type = normalize_mask_types(mask_types)
         out, lse = _flex_flash_attn_fwd(
@@ -1400,12 +1361,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sink_layout=sink_layout,
             softcap=softcap,
             pack_gqa=pack_gqa,
-            score_mod=score_mod,
-            mask_mod=mask_mod,
-            aux_tensors=aux_tensors,
-            block_sparse_tensors=block_sparse_tensors,
+            flex_attn_args=flex_attn_args,
         )
 
+        aux_tensors = flex_attn_args.aux_tensors if flex_attn_args else None
         ctx.save_for_backward(
             q,
             k,
@@ -1424,10 +1383,12 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
-        ctx.score_mod = score_mod
-        ctx.score_mod_bwd = score_mod_bwd
-        ctx.mask_mod = mask_mod
-        ctx.block_sparse_tensors_bwd = block_sparse_tensors_bwd
+        # Drop the direct aux_tensors reference on ctx; the real tensors are
+        # tracked via save_for_backward and restored in backward. Keeping them
+        # here too would bypass autograd's save_for_backward bookkeeping.
+        ctx.flex_attn_args = (
+            flex_attn_args.drop_aux_tensors() if flex_attn_args is not None else None
+        )
         ctx.set_materialize_grads(False)
 
         return out, lse
@@ -1445,9 +1406,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sink,
             *aux,
         ) = ctx.saved_tensors
-        aux_tensors = aux if aux else None
         if dout is None:
             dout = torch.zeros_like(out)
+
+        # Restore aux_tensors from the saved tail (kept tracked by autograd).
+        flex_attn_args: TorchFlexAttnArgs | None = ctx.flex_attn_args
+        if flex_attn_args is not None:
+            flex_attn_args = flex_attn_args.with_aux_tensors(aux)
 
         dq, dk, dv = _flex_flash_attn_bwd(
             q=q,
@@ -1466,11 +1431,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_q=ctx.max_seqlen_q,
             max_seqlen_k=ctx.max_seqlen_k,
             deterministic=ctx.deterministic,
-            score_mod=ctx.score_mod,
-            score_mod_bwd=ctx.score_mod_bwd,
-            mask_mod=ctx.mask_mod,
-            aux_tensors=aux_tensors,
-            block_sparse_tensors=ctx.block_sparse_tensors_bwd,
+            flex_attn_args=flex_attn_args,
         )
 
         return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
@@ -1491,14 +1452,11 @@ def flex_flash_attn_func(
     softcap: float = 0.0,
     pack_gqa: bool | None = None,
     deterministic: bool = False,
-    score_mod: Callable | None = None,
-    score_mod_bwd: Callable | None = None,
-    mask_mod: Callable | None = None,
-    aux_tensors: list | None = None,
-    block_sparse_tensors: BlockSparseTensorsTorch | None = None,
-    block_sparse_tensors_bwd: BlockSparseTensorsTorch | None = None,
+    flex_attn_args: TorchFlexAttnArgs | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
+    Flex-flash-attention interface (dense / varlen).
+
     Explanation of some optional arguments:
 
     cu_seqlens_q/cu_seqlens_k: cumulative sequence lengths for variable-length
@@ -1514,6 +1472,15 @@ def flex_flash_attn_func(
         - ``int``: all ranges share the same mask type.
         - ``torch.Tensor`` (cuda int32): a distinct mask type per q/k range
           (not supported yet).
+
+    softcap: tanh logit soft-capping value. Implemented internally via the
+        score_mod machinery, but exposed here as a plain scalar.
+
+    flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
+        FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
+        ``mask_mod`` / ``aux_tensors``) and block-sparse
+        (``block_sparse_tensors`` / ``block_sparse_tensors_bwd``) capabilities.
+        Leave as ``None`` for the plain dense / varlen path.
     """
     out, lse = FlexFlashAttnFunc.apply(
         q,
@@ -1530,12 +1497,7 @@ def flex_flash_attn_func(
         softcap,
         pack_gqa,
         deterministic,
-        score_mod,
-        score_mod_bwd,
-        mask_mod,
-        aux_tensors,
-        block_sparse_tensors,
-        block_sparse_tensors_bwd,
+        flex_attn_args,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)

@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .ffa_utils import MT_MAP
+from .ffa_utils import MT_MAP, TorchFlexAttnArgs
 from .flex_flash_attn import flex_flash_attn_func
 
 __all__ = [
     "flex_flash_attn_func",
+    "TorchFlexAttnArgs",
     "MT_MAP",
 ]
 

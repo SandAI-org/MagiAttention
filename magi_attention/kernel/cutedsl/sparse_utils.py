@@ -595,6 +595,141 @@ def to_cute_block_sparse_tensors(
     )
 
 
+def prepare_block_sparse_fwd(
+    block_sparse_tensors: BlockSparseTensorsTorch | None,
+    *,
+    pack_gqa: bool,
+    cu_seqlens_q: torch.Tensor | None,
+    batch_size: int,
+    num_head: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    tile_m: int,
+    tile_n: int,
+    q_stage: int,
+) -> tuple[BlockSparseTensorsTorch | None, object, int | None, bool]:
+    """Host-side block-sparse preparation for the forward pass.
+
+    Bundles the forward block-sparse host logic (pack_gqa adjustment, varlen
+    validation, and config normalization) so the fwd entry point stays clean.
+
+    Returns ``(normalized_tensors, broadcast_pattern, q_subtile_factor, pack_gqa)``.
+    When ``block_sparse_tensors is None``, returns ``(None, None, None, pack_gqa)``.
+    """
+    if block_sparse_tensors is None:
+        return None, None, None, pack_gqa
+
+    # NB: pack_gqa requires block sparse head dim == 1 (broadcasted)
+    head_dim_idx = 0 if block_sparse_tensors.mask_block_cnt.ndim == 2 else 1
+    if pack_gqa and block_sparse_tensors.mask_block_cnt.shape[head_dim_idx] != 1:
+        pack_gqa = False
+    if cu_seqlens_q is not None:
+        assert (
+            block_sparse_tensors.cu_total_m_blocks is not None
+        ), "Varlen block sparsity requires block_sparse_tensors.cu_total_m_blocks."
+
+    (
+        normalized_tensors,
+        broadcast_pattern,
+        q_subtile_factor,
+    ) = normalize_block_sparse_config(
+        block_sparse_tensors,
+        batch_size=batch_size,
+        num_head=num_head,
+        seqlen_q=seqlen_q,
+        seqlen_k=seqlen_k,
+        block_size=(tile_m, tile_n),
+        q_stage=q_stage,
+    )
+    return normalized_tensors, broadcast_pattern, q_subtile_factor, pack_gqa
+
+
+def prepare_block_sparse_bwd(
+    block_sparse_tensors: BlockSparseTensorsTorch | None,
+    *,
+    deterministic: bool,
+    causal: bool,
+    local: bool,
+    batch_size: int,
+    num_head: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    m_block_size: int,
+    n_block_size: int,
+    subtile_factor: int,
+) -> tuple[BlockSparseTensorsTorch | None, object, bool]:
+    """Host-side block-sparse preparation for the backward pass.
+
+    Bundles the backward block-sparse host logic (config normalization,
+    deterministic validation, and the ``spt`` flag) so the bwd entry point stays
+    clean. ``spt`` also covers the non-block-sparse case
+    (``(causal or local) and deterministic``).
+
+    Returns ``(normalized_tensors, broadcast_pattern, spt)``.
+    """
+    normalized_tensors = None
+    broadcast_pattern = None
+    if block_sparse_tensors is not None:
+        (
+            normalized_tensors,
+            broadcast_pattern,
+        ) = normalize_block_sparse_config_bwd(
+            block_sparse_tensors,
+            batch_size=batch_size,
+            num_head=num_head,
+            seqlen_q=seqlen_q,
+            seqlen_k=seqlen_k,
+            block_size=(m_block_size, n_block_size),
+            subtile_factor=subtile_factor,
+        )
+        if deterministic:
+            if normalized_tensors.dq_write_order is None:
+                raise ValueError(
+                    "deterministic block-sparse backward requires dq_write_order in block_sparse_tensors"
+                )
+            if (
+                normalized_tensors.full_block_cnt is not None
+                and normalized_tensors.dq_write_order_full is None
+            ):
+                raise ValueError(
+                    "deterministic block-sparse backward requires dq_write_order_full when full blocks are present"
+                )
+            if normalized_tensors.spt is None:
+                raise ValueError(
+                    "deterministic block-sparse backward requires block_sparse_tensors.spt "
+                    "to match dq_write_order direction"
+                )
+
+    if normalized_tensors is not None and normalized_tensors.spt is not None:
+        spt = normalized_tensors.spt and deterministic
+    else:
+        spt = (causal or local) and deterministic
+
+    return normalized_tensors, broadcast_pattern, spt
+
+
+def block_sparse_call_tuple(
+    normalized_tensors: BlockSparseTensorsTorch | None,
+) -> tuple | None:
+    """Flatten normalized block-sparse tensors into the kernel call-arg tuple.
+
+    Shared by both the forward and backward call sites. Returns ``None`` when
+    there are no block-sparse tensors.
+    """
+    if normalized_tensors is None:
+        return None
+    return (
+        normalized_tensors.mask_block_cnt,
+        normalized_tensors.mask_block_idx,
+        normalized_tensors.full_block_cnt,
+        normalized_tensors.full_block_idx,
+        normalized_tensors.cu_total_m_blocks,
+        normalized_tensors.cu_block_idx_offsets,
+        normalized_tensors.dq_write_order,
+        normalized_tensors.dq_write_order_full,
+    )
+
+
 # =============================================================================
 # Device-side (CUTE DSL) block-sparse runtime helpers
 # =============================================================================

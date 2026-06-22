@@ -18,9 +18,9 @@ and fake-tensor builders for bwd kernels."""
 import hashlib
 import inspect
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
-from typing import Callable, ClassVar, Tuple
+from typing import TYPE_CHECKING, Callable, ClassVar, Tuple
 
 import cutlass.cute as cute
 import torch
@@ -31,6 +31,9 @@ from cutlass.cute.runtime import from_dlpack
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
 from magi_attention.utils.arch import get_dev_cap_num
+
+if TYPE_CHECKING:
+    from .sparse_utils import BlockSparseTensorsTorch
 
 # ---------------------------------------------------------------------------
 # Mask Type Map helpers
@@ -86,6 +89,53 @@ def normalize_mask_types(mask_types: torch.Tensor | int | None) -> int:
     raise NotImplementedError(
         "Per-range mask_types (torch.Tensor) is not supported yet."
     )
+
+
+# ---------------------------------------------------------------------------
+# Torch FlexAttention-style / block-sparse args bundle
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TorchFlexAttnArgs:
+    """Bundle of the optional torch FlexAttention-style / block-sparse args.
+
+    These mirror torch's ``flex_attention`` programmable interface
+    (``score_mod`` / ``mask_mod``) plus block sparsity, and are threaded as a
+    single object through the FFA fwd/bwd entry points so the common dense /
+    varlen signature stays clean.
+
+    fwd reads: ``score_mod``, ``mask_mod``, ``aux_tensors``,
+    ``block_sparse_tensors``.
+    bwd reads: ``score_mod``, ``score_mod_bwd``, ``mask_mod``, ``aux_tensors``,
+    ``block_sparse_tensors_bwd``.
+    """
+
+    score_mod: Callable | None = None
+    score_mod_bwd: Callable | None = None
+    mask_mod: Callable | None = None
+    aux_tensors: list[torch.Tensor] | None = None
+    block_sparse_tensors: "BlockSparseTensorsTorch | None" = None
+    block_sparse_tensors_bwd: "BlockSparseTensorsTorch | None" = None
+
+    def drop_aux_tensors(self) -> "TorchFlexAttnArgs":
+        """Return a copy with ``aux_tensors`` cleared.
+
+        Used in autograd ``forward`` before stashing this bundle on ``ctx``:
+        the real aux tensors are tracked via ``save_for_backward`` instead, so
+        keeping a direct reference here would bypass autograd's bookkeeping.
+        """
+        return replace(self, aux_tensors=None)
+
+    def with_aux_tensors(
+        self, aux_tensors: "list[torch.Tensor] | tuple[torch.Tensor, ...] | None"
+    ) -> "TorchFlexAttnArgs":
+        """Return a copy with ``aux_tensors`` restored from the given tensors.
+
+        Used in autograd ``backward`` to refill the aux tensors recovered from
+        ``ctx.saved_tensors`` (which were dropped in ``forward``).
+        """
+        return replace(self, aux_tensors=list(aux_tensors) if aux_tensors else None)
 
 
 # ---------------------------------------------------------------------------
