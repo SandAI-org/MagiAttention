@@ -24,6 +24,7 @@ import torch
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.common import AttnForwardMeta
+from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.utils.dtype import to_cute_dtype
 
 from .cache_utils import get_jit_cache
@@ -82,7 +83,8 @@ def _flex_flash_attn_fwd(
     softmax_scale: float | None = None,
     mask_type: int = MT_MAP.full,
     softcap: float | None = None,
-    learnable_sink: torch.Tensor | None = None,
+    sink: torch.Tensor | None = None,
+    sink_layout: AttnSinkLayout = "sh",
     pack_gqa: bool | None = None,
     score_mod: Callable | None = None,
     mask_mod: Callable | None = None,
@@ -110,6 +112,10 @@ def _flex_flash_attn_fwd(
     """
     arch, major_arch = get_device_arch()
     validate_arch(arch, major_arch)
+
+    assert (
+        sink_layout == "sh"
+    ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
 
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
     num_head, head_dim = q.shape[-2:]
@@ -146,9 +152,9 @@ def _flex_flash_attn_fwd(
         if t is not None:
             assert t.dtype == torch.int32, "cu_seqlens_q, cu_seqlens_k must be int32"
             assert t.stride(0) == 1, "cu_seqlens_q, cu_seqlens_k must be contiguous"
-    if learnable_sink is not None:
-        assert learnable_sink.shape == (num_head,)
-        assert learnable_sink.dtype == torch.bfloat16, "learnable_sink must be bfloat16"
+    if sink is not None:
+        assert sink.shape == (num_head,)
+        assert sink.dtype == torch.bfloat16, "sink must be bfloat16"
 
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
@@ -342,7 +348,7 @@ def _flex_flash_attn_fwd(
         lse is None,
         cu_seqlens_q is None,
         cu_seqlens_k is None,
-        learnable_sink is not None,
+        sink is not None,
         block_sparse_tensors is None or block_sparse_tensors.cu_total_m_blocks is None,
         block_sparse_tensors is None
         or block_sparse_tensors.cu_block_idx_offsets is None,
@@ -363,10 +369,10 @@ def _flex_flash_attn_fwd(
         (
             cu_seqlens_q_tensor,
             cu_seqlens_k_tensor,
-            learnable_sink_tensor,
+            sink_tensor,
         ) = [
             to_cute_tensor(t, assumed_align=4, leading_dim=0) if t is not None else None
-            for t in (cu_seqlens_q, cu_seqlens_k, learnable_sink)
+            for t in (cu_seqlens_q, cu_seqlens_k, sink)
         ]
         seqused_q_tensor = seqused_k_tensor = None
         page_table_tensor = None
@@ -495,7 +501,7 @@ def _flex_flash_attn_fwd(
             page_table_tensor,
             None,  # window_size_left
             None,  # window_size_right
-            learnable_sink_tensor,
+            sink_tensor,
         ]
         if major_arch in [10, 11]:
             # FP8 descale tensors removed; SM100 kernel descale slot is always None.
@@ -527,7 +533,7 @@ def _flex_flash_attn_fwd(
         None,
         None,  # window_size_left
         None,  # window_size_right
-        learnable_sink,
+        sink,
     ]
     if major_arch in [10, 11]:
         # FP8 descale tensors removed; SM100 kernel descale slot is always None.
@@ -571,6 +577,8 @@ def _flex_flash_attn_bwd(
     softmax_scale: float | None = None,
     mask_type: int = MT_MAP.full,
     softcap: float = 0.0,
+    sink: torch.Tensor | None = None,
+    sink_layout: AttnSinkLayout = "sh",
     pack_gqa: bool = False,
     cu_seqlens_q: torch.Tensor | None = None,
     cu_seqlens_k: torch.Tensor | None = None,
@@ -590,6 +598,10 @@ def _flex_flash_attn_bwd(
     """
     arch, major_arch = get_device_arch()
     validate_arch(arch, major_arch)
+
+    assert (
+        sink_layout == "sh"
+    ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
 
     local = False
     # NOTE: only a single mask type shared by all q/k ranges is supported for now,
@@ -1361,7 +1373,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         max_seqlen_k: int | None = None,
         softmax_scale: float | None = None,
         mask_types: torch.Tensor | int | None = None,
-        learnable_sink: torch.Tensor | None = None,
+        sink: torch.Tensor | None = None,
+        sink_layout: AttnSinkLayout = "sh",
         softcap: float = 0.0,
         pack_gqa: bool | None = None,
         deterministic: bool = False,
@@ -1383,7 +1396,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_k=max_seqlen_k,
             softmax_scale=softmax_scale,
             mask_type=mask_type,
-            learnable_sink=learnable_sink,
+            sink=sink,
+            sink_layout=sink_layout,
             softcap=softcap,
             pack_gqa=pack_gqa,
             score_mod=score_mod,
@@ -1400,10 +1414,12 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse,
             cu_seqlens_q,
             cu_seqlens_k,
+            sink,
             *(aux_tensors or ()),
         )
         ctx.softmax_scale = softmax_scale
         ctx.mask_type = mask_type
+        ctx.sink_layout = sink_layout
         ctx.softcap = softcap
         ctx.deterministic = deterministic
         ctx.max_seqlen_q = max_seqlen_q
@@ -1426,6 +1442,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse,
             cu_seqlens_q,
             cu_seqlens_k,
+            sink,
             *aux,
         ) = ctx.saved_tensors
         aux_tensors = aux if aux else None
@@ -1441,6 +1458,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dout=dout,
             softmax_scale=ctx.softmax_scale,
             mask_type=ctx.mask_type,
+            sink=sink,
+            sink_layout=ctx.sink_layout,
             softcap=ctx.softcap,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
@@ -1467,7 +1486,8 @@ def flex_flash_attn_func(
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
     mask_types: torch.Tensor | int | None = None,
-    learnable_sink: torch.Tensor | None = None,
+    sink: torch.Tensor | None = None,
+    sink_layout: AttnSinkLayout = "sh",
     softcap: float = 0.0,
     pack_gqa: bool | None = None,
     deterministic: bool = False,
@@ -1505,7 +1525,8 @@ def flex_flash_attn_func(
         max_seqlen_k,
         softmax_scale,
         mask_types,
-        learnable_sink,
+        sink,
+        sink_layout,
         softcap,
         pack_gqa,
         deterministic,
@@ -1516,4 +1537,5 @@ def flex_flash_attn_func(
         block_sparse_tensors,
         block_sparse_tensors_bwd,
     )
+
     return out, AttnForwardMeta(lse=lse, max_logits=None)
