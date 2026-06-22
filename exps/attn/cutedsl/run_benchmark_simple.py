@@ -26,22 +26,16 @@ Compared baselines: ffa (current) vs fa3 (reference).
 If the machine is Blackwell (SM100) fa4 / ffa_fa4 are added automatically.
 
 Run:
-    cd exps/attn
-    python run_benchmark_simple.py
+    cd exps/attn/cutedsl
+    PYTHONPATH=../../.. python run_benchmark_simple.py
 
     # force the forked SM80 ffa kernel path (compared against fa2) even on sm90/sm100:
-    BENCH_FORCE_SM80=1 python run_benchmark_simple.py
+    BENCH_FORCE_SM80=1 PYTHONPATH=../../.. python run_benchmark_simple.py
 """
 
 import os
 
 import torch
-from baselines.utils import (
-    calculate_attn_flops,
-    generate_seqlens,
-    seqlens2cu_seqlens,
-    seqlens2curanges,
-)
 
 from magi_attention.benchmarking import (
     BENCH_CASE_NOT_SUPPORTED,
@@ -60,6 +54,14 @@ from magi_attention.utils.arch import (
     is_ampere,
     is_blackwell,
     is_hopper,
+)
+
+# isort: split
+from exps.attn.baselines.utils import (
+    calculate_attn_flops,
+    generate_seqlens,
+    seqlens2cu_seqlens,
+    seqlens2curanges,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,15 +83,15 @@ arch = "sm80" if FORCE_SM80 else get_dev_cap_str()
 
 # fa3 only runs on SM90; fa4/ffa_fa4 only on SM100+; fa2 is the SM80 baseline
 if IS_SM80:
-    from baselines.attn_impl import fa2_func, fa2_varlen_func  # noqa: F401
+    from exps.attn.baselines.attn_impl import fa2_func, fa2_varlen_func  # noqa: F401
 
     impls = ["ffa", "fa2"]
 elif IS_SM90:
-    from baselines.attn_impl import fa3_func, fa3_varlen_func  # noqa: F401
+    from exps.attn.baselines.attn_impl import fa3_func, fa3_varlen_func  # noqa: F401
 
     impls = ["ffa", "fa3"]
 elif IS_SM100:
-    from baselines.attn_impl import (  # noqa: F401
+    from exps.attn.baselines.attn_impl import (  # noqa: F401
         fa4_func,
         fa4_varlen_func,
         ffa_fa4_func,
