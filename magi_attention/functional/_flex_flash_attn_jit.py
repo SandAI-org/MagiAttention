@@ -484,6 +484,12 @@ def get_ffa_jit_spec(
                 _uri_val = _val.replace("-", "n")
                 uri += f"_{_uri_key}{_uri_val}"
 
+        # Default LseDpsumUnion=1 for LoopQ (saves ~5 producer spills, zero perf cost).
+        # Env MAGI_BWD_LSE_UNION overrides (handled above); only set default if not overridden.
+        if "bwd_lse_union" not in extra_template_args and not swap_bwd_qk_loop:
+            extra_template_args["bwd_lse_union"] = "1"
+            uri += "_lu1"
+
         # Force Mma_dKV to SS mode (SMEM-SMEM) for benchmarking register pressure
         _force_ss = os.environ.get("MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS")
         if _force_ss is not None and _force_ss == "1":
