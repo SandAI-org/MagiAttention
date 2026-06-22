@@ -519,29 +519,25 @@ def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k):
 
 _MIXER_ATTRS = ("__vec_size__",)
 
-_ffa_clc_enabled: bool = os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_CLC", "0") == "1"
-_ffa_disable_2cta_enabled: bool = (
-    os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA", "0") == "1"
-)
-
 
 def _is_cuda_12() -> bool:
     """Check if the CUDA toolkit version is 12.x."""
     return is_cuda_version_ge("12") and is_cuda_version_lt("13")
 
 
-# 2CTA forward non-causal has a codegen regression on CUDA 12.x that causes
-# ~18% slowdown compared to 1CTA. This is fixed in CUDA 13.x.
-_ffa_disable_2cta_cuda12: bool = _is_cuda_12()
+def is_ffa_clc_enabled() -> bool:
+    return os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_CLC", "0") == "1"
 
 
-def _get_use_clc_scheduler_default() -> bool:
-    return _ffa_clc_enabled
+def is_ffa_2cta_disabled(is_fwd: bool = False) -> bool:
+    _ffa_disable_2cta_enabled: bool = (
+        os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA", "0") == "1"
+    )
 
-
-def _get_disable_2cta_default(is_fwd: bool = False) -> bool:
     if is_fwd:
-        return _ffa_disable_2cta_enabled or _ffa_disable_2cta_cuda12
+        # NOTE: 2CTA forward non-causal has a codegen regression on CUDA 12.x
+        # that causes ~18% slowdown compared to 1CTA. This is fixed in CUDA 13.x.
+        return _ffa_disable_2cta_enabled or _is_cuda_12()
     else:
         return _ffa_disable_2cta_enabled
 

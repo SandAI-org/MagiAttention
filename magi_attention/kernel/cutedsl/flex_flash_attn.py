@@ -46,13 +46,13 @@ from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
     TorchFlexAttnArgs,
-    _get_disable_2cta_default,
-    _get_use_clc_scheduler_default,
     convert_from_dlpack_leading_static,
     create_softcap_scoremod,
     create_softcap_scoremod_bwd,
     get_device_arch,
     hash_callable,
+    is_ffa_2cta_disabled,
+    is_ffa_clc_enabled,
     maybe_contiguous,
     normalize_mask_types,
     ranges_to_cu_seqlens,
@@ -239,8 +239,8 @@ def _flex_flash_attn_fwd(
         causal = False
         mask_type = MT_MAP.full
 
-    requested_use_clc_scheduler = _get_use_clc_scheduler_default()
-    requested_disable_2cta = _get_disable_2cta_default(is_fwd=True)
+    requested_use_clc_scheduler = is_ffa_clc_enabled()
+    requested_disable_2cta = is_ffa_2cta_disabled(is_fwd=True)
 
     current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
 
@@ -714,7 +714,7 @@ def _flex_flash_attn_bwd(
         dKV_swapAB = False
         AtomLayoutMdQ = 1
         AtomLayoutNdKV = 1
-        requested_disable_2cta = _get_disable_2cta_default()
+        requested_disable_2cta = is_ffa_2cta_disabled()
         disable_2cta = (
             requested_disable_2cta
             or score_mod is not None
