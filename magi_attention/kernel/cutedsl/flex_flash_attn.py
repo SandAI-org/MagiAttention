@@ -55,6 +55,7 @@ from .ffa_utils import (
     hash_callable,
     maybe_contiguous,
     normalize_mask_types,
+    ranges_to_cu_seqlens,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
@@ -76,8 +77,8 @@ def _flex_flash_attn_fwd(
     v: torch.Tensor,
     out: torch.Tensor | None = None,
     lse: torch.Tensor | None = None,
-    cu_seqlens_q: torch.Tensor | None = None,
-    cu_seqlens_k: torch.Tensor | None = None,
+    q_ranges: torch.Tensor | None = None,
+    k_ranges: torch.Tensor | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
@@ -92,6 +93,10 @@ def _flex_flash_attn_fwd(
 
     Args:
         ...
+        q_ranges/k_ranges: ``[N, 2]`` int32 cuda tensors of [start, end) q/k
+            ranges. For now only ranges equivalent to a cu_seqlens partition are
+            supported (see :func:`ranges_to_cu_seqlens`); they are collapsed to
+            cu_seqlens before reaching the kernel.
         flex_attn_args: optional torch FlexAttention-style / block-sparse args
             (``score_mod`` / ``mask_mod`` / ``aux_tensors`` /
             ``block_sparse_tensors``). See :class:`TorchFlexAttnArgs`.
@@ -101,9 +106,9 @@ def _flex_flash_attn_fwd(
     Returns:
         A tuple of (output, lse) where:
         - output is the result of the attention operation, with shape (batch_size, seqlen_q, num_head, head_dim_v) or
-          (total_q, num_head, head_dim_v) if cu_seqlens_q is provided.
+          (total_q, num_head, head_dim_v) if q_ranges is provided.
         - lse is the log-sum-exp of the attention scores, with shape (batch_size, num_head, seqlen_q) or
-          (num_head, total_q) if cu_seqlens_q is provided.
+          (num_head, total_q) if q_ranges is provided.
     """
     arch, major_arch = get_device_arch()
     validate_arch(arch, major_arch)
@@ -111,6 +116,12 @@ def _flex_flash_attn_fwd(
     assert (
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
+
+    # Step-1 hack: only q/k ranges equivalent to a cu_seqlens partition are
+    # supported, so collapse them to cu_seqlens here and keep the kernel-facing
+    # internals on cu_seqlens for now.
+    cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
+    cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
 
     # Unpack the torch FlexAttention-style / block-sparse args (fwd uses these).
     flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
@@ -562,8 +573,8 @@ def _flex_flash_attn_bwd(
     sink: torch.Tensor | None = None,
     sink_layout: AttnSinkLayout = "sh",
     pack_gqa: bool = False,
-    cu_seqlens_q: torch.Tensor | None = None,
-    cu_seqlens_k: torch.Tensor | None = None,
+    q_ranges: torch.Tensor | None = None,
+    k_ranges: torch.Tensor | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     deterministic: bool = False,
@@ -580,6 +591,12 @@ def _flex_flash_attn_bwd(
     assert (
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
+
+    # Step-1 hack: only q/k ranges equivalent to a cu_seqlens partition are
+    # supported, so collapse them to cu_seqlens here and keep the kernel-facing
+    # internals on cu_seqlens for now.
+    cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
+    cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
 
     # Unpack the torch FlexAttention-style / block-sparse args (bwd uses these;
     # note block sparsity reads the bwd-specific tensors).
@@ -1333,8 +1350,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        cu_seqlens_q: torch.Tensor | None = None,
-        cu_seqlens_k: torch.Tensor | None = None,
+        q_ranges: torch.Tensor | None = None,
+        k_ranges: torch.Tensor | None = None,
         max_seqlen_q: int | None = None,
         max_seqlen_k: int | None = None,
         softmax_scale: float | None = None,
@@ -1351,8 +1368,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=softmax_scale,
@@ -1371,8 +1388,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             v,
             out,
             lse,
-            cu_seqlens_q,
-            cu_seqlens_k,
+            q_ranges,
+            k_ranges,
             sink,
             *(aux_tensors or ()),
         )
@@ -1401,8 +1418,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             v,
             out,
             lse,
-            cu_seqlens_q,
-            cu_seqlens_k,
+            q_ranges,
+            k_ranges,
             sink,
             *aux,
         ) = ctx.saved_tensors
@@ -1426,8 +1443,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sink=sink,
             sink_layout=ctx.sink_layout,
             softcap=ctx.softcap,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
             max_seqlen_q=ctx.max_seqlen_q,
             max_seqlen_k=ctx.max_seqlen_k,
             deterministic=ctx.deterministic,
@@ -1441,8 +1458,8 @@ def flex_flash_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens_q: torch.Tensor | None = None,
-    cu_seqlens_k: torch.Tensor | None = None,
+    q_ranges: torch.Tensor | None = None,
+    k_ranges: torch.Tensor | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
@@ -1459,10 +1476,13 @@ def flex_flash_attn_func(
 
     Explanation of some optional arguments:
 
-    cu_seqlens_q/cu_seqlens_k: cumulative sequence lengths for variable-length
-        (varlen) batches. When provided, q/k/v are expected in the packed
-        (total_seqlen, nheads, headdim) layout. varlen is a special case of the
-        more general flex q/k ranges that ffa targets.
+    q_ranges/k_ranges: ``[N, 2]`` int32 cuda tensors describing the per-range
+        [start, end) intervals over the packed (total_seqlen, nheads, headdim)
+        q/k layout. When provided, q/k/v are expected in that packed layout.
+        For now only ranges equivalent to a cu_seqlens partition (contiguous,
+        non-overlapping, starting at 0) are supported, i.e. plain varlen; the
+        caller must guarantee this. Leave as ``None`` for the dense
+        (batch, seqlen, nheads, headdim) path.
 
     max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
 
@@ -1486,8 +1506,8 @@ def flex_flash_attn_func(
         q,
         k,
         v,
-        cu_seqlens_q,
-        cu_seqlens_k,
+        q_ranges,
+        k_ranges,
         max_seqlen_q,
         max_seqlen_k,
         softmax_scale,

@@ -198,7 +198,7 @@ def test_non_varlen_fwd_bwd(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Varlen (packed, cu_seqlens): fwd + bwd
+# Varlen (packed, q/k ranges): fwd + bwd
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -209,7 +209,7 @@ def test_non_varlen_fwd_bwd(
 @pytest.mark.parametrize("force_sm80", [False, True])
 @pytest.mark.parametrize("seqlen", [128, 512, 1024])
 def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
-    """Varlen flex_flash_attn_func (packed cu_seqlens): fwd + bwd."""
+    """Varlen flex_flash_attn_func (packed q/k ranges): fwd + bwd."""
     # FIXME(sm80): the forced SM80 path has a numerical bug (fwd output is wrong
     # in the high 8 of every 16 head_dim_v lanes, ~40% mismatch). Skip until the
     # SM80 PV/epilogue layout is fixed, then remove this early return.
@@ -248,6 +248,9 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
     cu_seqlens = torch.arange(
         0, (batch_size + 1) * seqlen, seqlen, device=device, dtype=torch.int32
     )
+    # q/k ranges equivalent to the cu_seqlens partition: [[0, s], [s, 2s], ...]
+    q_ranges = torch.stack([cu_seqlens[:-1], cu_seqlens[1:]], dim=1)
+    k_ranges = q_ranges.clone()
     q_v = rearrange(q_ref.detach(), "b s h d -> (b s) h d").requires_grad_()
     k_v = rearrange(k_ref.detach(), "b s h d -> (b s) h d").requires_grad_()
     v_v = rearrange(v_ref.detach(), "b s h d -> (b s) h d").requires_grad_()
@@ -257,8 +260,8 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
             q_v,
             k_v,
             v_v,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
             max_seqlen_q=seqlen,
             max_seqlen_k=seqlen,
             mask_types=mask_types,

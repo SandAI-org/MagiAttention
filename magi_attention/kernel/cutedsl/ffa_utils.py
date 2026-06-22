@@ -91,6 +91,36 @@ def normalize_mask_types(mask_types: torch.Tensor | int | None) -> int:
     )
 
 
+def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
+    """Collapse q/k ranges down to a cu_seqlens tensor (step-1 hack).
+
+    The full q/k ranges semantics allow arbitrary (possibly overlapping /
+    non-contiguous) per-range [start, end) intervals, but the current kernels
+    only understand the varlen cu_seqlens layout. So as a first step we only
+    accept ranges that are *equivalent* to a cu_seqlens partition, i.e.
+    contiguous, non-overlapping intervals starting at 0:
+    ``[[0, e0], [e0, e1], ...]`` -> ``[0, e0, e1, ...]``.
+
+    The caller is responsible for guaranteeing this equivalence (no validating
+    device sync is done here); a non-conforming input silently produces a
+    wrong cu_seqlens.
+
+    Args:
+        ranges: an ``[N, 2]`` int32 cuda tensor of [start, end) intervals, or
+            ``None`` for the dense (non-varlen) path.
+
+    Returns:
+        An ``[N + 1]`` int32 cu_seqlens tensor, or ``None`` if ``ranges`` is None.
+    """
+    if ranges is None:
+        return None
+    assert (
+        ranges.dim() == 2 and ranges.shape[1] == 2
+    ), f"ranges must be an [N, 2] tensor, got shape {tuple(ranges.shape)}"
+    cu_seqlens = torch.cat([ranges[:1, 0], ranges[:, 1]]).to(torch.int32)
+    return cu_seqlens.contiguous()
+
+
 # ---------------------------------------------------------------------------
 # Torch FlexAttention-style / block-sparse args bundle
 # ---------------------------------------------------------------------------
