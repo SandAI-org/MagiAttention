@@ -33,11 +33,12 @@ import pytest
 import torch
 from einops import rearrange
 
+from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
-from magi_attention.kernel.cutedsl.legacy.testing import attention_ref
-from magi_attention.testing import assert_close
+from magi_attention.testing import assert_close, ref_attn_func
 from magi_attention.testing.utils import switch_envvars
+from magi_attention.utils import make_attn_mask_from_ffa_args
 
 IS_SM90 = torch.cuda.get_device_capability()[0] == 9
 IS_SM100 = torch.cuda.get_device_capability()[0] == 10
@@ -61,6 +62,55 @@ def _bwd_atol(grad_ref, grad_pt):
         2 * (grad_ref + 0.3 - 0.3 - grad_ref).abs().max().item()
         + 2 * (grad_pt - grad_ref).abs().max().item()
     )
+
+
+def _ref_attn_batched(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    mask_types: int,
+    high_precision: bool,
+) -> torch.Tensor:
+    """Block-diagonal reference attention over a batched ``(b, s, h, d)`` tensor.
+
+    Each batch element attends only within itself (matching the per-batch
+    semantics of the kernel), with ``mask_types`` selecting full (0) / causal
+    (1) within each block. Computed via ``ref_attn_func`` on the flattened
+    ``(total, h, d)`` layout, then reshaped back to ``(b, s, h, d)``.
+
+    The autograd graph is preserved end-to-end, so gradients flow back to the
+    input batched tensors.
+    """
+    b, sq = q.shape[0], q.shape[1]
+    sk = k.shape[1]
+
+    q_thd = rearrange(q, "b s h d -> (b s) h d")
+    k_thd = rearrange(k, "b s h d -> (b s) h d")
+    v_thd = rearrange(v, "b s h d -> (b s) h d")
+
+    q_ranges = AttnRanges.from_ranges([[i * sq, (i + 1) * sq] for i in range(b)])
+    k_ranges = AttnRanges.from_ranges([[i * sk, (i + 1) * sk] for i in range(b)])
+    mask = make_attn_mask_from_ffa_args(
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_type_map=[mask_types] * b,
+        total_seqlen_q=b * sq,
+        total_seqlen_k=b * sk,
+        device=q.device,
+    )
+
+    out_thd, _ = ref_attn_func(
+        q=q_thd,
+        k=k_thd,
+        v=v_thd,
+        mask=mask,
+        layout="thd",
+        backend="sdpa",
+        high_precision=high_precision,
+    )
+
+    return rearrange(out_thd, "(b s) h d -> b s h d", b=b)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,9 +194,11 @@ def test_non_varlen_fwd_bwd(
     k = k_ref.detach().requires_grad_()
     v = v_ref.detach().requires_grad_()
 
-    out_ref, _ = attention_ref(q_ref, k_ref, v_ref, None, None, causal=causal)
-    out_pt, _ = attention_ref(
-        q_ref, k_ref, v_ref, None, None, causal=causal, upcast=False, reorder_ops=True
+    out_ref = _ref_attn_batched(
+        q_ref, k_ref, v_ref, mask_types=mask_types, high_precision=True
+    )
+    out_pt = _ref_attn_batched(
+        q_ref, k_ref, v_ref, mask_types=mask_types, high_precision=False
     )
 
     with _maybe_force_sm80(force_sm80):
@@ -220,7 +272,6 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
     if IS_SM90:
         pytest.skip("SM90 varlen bwd not supported")
 
-    causal = mask_types == MT_MAP.causal
     device = "cuda"
     seed = seqlen + d + mask_types * 5
     torch.random.manual_seed(seed)
@@ -240,9 +291,11 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
         batch_size, seqlen, nheads_kv, d, device=device, dtype=dtype
     ).requires_grad_()
 
-    out_ref, _ = attention_ref(q_ref, k_ref, v_ref, None, None, causal=causal)
-    out_pt, _ = attention_ref(
-        q_ref, k_ref, v_ref, None, None, causal=causal, upcast=False, reorder_ops=True
+    out_ref = _ref_attn_batched(
+        q_ref, k_ref, v_ref, mask_types=mask_types, high_precision=True
+    )
+    out_pt = _ref_attn_batched(
+        q_ref, k_ref, v_ref, mask_types=mask_types, high_precision=False
     )
 
     cu_seqlens = torch.arange(
