@@ -164,9 +164,13 @@ struct CollectiveMainloopBwdSm90 {
   //          token's packed rows (inv_indices Q tokens are scattered but each has qhpkh
   //          contiguous packed rows; when qhpkh >= kBlockM the entire tile is contiguous).
   //          Fallback: qhpkh < kBlockM → kTma1D (future) or kCpAsync.
-  //   LoopK: SparseLoad (not IndexAttn) → K tiles within a range are contiguous
-  static constexpr bool ScatterInnerLoadStoreTMA =
-      InnerUseScatter && ((!SwapBwdQKLoop && PackGQA && (!IndexAttn || QheadPerKhead >= kBlockM)) || (SwapBwdQKLoop && SparseLoad && !IndexAttn));
+  //   LoopK: SparseLoad → K tiles within a range are contiguous.
+  //          IndexAttn + PackGQA + QheadPerKhead >= kBlockM → inner Q/dO tiles are
+  //          contiguous (each token has qhpkh packed rows; kbs>=kBlockN guarantees
+  //          contiguous K blocks). Same condition as LoopQ IndexAttn.
+  static constexpr bool ScatterInnerLoadStoreTMA = InnerUseScatter &&
+      ((!SwapBwdQKLoop && PackGQA && (!IndexAttn || QheadPerKhead >= kBlockM)) ||
+       (SwapBwdQKLoop && (SparseLoad || (IndexAttn && PackGQA && QheadPerKhead >= kBlockM))));
 
   // How the inner-loop loads (Q/dO for LoopQ, K/V for LoopK) are performed:
   //   kTma     — 2D TMA tile load (1 instr/tile). Dense uses sequential m_block;
@@ -2366,8 +2370,10 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (ScatterInnerLoadStoreTMA) {
-        // 2D TMA reduce: entire dV tile (absolute coordinates + pool offset)
-        if (lane_predicate) {
+        // 2D TMA reduce: entire dV tile (absolute coordinates + pool offset).
+        // When InnerUseScatter, multiple DxStorer warps enter this path; gate on
+        // the first DxStorer warp to issue exactly one TMA reduce-add per tile.
+        if (lane_predicate && warp_idx_in_warpgroup == ProducerWarpRoles::kNumLoaderWarps) {
           int const packed_first_row = idx_staging[0];
           int const n_block_abs = (pool_offset + packed_first_row) / kBlockN;
           Tensor gdVaccum_abs = local_tile(mdVaccum, TileShape_dKVaccum{}, make_coord(_, _0{}));
@@ -2406,8 +2412,9 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (ScatterInnerLoadStoreTMA) {
-        // 2D TMA reduce: entire dK tile (absolute coordinates + pool offset)
-        if (lane_predicate) {
+        // 2D TMA reduce: entire dK tile (absolute coordinates + pool offset).
+        // Same single-warp gate as store_dV above.
+        if (lane_predicate && warp_idx_in_warpgroup == ProducerWarpRoles::kNumLoaderWarps) {
           int const packed_first_row = idx_staging[kBlockN];
           int const n_block_abs = (pool_offset + packed_first_row) / kBlockN;
           Tensor gdKaccum_abs = local_tile(mdKaccum, TileShape_dKVaccum{}, make_coord(_, _0{}));
