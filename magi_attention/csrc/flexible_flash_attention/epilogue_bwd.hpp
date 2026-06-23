@@ -54,7 +54,7 @@ template <
     bool PackGQA_,
     bool CatGQA_,
     int QheadPerKhead_,
-    bool IndexAttn_ = false,
+    bool IndexSparse_ = false,
     int KBlockSize_ = 1>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
@@ -82,10 +82,10 @@ struct CollectiveEpilogueBwd {
   static constexpr bool CatGQA = CatGQA_;
   static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
   static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
-  static constexpr bool IndexAttn = IndexAttn_;
+  static constexpr bool IndexSparse = IndexSparse_;
   static constexpr int KBlockSize = KBlockSize_;
-  // IndexAttn LoopQ: outer block = 1 K token in a kBlockN tile; only row 0 is valid.
-  static constexpr bool IndexAttnInvLoopQ = IndexAttn && !SwapBwdQKLoop;
+  // IndexSparse LoopQ: outer block = 1 K token in a kBlockN tile; only row 0 is valid.
+  static constexpr bool IndexSparseInvLoopQ = IndexSparse && !SwapBwdQKLoop;
 
   static constexpr int NumEpilogueThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
   static constexpr int AtomLayoutMdKV = NumMmaWarpGroups * (Use_TMA ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV;
@@ -399,16 +399,16 @@ struct CollectiveEpilogueBwd {
     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
     int offset_k;
-    if constexpr (IndexAttnInvLoopQ) {
+    if constexpr (IndexSparseInvLoopQ) {
       offset_k = bidb * KBlockSize;
     } else {
       offset_k = get_batch_range(params.k_ranges, bidb).x;
     }
 
-    // IndexAttn LoopQ with KBlockSize < kBlockN: only partial rows valid in the tile,
+    // IndexSparse LoopQ with KBlockSize < kBlockN: only partial rows valid in the tile,
     // TMA full-tile store would corrupt neighbors. Use per-element path with residual guard.
     // When KBlockSize >= kBlockN the full tile is valid and can use TMA store.
-    if constexpr (!DisableBwdDkvAtomicReduction && !IndexAttnInvLoopQ) {
+    if constexpr (!DisableBwdDkvAtomicReduction && !IndexSparseInvLoopQ) {
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
       cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
 
@@ -494,7 +494,7 @@ struct CollectiveEpilogueBwd {
       Tensor tdVgdV = gmem_thr_copy_dKV.partition_D(gdV);
       Tensor tdVsdV = gmem_thr_copy_dKV.partition_S(sdV);
       int residual_n;
-      if constexpr (IndexAttnInvLoopQ) {
+      if constexpr (IndexSparseInvLoopQ) {
         residual_n = KBlockSize - n_block * kBlockN;
       } else {
         residual_n = get_batch_range(params.k_ranges, bidb).y - offset_k - n_block * kBlockN;

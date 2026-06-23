@@ -70,8 +70,8 @@ class FlashAttnFwdSm90 {
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
   static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
   static constexpr bool SwapAB = CollectiveMainloop::SwapAB;
-  static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
-  static constexpr bool IndexAttn = CollectiveMainloop::IndexAttn;
+  static constexpr bool BlockSparse = CollectiveMainloop::BlockSparse;
+  static constexpr bool IndexSparse = CollectiveMainloop::IndexSparse;
   static constexpr bool ReturnMaxLogits = CollectiveEpilogue::ReturnMaxLogits;
   static constexpr int NumMaxLogits = CollectiveEpilogue::NumMaxLogits;
 
@@ -270,11 +270,11 @@ class FlashAttnFwdSm90 {
 
     if (warp_group_idx == 0) { // Producer
       using BlockMetaT = std::conditional_t<
-          SparseLoad,
-          typename CollectiveMainloop::SparseLoadBlockMeta,
+          BlockSparse,
+          typename CollectiveMainloop::BlockSparseBlockMeta,
           std::conditional_t<
-              IndexAttn,
-              typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/true>,
+              IndexSparse,
+              typename CollectiveMainloop::template IndexSparseBlockMeta</*IsProducer=*/true>,
               typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>>>;
 
       // Deallocate the registers for the producer WG,
@@ -294,8 +294,8 @@ class FlashAttnFwdSm90 {
 
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // TMA paths (Dense/SparseLoad/IndexAttn kbs>=kBlockN): SingleProducerWarp=true → warps 1-3 exit.
-      // Scatter path (IndexAttn kbs<kBlockN): full warp group needed for cp.async loads.
+      // TMA paths (Dense/BlockSparse/IndexSparse kbs>=kBlockN): SingleProducerWarp=true → warps 1-3 exit.
+      // Scatter path (IndexSparse kbs<kBlockN): full warp group needed for cp.async loads.
       if constexpr (SingleProducerWarp) {
         if (warp_idx_in_warpgroup != 0) {
           return;
@@ -307,9 +307,9 @@ class FlashAttnFwdSm90 {
         scheduler.init_consumer();
       }
 
-      // SparseLoad: only warp 0 does scheduling (atomicAdd); Dense/IndexAttn: SingleProducerWarp or warp 0
+      // BlockSparse: only warp 0 does scheduling (atomicAdd); Dense/IndexSparse: SingleProducerWarp or warp 0
       auto is_scheduler_warp = [&]() {
-        if constexpr (SparseLoad) {
+        if constexpr (BlockSparse) {
           return warp_idx_in_warpgroup == 0;
         } else {
           return SingleProducerWarp || warp_idx_in_warpgroup == 0;
@@ -341,11 +341,11 @@ class FlashAttnFwdSm90 {
       mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
     } else { // Consumer
       using BlockMetaT = std::conditional_t<
-          SparseLoad,
+          BlockSparse,
           typename CollectiveMainloop::SparseMmaBlockMeta,
           std::conditional_t<
-              IndexAttn,
-              typename CollectiveMainloop::template IndexAttnBlockMeta</*IsProducer=*/false>,
+              IndexSparse,
+              typename CollectiveMainloop::template IndexSparseBlockMeta</*IsProducer=*/false>,
               typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>>>;
 
       // Allocate the registers for the consumer WGs

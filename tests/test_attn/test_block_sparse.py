@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+import unittest
 from typing import Any, Optional, Tuple
 
 import pytest
@@ -193,7 +195,7 @@ class TestBlockSparseAttn(DistTestBase):
             fwd_unique_count=fwd_unique_count,
             swap_ab=False,
             pack_gqa=False,
-            sparse_load=False,
+            block_sparse=False,
         )
         lse = meta.lse
         o_ref, lse_ref = correct_attn_out_lse(
@@ -228,7 +230,7 @@ class TestBlockSparseAttn(DistTestBase):
             fwd_unique_count=fwd_unique_count,
             swap_ab=False,
             pack_gqa=False,
-            sparse_load=False,
+            block_sparse=False,
         )
         lse_auto_acc = meta_auto_acc.lse
 
@@ -363,7 +365,7 @@ class TestBlockSparseAttn(DistTestBase):
         test_accumulation_inplace,
         swap_ab,
         ref_block_size,
-        sparse_load,
+        block_sparse,
         swap_bwd_qk_loop,
         test_case,
         err_msg_list,
@@ -450,7 +452,7 @@ class TestBlockSparseAttn(DistTestBase):
             pack_gqa=pack_gqa,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
-            sparse_load=sparse_load,
+            block_sparse=block_sparse,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
         torch.cuda.synchronize()
@@ -561,7 +563,7 @@ class TestBlockSparseAttn(DistTestBase):
         test_accumulation_inplace,
         swap_ab: bool,
         ref_block_size: tuple[int, int],
-        sparse_load,
+        block_sparse,
         swap_bwd_qk_loop,
         test_case,
         sparsity_ratio,
@@ -630,7 +632,7 @@ class TestBlockSparseAttn(DistTestBase):
             test_accumulation_inplace,
             swap_ab,
             ref_block_size,
-            sparse_load,
+            block_sparse,
             swap_bwd_qk_loop,
             test_case,
             err_msg_list,
@@ -1014,7 +1016,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1022,7 +1024,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 128,
                 "swap_ab": False,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (128, 128),
             },
             {
@@ -1030,7 +1032,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": True,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1038,7 +1040,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 128,
                 "swap_ab": True,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1046,7 +1048,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (64, 128),
             },
             # Small Q block sizes
@@ -1055,7 +1057,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 32,
                 "k_size": 64,
                 "swap_ab": True,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (32, 64),
             },
             {
@@ -1063,7 +1065,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (64, 64),
             },
             # Small K block sizes
@@ -1072,7 +1074,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 8,
                 "swap_ab": False,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (64, 128),
             },
             {
@@ -1080,7 +1082,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 1,
                 "swap_ab": False,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (128, 128),
             },
             # Small Q and K block sizes
@@ -1089,7 +1091,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 8,
                 "swap_ab": False,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (64, 128),
             },
             {
@@ -1097,7 +1099,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 8,
                 "swap_ab": True,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (16, 64),
             },
             # Variable blocks
@@ -1160,12 +1162,12 @@ class TestBlockSparseAttn(DistTestBase):
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
         swap_ab = block_config.get("swap_ab", False)
-        sparse_load = block_config.get("sparse_load", False)
+        block_sparse = block_config.get("block_sparse", False)
         ref_block_size = block_config.get("ref_block_size", None)
         max_seqlen_q = None
 
         # sparse load only applies to swapped backward QK loop
-        if sparse_load:
+        if block_sparse:
             if not swap_bwd_qk_loop:
                 return
 
@@ -1215,7 +1217,7 @@ class TestBlockSparseAttn(DistTestBase):
             f"[{test_type}]"
             f"[{block_info}]"
             f"[swap_ab={swap_ab}]"
-            f"[sparse_load={sparse_load}]"
+            f"[block_sparse={block_sparse}]"
             f"[swap_bwd_qk_loop={swap_bwd_qk_loop}]"
             f"[ref_block_size={ref_block_size}]"
             f"[sparsity_granularity={sparsity_granularity}]"
@@ -1274,7 +1276,7 @@ class TestBlockSparseAttn(DistTestBase):
             test_accumulation_inplace=test_accumulation_inplace,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
-            sparse_load=sparse_load,
+            block_sparse=block_sparse,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
             test_case=test_case,
             sparsity_ratio=sparsity_ratio,
@@ -1314,7 +1316,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": True,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1322,7 +1324,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 128,
                 "swap_ab": True,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1330,7 +1332,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (64, 128),
             },
             # Small Q block sizes
@@ -1339,7 +1341,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 32,
                 "k_size": 64,
                 "swap_ab": True,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (32, 64),
             },
             {
@@ -1347,7 +1349,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 32,
                 "k_size": 64,
                 "swap_ab": False,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (64, 128),
             },
             # Small K block sizes
@@ -1356,7 +1358,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 8,
                 "swap_ab": True,
-                "sparse_load": False,
+                "block_sparse": False,
                 "ref_block_size": (64, 64),
             },
             {
@@ -1364,7 +1366,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 64,
                 "k_size": 8,
                 "swap_ab": False,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (64, 128),
             },
             {
@@ -1372,7 +1374,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 128,
                 "k_size": 1,
                 "swap_ab": False,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (128, 128),
             },
             # Small Q and K block sizes
@@ -1381,7 +1383,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 8,
                 "swap_ab": False,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (64, 128),
             },
             {
@@ -1389,7 +1391,7 @@ class TestBlockSparseAttn(DistTestBase):
                 "q_size": 16,
                 "k_size": 8,
                 "swap_ab": True,
-                "sparse_load": True,
+                "block_sparse": True,
                 "ref_block_size": (16, 64),
             },
         ],
@@ -1433,11 +1435,11 @@ class TestBlockSparseAttn(DistTestBase):
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
         swap_ab = block_config.get("swap_ab", False)
-        sparse_load = block_config.get("sparse_load", False)
+        block_sparse = block_config.get("block_sparse", False)
         ref_block_size = block_config.get("ref_block_size", None)
 
         # sparse load only applies to swapped backward QK loop
-        if sparse_load:
+        if block_sparse:
             if not swap_bwd_qk_loop:
                 return
 
@@ -1485,7 +1487,7 @@ class TestBlockSparseAttn(DistTestBase):
             f"[{test_type}]"
             f"[{block_info}]"
             f"[swap_ab={swap_ab}]"
-            f"[sparse_load={sparse_load}]"
+            f"[block_sparse={block_sparse}]"
             f"[ref_block_size={ref_block_size}]"
             f"[sparsity_granularity={sparsity_granularity}]"
             f"[sparsity_ratio={sparsity_ratio}]"
@@ -1543,7 +1545,7 @@ class TestBlockSparseAttn(DistTestBase):
             test_accumulation_inplace=test_accumulation_inplace,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
-            sparse_load=sparse_load,
+            block_sparse=block_sparse,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
             test_case=test_case,
             sparsity_ratio=sparsity_ratio,
@@ -1553,6 +1555,434 @@ class TestBlockSparseAttn(DistTestBase):
             err_ratio_dict={},
             max_seqlen_q=max_seqlen_q,
         )
+
+
+class TestBlockSparseSimple(unittest.TestCase):
+    """Lightweight single-process block-sparse regression tests.
+
+    Extracted from test_simple_attn.py — validates block-sparse FWD+BWD
+    against SDPA reference via TestBlockSparseAttn helper methods.
+    """
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
+
+    def _get_block_sparse_helper(self):
+        helper = TestBlockSparseAttn.__new__(TestBlockSparseAttn)
+        return helper
+
+    # ─── Block-Sparse FWD (very simple) ───
+
+    VERY_SIMPLE_BLOCK_SPARSE_CONFIGS = [
+        {
+            "name": "swap_ab_q128k128",
+            "q_size": 128,
+            "k_size": 128,
+            "swap_ab": True,
+            "block_sparse": False,
+            "ref_block_size": (64, 64),
+        },
+        {
+            "name": "block_sparse_loopk_q64k64",
+            "q_size": 64,
+            "k_size": 64,
+            "swap_ab": False,
+            "block_sparse": True,
+            "swap_bwd_qk_loop": True,
+            "ref_block_size": (64, 128),
+        },
+        {
+            "name": "block_sparse_loopk_q128k1",
+            "q_size": 128,
+            "k_size": 1,
+            "swap_ab": False,
+            "block_sparse": True,
+            "swap_bwd_qk_loop": True,
+            "ref_block_size": (128, 128),
+        },
+        {
+            "name": "block_sparse_loopq_q64k64",
+            "q_size": 64,
+            "k_size": 64,
+            "swap_ab": False,
+            "block_sparse": True,
+            "swap_bwd_qk_loop": False,
+            "pack_gqa": False,
+            "ref_block_size": (64, 128),
+            # LoopQ uses atomicAdd for dQ accumulation across n_blocks,
+            # which introduces small non-deterministic rounding vs the
+            # register-accumulated LoopK baseline.
+            "err_ratio_dict": {"dq_min_norm_rtol": 0.05},
+        },
+        {
+            "name": "block_sparse_loopq_q128k1",
+            "q_size": 128,
+            "k_size": 1,
+            "swap_ab": False,
+            "block_sparse": True,
+            "swap_bwd_qk_loop": False,
+            "pack_gqa": False,
+            "ref_block_size": (128, 128),
+            "err_ratio_dict": {"dq_min_norm_rtol": 0.05},
+        },
+    ]
+
+    @parameterize("cfg", VERY_SIMPLE_BLOCK_SPARSE_CONFIGS)
+    def test_very_simple_block_sparse(self, cfg):
+        """Lightweight block-sparse FWD test (GQA NHQ=16, NHK=4)."""
+        torch.manual_seed(42)
+        device = self.device
+
+        seqlen = 2048
+        dtype = torch.bfloat16
+        num_heads_q = 16
+        num_heads_kv = 4
+        head_dim = 128
+
+        q_block_size = cfg["q_size"]
+        k_block_size = cfg["k_size"]
+        swap_ab = cfg["swap_ab"]
+        block_sparse = cfg["block_sparse"]
+        swap_bwd_qk_loop = cfg.get("swap_bwd_qk_loop", block_sparse)
+        pack_gqa = cfg.get("pack_gqa", True)
+        ref_block_size = cfg["ref_block_size"]
+        block_size = (q_block_size, k_block_size)
+        max_seqlen_q = q_block_size
+
+        helper = self._get_block_sparse_helper()
+
+        (
+            block_mask,
+            block_sizes,
+            block_row_sz,
+            block_col_sz,
+        ) = helper._generate_sparse_pattern(
+            test_type="uniform",
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            seqlen=seqlen,
+            sparsity_ratio=0.5,
+            sparsity_granularity="per_kv_head",
+            sparse_format="block_mask",
+            block_size=block_size,
+        )
+
+        q = torch.randn(
+            1,
+            seqlen,
+            num_heads_q,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            1,
+            seqlen,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            1,
+            seqlen,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        do = torch.randn_like(q)
+
+        err_ratio_dict = cfg.get("err_ratio_dict", {})
+        test_case = f"[very_simple_block_sparse][{cfg['name']}]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        helper.assert_close_to_torch_ref(
+            dtype=dtype,
+            q=q,
+            k=k,
+            v=v,
+            grad_output=do,
+            seqlen=seqlen,
+            block_size=block_sizes,
+            block_mask=block_mask,
+            head_wise="per_kv_head",
+            sparse_format="block_mask",
+            nhq=num_heads_q,
+            nhk=num_heads_kv,
+            pack_gqa=pack_gqa,
+            deterministic=False,
+            test_accumulation_inplace=False,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
+            block_sparse=block_sparse,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
+            test_case=test_case,
+            sparsity_ratio=0.5,
+            uniform=True,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
+            max_seqlen_q=max_seqlen_q,
+            err_ratio_dict=err_ratio_dict,
+        )
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
+
+    # ─── BlockSparse BWD scatter-path comparison tests ───
+    # Methodology: test per code path, not per flag cartesian product.
+    # Tier-0: test_block_sparse_loopq_packgqa (canonical LoopQ+PackGQA path).
+
+    def _check_block_sparse_vs_dense_ref(
+        self,
+        *,
+        S: int,
+        n_attend: int,
+        k_block: int,
+        swap_bwd_qk_loop_cases: tuple[bool, ...],
+        test_case: str,
+        tol: float = 2e-2,
+    ):
+        """Comparison helper: block_sparse variants vs the dense-TMA ffa reference.
+
+        Builds a canonical MQA uniform block mask (nhq=128, nhk=1, hd=128,
+        q_block=1), runs the dense (block_sparse=False) kernel as the reference,
+        then each requested sparse variant (swap_bwd_qk_loop=True is LoopK,
+        False is LoopQ), comparing out/dq/dk/dv max-relative error.
+        """
+        from magi_attention.utils.sparse_utils import (
+            generate_ranges_from_block_mask_triton,
+        )
+
+        device = self.device
+        nhq, nhk, head_dim = 128, 1, 128
+        dtype = torch.bfloat16
+        torch.manual_seed(42)
+
+        n_q_blocks, n_k_blocks = S, S // k_block
+        sel = torch.rand(n_q_blocks, n_k_blocks, device=device).argsort(dim=1)[
+            :, : min(n_attend, n_k_blocks)
+        ]
+        block_mask = torch.zeros(
+            1, nhk, n_q_blocks, n_k_blocks, dtype=torch.bool, device=device
+        )
+        block_mask[0, 0].scatter_(1, sel, True)
+        q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
+            block_mask, 1, k_block
+        )
+        attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device=device)
+
+        q0 = torch.randn(S, nhq, head_dim, device=device, dtype=dtype)
+        k0 = torch.randn(S, nhk, head_dim, device=device, dtype=dtype)
+        v0 = torch.randn(S, nhk, head_dim, device=device, dtype=dtype)
+        do = torch.randn(S, nhq, head_dim, device=device, dtype=dtype)
+
+        def run(block_sparse: bool, swap_bwd_qk_loop: bool):
+            q = q0.clone().requires_grad_(True)
+            k = k0.clone().requires_grad_(True)
+            v = v0.clone().requires_grad_(True)
+            out, _ = flex_flash_attn_func(
+                q,
+                k,
+                v,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=attn_type_map,
+                block_sparse=block_sparse,
+                auto_range_merge=True,
+                pack_gqa=True,
+                swap_bwd_qk_loop=swap_bwd_qk_loop,
+            )
+            out.backward(do)
+            return out.detach(), q.grad, k.grad, v.grad
+
+        ref = run(block_sparse=False, swap_bwd_qk_loop=True)
+        for swap in swap_bwd_qk_loop_cases:
+            got = run(block_sparse=True, swap_bwd_qk_loop=swap)
+            loop_name = "loopk" if swap else "loopq"
+            for name, a, b in zip(("out", "dq", "dk", "dv"), got, ref):
+                err = (
+                    (a.float() - b.float()).abs().max()
+                    / b.float().abs().max().clamp_min(1e-6)
+                ).item()
+                # atomic reduce-add ordering makes the comparison inexact;
+                # 2e-2 matches the standalone comparison script threshold
+                assert (
+                    err < tol
+                ), f"{test_case}[{loop_name}] {name} max_rel_err={err:.3e} >= {tol}"
+
+    LOOPQ_PACKGQA_CONFIGS = [
+        {"name": "kblk128", "S": 2048, "n_attend": 8, "k_block": 128},
+        # K window not a multiple of kBlockN=128: exercises the LoopQ residual
+        # K-column padding mask (num_invalid_k_token computed in the mainloop)
+        {"name": "kblk96_residual_cols", "S": 2304, "n_attend": 8, "k_block": 96},
+    ]
+
+    @parameterize("cfg", LOOPQ_PACKGQA_CONFIGS)
+    def test_block_sparse_loopq_packgqa(self, cfg):
+        """Tier-0: BlockSparse BWD LoopQ + PackGQA (canonical MQA, q_block=1)
+        against the dense-TMA reference kernel."""
+        test_case = f"[block_sparse_loopq_packgqa][{cfg['name']}]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        self._check_block_sparse_vs_dense_ref(
+            S=cfg["S"],
+            n_attend=cfg["n_attend"],
+            k_block=cfg["k_block"],
+            swap_bwd_qk_loop_cases=(False,),
+            test_case=test_case,
+        )
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
+
+    # ─── BlockSparse + SwapAB coverage ───
+
+    SPARSE_LOAD_SWAPAB_CONFIGS = [
+        {
+            "name": "qBlockM128_q32k64",
+            "q_size": 32,
+            "k_size": 64,
+            "swap_ab": False,
+            "ref_block_size": (128, 128),
+        },
+        {
+            "name": "qBlockM64_q16k64",
+            "q_size": 16,
+            "k_size": 64,
+            "swap_ab": False,
+            "ref_block_size": (64, 128),
+        },
+        {
+            "name": "qBlockM128_q32k128",
+            "q_size": 32,
+            "k_size": 128,
+            "swap_ab": False,
+            "ref_block_size": (128, 128),
+        },
+        {
+            "name": "qBlockM64_q16k128",
+            "q_size": 16,
+            "k_size": 128,
+            "swap_ab": False,
+            "ref_block_size": (64, 128),
+        },
+        # SwapAB=True → kBlockN=64 → NumRowsPerGroup=4 (tests advance_producer with smaller group)
+        {
+            "name": "swapab_q32k64",
+            "q_size": 32,
+            "k_size": 64,
+            "swap_ab": True,
+            "ref_block_size": (32, 64),
+        },
+        {
+            "name": "swapab_q16k64",
+            "q_size": 16,
+            "k_size": 64,
+            "swap_ab": True,
+            "ref_block_size": (16, 64),
+        },
+    ]
+
+    @parameterize("cfg", SPARSE_LOAD_SWAPAB_CONFIGS)
+    def test_block_sparse_swapab(self, cfg):
+        """BlockSparse + SwapAB coverage (GQA NHQ=16, NHK=4, group=4)."""
+        torch.manual_seed(42)
+        device = self.device
+
+        seqlen = 2048
+        dtype = torch.bfloat16
+        head_dim = 128
+        num_heads_q = 16
+        num_heads_kv = 4
+
+        q_block_size = cfg["q_size"]
+        k_block_size = cfg["k_size"]
+        swap_ab = cfg["swap_ab"]
+        ref_block_size = cfg["ref_block_size"]
+        block_size = (q_block_size, k_block_size)
+        max_seqlen_q = q_block_size
+
+        helper = self._get_block_sparse_helper()
+
+        (
+            block_mask,
+            block_sizes,
+            block_row_sz,
+            block_col_sz,
+        ) = helper._generate_sparse_pattern(
+            test_type="uniform",
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            seqlen=seqlen,
+            sparsity_ratio=0.5,
+            sparsity_granularity="per_kv_head",
+            sparse_format="block_mask",
+            block_size=block_size,
+        )
+
+        q = torch.randn(
+            1,
+            seqlen,
+            num_heads_q,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            1,
+            seqlen,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            1,
+            seqlen,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+        do = torch.randn_like(q)
+
+        group_size = num_heads_q // num_heads_kv
+        qBlockM = group_size * q_block_size
+        test_case = f"[block_sparse_swapab][{cfg['name']},qBlockM={qBlockM}]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        helper.assert_close_to_torch_ref(
+            dtype=dtype,
+            q=q,
+            k=k,
+            v=v,
+            grad_output=do,
+            seqlen=seqlen,
+            block_size=block_sizes,
+            block_mask=block_mask,
+            head_wise="per_kv_head",
+            sparse_format="block_mask",
+            nhq=num_heads_q,
+            nhk=num_heads_kv,
+            pack_gqa=False,
+            deterministic=False,
+            test_accumulation_inplace=False,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
+            block_sparse=True,
+            swap_bwd_qk_loop=True,
+            test_case=test_case,
+            sparsity_ratio=0.5,
+            uniform=True,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
+            max_seqlen_q=max_seqlen_q,
+        )
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
 
 
 if __name__ == "__main__":

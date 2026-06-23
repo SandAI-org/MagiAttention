@@ -13,9 +13,9 @@
 # limitations under the License.
 
 """
-Tests for index_attn_indices direct-to-kernel path (forward + backward).
+Tests for index_sparse_indices direct-to-kernel path (forward + backward).
 
-Validates flex_flash_attn_func with index_attn_indices against PyTorch SDPA
+Validates flex_flash_attn_func with index_sparse_indices against PyTorch SDPA
 reference.
 
 Tier 1 (CI quick): PackGQA, the most common DiT paths:
@@ -39,10 +39,11 @@ Known limitations:
   - k_block_size > 1 tests commented out, kernel support is WIP (future: 32/64/128)
   - No distributed sparse yet
   - max_topk must be multiples of tile_size (asserted in flex_flash_attn_func)
-  - Q/K/V are packed in (b, s, h) order to match index_attn_indices view layout
+  - Q/K/V are packed in (b, s, h) order to match index_sparse_indices view layout
 """
 
 import os
+import unittest
 from typing import Any
 
 import pytest
@@ -55,8 +56,8 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.utils import set_random_seed
 from magi_attention.utils.sparse_utils import (
-    build_index_attn_indices,
-    get_sdpa_mask_from_index_attn_indices,
+    build_index_sparse_indices,
+    get_sdpa_mask_from_index_sparse_indices,
 )
 
 SEED = 42
@@ -68,15 +69,15 @@ DEFAULT_ATOL = 0.01
 # ═══════════════════════════════════════════════════════════
 
 
-_build_index_attn_indices = build_index_attn_indices
-_build_sdpa_mask = get_sdpa_mask_from_index_attn_indices
+_build_index_sparse_indices = build_index_sparse_indices
+_build_sdpa_mask = get_sdpa_mask_from_index_sparse_indices
 
 
 def _run_sparse_attn_and_get_output(
     q,
     k,
     v,
-    index_attn_indices,
+    index_sparse_indices,
     B,
     S_q,
     S_kv,
@@ -88,7 +89,7 @@ def _run_sparse_attn_and_get_output(
     k_block_size=1,
     test_bwd=False,
 ):
-    """Run FFA with index_attn_indices and return reshaped output [B, S_q, NHQ, D].
+    """Run FFA with index_sparse_indices and return reshaped output [B, S_q, NHQ, D].
 
     When test_bwd=True, returns (output, q_ffa, k_ffa, v_ffa) with gradients enabled.
     """
@@ -105,7 +106,7 @@ def _run_sparse_attn_and_get_output(
             q_ffa,
             k_ffa,
             v_ffa,
-            index_attn_indices=index_attn_indices,
+            index_sparse_indices=index_sparse_indices,
             q_block_size=1,
             k_block_size=k_block_size,
             pack_gqa=pack_gqa,
@@ -122,7 +123,7 @@ def _run_sparse_attn_and_get_output(
                 q_ffa.clone(),
                 k_ffa.clone(),
                 v_ffa.clone(),
-                index_attn_indices=index_attn_indices,
+                index_sparse_indices=index_sparse_indices,
                 q_block_size=1,
                 k_block_size=k_block_size,
                 pack_gqa=pack_gqa,
@@ -176,7 +177,7 @@ def _compare_against_sdpa(
 # ═══════════════════════════════════════════════════════════
 
 
-class TestIndexAttnIndicesAttn(DistTestBase):
+class TestIndexSparseIndicesAttn(DistTestBase):
     @property
     def seed(self):
         return SEED
@@ -194,7 +195,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
         return 1200
 
     def _run_config(self, cfg: dict[str, Any], test_bwd: bool = True):
-        """Run one index_attn_indices test config and assert against SDPA."""
+        """Run one index_sparse_indices test config and assert against SDPA."""
         set_random_seed(SEED)
         B = cfg["B"]
         S = cfg.get("S", None)
@@ -230,7 +231,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
             NHQ = NHQ // NHK
             NHK = 1
 
-        index_attn_indices = _build_index_attn_indices(
+        index_sparse_indices = _build_index_sparse_indices(
             B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=k_block_size
         )
 
@@ -238,7 +239,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
             q,
             k,
             v,
-            index_attn_indices,
+            index_sparse_indices,
             B,
             S_q,
             S_kv,
@@ -257,7 +258,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
             o_ffa = result
 
         sdpa_mask = _build_sdpa_mask(
-            index_attn_indices,
+            index_sparse_indices,
             B,
             NHQ,
             NHK,
@@ -394,7 +395,7 @@ class TestIndexAttnIndicesAttn(DistTestBase):
             },
         ],
     )
-    def test_simple_index_attn_indices_attn(self, config: dict[str, Any]):
+    def test_simple_index_sparse_indices_attn(self, config: dict[str, Any]):
         self._run_config(config, test_bwd=True)
 
     # ─── Tier 2a: Cross-batch variable topk ──────────────
@@ -700,16 +701,254 @@ class TestIndexAttnIndicesAttn(DistTestBase):
             # LoopK BWD misinterprets block-level indices as token-level;
             # use LoopQ BWD for kbs>1 (requires env vars).
             # NHK>1 + kbs>1 not yet supported in LoopQ BWD (flat-layout mismatch).
-            os.environ["MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q"] = "1"
-            os.environ["MAGI_ATTENTION_INDEX_ATTN_BWD_K_BLOCK_SIZE"] = str(kbs)
+            os.environ["MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q"] = "1"
+            os.environ["MAGI_ATTENTION_INDEX_SPARSE_BWD_K_BLOCK_SIZE"] = str(kbs)
             test_bwd = config.get("NHK", 1) == 1
         else:
             test_bwd = True
         try:
             self._run_config(config, test_bwd=test_bwd)
         finally:
-            os.environ.pop("MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q", None)
-            os.environ.pop("MAGI_ATTENTION_INDEX_ATTN_BWD_K_BLOCK_SIZE", None)
+            os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q", None)
+            os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_K_BLOCK_SIZE", None)
+
+
+class TestIndexSparseSimple(unittest.TestCase):
+    """Lightweight single-process IndexSparse regression test.
+
+    Extracted from test_simple_attn.py — validates IndexSparse FWD+BWD
+    correctness against SDPA reference in various GQA configurations.
+    """
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
+
+    INDEX_ATTN_CONFIGS = [
+        {
+            "name": "mqa128_pack_gqa",
+            "B": 1,
+            "S": 256,
+            "NHQ": 128,
+            "NHK": 1,
+            "D": 128,
+            "topk": 128,
+            "pack_gqa": True,
+        },
+        {
+            "name": "gqa_32_4_pack_gqa",
+            "B": 1,
+            "S": 256,
+            "NHQ": 32,
+            "NHK": 4,
+            "D": 128,
+            "topk": 128,
+            "pack_gqa": True,
+        },
+        {
+            "name": "mha_aligned",
+            "B": 1,
+            "S": 256,
+            "NHQ": 4,
+            "NHK": 4,
+            "D": 64,
+            "topk": 128,
+            "pack_gqa": False,
+        },
+        {
+            "name": "gqa_4_2_aligned",
+            "B": 1,
+            "S": 256,
+            "NHQ": 4,
+            "NHK": 2,
+            "D": 64,
+            "topk": 128,
+            "pack_gqa": False,
+        },
+        {
+            "name": "mha_unaligned_seqlen",
+            "B": 1,
+            "S": 200,
+            "NHQ": 4,
+            "NHK": 4,
+            "D": 64,
+            "topk": 128,
+            "pack_gqa": False,
+        },
+        {
+            "name": "gqa_8_2_small",
+            "B": 2,
+            "S": 256,
+            "NHQ": 8,
+            "NHK": 2,
+            "D": 64,
+            "topk": 128,
+            "pack_gqa": False,
+        },
+        {
+            "name": "gqa_4_2_pack_gqa_d128",
+            "B": 1,
+            "S": 256,
+            "NHQ": 4,
+            "NHK": 2,
+            "D": 128,
+            "topk": 128,
+            "pack_gqa": True,
+        },
+        {
+            "name": "gqa_8_2_pack_gqa_d128",
+            "B": 1,
+            "S": 256,
+            "NHQ": 8,
+            "NHK": 2,
+            "D": 128,
+            "topk": 128,
+            "pack_gqa": True,
+        },
+        {
+            "name": "gqa_4_1_pack_gqa_d128",
+            "B": 1,
+            "S": 256,
+            "NHQ": 4,
+            "NHK": 1,
+            "D": 128,
+            "topk": 128,
+            "pack_gqa": True,
+        },
+        {
+            "name": "gqa_8_4_pack_gqa_d128",
+            "B": 2,
+            "S": 256,
+            "NHQ": 8,
+            "NHK": 4,
+            "D": 128,
+            "topk": 128,
+            "pack_gqa": True,
+        },
+    ]
+
+    @parameterize("cfg", INDEX_ATTN_CONFIGS)
+    def test_index_sparse_simple(self, cfg: dict[str, Any]):
+        """IndexSparse FWD+BWD correctness against SDPA reference.
+
+        The view trick flattens K from (B,S,NHK,D) to (B*S*NHK, 1, D), so
+        the kernel sees NHK_eff=1. Indices must be built in this flat token
+        space (NHK=1, S_flat=S*NHK) with logical positions.
+        """
+        set_random_seed(42)
+        B, S, NHQ, NHK, D, topk = (
+            cfg["B"],
+            cfg["S"],
+            cfg["NHQ"],
+            cfg["NHK"],
+            cfg["D"],
+            cfg["topk"],
+        )
+        pack_gqa = cfg["pack_gqa"]
+        device = self.device
+
+        gqa = NHQ // NHK
+        S_flat = S * NHK
+        NHQ_eff = gqa
+
+        indices = build_index_sparse_indices(B, 1, S_flat, S_flat, topk, topk, device)
+
+        q_raw = torch.randn(B, S, NHQ, D, dtype=torch.bfloat16, device=device)
+        k_raw = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
+        v_raw = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
+
+        q_ffa = (
+            q_raw.reshape(B, S, NHK, gqa, D)
+            .permute(0, 1, 2, 3, 4)
+            .reshape(B * S * NHK, gqa, D)
+            .detach()
+            .clone()
+            .requires_grad_(True)
+        )
+        k_ffa = k_raw.reshape(B * S * NHK, 1, D).detach().clone().requires_grad_(True)
+        v_ffa = v_raw.reshape(B * S * NHK, 1, D).detach().clone().requires_grad_(True)
+
+        o_sparse, _ = flex_flash_attn_func(
+            q_ffa,
+            k_ffa,
+            v_ffa,
+            index_sparse_indices=indices,
+            q_block_size=1,
+            k_block_size=1,
+            pack_gqa=pack_gqa,
+        )
+
+        mask = get_sdpa_mask_from_index_sparse_indices(
+            indices, B, NHQ_eff, 1, S_flat, S_flat, device
+        )
+
+        for b in range(B):
+            sl = slice(b * S_flat, (b + 1) * S_flat)
+            q_b = q_ffa[sl].detach().reshape(1, S_flat, NHQ_eff, D).transpose(1, 2)
+            k_b = k_ffa[sl].detach().reshape(1, S_flat, 1, D).transpose(1, 2)
+            v_b = v_ffa[sl].detach().reshape(1, S_flat, 1, D).transpose(1, 2)
+            if NHQ_eff > 1:
+                k_b = k_b.expand(1, NHQ_eff, S_flat, D)
+                v_b = v_b.expand(1, NHQ_eff, S_flat, D)
+
+            with torch.no_grad():
+                o_ref = torch.nn.functional.scaled_dot_product_attention(
+                    q_b, k_b, v_b, attn_mask=mask[b].unsqueeze(0)
+                )
+            o_ref = o_ref.squeeze(0).transpose(0, 1)
+
+            max_diff = (o_sparse[sl].float() - o_ref.float()).abs().max().item()
+            assert max_diff < 0.01, (
+                f"[test_index_sparse][{cfg['name']}] "
+                f"FWD batch {b}: max_diff={max_diff:.6f} >= 0.01"
+            )
+
+        # BWD verification
+        do = torch.randn_like(o_sparse)
+        o_sparse.backward(do)
+        dq_ffa = q_ffa.grad.clone()
+
+        for b in range(B):
+            sl = slice(b * S_flat, (b + 1) * S_flat)
+            q_b = (
+                q_ffa[sl]
+                .detach()
+                .clone()
+                .reshape(1, S_flat, NHQ_eff, D)
+                .transpose(1, 2)
+                .requires_grad_(True)
+            )
+            k_b = (
+                k_ffa[sl]
+                .detach()
+                .clone()
+                .reshape(1, S_flat, 1, D)
+                .transpose(1, 2)
+                .requires_grad_(True)
+            )
+            v_b = (
+                v_ffa[sl]
+                .detach()
+                .clone()
+                .reshape(1, S_flat, 1, D)
+                .transpose(1, 2)
+                .requires_grad_(True)
+            )
+            k_exp = k_b.expand(1, NHQ_eff, S_flat, D) if NHQ_eff > 1 else k_b
+            v_exp = v_b.expand(1, NHQ_eff, S_flat, D) if NHQ_eff > 1 else v_b
+
+            o_ref = torch.nn.functional.scaled_dot_product_attention(
+                q_b, k_exp, v_exp, attn_mask=mask[b].unsqueeze(0)
+            )
+            do_b = do[sl].reshape(1, S_flat, NHQ_eff, D).transpose(1, 2)
+            o_ref.backward(do_b)
+
+            dq_ref_b = q_b.grad.squeeze(0).transpose(0, 1)
+            max_dq_diff = (dq_ffa[sl].float() - dq_ref_b.float()).abs().max().item()
+            assert max_dq_diff < 0.05, (
+                f"[test_index_sparse][{cfg['name']}] "
+                f"BWD batch {b}: dQ max_diff={max_dq_diff:.6f} >= 0.05"
+            )
 
 
 if __name__ == "__main__":

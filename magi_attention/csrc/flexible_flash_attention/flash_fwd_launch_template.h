@@ -53,8 +53,8 @@ template <
     bool PackGQA,
     int QheadPerKhead,
     bool SwapAB,
-    bool SparseLoad,
-    bool IndexAttn,
+    bool BlockSparse,
+    bool IndexSparse,
     bool IntraWGOverlap,
     bool InnerDirMaxToMin,
     int MaskMode,
@@ -64,7 +64,7 @@ template <
     int KBlockSize,
     bool ProfileMode>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
-  static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
+  static_assert(!(BlockSparse && IndexSparse), "BlockSparse and IndexSparse cannot be enabled at the same time");
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   static constexpr bool MmaPV_is_RS = !SwapAB;
 
@@ -92,8 +92,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       PackGQA,
       QheadPerKhead,
       SwapAB,
-      SparseLoad,
-      IndexAttn,
+      BlockSparse,
+      IndexSparse,
       InnerDirMaxToMin,
       MaskMode,
       KBlockSize>;
@@ -105,7 +105,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       /*WarpSpecialized=*/Arch >= 90,
       PackGQA,
       Deterministic,
-      IndexAttn>;
+      IndexSparse>;
 
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
       TileShape_MNK_PV,
@@ -142,8 +142,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
         params.k_ranges,
         params.attn_type_map,
         params.qk_map,
-        params.index_attn_indices,
-        params.index_attn_max_topk};
+        params.index_sparse_indices,
+        params.index_sparse_max_topk};
   }();
 
   typename CollectiveEpilogue::Arguments epilogue_args{
@@ -219,8 +219,8 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool SwapAB,
-    bool kSparseLoad,
-    bool kIndexAttn,
+    bool kBlockSparse,
+    bool kIndexSparse,
     bool kIntraWGOverlap,
     bool kInnerDirMaxToMin,
     int kMaskMode,
@@ -254,8 +254,8 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*PackGQA=*/PackGQA,
         /*QheadPerKhead=*/QheadPerKhead,
         /*SwapAB=*/SwapAB,
-        /*SparseLoad=*/kSparseLoad,
-        /*IndexAttn=*/kIndexAttn,
+        /*BlockSparse=*/kBlockSparse,
+        /*IndexSparse=*/kIndexSparse,
         /*IntraWGOverlap=*/kIntraWGOverlap,
         /*InnerDirMaxToMin=*/kInnerDirMaxToMin,
         /*MaskMode=*/kMaskMode,

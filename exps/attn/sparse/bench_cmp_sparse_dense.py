@@ -13,22 +13,22 @@
 # limitations under the License.
 
 """
-Framework overhead isolation: Dense vs SparseLoad vs IndexAttn
+Framework overhead isolation: Dense vs BlockSparse vs IndexSparse
 with IDENTICAL effective compute.
 
 Config: nhq=128, nhk=1 (MQA), hd=128, PackGQA, bf16
         seqlen=32K, topk=seqlen=32K, k_block_size=128
         → every Q attends to ALL KV → same FLOPs as Dense
 
-FWD:  Dense, SparseLoad, IndexAttn
-BWD:  Dense-LoopQ, Dense-LoopK, SparseLoad-LoopQ, SparseLoad-LoopK,
-      IndexAttn-LoopK, IndexAttn-LoopQ (kbs=128)
+FWD:  Dense, BlockSparse, IndexSparse
+BWD:  Dense-LoopQ, Dense-LoopK, BlockSparse-LoopQ, BlockSparse-LoopK,
+      IndexSparse-LoopK, IndexSparse-LoopQ (kbs=128)
 
 Usage:
   cd /home/niubility2/cenzhiyao/MagiAttention-build
-  CUDA_VISIBLE_DEVICES=1 python exps/attn/bench_cmp_sparse_dense.py
-  CUDA_VISIBLE_DEVICES=1 python exps/attn/bench_cmp_sparse_dense.py --bwd
-  CUDA_VISIBLE_DEVICES=1 python exps/attn/bench_cmp_sparse_dense.py --bwd-only
+  CUDA_VISIBLE_DEVICES=1 python exps/attn/sparse/bench_cmp_sparse_dense.py
+  CUDA_VISIBLE_DEVICES=1 python exps/attn/sparse/bench_cmp_sparse_dense.py --bwd
+  CUDA_VISIBLE_DEVICES=1 python exps/attn/sparse/bench_cmp_sparse_dense.py --bwd-only
 """
 
 import argparse
@@ -52,13 +52,13 @@ seed_everything()
 
 
 def _build_ia_tensors(S, device, requires_grad=False):
-    """Build IndexAttn tensors with topk=S (arange indices)."""
+    """Build IndexSparse tensors with topk=S (arange indices)."""
     q = torch.randn(1, S, nhq, hd, device=device, dtype=dtype)
     k = torch.randn(1, S, nhk, hd, device=device, dtype=dtype)
     v = torch.randn(1, S, nhk, hd, device=device, dtype=dtype)
     local_pos = torch.arange(S, device=device).unsqueeze(0).expand(S, -1)
     h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
-    index_attn_indices = (local_pos.unsqueeze(1) * nhk + h_offsets).int()
+    index_sparse_indices = (local_pos.unsqueeze(1) * nhk + h_offsets).int()
     q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
     k_t = rearrange(k, "b s h d -> (b s h) 1 d")
     v_t = rearrange(v, "b s h d -> (b s h) 1 d")
@@ -66,7 +66,7 @@ def _build_ia_tensors(S, device, requires_grad=False):
         q_t.requires_grad_(True)
         k_t.requires_grad_(True)
         v_t.requires_grad_(True)
-    return q_t, k_t, v_t, index_attn_indices
+    return q_t, k_t, v_t, index_sparse_indices
 
 
 def bench_dense(S, direction="fwd", swap_bwd_qk_loop=False, warmup=25, rep=100):
@@ -118,8 +118,8 @@ def bench_dense(S, direction="fwd", swap_bwd_qk_loop=False, warmup=25, rep=100):
     return target_flops / ms * 1e-9
 
 
-def bench_sparse_load(S, direction="fwd", swap_bwd_qk_loop=False, warmup=25, rep=100):
-    """SparseLoad with effective_kv=S (all-True block mask)."""
+def bench_block_sparse(S, direction="fwd", swap_bwd_qk_loop=False, warmup=25, rep=100):
+    """BlockSparse with effective_kv=S (all-True block mask)."""
     device = torch.cuda.current_device()
     n_k_blocks = S // k_block_size
     fwd_flops = 4 * S * S * nhq * hd
@@ -146,7 +146,7 @@ def bench_sparse_load(S, direction="fwd", swap_bwd_qk_loop=False, warmup=25, rep
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
                 attn_type_map=attn_type_map,
-                sparse_load=True,
+                block_sparse=True,
                 auto_range_merge=True,
                 pack_gqa=True,
             )
@@ -163,7 +163,7 @@ def bench_sparse_load(S, direction="fwd", swap_bwd_qk_loop=False, warmup=25, rep
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
-            sparse_load=True,
+            block_sparse=True,
             auto_range_merge=True,
             pack_gqa=True,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
@@ -179,10 +179,10 @@ def bench_sparse_load(S, direction="fwd", swap_bwd_qk_loop=False, warmup=25, rep
     return target_flops / ms * 1e-9
 
 
-def bench_index_attn(
+def bench_index_sparse(
     S, direction="fwd", swap_bwd_qk_loop=True, warmup=25, rep=100, use_kbs128=False
 ):
-    """IndexAttn with topk=S (arange indices).
+    """IndexSparse with topk=S (arange indices).
 
     use_kbs128: if True, use k_block_size=128 and LoopQ BWD (requires env vars).
     """
@@ -194,10 +194,10 @@ def bench_index_attn(
     kbs = 128 if use_kbs128 else 1
 
     if use_kbs128 and direction == "bwd":
-        os.environ["MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q"] = "1"
-        os.environ["MAGI_ATTENTION_INDEX_ATTN_BWD_K_BLOCK_SIZE"] = "128"
+        os.environ["MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q"] = "1"
+        os.environ["MAGI_ATTENTION_INDEX_SPARSE_BWD_K_BLOCK_SIZE"] = "128"
 
-    q_t, k_t, v_t, index_attn_indices = _build_ia_tensors(
+    q_t, k_t, v_t, index_sparse_indices = _build_ia_tensors(
         S, device, requires_grad=(direction == "bwd")
     )
 
@@ -213,7 +213,7 @@ def bench_index_attn(
         ).int()
         indices_to_use = ia_indices_kbs128
     else:
-        indices_to_use = index_attn_indices
+        indices_to_use = index_sparse_indices
 
     if direction == "fwd":
 
@@ -222,7 +222,7 @@ def bench_index_attn(
                 q_t,
                 k_t,
                 v_t,
-                index_attn_indices=indices_to_use,
+                index_sparse_indices=indices_to_use,
                 q_block_size=1,
                 k_block_size=kbs,
                 pack_gqa=True,
@@ -235,7 +235,7 @@ def bench_index_attn(
             q_t,
             k_t,
             v_t,
-            index_attn_indices=indices_to_use,
+            index_sparse_indices=indices_to_use,
             q_block_size=1,
             k_block_size=kbs,
             pack_gqa=True,
@@ -251,8 +251,8 @@ def bench_index_attn(
     ms = do_bench(fn, warmup=warmup, rep=rep)
 
     if use_kbs128 and direction == "bwd":
-        os.environ.pop("MAGI_ATTENTION_INDEX_ATTN_BWD_LOOP_Q", None)
-        os.environ.pop("MAGI_ATTENTION_INDEX_ATTN_BWD_K_BLOCK_SIZE", None)
+        os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q", None)
+        os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_K_BLOCK_SIZE", None)
 
     return target_flops / ms * 1e-9
 
@@ -281,7 +281,7 @@ def main():
     run_fwd = not args.bwd_only
     run_bwd = args.bwd or args.bwd_only
 
-    print("=== Dense vs SparseLoad vs IndexAttn — Framework Overhead Isolation ===")
+    print("=== Dense vs BlockSparse vs IndexSparse — Framework Overhead Isolation ===")
     print(f"Config: nhq={nhq}, nhk={nhk}, hd={hd}, seqlen={S}, topk=seqlen={S}")
     print(f"        k_block_size={k_block_size}, PackGQA=True, dtype=bf16")
     print(f"Device: {torch.cuda.get_device_name()}")
@@ -292,8 +292,8 @@ def main():
         print(f"{'Method':<25} {'TFLOPS':>10}")
         print("-" * 37)
         run_one("Dense", bench_dense, S, "fwd")
-        run_one("SparseLoad", bench_sparse_load, S, "fwd")
-        run_one("IndexAttn", bench_index_attn, S, "fwd")
+        run_one("BlockSparse", bench_block_sparse, S, "fwd")
+        run_one("IndexSparse", bench_index_sparse, S, "fwd")
         print()
 
     if run_bwd:
@@ -302,12 +302,18 @@ def main():
         print("-" * 37)
         run_one("Dense LoopQ", bench_dense, S, "bwd", swap_bwd_qk_loop=False)
         run_one("Dense LoopK", bench_dense, S, "bwd", swap_bwd_qk_loop=True)
-        run_one("SparseLoad LoopQ", bench_sparse_load, S, "bwd", swap_bwd_qk_loop=False)
-        run_one("SparseLoad LoopK", bench_sparse_load, S, "bwd", swap_bwd_qk_loop=True)
-        run_one("IndexAttn LoopK", bench_index_attn, S, "bwd", swap_bwd_qk_loop=True)
         run_one(
-            "IndexAttn LoopQ kbs128",
-            bench_index_attn,
+            "BlockSparse LoopQ", bench_block_sparse, S, "bwd", swap_bwd_qk_loop=False
+        )
+        run_one(
+            "BlockSparse LoopK", bench_block_sparse, S, "bwd", swap_bwd_qk_loop=True
+        )
+        run_one(
+            "IndexSparse LoopK", bench_index_sparse, S, "bwd", swap_bwd_qk_loop=True
+        )
+        run_one(
+            "IndexSparse LoopQ kbs128",
+            bench_index_sparse,
             S,
             "bwd",
             swap_bwd_qk_loop=False,

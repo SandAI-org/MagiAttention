@@ -58,9 +58,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
-    std::optional<const at::Tensor>& index_attn_indices_,
-    int const index_attn_max_topk,
-    int const index_attn_k_block_size,
+    std::optional<const at::Tensor>& index_sparse_indices_,
+    int const index_sparse_max_topk,
+    int const index_sparse_k_block_size,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> out_type_,
@@ -71,8 +71,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
   bool is_sm9x = dprops->major >= 9;
   TORCH_CHECK(is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
 
-  bool const has_index_attn = index_attn_indices_.has_value();
-  int const batch_size = has_index_attn ? index_attn_indices_.value().size(0) : q_ranges_.value().size(0);
+  bool const has_index_sparse = index_sparse_indices_.has_value();
+  int const batch_size = has_index_sparse ? index_sparse_indices_.value().size(0) : q_ranges_.value().size(0);
   int const total_q = q.size(0);
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
@@ -96,8 +96,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
   TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1, "q/k/v last dim must be contiguous");
 
   at::Tensor q_ranges, k_ranges;
-  if (!has_index_attn) {
-    TORCH_CHECK(q_ranges_.has_value() && k_ranges_.has_value(), "q_ranges and k_ranges must be provided when index_attn_indices is not set");
+  if (!has_index_sparse) {
+    TORCH_CHECK(q_ranges_.has_value() && k_ranges_.has_value(), "q_ranges and k_ranges must be provided when index_sparse_indices is not set");
     q_ranges = q_ranges_.value();
     k_ranges = k_ranges_.value();
     TORCH_CHECK(q_ranges.dtype() == torch::kInt32 && k_ranges.dtype() == torch::kInt32, "ranges must be int32");
@@ -109,13 +109,13 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     CHECK_CONTIGUOUS(k_ranges);
   }
 
-  // Validate IndexAttn indices if provided
-  at::Tensor index_attn_indices;
-  if (has_index_attn) {
-    index_attn_indices = index_attn_indices_.value();
-    TORCH_CHECK(index_attn_indices.dtype() == torch::kInt32, "index_attn_indices must be int32");
-    CHECK_DEVICE(index_attn_indices);
-    CHECK_CONTIGUOUS(index_attn_indices);
+  // Validate IndexSparse indices if provided
+  at::Tensor index_sparse_indices;
+  if (has_index_sparse) {
+    index_sparse_indices = index_sparse_indices_.value();
+    TORCH_CHECK(index_sparse_indices.dtype() == torch::kInt32, "index_sparse_indices must be int32");
+    CHECK_DEVICE(index_sparse_indices);
+    CHECK_CONTIGUOUS(index_sparse_indices);
   }
 
   // Init attn_type_map
@@ -332,8 +332,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       v,
       sink,
       out,
-      /*q_ranges=*/has_index_attn ? nullptr : q_ranges.data_ptr(),
-      /*k_ranges=*/has_index_attn ? nullptr : k_ranges.data_ptr(),
+      /*q_ranges=*/has_index_sparse ? nullptr : q_ranges.data_ptr(),
+      /*k_ranges=*/has_index_sparse ? nullptr : k_ranges.data_ptr(),
       /*range_locks=*/range_locks.data_ptr(),
       /*deterministic=*/Deterministic,
       /*determin_range_locks=*/Deterministic ? determin_range_locks.data_ptr() : nullptr,
@@ -356,8 +356,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       /*blocks_per_batch=*/blocks_per_batch,
       /*tiles_per_batch_per_intergroup=*/tiles_per_batch_per_intergroup,
       /*max_tile_idx=*/max_tile_idx,
-      /*index_attn_indices=*/has_index_attn ? index_attn_indices.data_ptr() : nullptr,
-      /*index_attn_max_topk=*/index_attn_max_topk);
+      /*index_sparse_indices=*/has_index_sparse ? index_sparse_indices.data_ptr() : nullptr,
+      /*index_sparse_max_topk=*/index_sparse_max_topk);
 
   return {params, out, softmax_lse, max_logits};
 }

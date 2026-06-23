@@ -1315,8 +1315,8 @@ class DistAttnRuntime:
                     auto_range_merge=env.general.is_auto_range_merge_enable(),
                     swap_ab=False,
                     pack_gqa=False,
-                    sparse_load=False,
-                    index_attn=False,
+                    block_sparse=False,
+                    index_sparse=False,
                     return_max_logits=return_max_logits,
                     max_logits=max_logits_acc,  # directly reduce to max_logits_acc
                 )

@@ -13,27 +13,27 @@
 # limitations under the License.
 
 """
-Benchmark: Token-sparse attention (topk=2048) — FFA IndexAttn vs baselines.
+Benchmark: Token-sparse attention (topk=2048) — FFA IndexSparse vs baselines.
 
 MQA (nhq=128, nhk=1), head_dim=128, topk=2048 fixed, sweep seqlen.
 Token-level sparsity: q_block_size=k_block_size=1 (NOT block-sparse).
 
 Methods compared (FWD):
-  - FFA IndexAttn (token-sparse, block_size=1, PackGQA)
+  - FFA IndexSparse (token-sparse, block_size=1, PackGQA)
   - FlexAttention (PyTorch flex_attention with sparse block mask, enable_gqa=True)
   - Triton Token-Sparse (MQA batching, all 128 heads as tl.dot GEMM)
   - TileLang Sparse Attn (T.copy + T.gemm, online softmax)
   - EffectiveKernels (Kwai-Keye DSA topk_block_unique pipeline, nhk=16 due to GQA limit)
 
 Methods compared (BWD):
-  - FFA IndexAttn
+  - FFA IndexSparse
   - FlexAttention (autograd + torch.compile)
   - Triton Token-Sparse (dQ via tl.dot, dK/dV via atomic scatter)
 
 Reporting effective sparse TFLOPs/s (FWD flops = 4*S*topk*nhq*hd, BWD ~2.5x FWD).
 
 NOTE on TFLOPS drop at large S:
-  FFA IndexAttn peaks at S~16k then drops ~9% at S=102k. This is REAL
+  FFA IndexSparse peaks at S~16k then drops ~9% at S=102k. This is REAL
   (not a bench artifact): random gather from larger KV pool causes L2 cache
   thrashing when many thread blocks compete for cache lines simultaneously.
   See .tmp/038-index-attn-bench-analysis/analysis.md for details.
@@ -81,8 +81,8 @@ HAS_TILELANG = False  # Lazy-imported on first use to avoid CUDA context conflic
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def build_index_attn_indices(b, S, nhk, topk, device):
-    """Build index_attn_indices: (b*S, nhk, topk) int32 for token-sparse FFA."""
+def build_index_sparse_indices(b, S, nhk, topk, device):
+    """Build index_sparse_indices: (b*S, nhk, topk) int32 for token-sparse FFA."""
     total_q = b * S
     local_pos = torch.randint(0, S, (total_q, topk), device=device).sort(dim=1).values
     batch_idx = torch.arange(total_q, device=device) // S
@@ -156,14 +156,14 @@ quantiles = [0.5, 0.2, 0.8]
 seqlen_vals = [32768, 65536, 131072, 262144, 524288]
 
 METHODS = [
-    "ffa_index_attn",
+    "ffa_index_sparse",
     "flexattention",
     "triton_token_sparse",
     "tilelang_sparse_mla",
     "effective_kernels",  # last: may crash CUDA context at large S
 ]
 METHOD_NAMES = [
-    "FFA IndexAttn (token-sparse)",
+    "FFA IndexSparse (token-sparse)",
     "FlexAttention (GQA, sparse mask)",
     "Triton Token-Sparse (MQA tl.dot)",
     "TileLang Sparse Attn (T.gemm)",
@@ -212,12 +212,12 @@ def comparison_benchmark(S, method):
     sparse_flops = 4 * S * topk * nhq * hd
 
     try:
-        if method == "ffa_index_attn":
+        if method == "ffa_index_sparse":
             q = torch.randn(b, S, nhq, hd, device=device, dtype=dtype)
             k = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
             v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
 
-            index_attn_indices = build_index_attn_indices(b, S, nhk, topk, device)
+            index_sparse_indices = build_index_sparse_indices(b, S, nhk, topk, device)
             q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
             k_t = rearrange(k, "b s h d -> (b s h) 1 d")
             v_t = rearrange(v, "b s h d -> (b s h) 1 d")
@@ -229,7 +229,7 @@ def comparison_benchmark(S, method):
                     q_t,
                     k_t,
                     v_t,
-                    index_attn_indices=index_attn_indices,
+                    index_sparse_indices=index_sparse_indices,
                     q_block_size=1,
                     k_block_size=1,
                     pack_gqa=True,
@@ -423,7 +423,7 @@ def sanity_check(S_check=512, topk_check=128):
 
     results = {}
 
-    # 1. FFA IndexAttn
+    # 1. FFA IndexSparse
     try:
         local_pos = indices_2d.long()
         h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
@@ -432,15 +432,15 @@ def sanity_check(S_check=512, topk_check=128):
             q_3d,
             k_3d,
             v_3d,
-            index_attn_indices=ffa_indices,
+            index_sparse_indices=ffa_indices,
             q_block_size=1,
             k_block_size=1,
             pack_gqa=True,
         )
         err = (ffa_out.float() - ref_out.float()).abs().max().item()
-        results["ffa_index_attn"] = err
+        results["ffa_index_sparse"] = err
     except Exception as e:
-        results["ffa_index_attn"] = f"ERROR: {e}"
+        results["ffa_index_sparse"] = f"ERROR: {e}"
 
     # 2. Triton Token-Sparse
     try:
@@ -490,13 +490,13 @@ def sanity_check(S_check=512, topk_check=128):
 # ─── BWD Benchmark ────────────────────────────────────────────────────────────
 
 BWD_METHODS = [
-    "ffa_index_attn",
+    "ffa_index_sparse",
     "flexattention",
     "triton_token_sparse",
     "tilelang_sparse_mla",
 ]
 BWD_METHOD_NAMES = [
-    "FFA IndexAttn (token-sparse)",
+    "FFA IndexSparse (token-sparse)",
     "FlexAttention (GQA, sparse mask)",
     "Triton Token-Sparse (MQA tl.dot)",
     "TileLang Sparse Attn (T.gemm)",
@@ -532,12 +532,12 @@ def bwd_benchmark(S, method):
     sparse_flops = 4 * S * topk * nhq * hd * 2.5  # BWD ~2.5x FWD flops
 
     try:
-        if method == "ffa_index_attn":
+        if method == "ffa_index_sparse":
             q = torch.randn(b, S, nhq, hd, device=device, dtype=dtype)
             k = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
             v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
 
-            index_attn_indices = build_index_attn_indices(b, S, nhk, topk, device)
+            index_sparse_indices = build_index_sparse_indices(b, S, nhk, topk, device)
             q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
             k_t = rearrange(k, "b s h d -> (b s h) 1 d")
             v_t = rearrange(v, "b s h d -> (b s h) 1 d")
@@ -552,7 +552,7 @@ def bwd_benchmark(S, method):
                 q_t,
                 k_t,
                 v_t,
-                index_attn_indices=index_attn_indices,
+                index_sparse_indices=index_sparse_indices,
                 q_block_size=1,
                 k_block_size=1,
                 pack_gqa=True,
@@ -695,7 +695,7 @@ if __name__ == "__main__":
         "--methods",
         nargs="+",
         default=None,
-        help="Subset of methods to run (e.g., --methods ffa_index_attn triton_token_sparse)",
+        help="Subset of methods to run (e.g., --methods ffa_index_sparse triton_token_sparse)",
     )
     args = parser.parse_args()
 
@@ -748,7 +748,7 @@ if __name__ == "__main__":
                 args={},
             )
 
-    out_root = gen_save_path("bench_index_attn_comparison")
+    out_root = gen_save_path("bench_index_sparse_comparison")
 
     # Sanity check before benchmarking — auto-disable methods that crash
     if not args.skip_sanity:

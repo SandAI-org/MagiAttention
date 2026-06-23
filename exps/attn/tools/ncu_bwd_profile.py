@@ -12,18 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NCU profiling script: FFA Dense BWD vs FFA IndexAttn BWD.
+"""NCU profiling script: FFA Dense BWD vs FFA IndexSparse BWD.
 
 Usage:
     # Full profile (kernel-level metrics)
-    ncu --set full -o /tmp/bwd_profile python exps/attn/ncu_bwd_profile.py --mode dense_loopq
-    ncu --set full -o /tmp/bwd_idx_profile python exps/attn/ncu_bwd_profile.py --mode index_attn
+    ncu --set full -o /tmp/bwd_profile python exps/attn/tools/ncu_bwd_profile.py --mode dense_loopq
+    ncu --set full -o /tmp/bwd_idx_profile python exps/attn/tools/ncu_bwd_profile.py --mode index_sparse
 
     # Quick summary (SM throughput, memory, occupancy)
     ncu --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed,\
 dram__throughput.avg.pct_of_peak_sustained_elapsed,\
 sm__warps_active.avg.pct_of_peak_sustained_active \
-    python exps/attn/ncu_bwd_profile.py --mode dense_loopq
+    python exps/attn/tools/ncu_bwd_profile.py --mode dense_loopq
 """
 
 import argparse
@@ -75,8 +75,8 @@ def profile_dense_bwd(S, nhq, nhk, hd, swap_loop=False):
     print(f"Dense BWD {label} profiled at S={S}")
 
 
-def profile_index_attn_bwd(S, nhq, nhk, hd, topk):
-    """IndexAttn BWD."""
+def profile_index_sparse_bwd(S, nhq, nhk, hd, topk):
+    """IndexSparse BWD."""
     device, dtype = "cuda", torch.bfloat16
     total_q = S * nhk
     q = torch.randn(total_q, nhq, hd, device=device, dtype=dtype, requires_grad=True)
@@ -91,7 +91,7 @@ def profile_index_attn_bwd(S, nhq, nhk, hd, topk):
         q,
         k,
         v,
-        index_attn_indices=idx,
+        index_sparse_indices=idx,
         q_block_size=1,
         k_block_size=1,
         pack_gqa=True,
@@ -113,13 +113,13 @@ def profile_index_attn_bwd(S, nhq, nhk, hd, topk):
     torch.cuda.synchronize()
     torch.cuda.cudart().cudaProfilerStop()
 
-    print(f"IndexAttn BWD profiled at S={S}, topk={topk}")
+    print(f"IndexSparse BWD profiled at S={S}, topk={topk}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--mode", choices=["dense_loopq", "dense_loopk", "index_attn"], required=True
+        "--mode", choices=["dense_loopq", "dense_loopk", "index_sparse"], required=True
     )
     parser.add_argument("--seqlen", type=int, default=4096)
     parser.add_argument("--topk", type=int, default=2048)
@@ -131,5 +131,5 @@ if __name__ == "__main__":
         profile_dense_bwd(args.seqlen, nhq, nhk, hd, swap_loop=False)
     elif args.mode == "dense_loopk":
         profile_dense_bwd(args.seqlen, nhq, nhk, hd, swap_loop=True)
-    elif args.mode == "index_attn":
-        profile_index_attn_bwd(args.seqlen, nhq, nhk, hd, args.topk)
+    elif args.mode == "index_sparse":
+        profile_index_sparse_bwd(args.seqlen, nhq, nhk, hd, args.topk)

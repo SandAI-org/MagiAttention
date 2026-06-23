@@ -34,7 +34,7 @@ __all__: list[str] = [
     "argsort_ranges",
     "binary_greedy_parallel_solve",
     "check_valid_cu_seqlens",
-    "compute_sparse_load_metadata",
+    "compute_block_sparse_metadata",
     "cut_host_remote_buckets",
     "destroy_event",
     "elapsed_ms_event",
@@ -711,7 +711,7 @@ def check_valid_cu_seqlens(
     Validate cu_seqlens and raise ValueError if invalid.
     """
 
-def compute_sparse_load_metadata(
+def compute_block_sparse_metadata(
     arg0: torch.Tensor,
     arg1: torch.Tensor,
     arg2: torch.Tensor,

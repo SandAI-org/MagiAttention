@@ -33,7 +33,7 @@ print('UseMaskDispatch=true compiled OK')
     MAGI_ATTENTION_FFA_USE_MASK_DISPATCH=false CUDA_HOME=/usr/local/cuda-13.0 python -c "..."
 
     # Then run this benchmark:
-    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/bench_causal_partition.py
+    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/ablation/bench_causal_partition.py
 """
 
 import os

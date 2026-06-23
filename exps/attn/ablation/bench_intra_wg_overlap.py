@@ -16,7 +16,7 @@
 
 """Benchmark: IntraWGOverlap true vs false for FWD dense attention.
 
-Since SparseLoad/IndexAttn require IntraWGOverlap=true (static_assert),
+Since BlockSparse/IndexSparse require IntraWGOverlap=true (static_assert),
 this benchmark only tests dense causal/full attention.
 
 Usage:
@@ -36,7 +36,7 @@ print('IntraWGOverlap=true compiled OK')
     MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP=false CUDA_HOME=/usr/local/cuda-13.0 python -c "..."
 
     # Then run this benchmark:
-    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/bench_intra_wg_overlap.py
+    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/ablation/bench_intra_wg_overlap.py
 """
 
 import os

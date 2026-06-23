@@ -57,8 +57,8 @@ template <
     bool PackGQA_,
     int QheadPerKhead_,
     bool SwapAB_,
-    bool SparseLoad_,
-    bool IndexAttn_,
+    bool BlockSparse_,
+    bool IndexSparse_,
     bool InnerDirMaxToMin_,
     int MaskMode_,
     int KBlockSize_ = 1>
@@ -81,10 +81,10 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr bool SwapAB = SwapAB_;
   static constexpr bool PackGQA = PackGQA_;
   static constexpr int QheadPerKhead = QheadPerKhead_;
-  static constexpr bool SparseLoad = SparseLoad_;
-  static constexpr bool IndexAttn = IndexAttn_;
+  static constexpr bool BlockSparse = BlockSparse_;
+  static constexpr bool IndexSparse = IndexSparse_;
   static constexpr int KBlockSize = KBlockSize_;
-  static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
+  static_assert(!(BlockSparse && IndexSparse), "BlockSparse and IndexSparse cannot be enabled at the same time");
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
 
@@ -122,16 +122,16 @@ struct CollectiveMainloopFwdSm90 {
   using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB, TileShape_MNK_PV>;
 
   // By default, we use TMA for Q and KV to get better performance.
-  // SparseLoad K/V tiles are physically contiguous within each range, so TMA 2D
-  // applies with absolute coordinates. IndexAttn with KBlockSize >= kBlockN also
+  // BlockSparse K/V tiles are physically contiguous within each range, so TMA 2D
+  // applies with absolute coordinates. IndexSparse with KBlockSize >= kBlockN also
   // has contiguous K/V blocks (each block = one tile), enabling TMA 2D.
-  // IndexAttn with KBlockSize < kBlockN falls back to per-row cp.async scatter.
-  static constexpr bool IndexAttnUseTma = IndexAttn && KBlockSize >= kBlockN;
+  // IndexSparse with KBlockSize < kBlockN falls back to per-row cp.async scatter.
+  static constexpr bool IndexSparseUseTma = IndexSparse && KBlockSize >= kBlockN;
   static constexpr bool Use_TMA_Q = true;
-  static constexpr bool Use_TMA_KV = !IndexAttn || IndexAttnUseTma;
+  static constexpr bool Use_TMA_KV = !IndexSparse || IndexSparseUseTma;
   static_assert(Use_TMA_KV || CUTE_STATIC_V(size(ClusterShape{})) == 1, "If not using TMA for KV, ClusterShape must be 1");
-  // NOTE: SwapAB + IndexAttn is now allowed; small kBlockM (8/16) uses SwapAB
-  // while IndexAttn handles indirect KV loading via cp.async.
+  // NOTE: SwapAB + IndexSparse is now allowed; small kBlockM (8/16) uses SwapAB
+  // while IndexSparse handles indirect KV loading via cp.async.
 
   // By default, V is always row-major
   static constexpr GMMA::Major MmaMajorV = GMMA::Major::MN;
@@ -144,14 +144,14 @@ struct CollectiveMainloopFwdSm90 {
   // Leaving this option here for reference.
   static constexpr bool MmaQK_is_RS = false;
 
-  // OPT-6: Only the scatter path (IndexAttn without TMA) needs a full warp group for
-  // cp.async KV loads.  TMA paths (Dense, SparseLoad, IndexAttn with kbs>=kBlockN)
+  // OPT-6: Only the scatter path (IndexSparse without TMA) needs a full warp group for
+  // cp.async KV loads.  TMA paths (Dense, BlockSparse, IndexSparse with kbs>=kBlockN)
   // issue loads from a single thread, so a single warp suffices — matching Dense and
   // eliminating ~96 idle producer threads that only add barrier/instruction overhead.
-  static constexpr bool ScatterKV = IndexAttn && !IndexAttnUseTma;
+  static constexpr bool ScatterKV = IndexSparse && !IndexSparseUseTma;
   static constexpr int NumProducerThreads = ScatterKV ? cutlass::NumThreadsPerWarpGroup : cutlass::NumThreadsPerWarp;
 
-  // Const parameters for IndexAttn
+  // Const parameters for IndexSparse
   // SMEM bank row width: 32 banks * 4 bytes = 128 bytes
   static constexpr int kCpAsyncTransactionBytes = 128;
   // A group of 8 threads load global memory together to form one memory transaction (8 * 16B = 128B)
@@ -161,7 +161,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int NumRowsPerGroup = kBlockN / NumGroups;
   // Number of cp.async tiles per row: each tile covers kCpAsyncTransactionBytes of the row
   static constexpr int NumCpAsyncTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-  static_assert(!(SparseLoad || IndexAttn) || kBlockN % NumGroups == 0, "Sparse KV scatter requires kBlockN divisible by NumGroups");
+  static_assert(!(BlockSparse || IndexSparse) || kBlockN % NumGroups == 0, "Sparse KV scatter requires kBlockN divisible by NumGroups");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 
@@ -340,17 +340,17 @@ struct CollectiveMainloopFwdSm90 {
   // smem size to go from 227KB to 228KB and we get "invalid argument".
 
   // Scatter-load index slots, 1:1 with the K pipeline buffers.
-  // IndexAttn (scatter): kBlockN per-row token indices per stage (cp.async scatter).
-  // IndexAttn (TMA) / SparseLoad: 1 absolute block index per stage (TMA — communicated K→V).
+  // IndexSparse (scatter): kBlockN per-row token indices per stage (cp.async scatter).
+  // IndexSparse (TMA) / BlockSparse: 1 absolute block index per stage (TMA — communicated K→V).
   // Dense: nothing.
   using KVTokenIndices_t = std::conditional_t<
-      IndexAttn && !IndexAttnUseTma,
+      IndexSparse && !IndexSparseUseTma,
       cute::array<int, kBlockN * kStages>,
-      std::conditional_t<SparseLoad || IndexAttnUseTma, cute::array<int, kStages>, cute::array<int, 0>>>;
+      std::conditional_t<BlockSparse || IndexSparseUseTma, cute::array<int, kStages>, cute::array<int, 0>>>;
 
-  // OPT-5: SMEM cache for K block indices. IndexAttn TMA prefetches group_token_ptr
+  // OPT-5: SMEM cache for K block indices. IndexSparse TMA prefetches group_token_ptr
   // here once per outer tile so inner loop reads from SMEM (L1) instead of GMEM.
-  static constexpr int MaxKBlockIdxPrefetch = IndexAttnUseTma ? 1024 : 0;
+  static constexpr int MaxKBlockIdxPrefetch = IndexSparseUseTma ? 1024 : 0;
   using KBlockIdxPrefetch_t = cute::array<int, MaxKBlockIdxPrefetch>;
 
   struct TensorStorageWithoutP : cute::aligned_struct<maxSmemAlignmentWithoutP, _0> {
@@ -402,8 +402,8 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    int const* const index_attn_indices;
-    int const index_attn_max_topk;
+    int const* const index_sparse_indices;
+    int const index_sparse_max_topk;
   };
 
   // Device side kernel params
@@ -430,16 +430,28 @@ struct CollectiveMainloopFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const cu_batches;
-    int const* const index_attn_indices;
-    int const index_attn_max_topk;
+    int const* const index_sparse_indices;
+    int const index_sparse_max_topk;
   };
 
   // BlockMeta type aliases — definitions live in block_meta.h
   template <bool IsProducer>
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, /*FlattenGQA=*/PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
-  // SparseLoad producer (used by load)
-  using SparseLoadBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
+  // BlockSparse producer (used by load)
+  using BlockSparseBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
+                                                           RangeMerge,
+                                                           PackGQA,
+                                                           QheadPerKhead,
+                                                           NumRowsPerGroup,
+                                                           GroupSize,
+                                                           NumProducerThreads,
+                                                           kBlockN,
+                                                           InnerDirMaxToMin,
+                                                           /*IsLoopQ=*/false>;
+
+  // BlockSparse consumer (used by mma), replaces old SparseMmaBlockMeta
+  using SparseMmaBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
                                                          RangeMerge,
                                                          PackGQA,
                                                          QheadPerKhead,
@@ -450,21 +462,9 @@ struct CollectiveMainloopFwdSm90 {
                                                          InnerDirMaxToMin,
                                                          /*IsLoopQ=*/false>;
 
-  // SparseLoad consumer (used by mma), replaces old SparseMmaBlockMeta
-  using SparseMmaBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
-                                                        RangeMerge,
-                                                        PackGQA,
-                                                        QheadPerKhead,
-                                                        NumRowsPerGroup,
-                                                        GroupSize,
-                                                        NumProducerThreads,
-                                                        kBlockN,
-                                                        InnerDirMaxToMin,
-                                                        /*IsLoopQ=*/false>;
-
   template <bool IsProducer>
-  using IndexAttnBlockMeta =
-      flash::IndexAttnBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin, KBlockSize>;
+  using IndexSparseBlockMeta = flash::
+      IndexSparseBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin, KBlockSize>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
@@ -535,8 +535,8 @@ struct CollectiveMainloopFwdSm90 {
         args.k_ranges,
         args.attn_type_map,
         args.cu_batches,
-        args.index_attn_indices,
-        args.index_attn_max_topk};
+        args.index_sparse_indices,
+        args.index_sparse_max_topk};
   }
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -655,10 +655,10 @@ struct CollectiveMainloopFwdSm90 {
 
     // ─── Define K/V load lambdas for both paths ───
 
-    // SparseLoad/IndexAttn scatter-load addressing, hoisted out of the lambdas (loop-invariant,
+    // BlockSparse/IndexSparse scatter-load addressing, hoisted out of the lambdas (loop-invariant,
     // computed once; unused & DCE'd on the dense path below).
     // Use CuTe Copy_Atom for cp.async.cg (emits L2::128B). Benchmarked against bare-PTX
-    // L2::cache_hint.L2::256B + evict_last: < 0.5% difference on SparseLoad MQA workloads.
+    // L2::cache_hint.L2::256B + evict_last: < 0.5% difference on BlockSparse MQA workloads.
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
     int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
@@ -674,11 +674,11 @@ struct CollectiveMainloopFwdSm90 {
     bool first_v_loaded = false;
 
     // Unified K load.
-    // IndexAttn (scatter): per-row cp.async scatter via token indices in smem.
-    // IndexAttn (TMA) / SparseLoad: TMA 2D tile at absolute block coordinate from block_meta.
+    // IndexSparse (scatter): per-row cp.async scatter via token indices in smem.
+    // IndexSparse (TMA) / BlockSparse: TMA 2D tile at absolute block coordinate from block_meta.
     // Dense: TMA 2D tile at relative n_block within batch.
     auto load_K = [&]() {
-      if constexpr (IndexAttn && !IndexAttnUseTma) {
+      if constexpr (IndexSparse && !IndexSparseUseTma) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
@@ -699,11 +699,11 @@ struct CollectiveMainloopFwdSm90 {
         }
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_k;
-      } else if constexpr (SparseLoad || IndexAttnUseTma) {
-        // SparseLoad / IndexAttn TMA: tiles are contiguous → use absolute coords.
+      } else if constexpr (BlockSparse || IndexSparseUseTma) {
+        // BlockSparse / IndexSparse TMA: tiles are contiguous → use absolute coords.
         if (is_tma_issue_thread()) {
           int const n_block_abs = [&]() {
-            if constexpr (SparseLoad)
+            if constexpr (BlockSparse)
               return block_meta.get_packed_first_row() / kBlockN;
             else
               return block_meta.get_n_block_abs();
@@ -746,15 +746,15 @@ struct CollectiveMainloopFwdSm90 {
     };
 
     // Unified V load with lazy barrier_O.
-    // IndexAttn (scatter): token indices come from the smem stage slot written by the matching load_K.
-    // IndexAttn (TMA) / SparseLoad: TMA 2D at absolute block read from smem (written by matching load_K).
+    // IndexSparse (scatter): token indices come from the smem stage slot written by the matching load_K.
+    // IndexSparse (TMA) / BlockSparse: TMA 2D at absolute block read from smem (written by matching load_K).
     // Dense: use_prev derives V block from n_block ± stagger offset.
     auto load_V = [&](auto use_prev) {
       if (!first_v_loaded) {
         shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
         first_v_loaded = true;
       }
-      if constexpr (IndexAttn && !IndexAttnUseTma) {
+      if constexpr (IndexSparse && !IndexSparseUseTma) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
@@ -772,8 +772,8 @@ struct CollectiveMainloopFwdSm90 {
         }
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
-      } else if constexpr (SparseLoad || IndexAttnUseTma) {
-        // SparseLoad / IndexAttn TMA: read n_block_abs written by the matching load_K.
+      } else if constexpr (BlockSparse || IndexSparseUseTma) {
+        // BlockSparse / IndexSparse TMA: read n_block_abs written by the matching load_K.
         if (is_tma_issue_thread()) {
           int const n_block_abs = shared_storage.tensors.mainloop.smem_kv_token_indices[smem_pipe_write_v.index()];
           auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
@@ -833,7 +833,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (!IntraWGOverlap) {
         load_V(cute::false_type{} /*cur*/);
       }
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (BlockSparse || IndexSparse) {
         block_meta.prefetch();
       } else {
         flash::advance_block_cur<kInnerDir>(block_meta.inner_block_cur);
@@ -851,7 +851,7 @@ struct CollectiveMainloopFwdSm90 {
     // Sparse: single step per call (is_finish guard for single-block case).
     // Dense: iterates all remaining blocks after load_head's cursor advance.
     auto load_body = [&]() {
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (BlockSparse || IndexSparse) {
         if (block_meta.is_finish())
           return;
         load_step();
@@ -878,7 +878,7 @@ struct CollectiveMainloopFwdSm90 {
     // The TMA issue thread reads group_token_ptr[kblock_idx] every inner iteration
     // via get_n_block_abs(); redirecting that pointer to SMEM eliminates per-tile
     // GMEM latency on the producer critical path.
-    if constexpr (IndexAttnUseTma) {
+    if constexpr (IndexSparseUseTma) {
       int const num_kblocks = block_meta.seqlen_info.seqlen_k / KBlockSize;
       if (num_kblocks <= MaxKBlockIdxPrefetch) {
         int* const cache = shared_storage.tensors.mainloop.smem_kblock_idx_cache.data();
@@ -931,7 +931,7 @@ struct CollectiveMainloopFwdSm90 {
     if (work_idx == 0) {
       return;
     }
-    if (!(SparseLoad || IndexAttn)) {
+    if (!(BlockSparse || IndexSparse)) {
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       // Issue the epilogue waits
       // TODO: check if this should be called by 1 thread or more
@@ -1159,7 +1159,7 @@ struct CollectiveMainloopFwdSm90 {
           tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto padding_mask_fn = [&](int /*n_block*/) {
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (BlockSparse || IndexSparse) {
         mask.apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
       }
     };
@@ -1241,7 +1241,7 @@ struct CollectiveMainloopFwdSm90 {
       consumer_release(pipeline_k, smem_pipe_read_k);
       // Head mask: dense → boundary; sparse MaxToMin → padding (head is always max-end);
       // sparse MinToMax → runtime check (head is min-end, but single-block case is also padding block).
-      if constexpr (!(SparseLoad || IndexAttn)) {
+      if constexpr (!(BlockSparse || IndexSparse)) {
         apply_mask_softmax(block_meta.inner_block_cur, boundary_mask_fn, cute::true_type{}, /*is_first=*/true);
       } else if constexpr (InnerDirMaxToMin) {
         apply_mask_softmax(block_meta.inner_block_cur, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
@@ -1261,8 +1261,8 @@ struct CollectiveMainloopFwdSm90 {
 
       // Advance iteration cursor after head (direction-aware).
       // Dense: step one block so body starts from the next block.
-      // Sparse/IndexAttn: prefetch metadata to enable body's is_finish() guard.
-      if constexpr (SparseLoad || IndexAttn) {
+      // Sparse/IndexSparse: prefetch metadata to enable body's is_finish() guard.
+      if constexpr (BlockSparse || IndexSparse) {
         block_meta.prefetch();
       } else {
         flash::advance_block_cur<kInnerDir>(block_meta.inner_block_cur);
@@ -1347,7 +1347,7 @@ struct CollectiveMainloopFwdSm90 {
     // MMA body: sparse uses compile-time direction for mask selection;
     // Dense uses mask_dispatch (3-lambda, compile-time zone splitting) for zero-overhead inner loop.
     auto mma_body = [&]() {
-      if constexpr (SparseLoad || IndexAttn) {
+      if constexpr (BlockSparse || IndexSparse) {
         if (block_meta.is_finish())
           return;
         if constexpr (InnerDirMaxToMin) {

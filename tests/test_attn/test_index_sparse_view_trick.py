@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Test: simulate q_block_size>1 via external Q view/reshape for IndexAttn.
+"""Test: simulate q_block_size>1 via external Q view/reshape for IndexSparse.
 
-Fold QBS consecutive Q tokens into the heads dimension, then call index_attn
+Fold QBS consecutive Q tokens into the heads dimension, then call index_sparse
 with q_block_size=1.  No kernel modification needed.
 
     Q: (B, S, NHQ, D) → (B, S//QBS, NHQ*QBS, D)
@@ -63,7 +63,7 @@ from magi_attention.functional import flex_flash_attn_func
 
 
 def _build_block_shared_indices(B, S, NHK, topk, qbs, device):
-    """Build index_attn_indices where each q_block of *qbs* tokens shares K indices."""
+    """Build index_sparse_indices where each q_block of *qbs* tokens shares K indices."""
     S_blk = S // qbs
     indices_block = torch.full(
         (B * S_blk, NHK, topk), -1, dtype=torch.int32, device=device
@@ -80,7 +80,7 @@ def _build_block_shared_indices(B, S, NHK, topk, qbs, device):
 
 
 def _sdpa_reference(q_raw, k_raw, v_raw, indices_full, B, S, NHQ, NHK, device):
-    """SDPA reference with dense mask built from index_attn_indices."""
+    """SDPA reference with dense mask built from index_sparse_indices."""
     gqa = NHQ // NHK
     mask = torch.zeros(B, NHQ, S, S, dtype=torch.bool, device=device)
     for b in range(B):
@@ -140,7 +140,7 @@ def _run_view_trick(
         q_ffa,
         k_ffa,
         v_ffa,
-        index_attn_indices=indices_block,
+        index_sparse_indices=indices_block,
         q_block_size=1,
         k_block_size=1,
         pack_gqa=True,
