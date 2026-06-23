@@ -17,17 +17,6 @@
 # mypy: disable-error-code="union-attr,index,assignment,misc"
 # pyright: reportInvalidTypeForm=false
 
-# Supported features:
-# - BF16 & FP16 dtype
-# - noncausal & causal attention
-# - MHA, GQA, MQA
-# - hdim 64, 96, 128, (192, 128).
-# - varlen
-# - sliding window
-# - split-kv
-# Unsupported features that will be added later:
-# - page size != 128
-# - more hdim (192, 256)
 # Based on the cutlass example and cute-dsl example:
 # https://github.com/NVIDIA/cutlass/tree/main/examples/77_blackwell_fmha
 # https://github.com/NVIDIA/cutlass/blob/main/examples/python/CuTeDSL/blackwell/fmha.py
