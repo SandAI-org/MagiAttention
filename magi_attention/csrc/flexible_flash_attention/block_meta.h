@@ -597,15 +597,22 @@ struct IndexAttnBlockMeta {
     }
   }
 
-  // LoopQ only: absolute packed row for TMA coordinate computation
+  // Absolute packed row for TMA coordinate computation.
+  // LoopQ: maps inner_block_cur through inv_indices → absolute packed Q row.
+  // LoopK: maps inner_block_cur through index_attn_indices → absolute packed K row.
   CUTLASS_DEVICE
   int get_packed_first_row() const {
-    static_assert(IsProducer && IsLoopQ, "get_packed_first_row() is LoopQ producer-only");
-    int packed_row = inner_block_cur * kInnerBlockSize_;
-    int q_token_local_idx = packed_row / QheadPerKhead;
-    int sub_head_offset = packed_row % QheadPerKhead;
-    int q_token = (q_token_local_idx < seqlen_info.seqlen_q / QheadPerKhead) ? group_token_ptr[q_token_local_idx] : -1;
-    return (q_token >= 0) ? q_token * QheadPerKhead + sub_head_offset : 0;
+    static_assert(IsProducer, "get_packed_first_row() is producer-only");
+    if constexpr (IsLoopQ) {
+      int packed_row = inner_block_cur * kInnerBlockSize_;
+      int q_token_local_idx = packed_row / QheadPerKhead;
+      int sub_head_offset = packed_row % QheadPerKhead;
+      int q_token = (q_token_local_idx < seqlen_info.seqlen_q / QheadPerKhead) ? group_token_ptr[q_token_local_idx] : -1;
+      return (q_token >= 0) ? q_token * QheadPerKhead + sub_head_offset : 0;
+    } else {
+      static_assert(kKBlockSize >= kInnerBlockSize_, "LoopK get_packed_first_row() requires kbs >= kBlockN");
+      return get_n_block_abs() * kInnerBlockSize_;
+    }
   }
 
   // LoopK block-level only: absolute K block index for TMA tile load.
