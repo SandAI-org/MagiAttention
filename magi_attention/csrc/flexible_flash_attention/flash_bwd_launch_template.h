@@ -124,8 +124,8 @@ template <
     int AtomLayoutMdQ,
     bool V_in_regs,
     bool RangeMerge,
-    bool SparseLoad,
-    bool IndexAttn,
+    bool BlockSparse,
+    bool IndexSparse,
     bool UseMaskDispatch,
     bool InnerDirMaxToMin,
     int MaskMode,
@@ -186,8 +186,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       PackGQA,
       CatGQA,
       RangeMerge,
-      SparseLoad,
-      IndexAttn,
+      BlockSparse,
+      IndexSparse,
       UseMaskDispatch,
       InnerDirMaxToMin,
       MaskMode,
@@ -234,7 +234,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
       /*QheadPerKhead=*/QheadPerKhead,
-      /*IndexAttn=*/IndexAttn,
+      /*IndexSparse=*/IndexSparse,
       /*KBlockSize=*/KBlockSize>;
   using AttnKernel = flash::enable_sm90_or_later<
       flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, BwdProducerRegs, BwdConsumerRegs>>;
@@ -270,8 +270,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.bwd_kq_map,
       params.dq_determin_conflict_state,
       params.dq_determin_range_locks,
-      params.index_attn_indices,
-      params.index_attn_max_topk,
+      params.index_sparse_indices,
+      params.index_sparse_max_topk,
       params.pool_count,
       params.pool_seqlen_k};
 
@@ -380,8 +380,8 @@ template <
     bool PackGQA,
     bool CatGQA,
     int QheadPerKhead,
-    bool SparseLoad,
-    bool IndexAttn,
+    bool BlockSparse,
+    bool IndexSparse,
     bool UseMaskDispatch,
     bool InnerDirMaxToMin,
     int MaskMode,
@@ -402,12 +402,12 @@ template <
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  static constexpr bool IndexAttnInvLoopQ = IndexAttn && !SwapBwdQKLoop;
+  static constexpr bool IndexSparseInvLoopQ = IndexSparse && !SwapBwdQKLoop;
   // BwdTileM/N, BwdStages/Ds: 0 = use default, >0 = override (env: MAGI_BWD_TILE_M/N, MAGI_BWD_STAGES/DS).
   static constexpr int kBlockM =
-      BwdTileM > 0 ? BwdTileM : std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexAttnInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+      BwdTileM > 0 ? BwdTileM : std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexSparseInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
   static constexpr int kBlockN =
-      BwdTileN > 0 ? BwdTileN : std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexAttnInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+      BwdTileN > 0 ? BwdTileN : std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexSparseInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
 
   static constexpr int Stages = BwdStages > 0 ? BwdStages : 2;
   static constexpr int Stages_dO = Stages >= 2 ? (kHeadDim <= 128 ? 2 : 1) : 1;
@@ -467,8 +467,8 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*AtomLayoutMdQ=*/AtomLayoutMdQ,
       /*V_in_regs=*/V_in_regs,
       /*RangeMerge=*/RangeMerge,
-      /*SparseLoad=*/SparseLoad,
-      /*IndexAttn=*/IndexAttn,
+      /*BlockSparse=*/BlockSparse,
+      /*IndexSparse=*/IndexSparse,
       /*UseMaskDispatch=*/UseMaskDispatch,
       /*InnerDirMaxToMin=*/InnerDirMaxToMin,
       /*MaskMode=*/MaskMode,

@@ -13,9 +13,12 @@
 # limitations under the License.
 
 import random
+import time
+import unittest
 from datetime import datetime
 from typing import Any
 
+import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests
 
@@ -56,74 +59,74 @@ class TestFlexFlashAttn(DistTestBase):
                 "swap_ab": False,
                 "ref_block_size": None,
                 "pack_gqa": False,
-                "sparse_load": False,
+                "block_sparse": False,
             },
             # pack_gqa
             {
                 "swap_ab": False,
                 "ref_block_size": (128, 128),
                 "pack_gqa": True,
-                "sparse_load": False,
+                "block_sparse": False,
             },
-            # sparse_load
+            # block_sparse
             {
                 "swap_ab": False,
                 "ref_block_size": (128, 128),
                 "pack_gqa": False,
-                "sparse_load": True,
+                "block_sparse": True,
             },
             {
                 "swap_ab": False,
                 "ref_block_size": (64, 128),
                 "pack_gqa": False,
-                "sparse_load": True,
+                "block_sparse": True,
             },
-            # sparse_load & pack_gqa
+            # block_sparse & pack_gqa
             {
                 "swap_ab": False,
                 "ref_block_size": (64, 128),
                 "pack_gqa": True,
-                "sparse_load": True,
+                "block_sparse": True,
             },
-            # sparse_load & swap_ab
+            # block_sparse & swap_ab
             {
                 "swap_ab": True,
                 "ref_block_size": (16, 64),
                 "pack_gqa": False,
-                "sparse_load": True,
+                "block_sparse": True,
             },
             # swap_ab
             {
                 "swap_ab": True,
                 "ref_block_size": (8, 64),
                 "pack_gqa": False,
-                "sparse_load": False,
+                "block_sparse": False,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (16, 64),
                 "pack_gqa": False,
-                "sparse_load": False,
+                "block_sparse": False,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (32, 64),
                 "pack_gqa": False,
-                "sparse_load": False,
+                "block_sparse": False,
             },
             # swap_ab & pack_gqa
             {
                 "swap_ab": True,
                 "ref_block_size": (64, 64),
                 "pack_gqa": True,
-                "sparse_load": False,
+                "block_sparse": False,
             },
-            # swap_ab & pack_gqa & sparse_load
+            # swap_ab & pack_gqa & block_sparse
             {
                 "swap_ab": True,
                 "ref_block_size": (64, 64),
                 "pack_gqa": True,
-                "sparse_load": True,
+                "block_sparse": True,
             },
         ]
 
@@ -297,7 +300,7 @@ class TestFlexFlashAttn(DistTestBase):
         k_ranges_tensor: torch.Tensor,
         attn_type_map_tensor: torch.Tensor,
         auto_range_merge: bool,
-        sparse_load: bool,
+        block_sparse: bool,
         o_ref: torch.Tensor,
         lse_ref: torch.Tensor,
         dq_ref: torch.Tensor,
@@ -338,7 +341,7 @@ class TestFlexFlashAttn(DistTestBase):
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
-            sparse_load=sparse_load,
+            block_sparse=block_sparse,
         )
         lse = meta.lse
         o.backward(do)
@@ -468,7 +471,7 @@ class TestFlexFlashAttn(DistTestBase):
             fwd_unique_count=fwd_unique_count,
             swap_ab=False,
             pack_gqa=pack_gqa,
-            sparse_load=False,
+            block_sparse=False,
             return_max_logits=True,
             max_logits=None,
         )
@@ -513,7 +516,7 @@ class TestFlexFlashAttn(DistTestBase):
             fwd_unique_count=fwd_unique_count,
             swap_ab=False,
             pack_gqa=pack_gqa,
-            sparse_load=False,
+            block_sparse=False,
             return_max_logits=True,
             max_logits=max_logits_acc,
         )
@@ -1136,7 +1139,7 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
-        sparse_load: bool,
+        block_sparse: bool,
         sink_layout: AttnSinkLayout,
         swap_ab: bool,
         ref_block_size: tuple[int, int] | None,
@@ -1148,7 +1151,9 @@ class TestFlexFlashAttn(DistTestBase):
         return_max_logits: bool = False,
         cat_gqa: bool = False,
     ) -> None:
-        if sparse_load:  # sparse load supports only auto_range_merge and full attn_type
+        if (
+            block_sparse
+        ):  # sparse load supports only auto_range_merge and full attn_type
             if not auto_range_merge or test_accumulation_inplace:
                 return
             for attn_type in attn_type_map:
@@ -1254,7 +1259,7 @@ class TestFlexFlashAttn(DistTestBase):
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
-            sparse_load=sparse_load,
+            block_sparse=block_sparse,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
             return_max_logits=return_max_logits,
         )
@@ -1279,7 +1284,7 @@ class TestFlexFlashAttn(DistTestBase):
                 k_ranges_tensor=k_ranges_tensor,
                 attn_type_map_tensor=attn_type_map_tensor,
                 auto_range_merge=auto_range_merge,
-                sparse_load=sparse_load,
+                block_sparse=block_sparse,
                 o_ref=o,
                 lse_ref=lse,
                 dq_ref=q.grad,
@@ -1694,7 +1699,7 @@ class TestFlexFlashAttn(DistTestBase):
         swap_ab = ref_block_config["swap_ab"]
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
-        sparse_load = ref_block_config["sparse_load"]
+        block_sparse = ref_block_config["block_sparse"]
         return_max_logits = bool(flag_comb.get("return_max_logits", False))
         cat_gqa = bool(flag_comb.get("cat_gqa", False))
 
@@ -1735,7 +1740,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[swap_ab={swap_ab}]"
             f"[ref_block_size={ref_block_size}]"
             f"[pack_gqa={pack_gqa}]"
-            f"[sparse_load={sparse_load}]"
+            f"[block_sparse={block_sparse}]"
             f"[has_sink={seqlen_sink > 0}]"
             f"[sink_layout={sink_layout}] x "
             f"{flag_comb_test_case}"
@@ -1756,7 +1761,7 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
-            sparse_load=sparse_load,
+            block_sparse=block_sparse,
             sink_layout=sink_layout,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
@@ -1906,7 +1911,7 @@ class TestFlexFlashAttn(DistTestBase):
         swap_ab = ref_block_config["swap_ab"]
         ref_block_size = ref_block_config["ref_block_size"]
         pack_gqa = ref_block_config["pack_gqa"]
-        sparse_load = ref_block_config["sparse_load"]
+        block_sparse = ref_block_config["block_sparse"]
         return_max_logits = bool(flag_comb.get("return_max_logits", False))
         cat_gqa = bool(flag_comb.get("cat_gqa", False))
 
@@ -1923,8 +1928,8 @@ class TestFlexFlashAttn(DistTestBase):
                 return
 
         if pack_gqa:
-            # BWD SparseLoad does not support PackGQA (TMA shape conflict)
-            if sparse_load:
+            # BWD BlockSparse does not support PackGQA (TMA shape conflict)
+            if block_sparse:
                 return
 
         if cat_gqa:
@@ -1953,7 +1958,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[swap_ab={swap_ab}]"
             f"[ref_block_size={ref_block_size}]"
             f"[pack_gqa={pack_gqa}] x "
-            f"[sparse_load={sparse_load}]"
+            f"[block_sparse={block_sparse}]"
             f"{flag_comb_test_case}"
         )
         print(f"[{datetime.now()}] START {test_case}", flush=True)
@@ -1972,7 +1977,7 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
-            sparse_load=sparse_load,
+            block_sparse=block_sparse,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             pack_gqa=pack_gqa,
@@ -2037,7 +2042,7 @@ class TestFlexFlashAttn(DistTestBase):
             # FIXME: compiling does not support auto_range_merge
             # due to custom unique_consecutive_pairs kernel with dynamic output shape
             auto_range_merge=False,
-            sparse_load=False,
+            block_sparse=False,
         )
         lse = meta.lse
         o.backward(do)
@@ -2065,6 +2070,504 @@ class TestFlexFlashAttn(DistTestBase):
             test_case=("[test_ffa_compiled]" f"[sink_layout={sink_layout}]"),
             max_seqlen_q=None,
         )
+
+
+class TestFlexFlashAttnSimple(unittest.TestCase):
+    """Lightweight single-process regression tests for flex_flash_attn.
+
+    Extracted from test_simple_attn.py — covers env-var-toggled code paths,
+    mask build verification, and IndexSparse with non-standard inner direction.
+    """
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
+
+    def assert_close_to_torch_ref(self, **kwargs):
+        TestFlexFlashAttn.assert_close_to_torch_ref(self, **kwargs)
+
+    def _check_block_sparse_vs_dense_ref(
+        self,
+        *,
+        S: int,
+        n_attend: int,
+        k_block: int,
+        swap_bwd_qk_loop_cases: tuple[bool, ...],
+        test_case: str,
+        tol: float = 2e-2,
+    ):
+        """Comparison helper: block_sparse variants vs the dense-TMA ffa reference."""
+        from magi_attention.utils.sparse_utils import (
+            generate_ranges_from_block_mask_triton,
+        )
+
+        device = self.device
+        nhq, nhk, head_dim = 128, 1, 128
+        dtype = torch.bfloat16
+        torch.manual_seed(42)
+
+        n_q_blocks, n_k_blocks = S, S // k_block
+        sel = torch.rand(n_q_blocks, n_k_blocks, device=device).argsort(dim=1)[
+            :, : min(n_attend, n_k_blocks)
+        ]
+        block_mask = torch.zeros(
+            1, nhk, n_q_blocks, n_k_blocks, dtype=torch.bool, device=device
+        )
+        block_mask[0, 0].scatter_(1, sel, True)
+        q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
+            block_mask, 1, k_block
+        )
+        attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device=device)
+
+        q0 = torch.randn(S, nhq, head_dim, device=device, dtype=dtype)
+        k0 = torch.randn(S, nhk, head_dim, device=device, dtype=dtype)
+        v0 = torch.randn(S, nhk, head_dim, device=device, dtype=dtype)
+        do = torch.randn(S, nhq, head_dim, device=device, dtype=dtype)
+
+        def run(block_sparse: bool, swap_bwd_qk_loop: bool):
+            q = q0.clone().requires_grad_(True)
+            k = k0.clone().requires_grad_(True)
+            v = v0.clone().requires_grad_(True)
+            out, _ = flex_flash_attn_func(
+                q,
+                k,
+                v,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=attn_type_map,
+                block_sparse=block_sparse,
+                auto_range_merge=True,
+                pack_gqa=True,
+                swap_bwd_qk_loop=swap_bwd_qk_loop,
+            )
+            out.backward(do)
+            return out.detach(), q.grad, k.grad, v.grad
+
+        ref = run(block_sparse=False, swap_bwd_qk_loop=True)
+        for swap in swap_bwd_qk_loop_cases:
+            got = run(block_sparse=True, swap_bwd_qk_loop=swap)
+            loop_name = "loopk" if swap else "loopq"
+            for name, a, b in zip(("out", "dq", "dk", "dv"), got, ref):
+                err = (
+                    (a.float() - b.float()).abs().max()
+                    / b.float().abs().max().clamp_min(1e-6)
+                ).item()
+                assert (
+                    err < tol
+                ), f"{test_case}[{loop_name}] {name} max_rel_err={err:.3e} >= {tol}"
+
+    # ─── Mask build performance: vectorized vs python-loop ───
+
+    def test_sdpa_mask_build_vectorized(self):
+        """Verify vectorized get_sdpa_mask_from_block_sparse_mask matches a
+        naive python-loop reference and is significantly faster."""
+        from magi_attention.utils.sparse_utils import (
+            deprecated_slow_get_sdpa_mask_from_block_sparse_mask,
+            generate_block_sparse_pattern,
+            get_sdpa_mask_from_block_sparse_mask,
+        )
+
+        device = self.device
+        seqlen, q_bs, k_bs = 512, 64, 64
+        nhq, nhk = 8, 2
+        nqb, nkb = seqlen // q_bs, seqlen // k_bs
+
+        block_mask, _ = generate_block_sparse_pattern(
+            num_q_heads=nhq,
+            num_kv_heads=nhk,
+            num_q_blocks=nqb,
+            num_kv_blocks=nkb,
+            sparsity=0.5,
+            mode="per_kv_head",
+            sparse_format="block_mask",
+            device=device,
+        )
+
+        # --- reference: deprecated slow python-loop implementation ---
+        torch.cuda.synchronize()
+        t0 = time.time()
+
+        mask_ref = deprecated_slow_get_sdpa_mask_from_block_sparse_mask(
+            block_mask, seqlen, seqlen, q_bs, k_bs, nhq
+        )
+
+        torch.cuda.synchronize()
+        t_loop = time.time() - t0
+
+        # --- current: vectorized implementation ---
+        torch.cuda.synchronize()
+        t1 = time.time()
+
+        mask_vec = get_sdpa_mask_from_block_sparse_mask(
+            block_mask, seqlen, seqlen, q_bs, k_bs, nhq
+        )
+
+        torch.cuda.synchronize()
+        t_vec = time.time() - t1
+
+        print(
+            f"\n  mask build (seqlen={seqlen}, q_bs={q_bs}, k_bs={k_bs}):"
+            f"  loop={t_loop:.3f}s  vec={t_vec:.4f}s  speedup={t_loop / max(t_vec, 1e-9):.0f}x",
+            flush=True,
+        )
+
+        assert torch.equal(mask_ref, mask_vec), "vectorized mask != loop mask"
+
+    # ─── Tier-1: env-var-toggled code paths ───
+
+    @pytest.mark.slow
+    def test_consumer_dkv_store(self):
+        """Tier-1: consumer-side scatter dX store
+        (MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER=false) for both
+        LoopK (dKV from consumer WGs) and LoopQ (dQ from consumer WGs)."""
+        import os
+
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
+
+        test_case = "[consumer_dkv_store]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        os.environ["MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER"] = "false"
+        if hasattr(get_ffa_jit_mod, "cache_clear"):
+            get_ffa_jit_mod.cache_clear()
+        try:
+            self._check_block_sparse_vs_dense_ref(
+                S=2048,
+                n_attend=8,
+                k_block=128,
+                swap_bwd_qk_loop_cases=(True, False),
+                test_case=test_case,
+            )
+        finally:
+            del os.environ["MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER"]
+            if hasattr(get_ffa_jit_mod, "cache_clear"):
+                get_ffa_jit_mod.cache_clear()
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
+
+    @pytest.mark.slow
+    def test_scalar_dx_store(self):
+        """Tier-1: scalar atomicAdd dX store fallback
+        (MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE=false, i.e.
+        SparseInnerDxReduceUseTma=false) for both LoopK and LoopQ."""
+        import os
+
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
+
+        test_case = "[scalar_dx_store]"
+        print(f"\n>>> {test_case} START", flush=True)
+        t0 = time.time()
+        os.environ["MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"] = "false"
+        if hasattr(get_ffa_jit_mod, "cache_clear"):
+            get_ffa_jit_mod.cache_clear()
+        try:
+            self._check_block_sparse_vs_dense_ref(
+                S=2048,
+                n_attend=8,
+                k_block=128,
+                swap_bwd_qk_loop_cases=(True, False),
+                test_case=test_case,
+            )
+        finally:
+            del os.environ["MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"]
+            if hasattr(get_ffa_jit_mod, "cache_clear"):
+                get_ffa_jit_mod.cache_clear()
+        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
+
+    # ─── IntraWGOverlap=false unit test ───
+
+    @pytest.mark.slow
+    def test_intra_wg_overlap_off(self):
+        """Verify Dense FWD+BWD passes with IntraWGOverlap=false (non-overlapped V load)."""
+        import os
+
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
+
+        device = self.device
+        torch.manual_seed(42)
+
+        os.environ["MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP"] = "false"
+        if hasattr(get_ffa_jit_mod, "cache_clear"):
+            get_ffa_jit_mod.cache_clear()
+        try:
+            S_q, S_k, NHQ, NHK, head_dim = 256, 256, 4, 4, 128
+            dtype = torch.bfloat16
+            q = torch.randn(
+                S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            k = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            v = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            do = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device)
+
+            q_ranges = torch.tensor([[0, S_q]], dtype=torch.int32, device=device)
+            k_ranges = torch.tensor([[0, S_k]], dtype=torch.int32, device=device)
+            attn_type_map = torch.tensor([0], dtype=torch.int32, device=device)
+
+            o, meta = flex_flash_attn_func(
+                q=q,
+                k=k,
+                v=v,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=attn_type_map,
+            )
+            o.backward(do)
+
+            self.assert_close_to_torch_ref(
+                q_ranges=AttnRanges.from_ranges([[0, S_q]]),
+                k_ranges=AttnRanges.from_ranges([[0, S_k]]),
+                attn_type_map=[0],
+                total_seqlen_q=S_q,
+                total_seqlen_k=S_k,
+                total_q=q,
+                total_k=k,
+                total_v=v,
+                total_sink=None,
+                total_out=o,
+                total_lse=meta.lse,
+                grad_total_q=q.grad,
+                grad_total_k=k.grad,
+                grad_total_v=v.grad,
+                grad_total_sink=None,
+                grad_total_out=do,
+                dtype=dtype,
+                sink_layout="sh",
+                test_case="[test_intra_wg_overlap_off]",
+            )
+        finally:
+            del os.environ["MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP"]
+            if hasattr(get_ffa_jit_mod, "cache_clear"):
+                get_ffa_jit_mod.cache_clear()
+
+    # ─── InnerDir MinToMax unit test ───
+
+    @pytest.mark.slow
+    def test_inner_dir_min_to_max(self):
+        """Verify Dense + IndexSparse FWD+BWD with InnerDir=MinToMax.
+
+        Dense: causal 256 seqlen, verifies reversed traversal order.
+        IndexSparse: topk=100 with max_topk=128 (28 padding tokens in the last
+        block), verifies padding_mask is applied to the correct block when
+        the sparse iteration direction is flipped.
+        """
+        import os
+
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
+        from magi_attention.utils.sparse_utils import (
+            build_index_sparse_indices,
+            get_sdpa_mask_from_index_sparse_indices,
+        )
+
+        device = self.device
+        torch.manual_seed(42)
+
+        os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = "false"
+        if hasattr(get_ffa_jit_mod, "cache_clear"):
+            get_ffa_jit_mod.cache_clear()
+        try:
+            # ── Part 1: Dense causal ──
+            S_q, S_k, NHQ, NHK, head_dim = 256, 256, 4, 4, 128
+            dtype = torch.bfloat16
+            q = torch.randn(
+                S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            k = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            v = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            do = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device)
+
+            q_ranges = torch.tensor([[0, S_q]], dtype=torch.int32, device=device)
+            k_ranges = torch.tensor([[0, S_k]], dtype=torch.int32, device=device)
+            attn_type_map = torch.tensor([1], dtype=torch.int32, device=device)
+
+            o, meta = flex_flash_attn_func(
+                q=q,
+                k=k,
+                v=v,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=attn_type_map,
+            )
+            o.backward(do)
+
+            self.assert_close_to_torch_ref(
+                q_ranges=AttnRanges.from_ranges([[0, S_q]]),
+                k_ranges=AttnRanges.from_ranges([[0, S_k]]),
+                attn_type_map=[1],
+                total_seqlen_q=S_q,
+                total_seqlen_k=S_k,
+                total_q=q,
+                total_k=k,
+                total_v=v,
+                total_sink=None,
+                total_out=o,
+                total_lse=meta.lse,
+                grad_total_q=q.grad,
+                grad_total_k=k.grad,
+                grad_total_v=v.grad,
+                grad_total_sink=None,
+                grad_total_out=do,
+                dtype=dtype,
+                sink_layout="sh",
+                test_case="[test_inner_dir_min_to_max/dense_causal]",
+            )
+
+            # ── Part 2: IndexSparse with non-aligned topk (padding block) ──
+            B, S, NHQ_ia, NHK_ia, D = 1, 256, 32, 4, 128
+            actual_topk = 100
+            max_topk = 128
+            gqa_ia = NHQ_ia // NHK_ia
+            S_flat = S * NHK_ia
+            NHQ_eff = gqa_ia
+
+            indices = build_index_sparse_indices(
+                B, 1, S_flat, S_flat, actual_topk, max_topk, device
+            )
+
+            q_raw = torch.randn(B, S, NHQ_ia, D, dtype=dtype, device=device)
+            k_raw = torch.randn(B, S, NHK_ia, D, dtype=dtype, device=device)
+            v_raw = torch.randn(B, S, NHK_ia, D, dtype=dtype, device=device)
+
+            q_ffa = (
+                q_raw.reshape(B, S, NHK_ia, gqa_ia, D)
+                .permute(0, 1, 2, 3, 4)
+                .reshape(B * S * NHK_ia, gqa_ia, D)
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+            k_ffa = (
+                k_raw.reshape(B * S * NHK_ia, 1, D)
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+            v_ffa = (
+                v_raw.reshape(B * S * NHK_ia, 1, D)
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+
+            o_sparse, _ = flex_flash_attn_func(
+                q_ffa,
+                k_ffa,
+                v_ffa,
+                index_sparse_indices=indices,
+                q_block_size=1,
+                k_block_size=1,
+                pack_gqa=True,
+            )
+
+            ref_mask = get_sdpa_mask_from_index_sparse_indices(
+                indices, B, NHQ_eff, 1, S_flat, S_flat, device
+            )
+
+            for b_i in range(B):
+                sl = slice(b_i * S_flat, (b_i + 1) * S_flat)
+                q_b = q_ffa[sl].detach().reshape(1, S_flat, NHQ_eff, D).transpose(1, 2)
+                k_b = k_ffa[sl].detach().reshape(1, S_flat, 1, D).transpose(1, 2)
+                v_b = v_ffa[sl].detach().reshape(1, S_flat, 1, D).transpose(1, 2)
+                if NHQ_eff > 1:
+                    k_b = k_b.expand(1, NHQ_eff, S_flat, D)
+                    v_b = v_b.expand(1, NHQ_eff, S_flat, D)
+                with torch.no_grad():
+                    o_ref = torch.nn.functional.scaled_dot_product_attention(
+                        q_b, k_b, v_b, attn_mask=ref_mask[b_i].unsqueeze(0)
+                    )
+                o_ref = o_ref.squeeze(0).transpose(0, 1)
+                max_diff = (o_sparse[sl].float() - o_ref.float()).abs().max().item()
+                assert max_diff < 0.01, (
+                    f"[test_inner_dir_min_to_max/index_sparse] "
+                    f"FWD batch {b_i}: max_diff={max_diff:.6f} >= 0.01"
+                )
+
+            # BWD check
+            do_sparse = torch.randn_like(o_sparse)
+            o_sparse.backward(do_sparse)
+            assert (
+                q_ffa.grad is not None
+            ), "[test_inner_dir_min_to_max/index_sparse] BWD: q_ffa.grad is None"
+
+        finally:
+            del os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"]
+            if hasattr(get_ffa_jit_mod, "cache_clear"):
+                get_ffa_jit_mod.cache_clear()
+
+    # ─── UseMaskDispatch=false unit test ───
+
+    @pytest.mark.slow
+    def test_use_mask_dispatch_off(self):
+        """Verify Dense FWD+BWD passes with UseMaskDispatch=false (original mask loop)."""
+        import os
+
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
+
+        device = self.device
+        torch.manual_seed(42)
+
+        os.environ["MAGI_ATTENTION_FFA_USE_MASK_DISPATCH"] = "false"
+        if hasattr(get_ffa_jit_mod, "cache_clear"):
+            get_ffa_jit_mod.cache_clear()
+        try:
+            S_q, S_k, NHQ, NHK, head_dim = 256, 256, 4, 4, 128
+            dtype = torch.bfloat16
+            q = torch.randn(
+                S_q, NHQ, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            k = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            v = torch.randn(
+                S_k, NHK, head_dim, dtype=dtype, device=device, requires_grad=True
+            )
+            do = torch.randn(S_q, NHQ, head_dim, dtype=dtype, device=device)
+
+            q_ranges = torch.tensor([[0, S_q]], dtype=torch.int32, device=device)
+            k_ranges = torch.tensor([[0, S_k]], dtype=torch.int32, device=device)
+            attn_type_map = torch.tensor([1], dtype=torch.int32, device=device)
+
+            o, meta = flex_flash_attn_func(
+                q=q,
+                k=k,
+                v=v,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=attn_type_map,
+            )
+            o.backward(do)
+
+            self.assert_close_to_torch_ref(
+                q_ranges=AttnRanges.from_ranges([[0, S_q]]),
+                k_ranges=AttnRanges.from_ranges([[0, S_k]]),
+                attn_type_map=[1],
+                total_seqlen_q=S_q,
+                total_seqlen_k=S_k,
+                total_q=q,
+                total_k=k,
+                total_v=v,
+                total_sink=None,
+                total_out=o,
+                total_lse=meta.lse,
+                grad_total_q=q.grad,
+                grad_total_k=k.grad,
+                grad_total_v=v.grad,
+                grad_total_sink=None,
+                grad_total_out=do,
+                dtype=dtype,
+                sink_layout="sh",
+                test_case="[test_use_mask_dispatch_off]",
+            )
+        finally:
+            del os.environ["MAGI_ATTENTION_FFA_USE_MASK_DISPATCH"]
+            if hasattr(get_ffa_jit_mod, "cache_clear"):
+                get_ffa_jit_mod.cache_clear()
 
 
 if __name__ == "__main__":

@@ -41,7 +41,7 @@ from magi_attention.functional import flex_flash_attn_func as ffa_func
 
 b = 1
 nhq = 128
-nhk = 1  # MQA — same as index_attn benchmark
+nhk = 1  # MQA — same as index_sparse benchmark
 hd = 128
 dtype = torch.bfloat16
 quantiles = [0.5, 0.2, 0.8]

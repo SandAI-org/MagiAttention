@@ -73,7 +73,7 @@ struct enable_sm80_to_sm89 : Kernel {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Resolve the [start, end) token range for batch `bidb`.
-// `ranges == nullptr` is the IndexAttn convention: every "batch" is a single
+// `ranges == nullptr` is the IndexSparse convention: every "batch" is a single
 // query token, so its range is {bidb, bidb + 1}; otherwise read it from gmem.
 // Takes `int2 const*` so the scheduler (`int2* const ranges`) and the epilogue
 // (`int2 const* k_ranges/q_ranges`) share a single definition.

@@ -17,8 +17,8 @@
 Measures TFLOPS across 4 attention methods as topk varies (block-sparse MQA):
   Dense-1B  : Traditional dense, pack_gqa=False, single batch (baseline ceiling)
   Dense     : Same random IA mask via SL q_ranges/k_ranges (proves SL zero overhead)
-  IndexAttn : Random K blocks via IA kernel path
-  SparseLoad: Same random IA mask via SL q_ranges/k_ranges
+  IndexSparse : Random K blocks via IA kernel path
+  BlockSparse: Same random IA mask via SL q_ranges/k_ranges
 
 Each method has two variants:
   solid  (S=S_FULL): fixed full seqlen, topk varies → shows L2 cache + CTA effects
@@ -29,11 +29,11 @@ Passes: FWD, BWD LoopQ, BWD LoopK.
 Config: nhq=128, nhk=1 (MQA), hd=128, k_block_size=128, bf16.
 
 Usage:
-  python exps/attn/bench_l2_cache_sparse.py --bench
-  python exps/attn/bench_l2_cache_sparse.py --bench --force
-  python exps/attn/bench_l2_cache_sparse.py --bench --rerun "bwd_loopq/d1b_solid"
-  python exps/attn/bench_l2_cache_sparse.py --plot
-  python exps/attn/bench_l2_cache_sparse.py --bench --plot --out-dir /tmp/my_results
+  python exps/attn/sparse/bench_l2_cache_sparse.py --bench
+  python exps/attn/sparse/bench_l2_cache_sparse.py --bench --force
+  python exps/attn/sparse/bench_l2_cache_sparse.py --bench --rerun "bwd_loopq/d1b_solid"
+  python exps/attn/sparse/bench_l2_cache_sparse.py --plot
+  python exps/attn/sparse/bench_l2_cache_sparse.py --bench --plot --out-dir /tmp/my_results
 """
 
 import argparse
@@ -219,7 +219,7 @@ def run_bench(force=False, rerun_filter=None):
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=atm,
-            sparse_load=True,
+            block_sparse=True,
             auto_range_merge=True,
             pack_gqa=True,
         )
@@ -285,14 +285,14 @@ def run_bench(force=False, rerun_filter=None):
         return _run_sl_path(S, topk, pass_type, indices)
 
     def run_ia(S, topk, pass_type):
-        """IndexAttn with random K blocks."""
+        """IndexSparse with random K blocks."""
         gpu = _set_gpu()
         device = f"cuda:{gpu}"
         indices = build_random_indices(S, topk, device)
         kw = dict(
-            index_attn_indices=indices,
+            index_sparse_indices=indices,
             k_block_size=KBS,
-            index_attn=True,
+            index_sparse=True,
             pack_gqa=True,
         )
         if pass_type != "fwd":
@@ -302,7 +302,7 @@ def run_bench(force=False, rerun_filter=None):
         return round(tf, 1), round(ms, 3), gpu
 
     def run_sl(S, topk, pass_type):
-        """SparseLoad with same random IA mask, converted to ranges."""
+        """BlockSparse with same random IA mask, converted to ranges."""
         indices = build_random_indices(S, topk, "cpu")
         return _run_sl_path(S, topk, pass_type, indices)
 
@@ -419,8 +419,8 @@ def run_plot():
             "methods": [
                 ("d1b_solid", "Dense-1B", COL_D1B, ""),
                 ("dense_solid", "Dense", COL_DENSE, ""),
-                ("ia_solid", "IndexAttn", COL_IA, ""),
-                ("sl_solid", "SparseLoad", COL_SL, ""),
+                ("ia_solid", "IndexSparse", COL_IA, ""),
+                ("sl_solid", "BlockSparse", COL_SL, ""),
             ],
         },
         {
@@ -428,8 +428,8 @@ def run_plot():
             "methods": [
                 ("d1b_dashed", "Dense-1B", COL_D1B, "//"),
                 ("dense_dashed", "Dense", COL_DENSE, "//"),
-                ("ia_dashed", "IndexAttn", COL_IA, "//"),
-                ("sl_dashed", "SparseLoad", COL_SL, "//"),
+                ("ia_dashed", "IndexSparse", COL_IA, "//"),
+                ("sl_dashed", "BlockSparse", COL_SL, "//"),
             ],
         },
     ]

@@ -180,7 +180,7 @@ struct Mask {
     }
   };
 
-  // Mask invalid columns (N-side padding, for SparseLoad LoopK / IndexAttn)
+  // Mask invalid columns (N-side padding, for BlockSparse LoopK / IndexSparse)
   template <typename Engine, typename Layout>
   CUTLASS_DEVICE void apply_padding_mask(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");
@@ -210,7 +210,7 @@ struct Mask {
     }
   }
 
-  // Mask invalid rows (M-side padding, for SparseLoad LoopQ)
+  // Mask invalid rows (M-side padding, for BlockSparse LoopQ)
   template <typename Engine, typename Layout>
   CUTLASS_DEVICE void apply_padding_mask_row(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");

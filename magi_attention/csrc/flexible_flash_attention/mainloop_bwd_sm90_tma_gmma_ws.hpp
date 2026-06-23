@@ -64,8 +64,8 @@ template <
     bool PackGQA_,
     bool CatGQA_,
     bool RangeMerge_,
-    bool SparseLoad_,
-    bool IndexAttn_,
+    bool BlockSparse_,
+    bool IndexSparse_,
     bool UseMaskDispatch_,
     bool InnerDirMaxToMin_,
     int MaskMode_,
@@ -116,23 +116,23 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr int QheadPerKhead = QheadPerKhead_;
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
-  static constexpr bool SparseLoad = SparseLoad_;
-  static constexpr bool IndexAttn = IndexAttn_;
+  static constexpr bool BlockSparse = BlockSparse_;
+  static constexpr bool IndexSparse = IndexSparse_;
   static constexpr int KBlockSize = KBlockSize_;
-  static_assert(!SparseLoad || RangeMerge); // If SparseLoad, we need RangeMerge
-  static_assert(!(SparseLoad && IndexAttn));
-  static_assert(!IndexAttn || KBlockSize >= 1, "KBlockSize must be >= 1 for IndexAttn");
+  static_assert(!BlockSparse || RangeMerge); // If BlockSparse, we need RangeMerge
+  static_assert(!(BlockSparse && IndexSparse));
+  static_assert(!IndexSparse || KBlockSize >= 1, "KBlockSize must be >= 1 for IndexSparse");
 
   static constexpr bool UseMaskDispatch = UseMaskDispatch_;
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
   // InnerUseScatter: inner-loop direction data uses scatter load/store (vs TMA):
-  // LoopK (SwapBwdQKLoop=true):  KV scatter when SparseLoad or IndexAttn
-  // LoopQ (SwapBwdQKLoop=false): Q/dO scatter when SparseLoad or IndexAttn (inv_indices)
-  static constexpr bool InnerUseScatter = SparseLoad || IndexAttn;
+  // LoopK (SwapBwdQKLoop=true):  KV scatter when BlockSparse or IndexSparse
+  // LoopQ (SwapBwdQKLoop=false): Q/dO scatter when BlockSparse or IndexSparse (inv_indices)
+  static constexpr bool InnerUseScatter = BlockSparse || IndexSparse;
   // LoopQ scatter does not support CatGQA (the dense LoopQ load iterates bidh_kv_cat
   // per merged sub-range; the scatter load path has no such loop).
-  static_assert(!(InnerUseScatter && !SwapBwdQKLoop && CatGQA), "bwd LoopQ scatter (sparse_load) does not support cat_gqa");
+  static_assert(!(InnerUseScatter && !SwapBwdQKLoop && CatGQA), "bwd LoopQ scatter (block_sparse) does not support cat_gqa");
 
   // InnerDxStoreInProducer: who performs the inner-loop dX (dKV for LoopK / dQ for LoopQ)
   // store. Pure pass-through of the template/env toggle; the python JIT entry only emits
@@ -148,7 +148,7 @@ struct CollectiveMainloopBwdSm90 {
   // with this flag set would silently mismatch the r2s-write (flat) vs TMA-read (swizzled)
   // accum layouts and corrupt results.
   static constexpr bool SparseInnerDxReduceUseTma = SparseInnerDxReduceUseTma_;
-  static_assert(!SparseInnerDxReduceUseTma_ || InnerUseScatter, "SparseInnerDxReduceUseTma requires a scatter path (SparseLoad / IndexAttn)");
+  static_assert(!SparseInnerDxReduceUseTma_ || InnerUseScatter, "SparseInnerDxReduceUseTma requires a scatter path (BlockSparse / IndexSparse)");
 
   static constexpr int kBlockM = get<0>(TileShape_MNK{});
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
@@ -158,19 +158,19 @@ struct CollectiveMainloopBwdSm90 {
   // store on the scatter path. When true, loads use TMA 2D tile copy (1 instruction per tile)
   // and stores use TMA 2D reduce-add (1 instruction per tile), bypassing per-row bulk reduce.
   // Requires tiles to be physically contiguous in global memory:
-  //   LoopQ SparseLoad: PackGQA → consecutive Q tokens have contiguous packed rows
+  //   LoopQ BlockSparse: PackGQA → consecutive Q tokens have contiguous packed rows
   //          (tile = kBlockM/QheadPerKhead tokens × QheadPerKhead heads, all contiguous)
-  //   LoopQ IndexAttn:  PackGQA + QheadPerKhead >= kBlockM → each tile fits within one Q
+  //   LoopQ IndexSparse:  PackGQA + QheadPerKhead >= kBlockM → each tile fits within one Q
   //          token's packed rows (inv_indices Q tokens are scattered but each has qhpkh
   //          contiguous packed rows; when qhpkh >= kBlockM the entire tile is contiguous).
   //          Fallback: qhpkh < kBlockM → kTma1D (future) or kCpAsync.
-  //   LoopK: SparseLoad → K tiles within a range are contiguous.
-  //          IndexAttn + PackGQA + QheadPerKhead >= kBlockM → inner Q/dO tiles are
+  //   LoopK: BlockSparse → K tiles within a range are contiguous.
+  //          IndexSparse + PackGQA + QheadPerKhead >= kBlockM → inner Q/dO tiles are
   //          contiguous (each token has qhpkh packed rows; kbs>=kBlockN guarantees
-  //          contiguous K blocks). Same condition as LoopQ IndexAttn.
+  //          contiguous K blocks). Same condition as LoopQ IndexSparse.
   static constexpr bool ScatterInnerLoadStoreTMA = InnerUseScatter &&
-      ((!SwapBwdQKLoop && PackGQA && (!IndexAttn || QheadPerKhead >= kBlockM)) ||
-       (SwapBwdQKLoop && (SparseLoad || (IndexAttn && PackGQA && QheadPerKhead >= kBlockM))));
+      ((!SwapBwdQKLoop && PackGQA && (!IndexSparse || QheadPerKhead >= kBlockM)) ||
+       (SwapBwdQKLoop && (BlockSparse || (IndexSparse && PackGQA && QheadPerKhead >= kBlockM))));
 
   // How the inner-loop loads (Q/dO for LoopQ, K/V for LoopK) are performed:
   //   kTma     — 2D TMA tile load (1 instr/tile). Dense uses sequential m_block;
@@ -250,7 +250,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Aliases for backward compatibility with existing code references
   static constexpr int NumProducerThreads = ProducerWarpRoles::kTotalThreads;
-  static constexpr int NumSparseLoadThreads = cutlass::NumThreadsPerWarp * 2;
+  static constexpr int NumBlockSparseThreads = cutlass::NumThreadsPerWarp * 2;
   // Per-direction store barrier width (NOT total DxStorer threads)
   static constexpr int NumdKVStoreThreads = ProducerWarpRoles::kPerDirDkvStoreThreads;
   static constexpr int NumKVEmptyProducerThreads = ProducerWarpRoles::kOuterEmptyBarrierThreads;
@@ -263,7 +263,7 @@ struct CollectiveMainloopBwdSm90 {
   // Const parameters for scatter load/store
   static constexpr int kCpAsyncTransactionBytes = 128;
   static constexpr int GroupSize = kCpAsyncTransactionBytes / 16;
-  static constexpr int NumGroups = NumSparseLoadThreads / GroupSize;
+  static constexpr int NumGroups = NumBlockSparseThreads / GroupSize;
   // Only the inner (scatter-side) tensor is gathered row-by-row, so the per-group row
   // count is sized by the inner tile: kBlockN (KV) for LoopK, kBlockM (Q/dO) for LoopQ.
   // The smem token-index array (SmemTokenIndices_t below) is sized by the same dimension.
@@ -778,9 +778,9 @@ struct CollectiveMainloopBwdSm90 {
     int const* const cu_batches = nullptr;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
-    /* index_attn */
-    int const* const index_attn_indices;
-    int index_attn_max_topk;
+    /* index_sparse */
+    int const* const index_sparse_indices;
+    int index_sparse_max_topk;
     /* dKV pool: reduce L2 contention by splitting dK/dV into pool_count slices */
     int pool_count;
     int pool_seqlen_k;
@@ -836,16 +836,28 @@ struct CollectiveMainloopBwdSm90 {
     StrideQKV const stride_dO;
     ElementAccum* const ptr_dQ;
     StrideQKV const stride_dQ;
-    /* index_attn */
-    int const* const index_attn_indices;
-    int index_attn_max_topk;
+    /* index_sparse */
+    int const* const index_sparse_indices;
+    int index_sparse_max_topk;
     /* dKV pool */
     int pool_count;
     int pool_seqlen_k;
   };
 
-  // SparseLoad LoopK producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
-  using SparseLoadLoopKBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
+  // BlockSparse LoopK producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
+  using BlockSparseLoopKBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
+                                                                RangeMerge,
+                                                                PackGQA,
+                                                                QheadPerKhead,
+                                                                NumRowsPerGroup,
+                                                                GroupSize,
+                                                                NumProducerThreads,
+                                                                kBlockN,
+                                                                InnerDirMaxToMin,
+                                                                /*IsLoopQ=*/false>;
+
+  // BlockSparse LoopK consumer (used by mma), no token_indices arrays
+  using SparseMmaLoopKBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
                                                               RangeMerge,
                                                               PackGQA,
                                                               QheadPerKhead,
@@ -856,20 +868,20 @@ struct CollectiveMainloopBwdSm90 {
                                                               InnerDirMaxToMin,
                                                               /*IsLoopQ=*/false>;
 
-  // SparseLoad LoopK consumer (used by mma), no token_indices arrays
-  using SparseMmaLoopKBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
-                                                             RangeMerge,
-                                                             PackGQA,
-                                                             QheadPerKhead,
-                                                             NumRowsPerGroup,
-                                                             GroupSize,
-                                                             NumProducerThreads,
-                                                             kBlockN,
-                                                             InnerDirMaxToMin,
-                                                             /*IsLoopQ=*/false>;
+  // BlockSparse LoopQ producer: scatter Q/dO, token_indices = Q positions
+  using BlockSparseLoopQBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
+                                                                RangeMerge,
+                                                                PackGQA,
+                                                                QheadPerKhead,
+                                                                NumRowsPerGroup,
+                                                                GroupSize,
+                                                                NumProducerThreads,
+                                                                kBlockM,
+                                                                InnerDirMaxToMin,
+                                                                /*IsLoopQ=*/true>;
 
-  // SparseLoad LoopQ producer: scatter Q/dO, token_indices = Q positions
-  using SparseLoadLoopQBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/true,
+  // BlockSparse LoopQ consumer: no token_indices arrays
+  using SparseMmaLoopQBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
                                                               RangeMerge,
                                                               PackGQA,
                                                               QheadPerKhead,
@@ -879,18 +891,6 @@ struct CollectiveMainloopBwdSm90 {
                                                               kBlockM,
                                                               InnerDirMaxToMin,
                                                               /*IsLoopQ=*/true>;
-
-  // SparseLoad LoopQ consumer: no token_indices arrays
-  using SparseMmaLoopQBlockMeta = flash::SparseLoadBlockMeta</*IsProducer=*/false,
-                                                             RangeMerge,
-                                                             PackGQA,
-                                                             QheadPerKhead,
-                                                             NumRowsPerGroup,
-                                                             GroupSize,
-                                                             NumProducerThreads,
-                                                             kBlockM,
-                                                             InnerDirMaxToMin,
-                                                             /*IsLoopQ=*/true>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     if constexpr (Deterministic) {
@@ -1107,8 +1107,8 @@ struct CollectiveMainloopBwdSm90 {
         /*stride_dO=*/args.stride_dO,
         /*ptr_dQ=*/args.ptr_dQ,
         /*stride_dQ=*/args.stride_dQ,
-        /*index_attn_indices=*/args.index_attn_indices,
-        /*index_attn_max_topk=*/args.index_attn_max_topk,
+        /*index_sparse_indices=*/args.index_sparse_indices,
+        /*index_sparse_max_topk=*/args.index_sparse_max_topk,
         /*pool_count=*/args.pool_count,
         /*pool_seqlen_k=*/args.pool_seqlen_k};
   }
@@ -1121,9 +1121,9 @@ struct CollectiveMainloopBwdSm90 {
   template <bool IsProducer>
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
 
-  // IndexAttn LoopK: outer=Q token, inner=K from forward topk indices
+  // IndexSparse LoopK: outer=Q token, inner=K from forward topk indices
   template <bool IsProducer>
-  using IndexAttnLoadBlockMeta = flash::IndexAttnBlockMeta<
+  using IndexSparseLoadBlockMeta = flash::IndexSparseBlockMeta<
       IsProducer,
       RangeMerge,
       PackGQA,
@@ -1136,9 +1136,9 @@ struct CollectiveMainloopBwdSm90 {
       KBlockSize,
       /*IsLoopQ=*/false>;
 
-  // IndexAttn LoopQ: outer=K block, inner=Q from inv_indices
+  // IndexSparse LoopQ: outer=K block, inner=Q from inv_indices
   template <bool IsProducer>
-  using IndexAttnInvLoadBlockMeta = flash::IndexAttnBlockMeta<
+  using IndexSparseInvLoadBlockMeta = flash::IndexSparseBlockMeta<
       IsProducer,
       /*RangeMerge=*/false,
       PackGQA,
@@ -1162,7 +1162,7 @@ struct CollectiveMainloopBwdSm90 {
       cute::prefetch_tma_descriptor(params.tma_load_dO_packed.get_tma_descriptor());
     }
     // K/V TMA descriptors needed for dense and scatter-TMA paths (InnerLoadUseTma).
-    // Only cp.async-only scatter (IndexAttn etc) skips the prefetch.
+    // Only cp.async-only scatter (IndexSparse etc) skips the prefetch.
     if constexpr (!InnerUseScatter || InnerLoadUseTma) {
       cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
@@ -1239,7 +1239,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Perform a Producer Prologue/Mainloop -- TMA Load for K,V, with pipelining multi-stage TMA load for Q,dO,LSE,dPsum
   // k for outer-loop and q for inner-loop
-  // When SparseLoad (LoopQ): Q/dO/LSE/dPsum are scatter-loaded via cp.async, K/V are still TMA.
+  // When BlockSparse (LoopQ): Q/dO/LSE/dPsum are scatter-loaded via cp.async, K/V are still TMA.
   template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE bool load_with_loop_q(
       Params const& params,
@@ -1251,10 +1251,10 @@ struct CollectiveMainloopBwdSm90 {
       BlockMetaT& block_meta) {
     // Compile Guard Clause
     static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
-    // The SparseLoad scatter loader has no per-q-head (bidh_kv_cat) loop, so CatGQA cannot
+    // The BlockSparse scatter loader has no per-q-head (bidh_kv_cat) loop, so CatGQA cannot
     // be expressed on this path yet. PackGQA is supported by walking q_ranges in packed-row
-    // space instead (see SparseLoadBlockMeta::kScatterScale).
-    static_assert(!(SparseLoad && CatGQA), "SparseLoad LoopQ does not support CatGQA");
+    // space instead (see BlockSparseBlockMeta::kScatterScale).
+    static_assert(!(BlockSparse && CatGQA), "BlockSparse LoopQ does not support CatGQA");
 
     // BlockMeta: fixed per function call
     int const n_block = block_meta.outer_block;
@@ -1447,10 +1447,10 @@ struct CollectiveMainloopBwdSm90 {
     auto bulk_copy = Copy_Traits<SM90_BULK_COPY_AUTO>{};
     int const lane_predicate = cute::elect_one_sync();
 
-    // ─── SparseLoad LoopQ scatter infra (DCE'd on dense path) ───
+    // ─── BlockSparse LoopQ scatter infra (DCE'd on dense path) ───
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
-    int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+    int const thread_idx = threadIdx.x % NumBlockSparseThreads;
     int const idx_in_group = thread_idx % GroupSize;
     int const group_idx = thread_idx / GroupSize;
     // PackGQA: the token-index slots hold PACKED rows p = token * G + g (g = q-head
@@ -1494,7 +1494,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
     // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy (dense)
-    // or multi-thread scatter cp.async (SparseLoad).
+    // or multi-thread scatter cp.async (BlockSparse).
     // Q and dO share the same pipe slot when Q_dO_same_stages=true, so pipe advance
     // happens in load_dO_dPsum (the second of each pair) to keep the slot index in sync.
     auto load_Q_LSE = [&]() {
@@ -1639,7 +1639,7 @@ struct CollectiveMainloopBwdSm90 {
     auto load_KV = [&]() {
       // barrier_KV is init'd with numThreads=1, so exactly one thread may arrive.
       // thread_idx==0 selects one thread uniformly for dense (1 loader warp) and
-      // SparseLoad (2 loader warps, where a per-warp elect_one_sync would give 2 arrivals).
+      // BlockSparse (2 loader warps, where a per-warp elect_one_sync would give 2 arrivals).
       if (thread_idx != 0)
         return;
       auto& barrier_KV = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_KV);
@@ -1650,7 +1650,7 @@ struct CollectiveMainloopBwdSm90 {
 
     auto load_body = [&]() {
       if constexpr (InnerUseScatter) {
-        // Scatter (SparseLoad / IndexAttn LoopQ): one block per call, block_meta drives iteration
+        // Scatter (BlockSparse / IndexSparse LoopQ): one block per call, block_meta drives iteration
         load_Q_LSE();
         load_dO_dPsum();
       } else {
@@ -1791,19 +1791,19 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO)); // (TMA)
 
     int const lane_predicate = cute::elect_one_sync();
-    // SparseLoad/IndexAttn run the scatter load on 2 warps (warp 0 & 1), but the Q/dO/LSE/dPsum
+    // BlockSparse/IndexSparse run the scatter load on 2 warps (warp 0 & 1), but the Q/dO/LSE/dPsum
     // TMA must be issued by a single warp only (warp 0), otherwise barrier_QdO's expect_tx is
     // counted twice and mismatches the consumer's wait. Dense only runs warp 0, so this is a no-op there.
     int const warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-    // ─── SparseLoad / IndexAttn scatter load lambdas ───
+    // ─── BlockSparse / IndexSparse scatter load lambdas ───
     // Loop-invariant scatter addressing hoisted out of the lambdas (computed once; unused &
     // DCE'd on the dense path). sK/sV are already shared at function scope above.
     // Use CuTe Copy_Atom for cp.async.cg (emits L2::128B). Benchmarked against bare-PTX
-    // L2::cache_hint.L2::256B + evict_last: < 0.5% difference on SparseLoad MQA workloads.
+    // L2::cache_hint.L2::256B + evict_last: < 0.5% difference on BlockSparse MQA workloads.
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
-    int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+    int const thread_idx = threadIdx.x % NumBlockSparseThreads;
     int const idx_in_group = thread_idx % GroupSize;
     int const group_idx = thread_idx / GroupSize;
     int const stride_kv_row = get<0>(params.stride_K);
@@ -1865,7 +1865,7 @@ struct CollectiveMainloopBwdSm90 {
 
     auto load_K = [&]() {
       if constexpr (InnerLoadUseTma && InnerUseScatter) {
-        // Scatter TMA: SparseLoad K tiles are contiguous within each k_range.
+        // Scatter TMA: BlockSparse K tiles are contiguous within each k_range.
         // All elected threads participate in pipe state; only thread 0 issues TMA.
         if (!lane_predicate)
           return;
@@ -2316,7 +2316,7 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     // ─── Definitions hoisted to function top: shared by the Dense TMA-store path and the
-    //     SparseLoad/IndexAttn scatter-store path. All are pure (layout / scalar) computations,
+    //     BlockSparse/IndexSparse scatter-store path. All are pure (layout / scalar) computations,
     //     so whatever is unused on a given path is DCE'd away (no runtime cost / no descriptor deref). ───
     // BlockMeta: fixed per function call
     int const bidh_kv = block_meta.bidh_kv;
@@ -2341,8 +2341,8 @@ struct CollectiveMainloopBwdSm90 {
     auto block_tma_dV = params.tma_add_dV.get_slice(_0{});
     Tensor tdVsdV = block_tma_dV.partition_S(sdV_tma); // (TMA, TMA_N, TMA_K)
 
-    // SparseLoad / IndexAttn scatter-store addressing (pool_offset applied to base pointers)
-    int const thread_idx = threadIdx.x % NumSparseLoadThreads;
+    // BlockSparse / IndexSparse scatter-store addressing (pool_offset applied to base pointers)
+    int const thread_idx = threadIdx.x % NumBlockSparseThreads;
     int const stride_dV_row = get<0>(params.stride_dV);
     int const stride_dK_row = get<0>(params.stride_dK);
     ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV) + pool_offset * stride_dV_row;
@@ -2383,7 +2383,7 @@ struct CollectiveMainloopBwdSm90 {
           tma_store_wait<0>();
         }
       } else if constexpr (InnerUseScatter) {
-        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads, /*kRowPackScale=*/1>(sdV, &idx_staging[0 * kBlockN], ptr_gdV_base, stride_dV_row, thread_idx);
+        scatter_reduce_store_rows<kBlockN, NumBlockSparseThreads, /*kRowPackScale=*/1>(sdV, &idx_staging[0 * kBlockN], ptr_gdV_base, stride_dV_row, thread_idx);
       } else {
         if (lane_predicate) {
           Tensor gdVaccum =
@@ -2424,7 +2424,7 @@ struct CollectiveMainloopBwdSm90 {
           tma_store_wait<0>();
         }
       } else if constexpr (InnerUseScatter) {
-        scatter_reduce_store_rows<kBlockN, NumSparseLoadThreads, /*kRowPackScale=*/1>(sdK, &idx_staging[1 * kBlockN], ptr_gdK_base, stride_dK_row, thread_idx);
+        scatter_reduce_store_rows<kBlockN, NumBlockSparseThreads, /*kRowPackScale=*/1>(sdK, &idx_staging[1 * kBlockN], ptr_gdK_base, stride_dK_row, thread_idx);
       } else {
         if (lane_predicate) {
           Tensor gdKaccum =
@@ -2699,7 +2699,7 @@ struct CollectiveMainloopBwdSm90 {
     // Define backward step lambda func
     auto bwd_step = [&](int m_block, auto mask_fn, auto /*is_no_mask*/ = cute::false_type{}) {
       bool const is_last_m_block_this_batch = [&]() {
-        if constexpr (SparseLoad) {
+        if constexpr (BlockSparse) {
           return m_block == block_meta.padding_block() && block_meta.num_invalid_token > 0;
         } else {
           return (m_block == block_meta.inner_block_max - 1);
@@ -2778,7 +2778,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(t0ScS.layout()));
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
         int const seqlenq_row_limit = [&]() {
-          if constexpr (SparseLoad) {
+          if constexpr (BlockSparse) {
             return kBlockM - block_meta.num_invalid_token - thread_row_offset;
           } else {
             int const seqlen_q_packed_local = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * QheadPerKhead;
@@ -2976,7 +2976,7 @@ struct CollectiveMainloopBwdSm90 {
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
 
             if constexpr (ScatterInnerLoadStoreTMA) {
-              // IndexAttn TMA reduce: single thread issues one 2D TMA reduce-add instruction
+              // IndexSparse TMA reduce: single thread issues one 2D TMA reduce-add instruction
               if (thread_idx == 0) {
                 Tensor sdQ_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
                 auto block_tma_dQ_c = params.tma_add_dQ.get_slice(_0{});
@@ -2991,7 +2991,7 @@ struct CollectiveMainloopBwdSm90 {
                 tma_store_wait<0>();
               }
             } else if constexpr (InnerUseScatter) {
-              // SparseLoad scatter reduce: per-row 1D bulk reduce
+              // BlockSparse scatter reduce: per-row 1D bulk reduce
               Tensor sdQ_acc = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumStore{});
               static constexpr int kdQPackScale = PackGQA ? QheadPerKhead : 1;
               int const stride_dq_row = get<0>(params.stride_dQ);
@@ -3032,7 +3032,7 @@ struct CollectiveMainloopBwdSm90 {
             BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warp_group_idx);
           }
         } else { // directly atomic reduce-add to global memory
-          static_assert(!(InnerUseScatter && !SwapBwdQKLoop), "SparseLoad LoopQ requires dQacc_use_TMA (kHeadDim <= 128)");
+          static_assert(!(InnerUseScatter && !SwapBwdQKLoop), "BlockSparse LoopQ requires dQacc_use_TMA (kHeadDim <= 128)");
           // We can reuse r2s_thr_copy_dQaccum for this partitioning
           Tensor tdQrdQ_atomic = recast<float4>(r2s_thr_copy_dQaccum.retile_S(tdQrdQ));
           Tensor tdQgdQaccum_atomic = recast<float4>(tdQgdQaccum(_, _, _, _, _, m_block));
@@ -3117,7 +3117,7 @@ struct CollectiveMainloopBwdSm90 {
     // Unified MMA body: iterates over all m_blocks in the range with a single bwd_step instantiation.
     auto mma_body = [&]() {
       if constexpr (InnerUseScatter) {
-        // Scatter (SparseLoad / IndexAttn LoopQ): one Q block per call, block_meta drives iteration.
+        // Scatter (BlockSparse / IndexSparse LoopQ): one Q block per call, block_meta drives iteration.
         // LoopQ needs both padding masks: rows are the scattered Q tokens
         // (last tile may hold fewer than kBlockM valid tokens) and columns are
         // the contiguous K window (last n_block may overhang seqlen_k) —

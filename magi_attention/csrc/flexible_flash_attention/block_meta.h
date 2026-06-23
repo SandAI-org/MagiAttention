@@ -146,8 +146,8 @@ struct DenseBlockMeta {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// SparseLoadBlockMeta: Unified producer/consumer via IsProducer template parameter.
-// Replaces both old SparseLoadBlockMeta AND SparseMmaBlockMeta.
+// BlockSparseBlockMeta: Unified producer/consumer via IsProducer template parameter.
+// Replaces both old BlockSparseBlockMeta AND SparseMmaBlockMeta.
 //
 // IsLoopQ_=false (LoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
 // IsLoopQ_=true  (LoopQ): outer=KV (TMA), inner=Q (scatter),  token_indices = Q positions
@@ -164,7 +164,7 @@ template <
     int kBlockN_,
     bool InnerDirMaxToMin_,
     bool IsLoopQ_>
-struct SparseLoadBlockMeta {
+struct BlockSparseBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr bool NeedsBatchLoop = true;
   static constexpr bool IsLoopQ = IsLoopQ_;
@@ -194,7 +194,7 @@ struct SparseLoadBlockMeta {
   // (Register arrays with dynamic indexing made nvcc spill to local memory.)
   int cur_range_idx;
   int cur_range_inner_idx;
-  // SparseLoad contract: all scatter-dim ranges have one uniform size (block-mask
+  // BlockSparse contract: all scatter-dim ranges have one uniform size (block-mask
   // generated ranges are uniform by construction; asserted at the Python entry).
   // This is what makes the O(1) div/mod cursor arithmetic in advance_token_idx valid.
   int range_size;
@@ -215,7 +215,7 @@ struct SparseLoadBlockMeta {
   }
 
   template <typename ParamsT, typename SharedStorage>
-  CUTLASS_DEVICE SparseLoadBlockMeta(
+  CUTLASS_DEVICE BlockSparseBlockMeta(
       ParamsT const& params,
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,
@@ -288,7 +288,7 @@ struct SparseLoadBlockMeta {
   // (backward for MaxToMin, forward for MinToMax), then clamp to the nearest valid
   // boundary on overflow. Clamped positions load a duplicated valid token;
   // apply_padding_mask sets their attention scores to -inf so they contribute zero.
-  // The uniform range size (SparseLoad contract) makes this O(1) div/mod arithmetic.
+  // The uniform range size (BlockSparse contract) makes this O(1) div/mod arithmetic.
   CUTLASS_DEVICE
   void advance_token_idx(int& range_idx, int& inner_idx, int num_steps) const {
     int n_ranges = num_steps / range_size;
@@ -422,8 +422,8 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 } // namespace detail
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// IndexAttnBlockMeta: Unified sparse block metadata for index-based attention.
-// Handles both LoopK and LoopQ via the IsLoopQ_ template parameter (like SparseLoadBlockMeta).
+// IndexSparseBlockMeta: Unified sparse block metadata for index-based attention.
+// Handles both LoopK and LoopQ via the IsLoopQ_ template parameter (like BlockSparseBlockMeta).
 //
 // IsLoopQ_=false (LoopK): outer=Q token (bidb), inner=K from forward topk indices
 //   fill_token_indices fills K physical rows: id * nhk + kv_head_local
@@ -443,7 +443,7 @@ template <
     bool InnerDirMaxToMin_,
     int KBlockSize_ = 1,
     bool IsLoopQ_ = false>
-struct IndexAttnBlockMeta {
+struct IndexSparseBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr int kKBlockSize = KBlockSize_;
   static constexpr bool IsLoopQ = IsLoopQ_;
@@ -470,7 +470,11 @@ struct IndexAttnBlockMeta {
   int head_local;
 
   template <typename ParamsT, typename SharedStorage>
-  CUTLASS_DEVICE IndexAttnBlockMeta(ParamsT const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
+  CUTLASS_DEVICE IndexSparseBlockMeta(
+      ParamsT const& params,
+      cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
+      SharedStorage& shared_storage,
+      int thread_idx = 0)
       : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
         bidh_kv(IsLoopQ ? bidh : (!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh)),
@@ -485,7 +489,7 @@ struct IndexAttnBlockMeta {
 
     nhk = detail::nhk_of<ParamsT>::get(params);
 
-    int max_topk = params.index_attn_max_topk;
+    int max_topk = params.index_sparse_max_topk;
     int const* row_ptr;
     int actual_topk;
 
@@ -496,7 +500,7 @@ struct IndexAttnBlockMeta {
 
       int unique_idx = get<2>(block_coord);
       head_local = unique_idx % nhk;
-      row_ptr = params.index_attn_indices + static_cast<int64_t>(unique_idx) * max_topk;
+      row_ptr = params.index_sparse_indices + static_cast<int64_t>(unique_idx) * max_topk;
 
       actual_topk = max_topk;
       for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
@@ -514,7 +518,7 @@ struct IndexAttnBlockMeta {
 
       // inv_indices layout: (num_k_blocks, nhk * inv_topk_per_head)
       int inv_topk_per_head = max_topk / nhk;
-      row_ptr = params.index_attn_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh) * inv_topk_per_head;
+      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh) * inv_topk_per_head;
       int max_inv_topk = inv_topk_per_head;
 
       actual_topk = max_inv_topk;
@@ -599,7 +603,7 @@ struct IndexAttnBlockMeta {
 
   // Absolute packed row for TMA coordinate computation.
   // LoopQ: maps inner_block_cur through inv_indices → absolute packed Q row.
-  // LoopK: maps inner_block_cur through index_attn_indices → absolute packed K row.
+  // LoopK: maps inner_block_cur through index_sparse_indices → absolute packed K row.
   CUTLASS_DEVICE
   int get_packed_first_row() const {
     static_assert(IsProducer, "get_packed_first_row() is producer-only");
@@ -617,7 +621,7 @@ struct IndexAttnBlockMeta {
 
   // LoopK block-level only: absolute K block index for TMA tile load.
   // When kbs >= kBlockN, each inner_block_cur maps to exactly one K block index
-  // from index_attn_indices, and the tile is physically contiguous.
+  // from index_sparse_indices, and the tile is physically contiguous.
   CUTLASS_DEVICE
   int get_n_block_abs() const {
     static_assert(IsProducer && !IsLoopQ && kKBlockSize >= kInnerBlockSize_, "get_n_block_abs() requires block-level LoopK with kbs >= kBlockN");

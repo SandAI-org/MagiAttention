@@ -55,11 +55,11 @@ class FlashAttnBwdSm90 {
   static constexpr bool dKV_swapAB = CollectiveMainloop::dKV_swapAB;
   static constexpr bool dQ_swapAB = CollectiveMainloop::dQ_swapAB;
   static constexpr bool SwapBwdQKLoop = CollectiveMainloop::SwapBwdQKLoop;
-  static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
-  static constexpr bool IndexAttn = CollectiveMainloop::IndexAttn;
+  static constexpr bool BlockSparse = CollectiveMainloop::BlockSparse;
+  static constexpr bool IndexSparse = CollectiveMainloop::IndexSparse;
   static constexpr bool InnerUseScatter = CollectiveMainloop::InnerUseScatter;
   static constexpr bool InnerDxStoreInProducer = CollectiveMainloop::InnerDxStoreInProducer;
-  static constexpr int NumSparseLoadThreads = CollectiveMainloop::NumSparseLoadThreads;
+  static constexpr int NumBlockSparseThreads = CollectiveMainloop::NumBlockSparseThreads;
   static constexpr bool InnerLoadUseTmaPipeline = CollectiveMainloop::InnerLoadUseTmaPipeline;
   static constexpr bool InnerLoadUseTma = CollectiveMainloop::InnerLoadUseTma;
 
@@ -248,7 +248,7 @@ class FlashAttnBwdSm90 {
       pipeline_params_q.num_consumers = NumMmaThreads;
     } else {
       pipeline_params_q.consumer_arv_count = NumMmaThreads;
-      pipeline_params_q.producer_arv_count = NumSparseLoadThreads;
+      pipeline_params_q.producer_arv_count = NumBlockSparseThreads;
     }
     MainloopPipeline pipeline_q = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_q, pipeline_params_q);
 
@@ -258,7 +258,7 @@ class FlashAttnBwdSm90 {
       pipeline_params_do = {pipeline_params_q.transaction_bytes, role_do, pipeline_params_q.is_leader, pipeline_params_q.num_consumers};
     } else {
       pipeline_params_do.consumer_arv_count = NumMmaThreads;
-      pipeline_params_do.producer_arv_count = NumSparseLoadThreads;
+      pipeline_params_do.producer_arv_count = NumBlockSparseThreads;
     }
     MainloopPipeline_dO pipeline_do = make_inner_pipeline<MainloopPipeline_dO>(
         shared_storage.pipelines.pipeline_do, cute::conditional_return < Q_dO_same_stages && InnerLoadUseTmaPipeline > (pipeline_params_q, pipeline_params_do));
@@ -275,13 +275,13 @@ class FlashAttnBwdSm90 {
     using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
     using BlockMetaConsumerT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>;
 
-    // Scatter LoopQ producer: SparseLoad uses SparseLoadLoopQBlockMeta, IndexAttn uses IndexAttnInvLoadBlockMeta
+    // Scatter LoopQ producer: BlockSparse uses BlockSparseLoopQBlockMeta, IndexSparse uses IndexSparseInvLoadBlockMeta
     using ProducerBlockMetaT = std::conditional_t<
         InnerUseScatter,
         std::conditional_t<
-            IndexAttn,
-            typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/true>,
-            typename CollectiveMainloop::SparseLoadLoopQBlockMeta>,
+            IndexSparse,
+            typename CollectiveMainloop::template IndexSparseInvLoadBlockMeta</*IsProducer=*/true>,
+            typename CollectiveMainloop::BlockSparseLoopQBlockMeta>,
         BlockMetaT>;
 
     using Roles = typename CollectiveMainloop::ProducerWarpRoles;
@@ -321,7 +321,7 @@ class FlashAttnBwdSm90 {
           // Run the producer load pipeline
           bool tile_valid;
           if constexpr (InnerUseScatter) {
-            int thread_idx = threadIdx.x % NumSparseLoadThreads;
+            int thread_idx = threadIdx.x % NumBlockSparseThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
             tile_valid = mainloop.template load_with_loop_q<kInnerDir>(
                 params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_meta);
@@ -353,8 +353,8 @@ class FlashAttnBwdSm90 {
             // BlockMeta iterates per merged sub-range instead, which over-counts store
             // handshakes whenever a sub-range length is not a multiple of kBlockM
             // (e.g. hd64 LoopQ: kBlockM=128 with 64-token sparse blocks) → barrier deadlock.
-            if constexpr (IndexAttn) {
-              typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/false> block_meta{params.mainloop, block_coord, shared_storage};
+            if constexpr (IndexSparse) {
+              typename CollectiveMainloop::template IndexSparseInvLoadBlockMeta</*IsProducer=*/false> block_meta{params.mainloop, block_coord, shared_storage};
               mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
             } else {
               typename CollectiveMainloop::SparseMmaLoopQBlockMeta block_meta{params.mainloop, block_coord, shared_storage};
@@ -400,12 +400,12 @@ class FlashAttnBwdSm90 {
         clear(tdVrdV);
 
         // Run the mma to compute partial dQ,dK,dV
-        // SparseLoad LoopQ uses SparseMmaLoopQBlockMeta; IndexAttn LoopQ uses IndexAttnInvLoadBlockMeta; Dense uses DenseBlockMeta
+        // BlockSparse LoopQ uses SparseMmaLoopQBlockMeta; IndexSparse LoopQ uses IndexSparseInvLoadBlockMeta; Dense uses DenseBlockMeta
         using ConsumerBlockMetaT = std::conditional_t<
             InnerUseScatter,
             std::conditional_t<
-                IndexAttn,
-                typename CollectiveMainloop::template IndexAttnInvLoadBlockMeta</*IsProducer=*/false>,
+                IndexSparse,
+                typename CollectiveMainloop::template IndexSparseInvLoadBlockMeta</*IsProducer=*/false>,
                 typename CollectiveMainloop::SparseMmaLoopQBlockMeta>,
             BlockMetaConsumerT>;
         ConsumerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
@@ -490,7 +490,7 @@ class FlashAttnBwdSm90 {
       pipeline_params_k.num_consumers = NumMmaThreads;
     } else {
       pipeline_params_k.consumer_arv_count = NumMmaThreads;
-      pipeline_params_k.producer_arv_count = NumSparseLoadThreads;
+      pipeline_params_k.producer_arv_count = NumBlockSparseThreads;
     }
     using PipelineParams_V = typename CollectiveMainloop::MainloopPipeline_V::Params;
     PipelineParams_V pipeline_params_v;
@@ -501,7 +501,7 @@ class FlashAttnBwdSm90 {
       pipeline_params_v.num_consumers = NumMmaThreads;
     } else {
       pipeline_params_v.consumer_arv_count = NumMmaThreads;
-      pipeline_params_v.producer_arv_count = NumSparseLoadThreads;
+      pipeline_params_v.producer_arv_count = NumBlockSparseThreads;
     }
 
     MainloopPipeline pipeline_k = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_k, pipeline_params_k);
@@ -518,11 +518,11 @@ class FlashAttnBwdSm90 {
 
     using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
     using BlockMetaConsumerT = std::conditional_t<
-        SparseLoad,
+        BlockSparse,
         typename CollectiveMainloop::SparseMmaLoopKBlockMeta,
         std::conditional_t<
-            IndexAttn,
-            typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/false>,
+            IndexSparse,
+            typename CollectiveMainloop::template IndexSparseLoadBlockMeta</*IsProducer=*/false>,
             typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>>>;
 
     if (warp_group_idx == 0) { // Producer
@@ -537,9 +537,9 @@ class FlashAttnBwdSm90 {
       static constexpr int NumProducerSyncThreads = Roles::kLoaderThreads;
 
       using ProducerBlockMetaT = std::conditional_t<
-          SparseLoad,
-          typename CollectiveMainloop::SparseLoadLoopKBlockMeta,
-          std::conditional_t<IndexAttn, typename CollectiveMainloop::template IndexAttnLoadBlockMeta</*IsProducer=*/true>, BlockMetaT>>;
+          BlockSparse,
+          typename CollectiveMainloop::BlockSparseLoopKBlockMeta,
+          std::conditional_t<IndexSparse, typename CollectiveMainloop::template IndexSparseLoadBlockMeta</*IsProducer=*/true>, BlockMetaT>>;
 
       bool const is_loader = Roles::is_loader(warp_idx_in_warpgroup);
       bool const is_inner_dx_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);
@@ -568,7 +568,7 @@ class FlashAttnBwdSm90 {
           // Run the producer load pipeline
           bool has_tile_valid;
           if constexpr (InnerUseScatter) {
-            int thread_idx = threadIdx.x % NumSparseLoadThreads;
+            int thread_idx = threadIdx.x % NumBlockSparseThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
             has_tile_valid = mainloop.template load_with_loop_k<kInnerDir>(
                 params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);

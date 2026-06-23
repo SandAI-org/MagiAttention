@@ -99,9 +99,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
     std::optional<const at::Tensor>& bwd_unique_count_,
-    std::optional<const at::Tensor>& index_attn_indices_,
-    int index_attn_max_topk,
-    int index_attn_k_block_size,
+    std::optional<const at::Tensor>& index_sparse_indices_,
+    int index_sparse_max_topk,
+    int index_sparse_k_block_size,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> dq_type_,
@@ -119,8 +119,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   // Check compute capability
   TORCH_CHECK(is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
 
-  bool const has_index_attn = index_attn_indices_.has_value();
-  int batch_size = has_index_attn ? index_attn_indices_.value().size(0) : q_ranges_.value().size(0);
+  bool const has_index_sparse = index_sparse_indices_.has_value();
+  int batch_size = has_index_sparse ? index_sparse_indices_.value().size(0) : q_ranges_.value().size(0);
   int const total_q = q.size(0);
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
@@ -154,8 +154,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   TORCH_CHECK(softmax_lse.stride(-1) == 1);
 
   at::Tensor q_ranges, k_ranges;
-  if (!has_index_attn) {
-    TORCH_CHECK(q_ranges_.has_value() && k_ranges_.has_value(), "q_ranges and k_ranges must be provided when index_attn_indices is not set");
+  if (!has_index_sparse) {
+    TORCH_CHECK(q_ranges_.has_value() && k_ranges_.has_value(), "q_ranges and k_ranges must be provided when index_sparse_indices is not set");
     q_ranges = q_ranges_.value();
     k_ranges = k_ranges_.value();
     TORCH_CHECK(q_ranges.dtype() == torch::kInt32 && k_ranges.dtype() == torch::kInt32);
@@ -253,12 +253,12 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       (has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count),
       "merge_k_ranges, bwd_kq_map, and bwd_unique_count must all be provided together or all be omitted");
 
-  at::Tensor index_attn_indices;
-  if (has_index_attn) {
-    index_attn_indices = index_attn_indices_.value();
-    TORCH_CHECK(index_attn_indices.dtype() == torch::kInt32);
-    CHECK_DEVICE(index_attn_indices);
-    CHECK_CONTIGUOUS(index_attn_indices);
+  at::Tensor index_sparse_indices;
+  if (has_index_sparse) {
+    index_sparse_indices = index_sparse_indices_.value();
+    TORCH_CHECK(index_sparse_indices.dtype() == torch::kInt32);
+    CHECK_DEVICE(index_sparse_indices);
+    CHECK_CONTIGUOUS(index_sparse_indices);
   }
 
   int const max_headdim = get_max_headdim();
@@ -421,8 +421,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       dsink, // output tensors
       dsink_reduce_buf,
       dsink_reduce_cnt, // workspace tensors
-      /*q_ranges=*/has_index_attn ? nullptr : q_ranges.data_ptr(),
-      /*k_ranges=*/has_index_attn ? nullptr : k_ranges.data_ptr(),
+      /*q_ranges=*/has_index_sparse ? nullptr : q_ranges.data_ptr(),
+      /*k_ranges=*/has_index_sparse ? nullptr : k_ranges.data_ptr(),
       /*attn_type_map=*/has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
       /*merge_batch_size=*/merge_batch_size,
       /*merge_k_ranges=*/has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
@@ -443,8 +443,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*sm_margin=*/sm_margin,
       /*disable_bwd_dkv_atomic_reduction=*/DisableDkvAtomic);
 
-  params.index_attn_indices = has_index_attn ? static_cast<int*>(index_attn_indices.data_ptr()) : nullptr;
-  params.index_attn_max_topk = index_attn_max_topk;
+  params.index_sparse_indices = has_index_sparse ? static_cast<int*>(index_sparse_indices.data_ptr()) : nullptr;
+  params.index_sparse_max_topk = index_sparse_max_topk;
 
   return {params, dq, dk, dv, dsink};
 }

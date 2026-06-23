@@ -82,8 +82,8 @@ def _ffa_register_quota(
     kblock_m: int | None,
     swap_ab: bool,
     swap_bwd_qk_loop: bool,
-    sparse_load: bool,
-    index_attn: bool,
+    block_sparse: bool,
+    index_sparse: bool,
     sparse_dx_tma_reduce: bool,
     k_block_size: int = 1,
 ) -> tuple[int, int]:
@@ -93,9 +93,9 @@ def _ffa_register_quota(
     (flash_{fwd,bwd}_kernel_sm90.h) only static_assert the constraints.
 
     fwd (producer, consumer) by mode:
-      - scatter load (index_attn kbs<kBlockN, or sparse_load without TMA): (64, 216)
+      - scatter load (index_sparse kbs<kBlockN, or block_sparse without TMA): (64, 216)
         cp.async producer warpgroup needs more registers than the TMA producer warp.
-      - SparseLoad (always TMA) or IndexAttn kbs>=kBlockN (TMA KV): use Dense quota
+      - BlockSparse (always TMA) or IndexSparse kbs>=kBlockN (TMA KV): use Dense quota
         since only thread 0 issues TMA, minimal producer reg pressure.
       - dense, by MMA warpgroup count (1/2/3 from kBlockM/64, or 1 when SwapAB): (56, 256),
         (40, 232), (32, 160).
@@ -108,7 +108,7 @@ def _ffa_register_quota(
       - scatter + cp.async inner (sparse_dx_tma_reduce=False, scalar-atomicAdd dX
         store fallback): (104, ...). The store-warp code spills at 88 (STACK 3272B).
       Historical note: the sweep that found pr=56 as sweet spot was done with cp.async
-      (SparseLoad LoopQ, S=64K/256K), not TMA. With TMA inner loads, the producer
+      (BlockSparse LoopQ, S=64K/256K), not TMA. With TMA inner loads, the producer
       needs far fewer live variables, and pr=40 gives consumer enough regs to avoid
       MMA accumulator spills.
 
@@ -118,13 +118,13 @@ def _ffa_register_quota(
     kblock_n_fwd = 128  # Default FWD tile N
     if direction == "fwd":
         assert kblock_m is not None
-        # IndexAttn kbs>=kBlockN and SparseLoad both use TMA for KV → Dense-like quota
-        index_attn_uses_tma = index_attn and k_block_size >= kblock_n_fwd
-        uses_scatter = index_attn and not index_attn_uses_tma
+        # IndexSparse kbs>=kBlockN and BlockSparse both use TMA for KV → Dense-like quota
+        index_sparse_uses_tma = index_sparse and k_block_size >= kblock_n_fwd
+        uses_scatter = index_sparse and not index_sparse_uses_tma
         if uses_scatter:
             producer_regs, consumer_regs = 64, 216
         else:
-            # TMA KV paths (Dense, SparseLoad, IndexAttn kbs>=kBlockN): same quota
+            # TMA KV paths (Dense, BlockSparse, IndexSparse kbs>=kBlockN): same quota
             # mirrors NumMmaWarpGroups = size(TiledMmaPV)/128 (AtomLayoutQK in mainloop_fwd)
             num_mma_wgs = 1 if swap_ab else kblock_m // 64
             producer_regs, consumer_regs = {1: (56, 256), 2: (40, 232), 3: (32, 160)}[
@@ -133,7 +133,7 @@ def _ffa_register_quota(
     else:
         # mirrors NumMmaWarpGroups in run_mha_bwd_ (flash_bwd_launch_template.h)
         num_mma_wgs = 2 if swap_bwd_qk_loop else (3 if head_dim == 192 else 2)
-        inner_use_scatter = sparse_load or index_attn
+        inner_use_scatter = block_sparse or index_sparse
         budget = 168 * (1 + num_mma_wgs)
         if inner_use_scatter:
             if sparse_dx_tma_reduce:
@@ -173,8 +173,8 @@ def get_ffa_uri(
     pack_gqa: bool,
     cat_gqa: bool,
     qhead_per_khead: int,
-    sparse_load: bool,
-    index_attn: bool,
+    block_sparse: bool,
+    index_sparse: bool,
     swap_bwd_qk_loop: bool,
     profile_mode: bool,
     return_max_logits: bool,
@@ -199,8 +199,8 @@ def get_ffa_uri(
         f"{'_swapab' if swap_ab else ''}"
         f"{f'_packgqa{qhead_per_khead}' if pack_gqa else ''}"
         f"{f'_catgqa{qhead_per_khead}' if cat_gqa else ''}"
-        f"{'_sparse_load' if sparse_load else ''}"
-        f"{'_index_attn' if index_attn else ''}"
+        f"{'_block_sparse' if block_sparse else ''}"
+        f"{'_index_sparse' if index_sparse else ''}"
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_return_max_logits' if return_max_logits else ''}"
@@ -224,8 +224,8 @@ def sanity_check(
     output_dtype: torch.dtype | None,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
-    sparse_load: bool = False,
-    index_attn: bool = False,
+    block_sparse: bool = False,
+    index_sparse: bool = False,
     swap_bwd_qk_loop: bool = False,
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
@@ -311,8 +311,8 @@ def get_ffa_jit_spec(
     pack_gqa: bool = False,
     cat_gqa: bool = False,
     qhead_per_khead: int = 1,
-    sparse_load: bool = False,
-    index_attn: bool = False,
+    block_sparse: bool = False,
+    index_sparse: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
@@ -329,8 +329,8 @@ def get_ffa_jit_spec(
         output_dtype=output_dtype,
         ref_block_size=ref_block_size,
         swap_ab=swap_ab,
-        sparse_load=sparse_load,
-        index_attn=index_attn,
+        block_sparse=block_sparse,
+        index_sparse=index_sparse,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,
@@ -366,8 +366,8 @@ def get_ffa_jit_spec(
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
         qhead_per_khead=qhead_per_khead,
-        sparse_load=sparse_load,
-        index_attn=index_attn,
+        block_sparse=block_sparse,
+        index_sparse=index_sparse,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
@@ -380,7 +380,7 @@ def get_ffa_jit_spec(
         "FFA JIT params: arch=sm%s, direction=%s, head_dim=%d, compute_dtype=%s, "
         "output_dtype=%s, softcap=%s, deterministic=%s, block_size=%s, "
         "swap_ab=%s, pack_gqa=%s, cat_gqa=%s, qhead_per_khead=%d, "
-        "sparse_load=%s, index_attn=%s, profile_mode=%s, return_max_logits=%s",
+        "block_sparse=%s, index_sparse=%s, profile_mode=%s, return_max_logits=%s",
         arch_sm_num,
         direction,
         head_dim,
@@ -393,8 +393,8 @@ def get_ffa_jit_spec(
         pack_gqa,
         cat_gqa,
         qhead_per_khead,
-        sparse_load,
-        index_attn,
+        block_sparse,
+        index_sparse,
         profile_mode,
         return_max_logits,
     )
@@ -434,11 +434,11 @@ def get_ffa_jit_spec(
         extra_template_args["mask_mode_int"] = _mask_mode_map["unified"]
         uri += "_mmunified"
     # inner_use_scatter mirrors the mainloop predicate (mainloop_bwd_sm90_tma_gmma_ws.hpp):
-    # LoopK scatters K/V when sparse_load or index_attn, LoopQ scatters Q/dO when sparse_load
-    # or index_attn (inv_indices).
-    _inner_use_scatter = sparse_load or index_attn
+    # LoopK scatters K/V when block_sparse or index_sparse, LoopQ scatters Q/dO when block_sparse
+    # or index_sparse (inv_indices).
+    _inner_use_scatter = block_sparse or index_sparse
     _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER")
-    # Applies to ALL bwd configs (Dense, IndexAttn, SparseLoad).
+    # Applies to ALL bwd configs (Dense, IndexSparse, BlockSparse).
     # Default is true (producer store warp handles dX reduce-add to GMEM).
     # false → consumer WGs handle dX store directly; frees one producer warp but
     # shifts code pressure to the consumer (Dense: cr needs ~232 to avoid spill).
@@ -496,10 +496,10 @@ def get_ffa_jit_spec(
             extra_template_args["force_mma_dkv_ss"] = "true"
             uri += "_fss1"
 
-        # IndexAttn LoopQ with block-level K: override tile_n to match k_block_size
+        # IndexSparse LoopQ with block-level K: override tile_n to match k_block_size
         # so that kBlockN = k_block_size (full-tile outer K, no waste).
         if (
-            index_attn
+            index_sparse
             and not swap_bwd_qk_loop
             and "bwd_tile_n" not in extra_template_args
         ):
@@ -514,8 +514,8 @@ def get_ffa_jit_spec(
         kblock_m=kblock_m,
         swap_ab=swap_ab,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
-        sparse_load=sparse_load,
-        index_attn=index_attn,
+        block_sparse=block_sparse,
+        index_sparse=index_sparse,
         sparse_dx_tma_reduce=extra_template_args.get(
             "sparse_inner_dx_reduce_use_tma", "false"
         )
@@ -555,7 +555,7 @@ def get_ffa_jit_spec(
     swap_ab = bool(swap_ab)
     pack_gqa = bool(pack_gqa)
     cat_gqa = bool(cat_gqa)
-    sparse_load = bool(sparse_load)
+    block_sparse = bool(block_sparse)
     swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
 
     rendered = template.render(
@@ -576,8 +576,8 @@ def get_ffa_jit_spec(
         pack_gqa=str(pack_gqa).lower(),
         cat_gqa=str(cat_gqa).lower(),
         qhead_per_khead=qhead_per_khead,
-        sparse_load=str(sparse_load).lower(),
-        index_attn=str(index_attn).lower(),
+        block_sparse=str(block_sparse).lower(),
+        index_sparse=str(index_sparse).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
         return_max_logits=str(bool(return_max_logits)).lower(),
         **extra_template_args,
@@ -677,8 +677,8 @@ def get_ffa_jit_mod(
     pack_gqa: bool = False,
     cat_gqa: bool = False,
     qhead_per_khead: int = 1,
-    sparse_load: bool = False,
-    index_attn: bool = False,
+    block_sparse: bool = False,
+    index_sparse: bool = False,
     swap_bwd_qk_loop: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
@@ -717,8 +717,8 @@ def get_ffa_jit_mod(
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
         qhead_per_khead=qhead_per_khead,
-        sparse_load=sparse_load,
-        index_attn=index_attn,
+        block_sparse=block_sparse,
+        index_sparse=index_sparse,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,

@@ -13,14 +13,14 @@
 # limitations under the License.
 
 """
-Benchmark: FFA SparseLoad FWD+BWD performance.
+Benchmark: FFA BlockSparse FWD+BWD performance.
 
 nhq=128, nhk=1 (MQA), head_dim=128, PackGQA, block-sparse.
 q_block_size=1, k_block_size=128. Fixed effective_kv=2048 (16 k-blocks).
 
 Usage:
-    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/run_sparse_load_benchmark.py
-    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/run_sparse_load_benchmark.py --bwd
+    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/sparse/run_block_sparse_benchmark.py
+    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/sparse/run_block_sparse_benchmark.py --bwd
 """
 
 import torch
@@ -48,7 +48,7 @@ seed_everything()
 
 
 def build_block_sparse_inputs(S, device, requires_grad=False):
-    """Build q/k/v + q_ranges/k_ranges for SparseLoad block-sparse path."""
+    """Build q/k/v + q_ranges/k_ranges for BlockSparse block-sparse path."""
     n_q_blocks = S // q_block_size  # = S (one block per token)
     n_k_blocks = S // k_block_size
     actual_attend = min(n_attend, n_k_blocks)
@@ -94,7 +94,7 @@ def bench_fwd(S):
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
                 attn_type_map=attn_type_map,
-                sparse_load=True,
+                block_sparse=True,
                 auto_range_merge=True,
                 pack_gqa=True,
             )
@@ -133,7 +133,7 @@ def bench_bwd(S, swap_bwd_qk_loop=True):
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
-            sparse_load=True,
+            block_sparse=True,
             auto_range_merge=True,
             pack_gqa=True,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
@@ -159,7 +159,7 @@ def bench_bwd(S, swap_bwd_qk_loop=True):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="SparseLoad Block-Sparse Benchmark")
+    parser = argparse.ArgumentParser(description="BlockSparse Block-Sparse Benchmark")
     parser.add_argument("--bwd", action="store_true", help="Also run BWD benchmark")
     parser.add_argument("--bwd-only", action="store_true", help="Only BWD")
     parser.add_argument(
@@ -179,7 +179,7 @@ if __name__ == "__main__":
 
     if run_fwd:
         print("\n" + "=" * 50)
-        print("FWD Benchmark (SparseLoad block-sparse)")
+        print("FWD Benchmark (BlockSparse block-sparse)")
         print("=" * 50)
         print(f"{'seqlen':>10} {'TFLOPS':>10}")
         print("-" * 22)
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     if run_bwd:
         loop_tag = "LoopQ" if args.loopq else "LoopK"
         print("\n" + "=" * 50)
-        print(f"BWD Benchmark (SparseLoad block-sparse, {loop_tag})")
+        print(f"BWD Benchmark (BlockSparse block-sparse, {loop_tag})")
         print("=" * 50)
         print(f"{'seqlen':>10} {'TFLOPS':>10}")
         print("-" * 22)

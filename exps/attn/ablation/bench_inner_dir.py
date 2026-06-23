@@ -35,7 +35,7 @@ print('MaxToMin compiled OK')
     MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN=false CUDA_HOME=/usr/local/cuda-13.0 python -c "..."
 
     # Then run this benchmark:
-    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/bench_inner_dir.py
+    CUDA_HOME=/usr/local/cuda-13.0 python exps/attn/ablation/bench_inner_dir.py
 """
 
 import os
