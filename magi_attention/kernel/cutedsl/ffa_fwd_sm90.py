@@ -63,9 +63,6 @@ from .tile_scheduler import (
 
 
 class FFAFwdSm90(FFAFwdSm80):
-    # SM90 uses WGMMA, whose accumulator layout matches the StMatrix store atom.
-    use_stmatrix_O_store: bool = True
-
     def __init__(
         self,
         *args,
@@ -110,6 +107,11 @@ class FFAFwdSm90(FFAFwdSm80):
             )
             print(f"{prefix}{self.cluster_shape_mn=} | {self.arch=}")
             print()
+
+    @property
+    def use_stmatrix_O_store(self) -> bool:
+        """SM90 uses WGMMA, whose accumulator layout matches the StMatrix store atom."""
+        return True
 
     def _get_smem_layout_atom(self):
         sQ_layout_atom = warpgroup.make_smem_layout_atom(

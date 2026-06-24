@@ -49,13 +49,6 @@ from .tile_scheduler import (
 
 
 class FFAFwdSm80:
-    # Whether the epilogue stores the O accumulator to smem with the StMatrix copy
-    # atom. This must follow the *MMA kind*, not the hardware/DSL arch: this kernel
-    # always uses the Ampere warp MMA (m16n8k16, permutation_mnk N=16), whose
-    # accumulator layout is incompatible with StMatrix. Subclasses that switch to
-    # WGMMA (e.g. FFAFwdSm90) override this to True.
-    use_stmatrix_O_store: bool = False
-
     def __init__(
         self,
         dtype: Type[cutlass.Numeric],
@@ -150,6 +143,16 @@ class FFAFwdSm80:
             print(f"{prefix}{self.score_mod=} | {self.mask_mod=}")
             print(f"{prefix}{self.arch=}")
             print()
+
+    @property
+    def use_stmatrix_O_store(self) -> bool:
+        """Whether the epilogue stores the O accumulator to smem with the StMatrix copy
+        atom. This must follow the *MMA kind*, not the hardware/DSL arch: this kernel
+        always uses the Ampere warp MMA (m16n8k16, permutation_mnk N=16), whose
+        accumulator layout is incompatible with StMatrix. Subclasses that switch to
+        WGMMA (e.g. FFAFwdSm90) override this to True.
+        """
+        return False
 
     @property
     def is_causal(self) -> bool:
