@@ -131,6 +131,14 @@ class AttentionMask:
         int
     ] = 1  # only pass in if we're doing PackGQA
     swap_AB: cutlass.Constexpr[bool] = False
+    # The R2P (register-to-predicate) bitmask fast path assumes each thread's owned
+    # accumulator columns map to logical columns starting at 0 with the WGMMA stride
+    # pattern (see ``sm90_col_to_r2p_idx``). That only holds when the N (key) dim is
+    # owned by a single MMA warp-column. For MMAs that tile N across multiple
+    # warp-columns (e.g. the SM80 backward SdP MMA, N=128 over 8 warps), each warp's
+    # column offset is ignored by R2P, corrupting the mask. Such kernels must set this
+    # to False to fall back to the layout-agnostic per-column comparison path.
+    use_r2p: cutlass.Constexpr[bool] = True
 
     @property
     def seqlen_q(self) -> Int32:
@@ -183,7 +191,7 @@ class AttentionMask:
         seqlenk_col_limit = self.seqlen_k - n_block * self.tile_n - thr_col_offset
         if const_expr(not mask_causal and not mask_local and mask_mod is None):
             if const_expr(mask_seqlen):
-                r2p = const_expr(not self.swap_AB)
+                r2p = const_expr(not self.swap_AB and self.use_r2p)
                 if const_expr(not r2p):
                     # traverse column index.
                     for c in cutlass.range(
@@ -296,7 +304,7 @@ class AttentionMask:
                 )
                 if const_expr(mask_causal):
                     r2p = const_expr(
-                        not self.swap_AB
+                        not self.swap_AB and self.use_r2p
                     )  # R2P trick, see apply_mask_sm100
                     for r in cutlass.range(
                         cute.size(tScS_mn.shape[0]), unroll_full=True
@@ -342,7 +350,7 @@ class AttentionMask:
                         if const_expr(self.window_size_left is not None)
                         else None
                     )
-                    r2p_local = const_expr(not self.swap_AB)
+                    r2p_local = const_expr(not self.swap_AB and self.use_r2p)
                     for r in cutlass.range(
                         cute.size(tScS_mn.shape[0]), unroll_full=True
                     ):

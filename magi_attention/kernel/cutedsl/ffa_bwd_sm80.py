@@ -1132,7 +1132,13 @@ class FFABwdSm80:
             # Mainloop
             # ///////////////////////////////////////////////////////////////////////////////
             # Start processing of the first n-block.
-            mask = AttentionMask(self.m_block_size, self.n_block_size, seqlen)
+            # NOTE: use_r2p=False because the SM80 backward SdP MMA tiles the N (key)
+            # dimension across multiple warp-columns (n_block_size=128 over 8 warps),
+            # which the R2P bitmask fast path does not handle (it ignores each warp's
+            # column offset). Fall back to the layout-agnostic per-column mask path.
+            mask = AttentionMask(
+                self.m_block_size, self.n_block_size, seqlen, use_r2p=False
+            )
             mask_fn = partial(
                 mask.apply_mask,
                 n_block=n_block,

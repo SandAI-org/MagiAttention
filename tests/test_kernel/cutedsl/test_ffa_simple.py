@@ -209,13 +209,6 @@ def test_non_varlen_fwd_bwd(
         )
 
         # ── backward ──
-        # FIXME(sm80-bwd): the forced SM80 backward has the same class of bug the
-        # forward had — its dQ/dKV epilogue stores the warp-MMA accumulator with the
-        # StMatrix atom whenever compiled for sm90+, corrupting the result. The
-        # forward store was fixed (FFAFwdSm80.use_stmatrix_O_store); the analogous
-        # bwd fix is pending, so skip the SM80 backward comparison for now.
-        if force_sm80:
-            return
         # SM90 d=64 non-causal bwd is known to be unsupported
         if IS_SM90 and d == 64 and not causal:
             return
@@ -327,11 +320,6 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
         )
 
         # ── backward ──
-        # FIXME(sm80-bwd): forced SM80 backward still has the analogous epilogue
-        # store bug (see test_non_varlen_fwd_bwd). Skip the SM80 backward for now.
-        if force_sm80:
-            return
-
         g = torch.randn_like(out_v)
         dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
 

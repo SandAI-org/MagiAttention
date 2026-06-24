@@ -640,7 +640,12 @@ def _flex_flash_attn_bwd(
         dQ_swapAB = False
         AtomLayoutMSdP = 1
         AtomLayoutNdKV = 8
-        AtomLayoutMdQ = 1
+        # The dQ MMA tiles the head_dim (N) across (num_warps // AtomLayoutMdQ)
+        # warp-columns, each contributing 16 elements. With 8 warps, AtomLayoutMdQ=1
+        # needs head_dim >= 128; for head_dim <= 64 that overshoots the output tile
+        # and the dQ gemm fails to verify. Use AtomLayoutMdQ=2 (4 warp-columns ->
+        # 64-wide N) for head_dim <= 64, matching the SM90 config.
+        AtomLayoutMdQ = 2 if head_dim <= 64 else 1
         V_in_regs = False
         cluster_size = 1
         use_2cta_instrs = False
@@ -1259,11 +1264,13 @@ def _flex_flash_attn_bwd(
         num_threads_post_dQ = 128 if dQ_single_wg else cfg.num_wg * 128
         num_threads_post_dKV = cfg.num_wg * 128
     elif major_arch == 8:
-        # SM80: the postprocess MMA layout is (AtomLayout, num_warps // AtomLayout, 1),
-        # which requires num_warps to be a multiple of AtomLayout. The dKV
-        # postprocess uses AtomLayoutNdKV=8, so it needs >= 8 warps (256 threads,
-        # matching the main kernel). dQ uses AtomLayoutMdQ=1 and is fine with 4 warps.
-        num_threads_post_dQ = 128
+        # SM80: the dQ/dKV accumulator buffers are written by the main kernel's
+        # tiled-MMA, whose accumulator->linear layout depends on the warp (thread)
+        # count. The postprocess re-derives that layout from its own tiled-MMA, so
+        # it must use the *same* number of threads as the main kernel (256, i.e.
+        # 8 warps). Using fewer threads (e.g. 128) reshapes the linear accumulator
+        # with a different MMA layout and scrambles the result (was the SM80 dQ bug).
+        num_threads_post_dQ = 256
         num_threads_post_dKV = 256
     else:
         num_threads_post_dQ = 128
