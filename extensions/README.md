@@ -11,9 +11,9 @@ Extensions to provide supplementary utilities based on MagiAttention.
 * docker run command:
 
     ```bash
-    # choose one compatible version, e.g. 25.10, 25.12, 26.05, etc.
-    MAJOR_VERSION=26
-    MINOR_VERSION=05
+    # choose one compatible version, e.g. 25.10, 25.12, etc.
+    MAJOR_VERSION=25
+    MINOR_VERSION=10
 
     # specify your own names and paths
     CONTAINER_NAME=...

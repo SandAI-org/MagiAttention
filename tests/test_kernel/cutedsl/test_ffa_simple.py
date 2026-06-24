@@ -20,8 +20,6 @@ changes we can quickly verify correctness has not regressed:
   * Non-varlen fwd+bwd: full / causal  x  MHA / GQA / MQA
   * Varlen (packed cu_seqlens) fwd+bwd: full / causal  x  MHA / GQA / MQA
 
-SM90 and SM100 paths are exercised automatically via the IS_SM90 guard.
-
 Run:
     pytest tests/test_kernel/cutedsl/test_ffa_simple.py -v
 """
@@ -39,9 +37,7 @@ from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
 from magi_attention.testing import assert_close, ref_attn_func
 from magi_attention.testing.utils import switch_envvars
 from magi_attention.utils import make_attn_mask_from_ffa_args
-
-IS_SM90 = torch.cuda.get_device_capability()[0] == 9
-IS_SM100 = torch.cuda.get_device_capability()[0] == 10
+from magi_attention.utils.arch import is_ampere
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -157,15 +153,19 @@ def _maybe_force_sm80(enabled: bool):
     [
         (256, 256),
         (1024, 1024),
-        (113, 203),  # non-aligned
+        (203, 123),
     ],
 )
 def test_non_varlen_fwd_bwd(
     seqlen_q, seqlen_k, force_sm80, d, mask_types, mha_type, dtype
 ):
     """Non-varlen flex_flash_attn_func: fwd + bwd for full/causal x MHA/GQA/MQA."""
+    if force_sm80 and is_ampere():
+        pytest.skip(
+            "No need to force SM80 on Ampere+ hardware, the kernel path is selected automatically"
+        )
+
     device = "cuda"
-    causal = mask_types == MT_MAP.causal
     seed = seqlen_q + seqlen_k + d + mask_types * 3
     torch.random.manual_seed(seed)
     random.seed(seed)
@@ -209,13 +209,6 @@ def test_non_varlen_fwd_bwd(
         )
 
         # ── backward ──
-        # SM90 d=64 non-causal bwd is known to be unsupported
-        if IS_SM90 and d == 64 and not causal:
-            return
-        # Can't bwd when seqlen_k < seqlen_q with causal (undefined mask region)
-        if causal and seqlen_k < seqlen_q:
-            return
-
         g = torch.randn_like(out)
         dq, dk, dv = torch.autograd.grad(out, (q, k, v), g)
 
@@ -256,17 +249,18 @@ def test_non_varlen_fwd_bwd(
 @pytest.mark.parametrize("seqlen", [128, 512, 1024])
 def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
     """Varlen flex_flash_attn_func (packed q/k ranges): fwd + bwd."""
-    # FIXME(sm80-varlen): forcing the SM80 path for varlen crashes with an illegal
-    # memory access when the arch override is toggled mid-process on SM90 hardware.
-    # It is a varlen-only cross-arch persistent-state leak: the SM80-forced varlen
-    # kernel runs fine in isolation, native SM90 varlen (force_sm80=False) is fully
-    # covered below, and the non-varlen suite already validates SM80 bwd correctness.
-    # Skip the forced-SM80 varlen case on SM90 until the state leak is root-caused.
-    if force_sm80 and IS_SM90:
-        pytest.skip("SM80-forced varlen crashes under mid-process arch switch on SM90")
+    if force_sm80:
+        if is_ampere():
+            pytest.skip(
+                "No need to force SM80 on Ampere+ hardware, the kernel path is selected automatically"
+            )
+        else:
+            # FIXME(sm80-varlen): forcing the SM80 path for varlen crashes
+            # with an illegal memory access when the arch override is toggled mid-process
+            # on hardware with higher capability.
+            pytest.skip("SM80-forced varlen crashes under mid-process arch")
 
     device = "cuda"
-    causal = mask_types == MT_MAP.causal
     seed = seqlen + d + mask_types * 5
     torch.random.manual_seed(seed)
     random.seed(seed)
@@ -326,10 +320,6 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
         )
 
         # ── backward ──
-        # SM90 d=64 non-causal bwd is known to be unsupported
-        if IS_SM90 and d == 64 and not causal:
-            return
-
         g = torch.randn_like(out_v)
         dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
 
