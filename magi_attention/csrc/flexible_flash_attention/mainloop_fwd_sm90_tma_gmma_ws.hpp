@@ -627,10 +627,13 @@ struct CollectiveMainloopFwdSm90 {
       Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
 
       if constexpr (Use_TMA_Q) {
-        // Wait for the MMA warpgroups to signal that smem_q is ready
-        if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
-          BarrierManager::sync<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
-        }
+        // Wait for the MMA warpgroups to signal that smem_q is ready.
+        // All producer threads must participate: the barrier expects
+        // NumMmaThreadsQK + NumProducerThreads arrivals.  Restricting
+        // to warp 0 is only valid when SingleProducerWarp == true
+        // (NumProducerThreads == 32); ScatterKV has 128 producer threads
+        // and the barrier would deadlock if only 32 arrive.
+        BarrierManager::sync<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
 
         if (is_tma_issue_thread()) {
           auto& barrier_Q = reinterpret_cast<TMAClusterBarrier_t&>(shared_storage.pipelines.barrier_Q);
