@@ -224,3 +224,4 @@ Makefile
 cmake_install.cmake
 debug_bwd_hang.py
 detect_cuda_version.cc
+build_ext/
