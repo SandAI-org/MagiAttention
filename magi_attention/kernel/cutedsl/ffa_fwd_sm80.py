@@ -49,6 +49,13 @@ from .tile_scheduler import (
 
 
 class FFAFwdSm80:
+    # Whether the epilogue stores the O accumulator to smem with the StMatrix copy
+    # atom. This must follow the *MMA kind*, not the hardware/DSL arch: this kernel
+    # always uses the Ampere warp MMA (m16n8k16, permutation_mnk N=16), whose
+    # accumulator layout is incompatible with StMatrix. Subclasses that switch to
+    # WGMMA (e.g. FFAFwdSm90) override this to True.
+    use_stmatrix_O_store: bool = False
+
     def __init__(
         self,
         dtype: Type[cutlass.Numeric],
@@ -373,14 +380,28 @@ class FFAFwdSm80:
         smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(
             self.arch.major * 10 + self.arch.minor, self.dtype
         )
-        smem_thr_copy_O = cute.make_tiled_copy_C(smem_copy_atom_O, tiled_mma).get_slice(
-            tidx
-        )
-        taccOrO = smem_thr_copy_O.retile(rO)
-        taccOsO = smem_thr_copy_O.partition_D(sO)
-        # taccOsO = copy_utils.partition_D_position_independent(smem_thr_copy_O, sO)
-        # copy acc O from rmem to smem with the smem copy atom
-        cute.copy(smem_copy_atom_O, taccOrO, taccOsO)
+        if const_expr(not self.use_stmatrix_O_store):
+            # Ampere warp-MMA path. The O accumulator comes from the warp MMA whose
+            # permutation_mnk N=16 places two n8 atoms per 16-wide head_dim_v tile.
+            # cute.make_tiled_copy_C with the StMatrix atom (selected by get_smem_
+            # store_atom whenever this kernel is *compiled* for sm90+, even though it
+            # uses the Ampere MMA) mis-maps the second n8 atom, corrupting the high 8
+            # of every 16 head_dim_v columns. Store via the MMA's native C partition
+            # instead, which handles the N=16 permutation correctly on any target.
+            taccOsO = tiled_mma.get_slice(tidx).partition_C(sO)
+            cute.autovec_copy(rO, taccOsO)
+        else:
+            smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(
+                self.arch.major * 10 + self.arch.minor, self.dtype
+            )
+            smem_thr_copy_O = cute.make_tiled_copy_C(
+                smem_copy_atom_O, tiled_mma
+            ).get_slice(tidx)
+            taccOrO = smem_thr_copy_O.retile(rO)
+            taccOsO = smem_thr_copy_O.partition_D(sO)
+            # taccOsO = copy_utils.partition_D_position_independent(smem_thr_copy_O, sO)
+            # copy acc O from rmem to smem with the smem copy atom
+            cute.copy(smem_copy_atom_O, taccOrO, taccOsO)
 
         cO = cute.make_identity_tensor((self.tile_m, self.tile_hdimv))
         pack_gqa = PackGQA(

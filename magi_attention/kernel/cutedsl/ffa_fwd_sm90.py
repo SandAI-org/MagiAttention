@@ -63,6 +63,9 @@ from .tile_scheduler import (
 
 
 class FFAFwdSm90(FFAFwdSm80):
+    # SM90 uses WGMMA, whose accumulator layout matches the StMatrix store atom.
+    use_stmatrix_O_store: bool = True
+
     def __init__(
         self,
         *args,

@@ -164,12 +164,6 @@ def test_non_varlen_fwd_bwd(
     seqlen_q, seqlen_k, force_sm80, d, mask_types, mha_type, dtype
 ):
     """Non-varlen flex_flash_attn_func: fwd + bwd for full/causal x MHA/GQA/MQA."""
-    # FIXME(sm80): the forced SM80 path has a numerical bug (fwd output is wrong
-    # in the high 8 of every 16 head_dim_v lanes, ~40% mismatch). Skip until the
-    # SM80 PV/epilogue layout is fixed, then remove this early return.
-    if force_sm80:
-        return
-
     device = "cuda"
     causal = mask_types == MT_MAP.causal
     seed = seqlen_q + seqlen_k + d + mask_types * 3
@@ -215,6 +209,13 @@ def test_non_varlen_fwd_bwd(
         )
 
         # ── backward ──
+        # FIXME(sm80-bwd): the forced SM80 backward has the same class of bug the
+        # forward had — its dQ/dKV epilogue stores the warp-MMA accumulator with the
+        # StMatrix atom whenever compiled for sm90+, corrupting the result. The
+        # forward store was fixed (FFAFwdSm80.use_stmatrix_O_store); the analogous
+        # bwd fix is pending, so skip the SM80 backward comparison for now.
+        if force_sm80:
+            return
         # SM90 d=64 non-causal bwd is known to be unsupported
         if IS_SM90 and d == 64 and not causal:
             return
@@ -262,12 +263,6 @@ def test_non_varlen_fwd_bwd(
 @pytest.mark.parametrize("seqlen", [128, 512, 1024])
 def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
     """Varlen flex_flash_attn_func (packed q/k ranges): fwd + bwd."""
-    # FIXME(sm80): the forced SM80 path has a numerical bug (fwd output is wrong
-    # in the high 8 of every 16 head_dim_v lanes, ~40% mismatch). Skip until the
-    # SM80 PV/epilogue layout is fixed, then remove this early return.
-    if force_sm80:
-        return
-
     # SM90 varlen bwd is not supported by the upstream kernel
     if IS_SM90:
         pytest.skip("SM90 varlen bwd not supported")
@@ -332,6 +327,11 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
         )
 
         # ── backward ──
+        # FIXME(sm80-bwd): forced SM80 backward still has the analogous epilogue
+        # store bug (see test_non_varlen_fwd_bwd). Skip the SM80 backward for now.
+        if force_sm80:
+            return
+
         g = torch.randn_like(out_v)
         dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
 
