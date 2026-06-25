@@ -110,14 +110,11 @@ class FFAFwdSm80:
         self.mask_type = mask_type
         self.is_local = is_local
         self.pack_gqa = pack_gqa
-        self.tile_m = tile_m
-        self.tile_n = tile_n
+        self.tile_m = tile_m  # tileQ128
+        self.tile_n = tile_n  # tileK64
 
         self.num_threads = num_threads  # 128
         self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 4
-        self.num_producer_threads = self.num_threads
-        self.num_Q_load_threads = self.num_threads
-        self.num_epilogue_threads = self.num_threads
 
         self.num_stages = num_stages
         self.q_subtile_factor = q_subtile_factor
@@ -253,437 +250,28 @@ class FFAFwdSm80:
         if const_expr(mSeqUsedK_type not in [None, Int32]):
             raise TypeError("seqused_k tensor must be Int32")
 
-    def _setup_attributes(self):
-        # --- Set up tiled MMA ---
-
-        self.tiled_mma_qk, self.tiled_mma_pv = self._get_tiled_mma()
-        self.num_mma_threads = self.tiled_mma_pv.size
-
-        # --- Set up smem layout: sQ/sK/sV ---
-
-        (
-            sQ_layout_atom,
-            sK_layout_atom,
-            sV_layout_atom,
-            sO_layout_atom,
-            sP_layout_atom,
-        ) = self._get_smem_layout_atom()
-        self.sQ_layout = cute.tile_to_shape(
-            sQ_layout_atom,
-            (self.tile_m, self.tile_hdim),
-            (0, 1),
-        )
-        self.sK_layout = cute.tile_to_shape(
-            sK_layout_atom,
-            (self.tile_n, self.tile_hdim, self.num_stages),
-            (0, 1, 2),
-        )
-        self.sV_layout = cute.tile_to_shape(
-            sV_layout_atom,
-            (self.tile_n, self.tile_hdimv, self.num_stages),
-            (0, 1, 2),
-        )
-        self.sO_layout = cute.tile_to_shape(
-            sO_layout_atom,
-            (self.tile_m, self.tile_hdimv),
-            (0, 1),
-        )
-        if const_expr(sP_layout_atom is not None):
-            self.sP_layout = cute.tile_to_shape(
-                sP_layout_atom,
-                (self.tile_m, self.tile_n),
-                (0, 1),
-            )
-        else:
-            self.sP_layout = None
-
-        # --- Set up G2S/S2G tiled copy ---
-
-        # Thread layouts for copies
-        universal_copy_bits = 128
-        async_copy_elems = universal_copy_bits // self.dtype.width
-        # atom_async_copy: async copy atom for QKV load
-        atom_async_copy = cute.make_copy_atom(
-            cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
-            self.dtype,
-            num_bits_per_copy=universal_copy_bits,
-        )
-        # atom_universal_copy: universal copy atom for O store
-        atom_universal_copy = cute.make_copy_atom(
-            cute.nvgpu.CopyUniversalOp(),
-            self.dtype,
-            num_bits_per_copy=universal_copy_bits,
-        )
-        # tQ_layout and tK_layout: thread layout for QK load
-        tQK_shape_dim_1 = sQ_layout_atom.outer.shape[1] // async_copy_elems
-        assert (
-            self.num_Q_load_threads % tQK_shape_dim_1 == 0
-        ), "num_threads must be divisible by tQK_shape_dim_1"
-        assert (
-            self.num_producer_threads % tQK_shape_dim_1 == 0
-        ), "num_threads must be divisible by tQK_shape_dim_1"
-        tQ_layout = cute.make_ordered_layout(
-            (self.num_Q_load_threads // tQK_shape_dim_1, tQK_shape_dim_1),
-            order=(1, 0),
-        )
-        tK_layout = cute.make_ordered_layout(
-            (self.num_producer_threads // tQK_shape_dim_1, tQK_shape_dim_1),
-            order=(1, 0),
-        )
-        # So that we don't have to check if we overshoot kBlockM when we load Q
-        assert self.tile_m % tQ_layout.shape[0] == 0
-        tV_shape_dim_1 = sV_layout_atom.outer.shape[1] // async_copy_elems
-        tV_layout = cute.make_ordered_layout(
-            (self.num_producer_threads // tV_shape_dim_1, tV_shape_dim_1),
-            order=(1, 0),
-        )
-        # TODO: need a different layout for O if O dtype is not the same as V dtype
-        # tO_layout: thread layout for O store
-        tO_layout = cute.make_ordered_layout(
-            (self.num_epilogue_threads // tV_shape_dim_1, tV_shape_dim_1),
-            order=(1, 0),
-        )
-        # So that we don't have to check if we overshoot kBlockM when we store O
-        assert self.tile_m % tO_layout.shape[0] == 0
-
-        # Value layouts for copies
-        vQKV_layout = cute.make_layout((1, async_copy_elems))
-        vO_layout = vQKV_layout
-
-        self.gmem_tiled_copy_Q = cute.make_tiled_copy_tv(
-            atom_async_copy, tQ_layout, vQKV_layout
-        )
-        self.gmem_tiled_copy_K = cute.make_tiled_copy_tv(
-            atom_async_copy, tK_layout, vQKV_layout
-        )
-        self.gmem_tiled_copy_V = cute.make_tiled_copy_tv(
-            atom_async_copy, tV_layout, vQKV_layout
-        )
-
-        # gmem_tiled_copy_O: tiled copy for O store
-        self.gmem_tiled_copy_O = cute.make_tiled_copy_tv(
-            atom_universal_copy, tO_layout, vO_layout
-        )
-
-        self.use_tma_O = False
-
-    @cute.jit
-    def epilogue(
-        self,
-        acc_O: cute.Tensor,
-        lse: cute.Tensor,
-        mO: cute.Tensor,
-        mLSE: Optional[cute.Tensor],
-        sO: cute.Tensor,
-        seqlen: SeqlenInfoQK,
-        gmem_tiled_copy_O: cute.TiledCopy,
-        tma_atom_O: Optional[cute.CopyAtom],
-        tiled_mma: cute.TiledMma,
-        tidx: Int32,
-        m_block: Int32,
-        head_idx: Int32,
-        batch_idx: Int32,
-    ):
-        # store acc_O
-        rO = cute.make_fragment_like(acc_O, self.dtype)
-        rO.store(acc_O.load().to(self.dtype))
-        # Make sure all threads have finished reading V
-        cute.arch.barrier(
-            barrier_id=int(NamedBarrierFwd.Epilogue),
-            number_of_threads=self.num_epilogue_threads,
-        )
-        smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(
-            self.arch.major * 10 + self.arch.minor, self.dtype
-        )
-        if const_expr(not self.use_stmatrix_O_store):
-            # Ampere warp-MMA path. The O accumulator comes from the warp MMA whose
-            # permutation_mnk N=16 places two n8 atoms per 16-wide head_dim_v tile.
-            # cute.make_tiled_copy_C with the StMatrix atom (selected by get_smem_
-            # store_atom whenever this kernel is *compiled* for sm90+, even though it
-            # uses the Ampere MMA) mis-maps the second n8 atom, corrupting the high 8
-            # of every 16 head_dim_v columns. Store via the MMA's native C partition
-            # instead, which handles the N=16 permutation correctly on any target.
-            taccOsO = tiled_mma.get_slice(tidx).partition_C(sO)
-            cute.autovec_copy(rO, taccOsO)
-        else:
-            smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(
-                self.arch.major * 10 + self.arch.minor, self.dtype
-            )
-            smem_thr_copy_O = cute.make_tiled_copy_C(
-                smem_copy_atom_O, tiled_mma
-            ).get_slice(tidx)
-            taccOrO = smem_thr_copy_O.retile(rO)
-            taccOsO = smem_thr_copy_O.partition_D(sO)
-            # taccOsO = copy_utils.partition_D_position_independent(smem_thr_copy_O, sO)
-            # copy acc O from rmem to smem with the smem copy atom
-            cute.copy(smem_copy_atom_O, taccOrO, taccOsO)
-
-        cO = cute.make_identity_tensor((self.tile_m, self.tile_hdimv))
-        pack_gqa = PackGQA(
-            self.tile_m, self.tile_hdimv, self.check_hdim_v_oob, self.qhead_per_kvhead
-        )
-
-        # Write LSE from rmem -> gmem
-        if const_expr(mLSE is not None):
-            mLSE_cur = seqlen.offset_batch_Q(mLSE, batch_idx, dim=2)[None, head_idx]
-            if const_expr(not self.pack_gqa):
-                gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (m_block,))
-                gLSE_expanded_layout = cute.append(
-                    gLSE.layout, cute.make_layout((self.tile_hdimv,), stride=(0,))
-                )
-                gLSE_expanded = cute.make_tensor(gLSE.iterator, gLSE_expanded_layout)
-                thr_mma = tiled_mma.get_slice(tidx)
-                taccOgLSE = layout_utils.reshape_acc_to_mn(
-                    thr_mma.partition_C(gLSE_expanded)
-                )
-                assert cute.size(taccOgLSE, mode=[0]) == cute.size(lse)
-                taccOcO = layout_utils.reshape_acc_to_mn(thr_mma.partition_C(cO))
-                t0accOcO = layout_utils.reshape_acc_to_mn(
-                    thr_mma.get_slice(0).partition_C(cO)
-                )
-                # Only the thread corresponding to column 0 writes out the lse to gmem
-                if taccOcO[0][1] == 0:
-                    for m in cutlass.range(
-                        cute.size(taccOgLSE.shape[1]), unroll_full=True
-                    ):
-                        if (
-                            t0accOcO[m, 0][0]
-                            < seqlen.seqlen_q - m_block * self.tile_m - taccOcO[0][0]
-                        ):
-                            taccOgLSE[m, 0] = lse[m]
-            else:
-                pack_gqa.store_LSE(
-                    mLSE_cur, lse, tiled_mma, tidx, m_block, seqlen.seqlen_q
-                )
-
-        ragged = self.use_tma_O and (seqlen.has_cu_seqlens_q or seqlen.has_seqused_q)
-        mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3, ragged=ragged)[
-            None, None, head_idx
-        ]
-        # thr_mma = tiled_mma.get_slice(tidx)
-        # taccOgO = thr_mma.partition_C(gO)
-        # cute.autovec_copy(rO, taccOgO)
-        # sync to make sure all smem stores are done
-        if const_expr(self.use_tma_O):
-            # ensure smem writes are visible to TMA
-            cute.arch.fence_view_async_shared()
-            cute.arch.barrier_arrive(
-                barrier_id=int(NamedBarrierFwd.Epilogue),
-                number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
-            )
-            gO = cute.local_tile(mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0))
-            store_O, _, _ = copy_utils.tma_get_copy_fn(
-                tma_atom_O, 0, cute.make_layout(1), sO, gO, single_stage=True
-            )
-            warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-            if warp_idx == 4:
-                cute.arch.barrier(
-                    barrier_id=int(NamedBarrierFwd.Epilogue),
-                    number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
-                )
-                store_O()
-                cute.arch.cp_async_bulk_commit_group()
-                cute.arch.cp_async_bulk_wait_group(0, read=True)
-        else:
-            cute.arch.barrier(
-                barrier_id=int(NamedBarrierFwd.Epilogue),
-                number_of_threads=self.num_epilogue_threads,
-            )
-            gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
-            tOsO = gmem_thr_copy_O.partition_S(sO)
-            tOrO = cute.make_fragment_like(tOsO, self.dtype)
-            # load acc O from smem to rmem for wider vectorization
-            cute.autovec_copy(tOsO, tOrO)
-            if const_expr(not self.pack_gqa):
-                gO = cute.local_tile(
-                    mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0)
-                )
-                tOgO = gmem_thr_copy_O.partition_D(gO)
-                tOcO = gmem_thr_copy_O.partition_S(cO)
-                t0OcO = gmem_tiled_copy_O.get_slice(0).partition_S(cO)
-                tOpO = cutedsl_utils.predicate_k(tOcO, limit=mO.shape[1])
-                # copy acc O from rmem to gmem
-                for rest_m in cutlass.range_constexpr(cute.size(tOrO.shape[1])):
-                    if (
-                        t0OcO[0, rest_m, 0][0]
-                        < seqlen.seqlen_q - m_block * self.tile_m - tOcO[0][0]
-                    ):
-                        cute.copy(
-                            gmem_tiled_copy_O,
-                            tOrO[None, rest_m, None],
-                            tOgO[None, rest_m, None],
-                            pred=tOpO[None, rest_m, None]
-                            if const_expr(self.check_hdim_v_oob)
-                            else None,
-                        )
-            else:
-                pack_gqa.store_O(
-                    mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_block, seqlen.seqlen_q
-                )
-
-    @cute.jit
-    def advance_pipeline(self, pipeline_index):
-        return pipeline_index + 1 if pipeline_index < self.num_stages - 1 else 0
-
-    @cute.jit
-    def load_Q(
-        self,
-        gmem_thr_copy: cute.TiledCopy,
-        gQ: cute.Tensor,
-        sQ: cute.Tensor,
-        block: Int32,
-        seqlen: Int32,
-        headdim: Int32,
-    ):
-        tQsQ, tQgQ = gmem_thr_copy.partition_D(sQ), gmem_thr_copy.partition_S(gQ)
-        cQ = cute.make_identity_tensor((self.tile_m, self.tile_hdim))
-        tQcQ = gmem_thr_copy.partition_S(cQ)
-        t0QcQ = gmem_thr_copy.get_slice(0).partition_S(cQ)
-        tQpQ = cutedsl_utils.predicate_k(tQcQ, limit=headdim)
-        for m in cutlass.range_constexpr(cute.size(tQsQ.shape[1])):
-            # Instead of using tQcQ, we using t0QcQ and subtract the offset from the limit
-            # (seqlen - block * kBlockM). This is because the entries of t0QcQ are known at compile time.
-            if t0QcQ[0, m, 0][0] < seqlen - block * self.tile_m - tQcQ[0][0]:
-                cute.copy(
-                    gmem_thr_copy,
-                    tQgQ[None, m, None],
-                    tQsQ[None, m, None],
-                    pred=tQpQ[None, m, None]
-                    if const_expr(self.check_hdim_oob)
-                    else None,
-                )
-            # We don't need to clear the sQ smem tiles since we'll only write out the valid outputs
-
-    @cute.jit
-    def load_K(
-        self,
-        gmem_tiled_copy: cute.TiledCopy,
-        tKgK: cute.Tensor,
-        tKsK: cute.Tensor,
-        tKcK: cute.Tensor,
-        t0KcK: cute.Tensor,
-        tKpK: cute.Tensor,
-        block: Int32,
-        smem_pipe_write: Int32,
-        seqlen: Int32,
-        need_predicates: cutlass.Constexpr,
-    ):
-        # Do we need to check if we overshoot kBlockN when we load K?
-        is_even_n_smem_k = self.tile_n % gmem_tiled_copy.tiler_mn[0].shape == 0
-        if const_expr(need_predicates or not is_even_n_smem_k):
-            # Instead of using tKcK, we using t0KcK and subtract the offset from the limit
-            # (seqlen - block * kBlockN). This is because the entries of t0KcK are known at compile time.
-            if const_expr(is_even_n_smem_k):
-                seqlen_limit = seqlen - block * self.tile_n
-            else:
-                if const_expr(not need_predicates):
-                    seqlen_limit = self.tile_n
-                else:
-                    seqlen_limit = cutlass.min(
-                        seqlen - block * self.tile_n, self.tile_n
-                    )
-            seqlen_limit -= tKcK[0][0]
-            for n in cutlass.range_constexpr(cute.size(tKsK.shape[1])):
-                if t0KcK[0, n, 0][0] < seqlen_limit:
-                    cute.copy(
-                        gmem_tiled_copy,
-                        tKgK[None, n, None, block],
-                        tKsK[
-                            None,
-                            n,
-                            None,
-                            smem_pipe_write if const_expr(self.num_stages > 1) else 0,
-                        ],
-                        pred=tKpK[None, n, None]
-                        if const_expr(self.check_hdim_oob)
-                        else None,
-                    )
-                # We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
-        else:
-            cute.copy(
-                gmem_tiled_copy,
-                tKgK[None, None, None, block],
-                tKsK[
-                    None,
-                    None,
-                    None,
-                    smem_pipe_write if const_expr(self.num_stages > 1) else 0,
-                ],
-                pred=tKpK if const_expr(self.check_hdim_oob) else None,
-            )
-
-    @cute.jit
-    def load_V(
-        self,
-        gmem_tiled_copy: cute.TiledCopy,
-        tVgV: cute.Tensor,
-        tVsV: cute.Tensor,
-        tVcV: cute.Tensor,
-        t0VcV: cute.Tensor,
-        tVpV: cute.Tensor,
-        block: Int32,
-        smem_pipe_write: Int32,
-        seqlen: Int32,
-        need_predicates: cutlass.Constexpr,
-    ):
-        # Do we need to check if we overshoot kBlockN when we load V?
-        is_even_n_smem_v = self.tile_n % gmem_tiled_copy.tiler_mn[0].shape == 0
-        if const_expr(need_predicates or not is_even_n_smem_v):
-            for n in cutlass.range_constexpr(cute.size(tVsV.shape[1])):
-                # If kBlockN doesn't evenly divide the tiled copy, only the last `n` needs to be checked
-                if (
-                    is_even_n_smem_v
-                    or n < cute.size(tVsV.shape[1]) - 1
-                    or tVcV[0, n, 0][0] < self.tile_n
-                ):
-                    predicate = (
-                        tVpV[None, n, None]
-                        if const_expr(self.check_hdim_v_oob)
-                        else None
-                    )
-                    if const_expr(need_predicates):
-                        seqlen_limit = seqlen - block * self.tile_n - tVcV[0][0]
-                        predicate_n = t0VcV[0, n, 0][0] < seqlen_limit
-                        predicate = cute.make_fragment_like(tVpV[None, 0, None])
-                        for k in cutlass.range_constexpr(cute.size(predicate.shape[1])):
-                            for i in cutlass.range_constexpr(
-                                cute.size(predicate.shape[0])
-                            ):
-                                predicate[i, k] = (
-                                    tVpV[i, n, k]
-                                    if const_expr(self.check_hdim_v_oob)
-                                    else True
-                                ) and predicate_n
-                    cute.copy(
-                        gmem_tiled_copy,
-                        tVgV[None, n, None, block],
-                        tVsV[
-                            None,
-                            n,
-                            None,
-                            smem_pipe_write if const_expr(self.num_stages > 1) else 0,
-                        ],
-                        pred=predicate,
-                    )
-        else:
-            cute.copy(
-                gmem_tiled_copy,
-                tVgV[None, None, None, block],
-                tVsV[
-                    None,
-                    None,
-                    None,
-                    smem_pipe_write if const_expr(self.num_stages > 1) else 0,
-                ],
-                pred=tVpV if const_expr(self.check_hdim_v_oob) else None,
-            )
-
     def _get_smem_layout_atom(self):
+        # S<3,3,3> o 0 o (8,64):(64,1)
         sQ_layout_atom = sm80_utils.get_smem_layout_atom(self.dtype, self.tile_hdim)
         sK_layout_atom = sQ_layout_atom
         sV_layout_atom = sm80_utils.get_smem_layout_atom(self.dtype, self.tile_hdimv)
         sO_layout_atom = sV_layout_atom
-        sP_layout_atom = None
+        sP_layout_atom = (
+            None  # always rP for sm80, since mma needs all A,B to be in rmem
+        )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[fwd_sm80_get_smem_layout_atom] "
+            print()
+            print(f"{prefix}sQ_layout_atom: {sQ_layout_atom}")
+            print(f"{prefix}sK_layout_atom: {sK_layout_atom}")
+            print(f"{prefix}sV_layout_atom: {sV_layout_atom}")
+            print(f"{prefix}sO_layout_atom: {sO_layout_atom}")
+            print(f"{prefix}sP_layout_atom: {sP_layout_atom}")
+            print()
+
         return (
             sQ_layout_atom,
             sK_layout_atom,
@@ -693,7 +281,7 @@ class FFAFwdSm80:
         )
 
     def _get_tiled_mma(self):
-        # Tiled MMA
+        # Tiled MMA for S=Q*K.T
         # Thr Layout VMNK: (32,4,1,1):(1,32,0,0)
         # Permutation MNK: (64:1,16:1,16:1)
         # MMA Atom
@@ -702,14 +290,14 @@ class FFAFwdSm80:
         # TV Layout A:     ((4,8),(2,2,2)):((32,1),(16,8,128))
         # TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
         # TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
-        tiled_mma_qk = cute.make_tiled_mma(  # (tileQ16, tileK8, tileHD16)
+        tiled_mma_qk = cute.make_tiled_mma(  # (MMA_Q16, MMA_K8, MMA_HD16)
             warp.MmaF16BF16Op(self.dtype, Float32, (16, 8, 16)),
             atom_layout_mnk=(self.num_warps, 1, 1),  # (4, 1, 1)
-            # (permTileQ64, permTileK16, permTileHD16)
+            # (permMMA_Q64, permMMA_K16, permMMA_HD16)
             permutation_mnk=(self.num_warps * 16, 16, 16),
         )
 
-        # Tiled MMA
+        # Tiled MMA for O=P*V
         # Thr Layout VMNK: (32,4,1,1):(1,32,0,0)
         # Permutation MNK: (64:1,16:1,16:1)
         # MMA Atom
@@ -718,10 +306,10 @@ class FFAFwdSm80:
         # TV Layout A:     ((4,8),(2,2,2)):((32,1),(16,8,128))
         # TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
         # TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
-        tiled_mma_pv = cute.make_tiled_mma(  # (tileQ16, tileHD8, tileK16)
+        tiled_mma_pv = cute.make_tiled_mma(  # (MMA_Q16, MMA_HD8, MMA_K16)
             warp.MmaF16BF16Op(self.dtype, Float32, (16, 8, 16)),
             atom_layout_mnk=(self.num_warps, 1, 1),  # (4, 1, 1)
-            # (permTileQ64, permTileHD16, permTileK16)
+            # (permMMA_Q64, permMMA_HD16, permMMA_K16)
             permutation_mnk=(self.num_warps * 16, 16, 16),
         )
         return tiled_mma_qk, tiled_mma_pv
@@ -754,6 +342,210 @@ class FFAFwdSm80:
             if const_expr(not self.Q_in_regs)
             else SharedStorageSharedQV
         )
+
+    def _setup_attributes(self):
+        # --- Set up tiled MMA ---
+
+        self.tiled_mma_qk, self.tiled_mma_pv = self._get_tiled_mma()
+        self.num_mma_threads = self.tiled_mma_pv.size
+
+        # --- Set up smem layout: sQ/sK/sV ---
+
+        (
+            sQ_layout_atom,
+            sK_layout_atom,
+            sV_layout_atom,
+            sO_layout_atom,
+            sP_layout_atom,
+        ) = self._get_smem_layout_atom()
+
+        # sQ: S<3,3,3> o 0 o ((8,16),(64,2)):((64,512),(1,8192))
+        # sK: S<3,3,3> o 0 o ((8,8),(64,2),(1,1)):((64,512),(1,4096),(0,0))
+        # sV: S<3,3,3> o 0 o ((8,8),(64,2),(1,1)):((64,512),(1,4096),(0,0))
+        # sO: S<3,3,3> o 0 o ((8,16),(64,2)):((64,512),(1,8192))
+        self.sQ_layout = cute.tile_to_shape(
+            sQ_layout_atom,
+            # (tileQ128, tileHD128)
+            (self.tile_m, self.tile_hdim),
+            (0, 1),
+        )
+        self.sK_layout = cute.tile_to_shape(
+            sK_layout_atom,
+            # (tileK64, tileHD128, numStages)
+            (self.tile_n, self.tile_hdim, self.num_stages),
+            (0, 1, 2),
+        )
+        self.sV_layout = cute.tile_to_shape(
+            sV_layout_atom,
+            # (tileK64, tileHD128, numStages)
+            (self.tile_n, self.tile_hdimv, self.num_stages),
+            (0, 1, 2),
+        )
+        self.sO_layout = cute.tile_to_shape(
+            sO_layout_atom,
+            # (tileQ128, tileHD128)
+            (self.tile_m, self.tile_hdimv),
+            (0, 1),
+        )
+        if const_expr(sP_layout_atom is not None):
+            self.sP_layout = cute.tile_to_shape(
+                sP_layout_atom,
+                (self.tile_m, self.tile_n),
+                (0, 1),
+            )
+        else:
+            self.sP_layout = None
+
+        # --- Set up G2S/S2G tiled copy ---
+
+        # Thread layouts for copies
+        universal_copy_bits = 128  # 16B per copy atom
+        async_copy_elems = (
+            universal_copy_bits // self.dtype.width
+        )  # 8 elems per copy atom
+        self.num_producer_threads = self.num_threads
+        self.num_Q_load_threads = self.num_threads
+        self.num_epilogue_threads = self.num_threads
+        self.use_tma_O = False
+
+        # atom_async_copy: G2S copy atom for QKV load with `cp.async`
+        # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
+        # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
+        atom_async_copy = cute.make_copy_atom(
+            cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
+            self.dtype,
+            num_bits_per_copy=universal_copy_bits,
+        )
+
+        # Value layouts for all copies: (1,8):(0,1) => 8 bf16 elements per thread
+        vQKV_layout = cute.make_layout((1, async_copy_elems))
+        vO_layout = vQKV_layout
+
+        # atom_universal_copy: universal copy atom for O store
+        # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
+        # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
+        atom_universal_copy = cute.make_copy_atom(
+            cute.nvgpu.CopyUniversalOp(),
+            self.dtype,
+            num_bits_per_copy=universal_copy_bits,
+        )
+
+        # tQ: (16,8):(8,1)
+        tQK_shape_dim_1 = (
+            sQ_layout_atom.outer.shape[1] // async_copy_elems
+        )  # 8 for smem_blk=64
+        assert (
+            self.num_Q_load_threads % tQK_shape_dim_1 == 0
+        ), "num_Q_load_threads must be divisible by tQK_shape_dim_1"
+        tQ_layout = cute.make_ordered_layout(
+            (self.num_Q_load_threads // tQK_shape_dim_1, tQK_shape_dim_1),
+            order=(1, 0),
+        )
+        # So that we don't have to check if we overshoot kBlockM when we load Q
+        assert self.tile_m % tQ_layout.shape[0] == 0
+
+        # tK: (16,8):(8,1)
+        assert (
+            self.num_producer_threads % tQK_shape_dim_1 == 0
+        ), "num_producer_threads must be divisible by tQK_shape_dim_1"
+        tK_layout = cute.make_ordered_layout(
+            (self.num_producer_threads // tQK_shape_dim_1, tQK_shape_dim_1),
+            order=(1, 0),
+        )
+
+        # tV: (16,8):(8,1)
+        tV_shape_dim_1 = (
+            sV_layout_atom.outer.shape[1] // async_copy_elems
+        )  # 8 for smem_blk=64
+        tV_layout = cute.make_ordered_layout(
+            (self.num_producer_threads // tV_shape_dim_1, tV_shape_dim_1),
+            order=(1, 0),
+        )
+
+        # tO: (16,8):(8,1)
+        # TODO: need a different thread layout for O if O dtype is not the same as V dtype
+        tO_layout = cute.make_ordered_layout(
+            (self.num_epilogue_threads // tV_shape_dim_1, tV_shape_dim_1),
+            order=(1, 0),
+        )
+        # So that we don't have to check if we overshoot kBlockM when we store O
+        assert self.tile_m % tO_layout.shape[0] == 0
+
+        # tiled_copy_QKVO:
+        # layout_src_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
+        # layout_dst_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
+        self.gmem_tiled_copy_Q = cute.make_tiled_copy_tv(
+            atom_async_copy, tQ_layout, vQKV_layout
+        )
+        self.gmem_tiled_copy_K = cute.make_tiled_copy_tv(
+            atom_async_copy, tK_layout, vQKV_layout
+        )
+        self.gmem_tiled_copy_V = cute.make_tiled_copy_tv(
+            atom_async_copy, tV_layout, vQKV_layout
+        )
+        self.gmem_tiled_copy_O = cute.make_tiled_copy_tv(
+            atom_universal_copy, tO_layout, vO_layout
+        )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[fwd_sm80_setup_attributes] "
+            print()
+            print(f"{prefix}{self.use_tma_O=}")
+            print(f"{prefix}{self.num_producer_threads=}")
+            print(f"{prefix}{self.num_Q_load_threads=}")
+            print(f"{prefix}{self.num_epilogue_threads=}")
+            print(f"{prefix}{self.num_mma_threads=}")
+            print(f"{prefix}{self.tiled_mma_qk=}")
+            print()
+            print(f"{prefix}tiled_mma_pv: {self.tiled_mma_pv}")
+            print()
+            print(f"{prefix}sQ_layout: {self.sQ_layout}")
+            print(f"{prefix}sK_layout: {self.sK_layout}")
+            print(f"{prefix}sV_layout: {self.sV_layout}")
+            print(f"{prefix}sO_layout: {self.sO_layout}")
+            print(f"{prefix}sP_layout: {self.sP_layout}")
+            print()
+            print(
+                f"{prefix}atom_async_copy: "
+                f"layout_src_tv={atom_async_copy.layout_src_tv} | "
+                f"layout_dst_tv={atom_async_copy.layout_dst_tv}"
+            )
+            print(
+                f"{prefix}atom_universal_copy: "
+                f"layout_src_tv={atom_universal_copy.layout_src_tv} | "
+                f"layout_dst_tv={atom_universal_copy.layout_dst_tv}"
+            )
+            print()
+            print(f"{prefix}tQK_shape_dim_1: {tQK_shape_dim_1}")
+            print(f"{prefix}tV_shape_dim_1: {tV_shape_dim_1}")
+            print(f"{prefix}tQ_layout: {tQ_layout}")
+            print(f"{prefix}tK_layout: {tK_layout}")
+            print(f"{prefix}tV_layout: {tV_layout}")
+            print(f"{prefix}tO_layout: {tO_layout}")
+            print()
+            print(
+                f"{prefix}gmem_tiled_copy_Q: "
+                f"layout_src_tv_tiled={self.gmem_tiled_copy_Q.layout_src_tv_tiled} | "
+                f"layout_dst_tv_tiled={self.gmem_tiled_copy_Q.layout_dst_tv_tiled}"
+            )
+            print(
+                f"{prefix}gmem_tiled_copy_K: "
+                f"layout_src_tv_tiled={self.gmem_tiled_copy_K.layout_src_tv_tiled} | "
+                f"layout_dst_tv_tiled={self.gmem_tiled_copy_K.layout_dst_tv_tiled}"
+            )
+            print(
+                f"{prefix}gmem_tiled_copy_V: "
+                f"layout_src_tv_tiled={self.gmem_tiled_copy_V.layout_src_tv_tiled} | "
+                f"layout_dst_tv_tiled={self.gmem_tiled_copy_V.layout_dst_tv_tiled}"
+            )
+            print(
+                f"{prefix}gmem_tiled_copy_O: "
+                f"layout_src_tv_tiled={self.gmem_tiled_copy_O.layout_src_tv_tiled} | "
+                f"layout_dst_tv_tiled={self.gmem_tiled_copy_O.layout_dst_tv_tiled}"
+            )
+            print()
 
     @cute.jit
     def __call__(
@@ -905,21 +697,6 @@ class FFAFwdSm80:
 
         if const_expr(self.debug_print):
             prefix = "[fwd_sm80_call] "
-
-            print()
-            print(f"{prefix}tiled_mma_qk: {self.tiled_mma_qk}")
-            print()
-            print(f"{prefix}tiled_mma_pv: {self.tiled_mma_pv}")
-            print()
-            print(f"{prefix}sQ_layout: {self.sQ_layout}")
-            print(f"{prefix}sK_layout: {self.sK_layout}")
-            print(f"{prefix}sV_layout: {self.sV_layout}")
-            print(f"{prefix}sO_layout: {self.sO_layout}")
-            print(f"{prefix}sP_layout: {self.sP_layout}")
-            print(f"{prefix}num_stages: {self.num_stages}")
-            print(f"{prefix}pack_gqa: {self.pack_gqa}")
-            print(f"{prefix}num_threads: {self.num_threads}")
-            print()
 
             cute.printf("")
             cute.printf(prefix + "mQ.layout: {}", mQ.layout)
@@ -1366,6 +1143,159 @@ class FFAFwdSm80:
         )
 
     @cute.jit
+    def load_Q(
+        self,
+        gmem_thr_copy: cute.TiledCopy,
+        gQ: cute.Tensor,
+        sQ: cute.Tensor,
+        block: Int32,
+        seqlen: Int32,
+        headdim: Int32,
+    ):
+        tQsQ, tQgQ = gmem_thr_copy.partition_D(sQ), gmem_thr_copy.partition_S(gQ)
+        cQ = cute.make_identity_tensor((self.tile_m, self.tile_hdim))
+        tQcQ = gmem_thr_copy.partition_S(cQ)
+        t0QcQ = gmem_thr_copy.get_slice(0).partition_S(cQ)
+        tQpQ = cutedsl_utils.predicate_k(tQcQ, limit=headdim)
+        for m in cutlass.range_constexpr(cute.size(tQsQ.shape[1])):
+            # Instead of using tQcQ, we using t0QcQ and subtract the offset from the limit
+            # (seqlen - block * kBlockM). This is because the entries of t0QcQ are known at compile time.
+            if t0QcQ[0, m, 0][0] < seqlen - block * self.tile_m - tQcQ[0][0]:
+                cute.copy(
+                    gmem_thr_copy,
+                    tQgQ[None, m, None],
+                    tQsQ[None, m, None],
+                    pred=tQpQ[None, m, None]
+                    if const_expr(self.check_hdim_oob)
+                    else None,
+                )
+            # We don't need to clear the sQ smem tiles since we'll only write out the valid outputs
+
+    @cute.jit
+    def load_K(
+        self,
+        gmem_tiled_copy: cute.TiledCopy,
+        tKgK: cute.Tensor,
+        tKsK: cute.Tensor,
+        tKcK: cute.Tensor,
+        t0KcK: cute.Tensor,
+        tKpK: cute.Tensor,
+        block: Int32,
+        smem_pipe_write: Int32,
+        seqlen: Int32,
+        need_predicates: cutlass.Constexpr,
+    ):
+        # Do we need to check if we overshoot kBlockN when we load K?
+        is_even_n_smem_k = self.tile_n % gmem_tiled_copy.tiler_mn[0].shape == 0
+        if const_expr(need_predicates or not is_even_n_smem_k):
+            # Instead of using tKcK, we using t0KcK and subtract the offset from the limit
+            # (seqlen - block * kBlockN). This is because the entries of t0KcK are known at compile time.
+            if const_expr(is_even_n_smem_k):
+                seqlen_limit = seqlen - block * self.tile_n
+            else:
+                if const_expr(not need_predicates):
+                    seqlen_limit = self.tile_n
+                else:
+                    seqlen_limit = cutlass.min(
+                        seqlen - block * self.tile_n, self.tile_n
+                    )
+            seqlen_limit -= tKcK[0][0]
+            for n in cutlass.range_constexpr(cute.size(tKsK.shape[1])):
+                if t0KcK[0, n, 0][0] < seqlen_limit:
+                    cute.copy(
+                        gmem_tiled_copy,
+                        tKgK[None, n, None, block],
+                        tKsK[
+                            None,
+                            n,
+                            None,
+                            smem_pipe_write if const_expr(self.num_stages > 1) else 0,
+                        ],
+                        pred=tKpK[None, n, None]
+                        if const_expr(self.check_hdim_oob)
+                        else None,
+                    )
+                # We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
+        else:
+            cute.copy(
+                gmem_tiled_copy,
+                tKgK[None, None, None, block],
+                tKsK[
+                    None,
+                    None,
+                    None,
+                    smem_pipe_write if const_expr(self.num_stages > 1) else 0,
+                ],
+                pred=tKpK if const_expr(self.check_hdim_oob) else None,
+            )
+
+    @cute.jit
+    def load_V(
+        self,
+        gmem_tiled_copy: cute.TiledCopy,
+        tVgV: cute.Tensor,
+        tVsV: cute.Tensor,
+        tVcV: cute.Tensor,
+        t0VcV: cute.Tensor,
+        tVpV: cute.Tensor,
+        block: Int32,
+        smem_pipe_write: Int32,
+        seqlen: Int32,
+        need_predicates: cutlass.Constexpr,
+    ):
+        # Do we need to check if we overshoot kBlockN when we load V?
+        is_even_n_smem_v = self.tile_n % gmem_tiled_copy.tiler_mn[0].shape == 0
+        if const_expr(need_predicates or not is_even_n_smem_v):
+            for n in cutlass.range_constexpr(cute.size(tVsV.shape[1])):
+                # If kBlockN doesn't evenly divide the tiled copy, only the last `n` needs to be checked
+                if (
+                    is_even_n_smem_v
+                    or n < cute.size(tVsV.shape[1]) - 1
+                    or tVcV[0, n, 0][0] < self.tile_n
+                ):
+                    predicate = (
+                        tVpV[None, n, None]
+                        if const_expr(self.check_hdim_v_oob)
+                        else None
+                    )
+                    if const_expr(need_predicates):
+                        seqlen_limit = seqlen - block * self.tile_n - tVcV[0][0]
+                        predicate_n = t0VcV[0, n, 0][0] < seqlen_limit
+                        predicate = cute.make_fragment_like(tVpV[None, 0, None])
+                        for k in cutlass.range_constexpr(cute.size(predicate.shape[1])):
+                            for i in cutlass.range_constexpr(
+                                cute.size(predicate.shape[0])
+                            ):
+                                predicate[i, k] = (
+                                    tVpV[i, n, k]
+                                    if const_expr(self.check_hdim_v_oob)
+                                    else True
+                                ) and predicate_n
+                    cute.copy(
+                        gmem_tiled_copy,
+                        tVgV[None, n, None, block],
+                        tVsV[
+                            None,
+                            n,
+                            None,
+                            smem_pipe_write if const_expr(self.num_stages > 1) else 0,
+                        ],
+                        pred=predicate,
+                    )
+        else:
+            cute.copy(
+                gmem_tiled_copy,
+                tVgV[None, None, None, block],
+                tVsV[
+                    None,
+                    None,
+                    None,
+                    smem_pipe_write if const_expr(self.num_stages > 1) else 0,
+                ],
+                pred=tVpV if const_expr(self.check_hdim_v_oob) else None,
+            )
+
+    @cute.jit
     def compute_one_n_block(
         self,
         n_block: Int32,
@@ -1523,3 +1453,161 @@ class FFAFwdSm80:
             constant_q_idx=None,
             qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
         )
+
+    @cute.jit
+    def epilogue(
+        self,
+        acc_O: cute.Tensor,
+        lse: cute.Tensor,
+        mO: cute.Tensor,
+        mLSE: Optional[cute.Tensor],
+        sO: cute.Tensor,
+        seqlen: SeqlenInfoQK,
+        gmem_tiled_copy_O: cute.TiledCopy,
+        tma_atom_O: Optional[cute.CopyAtom],
+        tiled_mma: cute.TiledMma,
+        tidx: Int32,
+        m_block: Int32,
+        head_idx: Int32,
+        batch_idx: Int32,
+    ):
+        # store acc_O
+        rO = cute.make_fragment_like(acc_O, self.dtype)
+        rO.store(acc_O.load().to(self.dtype))
+        # Make sure all threads have finished reading V
+        cute.arch.barrier(
+            barrier_id=int(NamedBarrierFwd.Epilogue),
+            number_of_threads=self.num_epilogue_threads,
+        )
+        smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(
+            self.arch.major * 10 + self.arch.minor, self.dtype
+        )
+        if const_expr(not self.use_stmatrix_O_store):
+            # Ampere warp-MMA path. The O accumulator comes from the warp MMA whose
+            # permutation_mnk N=16 places two n8 atoms per 16-wide head_dim_v tile.
+            # cute.make_tiled_copy_C with the StMatrix atom (selected by get_smem_
+            # store_atom whenever this kernel is *compiled* for sm90+, even though it
+            # uses the Ampere MMA) mis-maps the second n8 atom, corrupting the high 8
+            # of every 16 head_dim_v columns. Store via the MMA's native C partition
+            # instead, which handles the N=16 permutation correctly on any target.
+            taccOsO = tiled_mma.get_slice(tidx).partition_C(sO)
+            cute.autovec_copy(rO, taccOsO)
+        else:
+            smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(
+                self.arch.major * 10 + self.arch.minor, self.dtype
+            )
+            smem_thr_copy_O = cute.make_tiled_copy_C(
+                smem_copy_atom_O, tiled_mma
+            ).get_slice(tidx)
+            taccOrO = smem_thr_copy_O.retile(rO)
+            taccOsO = smem_thr_copy_O.partition_D(sO)
+            # taccOsO = copy_utils.partition_D_position_independent(smem_thr_copy_O, sO)
+            # copy acc O from rmem to smem with the smem copy atom
+            cute.copy(smem_copy_atom_O, taccOrO, taccOsO)
+
+        cO = cute.make_identity_tensor((self.tile_m, self.tile_hdimv))
+        pack_gqa = PackGQA(
+            self.tile_m, self.tile_hdimv, self.check_hdim_v_oob, self.qhead_per_kvhead
+        )
+
+        # Write LSE from rmem -> gmem
+        if const_expr(mLSE is not None):
+            mLSE_cur = seqlen.offset_batch_Q(mLSE, batch_idx, dim=2)[None, head_idx]
+            if const_expr(not self.pack_gqa):
+                gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (m_block,))
+                gLSE_expanded_layout = cute.append(
+                    gLSE.layout, cute.make_layout((self.tile_hdimv,), stride=(0,))
+                )
+                gLSE_expanded = cute.make_tensor(gLSE.iterator, gLSE_expanded_layout)
+                thr_mma = tiled_mma.get_slice(tidx)
+                taccOgLSE = layout_utils.reshape_acc_to_mn(
+                    thr_mma.partition_C(gLSE_expanded)
+                )
+                assert cute.size(taccOgLSE, mode=[0]) == cute.size(lse)
+                taccOcO = layout_utils.reshape_acc_to_mn(thr_mma.partition_C(cO))
+                t0accOcO = layout_utils.reshape_acc_to_mn(
+                    thr_mma.get_slice(0).partition_C(cO)
+                )
+                # Only the thread corresponding to column 0 writes out the lse to gmem
+                if taccOcO[0][1] == 0:
+                    for m in cutlass.range(
+                        cute.size(taccOgLSE.shape[1]), unroll_full=True
+                    ):
+                        if (
+                            t0accOcO[m, 0][0]
+                            < seqlen.seqlen_q - m_block * self.tile_m - taccOcO[0][0]
+                        ):
+                            taccOgLSE[m, 0] = lse[m]
+            else:
+                pack_gqa.store_LSE(
+                    mLSE_cur, lse, tiled_mma, tidx, m_block, seqlen.seqlen_q
+                )
+
+        ragged = self.use_tma_O and (seqlen.has_cu_seqlens_q or seqlen.has_seqused_q)
+        mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3, ragged=ragged)[
+            None, None, head_idx
+        ]
+        # thr_mma = tiled_mma.get_slice(tidx)
+        # taccOgO = thr_mma.partition_C(gO)
+        # cute.autovec_copy(rO, taccOgO)
+        # sync to make sure all smem stores are done
+        if const_expr(self.use_tma_O):
+            # ensure smem writes are visible to TMA
+            cute.arch.fence_view_async_shared()
+            cute.arch.barrier_arrive(
+                barrier_id=int(NamedBarrierFwd.Epilogue),
+                number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
+            )
+            gO = cute.local_tile(mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0))
+            store_O, _, _ = copy_utils.tma_get_copy_fn(
+                tma_atom_O, 0, cute.make_layout(1), sO, gO, single_stage=True
+            )
+            warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+            if warp_idx == 4:
+                cute.arch.barrier(
+                    barrier_id=int(NamedBarrierFwd.Epilogue),
+                    number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
+                )
+                store_O()
+                cute.arch.cp_async_bulk_commit_group()
+                cute.arch.cp_async_bulk_wait_group(0, read=True)
+        else:
+            cute.arch.barrier(
+                barrier_id=int(NamedBarrierFwd.Epilogue),
+                number_of_threads=self.num_epilogue_threads,
+            )
+            gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
+            tOsO = gmem_thr_copy_O.partition_S(sO)
+            tOrO = cute.make_fragment_like(tOsO, self.dtype)
+            # load acc O from smem to rmem for wider vectorization
+            cute.autovec_copy(tOsO, tOrO)
+            if const_expr(not self.pack_gqa):
+                gO = cute.local_tile(
+                    mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0)
+                )
+                tOgO = gmem_thr_copy_O.partition_D(gO)
+                tOcO = gmem_thr_copy_O.partition_S(cO)
+                t0OcO = gmem_tiled_copy_O.get_slice(0).partition_S(cO)
+                tOpO = cutedsl_utils.predicate_k(tOcO, limit=mO.shape[1])
+                # copy acc O from rmem to gmem
+                for rest_m in cutlass.range_constexpr(cute.size(tOrO.shape[1])):
+                    if (
+                        t0OcO[0, rest_m, 0][0]
+                        < seqlen.seqlen_q - m_block * self.tile_m - tOcO[0][0]
+                    ):
+                        cute.copy(
+                            gmem_tiled_copy_O,
+                            tOrO[None, rest_m, None],
+                            tOgO[None, rest_m, None],
+                            pred=tOpO[None, rest_m, None]
+                            if const_expr(self.check_hdim_v_oob)
+                            else None,
+                        )
+            else:
+                pack_gqa.store_O(
+                    mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_block, seqlen.seqlen_q
+                )
+
+    @cute.jit
+    def advance_pipeline(self, pipeline_index):
+        return pipeline_index + 1 if pipeline_index < self.num_stages - 1 else 0

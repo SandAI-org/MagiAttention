@@ -28,6 +28,8 @@ def get_smem_layout_atom(
 ) -> cute.ComposedLayout:
     dtype_byte = cutlass.const_expr(dtype.width // 8)
     bytes_per_row = cutlass.const_expr(k_dim * dtype_byte)
+
+    # one smem row is at most 32banks x 4B/bank = 128B
     smem_k_block_size = (
         cutlass.const_expr(
             128
@@ -40,16 +42,21 @@ def get_smem_layout_atom(
         )
         // dtype_byte
     )
+
+    # B = log2(blk // 8) => TODO(REVIEW): why ?
     swizzle_bits = (
         4
         if smem_k_block_size == 128
         else (3 if smem_k_block_size == 64 else (2 if smem_k_block_size == 32 else 1))
     )
+
+    # M = S => TODO(REVIEW): why ?
     swizzle_base = 2 if dtype_byte == 4 else (3 if dtype_byte == 2 else 4)
+
     return cute.make_composed_layout(
-        cute.make_swizzle(swizzle_bits, swizzle_base, swizzle_base),
+        cute.make_swizzle(swizzle_bits, swizzle_base, swizzle_base),  # SW<B,M,S>
         0,
-        cute.make_ordered_layout(
+        cute.make_ordered_layout(  # (8, blk)
             (8 if cutlass.const_expr(k_dim % 32 == 0) else 16, smem_k_block_size),
             order=(1, 0),
         ),
