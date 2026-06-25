@@ -533,9 +533,9 @@ def _flex_flash_attn_fwd(
         softmax_scale,
         cu_seqlens_q,
         cu_seqlens_k,
-        None,
-        None,
-        None,
+        None,  # seqlen_used_q
+        None,  # seqlen_used_k
+        None,  # page_table
         None,  # window_size_left
         None,  # window_size_right
         sink,
@@ -1253,8 +1253,8 @@ def _flex_flash_attn_bwd(
         softmax_scale,
         cu_seqlens_q,
         cu_seqlens_k,
-        None,
-        None,
+        None,  # seqlen_used_q
+        None,  # seqlen_used_k
         None,  # window_size_left
         None,  # window_size_right
         dQ_semaphore,

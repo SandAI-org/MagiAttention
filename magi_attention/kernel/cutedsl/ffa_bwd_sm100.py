@@ -342,7 +342,7 @@ class FFABwdSm100:
 
         # --- Debug print ---
 
-        if self.debug_print:
+        if const_expr(self.debug_print):
             prefix = "[bwd_sm100_setup_attributes] "
             print()
             print(

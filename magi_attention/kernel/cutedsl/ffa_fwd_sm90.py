@@ -310,7 +310,7 @@ class FFAFwdSm90(FFAFwdSm80):
         self.use_tma_Q = self.arch >= Arch.sm_90 and not (
             self.pack_gqa and self.tile_m % self.qhead_per_kvhead != 0
         )
-        self.use_tma_O = self.use_tma_Q
+
         # Producer needs more registers when doing cp.async Q or KV loads
         if const_expr(
             self.num_wg_mma == 2 and (not self.use_tma_Q or not self.use_tma_KV)

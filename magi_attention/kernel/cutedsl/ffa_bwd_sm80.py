@@ -519,9 +519,19 @@ class FFABwdSm80:
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
+        # --- Checks ---
+
+        assert (
+            window_size_left is None and window_size_right is None
+        ), "Sliding window is not supported yet for sm80"
         assert (
             mdQ_semaphore is None and mdK_semaphore is None and mdV_semaphore is None
-        ), "determinism not supported yet for Sm80"
+        ), "Determinism is not supported yet for sm80"
+        assert aux_tensors is None, "Aux tensors are not supported yet for sm80"
+        assert (
+            blocksparse_tensors is None
+        ), "Blocksparse tensors are not supported yet for sm80"
+
         self._check_tile()
         self._check_type(
             *(
@@ -543,6 +553,7 @@ class FFABwdSm80:
                 )
             )
         )
+
         mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV = [
             cutedsl_utils.assume_tensor_aligned(t)
             for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV)

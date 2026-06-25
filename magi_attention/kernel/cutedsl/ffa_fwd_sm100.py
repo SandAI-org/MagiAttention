@@ -578,7 +578,7 @@ class FFAFwdSm100:
 
         # --- Debug print ---
 
-        if self.debug_print:
+        if const_expr(self.debug_print):
             prefix = "[fwd_sm100_setup_attributes] "
             print()
             print(f"{prefix}{self.kv_stage=} | {self.s_stage=} | {self.q_stage=}")

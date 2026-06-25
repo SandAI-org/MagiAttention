@@ -308,7 +308,7 @@ class FFABwdSm90:
 
         # --- Debug print ---
 
-        if self.debug_print:
+        if const_expr(self.debug_print):
             prefix = "[bwd_sm90_setup_attributes] "
             print()
             print(f"{prefix}sQ_layout: {self.sQ_layout}")

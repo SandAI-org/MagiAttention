@@ -112,7 +112,13 @@ class FFAFwdSm80:
         self.pack_gqa = pack_gqa
         self.tile_m = tile_m
         self.tile_n = tile_n
-        self.num_threads = num_threads
+
+        self.num_threads = num_threads  # 128
+        self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 4
+        self.num_producer_threads = self.num_threads
+        self.num_Q_load_threads = self.num_threads
+        self.num_epilogue_threads = self.num_threads
+
         self.num_stages = num_stages
         self.q_subtile_factor = q_subtile_factor
         self.Q_in_regs = Q_in_regs
@@ -230,8 +236,10 @@ class FFAFwdSm80:
         mSeqUsedK_type: Type[cutlass.Numeric] | None,
     ):
         # Get the data type and check if it is fp16 or bf16
-        if const_expr(not (mQ_type == mK_type == mV_type == mO_type)):
-            raise TypeError("All tensors must have the same data type")
+        if const_expr(not (mQ_type == mK_type == mV_type == mO_type == self.dtype)):
+            raise TypeError(
+                f"All tensors must have the same data type as the kernel dtype: {self.dtype}"
+            )
         if const_expr(mQ_type not in [cutlass.Float16, cutlass.BFloat16]):
             raise TypeError("Only Float16 or BFloat16 is supported")
         if const_expr(mLSE_type not in [None, Float32]):
@@ -244,12 +252,15 @@ class FFAFwdSm80:
             raise TypeError("seqused_q tensor must be Int32")
         if const_expr(mSeqUsedK_type not in [None, Int32]):
             raise TypeError("seqused_k tensor must be Int32")
-        assert mQ_type == self.dtype
 
     def _setup_attributes(self):
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Shared memory layout: Q/K/V
-        # ///////////////////////////////////////////////////////////////////////////////
+        # --- Set up tiled MMA ---
+
+        self.tiled_mma_qk, self.tiled_mma_pv = self._get_tiled_mma()
+        self.num_mma_threads = self.tiled_mma_pv.size
+
+        # --- Set up smem layout: sQ/sK/sV ---
+
         (
             sQ_layout_atom,
             sK_layout_atom,
@@ -286,9 +297,8 @@ class FFAFwdSm80:
         else:
             self.sP_layout = None
 
-        # ///////////////////////////////////////////////////////////////////////////////
-        # GMEM Tiled copy:
-        # ///////////////////////////////////////////////////////////////////////////////
+        # --- Set up G2S/S2G tiled copy ---
+
         # Thread layouts for copies
         universal_copy_bits = 128
         async_copy_elems = universal_copy_bits // self.dtype.width
@@ -349,10 +359,13 @@ class FFAFwdSm80:
         self.gmem_tiled_copy_V = cute.make_tiled_copy_tv(
             atom_async_copy, tV_layout, vQKV_layout
         )
+
         # gmem_tiled_copy_O: tiled copy for O store
         self.gmem_tiled_copy_O = cute.make_tiled_copy_tv(
             atom_universal_copy, tO_layout, vO_layout
         )
+
+        self.use_tma_O = False
 
     @cute.jit
     def epilogue(
@@ -680,15 +693,36 @@ class FFAFwdSm80:
         )
 
     def _get_tiled_mma(self):
-        tiled_mma_qk = cute.make_tiled_mma(
+        # Tiled MMA
+        # Thr Layout VMNK: (32,4,1,1):(1,32,0,0)
+        # Permutation MNK: (64:1,16:1,16:1)
+        # MMA Atom
+        # ThrID:           32:1
+        # Shape MNK:       (16,8,16)
+        # TV Layout A:     ((4,8),(2,2,2)):((32,1),(16,8,128))
+        # TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
+        # TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
+        tiled_mma_qk = cute.make_tiled_mma(  # (tileQ16, tileK8, tileHD16)
             warp.MmaF16BF16Op(self.dtype, Float32, (16, 8, 16)),
-            (self.num_threads // 32, 1, 1),
-            permutation_mnk=(self.num_threads // 32 * 16, 16, 16),
+            atom_layout_mnk=(self.num_warps, 1, 1),  # (4, 1, 1)
+            # (permTileQ64, permTileK16, permTileHD16)
+            permutation_mnk=(self.num_warps * 16, 16, 16),
         )
-        tiled_mma_pv = cute.make_tiled_mma(
+
+        # Tiled MMA
+        # Thr Layout VMNK: (32,4,1,1):(1,32,0,0)
+        # Permutation MNK: (64:1,16:1,16:1)
+        # MMA Atom
+        # ThrID:           32:1
+        # Shape MNK:       (16,8,16)
+        # TV Layout A:     ((4,8),(2,2,2)):((32,1),(16,8,128))
+        # TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
+        # TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
+        tiled_mma_pv = cute.make_tiled_mma(  # (tileQ16, tileHD8, tileK16)
             warp.MmaF16BF16Op(self.dtype, Float32, (16, 8, 16)),
-            (self.num_threads // 32, 1, 1),
-            permutation_mnk=(self.num_threads // 32 * 16, 16, 16),
+            atom_layout_mnk=(self.num_warps, 1, 1),  # (4, 1, 1)
+            # (permTileQ64, permTileHD16, permTileK16)
+            permutation_mnk=(self.num_warps * 16, 16, 16),
         )
         return tiled_mma_qk, tiled_mma_pv
 
@@ -748,7 +782,19 @@ class FFAFwdSm80:
         mQ/mK/mV/mO has same data types(supports fp16 and bf16) and same layout:
         (batch_size, seqlen_q, num_head, head_dim):(_, _, _, 1)
         """
-        assert learnable_sink is None, "Learnable sink is not supported in this kernel"
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Set up attributes
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Checks ---
+
+        assert mPageTable is None, "Page table is not supported yet for sm80"
+        assert learnable_sink is None, "Learnable sink is not supported yet for sm80"
+        assert (
+            blocksparse_tensors is None
+        ), "Blocksparse tensors are not supported yet for sm80"
+
         self._check_tile()
         self._check_type(
             *(
@@ -766,16 +812,20 @@ class FFAFwdSm80:
                 )
             )
         )
-        tiled_mma_qk, tiled_mma_pv = self._get_tiled_mma()
-        self.num_mma_threads = tiled_mma_pv.size
-        self.num_producer_threads = self.num_threads
-        self.num_Q_load_threads = self.num_threads
-        self.num_epilogue_threads = self.num_threads
-        # SM80 (Ampere) has no TMA; always use the plain cp.async epilogue path,
-        # even when this kernel is forced to run on a newer (sm90+) device.
-        self.use_tma_O = False
+
+        # --- Set up attributes ---
+
         self._setup_attributes()
+
+        # --- Set up shared storage ---
+
         SharedStorage = self._get_shared_storage_cls()
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make mQ/mK/mV/mO/mLSE tensors
+        # with layout transformations for specific memory access patterns
+        # ///////////////////////////////////////////////////////////////////////////////
+
         mQ, mK, mV, mO = [
             cutedsl_utils.assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)
         ]
@@ -805,6 +855,11 @@ class FFAFwdSm80:
             mLSE = cute.make_tensor(
                 mLSE.iterator, cute.select(mLSE.layout, mode=LSE_layout_transpose)
             )
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make tile scheduler class/args
+        # ///////////////////////////////////////////////////////////////////////////////
+
         # TileScheduler for varlen, simple grid for non-varlen
         if const_expr(mCuSeqlensQ is not None or mSeqUsedQ is not None):
             TileScheduler = SingleTileVarlenScheduler
@@ -842,15 +897,19 @@ class FFAFwdSm80:
             mQ, mK, self.qhead_per_kvhead, self.pack_gqa, aux_tensors
         )
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Launch the kernel
+        # ///////////////////////////////////////////////////////////////////////////////
+
         # --- Debug print ---
 
         if const_expr(self.debug_print):
             prefix = "[fwd_sm80_call] "
 
             print()
-            print(f"{prefix}tiled_mma_qk: {tiled_mma_qk}")
+            print(f"{prefix}tiled_mma_qk: {self.tiled_mma_qk}")
             print()
-            print(f"{prefix}tiled_mma_pv: {tiled_mma_pv}")
+            print(f"{prefix}tiled_mma_pv: {self.tiled_mma_pv}")
             print()
             print(f"{prefix}sQ_layout: {self.sQ_layout}")
             print(f"{prefix}sK_layout: {self.sK_layout}")
@@ -901,8 +960,8 @@ class FFAFwdSm80:
             self.gmem_tiled_copy_K,
             self.gmem_tiled_copy_V,
             self.gmem_tiled_copy_O,
-            tiled_mma_qk,
-            tiled_mma_pv,
+            self.tiled_mma_qk,
+            self.tiled_mma_pv,
             SharedStorage,
             tile_sched_params,
             TileScheduler,
