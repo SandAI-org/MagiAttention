@@ -154,42 +154,28 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
-  // ScatterInnerLoadStoreTMA: unified flag controlling both inner-loop load and inner-loop
-  // store on the scatter path. When true, loads use TMA 2D tile copy (1 instruction per tile)
-  // and stores use TMA 2D reduce-add (1 instruction per tile), bypassing per-row bulk reduce.
-  // Requires tiles to be physically contiguous in global memory:
-  //   LoopQ BlockSparse: PackGQA → consecutive Q tokens have contiguous packed rows
-  //          (tile = kBlockM/QheadPerKhead tokens × QheadPerKhead heads, all contiguous)
-  //   LoopQ IndexSparse:  PackGQA + QheadPerKhead >= kBlockM → each tile fits within one Q
-  //          token's packed rows (inv_indices Q tokens are scattered but each has qhpkh
-  //          contiguous packed rows; when qhpkh >= kBlockM the entire tile is contiguous).
-  //          Fallback: qhpkh < kBlockM → kTma1D (future) or kCpAsync.
-  //   LoopK: BlockSparse → K tiles within a range are contiguous.
-  //          IndexSparse + PackGQA + QheadPerKhead >= kBlockM → inner Q/dO tiles are
-  //          contiguous (each token has qhpkh packed rows; kbs>=kBlockN guarantees
-  //          contiguous K blocks). Same condition as LoopQ IndexSparse.
-  static constexpr bool ScatterInnerLoadStoreTMA = InnerUseScatter &&
-      ((!SwapBwdQKLoop && PackGQA && (!IndexSparse || QheadPerKhead >= kBlockM)) ||
-       (SwapBwdQKLoop && (BlockSparse || (IndexSparse && PackGQA && QheadPerKhead >= kBlockM))));
+  // ─── Inner-Loop Load/Store Strategy ───
+  // Whether TMA 2D is used for inner-loop loads (Q/dO in LoopQ, K/V in LoopK)
+  // and stores (dK/dV reduce in LoopQ, dQ reduce in LoopK).
+  // TMA 2D requires physically contiguous tiles in global memory:
+  //   Dense: always contiguous → TMA.
+  //   LoopQ sparse (inner=Q/dO): PackGQA makes tiles contiguous when:
+  //     - BlockSparse: always (packed rows = consecutive tokens × heads).
+  //     - IndexSparse: QheadPerKhead >= kBlockM (one Q token fills the tile).
+  //   LoopK sparse (inner=K/V): K tiles are contiguous when:
+  //     - BlockSparse: KBlockSize >= kBlockN (range covers full tile).
+  //     - IndexSparse: PackGQA + QheadPerKhead >= kBlockM + KBlockSize >= kBlockN.
+  // Fallback: per-row cp.async scatter (PipelineAsync, all 64 loader threads).
+  static constexpr bool Use_TMA_Inner = !InnerUseScatter || // Non-scatter (Dense): always TMA
+      (!SwapBwdQKLoop && PackGQA && (!IndexSparse || QheadPerKhead >= kBlockM)) ||
+      (SwapBwdQKLoop && ((BlockSparse && KBlockSize >= kBlockN) || (IndexSparse && PackGQA && QheadPerKhead >= kBlockM && KBlockSize >= kBlockN)));
+  static constexpr bool Use_CpAsync_Inner = !Use_TMA_Inner;
 
-  // How the inner-loop loads (Q/dO for LoopQ, K/V for LoopK) are performed:
-  //   kTma     — 2D TMA tile load (1 instr/tile). Dense uses sequential m_block;
-  //              scatter uses runtime absolute coordinates from block_meta. Same mechanism.
-  //   kTma1D   — per-row bulk copy (SM90_BULK_COPY_G2S), 1 thread, kBlockM instrs (future)
-  //   kCpAsync — per-row cp.async.cg scatter, all 64 loader threads (scatter fallback)
-  // Pipeline: kCpAsync → PipelineAsync (arrive-count);
-  //           kTma/kTma1D → PipelineTmaAsync (transaction-bytes).
-  enum class InnerLoadMode { kCpAsync, kTma1D, kTma };
-  static constexpr InnerLoadMode kInnerLoadMode = !InnerUseScatter ? InnerLoadMode::kTma : ScatterInnerLoadStoreTMA ? InnerLoadMode::kTma : InnerLoadMode::kCpAsync;
-
-  static constexpr bool InnerLoadUseTma = (kInnerLoadMode == InnerLoadMode::kTma);
-  static constexpr bool InnerLoadUseTmaPipeline = (kInnerLoadMode != InnerLoadMode::kCpAsync);
-
-  using MainloopPipeline = std::conditional_t<InnerLoadUseTmaPipeline, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
+  using MainloopPipeline = std::conditional_t<Use_TMA_Inner, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = typename MainloopPipeline::PipelineState;
-  using MainloopPipeline_dO = std::conditional_t<InnerLoadUseTmaPipeline, typename cutlass::PipelineTmaAsync<kStages_dO>, typename cutlass::PipelineAsync<kStages_dO>>;
+  using MainloopPipeline_dO = std::conditional_t<Use_TMA_Inner, typename cutlass::PipelineTmaAsync<kStages_dO>, typename cutlass::PipelineAsync<kStages_dO>>;
   using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
-  using MainloopPipeline_V = std::conditional_t<InnerLoadUseTmaPipeline, typename cutlass::PipelineTmaAsync<kStages_V>, typename cutlass::PipelineAsync<kStages_V>>;
+  using MainloopPipeline_V = std::conditional_t<Use_TMA_Inner, typename cutlass::PipelineTmaAsync<kStages_V>, typename cutlass::PipelineAsync<kStages_V>>;
   using PipelineState_V = typename MainloopPipeline_V::PipelineState;
   using TMAClusterBarrier_t = cutlass::arch::ClusterTransactionBarrier::ValueType;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
@@ -457,20 +443,18 @@ struct CollectiveMainloopBwdSm90 {
   // are 8*128B apart. So the 1D bulk-reduce path uses a row-contiguous layout.
   // A 4-float (16B) row pad keeps rows 16B-aligned (bulk reduce requirement) while breaking
   // the worst r2s store bank conflicts (8-way unpadded -> <=2-way padded).
-  // ScatterInnerLoadStoreTMA bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
+  // Use_TMA_Inner && InnerUseScatter bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
   // keeping the swizzled TMA layout → no bank conflicts, no padding needed.
   static constexpr int kScatterAccRowPad = ScatterPad_ >= 0 ? ScatterPad_ : 4; // floats; -1 = auto (default 4)
   using SmemLayoutdKVaccumScatter = Layout<Shape<Int<kBlockN>, Int<kHeadDim>>, Stride<Int<kHeadDim + kScatterAccRowPad>, _1>>;
   using SmemLayoutdQaccumScatter = Layout<Shape<Int<kBlockM>, Int<kHeadDim>>, Stride<Int<kHeadDim + kScatterAccRowPad>, _1>>;
   // Store-side accum layouts: r2s writes and scatter-store reads go through these.
   // They alias SmemLayoutd*accumTMA unless the 1D bulk-reduce path is active.
-  // When ScatterInnerLoadStoreTMA, the 2D TMA reduce reads the swizzled TMA layout natively.
-  // The flat Scatter layout only applies when SparseInnerDxReduceUseTma && !ScatterInnerLoadStoreTMA
+  // When Use_TMA_Inner && InnerUseScatter, 2D TMA reduce reads the swizzled layout natively.
+  // The flat Scatter layout only applies when SparseInnerDxReduceUseTma && Use_CpAsync_Inner
   // (1D per-row bulk reduce fallback), and only for the inner dX of this loop.
-  using SmemLayoutdKVaccumStore =
-      std::conditional_t<SparseInnerDxReduceUseTma && SwapBwdQKLoop && !ScatterInnerLoadStoreTMA, SmemLayoutdKVaccumScatter, SmemLayoutdKVaccumTMA>;
-  using SmemLayoutdQaccumStore =
-      std::conditional_t<SparseInnerDxReduceUseTma && !SwapBwdQKLoop && !ScatterInnerLoadStoreTMA, SmemLayoutdQaccumScatter, SmemLayoutdQaccumTMA>;
+  using SmemLayoutdKVaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && SwapBwdQKLoop && Use_CpAsync_Inner, SmemLayoutdKVaccumScatter, SmemLayoutdKVaccumTMA>;
+  using SmemLayoutdQaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && !SwapBwdQKLoop && Use_CpAsync_Inner, SmemLayoutdQaccumScatter, SmemLayoutdQaccumTMA>;
   using SmemLayoutdKVaccumtStore =
       decltype(cute::composition(SmemLayoutdKVaccumStore{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
   using SmemLayoutdQaccumtStore =
@@ -1161,9 +1145,9 @@ struct CollectiveMainloopBwdSm90 {
       cute::prefetch_tma_descriptor(params.tma_load_Q_packed.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_dO_packed.get_tma_descriptor());
     }
-    // K/V TMA descriptors needed for dense and scatter-TMA paths (InnerLoadUseTma).
+    // K/V TMA descriptors needed for dense and scatter-TMA paths (Use_TMA_Inner).
     // Only cp.async-only scatter (IndexSparse etc) skips the prefetch.
-    if constexpr (!InnerUseScatter || InnerLoadUseTma) {
+    if constexpr (!InnerUseScatter || Use_TMA_Inner) {
       cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
     }
@@ -1353,10 +1337,10 @@ struct CollectiveMainloopBwdSm90 {
       gdPsum = local_tile(cute::domain_offset(lse_off, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
     };
 
-    // InnerLoadUseTma && InnerUseScatter: absolute-coordinate TMA tensors (no domain_offset by offset_q)
+    // Use_TMA_Inner && InnerUseScatter: absolute-coordinate TMA tensors (no domain_offset by offset_q)
     // for issuing TMA loads at runtime-computed token positions.
     auto tQgQ_abs = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         auto gQ_abs = local_tile(mQ, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
         return group_modes<0, 3>(block_tma_Q.partition_S(gQ_abs));
       } else {
@@ -1364,7 +1348,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     }();
     auto tdOgdO_abs = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         auto gdO_abs = local_tile(mdO, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
         return group_modes<0, 3>(block_tma_dO.partition_S(gdO_abs));
       } else {
@@ -1372,14 +1356,14 @@ struct CollectiveMainloopBwdSm90 {
       }
     }();
     auto gLSE_abs = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         return local_tile(mLSE, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
       } else {
         return cute::make_tuple();
       }
     }();
     auto gdPsum_abs = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         return local_tile(mdPsum, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
       } else {
         return cute::make_tuple();
@@ -1498,7 +1482,7 @@ struct CollectiveMainloopBwdSm90 {
     // Q and dO share the same pipe slot when Q_dO_same_stages=true, so pipe advance
     // happens in load_dO_dPsum (the second of each pair) to keep the slot index in sync.
     auto load_Q_LSE = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         // All elected threads (lane_predicate) participate in pipe state advance,
         // but only thread 0 has the correct block_meta cursor and issues TMA.
         // (Each thread's block_meta.cur_range_inner_idx is group-offset-shifted
@@ -1563,7 +1547,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_dO_dPsum = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         if (!lane_predicate)
           return;
         PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
@@ -1839,10 +1823,10 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
-    // InnerLoadUseTma && InnerUseScatter (LoopK scatter TMA): absolute-coordinate
+    // Use_TMA_Inner && InnerUseScatter (LoopK scatter TMA): absolute-coordinate
     // K/V tensors for issuing TMA at runtime-computed positions from block_meta.
     auto tKgK_abs = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         auto gK_abs = local_tile(mK, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
         return group_modes<0, 3>(block_tma_K.partition_S(gK_abs));
       } else {
@@ -1850,7 +1834,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     }();
     auto tVgV_abs = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         auto gV_abs = local_tile(mV, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
         return group_modes<0, 3>(block_tma_V.partition_S(gV_abs));
       } else {
@@ -1864,7 +1848,7 @@ struct CollectiveMainloopBwdSm90 {
     int last_k_write_stage = 0;
 
     auto load_K = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         // Scatter TMA: BlockSparse K tiles are contiguous within each k_range.
         // All elected threads participate in pipe state; only thread 0 issues TMA.
         if (!lane_predicate)
@@ -1924,7 +1908,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_V = [&]() {
-      if constexpr (InnerLoadUseTma && InnerUseScatter) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         if (!lane_predicate)
           return;
         pipeline_v.producer_acquire(smem_pipe_write_v);
@@ -2022,7 +2006,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // PipelineAsync (kCpAsync): all threads must arrive.
     // PipelineTmaAsync (kTmaDense/kTma2D): single-thread arrive suffices.
-    if (!InnerLoadUseTmaPipeline || cute::elect_one_sync()) {
+    if (!Use_TMA_Inner || cute::elect_one_sync()) {
       pipeline_q.producer_tail(smem_pipe_write_q);
       pipeline_do.producer_tail(smem_pipe_write_do);
     }
@@ -2039,7 +2023,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // PipelineAsync (kCpAsync): all threads must arrive.
     // PipelineTmaAsync (kTma): single-thread arrive suffices.
-    if (!InnerLoadUseTmaPipeline || cute::elect_one_sync()) {
+    if (!Use_TMA_Inner || cute::elect_one_sync()) {
       pipeline_k.producer_tail(smem_pipe_write_k);
       pipeline_v.producer_tail(smem_pipe_write_v);
     }
@@ -2145,7 +2129,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
 
-      if constexpr (ScatterInnerLoadStoreTMA) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         // 2D TMA reduce: entire tile written in one TMA reduce-add instruction.
         // LoopQ: all kBlockM packed rows belong to one physical token (QheadPerKhead >= kBlockM).
         if (lane_predicate) {
@@ -2369,7 +2353,7 @@ struct CollectiveMainloopBwdSm90 {
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
-      if constexpr (ScatterInnerLoadStoreTMA) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         // 2D TMA reduce: entire dV tile (absolute coordinates + pool offset).
         // When InnerUseScatter, multiple DxStorer warps enter this path; gate on
         // the first DxStorer warp to issue exactly one TMA reduce-add per tile.
@@ -2411,7 +2395,7 @@ struct CollectiveMainloopBwdSm90 {
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
-      if constexpr (ScatterInnerLoadStoreTMA) {
+      if constexpr (Use_TMA_Inner && InnerUseScatter) {
         // 2D TMA reduce: entire dK tile (absolute coordinates + pool offset).
         // Same single-warp gate as store_dV above.
         if (lane_predicate && warp_idx_in_warpgroup == ProducerWarpRoles::kNumLoaderWarps) {
@@ -2975,7 +2959,7 @@ struct CollectiveMainloopBwdSm90 {
             // dQFull/dQEmpty barriers are NOT sufficient.
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
 
-            if constexpr (ScatterInnerLoadStoreTMA) {
+            if constexpr (Use_TMA_Inner && InnerUseScatter) {
               // IndexSparse TMA reduce: single thread issues one 2D TMA reduce-add instruction
               if (thread_idx == 0) {
                 Tensor sdQ_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
@@ -3701,7 +3685,7 @@ struct CollectiveMainloopBwdSm90 {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
         } else {
           // Consumer store path: dispatch on the store mechanism
-          if constexpr (ScatterInnerLoadStoreTMA) {
+          if constexpr (Use_TMA_Inner && InnerUseScatter) {
             static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
             Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
@@ -3824,7 +3808,7 @@ struct CollectiveMainloopBwdSm90 {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
         } else {
           // Consumer store path: dispatch on the store mechanism
-          if constexpr (ScatterInnerLoadStoreTMA) {
+          if constexpr (Use_TMA_Inner && InnerUseScatter) {
             static_assert(dKVacc_use_TMA, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
             Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);

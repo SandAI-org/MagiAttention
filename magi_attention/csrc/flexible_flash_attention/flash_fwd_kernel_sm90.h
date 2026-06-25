@@ -52,14 +52,14 @@ class FlashAttnFwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool Has_softcap = CollectiveMainloop::Has_softcap;
   static constexpr bool Use_TMA_Q = CollectiveMainloop::Use_TMA_Q;
-  static constexpr bool Use_TMA_KV = CollectiveMainloop::Use_TMA_KV;
+  static constexpr bool Use_TMA_Inner = CollectiveMainloop::Use_TMA_Inner;
 
   // KV pipelines come in two flavors with different constructor signatures: dense TMA
   // (PipelineTmaAsync, takes ClusterShape) and scatter cp.async (PipelineAsync, no
   // cluster argument). This helper hides the difference at every construction site.
   template <typename Pipeline, typename Storage, typename PipelineParamsT>
   CUTLASS_DEVICE static Pipeline make_kv_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
-    if constexpr (Use_TMA_KV) {
+    if constexpr (Use_TMA_Inner) {
       return Pipeline(storage, pipeline_params, ClusterShape{});
     } else {
       return Pipeline(storage, pipeline_params);
@@ -244,7 +244,7 @@ class FlashAttnFwdSm90 {
     // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParamsK pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipelineK::ThreadCategory::Producer : MainloopPipelineK::ThreadCategory::Consumer;
-    if constexpr (Use_TMA_KV) {
+    if constexpr (Use_TMA_Inner) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
       pipeline_params_k.num_consumers = NumMmaThreads;
@@ -294,8 +294,8 @@ class FlashAttnFwdSm90 {
 
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // TMA paths (Dense/BlockSparse/IndexSparse kbs>=kBlockN): SingleProducerWarp=true → warps 1-3 exit.
-      // Scatter path (IndexSparse kbs<kBlockN): full warp group needed for cp.async loads.
+      // TMA paths (Use_TMA_Inner): SingleProducerWarp=true → warps 1-3 exit.
+      // cp.async paths (Use_CpAsync_Inner): full warp group needed for per-row loads.
       if constexpr (SingleProducerWarp) {
         if (warp_idx_in_warpgroup != 0) {
           return;
