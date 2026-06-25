@@ -83,6 +83,7 @@ class FFABwdPreProcess:
         self.tile_m = tile_m
         # padding head_dim to a multiple of 32 as k_block_size
         hdim_multiple_of = 32
+        self.head_dim = head_dim
         self.head_dim_padded = int(
             math.ceil(head_dim / hdim_multiple_of) * hdim_multiple_of
         )
@@ -93,31 +94,21 @@ class FFABwdPreProcess:
         self.num_threads = num_threads
         self.use_padded_offsets = use_padded_offsets
 
-    @staticmethod
-    def can_implement(dtype, head_dim, tile_m, num_threads) -> bool:
-        """Check if the kernel can be implemented with the given parameters.
-
-        :param dtype: data type
-        :type dtype: cutlass.Numeric
-        :param head_dim: head dimension
-        :type head_dim: int
-        :param tile_m: m block size
-        :type tile_m: int
-        :param num_threads: number of threads
-        :type num_threads: int
-
-        :return: True if the kernel can be implemented, False otherwise
-        :rtype: bool
-        """
-        if dtype not in [cutlass.Float16, cutlass.BFloat16]:
-            return False
-        if head_dim % 8 != 0:
-            return False
-        if num_threads % 32 != 0:
-            return False
-        if num_threads < tile_m:  # For multiplying lse with log2
-            return False
-        return True
+    def _check_tile(self) -> None:
+        """Validate the kernel config (dtype, head dim, threads)."""
+        if self.dtype not in [cutlass.Float16, cutlass.BFloat16]:
+            raise ValueError(f"Only Float16/BFloat16 is supported, got {self.dtype}")
+        if self.head_dim % 8 != 0:
+            raise ValueError(f"head_dim must be a multiple of 8, got {self.head_dim}")
+        if self.num_threads % 32 != 0:
+            raise ValueError(
+                f"num_threads must be a multiple of 32, got {self.num_threads}"
+            )
+        # num_threads must cover tile_m for multiplying lse with log2.
+        if self.num_threads < self.tile_m:
+            raise ValueError(
+                f"num_threads ({self.num_threads}) must be >= tile_m ({self.tile_m})"
+            )
 
     def _setup_attributes(self):
         # ///////////////////////////////////////////////////////////////////////////////
@@ -187,6 +178,7 @@ class FFABwdPreProcess:
             if const_expr(mdLSE.element_type not in [Float32]):
                 raise TypeError("dLSE tensor must be Float32")
 
+        self._check_tile()
         self._setup_attributes()
 
         # (batch, nheads, seqlen) -> (seqlen, nheads, batch) or (total_q, nheads) -> (nheads, total_q)

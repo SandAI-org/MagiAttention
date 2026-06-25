@@ -79,6 +79,7 @@ class FFABwdPostProcess:
         self.arch = arch
         # padding head_dim to a multiple of 32 as k_block_size
         hdim_multiple_of = 32
+        self.head_dim = head_dim
         self.tile_hdim = int(math.ceil(head_dim / hdim_multiple_of) * hdim_multiple_of)
         self.check_hdim_oob = head_dim != self.tile_hdim
         self.num_threads = num_threads
@@ -87,27 +88,16 @@ class FFABwdPostProcess:
         self.use_2cta_instrs = use_2cta_instrs and arch // 10 == 10 and head_dim != 64
         self.cluster_size = cluster_size
 
-    @staticmethod
-    def can_implement(dtype, head_dim, tile_m, num_threads) -> bool:
-        """Check if the kernel can be implemented with the given parameters.
-
-        :param dtype: data type
-        :type dtype: cutlass.Numeric
-        :param head_dim: head dimension
-        :type head_dim: int
-        :param tile_m: m block size
-        :type tile_m: int
-
-        :return: True if the kernel can be implemented, False otherwise
-        :rtype: bool
-        """
-        if dtype not in [cutlass.Float16, cutlass.BFloat16]:
-            return False
-        if head_dim % 8 != 0:
-            return False
-        if num_threads % 32 != 0:
-            return False
-        return True
+    def _check_tile(self) -> None:
+        """Validate the kernel config (dtype, head dim, threads)."""
+        if self.dtype not in [cutlass.Float16, cutlass.BFloat16]:
+            raise ValueError(f"Only Float16/BFloat16 is supported, got {self.dtype}")
+        if self.head_dim % 8 != 0:
+            raise ValueError(f"head_dim must be a multiple of 8, got {self.head_dim}")
+        if self.num_threads % 32 != 0:
+            raise ValueError(
+                f"num_threads must be a multiple of 32, got {self.num_threads}"
+            )
 
     def _get_tiled_mma(self):
         if const_expr(self.arch // 10 in [8, 12]):
@@ -260,6 +250,7 @@ class FFABwdPostProcess:
             if const_expr(mdQaccum.element_type not in [cutlass.Float32]):
                 raise TypeError("dQaccum tensor must be Float32")
 
+        self._check_tile()
         mdQaccum, mdQ = [
             cutedsl_utils.assume_tensor_aligned(t) for t in (mdQaccum, mdQ)
         ]
