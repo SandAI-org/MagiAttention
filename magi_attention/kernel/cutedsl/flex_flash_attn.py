@@ -193,7 +193,7 @@ def _flex_flash_attn_fwd(
     q_batch_seqlen_shape = (
         (batch_size, seqlen_q) if cu_seqlens_q is None else (total_q,)
     )
-    lse_shape = (
+    lse_shape = (  # (b, nh, sq) or (nh, tq)
         (batch_size, num_head, seqlen_q)
         if cu_seqlens_q is None
         else (num_head, total_q)

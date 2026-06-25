@@ -118,7 +118,7 @@ class FFAFwdSm80:
 
         self.num_stages = num_stages
         self.q_subtile_factor = q_subtile_factor
-        self.Q_in_regs = Q_in_regs
+        self.Q_in_regs = Q_in_regs  # False
         self.score_mod = score_mod
         self.mask_mod = mask_mod
         self.qk_acc_dtype = Float32
@@ -131,6 +131,8 @@ class FFAFwdSm80:
                 f"score_mod vec_size {self.vec_size} not supported on sm80/90/120 "
                 "due to accumulator thread ownership pattern."
             )
+
+        self.buffer_align_bytes = 1024
 
         self.debug_print = debug_print
 
@@ -317,31 +319,29 @@ class FFAFwdSm80:
     def _get_shared_storage_cls(self):
         sQ_struct, sK_struct, sV_struct = [
             cute.struct.Align[
-                cute.struct.MemRange[self.dtype, cute.cosize(layout)], 1024
+                cute.struct.MemRange[self.dtype, cute.cosize(layout)],
+                self.buffer_align_bytes,
             ]
             for layout in (self.sQ_layout, self.sK_layout, self.sV_layout)
         ]
+
         cosize_sQV = max(cute.cosize(self.sQ_layout), cute.cosize(self.sV_layout))
         sQV_struct = cute.struct.Align[
-            cute.struct.MemRange[self.dtype, cosize_sQV], 1024
+            cute.struct.MemRange[self.dtype, cosize_sQV], self.buffer_align_bytes
         ]
 
         @cute.struct
-        class SharedStorageQKV:
+        class SharedStorageQKV:  # QKV
             sV: sV_struct
             sQ: sQ_struct
             sK: sK_struct
 
         @cute.struct
-        class SharedStorageSharedQV:
+        class SharedStorageSharedQV:  # QK, sharing V with Q, if Q_in_regs
             sQ: sQV_struct
             sK: sK_struct
 
-        return (
-            SharedStorageQKV
-            if const_expr(not self.Q_in_regs)
-            else SharedStorageSharedQV
-        )
+        return SharedStorageSharedQV if const_expr(self.Q_in_regs) else SharedStorageQKV
 
     def _setup_attributes(self):
         # --- Set up tiled MMA ---
@@ -609,19 +609,17 @@ class FFAFwdSm80:
 
         self._setup_attributes()
 
-        # --- Set up shared storage ---
-
-        SharedStorage = self._get_shared_storage_cls()
-
         # ///////////////////////////////////////////////////////////////////////////////
         # Make mQ/mK/mV/mO/mLSE tensors
         # with layout transformations for specific memory access patterns
         # ///////////////////////////////////////////////////////////////////////////////
 
+        # Layout permutation of Q/K/V/O:
+        # 4D non-varlen: (b, s, nh, hd) -> (s, hd, nh, b)
+        # 3D varlen: (t, nh, hd) -> (t, hd, nh)
         mQ, mK, mV, mO = [
             cutedsl_utils.assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)
         ]
-        # Layout permutation: 4D non-varlen vs 3D varlen
         QO_layout_transpose = (
             [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
         )
@@ -640,6 +638,10 @@ class FFAFwdSm80:
             )
             for t in (mK, mV)
         ]
+
+        # Layout permutation of LSE:
+        # 3D non-varlen: (b, nh, s) -> (s, nh, b)
+        # 2D varlen: (nh, t) -> (t, nh)
         if const_expr(mLSE is not None):
             LSE_layout_transpose = (
                 [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
@@ -649,23 +651,24 @@ class FFAFwdSm80:
             )
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Make tile scheduler class/args
+        # Make tile scheduler class/args, SMEM storage, and others
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # TileScheduler for varlen, simple grid for non-varlen
-        if const_expr(mCuSeqlensQ is not None or mSeqUsedQ is not None):
-            TileScheduler = SingleTileVarlenScheduler
-        else:
-            TileScheduler = SingleTileScheduler
-        num_batch = (
-            mCuSeqlensQ.shape[0] - 1
-            if const_expr(mCuSeqlensQ is not None)
-            else mQ.shape[3]
+        # --- Make tile scheduler class/args ---
+
+        TileScheduler = (
+            SingleTileVarlenScheduler
+            if const_expr(mCuSeqlensQ is not None or mSeqUsedQ is not None)
+            else SingleTileScheduler
         )
         tile_sched_args = TileSchedulerArguments(
             num_block=cute.ceil_div(mQ.shape[0], self.tile_m),
             num_head=cute.size(mQ.shape[2]),
-            num_batch=num_batch,
+            num_batch=(
+                mCuSeqlensQ.shape[0] - 1
+                if const_expr(mCuSeqlensQ is not None)
+                else mQ.shape[3]
+            ),
             num_splits=1,
             seqlen_k=0,
             headdim=mQ.shape[1],
@@ -682,6 +685,13 @@ class FFAFwdSm80:
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+
+        # --- Make smem storage ---
+
+        SharedStorage = self._get_shared_storage_cls()
+
+        # --- Make others ---
+
         softmax_scale_log2, softmax_scale = cutedsl_utils.compute_softmax_scale_log2(
             softmax_scale, self.score_mod
         )
