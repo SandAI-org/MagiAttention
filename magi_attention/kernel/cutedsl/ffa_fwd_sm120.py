@@ -24,9 +24,6 @@
 # NOTE: SM120 is currently unverified (no hardware available). This is intentionally
 # kept as a thin framework over the SM80 path; only the capacity check differs.
 
-import cutlass
-import cutlass.utils as utils_basic
-
 from .ffa_fwd_sm80 import FFAFwdSm80
 
 
@@ -34,52 +31,11 @@ class FFAFwdSm120(FFAFwdSm80):
     # Keep arch = 80 to use CpAsync code paths (no TMA for output).
     # The compilation target is determined by the GPU at compile time, not this field.
     arch = 80
+    # SM120 has a smaller SMEM budget (99 KB vs 163 KB on SM80); _check_tile reads
+    # this to size its capacity check.
+    smem_capacity_arch = "sm_120"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if kwargs.get("debug_print", False):
             print("[fwd_sm120_init] Using FFAFwdSm120 (SM80 MMA + SM120 SMEM capacity)")
-
-    @staticmethod
-    def can_implement(
-        dtype,
-        head_dim,
-        head_dim_v,
-        tile_m,
-        tile_n,
-        num_stages,
-        num_threads,
-        is_causal,
-        Q_in_regs=False,
-    ) -> bool:
-        """Check if the kernel can be implemented on SM120.
-
-        Same logic as SM80 but uses SM120's shared memory capacity (99 KB).
-        """
-        if dtype not in [cutlass.Float16, cutlass.BFloat16]:
-            return False
-        if head_dim % 8 != 0:
-            return False
-        if head_dim_v % 8 != 0:
-            return False
-        if tile_n % 16 != 0:
-            return False
-        if num_threads % 32 != 0:
-            return False
-        # Shared memory usage: Q tile + (K tile + V tile)
-        smem_usage_Q = tile_m * head_dim * 2
-        smem_usage_K = tile_n * head_dim * num_stages * 2
-        smem_usage_V = tile_n * head_dim_v * num_stages * 2
-        smem_usage_QV = (
-            (smem_usage_Q + smem_usage_V)
-            if not Q_in_regs
-            else max(smem_usage_Q, smem_usage_V)
-        )
-        smem_usage = smem_usage_QV + smem_usage_K
-        # SM120 has 99 KB shared memory (vs 163 KB on SM80)
-        smem_capacity = utils_basic.get_smem_capacity_in_bytes("sm_120")
-        if smem_usage > smem_capacity:
-            return False
-        if (tile_m * 2) % num_threads != 0:
-            return False
-        return True

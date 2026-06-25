@@ -49,6 +49,11 @@ from .tile_scheduler import (
 
 
 class FFAFwdSm80:
+    # SMEM-capacity bucket used by _check_tile. Subclasses for other archs that
+    # reuse the SM80 MMA but have a different SMEM budget override this (e.g.
+    # FFAFwdSm120 -> "sm_120").
+    smem_capacity_arch: str = "sm_80"
+
     def __init__(
         self,
         dtype: Type[cutlass.Numeric],
@@ -90,17 +95,23 @@ class FFAFwdSm80:
             Callable signature: ``mask_mod(batch_idx, head_idx, q_idx, kv_idx, aux_tensors) -> Boolean``
         """
         self.dtype = dtype
-        # padding head_dim to a multiple of 16 as k_block_size
+        self.arch = BaseDSL._get_dsl().get_arch_enum()
+
+        # Pad head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
         self.tile_hdim = int(math.ceil(head_dim / hdim_multiple_of) * hdim_multiple_of)
         head_dim_v = head_dim_v if head_dim_v is not None else head_dim
         self.same_hdim_kv = head_dim == head_dim_v
+        self.head_dim = head_dim
+        self.head_dim_v = head_dim_v
         self.tile_hdimv = int(
             math.ceil(head_dim_v / hdim_multiple_of) * hdim_multiple_of
         )
+
         # Can save registers (and hence be faster) if we don't have to check hdim predication
         self.check_hdim_oob = head_dim != self.tile_hdim
         self.check_hdim_v_oob = head_dim_v != self.tile_hdimv
+
         self.qhead_per_kvhead = qhead_per_kvhead
         self.mask_type = mask_type
         self.is_local = is_local
@@ -114,15 +125,15 @@ class FFAFwdSm80:
         self.score_mod = score_mod
         self.mask_mod = mask_mod
         self.qk_acc_dtype = Float32
+
         self.vec_size: cutlass.Constexpr = getattr(
             score_mod, "__vec_size__", 1 if cutlass.const_expr(has_aux_tensors) else 2
         )
         if self.vec_size > 2:
             raise ValueError(
-                f"score_mod vec_size {self.vec_size} not supported on Sm80/90/120 "
+                f"score_mod vec_size {self.vec_size} not supported on sm80/90/120 "
                 "due to accumulator thread ownership pattern."
             )
-        self.arch = BaseDSL._get_dsl().get_arch_enum()
 
         self.debug_print = debug_print
 
@@ -130,8 +141,10 @@ class FFAFwdSm80:
             prefix = "[fwd_sm80_init] "
             print()
             print(f"{prefix}Initialized FFAFwdSm80 with: ")
+            print(f"{prefix}{self.dtype=} | {self.arch=} | {self.qhead_per_kvhead=}")
             print(
-                f"{prefix}{self.dtype=} | {self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}"
+                f"{prefix}{self.tile_hdim=} | {self.tile_hdimv=} | "
+                f"{self.check_hdim_oob=} | {self.check_hdim_v_oob=}"
             )
             print(
                 f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | {self.pack_gqa=}"
@@ -141,7 +154,7 @@ class FFAFwdSm80:
             )
             print(f"{prefix}{self.Q_in_regs=} | {self.q_subtile_factor=}")
             print(f"{prefix}{self.score_mod=} | {self.mask_mod=}")
-            print(f"{prefix}{self.arch=}")
+            print(f"{prefix}{self.vec_size=} | {has_aux_tensors=}")
             print()
 
     @property
@@ -158,65 +171,44 @@ class FFAFwdSm80:
     def is_causal(self) -> bool:
         return self.mask_type == MT_MAP.causal
 
-    @staticmethod
-    def can_implement(
-        dtype,
-        head_dim,
-        head_dim_v,
-        tile_m,
-        tile_n,
-        num_stages,
-        num_threads,
-        is_causal,
-        Q_in_regs=False,
-    ) -> bool:
-        """Check if the kernel can be implemented with the given parameters.
-
-        :param dtype: data type
-        :type dtype: cutlass.Numeric
-        :param head_dim: head dimension
-        :type head_dim: int
-        :param tile_m: m block size
-        :type tile_m: int
-        :param tile_n: n block size
-        :type tile_n: int
-        :param num_threads: number of threads
-        :type num_threads: int
-        :param is_causal: is causal
-        :type is_causal: bool
-
-        :return: True if the kernel can be implemented, False otherwise
-        :rtype: bool
-        """
-        if dtype not in [cutlass.Float16, cutlass.BFloat16]:
-            return False
-        if head_dim % 8 != 0:
-            return False
-        if head_dim_v % 8 != 0:
-            return False
-        if tile_n % 16 != 0:
-            return False
-        if num_threads % 32 != 0:
-            return False
-        # Check if block size setting is out of shared memory capacity
-        # Shared memory usage: Q tile + (K tile + V tile) where K and V use the same tile size
-        smem_usage_Q = tile_m * head_dim * 2
-        smem_usage_K = tile_n * head_dim * num_stages * 2
-        smem_usage_V = tile_n * head_dim_v * num_stages * 2
+    def _check_tile(self) -> None:
+        """Validate the kernel config (dtype, head dims, tile sizes, threads, SMEM)."""
+        if self.dtype not in [cutlass.Float16, cutlass.BFloat16]:
+            raise ValueError(f"Only Float16/BFloat16 is supported, got {self.dtype}")
+        if self.head_dim % 8 != 0:
+            raise ValueError(f"head_dim must be a multiple of 8, got {self.head_dim}")
+        if self.head_dim_v % 8 != 0:
+            raise ValueError(
+                f"head_dim_v must be a multiple of 8, got {self.head_dim_v}"
+            )
+        if self.tile_n % 16 != 0:
+            raise ValueError(f"tile_n must be a multiple of 16, got {self.tile_n}")
+        if self.num_threads % 32 != 0:
+            raise ValueError(
+                f"num_threads must be a multiple of 32, got {self.num_threads}"
+            )
+        # Twice the M block must be divisible by the thread count.
+        if (self.tile_m * 2) % self.num_threads != 0:
+            raise ValueError(
+                f"tile_m * 2 ({self.tile_m * 2}) must be divisible by num_threads "
+                f"({self.num_threads})"
+            )
+        # SMEM usage: Q tile + (K tile + V tile); K and V use the same tile size.
+        smem_usage_Q = self.tile_m * self.head_dim * 2
+        smem_usage_K = self.tile_n * self.head_dim * self.num_stages * 2
+        smem_usage_V = self.tile_n * self.head_dim_v * self.num_stages * 2
         smem_usage_QV = (
-            (smem_usage_Q + smem_usage_V)
-            if not Q_in_regs
-            else max(smem_usage_Q, smem_usage_V)
+            max(smem_usage_Q, smem_usage_V)
+            if self.Q_in_regs
+            else (smem_usage_Q + smem_usage_V)
         )
         smem_usage = smem_usage_QV + smem_usage_K
-        # TODO: sm86 and sm89
-        smem_capacity = utils_basic.get_smem_capacity_in_bytes("sm_80")
+        smem_capacity = utils_basic.get_smem_capacity_in_bytes(self.smem_capacity_arch)
         if smem_usage > smem_capacity:
-            return False
-        # Check if twice the block size is divisible by the number of threads
-        if (tile_m * 2) % num_threads != 0:
-            return False
-        return True
+            raise ValueError(
+                f"SMEM usage {smem_usage} B exceeds {self.smem_capacity_arch} "
+                f"capacity {smem_capacity} B"
+            )
 
     def _check_type(
         self,
@@ -750,6 +742,7 @@ class FFAFwdSm80:
         (batch_size, seqlen_q, num_head, head_dim):(_, _, _, 1)
         """
         assert learnable_sink is None, "Learnable sink is not supported in this kernel"
+        self._check_tile()
         self._check_type(
             *(
                 t.element_type if t is not None else None

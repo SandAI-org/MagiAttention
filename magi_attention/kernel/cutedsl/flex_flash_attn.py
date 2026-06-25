@@ -489,7 +489,6 @@ def _flex_flash_attn_fwd(
             raise ValueError(
                 f"Unsupported compute capability: {arch}. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
             )
-        # TODO: check @can_implement
         compile_args = [
             fa_fwd,
             q_tensor,
@@ -1207,7 +1206,6 @@ def _flex_flash_attn_bwd(
             else None
         )
 
-        # TODO: check @can_implement
         _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
             fa_bwd_obj,
             q_tensor,

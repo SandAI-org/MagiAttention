@@ -95,6 +95,8 @@ class FFABwdSm90:
         self.tile_hdim = int(math.ceil(head_dim / hdim_multiple_of) * hdim_multiple_of)
         head_dim_v = head_dim_v if head_dim_v is not None else head_dim
         self.same_hdim_kv = head_dim == head_dim_v
+        self.head_dim = head_dim
+        self.head_dim_v = head_dim_v
         self.tile_hdimv = int(
             math.ceil(head_dim_v / hdim_multiple_of) * hdim_multiple_of
         )
@@ -191,30 +193,22 @@ class FFABwdSm90:
     def is_causal(self) -> bool:
         return self.mask_type == MT_MAP.causal
 
-    @staticmethod
-    def can_implement(
-        dtype,
-        head_dim,
-        head_dim_v,
-        tile_m,
-        tile_n,
-        Q_stage,
-        num_threads,
-        V_in_regs=False,
-    ) -> bool:
-        if dtype not in [cutlass.Float16, cutlass.BFloat16]:
-            return False
-        if head_dim % 8 != 0:
-            return False
-        if head_dim_v % 8 != 0:
-            return False
-        if tile_n % 16 != 0:
-            return False
-        if num_threads % 32 != 0:
-            return False
-        if (tile_m * 2) % num_threads != 0:
-            return False
-        return True
+    def _check_tile(self) -> None:
+        """Validate the kernel config (dtype, head dims, tile sizes, threads)."""
+        if self.dtype not in [cutlass.Float16, cutlass.BFloat16]:
+            raise ValueError(f"Only Float16/BFloat16 is supported, got {self.dtype}")
+        if self.head_dim % 8 != 0:
+            raise ValueError(f"head_dim must be a multiple of 8, got {self.head_dim}")
+        if self.head_dim_v % 8 != 0:
+            raise ValueError(
+                f"head_dim_v must be a multiple of 8, got {self.head_dim_v}"
+            )
+        if self.tile_n % 16 != 0:
+            raise ValueError(f"tile_n must be a multiple of 16, got {self.tile_n}")
+        if self.num_threads % 32 != 0:
+            raise ValueError(
+                f"num_threads must be a multiple of 32, got {self.num_threads}"
+            )
 
     def _check_type(
         self,
@@ -480,6 +474,7 @@ class FFABwdSm90:
         # For varlen_k with qhead_per_kvhead == 1, we use ragged TMA tensors.
         self.varlen_k = mCuSeqlensK is not None or mSeqUsedK is not None
 
+        self._check_tile()
         self._check_type(
             *(
                 t.element_type if t is not None else None

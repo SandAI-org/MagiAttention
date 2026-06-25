@@ -47,6 +47,11 @@ from .tile_scheduler import (
 
 
 class FFABwdSm80:
+    # SMEM-capacity bucket used by _check_tile. Subclasses for other archs that
+    # reuse the SM80 MMA but have a different SMEM budget override this (e.g.
+    # FFABwdSm120 -> "sm_120").
+    smem_capacity_arch: str = "sm_80"
+
     def __init__(
         self,
         dtype: Type[cutlass.Numeric],
@@ -95,6 +100,8 @@ class FFABwdSm80:
         )
         head_dim_v = head_dim_v if head_dim_v is not None else head_dim
         self.same_hdim_kv = head_dim == head_dim_v
+        self.head_dim = head_dim
+        self.head_dim_v = head_dim_v
         self.head_dim_v_padded = int(
             math.ceil(head_dim_v / hdim_multiple_of) * hdim_multiple_of
         )
@@ -155,63 +162,41 @@ class FFABwdSm80:
     def is_causal(self) -> bool:
         return self.mask_type == MT_MAP.causal
 
-    @staticmethod
-    def can_implement(
-        dtype,
-        head_dim,
-        head_dim_v,
-        m_block_size,
-        n_block_size,
-        num_stages_Q,
-        num_stages_dO,
-        num_threads,
-        is_causal,
-        V_in_regs=False,
-    ) -> bool:
-        """Check if the kernel can be implemented with the given parameters.
-
-        :param dtype: data type
-        :type dtype: cutlass.Numeric
-        :param head_dim: head dimension
-        :type head_dim: int
-        :param m_block_size: m block size
-        :type m_block_size: int
-        :param n_block_size: n block size
-        :type n_block_size: int
-        :param num_threads: number of threads
-        :type num_threads: int
-        :param is_causal: is causal
-        :type is_causal: bool
-
-        :return: True if the kernel can be implemented, False otherwise
-        :rtype: bool
-        """
-        if dtype not in [cutlass.Float16, cutlass.BFloat16]:
-            return False
-        if head_dim % 8 != 0:
-            return False
-        if head_dim_v % 8 != 0:
-            return False
-        if n_block_size % 16 != 0:
-            return False
-        if num_threads % 32 != 0:
-            return False
-        # Check if block size setting is out of shared memory capacity
-        # Shared memory usage: Q tile + (K tile + V tile) where K and V use the same tile size
-        smem_usage_Q = m_block_size * head_dim * num_stages_Q * 2
-        smem_usage_dO = m_block_size * head_dim_v * num_stages_dO * 2
-        smem_usage_K = n_block_size * head_dim * 2
-        smem_usage_V = n_block_size * head_dim_v * 2
+    def _check_tile(self) -> None:
+        """Validate the kernel config (dtype, head dims, tile sizes, threads, SMEM)."""
+        if self.dtype not in [cutlass.Float16, cutlass.BFloat16]:
+            raise ValueError(f"Only Float16/BFloat16 is supported, got {self.dtype}")
+        if self.head_dim % 8 != 0:
+            raise ValueError(f"head_dim must be a multiple of 8, got {self.head_dim}")
+        if self.head_dim_v % 8 != 0:
+            raise ValueError(
+                f"head_dim_v must be a multiple of 8, got {self.head_dim_v}"
+            )
+        if self.n_block_size % 16 != 0:
+            raise ValueError(
+                f"n_block_size must be a multiple of 16, got {self.n_block_size}"
+            )
+        if self.num_threads % 32 != 0:
+            raise ValueError(
+                f"num_threads must be a multiple of 32, got {self.num_threads}"
+            )
+        # SMEM usage: Q tile + dO tile + K tile + V tile.
+        smem_usage_Q = self.m_block_size * self.head_dim * self.num_stages_Q * 2
+        smem_usage_dO = self.m_block_size * self.head_dim_v * self.num_stages_dO * 2
+        smem_usage_K = self.n_block_size * self.head_dim * 2
+        smem_usage_V = self.n_block_size * self.head_dim_v * 2
         smem_usage_QV = (
-            (smem_usage_Q + smem_usage_V)
-            if not V_in_regs
-            else max(smem_usage_Q, smem_usage_V)
+            max(smem_usage_Q, smem_usage_V)
+            if self.V_in_regs
+            else (smem_usage_Q + smem_usage_V)
         )
         smem_usage = smem_usage_QV + smem_usage_dO + smem_usage_K
-        smem_capacity = utils_basic.get_smem_capacity_in_bytes("sm_80")
+        smem_capacity = utils_basic.get_smem_capacity_in_bytes(self.smem_capacity_arch)
         if smem_usage > smem_capacity:
-            return False
-        return True
+            raise ValueError(
+                f"SMEM usage {smem_usage} B exceeds {self.smem_capacity_arch} "
+                f"capacity {smem_capacity} B"
+            )
 
     def _check_type(
         self,
@@ -534,7 +519,7 @@ class FFABwdSm80:
         assert (
             mdQ_semaphore is None and mdK_semaphore is None and mdV_semaphore is None
         ), "determinism not supported yet for Sm80"
-        # Get the data type and check if it is fp16 or bf16
+        self._check_tile()
         self._check_type(
             *(
                 t.element_type if t is not None else None
