@@ -30,7 +30,10 @@ import cutlass.utils as utils_basic
 from cutlass import Float32, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp
 from cutlass.cutlass_dsl import BaseDSL
+
+# isort: split
 from quack import copy_utils, layout_utils
+from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
 from .block_info import BlockInfo
@@ -341,7 +344,9 @@ class FFAFwdSm80:
             sQ: sQV_struct
             sK: sK_struct
 
-        return SharedStorageSharedQV if const_expr(self.Q_in_regs) else SharedStorageQKV
+        self.shared_storage = (
+            SharedStorageSharedQV if const_expr(self.Q_in_regs) else SharedStorageQKV
+        )
 
     def _setup_attributes(self):
         # --- Set up tiled MMA ---
@@ -359,10 +364,10 @@ class FFAFwdSm80:
             sP_layout_atom,
         ) = self._get_smem_layout_atom()
 
-        # sQ: S<3,3,3> o 0 o ((8,16),(64,2)):((64,512),(1,8192))
-        # sK: S<3,3,3> o 0 o ((8,8),(64,2),(1,1)):((64,512),(1,4096),(0,0))
-        # sV: S<3,3,3> o 0 o ((8,8),(64,2),(1,1)):((64,512),(1,4096),(0,0))
-        # sO: S<3,3,3> o 0 o ((8,16),(64,2)):((64,512),(1,8192))
+        # sQ: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
+        # sK: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
+        # sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
+        # sO: S<3,3,3> o 0 o ((ATOM_O8,LAY_tileO16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
         self.sQ_layout = cute.tile_to_shape(
             sQ_layout_atom,
             # (tileQ128, tileHD128)
@@ -685,10 +690,11 @@ class FFAFwdSm80:
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+        self.tile_scheduler_cls = TileScheduler
 
         # --- Make smem storage ---
 
-        SharedStorage = self._get_shared_storage_cls()
+        self._get_shared_storage_cls()
 
         # --- Make others ---
 
@@ -742,22 +748,19 @@ class FFAFwdSm80:
             self.sK_layout,
             self.sV_layout,
             self.sO_layout,
-            self.sP_layout,
             self.gmem_tiled_copy_Q,
             self.gmem_tiled_copy_K,
             self.gmem_tiled_copy_V,
             self.gmem_tiled_copy_O,
             self.tiled_mma_qk,
             self.tiled_mma_pv,
-            SharedStorage,
             tile_sched_params,
-            TileScheduler,
             aux_tensors,
             fastdiv_mods,
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
-            smem=SharedStorage.size_in_bytes(),
+            smem=self.shared_storage.size_in_bytes(),
             stream=stream,
         )
 
@@ -781,25 +784,41 @@ class FFAFwdSm80:
         sK_layout: cute.ComposedLayout,
         sV_layout: cute.ComposedLayout,
         sO_layout: cute.ComposedLayout,
-        sP_layout: cute.ComposedLayout | None,
         gmem_tiled_copy_Q: cute.TiledCopy,
         gmem_tiled_copy_K: cute.TiledCopy,
         gmem_tiled_copy_V: cute.TiledCopy,
         gmem_tiled_copy_O: cute.TiledCopy,
         tiled_mma_qk: cute.TiledMma,
         tiled_mma_pv: cute.TiledMma,
-        SharedStorage: cutlass.Constexpr,
-        tile_sched_params,
-        TileScheduler: cutlass.Constexpr[Callable],
+        tile_sched_params: ParamsBase,
         aux_tensors=None,
         fastdiv_mods=None,
     ):
-        # Thread index, block index
-        tidx, _, _ = cute.arch.thread_idx()
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Set up thread and tile
+        # /////////////////////////////////////////////////////////////////////////////
 
-        tile_scheduler = TileScheduler.create(tile_sched_params)
+        # --- Set up thread info ---
+
+        tidx, _, _ = cute.arch.thread_idx()
+        bidx, bidy, bidz = cute.arch.block_idx()
+
+        # Used only for debug print
+        # guarded by const_expr so zero overhead when debug_print=False
+        is_print_block = const_expr(self.debug_print) and (
+            (bidx == 0) and (bidy == 0) and (bidz == 0)
+        )
+        is_print_thread = const_expr(self.debug_print) and (
+            (tidx == 63) and is_print_block
+        )
+
+        # --- Set up work tile ---
+
+        tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
         work_tile = tile_scheduler.initial_work_tile_info()
         m_block, num_head, batch_size, _ = work_tile.tile_idx
+
+        # --- Set up block info ---
 
         block_info = BlockInfo(
             self.tile_m,
@@ -813,7 +832,10 @@ class FFAFwdSm80:
             if const_expr(self.pack_gqa)
             else 1,
         )
-        seqlen = SeqlenInfoQK.create(
+
+        # --- Set up seqlen info ---
+
+        seqlen_info = SeqlenInfoQK.create(
             batch_idx=batch_size,
             seqlen_q_static=mQ.shape[0],
             seqlen_k_static=mK.shape[0],
@@ -822,7 +844,7 @@ class FFAFwdSm80:
             mSeqUsedQ=mSeqUsedQ,
             mSeqUsedK=mSeqUsedK,
         )
-        n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
+        n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen_info, m_block)
         # For varlen, wasted grid tiles (where batch_idx >= num_batch) will have
         # seqlen_q=seqlen_k=0 and n_block_max=0.  Clamp to 0 so we don't use a
         # negative block index for K/V loads; the load/store predicates already
@@ -830,68 +852,88 @@ class FFAFwdSm80:
         n_block = cutlass.max(n_block_max - 1, 0)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Get the appropriate tiles for this thread block.
+        # Make gmem tiles for Q/K/V
         # ///////////////////////////////////////////////////////////////////////////////
+
+        # mQ: (sQ,HD):(HD*nhQ,1)
+        # mK/mV: (sK,HD):(HD*nhK,1)
         blkQ_shape = (self.tile_m, self.tile_hdim)
         blkK_shape = (self.tile_n, self.tile_hdim)
         blkV_shape = (self.tile_n, self.tile_hdimv)
         num_head_kv = num_head // self.qhead_per_kvhead
-        if const_expr(not seqlen.has_cu_seqlens_q):
+        if const_expr(not seqlen_info.has_cu_seqlens_q):
             mQ_cur = mQ[None, None, num_head, batch_size]
         else:
-            mQ_cur = cute.domain_offset((seqlen.offset_q, 0), mQ[None, None, num_head])
-        if const_expr(not seqlen.has_cu_seqlens_k):
+            mQ_cur = cute.domain_offset(
+                (seqlen_info.offset_q, 0), mQ[None, None, num_head]
+            )
+        if const_expr(not seqlen_info.has_cu_seqlens_k):
             mK_cur = mK[None, None, num_head_kv, batch_size]
             mV_cur = mV[None, None, num_head_kv, batch_size]
         else:
             mK_cur = cute.domain_offset(
-                (seqlen.offset_k, 0), mK[None, None, num_head_kv]
+                (seqlen_info.offset_k, 0), mK[None, None, num_head_kv]
             )
             mV_cur = cute.domain_offset(
-                (seqlen.offset_k, 0), mV[None, None, num_head_kv]
+                (seqlen_info.offset_k, 0), mV[None, None, num_head_kv]
             )
-        gQ = cute.local_tile(mQ_cur, blkQ_shape, (m_block, 0))
-        gK = cute.local_tile(mK_cur, blkK_shape, (None, 0))
-        gV = cute.local_tile(mV_cur, blkV_shape, (None, 0))
+
+        # gQ: (tileQ128,tileHD128):(HD*nhQ,1)
+        # gK/gV: (tileK64,tileHD128,restK):(HD*nhK,1)
+        # where restK = sK // tileK64
+        gQ = cute.local_tile(mQ_cur, blkQ_shape, (m_block, 0))  # slice out this m_block
+        gK = cute.local_tile(mK_cur, blkK_shape, (None, 0))  # all n blocks
+        gV = cute.local_tile(mV_cur, blkV_shape, (None, 0))  # all n blocks
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Get shared memory buffer
+        # Alloc smem storage and make smem tensors for sQ/sK/sV
         # ///////////////////////////////////////////////////////////////////////////////
+
+        # sQ: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
+        # sK: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
+        # sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
+        # sVt: S<3,3,3> o 0 o ((ATOM_HD64,LAY_tileHD2),(ATOM_K8,LAY_tileK8),STAGE=(1,1)):((1,4096),(64,512),(0,0))
         smem = cutlass.utils.SmemAllocator()
-        storage = smem.allocate(SharedStorage)
+        storage = smem.allocate(self.shared_storage)
         sQ = storage.sQ.get_tensor(sQ_layout)
         sK = storage.sK.get_tensor(sK_layout)
         if const_expr(not self.Q_in_regs):
             sV = storage.sV.get_tensor(sV_layout)
-        else:
+        else:  # Q/V shares the same smem buffer
             sV = cute.make_tensor(
                 cute.recast_ptr(sQ.iterator, dtype=self.dtype), sV_layout
             )
-        # Transpose view of V to tensor with layout (head_dim_v, tile_n) for tiled mma
+        # Transpose view of V to tensor with layout (tileHD, tileK) for tiled mma pv
         sVt = layout_utils.transpose_view(sV)
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        # G2S tiled copy partitions for K/V
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # tKsK/tVsV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2,STAGE=(1,1)):((1,0),1024,4096,(0,0))
+        # tKgK/tVgV: (CPY_ATOM=(8,1),CPY_k4,CPY_HD2,restK):((1,0),4096,64,16384)
         gmem_thr_copy_K = gmem_tiled_copy_K.get_slice(tidx)
         gmem_thr_copy_V = gmem_tiled_copy_V.get_slice(tidx)
-        # (CPY_Atom, CPY_N, CPY_K, n_block)
         tKsK, tKgK = gmem_thr_copy_K.partition_D(sK), gmem_thr_copy_K.partition_S(gK)
-        # (CPY_Atom, CPY_N, CPY_K, n_block)
         tVsV, tVgV = gmem_thr_copy_V.partition_D(sV), gmem_thr_copy_V.partition_S(gV)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Tile MMA compute thread partitions and allocate accumulators
+        # Tile MMA partitions and allocate rmem accumulator
         # ///////////////////////////////////////////////////////////////////////////////
+
         thr_mma_qk = tiled_mma_qk.get_slice(tidx)
         thr_mma_pv = tiled_mma_pv.get_slice(tidx)
         tSrQ = thr_mma_qk.make_fragment_A(thr_mma_qk.partition_A(sQ))
         tSrK = thr_mma_qk.make_fragment_B(thr_mma_qk.partition_B(sK[None, None, 0]))
         tOrVt = thr_mma_pv.make_fragment_B(thr_mma_pv.partition_B(sVt[None, None, 0]))
         acc_shape_O = thr_mma_pv.partition_shape_C((self.tile_m, self.tile_hdimv))
-        acc_O = cute.make_fragment(acc_shape_O, Float32)
+        acc_O = cute.make_rmem_tensor(acc_shape_O, Float32)
         acc_O.fill(0.0)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Smem copy atom tiling
+        # Make S2R tiled copy and partitions for Q/K/V
         # ///////////////////////////////////////////////////////////////////////////////
+
         smem_copy_atom_QK = cute.make_copy_atom(
             warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=4),
             self.dtype,
@@ -915,9 +957,9 @@ class FFAFwdSm80:
         tOsVt = smem_thr_copy_V.partition_S(sVt)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Predicate: Mark indices that need to copy when problem_shape isn't a multiple
-        # of tile_shape
+        # Make predicate tensors for K/V loads
         # ///////////////////////////////////////////////////////////////////////////////
+
         # Construct identity layout for KV
         cK = cute.make_identity_tensor((self.tile_n, self.tile_hdim))
         tKcK = gmem_thr_copy_K.partition_S(cK)
@@ -971,7 +1013,7 @@ class FFAFwdSm80:
             tKcK,
             t0KcK,
             tKpK,
-            seqlen=seqlen.seqlen_k,
+            seqlen=seqlen_info.seqlen_k,
         )
         load_V = partial(
             self.load_V,
@@ -981,7 +1023,7 @@ class FFAFwdSm80:
             tVcV,
             t0VcV,
             tVpV,
-            seqlen=seqlen.seqlen_k,
+            seqlen=seqlen_info.seqlen_k,
         )
 
         compute_one_n_block = partial(
@@ -999,6 +1041,55 @@ class FFAFwdSm80:
             fastdiv_mods=fastdiv_mods,
         )
 
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[fwd_sm80_kernel_setup] "
+            if is_print_thread:
+                cute.printf("")
+                cute.printf(
+                    prefix
+                    + "bidx={}, bidy={}, bidz={}, tidx={}, m_block={}, num_head={}, batch_size={}",
+                    bidx,
+                    bidy,
+                    bidz,
+                    tidx,
+                    m_block,
+                    num_head,
+                    batch_size,
+                )
+                cute.printf(
+                    prefix + "n_block_min={}, n_block_max={}, n_block={}",
+                    n_block_min,
+                    n_block_max,
+                    n_block,
+                )
+                cute.printf("")
+                cute.printf(prefix + "mQ_cur: {}", mQ_cur.layout)
+                cute.printf(prefix + "mK_cur: {}", mK_cur.layout)
+                cute.printf(prefix + "mV_cur: {}", mV_cur.layout)
+                cute.printf("")
+                cute.printf(prefix + "gQ: {}", gQ.layout)
+                cute.printf(prefix + "gK: {}", gK.layout)
+                cute.printf(prefix + "gV: {}", gV.layout)
+                cute.printf("")
+                cute.printf(prefix + "sQ: {}", sQ.layout)
+                cute.printf(prefix + "sK: {}", sK.layout)
+                cute.printf(prefix + "sV: {}", sV.layout)
+                cute.printf(prefix + "sVt: {}", sVt.layout)
+                cute.printf("")
+                cute.printf(prefix + "tKsK: {}", tKsK.layout)
+                cute.printf(prefix + "tKgK: {}", tKgK.layout)
+                cute.printf(prefix + "tKcK: {}", tKcK.layout)
+                cute.printf(prefix + "t0KcK: {}", t0KcK.layout)
+                cute.printf(prefix + "tKpK: {}", tKpK.layout)
+                cute.printf(prefix + "tVsV: {}", tVsV.layout)
+                cute.printf(prefix + "tVgV: {}", tVgV.layout)
+                cute.printf(prefix + "tVcV: {}", tVcV.layout)
+                cute.printf(prefix + "t0VcV: {}", t0VcV.layout)
+                cute.printf(prefix + "tVpV: {}", tVpV.layout)
+                cute.printf("")
+
         # ///////////////////////////////////////////////////////////////////////////////
         # Prologue
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1009,7 +1100,7 @@ class FFAFwdSm80:
             gQ,
             sQ,
             m_block,
-            seqlen=seqlen.seqlen_q,
+            seqlen=seqlen_info.seqlen_q,
             headdim=mQ.shape[1],
         )
         cute.arch.cp_async_commit_group()
@@ -1061,7 +1152,7 @@ class FFAFwdSm80:
         mask = AttentionMask(
             self.tile_m,
             self.tile_n,
-            seqlen,
+            seqlen_info,
             window_size_left,
             window_size_right,
             self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
@@ -1088,7 +1179,7 @@ class FFAFwdSm80:
             smem_pipe_read,
             smem_pipe_write,
             is_first_n_block=True,
-            seqlen=seqlen,
+            seqlen=seqlen_info,
             mask_fn=partial(mask_fn, mask_mod=self.mask_mod, mask_seqlen=True),
         )
         smem_pipe_read = self.advance_pipeline(smem_pipe_read)
@@ -1097,7 +1188,7 @@ class FFAFwdSm80:
         if const_expr(self.is_causal or self.is_local):
             n_block_min_causal_local_mask = (
                 block_info.get_n_block_min_causal_local_mask(
-                    seqlen, m_block, n_block_min
+                    seqlen_info, m_block, n_block_min
                 )
             )
             for n_tile in cutlass.range(
@@ -1108,7 +1199,7 @@ class FFAFwdSm80:
                     n_block,
                     smem_pipe_read,
                     smem_pipe_write,
-                    seqlen=seqlen,
+                    seqlen=seqlen_info,
                     mask_fn=partial(mask_fn, mask_mod=self.mask_mod, mask_seqlen=True),
                 )
                 smem_pipe_read = self.advance_pipeline(smem_pipe_read)
@@ -1119,7 +1210,7 @@ class FFAFwdSm80:
                 n_block - n_tile - 1,
                 smem_pipe_read,
                 smem_pipe_write,
-                seqlen=seqlen,
+                seqlen=seqlen_info,
                 is_first_n_block=False,
                 mask_fn=partial(mask_fn, mask_mod=self.mask_mod, mask_seqlen=False),
             )
@@ -1142,7 +1233,7 @@ class FFAFwdSm80:
             mO,
             mLSE,
             sO,
-            seqlen,
+            seqlen_info,
             gmem_tiled_copy_O,
             None,
             tiled_mma_pv,
@@ -1340,7 +1431,7 @@ class FFAFwdSm80:
         acc_shape_S = mma_params.thr_mma_qk.partition_shape_C(
             (self.tile_m, self.tile_n)
         )
-        acc_S = cute.make_fragment(acc_shape_S, Float32)
+        acc_S = cute.make_rmem_tensor(acc_shape_S, Float32)
         acc_S.fill(0.0)
         # wait for smem tile QK before mma calculation for S
         sync()

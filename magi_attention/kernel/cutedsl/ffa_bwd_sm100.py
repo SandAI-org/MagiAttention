@@ -773,7 +773,7 @@ class FFABwdSm100:
         # Set up attributes
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # --- Setup attributes ---
+        # --- Set up attributes ---
 
         self._setup_attributes()
 
@@ -1479,7 +1479,7 @@ class FFABwdSm100:
         #  Set up before warp specialization
         # /////////////////////////////////////////////////////////////////////////////
 
-        # --- Setup thread info ---
+        # --- Set up thread info ---
 
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         tidx, _, _ = cute.arch.thread_idx()
@@ -4056,7 +4056,7 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
     ):
-        # --- Setup thread info ---
+        # --- Set up thread info ---
 
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         tidx = cute.arch.thread_idx()[0] % (
@@ -5021,7 +5021,7 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
     ):
-        # --- Setup thread info ---
+        # --- Set up thread info ---
 
         num_reduce_threads = cute.arch.WARP_SIZE * len(self.reduce_warp_ids)
         tidx = cute.arch.thread_idx()[0] % num_reduce_threads
@@ -5469,7 +5469,7 @@ class FFABwdSm100:
         softmax_scale: Float32,
         is_print_block: bool = False,
     ):
-        # --- Setup thread info ---
+        # --- Set up thread info ---
 
         num_compute_threads = cute.arch.WARP_SIZE * len(self.compute_warp_ids)
         wg_idx = (cute.arch.thread_idx()[0] % num_compute_threads) // 128
@@ -5697,7 +5697,7 @@ class FFABwdSm100:
         K_or_V: cutlass.Constexpr[str],
         is_print_block: bool = False,
     ) -> pipeline.PipelineState:
-        # --- Setup thread info ---
+        # --- Set up thread info ---
 
         num_compute_threads = cute.arch.WARP_SIZE * len(self.compute_warp_ids)
         wg_idx = (cute.arch.thread_idx()[0] % num_compute_threads) // 128

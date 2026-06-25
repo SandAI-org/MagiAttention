@@ -741,7 +741,7 @@ class FFAFwdSm100:
                         512 - self.num_regs_softmax * 2 - self.num_regs_correction
                     )
 
-        # --- Setup attributes ---
+        # --- Set up attributes ---
 
         self._setup_attributes()
 
@@ -1329,7 +1329,7 @@ class FFAFwdSm100:
         #  Set up before warp specialization
         # /////////////////////////////////////////////////////////////////////////////
 
-        # --- Setup thread info ---
+        # --- Set up thread info ---
 
         tidx, _, _ = cute.arch.thread_idx()
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
