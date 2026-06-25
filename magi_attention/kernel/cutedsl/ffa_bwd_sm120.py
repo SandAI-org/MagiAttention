@@ -28,11 +28,12 @@ from .ffa_bwd_sm80 import FFABwdSm80
 
 
 class FFABwdSm120(FFABwdSm80):
-    # SM120 has a smaller SMEM budget (99 KB vs 163 KB on SM80); _check_tile reads
-    # this to size its capacity check.
-    smem_capacity_arch = "sm_120"
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if kwargs.get("debug_print", False):
             print("[bwd_sm120_init] Using FFABwdSm120 (SM80 MMA + SM120 SMEM capacity)")
+
+    @property
+    def smem_capacity_arch(self) -> str:
+        """SM120 has a smaller SMEM budget (99 KB vs 163 KB on SM80)."""
+        return "sm_120"

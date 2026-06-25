@@ -39,9 +39,9 @@ from .cutedsl_utils import get_broadcast_dims, to_cute_tensor
 from .named_barrier import NamedBarrierBwd
 from .seqlen_info import SeqlenInfoQK
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Block-sparse tensor data structures
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 class BlockSparseTensors(NamedTuple):
@@ -79,9 +79,9 @@ class BlockSparseTensorsTorch(NamedTuple):
     spt: bool | None = None
 
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Host-side normalization/validation helpers
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -730,9 +730,9 @@ def block_sparse_call_tuple(
     )
 
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Device-side (CUTE DSL) block-sparse runtime helpers
-# =============================================================================
+# ---------------------------------------------------------------------------
 #
 # Runtime execution helpers used by the CUTE DSL forward/backward kernels to
 # produce and consume block-sparse K/V (and Q/dO) loads. Forked from the legacy
@@ -1730,9 +1730,9 @@ def softmax_block_sparse_sm100(
     )
 
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Backward-specific block-sparse helpers (SM90 / SM100)
-# =============================================================================
+# ---------------------------------------------------------------------------
 #
 # In backward, iteration is transposed compared to forward:
 # - Forward: outer loop over m_blocks (Q tiles), inner loop over n_blocks (KV tiles)

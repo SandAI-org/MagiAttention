@@ -28,14 +28,12 @@ from .ffa_fwd_sm80 import FFAFwdSm80
 
 
 class FFAFwdSm120(FFAFwdSm80):
-    # Keep arch = 80 to use CpAsync code paths (no TMA for output).
-    # The compilation target is determined by the GPU at compile time, not this field.
-    arch = 80
-    # SM120 has a smaller SMEM budget (99 KB vs 163 KB on SM80); _check_tile reads
-    # this to size its capacity check.
-    smem_capacity_arch = "sm_120"
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if kwargs.get("debug_print", False):
             print("[fwd_sm120_init] Using FFAFwdSm120 (SM80 MMA + SM120 SMEM capacity)")
+
+    @property
+    def smem_capacity_arch(self) -> str:
+        """SM120 has a smaller SMEM budget (99 KB vs 163 KB on SM80)."""
+        return "sm_120"

@@ -49,11 +49,6 @@ from .tile_scheduler import (
 
 
 class FFAFwdSm80:
-    # SMEM-capacity bucket used by _check_tile. Subclasses for other archs that
-    # reuse the SM80 MMA but have a different SMEM budget override this (e.g.
-    # FFAFwdSm120 -> "sm_120").
-    smem_capacity_arch: str = "sm_80"
-
     def __init__(
         self,
         dtype: Type[cutlass.Numeric],
@@ -95,7 +90,6 @@ class FFAFwdSm80:
             Callable signature: ``mask_mod(batch_idx, head_idx, q_idx, kv_idx, aux_tensors) -> Boolean``
         """
         self.dtype = dtype
-        self.arch = BaseDSL._get_dsl().get_arch_enum()
 
         # Pad head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
@@ -168,8 +162,21 @@ class FFAFwdSm80:
         return False
 
     @property
+    def arch(self):
+        """The DSL arch enum of the active compilation target."""
+        return BaseDSL._get_dsl().get_arch_enum()
+
+    @property
     def is_causal(self) -> bool:
         return self.mask_type == MT_MAP.causal
+
+    @property
+    def smem_capacity_arch(self) -> str:
+        """SMEM-capacity bucket used by _check_tile. Subclasses that reuse the SM80
+        MMA but have a different SMEM budget override this (e.g. FFAFwdSm120 ->
+        "sm_120").
+        """
+        return "sm_80"
 
     def _check_tile(self) -> None:
         """Validate the kernel config (dtype, head dims, tile sizes, threads, SMEM)."""
