@@ -248,24 +248,25 @@ def _flex_flash_attn_fwd(
     tile_m, tile_n = 128, 128
     mma_pv_is_rs = True
     intra_wg_overlap = True
-    if major_arch == 12:
-        # SM120 tile sizes tuned for 99 KB SMEM capacity:
-        # D<=64:  128x128 → 48 KB (good occupancy)
-        # D>64:   128x64  → 64 KB (128x128 would use 96 KB, hurting occupancy)
-        if head_dim <= 64:
-            tile_m, tile_n = 128, 128
-        else:
-            tile_m, tile_n = 128, 64
-    elif major_arch == 8:
-        tile_m, tile_n = 128, 64  # SM80, should tune
-    elif major_arch == 9:
-        sparse_q = get_sparse_q_block_size(block_sparse_tensors, seqlen_q)
-        fwd_cfg = tile_size_fwd_sm90(
-            head_dim, head_dim_v, causal, local, sparse_block_size_q=sparse_q
-        )
-        tile_m, tile_n = fwd_cfg.m_block_size, fwd_cfg.n_block_size
-        mma_pv_is_rs = fwd_cfg.mma_pv_is_rs
-        intra_wg_overlap = fwd_cfg.intra_wg_overlap
+    match major_arch:
+        case 12:
+            # SM120 tile sizes tuned for 99 KB SMEM capacity:
+            # D<=64:  128x128 → 48 KB (good occupancy)
+            # D>64:   128x64  → 64 KB (128x128 would use 96 KB, hurting occupancy)
+            if head_dim <= 64:
+                tile_m, tile_n = 128, 128
+            else:
+                tile_m, tile_n = 128, 64
+        case 8:
+            tile_m, tile_n = 128, 64  # SM80, should tune
+        case 9:
+            sparse_q = get_sparse_q_block_size(block_sparse_tensors, seqlen_q)
+            fwd_cfg = tile_size_fwd_sm90(
+                head_dim, head_dim_v, causal, local, sparse_block_size_q=sparse_q
+            )
+            tile_m, tile_n = fwd_cfg.m_block_size, fwd_cfg.n_block_size
+            mma_pv_is_rs = fwd_cfg.mma_pv_is_rs
+            intra_wg_overlap = fwd_cfg.intra_wg_overlap
 
     if max_seqlen_q is None:
         max_seqlen_q = seqlen_q if cu_seqlens_q is None else total_q
@@ -399,96 +400,97 @@ def _flex_flash_attn_fwd(
         if aux_tensors is not None:
             cute_aux_tensors = [to_cute_aux_tensor(buf) for buf in aux_tensors]
 
-        if major_arch == 8:
-            fa_fwd = FFAFwdSm80(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                mask_type=mask_type,
-                is_local=local,
-                pack_gqa=pack_gqa,
-                tile_m=tile_m,
-                tile_n=tile_n,
-                num_stages=1,
-                num_threads=128,
-                Q_in_regs=False,
-                score_mod=score_mod,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
-            )
-        elif major_arch == 9:
-            fa_fwd = FFAFwdSm90(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                mask_type=mask_type,
-                is_local=local,
-                pack_gqa=pack_gqa,
-                tile_m=tile_m,
-                tile_n=tile_n,
-                num_stages=2,
-                num_threads=384,
-                Q_in_regs=False,
-                intra_wg_overlap=intra_wg_overlap,
-                mma_pv_is_rs=mma_pv_is_rs,
-                mask_mod=mask_mod,
-                score_mod=score_mod,
-                has_aux_tensors=aux_tensors is not None,
-                q_subtile_factor=q_subtile_factor,
-                paged_kv_non_tma=False,
-                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
-            )
-        elif major_arch in [10, 11]:
-            fa_fwd = FFAFwdSm100(
-                head_dim=head_dim,
-                head_dim_v=head_dim_v,
-                qhead_per_kvhead=qhead_per_kvhead,
-                mask_type=mask_type,
-                is_local=local,
-                is_split_kv=False,
-                pack_gqa=pack_gqa,
-                m_block_size=tile_m,
-                n_block_size=tile_n,
-                q_stage=q_stage,
-                is_persistent=not causal and not local and cu_seqlens_q is None,
-                score_mod=score_mod,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-                paged_kv_non_tma=False,
-                is_varlen_q=cu_seqlens_q is not None,
-                q_subtile_factor=q_subtile_factor,
-                use_2cta_instrs=use_2cta_instrs,
-                use_clc_scheduler=use_clc_scheduler,
-                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
-            )
-        elif major_arch == 12:
-            # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
-            assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
-            fa_fwd = FFAFwdSm120(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                mask_type=mask_type,
-                is_local=local,
-                pack_gqa=pack_gqa,
-                tile_m=tile_m,
-                tile_n=tile_n,
-                num_stages=1,
-                num_threads=128,
-                Q_in_regs=False,
-                score_mod=score_mod,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
-            )
-        else:
-            raise ValueError(
-                f"Unsupported compute capability: {arch}. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
-            )
+        match major_arch:
+            case 8:
+                fa_fwd = FFAFwdSm80(
+                    dtype,
+                    head_dim,
+                    head_dim_v,
+                    qhead_per_kvhead,
+                    mask_type=mask_type,
+                    is_local=local,
+                    pack_gqa=pack_gqa,
+                    tile_m=tile_m,
+                    tile_n=tile_n,
+                    num_stages=1,
+                    num_threads=128,
+                    Q_in_regs=False,
+                    score_mod=score_mod,
+                    mask_mod=mask_mod,
+                    has_aux_tensors=aux_tensors is not None,
+                    debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                )
+            case 9:
+                fa_fwd = FFAFwdSm90(
+                    dtype,
+                    head_dim,
+                    head_dim_v,
+                    qhead_per_kvhead,
+                    mask_type=mask_type,
+                    is_local=local,
+                    pack_gqa=pack_gqa,
+                    tile_m=tile_m,
+                    tile_n=tile_n,
+                    num_stages=2,
+                    num_threads=384,
+                    Q_in_regs=False,
+                    intra_wg_overlap=intra_wg_overlap,
+                    mma_pv_is_rs=mma_pv_is_rs,
+                    mask_mod=mask_mod,
+                    score_mod=score_mod,
+                    has_aux_tensors=aux_tensors is not None,
+                    q_subtile_factor=q_subtile_factor,
+                    paged_kv_non_tma=False,
+                    debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                )
+            case 10 | 11:
+                fa_fwd = FFAFwdSm100(
+                    head_dim=head_dim,
+                    head_dim_v=head_dim_v,
+                    qhead_per_kvhead=qhead_per_kvhead,
+                    mask_type=mask_type,
+                    is_local=local,
+                    is_split_kv=False,
+                    pack_gqa=pack_gqa,
+                    m_block_size=tile_m,
+                    n_block_size=tile_n,
+                    q_stage=q_stage,
+                    is_persistent=not causal and not local and cu_seqlens_q is None,
+                    score_mod=score_mod,
+                    mask_mod=mask_mod,
+                    has_aux_tensors=aux_tensors is not None,
+                    paged_kv_non_tma=False,
+                    is_varlen_q=cu_seqlens_q is not None,
+                    q_subtile_factor=q_subtile_factor,
+                    use_2cta_instrs=use_2cta_instrs,
+                    use_clc_scheduler=use_clc_scheduler,
+                    debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                )
+            case 12:
+                # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
+                assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
+                fa_fwd = FFAFwdSm120(
+                    dtype,
+                    head_dim,
+                    head_dim_v,
+                    qhead_per_kvhead,
+                    mask_type=mask_type,
+                    is_local=local,
+                    pack_gqa=pack_gqa,
+                    tile_m=tile_m,
+                    tile_n=tile_n,
+                    num_stages=1,
+                    num_threads=128,
+                    Q_in_regs=False,
+                    score_mod=score_mod,
+                    mask_mod=mask_mod,
+                    has_aux_tensors=aux_tensors is not None,
+                    debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                )
+            case _:
+                raise ValueError(
+                    f"Unsupported compute capability: {arch}. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
+                )
         compile_args = [
             fa_fwd,
             q_tensor,
@@ -622,112 +624,117 @@ def _flex_flash_attn_bwd(
     num_head, head_dim = q.shape[-2:]
     head_dim_v = v.shape[-1]
 
-    if major_arch == 8:
-        # SM80 (Ampere): uses the dedicated FFABwdSm80 kernel (SM80 MMA, 256
-        # threads / 8 warps). Its tiled-MMA expects AtomLayout 1/8/1 with
-        # n_block_size == permutation_M (n_block_size = AtomLayoutNdKV * 16 = 128).
-        m_block_size = 64
-        n_block_size = 128
-        if head_dim <= 64:
-            num_stages_Q = 2
-            num_stages_dO = 2
-        else:
-            num_stages_Q = 1
-            num_stages_dO = 1
-        SdP_swapAB = False
-        dKV_swapAB = False
-        dQ_swapAB = False
-        AtomLayoutMSdP = 1
-        AtomLayoutNdKV = 8
-        # The dQ MMA tiles the head_dim (N) across (num_warps // AtomLayoutMdQ)
-        # warp-columns, each contributing 16 elements. With 8 warps, AtomLayoutMdQ=1
-        # needs head_dim >= 128; for head_dim <= 64 that overshoots the output tile
-        # and the dQ gemm fails to verify. Use AtomLayoutMdQ=2 (4 warp-columns ->
-        # 64-wide N) for head_dim <= 64, matching the SM90 config.
-        AtomLayoutMdQ = 2 if head_dim <= 64 else 1
-        V_in_regs = False
-        cluster_size = 1
-        use_2cta_instrs = False
-        num_threads = 256
-        dQ_single_wg = False
-        assert not (
-            block_sparse_tensors is not None
-        ), "Block sparsity backward not supported on SM 8.0"
-        assert (
-            score_mod is None and score_mod_bwd is None
-        ), "score_mod backward not supported on SM 8.0"
-        assert mask_mod is None, "mask_mod backward not supported on SM 8.0"
-        assert deterministic is False, "deterministic backward not supported on SM 8.0"
-    elif major_arch == 12:
-        # SM120: uses SM80 MMA with 99 KB SMEM, 128 threads (4 warps).
-        m_block_size = 64
-        n_block_size = 64
-        if head_dim <= 64:
-            num_stages_Q = 2
-            num_stages_dO = 2
-        else:
-            num_stages_Q = 1
-            num_stages_dO = 1
-        SdP_swapAB = False
-        dKV_swapAB = False
-        dQ_swapAB = False
-        AtomLayoutMSdP = 4
-        AtomLayoutNdKV = 4
-        AtomLayoutMdQ = 4
-        V_in_regs = False
-        cluster_size = 1
-        use_2cta_instrs = False
-        num_threads = 128
-        dQ_single_wg = False
-        assert not (
-            block_sparse_tensors is not None
-        ), "Block sparsity backward not supported on SM 12.0"
-        assert (
-            score_mod is None and score_mod_bwd is None
-        ), "score_mod backward not supported on SM 12.0"
-        assert mask_mod is None, "mask_mod backward not supported on SM 12.0"
-        assert deterministic is False, "deterministic backward not supported on SM 12.0"
-    elif major_arch == 9:
-        cfg = tile_size_bwd_sm90(
-            head_dim,
-            head_dim_v,
-            causal,
-            local,
-            sparse_block_size_q=sparse_q,
-        )
-        m_block_size = cfg.m_block_size
-        n_block_size = cfg.n_block_size
-        num_stages_Q = cfg.num_stages_Q
-        num_stages_dO = cfg.num_stages_dO
-        num_stages_PdS = cfg.num_stages_PdS
-        SdP_swapAB = cfg.SdP_swapAB
-        dKV_swapAB = cfg.dKV_swapAB
-        dQ_swapAB = cfg.dQ_swapAB
-        AtomLayoutMSdP = cfg.AtomLayoutMSdP
-        AtomLayoutNdKV = cfg.AtomLayoutNdKV
-        AtomLayoutMdQ = cfg.AtomLayoutMdQ
-        V_in_regs = False
-        num_threads = (cfg.num_wg + 1) * 128
-        dQ_single_wg = cfg.dQ_single_wg
-        cluster_size = 1
-        use_2cta_instrs = False
-    else:
-        m_block_size = 128
-        n_block_size = 128
-        dQ_swapAB = False
-        dKV_swapAB = False
-        AtomLayoutMdQ = 1
-        AtomLayoutNdKV = 1
-        requested_disable_2cta = is_ffa_2cta_disabled()
-        disable_2cta = (
-            requested_disable_2cta
-            or score_mod is not None
-            or score_mod_bwd is not None
-            or mask_mod is not None
-            or block_sparse_tensors is not None
-        )
-        cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
-        use_2cta_instrs = cluster_size == 2
+    match major_arch:
+        case 8:
+            # SM80 (Ampere): uses the dedicated FFABwdSm80 kernel (SM80 MMA, 256
+            # threads / 8 warps). Its tiled-MMA expects AtomLayout 1/8/1 with
+            # n_block_size == permutation_M (n_block_size = AtomLayoutNdKV * 16 = 128).
+            m_block_size = 64
+            n_block_size = 128
+            if head_dim <= 64:
+                num_stages_Q = 2
+                num_stages_dO = 2
+            else:
+                num_stages_Q = 1
+                num_stages_dO = 1
+            SdP_swapAB = False
+            dKV_swapAB = False
+            dQ_swapAB = False
+            AtomLayoutMSdP = 1
+            AtomLayoutNdKV = 8
+            # The dQ MMA tiles the head_dim (N) across (num_warps // AtomLayoutMdQ)
+            # warp-columns, each contributing 16 elements. With 8 warps, AtomLayoutMdQ=1
+            # needs head_dim >= 128; for head_dim <= 64 that overshoots the output tile
+            # and the dQ gemm fails to verify. Use AtomLayoutMdQ=2 (4 warp-columns ->
+            # 64-wide N) for head_dim <= 64, matching the SM90 config.
+            AtomLayoutMdQ = 2 if head_dim <= 64 else 1
+            V_in_regs = False
+            cluster_size = 1
+            use_2cta_instrs = False
+            num_threads = 256
+            dQ_single_wg = False
+            assert not (
+                block_sparse_tensors is not None
+            ), "Block sparsity backward not supported on SM 8.0"
+            assert (
+                score_mod is None and score_mod_bwd is None
+            ), "score_mod backward not supported on SM 8.0"
+            assert mask_mod is None, "mask_mod backward not supported on SM 8.0"
+            assert (
+                deterministic is False
+            ), "deterministic backward not supported on SM 8.0"
+        case 12:
+            # SM120: uses SM80 MMA with 99 KB SMEM, 128 threads (4 warps).
+            m_block_size = 64
+            n_block_size = 64
+            if head_dim <= 64:
+                num_stages_Q = 2
+                num_stages_dO = 2
+            else:
+                num_stages_Q = 1
+                num_stages_dO = 1
+            SdP_swapAB = False
+            dKV_swapAB = False
+            dQ_swapAB = False
+            AtomLayoutMSdP = 4
+            AtomLayoutNdKV = 4
+            AtomLayoutMdQ = 4
+            V_in_regs = False
+            cluster_size = 1
+            use_2cta_instrs = False
+            num_threads = 128
+            dQ_single_wg = False
+            assert not (
+                block_sparse_tensors is not None
+            ), "Block sparsity backward not supported on SM 12.0"
+            assert (
+                score_mod is None and score_mod_bwd is None
+            ), "score_mod backward not supported on SM 12.0"
+            assert mask_mod is None, "mask_mod backward not supported on SM 12.0"
+            assert (
+                deterministic is False
+            ), "deterministic backward not supported on SM 12.0"
+        case 9:
+            cfg = tile_size_bwd_sm90(
+                head_dim,
+                head_dim_v,
+                causal,
+                local,
+                sparse_block_size_q=sparse_q,
+            )
+            m_block_size = cfg.m_block_size
+            n_block_size = cfg.n_block_size
+            num_stages_Q = cfg.num_stages_Q
+            num_stages_dO = cfg.num_stages_dO
+            num_stages_PdS = cfg.num_stages_PdS
+            SdP_swapAB = cfg.SdP_swapAB
+            dKV_swapAB = cfg.dKV_swapAB
+            dQ_swapAB = cfg.dQ_swapAB
+            AtomLayoutMSdP = cfg.AtomLayoutMSdP
+            AtomLayoutNdKV = cfg.AtomLayoutNdKV
+            AtomLayoutMdQ = cfg.AtomLayoutMdQ
+            V_in_regs = False
+            num_threads = (cfg.num_wg + 1) * 128
+            dQ_single_wg = cfg.dQ_single_wg
+            cluster_size = 1
+            use_2cta_instrs = False
+        case _:
+            m_block_size = 128
+            n_block_size = 128
+            dQ_swapAB = False
+            dKV_swapAB = False
+            AtomLayoutMdQ = 1
+            AtomLayoutNdKV = 1
+            requested_disable_2cta = is_ffa_2cta_disabled()
+            disable_2cta = (
+                requested_disable_2cta
+                or score_mod is not None
+                or score_mod_bwd is not None
+                or mask_mod is not None
+                or block_sparse_tensors is not None
+            )
+            cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
+            use_2cta_instrs = cluster_size == 2
 
     q, k, v, out, dout, lse, cu_seqlens_q, cu_seqlens_k = [
         maybe_contiguous(t)
@@ -1119,85 +1126,86 @@ def _flex_flash_attn_bwd(
             else None
             for t in (dQ_semaphore, dK_semaphore, dV_semaphore)
         ]
-        if major_arch in [8, 12]:
-            flash_bwd_obj_cls = FFABwdSm120 if major_arch == 12 else FFABwdSm80
-            bwd_obj_kwargs = dict(
-                V_in_regs=V_in_regs,
-                score_mod=score_mod,
-                score_mod_bwd=score_mod_bwd,
-                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
-            )
+        match major_arch:
+            case 8 | 12:
+                flash_bwd_obj_cls = FFABwdSm120 if major_arch == 12 else FFABwdSm80
+                bwd_obj_kwargs = dict(
+                    V_in_regs=V_in_regs,
+                    score_mod=score_mod,
+                    score_mod_bwd=score_mod_bwd,
+                    debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                )
 
-            fa_bwd_obj = flash_bwd_obj_cls(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                m_block_size,
-                n_block_size,
-                num_stages_Q,
-                num_stages_dO,
-                num_threads,
-                pack_gqa,
-                mask_type,
-                SdP_swapAB,
-                dKV_swapAB,
-                dQ_swapAB,
-                AtomLayoutMSdP,
-                AtomLayoutNdKV,
-                AtomLayoutMdQ,
-                **bwd_obj_kwargs,
-            )
-        elif major_arch == 9:
-            fa_bwd_obj = FFABwdSm90(
-                dtype,
-                head_dim,
-                head_dim_v,
-                qhead_per_kvhead,
-                mask_type,
-                is_local=local,
-                deterministic=deterministic,
-                tile_m=m_block_size,
-                tile_n=n_block_size,
-                Q_stage=num_stages_Q,
-                dO_stage=num_stages_dO,
-                PdS_stage=num_stages_PdS,
-                SdP_swapAB=SdP_swapAB,
-                dKV_swapAB=dKV_swapAB,
-                dQ_swapAB=dQ_swapAB,
-                AtomLayoutMSdP=AtomLayoutMSdP,
-                AtomLayoutNdKV=AtomLayoutNdKV,
-                AtomLayoutMdQ=AtomLayoutMdQ,
-                num_threads=num_threads,
-                V_in_regs=V_in_regs,
-                score_mod=score_mod,
-                score_mod_bwd=score_mod_bwd,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-                subtile_factor=subtile_factor,
-                dQ_single_wg=dQ_single_wg,
-                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
-            )
-        else:
-            fa_bwd_obj = FFABwdSm100(
-                head_dim,
-                head_dim_v,
-                mask_type=mask_type,
-                is_local=local,
-                qhead_per_kvhead=qhead_per_kvhead,
-                tile_m=m_block_size,
-                tile_n=n_block_size,
-                cluster_size=cluster_size,
-                use_2cta_instrs=use_2cta_instrs,
-                deterministic=deterministic,
-                spt=spt,
-                score_mod=score_mod,
-                score_mod_bwd=score_mod_bwd,
-                mask_mod=mask_mod,
-                has_aux_tensors=aux_tensors is not None,
-                subtile_factor=subtile_factor,
-                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
-            )
+                fa_bwd_obj = flash_bwd_obj_cls(
+                    dtype,
+                    head_dim,
+                    head_dim_v,
+                    qhead_per_kvhead,
+                    m_block_size,
+                    n_block_size,
+                    num_stages_Q,
+                    num_stages_dO,
+                    num_threads,
+                    pack_gqa,
+                    mask_type,
+                    SdP_swapAB,
+                    dKV_swapAB,
+                    dQ_swapAB,
+                    AtomLayoutMSdP,
+                    AtomLayoutNdKV,
+                    AtomLayoutMdQ,
+                    **bwd_obj_kwargs,
+                )
+            case 9:
+                fa_bwd_obj = FFABwdSm90(
+                    dtype,
+                    head_dim,
+                    head_dim_v,
+                    qhead_per_kvhead,
+                    mask_type,
+                    is_local=local,
+                    deterministic=deterministic,
+                    tile_m=m_block_size,
+                    tile_n=n_block_size,
+                    Q_stage=num_stages_Q,
+                    dO_stage=num_stages_dO,
+                    PdS_stage=num_stages_PdS,
+                    SdP_swapAB=SdP_swapAB,
+                    dKV_swapAB=dKV_swapAB,
+                    dQ_swapAB=dQ_swapAB,
+                    AtomLayoutMSdP=AtomLayoutMSdP,
+                    AtomLayoutNdKV=AtomLayoutNdKV,
+                    AtomLayoutMdQ=AtomLayoutMdQ,
+                    num_threads=num_threads,
+                    V_in_regs=V_in_regs,
+                    score_mod=score_mod,
+                    score_mod_bwd=score_mod_bwd,
+                    mask_mod=mask_mod,
+                    has_aux_tensors=aux_tensors is not None,
+                    subtile_factor=subtile_factor,
+                    dQ_single_wg=dQ_single_wg,
+                    debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                )
+            case _:
+                fa_bwd_obj = FFABwdSm100(
+                    head_dim,
+                    head_dim_v,
+                    mask_type=mask_type,
+                    is_local=local,
+                    qhead_per_kvhead=qhead_per_kvhead,
+                    tile_m=m_block_size,
+                    tile_n=n_block_size,
+                    cluster_size=cluster_size,
+                    use_2cta_instrs=use_2cta_instrs,
+                    deterministic=deterministic,
+                    spt=spt,
+                    score_mod=score_mod,
+                    score_mod_bwd=score_mod_bwd,
+                    mask_mod=mask_mod,
+                    has_aux_tensors=aux_tensors is not None,
+                    subtile_factor=subtile_factor,
+                    debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                )
 
         # Block sparse tensors for backward use Q-direction indexing (transposed from forward).
         sparse_tensors_compile = (
@@ -1257,22 +1265,23 @@ def _flex_flash_attn_bwd(
     )
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
-    if major_arch == 9:
-        # dQ postprocess: match main kernel's MMA WG count, unless dQ_single_wg
-        num_threads_post_dQ = 128 if dQ_single_wg else cfg.num_wg * 128
-        num_threads_post_dKV = cfg.num_wg * 128
-    elif major_arch == 8:
-        # SM80: the dQ/dKV accumulator buffers are written by the main kernel's
-        # tiled-MMA, whose accumulator->linear layout depends on the warp (thread)
-        # count. The postprocess re-derives that layout from its own tiled-MMA, so
-        # it must use the *same* number of threads as the main kernel (256, i.e.
-        # 8 warps). Using fewer threads (e.g. 128) reshapes the linear accumulator
-        # with a different MMA layout and scrambles the result (was the SM80 dQ bug).
-        num_threads_post_dQ = 256
-        num_threads_post_dKV = 256
-    else:
-        num_threads_post_dQ = 128
-        num_threads_post_dKV = 128
+    match major_arch:
+        case 9:
+            # dQ postprocess: match main kernel's MMA WG count, unless dQ_single_wg
+            num_threads_post_dQ = 128 if dQ_single_wg else cfg.num_wg * 128
+            num_threads_post_dKV = cfg.num_wg * 128
+        case 8:
+            # SM80: the dQ/dKV accumulator buffers are written by the main kernel's
+            # tiled-MMA, whose accumulator->linear layout depends on the warp (thread)
+            # count. The postprocess re-derives that layout from its own tiled-MMA, so
+            # it must use the *same* number of threads as the main kernel (256, i.e.
+            # 8 warps). Using fewer threads (e.g. 128) reshapes the linear accumulator
+            # with a different MMA layout and scrambles the result (was the SM80 dQ bug).
+            num_threads_post_dQ = 256
+            num_threads_post_dKV = 256
+        case _:
+            num_threads_post_dQ = 128
+            num_threads_post_dKV = 128
 
     bwd_postprocess(
         dq_accum,
