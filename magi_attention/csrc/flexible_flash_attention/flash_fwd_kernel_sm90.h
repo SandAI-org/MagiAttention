@@ -53,6 +53,7 @@ class FlashAttnFwdSm90 {
   static constexpr bool Has_softcap = CollectiveMainloop::Has_softcap;
   static constexpr bool Use_TMA_Q = CollectiveMainloop::Use_TMA_Q;
   static constexpr bool Use_TMA_Inner = CollectiveMainloop::Use_TMA_Inner;
+  static constexpr bool Use_CpAsync_Inner = CollectiveMainloop::Use_CpAsync_Inner;
 
   // KV pipelines come in two flavors with different constructor signatures: dense TMA
   // (PipelineTmaAsync, takes ClusterShape) and scatter cp.async (PipelineAsync, no
@@ -139,6 +140,9 @@ class FlashAttnFwdSm90 {
       alignas(16) typename CollectiveMainloop::MainloopPipelineK::SharedStorage pipeline_k;
       alignas(16) typename CollectiveMainloop::MainloopPipelineV::SharedStorage pipeline_v;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
+      // TMA 1D staging mbarrier: tracks SM90_BULK_COPY_G2S completion for scatter loads.
+      // Only meaningful when Use_CpAsync_Inner (kbs < kBlockN); zero-cost otherwise.
+      alignas(8) typename cutlass::arch::ClusterTransactionBarrier::ValueType tma1d_staging_mbar;
     } pipelines;
   };
 
@@ -232,6 +236,10 @@ class FlashAttnFwdSm90 {
       shared_storage.pipelines.barrier_Q.init(/*numThreads=*/Use_TMA_Q ? 1 : NumProducerThreads);
       // TODO: Fix if TMA store O is used
       shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumMmaThreads);
+      // TMA 1D staging mbarrier: arrival_count=1 (single thread issues all bulk copies).
+      if constexpr (Use_CpAsync_Inner) {
+        cutlass::arch::ClusterTransactionBarrier::init(&shared_storage.pipelines.tma1d_staging_mbar, 1);
+      }
     }
 
     if constexpr (ReturnMaxLogits) {
