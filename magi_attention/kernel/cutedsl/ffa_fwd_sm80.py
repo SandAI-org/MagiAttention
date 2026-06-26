@@ -295,11 +295,10 @@ class FFAFwdSm80:
         # TV Layout A:     ((4,8),(2,2,2)):((32,1),(16,8,128))
         # TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
         # TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
-        tiled_mma_qk = cute.make_tiled_mma(  # (MMA_Q16, MMA_K8, MMA_HD16)
+        tiled_mma_qk = cute.make_tiled_mma(
             warp.MmaF16BF16Op(self.dtype, Float32, (16, 8, 16)),
-            atom_layout_mnk=(self.num_warps, 1, 1),  # (4, 1, 1)
-            # (permMMA_Q64, permMMA_K16, permMMA_HD16)
-            permutation_mnk=(self.num_warps * 16, 16, 16),
+            atom_layout_mnk=(self.num_warps, 1, 1),
+            permutation_mnk=(self.num_warps * 16, 16, 16),  # warps slice along m-dim
         )
 
         # Tiled MMA for O=P*V
@@ -311,11 +310,10 @@ class FFAFwdSm80:
         # TV Layout A:     ((4,8),(2,2,2)):((32,1),(16,8,128))
         # TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
         # TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
-        tiled_mma_pv = cute.make_tiled_mma(  # (MMA_Q16, MMA_HD8, MMA_K16)
+        tiled_mma_pv = cute.make_tiled_mma(
             warp.MmaF16BF16Op(self.dtype, Float32, (16, 8, 16)),
-            atom_layout_mnk=(self.num_warps, 1, 1),  # (4, 1, 1)
-            # (permMMA_Q64, permMMA_HD16, permMMA_K16)
-            permutation_mnk=(self.num_warps * 16, 16, 16),
+            atom_layout_mnk=(self.num_warps, 1, 1),
+            permutation_mnk=(self.num_warps * 16, 16, 16),  # warps slice along m-dim
         )
         return tiled_mma_qk, tiled_mma_pv
 
@@ -895,10 +893,10 @@ class FFAFwdSm80:
         # sVt: S<3,3,3> o 0 o ((ATOM_HD64,LAY_tileHD2),(ATOM_K8,LAY_tileK8),STAGE=(1,1)):((1,4096),(64,512),(0,0))
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage)
-        sQ = storage.sQ.get_tensor(sQ_layout)
-        sK = storage.sK.get_tensor(sK_layout)
+        sQ: cute.Tensor = storage.sQ.get_tensor(sQ_layout)
+        sK: cute.Tensor = storage.sK.get_tensor(sK_layout)
         if const_expr(not self.Q_in_regs):
-            sV = storage.sV.get_tensor(sV_layout)
+            sV: cute.Tensor = storage.sV.get_tensor(sV_layout)
         else:  # Q/V shares the same smem buffer
             sV = cute.make_tensor(
                 cute.recast_ptr(sQ.iterator, dtype=self.dtype), sV_layout
@@ -921,11 +919,19 @@ class FFAFwdSm80:
         # Tile MMA partitions and allocate rmem accumulator
         # ///////////////////////////////////////////////////////////////////////////////
 
+        # tSrQ: (MMA_ATOM=(2,2,2),MMA_Q2,MMA_HD=((2,2),2)):((1,2,4),8,((32,64),16))
+        # tSrK: (MMA_ATOM=(2,2),MMA_K8,MMA_HD=((2,2),2)):((1,2),4,((64,128),32))
+        # tOrVt: (MMA_ATOM=(2,2),MMA_HD=(8,2),MMA_K4):((1,2),(4,128),32)
+        # acc_O: (MMA_ATOM=(2,2),MMA_Q2,MMA_HD16):((1,2),4,8)
         thr_mma_qk = tiled_mma_qk.get_slice(tidx)
         thr_mma_pv = tiled_mma_pv.get_slice(tidx)
-        tSrQ = thr_mma_qk.make_fragment_A(thr_mma_qk.partition_A(sQ))
-        tSrK = thr_mma_qk.make_fragment_B(thr_mma_qk.partition_B(sK[None, None, 0]))
-        tOrVt = thr_mma_pv.make_fragment_B(thr_mma_pv.partition_B(sVt[None, None, 0]))
+        tSrQ: cute.Tensor = thr_mma_qk.make_fragment_A(thr_mma_qk.partition_A(sQ))
+        tSrK: cute.Tensor = thr_mma_qk.make_fragment_B(
+            thr_mma_qk.partition_B(sK[None, None, 0])
+        )
+        tOrVt: cute.Tensor = thr_mma_pv.make_fragment_B(
+            thr_mma_pv.partition_B(sVt[None, None, 0])
+        )
         acc_shape_O = thr_mma_pv.partition_shape_C((self.tile_m, self.tile_hdimv))
         acc_O = cute.make_rmem_tensor(acc_shape_O, Float32)
         acc_O.fill(0.0)
@@ -934,36 +940,64 @@ class FFAFwdSm80:
         # Make S2R tiled copy and partitions for Q/K/V
         # ///////////////////////////////////////////////////////////////////////////////
 
+        # S2R copy atom for Q/K with `ldmatrix.sync.aligned.m8n8.x4` => m32xn8
+        # layout_src_tv=(32,8):(8,1)
+        # layout_dst_tv=(32,(2,4)):(2,(1,64))
         smem_copy_atom_QK = cute.make_copy_atom(
             warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=4),
             self.dtype,
         )
+
+        # S2R copy atom for V with `ldmatrix.sync.aligned.m8n8.x4.trans` => m8xn32
+        # layout_src_tv=(32,8):(8,1)
+        # layout_dst_tv=((4,8),(1,2,4)):((16,1),(1,8,64))
         smem_copy_atom_V = cute.make_copy_atom(
             warp.LdMatrix8x8x16bOp(transpose=True, num_matrices=4),
             self.dtype,
         )
+
+        # S2R tiled copy for Q
+        # layout_src_tv_tiled=((16,2,4),(8,1)):((1,512,16),(64,0))
+        # layout_dst_tv_tiled=((4,8,4),((2,2,2),1)):((128,1,16),((64,8,512),0))
         smem_thr_copy_Q = cutedsl_utils.make_tiled_copy_A(
             smem_copy_atom_QK, tiled_mma_qk
         ).get_slice(tidx)
+
+        # S2R tiled copy for K
+        # layout_src_tv_tiled=((8,2,2,4),(8,1)):((1,128,8,0),(16,0))
+        # layout_dst_tv_tiled=((4,8,4),((2,2,2),1)):((32,1,0),((16,128,8),0))
         smem_thr_copy_K = cutedsl_utils.make_tiled_copy_B(
             smem_copy_atom_QK, tiled_mma_qk
         ).get_slice(tidx)
+
+        # S2R tiled copy for V
+        # layout_src_tv_tiled=((16,2,4),(8,1)):((16,8,0),(1,0))
+        # layout_dst_tv_tiled=((4,8,4),((2,2,2),1)):((32,1,0),((16,128,8),0))
         smem_thr_copy_V = cutedsl_utils.make_tiled_copy_B(
             smem_copy_atom_V, tiled_mma_pv
         ).get_slice(tidx)
 
+        # Partition src of sQ/sK/sVt for S2R tiled copy
+        # tSsQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD=((2,2),2)):((1,0),4096,((-16,-32),8192))
+        # tSsK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD=((2,2),2),STAGE=(1,1)):((1,0),1024,((-16,-32),4096),(0,0))
+        # tOsVt: (CPY_ATOM=(8,1),CPY_HD=((2,2),2),CPY_K4,STAGE=(1,1)):((1,0),((-16,-32),4096),1024,(0,0))
         tSsQ = smem_thr_copy_Q.partition_S(sQ)
         tSsK = smem_thr_copy_K.partition_S(sK)
         tOsVt = smem_thr_copy_V.partition_S(sVt)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Make predicate tensors for K/V loads
+        # Make predicate tensors for K/V G2S loads
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # Construct identity layout for KV
+        # cK: (tileK64,tileHD128):(1@0,1@1)
+        # tKcK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
+        # t0KcK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
         cK = cute.make_identity_tensor((self.tile_n, self.tile_hdim))
         tKcK = gmem_thr_copy_K.partition_S(cK)
         t0KcK = gmem_thr_copy_K.get_slice(0).partition_S(cK)
+
+        # tVcV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
+        # t0VcV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
         if const_expr(self.tile_hdim == self.tile_hdimv):
             tVcV = tKcK
             t0VcV = t0KcK
@@ -971,40 +1005,30 @@ class FFAFwdSm80:
             cV = cute.make_identity_tensor((self.tile_n, self.tile_hdimv))
             tVcV = gmem_thr_copy_V.partition_S(cV)
             t0VcV = gmem_thr_copy_V.get_slice(0).partition_S(cV)
-        # Allocate predicate tensors for m and n, here we only allocate the tile of k, and
-        # use "if" on the mn dimension.
-        # This is to reduce register pressure and gets 2-3% performance gain.
+
+        # tKpK: (1,CPY_K4,CPY_HD2):(2,0,1)
+        # tVpV: (1,CPY_K4,CPY_HD2):(2,0,1)
         tKpK = cutedsl_utils.predicate_k(tKcK, limit=mK.shape[1])
         if const_expr(self.same_hdim_kv):
             tVpV = tKpK
         else:
             tVpV = cutedsl_utils.predicate_k(tVcV, limit=mV.shape[1])
 
-        # shape: (atom_v_m * rest_m)
-        softmax = Softmax.create(
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make others
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Make softmax object ---
+
+        softmax = Softmax.create(  # shape: (atom_v_m * rest_m)
             softmax_scale_log2,
             num_rows=acc_O.shape[0][0] * acc_O.shape[1],
             softmax_scale=softmax_scale,
         )
         softmax.reset()
 
-        # group parameters for compute_one_n_block
-        mma_params = SimpleNamespace(
-            thr_mma_qk=thr_mma_qk,
-            thr_mma_pv=thr_mma_pv,
-            tSrQ=tSrQ,
-            tSrK=tSrK,
-            tOrVt=tOrVt,
-            acc_O=acc_O,
-        )
-        smem_copy_params = SimpleNamespace(
-            smem_thr_copy_Q=smem_thr_copy_Q,
-            smem_thr_copy_K=smem_thr_copy_K,
-            smem_thr_copy_V=smem_thr_copy_V,
-            tSsQ=tSsQ,
-            tSsK=tSsK,
-            tOsVt=tOsVt,
-        )
+        # --- Make partial functions for K/V loads ---
+
         load_K = partial(
             self.load_K,
             gmem_tiled_copy_K,
@@ -1026,6 +1050,24 @@ class FFAFwdSm80:
             seqlen=seqlen_info.seqlen_k,
         )
 
+        # --- Make partial functions for compute_one_n_block ---
+
+        mma_params = SimpleNamespace(
+            thr_mma_qk=thr_mma_qk,
+            thr_mma_pv=thr_mma_pv,
+            tSrQ=tSrQ,
+            tSrK=tSrK,
+            tOrVt=tOrVt,
+            acc_O=acc_O,
+        )
+        smem_copy_params = SimpleNamespace(
+            smem_thr_copy_Q=smem_thr_copy_Q,
+            smem_thr_copy_K=smem_thr_copy_K,
+            smem_thr_copy_V=smem_thr_copy_V,
+            tSsQ=tSsQ,
+            tSsK=tSsK,
+            tOsVt=tOsVt,
+        )
         compute_one_n_block = partial(
             self.compute_one_n_block,
             mma_params=mma_params,
@@ -1080,11 +1122,51 @@ class FFAFwdSm80:
                 cute.printf("")
                 cute.printf(prefix + "tKsK: {}", tKsK.layout)
                 cute.printf(prefix + "tKgK: {}", tKgK.layout)
+                cute.printf(prefix + "tVsV: {}", tVsV.layout)
+                cute.printf(prefix + "tVgV: {}", tVgV.layout)
+                cute.printf("")
+                cute.printf(prefix + "tSrQ: {}", tSrQ.layout)
+                cute.printf(prefix + "tSrK: {}", tSrK.layout)
+                cute.printf(prefix + "tOrVt: {}", tOrVt.layout)
+                cute.printf(prefix + "acc_O: {}", acc_O.layout)
+                cute.printf("")
+                cute.printf(
+                    prefix + "smem_copy_atom_QK: layout_src_tv={}, layout_dst_tv={}",
+                    smem_copy_atom_QK.layout_src_tv,
+                    smem_copy_atom_QK.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix + "smem_copy_atom_V: layout_src_tv={}, layout_dst_tv={}",
+                    smem_copy_atom_V.layout_src_tv,
+                    smem_copy_atom_V.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix
+                    + "smem_thr_copy_Q: layout_src_tv_tiled={}, layout_dst_tv_tiled={}",
+                    smem_thr_copy_Q.layout_src_tv_tiled,
+                    smem_thr_copy_Q.layout_dst_tv_tiled,
+                )
+                cute.printf(
+                    prefix
+                    + "smem_thr_copy_K: layout_src_tv_tiled={}, layout_dst_tv_tiled={}",
+                    smem_thr_copy_K.layout_src_tv_tiled,
+                    smem_thr_copy_K.layout_dst_tv_tiled,
+                )
+                cute.printf(
+                    prefix
+                    + "smem_thr_copy_V: layout_src_tv_tiled={}, layout_dst_tv_tiled={}",
+                    smem_thr_copy_V.layout_src_tv_tiled,
+                    smem_thr_copy_V.layout_dst_tv_tiled,
+                )
+                cute.printf("")
+                cute.printf(prefix + "tSsQ: {}", tSsQ.layout)
+                cute.printf(prefix + "tSsK: {}", tSsK.layout)
+                cute.printf(prefix + "tOsVt: {}", tOsVt.layout)
+                cute.printf("")
+                cute.printf(prefix + "cK: {}", cK.layout)
                 cute.printf(prefix + "tKcK: {}", tKcK.layout)
                 cute.printf(prefix + "t0KcK: {}", t0KcK.layout)
                 cute.printf(prefix + "tKpK: {}", tKpK.layout)
-                cute.printf(prefix + "tVsV: {}", tVsV.layout)
-                cute.printf(prefix + "tVgV: {}", tVgV.layout)
                 cute.printf(prefix + "tVcV: {}", tVcV.layout)
                 cute.printf(prefix + "t0VcV: {}", t0VcV.layout)
                 cute.printf(prefix + "tVpV: {}", tVpV.layout)

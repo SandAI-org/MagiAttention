@@ -521,7 +521,8 @@ def elem_pointer(
 
 @cute.jit
 def predicate_k(tAcA: cute.Tensor, limit: Int32) -> cute.Tensor:
-    # Only compute predicates for the "k" dimension. For the mn dimension, we will use "if"
+    # Only compute predicates for the "k" dimension,
+    # and use "if" on the mn dimension, to reduce register pressure.
     tApA = cute.make_rmem_tensor(
         cute.make_layout(
             (
