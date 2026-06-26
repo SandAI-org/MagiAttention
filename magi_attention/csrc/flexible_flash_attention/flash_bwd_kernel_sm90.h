@@ -61,6 +61,7 @@ class FlashAttnBwdSm90 {
   static constexpr bool InnerDxStoreInProducer = CollectiveMainloop::InnerDxStoreInProducer;
   static constexpr int NumBlockSparseThreads = CollectiveMainloop::NumBlockSparseThreads;
   static constexpr bool Use_TMA_Inner = CollectiveMainloop::Use_TMA_Inner;
+  static constexpr bool Use_CpAsync_Inner = CollectiveMainloop::Use_CpAsync_Inner;
 
   template <typename Pipeline, typename Storage, typename PipelineParamsT>
   CUTLASS_DEVICE static Pipeline make_inner_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
@@ -127,6 +128,7 @@ class FlashAttnBwdSm90 {
       alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_k;
       alignas(16) typename CollectiveMainloop::MainloopPipeline_V::SharedStorage pipeline_v;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
+      alignas(8) typename cutlass::arch::ClusterTransactionBarrier::ValueType tma1d_staging_mbar;
     };
 
     using PipelineStorage = std::conditional_t<SwapBwdQKLoop, PipelineStorageLoopK, PipelineStorageLoopQ>;
@@ -484,6 +486,9 @@ class FlashAttnBwdSm90 {
     // Initialize the barriers of Q,dO
     if (warp_idx == 0 && lane_predicate) {
       shared_storage.pipelines.barrier_QdO.init(/*numThreads=*/1);
+      if constexpr (Use_CpAsync_Inner) {
+        cutlass::arch::ClusterTransactionBarrier::init(&shared_storage.pipelines.tma1d_staging_mbar, 1);
+      }
     }
 
     // Initialize pipelines of K,V

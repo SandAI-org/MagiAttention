@@ -692,6 +692,12 @@ struct CollectiveMainloopBwdSm90 {
   // LoopK keeps P with kStages_dS stages (same as dS), unlike LoopQ which uses 1-stage P.
   using SmemP_LoopK_t = std::conditional_t<Mma_dKV_is_RS, SmemP_Empty_, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
 
+  // TMA 1D staging buffer: linear landing zone for SM90_BULK_COPY_G2S before rearrange
+  // to swizzled smem layout. Only allocated when scatter path uses TMA 1D (Use_CpAsync_Inner).
+  // LoopK: kBlockN rows of K/V. LoopQ: kBlockM rows of Q/dO.
+  static constexpr int kTma1dStagingElems = Use_CpAsync_Inner ? kInnerScatterRows * kHeadDim : 0;
+  using Tma1dStaging_t = cute::array_aligned<Element, kTma1dStagingElems, 128>;
+
   struct TensorStorageLoopK : cute::aligned_struct<maxSmemAlignment> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentQKVdO> smem_k;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutV>, SmemAlignmentV> smem_v;
@@ -708,6 +714,7 @@ struct CollectiveMainloopBwdSm90 {
       SmemdKVacc_t smem_dvacc;
     };
     SmemTokenIndices_t smem_token_indices;
+    Tma1dStaging_t smem_tma1d_staging;
     // Zero-sized fields placed AFTER all data buffers so they fall in struct tail padding
     // (struct alignment from PdS swizzle is 1024B; core data sums to exactly N*1024).
     // [[no_unique_address]] on truly-empty types lets the compiler overlap them with
@@ -1795,6 +1802,11 @@ struct CollectiveMainloopBwdSm90 {
     Element const* const ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
     Element const* const ptr_gV_base = params.ptr_V + bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
 
+    // TMA 1D base pointers (without idx_in_group offset — each row is a full contiguous load)
+    Element const* const ptr_gK_base_tma1d = params.ptr_K + bidh_kv * get<2>(params.stride_K);
+    Element const* const ptr_gV_base_tma1d = params.ptr_V + bidh_kv * get<2>(params.stride_V);
+    int tma1d_phase = 0;
+
     // ─── Shared Q/dO/LSE/dPsum loading ───
 
     auto load_QdO_LSE_dPsum = [&]() {
@@ -1873,23 +1885,44 @@ struct CollectiveMainloopBwdSm90 {
         ++smem_pipe_write_k;
       } else if constexpr (InnerUseScatter) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
-        // Fill this tile's token indices straight into the stage slot (held via acquire),
-        // then read row offsets back from smem — no per-row register array.
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_write_k.index() * kBlockN];
         block_meta.fill_token_indices(idx_slot, idx_in_group, group_idx);
         __syncwarp();
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int smem_row = group_idx * NumRowsPerGroup + local_row;
-          int token_idx = idx_slot[smem_row] * stride_kv_row;
+
+        // ─── TMA 1D bulk load path ───
+        // Each of NumBlockSparseThreads threads issues 1 bulk copy for its own row.
+        // thread_idx == group_idx * NumRowsPerGroup + idx_in_group (== thread_idx for 64/8/8).
+        Element* staging = shared_storage.tensors.mainloop.smem_tma1d_staging.data();
+        static constexpr int kRowBytes = kHeadDim * static_cast<int>(sizeof(Element));
+        static constexpr int kTotalTxBytes = kBlockN * kRowBytes;
+        auto* staging_mbar = &shared_storage.pipelines.tma1d_staging_mbar;
+
+        if (thread_idx == 0) {
+          cutlass::arch::ClusterTransactionBarrier::arrive_and_expect_tx(staging_mbar, kTotalTxBytes);
+        }
+        {
+          int my_row = thread_idx;
+          int token_offset = idx_slot[my_row] * stride_kv_row;
+          void const* src = reinterpret_cast<void const*>(ptr_gK_base_tma1d + token_offset);
+          void* dst = reinterpret_cast<void*>(staging + my_row * kHeadDim);
+          cute::SM90_BULK_COPY_G2S::copy(src, staging_mbar, dst, kRowBytes);
+        }
+        cutlass::arch::ClusterTransactionBarrier::wait(staging_mbar, tma1d_phase);
+        tma1d_phase ^= 1;
+
+        // Phase 2: Rearrange from linear staging to swizzled SmemLayoutK
+        static constexpr int kElemsPerU128 = 16 / static_cast<int>(sizeof(Element));
+        static constexpr int kU128PerRow = kHeadDim / kElemsPerU128;
+        int const stage = smem_pipe_write_k.index();
+        for (int row = thread_idx; row < kBlockN; row += NumBlockSparseThreads) {
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sK(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
-            auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_idx + tile_idx * 64)), Layout<_1>{});
-            auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gK_src, sK_dst);
+          for (int chunk = 0; chunk < kU128PerRow; ++chunk) {
+            int col = chunk * kElemsPerU128;
+            cute::uint128_t val = *reinterpret_cast<cute::uint128_t const*>(staging + row * kHeadDim + col);
+            *reinterpret_cast<cute::uint128_t*>(&sK(row, col, stage)) = val;
           }
         }
+
         last_k_write_stage = smem_pipe_write_k.index();
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_k;
@@ -1925,19 +1958,40 @@ struct CollectiveMainloopBwdSm90 {
         ++smem_pipe_write_v;
       } else if constexpr (InnerUseScatter) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
-        // V reads token indices from K's stage slot (they may differ when kStages_V < kStages)
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[last_k_write_stage * kBlockN];
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int token_idx = idx_slot[group_idx * NumRowsPerGroup + local_row] * stride_kv_row_v;
+
+        // ─── TMA 1D bulk load path for V ───
+        Element* staging = shared_storage.tensors.mainloop.smem_tma1d_staging.data();
+        static constexpr int kRowBytes = kHeadDim * static_cast<int>(sizeof(Element));
+        static constexpr int kTotalTxBytes = kBlockN * kRowBytes;
+        auto* staging_mbar = &shared_storage.pipelines.tma1d_staging_mbar;
+
+        if (thread_idx == 0) {
+          cutlass::arch::ClusterTransactionBarrier::arrive_and_expect_tx(staging_mbar, kTotalTxBytes);
+        }
+        {
+          int my_row = thread_idx;
+          int token_offset = idx_slot[my_row] * stride_kv_row_v;
+          void const* src = reinterpret_cast<void const*>(ptr_gV_base_tma1d + token_offset);
+          void* dst = reinterpret_cast<void*>(staging + my_row * kHeadDim);
+          cute::SM90_BULK_COPY_G2S::copy(src, staging_mbar, dst, kRowBytes);
+        }
+        cutlass::arch::ClusterTransactionBarrier::wait(staging_mbar, tma1d_phase);
+        tma1d_phase ^= 1;
+
+        // Phase 2: Rearrange from linear staging to swizzled SmemLayoutV
+        static constexpr int kElemsPerU128 = 16 / static_cast<int>(sizeof(Element));
+        static constexpr int kU128PerRow = kHeadDim / kElemsPerU128;
+        int const v_stage = smem_pipe_write_v.index();
+        for (int row = thread_idx; row < kBlockN; row += NumBlockSparseThreads) {
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
-            auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_idx + tile_idx * 64)), Layout<_1>{});
-            auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gV_src, sV_dst);
+          for (int chunk = 0; chunk < kU128PerRow; ++chunk) {
+            int col = chunk * kElemsPerU128;
+            cute::uint128_t val = *reinterpret_cast<cute::uint128_t const*>(staging + row * kHeadDim + col);
+            *reinterpret_cast<cute::uint128_t*>(&sV(row, col, v_stage)) = val;
           }
         }
+
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       } else {
