@@ -307,6 +307,7 @@ class FlashAttnBwdSm90 {
         // For each work tile job:
         //  1. load this n block of K,V from global memory into shared memory
         //  2. pipeline the loads of Q,dO for each m block from global memory into shared memory
+        bool any_tile_valid = false;
         CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = is_leader_warp ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
                                                   : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
@@ -332,12 +333,18 @@ class FlashAttnBwdSm90 {
 
           // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
           if (tile_valid) {
+            any_tile_valid = true;
             BarrierManager::sync<NumMmaThreads + NumProducerSyncThreads>(BwdNamedBarriers::KVEmpty);
           }
 
           scheduler_prefetch();
         }
-        mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do);
+        // Skip producer_tail when no valid tiles were processed: the consumer
+        // never consumed any pipeline stages, so producer_tail would deadlock
+        // waiting on the empty_barrier (same pattern as FWD fix bbd75d69).
+        if (any_tile_valid) {
+          mainloop.load_tail_with_loop_q(pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do);
+        }
       } else if (is_inner_dx_storer) { // store partial dQ (TMA or scatter reduce-add)
         // For each work tile job:
         //  1. atomic reduce-add the computed partial dQ from shared memory into global memory
