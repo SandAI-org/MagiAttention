@@ -935,19 +935,8 @@ struct CollectiveMainloopFwdSm90 {
       return;
     }
     shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
-    if (!(BlockSparse || IndexSparse)) {
-      int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
-      // Issue the epilogue waits
-      // TODO: check if this should be called by 1 thread or more
-      if (warp_idx_in_warpgroup == 0 && cute::elect_one_sync()) {
-        /* This helps avoid early exit of blocks in Cluster
-         *  Waits for all stages to either be released (all Consumer UNLOCKs), or if the stage was never used
-         *  then would just be acquired since the phase was still inverted from make_producer_start_state
-         */
-        pipeline_k.producer_tail(smem_pipe_write_k);
-        pipeline_v.producer_tail(smem_pipe_write_v);
-      }
-    } else {
+    int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
+    if (warp_idx_in_warpgroup == 0 && cute::elect_one_sync()) {
       pipeline_k.producer_tail(smem_pipe_write_k);
       pipeline_v.producer_tail(smem_pipe_write_v);
     }
