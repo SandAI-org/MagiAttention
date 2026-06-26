@@ -21,19 +21,19 @@ Measures TFLOPS across 4 attention methods as topk varies (block-sparse MQA):
   BlockSparse: Same random IA mask via SL q_ranges/k_ranges
 
 Each method has two variants:
-  solid  (S=S_FULL): fixed full seqlen, topk varies → shows L2 cache + CTA effects
-  dashed (S=topk) : seqlen = topk → shows "ideal" small-problem performance
+  solid  (S=S_FULL): fixed full seqlen, topk varies -> shows L2 cache + CTA effects
+  dashed (S=topk) : seqlen = topk -> shows "ideal" small-problem performance
 
 Passes: FWD, BWD LoopQ, BWD LoopK.
 
 Config: nhq=128, nhk=1 (MQA), hd=128, k_block_size=128, bf16.
 
-Usage:
-  python exps/attn/sparse/bench_l2_cache_sparse.py --bench
-  python exps/attn/sparse/bench_l2_cache_sparse.py --bench --force
-  python exps/attn/sparse/bench_l2_cache_sparse.py --bench --rerun "bwd_loopq/d1b_solid"
-  python exps/attn/sparse/bench_l2_cache_sparse.py --plot
-  python exps/attn/sparse/bench_l2_cache_sparse.py --bench --plot --out-dir /tmp/my_results
+Usage (subcommands):
+  python bench_l2_cache_sparse.py precompile
+  python bench_l2_cache_sparse.py data [--force] [--rerun "bwd_loopq/d1b_solid"]
+  python bench_l2_cache_sparse.py plot-bars
+  python bench_l2_cache_sparse.py plot-curves
+  python bench_l2_cache_sparse.py plot-loopq
 """
 
 import argparse
@@ -48,13 +48,13 @@ NHQ, NHK, HD, KBS = 128, 1, 128, 128
 WARMUP, ITERS = 8, 20
 S_FULL = 32768
 TOPK_VALS = [32768, 16384, 8192, 4096, 2048]
+YLIM_MAX = 700
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_OUT = os.path.join(_SCRIPT_DIR, "outs", "l2_cache_sparse")
 
 OUT_DIR = os.environ.get("L2_BENCH_OUT", _DEFAULT_OUT)
 RESULTS_FILE = os.path.join(OUT_DIR, "results.json")
-PLOT_FILE = os.path.join(OUT_DIR, "curves.png")
 
 
 def _ts():
@@ -145,7 +145,26 @@ def _parse_rerun(s):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Benchmark
+#  Precompile
+# ═══════════════════════════════════════════════════════════════
+def run_precompile():
+    """Run precompileall to warm JIT cache."""
+    import subprocess
+    import sys
+
+    print(f"[{_ts()}] Running precompileall...", flush=True)
+    result = subprocess.run(
+        [sys.executable, "-m", "magi_attention.precompileall"],
+        capture_output=False,
+    )
+    if result.returncode == 0:
+        print(f"[{_ts()}] Precompile done.", flush=True)
+    else:
+        print(f"[{_ts()}] Precompile failed (rc={result.returncode})", flush=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Benchmark (data)
 # ═══════════════════════════════════════════════════════════════
 def run_bench(force=False, rerun_filter=None):
     import torch
@@ -262,7 +281,7 @@ def run_bench(force=False, rerun_filter=None):
 
     # ── method runners ─────────────────────────────────────────
     def run_dense1b(S, topk, pass_type):
-        """Dense-1B: pack_gqa=False, single batch [0:S]×[0:topk]."""
+        """Dense-1B: pack_gqa=False, single batch [0:S]x[0:topk]."""
         gpu = _set_gpu()
         device = f"cuda:{gpu}"
         q_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
@@ -372,15 +391,15 @@ def run_bench(force=False, rerun_filter=None):
             _save_results(results)
 
     print(
-        f"\n[{_ts()}] Bench DONE: {ran} ran, {skipped} cached → {RESULTS_FILE}",
+        f"\n[{_ts()}] Bench DONE: {ran} ran, {skipped} cached -> {RESULTS_FILE}",
         flush=True,
     )
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Plot
+#  Plot: Bar chart (original --plot)
 # ═══════════════════════════════════════════════════════════════
-def run_plot():
+def run_plot_bars():
     import matplotlib
 
     matplotlib.use("Agg")
@@ -501,13 +520,7 @@ def run_plot():
             ax.set_ylabel("TFLOPS")
             ax.set_xticks(x)
             ax.set_xticklabels([f"{t // 1024}K" for t in TOPK_VALS])
-            all_vals = [
-                v
-                for mid, _, _, _ in present
-                for v in pd_.get(mid, {}).get("tflops", [])
-                if v
-            ]
-            ax.set_ylim(0, (max(all_vals) if all_vals else 100) * 1.18)
+            ax.set_ylim(0, YLIM_MAX)
             ax.legend(loc="upper right", fontsize=8, framealpha=0.8)
             ax.grid(axis="y", alpha=0.3, zorder=0)
 
@@ -519,9 +532,248 @@ def run_plot():
         y=1.01,
     )
     plt.tight_layout()
-    os.makedirs(os.path.dirname(PLOT_FILE), exist_ok=True)
-    fig.savefig(PLOT_FILE, dpi=180, bbox_inches="tight")
-    print(f"[{_ts()}] Plot → {PLOT_FILE}", flush=True)
+    out_path = os.path.join(OUT_DIR, "bars.png")
+    os.makedirs(OUT_DIR, exist_ok=True)
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    print(f"[{_ts()}] Plot bars -> {out_path}", flush=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Plot: Line curves (topk vs TFLOPS)
+# ═══════════════════════════════════════════════════════════════
+def run_plot_curves():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    with open(RESULTS_FILE) as f:
+        results = json.load(f)
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+    def get_tflops(pass_id, method_id):
+        pd = results.get(pass_id, {}).get(method_id, {})
+        if not pd:
+            return [None] * len(TOPK_VALS)
+        vals = []
+        for tk in TOPK_VALS:
+            if tk in pd.get("topk", []):
+                idx = pd["topk"].index(tk)
+                vals.append(pd["tflops"][idx])
+            else:
+                vals.append(None)
+        return vals
+
+    # ─── 3-panel: FWD / BWD LoopQ / BWD LoopK ───
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5), dpi=150)
+
+    PASSES = [("fwd", "FWD"), ("bwd_loopq", "BWD LoopQ"), ("bwd_loopk", "BWD LoopK")]
+
+    LINES = [
+        ("d1b_solid", "Dense-1B(S=32K)", "#888888", "-", "o"),
+        ("d1b_dashed", "Dense-1B(S=topk)", "#888888", "--", "s"),
+        ("ia_solid", "IndexSparse(S=32K)", "#C45680", "-", "^"),
+        ("ia_dashed", "IndexSparse(S=topk)", "#C45680", "--", "v"),
+        ("sl_solid", "BlockSparse(S=32K)", "#4A919A", "-", "D"),
+        ("sl_dashed", "BlockSparse(S=topk)", "#4A919A", "--", "d"),
+    ]
+
+    x = np.arange(len(TOPK_VALS))
+
+    for col, (pid, pname) in enumerate(PASSES):
+        ax = axes[col]
+        for mid, label, color, ls, marker in LINES:
+            vals = get_tflops(pid, mid)
+            valid = [(i, v) for i, v in enumerate(vals) if v is not None]
+            if not valid:
+                continue
+            xi, yi = zip(*valid)
+            ax.plot(
+                xi,
+                yi,
+                color=color,
+                linestyle=ls,
+                marker=marker,
+                markersize=5,
+                linewidth=1.8,
+                label=label,
+                alpha=0.85,
+            )
+
+        ax.set_title(pname, fontsize=13, fontweight="bold", pad=8)
+        ax.set_xlabel("topk")
+        ax.set_ylabel("TFLOPS")
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{t // 1024}K" for t in TOPK_VALS])
+        ax.legend(fontsize=7.5, loc="lower left", framealpha=0.8)
+        ax.grid(alpha=0.3)
+        ax.set_ylim(0, YLIM_MAX)
+
+    fig.suptitle(
+        "Sparse Attention TFLOPS vs topk  (nhq=128 nhk=1 hd=128 bf16 H100)\n"
+        "Solid=fixed S=32K, Dashed=S=topk (ideal small problem)",
+        fontsize=11,
+        y=1.02,
+    )
+    plt.tight_layout()
+    out_path = os.path.join(OUT_DIR, "curves.png")
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    print(f"[{_ts()}] Plot curves -> {out_path}", flush=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Plot: LoopQ vs LoopK comparison
+# ═══════════════════════════════════════════════════════════════
+def run_plot_loopq():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    with open(RESULTS_FILE) as f:
+        results = json.load(f)
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+    def get_tflops(pass_id, method_id):
+        pd = results.get(pass_id, {}).get(method_id, {})
+        if not pd:
+            return [None] * len(TOPK_VALS)
+        vals = []
+        for tk in TOPK_VALS:
+            if tk in pd.get("topk", []):
+                idx = pd["topk"].index(tk)
+                vals.append(pd["tflops"][idx])
+            else:
+                vals.append(None)
+        return vals
+
+    x = np.arange(len(TOPK_VALS))
+    x_labels = [f"{t // 1024}K" for t in TOPK_VALS]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), dpi=150)
+
+    # ─── Left: LoopQ vs LoopK TFLOPS (solid = S=32K fixed) ───
+    lines = [
+        ("bwd_loopq", "ia_solid", "LoopQ IndexSparse(S=32K)", "#E74C3C", "-", "D"),
+        ("bwd_loopk", "ia_solid", "LoopK IndexSparse(S=32K)", "#2E86C1", "-", "s"),
+        ("bwd_loopq", "d1b_solid", "LoopQ Dense-1B(S=32K)", "#E74C3C", "--", "^"),
+        ("bwd_loopk", "d1b_solid", "LoopK Dense-1B(S=32K)", "#2E86C1", "--", "v"),
+    ]
+
+    for pid, mid, label, color, ls, marker in lines:
+        vals = get_tflops(pid, mid)
+        valid = [(i, v) for i, v in enumerate(vals) if v is not None]
+        if not valid:
+            continue
+        xi, yi = zip(*valid)
+        ax1.plot(
+            xi,
+            yi,
+            color=color,
+            linestyle=ls,
+            marker=marker,
+            markersize=7,
+            linewidth=2.2,
+            label=label,
+            alpha=0.9,
+        )
+
+    # Drop annotation
+    loopq_ia = get_tflops("bwd_loopq", "ia_solid")
+    if loopq_ia[0] and loopq_ia[1]:
+        drop_pct = (1 - loopq_ia[1] / loopq_ia[0]) * 100
+        ax1.annotate(
+            f"L2 thrash\n-{drop_pct:.0f}%",
+            xy=(1, loopq_ia[1]),
+            xytext=(1.5, loopq_ia[1] + 100),
+            fontsize=9,
+            ha="center",
+            color="#E74C3C",
+            fontweight="bold",
+            arrowprops=dict(arrowstyle="->", color="#E74C3C", lw=1.5),
+        )
+
+    ax1.set_title(
+        "BWD: LoopQ vs LoopK (S=32K, topk varies)",
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax1.set_xlabel("topk")
+    ax1.set_ylabel("TFLOPS")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(x_labels)
+    ax1.legend(fontsize=8.5, loc="lower left", framealpha=0.9)
+    ax1.grid(alpha=0.3)
+    ax1.set_ylim(0, YLIM_MAX)
+
+    # ─── Right: S=topk (dashed) comparison ───
+    lines_dashed = [
+        ("bwd_loopq", "d1b_dashed", "LoopQ D1B(S=topk)", "#E74C3C", "--", "^"),
+        ("bwd_loopq", "ia_dashed", "LoopQ IA(S=topk)", "#E74C3C", "-", "D"),
+        ("bwd_loopk", "d1b_dashed", "LoopK D1B(S=topk)", "#2E86C1", "--", "v"),
+        ("bwd_loopk", "ia_dashed", "LoopK IA(S=topk)", "#2E86C1", "-", "s"),
+    ]
+
+    for pid, mid, label, color, ls, marker in lines_dashed:
+        vals = get_tflops(pid, mid)
+        valid = [(i, v) for i, v in enumerate(vals) if v is not None]
+        if not valid:
+            continue
+        xi, yi = zip(*valid)
+        ax2.plot(
+            xi,
+            yi,
+            color=color,
+            linestyle=ls,
+            marker=marker,
+            markersize=7,
+            linewidth=2.2,
+            label=label,
+            alpha=0.9,
+        )
+
+    # Annotate the LoopQ drop inflection
+    loopq_ia_d = get_tflops("bwd_loopq", "ia_dashed")
+    if loopq_ia_d[1] and loopq_ia_d[2]:
+        drop = (1 - loopq_ia_d[2] / loopq_ia_d[1]) * 100
+        ax2.annotate(
+            f"GQA L2 miss\n-{drop:.0f}%\n(Q 128x > KV)",
+            xy=(2, loopq_ia_d[2]),
+            xytext=(2.5, loopq_ia_d[2] + 120),
+            fontsize=8.5,
+            ha="center",
+            color="#E74C3C",
+            fontweight="bold",
+            arrowprops=dict(arrowstyle="->", color="#E74C3C", lw=1.5),
+        )
+
+    ax2.set_title(
+        "BWD: LoopQ vs LoopK (S=topk, ideal small problem)",
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax2.set_xlabel("S = topk")
+    ax2.set_ylabel("TFLOPS")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(x_labels)
+    ax2.legend(fontsize=8.5, loc="upper right", framealpha=0.9)
+    ax2.grid(alpha=0.3)
+    ax2.set_ylim(0, YLIM_MAX)
+
+    fig.suptitle(
+        "BWD LoopQ vs LoopK: GQA L2 Cache Divergence\n"
+        "(nhq=128 nhk=1 hd=128 kbs=128 bf16 H100)",
+        fontsize=11,
+        y=1.02,
+    )
+    plt.tight_layout()
+    out_path = os.path.join(OUT_DIR, "loopq_vs_loopk.png")
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    print(f"[{_ts()}] Plot loopq -> {out_path}", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -529,43 +781,84 @@ def main():
     parser = argparse.ArgumentParser(
         description="L2 cache / sparse-framework overhead benchmark"
     )
-    parser.add_argument("--bench", action="store_true", help="Run benchmarks")
-    parser.add_argument("--plot", action="store_true", help="Generate plot from JSON")
-    parser.add_argument(
+    sub = parser.add_subparsers(dest="cmd")
+
+    # precompile
+    sub.add_parser("precompile", help="Run precompileall to warm JIT cache")
+
+    # data
+    p_data = sub.add_parser("data", help="Run benchmarks -> results.json")
+    p_data.add_argument(
         "--force", action="store_true", help="Re-run all (ignore cache)"
     )
-    parser.add_argument(
+    p_data.add_argument(
         "--rerun",
         type=str,
         default=None,
         help="Re-run subset: 'pass/method' or 'pass/method/topk', comma-separated",
     )
-    parser.add_argument("--out-dir", default=None, help="Override output directory")
+    p_data.add_argument("--out-dir", default=None, help="Override output directory")
+
+    # plot-bars
+    p_bars = sub.add_parser("plot-bars", help="Generate bar chart")
+    p_bars.add_argument("--out-dir", default=None)
+
+    # plot-curves
+    p_curves = sub.add_parser("plot-curves", help="Generate line curve plot")
+    p_curves.add_argument("--out-dir", default=None)
+
+    # plot-loopq
+    p_loopq = sub.add_parser("plot-loopq", help="Generate LoopQ vs LoopK plot")
+    p_loopq.add_argument("--out-dir", default=None)
+
+    # Legacy compat: --bench / --plot
+    parser.add_argument("--bench", action="store_true", help="(legacy) same as 'data'")
+    parser.add_argument(
+        "--plot", action="store_true", help="(legacy) same as 'plot-bars'"
+    )
+    parser.add_argument("--force", action="store_true", help="(legacy) force re-run")
+    parser.add_argument("--rerun", type=str, default=None, help="(legacy) rerun filter")
+    parser.add_argument("--out-dir", default=None, help="(legacy) output dir override")
+
     args = parser.parse_args()
 
-    global OUT_DIR, RESULTS_FILE, PLOT_FILE
-    if args.out_dir:
-        OUT_DIR = args.out_dir
+    global OUT_DIR, RESULTS_FILE
+    out_dir_override = getattr(args, "out_dir", None)
+    if out_dir_override:
+        OUT_DIR = out_dir_override
         RESULTS_FILE = os.path.join(OUT_DIR, "results.json")
-        PLOT_FILE = os.path.join(OUT_DIR, "curves.png")
 
-    if not args.bench and not args.plot:
-        parser.error("Specify --bench, --plot, or both")
-
-    rerun_filter = _parse_rerun(args.rerun) if args.rerun else None
-    if rerun_filter:
-        print(f"[{_ts()}] Re-run filter: {len(rerun_filter)} entries", flush=True)
-
-    if args.bench:
+    if args.cmd == "precompile":
+        run_precompile()
+    elif args.cmd == "data":
+        rerun_filter = _parse_rerun(args.rerun) if args.rerun else None
+        if rerun_filter:
+            print(f"[{_ts()}] Re-run filter: {len(rerun_filter)} entries", flush=True)
         print(
-            f"[{_ts()}] L2 Cache Benchmark — "
+            f"[{_ts()}] L2 Cache Benchmark -- "
             f"D1B=pack_gqa=False  Dense/SL=IA random mask  IA=random K",
             flush=True,
         )
         run_bench(force=args.force, rerun_filter=rerun_filter)
-    if args.plot:
-        print(f"[{_ts()}] Plot from {RESULTS_FILE}", flush=True)
-        run_plot()
+    elif args.cmd == "plot-bars":
+        run_plot_bars()
+    elif args.cmd == "plot-curves":
+        run_plot_curves()
+    elif args.cmd == "plot-loopq":
+        run_plot_loopq()
+    elif args.bench or args.plot:
+        # Legacy compatibility
+        if args.bench:
+            rerun_filter = _parse_rerun(args.rerun) if args.rerun else None
+            run_bench(force=args.force, rerun_filter=rerun_filter)
+        if args.plot:
+            run_plot_bars()
+    else:
+        parser.print_help()
+        parser.error(
+            "Specify a subcommand: precompile, data, plot-bars, plot-curves, plot-loopq"
+        )
+
     print(f"[{_ts()}] ALL DONE", flush=True)
 
 
