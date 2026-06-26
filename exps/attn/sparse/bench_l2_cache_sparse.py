@@ -14,11 +14,12 @@
 
 """L2 cache / sparse-framework overhead benchmark.
 
-Measures TFLOPS across 4 attention methods as topk varies (block-sparse MQA):
-  Dense-1B  : Traditional dense, pack_gqa=False, single batch (baseline ceiling)
-  Dense     : Same random IA mask via SL q_ranges/k_ranges (proves SL zero overhead)
+Measures TFLOPS across 5 attention methods as topk varies (block-sparse MQA):
+  Dense-1B    : Traditional dense, pack_gqa=False, single batch (baseline ceiling)
+  D1B-PackGQA : Single range with pack_gqa=True (isolates pack_gqa kernel overhead)
+  Dense       : Same random IA mask via SL q_ranges/k_ranges (per-block ranges)
   IndexSparse : Random K blocks via IA kernel path
-  BlockSparse: Same random IA mask via SL q_ranges/k_ranges
+  BlockSparse : Same random IA mask via SL q_ranges/k_ranges
 
 Each method has two variants:
   solid  (S=S_FULL): fixed full seqlen, topk varies -> shows L2 cache + CTA effects
@@ -296,6 +297,24 @@ def run_bench(force=False, rerun_filter=None):
         tf, ms = _bench_ffa(S, topk, pass_type, kw, device)
         return round(tf, 1), round(ms, 3), gpu
 
+    def run_dense1b_pg(S, topk, pass_type):
+        """Dense-1B with pack_gqa=True, single range — isolates pack_gqa overhead."""
+        gpu = _set_gpu()
+        device = f"cuda:{gpu}"
+        q_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
+        k_ranges = torch.tensor([[0, topk]], dtype=torch.int32, device=device)
+        atm = torch.zeros(1, dtype=torch.int32, device=device)
+        kw = dict(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=atm,
+            pack_gqa=True,
+        )
+        if pass_type != "fwd":
+            kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
+        tf, ms = _bench_ffa(S, topk, pass_type, kw, device)
+        return round(tf, 1), round(ms, 3), gpu
+
     def run_dense(S, topk, pass_type):
         """Dense via SL path with same random IA mask."""
         indices = build_random_indices(S, topk, "cpu")
@@ -326,6 +345,8 @@ def run_bench(force=False, rerun_filter=None):
     METHODS = [
         ("d1b_solid", "D1B(S=32K)", lambda tk, pt: run_dense1b(S_FULL, tk, pt)),
         ("d1b_dashed", "D1B(S=topk)", lambda tk, pt: run_dense1b(tk, tk, pt)),
+        ("d1bpg_solid", "D1B-PG(S=32K)", lambda tk, pt: run_dense1b_pg(S_FULL, tk, pt)),
+        ("d1bpg_dashed", "D1B-PG(S=topk)", lambda tk, pt: run_dense1b_pg(tk, tk, pt)),
         ("dense_solid", "Dense(S=32K)", lambda tk, pt: run_dense(S_FULL, tk, pt)),
         ("dense_dashed", "Dense(S=topk)", lambda tk, pt: run_dense(tk, tk, pt)),
         ("ia_solid", "IA(S=32K)", lambda tk, pt: run_ia(S_FULL, tk, pt)),
@@ -426,6 +447,7 @@ def run_plot_bars():
         results = json.load(f)
 
     COL_D1B = (0.580, 0.580, 0.580)
+    COL_D1BPG = (0.400, 0.400, 0.400)
     COL_DENSE = (0.220, 0.373, 0.706)
     COL_IA = (0.769, 0.337, 0.494)
     COL_SL = (0.290, 0.569, 0.604)
@@ -435,6 +457,7 @@ def run_plot_bars():
             "suffix": "S=32K",
             "methods": [
                 ("d1b_solid", "Dense-1B", COL_D1B, ""),
+                ("d1bpg_solid", "D1B-PackGQA", COL_D1BPG, ""),
                 ("dense_solid", "Dense", COL_DENSE, ""),
                 ("ia_solid", "IndexSparse", COL_IA, ""),
                 ("sl_solid", "BlockSparse", COL_SL, ""),
@@ -444,6 +467,7 @@ def run_plot_bars():
             "suffix": "S=topk",
             "methods": [
                 ("d1b_dashed", "Dense-1B", COL_D1B, "//"),
+                ("d1bpg_dashed", "D1B-PackGQA", COL_D1BPG, "//"),
                 ("dense_dashed", "Dense", COL_DENSE, "//"),
                 ("ia_dashed", "IndexSparse", COL_IA, "//"),
                 ("sl_dashed", "BlockSparse", COL_SL, "//"),
