@@ -120,6 +120,7 @@ class FlashAttnBwdSm90 {
       alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_q;
       alignas(16) typename CollectiveMainloop::MainloopPipeline_dO::SharedStorage pipeline_do;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
+      alignas(8) typename cutlass::arch::ClusterTransactionBarrier::ValueType tma1d_staging_mbar;
     };
 
     // q for outer-loop and k for inner-loop
@@ -239,6 +240,9 @@ class FlashAttnBwdSm90 {
     // Initialize the barriers of K,V
     if (warp_idx == 0 && lane_predicate) {
       shared_storage.pipelines.barrier_KV.init(/*numThreads=*/1);
+      if constexpr (Use_CpAsync_Inner) {
+        cutlass::arch::ClusterTransactionBarrier::init(&shared_storage.pipelines.tma1d_staging_mbar, 1);
+      }
     }
 
     PipelineParams pipeline_params_q;
