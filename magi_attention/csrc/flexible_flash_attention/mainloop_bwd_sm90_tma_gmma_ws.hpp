@@ -671,6 +671,7 @@ struct CollectiveMainloopBwdSm90 {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
     SmemdQacc_t smem_dqacc;
     SmemTokenIndices_t smem_token_indices;
+    Tma1dStaging_t smem_tma1d_staging;
   };
 
   // Empty placeholders for zero-sized SMEM fields (used with [[no_unique_address]])
@@ -1455,6 +1456,10 @@ struct CollectiveMainloopBwdSm90 {
     int64_t const stride_do_head = get<2>(params.stride_dO);
     Element const* const ptr_gQ_base = params.ptr_Q + bidh * kQPackScale * stride_q_head + idx_in_group * 8;
     Element const* const ptr_gdO_base = params.ptr_dO + bidh * kQPackScale * stride_do_head + idx_in_group * 8;
+    // TMA 1D base pointers (without idx_in_group column offset — each row is a full contiguous load)
+    Element const* const ptr_gQ_base_tma1d = params.ptr_Q + bidh * kQPackScale * stride_q_head;
+    Element const* const ptr_gdO_base_tma1d = params.ptr_dO + bidh * kQPackScale * stride_do_head;
+    int tma1d_phase_q = 0;
     // Decompose a packed row into a gmem element offset (plain token * row_stride when !PackGQA)
     auto packed_row_offset = [&](int p, int64_t stride_token, int64_t stride_head) -> int64_t {
       if constexpr (PackGQA) {
@@ -1512,18 +1517,39 @@ struct CollectiveMainloopBwdSm90 {
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[stage * kBlockM];
         block_meta.fill_token_indices(idx_slot, idx_in_group, group_idx);
         __syncwarp();
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int smem_row = group_idx * NumRowsPerGroup + local_row;
-          int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_q_row, stride_q_head);
+
+        // ─── TMA 1D bulk load path for Q ───
+        Element* staging = shared_storage.tensors.mainloop.smem_tma1d_staging.data();
+        static constexpr int kRowBytes = kHeadDim * static_cast<int>(sizeof(Element));
+        static constexpr int kTotalTxBytes = kBlockM * kRowBytes;
+        auto* staging_mbar = &shared_storage.pipelines.tma1d_staging_mbar;
+
+        if (thread_idx == 0) {
+          cutlass::arch::ClusterTransactionBarrier::arrive_and_expect_tx(staging_mbar, kTotalTxBytes);
+        }
+        {
+          int my_row = thread_idx;
+          int64_t token_offset = packed_row_offset(idx_slot[my_row], stride_q_row, stride_q_head);
+          void const* src = reinterpret_cast<void const*>(ptr_gQ_base_tma1d + token_offset);
+          void* dst = reinterpret_cast<void*>(staging + my_row * kHeadDim);
+          cute::SM90_BULK_COPY_G2S::copy(src, staging_mbar, dst, kRowBytes);
+        }
+        cutlass::arch::ClusterTransactionBarrier::wait(staging_mbar, tma1d_phase_q);
+        tma1d_phase_q ^= 1;
+
+        // Phase 2: Rearrange from linear staging to swizzled SmemLayoutQ
+        static constexpr int kElemsPerU128 = 16 / static_cast<int>(sizeof(Element));
+        static constexpr int kU128PerRow = kHeadDim / kElemsPerU128;
+        for (int row = thread_idx; row < kBlockM; row += NumBlockSparseThreads) {
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sQ(smem_row, idx_in_group * 8 + tile_idx * 64, stage);
-            auto gQ_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gQ_base + token_offset + tile_idx * 64)), Layout<_1>{});
-            auto sQ_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gQ_src, sQ_dst);
+          for (int chunk = 0; chunk < kU128PerRow; ++chunk) {
+            int col = chunk * kElemsPerU128;
+            cute::uint128_t val = *reinterpret_cast<cute::uint128_t const*>(staging + row * kHeadDim + col);
+            *reinterpret_cast<cute::uint128_t*>(&sQ(row, col, stage)) = val;
           }
         }
+
+        // LSE: small per-row loads via cp.async (16B each, total 1KB)
         for (int i = idx_in_group; i < NumRowsPerGroup; i += GroupSize) {
           float* lse_dst = &sLSE(_0{}, group_idx * NumRowsPerGroup + i, stage);
           auto gLSE_src = make_tensor(
@@ -1574,20 +1600,42 @@ struct CollectiveMainloopBwdSm90 {
         PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_write_q.index() * kBlockM];
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumRowsPerGroup; ++local_row) {
-          int smem_row = group_idx * NumRowsPerGroup + local_row;
-          int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_do_row, stride_do_head);
+
+        // ─── TMA 1D bulk load path for dO ───
+        Element* staging = shared_storage.tensors.mainloop.smem_tma1d_staging.data();
+        static constexpr int kRowBytes = kHeadDim * static_cast<int>(sizeof(Element));
+        static constexpr int kTotalTxBytes = kBlockM * kRowBytes;
+        auto* staging_mbar = &shared_storage.pipelines.tma1d_staging_mbar;
+
+        if (thread_idx == 0) {
+          cutlass::arch::ClusterTransactionBarrier::arrive_and_expect_tx(staging_mbar, kTotalTxBytes);
+        }
+        {
+          int my_row = thread_idx;
+          int64_t token_offset = packed_row_offset(idx_slot[my_row], stride_do_row, stride_do_head);
+          void const* src = reinterpret_cast<void const*>(ptr_gdO_base_tma1d + token_offset);
+          void* dst = reinterpret_cast<void*>(staging + my_row * kHeadDim);
+          cute::SM90_BULK_COPY_G2S::copy(src, staging_mbar, dst, kRowBytes);
+        }
+        cutlass::arch::ClusterTransactionBarrier::wait(staging_mbar, tma1d_phase_q);
+        tma1d_phase_q ^= 1;
+
+        // Phase 2: Rearrange from linear staging to swizzled SmemLayoutdO
+        static constexpr int kElemsPerU128 = 16 / static_cast<int>(sizeof(Element));
+        static constexpr int kU128PerRow = kHeadDim / kElemsPerU128;
+        int const do_stage = smem_pipe_write_do_cur.index();
+        for (int row = thread_idx; row < kBlockM; row += NumBlockSparseThreads) {
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sdO(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_do_cur.index());
-            auto gdO_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdO_base + token_offset + tile_idx * 64)), Layout<_1>{});
-            auto sdO_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gdO_src, sdO_dst);
+          for (int chunk = 0; chunk < kU128PerRow; ++chunk) {
+            int col = chunk * kElemsPerU128;
+            cute::uint128_t val = *reinterpret_cast<cute::uint128_t const*>(staging + row * kHeadDim + col);
+            *reinterpret_cast<cute::uint128_t*>(&sdO(row, col, do_stage)) = val;
           }
         }
+
+        // dPsum: small per-row loads via cp.async (16B each)
         for (int i = idx_in_group; i < NumRowsPerGroup; i += GroupSize) {
-          float* dpsum_dst = &sdPsum(_0{}, group_idx * NumRowsPerGroup + i, smem_pipe_write_do_cur.index());
+          float* dpsum_dst = &sdPsum(_0{}, group_idx * NumRowsPerGroup + i, do_stage);
           auto gdPsum_src = make_tensor(
               make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdPsum_base + dpsum_row_offset(idx_slot[group_idx * NumRowsPerGroup + i]))), Layout<_1>{});
           auto sdPsum_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dpsum_dst)), Layout<_1>{});
