@@ -909,7 +909,7 @@ class FFAFwdSm80:
         # ///////////////////////////////////////////////////////////////////////////////
 
         # tKsK/tVsV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2,STAGE=(1,1)):((1,0),1024,4096,(0,0))
-        # tKgK/tVgV: (CPY_ATOM=(8,1),CPY_k4,CPY_HD2,restK):((1,0),4096,64,16384)
+        # tKgK/tVgV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2,restK):((1,0),4096,64,16384)
         gmem_thr_copy_K = gmem_tiled_copy_K.get_slice(tidx)
         gmem_thr_copy_V = gmem_tiled_copy_V.get_slice(tidx)
         tKsK, tKgK = gmem_thr_copy_K.partition_D(sK), gmem_thr_copy_K.partition_S(gK)
@@ -1006,8 +1006,8 @@ class FFAFwdSm80:
             tVcV = gmem_thr_copy_V.partition_S(cV)
             t0VcV = gmem_thr_copy_V.get_slice(0).partition_S(cV)
 
-        # tKpK: (1,CPY_K4,CPY_HD2):(2,0,1)
-        # tVpV: (1,CPY_K4,CPY_HD2):(2,0,1)
+        # tKpK: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1) => the same predicate along CPY_K
+        # tVpV: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1) => the same predicate along CPY_K
         tKpK = cutedsl_utils.predicate_k(tKcK, limit=mK.shape[1])
         if const_expr(self.same_hdim_kv):
             tVpV = tKpK
@@ -1175,6 +1175,7 @@ class FFAFwdSm80:
         # ///////////////////////////////////////////////////////////////////////////////
         # Prologue
         # ///////////////////////////////////////////////////////////////////////////////
+
         # Start async loads of the last mn-tile, where we take care of the mn residue
         gmem_thr_copy_Q = gmem_tiled_copy_Q.get_slice(tidx)
         self.load_Q(
@@ -1184,6 +1185,7 @@ class FFAFwdSm80:
             m_block,
             seqlen=seqlen_info.seqlen_q,
             headdim=mQ.shape[1],
+            is_print_thread_and_tile=is_print_thread,
         )
         cute.arch.cp_async_commit_group()
 
@@ -1198,7 +1200,12 @@ class FFAFwdSm80:
         # read from smem_q to registers, then load V.
         # If !Q_in_regs, we load Q, load all stages of K & V, then (optionally) rotate Q.
         if const_expr(self.Q_in_regs):
-            load_K(n_block, smem_pipe_write=0, need_predicates=True)
+            load_K(
+                n_block,
+                smem_pipe_write=0,
+                need_predicates=True,
+                is_print_thread_and_tile=is_print_thread,
+            )
             cute.arch.cp_async_commit_group()
             preprocess_Q()
             cute.arch.barrier()  # Make sure all threads have read smem_q before loading V
@@ -1210,6 +1217,7 @@ class FFAFwdSm80:
                         n_block - stage,
                         smem_pipe_write=stage,
                         need_predicates=stage == 0,
+                        is_print_thread_and_tile=is_print_thread and stage == 0,
                     )
                 cute.arch.cp_async_commit_group()
             if const_expr(stage < self.num_stages - 1):
@@ -1218,6 +1226,7 @@ class FFAFwdSm80:
                         n_block - stage,
                         smem_pipe_write=stage,
                         need_predicates=stage == 0,
+                        is_print_thread_and_tile=is_print_thread and stage == 0,
                     )
                 cute.arch.cp_async_commit_group()
         if const_expr(not self.Q_in_regs):
@@ -1298,7 +1307,6 @@ class FFAFwdSm80:
             )
             smem_pipe_read = self.advance_pipeline(smem_pipe_read)
             smem_pipe_write = self.advance_pipeline(smem_pipe_write)
-        # TODO: local
 
         # normalize acc_O by row_sum and calculate the lse
         row_scale = softmax.finalize()
@@ -1334,16 +1342,27 @@ class FFAFwdSm80:
         block: Int32,
         seqlen: Int32,
         headdim: Int32,
+        is_print_thread_and_tile: bool = False,
     ):
-        tQsQ, tQgQ = gmem_thr_copy.partition_D(sQ), gmem_thr_copy.partition_S(gQ)
+        # tQsQ: (CPY_ATOM=(8,1),CPY_Q8,CPY_HD2):((1,0),1024,8192)
+        # tQgQ: (CPY_ATOM=(8,1),CPY_Q8,CPY_HD2):((1,0),16384,64)
+        tQsQ: cute.Tensor = gmem_thr_copy.partition_D(sQ)
+        tQgQ: cute.Tensor = gmem_thr_copy.partition_S(gQ)
+
+        # tQcQ: (CPY_ATOM=(8,1),CPY_Q8,CPY_HD2):((1@1,0),16@0,64@1)
+        # t0QcQ: (CPY_ATOM=(8,1),CPY_Q8,CPY_HD2):((1@1,0),16@0,64@1)
+        # tQpQ: (ATOM_REST_V1,CPY_Q8,CPY_HD2):(2,0,1) => the same predicate along CPY_Q
         cQ = cute.make_identity_tensor((self.tile_m, self.tile_hdim))
-        tQcQ = gmem_thr_copy.partition_S(cQ)
+        tQcQ: cute.Tensor = gmem_thr_copy.partition_S(cQ)
         t0QcQ = gmem_thr_copy.get_slice(0).partition_S(cQ)
         tQpQ = cutedsl_utils.predicate_k(tQcQ, limit=headdim)
-        for m in cutlass.range_constexpr(cute.size(tQsQ.shape[1])):
-            # Instead of using tQcQ, we using t0QcQ and subtract the offset from the limit
-            # (seqlen - block * kBlockM). This is because the entries of t0QcQ are known at compile time.
-            if t0QcQ[0, m, 0][0] < seqlen - block * self.tile_m - tQcQ[0][0]:
+
+        sq_limit = seqlen - block * self.tile_m
+        for m in cutlass.range_constexpr(cute.size(tQsQ.shape[1])):  # loop over CPY_Q8
+            # NOTE: Instead of using `tQcQ[0, m, 0][0] < sq_limit`,
+            # we use t0QcQ to compare with `sq_limit - tQcQ[0][0]`
+            # to make the left hand side a compile-time constant expression.
+            if t0QcQ[0, m, 0][0] < sq_limit - tQcQ[0][0]:
                 cute.copy(
                     gmem_thr_copy,
                     tQgQ[None, m, None],
@@ -1352,7 +1371,28 @@ class FFAFwdSm80:
                     if const_expr(self.check_hdim_oob)
                     else None,
                 )
-            # We don't need to clear the sQ smem tiles since we'll only write out the valid outputs
+
+        # NOTE: We don't need to clear the sQ smem tiles
+        # since we'll only write out the valid outputs
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm80_load_Q] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "block={}, seqlen={}, headdim={}",
+                    block,
+                    seqlen,
+                    headdim,
+                )
+                cute.printf(prefix + "tQsQ: {}", tQsQ.layout)
+                cute.printf(prefix + "tQgQ: {}", tQgQ.layout)
+                cute.printf(prefix + "tQcQ: {}", tQcQ.layout)
+                cute.printf(prefix + "t0QcQ: {}", t0QcQ.layout)
+                cute.printf(prefix + "tQpQ: {}", tQpQ.layout)
+                cute.printf("")
 
     @cute.jit
     def load_K(
@@ -1367,24 +1407,32 @@ class FFAFwdSm80:
         smem_pipe_write: Int32,
         seqlen: Int32,
         need_predicates: cutlass.Constexpr,
+        is_print_thread_and_tile: bool = False,
     ):
-        # Do we need to check if we overshoot kBlockN when we load K?
+        # TODO(REVIEW): Do we need to check if we overshoot kBlockN when we load K ?
         is_even_n_smem_k = self.tile_n % gmem_tiled_copy.tiler_mn[0].shape == 0
+
+        # tKgK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2,restK):((1,0),4096,64,16384)
+        # tKsK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2,(1,1)):((1,0),1024,4096,(0,0))
+        # tKcK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
+        # t0KcK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
+        # tKpK: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1)
+
         if const_expr(need_predicates or not is_even_n_smem_k):
-            # Instead of using tKcK, we using t0KcK and subtract the offset from the limit
-            # (seqlen - block * kBlockN). This is because the entries of t0KcK are known at compile time.
-            if const_expr(is_even_n_smem_k):
-                seqlen_limit = seqlen - block * self.tile_n
-            else:
-                if const_expr(not need_predicates):
-                    seqlen_limit = self.tile_n
-                else:
-                    seqlen_limit = cutlass.min(
-                        seqlen - block * self.tile_n, self.tile_n
-                    )
-            seqlen_limit -= tKcK[0][0]
+            if const_expr(is_even_n_smem_k):  # even but need predicates
+                sk_limit = seqlen - block * self.tile_n
+            else:  # not even
+                sk_limit = (
+                    cutlass.min(seqlen - block * self.tile_n, self.tile_n)
+                    if const_expr(need_predicates)
+                    else self.tile_n
+                )
+
             for n in cutlass.range_constexpr(cute.size(tKsK.shape[1])):
-                if t0KcK[0, n, 0][0] < seqlen_limit:
+                # NOTE: Instead of using `tKcK[0, n, 0][0] < sk_limit`,
+                # we use t0KcK to compare with `sk_limit - tKcK[0][0]`
+                # to make the left hand side a compile-time constant expression.
+                if t0KcK[0, n, 0][0] < sk_limit - tKcK[0][0]:
                     cute.copy(
                         gmem_tiled_copy,
                         tKgK[None, n, None, block],
@@ -1398,8 +1446,7 @@ class FFAFwdSm80:
                         if const_expr(self.check_hdim_oob)
                         else None,
                     )
-                # We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
-        else:
+        else:  # even and no predicates needed
             cute.copy(
                 gmem_tiled_copy,
                 tKgK[None, None, None, block],
@@ -1411,6 +1458,33 @@ class FFAFwdSm80:
                 ],
                 pred=tKpK if const_expr(self.check_hdim_oob) else None,
             )
+
+        # NOTE: We don't need to clear the sK smem tiles
+        # since we'll mask out the scores anyway.
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm80_load_K] "
+                cute.printf("")
+                cute.printf(
+                    prefix
+                    + f"need_predicates={need_predicates}, "
+                    + f"is_even_n_smem_k={is_even_n_smem_k}"
+                )
+                cute.printf(
+                    prefix + "block={}, smem_pipe_write={}, seqlen={}",
+                    block,
+                    smem_pipe_write,
+                    seqlen,
+                )
+                cute.printf(prefix + "tKgK: {}", tKgK.layout)
+                cute.printf(prefix + "tKsK: {}", tKsK.layout)
+                cute.printf(prefix + "tKcK: {}", tKcK.layout)
+                cute.printf(prefix + "t0KcK: {}", t0KcK.layout)
+                cute.printf(prefix + "tKpK: {}", tKpK.layout)
+                cute.printf("")
 
     @cute.jit
     def load_V(
@@ -1425,9 +1499,17 @@ class FFAFwdSm80:
         smem_pipe_write: Int32,
         seqlen: Int32,
         need_predicates: cutlass.Constexpr,
+        is_print_thread_and_tile: bool = False,
     ):
-        # Do we need to check if we overshoot kBlockN when we load V?
+        # TODO(REVIEW): Do we need to check if we overshoot kBlockN when we load V ?
         is_even_n_smem_v = self.tile_n % gmem_tiled_copy.tiler_mn[0].shape == 0
+
+        # tVgV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2,restK):((1,0),4096,64,16384)
+        # tVsV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2,(1,1)):((1,0),1024,4096,(0,0))
+        # tVcV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
+        # t0VcV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
+        # tVpV: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1)
+
         if const_expr(need_predicates or not is_even_n_smem_v):
             for n in cutlass.range_constexpr(cute.size(tVsV.shape[1])):
                 # If kBlockN doesn't evenly divide the tiled copy, only the last `n` needs to be checked
@@ -1465,7 +1547,7 @@ class FFAFwdSm80:
                         ],
                         pred=predicate,
                     )
-        else:
+        else:  # even and no predicates needed
             cute.copy(
                 gmem_tiled_copy,
                 tVgV[None, None, None, block],
@@ -1477,6 +1559,30 @@ class FFAFwdSm80:
                 ],
                 pred=tVpV if const_expr(self.check_hdim_v_oob) else None,
             )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm80_load_V] "
+                cute.printf("")
+                cute.printf(
+                    prefix
+                    + f"need_predicates={need_predicates}, "
+                    + f"is_even_n_smem_v={is_even_n_smem_v}"
+                )
+                cute.printf(
+                    prefix + "block={}, smem_pipe_write={}, seqlen={}",
+                    block,
+                    smem_pipe_write,
+                    seqlen,
+                )
+                cute.printf(prefix + "tVgV: {}", tVgV.layout)
+                cute.printf(prefix + "tVsV: {}", tVsV.layout)
+                cute.printf(prefix + "tVcV: {}", tVcV.layout)
+                cute.printf(prefix + "t0VcV: {}", t0VcV.layout)
+                cute.printf(prefix + "tVpV: {}", tVpV.layout)
+                cute.printf("")
 
     @cute.jit
     def compute_one_n_block(

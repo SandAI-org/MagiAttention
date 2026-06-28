@@ -521,16 +521,25 @@ def elem_pointer(
 
 @cute.jit
 def predicate_k(tAcA: cute.Tensor, limit: Int32) -> cute.Tensor:
-    # Only compute predicates for the "k" dimension,
-    # and use "if" on the mn dimension, to reduce register pressure.
+    """Return a predicate tensor for the "k" dimension of ``tAcA``,
+    where ``tAcA`` is a tensor with shape
+
+    ``(CPY_ATOM=(ATOM_V,REST_V),CPY_MN,CPY_K)``.
+
+    NOTE: we only compute predicates for the "k" dimension,
+    and use "if" on the mn dimension, to reduce register pressure.
+    """
+
+    # tAcA: (CPY_ATOM=(ATOM_V,REST_V),CPY_MN,CPY_K)
+    # tApA: (REST_V,CPY_MN,CPY_K):(CPY_K,0,1)
     tApA = cute.make_rmem_tensor(
         cute.make_layout(
             (
-                cute.size(tAcA, mode=[0, 1]),
-                cute.size(tAcA, mode=[1]),
-                cute.size(tAcA, mode=[2]),
+                cute.size(tAcA, mode=[0, 1]),  # REST_V
+                cute.size(tAcA, mode=[1]),  # CPY_MN
+                cute.size(tAcA, mode=[2]),  # CPY_K
             ),
-            stride=(cute.size(tAcA, mode=[2]), 0, 1),
+            stride=(cute.size(tAcA, mode=[2]), 0, 1),  # (CPY_K,0,1)
         ),
         cutlass.Boolean,
     )
