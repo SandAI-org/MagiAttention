@@ -60,12 +60,13 @@ class FlashAttnBwdSm90 {
   static constexpr bool InnerUseScatter = CollectiveMainloop::InnerUseScatter;
   static constexpr bool InnerDxStoreInProducer = CollectiveMainloop::InnerDxStoreInProducer;
   static constexpr int NumBlockSparseThreads = CollectiveMainloop::NumBlockSparseThreads;
-  static constexpr bool Use_TMA_Inner = CollectiveMainloop::Use_TMA_Inner;
-  static constexpr bool Use_CpAsync_Inner = CollectiveMainloop::Use_CpAsync_Inner;
+  static constexpr bool InnerLoad_Tma = CollectiveMainloop::InnerLoad_Tma;
+  static constexpr bool InnerLoad_Tma1d = CollectiveMainloop::InnerLoad_Tma1d;
+  static constexpr bool InnerLoad_CpAsync = CollectiveMainloop::InnerLoad_CpAsync;
 
   template <typename Pipeline, typename Storage, typename PipelineParamsT>
   CUTLASS_DEVICE static Pipeline make_inner_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
-    if constexpr (Use_TMA_Inner) {
+    if constexpr (InnerLoad_Tma) {
       return Pipeline(storage, pipeline_params, ClusterShape{});
     } else {
       return Pipeline(storage, pipeline_params);
@@ -240,13 +241,13 @@ class FlashAttnBwdSm90 {
     // Initialize the barriers of K,V
     if (warp_idx == 0 && lane_predicate) {
       shared_storage.pipelines.barrier_KV.init(/*numThreads=*/1);
-      if constexpr (Use_CpAsync_Inner) {
+      if constexpr (InnerLoad_Tma1d) {
         cutlass::arch::ClusterTransactionBarrier::init(&shared_storage.pipelines.tma1d_staging_mbar, 1);
       }
     }
 
     PipelineParams pipeline_params_q;
-    if constexpr (Use_TMA_Inner) {
+    if constexpr (InnerLoad_Tma) {
       pipeline_params_q.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;
       pipeline_params_q.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
       pipeline_params_q.is_leader = warp_group_thread_idx == 0;
@@ -258,7 +259,7 @@ class FlashAttnBwdSm90 {
     MainloopPipeline pipeline_q = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_q, pipeline_params_q);
 
     PipelineParams_dO pipeline_params_do;
-    if constexpr (Use_TMA_Inner) {
+    if constexpr (InnerLoad_Tma) {
       auto role_do = warp_group_idx == 0 ? MainloopPipeline_dO::ThreadCategory::Producer : MainloopPipeline_dO::ThreadCategory::Consumer;
       pipeline_params_do = {pipeline_params_q.transaction_bytes, role_do, pipeline_params_q.is_leader, pipeline_params_q.num_consumers};
     } else {
@@ -266,7 +267,7 @@ class FlashAttnBwdSm90 {
       pipeline_params_do.producer_arv_count = NumBlockSparseThreads;
     }
     MainloopPipeline_dO pipeline_do = make_inner_pipeline<MainloopPipeline_dO>(
-        shared_storage.pipelines.pipeline_do, cute::conditional_return < Q_dO_same_stages && Use_TMA_Inner > (pipeline_params_q, pipeline_params_do));
+        shared_storage.pipelines.pipeline_do, cute::conditional_return < Q_dO_same_stages && InnerLoad_Tma > (pipeline_params_q, pipeline_params_do));
 
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
@@ -490,7 +491,7 @@ class FlashAttnBwdSm90 {
     // Initialize the barriers of Q,dO
     if (warp_idx == 0 && lane_predicate) {
       shared_storage.pipelines.barrier_QdO.init(/*numThreads=*/1);
-      if constexpr (Use_CpAsync_Inner) {
+      if constexpr (InnerLoad_Tma1d) {
         cutlass::arch::ClusterTransactionBarrier::init(&shared_storage.pipelines.tma1d_staging_mbar, 1);
       }
     }
@@ -499,7 +500,7 @@ class FlashAttnBwdSm90 {
     // NOTE: we're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParams pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
-    if constexpr (Use_TMA_Inner) {
+    if constexpr (InnerLoad_Tma) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
       pipeline_params_k.num_consumers = NumMmaThreads;
@@ -510,7 +511,7 @@ class FlashAttnBwdSm90 {
     using PipelineParams_V = typename CollectiveMainloop::MainloopPipeline_V::Params;
     PipelineParams_V pipeline_params_v;
     pipeline_params_v.role = warp_group_idx == 0 ? MainloopPipeline_V::ThreadCategory::Producer : MainloopPipeline_V::ThreadCategory::Consumer;
-    if constexpr (Use_TMA_Inner) {
+    if constexpr (InnerLoad_Tma) {
       pipeline_params_v.transaction_bytes = CollectiveMainloop::TmaTransactionBytesV;
       pipeline_params_v.is_leader = warp_group_thread_idx == 0;
       pipeline_params_v.num_consumers = NumMmaThreads;
