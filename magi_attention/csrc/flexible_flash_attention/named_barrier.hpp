@@ -59,12 +59,13 @@ enum class FwdNamedBarriers {
   WarpGroupSwapAB1 = 4,
   WarpGroupSwapAB2 = 5,
   WarpGroupSwapAB3 = 6,
+  Tma1dRearrange = 7,
 };
 
 template <>
 struct BarrierTraits<FwdNamedBarriers> {
   static constexpr bool kUseRawBarrier = false;
-  static constexpr uint32_t kNumBarriers = 7;
+  static constexpr uint32_t kNumBarriers = 8;
   static constexpr uint32_t kMaxNumWGs = 3;
 };
 

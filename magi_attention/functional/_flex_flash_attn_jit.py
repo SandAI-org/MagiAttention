@@ -450,21 +450,35 @@ def get_ffa_jit_spec(
         ), f"MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER must be true/false, got {_dxp}"
         extra_template_args["inner_dx_store_in_producer"] = _dxp_lower
         uri += f"_dxp{_dxp_lower}"
+    # ─── InnerStoreMode (BWD only): tma1d=1 (bulk reduce-add), cpasync=2 (atomicAdd) ───
     if direction == "bwd" and _inner_use_scatter:
-        # Scatter dX store flavor: per-row TMA bulk reduce-add by default (the scalar
-        # atomicAdd fallback is kept for A/B benchmarking). Dense configs never get this
-        # arg: the jinja default 'false' keeps them on the swizzled TMA accum layouts.
-        _sdxtma = os.environ.get("MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE")
-        if _sdxtma is not None:
-            _sdxtma_lower = _sdxtma.lower()
-            assert _sdxtma_lower in (
-                "true",
-                "false",
-            ), f"MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE must be true/false, got {_sdxtma}"
-            extra_template_args["sparse_inner_dx_reduce_use_tma"] = _sdxtma_lower
-            uri += f"_sdxtma{_sdxtma_lower}"
+        _store_env = os.environ.get(
+            "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE",
+            os.environ.get("MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"),
+        )
+        if _store_env is not None:
+            _store_lower = _store_env.lower()
+            _store_mode_map = {"tma1d": "1", "cpasync": "2", "true": "1", "false": "2"}
+            assert (
+                _store_lower in _store_mode_map
+            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE must be tma1d/cpasync, got {_store_env}"
+            extra_template_args["inner_store_mode"] = _store_mode_map[_store_lower]
+            uri += f"_sstore{_store_mode_map[_store_lower]}"
         else:
-            extra_template_args["sparse_inner_dx_reduce_use_tma"] = "true"
+            extra_template_args["inner_store_mode"] = "1"
+    # ─── InnerLoadMode: tma1d=1 (bulk+consumer rearrange), cpasync=2 (per-row) ───
+    if _inner_use_scatter:
+        _load_env = os.environ.get("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD")
+        if _load_env is not None:
+            _load_lower = _load_env.lower()
+            _load_mode_map = {"tma1d": "1", "cpasync": "2"}
+            assert (
+                _load_lower in _load_mode_map
+            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD must be tma1d/cpasync, got {_load_env}"
+            extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
+            uri += f"_sload{_load_mode_map[_load_lower]}"
+        else:
+            extra_template_args["inner_load_mode"] = "2"
     # Tile/stage overrides for A/B benchmarking (BWD only).
     # Each distinct combo produces a separate JIT URI → separate .so cache.
     if direction == "bwd":
@@ -516,10 +530,7 @@ def get_ffa_jit_spec(
         swap_bwd_qk_loop=swap_bwd_qk_loop,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
-        sparse_dx_tma_reduce=extra_template_args.get(
-            "sparse_inner_dx_reduce_use_tma", "false"
-        )
-        == "true",
+        sparse_dx_tma_reduce=extra_template_args.get("inner_store_mode", "2") == "1",
         k_block_size=k_block_size,
     )
     extra_template_args[f"{direction}_producer_regs"] = str(_producer_regs)

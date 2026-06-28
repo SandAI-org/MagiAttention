@@ -52,15 +52,16 @@ class FlashAttnFwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool Has_softcap = CollectiveMainloop::Has_softcap;
   static constexpr bool Use_TMA_Q = CollectiveMainloop::Use_TMA_Q;
-  static constexpr bool Use_TMA_Inner = CollectiveMainloop::Use_TMA_Inner;
-  static constexpr bool Use_CpAsync_Inner = CollectiveMainloop::Use_CpAsync_Inner;
+  static constexpr bool InnerLoad_Tma = CollectiveMainloop::InnerLoad_Tma;
+  static constexpr bool InnerLoad_Tma1d = CollectiveMainloop::InnerLoad_Tma1d;
+  static constexpr bool InnerLoad_CpAsync = CollectiveMainloop::InnerLoad_CpAsync;
 
   // KV pipelines come in two flavors with different constructor signatures: dense TMA
   // (PipelineTmaAsync, takes ClusterShape) and scatter cp.async (PipelineAsync, no
   // cluster argument). This helper hides the difference at every construction site.
   template <typename Pipeline, typename Storage, typename PipelineParamsT>
   CUTLASS_DEVICE static Pipeline make_kv_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
-    if constexpr (Use_TMA_Inner) {
+    if constexpr (InnerLoad_Tma || InnerLoad_Tma1d) {
       return Pipeline(storage, pipeline_params, ClusterShape{});
     } else {
       return Pipeline(storage, pipeline_params);
@@ -141,7 +142,7 @@ class FlashAttnFwdSm90 {
       alignas(16) typename CollectiveMainloop::MainloopPipelineV::SharedStorage pipeline_v;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
       // TMA 1D staging mbarrier: tracks SM90_BULK_COPY_G2S completion for scatter loads.
-      // Only meaningful when Use_CpAsync_Inner (kbs < kBlockN); zero-cost otherwise.
+      // Only meaningful when InnerLoad_Tma1d; zero-cost otherwise.
       alignas(8) typename cutlass::arch::ClusterTransactionBarrier::ValueType tma1d_staging_mbar;
     } pipelines;
   };
@@ -236,10 +237,6 @@ class FlashAttnFwdSm90 {
       shared_storage.pipelines.barrier_Q.init(/*numThreads=*/Use_TMA_Q ? 1 : NumProducerThreads);
       // TODO: Fix if TMA store O is used
       shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumMmaThreads);
-      // TMA 1D staging mbarrier: arrival_count=1 (single thread issues all bulk copies).
-      if constexpr (Use_CpAsync_Inner) {
-        cutlass::arch::ClusterTransactionBarrier::init(&shared_storage.pipelines.tma1d_staging_mbar, 1);
-      }
     }
 
     if constexpr (ReturnMaxLogits) {
@@ -252,7 +249,7 @@ class FlashAttnFwdSm90 {
     // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParamsK pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipelineK::ThreadCategory::Producer : MainloopPipelineK::ThreadCategory::Consumer;
-    if constexpr (Use_TMA_Inner) {
+    if constexpr (InnerLoad_Tma || InnerLoad_Tma1d) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
       pipeline_params_k.num_consumers = NumMmaThreads;
@@ -302,8 +299,8 @@ class FlashAttnFwdSm90 {
 
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // TMA paths (Use_TMA_Inner): SingleProducerWarp=true → warps 1-3 exit.
-      // cp.async paths (Use_CpAsync_Inner): full warp group needed for per-row loads.
+      // TMA 2D paths: SingleProducerWarp=true → warps 1-3 exit.
+      // Scatter paths (TMA 1D / cp.async): full warp group needed for per-row loads.
       if constexpr (SingleProducerWarp) {
         if (warp_idx_in_warpgroup != 0) {
           return;

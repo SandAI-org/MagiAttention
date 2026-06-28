@@ -132,7 +132,7 @@ template <
     bool InnerDxStoreInProducer,
     int BwdProducerRegs,
     int BwdConsumerRegs,
-    bool SparseInnerDxReduceUseTma,
+    int InnerStoreMode,
     bool DisableBwdDkvAtomicReduction,
     int Stages_V,
     int ScatterPad,
@@ -140,6 +140,7 @@ template <
     bool DkvaccBypassSmem,
     int KBlockSize,
     bool ForceMmaDkvSS,
+    int InnerLoadMode,
     bool ProfileMode>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
@@ -192,7 +193,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       InnerDirMaxToMin,
       MaskMode,
       InnerDxStoreInProducer,
-      SparseInnerDxReduceUseTma,
+      InnerStoreMode,
       QheadPerKhead,
       NumMmaWarpGroups,
       AtomLayoutMSdP,
@@ -204,7 +205,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       LseDpsumUnionDKVacc,
       DkvaccBypassSmem,
       KBlockSize,
-      ForceMmaDkvSS>;
+      ForceMmaDkvSS,
+      InnerLoadMode>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       SwapBwdQKLoop ? kBlockM : kBlockN,
@@ -388,7 +390,7 @@ template <
     bool InnerDxStoreInProducer,
     int BwdProducerRegs,
     int BwdConsumerRegs,
-    bool SparseInnerDxReduceUseTma,
+    int InnerStoreMode,
     int BwdTileM,
     int BwdTileN,
     int BwdStages,
@@ -399,6 +401,7 @@ template <
     int BwdDkvaccBypass,
     int KBlockSize,
     bool ForceMmaDkvSS,
+    int InnerLoadMode,
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -475,7 +478,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*InnerDxStoreInProducer=*/InnerDxStoreInProducer,
       /*BwdProducerRegs=*/BwdProducerRegs,
       /*BwdConsumerRegs=*/BwdConsumerRegs,
-      /*SparseInnerDxReduceUseTma=*/SparseInnerDxReduceUseTma,
+      /*InnerStoreMode=*/InnerStoreMode,
       /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
       /*Stages_V=*/Stages_V,
       /*ScatterPad=*/ScatterPad,
@@ -483,5 +486,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*DkvaccBypassSmem=*/DkvaccBypassSmem,
       /*KBlockSize=*/KBlockSize,
       /*ForceMmaDkvSS=*/ForceMmaDkvSS,
+      /*InnerLoadMode=*/InnerLoadMode,
       /*ProfileMode=*/ProfileMode>(params, stream);
 }
