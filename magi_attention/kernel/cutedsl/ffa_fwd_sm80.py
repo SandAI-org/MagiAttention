@@ -118,6 +118,9 @@ class FFAFwdSm80:
 
         self.num_threads = num_threads  # 128
         self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 4
+        self.num_producer_threads = self.num_threads
+        self.num_Q_load_threads = self.num_threads
+        self.num_epilogue_threads = self.num_threads
 
         self.num_stages = num_stages
         self.q_subtile_factor = q_subtile_factor
@@ -412,9 +415,6 @@ class FFAFwdSm80:
         async_copy_elems = (
             universal_copy_bits // self.dtype.width
         )  # 8 elems per copy atom
-        self.num_producer_threads = self.num_threads
-        self.num_Q_load_threads = self.num_threads
-        self.num_epilogue_threads = self.num_threads
 
         # atom_async_copy: G2S copy atom for QKV load with `cp.async`
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
