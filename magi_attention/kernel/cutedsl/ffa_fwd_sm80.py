@@ -27,7 +27,7 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import cutlass.utils as utils_basic
-from cutlass import Float32, Int32, const_expr
+from cutlass import Boolean, Float32, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp
 from cutlass.cutlass_dsl import BaseDSL
 
@@ -906,6 +906,8 @@ class FFAFwdSm80:
             )
         # Transpose view of V to tensor with layout (tileHD, tileK) for tiled mma pv
         sVt = layout_utils.transpose_view(sV)
+        # Reuse sQ buffer for O's S2G store
+        sO = cute.make_tensor(sQ.iterator, sO_layout)
 
         # ///////////////////////////////////////////////////////////////////////////////
         # G2S tiled copy partitions for K/V
@@ -919,13 +921,12 @@ class FFAFwdSm80:
         tVsV, tVgV = gmem_thr_copy_V.partition_D(sV), gmem_thr_copy_V.partition_S(gV)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Tile MMA partitions and allocate rmem accumulator
+        # Tile MMA partitions
         # ///////////////////////////////////////////////////////////////////////////////
 
         # tSrQ: (MMA_ATOM=(2,2,2),MMA_Q2,MMA_HD=((2,2),2)):((1,2,4),8,((32,64),16))
         # tSrK: (MMA_ATOM=(2,2),MMA_K8,MMA_HD=((2,2),2)):((1,2),4,((64,128),32))
         # tOrVt: (MMA_ATOM=(2,2),MMA_HD=(8,2),MMA_K4):((1,2),(4,128),32)
-        # acc_O: (MMA_ATOM=(2,2),MMA_Q2,MMA_HD16):((1,2),4,8)
         thr_mma_qk = tiled_mma_qk.get_slice(tidx)
         thr_mma_pv = tiled_mma_pv.get_slice(tidx)
         tSrQ: cute.Tensor = thr_mma_qk.make_fragment_A(thr_mma_qk.partition_A(sQ))
@@ -935,6 +936,12 @@ class FFAFwdSm80:
         tOrVt: cute.Tensor = thr_mma_pv.make_fragment_B(
             thr_mma_pv.partition_B(sVt[None, None, 0])
         )
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Allocate output rmem accumulator
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # acc_O: (MMA_ATOM=(2,2),MMA_Q2,MMA_HD16):((1,2),4,8)
         acc_shape_O = thr_mma_pv.partition_shape_C((self.tile_m, self.tile_hdimv))
         acc_O = cute.make_rmem_tensor(acc_shape_O, Float32)
         acc_O.fill(0.0)
@@ -1294,8 +1301,9 @@ class FFAFwdSm80:
             smem_pipe_read,
             smem_pipe_write,
             is_first_n_block=True,
-            seqlen=seqlen_info,
+            seqlen_info=seqlen_info,
             mask_fn=partial(mask_fn, mask_mod=self.mask_mod, mask_seqlen=True),
+            is_print_thread_and_tile=is_print_thread,
         )
         smem_pipe_read = self.advance_pipeline(smem_pipe_read)
         smem_pipe_write = self.advance_pipeline(smem_pipe_write)
@@ -1316,7 +1324,7 @@ class FFAFwdSm80:
                     n_block,
                     smem_pipe_read,
                     smem_pipe_write,
-                    seqlen=seqlen_info,
+                    seqlen_info=seqlen_info,
                     mask_fn=partial(mask_fn, mask_mod=self.mask_mod, mask_seqlen=True),
                 )
                 smem_pipe_read = self.advance_pipeline(smem_pipe_read)
@@ -1329,22 +1337,22 @@ class FFAFwdSm80:
                 n_block - n_tile - 1,
                 smem_pipe_read,
                 smem_pipe_write,
-                seqlen=seqlen_info,
+                seqlen_info=seqlen_info,
                 is_first_n_block=False,
                 mask_fn=partial(mask_fn, mask_mod=self.mask_mod, mask_seqlen=False),
             )
             smem_pipe_read = self.advance_pipeline(smem_pipe_read)
             smem_pipe_write = self.advance_pipeline(smem_pipe_write)
 
-        # normalize acc_O by row_sum and calculate the lse
+        # --- Final normalize acc_O by row_sum and calculate the lse ---
+
         row_scale = softmax.finalize()
         softmax.rescale_O(acc_O, row_scale)
 
         # ///////////////////////////////////////////////////////////////////////////////
         # Epilogue
         # ///////////////////////////////////////////////////////////////////////////////
-        # reuse sQ's data iterator
-        sO = cute.make_tensor(sQ.iterator, sO_layout)
+
         self.epilogue(
             acc_O,
             softmax.row_sum,
@@ -1627,12 +1635,13 @@ class FFAFwdSm80:
         batch_idx: cutlass.Int32,
         head_idx: cutlass.Int32,
         m_block: cutlass.Int32,
-        seqlen: SeqlenInfoQK,
+        seqlen_info: SeqlenInfoQK,
         aux_tensors=None,
         fastdiv_mods=None,
-        mask_fn: Optional[Callable] = None,
-        is_first_n_block: cutlass.Constexpr = False,
-        check_inf: cutlass.Constexpr = True,
+        mask_fn: Callable | None = None,
+        is_first_n_block: cutlass.Constexpr[Boolean] = False,
+        check_inf: cutlass.Constexpr[Boolean] = True,
+        is_print_thread_and_tile: bool = False,
     ):
         """Compute one n_block of S/O.
 
@@ -1640,29 +1649,44 @@ class FFAFwdSm80:
         subsequent blocks.
         """
 
+        # Define some helper functions
         def sync():
             cute.arch.cp_async_wait_group(self.num_stages * 2 - 2)
             cute.arch.barrier()
 
-        acc_shape_S = mma_params.thr_mma_qk.partition_shape_C(
-            (self.tile_m, self.tile_n)
-        )
-        acc_S = cute.make_rmem_tensor(acc_shape_S, Float32)
-        acc_S.fill(0.0)
-        # wait for smem tile QK before mma calculation for S
-        sync()
-
-        # need predicates for the first tile
         def load_V_next():
             if self.num_stages == 1 or n_block - self.num_stages + 1 >= 0:
                 load_V(
                     n_block - self.num_stages + 1,
                     smem_pipe_write,
+                    # need predicates for the first tile
                     need_predicates=is_first_n_block and self.num_stages == 1,
+                    is_print_thread_and_tile=const_expr(self.num_stages == 1)
+                    and is_print_thread_and_tile,
                 )
             cute.arch.cp_async_commit_group()
 
+        def load_K_next():
+            if n_block - self.num_stages >= 0:
+                load_K(
+                    n_block - self.num_stages, smem_pipe_write, need_predicates=False
+                )
+            cute.arch.cp_async_commit_group()
+
+        # Zero-init acc_S
+        # acc_S: (MMA_ATOM=(2,2),MMA_Q2,MMA_K8):((1,2),4,8)
+        # acc_O: (MMA_ATOM=(2,2),MMA_Q2,MMA_HD16):((1,2),4,8)
+        acc_shape_S = mma_params.thr_mma_qk.partition_shape_C(
+            (self.tile_m, self.tile_n)
+        )
+        acc_S = cute.make_rmem_tensor(acc_shape_S, Float32)
+        acc_S.fill(0.0)
+
+        # Wait for this K tile and load next V tile
+        sync()
         load_V_next()
+
+        # Issue mma for S = Q * K^T, after S2R copy sQ/sK to rQ/rK
         sm80_utils.gemm(
             mma_params.thr_mma_qk,
             acc_S,
@@ -1677,9 +1701,10 @@ class FFAFwdSm80:
             ],
             smem_copy_params.smem_thr_copy_Q,
             smem_copy_params.smem_thr_copy_K,
-            # hook_fn=load_V_next,
             A_in_regs=self.Q_in_regs,
         )
+
+        # Apply score_mod if provided
         if const_expr(score_mod is not None):
             self.apply_score_mod(
                 mma_params.thr_mma_qk,
@@ -1689,36 +1714,43 @@ class FFAFwdSm80:
                 acc_S,
                 n_block,
                 softmax_scale=softmax.softmax_scale,
-                seqlen=seqlen,
+                seqlen=seqlen_info,
                 aux_tensors=aux_tensors,
                 fastdiv_mods=fastdiv_mods,
             )
 
         smem_pipe_write = self.advance_pipeline(smem_pipe_write)
 
-        def load_K_next():
-            if n_block - self.num_stages >= 0:
-                load_K(
-                    n_block - self.num_stages, smem_pipe_write, need_predicates=False
-                )
-            cute.arch.cp_async_commit_group()
-
-        # wait for smem tile V for O
+        # For single stage, wait for this V tile and load next K tile here
+        # to overlap with softmax below since the pipeline is empty right now
         if const_expr(self.num_stages == 1):
-            sync()
+            sync()  # TODO(REVIEW): should we always delay the wait for V until mma for O ?
             load_K_next()
+
+        # Apply mask_fn if provided
         if const_expr(mask_fn is not None):
             mask_fn(acc_S, n_block=n_block)
+
+        # Apply softmax to acc_S and rescale acc_O
         row_scale = softmax.online_softmax(
             acc_S, is_first=is_first_n_block, check_inf=check_inf
         )
         softmax.rescale_O(mma_params.acc_O, row_scale)
+
+        # Make rP from rS with dtype cast and layout reshape
+        # rP: (MMA_ATOM_rC=(2,2),MMA_Q2,MMA_K8):((1,2),4,8)
+        # tOrP: (MMA_ATOM_rA=(2,2,2),MMA_Q2,MMA_K4):((1,2,8),4,16)
         rP = cute.make_fragment_like(acc_S, self.dtype)
         rP.store(acc_S.load().to(self.dtype))
         tOrP = layout_utils.reshape_acc_to_frgA(rP)
+
+        # For multi stage, we wait for this V tile and load next K tile here
+        # to overlap with mma for O below
         if const_expr(self.num_stages > 1):
             sync()
             load_K_next()
+
+        # Issue mma for O = P * V, after S2R copy sV to rV
         sm80_utils.gemm_rs(
             mma_params.thr_mma_pv,
             mma_params.acc_O,
@@ -1731,10 +1763,29 @@ class FFAFwdSm80:
                 smem_pipe_read if const_expr(self.num_stages > 1) else 0,
             ],
             smem_copy_params.smem_thr_copy_V,
-            # hook_fn=load_K_next,
         )
-        # if const_expr(self.num_stages > 1):
-        #     load_K_next()
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm80_compute_one_n_block] "
+                cute.printf("")
+                cute.printf(
+                    prefix
+                    + f"is_first_n_block={is_first_n_block}, check_inf={check_inf}"
+                )
+                cute.printf(
+                    prefix + "n_block={}, smem_pipe_read={}, smem_pipe_write={}",
+                    n_block,
+                    smem_pipe_read,
+                    smem_pipe_write,
+                )
+                cute.printf(prefix + "acc_S: {}", acc_S.layout)
+                cute.printf(prefix + "acc_O: {}", mma_params.acc_O.layout)
+                cute.printf(prefix + "rP: {}", rP.layout)
+                cute.printf(prefix + "tOrP: {}", tOrP.layout)
+                cute.printf("")
 
     @cute.jit
     def apply_score_mod(
