@@ -502,7 +502,7 @@ class FFAFwdSm80:
         # --- Debug print ---
 
         if const_expr(self.debug_print):
-            prefix = f"[fwd_sm{self.arch_num}_setup_attributes] "
+            prefix = "[fwd_sm80_setup_attributes] "
             print()
             print(f"{prefix}{self.use_tma_O=}")
             print(f"{prefix}{self.num_producer_threads=}")
@@ -931,7 +931,7 @@ class FFAFwdSm80:
         tVsV, tVgV = gmem_thr_copy_V.partition_D(sV), gmem_thr_copy_V.partition_S(gV)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Tile MMA partitions
+        # Tile MMA partitions and allocate accumulators
         # ///////////////////////////////////////////////////////////////////////////////
 
         # tSrQ: (MMA_ATOM=(2,2,2),MMA_Q2,MMA_HD=((2,2),2)):((1,2,4),8,((32,64),16))
@@ -946,10 +946,6 @@ class FFAFwdSm80:
         tOrVt: cute.Tensor = thr_mma_pv.make_fragment_B(
             thr_mma_pv.partition_B(sVt[None, None, 0])
         )
-
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Allocate output rmem accumulator
-        # ///////////////////////////////////////////////////////////////////////////////
 
         # acc_O: (MMA_ATOM=(2,2),MMA_Q2,MMA_HD16):((1,2),4,8)
         acc_shape_O = thr_mma_pv.partition_shape_C((self.tile_m, self.tile_hdimv))
@@ -2005,7 +2001,7 @@ class FFAFwdSm80:
 
         if const_expr(self.debug_print):
             if is_print_thread_and_tile:
-                prefix = f"[fwd_sm{self.arch_num}_epilogue] "
+                prefix = "[fwd_sm80_epilogue] "
                 cute.printf("")
                 cute.printf(
                     prefix + "m_block={}, head_idx={}, batch_idx={}",
