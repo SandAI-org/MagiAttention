@@ -408,7 +408,7 @@ class FFAFwdSm80:
         else:
             self.sP_layout = None
 
-        # --- Set up G2S/S2G tiled copy ---
+        # --- Set up G2S/S2G/R2G tiled copy ---
 
         # Thread layouts for copies
         universal_copy_bits = 128  # 16B per copy atom

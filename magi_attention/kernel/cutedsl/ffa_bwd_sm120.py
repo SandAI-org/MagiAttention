@@ -30,7 +30,8 @@ from .ffa_bwd_sm80 import FFABwdSm80
 class FFABwdSm120(FFABwdSm80):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if kwargs.get("debug_print", False):
+
+        if self.debug_print:
             print("[bwd_sm120_init] Using FFABwdSm120 (SM80 MMA + SM120 SMEM capacity)")
 
     @property

@@ -87,7 +87,8 @@ class FFABwdSm80:
         :param mask_type: attention mask type int key (see ``MT_MAP``)
         """
         self.dtype = dtype
-        # padding head_dim to a multiple of 32 (stricter than fwd's 16) due to
+
+        # NOTE: Pad head_dim to a multiple of 32 (stricter than fwd's 16) due to
         # backward kernel register layout requirements for dQ/dK/dV accumulation
         hdim_multiple_of = 32
         self.head_dim_padded = int(
@@ -100,9 +101,11 @@ class FFABwdSm80:
         self.head_dim_v_padded = int(
             math.ceil(head_dim_v / hdim_multiple_of) * hdim_multiple_of
         )
+
         # Can save registers (and hence be faster) if we don't have to check hdim predication
         self.check_hdim_oob = head_dim != self.head_dim_padded
         self.check_hdim_v_oob = head_dim_v != self.head_dim_v_padded
+
         self.qhead_per_kvhead = qhead_per_kvhead
         self.m_block_size = m_block_size
         self.n_block_size = n_block_size
@@ -136,7 +139,9 @@ class FFABwdSm80:
             print()
             print(f"{prefix}Initialized FFABwdSm80 with: ")
             print(
-                f"{prefix}{self.dtype=} | {self.head_dim_padded=} | {self.head_dim_v_padded=} | {self.qhead_per_kvhead=}"
+                f"{prefix}{self.dtype=} | {self.head_dim_padded=} | "
+                + f"{self.head_dim_v_padded=} | {self.qhead_per_kvhead=} | "
+                + f"{self.check_hdim_oob=} | {self.check_hdim_v_oob=}"
             )
             print(f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.pack_gqa=}")
             print(
@@ -248,9 +253,16 @@ class FFABwdSm80:
         assert mQ_type == self.dtype
 
     def _setup_attributes(self):
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Shared memory layout: Q/K/V
-        # ///////////////////////////////////////////////////////////////////////////////
+        # --- Set up tiled MMA ---
+
+        (
+            self.tiled_mma_sdp,
+            self.tiled_mma_dkv,
+            self.tiled_mma_dq,
+        ) = self._get_tiled_mma()
+
+        # --- Set up smem layout: sQ/sK/sV/sdO/sLSE ---
+
         sQ_layout_atom = sm80_utils.get_smem_layout_atom(
             self.dtype, self.head_dim_padded
         )
@@ -279,7 +291,7 @@ class FFABwdSm80:
             (self.m_block_size, self.head_dim_v_padded, self.num_stages_dO),
             (0, 1, 2),
         )
-        # TODO: do we set swizzle to be 3 here explicitly?
+        # TODO(REVIEW): do we set swizzle to be 3 here explicitly?
         sPdS_layout_atom = sm80_utils.get_smem_layout_atom(
             self.dtype, self.n_block_size
         )
@@ -306,9 +318,8 @@ class FFABwdSm80:
             sLSEMma_layout if not self.SdP_swapAB else sLSEMma_layout_transposed
         )
 
-        # ///////////////////////////////////////////////////////////////////////////////
-        # GMEM Tiled copy:
-        # ///////////////////////////////////////////////////////////////////////////////
+        # --- Set up G2S/S2G/R2G tiled copy ---
+
         # Thread layouts for copies
         universal_copy_bits = 128
         async_copy_elems = universal_copy_bits // self.dtype.width
@@ -432,6 +443,7 @@ class FFABwdSm80:
             AtomLayoutdQ,
             permutation_mnk=(AtomLayoutdQ[0] * 16, AtomLayoutdQ[1] * 16, 16),
         )
+
         return tiled_mma_sdp, tiled_mma_dkv, tiled_mma_dq
 
     def _get_shared_storage_cls(self):
@@ -519,6 +531,10 @@ class FFABwdSm80:
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Set up attributes
+        # ///////////////////////////////////////////////////////////////////////////////
+
         # --- Checks ---
 
         assert (
@@ -554,18 +570,26 @@ class FFABwdSm80:
             )
         )
 
+        # --- Set up attributes ---
+
+        self.varlen_q = mCuSeqlensQ is not None
+        self._setup_attributes()
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make mQ/mK/mV/mO/mLSE tensors
+        # with layout transformations for specific memory access patterns
+        # ///////////////////////////////////////////////////////////////////////////////
+
         mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV = [
             cutedsl_utils.assume_tensor_aligned(t)
             for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV)
         ]
-        self.varlen_q = mCuSeqlensQ is not None
-        self._setup_attributes()
-        SharedStorage = self._get_shared_storage_cls()
-        tiled_mma_sdp, tiled_mma_dkv, tiled_mma_dq = self._get_tiled_mma()
 
-        num_head = (
-            mQ.shape[1] if cutlass.const_expr(mCuSeqlensQ is not None) else mQ.shape[2]
-        )
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make tile scheduler class/args, SMEM storage, and others
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Make tile scheduler class/args ---
 
         if cutlass.const_expr(mCuSeqlensK is not None):
             TileScheduler = SingleTileVarlenScheduler
@@ -574,10 +598,14 @@ class FFABwdSm80:
             TileScheduler = SingleTileScheduler
             num_batch = mK.shape[0]
 
-        # Uses seqlen k, etc. since main bwd kernel's blocks are over n
         tile_sched_args = TileSchedulerArguments(
+            # Uses seqlen k, etc. since main bwd kernel's blocks are over n
             num_block=cute.ceil_div(mK.shape[1], self.n_block_size),
-            num_head=num_head,
+            num_head=(
+                mQ.shape[1]
+                if cutlass.const_expr(mCuSeqlensQ is not None)
+                else mQ.shape[2]
+            ),
             num_batch=num_batch,
             num_splits=1,
             seqlen_k=0,
@@ -591,9 +619,14 @@ class FFABwdSm80:
             mCuSeqlensQ=mCuSeqlensK,
             mSeqUsedQ=mSeqUsedK,
         )
-
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+
+        # --- Make smem storage ---
+
+        SharedStorage = self._get_shared_storage_cls()
+
+        # --- Make others ---
 
         # NB: keep softmax_scale as a real Float32 (the kernel param is typed
         # cutlass.Float32). compute_softmax_scale_log2 would null out softmax_scale
@@ -603,6 +636,10 @@ class FFABwdSm80:
             softmax_scale_log2 = softmax_scale * LOG2_E
         else:
             softmax_scale_log2 = LOG2_E
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Launch the kernel
+        # ///////////////////////////////////////////////////////////////////////////////
 
         # --- Debug print ---
 
@@ -662,9 +699,9 @@ class FFABwdSm80:
             self.gmem_tiled_copy_dV,
             self.gmem_tiled_copy_LSE,
             self.gmem_tiled_copy_dQaccum,
-            tiled_mma_sdp,
-            tiled_mma_dkv,
-            tiled_mma_dq,
+            self.tiled_mma_sdp,
+            self.tiled_mma_dkv,
+            self.tiled_mma_dq,
             SharedStorage,
             tile_sched_params,
             TileScheduler,
