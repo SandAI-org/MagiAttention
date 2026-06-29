@@ -1586,6 +1586,7 @@ class FFABwdSm80:
                 smem_pipe_write_q,
                 smem_pipe_write_do,
                 mask_fn=mask_fn,
+                is_print_thread_and_tile=is_print_thread and m_tile == m_block_min,
             )
             smem_pipe_read_q = self.advance_pipeline(
                 smem_pipe_read_q, self.num_stages_Q
@@ -1645,8 +1646,10 @@ class FFABwdSm80:
         softmax_scale: cutlass.Float32,
         softmax_scale_log2: cutlass.Float32,
         mask_fn: Optional[Callable] = None,
+        is_print_thread_and_tile: bool = False,
     ):
-        def load_Q_next():
+        # Define some helper functions
+        def load_Q_LSE_next():
             m_block_next = m_block + (
                 self.num_stages_Q - 1
                 if cutlass.const_expr(self.num_stages_Q > 1)
@@ -1656,7 +1659,7 @@ class FFABwdSm80:
                 load_Q_LSE(m_block_next, smem_pipe_write_q)
             cute.arch.cp_async_commit_group()
 
-        def load_dO_next():
+        def load_dO_dPsum_next():
             if m_block + self.num_stages_dO < m_block_max:
                 load_dO_dPsum(m_block + self.num_stages_dO, smem_pipe_write_do)
             cute.arch.cp_async_commit_group()
@@ -1750,7 +1753,9 @@ class FFABwdSm80:
             smem_copy_params.tdPsV,
             smem_copy_params.smem_thr_copy_QdO,
             smem_copy_params.smem_thr_copy_KV,
-            hook_fn=load_Q_next if cutlass.const_expr(self.num_stages_Q > 1) else None,
+            hook_fn=load_Q_LSE_next
+            if cutlass.const_expr(self.num_stages_Q > 1)
+            else None,
             swap_AB=self.SdP_swapAB,
         )
         tLSErdPsum = cute.make_fragment_like(smem_copy_params.tSsdPsumMma[None, 0])
@@ -1857,7 +1862,7 @@ class FFABwdSm80:
         # If num_stages_Q == 1,
         # we want to do Mma_dK first so we can start loading Q for the next iteration
         if cutlass.const_expr(self.num_stages_Q > 1):
-            dQ_mma(load_dO_next)
+            dQ_mma(load_dO_dPsum_next)
 
         # MMA dK
         if cutlass.const_expr(self.Mma_dKV_is_RS):
@@ -1880,14 +1885,63 @@ class FFABwdSm80:
             smem_copy_params.smem_thr_copy_QdOt,
             A_in_regs=self.Mma_dKV_is_RS,
             swap_AB=self.dKV_swapAB,
-            hook_fn=load_dO_next
+            hook_fn=load_dO_dPsum_next
             if cutlass.const_expr(self.num_stages_Q == 1)
             else None,
         )
         # if cute.arch.thread_idx()[0] == 0: cute.print_tensor(mma_params.acc_dK)
         if cutlass.const_expr(self.num_stages_Q == 1):
             cute.arch.barrier()
-            dQ_mma(load_Q_next)
+            dQ_mma(load_Q_LSE_next)
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm80_compute_one_m_block] "
+                cute.printf("")
+                cute.printf(
+                    prefix
+                    + f"Mma_dKV_is_RS={self.Mma_dKV_is_RS}, "
+                    + f"SdP_swapAB={self.SdP_swapAB}, "
+                    + f"dKV_swapAB={self.dKV_swapAB}, "
+                    + f"dQ_swapAB={self.dQ_swapAB}"
+                )
+                cute.printf(
+                    prefix
+                    + "m_block={}, smem_pipe_read_q={}, smem_pipe_read_do={}, "
+                    + "smem_pipe_write_q={}, smem_pipe_write_do={}",
+                    m_block,
+                    smem_pipe_read_q,
+                    smem_pipe_read_do,
+                    smem_pipe_write_q,
+                    smem_pipe_write_do,
+                )
+                # MMA S = Q @ K^T
+                cute.printf(prefix + "acc_S: {}", acc_S.layout)
+                cute.printf(prefix + "acc_S_mn: {}", acc_S_mn.layout)
+                cute.printf(prefix + "acc_S_pre: {}", acc_S_pre.layout)
+                cute.printf(prefix + "tLSErLSE: {}", tLSErLSE.layout)
+                # MMA dP = dO @ V^T
+                cute.printf(prefix + "acc_dP: {}", acc_dP.layout)
+                cute.printf(prefix + "acc_dP_mn: {}", acc_dP_mn.layout)
+                cute.printf(prefix + "tLSErdPsum: {}", tLSErdPsum.layout)
+                # P / dS in rmem (and smem operands when not Mma_dKV_is_RS)
+                cute.printf(prefix + "rP: {}", rP.layout)
+                cute.printf(prefix + "rdS: {}", rdS.layout)
+                cute.printf(prefix + "tdVrP: {}", tdVrP.layout)
+                cute.printf(prefix + "tdKrdS: {}", tdKrdS.layout)
+                # MMA dV = P^T @ dO, dK = dS^T @ Q (accumulated across m blocks)
+                cute.printf(prefix + "acc_dV: {}", mma_params.acc_dV.layout)
+                cute.printf(prefix + "acc_dK: {}", mma_params.acc_dK.layout)
+                # MMA dQ = dS @ K (atomic-added to gmem dQaccum)
+                cute.printf(prefix + "tdQrdS: {}", mma_params.tdQrdS.layout)
+                cute.printf(prefix + "tdQrK: {}", mma_params.tdQrK.layout)
+                cute.printf(
+                    prefix + "tdQgdQacc[m_block]: {}",
+                    gmem_copy_params.tdQgdQacc[None, None, m_block].layout,
+                )
+                cute.printf("")
 
     @cute.jit
     def epilogue(
