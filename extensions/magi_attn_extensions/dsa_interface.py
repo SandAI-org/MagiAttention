@@ -78,7 +78,7 @@ def fa_per_token_sparse_ffa_sparse_load_fwd(
         k_ranges=k_ranges,
         softmax_scale=softmax_scale,
         auto_range_merge=True,
-        sparse_load=True,
+        block_sparse=True,
         pack_gqa=True if group_size > 1 else False,
         ref_block_size=ref_block_size,
     )
@@ -142,7 +142,7 @@ def fa_per_token_sparse_ffa_index_attn_fwd(
         q_flat,
         k_flat,
         v_flat,
-        index_attn_indices=index_attn_indices,
+        index_sparse_indices=index_attn_indices,
         q_block_size=1,
         k_block_size=1,
         softmax_scale=softmax_scale,
