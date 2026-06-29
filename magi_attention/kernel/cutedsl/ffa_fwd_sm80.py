@@ -568,7 +568,7 @@ class FFAFwdSm80:
         window_size_right: Optional[Int32] = None,
         learnable_sink: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
-        aux_tensors=None,
+        aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -789,7 +789,7 @@ class FFAFwdSm80:
         tiled_mma_qk: cute.TiledMma,
         tiled_mma_pv: cute.TiledMma,
         tile_sched_params: ParamsBase,
-        aux_tensors=None,
+        aux_tensors: Optional[list] = None,
         fastdiv_mods=None,
     ):
         # /////////////////////////////////////////////////////////////////////////////
@@ -1636,7 +1636,7 @@ class FFAFwdSm80:
         head_idx: cutlass.Int32,
         m_block: cutlass.Int32,
         seqlen_info: SeqlenInfoQK,
-        aux_tensors=None,
+        aux_tensors: Optional[list] = None,
         fastdiv_mods=None,
         mask_fn: Callable | None = None,
         is_first_n_block: cutlass.Constexpr[Boolean] = False,
@@ -1708,13 +1708,13 @@ class FFAFwdSm80:
         if const_expr(score_mod is not None):
             self.apply_score_mod(
                 mma_params.thr_mma_qk,
+                acc_S,
                 batch_idx,
                 head_idx,
                 m_block,
-                acc_S,
                 n_block,
                 softmax_scale=softmax.softmax_scale,
-                seqlen=seqlen_info,
+                seqlen_info=seqlen_info,
                 aux_tensors=aux_tensors,
                 fastdiv_mods=fastdiv_mods,
             )
@@ -1790,14 +1790,14 @@ class FFAFwdSm80:
     @cute.jit
     def apply_score_mod(
         self,
-        thr_mma_qk,
-        batch_idx,
-        head_idx,
-        m_block,
-        acc_S,
-        n_block,
-        softmax_scale,
-        seqlen,
+        thr_mma_qk: cute.TiledMma,
+        acc_S: cute.Tensor,
+        batch_idx: cutlass.Int32,
+        head_idx: cutlass.Int32,
+        m_block: cutlass.Int32,
+        n_block: cutlass.Int32,
+        softmax_scale: cutlass.Float32 | None,
+        seqlen_info: SeqlenInfoQK,
         aux_tensors: Optional[list] = None,
         fastdiv_mods=None,
     ):
@@ -1817,7 +1817,7 @@ class FFAFwdSm80:
             self.qk_acc_dtype,
             aux_tensors,
             fastdiv_mods,
-            seqlen_info=seqlen,
+            seqlen_info=seqlen_info,
             constant_q_idx=None,
             qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
         )

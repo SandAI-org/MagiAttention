@@ -427,12 +427,12 @@ def floor_if_packed(
 
 @cute.jit
 def apply_score_mod_inner(
-    score_tensor,
-    index_tensor,
+    score_tensor: cute.Tensor,
+    index_tensor: cute.Tensor,
     score_mod: cutlass.Constexpr,
-    batch_idx,
-    head_idx,
-    softmax_scale,
+    batch_idx: cutlass.Int32,
+    head_idx: cutlass.Int32,
+    softmax_scale: cutlass.Float32 | None,
     vec_size: cutlass.Constexpr,
     qk_acc_dtype: cutlass.Constexpr,
     aux_tensors,
