@@ -29,7 +29,7 @@ import cutlass.cute as cute
 import cutlass.utils as utils_basic
 from cutlass import Boolean, Float32, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp
-from cutlass.cutlass_dsl import BaseDSL
+from cutlass.cutlass_dsl import Arch, BaseDSL
 
 # isort: split
 from quack import copy_utils, layout_utils
@@ -125,6 +125,7 @@ class FFAFwdSm80:
         self.score_mod = score_mod
         self.mask_mod = mask_mod
         self.qk_acc_dtype = Float32
+        self.use_tma_O = False  # sm80 does not support TMA, but sm90 does, so this's overridden in FFAFwdSm90
 
         self.vec_size: cutlass.Constexpr = getattr(
             score_mod, "__vec_size__", 1 if cutlass.const_expr(has_aux_tensors) else 2
@@ -170,9 +171,14 @@ class FFAFwdSm80:
         return False
 
     @property
-    def arch(self):
+    def arch(self) -> Arch:
         """The DSL arch enum of the active compilation target."""
         return BaseDSL._get_dsl().get_arch_enum()
+
+    @property
+    def arch_num(self) -> int:
+        """The DSL arch number of the active compilation target."""
+        return self.arch.major * 10 + self.arch.minor
 
     @property
     def is_causal(self) -> bool:
@@ -409,7 +415,6 @@ class FFAFwdSm80:
         self.num_producer_threads = self.num_threads
         self.num_Q_load_threads = self.num_threads
         self.num_epilogue_threads = self.num_threads
-        self.use_tma_O = False
 
         # atom_async_copy: G2S copy atom for QKV load with `cp.async`
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
@@ -1355,7 +1360,7 @@ class FFAFwdSm80:
 
         self.epilogue(
             acc_O,
-            softmax.row_sum,
+            softmax.row_sum,  # lse
             mO,
             mLSE,
             sO,
@@ -1830,26 +1835,27 @@ class FFAFwdSm80:
         mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
         sO: cute.Tensor,
-        seqlen: SeqlenInfoQK,
+        seqlen_info: SeqlenInfoQK,
         gmem_tiled_copy_O: cute.TiledCopy,
         tma_atom_O: Optional[cute.CopyAtom],
         tiled_mma: cute.TiledMma,
-        tidx: Int32,
-        m_block: Int32,
-        head_idx: Int32,
-        batch_idx: Int32,
+        tidx: cutlass.Int32,
+        m_block: cutlass.Int32,
+        head_idx: cutlass.Int32,
+        batch_idx: cutlass.Int32,
     ):
         # store acc_O
         rO = cute.make_fragment_like(acc_O, self.dtype)
         rO.store(acc_O.load().to(self.dtype))
+
         # Make sure all threads have finished reading V
         cute.arch.barrier(
             barrier_id=int(NamedBarrierFwd.Epilogue),
             number_of_threads=self.num_epilogue_threads,
         )
-        smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(
-            self.arch.major * 10 + self.arch.minor, self.dtype
-        )
+
+        # R2S copy O
+        smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(self.arch_num, self.dtype)
         if const_expr(not self.use_stmatrix_O_store):
             # Ampere warp-MMA path. The O accumulator comes from the warp MMA whose
             # permutation_mnk N=16 places two n8 atoms per 16-wide head_dim_v tile.
@@ -1862,7 +1868,7 @@ class FFAFwdSm80:
             cute.autovec_copy(rO, taccOsO)
         else:
             smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(
-                self.arch.major * 10 + self.arch.minor, self.dtype
+                self.arch_num, self.dtype
             )
             smem_thr_copy_O = cute.make_tiled_copy_C(
                 smem_copy_atom_O, tiled_mma
@@ -1878,9 +1884,11 @@ class FFAFwdSm80:
             self.tile_m, self.tile_hdimv, self.check_hdim_v_oob, self.qhead_per_kvhead
         )
 
-        # Write LSE from rmem -> gmem
+        # R2G store LSE
         if const_expr(mLSE is not None):
-            mLSE_cur = seqlen.offset_batch_Q(mLSE, batch_idx, dim=2)[None, head_idx]
+            mLSE_cur = seqlen_info.offset_batch_Q(mLSE, batch_idx, dim=2)[
+                None, head_idx
+            ]
             if const_expr(not self.pack_gqa):
                 gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (m_block,))
                 gLSE_expanded_layout = cute.append(
@@ -1903,21 +1911,23 @@ class FFAFwdSm80:
                     ):
                         if (
                             t0accOcO[m, 0][0]
-                            < seqlen.seqlen_q - m_block * self.tile_m - taccOcO[0][0]
+                            < seqlen_info.seqlen_q
+                            - m_block * self.tile_m
+                            - taccOcO[0][0]
                         ):
                             taccOgLSE[m, 0] = lse[m]
             else:
                 pack_gqa.store_LSE(
-                    mLSE_cur, lse, tiled_mma, tidx, m_block, seqlen.seqlen_q
+                    mLSE_cur, lse, tiled_mma, tidx, m_block, seqlen_info.seqlen_q
                 )
 
-        ragged = self.use_tma_O and (seqlen.has_cu_seqlens_q or seqlen.has_seqused_q)
-        mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3, ragged=ragged)[
+        ragged = self.use_tma_O and (
+            seqlen_info.has_cu_seqlens_q or seqlen_info.has_seqused_q
+        )
+        mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3, ragged=ragged)[
             None, None, head_idx
         ]
-        # thr_mma = tiled_mma.get_slice(tidx)
-        # taccOgO = thr_mma.partition_C(gO)
-        # cute.autovec_copy(rO, taccOgO)
+
         # sync to make sure all smem stores are done
         if const_expr(self.use_tma_O):
             # ensure smem writes are visible to TMA
@@ -1961,7 +1971,7 @@ class FFAFwdSm80:
                 for rest_m in cutlass.range_constexpr(cute.size(tOrO.shape[1])):
                     if (
                         t0OcO[0, rest_m, 0][0]
-                        < seqlen.seqlen_q - m_block * self.tile_m - tOcO[0][0]
+                        < seqlen_info.seqlen_q - m_block * self.tile_m - tOcO[0][0]
                     ):
                         cute.copy(
                             gmem_tiled_copy_O,
@@ -1973,7 +1983,7 @@ class FFAFwdSm80:
                         )
             else:
                 pack_gqa.store_O(
-                    mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_block, seqlen.seqlen_q
+                    mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_block, seqlen_info.seqlen_q
                 )
 
     @cute.jit
