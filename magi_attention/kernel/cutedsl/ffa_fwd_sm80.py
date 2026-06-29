@@ -1263,7 +1263,10 @@ class FFAFwdSm80:
             cute.arch.cp_async_wait_group(self.num_stages * 2 - 1)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Mainloop: Compute each n block iteration of S = QK^T, P = softmax(S), O = PV
+        # Mainloop: Compute each n block iteration of
+        #   1. forward before softmax: S = Q*K^T
+        #   2. forward of softmax: P = softmax(S)
+        #   3. forward after softmax: O = P*V
         # ///////////////////////////////////////////////////////////////////////////////
 
         # --- Make mask object and partial fn ---

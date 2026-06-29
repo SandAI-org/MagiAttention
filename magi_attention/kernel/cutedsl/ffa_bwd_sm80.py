@@ -1039,6 +1039,9 @@ class FFABwdSm80:
         sQt, sdOt, sKt, sPt, sdSt = [
             layout_utils.transpose_view(t) for t in (sQ, sdO, sK, sP, sdS)
         ]
+        # Reuse sK/sV buffer for sdK/sdV
+        sdK = cute.make_tensor(sK.iterator, sK_layout)
+        sdV = cute.make_tensor(sV.iterator, sV_layout)
 
         # ///////////////////////////////////////////////////////////////////////////////
         # G2S/S2G tiled copy partitions for Q/K/V/dO/LSE/dPsum/dQacc
@@ -1543,13 +1546,19 @@ class FFABwdSm80:
                 cute.arch.cp_async_commit_group()
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Mainloop
+        # Mainloop: Compute each m block iteration of
+        #   1. recompute with softmax: S = Q*K^T, P = softmax(S)
+        #   2. backward before softmax: dV = P^T*dO, dP = dO*V^T
+        #   3. backward of softmax: dS = P*(dP-sum(dP*P)) = P*(dP-sum(dO*O)) = P*(dP-dPsum))
+        #   4. backward after softmax: dK = dS*Q^T, dQ = dS*K
         # ///////////////////////////////////////////////////////////////////////////////
-        # Start processing of the first n-block.
+
+        # --- Make mask object and partial fn ---
+
         # NOTE: use_r2p=False because the SM80 backward SdP MMA tiles the N (key)
         # dimension across multiple warp-columns (n_block_size=128 over 8 warps),
         # which the R2P bitmask fast path does not handle (it ignores each warp's
-        # column offset). Fall back to the layout-agnostic per-column mask path.
+        # column offset). Thus fall back to the layout-agnostic per-column mask path.
         mask = AttentionMask(
             self.m_block_size, self.n_block_size, seqlen_info, use_r2p=False
         )
@@ -1562,6 +1571,9 @@ class FFABwdSm80:
             mask_seqlen=True,
             mask_causal=self.is_causal,
         )
+
+        # --- compute each m block iteration ---
+
         smem_pipe_read_q = cutlass.Int32(0)
         smem_pipe_read_do = cutlass.Int32(0)
         smem_pipe_write_q = cutlass.Int32(self.num_stages_Q - 1)
@@ -1591,12 +1603,11 @@ class FFABwdSm80:
         # ///////////////////////////////////////////////////////////////////////////////
         # Epilogue
         # ///////////////////////////////////////////////////////////////////////////////
-        # If GQA, we scale dK in the postprocessing kernel instead
+
+        # NOTE: If GQA, we scale dK in the postprocessing kernel instead
         if cutlass.const_expr(self.qhead_per_kvhead == 1):
             acc_dK.store(acc_dK.load() * softmax_scale)
-        # reuse sK and sV data iterator
-        sdK = cute.make_tensor(sK.iterator, sK_layout)
-        sdV = cute.make_tensor(sV.iterator, sV_layout)
+
         self.epilogue(
             acc_dK,
             acc_dV,
@@ -2004,7 +2015,6 @@ class FFABwdSm80:
                         if cutlass.const_expr(self.check_hdim_v_oob)
                         else None,
                     )
-
         else:  # qhead_per_kvhead > 1, do atomic add
             # For Sm90, we need to sync to avoid racy writes to smem_q
             # For Sm80, we don't need to sync since we're not touching smem
