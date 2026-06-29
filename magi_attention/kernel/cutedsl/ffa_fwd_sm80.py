@@ -502,7 +502,7 @@ class FFAFwdSm80:
         # --- Debug print ---
 
         if const_expr(self.debug_print):
-            prefix = "[fwd_sm80_setup_attributes] "
+            prefix = f"[fwd_sm{self.arch_num}_setup_attributes] "
             print()
             print(f"{prefix}{self.use_tma_O=}")
             print(f"{prefix}{self.num_producer_threads=}")
@@ -2004,7 +2004,7 @@ class FFAFwdSm80:
 
         if const_expr(self.debug_print):
             if is_print_thread_and_tile:
-                prefix = "[fwd_sm80_epilogue] "
+                prefix = f"[fwd_sm{self.arch_num}_epilogue] "
                 cute.printf("")
                 cute.printf(
                     prefix + "m_block={}, head_idx={}, batch_idx={}",
