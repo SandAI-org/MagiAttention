@@ -1028,6 +1028,22 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         else:
             swap_bwd_qk_loop = False  # Dense/BlockSparse default: LoopQ
 
+        # SM utilization guard: LoopQ's outer loop = K-tiles. When K-tiles < ~75% of
+        # available SMs, many SMs sit idle → switch to LoopK whose outer loop = Q-tiles
+        # (typically much more numerous). Only applies when user didn't explicitly choose.
+        if ctx.swap_bwd_qk_loop is None and not swap_bwd_qk_loop:
+            _SM_UTIL_RATIO = 0.75
+            num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
+            _KBLOCK_N = 128
+            if ctx.index_sparse and index_sparse_indices_2d is not None:
+                n_k_tiles = index_sparse_indices_2d.shape[-1]
+            elif ctx.index_sparse and ctx.k_block_size >= _KBLOCK_N:
+                n_k_tiles = q.shape[0] // _KBLOCK_N
+            else:
+                n_k_tiles = q.shape[0] // _KBLOCK_N
+            if n_k_tiles < int(num_sms * _SM_UTIL_RATIO):
+                swap_bwd_qk_loop = True
+
         if ctx.disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
             raise RuntimeError(
                 "disable_bwd_dkv_atomic_reduction is incompatible with swap_bwd_qk_loop=True (LoopK). "
