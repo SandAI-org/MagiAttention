@@ -479,7 +479,7 @@ class FFAFwdSm80:
         # So that we don't have to check if we overshoot kBlockM when we store O
         assert self.tile_m % tO_layout.shape[0] == 0
 
-        # tiled_copy_QKVO:
+        # G2S async tiled_copy_QKV:
         # layout_src_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
         # layout_dst_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
         self.gmem_tiled_copy_Q = cute.make_tiled_copy_tv(
@@ -491,6 +491,10 @@ class FFAFwdSm80:
         self.gmem_tiled_copy_V = cute.make_tiled_copy_tv(
             atom_async_copy, tV_layout, vQKV_layout
         )
+
+        # R2G universal tiled_copy_O:
+        # layout_src_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
+        # layout_dst_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
         self.gmem_tiled_copy_O = cute.make_tiled_copy_tv(
             atom_universal_copy, tO_layout, vO_layout
         )
@@ -1844,18 +1848,17 @@ class FFAFwdSm80:
         head_idx: cutlass.Int32,
         batch_idx: cutlass.Int32,
     ):
-        # store acc_O
+        # Make rO from acc_O with dtype cast
         rO = cute.make_fragment_like(acc_O, self.dtype)
         rO.store(acc_O.load().to(self.dtype))
 
-        # Make sure all threads have finished reading V
+        # Make sure all threads have finished reading smem
         cute.arch.barrier(
             barrier_id=int(NamedBarrierFwd.Epilogue),
             number_of_threads=self.num_epilogue_threads,
         )
 
-        # R2S copy O
-        smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(self.arch_num, self.dtype)
+        # R2S copy rO to sO
         if const_expr(not self.use_stmatrix_O_store):
             # Ampere warp-MMA path. The O accumulator comes from the warp MMA whose
             # permutation_mnk N=16 places two n8 atoms per 16-wide head_dim_v tile.
@@ -1873,10 +1876,9 @@ class FFAFwdSm80:
             smem_thr_copy_O = cute.make_tiled_copy_C(
                 smem_copy_atom_O, tiled_mma
             ).get_slice(tidx)
+
             taccOrO = smem_thr_copy_O.retile(rO)
             taccOsO = smem_thr_copy_O.partition_D(sO)
-            # taccOsO = copy_utils.partition_D_position_independent(smem_thr_copy_O, sO)
-            # copy acc O from rmem to smem with the smem copy atom
             cute.copy(smem_copy_atom_O, taccOrO, taccOsO)
 
         cO = cute.make_identity_tensor((self.tile_m, self.tile_hdimv))
@@ -1884,7 +1886,7 @@ class FFAFwdSm80:
             self.tile_m, self.tile_hdimv, self.check_hdim_v_oob, self.qhead_per_kvhead
         )
 
-        # R2G store LSE
+        # R2G copy rLSE to gLSE
         if const_expr(mLSE is not None):
             mLSE_cur = seqlen_info.offset_batch_Q(mLSE, batch_idx, dim=2)[
                 None, head_idx
@@ -1921,44 +1923,57 @@ class FFAFwdSm80:
                     mLSE_cur, lse, tiled_mma, tidx, m_block, seqlen_info.seqlen_q
                 )
 
+        # S2G copy sO to gO
         ragged = self.use_tma_O and (
             seqlen_info.has_cu_seqlens_q or seqlen_info.has_seqused_q
         )
         mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3, ragged=ragged)[
             None, None, head_idx
         ]
-
-        # sync to make sure all smem stores are done
         if const_expr(self.use_tma_O):
-            # ensure smem writes are visible to TMA
+            # Proxy fence to ensure smem writes are visible to TMA
             cute.arch.fence_view_async_shared()
+
+            # Notify the TMA-S2G warp that the sO store is ready for TMA copy
             cute.arch.barrier_arrive(
                 barrier_id=int(NamedBarrierFwd.Epilogue),
                 number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
             )
+
+            # S2G copy sO to gO via TMA
             gO = cute.local_tile(mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0))
             store_O, _, _ = copy_utils.tma_get_copy_fn(
                 tma_atom_O, 0, cute.make_layout(1), sO, gO, single_stage=True
             )
             warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-            if warp_idx == 4:
+            if warp_idx == 4:  # last warp in the producer WG
+                # Wait for sO store to be ready for TMA copy
                 cute.arch.barrier(
                     barrier_id=int(NamedBarrierFwd.Epilogue),
                     number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
                 )
+
+                # Issue TMA store for O
                 store_O()
+
+                # Commit and wait for TMA store to be finished (at least reading sO)
                 cute.arch.cp_async_bulk_commit_group()
                 cute.arch.cp_async_bulk_wait_group(0, read=True)
         else:
+            # Make sure sO store is ready
             cute.arch.barrier(
                 barrier_id=int(NamedBarrierFwd.Epilogue),
                 number_of_threads=self.num_epilogue_threads,
             )
+
+            # S2R copy sO back to rO for wider vectorization
             gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
             tOsO = gmem_thr_copy_O.partition_S(sO)
             tOrO = cute.make_fragment_like(tOsO, self.dtype)
-            # load acc O from smem to rmem for wider vectorization
             cute.autovec_copy(tOsO, tOrO)
+
+            # R2G copy rO to gO
+            sq_limit = seqlen_info.seqlen_q - m_block * self.tile_m
             if const_expr(not self.pack_gqa):
                 gO = cute.local_tile(
                     mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0)
@@ -1967,12 +1982,9 @@ class FFAFwdSm80:
                 tOcO = gmem_thr_copy_O.partition_S(cO)
                 t0OcO = gmem_tiled_copy_O.get_slice(0).partition_S(cO)
                 tOpO = cutedsl_utils.predicate_k(tOcO, limit=mO.shape[1])
-                # copy acc O from rmem to gmem
+
                 for rest_m in cutlass.range_constexpr(cute.size(tOrO.shape[1])):
-                    if (
-                        t0OcO[0, rest_m, 0][0]
-                        < seqlen_info.seqlen_q - m_block * self.tile_m - tOcO[0][0]
-                    ):
+                    if t0OcO[0, rest_m, 0][0] < sq_limit - tOcO[0][0]:
                         cute.copy(
                             gmem_tiled_copy_O,
                             tOrO[None, rest_m, None],
