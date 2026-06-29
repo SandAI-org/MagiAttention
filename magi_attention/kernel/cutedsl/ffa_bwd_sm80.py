@@ -1547,7 +1547,7 @@ class FFABwdSm80:
 
         # ///////////////////////////////////////////////////////////////////////////////
         # Mainloop: Compute each m block iteration of
-        #   1. recompute with softmax: S = Q*K^T, P = softmax(S)
+        #   1. recompute with softmax: S = Q*K^T, P = softmax(S) = exp(S - LSE)
         #   2. backward before softmax: dV = P^T*dO, dP = dO*V^T
         #   3. backward of softmax: dS = P*(dP-sum(dP*P)) = P*(dP-sum(dO*O)) = P*(dP-dPsum))
         #   4. backward after softmax: dK = dS*Q^T, dQ = dS*K
@@ -1664,7 +1664,10 @@ class FFABwdSm80:
                 load_dO_dPsum(m_block + self.num_stages_dO, smem_pipe_write_do)
             cute.arch.cp_async_commit_group()
 
-        # MMA S
+        # --- Apply S = Q*K^T ---
+
+        # Zero-init acc_S
+        # acc_S: (MMA_ATOM=(2,2),MMA_Q4,MMA_K2):((1,2),4,16)
         acc_shape_SdP = mma_params.thr_mma_sdp.partition_shape_C(
             (self.m_block_size, self.n_block_size)
             if cutlass.const_expr(not self.SdP_swapAB)
@@ -1672,10 +1675,14 @@ class FFABwdSm80:
         )
         acc_S = cute.make_rmem_tensor(acc_shape_SdP, cutlass.Float32)
         acc_S.fill(0.0)
+
+        # Wait for this Q/LSE tile
         cute.arch.cp_async_wait_group(
             1 if cutlass.const_expr(self.num_stages_Q > 1) else 0
         )
         cute.arch.barrier()
+
+        # Issue MMA for S = Q*K^T
         sm80_utils.gemm(
             mma_params.thr_mma_sdp,
             acc_S,
@@ -1692,9 +1699,24 @@ class FFABwdSm80:
             smem_copy_params.smem_thr_copy_KV,
             swap_AB=self.SdP_swapAB,
         )
-        acc_S_pre = cute.make_fragment_like(acc_S)
-        acc_S_pre.store(acc_S.load())
-        tLSErLSE = cute.make_fragment_like(smem_copy_params.tSsLSEMma[None, 0])
+
+        # --- Apply P = softmax(S) = exp(S - LSE) ---
+
+        acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S)
+        acc_P, acc_P_mn = acc_S, acc_S_mn
+
+        acc_S_pre_mn = None
+        if const_expr(self.score_mod_bwd is not None):
+            # Fork acc_S_pre from acc_S for score_mod_bwd, which needs the original S before softmax
+            # and acc_S will store P in-place
+            acc_S_pre = cute.make_fragment_like(acc_S)
+            acc_S_pre.store(acc_S.load())
+            acc_S_pre_mn = layout_utils.reshape_acc_to_mn(acc_S_pre)
+
+        # S2R copy LSE
+        tLSErLSE: cute.Tensor = cute.make_fragment_like(
+            smem_copy_params.tSsLSEMma[None, 0]
+        )
         cute.autovec_copy(
             smem_copy_params.tSsLSEMma[
                 None,
@@ -1702,8 +1724,8 @@ class FFABwdSm80:
             ],
             tLSErLSE,
         )
-        acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S)
-        acc_S_pre_mn = layout_utils.reshape_acc_to_mn(acc_S_pre)
+
+        # Apply score_mod if provided
         if cutlass.const_expr(self.score_mod is not None):
             for r in cutlass.range(cute.size(acc_S_mn, mode=[0]), unroll_full=True):
                 acc_S_mn[r, None].store(
@@ -1717,28 +1739,34 @@ class FFABwdSm80:
                         [],
                     )
                 )
+
+        # Apply mask if provided
         if cutlass.const_expr(mask_fn is not None):
             mask_fn(acc_S, m_block=m_block)
-        bidx = 0
-        # if cute.arch.thread_idx()[0] == 0 and cute.arch.block_idx()[0] == bidx: cute.print_tensor(acc_S_mn)
-        # if cute.arch.thread_idx()[0] == 0 and cute.arch.block_idx()[0] == 1: cute.print_tensor(tLSErLSE)
-        assert cute.size(acc_S_mn, mode=[0]) == cute.size(tLSErLSE)
+
+        # Apply softmax with LSE: P = exp(S - LSE)
+        assert cute.size(acc_P_mn, mode=[0]) == cute.size(tLSErLSE)
         for r in cutlass.range(cute.size(acc_S_mn, mode=[0]), unroll_full=True):
-            acc_S_mn[r, None].store(
+            acc_P_mn[r, None].store(
                 cute.math.exp2(
                     acc_S_mn[r, None].load() * softmax_scale_log2 - tLSErLSE[r],
                     fastmath=True,
                 )
             )
-        # if cute.arch.thread_idx()[0] == 0 and cute.arch.block_idx()[0] == bidx: cute.print_tensor(acc_S_mn)
 
-        # MMA dP
+        # --- Apply dP = dO*V^T ---
+
+        # Zero-init acc_dP
         acc_dP = cute.make_rmem_tensor(acc_shape_SdP, cutlass.Float32)
         acc_dP.fill(0.0)
+
+        # Wait for this dO/dPsum tile
         cute.arch.cp_async_wait_group(
             1 if cutlass.const_expr(self.num_stages_dO > 1) else 0
         )
         cute.arch.barrier()
+
+        # Issue MMA for dP = dO*V^T
         sm80_utils.gemm(
             mma_params.thr_mma_sdp,
             acc_dP,
@@ -1758,7 +1786,16 @@ class FFABwdSm80:
             else None,
             swap_AB=self.SdP_swapAB,
         )
-        tLSErdPsum = cute.make_fragment_like(smem_copy_params.tSsdPsumMma[None, 0])
+
+        # --- Apply softmax bwd: dS = P*(dP - dPsum) ---
+
+        acc_dP_mn = layout_utils.reshape_acc_to_mn(acc_dP)
+        acc_dS, acc_dS_mn = acc_dP, acc_dP_mn
+
+        # S2R copy dPsum
+        tLSErdPsum: cute.Tensor = cute.make_fragment_like(
+            smem_copy_params.tSsdPsumMma[None, 0]
+        )
         cute.autovec_copy(
             smem_copy_params.tSsdPsumMma[
                 None,
@@ -1766,16 +1803,17 @@ class FFABwdSm80:
             ],
             tLSErdPsum,
         )
-        acc_dP_mn = layout_utils.reshape_acc_to_mn(acc_dP)
-        # if cute.arch.thread_idx()[0] == 0 and cute.arch.block_idx()[0] == bidx: cute.print_tensor(acc_dP_mn)
-        assert cute.size(acc_dP_mn, mode=[0]) == cute.size(tLSErdPsum)
-        for r in cutlass.range(cute.size(acc_dP_mn, mode=[0]), unroll_full=True):
-            grad_val = acc_S_mn[r, None].load() * (
-                acc_dP_mn[r, None].load() - tLSErdPsum[r]
+
+        # Apply dS = P*(dP - dPsum)
+        assert cute.size(acc_dS_mn, mode=[0]) == cute.size(tLSErdPsum)
+        for r in cutlass.range(cute.size(acc_dS_mn, mode=[0]), unroll_full=True):
+            acc_dS_row = acc_P_mn[r, None].load() * (
+                acc_dS_mn[r, None].load() - tLSErdPsum[r]
             )
             if cutlass.const_expr(self.score_mod_bwd is not None):
-                grad_val = self.score_mod_bwd(
-                    grad_val,
+                assert acc_S_pre_mn is not None  # mypy
+                acc_dS_row = self.score_mod_bwd(
+                    acc_dS_row,
                     acc_S_pre_mn[r, None].load() * softmax_scale,
                     0,
                     0,
@@ -1784,31 +1822,42 @@ class FFABwdSm80:
                     None,
                     [],
                 )
-            acc_dP_mn[r, None].store(grad_val)
-        # if cute.arch.thread_idx()[0] == 0 and cute.arch.block_idx()[0] == bidx: cute.print_tensor(acc_dP_mn)
-        rP = cute.make_fragment_like(acc_S, self.dtype)
-        rP.store(acc_S.load().to(self.dtype))
-        if cutlass.const_expr(not self.Mma_dKV_is_RS):
+            acc_dS_mn[r, None].store(acc_dS_row)
+
+        # --- Prepare P/dS for dK/dV MMA ---
+
+        # Make rP/rdS from acc_P/acc_dS with dtype cast,
+        # and R2S copy to smem if RS MMA is required
+        rP = cute.make_fragment_like(acc_P, self.dtype)
+        rP.store(acc_P.load().to(self.dtype))
+        if cutlass.const_expr(not self.Mma_dKV_is_RS):  # dV MMA (SS)
             tPrP = smem_copy_params.r2s_thr_copy_PdS.retile(
                 rP
             )  # ((Atom,AtomNum), MMA_N, MMA_N)
             cute.copy(smem_copy_params.r2s_thr_copy_PdS, tPrP, smem_copy_params.tPsP)
-        rdS = cute.make_fragment_like(acc_dP, self.dtype)
-        rdS.store(acc_dP.load().to(self.dtype))
-        if cutlass.const_expr(not self.Mma_dKV_is_RS):
+        tdVrP = (
+            layout_utils.reshape_acc_to_frgA(rP)
+            if cutlass.const_expr(self.Mma_dKV_is_RS)
+            else mma_params.tdVrP
+        )
+
+        rdS = cute.make_fragment_like(acc_dS, self.dtype)
+        rdS.store(acc_dS.load().to(self.dtype))
+        if cutlass.const_expr(not self.Mma_dKV_is_RS):  # dK MMA (SS)
             cute.arch.barrier()  # Make sure P is written
-        # For hdim 64, It's faster to write to smem_dS first before the dV gemm
-        if cutlass.const_expr(not self.Mma_dKV_is_RS):
+            # NOTE: For hdim 64, It's faster to write to smem_dS first before the dV MMA
             tdSrdS = smem_copy_params.r2s_thr_copy_PdS.retile(rdS)
             cute.copy(
                 smem_copy_params.r2s_thr_copy_PdS, tdSrdS, smem_copy_params.tdSsdS
             )
-        if cutlass.const_expr(self.Mma_dKV_is_RS):
-            tdVrP = layout_utils.reshape_acc_to_frgA(rP)
-        else:
-            tdVrP = mma_params.tdVrP
+        tdKrdS = (
+            layout_utils.reshape_acc_to_frgA(rdS)
+            if cutlass.const_expr(self.Mma_dKV_is_RS)
+            else mma_params.tdKrdS
+        )
 
-        # MMA dK
+        # --- Apply dV = P.T*dO ---
+
         sm80_utils.gemm(
             mma_params.thr_mma_dkv,
             mma_params.acc_dV,
@@ -1826,11 +1875,14 @@ class FFABwdSm80:
             A_in_regs=self.Mma_dKV_is_RS,
             swap_AB=self.dKV_swapAB,
         )
-        # if cute.arch.thread_idx()[0] == 0 and cute.arch.block_idx()[0] == bidx: cute.print_tensor(mma_params.acc_dV)
-        cute.arch.barrier()  # Make sure dS is written
 
-        # MMA dQ
-        def dQ_mma(hook_fn):
+        # --- Apply dQ = dS*K ---
+
+        # Make sure dS is written
+        cute.arch.barrier()
+
+        def dQ_mma_with_atomic_add(hook_fn):
+            # Zero-init acc_dQ
             acc_shape_dQ = mma_params.thr_mma_dq.partition_shape_C(
                 (self.m_block_size, self.head_dim_padded)
                 if cutlass.const_expr(not self.dQ_swapAB)
@@ -1838,6 +1890,8 @@ class FFABwdSm80:
             )
             acc_dQ = cute.make_rmem_tensor(acc_shape_dQ, cutlass.Float32)
             acc_dQ.fill(0.0)
+
+            # Issue MMA for dQ = dS*K
             sm80_utils.gemm(
                 mma_params.thr_mma_dq,
                 acc_dQ,
@@ -1850,7 +1904,8 @@ class FFABwdSm80:
                 swap_AB=self.dQ_swapAB,
                 hook_fn=hook_fn,
             )
-            # ((1, 1), num_elements)
+
+            # Atomic-add acc_dQ to gmem dQaccum
             acc_dQ_atomic = gmem_copy_params.gmem_thr_copy_dQacc.retile(acc_dQ)
             tdQgdQacc_atomic = gmem_copy_params.tdQgdQacc[None, None, m_block]
             assert cute.size(acc_dQ_atomic) == cute.size(tdQgdQacc_atomic)
@@ -1859,16 +1914,12 @@ class FFABwdSm80:
                     acc_dQ_atomic[i], cutedsl_utils.elem_pointer(tdQgdQacc_atomic, i)
                 )
 
-        # If num_stages_Q == 1,
-        # we want to do Mma_dK first so we can start loading Q for the next iteration
+        # Apply dQ MMA with next Q tile load
         if cutlass.const_expr(self.num_stages_Q > 1):
-            dQ_mma(load_dO_dPsum_next)
+            dQ_mma_with_atomic_add(load_dO_dPsum_next)
 
-        # MMA dK
-        if cutlass.const_expr(self.Mma_dKV_is_RS):
-            tdKrdS = layout_utils.reshape_acc_to_frgA(rdS)
-        else:
-            tdKrdS = mma_params.tdKrdS
+        # --- Apply dK = dS*Q^T ---
+
         sm80_utils.gemm(
             mma_params.thr_mma_dkv,
             mma_params.acc_dK,
@@ -1889,10 +1940,12 @@ class FFABwdSm80:
             if cutlass.const_expr(self.num_stages_Q == 1)
             else None,
         )
-        # if cute.arch.thread_idx()[0] == 0: cute.print_tensor(mma_params.acc_dK)
+
+        # If num_stages_Q == 1, we want to do Mma_dK first
+        # so Q.T is used and we can start loading next Q tile
         if cutlass.const_expr(self.num_stages_Q == 1):
-            cute.arch.barrier()
-            dQ_mma(load_Q_LSE_next)
+            cute.arch.barrier()  # Make sure Q.T is read
+            dQ_mma_with_atomic_add(load_Q_LSE_next)
 
         # --- Debug print ---
 
@@ -1917,24 +1970,23 @@ class FFABwdSm80:
                     smem_pipe_write_q,
                     smem_pipe_write_do,
                 )
-                # MMA S = Q @ K^T
+                # MMA S = Q*K^T
                 cute.printf(prefix + "acc_S: {}", acc_S.layout)
                 cute.printf(prefix + "acc_S_mn: {}", acc_S_mn.layout)
-                cute.printf(prefix + "acc_S_pre: {}", acc_S_pre.layout)
                 cute.printf(prefix + "tLSErLSE: {}", tLSErLSE.layout)
-                # MMA dP = dO @ V^T
+                # MMA dP = dO*V^T
                 cute.printf(prefix + "acc_dP: {}", acc_dP.layout)
-                cute.printf(prefix + "acc_dP_mn: {}", acc_dP_mn.layout)
+                cute.printf(prefix + "acc_dP_mn: {}", acc_dS_mn.layout)
                 cute.printf(prefix + "tLSErdPsum: {}", tLSErdPsum.layout)
-                # P / dS in rmem (and smem operands when not Mma_dKV_is_RS)
+                # S/dP -> P/dS
                 cute.printf(prefix + "rP: {}", rP.layout)
                 cute.printf(prefix + "rdS: {}", rdS.layout)
                 cute.printf(prefix + "tdVrP: {}", tdVrP.layout)
                 cute.printf(prefix + "tdKrdS: {}", tdKrdS.layout)
-                # MMA dV = P^T @ dO, dK = dS^T @ Q (accumulated across m blocks)
+                # MMA dV = P^T*dO, dK = dS^T*Q
                 cute.printf(prefix + "acc_dV: {}", mma_params.acc_dV.layout)
                 cute.printf(prefix + "acc_dK: {}", mma_params.acc_dK.layout)
-                # MMA dQ = dS @ K (atomic-added to gmem dQaccum)
+                # MMA dQ = dS*K
                 cute.printf(prefix + "tdQrdS: {}", mma_params.tdQrdS.layout)
                 cute.printf(prefix + "tdQrK: {}", mma_params.tdQrK.layout)
                 cute.printf(

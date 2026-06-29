@@ -271,7 +271,7 @@ class FFAFwdSm80:
         sV_layout_atom = sm80_utils.get_smem_layout_atom(self.dtype, self.tile_hdimv)
         sO_layout_atom = sV_layout_atom
         sP_layout_atom = (
-            None  # always rP for sm80, since mma needs all A,B to be in rmem
+            None  # always rP for sm80, since MMA needs all A,B to be in rmem
         )
 
         # --- Debug print ---
@@ -1681,6 +1681,8 @@ class FFAFwdSm80:
                 )
             cute.arch.cp_async_commit_group()
 
+        # --- Apply S = Q*K^T ---
+
         # Zero-init acc_S
         # acc_S: (MMA_ATOM=(2,2),MMA_Q2,MMA_K8):((1,2),4,8)
         # acc_O: (MMA_ATOM=(2,2),MMA_Q2,MMA_HD16):((1,2),4,8)
@@ -1694,7 +1696,7 @@ class FFAFwdSm80:
         sync()
         load_V_next()
 
-        # Issue mma for S = Q * K^T, after S2R copy sQ/sK to rQ/rK
+        # Issue MMA for S = Q * K^T, after S2R copy sQ/sK to rQ/rK
         sm80_utils.gemm(
             mma_params.thr_mma_qk,
             acc_S,
@@ -1711,6 +1713,8 @@ class FFAFwdSm80:
             smem_copy_params.smem_thr_copy_K,
             A_in_regs=self.Q_in_regs,
         )
+
+        # --- Apply P = softmax(S) ---
 
         # Apply score_mod if provided
         if const_expr(score_mod is not None):
@@ -1732,7 +1736,7 @@ class FFAFwdSm80:
         # For single stage, wait for this V tile and load next K tile here
         # to overlap with softmax below since the pipeline is empty right now
         if const_expr(self.num_stages == 1):
-            sync()  # TODO(REVIEW): should we always delay the wait for V until mma for O ?
+            sync()  # TODO(REVIEW): should we always delay the wait for V until MMA for O ?
             load_K_next()
 
         # Apply mask_fn if provided
@@ -1752,13 +1756,15 @@ class FFAFwdSm80:
         rP.store(acc_S.load().to(self.dtype))
         tOrP = layout_utils.reshape_acc_to_frgA(rP)
 
+        # --- Apply O = P*V ---
+
         # For multi stage, we wait for this V tile and load next K tile here
-        # to overlap with mma for O below
+        # to overlap with MMA for O below
         if const_expr(self.num_stages > 1):
             sync()
             load_K_next()
 
-        # Issue mma for O = P * V, after S2R copy sV to rV
+        # Issue MMA for O = P * V, after S2R copy sV to rV
         sm80_utils.gemm_rs(
             mma_params.thr_mma_pv,
             mma_params.acc_O,
