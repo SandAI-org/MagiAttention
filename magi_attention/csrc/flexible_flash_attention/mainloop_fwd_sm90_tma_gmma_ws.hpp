@@ -813,6 +813,11 @@ struct CollectiveMainloopFwdSm90 {
             cute::SM90_BULK_COPY_G2S::copy(ptr_gV_base_tma1d + token_offset, mbar, smem_v_base + stage_offset + row * kHeadDim, kRowBytes);
           }
         }
+        // Sync all producer threads: the leader just finished reading idx_slot;
+        // without this barrier, non-leader threads race ahead to the next load_K
+        // and overwrite the same idx_slot via fill_token_indices before the leader
+        // finishes reading it.
+        asm volatile("bar.sync %0, %1;" : : "r"(6), "r"(NumProducerThreads));
         ++smem_pipe_write_v;
       } else if constexpr (InnerLoad_CpAsync) {
         // Legacy cp.async per-row scatter for V (A/B benchmarking).
@@ -1043,12 +1048,24 @@ struct CollectiveMainloopFwdSm90 {
     BarrierManager::arrive<NumMmaThreadsQK + NumProducerThreads>(FwdNamedBarriers::QueryEmpty);
 
     if constexpr (UseSchedulerBarrier) {
-      // We have NamedBarrier for up to 3 WGs (why 3 WGs ?)
       static_assert(NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
-      // WG1 is the smallest warp group used for mma, so it needs the very first signal to start
-      if (warp_group_idx == 1) {
-        BarrierManager::arrive<2 * cutlass::NumThreadsPerWarpGroup>(FwdNamedBarriers::WarpSchedulerWG1);
+      if constexpr (InnerLoad_Tma1d) {
+        // TMA1d rearrange requires all WGs to synchronize on rearrange barriers in fwd_step.
+        // Prime BOTH scheduler barriers so both WGs pass simultaneously (no first-iter deadlock).
+        if (warp_group_idx == 1) {
+          BarrierManager::arrive<2 * cutlass::NumThreadsPerWarpGroup>(FwdNamedBarriers::WarpSchedulerWG1);
+        }
+        if constexpr (NumMmaWarpGroups >= 2) {
+          if (warp_group_idx == 2) {
+            BarrierManager::arrive<2 * cutlass::NumThreadsPerWarpGroup>(FwdNamedBarriers::WarpSchedulerWG1, 1);
+          }
+        }
+      } else {
+        // Standard path: only prime WG0's barrier (WG1 waits for WG0's arrive).
+        if (warp_group_idx == 1) {
+          BarrierManager::arrive<2 * cutlass::NumThreadsPerWarpGroup>(FwdNamedBarriers::WarpSchedulerWG1);
+        }
       }
     }
   }
@@ -1167,11 +1184,20 @@ struct CollectiveMainloopFwdSm90 {
     };
 
     // Consumer-side rearrange: linear → swizzled for TMA 1D scatter loads.
-    // Called after consumer_wait, before WGMMA. Each MMA thread handles one row:
+    // Each participating thread handles one row (row < kBlockN):
     // read from linear positions into registers, barrier, write to swizzled positions.
     // Two barriers prevent RAW hazards (swizzled addr of row A may alias linear addr of row B).
+    //
+    // ALL MMA threads (NumMmaThreads) participate: WG0 threads (row < kBlockN) do actual
+    // read/write work; WG1 threads (row >= kBlockN) participate in barriers only.
+    // This ensures correctness in fwd_step where UseSchedulerBarrier is active: both WGs
+    // synchronize through the rearrange barriers (WG1 waits for WG0's writes to complete).
+    // To prevent deadlock in the first fwd_step iteration (where WG1 would otherwise be
+    // blocked at its scheduler barrier), mma_init primes BOTH scheduler barriers when
+    // InnerLoad_Tma1d is true, allowing both WGs to pass simultaneously.
     auto rearrange_K = [&](auto& smem_pipe_read) {
       if constexpr (InnerLoad_Tma1d) {
+        static constexpr int kBarrierId = static_cast<int>(FwdNamedBarriers::Tma1dRearrange);
         static constexpr int kElemsPerU128 = 16 / static_cast<int>(sizeof(Element));
         static constexpr int kU128PerRow = kHeadDim / kElemsPerU128;
         int const stage = smem_pipe_read.index();
@@ -1179,30 +1205,27 @@ struct CollectiveMainloopFwdSm90 {
         Tensor sK_swizzled = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
         int const row = thread_idx;
         if (row < kBlockN) {
-          // Phase 1: read entire row from linear layout into registers
           cute::uint128_t row_buf[kU128PerRow];
           CUTE_UNROLL
           for (int c = 0; c < kU128PerRow; ++c) {
             row_buf[c] = *reinterpret_cast<cute::uint128_t const*>(sK_linear + row * kHeadDim + c * kElemsPerU128);
           }
-          // Barrier: all reads done before any writes (swizzled writes may alias other rows' linear addrs)
-          cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<int>(FwdNamedBarriers::Tma1dRearrange));
-          // Phase 2: write from registers to swizzled positions
+          cutlass::arch::NamedBarrier::sync(NumMmaThreads, kBarrierId);
           CUTE_UNROLL
           for (int c = 0; c < kU128PerRow; ++c) {
             *reinterpret_cast<cute::uint128_t*>(&sK_swizzled(row, c * kElemsPerU128, stage)) = row_buf[c];
           }
         } else {
-          cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<int>(FwdNamedBarriers::Tma1dRearrange));
+          cutlass::arch::NamedBarrier::sync(NumMmaThreads, kBarrierId);
         }
-        // Fence + barrier: all writes visible before WGMMA reads
         cutlass::arch::fence_view_async_shared();
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<int>(FwdNamedBarriers::Tma1dRearrange));
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads, kBarrierId);
       }
     };
 
     auto rearrange_V = [&](auto& smem_pipe_read) {
       if constexpr (InnerLoad_Tma1d) {
+        static constexpr int kBarrierId = static_cast<int>(FwdNamedBarriers::Tma1dRearrange);
         static constexpr int kElemsPerU128 = 16 / static_cast<int>(sizeof(Element));
         static constexpr int kU128PerRow = kHeadDim / kElemsPerU128;
         int const stage = smem_pipe_read.index();
@@ -1210,25 +1233,21 @@ struct CollectiveMainloopFwdSm90 {
         Tensor sVt_swizzled = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
         int const row = thread_idx;
         if (row < kBlockN) {
-          // Phase 1: read entire row from linear layout into registers
           cute::uint128_t row_buf[kU128PerRow];
           CUTE_UNROLL
           for (int c = 0; c < kU128PerRow; ++c) {
             row_buf[c] = *reinterpret_cast<cute::uint128_t const*>(sV_linear + row * kHeadDim + c * kElemsPerU128);
           }
-          // Barrier: all reads done before any writes
-          cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<int>(FwdNamedBarriers::Tma1dRearrange));
-          // Phase 2: write from registers to transposed-swizzled positions
+          cutlass::arch::NamedBarrier::sync(NumMmaThreads, kBarrierId);
           CUTE_UNROLL
           for (int c = 0; c < kU128PerRow; ++c) {
             *reinterpret_cast<cute::uint128_t*>(&sVt_swizzled(c * kElemsPerU128, row, stage)) = row_buf[c];
           }
         } else {
-          cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<int>(FwdNamedBarriers::Tma1dRearrange));
+          cutlass::arch::NamedBarrier::sync(NumMmaThreads, kBarrierId);
         }
-        // Fence + barrier: all writes visible before WGMMA reads
         cutlass::arch::fence_view_async_shared();
-        cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<int>(FwdNamedBarriers::Tma1dRearrange));
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads, kBarrierId);
       }
     };
 
@@ -1398,7 +1417,9 @@ struct CollectiveMainloopFwdSm90 {
       using CheckInf = std::conditional_t<decltype(is_no_mask)::value, cute::false_type, cute::true_type>;
 
       // Common: wait for K, launch Q@K_i
-      if (!UseSchedulerBarrier || warp_group_idx == 0) {
+      // InnerLoad_Tma1d: all threads must wait — scheduler barriers are neutralized (primed)
+      // and rearrange reads smem before its internal sync, so data must be confirmed ready.
+      if (!UseSchedulerBarrier || InnerLoad_Tma1d || warp_group_idx == 0) {
         consumer_wait(pipeline_k, smem_pipe_read_k);
       }
       warp_scheduler_barrier_sync();
@@ -1410,7 +1431,7 @@ struct CollectiveMainloopFwdSm90 {
         if constexpr (RescaleOBeforeGemm) {
           softmax.rescale_o(tOrO, scores_scale);
         }
-        if (!UseSchedulerBarrier || warp_group_idx == 0) {
+        if (!UseSchedulerBarrier || InnerLoad_Tma1d || warp_group_idx == 0) {
           consumer_wait(pipeline_v, smem_pipe_read_v);
         }
         rearrange_V(smem_pipe_read_v);
