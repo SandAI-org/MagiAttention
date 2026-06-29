@@ -406,7 +406,7 @@ template <
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr bool IndexSparseInvLoopQ = IndexSparse && !SwapBwdQKLoop;
-  // BwdTileM/N, BwdStages/Ds: 0 = use default, >0 = override (env: MAGI_BWD_TILE_M/N, MAGI_BWD_STAGES/DS).
+  // BwdTileM/N, BwdStages/Ds: 0 = use default, >0 = override (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS).
   static constexpr int kBlockM =
       BwdTileM > 0 ? BwdTileM : std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexSparseInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
   static constexpr int kBlockN =

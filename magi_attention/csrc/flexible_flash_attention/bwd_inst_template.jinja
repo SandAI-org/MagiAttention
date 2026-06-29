@@ -39,14 +39,14 @@ static constexpr int kBwdConsumerRegs = {{ bwd_consumer_regs }};
 static constexpr int kInnerLoadMode = {{ inner_load_mode | default(2) }};
 // Inner-loop scatter store mode: 1=Tma1d(bulk reduce-add), 2=CpAsync(scalar atomicAdd)
 static constexpr int kInnerStoreMode = {{ inner_store_mode | default(1) }};
-// Tile/stage overrides for A/B benchmarking (env: MAGI_BWD_TILE_M/N, MAGI_BWD_STAGES/DS/V).
+// Tile/stage overrides for A/B benchmarking (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS/V).
 // 0 = use default from tile_size_bwd_sm90(); >0 = override.
 static constexpr int kBwdTileM = {{ bwd_tile_m | default(0) }};
 static constexpr int kBwdTileN = {{ bwd_tile_n | default(0) }};
 static constexpr int kBwdStages = {{ bwd_stages | default(0) }};
 static constexpr int kBwdStagesDs = {{ bwd_stages_ds | default(0) }};
 static constexpr int kBwdStagesV = {{ bwd_stages_v | default(0) }};
-// SMEM-saving overrides (env: MAGI_BWD_SCATTER_PAD, MAGI_BWD_LSE_UNION).
+// SMEM-saving overrides (env: MAGI_ATTENTION_FFA_BWD_SCATTER_PAD, MAGI_ATTENTION_FFA_BWD_LSE_UNION).
 // scatter_pad: -1 = auto (4 for kBlockN<=64, 0 for kBlockN>=128), >=0 = override.
 // lse_union: 0 = separate smem_lse/smem_dpsum, 1 = union with dKVacc buffer.
 static constexpr int kBwdScatterPad = {{ bwd_scatter_pad | default(-1) }};
@@ -134,7 +134,7 @@ std::vector<at::Tensor> mha_bwd(
   // dKV pool: split dK/dV accum into pool_count slices to reduce L2 contention
   int pool_count = 1;
   at::Tensor dk_pool, dv_pool;
-  const char* pool_env = std::getenv("MAGI_BWD_DKV_POOL_COUNT");
+  const char* pool_env = std::getenv("MAGI_ATTENTION_FFA_BWD_DKV_POOL_COUNT");
   if (pool_env) pool_count = std::max(1, std::atoi(pool_env));
   if (pool_count > 1 && kSwapBwdQKLoop) {
     auto opts = dk.options().dtype(torch::kFloat);
