@@ -351,7 +351,7 @@ class FFAFwdSm80:
             sQ: sQV_struct
             sK: sK_struct
 
-        self.shared_storage = (
+        self.shared_storage_cls = (
             SharedStorageSharedQV if const_expr(self.Q_in_regs) else SharedStorageQKV
         )
 
@@ -668,7 +668,7 @@ class FFAFwdSm80:
 
         # --- Make tile scheduler class/args ---
 
-        TileScheduler = (
+        self.tile_scheduler_cls = (
             SingleTileVarlenScheduler
             if const_expr(mCuSeqlensQ is not None or mSeqUsedQ is not None)
             else SingleTileScheduler
@@ -695,9 +695,10 @@ class FFAFwdSm80:
             mCuSeqlensQ=mCuSeqlensQ,
             mSeqUsedQ=mSeqUsedQ,
         )
-        tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
-        grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
-        self.tile_scheduler_cls = TileScheduler
+        tile_sched_params = self.tile_scheduler_cls.to_underlying_arguments(
+            tile_sched_args
+        )
+        grid_dim = self.tile_scheduler_cls.get_grid_shape(tile_sched_params)
 
         # --- Make smem storage ---
 
@@ -767,7 +768,7 @@ class FFAFwdSm80:
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
-            smem=self.shared_storage.size_in_bytes(),
+            smem=self.shared_storage_cls.size_in_bytes(),
             stream=stream,
         )
 
@@ -904,7 +905,7 @@ class FFAFwdSm80:
         # sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
         # sVt: S<3,3,3> o 0 o ((ATOM_HD64,LAY_tileHD2),(ATOM_K8,LAY_tileK8),STAGE=(1,1)):((1,4096),(64,512),(0,0))
         smem = cutlass.utils.SmemAllocator()
-        storage = smem.allocate(self.shared_storage)
+        storage = smem.allocate(self.shared_storage_cls)
         sQ: cute.Tensor = storage.sQ.get_tensor(sQ_layout)
         sK: cute.Tensor = storage.sK.get_tensor(sK_layout)
         if const_expr(not self.Q_in_regs):

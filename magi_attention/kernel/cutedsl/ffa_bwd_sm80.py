@@ -389,7 +389,7 @@ class FFABwdSm80:
             sP: sP_struct
             sdS: sdS_struct
 
-        return (
+        self.shared_storage_cls = (
             SharedStorageSeparateQV
             if cutlass.const_expr(not self.share_QV_smem)
             else SharedStorageSharedQV
@@ -641,13 +641,11 @@ class FFABwdSm80:
 
         # --- Make tile scheduler class/args ---
 
-        if cutlass.const_expr(mCuSeqlensK is not None):
-            TileScheduler = SingleTileVarlenScheduler
-            num_batch = mCuSeqlensK.shape[0] - 1
-        else:
-            TileScheduler = SingleTileScheduler
-            num_batch = mK.shape[0]
-
+        self.tile_scheduler_cls = (
+            SingleTileVarlenScheduler
+            if cutlass.const_expr(mCuSeqlensK is not None)
+            else SingleTileScheduler
+        )
         tile_sched_args = TileSchedulerArguments(
             # Uses seqlen k, etc. since main bwd kernel's blocks are over n
             num_block=cute.ceil_div(mK.shape[1], self.n_block_size),
@@ -656,7 +654,11 @@ class FFABwdSm80:
                 if cutlass.const_expr(mCuSeqlensQ is not None)
                 else mQ.shape[2]
             ),
-            num_batch=num_batch,
+            num_batch=(
+                mCuSeqlensK.shape[0] - 1
+                if cutlass.const_expr(mCuSeqlensK is not None)
+                else mK.shape[0]
+            ),
             num_splits=1,
             seqlen_k=0,
             headdim=mK.shape[2],
@@ -669,12 +671,14 @@ class FFABwdSm80:
             mCuSeqlensQ=mCuSeqlensK,
             mSeqUsedQ=mSeqUsedK,
         )
-        tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
-        grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+        tile_sched_params = self.tile_scheduler_cls.to_underlying_arguments(
+            tile_sched_args
+        )
+        grid_dim = self.tile_scheduler_cls.get_grid_shape(tile_sched_params)
 
         # --- Make smem storage ---
 
-        SharedStorage = self._get_shared_storage_cls()
+        self._get_shared_storage_cls()
 
         # --- Make others ---
 
@@ -752,13 +756,11 @@ class FFABwdSm80:
             self.tiled_mma_sdp,
             self.tiled_mma_dkv,
             self.tiled_mma_dq,
-            SharedStorage,
             tile_sched_params,
-            TileScheduler,
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
-            smem=SharedStorage.size_in_bytes(),
+            smem=self.shared_storage_cls.size_in_bytes(),
             stream=stream,
         )
 
@@ -796,14 +798,12 @@ class FFABwdSm80:
         tiled_mma_sdp: cute.TiledMma,
         tiled_mma_dkv: cute.TiledMma,
         tiled_mma_dq: cute.TiledMma,
-        SharedStorage: cutlass.Constexpr,
         tile_sched_params: ParamsBase,
-        TileScheduler: cutlass.Constexpr[Callable],
     ):
         # Thread index, block index
         tidx, _, _ = cute.arch.thread_idx()
 
-        tile_scheduler = TileScheduler.create(tile_sched_params)
+        tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
         work_tile = tile_scheduler.initial_work_tile_info()
 
         n_block, head_idx, batch_idx, _ = work_tile.tile_idx
@@ -894,7 +894,7 @@ class FFABwdSm80:
             # Get shared memory buffer
             # ///////////////////////////////////////////////////////////////////////////////
             smem = cutlass.utils.SmemAllocator()
-            storage = smem.allocate(SharedStorage)
+            storage = smem.allocate(self.shared_storage_cls)
             sQ = storage.sQ.get_tensor(sQ_layout)
             sK = storage.sK.get_tensor(sK_layout)
             if cutlass.const_expr(not self.share_QV_smem):
