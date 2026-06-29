@@ -938,6 +938,7 @@ class FFABwdSm80:
             tile_n=self.n_block_size,
         )
 
+        # TODO: return early if m_block_max == 0
         m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.m_block_size)
         m_block_min = 0
         if cutlass.const_expr(self.is_causal):
@@ -950,7 +951,9 @@ class FFABwdSm80:
                 // self.m_block_size,
                 m_block_min,
             )
-        # TODO: return early if m_block_max == 0
+
+        # NOTE: Start async loads of the last mn-tile, where we take care of the mn residue
+        m_block = m_block_min
 
         d_head = mQ.shape[cute.rank(mQ) - 1]
         d_head_v = mdO.shape[cute.rank(mdO) - 1]
@@ -1483,9 +1486,10 @@ class FFABwdSm80:
                 cute.printf("")
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Prologue
+        # Prologue: Load sK/sV, and one full stages of sQ/sLSE/sdO/sdPsum
         # ///////////////////////////////////////////////////////////////////////////////
-        # Start async loads of the last mn-tile, where we take care of the mn residue
+
+        # Load sV
         self.load_V(
             gmem_thr_copy_VdO,
             tVgV,
@@ -1496,6 +1500,8 @@ class FFABwdSm80:
         )
         if cutlass.const_expr(self.V_in_regs):
             cute.arch.cp_async_commit_group()
+
+        # Load sK
         self.load_K(
             gmem_thr_copy_QK,
             tKgK,
@@ -1506,15 +1512,20 @@ class FFABwdSm80:
         )
         cute.arch.cp_async_commit_group()
 
+        # S2R copy sV to rV if V_in_regs
         if cutlass.const_expr(self.V_in_regs):
+            # Wait for sV load to finish before S2R copy
             cute.arch.cp_async_wait_group(1)
             cute.arch.barrier()
+
+            # S2R copy rotated V from smem buffer that Q/V share to rmem
             tdPrV_copy_view = smem_thr_copy_KV.retile(tdPrV)
             cute.copy(smem_thr_copy_KV, tdPsV, tdPrV_copy_view)
-            # Sync to avoid loading Q to smem_q, which overlaps with smem_v
+
+            # Make sure all threads have read smem before loading Q
             cute.arch.barrier()
 
-        m_block = m_block_min
+        # Load sQ,sLSE/sdO,sdPsum for one full stages
         assert self.num_stages_Q >= self.num_stages_dO
         for stage in cutlass.range_constexpr(self.num_stages_Q):
             if cutlass.const_expr(
@@ -1523,6 +1534,7 @@ class FFABwdSm80:
                 if stage == 0 or m_block + stage < m_block_max:
                     load_Q_LSE(m_block + stage, smem_pipe_write_q=stage)
                 cute.arch.cp_async_commit_group()
+
             if cutlass.const_expr(stage < self.num_stages_dO):
                 if stage == 0 or m_block + stage < m_block_max:
                     load_dO_dPsum(m_block + stage, smem_pipe_write_q=stage)
