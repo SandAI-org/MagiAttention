@@ -408,8 +408,8 @@ class FFABwdSm80:
 
         # sQ/sdO: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_HD64,LAY_tileHD2),(1,1)):((64,512),(1,4096),(0,0))
         # sK/sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
-        # sPdS: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_K64,LAY_tileK2)):((64,512),(1,4096))
-        # sLSE: (tileQ64,1):(1,64) | sLSEMma: (tileQ64,tileHD128,1):(1,0,64)
+        # sP/sdS: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_K64,LAY_tileK2)):((64,512),(1,4096))
+        # sLSE/sdPsum: (tileQ64,1):(1,64) | sLSEMma/sdPsumMma: (tileQ64,tileHD128,1):(1,0,64)
         sQ_layout_atom = sm80_utils.get_smem_layout_atom(
             self.dtype, self.head_dim_padded
         )
@@ -1020,6 +1020,11 @@ class FFABwdSm80:
 
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage_cls)
+
+        # sQ/sdO: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_HD64,LAY_tileHD2),(1,1)):((64,512),(1,4096),(0,0))
+        # sK/sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
+        # sP/sdS: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_K64,LAY_tileK2)):((64,512),(1,4096))
+        # sLSE/sdPsum: (tileQ64,1):(1,64) | sLSEMma/sdPsumMma: (tileQ64,tileHD128,1):(1,0,64)
         sQ: cute.Tensor = storage.sQ.get_tensor(sQ_layout)
         sK: cute.Tensor = storage.sK.get_tensor(sK_layout)
         if cutlass.const_expr(not self.share_QV_smem):
@@ -1035,7 +1040,6 @@ class FFABwdSm80:
         sdPsum: cute.Tensor = storage.sdPsum.get_tensor(sLSE_layout)
         sLSEMma: cute.Tensor = storage.sLSE.get_tensor(sLSEMma_layout)
         sdPsumMma: cute.Tensor = storage.sdPsum.get_tensor(sLSEMma_layout)
-
         # Transpose view of tensors for tiled mma
         sQt, sdOt, sKt, sPt, sdSt = [
             layout_utils.transpose_view(t) for t in (sQ, sdO, sK, sP, sdS)
@@ -1045,46 +1049,49 @@ class FFABwdSm80:
         # G2S/S2G tiled copy partitions for Q/K/V/dO/LSE/dPsum/dQacc
         # ///////////////////////////////////////////////////////////////////////////////
 
+        # tQgQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,restQ):((1,0),32768,64,65536)
+        # tQsQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,STAGE=(1,1)):((1,0),2048,4096,(0,0))
+        # tKgK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),8192,64)
+        # tKsK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),2048,8192)
         gmem_thr_copy_QK = gmem_tiled_copy_QK.get_slice(tidx)
-        gmem_thr_copy_VdO = gmem_tiled_copy_VdO.get_slice(tidx)
-        gmem_thr_copy_lse = gmem_tiled_copy_LSE.get_slice(tidx)
-        gmem_thr_copy_dQacc = gmem_tiled_copy_dQacc.get_slice(tidx)
-        # (CPY_Atom, CPY_M, CPY_K, m_block)
         tQgQ = gmem_thr_copy_QK.partition_S(gQ)
         tQsQ = gmem_thr_copy_QK.partition_D(sQ)
-        # (CPY_Atom, CPY_N, CPY_K)
         tKgK = gmem_thr_copy_QK.partition_S(gK)
         tKsK = gmem_thr_copy_QK.partition_D(sK)
-        # (CPY_Atom, CPY_N, CPY_K)
+
+        # tVgV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),8192,64)
+        # tVsV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),2048,8192)
+        # tdOgdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,restQ):((1,0),32768,64,65536)
+        # tdOsdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,STAGE=(1,1)):((1,0),2048,4096,(0,0))
+        gmem_thr_copy_VdO = gmem_tiled_copy_VdO.get_slice(tidx)
         tVgV = gmem_thr_copy_VdO.partition_S(gV)
         tVsV = gmem_thr_copy_VdO.partition_D(sV)
-        # (CPY_Atom, CPY_M, CPY_K, m_block)
         tdOgdO = gmem_thr_copy_VdO.partition_S(gdO)
         tdOsdO = gmem_thr_copy_VdO.partition_D(sdO)
+
+        # tLSEgLSE: (CPY_ATOM=(4,1),CPY_Q1,restQ):((1,0),0,64)
+        # tLSEsLSE: (CPY_ATOM=(4,1),CPY_Q1,STAGE1):((1,0),0,64)
+        # tLSEgdPsum: (CPY_ATOM=(4,1),CPY_Q1,restQ):((1,0),0,64)
+        # tLSEsdPsum: (CPY_ATOM=(4,1),CPY_Q1,STAGE1):((1,0),0,64)
+        gmem_thr_copy_lse = gmem_tiled_copy_LSE.get_slice(tidx)
         tLSEgLSE = gmem_thr_copy_lse.partition_S(gLSE)
         tLSEsLSE = gmem_thr_copy_lse.partition_D(sLSE)
         tLSEgdPsum = gmem_thr_copy_lse.partition_S(gdPsum)
         tLSEsdPsum = gmem_thr_copy_lse.partition_D(sdPsum)
+
+        # tdQgdQacc: (CPY_ATOM=(1,1),CPY_V32,restQ):((0,0),256,8192)
+        gmem_thr_copy_dQacc = gmem_tiled_copy_dQacc.get_slice(tidx)
         tdQgdQacc = gmem_thr_copy_dQacc.partition_S(gdQacc)
 
         # ///////////////////////////////////////////////////////////////////////////////
         # Tile MMA partitions and allocate accumulators
         # ///////////////////////////////////////////////////////////////////////////////
 
+        # tSrQ: (MMA_ATOM=(2,2,2),MMA_Q4,MMA_HD=((2,2),2)):((1,2,4),8,((64,128),32))
+        # tSrK: (MMA_ATOM=(2,2),MMA_K2,MMA_HD=((2,2),2)):((1,2),4,((16,32),8))
+        # tdPrdO: (MMA_ATOM=(2,2,2),MMA_Q4,MMA_HD=((2,2),2)):((1,2,4),8,((64,128),32))
+        # tdPrV: (MMA_ATOM=(2,2),MMA_K2,MMA_HD=((2,2),2)):((1,2),4,((16,32),8))
         thr_mma_sdp = tiled_mma_sdp.get_slice(tidx)
-        thr_mma_dkv = tiled_mma_dkv.get_slice(tidx)
-        thr_mma_dq = tiled_mma_dq.get_slice(tidx)
-        acc_shape_dK = thr_mma_dkv.partition_shape_C(
-            (self.n_block_size, self.head_dim_padded)
-        )
-        acc_shape_dV = thr_mma_dkv.partition_shape_C(
-            (self.n_block_size, self.head_dim_v_padded)
-        )
-        acc_dK = cute.make_rmem_tensor(acc_shape_dK, cutlass.Float32)
-        acc_dV = cute.make_rmem_tensor(acc_shape_dV, cutlass.Float32)
-        acc_dK.fill(0.0)
-        acc_dV.fill(0.0)
-
         tSrQ = cutedsl_utils.mma_make_fragment_A(
             sQ[None, None, 0], thr_mma_sdp, swapAB=self.SdP_swapAB
         )
@@ -1097,6 +1104,12 @@ class FFABwdSm80:
         tdPrV = cutedsl_utils.mma_make_fragment_B(
             sV, thr_mma_sdp, swapAB=self.SdP_swapAB
         )
+
+        # tdVrP: (MMA_ATOM=(2,2,2),MMA_K1,MMA_Q4):((1,2,4),0,8)
+        # tdVrdO: (MMA_ATOM=(2,2),MMA_HD=(8,2),MMA_Q4):((1,2),(4,128),32)
+        # tdKrdS: (MMA_ATOM=(2,2,2),MMA_K1,MMA_Q4):((1,2,4),0,8)
+        # tdKrQ: (MMA_ATOM=(2,2),MMA_HD=(8,2),MMA_Q4):((1,2),(4,128),32)
+        thr_mma_dkv = tiled_mma_dkv.get_slice(tidx)
         tdVrP = cutedsl_utils.mma_make_fragment_A(
             sPt, thr_mma_dkv, swapAB=self.dKV_swapAB
         )
@@ -1109,6 +1122,22 @@ class FFABwdSm80:
         tdKrQ = cutedsl_utils.mma_make_fragment_B(
             sQt[None, None, 0], thr_mma_dkv, swapAB=self.dKV_swapAB
         )
+
+        # acc_dK/dV: (MMA_ATOM=(2,2),MMA_K1,MMA_HD16):((1,2),0,4)
+        acc_shape_dK = thr_mma_dkv.partition_shape_C(
+            (self.n_block_size, self.head_dim_padded)
+        )
+        acc_shape_dV = thr_mma_dkv.partition_shape_C(
+            (self.n_block_size, self.head_dim_v_padded)
+        )
+        acc_dK = cute.make_rmem_tensor(acc_shape_dK, cutlass.Float32)
+        acc_dV = cute.make_rmem_tensor(acc_shape_dV, cutlass.Float32)
+        acc_dK.fill(0.0)
+        acc_dV.fill(0.0)
+
+        # tdQrdS: (MMA_ATOM=(2,2,2),MMA_Q4,MMA_K=((2,2),2)):((1,2,4),8,((64,128),32))
+        # tdQrK: (MMA_ATOM=(2,2),MMA_HD2,MMA_K8):((1,2),32,4)
+        thr_mma_dq = tiled_mma_dq.get_slice(tidx)
         tdQrdS = cutedsl_utils.mma_make_fragment_A(
             sdS, thr_mma_dq, swapAB=self.dQ_swapAB
         )
@@ -1116,17 +1145,17 @@ class FFABwdSm80:
             sKt, thr_mma_dq, swapAB=self.dQ_swapAB
         )
 
+        # tSsLSEMma_/tSsdPsumMma_: (MMA_ATOM=(ATOM_Q2,ATOM_K2),MMA_Q4,MMA_K2,STAGE1):((0,8),16,0,64)
+        # tSsLSEMma/tSsdPsumMma: (MMA_ATOM=(ATOM_Q2,MMA_Q4),1):((8,16),0)
+        tSsLSEMma_ = thr_mma_sdp.partition_C(sLSEMma)
+        tSsdPsumMma_ = thr_mma_sdp.partition_C(sdPsumMma)
         LSEslice = (
             (None, 0, None)
             if cutlass.const_expr(not self.SdP_swapAB)
             else (0, None, None)
         )
-        tSsLSEMma = layout_utils.reshape_acc_to_mn(thr_mma_sdp.partition_C(sLSEMma))[
-            LSEslice
-        ]
-        tSsdPsumMma = layout_utils.reshape_acc_to_mn(
-            thr_mma_sdp.partition_C(sdPsumMma)
-        )[LSEslice]
+        tSsLSEMma = layout_utils.reshape_acc_to_mn(tSsLSEMma_)[LSEslice]
+        tSsdPsumMma = layout_utils.reshape_acc_to_mn(tSsdPsumMma_)[LSEslice]
 
         # ///////////////////////////////////////////////////////////////////////////////
         # Make S2R/R2S tiled copy and partitions for Q/K/V/dO/P/dS
@@ -1365,6 +1394,10 @@ class FFABwdSm80:
                 cute.printf(prefix + "tKsK: {}", tKsK.layout)
                 cute.printf(prefix + "tVgV: {}", tVgV.layout)
                 cute.printf(prefix + "tVsV: {}", tVsV.layout)
+                cute.printf(prefix + "tLSEgLSE: {}", tLSEgLSE.layout)
+                cute.printf(prefix + "tLSEsLSE: {}", tLSEsLSE.layout)
+                cute.printf(prefix + "tLSEgdPsum: {}", tLSEgdPsum.layout)
+                cute.printf(prefix + "tLSEsdPsum: {}", tLSEsdPsum.layout)
                 cute.printf(prefix + "tdOgdO: {}", tdOgdO.layout)
                 cute.printf(prefix + "tdOsdO: {}", tdOsdO.layout)
                 cute.printf(prefix + "tdQgdQacc: {}", tdQgdQacc.layout)
@@ -1381,6 +1414,10 @@ class FFABwdSm80:
                 cute.printf(prefix + "tdKrQ: {}", tdKrQ.layout)
                 cute.printf(prefix + "tdQrdS: {}", tdQrdS.layout)
                 cute.printf(prefix + "tdQrK: {}", tdQrK.layout)
+                cute.printf(prefix + "tSsLSEMma_: {}", tSsLSEMma_.layout)
+                cute.printf(prefix + "tSsdPsumMma_: {}", tSsdPsumMma_.layout)
+                cute.printf(prefix + "tSsLSEMma: {}", tSsLSEMma.layout)
+                cute.printf(prefix + "tSsdPsumMma: {}", tSsdPsumMma.layout)
                 cute.printf("")
                 cute.printf(prefix + "tQpQ: {}", tQpQ.layout)
                 cute.printf(prefix + "tdOpdO: {}", tdOpdO.layout)

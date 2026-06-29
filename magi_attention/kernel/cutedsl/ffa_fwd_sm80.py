@@ -899,12 +899,13 @@ class FFAFwdSm80:
         # Alloc smem storage and make smem tensors for sQ/sK/sV
         # ///////////////////////////////////////////////////////////////////////////////
 
+        smem = cutlass.utils.SmemAllocator()
+        storage = smem.allocate(self.shared_storage_cls)
+
         # sQ: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
         # sK: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
         # sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
         # sVt: S<3,3,3> o 0 o ((ATOM_HD64,LAY_tileHD2),(ATOM_K8,LAY_tileK8),STAGE=(1,1)):((1,4096),(64,512),(0,0))
-        smem = cutlass.utils.SmemAllocator()
-        storage = smem.allocate(self.shared_storage_cls)
         sQ: cute.Tensor = storage.sQ.get_tensor(sQ_layout)
         sK: cute.Tensor = storage.sK.get_tensor(sK_layout)
         if const_expr(not self.Q_in_regs):
