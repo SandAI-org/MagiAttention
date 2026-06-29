@@ -1910,13 +1910,6 @@ class FFABwdSm80:
         d_head_v: cutlass.Int32,
         is_print_thread_and_tile: bool = False,
     ):
-        rdV = cute.make_fragment_like(acc_dV, self.dtype)
-        rdV.store(acc_dV.load().to(self.dtype))
-        rdK = cute.make_fragment_like(acc_dK, self.dtype)
-        rdK.store(acc_dK.load().to(self.dtype))
-        gmem_thr_copy_dK = gmem_tiled_copy_dK.get_slice(tidx)
-        gmem_thr_copy_dV = gmem_tiled_copy_dV.get_slice(tidx)
-
         batch_idx = batch_size
         head_idx_kv = (
             num_head // self.qhead_per_kvhead
@@ -1924,27 +1917,51 @@ class FFABwdSm80:
             else num_head
         )
 
-        if cutlass.const_expr(self.qhead_per_kvhead == 1):
-            # Make sure all threads have finished reading K and V, otherwise we get racy dQ
-            # because smem_q could be changed.
+        gmem_thr_copy_dK = gmem_tiled_copy_dK.get_slice(tidx)
+        gmem_thr_copy_dV = gmem_tiled_copy_dV.get_slice(tidx)
+
+        if cutlass.const_expr(self.qhead_per_kvhead == 1):  # vectorized store
+            # Make rdK/rdV from acc_dK/dV with dtype cast
+            # acc_dK/dV: (MMA_ATOM=(2,2),MMA_K1,MMA_HD16):((1,2),0,4)
+            # rdK/rdV: (MMA_ATOM=(2,2),MMA_K1,MMA_HD16):((1,2),0,4)
+            rdK = cute.make_fragment_like(acc_dK, self.dtype)
+            rdK.store(acc_dK.load().to(self.dtype))
+            rdV = cute.make_fragment_like(acc_dV, self.dtype)
+            rdV.store(acc_dV.load().to(self.dtype))
+
+            # Make sure all threads have finished reading sK and sV,
+            # before we overwrite smem with dK and dV
             cute.arch.barrier()
-            # smem copy atom for dKV
+
+            # R2S copy atom for dK/dV with universal `st.shared`
+            # layout_src_tv=(1,2):(0,1)
+            # layout_dst_tv=(1,2):(0,1)
             smem_copy_atom_dKV = cute.make_copy_atom(
                 cute.nvgpu.CopyUniversalOp(),
                 self.dtype,
                 num_bits_per_copy=2 * self.dtype.width,
             )
+
+            # R2S tiled copy of dK/dV with universal `st.shared`
+            # layout_src_tv_tiled=((4,8,8),(2,(2,2))):((256,1,16),(128,(8,1024)))
+            # layout_dst_tv_tiled=((4,8,8),(2,(2,2))):((256,1,16),(128,(8,1024)))
             smem_thr_copy_dKV = cute.make_tiled_copy_C(
                 smem_copy_atom_dKV, tiled_mma
             ).get_slice(tidx)
-            taccdVrdV = smem_thr_copy_dKV.retile(rdV)
-            taccdKrdK = smem_thr_copy_dKV.retile(rdK)
-            taccdVsdV = smem_thr_copy_dKV.partition_D(sdV)
-            taccdKsdK = smem_thr_copy_dKV.partition_D(sdK)
-            # copy acc O from rmem to smem with the smem copy atom
-            cute.copy(smem_copy_atom_dKV, taccdVrdV, taccdVsdV)
-            cute.copy(smem_copy_atom_dKV, taccdKrdK, taccdKsdK)
 
+            # Partition for R2S copy dK/dV
+            # taccdKrdK/taccdVrdV: (CPY_ATOM=(2,4),CPY_K1,CPY_HD8):((1,2),0,8)
+            # taccdKsdK/taccdVsdV: (CPY_ATOM=(2,(2,2)),CPY_K1,CPY_HD=((2,2),2)):((1,(512,-8)),0,((-16,-32),8192))
+            taccdKrdK: cute.Tensor = smem_thr_copy_dKV.retile(rdK)
+            taccdVrdV: cute.Tensor = smem_thr_copy_dKV.retile(rdV)
+            taccdKsdK = smem_thr_copy_dKV.partition_D(sdK)
+            taccdVsdV = smem_thr_copy_dKV.partition_D(sdV)
+
+            # R2S copy dK/dV
+            cute.copy(smem_copy_atom_dKV, taccdKrdK, taccdKsdK)
+            cute.copy(smem_copy_atom_dKV, taccdVrdV, taccdVsdV)
+
+            # Make gdK/gdV and rdK/rdV for R2G copy
             if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
                 mdK_cur, mdV_cur = [
                     t[batch_idx, None, head_idx_kv, None] for t in (mdK, mdV)
@@ -1957,24 +1974,37 @@ class FFABwdSm80:
                     for t in (mdK, mdV)
                 ]
 
+            # mdK/dV_cur: (sK,HD):(HD*nhK,1)
+            # gdK/dV: (tileK128,tileHD128):(HD*nhK,1)
             blkdK_shape = (self.n_block_size, self.head_dim_padded)
             blkdV_shape = (self.n_block_size, self.head_dim_v_padded)
             gdK = cute.local_tile(mdK_cur, blkdK_shape, (n_block, 0))
             gdV = cute.local_tile(mdV_cur, blkdV_shape, (n_block, 0))
+
+            # Partition for S2R copy dK/dV
+            # tdKsdK/tdVsdV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),2048,8192)
+            # tdKgdK/tdVgdV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),32768,64)
+            # tdKrdK/tdVrdV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),16,8)
             tdKsdK = gmem_thr_copy_dK.partition_S(sdK)
-            tdKgdK = gmem_thr_copy_dK.partition_D(gdK)
             tdVsdV = gmem_thr_copy_dV.partition_S(sdV)
+            tdKgdK = gmem_thr_copy_dK.partition_D(gdK)
             tdVgdV = gmem_thr_copy_dV.partition_D(gdV)
             tdKrdK = cute.make_fragment_like(tdKgdK, self.dtype)
             tdVrdV = cute.make_fragment_like(tdVgdV, self.dtype)
-            # sync before all smem stores are done.
+
+            # Make sure R2S copy of dK/dV is finished
+            # before we start S2R copy
             cute.arch.barrier()
-            # load acc dK and dV from smem to rmem for wider vectorization
-            # Need to check OOB when reading from smem if kBlockN isn't evenly tiled
-            # TODO
+
+            # S2R copy dK/dV from smem back to rmem for wider vectorization
+            # TODO: Need to check OOB when reading from smem if kBlockN isn't evenly tiled
             cute.autovec_copy(tdKsdK, tdKrdK)
             cute.autovec_copy(tdVsdV, tdVrdV)
 
+            # Make predicates of dK/dV for R2G copy
+            # cdK: (tileK128,tileHD128):(1@0,1@1)
+            # tdKcdK/t0dKcdK/tdVcdV/t0dVcdV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),32@0,64@1)
+            # tdKpdK/tdVpdV: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1)  => the same predicate along CPY_K
             cdK = cute.make_identity_tensor((self.n_block_size, self.head_dim_padded))
             tdKcdK = gmem_thr_copy_dK.partition_S(cdK)
             t0dKcdK = gmem_tiled_copy_dK.get_slice(0).partition_S(cdK)
@@ -1992,12 +2022,13 @@ class FFABwdSm80:
                 tdVpdV = tdKpdK
             else:
                 tdVpdV = cutedsl_utils.predicate_k(tdVcdV, limit=d_head_v)
-            # copy acc dK and acc_dV from rmem to gmem
-            for rest_m in cutlass.range_constexpr(cute.size(tdKrdK.shape[1])):
-                if (
-                    t0dKcdK[0, rest_m, 0][0]
-                    < seqlen_info.seqlen_k - n_block * self.n_block_size - tdKcdK[0][0]
-                ):
+
+            # R2G copy dK/dV
+            sk_limit = seqlen_info.seqlen_k - n_block * self.n_block_size
+            for rest_m in cutlass.range_constexpr(
+                cute.size(tdKrdK.shape[1])
+            ):  # loop over CPY_K
+                if t0dKcdK[0, rest_m, 0][0] < sk_limit - tdKcdK[0][0]:
                     cute.copy(
                         gmem_tiled_copy_dK,
                         tdKrdK[None, rest_m, None],
@@ -2006,11 +2037,10 @@ class FFABwdSm80:
                         if cutlass.const_expr(self.check_hdim_oob)
                         else None,
                     )
-            for rest_m in cutlass.range_constexpr(cute.size(tdVrdV.shape[1])):
-                if (
-                    t0dVcdV[0, rest_m, 0][0]
-                    < seqlen_info.seqlen_k - n_block * self.n_block_size - tdVcdV[0][0]
-                ):
+            for rest_m in cutlass.range_constexpr(
+                cute.size(tdVrdV.shape[1])
+            ):  # loop over CPY_K
+                if t0dVcdV[0, rest_m, 0][0] < sk_limit - tdVcdV[0][0]:
                     cute.copy(
                         gmem_tiled_copy_dV,
                         tdVrdV[None, rest_m, None],
@@ -2019,15 +2049,8 @@ class FFABwdSm80:
                         if cutlass.const_expr(self.check_hdim_v_oob)
                         else None,
                     )
-        else:  # qhead_per_kvhead > 1, do atomic add
-            # For Sm90, we need to sync to avoid racy writes to smem_q
-            # For Sm80, we don't need to sync since we're not touching smem
-            head_idx_kv = (
-                num_head // self.qhead_per_kvhead
-                if cutlass.const_expr(not self.pack_gqa)
-                else num_head
-            )
-
+        else:  # qhead_per_kvhead > 1 => atomic add
+            # Make fp32 gdK/gdV buffer for atomic add
             if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
                 mdK_cur, mdV_cur = [t[batch_idx, head_idx_kv, None] for t in (mdK, mdV)]
             else:
@@ -2039,18 +2062,27 @@ class FFABwdSm80:
                     (padded_offset_k * self.head_dim_v_padded,), mdV[head_idx_kv, None]
                 )
 
-            gdV = cute.local_tile(
-                mdV_cur, (self.n_block_size * self.head_dim_v_padded,), (n_block,)
-            )
+            # mdK/dV_cur: (sK*HD):(1)
+            # gdK/dV: (tileK128*tileHD128):(1)
             gdK = cute.local_tile(
                 mdK_cur, (self.n_block_size * self.head_dim_padded,), (n_block,)
             )
-            tdVgdVaccum = gmem_thr_copy_dV.partition_S(gdV)
+            gdV = cute.local_tile(
+                mdV_cur, (self.n_block_size * self.head_dim_v_padded,), (n_block,)
+            )
+
+            # tdKgdKaccum/tdVgdVaccum: (CPY_ATOM=(1,1),REST_V=(64)):((0,0),(256))
             tdKgdKaccum = gmem_thr_copy_dK.partition_S(gdK)
-            acc_dV_atomic = gmem_thr_copy_dV.retile(acc_dV)
-            acc_dK_atomic = gmem_thr_copy_dK.retile(acc_dK)
-            assert cute.size(acc_dV_atomic) == cute.size(tdVgdVaccum)
+            tdVgdVaccum = gmem_thr_copy_dV.partition_S(gdV)
+
+            # acc_dK/dV: (MMA_ATOM=(2,2),MMA_K1,MMA_HD16):((1,2),0,4)
+            # acc_dK/dV_atomic: (CPY_ATOM=(1,4),CPY_K1,CPY_HD16):((0,1),0,4)
+            acc_dK_atomic: cute.Tensor = gmem_thr_copy_dK.retile(acc_dK)
+            acc_dV_atomic: cute.Tensor = gmem_thr_copy_dV.retile(acc_dV)
             assert cute.size(acc_dK_atomic) == cute.size(tdKgdKaccum)
+            assert cute.size(acc_dV_atomic) == cute.size(tdVgdVaccum)
+
+            # R2G atomic add dK/dV to fp32 gmem buffer
             for i in cutlass.range(cute.size(acc_dV_atomic), unroll_full=True):
                 cutedsl_utils.atomic_add_fp32(
                     acc_dV_atomic[i], cutedsl_utils.elem_pointer(tdVgdVaccum, i)
@@ -2066,7 +2098,6 @@ class FFABwdSm80:
             if is_print_thread_and_tile:
                 prefix = "[bwd_sm80_epilogue] "
                 cute.printf("")
-                # common
                 cute.printf(prefix + f"qhead_per_kvhead={self.qhead_per_kvhead}")
                 cute.printf(
                     prefix + "n_block={}, head_idx_kv={}, batch_idx={}",
@@ -2080,21 +2111,45 @@ class FFABwdSm80:
                 cute.printf(prefix + "mdV_cur: {}", mdV_cur.layout)
                 cute.printf(prefix + "gdK: {}", gdK.layout)
                 cute.printf(prefix + "gdV: {}", gdV.layout)
-                # path-specific
+                cute.printf("")
+
                 if cutlass.const_expr(self.qhead_per_kvhead == 1):
                     cute.printf(prefix + "(smem store path)")
                     cute.printf(prefix + "rdK: {}", rdK.layout)
                     cute.printf(prefix + "rdV: {}", rdV.layout)
                     cute.printf(prefix + "sdK: {}", sdK.layout)
                     cute.printf(prefix + "sdV: {}", sdV.layout)
+                    cute.printf("")
+                    cute.printf(
+                        prefix
+                        + "smem_copy_atom_dKV: layout_src_tv={}, layout_dst_tv={}",
+                        smem_copy_atom_dKV.layout_src_tv,
+                        smem_copy_atom_dKV.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix
+                        + "smem_thr_copy_dKV: layout_src_tv_tiled={}, layout_dst_tv_tiled={}",
+                        smem_thr_copy_dKV.layout_src_tv_tiled,
+                        smem_thr_copy_dKV.layout_dst_tv_tiled,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "taccdKrdK: {}", taccdKrdK.layout)
+                    cute.printf(prefix + "taccdVrdV: {}", taccdVrdV.layout)
+                    cute.printf(prefix + "taccdKsdK: {}", taccdKsdK.layout)
+                    cute.printf(prefix + "taccdVsdV: {}", taccdVsdV.layout)
+                    cute.printf("")
                     cute.printf(prefix + "tdKsdK: {}", tdKsdK.layout)
                     cute.printf(prefix + "tdKgdK: {}", tdKgdK.layout)
                     cute.printf(prefix + "tdVsdV: {}", tdVsdV.layout)
                     cute.printf(prefix + "tdVgdV: {}", tdVgdV.layout)
                     cute.printf(prefix + "tdKrdK: {}", tdKrdK.layout)
                     cute.printf(prefix + "tdVrdV: {}", tdVrdV.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "cdK: {}", cdK.layout)
                     cute.printf(prefix + "tdKcdK: {}", tdKcdK.layout)
+                    cute.printf(prefix + "t0dKcdK: {}", t0dKcdK.layout)
                     cute.printf(prefix + "tdVcdV: {}", tdVcdV.layout)
+                    cute.printf(prefix + "t0dVcdV: {}", t0dVcdV.layout)
                     cute.printf(prefix + "tdKpdK: {}", tdKpdK.layout)
                     cute.printf(prefix + "tdVpdV: {}", tdVpdV.layout)
                 else:
