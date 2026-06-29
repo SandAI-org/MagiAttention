@@ -25,7 +25,7 @@ from magi_attention.env.general import is_profile_mode_enable, is_sanity_check_e
 from magi_attention.meta.collection.calc_meta import FA4AttnArg
 from magi_attention.utils import nvtx
 
-from ._flex_flash_attn_jit import get_ffa_jit_mod
+from ._flex_flash_attn_jit import _snapshot_env, get_ffa_jit_mod
 from .fa4 import fa4_bwd, fa4_fwd, is_fa4_installed
 
 is_magi_attn_ext_installed = False
@@ -266,6 +266,7 @@ def _flex_flash_attn_forward_compilable(
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
         k_block_size=_ffa_k_block_size,
+        _env_snapshot=_snapshot_env(),
     )
     # Call for side effects: out_, lse, max_logits are mutated in place (mutates_args).
     mod.fwd(
@@ -522,6 +523,7 @@ def _flex_flash_attn_backward_compilable(
         dkv_dtype=dk_type
         or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
         k_block_size=_ffa_k_block_size,
+        _env_snapshot=_snapshot_env(),
     )
 
     (
@@ -1027,22 +1029,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             swap_bwd_qk_loop = True  # LoopK: token-level K
         else:
             swap_bwd_qk_loop = False  # Dense/BlockSparse default: LoopQ
-
-        # SM utilization guard: LoopQ's outer loop = K-tiles. When K-tiles < ~75% of
-        # available SMs, many SMs sit idle → switch to LoopK whose outer loop = Q-tiles
-        # (typically much more numerous). Only applies when user didn't explicitly choose.
-        if ctx.swap_bwd_qk_loop is None and not swap_bwd_qk_loop:
-            _SM_UTIL_RATIO = 0.75
-            num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
-            _KBLOCK_N = 128
-            if ctx.index_sparse and index_sparse_indices_2d is not None:
-                n_k_tiles = index_sparse_indices_2d.shape[-1]
-            elif ctx.index_sparse and ctx.k_block_size >= _KBLOCK_N:
-                n_k_tiles = q.shape[0] // _KBLOCK_N
-            else:
-                n_k_tiles = q.shape[0] // _KBLOCK_N
-            if n_k_tiles < int(num_sms * _SM_UTIL_RATIO):
-                swap_bwd_qk_loop = True
 
         if ctx.disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
             raise RuntimeError(

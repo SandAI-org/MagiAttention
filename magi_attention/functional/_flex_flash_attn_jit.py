@@ -483,14 +483,14 @@ def get_ffa_jit_spec(
     # Each distinct combo produces a separate JIT URI → separate .so cache.
     if direction == "bwd":
         for _env_name, _tpl_key, _uri_key in [
-            ("MAGI_BWD_TILE_M", "bwd_tile_m", "tm"),
-            ("MAGI_BWD_TILE_N", "bwd_tile_n", "tn"),
-            ("MAGI_BWD_STAGES", "bwd_stages", "stg"),
-            ("MAGI_BWD_STAGES_DS", "bwd_stages_ds", "stds"),
-            ("MAGI_BWD_STAGES_V", "bwd_stages_v", "stv"),
-            ("MAGI_BWD_SCATTER_PAD", "bwd_scatter_pad", "sp"),
-            ("MAGI_BWD_LSE_UNION", "bwd_lse_union", "lu"),
-            ("MAGI_BWD_DKVACC_BYPASS", "bwd_dkvacc_bypass", "db"),
+            ("MAGI_ATTENTION_FFA_BWD_TILE_M", "bwd_tile_m", "tm"),
+            ("MAGI_ATTENTION_FFA_BWD_TILE_N", "bwd_tile_n", "tn"),
+            ("MAGI_ATTENTION_FFA_BWD_STAGES", "bwd_stages", "stg"),
+            ("MAGI_ATTENTION_FFA_BWD_STAGES_DS", "bwd_stages_ds", "stds"),
+            ("MAGI_ATTENTION_FFA_BWD_STAGES_V", "bwd_stages_v", "stv"),
+            ("MAGI_ATTENTION_FFA_BWD_SCATTER_PAD", "bwd_scatter_pad", "sp"),
+            ("MAGI_ATTENTION_FFA_BWD_LSE_UNION", "bwd_lse_union", "lu"),
+            ("MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS", "bwd_dkvacc_bypass", "db"),
         ]:
             _val = os.environ.get(_env_name)
             if _val is not None:
@@ -499,7 +499,7 @@ def get_ffa_jit_spec(
                 uri += f"_{_uri_key}{_uri_val}"
 
         # Default LseDpsumUnion=1 for LoopQ (saves ~5 producer spills, zero perf cost).
-        # Env MAGI_BWD_LSE_UNION overrides (handled above); only set default if not overridden.
+        # Env MAGI_ATTENTION_FFA_BWD_LSE_UNION overrides (handled above); only set default if not overridden.
         if "bwd_lse_union" not in extra_template_args and not swap_bwd_qk_loop:
             extra_template_args["bwd_lse_union"] = "1"
             uri += "_lu1"
@@ -674,6 +674,37 @@ def get_ffa_jit_spec(
     return spec, uri
 
 
+_ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
+    "MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP",
+    "MAGI_ATTENTION_FFA_USE_MASK_DISPATCH",
+    "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN",
+    "MAGI_ATTENTION_FFA_MASK_MODE",
+    "MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER",
+    "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE",
+    "MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE",
+    "MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD",
+    "MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS",
+    "MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS",
+    "MAGI_ATTENTION_FFA_BWD_TILE_M",
+    "MAGI_ATTENTION_FFA_BWD_TILE_N",
+    "MAGI_ATTENTION_FFA_BWD_STAGES",
+    "MAGI_ATTENTION_FFA_BWD_STAGES_DS",
+    "MAGI_ATTENTION_FFA_BWD_STAGES_V",
+    "MAGI_ATTENTION_FFA_BWD_SCATTER_PAD",
+    "MAGI_ATTENTION_FFA_BWD_LSE_UNION",
+    "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
+)
+
+
+def _snapshot_env() -> tuple[tuple[str, str | None], ...]:
+    """Capture all env vars that affect kernel compilation into a hashable tuple.
+
+    Passed as ``_env_snapshot`` to ``get_ffa_jit_mod`` so that ``lru_cache``
+    sees different keys when env vars change between calls.
+    """
+    return tuple((k, os.environ.get(k)) for k in _ENV_KEYS_AFFECTING_COMPILATION)
+
+
 def get_ffa_jit_mod(
     direction: Literal["fwd", "bwd"],
     head_dim: int,
@@ -696,6 +727,7 @@ def get_ffa_jit_mod(
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
     k_block_size: int = 1,
+    _env_snapshot: tuple[tuple[str, str | None], ...] = (),
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
