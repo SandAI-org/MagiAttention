@@ -116,7 +116,7 @@ class FFAFwdSm80:
         self.tile_m = tile_m  # tileQ128
         self.tile_n = tile_n  # tileK64
 
-        self.num_threads = num_threads  # 128
+        self.num_threads = num_threads  # 128 (1 WG)
         self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 4
         self.num_producer_threads = self.num_threads
         self.num_Q_load_threads = self.num_threads

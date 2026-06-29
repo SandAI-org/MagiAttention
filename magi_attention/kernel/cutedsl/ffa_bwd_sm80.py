@@ -109,21 +109,23 @@ class FFABwdSm80:
         self.qhead_per_kvhead = qhead_per_kvhead
         self.m_block_size = m_block_size
         self.n_block_size = n_block_size
-        self.num_threads = num_threads
+        self.num_threads = num_threads  # 256 (2 WGs)
+        self.num_mma_warps = self.num_threads // cute.arch.WARP_SIZE  # 8
+
         self.pack_gqa = pack_gqa
         self.mask_type = mask_type
         self.num_stages_Q = num_stages_Q
         self.num_stages_dO = num_stages_dO
+
         self.SdP_swapAB = SdP_swapAB
         self.dKV_swapAB = dKV_swapAB
         self.dQ_swapAB = dQ_swapAB
         self.AtomLayoutMSdP = AtomLayoutMSdP
         self.AtomLayoutNdKV = AtomLayoutNdKV
         self.AtomLayoutMdQ = AtomLayoutMdQ
-        num_mma_warps = self.num_threads // cute.arch.WARP_SIZE
         self.Mma_dKV_is_RS = (
             AtomLayoutMSdP == 1
-            and AtomLayoutNdKV == num_mma_warps
+            and AtomLayoutNdKV == self.num_mma_warps
             and SdP_swapAB
             and not dKV_swapAB
         )
@@ -145,7 +147,8 @@ class FFABwdSm80:
             )
             print(f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.pack_gqa=}")
             print(
-                f"{prefix}{self.m_block_size=} | {self.n_block_size=} | {self.num_threads=}"
+                f"{prefix}{self.m_block_size=} | {self.n_block_size=} | "
+                + f"{self.num_threads=} | {self.num_mma_warps=}"
             )
             print(f"{prefix}{self.num_stages_Q=} | {self.num_stages_dO=}")
             print(
@@ -251,6 +254,146 @@ class FFABwdSm80:
         if cutlass.const_expr(mSeqUsedK_type not in [None, cutlass.Int32]):
             raise TypeError("SeqUsedK tensor must be Int32")
         assert mQ_type == self.dtype
+
+    def _get_tiled_mma(self):
+        # Tiled MMA for S=Q*K.T / dP = dO*V.T
+        # Thr Layout VMNK: (32,1,8,1):(1,0,32,0)
+        # Permutation MNK: (16:1,128:1,16:1)
+        # MMA Atom
+        # ThrID:           32:1
+        # Shape MNK:       (16,8,16)
+        # TV Layout A:     ((4,8),(2,2,2)):((32,1),(16,8,128))
+        # TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
+        # TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
+        AtomLayoutSdP = (  # (1, 8, 1) or (8, 1, 1) if SdP_swapAB
+            (self.AtomLayoutMSdP, self.num_mma_warps // self.AtomLayoutMSdP, 1)
+            if cutlass.const_expr(not self.SdP_swapAB)
+            else (self.num_mma_warps // self.AtomLayoutMSdP, self.AtomLayoutMSdP, 1)
+        )
+        tiled_mma_sdp = cute.make_tiled_mma(
+            warp.MmaF16BF16Op(self.dtype, cutlass.Float32, (16, 8, 16)),
+            AtomLayoutSdP,
+            # (16, 128, 16) or (128, 16, 16) if SdP_swapAB
+            permutation_mnk=(AtomLayoutSdP[0] * 16, AtomLayoutSdP[1] * 16, 16),
+        )
+
+        # Tiled MMA for dK=dS.T*Q / dV=P.T*dO
+        # Thr Layout VMNK: (32,8,1,1):(1,32,0,0)
+        # Permutation MNK: (128:1,16:1,16:1)
+        # MMA Atom
+        # ThrID:           32:1
+        # Shape MNK:       (16,8,16)
+        # TV Layout A:     ((4,8),(2,2,2)):((32,1),(16,8,128))
+        # TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
+        # TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
+        AtomLayoutdKV = (  # (8, 1, 1) or (1, 8, 1) if dKV_swapAB
+            (self.AtomLayoutNdKV, self.num_mma_warps // self.AtomLayoutNdKV, 1)
+            if cutlass.const_expr(not self.dKV_swapAB)
+            else (self.num_mma_warps // self.AtomLayoutNdKV, self.AtomLayoutNdKV, 1)
+        )
+        tiled_mma_dkv = cute.make_tiled_mma(
+            warp.MmaF16BF16Op(self.dtype, cutlass.Float32, (16, 8, 16)),
+            AtomLayoutdKV,
+            # (128, 16, 16) or (16, 128, 16) if dKV_swapAB
+            permutation_mnk=(AtomLayoutdKV[0] * 16, AtomLayoutdKV[1] * 16, 16),
+        )
+
+        # Tiled MMA for dQ=dS*K
+        # Thr Layout VMNK: (32,1,8,1):(1,0,32,0)
+        # Permutation MNK: (16:1,128:1,16:1)
+        # MMA Atom
+        # ThrID:           32:1
+        # Shape MNK:       (16,8,16)
+        # TV Layout A:     ((4,8),(2,2,2)):((32,1),(16,8,128))
+        # TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
+        # TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
+        AtomLayoutdQ = (  # (1, 8, 1) or (8, 1, 1) if dQ_swapAB
+            (self.AtomLayoutMdQ, self.num_mma_warps // self.AtomLayoutMdQ, 1)
+            if cutlass.const_expr(not self.dQ_swapAB)
+            else (self.num_mma_warps // self.AtomLayoutMdQ, self.AtomLayoutMdQ, 1)
+        )
+        tiled_mma_dq = cute.make_tiled_mma(
+            warp.MmaF16BF16Op(self.dtype, cutlass.Float32, (16, 8, 16)),
+            AtomLayoutdQ,
+            # (16, 128, 16) or (128, 16, 16) if dQ_swapAB
+            permutation_mnk=(AtomLayoutdQ[0] * 16, AtomLayoutdQ[1] * 16, 16),
+        )
+
+        # --- Debug print ---
+
+        if cutlass.const_expr(self.debug_print):
+            prefix = "[bwd_sm80_get_tiled_mma] "
+            print()
+            print(f"{prefix}AtomLayoutSdP: {AtomLayoutSdP}")
+            print(f"{prefix}AtomLayoutdKV: {AtomLayoutdKV}")
+            print(f"{prefix}AtomLayoutdQ: {AtomLayoutdQ}")
+            print()
+            print(f"{prefix}tiled_mma_sdp: {tiled_mma_sdp}")
+            print()
+            print(f"{prefix}tiled_mma_dkv: {tiled_mma_dkv}")
+            print()
+            print(f"{prefix}tiled_mma_dq: {tiled_mma_dq}")
+            print()
+
+        return tiled_mma_sdp, tiled_mma_dkv, tiled_mma_dq
+
+    def _get_shared_storage_cls(self):
+        sQ_struct, sK_struct, sV_struct, sdO_struct = [
+            cute.struct.Align[
+                cute.struct.MemRange[self.dtype, cute.cosize(layout)], 1024
+            ]
+            for layout in (
+                self.sQ_layout,
+                self.sK_layout,
+                self.sV_layout,
+                self.sdO_layout,
+            )
+        ]
+        cosize_sQV = max(cute.cosize(self.sQ_layout), cute.cosize(self.sV_layout))
+        sQV_struct = cute.struct.Align[
+            cute.struct.MemRange[self.dtype, cosize_sQV], 1024
+        ]
+        sLSE_struct, sdPsum_struct = [
+            cute.struct.Align[
+                cute.struct.MemRange[cutlass.Float32, cute.cosize(layout)], 128
+            ]
+            for layout in (self.sLSE_layout, self.sLSE_layout)
+        ]
+        sP_struct, sdS_struct = [
+            cute.struct.Align[
+                cute.struct.MemRange[self.dtype, cute.cosize(layout)], 128
+            ]
+            for layout in (self.sPdS_layout, self.sPdS_layout)
+        ]
+
+        @cute.struct
+        class SharedStorageSeparateQV:
+            sK: sK_struct
+            sV: sV_struct
+            sQ: sQ_struct
+            sdO: sdO_struct
+            sLSE: sLSE_struct
+            sdPsum: sdPsum_struct
+            sP: sP_struct
+            sdS: sdS_struct
+            # TODO: the case where there's no sP
+
+        @cute.struct
+        class SharedStorageSharedQV:
+            sK: sK_struct
+            sV: sV_struct
+            sQ: sQV_struct
+            sdO: sdO_struct
+            sLSE: sLSE_struct
+            sdPsum: sdPsum_struct
+            sP: sP_struct
+            sdS: sdS_struct
+
+        return (
+            SharedStorageSeparateQV
+            if cutlass.const_expr(not self.share_QV_smem)
+            else SharedStorageSharedQV
+        )
 
     def _setup_attributes(self):
         # --- Set up tiled MMA ---
@@ -410,99 +553,6 @@ class FFABwdSm80:
         if cutlass.const_expr(self.qhead_per_kvhead > 1):
             self.gmem_tiled_copy_dK = self.gmem_tiled_copy_dQaccum
             self.gmem_tiled_copy_dV = self.gmem_tiled_copy_dQaccum
-
-    def _get_tiled_mma(self):
-        num_mma_warps = self.num_threads // 32
-        AtomLayoutSdP = (
-            (self.AtomLayoutMSdP, num_mma_warps // self.AtomLayoutMSdP, 1)
-            if cutlass.const_expr(not self.SdP_swapAB)
-            else (num_mma_warps // self.AtomLayoutMSdP, self.AtomLayoutMSdP, 1)
-        )
-        tiled_mma_sdp = cute.make_tiled_mma(
-            warp.MmaF16BF16Op(self.dtype, cutlass.Float32, (16, 8, 16)),
-            AtomLayoutSdP,
-            permutation_mnk=(AtomLayoutSdP[0] * 16, AtomLayoutSdP[1] * 16, 16),
-        )
-        AtomLayoutdKV = (
-            (self.AtomLayoutNdKV, num_mma_warps // self.AtomLayoutNdKV, 1)
-            if cutlass.const_expr(not self.dKV_swapAB)
-            else (num_mma_warps // self.AtomLayoutNdKV, self.AtomLayoutNdKV, 1)
-        )
-        tiled_mma_dkv = cute.make_tiled_mma(
-            warp.MmaF16BF16Op(self.dtype, cutlass.Float32, (16, 8, 16)),
-            AtomLayoutdKV,
-            permutation_mnk=(AtomLayoutdKV[0] * 16, AtomLayoutdKV[1] * 16, 16),
-        )
-        AtomLayoutdQ = (
-            (self.AtomLayoutMdQ, num_mma_warps // self.AtomLayoutMdQ, 1)
-            if cutlass.const_expr(not self.dQ_swapAB)
-            else (num_mma_warps // self.AtomLayoutMdQ, self.AtomLayoutMdQ, 1)
-        )
-        tiled_mma_dq = cute.make_tiled_mma(
-            warp.MmaF16BF16Op(self.dtype, cutlass.Float32, (16, 8, 16)),
-            AtomLayoutdQ,
-            permutation_mnk=(AtomLayoutdQ[0] * 16, AtomLayoutdQ[1] * 16, 16),
-        )
-
-        return tiled_mma_sdp, tiled_mma_dkv, tiled_mma_dq
-
-    def _get_shared_storage_cls(self):
-        sQ_struct, sK_struct, sV_struct, sdO_struct = [
-            cute.struct.Align[
-                cute.struct.MemRange[self.dtype, cute.cosize(layout)], 1024
-            ]
-            for layout in (
-                self.sQ_layout,
-                self.sK_layout,
-                self.sV_layout,
-                self.sdO_layout,
-            )
-        ]
-        cosize_sQV = max(cute.cosize(self.sQ_layout), cute.cosize(self.sV_layout))
-        sQV_struct = cute.struct.Align[
-            cute.struct.MemRange[self.dtype, cosize_sQV], 1024
-        ]
-        sLSE_struct, sdPsum_struct = [
-            cute.struct.Align[
-                cute.struct.MemRange[cutlass.Float32, cute.cosize(layout)], 128
-            ]
-            for layout in (self.sLSE_layout, self.sLSE_layout)
-        ]
-        sP_struct, sdS_struct = [
-            cute.struct.Align[
-                cute.struct.MemRange[self.dtype, cute.cosize(layout)], 128
-            ]
-            for layout in (self.sPdS_layout, self.sPdS_layout)
-        ]
-
-        @cute.struct
-        class SharedStorageSeparateQV:
-            sK: sK_struct
-            sV: sV_struct
-            sQ: sQ_struct
-            sdO: sdO_struct
-            sLSE: sLSE_struct
-            sdPsum: sdPsum_struct
-            sP: sP_struct
-            sdS: sdS_struct
-            # TODO: the case where there's no sP
-
-        @cute.struct
-        class SharedStorageSharedQV:
-            sK: sK_struct
-            sV: sV_struct
-            sQ: sQV_struct
-            sdO: sdO_struct
-            sLSE: sLSE_struct
-            sdPsum: sdPsum_struct
-            sP: sP_struct
-            sdS: sdS_struct
-
-        return (
-            SharedStorageSeparateQV
-            if cutlass.const_expr(not self.share_QV_smem)
-            else SharedStorageSharedQV
-        )
 
     @cute.jit
     def __call__(
