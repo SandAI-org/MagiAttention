@@ -523,9 +523,6 @@ class FFABwdSm80:
             (self.num_threads // tQK_shape_dim_1, tQK_shape_dim_1),
             order=(1, 0),
         )
-        # TODO(REVIEW): Do we need to check if we overshot kBlockM/kBlockN when we load Q/K ?
-        self.is_even_m_smem_q = self.m_block_size % tQK_layout.shape[0] == 0
-        self.is_even_n_smem_k = self.n_block_size % tQK_layout.shape[0] == 0
 
         # tV/tdO: (32,8):(8,1)
         tVdO_shape_dim_1 = sV_layout_atom.outer.shape[1] // async_copy_elems
@@ -536,9 +533,6 @@ class FFABwdSm80:
             (self.num_threads // tVdO_shape_dim_1, tVdO_shape_dim_1),
             order=(1, 0),
         )
-        # TODO(REVIEW): Do we need to check if we overshot kBlockN when we load V ?
-        self.is_even_n_smem_v = self.n_block_size % tVdO_layout.shape[0] == 0
-        self.is_even_m_smem_do = self.m_block_size % tVdO_layout.shape[0] == 0
 
         # G2S async tiled_copy_QKVdO:
         # layout_src_tv_tiled=((8,32),(8,1)):((256,1),(32,0))
@@ -598,10 +592,6 @@ class FFABwdSm80:
             print(f"{prefix}sLSE_layout: {self.sLSE_layout}")
             print(f"{prefix}sLSEMma_layout: {self.sLSEMma_layout}")
             print()
-            print(
-                f"{prefix}{self.is_even_m_smem_q=} | {self.is_even_n_smem_k=} | "
-                f"{self.is_even_n_smem_v=} | {self.is_even_m_smem_do=}"
-            )
             print(f"{prefix}tQK_layout: {tQK_layout}")
             print(f"{prefix}tVdO_layout: {tVdO_layout}")
             print(f"{prefix}vQKVdO_layout: {vQKVdO_layout}")
@@ -1248,7 +1238,7 @@ class FFABwdSm80:
         # cQ: (tileQ64,tileHD128):(1@0,1@1)
         # tQcQ/t0QcQ/tdOcdO/t0dOcdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2):((1@1,0),32@0,64@1)
         # cLSE: (tileQ64):(1@0)
-        # tLSEcLSE: (CPY_ATOM=(4,1),CPY_Q=(1)):((1@0,0),(0))
+        # tLSEcLSE/tdPsumcdPsum: (CPY_ATOM=(4,1),CPY_Q=(1)):((1@0,0),(0))
         cQ = cute.make_identity_tensor((self.m_block_size, self.head_dim_padded))
         tQcQ = gmem_thr_copy_QK.partition_S(cQ)
         t0QcQ = gmem_thr_copy_QK.get_slice(0).partition_S(cQ)
@@ -1261,6 +1251,7 @@ class FFABwdSm80:
             t0dOcdO = gmem_thr_copy_VdO.get_slice(0).partition_S(cdO)
         cLSE = cute.make_identity_tensor((self.m_block_size,))
         tLSEcLSE = gmem_thr_copy_lse.partition_S(cLSE)
+        tdPsumcdPsum = tLSEcLSE
 
         # tQpQ/tdOpdO: (ATOM_REST_V1,CPY_Q2,CPY_HD2):(2,0,1) => the same predicate along CPY_Q
         tQpQ = cutedsl_utils.predicate_k(tQcQ, limit=d_head)
@@ -1300,7 +1291,7 @@ class FFABwdSm80:
             tdOpdO,
             tLSEgdPsum,
             tLSEsdPsum,
-            tLSEcLSE,
+            tdPsumcdPsum,
             seqlen=seqlen_info.seqlen_q,
         )
 
@@ -1481,6 +1472,7 @@ class FFABwdSm80:
                 cute.printf(prefix + "t0dOcdO: {}", t0dOcdO.layout)
                 cute.printf(prefix + "cLSE: {}", cLSE.layout)
                 cute.printf(prefix + "tLSEcLSE: {}", tLSEcLSE.layout)
+                cute.printf(prefix + "tdPsumcdPsum: {}", tdPsumcdPsum.layout)
                 cute.printf(prefix + "tQpQ: {}", tQpQ.layout)
                 cute.printf(prefix + "tdOpdO: {}", tdOpdO.layout)
                 cute.printf("")
@@ -2069,22 +2061,32 @@ class FFABwdSm80:
         headdim: cutlass.Int32,
         is_print_thread_and_tile: bool = False,
     ):
+        # TODO(REVIEW): Do we need to check if we overshot kBlockM/kBlockN when we load Q/K ?
+        is_even_n_smem_k = self.n_block_size % gmem_thr_copy.tiler_mn[0].shape == 0
+
+        # tKgK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),8192,64)
+        # tKsK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),2048,8192)
+
+        # cK: (tileK128,tileHD128):(1@0,1@1)
+        # tKcK/t0KcK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),32@0,64@1)
+        # tKpK: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1) => the same predicate along CPY_K
         cK = cute.make_identity_tensor((self.n_block_size, self.head_dim_padded))
-        tKcK = gmem_thr_copy.partition_S(cK)
+        tKcK: cute.Tensor = gmem_thr_copy.partition_S(cK)
         t0KcK = gmem_thr_copy.get_slice(0).partition_S(cK)
         tKpK = cutedsl_utils.predicate_k(tKcK, limit=headdim)
+
+        sk_limit = seqlen - block * self.n_block_size
         for n in cutlass.range_constexpr(cute.size(tKsK.shape[1])):
             # If kBlockN doesn't evenly divide the tiled copy, only the last `n` needs to be checked
             if (
-                self.is_even_n_smem_k
+                is_even_n_smem_k
                 or n < cute.size(tKsK.shape[1]) - 1
                 or tKcK[0, n, 0][0] < self.n_block_size
             ):
-                # Instead of using tKcK, we using t0KcK and subtract the offset from the limit
-                # (seqlen - block * kBlockN). This is because the entries of t0KcK are known at compile time.
-                predicate_n = (
-                    t0KcK[0, n, 0][0] < seqlen - block * self.n_block_size - tKcK[0][0]
-                )
+                # NOTE: Instead of using `tKcK[0, n, 0][0] < sk_limit`,
+                # we use t0KcK to compare with `sk_limit - tKcK[0][0]`
+                # to make the left hand side a compile-time constant expression.
+                predicate_n = t0KcK[0, n, 0][0] < sk_limit - tKcK[0][0]
                 predicate = cute.make_fragment_like(tKpK[None, 0, None])
                 for k in cutlass.range_constexpr(cute.size(predicate.shape[1])):
                     for i in cutlass.range_constexpr(cute.size(predicate.shape[0])):
@@ -2093,13 +2095,16 @@ class FFABwdSm80:
                             if cutlass.const_expr(self.check_hdim_oob)
                             else True
                         ) and predicate_n
+
                 cute.copy(
                     gmem_thr_copy,
                     tKgK[None, n, None],
                     tKsK[None, n, None],
                     pred=predicate,
                 )
-            # We need to clear the sK smem tiles since we'll use sKt for mma_dq
+
+            # NOTE: We need to clear the sK smem tiles
+            # since we'll use sKt for mma_dq
 
         # --- Debug print ---
 
@@ -2113,8 +2118,15 @@ class FFABwdSm80:
                     seqlen,
                     headdim,
                 )
+                cute.printf(
+                    prefix + "sk_limit={}, is_even_n_smem_k={}",
+                    sk_limit,
+                    is_even_n_smem_k,
+                )
+                cute.printf("")
                 cute.printf(prefix + "tKgK: {}", tKgK.layout)
                 cute.printf(prefix + "tKsK: {}", tKsK.layout)
+                cute.printf(prefix + "cK: {}", cK.layout)
                 cute.printf(prefix + "tKcK: {}", tKcK.layout)
                 cute.printf(prefix + "t0KcK: {}", t0KcK.layout)
                 cute.printf(prefix + "tKpK: {}", tKpK.layout)
@@ -2131,22 +2143,32 @@ class FFABwdSm80:
         headdim: cutlass.Int32,
         is_print_thread_and_tile: bool = False,
     ):
+        # TODO(REVIEW): Do we need to check if we overshot kBlockN when we load V ?
+        is_even_n_smem_v = self.n_block_size % gmem_thr_copy.tiler_mn[0].shape == 0
+
+        # tVgV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),8192,64)
+        # tVsV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),2048,8192)
+
+        # cV: (tileK128,tileHD128):(1@0,1@1)
+        # tVcV/t0VcV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),32@0,64@1)
+        # tVpV: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1) => the same predicate along CPY_K
         cV = cute.make_identity_tensor((self.n_block_size, self.head_dim_v_padded))
-        tVcV = gmem_thr_copy.partition_S(cV)
+        tVcV: cute.Tensor = gmem_thr_copy.partition_S(cV)
         t0VcV = gmem_thr_copy.get_slice(0).partition_S(cV)
         tVpV = cutedsl_utils.predicate_k(tVcV, limit=headdim)
+
+        sk_limit = seqlen - block * self.n_block_size
         for n in cutlass.range_constexpr(cute.size(tVsV.shape[1])):
             # If kBlockN doesn't evenly divide the tiled copy, only the last `n` needs to be checked
             if (
-                self.is_even_n_smem_v
+                is_even_n_smem_v
                 or n < cute.size(tVsV.shape[1]) - 1
                 or tVcV[0, n, 0][0] < self.n_block_size
             ):
-                # Instead of using tVcV, we using t0VcV and subtract the offset from the limit
-                # (seqlen - block * kBlockN). This is because the entries of t0VcV are known at compile time.
-                predicate_n = (
-                    t0VcV[0, n, 0][0] < seqlen - block * self.n_block_size - tVcV[0][0]
-                )
+                # NOTE: Instead of using `tVcV[0, n, 0][0] < sk_limit`,
+                # we use t0VcV to compare with `sk_limit - tVcV[0][0]`
+                # to make the left hand side a compile-time constant expression.
+                predicate_n = t0VcV[0, n, 0][0] < sk_limit - tVcV[0][0]
                 predicate = cute.make_fragment_like(tVpV[None, 0, None])
                 for k in cutlass.range_constexpr(cute.size(predicate.shape[1])):
                     for i in cutlass.range_constexpr(cute.size(predicate.shape[0])):
@@ -2174,6 +2196,13 @@ class FFABwdSm80:
                     seqlen,
                     headdim,
                 )
+                cute.printf(
+                    prefix + "sk_limit={}, is_even_n_smem_v={}",
+                    sk_limit,
+                    is_even_n_smem_v,
+                )
+                cute.printf("")
+                cute.printf(prefix + "cV: {}", cV.layout)
                 cute.printf(prefix + "tVgV: {}", tVgV.layout)
                 cute.printf(prefix + "tVsV: {}", tVsV.layout)
                 cute.printf(prefix + "tVcV: {}", tVcV.layout)
@@ -2199,18 +2228,29 @@ class FFABwdSm80:
         seqlen: cutlass.Int32,
         is_print_thread_and_tile: bool = False,
     ):
+        # TODO(REVIEW): Do we need to check if we overshot kBlockM when we load Q ?
+        is_even_m_smem_q = self.m_block_size % gmem_tiled_copy_Q.tiler_mn[0].shape == 0
+
+        # tQgQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,restQ):((1,0),32768,64,65536)
+        # tQsQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,STAGE=(1,1)):((1,0),2048,4096,(0,0))
+        # tQcQ/t0QcQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2):((1@1,0),32@0,64@1)
+        # tQpQ: (ATOM_REST_V1,CPY_Q2,CPY_HD2):(2,0,1) => the same predicate along CPY_Q
+        # tLSEgLSE: (CPY_ATOM=(4,1),CPY_Q1,restQ):((1,0),0,64)
+        # tLSEsLSE: (CPY_ATOM=(4,1),CPY_Q1,STAGE1):((1,0),0,64)
+        # tLSEcLSE: (CPY_ATOM=(4,1),CPY_Q=(1)):((1@0,0),(0))
+
+        sq_limit = seqlen - block * self.m_block_size
         for m in cutlass.range_constexpr(cute.size(tQsQ.shape[1])):
             # If kBlockM doesn't evenly divide the tiled copy, only the last `m` needs to be checked
             if (
-                self.is_even_m_smem_q
+                is_even_m_smem_q
                 or m < cute.size(tQsQ.shape[1]) - 1
                 or tQcQ[0, m, 0][0] < self.m_block_size
             ):
-                # Instead of using tQcQ, we using t0QcQ and subtract the offset from the limit
-                # (seqlen - block * kBlockM). This is because the entries of t0QcQ are known at compile time.
-                predicate_m = (
-                    t0QcQ[0, m, 0][0] < seqlen - block * self.m_block_size - tQcQ[0][0]
-                )
+                # NOTE: Instead of using `tQcQ[0, m, 0][0] < sq_limit`,
+                # we use t0QcQ to compare with `sq_limit - tQcQ[0][0]`
+                # to make the left hand side a compile-time constant expression.
+                predicate_m = t0QcQ[0, m, 0][0] < sq_limit - tQcQ[0][0]
                 predicate = cute.make_fragment_like(tQpQ[None, 0, None])
                 for k in cutlass.range_constexpr(cute.size(predicate.shape[1])):
                     for i in cutlass.range_constexpr(cute.size(predicate.shape[0])):
@@ -2261,6 +2301,12 @@ class FFABwdSm80:
                     smem_pipe_write_q,
                     seqlen,
                 )
+                cute.printf(
+                    prefix + "sq_limit={}, is_even_m_smem_q={}",
+                    sq_limit,
+                    is_even_m_smem_q,
+                )
+                cute.printf("")
                 cute.printf(prefix + "tQgQ: {}", tQgQ.layout)
                 cute.printf(prefix + "tQsQ: {}", tQsQ.layout)
                 cute.printf(prefix + "tQcQ: {}", tQcQ.layout)
@@ -2289,19 +2335,31 @@ class FFABwdSm80:
         seqlen: cutlass.Int32,
         is_print_thread_and_tile: bool = False,
     ):
+        # TODO(REVIEW): Do we need to check if we overshot kBlockM when we load dO ?
+        is_even_m_smem_do = (
+            self.m_block_size % gmem_tiled_copy_dO.tiler_mn[0].shape == 0
+        )
+
+        # tdOgdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,restQ):((1,0),32768,64,65536)
+        # tdOsdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,STAGE=(1,1)):((1,0),2048,4096,(0,0))
+        # tdOcdO/t0dOcdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2):((1@1,0),32@0,64@1)
+        # tdOpdO: (ATOM_REST_V1,CPY_Q2,CPY_HD2):(2,0,1) => the same predicate along CPY_Q
+        # tLSEgdPsum: (CPY_ATOM=(4,1),CPY_Q1,restQ):((1,0),0,64)
+        # tLSEsdPsum: (CPY_ATOM=(4,1),CPY_Q1,STAGE1):((1,0),0,64)
+        # tdPsumcdPsum: (CPY_ATOM=(4,1),CPY_Q=(1)):((1@0,0),(0))
+
+        sq_limit = seqlen - block * self.m_block_size
         for m in cutlass.range_constexpr(cute.size(tdOsdO.shape[1])):
             # If kBlockM doesn't evenly divide the tiled copy, only the last `m` needs to be checked
             if (
-                self.is_even_m_smem_do
+                is_even_m_smem_do
                 or m < cute.size(tdOsdO.shape[1]) - 1
                 or tdOcdO[0, m, 0][0] < self.m_block_size
             ):
-                # Instead of using tdOcdO, we using t0dOcdO and subtract the offset from the limit
-                # (seqlen - block * kBlockM). This is because the entries of t0dOcdO are known at compile time.
-                predicate_m = (
-                    t0dOcdO[0, m, 0][0]
-                    < seqlen - block * self.m_block_size - tdOcdO[0][0]
-                )
+                # NOTE: Instead of using `tdOcdO[0, m, 0][0] < sq_limit`,
+                # we use t0dOcdO to compare with `sq_limit - tdOcdO[0][0]`
+                # to make the left hand side a compile-time constant expression.
+                predicate_m = t0dOcdO[0, m, 0][0] < sq_limit - tdOcdO[0][0]
                 predicate = cute.make_fragment_like(tdOpdO[None, 0, None])
                 for k in cutlass.range_constexpr(cute.size(predicate.shape[1])):
                     for i in cutlass.range_constexpr(cute.size(predicate.shape[0])):
@@ -2352,6 +2410,12 @@ class FFABwdSm80:
                     smem_pipe_write_q,
                     seqlen,
                 )
+                cute.printf(
+                    prefix + "sq_limit={}, is_even_m_smem_do={}",
+                    sq_limit,
+                    is_even_m_smem_do,
+                )
+                cute.printf("")
                 cute.printf(prefix + "tdOgdO: {}", tdOgdO.layout)
                 cute.printf(prefix + "tdOsdO: {}", tdOsdO.layout)
                 cute.printf(prefix + "tdOcdO: {}", tdOcdO.layout)

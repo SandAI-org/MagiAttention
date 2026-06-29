@@ -1389,6 +1389,7 @@ class FFAFwdSm80:
         tQsQ: cute.Tensor = gmem_thr_copy.partition_D(sQ)
         tQgQ: cute.Tensor = gmem_thr_copy.partition_S(gQ)
 
+        # cQ: (tileQ128,tileHD128):(1@0,1@1)
         # tQcQ/t0QcQ: (CPY_ATOM=(8,1),CPY_Q8,CPY_HD2):((1@1,0),16@0,64@1)
         # tQpQ: (ATOM_REST_V1,CPY_Q8,CPY_HD2):(2,0,1) => the same predicate along CPY_Q
         cQ = cute.make_identity_tensor((self.tile_m, self.tile_hdim))
@@ -1426,6 +1427,7 @@ class FFAFwdSm80:
                     seqlen,
                     headdim,
                 )
+                cute.printf(prefix + "cQ: {}", cQ.layout)
                 cute.printf(prefix + "tQsQ: {}", tQsQ.layout)
                 cute.printf(prefix + "tQgQ: {}", tQgQ.layout)
                 cute.printf(prefix + "tQcQ: {}", tQcQ.layout)
