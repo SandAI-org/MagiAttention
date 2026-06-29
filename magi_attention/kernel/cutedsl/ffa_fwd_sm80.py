@@ -372,8 +372,7 @@ class FFAFwdSm80:
         ) = self._get_smem_layout_atom()
 
         # sQ: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
-        # sK: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
-        # sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
+        # sK/sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
         # sO: S<3,3,3> o 0 o ((ATOM_O8,LAY_tileO16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
         self.sQ_layout = cute.tile_to_shape(
             sQ_layout_atom,
@@ -416,6 +415,10 @@ class FFAFwdSm80:
             universal_copy_bits // self.dtype.width
         )  # 8 elems per copy atom
 
+        # Value layouts for all copies: (1,8):(0,1) => 8 bf16 elements per thread
+        vQKV_layout = cute.make_layout((1, async_copy_elems))
+        vO_layout = vQKV_layout
+
         # atom_async_copy: G2S copy atom for QKV load with `cp.async`
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
         # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
@@ -424,10 +427,6 @@ class FFAFwdSm80:
             self.dtype,
             num_bits_per_copy=universal_copy_bits,
         )
-
-        # Value layouts for all copies: (1,8):(0,1) => 8 bf16 elements per thread
-        vQKV_layout = cute.make_layout((1, async_copy_elems))
-        vO_layout = vQKV_layout
 
         # atom_universal_copy: universal copy atom for O store
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
@@ -438,7 +437,7 @@ class FFAFwdSm80:
             num_bits_per_copy=universal_copy_bits,
         )
 
-        # tQ: (16,8):(8,1)
+        # tQ/tK: (16,8):(8,1)
         tQK_shape_dim_1 = (
             sQ_layout_atom.outer.shape[1] // async_copy_elems
         )  # 8 for smem_blk=64
@@ -866,8 +865,8 @@ class FFAFwdSm80:
         # Make gmem tiles for Q/K/V
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # mQ: (sQ,HD):(HD*nhQ,1)
-        # mK/mV: (sK,HD):(HD*nhK,1)
+        # mQ_cur: (sQ,HD):(HD*nhQ,1)
+        # mK_cur/mV_cur: (sK,HD):(HD*nhK,1)
         blkQ_shape = (self.tile_m, self.tile_hdim)
         blkK_shape = (self.tile_n, self.tile_hdim)
         blkV_shape = (self.tile_n, self.tile_hdimv)
@@ -890,7 +889,7 @@ class FFAFwdSm80:
             )
 
         # gQ: (tileQ128,tileHD128):(HD*nhQ,1)
-        # gK/gV: (tileK64,tileHD128,restK):(HD*nhK,1)
+        # gK/gV: (tileK64,tileHD128,restK):(HD*nhK,1,HD*nhK*tileK)
         # where restK = sK // tileK64
         gQ = cute.local_tile(mQ_cur, blkQ_shape, (m_block, 0))  # slice out this m_block
         gK = cute.local_tile(mK_cur, blkK_shape, (None, 0))  # all n blocks
