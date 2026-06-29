@@ -1006,14 +1006,11 @@ class FFAFwdSm80:
         # ///////////////////////////////////////////////////////////////////////////////
 
         # cK: (tileK64,tileHD128):(1@0,1@1)
-        # tKcK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
-        # t0KcK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
+        # tKcK/t0KcK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
+        # tVcV/t0VcV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
         cK = cute.make_identity_tensor((self.tile_n, self.tile_hdim))
         tKcK = gmem_thr_copy_K.partition_S(cK)
         t0KcK = gmem_thr_copy_K.get_slice(0).partition_S(cK)
-
-        # tVcV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
-        # t0VcV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1@1,0),16@0,64@1)
         if const_expr(self.tile_hdim == self.tile_hdimv):
             tVcV = tKcK
             t0VcV = t0KcK
@@ -1392,8 +1389,7 @@ class FFAFwdSm80:
         tQsQ: cute.Tensor = gmem_thr_copy.partition_D(sQ)
         tQgQ: cute.Tensor = gmem_thr_copy.partition_S(gQ)
 
-        # tQcQ: (CPY_ATOM=(8,1),CPY_Q8,CPY_HD2):((1@1,0),16@0,64@1)
-        # t0QcQ: (CPY_ATOM=(8,1),CPY_Q8,CPY_HD2):((1@1,0),16@0,64@1)
+        # tQcQ/t0QcQ: (CPY_ATOM=(8,1),CPY_Q8,CPY_HD2):((1@1,0),16@0,64@1)
         # tQpQ: (ATOM_REST_V1,CPY_Q8,CPY_HD2):(2,0,1) => the same predicate along CPY_Q
         cQ = cute.make_identity_tensor((self.tile_m, self.tile_hdim))
         tQcQ: cute.Tensor = gmem_thr_copy.partition_S(cQ)

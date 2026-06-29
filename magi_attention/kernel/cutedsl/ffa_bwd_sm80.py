@@ -952,6 +952,8 @@ class FFABwdSm80:
             )
         # TODO: return early if m_block_max == 0
 
+        d_head = mQ.shape[cute.rank(mQ) - 1]
+        d_head_v = mdO.shape[cute.rank(mdO) - 1]
         head_idx_kv = (
             head_idx // self.qhead_per_kvhead
             if cutlass.const_expr(not self.pack_gqa)
@@ -1161,53 +1163,78 @@ class FFABwdSm80:
         # Make S2R/R2S tiled copy and partitions for Q/K/V/dO/P/dS
         # ///////////////////////////////////////////////////////////////////////////////
 
+        # S2R copy atom for Q/K/V/dO with `ldmatrix.sync.aligned.m8n8.x4` => m32xn8
+        # layout_src_tv=(32,8):(8,1)
+        # layout_dst_tv=(32,(2,4)):(2,(1,64))
         smem_copy_atom = cute.make_copy_atom(
             warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=4),
             self.dtype,
         )
-        smem_copy_atom_transposed = cute.make_copy_atom(
+
+        # S2R copy atom for Pt/dSt/Qt/dOt/Kt with `ldmatrix.sync.aligned.m8n8.x4.trans` => m8xn32
+        # layout_src_tv=(32,8):(8,1)
+        # layout_dst_tv=((4,8),(1,2,4)):((16,1),(1,8,64))
+        smem_copy_atom_trans = cute.make_copy_atom(
             warp.LdMatrix8x8x16bOp(transpose=True, num_matrices=4),
             self.dtype,
         )
+
+        # R2S copy atom for P/dS with universal `st.shared`
+        # layout_src_tv=(1,2):(0,1)
+        # layout_dst_tv=(1,2):(0,1)
+        r2s_copy_atom = cute.make_copy_atom(
+            cute.nvgpu.CopyUniversalOp(),
+            self.dtype,
+            # TODO(REVIEW): what's the number of bits? What if SdP_swapAB
+            num_bits_per_copy=2 * self.dtype.width,
+        )
+
+        # tSsQ/tdPsdO: (CPY_ATOM=(8,1),CPY_Q4,CPY_HD=((2,2),2),STAGE=(1,1)):((1,0),1024,((-16,-32),4096),(0,0))
         smem_thr_copy_QdO = cutedsl_utils.make_tiled_copy_A(
             smem_copy_atom, tiled_mma_sdp, swapAB=self.SdP_swapAB
         ).get_slice(tidx)
+        tSsQ = smem_thr_copy_QdO.partition_S(sQ)
+        tdPsdO = smem_thr_copy_QdO.partition_S(sdO)
+
+        # tSsK/tdPsV: (CPY_ATOM=(8,1),CPY_K1,CPY_HD=((2,2),2)):((1,0),0,((-16,-32),8192))
         smem_thr_copy_KV = cutedsl_utils.make_tiled_copy_B(
             smem_copy_atom, tiled_mma_sdp, swapAB=self.SdP_swapAB
         ).get_slice(tidx)
-        # TODO: should this be smem_copy_atom_transposed?
+        tSsK = smem_thr_copy_KV.partition_S(sK)
+        tdPsV = smem_thr_copy_KV.partition_S(sV)
+
+        # tdVsPt/tdKsdSt: (CPY_ATOM=(8,1),CPY_K1,CPY_Q4):((1,0),0,1024)
+        # TODO(REVIEW): should this be smem_copy_atom_transposed?
         smem_thr_copy_PdSt = cutedsl_utils.make_tiled_copy_A(
-            smem_copy_atom_transposed, tiled_mma_dkv, swapAB=self.dKV_swapAB
+            smem_copy_atom_trans, tiled_mma_dkv, swapAB=self.dKV_swapAB
         ).get_slice(tidx)
+        tdVsPt = smem_thr_copy_PdSt.partition_S(sPt)
+        tdKsdSt = smem_thr_copy_PdSt.partition_S(sdSt)
+
+        # tdVsdOt/tdKsQt: (CPY_ATOM=(8,1),CPY_HD=((2,2),2),CPY_Q4,STAGE=(1,1)):((1,0),((-16,-32),4096),1024,(0,0))
         smem_thr_copy_QdOt = cutedsl_utils.make_tiled_copy_B(
-            smem_copy_atom_transposed, tiled_mma_dkv, swapAB=self.dKV_swapAB
+            smem_copy_atom_trans, tiled_mma_dkv, swapAB=self.dKV_swapAB
         ).get_slice(tidx)
+        tdVsdOt = smem_thr_copy_QdOt.partition_S(sdOt)
+        tdKsQt = smem_thr_copy_QdOt.partition_S(sQt)
+
+        # tdQsdS: (CPY_ATOM=(8,1),CPY_Q4,CPY_K=((2,2),2)):((1,0),1024,((-16,-32),4096))
         smem_thr_copy_dS = cutedsl_utils.make_tiled_copy_A(
             smem_copy_atom, tiled_mma_dq, swapAB=self.dQ_swapAB
         ).get_slice(tidx)
+        tdQsdS = smem_thr_copy_dS.partition_S(sdS)
+
+        # tdQsKt: (CPY_ATOM=(8,1),CPY_HD1,CPY_K8):((1,0),0,1024)
         smem_thr_copy_Kt = cutedsl_utils.make_tiled_copy_B(
-            smem_copy_atom_transposed, tiled_mma_dq, swapAB=self.dQ_swapAB
+            smem_copy_atom_trans, tiled_mma_dq, swapAB=self.dQ_swapAB
         ).get_slice(tidx)
-        # TODO: what's the number of bits? What if SdP_swapAB
+        tdQsKt = smem_thr_copy_Kt.partition_S(sKt)
+
+        # tPsP/tdSsdS: (CPY_ATOM=(2,(2,2)),CPY_Q4,CPY_K1):((1,(512,4096)),1024,0)
         r2s_thr_copy_PdS = cute.make_tiled_copy_C(
-            cute.make_copy_atom(
-                cute.nvgpu.CopyUniversalOp(),
-                self.dtype,
-                num_bits_per_copy=2 * self.dtype.width,
-            ),
+            r2s_copy_atom,
             tiled_mma_sdp,
         ).get_slice(tidx)
-
-        tSsQ = smem_thr_copy_QdO.partition_S(sQ)
-        tdPsdO = smem_thr_copy_QdO.partition_S(sdO)
-        tSsK = smem_thr_copy_KV.partition_S(sK)
-        tdPsV = smem_thr_copy_KV.partition_S(sV)
-        tdVsPt = smem_thr_copy_PdSt.partition_S(sPt)
-        tdKsdSt = smem_thr_copy_PdSt.partition_S(sdSt)
-        tdVsdOt = smem_thr_copy_QdOt.partition_S(sdOt)
-        tdKsQt = smem_thr_copy_QdOt.partition_S(sQt)
-        tdQsdS = smem_thr_copy_dS.partition_S(sdS)
-        tdQsKt = smem_thr_copy_Kt.partition_S(sKt)
         tPsP = r2s_thr_copy_PdS.partition_D(sP)
         tdSsdS = r2s_thr_copy_PdS.partition_D(sdS)
 
@@ -1215,7 +1242,10 @@ class FFABwdSm80:
         # Make predicate tensors for Q/LSE G2S loads
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # Construct identity layout for KV
+        # cQ: (tileQ64,tileHD128):(1@0,1@1)
+        # tQcQ/t0QcQ/tdOcdO/t0dOcdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2):((1@1,0),32@0,64@1)
+        # cLSE: (tileQ64):(1@0)
+        # tLSEcLSE: (CPY_ATOM=(4,1),CPY_Q=(1)):((1@0,0),(0))
         cQ = cute.make_identity_tensor((self.m_block_size, self.head_dim_padded))
         tQcQ = gmem_thr_copy_QK.partition_S(cQ)
         t0QcQ = gmem_thr_copy_QK.get_slice(0).partition_S(cQ)
@@ -1229,13 +1259,7 @@ class FFABwdSm80:
         cLSE = cute.make_identity_tensor((self.m_block_size,))
         tLSEcLSE = gmem_thr_copy_lse.partition_S(cLSE)
 
-        # Allocate predicate tensors for m and n, here we only allocate the tile of k, and
-        # use "if" on the mn dimension.
-        # This is to reduce register pressure and gets 2-3% performance gain.
-
-        d_head = mQ.shape[cute.rank(mQ) - 1]
-        d_head_v = mdO.shape[cute.rank(mdO) - 1]
-
+        # tQpQ/tdOpdO: (ATOM_REST_V1,CPY_Q2,CPY_HD2):(2,0,1) => the same predicate along CPY_Q
         tQpQ = cutedsl_utils.predicate_k(tQcQ, limit=d_head)
         if cutlass.const_expr(self.same_hdim_kv):
             tdOpdO = tQpQ
@@ -1419,6 +1443,41 @@ class FFABwdSm80:
                 cute.printf(prefix + "tSsLSEMma: {}", tSsLSEMma.layout)
                 cute.printf(prefix + "tSsdPsumMma: {}", tSsdPsumMma.layout)
                 cute.printf("")
+                cute.printf(
+                    prefix + "smem_copy_atom: layout_src_tv={}, layout_dst_tv={}",
+                    smem_copy_atom.layout_src_tv,
+                    smem_copy_atom.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix + "smem_copy_atom_trans: layout_src_tv={}, layout_dst_tv={}",
+                    smem_copy_atom_trans.layout_src_tv,
+                    smem_copy_atom_trans.layout_dst_tv,
+                )
+                cute.printf(
+                    prefix + "r2s_copy_atom: layout_src_tv={}, layout_dst_tv={}",
+                    r2s_copy_atom.layout_src_tv,
+                    r2s_copy_atom.layout_dst_tv,
+                )
+                cute.printf(prefix + "tSsQ: {}", tSsQ.layout)
+                cute.printf(prefix + "tSsK: {}", tSsK.layout)
+                cute.printf(prefix + "tdPsdO: {}", tdPsdO.layout)
+                cute.printf(prefix + "tdPsV: {}", tdPsV.layout)
+                cute.printf(prefix + "tdVsPt: {}", tdVsPt.layout)
+                cute.printf(prefix + "tdVsdOt: {}", tdVsdOt.layout)
+                cute.printf(prefix + "tdKsdSt: {}", tdKsdSt.layout)
+                cute.printf(prefix + "tdKsQt: {}", tdKsQt.layout)
+                cute.printf(prefix + "tdQsdS: {}", tdQsdS.layout)
+                cute.printf(prefix + "tdQsKt: {}", tdQsKt.layout)
+                cute.printf(prefix + "tPsP: {}", tPsP.layout)
+                cute.printf(prefix + "tdSsdS: {}", tdSsdS.layout)
+                cute.printf("")
+                cute.printf(prefix + "cQ: {}", cQ.layout)
+                cute.printf(prefix + "tQcQ: {}", tQcQ.layout)
+                cute.printf(prefix + "t0QcQ: {}", t0QcQ.layout)
+                cute.printf(prefix + "tdOcdO: {}", tdOcdO.layout)
+                cute.printf(prefix + "t0dOcdO: {}", t0dOcdO.layout)
+                cute.printf(prefix + "cLSE: {}", cLSE.layout)
+                cute.printf(prefix + "tLSEcLSE: {}", tLSEcLSE.layout)
                 cute.printf(prefix + "tQpQ: {}", tQpQ.layout)
                 cute.printf(prefix + "tdOpdO: {}", tdOpdO.layout)
                 cute.printf("")
