@@ -146,10 +146,10 @@ struct CollectiveMainloopBwdSm90 {
   // ─── Inner-Loop Store Strategy (InnerStoreMode enum) ───
   // Tma1d:   cp.reduce.async.bulk per-row (bulk reduce-add from row-contiguous smem)
   // CpAsync: scalar atomicAdd fallback
-  static constexpr InnerStoreMode kInnerStoreMode = static_cast<InnerStoreMode>(InnerStoreMode_);
+  // Non-scatter (Dense) paths ignore InnerStoreMode; auto-resolve to CpAsync to avoid static_assert.
+  static constexpr InnerStoreMode kInnerStoreMode = InnerUseScatter ? static_cast<InnerStoreMode>(InnerStoreMode_) : InnerStoreMode::CpAsync;
   static constexpr bool SparseInnerDxReduceUseTma = (kInnerStoreMode == InnerStoreMode::Tma1d);
   static_assert(kInnerStoreMode == InnerStoreMode::Tma1d || kInnerStoreMode == InnerStoreMode::CpAsync);
-  static_assert(!SparseInnerDxReduceUseTma || InnerUseScatter, "InnerStoreMode::Tma1d requires a scatter path (BlockSparse / IndexSparse)");
 
   static constexpr int kBlockM = get<0>(TileShape_MNK{});
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
