@@ -419,7 +419,7 @@ class FFAFwdSm80:
         vQKV_layout = cute.make_layout((1, async_copy_elems))
         vO_layout = vQKV_layout
 
-        # atom_async_copy: G2S copy atom for QKV load with `cp.async`
+        # atom_async_copy: G2S copy atom for Q/K/V load with `cp.async`
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
         # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
         atom_async_copy = cute.make_copy_atom(
@@ -428,7 +428,7 @@ class FFAFwdSm80:
             num_bits_per_copy=universal_copy_bits,
         )
 
-        # atom_universal_copy: universal copy atom for O store
+        # atom_universal_copy: universal copy atom for O store with `st.global`
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
         # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
         atom_universal_copy = cute.make_copy_atom(

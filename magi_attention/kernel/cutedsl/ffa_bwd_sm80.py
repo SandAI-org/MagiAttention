@@ -217,7 +217,7 @@ class FFABwdSm80:
         mdO_type: Type[cutlass.Numeric],
         mLSE_type: Type[cutlass.Numeric],
         mdPsum_type: Type[cutlass.Numeric],
-        mdQaccum_type: Type[cutlass.Numeric],
+        mdQacc_type: Type[cutlass.Numeric],
         mdK_type: Type[cutlass.Numeric],
         mdV_type: Type[cutlass.Numeric],
         mCuSeqlensQ_type: Type[cutlass.Numeric] | None,
@@ -243,8 +243,8 @@ class FFABwdSm80:
             raise TypeError("LSE tensor must be Float32")
         if cutlass.const_expr(mdPsum_type not in [cutlass.Float32]):
             raise TypeError("dPsum tensor must be Float32")
-        if cutlass.const_expr(mdQaccum_type not in [cutlass.Float32]):
-            raise TypeError("dQaccum tensor must be Float32")
+        if cutlass.const_expr(mdQacc_type not in [cutlass.Float32]):
+            raise TypeError("dQacc tensor must be Float32")
         if cutlass.const_expr(mCuSeqlensQ_type not in [None, cutlass.Int32]):
             raise TypeError("cuSeqlensQ tensor must be Int32")
         if cutlass.const_expr(mCuSeqlensK_type not in [None, cutlass.Int32]):
@@ -479,7 +479,7 @@ class FFABwdSm80:
         # Value layouts for all copies: (1,8):(0,1) => 8 bf16 elements per thread
         vQKVdO_layout = cute.make_layout((1, async_copy_elems))
 
-        # atom_async_copy: G2S copy atom for QKV load with `cp.async`
+        # atom_async_copy: G2S copy atom for Q/K/V/dO load with `cp.async`
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
         # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
         atom_async_copy = cute.make_copy_atom(
@@ -505,7 +505,7 @@ class FFABwdSm80:
                 num_bits_per_copy=cutlass.Float32.width,
             )
 
-        # atom_universal_copy: universal copy atom for O store
+        # atom_universal_copy: universal copy atom for dQacc/dK/dV store with `st.global`
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
         # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
         atom_universal_copy = cute.make_copy_atom(
@@ -572,7 +572,7 @@ class FFABwdSm80:
         # R2G universal atomic tiled_copy_dOacc:
         # layout_src_tv_tiled=(256,(1,1)):(1,(0,0))
         # layout_dst_tv_tiled=(256,(1,1)):(1,(0,0))
-        self.gmem_tiled_copy_dQaccum = cute.make_tiled_copy_tv(
+        self.gmem_tiled_copy_dQacc = cute.make_tiled_copy_tv(
             cute.make_copy_atom(
                 cute.nvgpu.CopyUniversalOp(),
                 cutlass.Float32,
@@ -582,8 +582,8 @@ class FFABwdSm80:
             cute.make_layout(1),
         )
         if cutlass.const_expr(self.qhead_per_kvhead > 1):
-            self.gmem_tiled_copy_dK = self.gmem_tiled_copy_dQaccum
-            self.gmem_tiled_copy_dV = self.gmem_tiled_copy_dQaccum
+            self.gmem_tiled_copy_dK = self.gmem_tiled_copy_dQacc
+            self.gmem_tiled_copy_dV = self.gmem_tiled_copy_dQacc
 
         # --- Debug print ---
 
@@ -648,9 +648,9 @@ class FFABwdSm80:
                 f"layout_dst_tv_tiled={self.gmem_tiled_copy_LSE.layout_dst_tv_tiled}"
             )
             print(
-                f"{prefix}gmem_tiled_copy_dQaccum: "
-                f"layout_src_tv_tiled={self.gmem_tiled_copy_dQaccum.layout_src_tv_tiled} | "
-                f"layout_dst_tv_tiled={self.gmem_tiled_copy_dQaccum.layout_dst_tv_tiled}"
+                f"{prefix}gmem_tiled_copy_dQacc: "
+                f"layout_src_tv_tiled={self.gmem_tiled_copy_dQacc.layout_src_tv_tiled} | "
+                f"layout_dst_tv_tiled={self.gmem_tiled_copy_dQacc.layout_dst_tv_tiled}"
             )
             print()
 
@@ -663,7 +663,7 @@ class FFABwdSm80:
         mdO: cute.Tensor,
         mLSE: cute.Tensor,
         mdPsum: cute.Tensor,
-        mdQaccum: cute.Tensor,
+        mdQacc: cute.Tensor,
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         softmax_scale: cutlass.Float32,
@@ -709,7 +709,7 @@ class FFABwdSm80:
                     mdO,
                     mLSE,
                     mdPsum,
-                    mdQaccum,
+                    mdQacc,
                     mdK,
                     mdV,
                     mCuSeqlensQ,
@@ -730,9 +730,9 @@ class FFABwdSm80:
         # with layout transformations for specific memory access patterns
         # ///////////////////////////////////////////////////////////////////////////////
 
-        mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV = [
+        mQ, mK, mV, mdO, mLSE, mdPsum, mdQacc, mdK, mdV = [
             cutedsl_utils.assume_tensor_aligned(t)
-            for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV)
+            for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQacc, mdK, mdV)
         ]
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -831,7 +831,7 @@ class FFABwdSm80:
             mdO,
             mLSE,
             mdPsum,
-            mdQaccum,
+            mdQacc,
             mdK,
             mdV,
             mCuSeqlensQ,
@@ -852,7 +852,7 @@ class FFABwdSm80:
             self.gmem_tiled_copy_dK,
             self.gmem_tiled_copy_dV,
             self.gmem_tiled_copy_LSE,
-            self.gmem_tiled_copy_dQaccum,
+            self.gmem_tiled_copy_dQacc,
             self.tiled_mma_sdp,
             self.tiled_mma_dkv,
             self.tiled_mma_dq,
@@ -873,7 +873,7 @@ class FFABwdSm80:
         mdO: cute.Tensor,
         mLSE: cute.Tensor,
         mdPsum: cute.Tensor,
-        mdQaccum: cute.Tensor,
+        mdQacc: cute.Tensor,
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         mCuSeqlensQ: Optional[cute.Tensor],
@@ -894,7 +894,7 @@ class FFABwdSm80:
         gmem_tiled_copy_dK: cute.TiledCopy,
         gmem_tiled_copy_dV: cute.TiledCopy,
         gmem_tiled_copy_LSE: cute.TiledCopy,
-        gmem_tiled_copy_dQaccum: cute.TiledCopy,
+        gmem_tiled_copy_dQacc: cute.TiledCopy,
         tiled_mma_sdp: cute.TiledMma,
         tiled_mma_dkv: cute.TiledMma,
         tiled_mma_dq: cute.TiledMma,
@@ -959,13 +959,13 @@ class FFABwdSm80:
         )
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Make gmem tiles for Q/K/V/dO/LSE/dPsum/dQaccum
+        # Make gmem tiles for Q/K/V/dO/LSE/dPsum/dQacc
         # ///////////////////////////////////////////////////////////////////////////////
 
         # mQ_cur/mdO_cur: (sQ,HD):(HD*nhQ,1)
         # mK_cur/mV_cur: (sK,HD):(HD*nhK,1)
         # mLSE_cur/mdPsum_cur: (sQ):(1)
-        # mdQaccum_cur: (sQ*HD):(1)
+        # mdQacc_cur: (sQ*HD):(1)
         blkQ_shape = (self.m_block_size, self.head_dim_padded)
         blkK_shape = (self.n_block_size, self.head_dim_padded)
         blkV_shape = (self.n_block_size, self.head_dim_v_padded)
@@ -975,7 +975,7 @@ class FFABwdSm80:
             mLSE_cur = mLSE[batch_idx, head_idx, None]
             mdO_cur = mdO[batch_idx, None, head_idx, None]
             mdPsum_cur = mdPsum[batch_idx, head_idx, None]
-            mdQaccum_cur = mdQaccum[batch_idx, head_idx, None]
+            mdQacc_cur = mdQacc[batch_idx, head_idx, None]
         else:
             padded_offset_q = seqlen_info.padded_offset_q
             mQ_cur = cute.domain_offset(
@@ -986,8 +986,8 @@ class FFABwdSm80:
                 (seqlen_info.offset_q, 0), mdO[None, head_idx, None]
             )
             mdPsum_cur = cute.domain_offset((padded_offset_q,), mdPsum[head_idx, None])
-            mdQaccum_cur = cute.domain_offset(
-                (padded_offset_q * self.head_dim_padded,), mdQaccum[head_idx, None]
+            mdQacc_cur = cute.domain_offset(
+                (padded_offset_q * self.head_dim_padded,), mdQacc[head_idx, None]
             )
         if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
             mK_cur, mV_cur = [t[batch_idx, None, head_idx_kv, None] for t in (mK, mV)]
@@ -1002,7 +1002,7 @@ class FFABwdSm80:
         # gQ/gdO: (tileQ64,tileHD128,restQ):(HD*nhQ,1,HD*nhQ*tileQ)
         # gK/gV: (tileK128,tileHD128):(HD*nhK,1)
         # gLSE/gdPsum: (tileQ64,restQ):(1,tileQ)
-        # gdQaccum: (tileQ64*tileHD128,restQ):(1,tileQ*tileHD)
+        # gdQacc: (tileQ64*tileHD128,restQ):(1,tileQ*tileHD)
         # where restQ = sQ // tileQ64
         gQ = cute.local_tile(mQ_cur, blkQ_shape, (None, 0))
         gK = cute.local_tile(mK_cur, blkK_shape, (n_block, 0))
@@ -1010,8 +1010,8 @@ class FFABwdSm80:
         gdO = cute.local_tile(mdO_cur, blkdO_shape, (None, 0))
         gLSE = cute.local_tile(mLSE_cur, (self.m_block_size,), (None,))
         gdPsum = cute.local_tile(mdPsum_cur, (self.m_block_size,), (None,))
-        gdQaccum = cute.local_tile(
-            mdQaccum_cur, (self.m_block_size * self.head_dim_padded,), (None,)
+        gdQacc = cute.local_tile(
+            mdQacc_cur, (self.m_block_size * self.head_dim_padded,), (None,)
         )
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1042,13 +1042,13 @@ class FFABwdSm80:
         ]
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # G2S/S2G tiled copy partitions for Q/K/V/dO/LSE/dPsum/dQaccum
+        # G2S/S2G tiled copy partitions for Q/K/V/dO/LSE/dPsum/dQacc
         # ///////////////////////////////////////////////////////////////////////////////
 
         gmem_thr_copy_QK = gmem_tiled_copy_QK.get_slice(tidx)
         gmem_thr_copy_VdO = gmem_tiled_copy_VdO.get_slice(tidx)
         gmem_thr_copy_lse = gmem_tiled_copy_LSE.get_slice(tidx)
-        gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_slice(tidx)
+        gmem_thr_copy_dQacc = gmem_tiled_copy_dQacc.get_slice(tidx)
         # (CPY_Atom, CPY_M, CPY_K, m_block)
         tQgQ = gmem_thr_copy_QK.partition_S(gQ)
         tQsQ = gmem_thr_copy_QK.partition_D(sQ)
@@ -1065,7 +1065,7 @@ class FFABwdSm80:
         tLSEsLSE = gmem_thr_copy_lse.partition_D(sLSE)
         tLSEgdPsum = gmem_thr_copy_lse.partition_S(gdPsum)
         tLSEsdPsum = gmem_thr_copy_lse.partition_D(sdPsum)
-        tdQgdQaccum = gmem_thr_copy_dQaccum.partition_S(gdQaccum)
+        tdQgdQacc = gmem_thr_copy_dQacc.partition_S(gdQacc)
 
         # ///////////////////////////////////////////////////////////////////////////////
         # Tile MMA partitions and allocate accumulators
@@ -1291,7 +1291,7 @@ class FFABwdSm80:
             tdQsKt=tdQsKt,
         )
         gmem_copy_params = SimpleNamespace(
-            gmem_thr_copy_dQaccum=gmem_thr_copy_dQaccum, tdQgdQaccum=tdQgdQaccum
+            gmem_thr_copy_dQacc=gmem_thr_copy_dQacc, tdQgdQacc=tdQgdQacc
         )
         compute_one_m_block = partial(
             self.compute_one_m_block,
@@ -1334,7 +1334,7 @@ class FFABwdSm80:
                 cute.printf(prefix + "mdO_cur: {}", mdO_cur.layout)
                 cute.printf(prefix + "mLSE_cur: {}", mLSE_cur.layout)
                 cute.printf(prefix + "mdPsum_cur: {}", mdPsum_cur.layout)
-                cute.printf(prefix + "mdQaccum_cur: {}", mdQaccum_cur.layout)
+                cute.printf(prefix + "mdQacc_cur: {}", mdQacc_cur.layout)
                 cute.printf("")
                 cute.printf(prefix + "gQ: {}", gQ.layout)
                 cute.printf(prefix + "gK: {}", gK.layout)
@@ -1342,7 +1342,7 @@ class FFABwdSm80:
                 cute.printf(prefix + "gdO: {}", gdO.layout)
                 cute.printf(prefix + "gLSE: {}", gLSE.layout)
                 cute.printf(prefix + "gdPsum: {}", gdPsum.layout)
-                cute.printf(prefix + "gdQaccum: {}", gdQaccum.layout)
+                cute.printf(prefix + "gdQacc: {}", gdQacc.layout)
                 cute.printf("")
                 cute.printf(prefix + "sQ: {}", sQ.layout)
                 cute.printf(prefix + "sK: {}", sK.layout)
@@ -1367,7 +1367,7 @@ class FFABwdSm80:
                 cute.printf(prefix + "tVsV: {}", tVsV.layout)
                 cute.printf(prefix + "tdOgdO: {}", tdOgdO.layout)
                 cute.printf(prefix + "tdOsdO: {}", tdOsdO.layout)
-                cute.printf(prefix + "tdQgdQaccum: {}", tdQgdQaccum.layout)
+                cute.printf(prefix + "tdQgdQacc: {}", tdQgdQacc.layout)
                 cute.printf("")
                 cute.printf(prefix + "acc_dK: {}", acc_dK.layout)
                 cute.printf(prefix + "acc_dV: {}", acc_dV.layout)
@@ -1724,17 +1724,16 @@ class FFABwdSm80:
                 hook_fn=hook_fn,
             )
             # ((1, 1), num_elements)
-            acc_dQ_atomic = gmem_copy_params.gmem_thr_copy_dQaccum.retile(acc_dQ)
-            tdQgdQaccum_atomic = gmem_copy_params.tdQgdQaccum[None, None, m_block]
-            assert cute.size(acc_dQ_atomic) == cute.size(tdQgdQaccum_atomic)
+            acc_dQ_atomic = gmem_copy_params.gmem_thr_copy_dQacc.retile(acc_dQ)
+            tdQgdQacc_atomic = gmem_copy_params.tdQgdQacc[None, None, m_block]
+            assert cute.size(acc_dQ_atomic) == cute.size(tdQgdQacc_atomic)
             for i in cutlass.range(cute.size(acc_dQ_atomic), unroll_full=True):
                 cutedsl_utils.atomic_add_fp32(
-                    acc_dQ_atomic[i], cutedsl_utils.elem_pointer(tdQgdQaccum_atomic, i)
+                    acc_dQ_atomic[i], cutedsl_utils.elem_pointer(tdQgdQacc_atomic, i)
                 )
-                # cutedsl_utils.atomic_add_fp32(acc_dQ[i], tdQgdQaccum_atomic.iterator + i * tdQgdQaccum_atomic.stride[1])
-            # if cute.arch.thread_idx()[0] == 64 and cute.arch.block_idx()[0] == bidx: cute.print_tensor(acc_dQ)
 
-        # If num_stages_Q == 1, we want to do Mma_dK first so we can start loading Q for the next iteration
+        # If num_stages_Q == 1,
+        # we want to do Mma_dK first so we can start loading Q for the next iteration
         if cutlass.const_expr(self.num_stages_Q > 1):
             dQ_mma(load_dO_next)
 
