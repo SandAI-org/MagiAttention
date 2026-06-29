@@ -1497,6 +1497,7 @@ class FFABwdSm80:
             n_block,
             seqlen=seqlen_info.seqlen_k,
             headdim=d_head_v,
+            is_print_thread_and_tile=is_print_thread,
         )
         if cutlass.const_expr(self.V_in_regs):
             cute.arch.cp_async_commit_group()
@@ -1509,6 +1510,7 @@ class FFABwdSm80:
             n_block,
             seqlen=seqlen_info.seqlen_k,
             headdim=d_head,
+            is_print_thread_and_tile=is_print_thread,
         )
         cute.arch.cp_async_commit_group()
 
@@ -1532,12 +1534,20 @@ class FFABwdSm80:
                 self.num_stages_Q == 1 or stage < self.num_stages_Q - 1
             ):
                 if stage == 0 or m_block + stage < m_block_max:
-                    load_Q_LSE(m_block + stage, smem_pipe_write_q=stage)
+                    load_Q_LSE(
+                        m_block + stage,
+                        smem_pipe_write_q=stage,
+                        is_print_thread_and_tile=is_print_thread and stage == 0,
+                    )
                 cute.arch.cp_async_commit_group()
 
             if cutlass.const_expr(stage < self.num_stages_dO):
                 if stage == 0 or m_block + stage < m_block_max:
-                    load_dO_dPsum(m_block + stage, smem_pipe_write_q=stage)
+                    load_dO_dPsum(
+                        m_block + stage,
+                        smem_pipe_write_q=stage,
+                        is_print_thread_and_tile=is_print_thread and stage == 0,
+                    )
                 cute.arch.cp_async_commit_group()
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -2057,6 +2067,7 @@ class FFABwdSm80:
         block: cutlass.Int32,
         seqlen: cutlass.Int32,
         headdim: cutlass.Int32,
+        is_print_thread_and_tile: bool = False,
     ):
         cK = cute.make_identity_tensor((self.n_block_size, self.head_dim_padded))
         tKcK = gmem_thr_copy.partition_S(cK)
@@ -2090,6 +2101,25 @@ class FFABwdSm80:
                 )
             # We need to clear the sK smem tiles since we'll use sKt for mma_dq
 
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm80_load_K] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "block={}, seqlen={}, headdim={}",
+                    block,
+                    seqlen,
+                    headdim,
+                )
+                cute.printf(prefix + "tKgK: {}", tKgK.layout)
+                cute.printf(prefix + "tKsK: {}", tKsK.layout)
+                cute.printf(prefix + "tKcK: {}", tKcK.layout)
+                cute.printf(prefix + "t0KcK: {}", t0KcK.layout)
+                cute.printf(prefix + "tKpK: {}", tKpK.layout)
+                cute.printf("")
+
     @cute.jit
     def load_V(
         self,
@@ -2099,6 +2129,7 @@ class FFABwdSm80:
         block: cutlass.Int32,
         seqlen: cutlass.Int32,
         headdim: cutlass.Int32,
+        is_print_thread_and_tile: bool = False,
     ):
         cV = cute.make_identity_tensor((self.n_block_size, self.head_dim_v_padded))
         tVcV = gmem_thr_copy.partition_S(cV)
@@ -2131,6 +2162,25 @@ class FFABwdSm80:
                     pred=predicate,
                 )
 
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm80_load_V] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "block={}, seqlen={}, headdim={}",
+                    block,
+                    seqlen,
+                    headdim,
+                )
+                cute.printf(prefix + "tVgV: {}", tVgV.layout)
+                cute.printf(prefix + "tVsV: {}", tVsV.layout)
+                cute.printf(prefix + "tVcV: {}", tVcV.layout)
+                cute.printf(prefix + "t0VcV: {}", t0VcV.layout)
+                cute.printf(prefix + "tVpV: {}", tVpV.layout)
+                cute.printf("")
+
     @cute.jit
     def load_Q_LSE(
         self,
@@ -2147,6 +2197,7 @@ class FFABwdSm80:
         block: cutlass.Int32,
         smem_pipe_write_q: cutlass.Int32,
         seqlen: cutlass.Int32,
+        is_print_thread_and_tile: bool = False,
     ):
         for m in cutlass.range_constexpr(cute.size(tQsQ.shape[1])):
             # If kBlockM doesn't evenly divide the tiled copy, only the last `m` needs to be checked
@@ -2198,6 +2249,28 @@ class FFABwdSm80:
                     ],
                 )
 
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm80_load_Q_LSE] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "block={}, smem_pipe_write_q={}, seqlen={}",
+                    block,
+                    smem_pipe_write_q,
+                    seqlen,
+                )
+                cute.printf(prefix + "tQgQ: {}", tQgQ.layout)
+                cute.printf(prefix + "tQsQ: {}", tQsQ.layout)
+                cute.printf(prefix + "tQcQ: {}", tQcQ.layout)
+                cute.printf(prefix + "t0QcQ: {}", t0QcQ.layout)
+                cute.printf(prefix + "tQpQ: {}", tQpQ.layout)
+                cute.printf(prefix + "tLSEgLSE: {}", tLSEgLSE.layout)
+                cute.printf(prefix + "tLSEsLSE: {}", tLSEsLSE.layout)
+                cute.printf(prefix + "tLSEcLSE: {}", tLSEcLSE.layout)
+                cute.printf("")
+
     @cute.jit
     def load_dO_dPsum(
         self,
@@ -2214,6 +2287,7 @@ class FFABwdSm80:
         block: cutlass.Int32,
         smem_pipe_write_q: cutlass.Int32,
         seqlen: cutlass.Int32,
+        is_print_thread_and_tile: bool = False,
     ):
         for m in cutlass.range_constexpr(cute.size(tdOsdO.shape[1])):
             # If kBlockM doesn't evenly divide the tiled copy, only the last `m` needs to be checked
@@ -2265,3 +2339,25 @@ class FFABwdSm80:
                         else 0,
                     ],
                 )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm80_load_dO_dPsum] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "block={}, smem_pipe_write_q={}, seqlen={}",
+                    block,
+                    smem_pipe_write_q,
+                    seqlen,
+                )
+                cute.printf(prefix + "tdOgdO: {}", tdOgdO.layout)
+                cute.printf(prefix + "tdOsdO: {}", tdOsdO.layout)
+                cute.printf(prefix + "tdOcdO: {}", tdOcdO.layout)
+                cute.printf(prefix + "t0dOcdO: {}", t0dOcdO.layout)
+                cute.printf(prefix + "tdOpdO: {}", tdOpdO.layout)
+                cute.printf(prefix + "tdPsumgdPsum: {}", tdPsumgdPsum.layout)
+                cute.printf(prefix + "tdPsumsdPsum: {}", tdPsumsdPsum.layout)
+                cute.printf(prefix + "tdPsumcdPsum: {}", tdPsumcdPsum.layout)
+                cute.printf("")
