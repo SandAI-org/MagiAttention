@@ -843,10 +843,13 @@ class FFAFwdSm80:
             mSeqUsedK=mSeqUsedK,
         )
         n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen_info, m_block)
-        # For varlen, wasted grid tiles (where batch_idx >= num_batch) will have
-        # seqlen_q=seqlen_k=0 and n_block_max=0.  Clamp to 0 so we don't use a
-        # negative block index for K/V loads; the load/store predicates already
-        # guard all memory accesses when seqlen is 0.
+
+        # NOTE:
+        # 1. Start async loads KV of the last mn-tile, where we take care of the mn residue
+        # 2. For varlen, wasted grid tiles (where batch_idx >= num_batch) will have
+        #   `seqlen_q=seqlen_k=0 and n_block_max=0`. Therefore, we clamp to 0
+        #   so we don't use a negative block index for K/V loads, and the load/store predicates
+        #   already guard all memory accesses when seqlen is 0.
         n_block = cutlass.max(n_block_max - 1, 0)
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1006,8 +1009,7 @@ class FFAFwdSm80:
             tVcV = gmem_thr_copy_V.partition_S(cV)
             t0VcV = gmem_thr_copy_V.get_slice(0).partition_S(cV)
 
-        # tKpK: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1) => the same predicate along CPY_K
-        # tVpV: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1) => the same predicate along CPY_K
+        # tKpK/tVpV: (ATOM_REST_V1,CPY_K4,CPY_HD2):(2,0,1) => the same predicate along CPY_K
         tKpK = cutedsl_utils.predicate_k(tKcK, limit=mK.shape[1])
         if const_expr(self.same_hdim_kv):
             tVpV = tKpK
@@ -1173,32 +1175,31 @@ class FFAFwdSm80:
                 cute.printf("")
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Prologue
+        # Prologue: Load sQ, and one full stages of sK/sV
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # Start async loads of the last mn-tile, where we take care of the mn residue
+        # NOTE:
+        # 1. If Q_in_regs, we load Q, then load 1 stage of K,
+        #     then load the rest stages of K and all stages of V except the last stage of V,
+        #     after we (optionally) rotate Q and read from smem buffer that Q/V share to rmem.
+        # 2. Otherwise, we load Q, then load all stages of K/V except the last stage of V,
+        #     then (optionally) rotate Q.
+
+        # Load sQ
         gmem_thr_copy_Q = gmem_tiled_copy_Q.get_slice(tidx)
         self.load_Q(
             gmem_thr_copy_Q,
             gQ,
             sQ,
-            m_block,
+            block=m_block,
             seqlen=seqlen_info.seqlen_q,
             headdim=mQ.shape[1],
             is_print_thread_and_tile=is_print_thread,
         )
         cute.arch.cp_async_commit_group()
 
-        def preprocess_Q():
-            cute.arch.cp_async_wait_group(self.num_stages * 2 - 1)
-            if const_expr(self.Q_in_regs):
-                cute.arch.barrier()
-                tSrQ_copy_view = smem_thr_copy_Q.retile(tSrQ)
-                cute.copy(smem_thr_copy_Q, tSsQ, tSrQ_copy_view)
-
-        # If Q_in_regs, we load Q, then load 1 stage of K, then (optionally) rotate Q and
-        # read from smem_q to registers, then load V.
-        # If !Q_in_regs, we load Q, load all stages of K & V, then (optionally) rotate Q.
+        # Load sK0, wait for sQ load to finish
+        # and S2R copy sQ to rQ, if Q_in_regs
         if const_expr(self.Q_in_regs):
             load_K(
                 n_block,
@@ -1207,10 +1208,21 @@ class FFAFwdSm80:
                 is_print_thread_and_tile=is_print_thread,
             )
             cute.arch.cp_async_commit_group()
-            preprocess_Q()
-            cute.arch.barrier()  # Make sure all threads have read smem_q before loading V
 
+            # Wait for sQ load to finish before S2R copy
+            cute.arch.cp_async_wait_group(1)
+            cute.arch.barrier()
+
+            # S2R copy rotated Q from smem buffer that Q/V share to rmem
+            tSrQ_copy_view = smem_thr_copy_Q.retile(tSrQ)
+            cute.copy(smem_thr_copy_Q, tSsQ, tSrQ_copy_view)
+
+            # Make sure all threads have read smem before loading V
+            cute.arch.barrier()
+
+        # Load sK/sV for the rest of stages
         for stage in cutlass.range_constexpr(self.num_stages):
+            # Load Ki, i ∈ {1,...,num_stages-1} (∪ {0} if !Q_in_regs)
             if const_expr(not self.Q_in_regs or stage > 0):
                 if stage == 0 or n_block - stage >= 0:
                     load_K(
@@ -1220,6 +1232,8 @@ class FFAFwdSm80:
                         is_print_thread_and_tile=is_print_thread and stage == 0,
                     )
                 cute.arch.cp_async_commit_group()
+
+            # Load Vi, i ∈ {0,...,num_stages-2}
             if const_expr(stage < self.num_stages - 1):
                 if stage == 0 or n_block - stage >= 0:
                     load_V(
@@ -1229,17 +1243,26 @@ class FFAFwdSm80:
                         is_print_thread_and_tile=is_print_thread and stage == 0,
                     )
                 cute.arch.cp_async_commit_group()
+
+        # Wait for sQ load to finish before mainloop
+        # if not Q_in_regs, otherwise, it's been waited before S2R copy already
         if const_expr(not self.Q_in_regs):
-            preprocess_Q()
+            # group cnt: load_Q: 1, load_K: num_stages, load_V: num_stages-1
+            # thus we wait for `num_stages * 2 - 1` groups
+            # to allow all stages of K/V loads on the fly
+            cute.arch.cp_async_wait_group(self.num_stages * 2 - 1)
 
         # ///////////////////////////////////////////////////////////////////////////////
         # Mainloop
         # ///////////////////////////////////////////////////////////////////////////////
-        # Start processing of the first n-block.
-        # For performance reason, we separate out two kinds of iterations:
+
+        # --- Make mask object and partial fn ---
+
+        # NOTE: For performance reason, we separate out two kinds of iterations:
         # those that need masking on S, and those that don't.
         # We need masking on S for the very last block when K and V has length not multiple of tile_n.
         # We also need masking on S if it's causal, for the last several blocks.
+
         mask = AttentionMask(
             self.tile_m,
             self.tile_n,
@@ -1262,7 +1285,8 @@ class FFAFwdSm80:
             else None,
         )
 
-        # First iteration with seqlen masking
+        # --- First iteration with seqlen masking ---
+
         smem_pipe_read = Int32(0)
         smem_pipe_write = Int32(self.num_stages - 1)
         compute_one_n_block(
@@ -1275,7 +1299,9 @@ class FFAFwdSm80:
         )
         smem_pipe_read = self.advance_pipeline(smem_pipe_read)
         smem_pipe_write = self.advance_pipeline(smem_pipe_write)
-        # Next couple of iterations with causal masking
+
+        # --- Next couple of iterations with causal/local masking ---
+
         if const_expr(self.is_causal or self.is_local):
             n_block_min_causal_local_mask = (
                 block_info.get_n_block_min_causal_local_mask(
@@ -1295,7 +1321,9 @@ class FFAFwdSm80:
                 )
                 smem_pipe_read = self.advance_pipeline(smem_pipe_read)
                 smem_pipe_write = self.advance_pipeline(smem_pipe_write)
-        # The remaining iterations have no masking
+
+        # --- The remaining iterations without masking ---
+
         for n_tile in cutlass.range(n_block, unroll=1):
             compute_one_n_block(
                 n_block - n_tile - 1,
@@ -1898,5 +1926,5 @@ class FFAFwdSm80:
                 )
 
     @cute.jit
-    def advance_pipeline(self, pipeline_index):
+    def advance_pipeline(self, pipeline_index: Int32) -> Int32:
         return pipeline_index + 1 if pipeline_index < self.num_stages - 1 else 0
