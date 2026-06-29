@@ -1625,6 +1625,7 @@ class FFABwdSm80:
             seqlen_info,
             d_head,
             d_head_v,
+            is_print_thread_and_tile=is_print_thread,
         )
 
     @cute.jit
@@ -1904,9 +1905,10 @@ class FFABwdSm80:
         n_block: cutlass.Int32,
         num_head: cutlass.Int32,
         batch_size: cutlass.Int32,
-        seqlen: SeqlenInfoQK,
+        seqlen_info: SeqlenInfoQK,
         d_head: cutlass.Int32,
         d_head_v: cutlass.Int32,
+        is_print_thread_and_tile: bool = False,
     ):
         rdV = cute.make_fragment_like(acc_dV, self.dtype)
         rdV.store(acc_dV.load().to(self.dtype))
@@ -1943,13 +1945,15 @@ class FFABwdSm80:
             cute.copy(smem_copy_atom_dKV, taccdVrdV, taccdVsdV)
             cute.copy(smem_copy_atom_dKV, taccdKrdK, taccdKsdK)
 
-            if cutlass.const_expr(not seqlen.has_cu_seqlens_k):
+            if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
                 mdK_cur, mdV_cur = [
                     t[batch_idx, None, head_idx_kv, None] for t in (mdK, mdV)
                 ]
             else:
                 mdK_cur, mdV_cur = [
-                    cute.domain_offset((seqlen.offset_k, 0), t[None, head_idx_kv, None])
+                    cute.domain_offset(
+                        (seqlen_info.offset_k, 0), t[None, head_idx_kv, None]
+                    )
                     for t in (mdK, mdV)
                 ]
 
@@ -1992,7 +1996,7 @@ class FFABwdSm80:
             for rest_m in cutlass.range_constexpr(cute.size(tdKrdK.shape[1])):
                 if (
                     t0dKcdK[0, rest_m, 0][0]
-                    < seqlen.seqlen_k - n_block * self.n_block_size - tdKcdK[0][0]
+                    < seqlen_info.seqlen_k - n_block * self.n_block_size - tdKcdK[0][0]
                 ):
                     cute.copy(
                         gmem_tiled_copy_dK,
@@ -2005,7 +2009,7 @@ class FFABwdSm80:
             for rest_m in cutlass.range_constexpr(cute.size(tdVrdV.shape[1])):
                 if (
                     t0dVcdV[0, rest_m, 0][0]
-                    < seqlen.seqlen_k - n_block * self.n_block_size - tdVcdV[0][0]
+                    < seqlen_info.seqlen_k - n_block * self.n_block_size - tdVcdV[0][0]
                 ):
                     cute.copy(
                         gmem_tiled_copy_dV,
@@ -2024,10 +2028,10 @@ class FFABwdSm80:
                 else num_head
             )
 
-            if cutlass.const_expr(not seqlen.has_cu_seqlens_k):
+            if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
                 mdK_cur, mdV_cur = [t[batch_idx, head_idx_kv, None] for t in (mdK, mdV)]
             else:
-                padded_offset_k = seqlen.offset_k + batch_idx * self.n_block_size
+                padded_offset_k = seqlen_info.offset_k + batch_idx * self.n_block_size
                 mdK_cur = cute.domain_offset(
                     (padded_offset_k * self.head_dim_padded,), mdK[head_idx_kv, None]
                 )
@@ -2055,6 +2059,51 @@ class FFABwdSm80:
                 cutedsl_utils.atomic_add_fp32(
                     acc_dK_atomic[i], cutedsl_utils.elem_pointer(tdKgdKaccum, i)
                 )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm80_epilogue] "
+                cute.printf("")
+                # common
+                cute.printf(prefix + f"qhead_per_kvhead={self.qhead_per_kvhead}")
+                cute.printf(
+                    prefix + "n_block={}, head_idx_kv={}, batch_idx={}",
+                    n_block,
+                    head_idx_kv,
+                    batch_idx,
+                )
+                cute.printf(prefix + "acc_dK: {}", acc_dK.layout)
+                cute.printf(prefix + "acc_dV: {}", acc_dV.layout)
+                cute.printf(prefix + "mdK_cur: {}", mdK_cur.layout)
+                cute.printf(prefix + "mdV_cur: {}", mdV_cur.layout)
+                cute.printf(prefix + "gdK: {}", gdK.layout)
+                cute.printf(prefix + "gdV: {}", gdV.layout)
+                # path-specific
+                if cutlass.const_expr(self.qhead_per_kvhead == 1):
+                    cute.printf(prefix + "(smem store path)")
+                    cute.printf(prefix + "rdK: {}", rdK.layout)
+                    cute.printf(prefix + "rdV: {}", rdV.layout)
+                    cute.printf(prefix + "sdK: {}", sdK.layout)
+                    cute.printf(prefix + "sdV: {}", sdV.layout)
+                    cute.printf(prefix + "tdKsdK: {}", tdKsdK.layout)
+                    cute.printf(prefix + "tdKgdK: {}", tdKgdK.layout)
+                    cute.printf(prefix + "tdVsdV: {}", tdVsdV.layout)
+                    cute.printf(prefix + "tdVgdV: {}", tdVgdV.layout)
+                    cute.printf(prefix + "tdKrdK: {}", tdKrdK.layout)
+                    cute.printf(prefix + "tdVrdV: {}", tdVrdV.layout)
+                    cute.printf(prefix + "tdKcdK: {}", tdKcdK.layout)
+                    cute.printf(prefix + "tdVcdV: {}", tdVcdV.layout)
+                    cute.printf(prefix + "tdKpdK: {}", tdKpdK.layout)
+                    cute.printf(prefix + "tdVpdV: {}", tdVpdV.layout)
+                else:
+                    cute.printf(prefix + "(atomic add path)")
+                    cute.printf(prefix + "tdKgdKaccum: {}", tdKgdKaccum.layout)
+                    cute.printf(prefix + "tdVgdVaccum: {}", tdVgdVaccum.layout)
+                    cute.printf(prefix + "acc_dK_atomic: {}", acc_dK_atomic.layout)
+                    cute.printf(prefix + "acc_dV_atomic: {}", acc_dV_atomic.layout)
+                cute.printf("")
 
     @cute.jit
     def advance_pipeline(self, pipeline_index, num_stages: cutlass.Constexpr):
