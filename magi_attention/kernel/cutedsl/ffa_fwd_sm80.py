@@ -1376,6 +1376,7 @@ class FFAFwdSm80:
             m_block,
             num_head,
             batch_size,
+            is_print_thread_and_tile=is_print_thread,
         )
 
     @cute.jit
@@ -1847,6 +1848,7 @@ class FFAFwdSm80:
         m_block: cutlass.Int32,
         head_idx: cutlass.Int32,
         batch_idx: cutlass.Int32,
+        is_print_thread_and_tile: bool = False,
     ):
         # Make rO from acc_O with dtype cast
         rO = cute.make_fragment_like(acc_O, self.dtype)
@@ -1997,6 +1999,31 @@ class FFAFwdSm80:
                 pack_gqa.store_O(
                     mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_block, seqlen_info.seqlen_q
                 )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm80_epilogue] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "m_block={}, head_idx={}, batch_idx={}",
+                    m_block,
+                    head_idx,
+                    batch_idx,
+                )
+                cute.printf(
+                    prefix
+                    + f"use_tma_O={self.use_tma_O}, "
+                    + f"use_stmatrix_O_store={self.use_stmatrix_O_store}, "
+                    + f"{ragged=}"
+                )
+                cute.printf(prefix + "acc_O: {}", acc_O.layout)
+                cute.printf(prefix + "rO: {}", rO.layout)
+                cute.printf(prefix + "sO: {}", sO.layout)
+                cute.printf(prefix + "cO: {}", cO.layout)
+                cute.printf(prefix + "mO_cur: {}", mO_cur.layout)
+                cute.printf("")
 
     @cute.jit
     def advance_pipeline(self, pipeline_index: Int32) -> Int32:
