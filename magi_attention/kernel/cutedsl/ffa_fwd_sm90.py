@@ -1021,6 +1021,11 @@ class FFAFwdSm90:
 
         # --- Make smem tensors of sQ/sK/sV/sO/sP ---
 
+        # sQ: ((ATOM_Q8,LAY_tileQ16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
+        # sK: ((ATOM_K8,LAY_tileK16),(ATOM_HD64,LAY_tileHD2),STAGE_K=(1,2)):((64,512),(1,8192),(0,16384))
+        # sV: ((ATOM_K8,LAY_tileK16),(ATOM_HDV64,LAY_tileHD2),STAGE_V=(1,2)):((64,512),(1,8192),(0,16384))
+        # sVt: ((ATOM_HDV64,LAY_tileHD2),(ATOM_K8,LAY_tileK16),STAGE_V=(1,2)):((1,8192),(64,512),(0,16384))
+        # sO: ((ATOM_Q8,LAY_tileQ16),(ATOM_HDV64,LAY_tileHD2)):((64,512),(1,8192))
         sQ: cute.Tensor = storage.sQ.get_tensor(
             sQ_layout.outer, swizzle=sQ_layout.inner
         )
@@ -1661,6 +1666,11 @@ class FFAFwdSm90:
         thr_mma_qk = tiled_mma_qk.get_slice(tidx)
         wg_mma_qk = tiled_mma_qk.get_slice(warp_group_thread_layout(warp_group_idx))
         wg_mma_pv = tiled_mma_pv.get_slice(warp_group_thread_layout(warp_group_idx))
+
+        # --- S = Q @ K.T ---
+
+        # tSrQ: (MMA_ATOM=1,MMA_Q1,MMA_HD=(4,2)):(0,0,(2,1024))
+        # tSrK: (MMA_ATOM=1,MMA_K1,MMA_HD=(4,2),STAGE_K=(1,2)):(0,0,(2,1024),(0,2048))
         _, tSrQ, tSrK = sm90_utils.partition_fragment_ABC(
             wg_mma_qk, (self.tile_m, self.tile_n, self.tile_hdim), sQ, sK
         )
@@ -1671,6 +1681,12 @@ class FFAFwdSm90:
             tSrQ,
             tSrK,
         )
+
+        # --- O = P @ V ---
+
+        # acc_O:  (MMA_ATOM=(2,2,16),MMA_Q1,MMA_HD1):((1,2,4),0,0)
+        # tOrP:   (MMA_ATOM=(2,2,2),MMA_Q1,MMA_K8):((1,2,4),0,8)
+        # tOrVt:  (MMA_ATOM=1,MMA_HD1,MMA_K8,STAGE_V=(1,2)):(0,0,128,(0,2048))
         acc_O, tOrP, tOrVt = sm90_utils.partition_fragment_ABC(
             wg_mma_pv, (self.tile_m, self.tile_hdimv, self.tile_n), sP, sVt
         )

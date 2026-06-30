@@ -1054,6 +1054,13 @@ class FFABwdSm90:
 
         # --- Make smem tensors of sQ/sK/sV/sO/sP/sdS/sLSE/sdPsum/sdQacc ---
 
+        # sQ:  ((ATOM_Q8,LAY_tileQ10),(ATOM_HD64,LAY_tileHD2),STAGE_Q=(1,2)):((64,512),(1,5120),(0,10240))
+        # sdO: ((ATOM_Q8,LAY_tileQ10),(ATOM_HDV64,LAY_tileHD2),STAGE_dO=(1,2)):((64,512),(1,5120),(0,10240))
+        # sK:  ((ATOM_K8,LAY_tileK16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
+        # sV:  ((ATOM_K8,LAY_tileK16),(ATOM_HDV64,LAY_tileHD2)):((64,512),(1,8192))
+        # sP/sdS: ((ATOM_Q8,LAY_tileQ10),(ATOM_K64,LAY_tileK2),STAGE_PdS=(1,2)):((64,512),(1,5120),(0,10240))
+        # sLSE/sdPsum:   (tileQ80,STAGE_Q=2):(1,128)
+        # sdQacc: (tileQ*tileHD//2=5120,STAGE=2):(1,5120)
         sQ: cute.Tensor = storage.sQ.get_tensor(
             sQ_layout.outer, swizzle=sQ_layout.inner
         )
