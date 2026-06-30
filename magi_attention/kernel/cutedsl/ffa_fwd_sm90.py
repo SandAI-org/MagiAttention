@@ -61,6 +61,7 @@ from .tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
+    TileSchedulerProtocol,
 )
 
 
@@ -1084,11 +1085,17 @@ class FFAFwdSm90:
             if const_expr(self.pack_gqa)
             else 1,
         )
-        TileSchedulerCls = partial(self.tile_scheduler_cls.create, tile_sched_params)
 
         # --- Cluster wait before warp specialization ---
 
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mn)
+
+        # --- Make tile scheduler ---
+
+        tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
+        assert isinstance(
+            tile_scheduler, TileSchedulerProtocol
+        ), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
 
         # --- Debug print ---
 
@@ -1121,8 +1128,8 @@ class FFAFwdSm90:
                 blocksparse_tensors,
                 block_info,
                 SeqlenInfoCls,
-                TileSchedulerCls,
-                is_print_block,
+                tile_scheduler=tile_scheduler,
+                is_print_block=is_print_block,
             )
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1147,17 +1154,16 @@ class FFAFwdSm90:
                 pipeline_q,
                 gmem_tiled_copy_O,
                 tma_atom_O,
-                tidx - 128,
                 softmax_scale_log2,
                 softmax_scale,
                 block_info,
                 SeqlenInfoCls,
                 AttentionMaskCls,
-                TileSchedulerCls,
+                tile_scheduler,
                 blocksparse_tensors,
                 aux_tensors,
                 fastdiv_mods,
-                is_print_block,
+                is_print_block=is_print_block,
             )
 
     @cute.jit
@@ -1180,17 +1186,20 @@ class FFAFwdSm90:
         blocksparse_tensors: Optional[BlockSparseTensors],
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
-        TileSchedulerCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
         is_print_block: bool = False,
     ):
-        warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
+        warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % len(
+            self.load_warp_ids
+        )
         tidx, _, _ = cute.arch.thread_idx()
 
-        # TMA: only warp 0 loads. cp_async: all warps load.
+        # NOTE: TMA: only warp 0 loads | cp_async: all warps load
         # When not use_tma_Q, all 128 producer threads participate in Q loading.
         is_load_warp = warp_idx_in_wg == 0 or const_expr(
             not self.use_tma_KV or not self.use_tma_Q
         )
+
         # KV loading restricted to warp 0 for TMA, all warps for non-TMA KV
         is_kv_load_warp = warp_idx_in_wg == 0 or const_expr(not self.use_tma_KV)
 
@@ -1203,7 +1212,6 @@ class FFAFwdSm90:
             # ///////////////////////////////////////////////////////////////////////////////
             #  Persistent tile scheduler loop
             # ///////////////////////////////////////////////////////////////////////////////
-            tile_scheduler = TileSchedulerCls()
             work_tile = tile_scheduler.initial_work_tile_info()
             while work_tile.is_valid_tile:
                 m_block, head_idx, batch_idx, _ = work_tile.tile_idx
@@ -1565,18 +1573,19 @@ class FFAFwdSm90:
         pipeline_q: pipeline.PipelineAsync,
         gmem_tiled_copy_O: cute.TiledCopy,
         tma_atom_O: Optional[cute.CopyAtom],
-        tidx: Int32,
         softmax_scale_log2: Float32,
         softmax_scale: Optional[Float32],
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         AttentionMaskCls: Callable,
-        TileSchedulerCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors],
         aux_tensors: Optional[list],
         fastdiv_mods=None,
         is_print_block: bool = False,
     ):
+        tidx, _, _ = cute.arch.thread_idx()
+        tidx -= self.mma_warp_ids[0] * cute.arch.WARP_SIZE
         warp_group_idx = cute.arch.make_warp_uniform(tidx // self.num_threads_per_wg)
         warp_group_thread_layout = cute.make_layout(
             self.num_wg_mma, stride=self.num_threads_per_wg
@@ -1616,7 +1625,6 @@ class FFAFwdSm90:
             pipeline.PipelineUserType.Consumer, self.num_stages
         )
 
-        tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         softmax = Softmax.create(
             softmax_scale_log2,
