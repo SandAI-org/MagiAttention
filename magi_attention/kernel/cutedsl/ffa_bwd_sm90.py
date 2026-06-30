@@ -110,7 +110,7 @@ class FFABwdSm90:
         self.mask_type = mask_type
         self.is_local = is_local
         self.deterministic = deterministic
-        self.tile_m = tile_m  # tileQ128
+        self.tile_m = tile_m  # tileQ64
         self.tile_n = tile_n  # tileK128
         self.num_threads = num_threads  # 384 (3 WGs = 1 producer + 2 MMA)
         self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 12
@@ -279,10 +279,10 @@ class FFABwdSm90:
         # Permutation MNK: (_,_,_)
         # MMA Atom
         # ThrID:           128:1
-        # Shape MNK:       (64,80,16)
+        # Shape MNK:       (64,64,16)
         # TV Layout A:     (128,(64,16)):(0,(1,64))
-        # TV Layout B:     (128,(80,16)):(0,(1,80))
-        # TV Layout C:     ((4,8,4),(2,2,10)):((128,1,16),(64,8,512))
+        # TV Layout B:     (128,(64,16)):(0,(1,64))
+        # TV Layout C:     ((4,8,4),(2,2,8)):((128,1,16),(64,8,512))
         atom_layout_SdP = (
             self.AtomLayoutMSdP,
             self.num_wg_mma // self.AtomLayoutMSdP,
@@ -343,14 +343,14 @@ class FFABwdSm90:
         ]
 
         # Tiled MMA for dQ = dS @ K
-        # Thr Layout VMNK: (128,2,1,1):(1,128,0,0)
+        # Thr Layout VMNK: (128,1,2,1):(1,0,128,0)
         # Permutation MNK: (_,_,_)
         # MMA Atom
         # ThrID:           128:1
-        # Shape MNK:       (64,80,16)
+        # Shape MNK:       (64,64,16)
         # TV Layout A:     (128,(64,16)):(0,(1,64))
-        # TV Layout B:     (128,(80,16)):(0,(1,80))
-        # TV Layout C:     ((4,8,4),(2,2,10)):((128,1,16),(64,8,512))
+        # TV Layout B:     (128,(64,16)):(0,(1,64))
+        # TV Layout C:     ((4,8,4),(2,2,8)):((128,1,16),(64,8,512))
         assert self.num_wg_dQ % self.AtomLayoutMdQ == 0
         atom_layout_dQ = (self.AtomLayoutMdQ, self.num_wg_dQ // self.AtomLayoutMdQ, 1)
         tiler_mn_dQ = (
@@ -413,8 +413,12 @@ class FFABwdSm90:
             sV: sV_struct
             sK: sK_struct
             sdO: sdO_struct
-            sP: cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sP], 1024]
-            sdS: cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sdS], 1024]
+            sP: cute.struct.Align[
+                cute.struct.MemRange[self.dtype, cosize_sP], self.buffer_align_bytes
+            ]
+            sdS: cute.struct.Align[
+                cute.struct.MemRange[self.dtype, cosize_sdS], self.buffer_align_bytes
+            ]
             sdQacc: sdQacc_struct
 
         self.shared_storage_cls = SharedStorageQKV
@@ -1081,13 +1085,13 @@ class FFABwdSm90:
 
         # --- Make smem tensors of sQ/sK/sV/sO/sP/sdS/sLSE/sdPsum/sdQacc ---
 
-        # sQ:  ((ATOM_Q8,LAY_tileQ10),(ATOM_HD64,LAY_tileHD2),STAGE_Q=(1,2)):((64,512),(1,5120),(0,10240))
-        # sdO: ((ATOM_Q8,LAY_tileQ10),(ATOM_HDV64,LAY_tileHD2),STAGE_dO=(1,2)):((64,512),(1,5120),(0,10240))
+        # sQ:  ((ATOM_Q8,LAY_tileQ8),(ATOM_HD64,LAY_tileHD2),STAGE_Q=(1,2)):((64,512),(1,4096),(0,8192))
+        # sdO: ((ATOM_Q8,LAY_tileQ8),(ATOM_HDV64,LAY_tileHD2),STAGE_dO=(1,2)):((64,512),(1,4096),(0,8192))
         # sK:  ((ATOM_K8,LAY_tileK16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
         # sV:  ((ATOM_K8,LAY_tileK16),(ATOM_HDV64,LAY_tileHD2)):((64,512),(1,8192))
-        # sP/sdS: ((ATOM_Q8,LAY_tileQ10),(ATOM_K64,LAY_tileK2),STAGE_PdS=(1,2)):((64,512),(1,5120),(0,10240))
-        # sLSE/sdPsum:   (tileQ80,STAGE_Q=2):(1,128)
-        # sdQacc: (tileQ*tileHD//2=5120,STAGE=2):(1,5120)
+        # sP/sdS: ((ATOM_Q8,LAY_tileQ8),(ATOM_K64,LAY_tileK2),STAGE_PdS=(1,2)):((64,512),(1,4096),(0,8192))
+        # sLSE/sdPsum:   (tileQ64,STAGE_Q=2):(1,64)
+        # sdQacc: (tileQ*tileHD//2=4096,STAGE=2):(1,4096)
         sQ: cute.Tensor = storage.sQ.get_tensor(
             sQ_layout.outer, swizzle=sQ_layout.inner
         )
@@ -1711,7 +1715,7 @@ class FFABwdSm90:
         wg_mma_SdP = tiled_mma_SdP.get_slice(warp_group_thread_layout(warp_group_idx))
 
         shape_mnk_S = (self.tile_m, self.tile_n, self.tile_hdim)
-        # tSrQ: (MMA_ATOM=1,MMA_Q1,MMA_HD=(4,2),STAGE_Q=(1,2)):(0,0,(2,640),(0,1280))
+        # tSrQ: (MMA_ATOM=1,MMA_Q1,MMA_HD=(4,2),STAGE_Q=(1,2)):(0,0,(2,512),(0,1024))
         # tSrK: (MMA_ATOM=1,MMA_K1,MMA_HD=(4,2)):(0,0,(2,1024))
         _, tSrQ, tSrK = sm90_utils.partition_fragment_ABC(
             wg_mma_SdP, shape_mnk_S, sQ, sK, swap_AB=self.SdP_swapAB
@@ -1725,8 +1729,8 @@ class FFABwdSm90:
             swap_AB=self.SdP_swapAB,
         )
 
-        # tLSEsLSE:   ((ATOM_Q2,MMA_Q10,1),STAGE2):((1,8,0),128)
-        # tLSEsdPsum: ((ATOM_Q2,MMA_Q10,1),STAGE2):((1,8,0),128)
+        # tLSEsLSE:   ((ATOM_Q2,MMA_Q8,1),STAGE2):((1,8,0),64)
+        # tLSEsdPsum: ((ATOM_Q2,MMA_Q8,1),STAGE2):((1,8,0),64)
         tLSEsLSE = layout_utils.mma_partition_C_vec(
             sLSE, thr_mma_SdP, expand_shape=self.tile_n, is_colvec=not self.SdP_swapAB
         )
@@ -1753,7 +1757,7 @@ class FFABwdSm90:
         # --- dP = dO @ V.T ---
 
         shape_mnk_dP = (self.tile_m, self.tile_n, self.tile_hdimv)
-        # tdPrdO: (MMA_ATOM=1,MMA_Q1,MMA_HD=(4,2),STAGE_dO=(1,2)):(0,0,(2,640),(0,1280))
+        # tdPrdO: (MMA_ATOM=1,MMA_Q1,MMA_HD=(4,2),STAGE_dO=(1,2)):(0,0,(2,512),(0,1024))
         # tdPrV:  (MMA_ATOM=1,MMA_K1,MMA_HD=(4,2)):(0,0,(2,1024))
         _, tdPrdO, tdPrV = sm90_utils.partition_fragment_ABC(
             wg_mma_SdP, shape_mnk_dP, sdO, sV, swap_AB=self.SdP_swapAB
@@ -1775,7 +1779,7 @@ class FFABwdSm90:
         sdOt = layout_utils.transpose_view(sdO)
         shape_mnk_dV = (self.tile_n, self.tile_hdimv, self.tile_m)
         # acc_dV:  (MMA_ATOM=(2,2,16),MMA_K1,MMA_HD1):((1,2,4),0,0)
-        # tdVrdOt: (MMA_ATOM=1,MMA_HD1,MMA_Q5,STAGE_dO=(1,2)):(0,0,128,(0,1280))
+        # tdVrdOt: (MMA_ATOM=1,MMA_HD1,MMA_Q4,STAGE_dO=(1,2)):(0,0,128,(0,1024))
         acc_dV, tdVrPt, tdVrdOt = sm90_utils.partition_fragment_ABC(
             wg_mma_dV, shape_mnk_dV, sPt, sdOt, swap_AB=self.dKV_swapAB
         )
@@ -1799,8 +1803,8 @@ class FFABwdSm90:
         sQt = layout_utils.transpose_view(sQ)
         shape_mnk_dK = (self.tile_n, self.tile_hdim, self.tile_m)
         # acc_dK:  (MMA_ATOM=(2,2,16),MMA_K1,MMA_HD1):((1,2,4),0,0)
-        # tdKrdSt: (MMA_ATOM=(2,2,2),MMA_K1,MMA_Q5):((1,2,4),0,8)
-        # tdKrQt:  (MMA_ATOM=1,MMA_HD1,MMA_Q5,STAGE_Q=(1,2)):(0,0,128,(0,1280))
+        # tdKrdSt: (MMA_ATOM=(2,2,2),MMA_K1,MMA_Q4):((1,2,4),0,8)
+        # tdKrQt:  (MMA_ATOM=1,MMA_HD1,MMA_Q4,STAGE_Q=(1,2)):(0,0,128,(0,1024))
         acc_dK, tdKrdSt, tdKrQt = sm90_utils.partition_fragment_ABC(
             wg_mma_dK, shape_mnk_dK, sdSt, sQt, swap_AB=self.dKV_swapAB
         )
@@ -1827,7 +1831,7 @@ class FFABwdSm90:
         shape_mnk_dQ = (self.tile_m, self.tile_hdim, self.tile_n)
         mma_dsk_fn = None
         if const_expr(is_dQ_wg):
-            # tdQrdS: (MMA_ATOM=1,MMA_Q1,MMA_K=(4,2),STAGE_dS=(1,2)):(0,0,(2,640),(0,1280))
+            # tdQrdS: (MMA_ATOM=1,MMA_Q1,MMA_K=(4,2),STAGE_dS=(1,2)):(0,0,(2,512),(0,1024))
             # tdQrKt: (MMA_ATOM=1,MMA_HD1,MMA_K8):(0,0,128)
             _, tdQrdS, tdQrKt = sm90_utils.partition_fragment_ABC(
                 wg_mma_dQ, shape_mnk_dQ, sdS, sKt, swap_AB=self.dQ_swapAB
@@ -1870,7 +1874,7 @@ class FFABwdSm90:
         tdQsdQacc = None
         if const_expr(is_dQ_wg):
             smem_thr_copy_dQacc = r2s_tiled_copy_dQacc.get_slice(tidx)
-            # tdQsdQacc: ((CPY_ATOM=(4,1)),CPY_Q10,1):((1,0),512,0)
+            # tdQsdQacc: ((CPY_ATOM=(4,1)),CPY_Q8,1):((1,0),512,0)
             tdQsdQacc = smem_thr_copy_dQacc.partition_D(sdQacc)
 
         # ///////////////////////////////////////////////////////////////////////////////
