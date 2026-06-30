@@ -1698,19 +1698,19 @@ class FFAFwdSm80:
 
         # Issue MMA for S = Q * K^T, after S2R copy sQ/sK to rQ/rK
         sm80_utils.gemm(
-            mma_params.thr_mma_qk,
-            acc_S,
-            mma_params.tSrQ,
-            mma_params.tSrK,
-            smem_copy_params.tSsQ,
-            smem_copy_params.tSsK[
+            tiled_mma=mma_params.thr_mma_qk,
+            acc=acc_S,
+            tCrA=mma_params.tSrQ,
+            tCrB=mma_params.tSrK,
+            tCsA=smem_copy_params.tSsQ,
+            tCsB=smem_copy_params.tSsK[
                 None,
                 None,
                 None,
                 smem_pipe_read if const_expr(self.num_stages > 1) else 0,
             ],
-            smem_copy_params.smem_thr_copy_Q,
-            smem_copy_params.smem_thr_copy_K,
+            smem_thr_copy_A=smem_copy_params.smem_thr_copy_Q,
+            smem_thr_copy_B=smem_copy_params.smem_thr_copy_K,
             A_in_regs=self.Q_in_regs,
         )
 
@@ -1766,17 +1766,17 @@ class FFAFwdSm80:
 
         # Issue MMA for O = P * V, after S2R copy sV to rV
         sm80_utils.gemm_rs(
-            mma_params.thr_mma_pv,
-            mma_params.acc_O,
-            tOrP,
-            mma_params.tOrVt,
-            smem_copy_params.tOsVt[
+            tiled_mma=mma_params.thr_mma_pv,
+            acc=mma_params.acc_O,
+            tCrA=tOrP,
+            tCrB=mma_params.tOrVt,
+            tCsB=smem_copy_params.tOsVt[
                 None,
                 None,
                 None,
                 smem_pipe_read if const_expr(self.num_stages > 1) else 0,
             ],
-            smem_copy_params.smem_thr_copy_V,
+            smem_thr_copy_B=smem_copy_params.smem_thr_copy_V,
         )
 
         # --- Debug print ---

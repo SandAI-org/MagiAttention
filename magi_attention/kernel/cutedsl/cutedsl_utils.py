@@ -277,7 +277,7 @@ def make_tiled_copy_B(
 
 def mma_make_fragment_A(
     smem: cute.Tensor,
-    thr_mma: cute.core.ThrMma,
+    thr_mma: cute.ThrMma,
     swapAB: cutlass.Constexpr[bool] = False,
 ) -> cute.Tensor:
     if const_expr(swapAB):
@@ -288,7 +288,7 @@ def mma_make_fragment_A(
 
 def mma_make_fragment_B(
     smem: cute.Tensor,
-    thr_mma: cute.core.ThrMma,
+    thr_mma: cute.ThrMma,
     swapAB: cutlass.Constexpr[bool] = False,
 ) -> cute.Tensor:
     if const_expr(swapAB):

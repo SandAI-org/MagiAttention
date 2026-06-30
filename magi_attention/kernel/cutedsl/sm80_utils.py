@@ -78,6 +78,55 @@ def gemm(
     B_in_regs: cutlass.Constexpr[bool] = False,
     swap_AB: cutlass.Constexpr[bool] = False,
 ) -> None:
+    """Issue an SM80 (Ampere) warp-level tiled MMA `acc += A @ B.T`, with the
+    operands' S2R (smem-to-register) copies software-pipelined against the
+    MMA along the K (contraction) dimension.
+
+    The K dimension is iterated in `MMA_K = cute.size(tCsA.shape[2])` steps.
+    Before the first `cute.gemm`, the k=0 operand tile is loaded from smem to
+    rmem; then within the loop, the k+1 tile is prefetched (S2R copied) while
+    the k-th `cute.gemm` is issued, so the next operand load overlaps with the
+    current MMA. An operand already living in registers can skip its S2R copy
+    via `A_in_regs`/`B_in_regs`.
+
+    Args:
+        tiled_mma: The tiled MMA describing the warp-level MMA atom and the
+            thread/value partitioning of A, B and the accumulator.
+        acc: The accumulator fragment in registers (the MMA's C operand). It is
+            read-modify-written in place: on return `acc += A @ B`. Must be
+            pre-initialized (e.g. zero-filled) by the caller.
+        tCrA: A-operand register fragment, partitioned for the MMA as
+            `(MMA_ATOM, MMA_M, MMA_K)`. This is the tensor fed to `cute.gemm`.
+        tCrB: B-operand register fragment, partitioned for the MMA as
+            `(MMA_ATOM, MMA_N, MMA_K)`. This is the tensor fed to `cute.gemm`.
+        tCsA: A-operand source view in shared memory, partitioned by
+            `smem_thr_copy_A` and indexed per K-step `[None, None, k]` for the
+            S2R copy into `tCrA`. Ignored when `A_in_regs=True`.
+        tCsB: B-operand source view in shared memory, partitioned by
+            `smem_thr_copy_B` and indexed per K-step `[None, None, k]` for the
+            S2R copy into `tCrB`. Ignored when `B_in_regs=True`.
+        smem_thr_copy_A: The thread-sliced smem->rmem tiled copy used to stage
+            A from `tCsA` into `tCrA` (via `retile`). Encodes the S2R copy atom
+            (e.g. ldmatrix) and the per-thread layout for A.
+        smem_thr_copy_B: The thread-sliced smem->rmem tiled copy used to stage
+            B from `tCsB` into `tCrB`. Same role as `smem_thr_copy_A` but for B.
+        hook_fn: Optional callback invoked exactly once, right after the k=0
+            `cute.gemm` is issued. Used to overlap unrelated work with the MMA
+            pipeline, e.g. committing the cp.async group that loads the next
+            Q/K/V tile for the following mainloop iteration.
+        A_in_regs: If True, A already resides in registers (`tCrA`); skip its
+            S2R copy and ignore `tCsA`/`smem_thr_copy_A`. Used for RS-MMA where
+            the A operand is produced in registers by a previous MMA.
+        B_in_regs: If True, B already resides in registers (`tCrB`); skip its
+            S2R copy and ignore `tCsB`/`smem_thr_copy_B`.
+        swap_AB: If True, compute `acc += B @ A.T` instead by swapping the A and B
+            operands (and their copies / in-regs flags) before recursing. Used
+            to map a logically transposed MMA onto the same physical atom (e.g.
+            the `*_swapAB` variants of the SdP/dKV/dQ MMAs).
+
+    Returns:
+        None. The result is accumulated in place into `acc`.
+    """
     if cutlass.const_expr(swap_AB):
         gemm(
             tiled_mma,
@@ -133,6 +182,45 @@ def gemm_rs(
     smem_thr_copy_B: cute.TiledCopy,
     hook_fn: Optional[Callable] = None,
 ) -> None:
+    """Issue an SM80 (Ampere) warp-level tiled MMA `acc += A @ B.T`, the
+    register-stationary (RS) variant of `gemm`.
+
+    Unlike `gemm`, the A operand is assumed to already live in registers
+    (`tCrA`), so only the B operand is software-pipelined from smem to rmem
+    along the K (contraction) dimension. The K loop iterates
+    `MMA_K = cute.size(tCrA.shape[2])` steps: the k=0 B tile is S2R-copied
+    before the loop, then each k+1 B tile is prefetched while the k-th
+    `cute.gemm` is issued, overlapping the next B load with the current MMA.
+
+    This is used when A is produced directly in registers by a preceding MMA
+    (e.g. P/dS feeding the dV/dK MMA), avoiding a round-trip through smem.
+
+    Args:
+        tiled_mma: The tiled MMA describing the warp-level MMA atom and the
+            thread/value partitioning of A, B and the accumulator.
+        acc: The accumulator fragment in registers (the MMA's C operand). It is
+            read-modify-written in place: on return `acc += A @ B.T`. Must be
+            pre-initialized (e.g. zero-filled) by the caller.
+        tCrA: A-operand register fragment, partitioned for the MMA as
+            `(MMA_ATOM, MMA_M, MMA_K)`. Already resident in registers; fed
+            directly to `cute.gemm` with no S2R copy.
+        tCrB: B-operand register fragment, partitioned for the MMA as
+            `(MMA_ATOM, MMA_N, MMA_K)`. Filled per K-step by the S2R copy from
+            `tCsB` and then fed to `cute.gemm`.
+        tCsB: B-operand source view in shared memory, partitioned by
+            `smem_thr_copy_B` and indexed per K-step `[None, None, k]` for the
+            S2R copy into `tCrB`.
+        smem_thr_copy_B: The thread-sliced smem->rmem tiled copy used to stage
+            B from `tCsB` into `tCrB` (via `retile`). Encodes the S2R copy atom
+            (e.g. ldmatrix) and the per-thread layout for B.
+        hook_fn: Optional callback invoked exactly once, right after the k=0
+            `cute.gemm` is issued. Used to overlap unrelated work with the MMA
+            pipeline, e.g. committing the cp.async group that loads the next
+            tile for the following mainloop iteration.
+
+    Returns:
+        None. The result is accumulated in place into `acc`.
+    """
     tCrB_copy_view = smem_thr_copy_B.retile(tCrB)
     cute.copy(smem_thr_copy_B, tCsB[None, None, 0], tCrB_copy_view[None, None, 0])
     for k in cutlass.range_constexpr(cute.size(tCrA.shape[2])):
