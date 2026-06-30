@@ -419,8 +419,9 @@ def _flex_flash_attn_forward(
 
     # NOTE: we can not directly compile `_flex_flash_attn_forward`
     # since torch.compile does not allow returning the mutated args (out, lse)
-    global _ffa_k_block_size
-    _ffa_k_block_size = k_block_size
+    if not torch.compiler.is_compiling():
+        global _ffa_k_block_size
+        _ffa_k_block_size = k_block_size
     _flex_flash_attn_forward_compilable(
         q=q,
         k=k,
@@ -692,8 +693,9 @@ def _flex_flash_attn_backward(
 
     # NOTE: we can not directly compile `_flex_flash_attn_backward`
     # since torch.compile does not allow returning the mutated args (dq, dk, dv, dsink)
-    global _ffa_k_block_size
-    _ffa_k_block_size = k_block_size
+    if not torch.compiler.is_compiling():
+        global _ffa_k_block_size
+        _ffa_k_block_size = k_block_size
     _flex_flash_attn_backward_compilable(
         dout=dout,
         q=q,
@@ -862,6 +864,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges = None
             fwd_qk_map = None
             fwd_unique_count = None
+
+        if not torch.compiler.is_compiling():
+            global _ffa_k_block_size
+            _ffa_k_block_size = k_block_size
 
         out, meta = _flex_flash_attn_forward(
             q=q,
@@ -1132,6 +1138,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             )
             merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
 
+        if not torch.compiler.is_compiling():
+            global _ffa_k_block_size
+            _ffa_k_block_size = ctx.k_block_size
+
         dq, dk, dv, dsink = _flex_flash_attn_backward(
             dout=dout,
             q=q,
@@ -1270,8 +1280,14 @@ def flex_flash_attn_func(
             but currently only ``k_block_size=1`` (token-level) is implemented.
         q_block_size (int, optional): Q block size. Defaults to ``1``.
             Currently only ``1`` (per-token Q granularity) is supported.
-        k_block_size (int, optional): K block size. Defaults to ``1``.
-            Currently only ``1`` (token-level KV) is implemented; future may support 32/64.
+        k_block_size (int, optional): K block size for inner-loop contiguity. Defaults to ``1``.
+            For ``index_sparse``: specifies the granularity of K indices (each index covers
+            ``k_block_size`` tokens). When ``k_block_size >= tile_N`` (128), inner KV loads
+            use TMA 2D instead of CpAsync scatter — critical for performance.
+            For ``block_sparse``: auto-derived from the uniform k_range size if left at
+            default. When k_range_size >= tile_N, inner loads use TMA 2D for best perf.
+            Explicitly setting ``k_block_size`` to match your k_range tile size is
+            recommended to avoid the (minor) cost of computing it from k_ranges.
 
         max_seqlen_q (int | None, optional): Maximum sequence length for query. Defaults to ``None``.
             If provided, enables optimization for tile_scheduler. Most recommended to set this when using
@@ -1358,6 +1374,9 @@ def flex_flash_attn_func(
             Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
             Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
             Mutually exclusive with ``index_sparse_indices``.
+            When enabled, ``k_block_size`` is auto-set to ``tile_N`` (128 or 64 with swap_ab)
+            so that inner KV loads use TMA 2D — without this, the kernel falls back to CpAsync
+            scatter load with ~40% performance loss.
             **Contract:** all k_ranges (and, for ``swap_bwd_qk_loop=False`` backward, all q_ranges)
             must have one uniform size — the kernel relies on it for O(1) cursor seeks.
             Block-mask generated ranges satisfy this by construction; it is verified when
@@ -1511,17 +1530,30 @@ def flex_flash_attn_func(
     if _has_ranges:
         assert k_ranges is not None, "k_ranges must be provided together with q_ranges"
 
-    if block_sparse and is_sanity_check_enable():
-        # BlockSparse contract: scatter-dim ranges must share one uniform size
-        # (the kernel's O(1) cursor seek divides by it). LoopK scatters k_ranges;
-        # LoopQ backward scatters q_ranges. Forces a device sync, hence gated.
-        assert q_ranges is not None and k_ranges is not None
-        for name, ranges in (("k_ranges", k_ranges), ("q_ranges", q_ranges)):
-            sizes = ranges[:, 1] - ranges[:, 0]
-            assert (sizes == sizes[0]).all().item(), (
-                f"block_sparse requires all {name} to have one uniform size, "
-                f"got sizes in [{sizes.min().item()}, {sizes.max().item()}]"
-            )
+    if block_sparse:
+        # BlockSparse uses the same k_block_size mechanism as IndexSparse to
+        # tell the kernel that inner KV tiles are contiguous (KBlockSize >= kBlockN
+        # → TMA 2D load). When k_block_size is left at default (1), derive it
+        # from the actual k_ranges uniform size. If the k_range size >= kBlockN,
+        # the kernel uses TMA 2D; otherwise it falls back to CpAsync scatter.
+        assert k_ranges is not None, "block_sparse requires k_ranges"
+        if k_block_size <= 1:
+            k_sizes = k_ranges[:, 1] - k_ranges[:, 0]
+            _bs_k_size = k_sizes[0].item()
+            k_block_size = _bs_k_size
+
+        if is_sanity_check_enable():
+            assert q_ranges is not None
+            k_sizes = k_ranges[:, 1] - k_ranges[:, 0]
+            if not (k_sizes == k_sizes[0]).all().item():
+                import warnings
+
+                warnings.warn(
+                    f"block_sparse: non-uniform k_ranges detected "
+                    f"(sizes in [{k_sizes.min().item()}, {k_sizes.max().item()}]). "
+                    f"auto_range_merge will normalize them to ref_block_size.",
+                    stacklevel=2,
+                )
 
     # ── index_sparse_indices direct path: kernel reads indices directly ──
     if _has_index_sparse:

@@ -438,7 +438,7 @@ def _phase2_plot():
     x = np.arange(len(TOPK_VALS))
     x_labels = [f"{t // 1024}K" for t in TOPK_VALS]
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6), dpi=150)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6), dpi=150)
     for ax_idx, (pass_id, title) in enumerate(
         [("fwd", "FWD"), ("bwd_loopk", "BWD LoopK")]
     ):
@@ -460,23 +460,24 @@ def _phase2_plot():
                 yi,
                 color=color,
                 marker=marker,
-                markersize=7,
+                markersize=8,
                 linewidth=2.2,
                 label=label,
             )
 
         ax.set_title(
             f"{title}: kbs=1 vs kbs=128\n(S={S_FULL}, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16)",
-            fontsize=11,
+            fontsize=13,
             fontweight="bold",
         )
-        ax.set_xlabel("topk")
-        ax.set_ylabel("TFLOPS")
+        ax.set_xlabel("topk", fontsize=12)
+        ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
-        ax.set_xticklabels(x_labels)
-        ax.legend(fontsize=9, loc="lower left")
+        ax.set_xticklabels(x_labels, fontsize=11)
+        ax.tick_params(axis="y", labelsize=11)
+        ax.legend(fontsize=10, loc="lower left")
         ax.grid(alpha=0.3)
-        ax.set_ylim(bottom=0)
+        ax.set_ylim(0, 800)
 
     plt.tight_layout()
     path = os.path.join(out, "kbs1_vs_kbs128.png")
@@ -622,14 +623,18 @@ def _phase0_bench(force=False, rerun_filter=None):
         return _bench_ffa(topk, topk, pass_type, kw, device)
 
     def run_dense_nb(topk, pass_type):
-        indices = _build_idx_kbs128(topk, topk, "cpu").to(device)
-        q_ranges, k_ranges, atm = _indices_to_ranges(indices, topk)
+        n_qblocks = topk // 128
+        q_starts = torch.arange(0, topk, 128, dtype=torch.int32, device=device)
+        q_ends = q_starts + 128
+        q_r = torch.stack([q_starts, q_ends], dim=-1)
+        k_r = torch.zeros(n_qblocks, 2, dtype=torch.int32, device=device)
+        k_r[:, 1] = topk
+        atm = torch.zeros(n_qblocks, dtype=torch.int32, device=device)
         kw = dict(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
+            q_ranges=q_r,
+            k_ranges=k_r,
             attn_type_map=atm,
-            block_sparse=True,
-            auto_range_merge=True,
+            block_sparse=False,
             pack_gqa=True,
         )
         if pass_type != "fwd":
@@ -741,7 +746,7 @@ def _phase0_plot():
         ("sl", "BlockSparse", (0.29, 0.57, 0.60)),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(24, 7), dpi=150)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 6), dpi=150)
     x = np.arange(len(TOPK_VALS))
     bw = 0.15
 
@@ -773,29 +778,30 @@ def _phase0_plot():
                 if v > 0:
                     ax.text(
                         bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + 2,
+                        bar.get_height() + 5,
                         f"{v:.0f}",
                         ha="center",
                         va="bottom",
-                        fontsize=6,
+                        fontsize=7,
                         fontweight="bold",
                     )
 
-        ax.set_title(f"{pname} (S=topk)", fontsize=12, fontweight="bold")
-        ax.set_xlabel("topk")
-        ax.set_ylabel("TFLOPS")
+        ax.set_title(f"{pname} (S=topk)", fontsize=14, fontweight="bold")
+        ax.set_xlabel("topk", fontsize=12)
+        ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
-        ax.set_xticklabels([f"{t // 1024}K" for t in TOPK_VALS])
-        ax.set_ylim(0, 700)
-        ax.legend(loc="upper right", fontsize=8)
+        ax.set_xticklabels([f"{t // 1024}K" for t in TOPK_VALS], fontsize=11)
+        ax.tick_params(axis="y", labelsize=11)
+        ax.set_ylim(0, 800)
+        ax.legend(loc="upper right", fontsize=9)
         ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle(
         "Phase 0: Method Parity at S=topk "
         f"(nhq={NHQ}, nhk={NHK}, hd={HD}, kbs={KBS}, bf16)",
-        fontsize=13,
+        fontsize=14,
         fontweight="bold",
-        y=1.01,
+        y=1.02,
     )
     plt.tight_layout()
     path = os.path.join(out, "method_parity.png")
@@ -1073,7 +1079,7 @@ def _phase1_plot():
         ("sl", "BlockSparse", "#2980B9", "s"),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(24, 7), dpi=150)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 6), dpi=150)
     x = np.arange(len(TOPK_VALS))
     x_labels = [f"{t // 1024}K" for t in TOPK_VALS]
 
@@ -1092,30 +1098,31 @@ def _phase1_plot():
                 yi,
                 color=col,
                 marker=marker,
-                markersize=7,
+                markersize=8,
                 linewidth=2.2,
                 label=lbl,
             )
 
         ax.set_title(
             f"{pname} (S={S_FULL // 1024}K, topk varies)",
-            fontsize=12,
+            fontsize=14,
             fontweight="bold",
         )
-        ax.set_xlabel("topk")
-        ax.set_ylabel("TFLOPS")
+        ax.set_xlabel("topk", fontsize=12)
+        ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
-        ax.set_xticklabels(x_labels)
-        ax.legend(fontsize=9, loc="lower left")
+        ax.set_xticklabels(x_labels, fontsize=11)
+        ax.tick_params(axis="y", labelsize=11)
+        ax.legend(fontsize=10, loc="lower left")
         ax.grid(alpha=0.3)
-        ax.set_ylim(bottom=0)
+        ax.set_ylim(0, 800)
 
     fig.suptitle(
         "Phase 1: topk Sweep at S=32K "
         f"(nhq={NHQ}, nhk={NHK}, hd={HD}, kbs={KBS}, bf16)",
-        fontsize=13,
+        fontsize=14,
         fontweight="bold",
-        y=1.01,
+        y=1.02,
     )
     plt.tight_layout()
     path = os.path.join(out, "topk_sweep.png")

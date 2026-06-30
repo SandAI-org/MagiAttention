@@ -164,7 +164,7 @@ struct CollectiveMainloopBwdSm90 {
   //     - BlockSparse: always (packed rows = consecutive tokens × heads).
   //     - IndexSparse: QheadPerKhead >= kBlockM (one Q token fills the tile).
   //   LoopK sparse (inner=K/V): K tiles are contiguous when:
-  //     - BlockSparse: KBlockSize >= kBlockN (range covers full tile).
+  //     - BlockSparse: KBlockSize >= kBlockN (Python sets kbs=kBlockN for BlockSparse).
   //     - IndexSparse: PackGQA + QheadPerKhead >= kBlockM + KBlockSize >= kBlockN.
   static constexpr bool _is_contiguous = !InnerUseScatter || (!SwapBwdQKLoop && PackGQA && (!IndexSparse || QheadPerKhead >= kBlockM)) ||
       (SwapBwdQKLoop && ((BlockSparse && KBlockSize >= kBlockN) || (IndexSparse && PackGQA && QheadPerKhead >= kBlockM && KBlockSize >= kBlockN)));
@@ -1515,10 +1515,12 @@ struct CollectiveMainloopBwdSm90 {
           int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_q_row, stride_q_head);
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sQ(smem_row, idx_in_group * 8 + tile_idx * 64, stage);
-            auto gQ_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gQ_base + token_offset + tile_idx * 64)), Layout<_1>{});
-            auto sQ_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gQ_src, sQ_dst);
+            if (idx_in_group * 8 + tile_idx * 64 < kHeadDim) {
+              Element* dst_ptr = &sQ(smem_row, idx_in_group * 8 + tile_idx * 64, stage);
+              auto gQ_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gQ_base + token_offset + tile_idx * 64)), Layout<_1>{});
+              auto sQ_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+              cute::copy(cp_async_cg, gQ_src, sQ_dst);
+            }
           }
         }
         for (int i = idx_in_group; i < NumRowsPerGroup; i += GroupSize) {
@@ -1578,10 +1580,12 @@ struct CollectiveMainloopBwdSm90 {
           int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_do_row, stride_do_head);
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sdO(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_do_cur.index());
-            auto gdO_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdO_base + token_offset + tile_idx * 64)), Layout<_1>{});
-            auto sdO_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gdO_src, sdO_dst);
+            if (idx_in_group * 8 + tile_idx * 64 < kHeadDim) {
+              Element* dst_ptr = &sdO(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_do_cur.index());
+              auto gdO_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdO_base + token_offset + tile_idx * 64)), Layout<_1>{});
+              auto sdO_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+              cute::copy(cp_async_cg, gdO_src, sdO_dst);
+            }
           }
         }
         for (int i = idx_in_group; i < NumRowsPerGroup; i += GroupSize) {
@@ -1888,10 +1892,12 @@ struct CollectiveMainloopBwdSm90 {
           int token_idx = idx_slot[smem_row] * stride_kv_row;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sK(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
-            auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_idx + tile_idx * 64)), Layout<_1>{});
-            auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gK_src, sK_dst);
+            if (idx_in_group * 8 + tile_idx * 64 < kHeadDim) {
+              Element* dst_ptr = &sK(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
+              auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_idx + tile_idx * 64)), Layout<_1>{});
+              auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+              cute::copy(cp_async_cg, gK_src, sK_dst);
+            }
           }
         }
         last_k_write_stage = smem_pipe_write_k.index();
@@ -1936,10 +1942,12 @@ struct CollectiveMainloopBwdSm90 {
           int token_idx = idx_slot[group_idx * NumRowsPerGroup + local_row] * stride_kv_row_v;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
-            auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_idx + tile_idx * 64)), Layout<_1>{});
-            auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gV_src, sV_dst);
+            if (idx_in_group * 8 + tile_idx * 64 < kHeadDim) {
+              Element* dst_ptr = &sV(group_idx * NumRowsPerGroup + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_v.index());
+              auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_idx + tile_idx * 64)), Layout<_1>{});
+              auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+              cute::copy(cp_async_cg, gV_src, sV_dst);
+            }
           }
         }
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
