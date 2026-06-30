@@ -590,14 +590,20 @@ class FFABwdSm90:
                 t, [1, 3, 2, 0] if cute.rank(t.shape) == 4 else [0, 2, 1]
             )
 
+        # mQ/mdO: (sQ,HD,nhQ,batch):(nhQ*HD,1,HD,sQ*nhQ*HD)
+        # mK/mV:  (sK,HD,nhK,batch):(nhK*HD,1,HD,sK*nhK*HD)
         mQ, mK, mV, mdO = [_qkv_transpose(t) for t in (mQ, mK, mV, mdO)]
         if const_expr(self.qhead_per_kvhead == 1):
+            # mdK/mdV: (sK,HD,nhK,batch):(nhK*HD,1,HD,sK*nhK*HD)
             mdK, mdV = [_qkv_transpose(t) for t in (mdK, mdV)]
         else:
             # Accum tensors are (b, n, s*h) for non-varlen and (n, s*h) for varlen.
+            # mdK/mdV: (sK*HD,nhK,batch):(1,sK*HD,sK*HD*nhK)
             accum_transpose = [2, 1, 0] if cute.rank(mdK.shape) == 3 else [1, 0]
             mdK, mdV = [layout_utils.select(t, accum_transpose) for t in (mdK, mdV)]
         # Non-varlen stats are (b, n, s), varlen stats are (n, s).
+        # mLSE/mdPsum: (sQpad,nhQ,batch):(1,sQpad,sQpad*nhQ)
+        # mdQaccum:    (sQpad*HD,nhQ,batch):(1,sQpad*HD,sQpad*HD*nhQ)
         LSE_dPsum_dQaccum_transpose = (
             [2, 1, 0] if cute.rank(mLSE.shape) == 3 else [1, 0]
         )
@@ -644,24 +650,32 @@ class FFABwdSm90:
             self.tile_n * self.tile_hdimv * Float32.width // 8
         )
 
+        # tma_atom_Q: layout_src_tv=(1,tileM*tileHD):(0,1), layout_dst_tv=(1,tileM*tileHD):(0,1)
+        # tma_tensor_Q: (sQ,HD,nhQ,batch):(1@1,1@0,1@2,1@3)
         tma_atom_Q, tma_tensor_Q = cpasync.make_tiled_tma_atom(
             cpasync.CopyBulkTensorTileG2SOp(),
             mQ,
             cute.select(self.sQ_layout, mode=[0, 1]),
             (self.tile_m, self.tile_hdim),
         )
+        # tma_atom_K: layout_src_tv=(1,tileN*tileHD):(0,1), layout_dst_tv=(1,tileN*tileHD):(0,1)
+        # tma_tensor_K: (sK,HD,nhK,batch):(1@1,1@0,1@2,1@3)
         tma_atom_K, tma_tensor_K = cpasync.make_tiled_tma_atom(
             cpasync.CopyBulkTensorTileG2SOp(),
             mK,
             cute.select(self.sK_layout, mode=[0, 1]),
             (self.tile_n, self.tile_hdim),
         )
+        # tma_atom_V: layout_src_tv=(1,tileN*tileHDv):(0,1), layout_dst_tv=(1,tileN*tileHDv):(0,1)
+        # tma_tensor_V: (sK,HDv,nhK,batch):(1@1,1@0,1@2,1@3)
         tma_atom_V, tma_tensor_V = cpasync.make_tiled_tma_atom(
             cpasync.CopyBulkTensorTileG2SOp(),
             mV,
             cute.select(self.sV_layout, mode=[0, 1]),
             (self.tile_n, self.tile_hdimv),
         )
+        # tma_atom_dO: layout_src_tv=(1,tileM*tileHDv):(0,1), layout_dst_tv=(1,tileM*tileHDv):(0,1)
+        # tma_tensor_dO: (sQ,HDv,nhQ,batch):(1@1,1@0,1@2,1@3)
         tma_atom_dO, tma_tensor_dO = cpasync.make_tiled_tma_atom(
             cpasync.CopyBulkTensorTileG2SOp(),
             mdO,
@@ -683,12 +697,16 @@ class FFABwdSm90:
                 if self.varlen_k
                 else mdV
             )
+            # tma_atom_dK: layout_src_tv=(1,tileN*tileHD):(0,1), layout_dst_tv=(1,tileN*tileHD):(0,1)
+            # tma_tensor_dK: (sK,HD,nhK,batch):(1@1,1@0,1@2,1@3)
             tma_atom_dK, tma_tensor_dK = cpasync.make_tiled_tma_atom(
                 cpasync.CopyBulkTensorTileS2GOp(),
                 mdK_tma,
                 cute.select(self.sK_layout, mode=[0, 1]),
                 (self.tile_n, self.tile_hdim),
             )
+            # tma_atom_dV: layout_src_tv=(1,tileN*tileHDv):(0,1), layout_dst_tv=(1,tileN*tileHDv):(0,1)
+            # tma_tensor_dV: (sK,HDv,nhK,batch):(1@1,1@0,1@2,1@3)
             tma_atom_dV, tma_tensor_dV = cpasync.make_tiled_tma_atom(
                 cpasync.CopyBulkTensorTileS2GOp(),
                 mdV_tma,
@@ -776,19 +794,77 @@ class FFABwdSm90:
         if const_expr(self.debug_print):
             prefix = "[bwd_sm90_call] "
 
-            print()
-            print(
-                f"{prefix}use_block_sparsity: {self.use_block_sparsity} | "
-                f"varlen_q: {self.is_varlen_q} | varlen_k: {self.varlen_k} | "
-            )
-            print()
-
             cute.printf("")
+            cute.printf(
+                prefix + "use_block_sparsity: {} | varlen_q: {} | varlen_k: {} | ",
+                self.use_block_sparsity,
+                self.is_varlen_q,
+                self.varlen_k,
+            )
+            cute.printf("")
+            cute.printf(prefix + "mQ.layout: {}", mQ.layout)
+            cute.printf(prefix + "mK.layout: {}", mK.layout)
+            cute.printf(prefix + "mV.layout: {}", mV.layout)
+            cute.printf(prefix + "mdO.layout: {}", mdO.layout)
             cute.printf(prefix + "mLSE.layout: {}", mLSE.layout)
             cute.printf(prefix + "mdPsum.layout: {}", mdPsum.layout)
             cute.printf(prefix + "mdQaccum.layout: {}", mdQaccum.layout)
             cute.printf(prefix + "mdK.layout: {}", mdK.layout)
             cute.printf(prefix + "mdV.layout: {}", mdV.layout)
+            cute.printf("")
+            cute.printf(
+                prefix + "tma_copy_bytes: Q={}, K={}, V={}, dO={}",
+                self.tma_copy_bytes["Q"],
+                self.tma_copy_bytes["K"],
+                self.tma_copy_bytes["V"],
+                self.tma_copy_bytes["dO"],
+            )
+            cute.printf(
+                prefix + "tma_copy_bytes: LSE={}, dPsum={}, dQ={}, dKacc={}, dVacc={}",
+                self.tma_copy_bytes["LSE"],
+                self.tma_copy_bytes["dPsum"],
+                self.tma_copy_bytes["dQ"],
+                self.tma_copy_bytes["dKacc"],
+                self.tma_copy_bytes["dVacc"],
+            )
+            cute.printf("")
+            cute.printf(
+                prefix + "tma_atom_Q: layout_src_tv={}, layout_dst_tv={}",
+                tma_atom_Q.layout_src_tv,
+                tma_atom_Q.layout_dst_tv,
+            )
+            cute.printf(prefix + "tma_tensor_Q.layout: {}", tma_tensor_Q.layout)
+            cute.printf(
+                prefix + "tma_atom_K: layout_src_tv={}, layout_dst_tv={}",
+                tma_atom_K.layout_src_tv,
+                tma_atom_K.layout_dst_tv,
+            )
+            cute.printf(prefix + "tma_tensor_K.layout: {}", tma_tensor_K.layout)
+            cute.printf(
+                prefix + "tma_atom_V: layout_src_tv={}, layout_dst_tv={}",
+                tma_atom_V.layout_src_tv,
+                tma_atom_V.layout_dst_tv,
+            )
+            cute.printf(prefix + "tma_tensor_V.layout: {}", tma_tensor_V.layout)
+            cute.printf(
+                prefix + "tma_atom_dO: layout_src_tv={}, layout_dst_tv={}",
+                tma_atom_dO.layout_src_tv,
+                tma_atom_dO.layout_dst_tv,
+            )
+            cute.printf(prefix + "tma_tensor_dO.layout: {}", tma_tensor_dO.layout)
+            if const_expr(self.qhead_per_kvhead == 1):
+                cute.printf(
+                    prefix + "tma_atom_dK: layout_src_tv={}, layout_dst_tv={}",
+                    tma_atom_dK.layout_src_tv,
+                    tma_atom_dK.layout_dst_tv,
+                )
+                cute.printf(prefix + "tma_tensor_dK.layout: {}", tma_tensor_dK.layout)
+                cute.printf(
+                    prefix + "tma_atom_dV: layout_src_tv={}, layout_dst_tv={}",
+                    tma_atom_dV.layout_src_tv,
+                    tma_atom_dV.layout_dst_tv,
+                )
+                cute.printf(prefix + "tma_tensor_dV.layout: {}", tma_tensor_dV.layout)
             cute.printf("")
             cute.printf(prefix + "grid_dim: {}", grid_dim)
             cute.printf(
@@ -1328,7 +1404,7 @@ class FFABwdSm90:
     def apply_score_mod(
         self,
         acc_S: cute.Tensor,
-        thr_mma_SdP: cute.core.ThrMma,
+        thr_mma_SdP: cute.ThrMma,
         batch_idx,
         head_idx,
         m_block,
@@ -1374,7 +1450,7 @@ class FFABwdSm90:
         self,
         grad_tensor: cute.Tensor,
         score_tensor: cute.Tensor,
-        thr_mma_SdP: cute.core.ThrMma,
+        thr_mma_SdP: cute.ThrMma,
         batch_idx,
         head_idx,
         m_block,
