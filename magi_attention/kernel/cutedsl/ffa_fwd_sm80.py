@@ -354,9 +354,8 @@ class FFAFwdSm80:
             sP_layout_atom,
         ) = self._get_smem_layout_atom()
 
-        # sQ: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
+        # sQ/sO: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
         # sK/sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK8),(ATOM_HD64,LAY_tileHD2),STAGE=(1,1)):((64,512),(1,4096),(0,0))
-        # sO: S<3,3,3> o 0 o ((ATOM_O8,LAY_tileO16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
         self.sQ_layout = cute.tile_to_shape(
             sQ_layout_atom,
             # (tileQ128, tileHD128)
