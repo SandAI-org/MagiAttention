@@ -71,21 +71,6 @@ class FFABwdSm80:
         score_mod_bwd: cutlass.Constexpr | None = None,
         debug_print: bool = False,
     ):
-        """Initializes the configuration for a flash attention v2 kernel.
-
-        All contiguous dimensions must be at least 16 bytes aligned which indicates the head dimension
-        should be a multiple of 8.
-
-        :param head_dim: head dimension
-        :type head_dim: int
-        :param m_block_size: m block size
-        :type m_block_size: int
-        :param n_block_size: n block size
-        :type n_block_size: int
-        :param num_threads: number of threads
-        :type num_threads: int
-        :param mask_type: attention mask type int key (see ``MT_MAP``)
-        """
         self.dtype = dtype
 
         # NOTE: Pad head_dim to a multiple of 32 (stricter than fwd's 16) due to
@@ -167,9 +152,10 @@ class FFABwdSm80:
 
     @property
     def smem_capacity_arch(self) -> str:
-        """SMEM-capacity bucket used by _check_tile. Subclasses that reuse the SM80
-        MMA but have a different SMEM budget override this (e.g. FFABwdSm120 ->
-        "sm_120").
+        """SMEM-capacity bucket used by ``_check_tile``.
+
+        Subclasses that reuse the SM80 MMA but have a different SMEM budget
+        override this (e.g. FFABwdSm120 -> "sm_120").
         """
         return "sm_80"
 

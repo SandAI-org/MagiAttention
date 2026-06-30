@@ -57,8 +57,6 @@ from .tile_scheduler import (
 
 
 class FFABwdSm90:
-    arch = 90
-
     def __init__(
         self,
         dtype: Type[cutlass.Numeric],

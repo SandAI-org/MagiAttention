@@ -21,7 +21,7 @@
 
 from functools import partial
 from types import SimpleNamespace
-from typing import Callable, Literal, Optional
+from typing import Callable, Literal, Optional, Type
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -43,6 +43,7 @@ from . import pipeline as ffa_pipeline
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_fwd_sm80 import FFAFwdSm80
+from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwd
 from .pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
@@ -65,47 +66,67 @@ from .tile_scheduler import (
 class FFAFwdSm90(FFAFwdSm80):
     def __init__(
         self,
-        *args,
+        dtype: Type[cutlass.Numeric],
+        head_dim: int,
+        head_dim_v: Optional[int] = None,
+        qhead_per_kvhead: int = 1,
+        mask_type: int = MT_MAP.full,
+        is_local: bool = False,
+        pack_gqa: bool = True,
+        tile_m: int = 128,
+        tile_n: int = 128,
+        num_stages: int = 1,
+        num_threads: int = 128,
+        Q_in_regs: bool = False,
         intra_wg_overlap: bool = True,
         mma_pv_is_rs: bool = True,
         paged_kv_non_tma: bool = False,
+        score_mod: Optional[cutlass.Constexpr] = None,
+        mask_mod: Optional[cutlass.Constexpr] = None,
+        has_aux_tensors: bool = False,
+        q_subtile_factor: int | None = None,
         debug_print: bool = False,
-        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
-        self.intra_wg_overlap = intra_wg_overlap
-        self.mma_pv_is_rs = mma_pv_is_rs
-        self.buffer_align_bytes = 1024
-        self.use_tma_KV = not paged_kv_non_tma
-        assert self.use_tma_KV or not (
+        super().__init__(
+            dtype=dtype,
+            head_dim=head_dim,
+            head_dim_v=head_dim_v,
+            qhead_per_kvhead=qhead_per_kvhead,
+            mask_type=mask_type,
+            is_local=is_local,
+            pack_gqa=pack_gqa,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            num_stages=num_stages,
+            num_threads=num_threads,
+            Q_in_regs=Q_in_regs,
+            score_mod=score_mod,
+            mask_mod=mask_mod,
+            has_aux_tensors=has_aux_tensors,
+            q_subtile_factor=q_subtile_factor,
+            debug_print=debug_print,
+        )
+
+        assert not paged_kv_non_tma or not (
             self.check_hdim_oob or self.check_hdim_v_oob
         ), "Paged KV does not support irregular head dim"
-        self.cluster_shape_mn = (1, 1)
         assert (
             self.arch >= Arch.sm_90 and self.arch <= Arch.sm_90a
         ), "Only SM 9.x is supported"
 
-        self.debug_print = debug_print
+        self.intra_wg_overlap = intra_wg_overlap
+        self.mma_pv_is_rs = mma_pv_is_rs
+        self.use_tma_KV = not paged_kv_non_tma
+        self.cluster_shape_mn = (1, 1)
 
         if self.debug_print:
             prefix = "[fwd_sm90_init] "
             print()
             print(f"{prefix}Initialized FFAFwdSm90 with: ")
             print(
-                f"{prefix}{self.dtype=} | {self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}"
-            )
-            print(
-                f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | {self.pack_gqa=}"
-            )
-            print(
-                f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_stages=} | {self.num_threads=}"
-            )
-            print(f"{prefix}{self.Q_in_regs=} | {self.q_subtile_factor=}")
-            print(f"{prefix}{self.score_mod=} | {self.mask_mod=}")
-            print(
                 f"{prefix}{self.intra_wg_overlap=} | {self.mma_pv_is_rs=} | {self.use_tma_KV=}"
             )
-            print(f"{prefix}{self.cluster_shape_mn=} | {self.arch=}")
+            print(f"{prefix}{self.cluster_shape_mn=} | {self.use_stmatrix_O_store=}")
             print()
 
     @property
@@ -972,7 +993,7 @@ class FFAFwdSm90(FFAFwdSm80):
                         self.tile_hdimv,
                         self.num_threads_per_warp_group,
                         mK.element_type,
-                        arch=self.arch.major * 10 + self.arch.minor,
+                        arch=self.arch_num,
                     )
 
                 load_K = partial(
@@ -1267,9 +1288,7 @@ class FFAFwdSm90(FFAFwdSm80):
         # ///////////////////////////////////////////////////////////////////////////////
         # Smem copy atom tiling
         # ///////////////////////////////////////////////////////////////////////////////
-        smem_copy_atom_P = cutedsl_utils.get_smem_store_atom(
-            self.arch.major * 10 + self.arch.minor, self.dtype
-        )
+        smem_copy_atom_P = cutedsl_utils.get_smem_store_atom(self.arch_num, self.dtype)
         smem_thr_copy_P = cute.make_tiled_copy_C(
             smem_copy_atom_P, tiled_mma_qk
         ).get_slice(tidx)

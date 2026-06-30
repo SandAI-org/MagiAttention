@@ -72,26 +72,6 @@ class FFAFwdSm80:
         q_subtile_factor: int | None = None,
         debug_print: bool = False,
     ):
-        """Initializes the configuration for a flash attention kernel.
-
-        All contiguous dimensions must be at least 16 bytes aligned, which means that the head dimension
-        should be a multiple of 8.
-
-        :param head_dim: head dimension
-        :type head_dim: int
-        :param tile_m: m block size
-        :type tile_m: int
-        :param tile_n: n block size
-        :type tile_n: int
-        :param num_threads: number of threads
-        :type num_threads: int
-        :param mask_type: attention mask type int key (see ``MT_MAP``)
-        :param score_mod: A callable that takes the attention scores and applies a modification.
-            Callable signature: ``score_mod(scores, batch_idx, head_idx, q_idx, kv_idx, aux_tensors) -> Any``
-        :param mask_mod: A callable that takes the attention scores and returns a boolean
-            representing whether that score should be masked.
-            Callable signature: ``mask_mod(batch_idx, head_idx, q_idx, kv_idx, aux_tensors) -> Boolean``
-        """
         self.dtype = dtype
 
         # Pad head_dim to a multiple of 16 as k_block_size
@@ -189,9 +169,10 @@ class FFAFwdSm80:
 
     @property
     def smem_capacity_arch(self) -> str:
-        """SMEM-capacity bucket used by _check_tile. Subclasses that reuse the SM80
-        MMA but have a different SMEM budget override this (e.g. FFAFwdSm120 ->
-        "sm_120").
+        """SMEM-capacity bucket used by ``_check_tile``.
+
+        Subclasses that reuse the SM80 MMA but have a different SMEM budget
+        override this (e.g. FFAFwdSm120 -> "sm_120").
         """
         return "sm_80"
 
