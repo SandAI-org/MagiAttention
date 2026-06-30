@@ -113,7 +113,7 @@ class FFAFwdSm90:
         self.is_local = is_local
         self.pack_gqa = pack_gqa
         self.tile_m = tile_m  # tileQ128
-        self.tile_n = tile_n  # tileK64
+        self.tile_n = tile_n  # tileK128
 
         self.intra_wg_overlap = intra_wg_overlap
         self.mma_pv_is_rs = mma_pv_is_rs
@@ -1100,9 +1100,25 @@ class FFAFwdSm90:
         # --- Debug print ---
 
         if const_expr(self.debug_print):
-            prefix = "[fwd_sm90_kernel_setup] "
             if is_print_thread:
-                pass
+                prefix = "[fwd_sm90_kernel_setup] "
+                cute.printf("")
+                cute.printf(prefix + "warp_idx={} tidx={}", warp_idx, tidx)
+                cute.printf(
+                    prefix + "num_threads={} num_producer_regs={} num_mma_regs={}",
+                    self.num_threads,
+                    self.num_producer_regs,
+                    self.num_mma_regs,
+                )
+                cute.printf("")
+                cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                cute.printf(prefix + "sK.layout: {}", sK.layout)
+                cute.printf(prefix + "sV.layout: {}", sV.layout)
+                cute.printf(prefix + "sVt.layout: {}", sVt.layout)
+                cute.printf(prefix + "sO.layout: {}", sO.layout)
+                if const_expr(sP is not None):
+                    cute.printf(prefix + "sP.layout: {}", sP.layout)
+                cute.printf("")
 
         # ///////////////////////////////////////////////////////////////////////////////
         #  Load WarpGroup
@@ -1185,7 +1201,7 @@ class FFAFwdSm90:
         mPageTable: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
         block_info: BlockInfo,
-        SeqlenInfoCls: Callable,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
         is_print_block: bool = False,
     ):
@@ -1214,19 +1230,17 @@ class FFAFwdSm90:
             # ///////////////////////////////////////////////////////////////////////////////
             work_tile = tile_scheduler.initial_work_tile_info()
             while work_tile.is_valid_tile:
+                # --- Get current tile info ---
+
                 m_block, head_idx, batch_idx, _ = work_tile.tile_idx
                 seqlen = SeqlenInfoCls(batch_idx)
-                mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[
-                    None, None, head_idx
-                ]
                 head_idx_kv = (
                     head_idx // self.qhead_per_kvhead
                     if const_expr(not self.pack_gqa)
                     else head_idx
                 )
 
-                # --- Debug print ---
-
+                # Used only for debug print
                 is_print_thread_and_tile = const_expr(self.debug_print) and (
                     (tidx == 0)
                     and is_print_block
@@ -1234,21 +1248,16 @@ class FFAFwdSm90:
                     and (head_idx == 0)
                     and (batch_idx == 0)
                 )
-                if const_expr(self.debug_print):
-                    if is_print_thread_and_tile:
-                        prefix = "[fwd_sm90_load] "
-                        cute.printf(
-                            prefix + "m_block={} head_idx={} batch_idx={}",
-                            m_block,
-                            head_idx,
-                            batch_idx,
-                        )
-                        cute.printf("")
-                        cute.printf(prefix + "sQ.layout: {}", sQ.layout)
-                        cute.printf(prefix + "sK.layout: {}", sK.layout)
-                        cute.printf(prefix + "sV.layout: {}", sV.layout)
-                        cute.printf("")
 
+                # //////////////////////////////////////////////
+                #  Make gQ/gK/gV with TMA load partial fns
+                # //////////////////////////////////////////////
+
+                # mQ_cur: ((nhG,sQ),HD):((1@1,1@2),1@0)
+                # gQ: ((nhG,tileQ128//nhG),tileHD128):((1@1,1@2),1@0)
+                mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[
+                    None, None, head_idx
+                ]
                 load_Q = None
                 if const_expr(self.use_tma_Q):
                     gQ = cute.local_tile(
@@ -1262,8 +1271,7 @@ class FFAFwdSm90:
                 tma_load_K_fn = None
                 tma_load_V_fn = None
                 if const_expr(self.use_tma_KV):
-                    # === TMA path (non-paged and paged with page_size == n_block_size) ===
-                    if const_expr(mPageTable is not None):
+                    if const_expr(mPageTable is not None):  # TODO: review the logics
                         # Paged TMA: keep page dimension indexable
                         mK_cur = mK[None, None, head_idx_kv, None]
                         mV_cur = mV[None, None, head_idx_kv, None]
@@ -1274,7 +1282,9 @@ class FFAFwdSm90:
                             mV_cur, (self.tile_n, self.tile_hdimv), (0, 0, None)
                         )
                     else:
-                        # Non-paged TMA
+                        # mK_cur/mV_cur: (sK,HD):(1@1,1@0)
+                        # gK/gV: (tileK128,tileHD128,restK):(1@1,1@0,128@1)
+                        # where restK = sK // tileK128
                         mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[
                             None, None, head_idx_kv
                         ]
@@ -1287,7 +1297,7 @@ class FFAFwdSm90:
                         gV = cute.local_tile(
                             mV_cur, (self.tile_n, self.tile_hdimv), (None, 0)
                         )
-                    # TODO: mcast
+
                     tma_load_K_fn, _, _ = copy_utils.tma_get_copy_fn(
                         tma_atom_K, 0, cute.make_layout(1), gK, sK
                     )
@@ -1300,8 +1310,7 @@ class FFAFwdSm90:
                     tma_load_V_fn = copy_utils.tma_producer_copy_fn(
                         tma_load_V_fn, pipeline_v
                     )
-                else:
-                    # === cp_async path (paged KV with page_size != n_block_size) ===
+                else:  # cp.async path
                     paged_kv_manager = PagedKVManager.create(
                         mPageTable,
                         mK,
@@ -1337,6 +1346,38 @@ class FFAFwdSm90:
                     K_or_V="V",
                 )
 
+                # --- Debug print ---
+
+                if const_expr(self.debug_print):
+                    if is_print_thread_and_tile:
+                        prefix = "[fwd_sm90_load] "
+                        cute.printf("")
+                        cute.printf(
+                            prefix + "m_block={} head_idx={} batch_idx={}",
+                            m_block,
+                            head_idx,
+                            batch_idx,
+                        )
+                        cute.printf(prefix + "mQ_cur.layout: {}", mQ_cur.layout)
+                        if const_expr(self.use_tma_KV):
+                            cute.printf(prefix + "mK_cur.layout: {}", mK_cur.layout)
+                            cute.printf(prefix + "mV_cur.layout: {}", mV_cur.layout)
+                        cute.printf("")
+                        if const_expr(self.use_tma_Q):
+                            cute.printf(prefix + "gQ.layout: {}", gQ.layout)
+                        if const_expr(self.use_tma_KV):
+                            cute.printf(prefix + "gK.layout: {}", gK.layout)
+                            cute.printf(prefix + "gV.layout: {}", gV.layout)
+                        cute.printf("")
+                        cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                        cute.printf(prefix + "sK.layout: {}", sK.layout)
+                        cute.printf(prefix + "sV.layout: {}", sV.layout)
+                        cute.printf("")
+
+                # //////////////////////////////////////////////
+                #  G2S-load sQ/sK/sV
+                # //////////////////////////////////////////////
+
                 pack_gqa = None
                 if const_expr(not self.use_tma_Q):
                     pack_gqa = PackGQA(
@@ -1350,12 +1391,11 @@ class FFAFwdSm90:
                     n_block_min, n_block_max = block_info.get_n_block_min_max(
                         seqlen, m_block
                     )
-                    # if cute.arch.thread_idx()[0] == 0:
-                    #     cute.printf("m_block = %d, n_block_min: %d, n_block_max: %d", m_block, n_block_min, n_block_max)
-                    # Clamp n_block to 0 when n_block_max == 0 (can happen with causal
-                    # + pack_gqa when seqlen_k < tile_n). TMA handles n_block=-1
-                    # gracefully (fills zeros), but cp.async would crash on
-                    # out-of-bounds page table access.
+
+                    # Clamp n_block to 0 when n_block_max == 0
+                    # (can happen with causal + pack_gqa when seqlen_k < tile_n).
+                    # TMA handles n_block=-1 gracefully (fills zeros),
+                    # but cp.async would crash on out-of-bounds page table access.
                     n_block = (
                         n_block_max - 1
                         if const_expr(self.use_tma_KV)
@@ -1366,6 +1406,8 @@ class FFAFwdSm90:
                         if const_expr(mPageTable is not None and self.use_tma_KV)
                         else None
                     )
+
+                    # --- Prologue: load Q,K0 ---
 
                     # First iteration: load K on pipeline_k, Q on pipeline_q
                     if is_kv_load_warp:
@@ -1400,8 +1442,12 @@ class FFAFwdSm90:
                         pipeline_q.producer_commit_w_index(0)
                         q_producer_phase ^= 1
 
+                    # --- Mainloop/Epilogue: load Ki,Vi ---
+
                     if is_kv_load_warp:
                         if const_expr(not self.intra_wg_overlap or not self.use_tma_KV):
+                            # --- Mainloop0: load V0 ---
+
                             pipeline_v.producer_acquire(kv_producer_state)
                             load_V(
                                 block=n_block,
@@ -1409,6 +1455,9 @@ class FFAFwdSm90:
                                 page_idx=page_idx,
                             )
                             kv_producer_state.advance()
+
+                            # --- Mainloop1: load Ki,Vi ---
+
                             for i in cutlass.range(
                                 n_block_max - 1 - n_block_min, unroll=1
                             ):
@@ -1436,6 +1485,8 @@ class FFAFwdSm90:
                                 )
                                 kv_producer_state.advance()
                         else:
+                            # --- Mainloop: load Ki,V(i-1) ---
+
                             for i in cutlass.range(
                                 n_block_max - 1 - n_block_min, unroll=1
                             ):
@@ -1465,6 +1516,9 @@ class FFAFwdSm90:
                                     producer_state=kv_producer_state_prev,
                                     page_idx=page_idx_prev,
                                 )
+
+                            # --- Epilogue: load V(-1) ---
+
                             n_block = n_block_min
                             page_idx = (
                                 mPageTable[batch_idx, n_block]
@@ -1478,7 +1532,7 @@ class FFAFwdSm90:
                                 page_idx=page_idx,
                             )
                             kv_producer_state.advance()
-                else:
+                else:  # block sparse load (TODO: review the logics)
                     # Block sparsity: use TMA closures directly (not paged)
                     # Load Q on pipeline_q, separate from K/V pipeline
                     if const_expr(self.use_tma_Q):
@@ -1522,14 +1576,14 @@ class FFAFwdSm90:
                             else 1,
                         )
 
+                # Advance to next Q tile
                 tile_scheduler.prefetch_next_work()
                 tile_scheduler.advance_to_next_work()
                 work_tile = tile_scheduler.get_current_work()
-                # End of persistent scheduler loop
 
-            # Producer tail is only useful for cluster to avoid early exit of blocks.
-            # We only need producer_tail on V since that's the last that's loaded, we don't
-            # need it for Q (no cluster) and K.
+            # NOTE: Producer tail is only useful for cluster to avoid early exit of blocks.
+            # We only need producer_tail on V since that's the last that's loaded,
+            # and we don't need it for Q (no cluster) and K.
             if is_kv_load_warp:
                 pipeline_v.producer_tail(kv_producer_state)
 
@@ -1548,11 +1602,12 @@ class FFAFwdSm90:
         if const_expr(self.use_tma_KV):
             src_idx = block if const_expr(page_idx is None) else page_idx
             tma_load_fn(src_idx=src_idx, producer_state=producer_state)
-        else:
+        else:  # cp.async
             paged_kv_manager.load_KV(
                 block, sX[None, None, producer_state.index], K_or_V
             )
             cute.arch.cp_async_commit_group()
+
         pipeline_kv.producer_commit(producer_state)
 
     @cute.jit
@@ -1576,8 +1631,8 @@ class FFAFwdSm90:
         softmax_scale_log2: Float32,
         softmax_scale: Optional[Float32],
         block_info: BlockInfo,
-        SeqlenInfoCls: Callable,
-        AttentionMaskCls: Callable,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
+        AttentionMaskCls: Callable[..., AttentionMask],
         tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors],
         aux_tensors: Optional[list],

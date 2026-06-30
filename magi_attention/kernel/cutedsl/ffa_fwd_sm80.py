@@ -1062,8 +1062,8 @@ class FFAFwdSm80:
         # --- Debug print ---
 
         if const_expr(self.debug_print):
-            prefix = "[fwd_sm80_kernel_setup] "
             if is_print_thread:
+                prefix = "[fwd_sm80_kernel_setup] "
                 cute.printf("")
                 cute.printf(
                     prefix
