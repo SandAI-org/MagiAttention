@@ -134,38 +134,6 @@ class FFAFwdSm90(FFAFwdSm80):
         """SM90 uses WGMMA, whose accumulator layout matches the StMatrix store atom."""
         return True
 
-    def _get_smem_layout_atom(self):
-        sQ_layout_atom = warpgroup.make_smem_layout_atom(
-            sm90_utils_basic.get_smem_layout_atom(
-                LayoutEnum.ROW_MAJOR, self.dtype, self.tile_hdim
-            ),
-            self.dtype,
-        )
-        sK_layout_atom = sQ_layout_atom
-        sV_layout_atom = warpgroup.make_smem_layout_atom(
-            sm90_utils_basic.get_smem_layout_atom(
-                LayoutEnum.ROW_MAJOR, self.dtype, self.tile_hdimv
-            ),
-            self.dtype,
-        )
-        sO_layout_atom = sV_layout_atom
-        if not self.mma_pv_is_rs:
-            sP_layout_atom = warpgroup.make_smem_layout_atom(
-                sm90_utils_basic.get_smem_layout_atom(
-                    LayoutEnum.ROW_MAJOR, self.dtype, self.tile_n
-                ),
-                self.dtype,
-            )
-        else:
-            sP_layout_atom = None
-        return (
-            sQ_layout_atom,
-            sK_layout_atom,
-            sV_layout_atom,
-            sO_layout_atom,
-            sP_layout_atom,
-        )
-
     def _get_tiled_mma(self):
         tiled_mma_qk = sm90_utils_basic.make_trivial_tiled_mma(
             self.dtype,
@@ -204,12 +172,15 @@ class FFAFwdSm90(FFAFwdSm80):
         ]
         cosize_sQV = max(cute.cosize(self.sQ_layout), cute.cosize(self.sV_layout))
         sQV_struct = cute.struct.Align[
-            cute.struct.MemRange[self.dtype, cosize_sQV], 1024
+            cute.struct.MemRange[self.dtype, cosize_sQV], self.buffer_align_bytes
         ]
         cosize_sP = (
             cute.cosize(self.sP_layout) if const_expr(self.sP_layout is not None) else 0
         )
-        sP_struct = cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sP], 1024]
+        sP_struct = cute.struct.Align[
+            cute.struct.MemRange[self.dtype, cosize_sP], self.buffer_align_bytes
+        ]
+
         # 1 stage * 2 for Q pipeline (full + empty), self.num_stages*2 for K, self.num_stages*2 for V,
         mbar_ptr_Q_struct = cute.struct.MemRange[cutlass.Int64, 1 * 2]
         mbar_ptr_K_struct = cute.struct.MemRange[cutlass.Int64, self.num_stages * 2]
@@ -234,84 +205,24 @@ class FFAFwdSm90(FFAFwdSm80):
             sK: sK_struct
             sP: sP_struct
 
-        return (
+        self.shared_storage_cls = (
             SharedStorageQKV
             if const_expr(not self.Q_in_regs)
             else SharedStorageSharedQV
         )
 
-    @cute.jit
-    def __call__(
-        self,
-        mQ: cute.Tensor,  # (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
-        mK: cute.Tensor,  # (b_k, s_k, h_k, d) or (total_k, h_k, d) if cu_seqlens_k
-        # or (num_pages, page_size, h_k, d) if page_table
-        mV: cute.Tensor,  # (b_k, s_k, h_k, dv) or (total_k, h_k, dv) if cu_seqlens_k
-        # or (num_pages, page_size, h_k, dv) if page_table
-        mO: cute.Tensor,  # (b, s_q, h, dv) or (total_q, h, dv) if there is cu_seqlens_q
-        mLSE: Optional[cute.Tensor],
-        softmax_scale: Float32,
-        mCuSeqlensQ: Optional[cute.Tensor] = None,
-        mCuSeqlensK: Optional[cute.Tensor] = None,
-        mSeqUsedQ: Optional[cute.Tensor] = None,
-        mSeqUsedK: Optional[cute.Tensor] = None,
-        mPageTable: Optional[cute.Tensor] = None,  # (b_k, max_num_pages_per_seq)
-        window_size_left: Int32 | int | None = None,
-        window_size_right: Int32 | int | None = None,
-        learnable_sink: Optional[cute.Tensor] = None,
-        blocksparse_tensors: Optional[BlockSparseTensors] = None,
-        aux_tensors: Optional[list] = None,
-        # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
-        stream: cuda.CUstream = None,
-    ):
-        """Configures and launches the flash attention kernel.
+    def _setup_attributes(self):
+        # --- Set up tiled MMA ---
 
-        mQ/mK/mV/mO has same data types(supports fp16 and bf16) and same layout:
-        (batch_size, seqlen_q, num_head, head_dim):(_, _, _, 1)
-        """
+        self.tiled_mma_qk, self.tiled_mma_pv = self._get_tiled_mma()
+        self.num_mma_threads = self.tiled_mma_qk.size
 
-        self._check_type(
-            *(
-                t.element_type if t is not None else None
-                for t in (
-                    mQ,
-                    mK,
-                    mV,
-                    mO,
-                    mLSE,
-                    mCuSeqlensQ,
-                    mCuSeqlensK,
-                    mSeqUsedQ,
-                    mSeqUsedK,
-                )
-            )
-        )
+        # --- Set up other attrs ---
 
-        self.varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
-
-        mQ, mK, mV, mO = [
-            cutedsl_utils.assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)
-        ]
-        QO_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
-        )
-        mQ, mO = [layout_utils.select(t, QO_layout_transpose) for t in (mQ, mO)]
-        KV_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
-        )
-        mK, mV = [layout_utils.select(t, KV_layout_transpose) for t in (mK, mV)]
-        LSE_layout_transpose = [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
-        mLSE = (
-            layout_utils.select(mLSE, LSE_layout_transpose)
-            if const_expr(mLSE is not None)
-            else None
-        )
-
-        tiled_mma_qk, tiled_mma_pv = self._get_tiled_mma()
-        self.num_mma_threads = tiled_mma_qk.size
         self.num_threads_per_warp_group = 128
         self.num_wg_mma = self.num_mma_threads // self.num_threads_per_warp_group
         assert self.num_wg_mma in [1, 2, 3]
+
         self.num_threads = self.num_threads_per_warp_group * (self.num_wg_mma + 1)
         self.num_producer_threads = 32
         self.num_Q_load_threads = self.num_threads_per_warp_group  # If not TMA_Q
@@ -321,7 +232,6 @@ class FFAFwdSm90(FFAFwdSm80):
             2: (240, 24),
             3: (160, 32),
         }[self.num_wg_mma]
-        self.use_block_sparsity = cutlass.const_expr(blocksparse_tensors is not None)
 
         self.use_scheduler_barrier = (
             (self.num_wg_mma >= 2 and self.tile_hdim <= 128)
@@ -347,9 +257,110 @@ class FFAFwdSm90(FFAFwdSm80):
             self.num_producer_regs += num_regs_for_print
             self.num_mma_regs -= num_regs_for_print
 
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[fwd_sm90_setup_attributes] "
+            print()
+            print(f"{prefix}{self.num_threads=}")
+            print(f"{prefix}{self.num_threads_per_warp_group=}")
+            print(f"{prefix}{self.num_wg_mma=}")
+            print(f"{prefix}{self.num_mma_threads=}")
+            print(f"{prefix}{self.num_producer_threads=}")
+            print(f"{prefix}{self.num_Q_load_threads=}")
+            print(f"{prefix}{self.num_epilogue_threads=}")
+            print()
+            print(f"{prefix}{self.num_mma_regs=} | {self.num_producer_regs=}")
+            print(f"{prefix}{self.use_scheduler_barrier=}")
+            print(f"{prefix}{self.use_tma_Q=} | {self.use_tma_KV=} | {self.use_tma_O=}")
+            print(f"{prefix}{self.rescale_O_before_gemm=}")
+            print()
+
+        # HACK: Call sm80 setup_attributes to
+        # reuse some old features like cp-async gmem tiled copy
+        # FIXME: but this is hacky and not safe, since a lot of attributes are overridden in-place,
+        # requiring a better way in the future to safely reuse
+        super()._setup_attributes()
+
+    @cute.jit
+    def __call__(
+        self,
+        mQ: cute.Tensor,  # (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
+        mK: cute.Tensor,  # (b_k, s_k, h_k, d) or (total_k, h_k, d) if cu_seqlens_k
+        # or (num_pages, page_size, h_k, d) if page_table
+        mV: cute.Tensor,  # (b_k, s_k, h_k, dv) or (total_k, h_k, dv) if cu_seqlens_k
+        # or (num_pages, page_size, h_k, dv) if page_table
+        mO: cute.Tensor,  # (b, s_q, h, dv) or (total_q, h, dv) if there is cu_seqlens_q
+        mLSE: Optional[cute.Tensor],
+        softmax_scale: Float32,
+        mCuSeqlensQ: Optional[cute.Tensor] = None,
+        mCuSeqlensK: Optional[cute.Tensor] = None,
+        mSeqUsedQ: Optional[cute.Tensor] = None,
+        mSeqUsedK: Optional[cute.Tensor] = None,
+        mPageTable: Optional[cute.Tensor] = None,  # (b_k, max_num_pages_per_seq)
+        window_size_left: Int32 | int | None = None,
+        window_size_right: Int32 | int | None = None,
+        learnable_sink: Optional[cute.Tensor] = None,
+        blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        aux_tensors: Optional[list] = None,
+        # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
+        stream: cuda.CUstream = None,
+    ):
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Set up attributes
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Checks ---
+
+        self._check_type(
+            *(
+                t.element_type if t is not None else None
+                for t in (
+                    mQ,
+                    mK,
+                    mV,
+                    mO,
+                    mLSE,
+                    mCuSeqlensQ,
+                    mCuSeqlensK,
+                    mSeqUsedQ,
+                    mSeqUsedK,
+                )
+            )
+        )
+
+        self.varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
+        self.use_block_sparsity = cutlass.const_expr(blocksparse_tensors is not None)
+
+        # --- Set up attributes ---
+
         self._setup_attributes()
 
-        # TODO: we prob don't need most of what's in _setup_attributes
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make mQ/mK/mV/mO/mLSE tensors
+        # with layout transformations for specific memory access patterns
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        mQ, mK, mV, mO = [
+            cutedsl_utils.assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)
+        ]
+        QO_layout_transpose = (
+            [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
+        )
+        mQ, mO = [layout_utils.select(t, QO_layout_transpose) for t in (mQ, mO)]
+        KV_layout_transpose = (
+            [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
+        )
+        mK, mV = [layout_utils.select(t, KV_layout_transpose) for t in (mK, mV)]
+        LSE_layout_transpose = [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
+        mLSE = (
+            layout_utils.select(mLSE, LSE_layout_transpose)
+            if const_expr(mLSE is not None)
+            else None
+        )
+
+        # --- Set up smem layout: sQ/sK/sV ---
+
         self.sQ_layout, self.sK_layout, self.sV_layout, self.sO_layout = [
             sm90_utils.make_smem_layout(
                 mX.element_type, LayoutEnum.ROW_MAJOR, shape, stage
@@ -367,21 +378,6 @@ class FFAFwdSm90(FFAFwdSm80):
                 mV.element_type, LayoutEnum.ROW_MAJOR, (self.tile_m, self.tile_n)
             )
 
-        SharedStorage = self._get_shared_storage_cls()
-
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            prefix = "[fwd_sm90_setup_attributes] "
-            print()
-            print(f"{prefix}{self.num_stages=}")
-            print(f"{prefix}sQ_layout: {self.sQ_layout}")
-            print(f"{prefix}sK_layout: {self.sK_layout}")
-            print(f"{prefix}sV_layout: {self.sV_layout}")
-            print(f"{prefix}sO_layout: {self.sO_layout}")
-            print(f"{prefix}sP_layout: {self.sP_layout}")
-            print()
-
         mQ_og, mO_og = mQ, mO
         if const_expr(self.pack_gqa):
             nheads_kv = mK.shape[2]
@@ -392,10 +388,13 @@ class FFAFwdSm90(FFAFwdSm80):
                     mLSE, self.qhead_per_kvhead, nheads_kv, head_idx=1
                 )
 
-        # TMA
-        gmem_tiled_copy_Q = cpasync.CopyBulkTensorTileG2SOp()
-        gmem_tiled_copy_KV = cpasync.CopyBulkTensorTileG2SOp()  # Might multicast
-        gmem_tiled_copy_O = cpasync.CopyBulkTensorTileS2GOp()
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make TMA tiled copy atom and tensors
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        g2s_copy_op_Q = cpasync.CopyBulkTensorTileG2SOp()
+        g2s_copy_op_KV = cpasync.CopyBulkTensorTileG2SOp()  # Might multicast
+        s2g_copy_op_O = cpasync.CopyBulkTensorTileS2GOp()
         self.tma_copy_bytes = {
             name: cute.size_in_bytes(mX.element_type, cute.select(layout, mode=[0, 1]))
             for name, mX, layout in [
@@ -413,10 +412,11 @@ class FFAFwdSm90(FFAFwdSm80):
             if const_expr(self.pack_gqa)
             else cpasync.make_tiled_tma_atom
         )
+
         tma_atom_Q, tma_tensor_Q = None, None
         if const_expr(self.use_tma_Q):
             tma_atom_Q, tma_tensor_Q = make_tiled_tma_atom_fn(
-                gmem_tiled_copy_Q,
+                g2s_copy_op_Q,
                 mQ_og if const_expr(self.pack_gqa) else mQ,
                 self.sQ_layout,
                 (self.tile_m, self.tile_hdim),  # No mcast
@@ -425,14 +425,14 @@ class FFAFwdSm90(FFAFwdSm80):
         tma_atom_V, tma_tensor_V = None, None
         if const_expr(self.use_tma_KV):
             tma_atom_K, tma_tensor_K = cpasync.make_tiled_tma_atom(
-                gmem_tiled_copy_KV,
+                g2s_copy_op_KV,
                 mK,
                 cute.select(self.sK_layout, mode=[0, 1]),
                 (self.tile_n, self.tile_hdim),
                 1,  # No mcast for now
             )
             tma_atom_V, tma_tensor_V = cpasync.make_tiled_tma_atom(
-                gmem_tiled_copy_KV,
+                g2s_copy_op_KV,
                 mV,
                 cute.select(self.sV_layout, mode=[0, 1]),
                 (self.tile_n, self.tile_hdimv),
@@ -446,15 +446,22 @@ class FFAFwdSm90(FFAFwdSm80):
                     mO_tma, ragged_dim=0, ptr_shift=True
                 )
             tma_atom_O, tma_tensor_O = make_tiled_tma_atom_fn(
-                gmem_tiled_copy_O,
+                s2g_copy_op_O,
                 mO_tma,
                 self.sO_layout,
                 (self.tile_m, self.tile_hdimv),  # No mcast
             )
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make tile scheduler class/args, SMEM storage, and others
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Make tile scheduler class/args ---
+
         if const_expr(mCuSeqlensQ is not None or mSeqUsedQ is not None):
-            TileScheduler = SingleTileVarlenScheduler
+            self.tile_scheduler_cls = SingleTileVarlenScheduler
         else:
-            TileScheduler = (
+            self.tile_scheduler_cls = (
                 SingleTileScheduler
                 if const_expr(not self.is_causal or self.is_local)
                 else SingleTileLPTScheduler
@@ -484,8 +491,17 @@ class FFAFwdSm90(FFAFwdSm80):
             is_persistent=False,
             lpt=self.is_causal or self.is_local,
         )
-        tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
-        grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+        tile_sched_params = self.tile_scheduler_cls.to_underlying_arguments(
+            tile_sched_args
+        )
+        grid_dim = self.tile_scheduler_cls.get_grid_shape(tile_sched_params)
+
+        # --- Make smem storage ---
+
+        self._get_shared_storage_cls()
+
+        # --- Make others ---
+
         softmax_scale_log2, softmax_scale = cutedsl_utils.compute_softmax_scale_log2(
             softmax_scale, self.score_mod
         )
@@ -508,32 +524,17 @@ class FFAFwdSm90(FFAFwdSm80):
         if const_expr(self.debug_print):
             prefix = "[fwd_sm90_call] "
 
-            print()
-            print(f"{prefix}tiled_mma_qk: {tiled_mma_qk}")
-            print()
-            print(f"{prefix}tiled_mma_pv: {tiled_mma_pv}")
-            print()
-            print(f"{prefix}sQ_layout: {self.sQ_layout}")
-            print(f"{prefix}sK_layout: {self.sK_layout}")
-            print(f"{prefix}sV_layout: {self.sV_layout}")
-            print(f"{prefix}sO_layout: {self.sO_layout}")
-            print(f"{prefix}sP_layout: {self.sP_layout}")
-            print(
-                f"{prefix}use_tma_Q: {self.use_tma_Q} | use_tma_KV: {self.use_tma_KV} | "
-                f"use_tma_O: {self.use_tma_O}"
-            )
-            print(
-                f"{prefix}intra_wg_overlap: {self.intra_wg_overlap} | "
-                f"pack_gqa: {self.pack_gqa}"
-            )
-            print(f"{prefix}num_threads: {self.num_threads}")
-            print()
-
             cute.printf("")
             cute.printf(prefix + "mQ.layout: {}", mQ.layout)
             cute.printf(prefix + "mK.layout: {}", mK.layout)
             cute.printf(prefix + "mV.layout: {}", mV.layout)
             cute.printf(prefix + "mO.layout: {}", mO.layout)
+            cute.printf("")
+            cute.printf(prefix + "sQ_layout: {}", self.sQ_layout)
+            cute.printf(prefix + "sK_layout: {}", self.sK_layout)
+            cute.printf(prefix + "sV_layout: {}", self.sV_layout)
+            cute.printf(prefix + "sO_layout: {}", self.sO_layout)
+            cute.printf(prefix + "sP_layout: {}", self.sP_layout)
             cute.printf("")
             cute.printf(prefix + "grid_dim: {}", grid_dim)
             cute.printf(
@@ -572,14 +573,10 @@ class FFAFwdSm90(FFAFwdSm80):
             self.sO_layout,
             self.sP_layout,
             self.gmem_tiled_copy_Q,
-            self.gmem_tiled_copy_K,
-            self.gmem_tiled_copy_V,
             self.gmem_tiled_copy_O,
-            tiled_mma_qk,
-            tiled_mma_pv,
+            self.tiled_mma_qk,
+            self.tiled_mma_pv,
             tile_sched_params,
-            TileScheduler,
-            SharedStorage,
             aux_tensors,
             fastdiv_mods,
         ).launch(
@@ -618,14 +615,10 @@ class FFAFwdSm90(FFAFwdSm80):
         sO_layout: cute.ComposedLayout,
         sP_layout: cute.ComposedLayout | None,
         gmem_tiled_copy_Q: cute.TiledCopy,
-        gmem_tiled_copy_K: cute.TiledCopy,
-        gmem_tiled_copy_V: cute.TiledCopy,
         gmem_tiled_copy_O: cute.TiledCopy,
         tiled_mma_qk: cute.TiledMma,
         tiled_mma_pv: cute.TiledMma,
         tile_sched_params: ParamsBase,
-        TileScheduler: cutlass.Constexpr[Callable],
-        SharedStorage: cutlass.Constexpr[Callable],
         aux_tensors=Optional[list[cute.Tensor]],
         fastdiv_mods=None,
     ):
@@ -645,7 +638,7 @@ class FFAFwdSm90(FFAFwdSm80):
                     cpasync.prefetch_descriptor(tma_atom)
 
         smem = cutlass.utils.SmemAllocator()
-        storage = smem.allocate(SharedStorage)
+        storage = smem.allocate(self.shared_storage_cls)
 
         # Mbarrier / pipeline init
         mbar_ptr_Q = storage.mbar_ptr_Q.data_ptr()
@@ -779,7 +772,7 @@ class FFAFwdSm90(FFAFwdSm80):
             if const_expr(self.pack_gqa)
             else 1,
         )
-        TileSchedulerCls = partial(TileScheduler.create, tile_sched_params)
+        TileSchedulerCls = partial(self.tile_scheduler_cls.create, tile_sched_params)
 
         # Cluster wait before starting
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mn)

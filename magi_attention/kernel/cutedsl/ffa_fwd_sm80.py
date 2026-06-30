@@ -340,7 +340,7 @@ class FFAFwdSm80:
         # --- Set up tiled MMA ---
 
         self.tiled_mma_qk, self.tiled_mma_pv = self._get_tiled_mma()
-        self.num_mma_threads = self.tiled_mma_pv.size
+        self.num_mma_threads = self.tiled_mma_qk.size
 
         # --- Set up smem layout: sQ/sK/sV ---
 
@@ -489,8 +489,8 @@ class FFAFwdSm80:
             print(f"{prefix}{self.num_Q_load_threads=}")
             print(f"{prefix}{self.num_epilogue_threads=}")
             print(f"{prefix}{self.num_mma_threads=}")
-            print(f"{prefix}{self.tiled_mma_qk=}")
             print()
+            print(f"{prefix}tiled_mma_qk: {self.tiled_mma_qk}")
             print(f"{prefix}tiled_mma_pv: {self.tiled_mma_pv}")
             print()
             print(f"{prefix}sQ_layout: {self.sQ_layout}")
@@ -561,12 +561,6 @@ class FFAFwdSm80:
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
-        """Configures and launches the flash attention kernel.
-
-        mQ/mK/mV/mO has same data types(supports fp16 and bf16) and same layout:
-        (batch_size, seqlen_q, num_head, head_dim):(_, _, _, 1)
-        """
-
         # ///////////////////////////////////////////////////////////////////////////////
         # Set up attributes
         # ///////////////////////////////////////////////////////////////////////////////
