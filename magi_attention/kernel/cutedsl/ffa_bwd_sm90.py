@@ -53,6 +53,7 @@ from .tile_scheduler import (
     SingleTileScheduler,
     SingleTileVarlenScheduler,
     TileSchedulerArguments,
+    TileSchedulerProtocol,
 )
 
 
@@ -256,6 +257,129 @@ class FFABwdSm90:
                 )
         assert mQ_type == self.dtype
 
+    def _get_tiled_mma(self):
+        maybe_swap_mn = (
+            lambda shape, swap: (shape[1], shape[0], *shape[2:]) if swap else shape
+        )
+        # S = Q @ K.T, dP = dO @ V.T
+        atom_layout_SdP = (
+            self.AtomLayoutMSdP,
+            self.num_wg_mma // self.AtomLayoutMSdP,
+            1,
+        )
+        tiler_mn_SdP = (
+            self.tile_m // atom_layout_SdP[0],
+            self.tile_n // atom_layout_SdP[1],
+        )
+        tiled_mma_SdP = sm90_utils_basic.make_trivial_tiled_mma(
+            self.dtype,
+            self.dtype,
+            warpgroup.OperandMajorMode.K,
+            warpgroup.OperandMajorMode.K,
+            Float32,
+            atom_layout_mnk=maybe_swap_mn(atom_layout_SdP, self.SdP_swapAB),
+            tiler_mn=(64, tiler_mn_SdP[1] if not self.SdP_swapAB else tiler_mn_SdP[0]),
+        )
+        # dV = P.T @ dO, dK = dS.T @ Q
+        atom_layout_dKV = (
+            self.AtomLayoutNdKV,
+            self.num_wg_mma // self.AtomLayoutNdKV,
+            1,
+        )
+        tiler_mn_dK = (
+            self.tile_n // atom_layout_dKV[0],
+            self.tile_hdim // atom_layout_dKV[1],
+        )
+        tiler_mn_dV = (
+            self.tile_n // atom_layout_dKV[0],
+            self.tile_hdimv // atom_layout_dKV[1],
+        )
+        tiled_mma_dK, tiled_mma_dV = [
+            sm90_utils_basic.make_trivial_tiled_mma(
+                self.dtype,
+                self.dtype,
+                warpgroup.OperandMajorMode.MN
+                if not self.mma_dkv_is_rs
+                else warpgroup.OperandMajorMode.K,
+                warpgroup.OperandMajorMode.MN,
+                Float32,
+                atom_layout_mnk=maybe_swap_mn(atom_layout_dKV, self.dKV_swapAB),
+                tiler_mn=(64, tiler_mn_d[1] if not self.dKV_swapAB else tiler_mn_d[0]),
+                a_source=warpgroup.OperandSource.RMEM
+                if self.mma_dkv_is_rs
+                else warpgroup.OperandSource.SMEM,
+            )
+            for tiler_mn_d in (tiler_mn_dK, tiler_mn_dV)
+        ]
+        # dQ = dS @ K
+        assert self.num_wg_dQ % self.AtomLayoutMdQ == 0
+        atom_layout_dQ = (self.AtomLayoutMdQ, self.num_wg_dQ // self.AtomLayoutMdQ, 1)
+        tiler_mn_dQ = (
+            self.tile_m // atom_layout_dQ[0],
+            self.tile_hdim // atom_layout_dQ[1],
+        )
+        tiled_mma_dQ = sm90_utils_basic.make_trivial_tiled_mma(
+            self.dtype,
+            self.dtype,
+            warpgroup.OperandMajorMode.K
+            if not self.dQ_swapAB
+            else warpgroup.OperandMajorMode.MN,
+            warpgroup.OperandMajorMode.MN
+            if not self.dQ_swapAB
+            else warpgroup.OperandMajorMode.K,
+            Float32,
+            atom_layout_mnk=maybe_swap_mn(atom_layout_dQ, self.dQ_swapAB),
+            tiler_mn=(64, tiler_mn_dQ[1] if not self.dQ_swapAB else tiler_mn_dQ[0]),
+        )
+        return tiled_mma_SdP, tiled_mma_dK, tiled_mma_dV, tiled_mma_dQ
+
+    def _get_shared_storage_cls(self):
+        sQ_struct, sK_struct, sV_struct, sdO_struct, sdQaccum_struct = [
+            cute.struct.Align[
+                cute.struct.MemRange[t, cute.cosize(layout)], self.buffer_align_bytes
+            ]
+            for (layout, t) in [
+                (self.sQ_layout, self.dtype),
+                (self.sK_layout, self.dtype),
+                (self.sV_layout, self.dtype),
+                (self.sdO_layout, self.dtype),
+                (self.sdQaccum_layout, Float32),
+            ]
+        ]
+
+        cosize_sdS = cute.cosize(self.sPdS_layout)
+        cosize_sP = (
+            cute.cosize(self.sPdS_layout) if const_expr(not self.mma_dkv_is_rs) else 0
+        )
+        sLSE_struct = cute.struct.Align[
+            cute.struct.MemRange[
+                Float32, cute.round_up(self.tile_m, 64) * self.Q_stage
+            ],
+            128,
+        ]
+        sdPsum_struct = cute.struct.Align[
+            cute.struct.MemRange[
+                Float32, cute.round_up(self.tile_m, 64) * self.dO_stage
+            ],
+            128,
+        ]
+
+        @cute.struct
+        class SharedStorageQKV:
+            mbar_ptr_Q: cute.struct.MemRange[cutlass.Int64, self.Q_stage * 2]
+            mbar_ptr_dO: cute.struct.MemRange[cutlass.Int64, self.dO_stage * 2]
+            sLSE: sLSE_struct
+            sdPsum: sdPsum_struct
+            sQ: sQ_struct
+            sV: sV_struct
+            sK: sK_struct
+            sdO: sdO_struct
+            sP: cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sP], 1024]
+            sdS: cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sdS], 1024]
+            sdQaccum: sdQaccum_struct
+
+        self.shared_storage_cls = SharedStorageQKV
+
     def _setup_attributes(self):
         # --- Set up tiled MMA ---
 
@@ -397,129 +521,6 @@ class FFABwdSm90:
             print(f"{prefix}sPdS_layout: {self.sPdS_layout}")
             print(f"{prefix}sdQaccum_layout: {self.sdQaccum_layout}")
             print()
-
-    def _get_tiled_mma(self):
-        maybe_swap_mn = (
-            lambda shape, swap: (shape[1], shape[0], *shape[2:]) if swap else shape
-        )
-        # S = Q @ K.T, dP = dO @ V.T
-        atom_layout_SdP = (
-            self.AtomLayoutMSdP,
-            self.num_wg_mma // self.AtomLayoutMSdP,
-            1,
-        )
-        tiler_mn_SdP = (
-            self.tile_m // atom_layout_SdP[0],
-            self.tile_n // atom_layout_SdP[1],
-        )
-        tiled_mma_SdP = sm90_utils_basic.make_trivial_tiled_mma(
-            self.dtype,
-            self.dtype,
-            warpgroup.OperandMajorMode.K,
-            warpgroup.OperandMajorMode.K,
-            Float32,
-            atom_layout_mnk=maybe_swap_mn(atom_layout_SdP, self.SdP_swapAB),
-            tiler_mn=(64, tiler_mn_SdP[1] if not self.SdP_swapAB else tiler_mn_SdP[0]),
-        )
-        # dV = P.T @ dO, dK = dS.T @ Q
-        atom_layout_dKV = (
-            self.AtomLayoutNdKV,
-            self.num_wg_mma // self.AtomLayoutNdKV,
-            1,
-        )
-        tiler_mn_dK = (
-            self.tile_n // atom_layout_dKV[0],
-            self.tile_hdim // atom_layout_dKV[1],
-        )
-        tiler_mn_dV = (
-            self.tile_n // atom_layout_dKV[0],
-            self.tile_hdimv // atom_layout_dKV[1],
-        )
-        tiled_mma_dK, tiled_mma_dV = [
-            sm90_utils_basic.make_trivial_tiled_mma(
-                self.dtype,
-                self.dtype,
-                warpgroup.OperandMajorMode.MN
-                if not self.mma_dkv_is_rs
-                else warpgroup.OperandMajorMode.K,
-                warpgroup.OperandMajorMode.MN,
-                Float32,
-                atom_layout_mnk=maybe_swap_mn(atom_layout_dKV, self.dKV_swapAB),
-                tiler_mn=(64, tiler_mn_d[1] if not self.dKV_swapAB else tiler_mn_d[0]),
-                a_source=warpgroup.OperandSource.RMEM
-                if self.mma_dkv_is_rs
-                else warpgroup.OperandSource.SMEM,
-            )
-            for tiler_mn_d in (tiler_mn_dK, tiler_mn_dV)
-        ]
-        # dQ = dS @ K
-        assert self.num_wg_dQ % self.AtomLayoutMdQ == 0
-        atom_layout_dQ = (self.AtomLayoutMdQ, self.num_wg_dQ // self.AtomLayoutMdQ, 1)
-        tiler_mn_dQ = (
-            self.tile_m // atom_layout_dQ[0],
-            self.tile_hdim // atom_layout_dQ[1],
-        )
-        tiled_mma_dQ = sm90_utils_basic.make_trivial_tiled_mma(
-            self.dtype,
-            self.dtype,
-            warpgroup.OperandMajorMode.K
-            if not self.dQ_swapAB
-            else warpgroup.OperandMajorMode.MN,
-            warpgroup.OperandMajorMode.MN
-            if not self.dQ_swapAB
-            else warpgroup.OperandMajorMode.K,
-            Float32,
-            atom_layout_mnk=maybe_swap_mn(atom_layout_dQ, self.dQ_swapAB),
-            tiler_mn=(64, tiler_mn_dQ[1] if not self.dQ_swapAB else tiler_mn_dQ[0]),
-        )
-        return tiled_mma_SdP, tiled_mma_dK, tiled_mma_dV, tiled_mma_dQ
-
-    def _get_shared_storage_cls(self):
-        sQ_struct, sK_struct, sV_struct, sdO_struct, sdQaccum_struct = [
-            cute.struct.Align[
-                cute.struct.MemRange[t, cute.cosize(layout)], self.buffer_align_bytes
-            ]
-            for (layout, t) in [
-                (self.sQ_layout, self.dtype),
-                (self.sK_layout, self.dtype),
-                (self.sV_layout, self.dtype),
-                (self.sdO_layout, self.dtype),
-                (self.sdQaccum_layout, Float32),
-            ]
-        ]
-
-        cosize_sdS = cute.cosize(self.sPdS_layout)
-        cosize_sP = (
-            cute.cosize(self.sPdS_layout) if const_expr(not self.mma_dkv_is_rs) else 0
-        )
-        sLSE_struct = cute.struct.Align[
-            cute.struct.MemRange[
-                Float32, cute.round_up(self.tile_m, 64) * self.Q_stage
-            ],
-            128,
-        ]
-        sdPsum_struct = cute.struct.Align[
-            cute.struct.MemRange[
-                Float32, cute.round_up(self.tile_m, 64) * self.dO_stage
-            ],
-            128,
-        ]
-
-        @cute.struct
-        class SharedStorageQKV:
-            mbar_ptr_Q: cute.struct.MemRange[cutlass.Int64, self.Q_stage * 2]
-            mbar_ptr_dO: cute.struct.MemRange[cutlass.Int64, self.dO_stage * 2]
-            sLSE: sLSE_struct
-            sdPsum: sdPsum_struct
-            sQ: sQ_struct
-            sV: sV_struct
-            sK: sK_struct
-            sdO: sdO_struct
-            sP: cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sP], 1024]
-            sdS: cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sdS], 1024]
-            sdQaccum: sdQaccum_struct
-
-        return SharedStorageQKV
 
     @cute.jit
     def __call__(
@@ -723,11 +724,11 @@ class FFABwdSm90:
         # --- Make tile scheduler class/args ---
 
         if const_expr(mCuSeqlensK is not None or mSeqUsedK is not None):
-            TileScheduler = SingleTileVarlenScheduler
+            self.tile_scheduler_cls = SingleTileVarlenScheduler
         elif const_expr(self.deterministic):
-            TileScheduler = SingleTileLPTBwdScheduler
+            self.tile_scheduler_cls = SingleTileLPTBwdScheduler
         else:
-            TileScheduler = SingleTileScheduler
+            self.tile_scheduler_cls = SingleTileScheduler
         self.spt = (self.is_causal or self.is_local) and self.deterministic
         tile_sched_args = TileSchedulerArguments(
             cute.ceil_div(cute.size(mK.shape[0]), self.tile_n),
@@ -751,12 +752,14 @@ class FFABwdSm90:
             lpt=self.spt,
             head_swizzle=self.deterministic,
         )
-        tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
-        grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+        tile_sched_params = self.tile_scheduler_cls.to_underlying_arguments(
+            tile_sched_args
+        )
+        grid_dim = self.tile_scheduler_cls.get_grid_shape(tile_sched_params)
 
         # --- Make smem storage ---
 
-        SharedStorage = self._get_shared_storage_cls()
+        self._get_shared_storage_cls()
 
         # --- Make others ---
 
@@ -910,8 +913,6 @@ class FFABwdSm90:
             softmax_scale_log2,
             softmax_scale,
             tile_sched_params,
-            TileScheduler,
-            SharedStorage,
             aux_tensors,
             fastdiv_mods,
             blocksparse_tensors,
@@ -965,8 +966,6 @@ class FFABwdSm90:
         softmax_scale_log2,
         softmax_scale,
         tile_sched_params: ParamsBase,
-        TileScheduler: cutlass.Constexpr[Callable],
-        SharedStorage: cutlass.Constexpr[Callable],
         aux_tensors: Optional[list] = None,
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -1000,7 +999,7 @@ class FFABwdSm90:
                     cpasync.prefetch_descriptor(atom)
 
         smem = cutlass.utils.SmemAllocator()
-        storage = smem.allocate(SharedStorage)
+        storage = smem.allocate(self.shared_storage_cls)
 
         pipeline_producer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
         pipeline_consumer_group = pipeline.CooperativeGroup(
@@ -1074,7 +1073,13 @@ class FFABwdSm90:
             window_size_right=window_size_right,
             swap_AB=self.SdP_swapAB,
         )
-        TileSchedulerCls = partial(TileScheduler.create, tile_sched_params)
+
+        # --- Make tile scheduler ---
+
+        tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
+        assert isinstance(
+            tile_scheduler, TileSchedulerProtocol
+        ), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
 
         if warp_idx < 4:
             cute.arch.setmaxregister_decrease(self.num_producer_regs)
@@ -1100,7 +1105,7 @@ class FFABwdSm90:
                     pipeline_dO,
                     block_info,
                     SeqlenInfoCls,
-                    TileSchedulerCls,
+                    tile_scheduler,
                     blocksparse_tensors,
                     qhead_per_kvhead_divmod,
                     is_print_block,
@@ -1110,7 +1115,7 @@ class FFABwdSm90:
                     mdQaccum,
                     sdQaccum,
                     block_info,
-                    TileSchedulerCls,
+                    tile_scheduler,
                     SeqlenInfoCls,
                     blocksparse_tensors,
                     mdQ_semaphore,
@@ -1149,7 +1154,7 @@ class FFABwdSm90:
                 block_info,
                 SeqlenInfoCls,
                 AttentionMaskCls,
-                TileSchedulerCls,
+                tile_scheduler,
                 aux_tensors,
                 fastdiv_mods,
                 blocksparse_tensors,
@@ -1192,7 +1197,7 @@ class FFABwdSm90:
         pipeline_dO: pipeline.PipelineAsync,
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
-        TileSchedulerCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
         is_print_block: bool = False,
@@ -1210,7 +1215,6 @@ class FFABwdSm90:
             # ///////////////////////////////////////////////////////////////////////////////
             #  Persistent tile scheduler loop
             # ///////////////////////////////////////////////////////////////////////////////
-            tile_scheduler = TileSchedulerCls()
             work_tile = tile_scheduler.initial_work_tile_info()
             while work_tile.is_valid_tile:
                 n_block, head_idx, batch_idx, _ = work_tile.tile_idx
@@ -1523,7 +1527,7 @@ class FFABwdSm90:
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         AttentionMaskCls: Callable,
-        TileSchedulerCls: Callable,
+        tile_scheduler: TileSchedulerProtocol,
         aux_tensors: Optional[list] = None,
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -1725,7 +1729,6 @@ class FFABwdSm90:
         # ///////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # ///////////////////////////////////////////////////////////////////////////////
-        tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
@@ -2338,7 +2341,7 @@ class FFABwdSm90:
         mdQaccum: cute.Tensor,
         sdQaccum: cute.Tensor,
         block_info: BlockInfo,
-        TileSchedulerCls: cutlass.Constexpr[Callable],
+        tile_scheduler: TileSchedulerProtocol,
         SeqlenInfoCls: cutlass.Constexpr[Callable],
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mdQ_semaphore: Optional[cute.Tensor] = None,
@@ -2352,7 +2355,6 @@ class FFABwdSm90:
         # ///////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # ///////////////////////////////////////////////////////////////////////////////
-        tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
