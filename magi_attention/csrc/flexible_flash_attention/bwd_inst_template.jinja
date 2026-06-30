@@ -122,7 +122,7 @@ std::vector<at::Tensor> mha_bwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop, kPackGQA, kCatGQA>(
+  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop, kPackGQA, kCatGQA, kIndexSparse>(
       dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
       q_ranges_, k_ranges_, attn_type_map_, 
       merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 

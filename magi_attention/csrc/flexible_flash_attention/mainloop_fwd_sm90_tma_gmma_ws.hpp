@@ -126,6 +126,9 @@ struct CollectiveMainloopFwdSm90 {
   // ─── Inner-Loop KV Load Strategy (InnerLoadMode enum) ───
   // Tma:     physically contiguous tiles → TMA 2D descriptor (auto-detected)
   // CpAsync: scatter rows → cp.async per-row
+  // KBlockSize controls contiguity: when KBlockSize >= kBlockN, each inner tile
+  // is a contiguous memory region → TMA 2D. Both IndexSparse and BlockSparse
+  // must set KBlockSize appropriately (BlockSparse: kBlockN, IndexSparse: user).
   static constexpr bool Use_TMA_Q = true;
   static constexpr bool _is_contiguous = (!IndexSparse && !BlockSparse) || (KBlockSize >= kBlockN);
   static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
@@ -242,10 +245,17 @@ struct CollectiveMainloopFwdSm90 {
   using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQ{}, select<0, 2>(TileShape_MNK{}))); // (kBlockM, kHeadDim)
 
   // Get the smem layout for K
+  // Both TMA2d and CpAsync paths use the same SW128 swizzle for K. WGMMA SS-mode reads benefit
+  // from swizzle for bank-conflict-free access. Tested INTER (no-swizzle) alternative:
+  // correctness OK but ~5% performance regression on kbs=1 due to SmemAlignment change
+  // affecting TensorStorage placement.
   using SmemLayoutAtomK = decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
   using SmemLayoutK = decltype(tile_to_shape(SmemLayoutAtomK{}, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}, Int<kStages>{}))); // (kBlockN, kHeadDim, kStages)
 
   // Get the smem layout for V transpose
+  // V stays swizzled (SW128) even for CpAsync: the MN-major INTER atom is too fine-grained
+  // (2×16 elements) and causes poor WGMMA PV GEMM access patterns. Benchmarked: V INTER
+  // causes ~37% regression on kbs=1 FWD. K INTER works because K-major atom is 16×2 (matching WGMMA reads).
   using SmemLayoutAtomVt = decltype(gcd::ss_smem_selector<TmaMajorV, Element, Int<kHeadDim>, decltype(cute::get<2>(TileShape_MNK_PV_Active{}))>());
   using SmemLayoutVt = decltype(tile_to_shape(
       SmemLayoutAtomVt{},
@@ -701,10 +711,12 @@ struct CollectiveMainloopFwdSm90 {
           int token_offset = idx_slot[smem_row] * stride_kv;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sK(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
-            auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_offset + tile_idx * 64)), Layout<_1>{});
-            auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gK_src, sK_dst);
+            if (idx_in_group * 8 + tile_idx * 64 < kHeadDim) {
+              Element* dst_ptr = &sK(smem_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write_k.index());
+              auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_offset + tile_idx * 64)), Layout<_1>{});
+              auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+              cute::copy(cp_async_cg, gK_src, sK_dst);
+            }
           }
         }
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
@@ -773,10 +785,12 @@ struct CollectiveMainloopFwdSm90 {
           int const token_offset = idx_slot[group_idx * NumRowsPerGroup + local_row] * stride_kv_v;
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
-            auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_offset + tile_idx * 64)), Layout<_1>{});
-            auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, gV_src, sV_dst);
+            if (idx_in_group * 8 + tile_idx * 64 < kHeadDim) {
+              Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NumRowsPerGroup + local_row, smem_pipe_write_v.index());
+              auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_offset + tile_idx * 64)), Layout<_1>{});
+              auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+              cute::copy(cp_async_cg, gV_src, sV_dst);
+            }
           }
         }
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
