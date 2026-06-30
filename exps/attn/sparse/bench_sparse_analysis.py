@@ -348,7 +348,7 @@ def _phase2_bench(force=False):
                             q_ranges=q_ranges,
                             k_ranges=k_ranges,
                             attn_type_map=atm,
-                            pack_gqa=False,
+                            pack_gqa=True,
                         )
                         if is_bwd:
                             kw["swap_bwd_qk_loop"] = True
@@ -621,18 +621,18 @@ def _phase0_bench(force=False, rerun_filter=None):
             q_ranges=torch.tensor([[0, topk]], dtype=torch.int32, device=device),
             k_ranges=torch.tensor([[0, topk]], dtype=torch.int32, device=device),
             attn_type_map=torch.zeros(1, dtype=torch.int32, device=device),
-            pack_gqa=False,
+            pack_gqa=True,
         )
         if pass_type != "fwd":
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
         return _bench_ffa(topk, topk, pass_type, kw, device)
 
-    def run_d1b_pg(topk, pass_type):
+    def run_d1b_nopg(topk, pass_type):
         kw = dict(
             q_ranges=torch.tensor([[0, topk]], dtype=torch.int32, device=device),
             k_ranges=torch.tensor([[0, topk]], dtype=torch.int32, device=device),
             attn_type_map=torch.zeros(1, dtype=torch.int32, device=device),
-            pack_gqa=True,
+            pack_gqa=False,
         )
         if pass_type != "fwd":
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
@@ -686,8 +686,8 @@ def _phase0_bench(force=False, rerun_filter=None):
 
     METHODS = [
         ("d1b", "Dense-1B", run_d1b),
-        ("d1b_pg", "D1B-PackGQA", run_d1b_pg),
-        ("dense_nb", "Dense-nBatch", run_dense_nb),
+        ("d1b_nopg", "D1B-noPG", run_d1b_nopg),
+        ("dense_nb", "Dense-nB", run_dense_nb),
         ("ia", "IndexSparse", run_ia),
         ("sl", "BlockSparse", run_sl),
     ]
@@ -756,7 +756,7 @@ def _phase0_plot():
     PASSES = [("fwd", "FWD"), ("bwd_loopq", "BWD LoopQ"), ("bwd_loopk", "BWD LoopK")]
     METHODS = [
         ("d1b", "Dense-1B", (0.58, 0.58, 0.58)),
-        ("d1b_pg", "D1B-PackGQA", (0.40, 0.40, 0.40)),
+        ("d1b_nopg", "D1B-noPG", (0.40, 0.40, 0.40)),
         ("dense_nb", "Dense-nB", (0.22, 0.37, 0.71)),
         ("ia", "IndexSparse", (0.77, 0.34, 0.49)),
         ("sl", "BlockSparse", (0.29, 0.57, 0.60)),
@@ -966,7 +966,7 @@ def _phase1_bench(force=False, rerun_filter=None):
             q_ranges=torch.tensor([[0, S_FULL]], dtype=torch.int32, device=device),
             k_ranges=torch.tensor([[0, topk]], dtype=torch.int32, device=device),
             attn_type_map=torch.zeros(1, dtype=torch.int32, device=device),
-            pack_gqa=False,
+            pack_gqa=True,
         )
         if pass_type != "fwd":
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
