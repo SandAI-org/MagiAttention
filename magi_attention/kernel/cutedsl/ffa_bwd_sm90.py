@@ -1203,7 +1203,6 @@ class FFABwdSm90:
                 mdV,
                 mdK_semaphore,
                 mdV_semaphore,
-                mdQacc,
                 sQ,
                 sK,
                 sV,
@@ -1236,8 +1235,11 @@ class FFABwdSm90:
                 self.mma(*mma_args, is_dQ_wg=True, is_print_block=is_print_block)
             else:
                 # WG0 computes dQ, WG1 skips it
-                warp_idx_in_mma = cute.arch.make_warp_uniform(cute.arch.warp_idx()) - 4
-                if warp_idx_in_mma < 4:
+                warp_idx_in_mma = (
+                    cute.arch.make_warp_uniform(cute.arch.warp_idx())
+                    - self.mma_warp_ids[0] * cute.arch.WARP_SIZE
+                )
+                if warp_idx_in_mma < self.num_warps_per_wg:
                     cute.arch.setmaxregister_increase(self.num_mma_regs_wg0)
                     self.mma(*mma_args, is_dQ_wg=True, is_print_block=is_print_block)
                 else:
@@ -1523,6 +1525,7 @@ class FFABwdSm90:
                             m_block_max=m_block_max,
                         )
 
+                # Advance to next K/V tile
                 tile_scheduler.prefetch_next_work()
                 tile_scheduler.advance_to_next_work()
                 work_tile = tile_scheduler.get_current_work()
@@ -1629,7 +1632,6 @@ class FFABwdSm90:
         mdV: cute.Tensor,
         mdK_semaphore: Optional[cute.Tensor],
         mdV_semaphore: Optional[cute.Tensor],
-        mdQacc: cute.Tensor,
         sQ: cute.Tensor,
         sK: cute.Tensor,
         sV: cute.Tensor,
@@ -1659,19 +1661,21 @@ class FFABwdSm90:
     ):
         tidx, _, _ = cute.arch.thread_idx()
         tidx -= self.mma_warp_ids[0] * cute.arch.WARP_SIZE
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         warp_group_idx = cute.arch.make_warp_uniform(tidx // self.num_threads_per_wg)
         warp_group_thread_layout = cute.make_layout(
             self.num_wg_mma, stride=self.num_threads_per_wg
         )
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Tiled MMA partitions with partial MMA fns
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- S = Q @ K.T ---
+
         thr_mma_SdP = tiled_mma_SdP.get_slice(tidx)
         wg_mma_SdP = tiled_mma_SdP.get_slice(warp_group_thread_layout(warp_group_idx))
-        wg_mma_dK = tiled_mma_dK.get_slice(warp_group_thread_layout(warp_group_idx))
-        wg_mma_dV = tiled_mma_dV.get_slice(warp_group_thread_layout(warp_group_idx))
-        wg_mma_dQ = None
-        if const_expr(is_dQ_wg):
-            wg_idx_dQ = warp_group_idx if const_expr(self.num_wg_dQ > 1) else 0
-            wg_mma_dQ = tiled_mma_dQ.get_slice(warp_group_thread_layout(wg_idx_dQ))
-        # S = Q @ K.T
+
         shape_mnk_S = (self.tile_m, self.tile_n, self.tile_hdim)
         _, tSrQ, tSrK = sm90_utils.partition_fragment_ABC(
             wg_mma_SdP, shape_mnk_S, sQ, sK, swap_AB=self.SdP_swapAB
@@ -1683,94 +1687,6 @@ class FFABwdSm90:
             tSrQ,
             tSrK,
             swap_AB=self.SdP_swapAB,
-        )
-        # dP = dO @ V.T
-        shape_mnk_dP = (self.tile_m, self.tile_n, self.tile_hdimv)
-        _, tdPrdO, tdPrV = sm90_utils.partition_fragment_ABC(
-            wg_mma_SdP, shape_mnk_dP, sdO, sV, swap_AB=self.SdP_swapAB
-        )
-        mma_dov_fn = partial(
-            gemm_zero_init,
-            tiled_mma_SdP,
-            shape_mnk_dP[:2],
-            tdPrdO,
-            tdPrV,
-            swap_AB=self.SdP_swapAB,
-        )
-        # dV += P.T @ dO
-        sPt = layout_utils.transpose_view(sP) if sP is not None else None
-        sdOt = layout_utils.transpose_view(sdO)
-        shape_mnk_dV = (self.tile_n, self.tile_hdimv, self.tile_m)
-        acc_dV, tdVrPt, tdVrdOt = sm90_utils.partition_fragment_ABC(
-            wg_mma_dV, shape_mnk_dV, sPt, sdOt, swap_AB=self.dKV_swapAB
-        )
-        if const_expr(not self.mma_dkv_is_rs):
-            mma_pdo_fn = partial(
-                gemm_w_idx,
-                tiled_mma_dV,
-                acc_dV,
-                tdVrPt,
-                tdVrdOt,
-                swap_AB=self.dKV_swapAB,
-            )
-        else:
-            mma_pdo_fn = partial(gemm_w_idx, tiled_mma_dV, acc_dV, tCrB=tdVrdOt)
-        # dK += dS.T @ Q
-        sdSt = layout_utils.transpose_view(sdS)
-        sQt = layout_utils.transpose_view(sQ)
-        shape_mnk_dK = (self.tile_n, self.tile_hdim, self.tile_m)
-        acc_dK, tdKrdSt, tdKrQt = sm90_utils.partition_fragment_ABC(
-            wg_mma_dK, shape_mnk_dK, sdSt, sQt, swap_AB=self.dKV_swapAB
-        )
-        if const_expr(not self.mma_dkv_is_rs):
-            mma_dsq_fn = partial(
-                gemm_w_idx,
-                tiled_mma_dK,
-                acc_dK,
-                tdKrdSt,
-                tdKrQt,
-                swap_AB=self.dKV_swapAB,
-            )
-        else:
-            mma_dsq_fn = partial(gemm_w_idx, tiled_mma_dK, acc_dK, tCrB=tdKrQt)
-        # dQ = dS @ K
-        sKt = layout_utils.transpose_view(sK)
-        shape_mnk_dQ = (self.tile_m, self.tile_hdim, self.tile_n)
-        mma_dsk_fn = None
-        if const_expr(is_dQ_wg):
-            _, tdQrdS, tdQrKt = sm90_utils.partition_fragment_ABC(
-                wg_mma_dQ, shape_mnk_dQ, sdS, sKt, swap_AB=self.dQ_swapAB
-            )
-            mma_dsk_fn = partial(
-                gemm_zero_init,
-                tiled_mma_dQ,
-                shape_mnk_dQ[:2],
-                tdQrdS,
-                tdQrKt,
-                swap_AB=self.dQ_swapAB,
-            )
-
-        # Smem copy atom tiling for P/dS R2S
-        copy_P_r2s = None
-        mms_PdS = self.tile_n // (self.num_wg_mma // self.AtomLayoutMSdP)
-        if const_expr(sP is not None):
-            sP_cpy = sP if const_expr(not self.SdP_swapAB) else sPt
-            copy_P_r2s, _, _ = copy_utils.get_smem_store_C(
-                tiled_mma_SdP,
-                sP_cpy,
-                tidx,
-                transpose=self.SdP_swapAB,
-                position_independent=True,
-                major_mode_size=mms_PdS,
-            )
-        sdS_cpy = sdS if const_expr(not self.SdP_swapAB) else sdSt
-        copy_dS_r2s, _, _ = copy_utils.get_smem_store_C(
-            tiled_mma_SdP,
-            sdS_cpy,
-            tidx,
-            transpose=self.SdP_swapAB,
-            position_independent=True,
-            major_mode_size=mms_PdS,
         )
 
         tLSEsLSE = layout_utils.mma_partition_C_vec(
@@ -1796,10 +1712,122 @@ class FFABwdSm90:
             )
             tLSEsdPsum = cute.group_modes(tLSEsdPsum, 0, 2)
 
+        # --- dP = dO @ V.T ---
+
+        shape_mnk_dP = (self.tile_m, self.tile_n, self.tile_hdimv)
+        _, tdPrdO, tdPrV = sm90_utils.partition_fragment_ABC(
+            wg_mma_SdP, shape_mnk_dP, sdO, sV, swap_AB=self.SdP_swapAB
+        )
+        mma_dov_fn = partial(
+            gemm_zero_init,
+            tiled_mma_SdP,
+            shape_mnk_dP[:2],
+            tdPrdO,
+            tdPrV,
+            swap_AB=self.SdP_swapAB,
+        )
+
+        # --- dV += P.T @ dO ---
+
+        wg_mma_dV = tiled_mma_dV.get_slice(warp_group_thread_layout(warp_group_idx))
+
+        sPt = layout_utils.transpose_view(sP) if sP is not None else None
+        sdOt = layout_utils.transpose_view(sdO)
+        shape_mnk_dV = (self.tile_n, self.tile_hdimv, self.tile_m)
+        acc_dV, tdVrPt, tdVrdOt = sm90_utils.partition_fragment_ABC(
+            wg_mma_dV, shape_mnk_dV, sPt, sdOt, swap_AB=self.dKV_swapAB
+        )
+        if const_expr(not self.mma_dkv_is_rs):
+            mma_pdo_fn = partial(
+                gemm_w_idx,
+                tiled_mma_dV,
+                acc_dV,
+                tdVrPt,
+                tdVrdOt,
+                swap_AB=self.dKV_swapAB,
+            )
+        else:
+            mma_pdo_fn = partial(gemm_w_idx, tiled_mma_dV, acc_dV, tCrB=tdVrdOt)
+
+        # --- dK += dS.T @ Q ---
+
+        wg_mma_dK = tiled_mma_dK.get_slice(warp_group_thread_layout(warp_group_idx))
+
+        sdSt = layout_utils.transpose_view(sdS)
+        sQt = layout_utils.transpose_view(sQ)
+        shape_mnk_dK = (self.tile_n, self.tile_hdim, self.tile_m)
+        acc_dK, tdKrdSt, tdKrQt = sm90_utils.partition_fragment_ABC(
+            wg_mma_dK, shape_mnk_dK, sdSt, sQt, swap_AB=self.dKV_swapAB
+        )
+        if const_expr(not self.mma_dkv_is_rs):
+            mma_dsq_fn = partial(
+                gemm_w_idx,
+                tiled_mma_dK,
+                acc_dK,
+                tdKrdSt,
+                tdKrQt,
+                swap_AB=self.dKV_swapAB,
+            )
+        else:
+            mma_dsq_fn = partial(gemm_w_idx, tiled_mma_dK, acc_dK, tCrB=tdKrQt)
+
+        # --- dQ = dS @ K ---
+
+        wg_mma_dQ = None
+        if const_expr(is_dQ_wg):
+            wg_idx_dQ = warp_group_idx if const_expr(self.num_wg_dQ > 1) else 0
+            wg_mma_dQ = tiled_mma_dQ.get_slice(warp_group_thread_layout(wg_idx_dQ))
+
+        sKt = layout_utils.transpose_view(sK)
+        shape_mnk_dQ = (self.tile_m, self.tile_hdim, self.tile_n)
+        mma_dsk_fn = None
+        if const_expr(is_dQ_wg):
+            _, tdQrdS, tdQrKt = sm90_utils.partition_fragment_ABC(
+                wg_mma_dQ, shape_mnk_dQ, sdS, sKt, swap_AB=self.dQ_swapAB
+            )
+            mma_dsk_fn = partial(
+                gemm_zero_init,
+                tiled_mma_dQ,
+                shape_mnk_dQ[:2],
+                tdQrdS,
+                tdQrKt,
+                swap_AB=self.dQ_swapAB,
+            )
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # R2S tiled copy atom and partition of P/dS/dQacc
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        copy_P_r2s = None
+        mms_PdS = self.tile_n // (self.num_wg_mma // self.AtomLayoutMSdP)
+        if const_expr(sP is not None):
+            sP_cpy = sP if const_expr(not self.SdP_swapAB) else sPt
+            copy_P_r2s, _, _ = copy_utils.get_smem_store_C(
+                tiled_mma_SdP,
+                sP_cpy,
+                tidx,
+                transpose=self.SdP_swapAB,
+                position_independent=True,
+                major_mode_size=mms_PdS,
+            )
+        sdS_cpy = sdS if const_expr(not self.SdP_swapAB) else sdSt
+        copy_dS_r2s, _, _ = copy_utils.get_smem_store_C(
+            tiled_mma_SdP,
+            sdS_cpy,
+            tidx,
+            transpose=self.SdP_swapAB,
+            position_independent=True,
+            major_mode_size=mms_PdS,
+        )
+
         tdQsdQacc = None
         if const_expr(is_dQ_wg):
             smem_thr_copy_dQacc = r2s_tiled_copy_dQacc.get_slice(tidx)
             tdQsdQacc = smem_thr_copy_dQacc.partition_D(sdQacc)
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make others before persistent tile scheduler loop
+        # ///////////////////////////////////////////////////////////////////////////////
 
         PdS_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwd.PdS), num_threads=self.num_mma_threads
@@ -1853,12 +1881,12 @@ class FFABwdSm90:
         # ///////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
 
-            # --- Debug print ---
-
-            # local thread-0 of the consumer warp group(s) (tidx already block-local)
+            # Used only for debug print
             is_print_thread_and_tile = const_expr(self.debug_print) and (
                 (tidx == 0)
                 and is_print_block
@@ -1866,6 +1894,47 @@ class FFABwdSm90:
                 and (head_idx == 0)
                 and (batch_idx == 0)
             )
+
+            m_block_min, m_block_max = block_info.get_m_block_min_max(
+                seqlen_info, n_block
+            )
+
+            if const_expr(not self.use_block_sparsity):
+                process_tile = (
+                    const_expr(not self.is_local and not self.is_varlen_q)
+                    or m_block_min < m_block_max
+                )
+            else:
+                total_m_block_cnt = get_total_q_block_count_bwd(
+                    blocksparse_tensors,
+                    batch_idx,
+                    head_idx,
+                    n_block,
+                    subtile_factor=self.subtile_factor,
+                    m_block_max=m_block_max,
+                )
+                process_tile = total_m_block_cnt > Int32(0)
+
+            # --- Make mask object and score-mod fn ---
+
+            mask = AttentionMaskCls(seqlen_info)
+            score_mod_fn_cur = partial(
+                score_mod_fn,
+                batch_idx=batch_idx,
+                head_idx=head_idx,
+                n_block=n_block,
+                seqlen_info=seqlen_info,
+            )
+            score_mod_bwd_fn_cur = partial(
+                score_mod_bwd_fn,
+                batch_idx=batch_idx,
+                head_idx=head_idx,
+                n_block=n_block,
+                seqlen_info=seqlen_info,
+            )
+
+            # --- Debug print ---
+
             if const_expr(self.debug_print):
                 if is_print_thread_and_tile:
                     prefix = "[bwd_sm90_mma] "
@@ -1891,38 +1960,7 @@ class FFABwdSm90:
                     cute.printf(prefix + "tdPrV.layout: {}", tdPrV.layout)
                     cute.printf("")
 
-            mask = AttentionMaskCls(seqlen)
-            score_mod_fn_cur = partial(
-                score_mod_fn,
-                batch_idx=batch_idx,
-                head_idx=head_idx,
-                n_block=n_block,
-                seqlen_info=seqlen,
-            )
-            score_mod_bwd_fn_cur = partial(
-                score_mod_bwd_fn,
-                batch_idx=batch_idx,
-                head_idx=head_idx,
-                n_block=n_block,
-                seqlen_info=seqlen,
-            )
-            m_block_min, m_block_max = block_info.get_m_block_min_max(seqlen, n_block)
-
-            if const_expr(not self.use_block_sparsity):
-                process_tile = (
-                    const_expr(not self.is_local and not self.is_varlen_q)
-                    or m_block_min < m_block_max
-                )
-            else:
-                total_m_block_cnt = get_total_q_block_count_bwd(
-                    blocksparse_tensors,
-                    batch_idx,
-                    head_idx,
-                    n_block,
-                    subtile_factor=self.subtile_factor,
-                    m_block_max=m_block_max,
-                )
-                process_tile = total_m_block_cnt > Int32(0)
+            # --- Mainloop ---
 
             if process_tile:
                 if const_expr(not self.use_block_sparsity):
@@ -1954,7 +1992,7 @@ class FFABwdSm90:
                             ),
                         )
                         dKV_accumulate = True
-                else:
+                else:  # block sparse load (TODO: review the logics)
                     (
                         consumer_state_Q,
                         consumer_state_dO,
@@ -1979,6 +2017,8 @@ class FFABwdSm90:
                         fastdiv_mods=fastdiv_mods,
                     )
 
+                # --- Epilogue ---
+
                 if const_expr(self.qhead_per_kvhead == 1):
                     acc_dK.store(acc_dK.load() * softmax_scale)
                 self.epilogue_dKV(
@@ -1988,7 +2028,7 @@ class FFABwdSm90:
                     acc_dK,
                     mdK,
                     sK,
-                    seqlen,
+                    seqlen_info,
                     tma_atom_dK,
                     tma_atom_dV,
                     tiled_mma_dK,
@@ -2002,8 +2042,7 @@ class FFABwdSm90:
                     mdV_semaphore,
                     is_print_thread_and_tile,
                 )
-            else:
-                # KV tile with zero Q blocks produces no dK/dV; write zeros.
+            else:  # KV tile with zero Q blocks produces no dK/dV; write zeros.
                 if const_expr(
                     self.use_block_sparsity or self.is_local or self.is_varlen_q
                 ):
@@ -2016,7 +2055,7 @@ class FFABwdSm90:
                         acc_dK,
                         mdK,
                         sK,
-                        seqlen,
+                        seqlen_info,
                         tma_atom_dK,
                         tma_atom_dV,
                         tiled_mma_dK,
@@ -2030,11 +2069,11 @@ class FFABwdSm90:
                         mdV_semaphore,
                     )
 
+            # Advance to next K/V tile
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-        if warp_idx == 4:
+        if warp_idx == self.mma_warp_ids[0]:
             cute.arch.cp_async_bulk_wait_group(0, read=True)
 
     @staticmethod

@@ -1677,7 +1677,7 @@ class FFAFwdSm90:
         mma_pv_fn = partial(sm90_utils.gemm_w_idx, tiled_mma_pv, acc_O, tOrP, tOrVt)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # R2S tiled copy atom and partion of P
+        # R2S tiled copy atom and partition of P
         # ///////////////////////////////////////////////////////////////////////////////
 
         smem_copy_atom_P = cutedsl_utils.get_smem_store_atom(self.arch_num, self.dtype)
