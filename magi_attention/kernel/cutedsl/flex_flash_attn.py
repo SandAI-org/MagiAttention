@@ -432,7 +432,6 @@ def _flex_flash_attn_fwd(
                     tile_m=tile_m,
                     tile_n=tile_n,
                     num_stages=2,
-                    num_threads=384,
                     Q_in_regs=False,
                     intra_wg_overlap=intra_wg_overlap,
                     mma_pv_is_rs=mma_pv_is_rs,

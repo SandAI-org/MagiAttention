@@ -77,7 +77,6 @@ class FFAFwdSm90(FFAFwdSm80):
         tile_m: int = 128,
         tile_n: int = 128,
         num_stages: int = 2,
-        num_threads: int = 384,
         Q_in_regs: bool = False,
         intra_wg_overlap: bool = True,
         mma_pv_is_rs: bool = True,
@@ -119,12 +118,7 @@ class FFAFwdSm90(FFAFwdSm80):
         self.mma_pv_is_rs = mma_pv_is_rs
         self.use_tma_KV = not paged_kv_non_tma
         self.cluster_shape_mn = (1, 1)
-
-        self.num_threads = num_threads  # 384 (3 WGs = 1 producer + 2 MMA)
-        self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 12
-        self.num_producer_threads = self.num_threads
-        self.num_Q_load_threads = self.num_threads
-        self.num_epilogue_threads = self.num_threads
+        self.num_threads_per_wg = 128
 
         self.num_stages = num_stages
         self.q_subtile_factor = q_subtile_factor
@@ -158,16 +152,16 @@ class FFAFwdSm90(FFAFwdSm80):
             print(
                 f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | {self.pack_gqa=}"
             )
-            print(
-                f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_stages=} | {self.num_threads=}"
-            )
+            print(f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_stages=}")
             print(f"{prefix}{self.Q_in_regs=} | {self.q_subtile_factor=}")
             print(f"{prefix}{self.score_mod=} | {self.mask_mod=}")
             print(f"{prefix}{self.vec_size=} | {has_aux_tensors=}")
             print(
                 f"{prefix}{self.intra_wg_overlap=} | "
                 f"{self.mma_pv_is_rs=} | {self.use_tma_KV=} | "
-                f"{self.cluster_shape_mn=}"
+                f"{self.cluster_shape_mn=} | "
+                f"{self.num_threads_per_wg=} | "
+                f"{self.buffer_align_bytes=}"
             )
             print()
 
@@ -205,6 +199,51 @@ class FFAFwdSm90(FFAFwdSm80):
             raise TypeError("seqused_q tensor must be Int32")
         if const_expr(mSeqUsedK_type not in [None, Int32]):
             raise TypeError("seqused_k tensor must be Int32")
+
+    def _get_smem_layout_atom(self):
+        sQ_layout_atom = warpgroup.make_smem_layout_atom(
+            sm90_utils_basic.get_smem_layout_atom(
+                LayoutEnum.ROW_MAJOR, self.dtype, self.tile_hdim
+            ),
+            self.dtype,
+        )
+        sK_layout_atom = sQ_layout_atom
+        sV_layout_atom = warpgroup.make_smem_layout_atom(
+            sm90_utils_basic.get_smem_layout_atom(
+                LayoutEnum.ROW_MAJOR, self.dtype, self.tile_hdimv
+            ),
+            self.dtype,
+        )
+        sO_layout_atom = sV_layout_atom
+        if not self.mma_pv_is_rs:
+            sP_layout_atom = warpgroup.make_smem_layout_atom(
+                sm90_utils_basic.get_smem_layout_atom(
+                    LayoutEnum.ROW_MAJOR, self.dtype, self.tile_n
+                ),
+                self.dtype,
+            )
+        else:
+            sP_layout_atom = None
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[fwd_sm90_get_smem_layout_atom] "
+            print()
+            print(f"{prefix}sQ_layout_atom: {sQ_layout_atom}")
+            print(f"{prefix}sK_layout_atom: {sK_layout_atom}")
+            print(f"{prefix}sV_layout_atom: {sV_layout_atom}")
+            print(f"{prefix}sO_layout_atom: {sO_layout_atom}")
+            print(f"{prefix}sP_layout_atom: {sP_layout_atom}")
+            print()
+
+        return (
+            sQ_layout_atom,
+            sK_layout_atom,
+            sV_layout_atom,
+            sO_layout_atom,
+            sP_layout_atom,
+        )
 
     def _get_tiled_mma(self):
         tiled_mma_qk = sm90_utils_basic.make_trivial_tiled_mma(
@@ -289,21 +328,126 @@ class FFAFwdSm90(FFAFwdSm80):
         self.tiled_mma_qk, self.tiled_mma_pv = self._get_tiled_mma()
         self.num_mma_threads = self.tiled_mma_qk.size
 
-        # --- Set up other attrs ---
-
-        self.num_threads_per_warp_group = 128
-        self.num_wg_mma = self.num_mma_threads // self.num_threads_per_warp_group
+        self.num_wg_mma = self.num_mma_threads // self.num_threads_per_wg
         assert self.num_wg_mma in [1, 2, 3]
 
-        self.num_threads = self.num_threads_per_warp_group * (self.num_wg_mma + 1)
-        self.num_producer_threads = 32
-        self.num_Q_load_threads = self.num_threads_per_warp_group  # If not TMA_Q
+        self.num_wg_load = 1
+        self.num_producer_threads = (
+            self.num_wg_load * cute.arch.WARP_SIZE
+        )  # only first warp in producer WG
+        self.num_threads = self.num_threads_per_wg * (
+            self.num_wg_mma + self.num_wg_load
+        )  # 384 (3 WGs = 1 producer + 2 MMA)
+        self.num_Q_load_threads = self.num_threads_per_wg  # If not TMA_Q
         self.num_epilogue_threads = self.num_mma_threads
         self.num_mma_regs, self.num_producer_regs = {
             1: (256, 56),
             2: (240, 24),
             3: (160, 32),
         }[self.num_wg_mma]
+
+        # --- Set up smem layout: sQ/sK/sV ---
+
+        (
+            sQ_layout_atom,
+            sK_layout_atom,
+            sV_layout_atom,
+            sO_layout_atom,
+            sP_layout_atom,
+        ) = self._get_smem_layout_atom()
+
+        # --- Set up G2S/S2G/R2G tiled copy (legacy from sm80) ---
+
+        # Thread layouts for copies
+        universal_copy_bits = 128  # 16B per copy atom
+        async_copy_elems = (
+            universal_copy_bits // self.dtype.width
+        )  # 8 elems per copy atom
+
+        # Value layouts for all copies: (1,8):(0,1) => 8 bf16 elements per thread
+        vQKV_layout = cute.make_layout((1, async_copy_elems))
+        vO_layout = vQKV_layout
+
+        # atom_async_copy: G2S copy atom for Q/K/V load with `cp.async`
+        # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
+        # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
+        atom_async_copy = cute.make_copy_atom(
+            cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
+            self.dtype,
+            num_bits_per_copy=universal_copy_bits,
+        )
+
+        # atom_universal_copy: universal copy atom for O store with `st.global`
+        # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
+        # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
+        atom_universal_copy = cute.make_copy_atom(
+            cute.nvgpu.CopyUniversalOp(),
+            self.dtype,
+            num_bits_per_copy=universal_copy_bits,
+        )
+
+        # tQ/tK: (16,8):(8,1)
+        tQK_shape_dim_1 = (
+            sQ_layout_atom.outer.shape[1] // async_copy_elems
+        )  # 8 for smem_blk=64
+        assert (
+            self.num_Q_load_threads % tQK_shape_dim_1 == 0
+        ), "num_Q_load_threads must be divisible by tQK_shape_dim_1"
+        tQ_layout = cute.make_ordered_layout(
+            (self.num_Q_load_threads // tQK_shape_dim_1, tQK_shape_dim_1),
+            order=(1, 0),
+        )
+        # So that we don't have to check if we overshoot kBlockM when we load Q
+        assert self.tile_m % tQ_layout.shape[0] == 0
+
+        # tK: (16,8):(8,1)
+        assert (
+            self.num_producer_threads % tQK_shape_dim_1 == 0
+        ), "num_producer_threads must be divisible by tQK_shape_dim_1"
+        tK_layout = cute.make_ordered_layout(
+            (self.num_producer_threads // tQK_shape_dim_1, tQK_shape_dim_1),
+            order=(1, 0),
+        )
+
+        # tV: (16,8):(8,1)
+        tV_shape_dim_1 = (
+            sV_layout_atom.outer.shape[1] // async_copy_elems
+        )  # 8 for smem_blk=64
+        tV_layout = cute.make_ordered_layout(
+            (self.num_producer_threads // tV_shape_dim_1, tV_shape_dim_1),
+            order=(1, 0),
+        )
+
+        # tO: (16,8):(8,1)
+        # TODO: need a different thread layout for O if O dtype is not the same as V dtype
+        tO_layout = cute.make_ordered_layout(
+            (self.num_epilogue_threads // tV_shape_dim_1, tV_shape_dim_1),
+            order=(1, 0),
+        )
+        # So that we don't have to check if we overshoot kBlockM when we store O
+        assert self.tile_m % tO_layout.shape[0] == 0
+
+        # G2S async tiled_copy_QKV:
+        # layout_src_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
+        # layout_dst_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
+        self.gmem_tiled_copy_Q = cute.make_tiled_copy_tv(
+            atom_async_copy, tQ_layout, vQKV_layout
+        )
+        self.gmem_tiled_copy_K = cute.make_tiled_copy_tv(
+            atom_async_copy, tK_layout, vQKV_layout
+        )
+        self.gmem_tiled_copy_V = cute.make_tiled_copy_tv(
+            atom_async_copy, tV_layout, vQKV_layout
+        )
+
+        # R2G universal tiled_copy_O:
+        # layout_src_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
+        # layout_dst_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
+        self.gmem_tiled_copy_O = cute.make_tiled_copy_tv(
+            atom_universal_copy, tO_layout, vO_layout
+        )
+
+        # --- Set up other attrs ---
 
         self.use_scheduler_barrier = (
             (self.num_wg_mma >= 2 and self.tile_hdim <= 128)
@@ -335,8 +479,7 @@ class FFAFwdSm90(FFAFwdSm80):
             prefix = "[fwd_sm90_setup_attributes] "
             print()
             print(f"{prefix}{self.num_threads=}")
-            print(f"{prefix}{self.num_threads_per_warp_group=}")
-            print(f"{prefix}{self.num_wg_mma=}")
+            print(f"{prefix}{self.num_wg_mma=} | {self.num_wg_load=}")
             print(f"{prefix}{self.num_mma_threads=}")
             print(f"{prefix}{self.num_producer_threads=}")
             print(f"{prefix}{self.num_Q_load_threads=}")
@@ -347,12 +490,48 @@ class FFAFwdSm90(FFAFwdSm80):
             print(f"{prefix}{self.use_tma_Q=} | {self.use_tma_KV=} | {self.use_tma_O=}")
             print(f"{prefix}{self.rescale_O_before_gemm=}")
             print()
-
-        # HACK: Call sm80 setup_attributes to
-        # reuse some old features like cp-async gmem tiled copy
-        # FIXME: but this is hacky and not safe, since a lot of attributes are overridden in-place,
-        # requiring a better way in the future to safely reuse
-        super()._setup_attributes()
+            print(f"{prefix}tiled_mma_qk: {self.tiled_mma_qk}")
+            print(f"{prefix}tiled_mma_pv: {self.tiled_mma_pv}")
+            print()
+            print(
+                f"{prefix}atom_async_copy: "
+                f"layout_src_tv={atom_async_copy.layout_src_tv} | "
+                f"layout_dst_tv={atom_async_copy.layout_dst_tv}"
+            )
+            print(
+                f"{prefix}atom_universal_copy: "
+                f"layout_src_tv={atom_universal_copy.layout_src_tv} | "
+                f"layout_dst_tv={atom_universal_copy.layout_dst_tv}"
+            )
+            print()
+            print(f"{prefix}tQK_shape_dim_1: {tQK_shape_dim_1}")
+            print(f"{prefix}tV_shape_dim_1: {tV_shape_dim_1}")
+            print(f"{prefix}tQ_layout: {tQ_layout}")
+            print(f"{prefix}tK_layout: {tK_layout}")
+            print(f"{prefix}tV_layout: {tV_layout}")
+            print(f"{prefix}tO_layout: {tO_layout}")
+            print()
+            print(
+                f"{prefix}gmem_tiled_copy_Q: "
+                f"layout_src_tv_tiled={self.gmem_tiled_copy_Q.layout_src_tv_tiled} | "
+                f"layout_dst_tv_tiled={self.gmem_tiled_copy_Q.layout_dst_tv_tiled}"
+            )
+            print(
+                f"{prefix}gmem_tiled_copy_K: "
+                f"layout_src_tv_tiled={self.gmem_tiled_copy_K.layout_src_tv_tiled} | "
+                f"layout_dst_tv_tiled={self.gmem_tiled_copy_K.layout_dst_tv_tiled}"
+            )
+            print(
+                f"{prefix}gmem_tiled_copy_V: "
+                f"layout_src_tv_tiled={self.gmem_tiled_copy_V.layout_src_tv_tiled} | "
+                f"layout_dst_tv_tiled={self.gmem_tiled_copy_V.layout_dst_tv_tiled}"
+            )
+            print(
+                f"{prefix}gmem_tiled_copy_O: "
+                f"layout_src_tv_tiled={self.gmem_tiled_copy_O.layout_src_tv_tiled} | "
+                f"layout_dst_tv_tiled={self.gmem_tiled_copy_O.layout_dst_tv_tiled}"
+            )
+            print()
 
     @cute.jit
     def __call__(
@@ -715,7 +894,7 @@ class FFAFwdSm90(FFAFwdSm80):
         # Mbarrier / pipeline init
         mbar_ptr_Q = storage.mbar_ptr_Q.data_ptr()
         tma_warp = ThreadCooperativeGroup(1)
-        load_threads = ThreadCooperativeGroup(self.num_threads_per_warp_group)
+        load_threads = ThreadCooperativeGroup(self.num_threads_per_wg)
         mma_warps = ThreadCooperativeGroup(self.num_mma_threads // cute.arch.WARP_SIZE)
         if const_expr(self.use_tma_Q):
             pipeline_q = ffa_pipeline.PipelineTmaAsync.create(
@@ -1056,7 +1235,7 @@ class FFAFwdSm90(FFAFwdSm80):
                         self.tile_n,
                         self.tile_hdim,
                         self.tile_hdimv,
-                        self.num_threads_per_warp_group,
+                        self.num_threads_per_wg,
                         mK.element_type,
                         arch=self.arch_num,
                     )
@@ -1326,11 +1505,9 @@ class FFAFwdSm90(FFAFwdSm80):
         fastdiv_mods=None,
         is_print_block: bool = False,
     ):
-        warp_group_idx = cute.arch.make_warp_uniform(
-            tidx // self.num_threads_per_warp_group
-        )
+        warp_group_idx = cute.arch.make_warp_uniform(tidx // self.num_threads_per_wg)
         warp_group_thread_layout = cute.make_layout(
-            self.num_wg_mma, stride=self.num_threads_per_warp_group
+            self.num_wg_mma, stride=self.num_threads_per_wg
         )
         thr_mma_qk = tiled_mma_qk.get_slice(tidx)
         wg_mma_qk = tiled_mma_qk.get_slice(warp_group_thread_layout(warp_group_idx))
@@ -2071,7 +2248,7 @@ class FFAFwdSm90(FFAFwdSm80):
             if warp_group_idx == 1:
                 cute.arch.barrier_arrive(
                     barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1),
-                    number_of_threads=2 * self.num_threads_per_warp_group,
+                    number_of_threads=2 * self.num_threads_per_wg,
                 )
 
     @cute.jit
@@ -2115,7 +2292,7 @@ class FFAFwdSm90(FFAFwdSm80):
                 barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1)
                 - 1
                 + cutedsl_utils.canonical_warp_group_idx(sync=False),
-                number_of_threads=2 * self.num_threads_per_warp_group,
+                number_of_threads=2 * self.num_threads_per_wg,
             )
 
     def warp_scheduler_barrier_arrive(self):
@@ -2129,5 +2306,5 @@ class FFAFwdSm90(FFAFwdSm80):
                 next_wg = t % self.num_wg_mma
             cute.arch.barrier_arrive(
                 barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1) + next_wg,
-                number_of_threads=2 * self.num_threads_per_warp_group,
+                number_of_threads=2 * self.num_threads_per_wg,
             )

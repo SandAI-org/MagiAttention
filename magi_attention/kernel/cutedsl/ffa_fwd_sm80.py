@@ -98,9 +98,6 @@ class FFAFwdSm80:
 
         self.num_threads = num_threads  # 128 (1 WG)
         self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 4
-        self.num_producer_threads = self.num_threads
-        self.num_Q_load_threads = self.num_threads
-        self.num_epilogue_threads = self.num_threads
 
         self.num_stages = num_stages
         self.q_subtile_factor = q_subtile_factor
@@ -141,6 +138,7 @@ class FFAFwdSm80:
             print(f"{prefix}{self.Q_in_regs=} | {self.q_subtile_factor=}")
             print(f"{prefix}{self.score_mod=} | {self.mask_mod=}")
             print(f"{prefix}{self.vec_size=} | {has_aux_tensors=}")
+            print(f"{prefix}{self.buffer_align_bytes=}")
             print()
 
     @property
@@ -341,6 +339,10 @@ class FFAFwdSm80:
 
         self.tiled_mma_qk, self.tiled_mma_pv = self._get_tiled_mma()
         self.num_mma_threads = self.tiled_mma_qk.size
+
+        self.num_producer_threads = self.num_threads
+        self.num_Q_load_threads = self.num_threads
+        self.num_epilogue_threads = self.num_threads
 
         # --- Set up smem layout: sQ/sK/sV ---
 
