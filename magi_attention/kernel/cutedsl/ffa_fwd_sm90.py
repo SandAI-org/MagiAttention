@@ -1233,7 +1233,7 @@ class FFAFwdSm90:
                 # --- Get current tile info ---
 
                 m_block, head_idx, batch_idx, _ = work_tile.tile_idx
-                seqlen = SeqlenInfoCls(batch_idx)
+                seqlen_info = SeqlenInfoCls(batch_idx)
                 head_idx_kv = (
                     head_idx // self.qhead_per_kvhead
                     if const_expr(not self.pack_gqa)
@@ -1255,7 +1255,7 @@ class FFAFwdSm90:
 
                 # mQ_cur: ((nhG,sQ),HD):((1@1,1@2),1@0)
                 # gQ: ((nhG,tileQ128//nhG),tileHD128):((1@1,1@2),1@0)
-                mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[
+                mQ_cur = seqlen_info.offset_batch_Q(mQ, batch_idx, dim=3)[
                     None, None, head_idx
                 ]
                 load_Q = None
@@ -1285,10 +1285,10 @@ class FFAFwdSm90:
                         # mK_cur/mV_cur: (sK,HD):(1@1,1@0)
                         # gK/gV: (tileK128,tileHD128,restK):(1@1,1@0,128@1)
                         # where restK = sK // tileK128
-                        mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[
+                        mK_cur = seqlen_info.offset_batch_K(mK, batch_idx, dim=3)[
                             None, None, head_idx_kv
                         ]
-                        mV_cur = seqlen.offset_batch_K(mV, batch_idx, dim=3)[
+                        mV_cur = seqlen_info.offset_batch_K(mV, batch_idx, dim=3)[
                             None, None, head_idx_kv
                         ]
                         gK = cute.local_tile(
@@ -1319,7 +1319,7 @@ class FFAFwdSm90:
                         batch_idx,
                         head_idx_kv,
                         tidx,
-                        seqlen.seqlen_k,
+                        seqlen_info.seqlen_k,
                         0,  # leftpad_k
                         self.tile_n,
                         self.tile_hdim,
@@ -1389,7 +1389,7 @@ class FFAFwdSm90:
 
                 if const_expr(not self.use_block_sparsity):
                     n_block_min, n_block_max = block_info.get_n_block_min_max(
-                        seqlen, m_block
+                        seqlen_info, m_block
                     )
 
                     # Clamp n_block to 0 when n_block_max == 0
@@ -1436,7 +1436,7 @@ class FFAFwdSm90:
                             gmem_tiled_copy_Q,
                             tidx,
                             m_block,
-                            seqlen.seqlen_q,
+                            seqlen_info.seqlen_q,
                         )
                         cute.arch.cp_async_commit_group()
                         pipeline_q.producer_commit_w_index(0)
@@ -1552,7 +1552,7 @@ class FFAFwdSm90:
                             gmem_tiled_copy_Q,
                             tidx,
                             m_block,
-                            seqlen.seqlen_q,
+                            seqlen_info.seqlen_q,
                         )
                         cute.arch.cp_async_commit_group()
                         pipeline_q.producer_commit_w_index(0)
@@ -1563,7 +1563,7 @@ class FFAFwdSm90:
                             batch_idx,
                             head_idx,
                             m_block,
-                            seqlen,
+                            seqlen_info,
                             kv_producer_state,
                             tma_load_K_fn,
                             tma_load_V_fn,
@@ -1645,6 +1645,11 @@ class FFAFwdSm90:
         warp_group_thread_layout = cute.make_layout(
             self.num_wg_mma, stride=self.num_threads_per_wg
         )
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Tiled MMA partitions with partial MMA fns
+        # ///////////////////////////////////////////////////////////////////////////////
+
         thr_mma_qk = tiled_mma_qk.get_slice(tidx)
         wg_mma_qk = tiled_mma_qk.get_slice(warp_group_thread_layout(warp_group_idx))
         wg_mma_pv = tiled_mma_pv.get_slice(warp_group_thread_layout(warp_group_idx))
@@ -1664,7 +1669,7 @@ class FFAFwdSm90:
         mma_pv_fn = partial(sm90_utils.gemm_w_idx, tiled_mma_pv, acc_O, tOrP, tOrVt)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Smem copy atom tiling
+        # R2S tiled copy atom and partion of P
         # ///////////////////////////////////////////////////////////////////////////////
         smem_copy_atom_P = cutedsl_utils.get_smem_store_atom(self.arch_num, self.dtype)
         smem_thr_copy_P = cute.make_tiled_copy_C(
@@ -1673,25 +1678,37 @@ class FFAFwdSm90:
         tPsP = smem_thr_copy_P.partition_D(sP) if const_expr(sP is not None) else None
         smem_copy_params = SimpleNamespace(smem_thr_copy_P=smem_thr_copy_P, tPsP=tPsP)
 
-        self.mma_init()
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make others before persistent tile scheduler loop
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # Arrive between MMA WGs
+        if const_expr(self.use_scheduler_barrier):
+            if cutedsl_utils.canonical_warp_group_idx(sync=False) == 1:
+                cute.arch.barrier_arrive(
+                    barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1),
+                    number_of_threads=2 * self.num_threads_per_wg,
+                )
 
         q_consumer_phase = Int32(0)
         kv_consumer_state = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.num_stages
         )
 
-        work_tile = tile_scheduler.initial_work_tile_info()
+        # Make softmax object
         softmax = Softmax.create(
             softmax_scale_log2,
             num_rows=acc_O.shape[0][0] * acc_O.shape[1],
             softmax_scale=softmax_scale,
         )
 
-        # For RescaleOBeforeGemm: persistent scores_scale across iterations
+        # If self.rescale_O_before_gemm:
+        # persistent scores_scale across iterations
         scores_scale = None
         if const_expr(self.rescale_O_before_gemm):
             scores_scale = cute.make_rmem_tensor_like(softmax.row_max, Float32)
 
+        # Make partial functions for MMA and first/last half block processing
         mma_one_n_block_all = partial(
             self.mma_one_n_block_intrawg_overlap
             if const_expr(self.intra_wg_overlap)
@@ -1705,7 +1722,6 @@ class FFAFwdSm90:
             check_inf=True,
             scores_scale=scores_scale,
         )
-
         process_first_half_block = partial(
             self.first_half_block_overlap,
             mma_qk_fn=mma_qk_fn,
@@ -1728,12 +1744,11 @@ class FFAFwdSm90:
         # ///////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # ///////////////////////////////////////////////////////////////////////////////
+        work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
-            # if work_tile.is_valid_tile:
-
             # shape: (atom_v_m * rest_m)
             m_block, head_idx, batch_idx, _ = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
 
             # --- Debug print ---
 
@@ -1771,24 +1786,24 @@ class FFAFwdSm90:
             # Recompute fastdiv_mods if necessary for varlen with aux_tensors
             recompute_fastdiv_mods_q = cutlass.const_expr(
                 aux_tensors is not None
-                and (seqlen.has_cu_seqlens_q or seqlen.has_seqused_q)
+                and (seqlen_info.has_cu_seqlens_q or seqlen_info.has_seqused_q)
             )
             recompute_fastdiv_mods_k = cutlass.const_expr(
                 aux_tensors is not None
-                and (seqlen.has_cu_seqlens_k or seqlen.has_seqused_k)
+                and (seqlen_info.has_cu_seqlens_k or seqlen_info.has_seqused_k)
             )
             if cutlass.const_expr(fastdiv_mods is not None):
                 seqlen_q_divmod, seqlen_k_divmod = fastdiv_mods
                 fastdiv_mods = (
                     seqlen_q_divmod
                     if not recompute_fastdiv_mods_q
-                    else FastDivmodDivisor(seqlen.seqlen_q),
+                    else FastDivmodDivisor(seqlen_info.seqlen_q),
                     seqlen_k_divmod
                     if not recompute_fastdiv_mods_k
-                    else FastDivmodDivisor(seqlen.seqlen_k),
+                    else FastDivmodDivisor(seqlen_info.seqlen_k),
                 )
 
-            mask = AttentionMaskCls(seqlen)
+            mask = AttentionMaskCls(seqlen_info)
             mask_fn = partial(
                 mask.apply_mask,
                 batch_idx=batch_idx,
@@ -1814,11 +1829,13 @@ class FFAFwdSm90:
                 )
             mma_one_n_block = partial(
                 mma_one_n_block_all,
-                seqlen=seqlen,
+                seqlen=seqlen_info,
                 softmax=softmax,
                 score_mod_fn=score_mod_fn,
             )
-            n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
+            n_block_min, n_block_max = block_info.get_n_block_min_max(
+                seqlen_info, m_block
+            )
             pipeline_q.consumer_wait_w_index_phase(0, q_consumer_phase)
             # For performance reason, we separate out two kinds of iterations:
             # those that need masking on S, and those that don't.
@@ -1838,7 +1855,7 @@ class FFAFwdSm90:
                 if const_expr(self.intra_wg_overlap):
                     kv_consumer_state = process_first_half_block(
                         n_block=n_block_max - 1,
-                        seqlen=seqlen,
+                        seqlen=seqlen_info,
                         kv_consumer_state=kv_consumer_state,
                         mask_fn=partial(mask_fn, mask_mod=self.mask_mod),
                         score_mod_fn=score_mod_fn,
@@ -1850,7 +1867,7 @@ class FFAFwdSm90:
                     kv_consumer_state = mma_one_n_block(
                         kv_consumer_state,
                         n_block=n_block_max - 1,
-                        seqlen=seqlen,
+                        seqlen=seqlen_info,
                         mma_pv_fn=partial(mma_pv_fn, zero_init=True),
                         is_first_n_block=True,
                         mask_fn=partial(
@@ -1864,7 +1881,7 @@ class FFAFwdSm90:
                 if const_expr(self.is_causal or self.is_local):
                     n_block_min_causal_local_mask = (
                         block_info.get_n_block_min_causal_local_mask(
-                            seqlen, m_block, n_block_min
+                            seqlen_info, m_block, n_block_min
                         )
                     )
                     for n_tile in cutlass.range(
@@ -1873,7 +1890,7 @@ class FFAFwdSm90:
                         kv_consumer_state = mma_one_n_block(
                             kv_consumer_state,
                             n_block=n_block_max - 1 - n_tile,
-                            seqlen=seqlen,
+                            seqlen=seqlen_info,
                             mma_pv_fn=partial(
                                 mma_pv_fn, zero_init=not O_should_accumulate
                             ),
@@ -1888,7 +1905,7 @@ class FFAFwdSm90:
                 # The remaining iterations have no masking
                 n_block_min_before_local_mask = (
                     block_info.get_n_block_min_before_local_mask(
-                        seqlen, m_block, n_block_min
+                        seqlen_info, m_block, n_block_min
                     )
                 )
 
@@ -1898,7 +1915,7 @@ class FFAFwdSm90:
                     kv_consumer_state = mma_one_n_block(
                         kv_consumer_state,
                         n_block=n_block_max - 1 - n_tile,
-                        seqlen=seqlen,
+                        seqlen=seqlen_info,
                         mma_pv_fn=partial(mma_pv_fn, zero_init=not O_should_accumulate),
                         mask_fn=partial(
                             mask_fn, mask_mod=self.mask_mod, mask_seqlen=False
@@ -1919,7 +1936,7 @@ class FFAFwdSm90:
                         kv_consumer_state = mma_one_n_block(
                             kv_consumer_state,
                             n_block=n_block_max - 1 - n_tile,
-                            seqlen=seqlen,
+                            seqlen=seqlen_info,
                             mma_pv_fn=partial(
                                 mma_pv_fn, zero_init=not O_should_accumulate
                             ),
@@ -1954,7 +1971,7 @@ class FFAFwdSm90:
                     batch_idx,
                     head_idx,
                     m_block,
-                    seqlen,
+                    seqlen_info,
                     kv_consumer_state,
                     mma_pv_fn,
                     mma_one_n_block,
@@ -2011,7 +2028,7 @@ class FFAFwdSm90:
                 mO,
                 mLSE,
                 sO,
-                seqlen,
+                seqlen_info,
                 gmem_tiled_copy_O,
                 tma_atom_O,
                 tiled_mma_pv,
@@ -2375,16 +2392,6 @@ class FFAFwdSm90:
             cute.arch.fence_view_async_shared()
             cute.arch.sync_warp()  # Only need syncwarp since each warp is using its own P values for MmaPV
         return smem_pipe_read
-
-    @cute.jit
-    def mma_init(self):
-        warp_group_idx = cutedsl_utils.canonical_warp_group_idx(sync=False)
-        if const_expr(self.use_scheduler_barrier):
-            if warp_group_idx == 1:
-                cute.arch.barrier_arrive(
-                    barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1),
-                    number_of_threads=2 * self.num_threads_per_wg,
-                )
 
     @cute.jit
     def apply_score_mod(

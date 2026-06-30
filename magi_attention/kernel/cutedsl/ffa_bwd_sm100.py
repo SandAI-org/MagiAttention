@@ -2276,9 +2276,9 @@ class FFABwdSm100:
             # --- Get current tile info ---
 
             n_block, _, batch_idx, _ = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
             m_block_min, m_block_max = block_info.get_m_block_min_max(
-                seqlen, n_block // self.cluster_shape_mnk[0]
+                seqlen_info, n_block // self.cluster_shape_mnk[0]
             )
 
             process_tile = (
@@ -2412,10 +2412,12 @@ class FFABwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
             m_block_min, m_block_max = block_info.get_m_block_min_max(
-                seqlen, n_block // self.cluster_shape_mnk[0]
+                seqlen_info, n_block // self.cluster_shape_mnk[0]
             )
             head_idx_kv = head_idx // self.qhead_per_kvhead
             n_block_cta_group = n_block // self.cta_group_size
@@ -2428,18 +2430,20 @@ class FFABwdSm100:
             # mK_cur: (seqK,HD):(1@1,1@0)
             # mV_cur: (seqK,HD):(1@1,1@0)
             # mdO_cur: (HD,seqQ):(1@0,1@1) => actually dO.T
-            mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[None, None, head_idx]
-            mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[
+            mQ_cur = seqlen_info.offset_batch_Q(mQ, batch_idx, dim=3)[
+                None, None, head_idx
+            ]
+            mK_cur = seqlen_info.offset_batch_K(mK, batch_idx, dim=3)[
                 None, None, head_idx_kv
             ]
-            mV_cur = seqlen.offset_batch_K(mV, batch_idx, dim=3)[
+            mV_cur = seqlen_info.offset_batch_K(mV, batch_idx, dim=3)[
                 None, None, head_idx_kv
             ]
-            if const_expr(not seqlen.has_cu_seqlens_q):
+            if const_expr(not seqlen_info.has_cu_seqlens_q):
                 mdO_cur = mdO[None, None, head_idx, batch_idx]
             else:
                 mdO_cur = cute.domain_offset(
-                    (0, seqlen.offset_q), mdO[None, None, head_idx]
+                    (0, seqlen_info.offset_q), mdO[None, None, head_idx]
                 )
             # gQ: (tileQ128,tileHD128,restQ):(1@1,1@0,128@1)
             # gK: (tileK128*CTA2,tileHD128):(1@1,1@0)
@@ -2465,12 +2469,12 @@ class FFABwdSm100:
 
             # mLSE_cur: (seqQ):(1)
             # mdPsum_cur: (seqQ):(1)
-            mLSE_cur = seqlen.offset_batch_Q(mLSE, batch_idx, dim=2, padded=True)[
+            mLSE_cur = seqlen_info.offset_batch_Q(mLSE, batch_idx, dim=2, padded=True)[
                 None, head_idx
             ]
-            mdPsum_cur = seqlen.offset_batch_Q(mdPsum, batch_idx, dim=2, padded=True)[
-                None, head_idx
-            ]
+            mdPsum_cur = seqlen_info.offset_batch_Q(
+                mdPsum, batch_idx, dim=2, padded=True
+            )[None, head_idx]
             # gLSE: (tileQ128,restQ):(1,128)
             # gdPsum: (tileQ128,restQ):(1,128)
             gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
@@ -2480,20 +2484,20 @@ class FFABwdSm100:
             # mKt_cur: (HD,seqK):(1@0,1@1)
             # mdOt_cur: (seqQ,HD):(1@1,1@0) => actually dO
             if const_expr(self.use_2cta_instrs):
-                if const_expr(not seqlen.has_cu_seqlens_q):
+                if const_expr(not seqlen_info.has_cu_seqlens_q):
                     mQt_cur = mQt[None, None, head_idx, batch_idx]
                     mdOt_cur = mdOt[None, None, head_idx, batch_idx]
                 else:
-                    mQt_cur = cute.domain_offset((0, seqlen.offset_q, 0), mQt)[
+                    mQt_cur = cute.domain_offset((0, seqlen_info.offset_q, 0), mQt)[
                         None, None, head_idx
                     ]
-                    mdOt_cur = cute.domain_offset((seqlen.offset_q, 0, 0), mdOt)[
+                    mdOt_cur = cute.domain_offset((seqlen_info.offset_q, 0, 0), mdOt)[
                         None, None, head_idx
                     ]
-                if const_expr(not seqlen.has_cu_seqlens_k):
+                if const_expr(not seqlen_info.has_cu_seqlens_k):
                     mKt_cur = mKt[None, None, head_idx_kv, batch_idx]
                 else:
-                    mKt_cur = cute.domain_offset((0, seqlen.offset_k, 0), mKt)[
+                    mKt_cur = cute.domain_offset((0, seqlen_info.offset_k, 0), mKt)[
                         None, None, head_idx_kv
                     ]
 
@@ -3265,9 +3269,9 @@ class FFABwdSm100:
             # --- Get current tile info ---
 
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)  # must be seqlen_k
+            seqlen_info = SeqlenInfoCls(batch_idx)
             m_block_min, m_block_max = block_info.get_m_block_min_max(
-                seqlen, n_block // self.cluster_shape_mnk[0]
+                seqlen_info, n_block // self.cluster_shape_mnk[0]
             )
 
             if const_expr(self.use_block_sparsity):  # TODO: review the logics
@@ -4269,14 +4273,14 @@ class FFABwdSm100:
             # --- Get current tile info ---
 
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
             m_block_min, m_block_max = block_info.get_m_block_min_max(
-                seqlen, n_block // self.cluster_shape_mnk[0]
+                seqlen_info, n_block // self.cluster_shape_mnk[0]
             )
 
             # --- Define attn mask apply fn ---
 
-            mask = AttentionMaskCls(seqlen)
+            mask = AttentionMaskCls(seqlen_info)
             n_block_for_cluster = n_block // self.cta_group_size
             mask_fn = partial(
                 mask.apply_mask_sm100_transposed,
@@ -4527,7 +4531,7 @@ class FFABwdSm100:
                         m_block,
                         n_block,
                         softmax_scale,
-                        seqlen,
+                        seqlen_info,
                         aux_tensors,
                         fastdiv_mods,
                     )
@@ -4536,7 +4540,7 @@ class FFABwdSm100:
                 #  Apply mask on rS
                 # //////////////////////////////////////////////
 
-                check_m_boundary = (m_block + 1) * self.tile_m > seqlen.seqlen_q
+                check_m_boundary = (m_block + 1) * self.tile_m > seqlen_info.seqlen_q
                 mask_fn(
                     tSrS_t2r,
                     m_block=m_block,
@@ -4708,7 +4712,7 @@ class FFABwdSm100:
                             batch_idx,
                             head_idx,
                             softmax_scale,
-                            seqlen,
+                            seqlen_info,
                             aux_tensors,
                             fastdiv_mods,
                         )
@@ -4716,7 +4720,7 @@ class FFABwdSm100:
                         for i in cutlass.range(cute.size(tdPrdP_cur), unroll_full=True):
                             kv_idx = tScS_idx_cur[i][0]
                             tdPrdP_cur[i] = (
-                                0.0 if kv_idx >= seqlen.seqlen_k else tdPrdP_cur[i]
+                                0.0 if kv_idx >= seqlen_info.seqlen_k else tdPrdP_cur[i]
                             )
 
                     # Type convert from rdP to rdS
@@ -4832,7 +4836,7 @@ class FFABwdSm100:
                         batch_idx,
                         head_idx,
                         n_block,
-                        seqlen,
+                        seqlen_info,
                         thr_mma_dV,
                         thr_mma_dK,
                         tdVtdV,
@@ -4852,7 +4856,7 @@ class FFABwdSm100:
                         batch_idx,
                         head_idx,
                         n_block,
-                        seqlen,
+                        seqlen_info,
                         thr_mma_dV,
                         tdVtdV,
                         mdV_tma_tensor,
@@ -4873,7 +4877,7 @@ class FFABwdSm100:
                         batch_idx,
                         head_idx,
                         n_block,
-                        seqlen,
+                        seqlen_info,
                         thr_mma_dK,
                         tdKtdK,
                         mdK_tma_tensor,
@@ -4918,10 +4922,10 @@ class FFABwdSm100:
                     )
                     gmem_thr_copy_zero_dK = gmem_tiled_copy_zero_dK.get_slice(dp_idx)
                     gmem_thr_copy_zero_dV = gmem_tiled_copy_zero_dV.get_slice(dp_idx)
-                    mdV_cur = seqlen.offset_batch_K(mdV, batch_idx, dim=3)[
+                    mdV_cur = seqlen_info.offset_batch_K(mdV, batch_idx, dim=3)[
                         None, None, head_idx
                     ]
-                    mdK_cur = seqlen.offset_batch_K(mdK, batch_idx, dim=3)[
+                    mdK_cur = seqlen_info.offset_batch_K(mdK, batch_idx, dim=3)[
                         None, None, head_idx
                     ]
                     gdK = cute.local_tile(
@@ -4948,7 +4952,8 @@ class FFABwdSm100:
                             row_idx = tdKcdK[0, i, 0][0]
                             if (
                                 row_idx
-                                < seqlen.seqlen_k - cluster_tile_n * n_block_for_tile
+                                < seqlen_info.seqlen_k
+                                - cluster_tile_n * n_block_for_tile
                             ):
                                 for j in cutlass.range_constexpr(tdKgdK.shape[2]):
                                     cute.copy(
@@ -4961,7 +4966,8 @@ class FFABwdSm100:
                             row_idx = tdVcdV[0, i, 0][0]
                             if (
                                 row_idx
-                                < seqlen.seqlen_k - cluster_tile_n * n_block_for_tile
+                                < seqlen_info.seqlen_k
+                                - cluster_tile_n * n_block_for_tile
                             ):
                                 for j in cutlass.range_constexpr(tdVgdV.shape[2]):
                                     cute.copy(
@@ -5107,20 +5113,21 @@ class FFABwdSm100:
             # --- Get current tile info ---
 
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
-            n_block_cta_group = n_block // self.cta_group_size  # for 2cta
-            seqlen = SeqlenInfoCls(batch_idx)
+            n_block_cta_group = n_block // self.cta_group_size  # for 2CTA
+            seqlen_info = SeqlenInfoCls(batch_idx)
             m_block_min, m_block_max = block_info.get_m_block_min_max(
-                seqlen, n_block_cta_group
+                seqlen_info, n_block_cta_group
             )
 
             # --- Make gdQacc ---
 
             # mdQacc_cur: (seqQ*tileHD):(1)
-            if const_expr(not seqlen.has_cu_seqlens_q):
+            if const_expr(not seqlen_info.has_cu_seqlens_q):
                 mdQacc_cur = mdQacc[None, head_idx, batch_idx]
             else:
                 mdQacc_cur = cute.domain_offset(
-                    (seqlen.padded_offset_q * self.tile_hdim,), mdQacc[None, head_idx]
+                    (seqlen_info.padded_offset_q * self.tile_hdim,),
+                    mdQacc[None, head_idx],
                 )
 
             # gdQacc_: (tileQ128*tileHD128,restQ):(1,16384)
@@ -5344,7 +5351,7 @@ class FFABwdSm100:
                                 curr_dq_write_order_full,
                                 blocksparse_tensors,
                                 block_info,
-                                seqlen,
+                                seqlen_info,
                                 m_block,
                                 n_block_cta_group,
                             )
@@ -5434,7 +5441,7 @@ class FFABwdSm100:
                 and not self.use_block_sparsity
                 and block_info.window_size_left is not None
             ):
-                m_block_global_max = cute.ceil_div(seqlen.seqlen_q, self.tile_m)
+                m_block_global_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
                 for m_block in cutlass.range(m_block_max, m_block_global_max, unroll=1):
                     cutedsl_utils.arrive_inc(
                         mdQ_semaphore_cur[(m_block, None)].iterator,
@@ -5457,7 +5464,7 @@ class FFABwdSm100:
         batch_idx: Int32,
         head_idx: Int32,
         n_block: Int32,
-        seqlen: SeqlenInfoQK,
+        seqlen_info: SeqlenInfoQK,
         thr_mma_dV: cute.ThrMma,
         thr_mma_dK: cute.ThrMma,
         tdVtdV: cute.Tensor,
@@ -5476,8 +5483,12 @@ class FFABwdSm100:
         num_wg = num_compute_threads // 128
 
         assert self.qhead_per_kvhead == 1, "This epilogue path is only for MHA"
-        mdV_cur = seqlen.offset_batch_K(mdV, batch_idx, dim=3)[None, None, head_idx]
-        mdK_cur = seqlen.offset_batch_K(mdK, batch_idx, dim=3)[None, None, head_idx]
+        mdV_cur = seqlen_info.offset_batch_K(mdV, batch_idx, dim=3)[
+            None, None, head_idx
+        ]
+        mdK_cur = seqlen_info.offset_batch_K(mdK, batch_idx, dim=3)[
+            None, None, head_idx
+        ]
 
         # --- T2R tiled copy tdV to rdV ---
 
@@ -5532,7 +5543,7 @@ class FFABwdSm100:
         tdVgdV_r2g_p = thr_tmem_ld_dV.partition_D(tdVgdV)
         tdVgdV_r2g = self.split_wg(tdVgdV_r2g_p, wg_idx, num_wg)
 
-        if tidx < seqlen.seqlen_k - self.tile_n * n_block:
+        if tidx < seqlen_info.seqlen_k - self.tile_n * n_block:
             cute.copy(tiled_gmem_store_dV, tdVrdV_r2s, tdVgdV_r2g)
 
         cute.arch.sync_warp()
@@ -5593,7 +5604,7 @@ class FFABwdSm100:
         tdKgdK_r2g_p = thr_tmem_ld_dK.partition_D(tdKgdK)
         tdKgdK_r2g = self.split_wg(tdKgdK_r2g_p, wg_idx, num_wg)
 
-        if tidx < seqlen.seqlen_k - self.tile_n * n_block:
+        if tidx < seqlen_info.seqlen_k - self.tile_n * n_block:
             cute.copy(tiled_gmem_store_dK, tdKrdK_r2s, tdKgdK_r2g)
 
         cute.arch.sync_warp()
@@ -5682,7 +5693,7 @@ class FFABwdSm100:
         batch_idx: Int32,
         head_idx: Int32,
         n_block: Int32,
-        seqlen: SeqlenInfoQK,
+        seqlen_info: SeqlenInfoQK,
         thr_mma: cute.ThrMma,
         tdKVtdKV: cute.Tensor,
         mdKV: cute.Tensor,
@@ -5735,7 +5746,7 @@ class FFABwdSm100:
 
         head_idx_kv = head_idx // self.qhead_per_kvhead
         if const_expr(not self.dKV_postprocess):
-            assert not seqlen.has_cu_seqlens_k, "varlen uses non tma store path"
+            assert not seqlen_info.has_cu_seqlens_k, "varlen uses non tma store path"
             mdKV_cur = mdKV[None, None, head_idx_kv, batch_idx]  # (seqlen, hdim)
             gdKV_p = cute.local_tile(  # (tileK128,tileHD128)
                 mdKV_cur, (self.tile_n, tile_hdim), (n_block, 0)
@@ -5745,11 +5756,11 @@ class FFABwdSm100:
                 gdKV, epi_tile, (0, None)
             )
         else:
-            if const_expr(not seqlen.has_cu_seqlens_k):
+            if const_expr(not seqlen_info.has_cu_seqlens_k):
                 mdKV_cur = mdKV[None, head_idx_kv, batch_idx]  # (seqlen * hdim)
             else:
                 mdKV_cur = cute.domain_offset(
-                    (seqlen.padded_offset_k * tile_hdim,), mdKV[None, head_idx_kv]
+                    (seqlen_info.padded_offset_k * tile_hdim,), mdKV[None, head_idx_kv]
                 )
             gdKV_p = cute.local_tile(  # (tileK*tileHD,)
                 mdKV_cur, (self.tile_n * tile_hdim,), (n_block,)

@@ -2627,7 +2627,7 @@ class FFAFwdSm100:
             # --- Get current tile info ---
 
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
 
             block_iter_count = Int32(0)
             process_tile = False
@@ -2640,12 +2640,12 @@ class FFAFwdSm100:
                     m_block,
                     self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
                     self.q_subtile_factor if self.q_subtile_factor is not None else 1,
-                    seqlen_info=seqlen,
+                    seqlen_info=seqlen_info,
                 )
                 process_tile = block_iter_count > Int32(0)
             else:
                 n_block_min, n_block_max = block_info.get_n_block_min_max(
-                    seqlen, m_block, split_idx, num_splits
+                    seqlen_info, m_block, split_idx, num_splits
                 )
                 block_iter_count = n_block_max - n_block_min
                 if const_expr(not self.is_split_kv):
@@ -3093,12 +3093,12 @@ class FFAFwdSm100:
 
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
             n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen, m_block, split_idx, num_splits
+                seqlen_info, m_block, split_idx, num_splits
             )
 
-            mask = AttentionMaskCls(seqlen)
+            mask = AttentionMaskCls(seqlen_info)
             shared_mask_kwargs = dict(
                 m_block=(self.q_stage * m_block + stage) * self.cta_group_size,
                 thr_mma=thr_mma_qk,
@@ -3114,11 +3114,11 @@ class FFAFwdSm100:
 
             recompute_fastdiv_mods_q = const_expr(
                 aux_tensors is not None
-                and (seqlen.has_cu_seqlens_q or seqlen.has_seqused_q)
+                and (seqlen_info.has_cu_seqlens_q or seqlen_info.has_seqused_q)
             )
             recompute_fastdiv_mods_k = const_expr(
                 aux_tensors is not None
-                and (seqlen.has_cu_seqlens_k or seqlen.has_seqused_k)
+                and (seqlen_info.has_cu_seqlens_k or seqlen_info.has_seqused_k)
             )
 
             if const_expr(fastdiv_mods is not None):
@@ -3126,10 +3126,10 @@ class FFAFwdSm100:
                 fastdiv_mods = (
                     seqlen_q_divmod
                     if not recompute_fastdiv_mods_q
-                    else FastDivmodDivisor(seqlen.seqlen_q),
+                    else FastDivmodDivisor(seqlen_info.seqlen_q),
                     seqlen_k_divmod
                     if not recompute_fastdiv_mods_k
-                    else FastDivmodDivisor(seqlen.seqlen_k),
+                    else FastDivmodDivisor(seqlen_info.seqlen_k),
                 )
 
             # --- Define attn mask apply fn ---
@@ -3196,7 +3196,7 @@ class FFAFwdSm100:
                     m_block,
                     self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
                     self.q_subtile_factor if self.q_subtile_factor is not None else 1,
-                    seqlen_info=seqlen,
+                    seqlen_info=seqlen_info,
                 )
                 has_work = tile_block_count > Int32(0)
             else:
@@ -3227,7 +3227,7 @@ class FFAFwdSm100:
                 batch_idx=batch_idx,
                 head_idx=head_idx,
                 m_block=(self.q_stage * m_block + stage) * self.cta_group_size,
-                seqlen=seqlen,
+                seqlen=seqlen_info,
                 aux_tensors=aux_tensors,
                 fastdiv_mods=fastdiv_mods,
                 head_divmod=head_divmod,
@@ -3333,7 +3333,7 @@ class FFAFwdSm100:
                     m_tile_end = (
                         (self.q_stage * m_block + stage + 1) * self.cta_group_size
                     ) * self.m_block_size
-                    check_m_boundary = m_tile_end > seqlen.seqlen_q
+                    check_m_boundary = m_tile_end > seqlen_info.seqlen_q
                 else:
                     check_m_boundary = False
                 (
@@ -3346,7 +3346,7 @@ class FFAFwdSm100:
                     batch_idx,
                     head_idx,
                     m_block,
-                    seqlen,
+                    seqlen_info,
                     softmax_step,
                     mask_fn,
                     mask_fn_none,
@@ -3393,7 +3393,7 @@ class FFAFwdSm100:
                     if const_expr(self.is_causal or self.is_local):
                         n_block_min_causal_local_mask = (
                             block_info.get_n_block_min_causal_local_mask(
-                                seqlen, m_block, n_block_min
+                                seqlen_info, m_block, n_block_min
                             )
                         )
                         for n_tile in cutlass.range(
@@ -3419,7 +3419,7 @@ class FFAFwdSm100:
                     # NOTE: The remaining iterations have no masking, but may still need mask_mod
                     n_block_min_before_local_mask = (
                         block_info.get_n_block_min_before_local_mask(
-                            seqlen, m_block, n_block_min
+                            seqlen_info, m_block, n_block_min
                         )
                     )
                     for n_tile in cutlass.range(
@@ -3796,9 +3796,9 @@ class FFAFwdSm100:
 
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
             n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen, m_block, split_idx, num_splits
+                seqlen_info, m_block, split_idx, num_splits
             )
 
             # --- Compute sm_scale factor ---
@@ -3821,11 +3821,11 @@ class FFAFwdSm100:
             # --- Make gO of current tile ---
 
             if const_expr(self.is_split_kv):
-                mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[
+                mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
                     None, None, head_idx, split_idx
                 ]
             else:
-                mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[
+                mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
                     None, None, head_idx
                 ]
             gO = None
@@ -3868,7 +3868,7 @@ class FFAFwdSm100:
                     m_block,
                     self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
                     self.q_subtile_factor if self.q_subtile_factor is not None else 1,
-                    seqlen_info=seqlen,
+                    seqlen_info=seqlen_info,
                 )
                 has_work = total_block_count > Int32(0)
             else:
@@ -4100,7 +4100,7 @@ class FFAFwdSm100:
                         tidx,
                         stage,
                         m_block,
-                        seqlen.seqlen_q,
+                        seqlen_info.seqlen_q,
                         rowsum_norm_scale,
                         sO[None, None, stage],
                         mO_cur,
@@ -4142,7 +4142,7 @@ class FFAFwdSm100:
                         self.is_split_kv,
                         learnable_sink,
                         mLSE,
-                        seqlen,
+                        seqlen_info,
                         m_block,
                         head_idx,
                         batch_idx,
@@ -4170,16 +4170,16 @@ class FFAFwdSm100:
             # --- Compute LSE and write to gmem ---
 
             if const_expr(mLSE is not None):
-                if const_expr(not seqlen.has_cu_seqlens_q):
+                if const_expr(not seqlen_info.has_cu_seqlens_q):
                     if const_expr(self.is_split_kv):
                         mLSE_cur = mLSE[None, head_idx, batch_idx, split_idx]
                     else:
                         mLSE_cur = mLSE[None, head_idx, batch_idx]
                 else:
                     offset = (
-                        seqlen.offset_q
+                        seqlen_info.offset_q
                         if const_expr(not self.pack_gqa)
-                        else (0, seqlen.offset_q)
+                        else (0, seqlen_info.offset_q)
                     )
                     if const_expr(self.is_split_kv):
                         mLSE_cur = cute.domain_offset(
@@ -4204,9 +4204,9 @@ class FFAFwdSm100:
                         else -Float32.inf
                     )
                     seqlen_q = (
-                        seqlen.seqlen_q
+                        seqlen_info.seqlen_q
                         if const_expr(not self.pack_gqa)
-                        else seqlen.seqlen_q * self.qhead_per_kvhead
+                        else seqlen_info.seqlen_q * self.qhead_per_kvhead
                     )
                     if const_expr(
                         not self.pack_gqa
@@ -4747,9 +4747,9 @@ class FFAFwdSm100:
             # --- Get current tile info ---
 
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
             n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen, m_block, split_idx, num_splits
+                seqlen_info, m_block, split_idx, num_splits
             )
 
             # --- Debug print ---
@@ -4785,11 +4785,11 @@ class FFAFwdSm100:
 
             if const_expr(not self.is_split_kv) or n_block_min < n_block_max:
                 if const_expr(self.is_split_kv):
-                    mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[
+                    mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
                         None, None, head_idx, split_idx
                     ]
                 else:
-                    mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[
+                    mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
                         None, None, head_idx
                     ]
                 gO = None
@@ -4863,7 +4863,7 @@ class FFAFwdSm100:
                             mO_cur,
                             gmem_tiled_copy_O,
                             tidx,
-                            seqlen.seqlen_q,
+                            seqlen_info.seqlen_q,
                             m_tile_idx,
                             is_print_thread_and_tile=(
                                 stage == 0 and is_print_thread_and_tile
@@ -5064,7 +5064,7 @@ class FFAFwdSm100:
         m_block,
         n_block,
         softmax,
-        seqlen: SeqlenInfoQK,
+        seqlen_info: SeqlenInfoQK,
         aux_tensors=None,
         fastdiv_mods=(None, None),
         head_divmod=None,
@@ -5105,7 +5105,7 @@ class FFAFwdSm100:
             self.qk_acc_dtype,
             aux_tensors,
             fastdiv_mods,
-            seqlen_info=seqlen,
+            seqlen_info=seqlen_info,
             constant_q_idx=q_idx_logical,
             qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
         )
