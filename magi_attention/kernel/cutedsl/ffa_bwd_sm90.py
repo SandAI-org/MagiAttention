@@ -1677,6 +1677,8 @@ class FFABwdSm90:
         wg_mma_SdP = tiled_mma_SdP.get_slice(warp_group_thread_layout(warp_group_idx))
 
         shape_mnk_S = (self.tile_m, self.tile_n, self.tile_hdim)
+        # tSrQ: (MMA_ATOM=1,MMA_Q1,MMA_HD=(4,2),STAGE_Q=(1,2)):(0,0,(2,640),(0,1280))
+        # tSrK: (MMA_ATOM=1,MMA_K1,MMA_HD=(4,2)):(0,0,(2,1024))
         _, tSrQ, tSrK = sm90_utils.partition_fragment_ABC(
             wg_mma_SdP, shape_mnk_S, sQ, sK, swap_AB=self.SdP_swapAB
         )
@@ -1689,6 +1691,8 @@ class FFABwdSm90:
             swap_AB=self.SdP_swapAB,
         )
 
+        # tLSEsLSE:   ((ATOM_Q2,MMA_Q10,1),STAGE2):((1,8,0),128)
+        # tLSEsdPsum: ((ATOM_Q2,MMA_Q10,1),STAGE2):((1,8,0),128)
         tLSEsLSE = layout_utils.mma_partition_C_vec(
             sLSE, thr_mma_SdP, expand_shape=self.tile_n, is_colvec=not self.SdP_swapAB
         )
@@ -1715,6 +1719,8 @@ class FFABwdSm90:
         # --- dP = dO @ V.T ---
 
         shape_mnk_dP = (self.tile_m, self.tile_n, self.tile_hdimv)
+        # tdPrdO: (MMA_ATOM=1,MMA_Q1,MMA_HD=(4,2),STAGE_dO=(1,2)):(0,0,(2,640),(0,1280))
+        # tdPrV:  (MMA_ATOM=1,MMA_K1,MMA_HD=(4,2)):(0,0,(2,1024))
         _, tdPrdO, tdPrV = sm90_utils.partition_fragment_ABC(
             wg_mma_SdP, shape_mnk_dP, sdO, sV, swap_AB=self.SdP_swapAB
         )
@@ -1734,6 +1740,8 @@ class FFABwdSm90:
         sPt = layout_utils.transpose_view(sP) if sP is not None else None
         sdOt = layout_utils.transpose_view(sdO)
         shape_mnk_dV = (self.tile_n, self.tile_hdimv, self.tile_m)
+        # acc_dV:  (MMA_ATOM=(2,2,16),MMA_K1,MMA_HD1):((1,2,4),0,0)
+        # tdVrdOt: (MMA_ATOM=1,MMA_HD1,MMA_Q5,STAGE_dO=(1,2)):(0,0,128,(0,1280))
         acc_dV, tdVrPt, tdVrdOt = sm90_utils.partition_fragment_ABC(
             wg_mma_dV, shape_mnk_dV, sPt, sdOt, swap_AB=self.dKV_swapAB
         )
@@ -1756,6 +1764,9 @@ class FFABwdSm90:
         sdSt = layout_utils.transpose_view(sdS)
         sQt = layout_utils.transpose_view(sQ)
         shape_mnk_dK = (self.tile_n, self.tile_hdim, self.tile_m)
+        # acc_dK:  (MMA_ATOM=(2,2,16),MMA_K1,MMA_HD1):((1,2,4),0,0)
+        # tdKrdSt: (MMA_ATOM=(2,2,2),MMA_K1,MMA_Q5):((1,2,4),0,8)
+        # tdKrQt:  (MMA_ATOM=1,MMA_HD1,MMA_Q5,STAGE_Q=(1,2)):(0,0,128,(0,1280))
         acc_dK, tdKrdSt, tdKrQt = sm90_utils.partition_fragment_ABC(
             wg_mma_dK, shape_mnk_dK, sdSt, sQt, swap_AB=self.dKV_swapAB
         )
@@ -1782,6 +1793,8 @@ class FFABwdSm90:
         shape_mnk_dQ = (self.tile_m, self.tile_hdim, self.tile_n)
         mma_dsk_fn = None
         if const_expr(is_dQ_wg):
+            # tdQrdS: (MMA_ATOM=1,MMA_Q1,MMA_K=(4,2),STAGE_dS=(1,2)):(0,0,(2,640),(0,1280))
+            # tdQrKt: (MMA_ATOM=1,MMA_HD1,MMA_K8):(0,0,128)
             _, tdQrdS, tdQrKt = sm90_utils.partition_fragment_ABC(
                 wg_mma_dQ, shape_mnk_dQ, sdS, sKt, swap_AB=self.dQ_swapAB
             )
@@ -1823,6 +1836,7 @@ class FFABwdSm90:
         tdQsdQacc = None
         if const_expr(is_dQ_wg):
             smem_thr_copy_dQacc = r2s_tiled_copy_dQacc.get_slice(tidx)
+            # tdQsdQacc: ((CPY_ATOM=(4,1)),CPY_Q10,1):((1,0),512,0)
             tdQsdQacc = smem_thr_copy_dQacc.partition_D(sdQacc)
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1950,15 +1964,40 @@ class FFABwdSm90:
                     cute.printf(prefix + "sK.layout: {}", sK.layout)
                     cute.printf(prefix + "sV.layout: {}", sV.layout)
                     cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                    if const_expr(sP is not None):
+                        cute.printf(prefix + "sP.layout: {}", sP.layout)
                     cute.printf(prefix + "sdS.layout: {}", sdS.layout)
                     cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
                     cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
                     cute.printf("")
+                    cute.printf(prefix + "tLSEsLSE.layout: {}", tLSEsLSE.layout)
+                    cute.printf(prefix + "tLSEsdPsum.layout: {}", tLSEsdPsum.layout)
+                    cute.printf("")
+                    # S = Q @ K.T
                     cute.printf(prefix + "tSrQ.layout: {}", tSrQ.layout)
                     cute.printf(prefix + "tSrK.layout: {}", tSrK.layout)
+                    cute.printf("")
+                    # dP = dO @ V.T
                     cute.printf(prefix + "tdPrdO.layout: {}", tdPrdO.layout)
                     cute.printf(prefix + "tdPrV.layout: {}", tdPrV.layout)
                     cute.printf("")
+                    # dV += P.T @ dO
+                    cute.printf(prefix + "acc_dV.layout: {}", acc_dV.layout)
+                    if const_expr(sP is not None):
+                        cute.printf(prefix + "tdVrPt.layout: {}", tdVrPt.layout)
+                    cute.printf(prefix + "tdVrdOt.layout: {}", tdVrdOt.layout)
+                    cute.printf("")
+                    # dK += dS.T @ Q
+                    cute.printf(prefix + "acc_dK.layout: {}", acc_dK.layout)
+                    cute.printf(prefix + "tdKrdSt.layout: {}", tdKrdSt.layout)
+                    cute.printf(prefix + "tdKrQt.layout: {}", tdKrQt.layout)
+                    cute.printf("")
+                    # dQ = dS @ K
+                    if const_expr(is_dQ_wg):
+                        cute.printf(prefix + "tdQrdS.layout: {}", tdQrdS.layout)
+                        cute.printf(prefix + "tdQrKt.layout: {}", tdQrKt.layout)
+                        cute.printf(prefix + "tdQsdQacc.layout: {}", tdQsdQacc.layout)
+                        cute.printf("")
 
             # --- Mainloop ---
 
@@ -1992,7 +2031,7 @@ class FFABwdSm90:
                             ),
                         )
                         dKV_accumulate = True
-                else:  # block sparse load (TODO: review the logics)
+                else:  # block sparse mma (TODO: review the logics)
                     (
                         consumer_state_Q,
                         consumer_state_dO,
@@ -2509,7 +2548,6 @@ class FFABwdSm90:
         is_print_block: bool = False,
     ):
         tidx, _, _ = cute.arch.thread_idx()
-        # warp-local thread index (dQacc_store runs on warp 1, global tidx 32-63)
         warp_local_tidx = tidx % cute.arch.WARP_SIZE
         read_flag = const_expr(not self.deterministic)
 
@@ -2518,12 +2556,12 @@ class FFABwdSm90:
         # ///////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
+            # --- Get current tile info ---
+
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
 
-            # --- Debug print ---
-
-            # local thread-0 of the dQacc_store warp (warp 1)
+            # Used only for debug print
             is_print_thread_and_tile = const_expr(self.debug_print) and (
                 (warp_local_tidx == 0)
                 and is_print_block
@@ -2531,18 +2569,6 @@ class FFABwdSm90:
                 and (head_idx == 0)
                 and (batch_idx == 0)
             )
-            if const_expr(self.debug_print):
-                if is_print_thread_and_tile:
-                    prefix = "[bwd_sm90_dQacc_store] "
-                    cute.printf("")
-                    cute.printf(
-                        prefix + "n_block={} head_idx={} batch_idx={}",
-                        n_block,
-                        head_idx,
-                        batch_idx,
-                    )
-                    cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
-                    cute.printf("")
 
             if const_expr(not seqlen.has_cu_seqlens_q):
                 mdQacc_cur = mdQacc[None, head_idx, batch_idx]
@@ -2582,6 +2608,21 @@ class FFABwdSm90:
                     m_block_max=m_block_max,
                 )
                 process_tile = total_block_cnt > Int32(0)
+
+            # --- Debug print ---
+
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[bwd_sm90_dQacc_store] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "n_block={} head_idx={} batch_idx={}",
+                        n_block,
+                        head_idx,
+                        batch_idx,
+                    )
+                    cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
+                    cute.printf("")
 
             if process_tile:
                 if const_expr(not self.use_block_sparsity):
@@ -2646,7 +2687,7 @@ class FFABwdSm90:
                                 0,  # flag_offset
                                 1,
                             )
-                else:
+                else:  # block sparse dQ (TODO: review the logics)
                     assert (
                         not self.deterministic
                     ), "Deterministic not implemented for block-sparse backward"

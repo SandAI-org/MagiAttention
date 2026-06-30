@@ -1981,7 +1981,7 @@ class FFAFwdSm90:
                 else:
                     self.warp_scheduler_barrier_arrive()
 
-            else:  # block sparse load (TODO: review the logics)
+            else:  # block sparse mma (TODO: review the logics)
                 (
                     kv_consumer_state,
                     O_should_accumulate,
