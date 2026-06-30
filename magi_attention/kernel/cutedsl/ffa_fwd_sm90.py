@@ -19,6 +19,7 @@
 
 # SM90 (Hopper) forward pass for flash attention, extracted from flash_fwd.py.
 
+import math
 from functools import partial
 from types import SimpleNamespace
 from typing import Callable, Literal, Optional, Type
@@ -75,8 +76,8 @@ class FFAFwdSm90(FFAFwdSm80):
         pack_gqa: bool = True,
         tile_m: int = 128,
         tile_n: int = 128,
-        num_stages: int = 1,
-        num_threads: int = 128,
+        num_stages: int = 2,
+        num_threads: int = 384,
         Q_in_regs: bool = False,
         intra_wg_overlap: bool = True,
         mma_pv_is_rs: bool = True,
@@ -87,46 +88,87 @@ class FFAFwdSm90(FFAFwdSm80):
         q_subtile_factor: int | None = None,
         debug_print: bool = False,
     ):
-        super().__init__(
-            dtype=dtype,
-            head_dim=head_dim,
-            head_dim_v=head_dim_v,
-            qhead_per_kvhead=qhead_per_kvhead,
-            mask_type=mask_type,
-            is_local=is_local,
-            pack_gqa=pack_gqa,
-            tile_m=tile_m,
-            tile_n=tile_n,
-            num_stages=num_stages,
-            num_threads=num_threads,
-            Q_in_regs=Q_in_regs,
-            score_mod=score_mod,
-            mask_mod=mask_mod,
-            has_aux_tensors=has_aux_tensors,
-            q_subtile_factor=q_subtile_factor,
-            debug_print=debug_print,
+        self.dtype = dtype
+
+        # Pad head_dim to a multiple of 16 as k_block_size
+        hdim_multiple_of = 16
+        self.tile_hdim = int(math.ceil(head_dim / hdim_multiple_of) * hdim_multiple_of)
+        head_dim_v = head_dim_v if head_dim_v is not None else head_dim
+        self.same_hdim_kv = head_dim == head_dim_v
+        self.head_dim = head_dim
+        self.head_dim_v = head_dim_v
+        self.tile_hdimv = int(
+            math.ceil(head_dim_v / hdim_multiple_of) * hdim_multiple_of
         )
 
+        # Can save registers (and hence be faster) if we don't have to check hdim predication
+        self.check_hdim_oob = head_dim != self.tile_hdim
+        self.check_hdim_v_oob = head_dim_v != self.tile_hdimv
         assert not paged_kv_non_tma or not (
             self.check_hdim_oob or self.check_hdim_v_oob
         ), "Paged KV does not support irregular head dim"
-        assert (
-            self.arch >= Arch.sm_90 and self.arch <= Arch.sm_90a
-        ), "Only SM 9.x is supported"
+
+        self.qhead_per_kvhead = qhead_per_kvhead
+        self.mask_type = mask_type
+        self.is_local = is_local
+        self.pack_gqa = pack_gqa
+        self.tile_m = tile_m  # tileQ128
+        self.tile_n = tile_n  # tileK64
 
         self.intra_wg_overlap = intra_wg_overlap
         self.mma_pv_is_rs = mma_pv_is_rs
         self.use_tma_KV = not paged_kv_non_tma
         self.cluster_shape_mn = (1, 1)
 
+        self.num_threads = num_threads  # 384 (3 WGs = 1 producer + 2 MMA)
+        self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 12
+        self.num_producer_threads = self.num_threads
+        self.num_Q_load_threads = self.num_threads
+        self.num_epilogue_threads = self.num_threads
+
+        self.num_stages = num_stages
+        self.q_subtile_factor = q_subtile_factor
+        self.Q_in_regs = Q_in_regs  # False
+        self.score_mod = score_mod
+        self.mask_mod = mask_mod
+        self.qk_acc_dtype = Float32
+
+        self.vec_size: cutlass.Constexpr = getattr(
+            score_mod, "__vec_size__", 1 if cutlass.const_expr(has_aux_tensors) else 2
+        )
+        if self.vec_size > 2:
+            raise ValueError(
+                f"score_mod vec_size {self.vec_size} not supported on sm80/90/120 "
+                "due to accumulator thread ownership pattern."
+            )
+
+        self.buffer_align_bytes = 1024
+
+        self.debug_print = debug_print
+
         if self.debug_print:
             prefix = "[fwd_sm90_init] "
             print()
             print(f"{prefix}Initialized FFAFwdSm90 with: ")
+            print(f"{prefix}{self.dtype=} | {self.arch=} | {self.qhead_per_kvhead=}")
             print(
-                f"{prefix}{self.intra_wg_overlap=} | {self.mma_pv_is_rs=} | {self.use_tma_KV=}"
+                f"{prefix}{self.tile_hdim=} | {self.tile_hdimv=} | "
+                f"{self.check_hdim_oob=} | {self.check_hdim_v_oob=}"
             )
-            print(f"{prefix}{self.cluster_shape_mn=} | {self.use_stmatrix_O_store=}")
+            print(
+                f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | {self.pack_gqa=}"
+            )
+            print(
+                f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_stages=} | {self.num_threads=}"
+            )
+            print(f"{prefix}{self.Q_in_regs=} | {self.q_subtile_factor=}")
+            print(f"{prefix}{self.score_mod=} | {self.mask_mod=}")
+            print(f"{prefix}{self.vec_size=} | {has_aux_tensors=}")
+            print(
+                f"{prefix}{self.intra_wg_overlap=} | "
+                f"{self.mma_pv_is_rs=} | {self.use_tma_KV=} | "
+                f"{self.cluster_shape_mn=}"
+            )
             print()
 
     @property
