@@ -14,22 +14,23 @@
 
 """Unified sparse attention benchmark & analysis.
 
-Phases:
-  0-kbs-compare    : kbs=1 (CpAsync) vs kbs=128 (TMA2D) TFLOPS (FWD+BWD)
-  1-method-parity  : 5 methods at S=topk (sparse framework overhead baseline)
-  2-topk-sweep     : Fixed S=32K varying topk (L2 cache / CTA starvation)
+Phases (TFLOPS high→low, ideal→realistic):
+  0-method-parity  : 5 methods at S=topk (sparse framework overhead baseline)
+  1-topk-sweep     : Fixed S=32K varying topk (L2 cache / CTA starvation)
+  2-kbs-compare    : kbs=1 (CpAsync) vs kbs=128 (TMA2D) TFLOPS (FWD+BWD)
   3-l2-inflection  : NCU at specific TFLOPS inflection points
 
 Usage:
-  python bench_sparse_analysis.py --exp  0-kbs-compare        # run benchmark
-  python bench_sparse_analysis.py --plot 0-kbs-compare        # generate plot
-  python bench_sparse_analysis.py --ncu  0-kbs-compare        # NCU profiling
+  python bench_sparse_analysis.py --exp  0-method-parity      # run benchmark
+  python bench_sparse_analysis.py --plot 0-method-parity      # generate plot
+  python bench_sparse_analysis.py --ncu  0-method-parity      # NCU profiling
 
-  python bench_sparse_analysis.py --exp  1-method-parity
-  python bench_sparse_analysis.py --plot 1-method-parity
+  python bench_sparse_analysis.py --exp  1-topk-sweep
+  python bench_sparse_analysis.py --plot 1-topk-sweep
 
-  python bench_sparse_analysis.py --exp  2-topk-sweep
-  python bench_sparse_analysis.py --plot 2-topk-sweep
+  python bench_sparse_analysis.py --exp  2-kbs-compare
+  python bench_sparse_analysis.py --plot 2-kbs-compare
+  python bench_sparse_analysis.py --ncu  2-kbs-compare
 
   python bench_sparse_analysis.py --ncu  3-l2-inflection      # generate + run + parse
 
@@ -57,9 +58,9 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BASE_OUT = os.path.join(_SCRIPT_DIR, "outs", "sparse_analysis")
 
 PHASES = [
-    "0-kbs-compare",
-    "1-method-parity",
-    "2-topk-sweep",
+    "0-method-parity",
+    "1-topk-sweep",
+    "2-kbs-compare",
     "3-l2-inflection",
 ]
 
@@ -293,18 +294,18 @@ def _bench_ffa(S, topk, pass_type, kw, device):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Phase 0: kbs-compare
+#  Phase 2: kbs-compare
 # ═══════════════════════════════════════════════════════════════
-def _phase0_bench(force=False):
+def _phase2_bench(force=False):
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
 
-    phase = "0-kbs-compare"
+    phase = "2-kbs-compare"
     results = _load_results(phase)
     gpu = _set_gpu()
     device = f"cuda:{gpu}"
-    print(f"[{_ts()}] Phase 0: kbs=1 vs kbs=128 (gpu{gpu})", flush=True)
+    print(f"[{_ts()}] Phase 2: kbs=1 vs kbs=128 (gpu{gpu})", flush=True)
 
     CONFIGS = [
         ("fwd", "FWD"),
@@ -418,14 +419,14 @@ def _phase0_bench(force=False):
     print(f"\n[{_ts()}] Phase 0 DONE -> {_results_path(phase)}", flush=True)
 
 
-def _phase0_plot():
+def _phase2_plot():
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
 
-    phase = "0-kbs-compare"
+    phase = "2-kbs-compare"
     results = _load_results(phase)
     if not results:
         print(f"ERROR: {_results_path(phase)} not found. Run --exp first.")
@@ -484,8 +485,8 @@ def _phase0_plot():
     print(f"[{_ts()}] Plot -> {path}")
 
 
-def _phase0_ncu():
-    phase = "0-kbs-compare"
+def _phase2_ncu():
+    phase = "2-kbs-compare"
     out = _out_dir(phase)
     os.makedirs(out, exist_ok=True)
 
@@ -587,16 +588,16 @@ print('[DONE] {name}')
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Phase 1: method-parity (S=topk, 5 methods)
+#  Phase 0: method-parity (S=topk, 5 methods)
 # ═══════════════════════════════════════════════════════════════
-def _phase1_bench(force=False, rerun_filter=None):
+def _phase0_bench(force=False, rerun_filter=None):
     import torch
 
-    phase = "1-method-parity"
+    phase = "0-method-parity"
     results = _load_results(phase)
     gpu = _set_gpu()
     device = f"cuda:{gpu}"
-    print(f"[{_ts()}] Phase 1: method-parity S=topk (gpu{gpu})", flush=True)
+    print(f"[{_ts()}] Phase 0: method-parity S=topk (gpu{gpu})", flush=True)
 
     def run_d1b(topk, pass_type):
         kw = dict(
@@ -715,14 +716,14 @@ def _phase1_bench(force=False, rerun_filter=None):
     print(f"\n[{_ts()}] Phase 1 DONE -> {_results_path(phase)}", flush=True)
 
 
-def _phase1_plot():
+def _phase0_plot():
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
 
-    phase = "1-method-parity"
+    phase = "0-method-parity"
     results = _load_results(phase)
     if not results:
         print(f"ERROR: {_results_path(phase)} not found. Run --exp first.")
@@ -790,7 +791,7 @@ def _phase1_plot():
         ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle(
-        "Phase 1: Method Parity at S=topk "
+        "Phase 0: Method Parity at S=topk "
         f"(nhq={NHQ}, nhk={NHK}, hd={HD}, kbs={KBS}, bf16)",
         fontsize=13,
         fontweight="bold",
@@ -803,8 +804,8 @@ def _phase1_plot():
     print(f"[{_ts()}] Plot -> {path}")
 
 
-def _phase1_ncu():
-    phase = "1-method-parity"
+def _phase0_ncu():
+    phase = "0-method-parity"
     out = _out_dir(phase)
     os.makedirs(out, exist_ok=True)
 
@@ -927,16 +928,16 @@ print('[DONE] {name}')
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Phase 2: topk-sweep (S=32K fixed, topk varies)
+#  Phase 1: topk-sweep (S=32K fixed, topk varies)
 # ═══════════════════════════════════════════════════════════════
-def _phase2_bench(force=False, rerun_filter=None):
+def _phase1_bench(force=False, rerun_filter=None):
     import torch
 
-    phase = "2-topk-sweep"
+    phase = "1-topk-sweep"
     results = _load_results(phase)
     gpu = _set_gpu()
     device = f"cuda:{gpu}"
-    print(f"[{_ts()}] Phase 2: topk-sweep S={S_FULL} (gpu{gpu})", flush=True)
+    print(f"[{_ts()}] Phase 1: topk-sweep S={S_FULL} (gpu{gpu})", flush=True)
 
     def run_d1b(topk, pass_type):
         kw = dict(
@@ -1049,14 +1050,14 @@ def _phase2_bench(force=False, rerun_filter=None):
     print(f"\n[{_ts()}] Phase 2 DONE -> {_results_path(phase)}", flush=True)
 
 
-def _phase2_plot():
+def _phase1_plot():
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
 
-    phase = "2-topk-sweep"
+    phase = "1-topk-sweep"
     results = _load_results(phase)
     if not results:
         print(f"ERROR: {_results_path(phase)} not found. Run --exp first.")
@@ -1110,7 +1111,7 @@ def _phase2_plot():
         ax.set_ylim(bottom=0)
 
     fig.suptitle(
-        "Phase 2: topk Sweep at S=32K "
+        "Phase 1: topk Sweep at S=32K "
         f"(nhq={NHQ}, nhk={NHK}, hd={HD}, kbs={KBS}, bf16)",
         fontsize=13,
         fontweight="bold",
@@ -1314,34 +1315,34 @@ def main():
     if args.exp:
         phase = args.exp
         print(f"[{_ts()}] === --exp {phase} ===", flush=True)
-        if phase == "0-kbs-compare":
-            _phase0_bench(force=args.force)
-        elif phase == "1-method-parity":
+        if phase == "0-method-parity":
+            _phase0_bench(force=args.force, rerun_filter=rerun_filter)
+        elif phase == "1-topk-sweep":
             _phase1_bench(force=args.force, rerun_filter=rerun_filter)
-        elif phase == "2-topk-sweep":
-            _phase2_bench(force=args.force, rerun_filter=rerun_filter)
+        elif phase == "2-kbs-compare":
+            _phase2_bench(force=args.force)
         elif phase == "3-l2-inflection":
             parser.error("Phase 3 has no --exp. Use --ncu 3-l2-inflection")
     elif args.plot:
         phase = args.plot
         print(f"[{_ts()}] === --plot {phase} ===", flush=True)
-        if phase == "0-kbs-compare":
+        if phase == "0-method-parity":
             _phase0_plot()
-        elif phase == "1-method-parity":
+        elif phase == "1-topk-sweep":
             _phase1_plot()
-        elif phase == "2-topk-sweep":
+        elif phase == "2-kbs-compare":
             _phase2_plot()
         elif phase == "3-l2-inflection":
             parser.error("Phase 3 has no --plot. Use --ncu 3-l2-inflection")
     elif args.ncu:
         phase = args.ncu
         print(f"[{_ts()}] === --ncu {phase} ===", flush=True)
-        if phase == "0-kbs-compare":
+        if phase == "0-method-parity":
             _phase0_ncu()
-        elif phase == "1-method-parity":
-            _phase1_ncu()
-        elif phase == "2-topk-sweep":
-            parser.error("Phase 2 has no --ncu")
+        elif phase == "1-topk-sweep":
+            parser.error("Phase 1 has no --ncu")
+        elif phase == "2-kbs-compare":
+            _phase2_ncu()
         elif phase == "3-l2-inflection":
             _phase3_ncu()
 
