@@ -1703,8 +1703,7 @@ class FFAFwdSm90:
             softmax_scale=softmax_scale,
         )
 
-        # If self.rescale_O_before_gemm:
-        # persistent scores_scale across iterations
+        # For RescaleOBeforeGemm: persistent scores_scale across iterations
         scores_scale = None
         if const_expr(self.rescale_O_before_gemm):
             scores_scale = cute.make_rmem_tensor_like(softmax.row_max, Float32)
@@ -1857,7 +1856,8 @@ class FFAFwdSm90:
             # --- Mainloop ---
 
             if const_expr(not self.use_block_sparsity):
-                # --- First iteration with seqlen masking ---
+                # --- First ("half") iteration with seqlen masking ---
+
                 if const_expr(self.intra_wg_overlap):
                     kv_consumer_state = process_first_half_block(
                         n_block=n_block_max - 1,
@@ -1883,7 +1883,9 @@ class FFAFwdSm90:
                     O_should_accumulate = True
 
                 n_block_max -= 1
-                # Next couple of iterations with causal masking
+
+                # --- Next couple of iterations with causal/local masking ---
+
                 if const_expr(self.is_causal or self.is_local):
                     n_block_min_causal_local_mask = (
                         block_info.get_n_block_min_causal_local_mask(
@@ -1908,7 +1910,9 @@ class FFAFwdSm90:
                     n_block_max = cutlass.min(
                         n_block_max, n_block_min_causal_local_mask
                     )
-                # The remaining iterations have no masking
+
+                # --- The remaining iterations have no masking ---
+
                 n_block_min_before_local_mask = (
                     block_info.get_n_block_min_before_local_mask(
                         seqlen_info, m_block, n_block_min
@@ -1931,7 +1935,9 @@ class FFAFwdSm90:
                         ),
                     )
                     O_should_accumulate = True
-                # Separate iterations with local masking on the left
+
+                # --- Separate iterations with local masking on the left ---
+
                 if const_expr(
                     self.is_local and block_info.window_size_left is not None
                 ):
@@ -1951,9 +1957,12 @@ class FFAFwdSm90:
                             ),
                         )
                         O_should_accumulate = True
+
                 # Release Q pipeline so the producer can load the next tile's Q
                 pipeline_q.consumer_release_w_index(0)
-                # Last "half" iteration
+
+                # --- Last "half" iteration ---
+
                 if const_expr(self.intra_wg_overlap):
                     kv_consumer_state = process_last_half_block(
                         kv_consumer_state=kv_consumer_state,
@@ -2098,17 +2107,6 @@ class FFAFwdSm90:
 
         row_scale = softmax.online_softmax(acc_S, is_first=is_first_block)
 
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            if is_print_thread_and_tile:
-                prefix = "[fwd_sm90_first_half_block_overlap] "
-                cute.printf("")
-                cute.printf(prefix + "n_block={}", n_block)
-                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
-                cute.printf(prefix + "row_scale.layout: {}", row_scale.layout)
-                cute.printf("")
-
         # --- Convert P and copy to smem ---
 
         tOrP_acc = layout_utils.reshape_acc_to_frgA(acc_S)
@@ -2133,6 +2131,17 @@ class FFAFwdSm90:
             acc_O.fill(0.0)
             scores_scale.store(row_scale.load())
 
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm90_first_half_block_overlap] "
+                cute.printf("")
+                cute.printf(prefix + "n_block={}", n_block)
+                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
+                cute.printf(prefix + "row_scale.layout: {}", row_scale.layout)
+                cute.printf("")
+
         return kv_consumer_state
 
     @cute.jit
@@ -2153,8 +2162,6 @@ class FFAFwdSm90:
           1. (RescaleOBeforeGemm) rescale acc_O by the stashed scores_scale
           2. O += P @ V   (wait V full, GEMM, release V, advance pipeline state)
         """
-
-        # --- RescaleOBeforeGemm: rescale O before the final PV GEMM ---
 
         # For RescaleOBeforeGemm: rescale O before the final PV GEMM
         if const_expr(self.rescale_O_before_gemm):
@@ -2238,18 +2245,6 @@ class FFAFwdSm90:
             acc_S, is_first=is_first_n_block, check_inf=check_inf
         )
 
-        # --- Debug print (first n_block only) ---
-
-        if const_expr(self.debug_print):
-            if is_print_thread_and_tile:
-                prefix = "[fwd_sm90_mma_one_n_block] "
-                cute.printf("")
-                cute.printf(prefix + "n_block={}", n_block)
-                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
-                cute.printf(prefix + "row_scale.layout: {}", row_scale.layout)
-                cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
-                cute.printf("")
-
         # --- Convert P and copy to smem ---
 
         # if cute.arch.thread_idx()[0] == 0: cute.print_tensor(layout_utils.reshape_acc_to_mn(acc_S))
@@ -2282,10 +2277,23 @@ class FFAFwdSm90:
             smem_pipe_read, pipeline_v.consumer_try_wait(smem_pipe_read)
         )
         self.warp_scheduler_barrier_sync()
-        # O += P @ V
+
         mma_pv_fn(B_idx=smem_pipe_read.index, wg_wait=0)
         pipeline_v.consumer_release(smem_pipe_read)
         smem_pipe_read.advance()
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm90_mma_one_n_block] "
+                cute.printf("")
+                cute.printf(prefix + "n_block={}", n_block)
+                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
+                cute.printf(prefix + "row_scale.layout: {}", row_scale.layout)
+                cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
+                cute.printf("")
+
         return smem_pipe_read
 
     @cute.jit
@@ -2361,18 +2369,6 @@ class FFAFwdSm90:
         warpgroup.wait_group(0)
         pipeline_v.consumer_release(smem_pipe_read_v)
 
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            if is_print_thread_and_tile:
-                prefix = "[fwd_sm90_mma_one_n_block_intrawg_overlap] "
-                cute.printf("")
-                cute.printf(prefix + "n_block={}", n_block)
-                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
-                cute.printf(prefix + "row_scale.layout: {}", row_scale.layout)
-                cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
-                cute.printf("")
-
         # --- Convert P(i) and copy to smem ---
 
         tOrP_acc = layout_utils.reshape_acc_to_frgA(acc_S)
@@ -2397,6 +2393,19 @@ class FFAFwdSm90:
             # Fence and barrier to make sure smem store is visible to WGMMA
             cute.arch.fence_view_async_shared()
             cute.arch.sync_warp()  # Only need syncwarp since each warp is using its own P values for MmaPV
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm90_mma_one_n_block_intrawg_overlap] "
+                cute.printf("")
+                cute.printf(prefix + "n_block={}", n_block)
+                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
+                cute.printf(prefix + "row_scale.layout: {}", row_scale.layout)
+                cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
+                cute.printf("")
+
         return smem_pipe_read
 
     @cute.jit
