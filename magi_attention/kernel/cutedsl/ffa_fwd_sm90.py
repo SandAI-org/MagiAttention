@@ -340,11 +340,6 @@ class FFAFwdSm90(FFAFwdSm80):
         )  # 384 (3 WGs = 1 producer + 2 MMA)
         self.num_Q_load_threads = self.num_threads_per_wg  # If not TMA_Q
         self.num_epilogue_threads = self.num_mma_threads
-        self.num_mma_regs, self.num_producer_regs = {
-            1: (256, 56),
-            2: (240, 24),
-            3: (160, 32),
-        }[self.num_wg_mma]
 
         # --- Set up smem layout: sQ/sK/sV ---
 
@@ -458,16 +453,22 @@ class FFAFwdSm90(FFAFwdSm80):
             self.pack_gqa and self.tile_m % self.qhead_per_kvhead != 0
         )
         self.use_tma_O = self.use_tma_Q
+        self.rescale_O_before_gemm = self.tile_hdimv > 128 and self.intra_wg_overlap
+
+        self.num_mma_regs, self.num_producer_regs = {
+            1: (256, 56),
+            2: (240, 24),
+            3: (160, 32),
+        }[self.num_wg_mma]
 
         # Producer needs more registers when doing cp.async Q or KV loads
         if const_expr(
             self.num_wg_mma == 2 and (not self.use_tma_Q or not self.use_tma_KV)
         ):
             self.num_mma_regs, self.num_producer_regs = 224, 40
-        self.rescale_O_before_gemm = self.tile_hdimv > 128 and self.intra_wg_overlap
 
         if const_expr(self.debug_print):
-            # NOTE: we might need extra registers for load warp to debug print
+            # NOTE: we need extra registers for load warp to debug print
             # otherwise, it will raise illegal instruction error
             num_regs_for_print = 24
             self.num_producer_regs += num_regs_for_print
@@ -536,12 +537,10 @@ class FFAFwdSm90(FFAFwdSm80):
     @cute.jit
     def __call__(
         self,
-        mQ: cute.Tensor,  # (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
-        mK: cute.Tensor,  # (b_k, s_k, h_k, d) or (total_k, h_k, d) if cu_seqlens_k
-        # or (num_pages, page_size, h_k, d) if page_table
-        mV: cute.Tensor,  # (b_k, s_k, h_k, dv) or (total_k, h_k, dv) if cu_seqlens_k
-        # or (num_pages, page_size, h_k, dv) if page_table
-        mO: cute.Tensor,  # (b, s_q, h, dv) or (total_q, h, dv) if there is cu_seqlens_q
+        mQ: cute.Tensor,
+        mK: cute.Tensor,
+        mV: cute.Tensor,
+        mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
         softmax_scale: Float32,
         mCuSeqlensQ: Optional[cute.Tensor] = None,

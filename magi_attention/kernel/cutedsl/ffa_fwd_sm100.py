@@ -588,17 +588,17 @@ class FFAFwdSm100:
     @cute.jit
     def __call__(
         self,
-        mQ: cute.Tensor,  # (b, sq, nqh, hd) or (sq, nhq, hd) if there is cu_seqlens_q
-        mK: cute.Tensor,  # (b, sk, nhk, hd) or (sk, nhk, hd) if cu_seqlens_k
-        mV: cute.Tensor,  # (b, sk, nhk, dv) or (sk, nhk, dv) if cu_seqlens_k
-        mO: cute.Tensor,  # (b, sq, nhq, dv) or (total_q, nhq, dv) if there is cu_seqlens_q
+        mQ: cute.Tensor,
+        mK: cute.Tensor,
+        mV: cute.Tensor,
+        mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
         softmax_scale: Float32,
         mCuSeqlensQ: Optional[cute.Tensor] = None,
         mCuSeqlensK: Optional[cute.Tensor] = None,
         mSeqUsedQ: Optional[cute.Tensor] = None,
         mSeqUsedK: Optional[cute.Tensor] = None,
-        mPageTable: Optional[cute.Tensor] = None,  # (b_k, max_num_pages_per_seq)
+        mPageTable: Optional[cute.Tensor] = None,
         window_size_left: Int32 | int | None = None,
         window_size_right: Int32 | int | None = None,
         learnable_sink: Optional[cute.Tensor] = None,
