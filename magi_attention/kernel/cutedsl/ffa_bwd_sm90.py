@@ -2163,9 +2163,11 @@ class FFABwdSm90:
         """
         if const_expr(not shuffle):
             return tSrS[row]
+
         # tSrS: (((2, 1), 1), 1)), distributed across 8 threads in the warp
         vecsize = cute.size(tSrS, mode=[0, 0])  # 2
         idx0, off, idx1 = cute.idx2crd(row, (vecsize, 8, cute.shape(tSrS, mode=[0, 1])))
+
         # register index: 0, 1, 0, 1, ..., 2, 3, 2, 3, ...
         return cutedsl_utils.shuffle_sync(
             tSrS[idx0 + idx1 * vecsize], offset=off * 4 + (lane % 4)
@@ -2222,29 +2224,25 @@ class FFABwdSm90:
             consumer_state_dO_cur.index if const_expr(self.dO_stage > 1) else 0
         )
         smem_idx_PdS = smem_idx_Q if const_expr(self.PdS_stage > 1) else 0
-        # (1) [GEMM 1] S = Q @ K^T
+
+        # --- Apply S = Q @ K.T ---
+
         pipeline_Q.consumer_wait(
             consumer_state_Q, pipeline_Q.consumer_try_wait(consumer_state_Q)
         )
+        # acc_S:   (MMA_ATOM=(2,2,8),MMA_Q1,MMA_K1):((1,2,4),0,0)
+        # tLSErLSE: ((ATOM_Q2,MMA_Q8,1)):((1,2,0))
         acc_S = mma_qk_fn(A_idx=smem_idx_Q, wg_wait=-1)
         # If shuffle_LSE, OOB reads are OK since sLSE is already padded
         tLSErLSE = copy_utils.load_s2r(tLSEsLSE[None, smem_idx_Q])
-        # (2) [GEMM 2] dP = dO @ V.T
+
+        # --- Apply dP = dO @ V.T ---
+
         pipeline_dO.consumer_wait(
             consumer_state_dO_cur, pipeline_dO.consumer_try_wait(consumer_state_dO_cur)
         )
+        # acc_dP: (MMA_ATOM=(2,2,8),MMA_Q1,MMA_K1):((1,2,4),0,0)
         acc_dP = mma_dov_fn(A_idx=smem_idx_Q, wg_wait=1)
-
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            if is_print_thread_and_tile:
-                prefix = "[bwd_sm90_mma_one_m_block] "
-                cute.printf("")
-                cute.printf(prefix + "m_block={}", m_block)
-                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
-                cute.printf(prefix + "acc_dP.layout: {}", acc_dP.layout)
-                cute.printf("")
 
         if const_expr(self.score_mod_bwd is not None):
             acc_S_pre = cute.make_fragment_like(acc_S)
@@ -2253,9 +2251,11 @@ class FFABwdSm90:
         if const_expr(self.score_mod is not None):
             score_mod_fn(acc_S, m_block=m_block)
 
-        # (3) [Pointwise 1] P = exp(S - LSE)
+        # --- Apply P = softmax(S) = exp(S - LSE) ---
+
         if cutlass.const_expr(mask_fn is not None):
             mask_fn(acc_S, m_block=m_block)
+        # acc_S_mn: ((ATOM_Q2,MMA_Q8,1),(ATOM_K2,1)):((1,4,0),(2,0))
         acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S, transpose=self.SdP_swapAB)
         lane_idx = cute.arch.lane_idx()
         for r in cutlass.range_constexpr(cute.size(acc_S_mn, mode=[0])):
@@ -2267,9 +2267,11 @@ class FFABwdSm90:
         tLSErdPsum = copy_utils.load_s2r(tLSEsdPsum[None, smem_idx_dO])
 
         # Convert P from f32 -> f16
+        # tdVrP: (MMA_ATOM=(2,2,2),MMA_M1,MMA_K=(4,1)):((1,2,4),0,(8,0))
         tdVrP = cutedsl_utils.cvt_f16(
             layout_utils.reshape_acc_to_frgA(acc_S), self.dtype
         )
+
         # R2S for P
         if const_expr(not self.mma_dkv_is_rs):
             # sync to ensure P has already been used in the previous iteration before overwriting
@@ -2277,8 +2279,10 @@ class FFABwdSm90:
                 PdS_barrier.arrive_and_wait()
             copy_P_r2s(tdVrP, dst_idx=smem_idx_PdS)
 
-        # (4) [Pointwise 2] dS = P*(dP-dPsum)
+        # --- Apply softmax bwd: dS = P*(dP - dPsum) ---
+
         warpgroup.wait_group(0)
+        # acc_dP_mn: ((ATOM_Q2,MMA_Q8,1),(ATOM_K2,1)):((1,4,0),(2,0))
         acc_dP_mn = layout_utils.reshape_acc_to_mn(acc_dP, transpose=self.SdP_swapAB)
         for r in cutlass.range_constexpr(cute.size(acc_dP_mn, mode=[0])):
             dpsum_val = self._get_stat(
@@ -2291,16 +2295,18 @@ class FFABwdSm90:
             score_mod_bwd_fn(acc_dP, acc_S_pre, m_block=m_block)
 
         # Convert dS from f32 -> f16
+        # tdKrdS: (MMA_ATOM=(2,2,2),MMA_M1,MMA_K=(4,1)):((1,2,4),0,(8,0))
         tdKrdS = cutedsl_utils.cvt_f16(
             layout_utils.reshape_acc_to_frgA(acc_dP), self.dtype
         )
 
-        # If there's double buffering on dS, we don't need to sync here.
+        # NOTE: If there's double buffering on dS, we don't need to sync here.
         # Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
         # But because both WGs have to sync at the end of the loop and double buffering,
         # this race condition is not possible.
-        # This sync is to ensure (1) P is written in case of !mma_dkv_is_rs and
-        # (2) dS is already read by the Mma in the previous iteration in case of mma_dkv_is_rs.
+        # This sync is to ensure:
+        #  (1) P is written in case of !mma_dkv_is_rs and
+        #  (2) dS is already read by the Mma in the previous iteration in case of mma_dkv_is_rs.
         if const_expr(
             not self.mma_dkv_is_rs or (self.PdS_stage == 1 and self.mma_dkv_is_rs)
         ):
@@ -2310,7 +2316,8 @@ class FFABwdSm90:
         # R2S for dS
         copy_dS_r2s(tdKrdS, dst_idx=smem_idx_PdS)
 
-        # (5) [GEMM 3] dV += P.T @ dO
+        # --- dV += P.T @ dO ---
+
         if const_expr(not self.mma_dkv_is_rs):
             mma_pdo_fn(
                 A_idx=smem_idx_PdS,
@@ -2323,18 +2330,21 @@ class FFABwdSm90:
                 tCrA=tdVrP, B_idx=smem_idx_dO, zero_init=not dKV_accumulate, wg_wait=-1
             )
 
-        # smem fence to make sure sdS is written before it's read by WGMMA
+        # Proxy fence to make sure sdS is written before it's read by WGMMA
         cute.arch.fence_view_async_shared()
         PdS_barrier.arrive_and_wait()
 
         if const_expr(is_dQ_wg):
-            # (6) [GEMM 4] dQ = dS @ K
+            # --- Apply dQ = dS @ K ---
+
+            # acc_dQ: (MMA_ATOM=(2,2,8),MMA_Q1,MMA_HD1):((1,2,4),0,0)
             acc_dQ = mma_dsk_fn(A_idx=smem_idx_PdS, wg_wait=1)
             pipeline_dO.consumer_release(
                 consumer_state_dO_cur
             )  # release dO as dV mma is done
 
-            # (7) [GEMM 5] dK += dS.T @ Q
+            # --- Apply dK += dS.T @ Q ---
+
             if const_expr(not self.mma_dkv_is_rs):
                 mma_dsq_fn(
                     A_idx=smem_idx_PdS,
@@ -2368,9 +2378,8 @@ class FFABwdSm90:
 
             warpgroup.wait_group(0)
             pipeline_Q.consumer_release(consumer_state_Q)
-        else:
-            # dQ_single_wg: WG1 skips dQ, only does dV wait + dK
-            # (7) [GEMM 5] dK += dS.T @ Q
+        else:  # WG1 skips dQ, only does dV wait + dK
+            # --- Apply dK += dS.T @ Q ---
             if const_expr(not self.mma_dkv_is_rs):
                 mma_dsq_fn(
                     A_idx=smem_idx_PdS,
@@ -2391,6 +2400,39 @@ class FFABwdSm90:
 
         consumer_state_Q.advance()
         consumer_state_dO.advance()
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm90_mma_one_m_block] "
+                cute.printf("")
+                cute.printf(prefix + "m_block={}", m_block)
+                cute.printf(
+                    prefix + "smem_idx_Q={} smem_idx_dO={} smem_idx_PdS={}",
+                    smem_idx_Q,
+                    smem_idx_dO,
+                    smem_idx_PdS,
+                )
+                cute.printf("")
+                # S = Q @ K.T
+                cute.printf(prefix + "acc_S.layout: {}", acc_S.layout)
+                cute.printf(prefix + "tLSErLSE.layout: {}", tLSErLSE.layout)
+                # dP = dO @ V.T
+                cute.printf(prefix + "acc_dP.layout: {}", acc_dP.layout)
+                cute.printf(prefix + "tLSErdPsum.layout: {}", tLSErdPsum.layout)
+                cute.printf("")
+                # P = exp2(S * scale - LSE) / dS = P * (dP - dPsum)
+                cute.printf(prefix + "acc_S_mn.layout: {}", acc_S_mn.layout)
+                cute.printf(prefix + "acc_dP_mn.layout: {}", acc_dP_mn.layout)
+                cute.printf(prefix + "tdVrP.layout: {}", tdVrP.layout)
+                cute.printf(prefix + "tdKrdS.layout: {}", tdKrdS.layout)
+                cute.printf("")
+                # dQ = dS @ K
+                if const_expr(is_dQ_wg):
+                    cute.printf(prefix + "acc_dQ.layout: {}", acc_dQ.layout)
+                    cute.printf("")
+
         return consumer_state_Q, consumer_state_dO
 
     @cute.jit
