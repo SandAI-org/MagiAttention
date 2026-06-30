@@ -176,6 +176,36 @@ class FFAFwdSm90(FFAFwdSm80):
         """SM90 uses WGMMA, whose accumulator layout matches the StMatrix store atom."""
         return True
 
+    def _check_type(
+        self,
+        mQ_type: Type[cutlass.Numeric],
+        mK_type: Type[cutlass.Numeric],
+        mV_type: Type[cutlass.Numeric],
+        mO_type: Type[cutlass.Numeric],
+        mLSE_type: Type[cutlass.Numeric] | None,
+        mCuSeqlensQ_type: Type[cutlass.Numeric] | None,
+        mCuSeqlensK_type: Type[cutlass.Numeric] | None,
+        mSeqUsedQ_type: Type[cutlass.Numeric] | None,
+        mSeqUsedK_type: Type[cutlass.Numeric] | None,
+    ):
+        # Get the data type and check if it is fp16 or bf16
+        if const_expr(not (mQ_type == mK_type == mV_type == mO_type == self.dtype)):
+            raise TypeError(
+                f"All tensors must have the same data type as the kernel dtype: {self.dtype}"
+            )
+        if const_expr(mQ_type not in [cutlass.Float16, cutlass.BFloat16]):
+            raise TypeError("Only Float16 or BFloat16 is supported")
+        if const_expr(mLSE_type not in [None, Float32]):
+            raise TypeError("LSE tensor must be Float32")
+        if const_expr(mCuSeqlensQ_type not in [None, Int32]):
+            raise TypeError("cu_seqlens_q tensor must be Int32")
+        if const_expr(mCuSeqlensK_type not in [None, Int32]):
+            raise TypeError("cu_seqlens_k tensor must be Int32")
+        if const_expr(mSeqUsedQ_type not in [None, Int32]):
+            raise TypeError("seqused_q tensor must be Int32")
+        if const_expr(mSeqUsedK_type not in [None, Int32]):
+            raise TypeError("seqused_k tensor must be Int32")
+
     def _get_tiled_mma(self):
         tiled_mma_qk = sm90_utils_basic.make_trivial_tiled_mma(
             self.dtype,
