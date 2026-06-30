@@ -381,58 +381,36 @@ class FFAFwdSm90(FFAFwdSm80):
             num_bits_per_copy=universal_copy_bits,
         )
 
-        # tQ/tK: (16,8):(8,1)
-        tQK_shape_dim_1 = (
+        # tQ: (16,8):(8,1)
+        tQ_shape_dim_1 = (
             sQ_layout_atom.outer.shape[1] // async_copy_elems
         )  # 8 for smem_blk=64
         assert (
-            self.num_Q_load_threads % tQK_shape_dim_1 == 0
-        ), "num_Q_load_threads must be divisible by tQK_shape_dim_1"
+            self.num_Q_load_threads % tQ_shape_dim_1 == 0
+        ), "num_Q_load_threads must be divisible by tQ_shape_dim_1"
         tQ_layout = cute.make_ordered_layout(
-            (self.num_Q_load_threads // tQK_shape_dim_1, tQK_shape_dim_1),
+            (self.num_Q_load_threads // tQ_shape_dim_1, tQ_shape_dim_1),
             order=(1, 0),
         )
         # So that we don't have to check if we overshoot kBlockM when we load Q
         assert self.tile_m % tQ_layout.shape[0] == 0
 
-        # tK: (16,8):(8,1)
-        assert (
-            self.num_producer_threads % tQK_shape_dim_1 == 0
-        ), "num_producer_threads must be divisible by tQK_shape_dim_1"
-        tK_layout = cute.make_ordered_layout(
-            (self.num_producer_threads // tQK_shape_dim_1, tQK_shape_dim_1),
-            order=(1, 0),
-        )
-
-        # tV: (16,8):(8,1)
-        tV_shape_dim_1 = (
+        # tO: (16,8):(8,1)
+        tO_shape_dim_1 = (
             sV_layout_atom.outer.shape[1] // async_copy_elems
         )  # 8 for smem_blk=64
-        tV_layout = cute.make_ordered_layout(
-            (self.num_producer_threads // tV_shape_dim_1, tV_shape_dim_1),
-            order=(1, 0),
-        )
-
-        # tO: (16,8):(8,1)
-        # TODO: need a different thread layout for O if O dtype is not the same as V dtype
         tO_layout = cute.make_ordered_layout(
-            (self.num_epilogue_threads // tV_shape_dim_1, tV_shape_dim_1),
+            (self.num_epilogue_threads // tO_shape_dim_1, tO_shape_dim_1),
             order=(1, 0),
         )
         # So that we don't have to check if we overshoot kBlockM when we store O
         assert self.tile_m % tO_layout.shape[0] == 0
 
-        # G2S async tiled_copy_QKV:
+        # G2S async tiled_copy_Q:
         # layout_src_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
         # layout_dst_tv_tiled=((8,16),(8,1)):((128,1),(16,0))
         self.gmem_tiled_copy_Q = cute.make_tiled_copy_tv(
             atom_async_copy, tQ_layout, vQKV_layout
-        )
-        self.gmem_tiled_copy_K = cute.make_tiled_copy_tv(
-            atom_async_copy, tK_layout, vQKV_layout
-        )
-        self.gmem_tiled_copy_V = cute.make_tiled_copy_tv(
-            atom_async_copy, tV_layout, vQKV_layout
         )
 
         # R2G universal tiled_copy_O:
@@ -505,27 +483,15 @@ class FFAFwdSm90(FFAFwdSm80):
                 f"layout_dst_tv={atom_universal_copy.layout_dst_tv}"
             )
             print()
-            print(f"{prefix}tQK_shape_dim_1: {tQK_shape_dim_1}")
-            print(f"{prefix}tV_shape_dim_1: {tV_shape_dim_1}")
+            print(f"{prefix}tQ_shape_dim_1: {tQ_shape_dim_1}")
+            print(f"{prefix}tO_shape_dim_1: {tO_shape_dim_1}")
             print(f"{prefix}tQ_layout: {tQ_layout}")
-            print(f"{prefix}tK_layout: {tK_layout}")
-            print(f"{prefix}tV_layout: {tV_layout}")
             print(f"{prefix}tO_layout: {tO_layout}")
             print()
             print(
                 f"{prefix}gmem_tiled_copy_Q: "
                 f"layout_src_tv_tiled={self.gmem_tiled_copy_Q.layout_src_tv_tiled} | "
                 f"layout_dst_tv_tiled={self.gmem_tiled_copy_Q.layout_dst_tv_tiled}"
-            )
-            print(
-                f"{prefix}gmem_tiled_copy_K: "
-                f"layout_src_tv_tiled={self.gmem_tiled_copy_K.layout_src_tv_tiled} | "
-                f"layout_dst_tv_tiled={self.gmem_tiled_copy_K.layout_dst_tv_tiled}"
-            )
-            print(
-                f"{prefix}gmem_tiled_copy_V: "
-                f"layout_src_tv_tiled={self.gmem_tiled_copy_V.layout_src_tv_tiled} | "
-                f"layout_dst_tv_tiled={self.gmem_tiled_copy_V.layout_dst_tv_tiled}"
             )
             print(
                 f"{prefix}gmem_tiled_copy_O: "
