@@ -402,7 +402,7 @@ def _flex_flash_attn_fwd(
 
         match major_arch:
             case 8:
-                fa_fwd = FFAFwdSm80(
+                ffa_fwd_obj = FFAFwdSm80(
                     dtype,
                     head_dim,
                     head_dim_v,
@@ -421,7 +421,7 @@ def _flex_flash_attn_fwd(
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 9:
-                fa_fwd = FFAFwdSm90(
+                ffa_fwd_obj = FFAFwdSm90(
                     dtype,
                     head_dim,
                     head_dim_v,
@@ -443,7 +443,7 @@ def _flex_flash_attn_fwd(
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 10 | 11:
-                fa_fwd = FFAFwdSm100(
+                ffa_fwd_obj = FFAFwdSm100(
                     head_dim=head_dim,
                     head_dim_v=head_dim_v,
                     qhead_per_kvhead=qhead_per_kvhead,
@@ -468,7 +468,7 @@ def _flex_flash_attn_fwd(
             case 12:
                 # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
                 assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
-                fa_fwd = FFAFwdSm120(
+                ffa_fwd_obj = FFAFwdSm120(
                     dtype,
                     head_dim,
                     head_dim_v,
@@ -491,7 +491,7 @@ def _flex_flash_attn_fwd(
                     f"Unsupported compute capability: {arch}. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
                 )
         compile_args = [
-            fa_fwd,
+            ffa_fwd_obj,
             q_tensor,
             k_tensor,
             v_tensor,
@@ -1127,15 +1127,15 @@ def _flex_flash_attn_bwd(
         ]
         match major_arch:
             case 8 | 12:
-                flash_bwd_obj_cls = FFABwdSm120 if major_arch == 12 else FFABwdSm80
-                bwd_obj_kwargs = dict(
+                ffa_bwd_cls = FFABwdSm120 if major_arch == 12 else FFABwdSm80
+                ffa_bwd_kwargs = dict(
                     V_in_regs=V_in_regs,
                     score_mod=score_mod,
                     score_mod_bwd=score_mod_bwd,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
-                fa_bwd_obj = flash_bwd_obj_cls(
+                ffa_bwd_obj = ffa_bwd_cls(
                     dtype,
                     head_dim,
                     head_dim_v,
@@ -1153,10 +1153,10 @@ def _flex_flash_attn_bwd(
                     AtomLayoutMSdP,
                     AtomLayoutNdKV,
                     AtomLayoutMdQ,
-                    **bwd_obj_kwargs,
+                    **ffa_bwd_kwargs,
                 )
             case 9:
-                fa_bwd_obj = FFABwdSm90(
+                ffa_bwd_obj = FFABwdSm90(
                     dtype,
                     head_dim,
                     head_dim_v,
@@ -1186,7 +1186,7 @@ def _flex_flash_attn_bwd(
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case _:
-                fa_bwd_obj = FFABwdSm100(
+                ffa_bwd_obj = FFABwdSm100(
                     head_dim,
                     head_dim_v,
                     mask_type=mask_type,
@@ -1214,7 +1214,7 @@ def _flex_flash_attn_bwd(
         )
 
         _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
-            fa_bwd_obj,
+            ffa_bwd_obj,
             q_tensor,
             k_tensor,
             v_tensor,
