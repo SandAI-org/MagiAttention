@@ -436,48 +436,64 @@ def _phase2_plot():
     os.makedirs(out, exist_ok=True)
 
     x = np.arange(len(TOPK_VALS))
-    x_labels = [f"{t // 1024}K" for t in TOPK_VALS]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 6), dpi=150)
+    bw = 0.25
     for ax_idx, (pass_id, title) in enumerate(
         [("fwd", "FWD"), ("bwd_loopk", "BWD LoopK")]
     ):
         ax = axes[ax_idx]
         configs = [
-            (f"{pass_id}/dense", "Dense (baseline)", "#888888", "o"),
-            (f"{pass_id}/is128", "kbs=128 TMA", "#2E86C1", "s"),
-            (f"{pass_id}/is1", "kbs=1 CpAsync", "#E74C3C", "D"),
+            (f"{pass_id}/dense", "Dense (baseline)", (0.58, 0.58, 0.58)),
+            (f"{pass_id}/is128", "kbs=128 TMA", (0.18, 0.53, 0.76)),
+            (f"{pass_id}/is1", "kbs=1 CpAsync", (0.91, 0.30, 0.24)),
         ]
-        for key, label, color, marker in configs:
+        for i, (key, label, color) in enumerate(configs):
             d = results.get(key, {})
-            if not d:
-                continue
-            topks, tflops = d["topk"], d["tflops"]
-            xi = [TOPK_VALS.index(t) for t in topks if t in TOPK_VALS]
-            yi = [tflops[topks.index(t)] for t in topks if t in TOPK_VALS]
-            ax.plot(
-                xi,
-                yi,
-                color=color,
-                marker=marker,
-                markersize=8,
-                linewidth=2.2,
+            vals = []
+            for tk in TOPK_VALS:
+                if tk in d.get("topk", []):
+                    idx = d["topk"].index(tk)
+                    v = d["tflops"][idx] if d["tflops"][idx] else 0
+                else:
+                    v = 0
+                vals.append(v)
+            off = (i - len(configs) / 2 + 0.5) * bw
+            bars = ax.bar(
+                x + off,
+                vals,
+                width=bw,
                 label=label,
+                color=color,
+                edgecolor="white",
+                linewidth=0.5,
+                alpha=0.85,
             )
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 5,
+                        f"{v:.0f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        fontweight="bold",
+                    )
 
         ax.set_title(
-            f"{title}: kbs=1 vs kbs=128\n(S={S_FULL}, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16)",
+            f"{title}: kbs=1 vs kbs=128\n(S={S_FULL // 1024}K, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16)",
             fontsize=13,
             fontweight="bold",
         )
         ax.set_xlabel("topk", fontsize=12)
         ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, fontsize=11)
+        ax.set_xticklabels([f"{t // 1024}K" for t in TOPK_VALS], fontsize=11)
         ax.tick_params(axis="y", labelsize=11)
-        ax.legend(fontsize=10, loc="lower left")
-        ax.grid(alpha=0.3)
         ax.set_ylim(0, 800)
+        ax.legend(loc="upper right", fontsize=9)
+        ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
     path = os.path.join(out, "kbs1_vs_kbs128.png")
@@ -1074,34 +1090,50 @@ def _phase1_plot():
 
     PASSES = [("fwd", "FWD"), ("bwd_loopq", "BWD LoopQ"), ("bwd_loopk", "BWD LoopK")]
     METHODS = [
-        ("d1b", "Dense-1B", "#888888", "o"),
-        ("ia", "IndexSparse", "#C0392B", "D"),
-        ("sl", "BlockSparse", "#2980B9", "s"),
+        ("d1b", "Dense-1B", (0.58, 0.58, 0.58)),
+        ("ia", "IndexSparse", (0.77, 0.34, 0.49)),
+        ("sl", "BlockSparse", (0.29, 0.57, 0.60)),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 6), dpi=150)
     x = np.arange(len(TOPK_VALS))
-    x_labels = [f"{t // 1024}K" for t in TOPK_VALS]
+    bw = 0.25
 
     for col_idx, (pid, pname) in enumerate(PASSES):
         ax = axes[col_idx]
-        for mid, lbl, col, marker in METHODS:
+        for i, (mid, lbl, col) in enumerate(METHODS):
             key = f"{pid}/{mid}"
             d = results.get(key, {})
-            if not d:
-                continue
-            topks, tflops = d["topk"], d["tflops"]
-            xi = [TOPK_VALS.index(t) for t in topks if t in TOPK_VALS]
-            yi = [tflops[topks.index(t)] for t in topks if t in TOPK_VALS]
-            ax.plot(
-                xi,
-                yi,
-                color=col,
-                marker=marker,
-                markersize=8,
-                linewidth=2.2,
+            vals = []
+            for tk in TOPK_VALS:
+                if tk in d.get("topk", []):
+                    idx = d["topk"].index(tk)
+                    v = d["tflops"][idx] if d["tflops"][idx] else 0
+                else:
+                    v = 0
+                vals.append(v)
+            off = (i - len(METHODS) / 2 + 0.5) * bw
+            bars = ax.bar(
+                x + off,
+                vals,
+                width=bw,
                 label=lbl,
+                color=col,
+                edgecolor="white",
+                linewidth=0.5,
+                alpha=0.85,
             )
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 5,
+                        f"{v:.0f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        fontweight="bold",
+                    )
 
         ax.set_title(
             f"{pname} (S={S_FULL // 1024}K, topk varies)",
@@ -1111,11 +1143,11 @@ def _phase1_plot():
         ax.set_xlabel("topk", fontsize=12)
         ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, fontsize=11)
+        ax.set_xticklabels([f"{t // 1024}K" for t in TOPK_VALS], fontsize=11)
         ax.tick_params(axis="y", labelsize=11)
-        ax.legend(fontsize=10, loc="lower left")
-        ax.grid(alpha=0.3)
         ax.set_ylim(0, 800)
+        ax.legend(loc="upper right", fontsize=9)
+        ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle(
         "Phase 1: topk Sweep at S=32K "
