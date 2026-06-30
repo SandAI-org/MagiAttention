@@ -713,16 +713,16 @@ class FFABwdSm90:
             cute.select(self.sK_layout, mode=[0, 1]),
             (self.tile_n, self.tile_hdim),
         )
-        # tma_atom_V: layout_src_tv=(1,tileN*tileHDv):(0,1), layout_dst_tv=(1,tileN*tileHDv):(0,1)
-        # tma_tensor_V: (sK,HDv,nhK,batch):(1@1,1@0,1@2,1@3)
+        # tma_atom_V: layout_src_tv=(1,tileN*tileHD):(0,1), layout_dst_tv=(1,tileN*tileHD):(0,1)
+        # tma_tensor_V: (sK,HD,nhK,batch):(1@1,1@0,1@2,1@3)
         tma_atom_V, tma_tensor_V = cpasync.make_tiled_tma_atom(
             cpasync.CopyBulkTensorTileG2SOp(),
             mV,
             cute.select(self.sV_layout, mode=[0, 1]),
             (self.tile_n, self.tile_hdimv),
         )
-        # tma_atom_dO: layout_src_tv=(1,tileM*tileHDv):(0,1), layout_dst_tv=(1,tileM*tileHDv):(0,1)
-        # tma_tensor_dO: (sQ,HDv,nhQ,batch):(1@1,1@0,1@2,1@3)
+        # tma_atom_dO: layout_src_tv=(1,tileM*tileHD):(0,1), layout_dst_tv=(1,tileM*tileHD):(0,1)
+        # tma_tensor_dO: (sQ,HD,nhQ,batch):(1@1,1@0,1@2,1@3)
         tma_atom_dO, tma_tensor_dO = cpasync.make_tiled_tma_atom(
             cpasync.CopyBulkTensorTileG2SOp(),
             mdO,
@@ -752,8 +752,8 @@ class FFABwdSm90:
                 cute.select(self.sK_layout, mode=[0, 1]),
                 (self.tile_n, self.tile_hdim),
             )
-            # tma_atom_dV: layout_src_tv=(1,tileN*tileHDv):(0,1), layout_dst_tv=(1,tileN*tileHDv):(0,1)
-            # tma_tensor_dV: (sK,HDv,nhK,batch):(1@1,1@0,1@2,1@3)
+            # tma_atom_dV: layout_src_tv=(1,tileN*tileHD):(0,1), layout_dst_tv=(1,tileN*tileHD):(0,1)
+            # tma_tensor_dV: (sK,HD,nhK,batch):(1@1,1@0,1@2,1@3)
             tma_atom_dV, tma_tensor_dV = cpasync.make_tiled_tma_atom(
                 cpasync.CopyBulkTensorTileS2GOp(),
                 mdV_tma,
@@ -1086,9 +1086,9 @@ class FFABwdSm90:
         # --- Make smem tensors of sQ/sK/sV/sO/sP/sdS/sLSE/sdPsum/sdQacc ---
 
         # sQ:  ((ATOM_Q8,LAY_tileQ8),(ATOM_HD64,LAY_tileHD2),STAGE_Q=(1,2)):((64,512),(1,4096),(0,8192))
-        # sdO: ((ATOM_Q8,LAY_tileQ8),(ATOM_HDV64,LAY_tileHD2),STAGE_dO=(1,2)):((64,512),(1,4096),(0,8192))
+        # sdO: ((ATOM_Q8,LAY_tileQ8),(ATOM_HD64,LAY_tileHD2),STAGE_dO=(1,2)):((64,512),(1,4096),(0,8192))
         # sK:  ((ATOM_K8,LAY_tileK16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
-        # sV:  ((ATOM_K8,LAY_tileK16),(ATOM_HDV64,LAY_tileHD2)):((64,512),(1,8192))
+        # sV:  ((ATOM_K8,LAY_tileK16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
         # sP/sdS: ((ATOM_Q8,LAY_tileQ8),(ATOM_K64,LAY_tileK2),STAGE_PdS=(1,2)):((64,512),(1,4096),(0,8192))
         # sLSE/sdPsum:   (tileQ64,STAGE_Q=2):(1,64)
         # sdQacc: (tileQ*tileHD//2=4096,STAGE=2):(1,4096)
@@ -2416,32 +2416,24 @@ class FFABwdSm90:
         mdV_semaphore: Optional[cute.Tensor] = None,
         is_print_thread_and_tile: bool = False,
     ):
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         epi_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwd.Epilogue),
             num_threads=self.num_mma_threads,
         )
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
 
-        # --- Debug print ---
+        # --- Write dK/dV back to gmem ---
 
-        if const_expr(self.debug_print):
-            if is_print_thread_and_tile:
-                prefix = "[bwd_sm90_epilogue_dKV] "
-                cute.printf("")
-                cute.printf(prefix + "n_block={}", n_block)
-                cute.printf(prefix + "acc_dK.layout: {}", acc_dK.layout)
-                cute.printf(prefix + "acc_dV.layout: {}", acc_dV.layout)
-                cute.printf(prefix + "sK.layout: {}", sK.layout)
-                cute.printf(prefix + "sV.layout: {}", sV.layout)
-                cute.printf("")
-
-        if const_expr(self.qhead_per_kvhead == 1):
+        if const_expr(self.qhead_per_kvhead == 1):  # store
+            # mdK_cur/mdV_cur: (sK,HD):(1@1,1@0)
             mdK_cur = seqlen.offset_batch_K(
                 mdK, batch_idx, dim=3, ragged=self.varlen_k
             )[None, None, head_idx]
             mdV_cur = seqlen.offset_batch_K(
                 mdV, batch_idx, dim=3, ragged=self.varlen_k
             )[None, None, head_idx]
+            # gdK: (tileK128,tileHD128):(1@1,1@0)
+            # gdV: (tileK128,tileHD128):(1@1,1@0)
             gdK = cute.local_tile(mdK_cur, (self.tile_n, self.tile_hdim), (n_block, 0))
             gdV = cute.local_tile(mdV_cur, (self.tile_n, self.tile_hdimv), (n_block, 0))
             store_dK, _, _ = copy_utils.tma_get_copy_fn(
@@ -2490,7 +2482,7 @@ class FFABwdSm90:
             if warp_idx == 4:
                 store_dK()
                 cute.arch.cp_async_bulk_commit_group()
-        else:
+        else:  # atomic add
             deterministic_KV = self.deterministic and self.qhead_per_kvhead > 1
             sdKaccum_shape0 = self.tile_n * self.tile_hdim // self.num_wg_mma
             sdVaccum_shape0 = self.tile_n * self.tile_hdimv // self.num_wg_mma
@@ -2503,12 +2495,16 @@ class FFABwdSm90:
                 mdK_semaphore_cur = mdK_semaphore[n_block, None, head_idx_kv, batch_idx]
                 mdV_semaphore_cur = mdV_semaphore[n_block, None, head_idx_kv, batch_idx]
                 lock_value = head_idx % self.qhead_per_kvhead
+            # mdKaccum_cur: (sKpad*tileHD):(1)
+            # mdVaccum_cur: (sKpad*tileHD):(1)
             mdKaccum_cur = seqlen.offset_batch_K(
                 mdK, batch_idx, dim=2, padded=True, multiple=self.tile_hdim
             )[None, head_idx_kv]
             mdVaccum_cur = seqlen.offset_batch_K(
                 mdV, batch_idx, dim=2, padded=True, multiple=self.tile_hdimv
             )[None, head_idx_kv]
+            # gdKaccum: (tileK*tileHD//num_wg=8192,num_wg=2):(1,8192)
+            # gdVaccum: (tileK*tileHD//num_wg=8192,num_wg=2):(1,8192)
             gdKaccum_ = cute.local_tile(
                 mdKaccum_cur, (self.tile_n * self.tile_hdim,), (n_block,)
             )
@@ -2518,6 +2514,8 @@ class FFABwdSm90:
             )
             gdVaccum = cute.flat_divide(gdVaccum_, (sdVaccum_shape0,))
             # These two overlap each other
+            # sdKaccum: (tileK*tileHD//num_wg=8192,num_wg=2):(1,8192)
+            # sdVaccum: (tileK*tileHD//num_wg=8192,num_wg=2):(1,8192)
             sVaccum_ptr = cute.recast_ptr(sV.iterator, dtype=Float32)
             sdKaccum = cute.make_tensor(sVaccum_ptr, sdKaccum_layout)
             sdVaccum = cute.make_tensor(sVaccum_ptr, sdVaccum_layout)
@@ -2529,6 +2527,8 @@ class FFABwdSm90:
                 cute.make_layout(128 // Float32.width),
             )
             thr_copy_dKVaccum_r2s = tiled_copy_dKVaccum_r2s.get_slice(tidx)
+            # tdKsdKaccum: ((CPY_ATOM=(4,1)),CPY_K16,1):((1,0),512,0)
+            # tdVsdVaccum: ((CPY_ATOM=(4,1)),CPY_K16,1):((1,0),512,0)
             tdKsdKaccum = thr_copy_dKVaccum_r2s.partition_D(sdKaccum)
             tdVsdVaccum = thr_copy_dKVaccum_r2s.partition_D(sdVaccum)
 
@@ -2572,6 +2572,42 @@ class FFABwdSm90:
             if const_expr(deterministic_KV):
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
                 cutedsl_utils.arrive_inc(mdV_semaphore_cur.iterator, tidx, 0, 1)
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[bwd_sm90_epilogue_dKV] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "n_block={} head_idx={} batch_idx={}",
+                    n_block,
+                    head_idx,
+                    batch_idx,
+                )
+                cute.printf("")
+                cute.printf(prefix + "acc_dK.layout: {}", acc_dK.layout)
+                cute.printf(prefix + "acc_dV.layout: {}", acc_dV.layout)
+                cute.printf(prefix + "sK.layout: {}", sK.layout)
+                cute.printf(prefix + "sV.layout: {}", sV.layout)
+                cute.printf("")
+                if const_expr(self.qhead_per_kvhead == 1):
+                    # store path: TMA store sK/sV -> gdK/gdV
+                    cute.printf(prefix + "gdK.layout: {}", gdK.layout)
+                    cute.printf(prefix + "gdV.layout: {}", gdV.layout)
+                    cute.printf("")
+                else:
+                    # atomic-add path: GQA accum via cp.async.bulk reduce add
+                    cute.printf(prefix + "head_idx_kv={}", head_idx_kv)
+                    cute.printf(prefix + "mdKaccum_cur.layout: {}", mdKaccum_cur.layout)
+                    cute.printf(prefix + "mdVaccum_cur.layout: {}", mdVaccum_cur.layout)
+                    cute.printf(prefix + "gdKaccum.layout: {}", gdKaccum.layout)
+                    cute.printf(prefix + "gdVaccum.layout: {}", gdVaccum.layout)
+                    cute.printf(prefix + "sdKaccum.layout: {}", sdKaccum.layout)
+                    cute.printf(prefix + "sdVaccum.layout: {}", sdVaccum.layout)
+                    cute.printf(prefix + "tdKsdKaccum.layout: {}", tdKsdKaccum.layout)
+                    cute.printf(prefix + "tdVsdVaccum.layout: {}", tdVsdVaccum.layout)
+                    cute.printf("")
 
     @cute.jit
     def dQacc_store(
