@@ -1260,18 +1260,28 @@ def choose_ref_block(
 def build_inv_indices(
     index_sparse_indices: torch.Tensor,
     seqlen_k: int,
+    k_block_size: int = 1,
     pad_multiple: int = 64,
 ) -> tuple[torch.Tensor, int]:
     """Build inverse indices from forward IndexSparse indices (Q→K to K→Q).
 
+    When ``k_block_size == 1`` (default), produces a token-level inverse mapping.
+    When ``k_block_size > 1``, groups K tokens into blocks and deduplicates,
+    producing a block-level inverse mapping.
+
     Args:
         index_sparse_indices: (seqlen_q, nhk, topk) int32.
             Forward Q→K mapping. Trailing -1 entries are padding.
+            When k_block_size > 1, values are already K block indices.
         seqlen_k: total number of K tokens.
+        k_block_size: K block granularity. 1 = token-level (default).
+            When > 1, must divide seqlen_k.
         pad_multiple: pad inv_topk to this multiple (matches kBlockM).
 
     Returns:
-        inv_indices: (seqlen_k, nhk, inv_topk) int32.
+        inv_indices: int32 tensor.
+            - k_block_size == 1: (seqlen_k, nhk, inv_topk)
+            - k_block_size > 1: (num_k_blocks, nhk, inv_topk)
             Inverse K→Q mapping. Each entry is a Q token position.
             Trailing -1 entries are padding.
         inv_topk: int — padded max Q count.
@@ -1285,81 +1295,6 @@ def build_inv_indices(
     seqlen_q, nhk, topk = index_sparse_indices.shape
     device = index_sparse_indices.device
 
-    valid_mask = index_sparse_indices >= 0  # (sq, nhk, topk)
-    kv_positions = index_sparse_indices.clamp(min=0)
-
-    q_ids = torch.arange(seqlen_q, device=device, dtype=torch.int32)
-    q_ids = q_ids[:, None, None].expand_as(index_sparse_indices)
-    head_ids = torch.arange(nhk, device=device, dtype=torch.int32)
-    head_ids = head_ids[None, :, None].expand_as(index_sparse_indices)
-
-    flat_q = q_ids[valid_mask]
-    flat_k = kv_positions[valid_mask]
-    flat_h = head_ids[valid_mask]
-
-    # Count Q tokens per (k_pos, head)
-    flat_kh = flat_k.long() * nhk + flat_h.long()
-    total_kh = seqlen_k * nhk
-    counts = torch.zeros(total_kh, device=device, dtype=torch.int32)
-    counts.scatter_add_(
-        0, flat_kh.int().long(), torch.ones_like(flat_kh, dtype=torch.int32)
-    )
-
-    max_inv_topk = int(counts.max().item())
-    inv_topk = ((max_inv_topk + pad_multiple - 1) // pad_multiple) * pad_multiple
-
-    # Sort by (k_pos, head) to group entries
-    sorted_order = flat_kh.argsort(stable=True)
-    sorted_q = flat_q[sorted_order]
-    sorted_kh = flat_kh[sorted_order]
-
-    # Within-group offset via cumulative start positions
-    group_starts = torch.zeros(total_kh + 1, device=device, dtype=torch.int64)
-    group_starts[1:] = counts.cumsum(0).long()
-
-    offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
-    offsets = offsets - group_starts[sorted_kh.long()]
-
-    # Fill inv_indices
-    inv_indices = torch.full(
-        (seqlen_k, nhk, inv_topk), -1, device=device, dtype=torch.int32
-    )
-    inv_indices_flat = inv_indices.reshape(total_kh, inv_topk)
-
-    inv_indices_flat[sorted_kh.long(), offsets.long()] = sorted_q
-
-    return inv_indices, inv_topk
-
-
-def build_inv_indices_block(
-    index_sparse_indices: torch.Tensor,
-    seqlen_k: int,
-    k_block_size: int = 128,
-    pad_multiple: int = 64,
-) -> tuple[torch.Tensor, int]:
-    """Build block-level inverse indices (Q->K to K_block->Q).
-
-    Groups K tokens into blocks of ``k_block_size`` and collects the unique
-    Q tokens that attend to any K token within each block.
-
-    Args:
-        index_sparse_indices: (seqlen_q, nhk, topk) int32 forward Q->K mapping.
-        seqlen_k: total number of K tokens.
-        k_block_size: K block granularity (must divide seqlen_k).
-        pad_multiple: pad inv_topk to this multiple.
-
-    Returns:
-        inv_indices_block: (num_k_blocks, nhk, inv_topk_block) int32.
-        inv_topk_block: padded max Q count per block.
-    """
-    assert index_sparse_indices.dim() == 3
-    seqlen_q, nhk, topk = index_sparse_indices.shape
-    device = index_sparse_indices.device
-    assert (
-        seqlen_k % k_block_size == 0
-    ), f"seqlen_k ({seqlen_k}) must be divisible by k_block_size ({k_block_size})"
-    num_k_blocks = seqlen_k // k_block_size
-
     valid_mask = index_sparse_indices >= 0
     kv_positions = index_sparse_indices.clamp(min=0)
 
@@ -1372,43 +1307,73 @@ def build_inv_indices_block(
     flat_k = kv_positions[valid_mask]
     flat_h = head_ids[valid_mask]
 
-    # build_index_sparse_indices stores block-level indices when k_block_size > 1,
-    # so the values are already K block indices — no division needed.
-    flat_k_block = flat_k.long()
+    if k_block_size > 1:
+        assert (
+            seqlen_k % k_block_size == 0
+        ), f"seqlen_k ({seqlen_k}) must be divisible by k_block_size ({k_block_size})"
+        num_k_slots = seqlen_k // k_block_size
 
-    # Deduplicate (k_block, head, q) triples
-    flat_bh = flat_k_block * nhk + flat_h.long()
-    # Encode (block_head, q) as a single int64 for uniqueness
-    combo = flat_bh * seqlen_q + flat_q.long()
-    combo_unique, inv = combo.unique(return_inverse=True)
-    flat_bh_unique = combo_unique // seqlen_q
-    flat_q_unique = (combo_unique % seqlen_q).int()
+        # Values are already K block indices — no division needed.
+        flat_k_block = flat_k.long()
 
-    total_bh = num_k_blocks * nhk
-    counts = torch.zeros(total_bh, device=device, dtype=torch.int32)
-    counts.scatter_add_(
-        0,
-        flat_bh_unique.int().long(),
-        torch.ones(flat_bh_unique.shape[0], device=device, dtype=torch.int32),
-    )
+        # Deduplicate (k_block, head, q) triples
+        flat_bh = flat_k_block * nhk + flat_h.long()
+        combo = flat_bh * seqlen_q + flat_q.long()
+        combo_unique, _inv = combo.unique(return_inverse=True)
+        flat_bh_unique = combo_unique // seqlen_q
+        flat_q_unique = (combo_unique % seqlen_q).int()
 
-    max_inv_topk = int(counts.max().item())
-    inv_topk_block = ((max_inv_topk + pad_multiple - 1) // pad_multiple) * pad_multiple
+        total_slots = num_k_slots * nhk
+        counts = torch.zeros(total_slots, device=device, dtype=torch.int32)
+        counts.scatter_add_(
+            0,
+            flat_bh_unique.int().long(),
+            torch.ones(flat_bh_unique.shape[0], device=device, dtype=torch.int32),
+        )
 
-    sorted_order = flat_bh_unique.argsort(stable=True)
-    sorted_q = flat_q_unique[sorted_order]
-    sorted_bh = flat_bh_unique[sorted_order]
+        max_inv_topk = int(counts.max().item())
+        inv_topk = ((max_inv_topk + pad_multiple - 1) // pad_multiple) * pad_multiple
 
-    group_starts = torch.zeros(total_bh + 1, device=device, dtype=torch.int64)
-    group_starts[1:] = counts.cumsum(0).long()
+        sorted_order = flat_bh_unique.argsort(stable=True)
+        sorted_q = flat_q_unique[sorted_order]
+        sorted_kh = flat_bh_unique[sorted_order]
 
-    offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
-    offsets = offsets - group_starts[sorted_bh.long()]
+        group_starts = torch.zeros(total_slots + 1, device=device, dtype=torch.int64)
+        group_starts[1:] = counts.cumsum(0).long()
 
-    inv_indices_block = torch.full(
-        (num_k_blocks, nhk, inv_topk_block), -1, device=device, dtype=torch.int32
-    )
-    inv_flat = inv_indices_block.reshape(total_bh, inv_topk_block)
-    inv_flat[sorted_bh.long(), offsets.long()] = sorted_q
+        offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
+        offsets = offsets - group_starts[sorted_kh.long()]
 
-    return inv_indices_block, inv_topk_block
+        inv_indices = torch.full(
+            (num_k_slots, nhk, inv_topk), -1, device=device, dtype=torch.int32
+        )
+        inv_flat = inv_indices.reshape(total_slots, inv_topk)
+        inv_flat[sorted_kh.long(), offsets.long()] = sorted_q
+    else:
+        flat_kh = flat_k.long() * nhk + flat_h.long()
+        total_kh = seqlen_k * nhk
+        counts = torch.zeros(total_kh, device=device, dtype=torch.int32)
+        counts.scatter_add_(
+            0, flat_kh.int().long(), torch.ones_like(flat_kh, dtype=torch.int32)
+        )
+
+        max_inv_topk = int(counts.max().item())
+        inv_topk = ((max_inv_topk + pad_multiple - 1) // pad_multiple) * pad_multiple
+
+        sorted_order = flat_kh.argsort(stable=True)
+        sorted_q = flat_q[sorted_order]
+        sorted_kh = flat_kh[sorted_order]
+
+        group_starts = torch.zeros(total_kh + 1, device=device, dtype=torch.int64)
+        group_starts[1:] = counts.cumsum(0).long()
+
+        offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
+        offsets = offsets - group_starts[sorted_kh.long()]
+
+        inv_indices = torch.full(
+            (seqlen_k, nhk, inv_topk), -1, device=device, dtype=torch.int32
+        )
+        inv_indices_flat = inv_indices.reshape(total_kh, inv_topk)
+        inv_indices_flat[sorted_kh.long(), offsets.long()] = sorted_q
+
+    return inv_indices, inv_topk

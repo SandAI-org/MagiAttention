@@ -61,7 +61,6 @@ class FlashAttnBwdSm90 {
   static constexpr bool InnerDxStoreInProducer = CollectiveMainloop::InnerDxStoreInProducer;
   static constexpr int NumBlockSparseThreads = CollectiveMainloop::NumBlockSparseThreads;
   static constexpr bool InnerLoad_Tma = CollectiveMainloop::InnerLoad_Tma;
-  static constexpr bool InnerLoad_Tma1d = CollectiveMainloop::InnerLoad_Tma1d;
   static constexpr bool InnerLoad_CpAsync = CollectiveMainloop::InnerLoad_CpAsync;
 
   template <typename Pipeline, typename Storage, typename PipelineParamsT>
@@ -121,7 +120,6 @@ class FlashAttnBwdSm90 {
       alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_q;
       alignas(16) typename CollectiveMainloop::MainloopPipeline_dO::SharedStorage pipeline_do;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
-      alignas(8) typename cutlass::arch::ClusterTransactionBarrier::ValueType tma1d_staging_mbar;
     };
 
     // q for outer-loop and k for inner-loop
@@ -130,7 +128,6 @@ class FlashAttnBwdSm90 {
       alignas(16) typename CollectiveMainloop::MainloopPipeline::SharedStorage pipeline_k;
       alignas(16) typename CollectiveMainloop::MainloopPipeline_V::SharedStorage pipeline_v;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
-      alignas(8) typename cutlass::arch::ClusterTransactionBarrier::ValueType tma1d_staging_mbar;
     };
 
     using PipelineStorage = std::conditional_t<SwapBwdQKLoop, PipelineStorageLoopK, PipelineStorageLoopQ>;
@@ -241,9 +238,6 @@ class FlashAttnBwdSm90 {
     // Initialize the barriers of K,V
     if (warp_idx == 0 && lane_predicate) {
       shared_storage.pipelines.barrier_KV.init(/*numThreads=*/1);
-      if constexpr (InnerLoad_Tma1d) {
-        cutlass::arch::ClusterTransactionBarrier::init(&shared_storage.pipelines.tma1d_staging_mbar, 1);
-      }
     }
 
     PipelineParams pipeline_params_q;
@@ -281,13 +275,13 @@ class FlashAttnBwdSm90 {
     using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
     using BlockMetaConsumerT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>;
 
-    // Scatter LoopQ producer: BlockSparse uses BlockSparseLoopQBlockMeta, IndexSparse uses IndexSparseInvLoadBlockMeta
+    // Scatter LoopQ producer: BlockSparse uses BlockSparseLoopQProducerBlockMeta, IndexSparse uses IndexSparseLoopQBlockMeta
     using ProducerBlockMetaT = std::conditional_t<
         InnerUseScatter,
         std::conditional_t<
             IndexSparse,
-            typename CollectiveMainloop::template IndexSparseInvLoadBlockMeta</*IsProducer=*/true>,
-            typename CollectiveMainloop::BlockSparseLoopQBlockMeta>,
+            typename CollectiveMainloop::template IndexSparseLoopQBlockMeta</*IsProducer=*/true>,
+            typename CollectiveMainloop::BlockSparseLoopQProducerBlockMeta>,
         BlockMetaT>;
 
     using Roles = typename CollectiveMainloop::ProducerWarpRoles;
@@ -367,10 +361,10 @@ class FlashAttnBwdSm90 {
             // handshakes whenever a sub-range length is not a multiple of kBlockM
             // (e.g. hd64 LoopQ: kBlockM=128 with 64-token sparse blocks) → barrier deadlock.
             if constexpr (IndexSparse) {
-              typename CollectiveMainloop::template IndexSparseInvLoadBlockMeta</*IsProducer=*/false> block_meta{params.mainloop, block_coord, shared_storage};
+              typename CollectiveMainloop::template IndexSparseLoopQBlockMeta</*IsProducer=*/false> block_meta{params.mainloop, block_coord, shared_storage};
               mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
             } else {
-              typename CollectiveMainloop::SparseMmaLoopQBlockMeta block_meta{params.mainloop, block_coord, shared_storage};
+              typename CollectiveMainloop::BlockSparseLoopQConsumerBlockMeta block_meta{params.mainloop, block_coord, shared_storage};
               mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
             }
           } else {
@@ -413,13 +407,13 @@ class FlashAttnBwdSm90 {
         clear(tdVrdV);
 
         // Run the mma to compute partial dQ,dK,dV
-        // BlockSparse LoopQ uses SparseMmaLoopQBlockMeta; IndexSparse LoopQ uses IndexSparseInvLoadBlockMeta; Dense uses DenseBlockMeta
+        // BlockSparse LoopQ uses BlockSparseLoopQConsumerBlockMeta; IndexSparse LoopQ uses IndexSparseLoopQBlockMeta; Dense uses DenseBlockMeta
         using ConsumerBlockMetaT = std::conditional_t<
             InnerUseScatter,
             std::conditional_t<
                 IndexSparse,
-                typename CollectiveMainloop::template IndexSparseInvLoadBlockMeta</*IsProducer=*/false>,
-                typename CollectiveMainloop::SparseMmaLoopQBlockMeta>,
+                typename CollectiveMainloop::template IndexSparseLoopQBlockMeta</*IsProducer=*/false>,
+                typename CollectiveMainloop::BlockSparseLoopQConsumerBlockMeta>,
             BlockMetaConsumerT>;
         ConsumerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
 
@@ -491,9 +485,6 @@ class FlashAttnBwdSm90 {
     // Initialize the barriers of Q,dO
     if (warp_idx == 0 && lane_predicate) {
       shared_storage.pipelines.barrier_QdO.init(/*numThreads=*/1);
-      if constexpr (InnerLoad_Tma1d) {
-        cutlass::arch::ClusterTransactionBarrier::init(&shared_storage.pipelines.tma1d_staging_mbar, 1);
-      }
     }
 
     // Initialize pipelines of K,V
@@ -535,10 +526,10 @@ class FlashAttnBwdSm90 {
     using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
     using BlockMetaConsumerT = std::conditional_t<
         BlockSparse,
-        typename CollectiveMainloop::SparseMmaLoopKBlockMeta,
+        typename CollectiveMainloop::BlockSparseLoopKConsumerBlockMeta,
         std::conditional_t<
             IndexSparse,
-            typename CollectiveMainloop::template IndexSparseLoadBlockMeta</*IsProducer=*/false>,
+            typename CollectiveMainloop::template IndexSparseLoopKBlockMeta</*IsProducer=*/false>,
             typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>>>;
 
     if (warp_group_idx == 0) { // Producer
@@ -554,8 +545,8 @@ class FlashAttnBwdSm90 {
 
       using ProducerBlockMetaT = std::conditional_t<
           BlockSparse,
-          typename CollectiveMainloop::BlockSparseLoopKBlockMeta,
-          std::conditional_t<IndexSparse, typename CollectiveMainloop::template IndexSparseLoadBlockMeta</*IsProducer=*/true>, BlockMetaT>>;
+          typename CollectiveMainloop::BlockSparseLoopKProducerBlockMeta,
+          std::conditional_t<IndexSparse, typename CollectiveMainloop::template IndexSparseLoopKBlockMeta</*IsProducer=*/true>, BlockMetaT>>;
 
       bool const is_loader = Roles::is_loader(warp_idx_in_warpgroup);
       bool const is_inner_dx_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);

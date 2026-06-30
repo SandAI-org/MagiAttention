@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""kbs=1 (IndexSparse) vs kbs=128 (IndexSparse/BlockSparse): BWD LoopK TFLOPS.
+"""kbs=1 (IndexSparse) vs kbs=128 (IndexSparse): FWD+BWD TFLOPS.
 
 Purpose: Quantify the overhead of cp.async scatter (kbs=1) vs TMA (kbs=128)
-in BWD LoopK, which is the only valid BWD direction for IndexSparse kbs=1.
+in both FWD and BWD LoopK.
 
 Benchmark configs:
-  - Dense BWD LoopK (q_ranges baseline, pack_gqa=False)
-  - IndexSparse kbs=128 BWD LoopK (TMA 2D contiguous tiles)
-  - IndexSparse kbs=1 BWD LoopK (cp.async per-row scatter)
+  - Dense (q_ranges baseline, pack_gqa=False)
+  - IndexSparse kbs=128 (TMA 2D contiguous tiles)
+  - IndexSparse kbs=1 (cp.async per-row scatter)
 
 All with: S=32K, nhq=128, nhk=1, hd=128, topk variable.
 
@@ -80,6 +80,10 @@ def run_benchmark():
     results = {}
     device = "cuda"
 
+    def calc_fwd_tflops(s, topk, time_ms):
+        flops_fwd = 2 * 2 * s * topk * NHQ * HD
+        return flops_fwd / (time_ms * 1e-3) / 1e12
+
     def calc_bwd_tflops(s, topk, time_ms):
         flops_bwd = 2 * 2 * s * topk * NHQ * HD * 2
         return flops_bwd / (time_ms * 1e-3) / 1e12
@@ -101,159 +105,176 @@ def run_benchmark():
         times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
         return sorted(times)[REPEAT // 2]
 
+    def make_idx128(topk_blocks, n_kblocks):
+        if topk_blocks >= n_kblocks:
+            idx = torch.arange(n_kblocks, dtype=torch.int32, device=device)
+        else:
+            gen = torch.Generator().manual_seed(42)
+            rand_vals = torch.rand(S, n_kblocks, generator=gen)
+            idx = rand_vals.argsort(dim=1)[:, :topk_blocks].sort(dim=1).values
+            idx = idx.to(dtype=torch.int32, device=device)
+        idx = idx.view(S, 1, topk_blocks) if idx.dim() == 2 else idx.unsqueeze(0).unsqueeze(0)
+        return idx.expand(S, NHK, -1).contiguous()
+
+    def make_idx1(topk):
+        if topk >= S:
+            idx = torch.arange(S, dtype=torch.int32, device=device)
+            return idx.unsqueeze(0).unsqueeze(0).expand(S, NHK, -1).contiguous()
+        gen = torch.Generator().manual_seed(42)
+        rand_vals = torch.rand(S, S, generator=gen)
+        idx = rand_vals.argsort(dim=1)[:, :topk].sort(dim=1).values
+        return idx.unsqueeze(1).expand(-1, NHK, -1).to(dtype=torch.int32, device=device).contiguous()
+
     for topk in TOPK_VALS:
-        print(f"\n[{datetime.now()}] topk={topk}")
+        print(f"\n{'='*60}")
+        print(f"[{datetime.now()}] topk={topk}")
         topk_blocks = topk // 128
         n_kblocks = S // 128
 
-        # --- Dense BWD LoopK (baseline) ---
+        # ━━━ FWD benchmarks ━━━
+
+        # --- Dense FWD ---
         torch.manual_seed(42)
-        q = torch.randn(
-            S, NHQ, HD, dtype=torch.bfloat16, device=device, requires_grad=True
-        )
-        k = torch.randn(
-            topk, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True
-        )
-        v = torch.randn(
-            topk, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True
-        )
+        q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
+        k = torch.randn(topk, NHK, HD, dtype=torch.bfloat16, device=device)
+        v = torch.randn(topk, NHK, HD, dtype=torch.bfloat16, device=device)
         q_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
         k_ranges = torch.tensor([[0, topk]], dtype=torch.int32, device=device)
         atm = torch.zeros(1, dtype=torch.int32, device=device)
 
-        out, _ = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_type_map=atm,
-            pack_gqa=False,
-            swap_bwd_qk_loop=True,
-        )
-        do = torch.randn_like(out)
+        def run_fwd_dense():
+            flex_flash_attn_func(q, k, v, q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=atm, pack_gqa=False)
 
-        def run_dense():
-            out.backward(do, retain_graph=True)
+        ms = bench_one(run_fwd_dense)
+        tf = calc_fwd_tflops(S, topk, ms)
+        results.setdefault("dense_fwd", {"topk": [], "tflops": [], "ms": []})
+        results["dense_fwd"]["topk"].append(topk)
+        results["dense_fwd"]["tflops"].append(round(tf, 1))
+        results["dense_fwd"]["ms"].append(round(ms, 3))
+        print(f"  [FWD] Dense:          {ms:.2f}ms, {tf:.1f} TFLOPS")
+        del q, k, v
+        gc.collect(); torch.cuda.empty_cache()
 
-        ms = bench_one(run_dense)
-        tf = calc_bwd_tflops(S, topk, ms)
-        results.setdefault("dense_loopk", {"topk": [], "tflops": [], "ms": []})
-        results["dense_loopk"]["topk"].append(topk)
-        results["dense_loopk"]["tflops"].append(round(tf, 1))
-        results["dense_loopk"]["ms"].append(round(ms, 3))
-        print(f"  Dense LoopK (S={S}, K={topk}): {ms:.2f}ms, {tf:.1f} TFLOPS")
-        del q, k, v, out, do
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        # --- IndexSparse kbs=128 BWD LoopK (TMA) ---
+        # --- IndexSparse kbs=128 FWD ---
         torch.manual_seed(42)
-        q = torch.randn(
-            S, NHQ, HD, dtype=torch.bfloat16, device=device, requires_grad=True
-        )
-        k = torch.randn(
-            S, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True
-        )
-        v = torch.randn(
-            S, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True
-        )
+        q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
+        k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+        v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+        idx128 = make_idx128(topk_blocks, n_kblocks)
 
-        if topk_blocks >= n_kblocks:
-            idx128 = torch.arange(n_kblocks, dtype=torch.int32, device=device)
-        else:
-            gen = torch.Generator().manual_seed(42)
-            rand_vals = torch.rand(S, n_kblocks, generator=gen)
-            idx128 = rand_vals.argsort(dim=1)[:, :topk_blocks].sort(dim=1).values
-            idx128 = idx128.to(dtype=torch.int32, device=device)
-        idx128 = (
-            idx128.view(S, 1, topk_blocks)
-            if idx128.dim() == 2
-            else idx128.unsqueeze(0).unsqueeze(0)
-        )
-        idx128 = idx128.expand(S, NHK, -1).contiguous()
+        def run_fwd_is128():
+            flex_flash_attn_func(q, k, v, index_sparse_indices=idx128, k_block_size=128, index_sparse=True, pack_gqa=True)
 
-        out, _ = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            index_sparse_indices=idx128,
-            k_block_size=128,
-            index_sparse=True,
-            pack_gqa=True,
-            swap_bwd_qk_loop=True,
-        )
-        do = torch.randn_like(out)
+        ms = bench_one(run_fwd_is128)
+        tf = calc_fwd_tflops(S, topk, ms)
+        results.setdefault("is128_fwd", {"topk": [], "tflops": [], "ms": []})
+        results["is128_fwd"]["topk"].append(topk)
+        results["is128_fwd"]["tflops"].append(round(tf, 1))
+        results["is128_fwd"]["ms"].append(round(ms, 3))
+        print(f"  [FWD] kbs=128 (TMA):  {ms:.2f}ms, {tf:.1f} TFLOPS")
+        del q, k, v, idx128
+        gc.collect(); torch.cuda.empty_cache()
 
-        def run_is128():
-            out.backward(do, retain_graph=True)
-
-        ms = bench_one(run_is128)
-        tf = calc_bwd_tflops(S, topk, ms)
-        results.setdefault("is128_loopk", {"topk": [], "tflops": [], "ms": []})
-        results["is128_loopk"]["topk"].append(topk)
-        results["is128_loopk"]["tflops"].append(round(tf, 1))
-        results["is128_loopk"]["ms"].append(round(ms, 3))
-        print(f"  IndexSparse kbs=128 LoopK: {ms:.2f}ms, {tf:.1f} TFLOPS")
-        del q, k, v, out, do, idx128
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        # --- IndexSparse kbs=1 BWD LoopK (cp.async scatter) ---
+        # --- IndexSparse kbs=1 FWD ---
         torch.manual_seed(42)
-        q = torch.randn(
-            S, NHQ, HD, dtype=torch.bfloat16, device=device, requires_grad=True
-        )
-        k = torch.randn(
-            S, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True
-        )
-        v = torch.randn(
-            S, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True
-        )
-
-        if topk >= S:
-            idx1 = torch.arange(S, dtype=torch.int32, device=device)
-            idx1 = idx1.unsqueeze(0).unsqueeze(0).expand(S, NHK, -1).contiguous()
-        else:
-            gen = torch.Generator().manual_seed(42)
-            rand_vals = torch.rand(S, S, generator=gen)
-            idx1 = rand_vals.argsort(dim=1)[:, :topk].sort(dim=1).values
-            idx1 = (
-                idx1.unsqueeze(1)
-                .expand(-1, NHK, -1)
-                .to(dtype=torch.int32, device=device)
-                .contiguous()
-            )
+        q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
+        k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+        v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+        idx1 = make_idx1(topk)
 
         try:
-            out, _ = flex_flash_attn_func(
-                q,
-                k,
-                v,
-                index_sparse_indices=idx1,
-                k_block_size=1,
-                index_sparse=True,
-                pack_gqa=True,
-                swap_bwd_qk_loop=True,
-            )
-            do = torch.randn_like(out)
+            def run_fwd_is1():
+                flex_flash_attn_func(q, k, v, index_sparse_indices=idx1, k_block_size=1, index_sparse=True, pack_gqa=True)
 
-            def run_is1():
-                out.backward(do, retain_graph=True)
-
-            ms = bench_one(run_is1)
-            tf = calc_bwd_tflops(S, topk, ms)
-            results.setdefault("is1_loopk", {"topk": [], "tflops": [], "ms": []})
-            results["is1_loopk"]["topk"].append(topk)
-            results["is1_loopk"]["tflops"].append(round(tf, 1))
-            results["is1_loopk"]["ms"].append(round(ms, 3))
-            print(f"  IndexSparse kbs=1 LoopK: {ms:.2f}ms, {tf:.1f} TFLOPS")
+            ms = bench_one(run_fwd_is1)
+            tf = calc_fwd_tflops(S, topk, ms)
+            results.setdefault("is1_fwd", {"topk": [], "tflops": [], "ms": []})
+            results["is1_fwd"]["topk"].append(topk)
+            results["is1_fwd"]["tflops"].append(round(tf, 1))
+            results["is1_fwd"]["ms"].append(round(ms, 3))
+            print(f"  [FWD] kbs=1 (cpasync):{ms:.2f}ms, {tf:.1f} TFLOPS")
         except Exception as e:
-            print(f"  IndexSparse kbs=1 LoopK: FAILED — {e}")
+            print(f"  [FWD] kbs=1: FAILED — {e}")
         finally:
             del q, k, v, idx1
-            gc.collect()
-            torch.cuda.empty_cache()
+            gc.collect(); torch.cuda.empty_cache()
+
+        # ━━━ BWD benchmarks ━━━
+
+        # --- Dense BWD LoopK ---
+        torch.manual_seed(42)
+        q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device, requires_grad=True)
+        k = torch.randn(topk, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True)
+        v = torch.randn(topk, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True)
+        q_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
+        k_ranges = torch.tensor([[0, topk]], dtype=torch.int32, device=device)
+        atm = torch.zeros(1, dtype=torch.int32, device=device)
+
+        out, _ = flex_flash_attn_func(q, k, v, q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=atm, pack_gqa=False, swap_bwd_qk_loop=True)
+        do = torch.randn_like(out)
+
+        def run_bwd_dense():
+            out.backward(do, retain_graph=True)
+
+        ms = bench_one(run_bwd_dense)
+        tf = calc_bwd_tflops(S, topk, ms)
+        results.setdefault("dense_bwd", {"topk": [], "tflops": [], "ms": []})
+        results["dense_bwd"]["topk"].append(topk)
+        results["dense_bwd"]["tflops"].append(round(tf, 1))
+        results["dense_bwd"]["ms"].append(round(ms, 3))
+        print(f"  [BWD] Dense LoopK:    {ms:.2f}ms, {tf:.1f} TFLOPS")
+        del q, k, v, out, do
+        gc.collect(); torch.cuda.empty_cache()
+
+        # --- IndexSparse kbs=128 BWD LoopK ---
+        torch.manual_seed(42)
+        q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device, requires_grad=True)
+        k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True)
+        v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True)
+        idx128 = make_idx128(topk_blocks, n_kblocks)
+
+        out, _ = flex_flash_attn_func(q, k, v, index_sparse_indices=idx128, k_block_size=128, index_sparse=True, pack_gqa=True, swap_bwd_qk_loop=True)
+        do = torch.randn_like(out)
+
+        def run_bwd_is128():
+            out.backward(do, retain_graph=True)
+
+        ms = bench_one(run_bwd_is128)
+        tf = calc_bwd_tflops(S, topk, ms)
+        results.setdefault("is128_bwd", {"topk": [], "tflops": [], "ms": []})
+        results["is128_bwd"]["topk"].append(topk)
+        results["is128_bwd"]["tflops"].append(round(tf, 1))
+        results["is128_bwd"]["ms"].append(round(ms, 3))
+        print(f"  [BWD] kbs=128 (TMA):  {ms:.2f}ms, {tf:.1f} TFLOPS")
+        del q, k, v, out, do, idx128
+        gc.collect(); torch.cuda.empty_cache()
+
+        # --- IndexSparse kbs=1 BWD LoopK ---
+        torch.manual_seed(42)
+        q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device, requires_grad=True)
+        k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True)
+        v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True)
+        idx1 = make_idx1(topk)
+
+        try:
+            out, _ = flex_flash_attn_func(q, k, v, index_sparse_indices=idx1, k_block_size=1, index_sparse=True, pack_gqa=True, swap_bwd_qk_loop=True)
+            do = torch.randn_like(out)
+
+            def run_bwd_is1():
+                out.backward(do, retain_graph=True)
+
+            ms = bench_one(run_bwd_is1)
+            tf = calc_bwd_tflops(S, topk, ms)
+            results.setdefault("is1_bwd", {"topk": [], "tflops": [], "ms": []})
+            results["is1_bwd"]["topk"].append(topk)
+            results["is1_bwd"]["tflops"].append(round(tf, 1))
+            results["is1_bwd"]["ms"].append(round(ms, 3))
+            print(f"  [BWD] kbs=1 (cpasync):{ms:.2f}ms, {tf:.1f} TFLOPS")
+        except Exception as e:
+            print(f"  [BWD] kbs=1: FAILED — {e}")
+        finally:
+            del q, k, v, idx1
+            gc.collect(); torch.cuda.empty_cache()
 
     out_path = os.path.join(_OUT_DIR, "results.json")
     with open(out_path, "w") as f:
@@ -279,46 +300,34 @@ def run_plot():
     x = np.arange(len(TOPK_VALS))
     x_labels = [f"{t // 1024}K" for t in TOPK_VALS]
 
-    fig, ax = plt.subplots(1, 1, figsize=(9, 6), dpi=150)
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6), dpi=150)
 
-    configs = [
-        ("dense_loopk", "Dense LoopK (baseline)", "#888888", "-", "o"),
-        ("is128_loopk", "IndexSparse kbs=128 LoopK (TMA)", "#2E86C1", "-", "s"),
-        ("is1_loopk", "IndexSparse kbs=1 LoopK (cp.async)", "#E74C3C", "-", "D"),
-    ]
+    for ax_idx, (direction, title_prefix) in enumerate([("fwd", "FWD"), ("bwd", "BWD LoopK")]):
+        ax = axes[ax_idx]
+        configs = [
+            (f"dense_{direction}", f"Dense ({title_prefix})", "#888888", "-", "o"),
+            (f"is128_{direction}", f"kbs=128 TMA", "#2E86C1", "-", "s"),
+            (f"is1_{direction}", f"kbs=1 CpAsync", "#E74C3C", "-", "D"),
+        ]
 
-    for key, label, color, ls, marker in configs:
-        data = results.get(key, {})
-        if not data:
-            continue
-        topks = data["topk"]
-        tflops = data["tflops"]
-        xi = [TOPK_VALS.index(t) for t in topks if t in TOPK_VALS]
-        yi = [tflops[topks.index(t)] for t in topks if t in TOPK_VALS]
-        ax.plot(
-            xi,
-            yi,
-            color=color,
-            linestyle=ls,
-            marker=marker,
-            markersize=7,
-            linewidth=2.2,
-            label=label,
-        )
+        for key, label, color, ls, marker in configs:
+            data = results.get(key, {})
+            if not data:
+                continue
+            topks = data["topk"]
+            tflops = data["tflops"]
+            xi = [TOPK_VALS.index(t) for t in topks if t in TOPK_VALS]
+            yi = [tflops[topks.index(t)] for t in topks if t in TOPK_VALS]
+            ax.plot(xi, yi, color=color, linestyle=ls, marker=marker, markersize=7, linewidth=2.2, label=label)
 
-    ax.set_title(
-        "BWD LoopK: kbs=1 (cp.async scatter) vs kbs=128 (TMA)\n"
-        f"(S={S}, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16, H100)",
-        fontsize=11,
-        fontweight="bold",
-    )
-    ax.set_xlabel("topk (K tokens selected)", fontsize=10)
-    ax.set_ylabel("TFLOPS", fontsize=10)
-    ax.set_xticks(x)
-    ax.set_xticklabels(x_labels)
-    ax.legend(fontsize=9, loc="lower left")
-    ax.grid(alpha=0.3)
-    ax.set_ylim(bottom=0)
+        ax.set_title(f"{title_prefix}: kbs=1 vs kbs=128\n(S={S}, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16, H100)", fontsize=11, fontweight="bold")
+        ax.set_xlabel("topk (K tokens selected)", fontsize=10)
+        ax.set_ylabel("TFLOPS", fontsize=10)
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels)
+        ax.legend(fontsize=9, loc="lower left")
+        ax.grid(alpha=0.3)
+        ax.set_ylim(bottom=0)
 
     plt.tight_layout()
     out_path = os.path.join(_OUT_DIR, "kbs1_vs_kbs128.png")

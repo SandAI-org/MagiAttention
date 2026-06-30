@@ -18,11 +18,10 @@
 
 namespace flash {
 
-// 3-way inner-loop KV load strategy for sparse attention scatter paths.
+// 2-way inner-loop KV load strategy for sparse attention scatter paths.
 // Tma:     2D TMA descriptor — auto-selected when tiles are physically contiguous
-// Tma1d:   SM90_BULK_COPY_G2S per-row + consumer-side rearrange (linear→swizzled)
-// CpAsync: cp.async per-row scatter (baseline)
-enum class InnerLoadMode : int { Tma = 0, Tma1d = 1, CpAsync = 2 };
+// CpAsync: cp.async per-row scatter
+enum class InnerLoadMode : int { Tma = 0, CpAsync = 2 };
 
 // 2-way inner-loop scatter store strategy (BWD dX accumulation).
 // Tma1d:   cp.reduce.async.bulk per-row (bulk reduce-add from row-contiguous smem)
