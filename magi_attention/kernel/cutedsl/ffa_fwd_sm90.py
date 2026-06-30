@@ -1671,6 +1671,7 @@ class FFAFwdSm90:
         # ///////////////////////////////////////////////////////////////////////////////
         # R2S tiled copy atom and partion of P
         # ///////////////////////////////////////////////////////////////////////////////
+
         smem_copy_atom_P = cutedsl_utils.get_smem_store_atom(self.arch_num, self.dtype)
         smem_thr_copy_P = cute.make_tiled_copy_C(
             smem_copy_atom_P, tiled_mma_qk
@@ -1746,13 +1747,12 @@ class FFAFwdSm90:
         # ///////////////////////////////////////////////////////////////////////////////
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
-            # shape: (atom_v_m * rest_m)
+            # --- Get current tile info ---
+
             m_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen_info = SeqlenInfoCls(batch_idx)
 
-            # --- Debug print ---
-
-            # local thread-0 of the consumer warp group(s) (tidx already block-local)
+            # Used only for debug print
             is_print_thread_and_tile = const_expr(self.debug_print) and (
                 (tidx == 128)
                 and is_print_block
@@ -1760,28 +1760,8 @@ class FFAFwdSm90:
                 and (head_idx == 0)
                 and (batch_idx == 0)
             )
-            if const_expr(self.debug_print):
-                if is_print_thread_and_tile:
-                    prefix = "[fwd_sm90_mma] "
-                    cute.printf("")
-                    cute.printf(
-                        prefix + "m_block={} head_idx={} batch_idx={}",
-                        m_block,
-                        head_idx,
-                        batch_idx,
-                    )
-                    cute.printf("")
-                    cute.printf(prefix + "sQ.layout: {}", sQ.layout)
-                    cute.printf(prefix + "sK.layout: {}", sK.layout)
-                    cute.printf(prefix + "sVt.layout: {}", sVt.layout)
-                    cute.printf(prefix + "sO.layout: {}", sO.layout)
-                    cute.printf("")
-                    cute.printf(prefix + "tSrQ.layout: {}", tSrQ.layout)
-                    cute.printf(prefix + "tSrK.layout: {}", tSrK.layout)
-                    cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
-                    cute.printf(prefix + "tOrP.layout: {}", tOrP.layout)
-                    cute.printf(prefix + "tOrVt.layout: {}", tOrVt.layout)
-                    cute.printf("")
+
+            # --- Make mask fn and score-mod fn ---
 
             # Recompute fastdiv_mods if necessary for varlen with aux_tensors
             recompute_fastdiv_mods_q = cutlass.const_expr(
@@ -1827,31 +1807,57 @@ class FFAFwdSm90:
                     aux_tensors=aux_tensors,
                     fastdiv_mods=fastdiv_mods,
                 )
+
+            # --- Make MMA one n-block fn ---
+
             mma_one_n_block = partial(
                 mma_one_n_block_all,
                 seqlen=seqlen_info,
                 softmax=softmax,
                 score_mod_fn=score_mod_fn,
             )
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen_info, m_block
-            )
-            pipeline_q.consumer_wait_w_index_phase(0, q_consumer_phase)
+
             # For performance reason, we separate out two kinds of iterations:
             # those that need masking on S, and those that don't.
             # We need masking on S for the very last block when K and V has length not multiple of tile_n.
             # We also need masking on S if it's causal, for the last several blocks.
+            n_block_min, n_block_max = block_info.get_n_block_min_max(
+                seqlen_info, m_block
+            )
+            pipeline_q.consumer_wait_w_index_phase(0, q_consumer_phase)
+
             # softmax.reset()  # Don't need reset as we explicitly call softmax w is_first=True
             O_should_accumulate = False
 
-            # ==========================================
-            # MAINLOOP
-            # ==========================================
+            # --- Debug print ---
+
+            if const_expr(self.debug_print):
+                if is_print_thread_and_tile:
+                    prefix = "[fwd_sm90_mma] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "m_block={} head_idx={} batch_idx={}",
+                        m_block,
+                        head_idx,
+                        batch_idx,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                    cute.printf(prefix + "sK.layout: {}", sK.layout)
+                    cute.printf(prefix + "sVt.layout: {}", sVt.layout)
+                    cute.printf(prefix + "sO.layout: {}", sO.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "tSrQ.layout: {}", tSrQ.layout)
+                    cute.printf(prefix + "tSrK.layout: {}", tSrK.layout)
+                    cute.printf(prefix + "acc_O.layout: {}", acc_O.layout)
+                    cute.printf(prefix + "tOrP.layout: {}", tOrP.layout)
+                    cute.printf(prefix + "tOrVt.layout: {}", tOrVt.layout)
+                    cute.printf("")
+
+            # --- Mainloop ---
+
             if const_expr(not self.use_block_sparsity):
-                # ==========================================
-                # No block-sparsity (original path)
-                # ==========================================
-                # First iteration with seqlen masking
+                # --- First iteration with seqlen masking ---
                 if const_expr(self.intra_wg_overlap):
                     kv_consumer_state = process_first_half_block(
                         n_block=n_block_max - 1,
@@ -1958,10 +1964,7 @@ class FFAFwdSm90:
                 else:
                     self.warp_scheduler_barrier_arrive()
 
-            else:
-                # ==========================================
-                # Block sparsity
-                # ==========================================
+            else:  # block sparse load (TODO: review the logics)
                 (
                     kv_consumer_state,
                     O_should_accumulate,
@@ -1999,6 +2002,8 @@ class FFAFwdSm90:
 
             q_consumer_phase ^= 1
 
+            # --- Apply attention sink ---
+
             sink_val = None
             if const_expr(learnable_sink is not None):
                 if const_expr(not self.pack_gqa):
@@ -2015,13 +2020,13 @@ class FFAFwdSm90:
                         )
                         sink_val[r] = Float32(learnable_sink[q_head_idx])
 
-            # normalize acc_O by row_sum and calculate the lse
+            # --- Final normalize acc_O by row_sum and calculate LSE ---
+
             row_scale = softmax.finalize(sink_val=sink_val)
             softmax.rescale_O(acc_O, row_scale)
 
-            # ///////////////////////////////////////////////////////////////////////////////
-            # Epilogue
-            # ///////////////////////////////////////////////////////////////////////////////
+            # --- Epilogue ---
+
             self.epilogue(
                 acc_O,
                 softmax.row_sum,
@@ -2038,6 +2043,7 @@ class FFAFwdSm90:
                 batch_idx,
             )
 
+            # Advance to next Q tile
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 

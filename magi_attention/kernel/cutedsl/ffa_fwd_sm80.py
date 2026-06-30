@@ -1314,7 +1314,7 @@ class FFAFwdSm80:
             smem_pipe_read = self.advance_pipeline(smem_pipe_read)
             smem_pipe_write = self.advance_pipeline(smem_pipe_write)
 
-        # --- Final normalize acc_O by row_sum and calculate the lse ---
+        # --- Final normalize acc_O by row_sum and calculate LSE ---
 
         row_scale = softmax.finalize()
         softmax.rescale_O(acc_O, row_scale)
