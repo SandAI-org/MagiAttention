@@ -104,7 +104,8 @@ else:
 # Scenarios: full / causal (non-varlen) and varlen_full / varlen_causal (packed)
 mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
 if IS_SM80:
-    # FIXME: for now, ffa_bwd_sm80 will encounter IMA error with varlen_causal mask
+    # FIXME: for now, ffa_bwd_sm80 will encounter IMA error with varlen mask
+    mask_types.remove("varlen_full")
     mask_types.remove("varlen_causal")
 
 # Simple varlen seqlen distribution (doc length intervals -> weight). Each
