@@ -110,8 +110,8 @@ class FFABwdSm90:
         self.mask_type = mask_type
         self.is_local = is_local
         self.deterministic = deterministic
-        self.tile_m = tile_m
-        self.tile_n = tile_n
+        self.tile_m = tile_m  # tileQ128
+        self.tile_n = tile_n  # tileK128
         self.num_threads = num_threads  # 384 (3 WGs = 1 producer + 2 MMA)
         self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 12
 
@@ -1272,9 +1272,14 @@ class FFABwdSm90:
         qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
         is_print_block: bool = False,
     ):
-        warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
+        warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % len(
+            self.load_warp_ids
+        )
+        tidx, _, _ = cute.arch.thread_idx()
 
-        if warp_idx_in_wg == 0:
+        is_load_warp = warp_idx_in_wg == 0
+
+        if is_load_warp:
             producer_state_Q = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Producer, self.Q_stage
             )
@@ -1287,19 +1292,59 @@ class FFABwdSm90:
             # ///////////////////////////////////////////////////////////////////////////////
             work_tile = tile_scheduler.initial_work_tile_info()
             while work_tile.is_valid_tile:
+                # --- Get current tile info ---
+
                 n_block, head_idx, batch_idx, _ = work_tile.tile_idx
-                seqlen = SeqlenInfoCls(batch_idx)
+                seqlen_info = SeqlenInfoCls(batch_idx)
                 head_idx_kv = (
                     head_idx
                     if const_expr(self.qhead_per_kvhead == 1)
                     else head_idx // qhead_per_kvhead_divmod
                 )
-                mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[
+
+                m_block_min, m_block_max = block_info.get_m_block_min_max(
+                    seqlen_info, n_block
+                )
+
+                if const_expr(not self.use_block_sparsity):
+                    total_m_block_cnt = m_block_max - m_block_min
+                    process_tile = (
+                        const_expr(not self.is_local and not self.is_varlen_q)
+                        or m_block_min < m_block_max
+                    )
+                else:
+                    total_m_block_cnt = get_total_q_block_count_bwd(
+                        blocksparse_tensors,
+                        batch_idx,
+                        head_idx,
+                        n_block,
+                        subtile_factor=self.subtile_factor,
+                        m_block_max=m_block_max,
+                    )
+                    process_tile = total_m_block_cnt > Int32(0)
+
+                # Used only for debug print
+                is_print_thread_and_tile = const_expr(self.debug_print) and (
+                    (tidx == 0)
+                    and is_print_block
+                    and (n_block == 0)
+                    and (head_idx == 0)
+                    and (batch_idx == 0)
+                )
+
+                # //////////////////////////////////////////////
+                #  Make gQ/gK/gV/gdO/gLSE/gdPsum
+                # //////////////////////////////////////////////
+
+                # mK_cur/mV_cur: (sK,HD):(1@1,1@0)
+                mK_cur = seqlen_info.offset_batch_K(mK, batch_idx, dim=3)[
                     None, None, head_idx_kv
                 ]
-                mV_cur = seqlen.offset_batch_K(mV, batch_idx, dim=3)[
+                mV_cur = seqlen_info.offset_batch_K(mV, batch_idx, dim=3)[
                     None, None, head_idx_kv
                 ]
+
+                # gK/gV: (tileK,tileHD):(1@1,1@0)
                 gK = cute.local_tile(
                     mK_cur, (self.tile_n, self.tile_hdim), (n_block, 0)
                 )
@@ -1307,18 +1352,24 @@ class FFABwdSm90:
                     mV_cur, (self.tile_n, self.tile_hdimv), (n_block, 0)
                 )
 
-                mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[
+                # mQ_cur/mdO_cur: (sQ,HD):(1@1,1@0)
+                # mLSE_cur/mdPsum_cur: (sQpad):(1)
+                mQ_cur = seqlen_info.offset_batch_Q(mQ, batch_idx, dim=3)[
                     None, None, head_idx
                 ]
-                mLSE_cur = seqlen.offset_batch_Q(mLSE, batch_idx, dim=2, padded=True)[
-                    None, head_idx
-                ]
-                mdO_cur = seqlen.offset_batch_Q(mdO, batch_idx, dim=3)[
+                mLSE_cur = seqlen_info.offset_batch_Q(
+                    mLSE, batch_idx, dim=2, padded=True
+                )[None, head_idx]
+                mdO_cur = seqlen_info.offset_batch_Q(mdO, batch_idx, dim=3)[
                     None, None, head_idx
                 ]
-                mdPsum_cur = seqlen.offset_batch_Q(
+                mdPsum_cur = seqlen_info.offset_batch_Q(
                     mdPsum, batch_idx, dim=2, padded=True
                 )[None, head_idx]
+
+                # gQ/gdO: (tileQ,tileHD,restQ):(1@1,1@0,tileQ@1)
+                # gLSE/gdPsum: (tileQ,restQ):(1,tileQ)
+                # where restQ = sQ // tileQ
                 gQ = cute.local_tile(mQ_cur, (self.tile_m, self.tile_hdim), (None, 0))
                 gdO = cute.local_tile(
                     mdO_cur, (self.tile_m, self.tile_hdimv), (None, 0)
@@ -1326,33 +1377,9 @@ class FFABwdSm90:
                 gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
                 gdPsum = cute.local_tile(mdPsum_cur, (self.tile_m,), (None,))
 
-                # --- Debug print ---
-
-                is_print_thread_and_tile = const_expr(self.debug_print) and (
-                    (cute.arch.thread_idx()[0] == 0)
-                    and is_print_block
-                    and (n_block == 0)
-                    and (head_idx == 0)
-                    and (batch_idx == 0)
-                )
-                if const_expr(self.debug_print):
-                    if is_print_thread_and_tile:
-                        prefix = "[bwd_sm90_load] "
-                        cute.printf("")
-                        cute.printf(
-                            prefix + "n_block={} head_idx={} batch_idx={}",
-                            n_block,
-                            head_idx,
-                            batch_idx,
-                        )
-                        cute.printf("")
-                        cute.printf(prefix + "sQ.layout: {}", sQ.layout)
-                        cute.printf(prefix + "sK.layout: {}", sK.layout)
-                        cute.printf(prefix + "sV.layout: {}", sV.layout)
-                        cute.printf(prefix + "sdO.layout: {}", sdO.layout)
-                        cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
-                        cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
-                        cute.printf("")
+                # //////////////////////////////////////////////
+                #  Make TMA load partial fns
+                # //////////////////////////////////////////////
 
                 load_K, _, _ = copy_utils.tma_get_copy_fn(
                     tma_atom_K, 0, cute.make_layout(1), gK, sK, single_stage=True
@@ -1373,26 +1400,52 @@ class FFABwdSm90:
                 load_dPsum = copy_utils.cpasync_bulk_get_copy_fn(gdPsum, sdPsum)
                 load_dPsum = copy_utils.tma_producer_copy_fn(load_dPsum, pipeline_dO)
 
-                m_block_min, m_block_max = block_info.get_m_block_min_max(
-                    seqlen, n_block
-                )
+                # --- Debug print ---
 
-                if const_expr(not self.use_block_sparsity):
-                    total_m_block_cnt = m_block_max - m_block_min
-                    process_tile = (
-                        const_expr(not self.is_local and not self.is_varlen_q)
-                        or m_block_min < m_block_max
-                    )
-                else:
-                    total_m_block_cnt = get_total_q_block_count_bwd(
-                        blocksparse_tensors,
-                        batch_idx,
-                        head_idx,
-                        n_block,
-                        subtile_factor=self.subtile_factor,
-                        m_block_max=m_block_max,
-                    )
-                    process_tile = total_m_block_cnt > Int32(0)
+                if const_expr(self.debug_print):
+                    if is_print_thread_and_tile:
+                        prefix = "[bwd_sm90_load] "
+                        cute.printf("")
+                        cute.printf(
+                            prefix + "n_block={}, head_idx={}, batch_idx={}",
+                            n_block,
+                            head_idx,
+                            batch_idx,
+                        )
+                        cute.printf(
+                            prefix
+                            + "m_block_min={}, m_block_max={}, total_m_block_cnt={}",
+                            m_block_min,
+                            m_block_max,
+                            total_m_block_cnt,
+                        )
+                        cute.printf(prefix + "process_tile={}", process_tile)
+                        cute.printf("")
+                        cute.printf(prefix + "mQ_cur.layout: {}", mQ_cur.layout)
+                        cute.printf(prefix + "mK_cur.layout: {}", mK_cur.layout)
+                        cute.printf(prefix + "mV_cur.layout: {}", mV_cur.layout)
+                        cute.printf(prefix + "mdO_cur.layout: {}", mdO_cur.layout)
+                        cute.printf(prefix + "mLSE_cur.layout: {}", mLSE_cur.layout)
+                        cute.printf(prefix + "mdPsum_cur.layout: {}", mdPsum_cur.layout)
+                        cute.printf("")
+                        cute.printf(prefix + "gQ.layout: {}", gQ.layout)
+                        cute.printf(prefix + "gK.layout: {}", gK.layout)
+                        cute.printf(prefix + "gV.layout: {}", gV.layout)
+                        cute.printf(prefix + "gdO.layout: {}", gdO.layout)
+                        cute.printf(prefix + "gLSE.layout: {}", gLSE.layout)
+                        cute.printf(prefix + "gdPsum.layout: {}", gdPsum.layout)
+                        cute.printf("")
+                        cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                        cute.printf(prefix + "sK.layout: {}", sK.layout)
+                        cute.printf(prefix + "sV.layout: {}", sV.layout)
+                        cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                        cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
+                        cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
+                        cute.printf("")
+
+                # //////////////////////////////////////////////
+                #  G2S-load sQ/sK/sV/sdO/sLSE/sdPsum
+                # //////////////////////////////////////////////
 
                 if process_tile:
                     if const_expr(not self.use_block_sparsity):
@@ -1444,7 +1497,7 @@ class FFABwdSm90:
                             load_dPsum(m_block, producer_state=producer_state_dO_cur)
                             producer_state_Q.advance()
                             producer_state_dO.advance()
-                    else:
+                    else:  # block sparse load (TODO: review the logics)
                         (
                             producer_state_Q,
                             producer_state_dO,
