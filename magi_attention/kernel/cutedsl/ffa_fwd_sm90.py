@@ -118,7 +118,8 @@ class FFAFwdSm90:
         self.mma_pv_is_rs = mma_pv_is_rs
         self.use_tma_KV = not paged_kv_non_tma
         self.cluster_shape_mn = (1, 1)
-        self.num_threads_per_wg = 128
+        self.num_warps_per_wg = 4
+        self.num_threads_per_wg = self.num_warps_per_wg * cute.arch.WARP_SIZE
 
         self.num_stages = num_stages
         self.q_subtile_factor = q_subtile_factor
@@ -150,7 +151,8 @@ class FFAFwdSm90:
                 f"{self.check_hdim_oob=} | {self.check_hdim_v_oob=}"
             )
             print(
-                f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | {self.pack_gqa=}"
+                f"{prefix}{self.mask_type=} | {self.is_causal=} | "
+                f"{self.is_local=} | {self.pack_gqa=}"
             )
             print(f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_stages=}")
             print(f"{prefix}{self.Q_in_regs=} | {self.q_subtile_factor=}")
@@ -160,6 +162,9 @@ class FFAFwdSm90:
                 f"{prefix}{self.intra_wg_overlap=} | "
                 f"{self.mma_pv_is_rs=} | {self.use_tma_KV=} | "
                 f"{self.cluster_shape_mn=} | "
+            )
+            print(
+                f"{self.num_warps_per_wg=} | "
                 f"{self.num_threads_per_wg=} | "
                 f"{self.buffer_align_bytes=}"
             )
@@ -347,6 +352,11 @@ class FFAFwdSm90:
         self.num_threads = self.num_threads_per_wg * (
             self.num_wg_mma + self.num_wg_load
         )  # 384 (3 WGs = 1 producer + 2 MMA)
+        self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 12
+        self.load_warp_ids = list(range(0, self.num_wg_load * self.num_warps_per_wg))
+        self.mma_warp_ids = list(
+            range(self.num_wg_load * self.num_warps_per_wg, self.num_warps)
+        )
         self.num_Q_load_threads = self.num_threads_per_wg  # If not TMA_Q
         self.num_epilogue_threads = self.num_mma_threads
 
@@ -466,12 +476,13 @@ class FFAFwdSm90:
         if const_expr(self.debug_print):
             prefix = "[fwd_sm90_setup_attributes] "
             print()
-            print(f"{prefix}{self.num_threads=}")
+            print(f"{prefix}{self.num_threads=} | {self.num_warps=}")
             print(f"{prefix}{self.num_wg_mma=} | {self.num_wg_load=}")
             print(f"{prefix}{self.num_mma_threads=}")
             print(f"{prefix}{self.num_producer_threads=}")
             print(f"{prefix}{self.num_Q_load_threads=}")
             print(f"{prefix}{self.num_epilogue_threads=}")
+            print(f"{prefix}{self.load_warp_ids=} | {self.mma_warp_ids=}")
             print()
             print(f"{prefix}{self.num_mma_regs=} | {self.num_producer_regs=}")
             print(f"{prefix}{self.use_scheduler_barrier=}")
@@ -907,7 +918,14 @@ class FFAFwdSm90:
         aux_tensors=Optional[list[cute.Tensor]],
         fastdiv_mods=None,
     ):
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Set up before warp specialization
+        # /////////////////////////////////////////////////////////////////////////////
+
+        # --- Set up thread info ---
+
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        tidx, _, _ = cute.arch.thread_idx()
 
         # Used only for debug print
         # guarded by const_expr so zero overhead when debug_print=False
@@ -915,18 +933,25 @@ class FFAFwdSm90:
         is_print_block = const_expr(self.debug_print) and (
             (bidx == 0) and (bidy == 0) and (bidz == 0)
         )
+        is_print_thread = const_expr(self.debug_print) and (
+            (tidx == 127) and is_print_block
+        )
 
-        # Prefetch tma descriptor
+        # --- Prefetch TMA descriptor ---
+
         if warp_idx == 0:
             for tma_atom in (tma_atom_Q, tma_atom_K, tma_atom_V, tma_atom_O):
                 if const_expr(tma_atom is not None):
                     cpasync.prefetch_descriptor(tma_atom)
 
+        # --- Alloc smem storage and fetch ptrs ---
+
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage_cls)
-
-        # Mbarrier / pipeline init
         mbar_ptr_Q = storage.mbar_ptr_Q.data_ptr()
+
+        # --- Make pipelines ---
+
         tma_warp = ThreadCooperativeGroup(1)
         load_threads = ThreadCooperativeGroup(self.num_threads_per_wg)
         mma_warps = ThreadCooperativeGroup(self.num_mma_threads // cute.arch.WARP_SIZE)
@@ -987,12 +1012,12 @@ class FFAFwdSm90:
                 syncwarp_before_release=False,
             )
 
-        # Cluster arrive after barrier init
+        # --- Cluster arrive after mbarrier init ---
+
         pipeline_init_arrive(cluster_shape_mn=self.cluster_shape_mn, is_relaxed=True)
 
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Get shared memory buffer
-        # ///////////////////////////////////////////////////////////////////////////////
+        # --- Make smem tensors of sQ/sK/sV/sO/sP ---
+
         sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)
         sK = storage.sK.get_tensor(sK_layout.outer, swizzle=sK_layout.inner)
         if const_expr(not self.Q_in_regs):
@@ -1006,10 +1031,12 @@ class FFAFwdSm90:
         sP = None
         if const_expr(sP_layout is not None):
             sP = storage.sP.get_tensor(sP_layout.outer, swizzle=sP_layout.inner)
-        # reuse sQ's data iterator
+        # Reuse sQ's buffer for sO
         sO = storage.sQ.get_tensor(
             sO_layout.outer, swizzle=sO_layout.inner, dtype=self.dtype
         )
+
+        # --- Make other info dataclass ---
 
         block_info = BlockInfo(
             self.tile_m,
@@ -1059,11 +1086,23 @@ class FFAFwdSm90:
         )
         TileSchedulerCls = partial(self.tile_scheduler_cls.create, tile_sched_params)
 
-        # Cluster wait before starting
+        # --- Cluster wait before warp specialization ---
+
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mn)
 
-        if warp_idx < 4:  # Producer
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            prefix = "[fwd_sm90_kernel_setup] "
+            if is_print_thread:
+                pass
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Load WarpGroup
+        # ///////////////////////////////////////////////////////////////////////////////
+        if warp_idx <= self.load_warp_ids[-1]:  # Producer
             cute.arch.setmaxregister_decrease(self.num_producer_regs)
+
             self.load(
                 mQ,
                 mK,
@@ -1086,13 +1125,12 @@ class FFAFwdSm90:
                 is_print_block,
             )
 
-        else:  # Consumer
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  MMA WarpGroups
+        # ///////////////////////////////////////////////////////////////////////////////
+        if warp_idx >= self.mma_warp_ids[0]:  # Consumer
             cute.arch.setmaxregister_increase(self.num_mma_regs)
-            # ///////////////////////////////////////////////////////////////////////////////
-            # Tile MMA compute thread partitions and allocate accumulators
-            # ///////////////////////////////////////////////////////////////////////////////
-            tidx, _, _ = cute.arch.thread_idx()
-            tidx = tidx - 128
+
             self.mma(
                 tiled_mma_qk,
                 tiled_mma_pv,
@@ -1109,7 +1147,7 @@ class FFAFwdSm90:
                 pipeline_q,
                 gmem_tiled_copy_O,
                 tma_atom_O,
-                tidx,
+                tidx - 128,
                 softmax_scale_log2,
                 softmax_scale,
                 block_info,

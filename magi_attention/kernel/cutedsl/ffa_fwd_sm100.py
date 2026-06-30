@@ -1272,11 +1272,9 @@ class FFAFwdSm100:
     @cute.kernel
     def kernel(
         self,
-        mQ: cute.Tensor,  # (s_q, d, h, b) or (total_q, d, h) if there is cu_seqlens_q
-        mK: cute.Tensor,  # (s_k, d, h_k, b_k) or (total_k, d, h_k) if cu_seqlens_k
-        # or (page_size, d, h_k, num_pages) if page_table
-        mV: cute.Tensor,  # (d, s_k, h_k, b_k) or (d, total_k, h_k) if cu_seqlens_k
-        # or (d, page_size, h_k, num_pages) if page_table
+        mQ: cute.Tensor,
+        mK: cute.Tensor,
+        mV: cute.Tensor,
         mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
         mCuSeqlensQ: Optional[cute.Tensor],
