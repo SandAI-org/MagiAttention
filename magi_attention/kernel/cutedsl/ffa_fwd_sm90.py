@@ -453,6 +453,8 @@ class FFAFwdSm90:
         self.use_tma_O = self.use_tma_Q
         self.rescale_O_before_gemm = self.tile_hdimv > 128 and self.intra_wg_overlap
 
+        # --- Set up registers ---
+
         self.num_mma_regs, self.num_producer_regs = {
             1: (256, 56),
             2: (240, 24),

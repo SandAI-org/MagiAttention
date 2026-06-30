@@ -88,6 +88,7 @@ class FFABwdSm90:
         debug_print: bool = False,
     ):
         self.dtype = dtype
+
         # padding head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
         self.tile_hdim = int(math.ceil(head_dim / hdim_multiple_of) * hdim_multiple_of)
@@ -98,9 +99,11 @@ class FFABwdSm90:
         self.tile_hdimv = int(
             math.ceil(head_dim_v / hdim_multiple_of) * hdim_multiple_of
         )
+
         # Can save registers (and hence be faster) if we don't have to check hdim predication
         self.check_hdim_oob = head_dim != self.tile_hdim
         self.check_hdim_v_oob = head_dim_v != self.tile_hdimv
+
         self.qhead_per_kvhead = qhead_per_kvhead
         self.mask_type = mask_type
         self.is_local = is_local
@@ -108,17 +111,21 @@ class FFABwdSm90:
         self.tile_m = tile_m
         self.tile_n = tile_n
         self.num_threads = num_threads
+
         self.Q_stage = Q_stage
         self.dO_stage = dO_stage
         self.PdS_stage = PdS_stage
         assert self.dO_stage in [1, self.Q_stage]
         assert self.PdS_stage in [1, self.Q_stage]
+
         self.SdP_swapAB = SdP_swapAB
         self.dKV_swapAB = dKV_swapAB
         self.dQ_swapAB = dQ_swapAB
+
         self.AtomLayoutMSdP = AtomLayoutMSdP
         self.AtomLayoutNdKV = AtomLayoutNdKV
         self.AtomLayoutMdQ = AtomLayoutMdQ
+
         self.num_wg_mma = (self.num_threads // 128) - 1
         self.mma_dkv_is_rs = (
             AtomLayoutMSdP == 1
@@ -126,11 +133,14 @@ class FFABwdSm90:
             and SdP_swapAB
             and not dKV_swapAB
         )
+
         self.V_in_regs = V_in_regs
+
         # May be overridden in __call__ for varlen inputs.
         if qhead_per_kvhead > 1:
             assert self.same_hdim_kv, "GQA backward requires head_dim == head_dim_v"
             assert self.num_wg_mma == 2, "GQA backward assumes 2 warp groups"
+
         # These are tuned for speed
         # Do we keep the LSE and dPsum in each thread, or split them across 8 threads that share
         # them and then shuffle to get the value whenever we need? This can reduce register
@@ -140,6 +150,7 @@ class FFABwdSm90:
         self.shuffle_dPsum = self.SdP_swapAB and self.tile_hdim <= 64
 
         self.buffer_align_bytes = 1024
+        self.num_threads_per_warp_group = 128
 
         self.score_mod = score_mod
         self.score_mod_bwd = score_mod_bwd
@@ -150,12 +161,14 @@ class FFABwdSm90:
             self.vec_size: cutlass.Constexpr = 1
         else:
             self.vec_size: cutlass.Constexpr = 4
+
         self.qk_acc_dtype = Float32
+
         # dQ_single_wg: WG0 computes the full dQ GEMM, WG1 skips it.
         # Only valid for 2 MMA warp groups.
-        # Credit: Ben Spector
         if dQ_single_wg:
             assert self.num_wg_mma == 2, "dQ_single_wg only supports 2 warp groups"
+
         self.num_wg_dQ = 1 if dQ_single_wg else self.num_wg_mma
 
         self.debug_print = debug_print
@@ -244,6 +257,56 @@ class FFABwdSm90:
         assert mQ_type == self.dtype
 
     def _setup_attributes(self):
+        # --- Set up tiled MMA ---
+
+        (
+            self.tiled_mma_SdP,
+            self.tiled_mma_dK,
+            self.tiled_mma_dV,
+            self.tiled_mma_dQ,
+        ) = self._get_tiled_mma()
+
+        self.num_mma_threads = self.tiled_mma_SdP.size
+        assert (
+            self.num_threads == self.num_mma_threads + self.num_threads_per_warp_group
+        )
+        self.num_producer_threads = cute.arch.WARP_SIZE
+
+        # --- Set up registers ---
+
+        REG_LIMIT = 504 if self.num_wg_mma == 2 else 512
+        if const_expr(self.num_wg_mma == 2):
+            if const_expr(self.num_wg_dQ == 1):
+                self.num_mma_regs_wg0 = 256
+                self.num_mma_regs_wg1 = 224
+            else:
+                self.num_mma_regs_wg0 = 240
+                self.num_mma_regs_wg1 = 240
+            self.num_mma_regs = self.num_mma_regs_wg0  # for backward compat
+            self.num_producer_regs = 24
+            assert (
+                self.num_mma_regs_wg0 + self.num_mma_regs_wg1 + self.num_producer_regs
+                <= REG_LIMIT
+            )
+        else:  # 3 warp groups
+            self.num_mma_regs_wg0 = 160
+            self.num_mma_regs_wg1 = 160
+            self.num_mma_regs = 160
+            self.num_producer_regs = 32
+            assert (
+                self.num_mma_regs_wg0 * self.num_wg_mma + self.num_producer_regs
+                <= REG_LIMIT
+            )
+
+        if const_expr(self.debug_print):
+            # NOTE: we might need extra registers for load warp to debug print
+            # otherwise, it will raise illegal instruction error
+            num_regs_for_print = 24
+            self.num_producer_regs += num_regs_for_print
+            self.num_mma_regs -= num_regs_for_print
+            self.num_mma_regs_wg0 -= num_regs_for_print
+            self.num_mma_regs_wg1 -= num_regs_for_print
+
         # We need to accommodate both Q and Q^T (and dO and dO^T) in shared memory.
         # Q & dO are used in the SdP Mma and Q^T and dO^T are used in the dKV Mma.
         # The M dimension (tile_m) doesn't matter for the layout, only the K dimension
@@ -267,6 +330,7 @@ class FFABwdSm90:
             ]
         ]
         wg_d_dQ = self.num_wg_dQ // self.AtomLayoutMdQ
+
         # Accomodate both K and K.T
         self.sK_layout = sm90_utils.make_smem_layout(
             self.dtype,
@@ -279,6 +343,7 @@ class FFABwdSm90:
         self.sV_layout = sm90_utils.make_smem_layout(
             self.dtype, LayoutEnum.ROW_MAJOR, (self.tile_n, self.tile_hdimv), None
         )
+
         # Accomodate both S and S.T
         wg_n_SdP = self.num_wg_mma // self.AtomLayoutMSdP
         wg_n_dKV = self.AtomLayoutNdKV
@@ -292,6 +357,7 @@ class FFABwdSm90:
         self.sdQaccum_layout = cute.make_layout(
             (self.tile_m * self.tile_hdim // self.num_wg_dQ, self.num_wg_dQ)
         )
+
         # dQaccum R->S
         self.r2s_tiled_copy_dQaccum = cute.make_tiled_copy_tv(
             cute.make_copy_atom(
@@ -308,6 +374,21 @@ class FFABwdSm90:
 
         if const_expr(self.debug_print):
             prefix = "[bwd_sm90_setup_attributes] "
+            print()
+            print(f"{prefix}num_mma_threads: {self.num_mma_threads}")
+            print(f"{prefix}num_producer_threads: {self.num_producer_threads}")
+            print(f"{prefix}num_mma_regs: {self.num_mma_regs}")
+            print(f"{prefix}num_mma_regs_wg0: {self.num_mma_regs_wg0}")
+            print(f"{prefix}num_mma_regs_wg1: {self.num_mma_regs_wg1}")
+            print(f"{prefix}num_producer_regs: {self.num_producer_regs}")
+            print()
+            print(f"{prefix}tiled_mma_SdP: {self.tiled_mma_SdP}")
+            print()
+            print(f"{prefix}tiled_mma_dK: {self.tiled_mma_dK}")
+            print()
+            print(f"{prefix}tiled_mma_dV: {self.tiled_mma_dV}")
+            print()
+            print(f"{prefix}tiled_mma_dQ: {self.tiled_mma_dQ}")
             print()
             print(f"{prefix}sQ_layout: {self.sQ_layout}")
             print(f"{prefix}sdO_layout: {self.sdO_layout}")
@@ -467,10 +548,11 @@ class FFABwdSm90:
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
-        # For GQA (qhead_per_kvhead > 1), multiple Q heads accumulate into the same dK/dV,
-        # so we need the float32 accum path + postprocess.
-        # For varlen_k with qhead_per_kvhead == 1, we use ragged TMA tensors.
-        self.varlen_k = mCuSeqlensK is not None or mSeqUsedK is not None
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Set up attributes
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Checks ---
 
         self._check_tile()
         self._check_type(
@@ -481,6 +563,19 @@ class FFABwdSm90:
         )
 
         self.is_varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
+        # For GQA (qhead_per_kvhead > 1), multiple Q heads accumulate into the same dK/dV,
+        # so we need the float32 accum path + postprocess.
+        # For varlen_k with qhead_per_kvhead == 1, we use ragged TMA tensors.
+        self.varlen_k = mCuSeqlensK is not None or mSeqUsedK is not None
+
+        # --- Set up attributes ---
+
+        self._setup_attributes()
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make mQ/mK/mV/mO/mLSE tensors
+        # with layout transformations for specific memory access patterns
+        # ///////////////////////////////////////////////////////////////////////////////
 
         mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV = [
             cutedsl_utils.assume_tensor_aligned(t)
@@ -511,7 +606,6 @@ class FFABwdSm90:
             for t in (mLSE, mdPsum, mdQaccum)
         ]
 
-        tiled_mma_SdP, tiled_mma_dK, tiled_mma_dV, tiled_mma_dQ = self._get_tiled_mma()
         # (batch, num_head, num_m_blocks, cluster_size) -> (num_m_blocks, cluster_size, num_head, batch)
         if const_expr(self.deterministic):
             assert mdQ_semaphore is not None
@@ -527,48 +621,9 @@ class FFABwdSm90:
             mdK_semaphore = None
             mdV_semaphore = None
 
-        self.num_mma_threads = tiled_mma_SdP.size
-        assert self.num_mma_threads + 128 == self.num_threads
-
-        self.num_threads_per_warp_group = 128
-        self.num_producer_threads = 32
-
-        REG_LIMIT = 504 if self.num_wg_mma == 2 else 512
-        if const_expr(self.num_wg_mma == 2):
-            if const_expr(self.num_wg_dQ == 1):
-                self.num_mma_regs_wg0 = 256
-                self.num_mma_regs_wg1 = 224
-            else:
-                self.num_mma_regs_wg0 = 240
-                self.num_mma_regs_wg1 = 240
-            self.num_mma_regs = self.num_mma_regs_wg0  # for backward compat
-            self.num_producer_regs = 24
-            assert (
-                self.num_mma_regs_wg0 + self.num_mma_regs_wg1 + self.num_producer_regs
-                <= REG_LIMIT
-            )
-        else:  # 3 warp groups
-            self.num_mma_regs_wg0 = 160
-            self.num_mma_regs_wg1 = 160
-            self.num_mma_regs = 160
-            self.num_producer_regs = 32
-            assert (
-                self.num_mma_regs_wg0 * self.num_wg_mma + self.num_producer_regs
-                <= REG_LIMIT
-            )
-
-        if const_expr(self.debug_print):
-            # NOTE: we might need extra registers for load warp to debug print
-            # otherwise, it will raise illegal instruction error
-            num_regs_for_print = 24
-            self.num_producer_regs += num_regs_for_print
-            self.num_mma_regs -= num_regs_for_print
-            self.num_mma_regs_wg0 -= num_regs_for_print
-            self.num_mma_regs_wg1 -= num_regs_for_print
-
-        self._setup_attributes()
-
-        SharedStorage = self._get_shared_storage_cls()
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make TMA tiled copy atom and tensors
+        # ///////////////////////////////////////////////////////////////////////////////
 
         self.tma_copy_bytes = {
             name: cute.size_in_bytes(mX.element_type, cute.select(layout, mode=[0, 1]))
@@ -643,6 +698,12 @@ class FFABwdSm90:
         else:
             tma_atom_dK = tma_atom_dV = tma_tensor_dK = tma_tensor_dV = None
 
+        # ///////////////////////////////////////////////////////////////////////////////
+        # Make tile scheduler class/args, SMEM storage, and others
+        # ///////////////////////////////////////////////////////////////////////////////
+
+        # --- Make tile scheduler class/args ---
+
         if const_expr(mCuSeqlensK is not None or mSeqUsedK is not None):
             TileScheduler = SingleTileVarlenScheduler
         elif const_expr(self.deterministic):
@@ -672,9 +733,14 @@ class FFABwdSm90:
             lpt=self.spt,
             head_swizzle=self.deterministic,
         )
-
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+
+        # --- Make smem storage ---
+
+        SharedStorage = self._get_shared_storage_cls()
+
+        # --- Make others ---
 
         LOG2_E = math.log2(math.e)
         if const_expr(self.score_mod is None):
@@ -711,25 +777,10 @@ class FFABwdSm90:
             prefix = "[bwd_sm90_call] "
 
             print()
-            print(f"{prefix}tiled_mma_SdP: {tiled_mma_SdP}")
-            print()
-            print(f"{prefix}tiled_mma_dK: {tiled_mma_dK}")
-            print()
-            print(f"{prefix}tiled_mma_dV: {tiled_mma_dV}")
-            print()
-            print(f"{prefix}tiled_mma_dQ: {tiled_mma_dQ}")
-            print()
-            print(f"{prefix}sQ_layout: {self.sQ_layout}")
-            print(f"{prefix}sK_layout: {self.sK_layout}")
-            print(f"{prefix}sV_layout: {self.sV_layout}")
-            print(f"{prefix}sPdS_layout: {self.sPdS_layout}")
-            print(f"{prefix}sdO_layout: {self.sdO_layout}")
-            print(f"{prefix}sdQaccum_layout: {self.sdQaccum_layout}")
             print(
                 f"{prefix}use_block_sparsity: {self.use_block_sparsity} | "
-                f"qhead_per_kvhead: {self.qhead_per_kvhead}"
+                f"varlen_q: {self.is_varlen_q} | varlen_k: {self.varlen_k} | "
             )
-            print(f"{prefix}num_threads: {self.num_threads}")
             print()
 
             cute.printf("")
@@ -776,10 +827,10 @@ class FFABwdSm90:
             self.sdO_layout,
             self.sdQaccum_layout,
             self.r2s_tiled_copy_dQaccum,
-            tiled_mma_SdP,
-            tiled_mma_dK,
-            tiled_mma_dV,
-            tiled_mma_dQ,
+            self.tiled_mma_SdP,
+            self.tiled_mma_dK,
+            self.tiled_mma_dV,
+            self.tiled_mma_dQ,
             softmax_scale_log2,
             softmax_scale,
             tile_sched_params,
