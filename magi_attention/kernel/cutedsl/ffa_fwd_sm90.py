@@ -261,6 +261,15 @@ class FFAFwdSm90:
         )
 
     def _get_tiled_mma(self):
+        # Tiled MMA for S=Q*K.T
+        # Thr Layout VMNK: (128,2,1,1):(1,128,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           128:1
+        # Shape MNK:       (64,128,16)
+        # TV Layout A:     (128,(64,16)):(0,(1,64))
+        # TV Layout B:     (128,(128,16)):(0,(1,128))
+        # TV Layout C:     ((4,8,4),(2,2,16)):((128,1,16),(64,8,512))
         tiled_mma_qk = sm90_utils_basic.make_trivial_tiled_mma(
             self.dtype,
             self.dtype,
@@ -270,6 +279,16 @@ class FFAFwdSm90:
             atom_layout_mnk=(self.tile_m // 64, 1, 1),
             tiler_mn=(64, self.tile_n),
         )
+
+        # Tiled MMA for O=P*V
+        # Thr Layout VMNK: (128,2,1,1):(1,128,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           128:1
+        # Shape MNK:       (64,128,16)
+        # TV Layout A:     ((4,8,4),(2,2,2)):((128,1,16),(64,8,512))
+        # TV Layout B:     (128,(128,16)):(0,(1,128))
+        # TV Layout C:     ((4,8,4),(2,2,16)):((128,1,16),(64,8,512))
         tiled_mma_pv = sm90_utils_basic.make_trivial_tiled_mma(
             self.dtype,
             self.dtype,

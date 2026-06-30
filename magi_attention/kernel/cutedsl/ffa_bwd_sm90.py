@@ -273,7 +273,16 @@ class FFABwdSm90:
         maybe_swap_mn = (
             lambda shape, swap: (shape[1], shape[0], *shape[2:]) if swap else shape
         )
-        # S = Q @ K.T, dP = dO @ V.T
+
+        # Tiled MMA for S = Q @ K.T / dP = dO @ V.T
+        # Thr Layout VMNK: (128,2,1,1):(1,128,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           128:1
+        # Shape MNK:       (64,80,16)
+        # TV Layout A:     (128,(64,16)):(0,(1,64))
+        # TV Layout B:     (128,(80,16)):(0,(1,80))
+        # TV Layout C:     ((4,8,4),(2,2,10)):((128,1,16),(64,8,512))
         atom_layout_SdP = (
             self.AtomLayoutMSdP,
             self.num_wg_mma // self.AtomLayoutMSdP,
@@ -292,7 +301,16 @@ class FFABwdSm90:
             atom_layout_mnk=maybe_swap_mn(atom_layout_SdP, self.SdP_swapAB),
             tiler_mn=(64, tiler_mn_SdP[1] if not self.SdP_swapAB else tiler_mn_SdP[0]),
         )
-        # dV = P.T @ dO, dK = dS.T @ Q
+
+        # Tiled MMA for dV = P.T @ dO / dK = dS.T @ Q
+        # Thr Layout VMNK: (128,2,1,1):(1,128,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           128:1
+        # Shape MNK:       (64,128,16)
+        # TV Layout A:     ((4,8,4),(2,2,2)):((128,1,16),(64,8,512))
+        # TV Layout B:     (128,(128,16)):(0,(1,128))
+        # TV Layout C:     ((4,8,4),(2,2,16)):((128,1,16),(64,8,512))
         atom_layout_dKV = (
             self.AtomLayoutNdKV,
             self.num_wg_mma // self.AtomLayoutNdKV,
@@ -323,7 +341,16 @@ class FFABwdSm90:
             )
             for tiler_mn_d in (tiler_mn_dK, tiler_mn_dV)
         ]
-        # dQ = dS @ K
+
+        # Tiled MMA for dQ = dS @ K
+        # Thr Layout VMNK: (128,2,1,1):(1,128,0,0)
+        # Permutation MNK: (_,_,_)
+        # MMA Atom
+        # ThrID:           128:1
+        # Shape MNK:       (64,80,16)
+        # TV Layout A:     (128,(64,16)):(0,(1,64))
+        # TV Layout B:     (128,(80,16)):(0,(1,80))
+        # TV Layout C:     ((4,8,4),(2,2,10)):((128,1,16),(64,8,512))
         assert self.num_wg_dQ % self.AtomLayoutMdQ == 0
         atom_layout_dQ = (self.AtomLayoutMdQ, self.num_wg_dQ // self.AtomLayoutMdQ, 1)
         tiler_mn_dQ = (
