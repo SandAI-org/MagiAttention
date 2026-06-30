@@ -466,19 +466,6 @@ def get_ffa_jit_spec(
             uri += f"_sstore{_store_mode_map[_store_lower]}"
         else:
             extra_template_args["inner_store_mode"] = "1"
-    # ─── InnerLoadMode: tma1d=1 (bulk+consumer rearrange), cpasync=2 (per-row) ───
-    if _inner_use_scatter:
-        _load_env = os.environ.get("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD")
-        if _load_env is not None:
-            _load_lower = _load_env.lower()
-            _load_mode_map = {"tma1d": "1", "cpasync": "2"}
-            assert (
-                _load_lower in _load_mode_map
-            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD must be tma1d/cpasync, got {_load_env}"
-            extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
-            uri += f"_sload{_load_mode_map[_load_lower]}"
-        else:
-            extra_template_args["inner_load_mode"] = "2"
     # Tile/stage overrides for A/B benchmarking (BWD only).
     # Each distinct combo produces a separate JIT URI → separate .so cache.
     if direction == "bwd":
@@ -682,7 +669,6 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER",
     "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE",
     "MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE",
-    "MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD",
     "MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS",
     "MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS",
     "MAGI_ATTENTION_FFA_BWD_TILE_M",

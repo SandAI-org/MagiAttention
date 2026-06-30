@@ -1019,22 +1019,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             index_sparse_indices_2d,
         ) = ctx.saved_tensors
 
-        # Resolve swap_bwd_qk_loop: None → auto-infer, True/False → explicit override
-        _INDEX_SPARSE_LOOPQ_KBS_THRESHOLD = 8
-        if ctx.swap_bwd_qk_loop is not None:
-            swap_bwd_qk_loop = ctx.swap_bwd_qk_loop
-        elif ctx.index_sparse and ctx.k_block_size >= _INDEX_SPARSE_LOOPQ_KBS_THRESHOLD:
-            swap_bwd_qk_loop = False  # LoopQ: block-level K → good outer parallelism
-        elif ctx.index_sparse:
-            swap_bwd_qk_loop = True  # LoopK: token-level K
-        else:
-            swap_bwd_qk_loop = False  # Dense/BlockSparse default: LoopQ
+        swap_bwd_qk_loop = ctx.swap_bwd_qk_loop if ctx.swap_bwd_qk_loop is not None else False
 
         if ctx.disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
             raise RuntimeError(
-                "disable_bwd_dkv_atomic_reduction is incompatible with swap_bwd_qk_loop=True (LoopK). "
-                f"Auto-inferred swap_bwd_qk_loop={swap_bwd_qk_loop} for index_sparse={ctx.index_sparse}, "
-                f"k_block_size={ctx.k_block_size}. Pass swap_bwd_qk_loop=False to override."
+                "disable_bwd_dkv_atomic_reduction is incompatible with swap_bwd_qk_loop=True (LoopK)."
             )
 
         if ctx.index_sparse:
@@ -1059,16 +1048,15 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     -1, nhk, index_sparse_indices_2d.size(-1)
                 )
 
+                from magi_attention.utils.sparse_utils import build_inv_indices
+
                 if _loopq_kbs > 1:
                     assert nhk == 1, (
                         f"IndexSparse BWD LoopQ with k_block_size>1 currently only supports nhk=1, "
                         f"got nhk={nhk}. NHK>1 + kbs>1 has a flat-layout mismatch (P8-BUG-NHK)."
                     )
-                    from magi_attention.utils.sparse_utils import (
-                        build_inv_indices_block,
-                    )
 
-                    _inv_indices, _inv_topk = build_inv_indices_block(
+                    _inv_indices, _inv_topk = build_inv_indices(
                         _fwd_3d,
                         seqlen_k=seqlen_k,
                         k_block_size=_loopq_kbs,
@@ -1080,8 +1068,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     ).contiguous()
                     ctx.index_sparse_max_topk = nhk * _inv_topk
                 else:
-                    from magi_attention.utils.sparse_utils import build_inv_indices
-
                     _inv_indices, _inv_topk = build_inv_indices(
                         _fwd_3d,
                         seqlen_k=seqlen_k,

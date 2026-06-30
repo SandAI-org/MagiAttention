@@ -53,7 +53,6 @@ class FlashAttnFwdSm90 {
   static constexpr bool Has_softcap = CollectiveMainloop::Has_softcap;
   static constexpr bool Use_TMA_Q = CollectiveMainloop::Use_TMA_Q;
   static constexpr bool InnerLoad_Tma = CollectiveMainloop::InnerLoad_Tma;
-  static constexpr bool InnerLoad_Tma1d = CollectiveMainloop::InnerLoad_Tma1d;
   static constexpr bool InnerLoad_CpAsync = CollectiveMainloop::InnerLoad_CpAsync;
 
   // KV pipelines come in two flavors with different constructor signatures: dense TMA
@@ -61,7 +60,7 @@ class FlashAttnFwdSm90 {
   // cluster argument). This helper hides the difference at every construction site.
   template <typename Pipeline, typename Storage, typename PipelineParamsT>
   CUTLASS_DEVICE static Pipeline make_kv_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
-    if constexpr (InnerLoad_Tma || InnerLoad_Tma1d) {
+    if constexpr (InnerLoad_Tma) {
       return Pipeline(storage, pipeline_params, ClusterShape{});
     } else {
       return Pipeline(storage, pipeline_params);
@@ -141,9 +140,6 @@ class FlashAttnFwdSm90 {
       alignas(16) typename CollectiveMainloop::MainloopPipelineK::SharedStorage pipeline_k;
       alignas(16) typename CollectiveMainloop::MainloopPipelineV::SharedStorage pipeline_v;
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
-      // TMA 1D staging mbarrier: tracks SM90_BULK_COPY_G2S completion for scatter loads.
-      // Only meaningful when InnerLoad_Tma1d; zero-cost otherwise.
-      alignas(8) typename cutlass::arch::ClusterTransactionBarrier::ValueType tma1d_staging_mbar;
     } pipelines;
   };
 
@@ -249,7 +245,7 @@ class FlashAttnFwdSm90 {
     // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParamsK pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipelineK::ThreadCategory::Producer : MainloopPipelineK::ThreadCategory::Consumer;
-    if constexpr (InnerLoad_Tma || InnerLoad_Tma1d) {
+    if constexpr (InnerLoad_Tma) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
       pipeline_params_k.num_consumers = NumMmaThreads;
@@ -276,7 +272,7 @@ class FlashAttnFwdSm90 {
     if (warp_group_idx == 0) { // Producer
       using BlockMetaT = std::conditional_t<
           BlockSparse,
-          typename CollectiveMainloop::BlockSparseBlockMeta,
+          typename CollectiveMainloop::BlockSparseProducerBlockMeta,
           std::conditional_t<
               IndexSparse,
               typename CollectiveMainloop::template IndexSparseBlockMeta</*IsProducer=*/true>,
@@ -347,7 +343,7 @@ class FlashAttnFwdSm90 {
     } else { // Consumer
       using BlockMetaT = std::conditional_t<
           BlockSparse,
-          typename CollectiveMainloop::SparseMmaBlockMeta,
+          typename CollectiveMainloop::BlockSparseConsumerBlockMeta,
           std::conditional_t<
               IndexSparse,
               typename CollectiveMainloop::template IndexSparseBlockMeta</*IsProducer=*/false>,

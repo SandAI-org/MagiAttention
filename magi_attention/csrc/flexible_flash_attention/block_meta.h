@@ -147,7 +147,7 @@ struct DenseBlockMeta {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // BlockSparseBlockMeta: Unified producer/consumer via IsProducer template parameter.
-// Replaces both old BlockSparseBlockMeta AND SparseMmaBlockMeta.
+// Used by both producer (IsProducer=true) and consumer (IsProducer=false) aliases.
 //
 // IsLoopQ_=false (LoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
 // IsLoopQ_=true  (LoopQ): outer=KV (TMA), inner=Q (scatter),  token_indices = Q positions

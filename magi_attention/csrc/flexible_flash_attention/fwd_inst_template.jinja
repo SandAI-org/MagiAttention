@@ -35,7 +35,7 @@ static constexpr int kFwdProducerRegs = {{ fwd_producer_regs }};
 static constexpr int kFwdConsumerRegs = {{ fwd_consumer_regs }};
 // IndexSparse K block size: 1 = token-level indices, >1 = block-level (each index covers KBlockSize tokens)
 static constexpr int kKBlockSize = {{ k_block_size | default(1) }};
-// Inner-loop scatter load mode: 0=Tma(2D,auto), 1=Tma1d(bulk+consumer rearrange), 2=CpAsync(per-row)
+// Inner-loop scatter load mode: 0=Tma(2D,auto), 2=CpAsync(per-row)
 static constexpr int kInnerLoadMode = {{ inner_load_mode | default(2) }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
