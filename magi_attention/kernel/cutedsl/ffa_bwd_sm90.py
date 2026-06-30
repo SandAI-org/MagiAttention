@@ -36,6 +36,7 @@ from quack.sm90_utils import gemm_w_idx, gemm_zero_init
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
 from .block_info import BlockInfo
+from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwd
@@ -44,7 +45,7 @@ from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_utils import (
     BlockSparseTensors,
     consume_block_sparse_mma_bwd_sm90,
-    dQaccum_store_block_sparse_bwd_sm90,
+    dQacc_store_block_sparse_bwd_sm90,
     get_total_q_block_count_bwd,
     produce_block_sparse_q_loads_bwd_sm90,
 )
@@ -230,7 +231,7 @@ class FFABwdSm90:
         mdO_type: Type[cutlass.Numeric],
         mLSE_type: Type[cutlass.Numeric],
         mdPsum_type: Type[cutlass.Numeric],
-        mdQaccum_type: Type[cutlass.Numeric],
+        mdQacc_type: Type[cutlass.Numeric],
         mdK_type: Type[cutlass.Numeric],
         mdV_type: Type[cutlass.Numeric],
     ):
@@ -243,8 +244,8 @@ class FFABwdSm90:
             raise TypeError("LSE tensor must be Float32")
         if const_expr(mdPsum_type not in [Float32]):
             raise TypeError("dPsum tensor must be Float32")
-        if const_expr(mdQaccum_type not in [Float32]):
-            raise TypeError("dQaccum tensor must be Float32")
+        if const_expr(mdQacc_type not in [Float32]):
+            raise TypeError("dQacc tensor must be Float32")
         if const_expr(self.qhead_per_kvhead == 1):
             if const_expr(not (mdK_type == mdV_type == mQ_type)):
                 raise TypeError(
@@ -334,7 +335,7 @@ class FFABwdSm90:
         return tiled_mma_SdP, tiled_mma_dK, tiled_mma_dV, tiled_mma_dQ
 
     def _get_shared_storage_cls(self):
-        sQ_struct, sK_struct, sV_struct, sdO_struct, sdQaccum_struct = [
+        sQ_struct, sK_struct, sV_struct, sdO_struct, sdQacc_struct = [
             cute.struct.Align[
                 cute.struct.MemRange[t, cute.cosize(layout)], self.buffer_align_bytes
             ]
@@ -343,7 +344,7 @@ class FFABwdSm90:
                 (self.sK_layout, self.dtype),
                 (self.sV_layout, self.dtype),
                 (self.sdO_layout, self.dtype),
-                (self.sdQaccum_layout, Float32),
+                (self.sdQacc_layout, Float32),
             ]
         ]
 
@@ -376,7 +377,7 @@ class FFABwdSm90:
             sdO: sdO_struct
             sP: cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sP], 1024]
             sdS: cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sdS], 1024]
-            sdQaccum: sdQaccum_struct
+            sdQacc: sdQacc_struct
 
         self.shared_storage_cls = SharedStorageQKV
 
@@ -478,12 +479,12 @@ class FFABwdSm90:
             stage=self.PdS_stage,
             major_mode_size=math.gcd(self.tile_n // wg_n_SdP, self.tile_n // wg_n_dKV),
         )
-        self.sdQaccum_layout = cute.make_layout(
+        self.sdQacc_layout = cute.make_layout(
             (self.tile_m * self.tile_hdim // self.num_wg_dQ, self.num_wg_dQ)
         )
 
-        # dQaccum R->S
-        self.r2s_tiled_copy_dQaccum = cute.make_tiled_copy_tv(
+        # dQacc R->S
+        self.r2s_tiled_copy_dQacc = cute.make_tiled_copy_tv(
             cute.make_copy_atom(
                 cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=128
             ),
@@ -519,7 +520,7 @@ class FFABwdSm90:
             print(f"{prefix}sK_layout: {self.sK_layout}")
             print(f"{prefix}sV_layout: {self.sV_layout}")
             print(f"{prefix}sPdS_layout: {self.sPdS_layout}")
-            print(f"{prefix}sdQaccum_layout: {self.sdQaccum_layout}")
+            print(f"{prefix}sdQacc_layout: {self.sdQacc_layout}")
             print()
 
     @cute.jit
@@ -531,7 +532,7 @@ class FFABwdSm90:
         mdO: cute.Tensor,
         mLSE: cute.Tensor,
         mdPsum: cute.Tensor,
-        mdQaccum: cute.Tensor,
+        mdQacc: cute.Tensor,
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         softmax_scale: Float32,
@@ -559,7 +560,7 @@ class FFABwdSm90:
         self._check_type(
             *(
                 t.element_type if t is not None else None
-                for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV)
+                for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQacc, mdK, mdV)
             )
         )
 
@@ -578,9 +579,9 @@ class FFABwdSm90:
         # with layout transformations for specific memory access patterns
         # ///////////////////////////////////////////////////////////////////////////////
 
-        mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV = [
+        mQ, mK, mV, mdO, mLSE, mdPsum, mdQacc, mdK, mdV = [
             cutedsl_utils.assume_tensor_aligned(t)
-            for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQaccum, mdK, mdV)
+            for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQacc, mdK, mdV)
         ]
 
         # Non-varlen inputs are (b, s, n, h), varlen inputs are (s, n, h).
@@ -604,13 +605,11 @@ class FFABwdSm90:
             mdK, mdV = [layout_utils.select(t, accum_transpose) for t in (mdK, mdV)]
         # Non-varlen stats are (b, n, s), varlen stats are (n, s).
         # mLSE/mdPsum: (sQpad,nhQ,batch):(1,sQpad,sQpad*nhQ)
-        # mdQaccum:    (sQpad*HD,nhQ,batch):(1,sQpad*HD,sQpad*HD*nhQ)
-        LSE_dPsum_dQaccum_transpose = (
-            [2, 1, 0] if cute.rank(mLSE.shape) == 3 else [1, 0]
-        )
-        mLSE, mdPsum, mdQaccum = [
-            layout_utils.select(t, LSE_dPsum_dQaccum_transpose)
-            for t in (mLSE, mdPsum, mdQaccum)
+        # mdQacc:    (sQpad*HD,nhQ,batch):(1,sQpad*HD,sQpad*HD*nhQ)
+        LSE_dPsum_dQacc_transpose = [2, 1, 0] if cute.rank(mLSE.shape) == 3 else [1, 0]
+        mLSE, mdPsum, mdQacc = [
+            layout_utils.select(t, LSE_dPsum_dQacc_transpose)
+            for t in (mLSE, mdPsum, mdQacc)
         ]
 
         # (batch, num_head, num_m_blocks, cluster_size) -> (num_m_blocks, cluster_size, num_head, batch)
@@ -811,7 +810,7 @@ class FFABwdSm90:
             cute.printf(prefix + "mdO.layout: {}", mdO.layout)
             cute.printf(prefix + "mLSE.layout: {}", mLSE.layout)
             cute.printf(prefix + "mdPsum.layout: {}", mdPsum.layout)
-            cute.printf(prefix + "mdQaccum.layout: {}", mdQaccum.layout)
+            cute.printf(prefix + "mdQacc.layout: {}", mdQacc.layout)
             cute.printf(prefix + "mdK.layout: {}", mdK.layout)
             cute.printf(prefix + "mdV.layout: {}", mdV.layout)
             cute.printf("")
@@ -894,7 +893,7 @@ class FFABwdSm90:
             tma_atom_dV,
             mLSE,
             mdPsum,
-            mdQaccum,
+            mdQacc,
             mCuSeqlensQ,
             mCuSeqlensK,
             mSeqUsedQ,
@@ -904,8 +903,8 @@ class FFABwdSm90:
             self.sV_layout,
             self.sPdS_layout,
             self.sdO_layout,
-            self.sdQaccum_layout,
-            self.r2s_tiled_copy_dQaccum,
+            self.sdQacc_layout,
+            self.r2s_tiled_copy_dQacc,
             self.tiled_mma_SdP,
             self.tiled_mma_dK,
             self.tiled_mma_dV,
@@ -947,7 +946,7 @@ class FFABwdSm90:
         tma_atom_dV: cute.CopyAtom,
         mLSE: cute.Tensor,
         mdPsum: cute.Tensor,
-        mdQaccum: cute.Tensor,
+        mdQacc: cute.Tensor,
         mCuSeqlensQ: Optional[cute.Tensor],
         mCuSeqlensK: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
@@ -957,8 +956,8 @@ class FFABwdSm90:
         sV_layout: cute.ComposedLayout,
         sPdS_layout: cute.ComposedLayout,
         sdO_layout: cute.ComposedLayout,
-        sdQaccum_layout: cute.Layout,
-        r2s_tiled_copy_dQaccum: cute.TiledCopy,
+        sdQacc_layout: cute.Layout,
+        r2s_tiled_copy_dQacc: cute.TiledCopy,
         tiled_mma_SdP: cute.TiledMma,
         tiled_mma_dK: cute.TiledMma,
         tiled_mma_dV: cute.TiledMma,
@@ -976,7 +975,14 @@ class FFABwdSm90:
         window_size_left: Optional[Int32] = None,
         window_size_right: Optional[Int32] = None,
     ):
+        # /////////////////////////////////////////////////////////////////////////////
+        #  Set up before warp specialization
+        # /////////////////////////////////////////////////////////////////////////////
+
+        # --- Set up thread info ---
+
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        tidx, _, _ = cute.arch.thread_idx()
 
         # Used only for debug print
         # guarded by const_expr so zero overhead when debug_print=False
@@ -984,8 +990,12 @@ class FFABwdSm90:
         is_print_block = const_expr(self.debug_print) and (
             (bidx == 0) and (bidy == 0) and (bidz == 0)
         )
+        is_print_thread = const_expr(self.debug_print) and (
+            (tidx == 127) and is_print_block
+        )
 
-        # prefetch TMA descriptors
+        # --- Prefetch TMA descriptor ---
+
         if warp_idx == 0:
             for atom in [
                 tma_atom_Q,
@@ -998,12 +1008,16 @@ class FFABwdSm90:
                 if const_expr(atom is not None):
                     cpasync.prefetch_descriptor(atom)
 
+        # --- Alloc smem storage and fetch ptrs ---
+
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage_cls)
 
-        pipeline_producer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
-        pipeline_consumer_group = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread, self.num_mma_threads // cute.arch.WARP_SIZE
+        # --- Make pipelines ---
+
+        pipeline_producer_group = ThreadCooperativeGroup(1)
+        pipeline_consumer_group = ThreadCooperativeGroup(
+            self.num_mma_threads // cute.arch.WARP_SIZE
         )
         pipeline_Q = ffa_pipeline.PipelineTmaAsync.create(
             barrier_storage=storage.mbar_ptr_Q.data_ptr(),
@@ -1021,6 +1035,8 @@ class FFABwdSm90:
             tx_count=self.tma_copy_bytes["dO"] + self.tma_copy_bytes["dPsum"],
             defer_sync=False,
         )
+
+        # --- Make smem tensors of sQ/sK/sV/sO/sP/sdS/sLSE/sdPsum/sdQacc ---
 
         sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)
         sdO = storage.sdO.get_tensor(sdO_layout.outer, swizzle=sdO_layout.inner)
@@ -1042,7 +1058,7 @@ class FFABwdSm90:
                 stride=(1, cute.round_up(self.tile_m, 64)),
             )
         )
-        sdQaccum = storage.sdQaccum.get_tensor(sdQaccum_layout)
+        sdQacc = storage.sdQacc.get_tensor(sdQacc_layout)
 
         block_info = BlockInfo(
             self.tile_m,
@@ -1111,9 +1127,9 @@ class FFABwdSm90:
                     is_print_block,
                 )
             if warp_idx == 1:
-                self.dQaccum_store(
-                    mdQaccum,
-                    sdQaccum,
+                self.dQacc_store(
+                    mdQacc,
+                    sdQacc,
                     block_info,
                     tile_scheduler,
                     SeqlenInfoCls,
@@ -1133,7 +1149,7 @@ class FFABwdSm90:
                 mdV,
                 mdK_semaphore,
                 mdV_semaphore,
-                mdQaccum,
+                mdQacc,
                 sQ,
                 sK,
                 sV,
@@ -1142,13 +1158,13 @@ class FFABwdSm90:
                 sdS,
                 sLSE,
                 sdPsum,
-                sdQaccum,
+                sdQacc,
                 pipeline_Q,
                 pipeline_dO,
                 tidx,
                 tma_atom_dK,
                 tma_atom_dV,
-                r2s_tiled_copy_dQaccum,
+                r2s_tiled_copy_dQacc,
                 softmax_scale_log2,
                 softmax_scale,
                 block_info,
@@ -1506,7 +1522,7 @@ class FFABwdSm90:
         mdV: cute.Tensor,
         mdK_semaphore: Optional[cute.Tensor],
         mdV_semaphore: Optional[cute.Tensor],
-        mdQaccum: cute.Tensor,
+        mdQacc: cute.Tensor,
         sQ: cute.Tensor,
         sK: cute.Tensor,
         sV: cute.Tensor,
@@ -1515,13 +1531,13 @@ class FFABwdSm90:
         sdS: cute.Tensor,
         sLSE: cute.Tensor,
         sdPsum: cute.Tensor,
-        sdQaccum: cute.Tensor,
+        sdQacc: cute.Tensor,
         pipeline_Q: pipeline.PipelineAsync,
         pipeline_dO: pipeline.PipelineAsync,
         tidx: Int32,
         tma_atom_dK: cute.CopyAtom,
         tma_atom_dV: cute.CopyAtom,
-        r2s_tiled_copy_dQaccum: cute.TiledCopy,
+        r2s_tiled_copy_dQacc: cute.TiledCopy,
         softmax_scale_log2: Float32,
         softmax_scale: Float32,
         block_info: BlockInfo,
@@ -1674,10 +1690,10 @@ class FFABwdSm90:
             )
             tLSEsdPsum = cute.group_modes(tLSEsdPsum, 0, 2)
 
-        tdQsdQaccum = None
+        tdQsdQacc = None
         if const_expr(is_dQ_wg):
-            smem_thr_copy_dQaccum = r2s_tiled_copy_dQaccum.get_slice(tidx)
-            tdQsdQaccum = smem_thr_copy_dQaccum.partition_D(sdQaccum)
+            smem_thr_copy_dQacc = r2s_tiled_copy_dQacc.get_slice(tidx)
+            tdQsdQacc = smem_thr_copy_dQacc.partition_D(sdQacc)
 
         PdS_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwd.PdS), num_threads=self.num_mma_threads
@@ -1711,7 +1727,7 @@ class FFABwdSm90:
             pipeline_dO=pipeline_dO,
             tLSEsLSE=tLSEsLSE,
             tLSEsdPsum=tLSEsdPsum,
-            tdQsdQaccum=tdQsdQaccum,
+            tdQsdQacc=tdQsdQacc,
             softmax_scale_log2=softmax_scale_log2,
             PdS_barrier=PdS_barrier,
             # acc_dV=acc_dV,
@@ -1951,7 +1967,7 @@ class FFABwdSm90:
         pipeline_dO: pipeline.PipelineAsync,
         tLSEsLSE: cute.Tensor,
         tLSEsdPsum: cute.Tensor,
-        tdQsdQaccum: Optional[cute.Tensor],
+        tdQsdQacc: Optional[cute.Tensor],
         softmax_scale_log2: Float32,
         PdS_barrier: pipeline.NamedBarrier,
         is_dQ_wg: cutlass.Constexpr[bool] = True,
@@ -1965,7 +1981,7 @@ class FFABwdSm90:
 
         This is the core bwd sub-process: it fuses 5 GEMMs and 2 pointwise ops over
         one (m_block) x (n_block) tile, accumulating dK/dV across m_blocks and writing
-        dQ to smem (handed off to dQaccum_store):
+        dQ to smem (handed off to dQacc_store):
           (1) [GEMM 1] S   = Q @ K^T
           (2) [GEMM 2] dP  = dO @ V^T
           (3) [Pointwise 1] P  = exp2(S * scale - LSE)
@@ -2112,16 +2128,16 @@ class FFABwdSm90:
                     wg_wait=1,
                 )
 
-            # dQ R2S: wait for dQaccum_store to free the smem buffer, then write dQ to smem
+            # dQ R2S: wait for dQacc_store to free the smem buffer, then write dQ to smem
             # When dQ_single_wg, only WG0 enters here so warp_group_idx == 0
             cute.arch.barrier(
                 barrier_id=int(NamedBarrierBwd.dQEmptyWG0) + warp_group_idx,
                 number_of_threads=self.num_threads_per_warp_group + cute.arch.WARP_SIZE,
             )
-            tdQrdQaccum_flat = cute.make_tensor(
-                acc_dQ.iterator, cute.make_layout(tdQsdQaccum.shape)
+            tdQrdQacc_flat = cute.make_tensor(
+                acc_dQ.iterator, cute.make_layout(tdQsdQacc.shape)
             )
-            cute.autovec_copy(tdQrdQaccum_flat, tdQsdQaccum)
+            cute.autovec_copy(tdQrdQacc_flat, tdQsdQacc)
             cute.arch.fence_view_async_shared()
             cute.arch.barrier_arrive(
                 barrier_id=int(NamedBarrierBwd.dQFullWG0) + warp_group_idx,
@@ -2336,10 +2352,10 @@ class FFABwdSm90:
                 cutedsl_utils.arrive_inc(mdV_semaphore_cur.iterator, tidx, 0, 1)
 
     @cute.jit
-    def dQaccum_store(
+    def dQacc_store(
         self,
-        mdQaccum: cute.Tensor,
-        sdQaccum: cute.Tensor,
+        mdQacc: cute.Tensor,
+        sdQacc: cute.Tensor,
         block_info: BlockInfo,
         tile_scheduler: TileSchedulerProtocol,
         SeqlenInfoCls: cutlass.Constexpr[Callable],
@@ -2348,7 +2364,7 @@ class FFABwdSm90:
         is_print_block: bool = False,
     ):
         tidx, _, _ = cute.arch.thread_idx()
-        # warp-local thread index (dQaccum_store runs on warp 1, global tidx 32-63)
+        # warp-local thread index (dQacc_store runs on warp 1, global tidx 32-63)
         warp_local_tidx = tidx % cute.arch.WARP_SIZE
         read_flag = const_expr(not self.deterministic)
 
@@ -2362,7 +2378,7 @@ class FFABwdSm90:
 
             # --- Debug print ---
 
-            # local thread-0 of the dQaccum_store warp (warp 1)
+            # local thread-0 of the dQacc_store warp (warp 1)
             is_print_thread_and_tile = const_expr(self.debug_print) and (
                 (warp_local_tidx == 0)
                 and is_print_block
@@ -2372,7 +2388,7 @@ class FFABwdSm90:
             )
             if const_expr(self.debug_print):
                 if is_print_thread_and_tile:
-                    prefix = "[bwd_sm90_dQaccum_store] "
+                    prefix = "[bwd_sm90_dQacc_store] "
                     cute.printf("")
                     cute.printf(
                         prefix + "n_block={} head_idx={} batch_idx={}",
@@ -2380,18 +2396,18 @@ class FFABwdSm90:
                         head_idx,
                         batch_idx,
                     )
-                    cute.printf(prefix + "sdQaccum.layout: {}", sdQaccum.layout)
+                    cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
                     cute.printf("")
 
             if const_expr(not seqlen.has_cu_seqlens_q):
-                mdQaccum_cur = mdQaccum[None, head_idx, batch_idx]
+                mdQacc_cur = mdQacc[None, head_idx, batch_idx]
             else:
-                mdQaccum_cur = cute.domain_offset(
-                    (seqlen.padded_offset_q * self.tile_hdim,), mdQaccum[None, head_idx]
+                mdQacc_cur = cute.domain_offset(
+                    (seqlen.padded_offset_q * self.tile_hdim,), mdQacc[None, head_idx]
                 )
             # ((M * K / num_wg_dQ, num_wg_dQ), num_m_blocks)
-            gdQaccum = cute.local_tile(
-                mdQaccum_cur,
+            gdQacc = cute.local_tile(
+                mdQacc_cur,
                 (
                     cute.make_layout(
                         (self.tile_m * self.tile_hdim // self.num_wg_dQ, self.num_wg_dQ)
@@ -2468,8 +2484,8 @@ class FFABwdSm90:
                             )
                             with cute.arch.elect_one():
                                 copy_utils.cpasync_reduce_bulk_add_f32(
-                                    sdQaccum[None, warp_group_idx].iterator,
-                                    gdQaccum[
+                                    sdQacc[None, warp_group_idx].iterator,
+                                    gdQacc[
                                         (None, warp_group_idx), m_block_safe
                                     ].iterator,
                                     self.tma_copy_bytes["dQ"],
@@ -2489,13 +2505,13 @@ class FFABwdSm90:
                     assert (
                         not self.deterministic
                     ), "Deterministic not implemented for block-sparse backward"
-                    dQaccum_store_block_sparse_bwd_sm90(
+                    dQacc_store_block_sparse_bwd_sm90(
                         blocksparse_tensors,
                         batch_idx,
                         head_idx,
                         n_block,
-                        sdQaccum,
-                        gdQaccum,
+                        sdQacc,
+                        gdQacc,
                         subtile_factor=self.subtile_factor,
                         m_block_max=m_block_max,
                         num_dQ_warp_groups=self.num_wg_dQ,

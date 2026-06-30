@@ -2246,7 +2246,7 @@ def _store_one_dQaccum_sm90(
 
 
 @cute.jit
-def dQaccum_store_block_sparse_bwd_sm90(
+def dQacc_store_block_sparse_bwd_sm90(
     blocksparse_tensors: BlockSparseTensors,
     batch_idx,
     head_idx,
