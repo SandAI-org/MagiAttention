@@ -2597,7 +2597,7 @@ class FFABwdSm90:
             # --- Get current tile info ---
 
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
-            seqlen = SeqlenInfoCls(batch_idx)
+            seqlen_info = SeqlenInfoCls(batch_idx)
 
             # Used only for debug print
             is_print_thread_and_tile = const_expr(self.debug_print) and (
@@ -2608,13 +2608,16 @@ class FFABwdSm90:
                 and (batch_idx == 0)
             )
 
-            if const_expr(not seqlen.has_cu_seqlens_q):
+            # mdQacc_cur: (sQpad*tileHD):(1)
+            if const_expr(not seqlen_info.has_cu_seqlens_q):
                 mdQacc_cur = mdQacc[None, head_idx, batch_idx]
             else:
                 mdQacc_cur = cute.domain_offset(
-                    (seqlen.padded_offset_q * self.tile_hdim,), mdQacc[None, head_idx]
+                    (seqlen_info.padded_offset_q * self.tile_hdim,),
+                    mdQacc[None, head_idx],
                 )
-            # ((M * K / num_wg_dQ, num_wg_dQ), num_m_blocks)
+            # gdQacc: ((tileQ*tileHD//num_wg_dQ=4096,num_wg_dQ),restQ):((1,4096),8192)
+            # where restQ = sQpad // tileQ
             gdQacc = cute.local_tile(
                 mdQacc_cur,
                 (
@@ -2629,7 +2632,9 @@ class FFABwdSm90:
                 # mdQ_semaphore is (num_m_blocks, cluster_size, num_head, batch) after transpose
                 mdQ_semaphore_cur = mdQ_semaphore[None, None, head_idx, batch_idx]
 
-            m_block_min, m_block_max = block_info.get_m_block_min_max(seqlen, n_block)
+            m_block_min, m_block_max = block_info.get_m_block_min_max(
+                seqlen_info, n_block
+            )
             if const_expr(not self.use_block_sparsity):
                 process_tile = (
                     const_expr(not self.is_local and not self.is_varlen_q)
@@ -2659,8 +2664,21 @@ class FFABwdSm90:
                         head_idx,
                         batch_idx,
                     )
+                    cute.printf(
+                        prefix + "m_block_min={} m_block_max={}",
+                        m_block_min,
+                        m_block_max,
+                    )
+                    if const_expr(not self.use_block_sparsity):
+                        cute.printf(prefix + "loop_count={}", loop_count)
+                    cute.printf(prefix + "process_tile={}", process_tile)
+                    cute.printf("")
+                    cute.printf(prefix + "mdQacc_cur.layout: {}", mdQacc_cur.layout)
+                    cute.printf(prefix + "gdQacc.layout: {}", gdQacc.layout)
                     cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
                     cute.printf("")
+
+            # --- Store dQacc ---
 
             if process_tile:
                 if const_expr(not self.use_block_sparsity):
@@ -2688,7 +2706,9 @@ class FFABwdSm90:
                                 (
                                     _,
                                     n_block_max_for_m_block,
-                                ) = block_info.get_n_block_min_max(seqlen, m_block_safe)
+                                ) = block_info.get_n_block_min_max(
+                                    seqlen_info, m_block_safe
+                                )
                                 lock_value = n_block_max_for_m_block - 1 - n_block
                             else:
                                 lock_value = n_block
@@ -2725,7 +2745,7 @@ class FFABwdSm90:
                                 0,  # flag_offset
                                 1,
                             )
-                else:  # block sparse dQ (TODO: review the logics)
+                else:  # block sparse dQacc (TODO: review the logics)
                     assert (
                         not self.deterministic
                     ), "Deterministic not implemented for block-sparse backward"
@@ -2750,7 +2770,7 @@ class FFABwdSm90:
                 and not self.spt
                 and block_info.window_size_left is not None
             ):
-                m_block_global_max = cute.ceil_div(seqlen.seqlen_q, self.tile_m)
+                m_block_global_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
                 for m_block in cutlass.range(m_block_max, m_block_global_max, unroll=1):
                     cutedsl_utils.arrive_inc(
                         mdQ_semaphore_cur[(m_block, None)].iterator,
@@ -2759,6 +2779,7 @@ class FFABwdSm90:
                         1,
                     )
 
+            # Advance to next K/V tile
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 
