@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="arg-type,union-attr,index,misc,no-redef,assignment"
+# mypy: disable-error-code="arg-type,union-attr,index,misc,no-redef,assignment,attr-defined"
 # pyright: reportInvalidTypeForm=false
 
 import math
@@ -112,7 +112,8 @@ class FFABwdSm90:
         self.deterministic = deterministic
         self.tile_m = tile_m
         self.tile_n = tile_n
-        self.num_threads = num_threads
+        self.num_threads = num_threads  # 384 (3 WGs = 1 producer + 2 MMA)
+        self.num_warps = self.num_threads // cute.arch.WARP_SIZE  # 12
 
         self.Q_stage = Q_stage
         self.dO_stage = dO_stage
@@ -128,7 +129,8 @@ class FFABwdSm90:
         self.AtomLayoutNdKV = AtomLayoutNdKV
         self.AtomLayoutMdQ = AtomLayoutMdQ
 
-        self.num_wg_mma = (self.num_threads // 128) - 1
+        self.num_wg_load = 1
+        self.num_wg_mma = (self.num_threads // 128) - self.num_wg_load
         self.mma_dkv_is_rs = (
             AtomLayoutMSdP == 1
             and AtomLayoutNdKV == self.num_wg_mma
@@ -152,7 +154,8 @@ class FFABwdSm90:
         self.shuffle_dPsum = self.SdP_swapAB and self.tile_hdim <= 64
 
         self.buffer_align_bytes = 1024
-        self.num_threads_per_warp_group = 128
+        self.num_warps_per_wg = 4
+        self.num_threads_per_wg = self.num_warps_per_wg * cute.arch.WARP_SIZE
 
         self.score_mod = score_mod
         self.score_mod_bwd = score_mod_bwd
@@ -185,7 +188,9 @@ class FFABwdSm90:
             print(
                 f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | {self.deterministic=}"
             )
-            print(f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_threads=}")
+            print(
+                f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.num_threads=} | {self.num_warps=}"
+            )
             print(f"{prefix}{self.Q_stage=} | {self.dO_stage=} | {self.PdS_stage=}")
             print(
                 f"{prefix}{self.SdP_swapAB=} | {self.dKV_swapAB=} | {self.dQ_swapAB=}"
@@ -194,11 +199,17 @@ class FFABwdSm90:
                 f"{prefix}{self.AtomLayoutMSdP=} | {self.AtomLayoutNdKV=} | {self.AtomLayoutMdQ=}"
             )
             print(
-                f"{prefix}{self.num_wg_mma=} | {self.num_wg_dQ=} | {self.mma_dkv_is_rs=} | {self.V_in_regs=}"
+                f"{prefix}{self.num_wg_mma=} | {self.num_wg_load=} | "
+                f"{self.num_wg_dQ=} | {self.mma_dkv_is_rs=} | {self.V_in_regs=}"
             )
             print(f"{prefix}{self.shuffle_LSE=} | {self.shuffle_dPsum=}")
             print(
                 f"{prefix}{self.score_mod=} | {self.score_mod_bwd=} | {self.mask_mod=}"
+            )
+            print(
+                f"{self.num_warps_per_wg=} | "
+                f"{self.num_threads_per_wg=} | "
+                f"{self.buffer_align_bytes=}"
             )
             print()
 
@@ -392,10 +403,14 @@ class FFABwdSm90:
         ) = self._get_tiled_mma()
 
         self.num_mma_threads = self.tiled_mma_SdP.size
-        assert (
-            self.num_threads == self.num_mma_threads + self.num_threads_per_warp_group
+        assert self.num_threads == self.num_mma_threads + self.num_threads_per_wg
+        self.num_producer_threads = (
+            self.num_wg_load * cute.arch.WARP_SIZE
+        )  # only first warp in producer WG
+        self.load_warp_ids = list(range(0, self.num_wg_load * self.num_warps_per_wg))
+        self.mma_warp_ids = list(
+            range(self.num_wg_load * self.num_warps_per_wg, self.num_warps)
         )
-        self.num_producer_threads = cute.arch.WARP_SIZE
 
         # --- Set up registers ---
 
@@ -489,7 +504,7 @@ class FFABwdSm90:
                 cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=128
             ),
             # thr_layout
-            cute.make_layout((self.num_threads_per_warp_group, self.num_wg_dQ)),
+            cute.make_layout((self.num_threads_per_wg, self.num_wg_dQ)),
             cute.make_layout(128 // Float32.width),  # val_layout
         )
         # dKVaccum for GQA epilogue - reuses sV+sK memory recast as f32
@@ -502,6 +517,7 @@ class FFABwdSm90:
             print()
             print(f"{prefix}num_mma_threads: {self.num_mma_threads}")
             print(f"{prefix}num_producer_threads: {self.num_producer_threads}")
+            print(f"{prefix}{self.load_warp_ids=} | {self.mma_warp_ids=}")
             print(f"{prefix}num_mma_regs: {self.num_mma_regs}")
             print(f"{prefix}num_mma_regs_wg0: {self.num_mma_regs_wg0}")
             print(f"{prefix}num_mma_regs_wg1: {self.num_mma_regs_wg1}")
@@ -1038,27 +1054,39 @@ class FFABwdSm90:
 
         # --- Make smem tensors of sQ/sK/sV/sO/sP/sdS/sLSE/sdPsum/sdQacc ---
 
-        sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)
-        sdO = storage.sdO.get_tensor(sdO_layout.outer, swizzle=sdO_layout.inner)
-        sK = storage.sK.get_tensor(sK_layout.outer, swizzle=sK_layout.inner)
-        sV = storage.sV.get_tensor(sV_layout.outer, swizzle=sV_layout.inner)
-        sP = None
+        sQ: cute.Tensor = storage.sQ.get_tensor(
+            sQ_layout.outer, swizzle=sQ_layout.inner
+        )
+        sdO: cute.Tensor = storage.sdO.get_tensor(
+            sdO_layout.outer, swizzle=sdO_layout.inner
+        )
+        sK: cute.Tensor = storage.sK.get_tensor(
+            sK_layout.outer, swizzle=sK_layout.inner
+        )
+        sV: cute.Tensor = storage.sV.get_tensor(
+            sV_layout.outer, swizzle=sV_layout.inner
+        )
+        sP: cute.Tensor | None = None
         if const_expr(not self.mma_dkv_is_rs):
             sP = storage.sP.get_tensor(sPdS_layout.outer, swizzle=sPdS_layout.inner)
-        sdS = storage.sdS.get_tensor(sPdS_layout.outer, swizzle=sPdS_layout.inner)
-        sLSE = storage.sLSE.get_tensor(
+        sdS: cute.Tensor = storage.sdS.get_tensor(
+            sPdS_layout.outer, swizzle=sPdS_layout.inner
+        )
+        sLSE: cute.Tensor = storage.sLSE.get_tensor(
             cute.make_layout(
                 (self.tile_m, self.Q_stage),
                 stride=(1, cute.round_up(self.tile_m, 64)),
             )
         )
-        sdPsum = storage.sdPsum.get_tensor(
+        sdPsum: cute.Tensor = storage.sdPsum.get_tensor(
             cute.make_layout(
                 (self.tile_m, self.dO_stage),
                 stride=(1, cute.round_up(self.tile_m, 64)),
             )
         )
-        sdQacc = storage.sdQacc.get_tensor(sdQacc_layout)
+        sdQacc: cute.Tensor = storage.sdQacc.get_tensor(sdQacc_layout)
+
+        # --- Make other info dataclass ---
 
         block_info = BlockInfo(
             self.tile_m,
@@ -1097,9 +1125,33 @@ class FFABwdSm90:
             tile_scheduler, TileSchedulerProtocol
         ), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
 
-        if warp_idx < 4:
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread:
+                prefix = "[bwd_sm90_kernel_setup] "
+                cute.printf("")
+                cute.printf(prefix + "warp_idx={} tidx={}", warp_idx, tidx)
+                cute.printf("")
+                cute.printf(prefix + "sQ.layout: {}", sQ.layout)
+                cute.printf(prefix + "sdO.layout: {}", sdO.layout)
+                cute.printf(prefix + "sK.layout: {}", sK.layout)
+                cute.printf(prefix + "sV.layout: {}", sV.layout)
+                if const_expr(sP is not None):
+                    cute.printf(prefix + "sP.layout: {}", sP.layout)
+                cute.printf(prefix + "sdS.layout: {}", sdS.layout)
+                cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
+                cute.printf(prefix + "sdPsum.layout: {}", sdPsum.layout)
+                cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
+                cute.printf("")
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  Load WarpGroup
+        # ///////////////////////////////////////////////////////////////////////////////
+        if warp_idx <= self.load_warp_ids[-1]:  # Producer
             cute.arch.setmaxregister_decrease(self.num_producer_regs)
-            if warp_idx == 0:
+
+            if warp_idx == 0:  # load
                 self.load(
                     mQ,
                     mK,
@@ -1126,7 +1178,7 @@ class FFABwdSm90:
                     qhead_per_kvhead_divmod,
                     is_print_block,
                 )
-            if warp_idx == 1:
+            elif warp_idx == 1:  # dQacc atomic reduce
                 self.dQacc_store(
                     mdQacc,
                     sdQacc,
@@ -1137,9 +1189,11 @@ class FFABwdSm90:
                     mdQ_semaphore,
                     is_print_block,
                 )
-        else:
-            tidx, _, _ = cute.arch.thread_idx()
-            tidx = tidx - 128
+
+        # ///////////////////////////////////////////////////////////////////////////////
+        #  MMA WarpGroups
+        # ///////////////////////////////////////////////////////////////////////////////
+        if warp_idx >= self.mma_warp_ids[0]:  # Consumer
             mma_args = (
                 tiled_mma_SdP,
                 tiled_mma_dK,
@@ -1161,7 +1215,6 @@ class FFABwdSm90:
                 sdQacc,
                 pipeline_Q,
                 pipeline_dO,
-                tidx,
                 tma_atom_dK,
                 tma_atom_dV,
                 r2s_tiled_copy_dQacc,
@@ -1176,6 +1229,7 @@ class FFABwdSm90:
                 blocksparse_tensors,
                 qhead_per_kvhead_divmod,
             )
+
             if const_expr(self.num_wg_dQ == self.num_wg_mma):
                 # Both WGs compute dQ
                 cute.arch.setmaxregister_increase(self.num_mma_regs_wg0)
@@ -1534,7 +1588,6 @@ class FFABwdSm90:
         sdQacc: cute.Tensor,
         pipeline_Q: pipeline.PipelineAsync,
         pipeline_dO: pipeline.PipelineAsync,
-        tidx: Int32,
         tma_atom_dK: cute.CopyAtom,
         tma_atom_dV: cute.CopyAtom,
         r2s_tiled_copy_dQacc: cute.TiledCopy,
@@ -1551,11 +1604,11 @@ class FFABwdSm90:
         is_dQ_wg: cutlass.Constexpr[bool] = True,
         is_print_block: bool = False,
     ):
-        warp_group_idx = cute.arch.make_warp_uniform(
-            tidx // self.num_threads_per_warp_group
-        )
+        tidx, _, _ = cute.arch.thread_idx()
+        tidx -= self.mma_warp_ids[0] * cute.arch.WARP_SIZE
+        warp_group_idx = cute.arch.make_warp_uniform(tidx // self.num_threads_per_wg)
         warp_group_thread_layout = cute.make_layout(
-            self.num_wg_mma, stride=self.num_threads_per_warp_group
+            self.num_wg_mma, stride=self.num_threads_per_wg
         )
         thr_mma_SdP = tiled_mma_SdP.get_slice(tidx)
         wg_mma_SdP = tiled_mma_SdP.get_slice(warp_group_thread_layout(warp_group_idx))
@@ -2132,7 +2185,7 @@ class FFABwdSm90:
             # When dQ_single_wg, only WG0 enters here so warp_group_idx == 0
             cute.arch.barrier(
                 barrier_id=int(NamedBarrierBwd.dQEmptyWG0) + warp_group_idx,
-                number_of_threads=self.num_threads_per_warp_group + cute.arch.WARP_SIZE,
+                number_of_threads=self.num_threads_per_wg + cute.arch.WARP_SIZE,
             )
             tdQrdQacc_flat = cute.make_tensor(
                 acc_dQ.iterator, cute.make_layout(tdQsdQacc.shape)
@@ -2141,7 +2194,7 @@ class FFABwdSm90:
             cute.arch.fence_view_async_shared()
             cute.arch.barrier_arrive(
                 barrier_id=int(NamedBarrierBwd.dQFullWG0) + warp_group_idx,
-                number_of_threads=self.num_threads_per_warp_group + cute.arch.WARP_SIZE,
+                number_of_threads=self.num_threads_per_wg + cute.arch.WARP_SIZE,
             )
 
             warpgroup.wait_group(0)
@@ -2303,7 +2356,7 @@ class FFABwdSm90:
                 cute.make_copy_atom(
                     cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=128
                 ),
-                cute.make_layout((self.num_threads_per_warp_group, self.num_wg_mma)),
+                cute.make_layout((self.num_threads_per_wg, self.num_wg_mma)),
                 cute.make_layout(128 // Float32.width),
             )
             thr_copy_dKVaccum_r2s = tiled_copy_dKVaccum_r2s.get_slice(tidx)
@@ -2454,7 +2507,7 @@ class FFABwdSm90:
                             cute.arch.barrier_arrive(
                                 barrier_id=int(NamedBarrierBwd.dQEmptyWG0)
                                 + warp_group_idx,
-                                number_of_threads=self.num_threads_per_warp_group
+                                number_of_threads=self.num_threads_per_wg
                                 + cute.arch.WARP_SIZE,
                             )
 
@@ -2479,7 +2532,7 @@ class FFABwdSm90:
                             cute.arch.barrier(
                                 barrier_id=int(NamedBarrierBwd.dQFullWG0)
                                 + warp_group_idx,
-                                number_of_threads=self.num_threads_per_warp_group
+                                number_of_threads=self.num_threads_per_wg
                                 + cute.arch.WARP_SIZE,
                             )
                             with cute.arch.elect_one():
@@ -2515,7 +2568,7 @@ class FFABwdSm90:
                         subtile_factor=self.subtile_factor,
                         m_block_max=m_block_max,
                         num_dQ_warp_groups=self.num_wg_dQ,
-                        num_threads_per_warp_group=self.num_threads_per_warp_group,
+                        num_threads_per_warp_group=self.num_threads_per_wg,
                         tma_copy_bytes_dQ=self.tma_copy_bytes["dQ"],
                     )
 

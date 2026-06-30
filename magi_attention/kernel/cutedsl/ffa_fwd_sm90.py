@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="arg-type,union-attr,index,misc,assignment"
+# mypy: disable-error-code="arg-type,union-attr,index,misc,assignment,attr-defined"
 # pyright: reportInvalidTypeForm=false
 
 # SM90 (Hopper) forward pass for flash attention, extracted from flash_fwd.py.
@@ -1021,21 +1021,27 @@ class FFAFwdSm90:
 
         # --- Make smem tensors of sQ/sK/sV/sO/sP ---
 
-        sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)
-        sK = storage.sK.get_tensor(sK_layout.outer, swizzle=sK_layout.inner)
+        sQ: cute.Tensor = storage.sQ.get_tensor(
+            sQ_layout.outer, swizzle=sQ_layout.inner
+        )
+        sK: cute.Tensor = storage.sK.get_tensor(
+            sK_layout.outer, swizzle=sK_layout.inner
+        )
         if const_expr(not self.Q_in_regs):
-            sV = storage.sV.get_tensor(sV_layout.outer, swizzle=sV_layout.inner)
+            sV: cute.Tensor = storage.sV.get_tensor(
+                sV_layout.outer, swizzle=sV_layout.inner
+            )
         else:
             sV = storage.sQ.get_tensor(
                 sV_layout.outer, swizzle=sV_layout.inner, dtype=mV.element_type
             )
         # Transpose view of V to tensor with layout (head_dim_v, tile_n) for tiled mma
-        sVt = layout_utils.transpose_view(sV)
-        sP = None
+        sVt: cute.Tensor = layout_utils.transpose_view(sV)
+        sP: cute.Tensor | None = None
         if const_expr(sP_layout is not None):
             sP = storage.sP.get_tensor(sP_layout.outer, swizzle=sP_layout.inner)
         # Reuse sQ's buffer for sO
-        sO = storage.sQ.get_tensor(
+        sO: cute.Tensor = storage.sQ.get_tensor(
             sO_layout.outer, swizzle=sO_layout.inner, dtype=self.dtype
         )
 
