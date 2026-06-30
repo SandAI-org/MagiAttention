@@ -32,6 +32,7 @@ from cutlass import Float32, Int32, const_expr, pipeline
 from cutlass.base_dsl.arch import Arch
 from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync, warpgroup
+from cutlass.cutlass_dsl import BaseDSL
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import LayoutEnum
 
@@ -43,7 +44,6 @@ from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
-from .ffa_fwd_sm80 import FFAFwdSm80
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwd
@@ -64,7 +64,7 @@ from .tile_scheduler import (
 )
 
 
-class FFAFwdSm90(FFAFwdSm80):
+class FFAFwdSm90:
     def __init__(
         self,
         dtype: Type[cutlass.Numeric],
@@ -166,9 +166,18 @@ class FFAFwdSm90(FFAFwdSm80):
             print()
 
     @property
-    def use_stmatrix_O_store(self) -> bool:
-        """SM90 uses WGMMA, whose accumulator layout matches the StMatrix store atom."""
-        return True
+    def arch(self) -> Arch:
+        """The DSL arch enum of the active compilation target."""
+        return BaseDSL._get_dsl().get_arch_enum()
+
+    @property
+    def arch_num(self) -> int:
+        """The DSL arch number of the active compilation target."""
+        return self.arch.major * 10 + self.arch.minor
+
+    @property
+    def is_causal(self) -> bool:
+        return self.mask_type == MT_MAP.causal
 
     def _check_type(
         self,
@@ -2310,6 +2319,181 @@ class FFAFwdSm90(FFAFwdSm80):
             constant_q_idx=None,
             qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
         )
+
+    @cute.jit
+    def epilogue(
+        self,
+        acc_O: cute.Tensor,
+        lse: cute.Tensor,
+        mO: cute.Tensor,
+        mLSE: Optional[cute.Tensor],
+        sO: cute.Tensor,
+        seqlen_info: SeqlenInfoQK,
+        gmem_tiled_copy_O: cute.TiledCopy,
+        tma_atom_O: Optional[cute.CopyAtom],
+        tiled_mma: cute.TiledMma,
+        tidx: cutlass.Int32,
+        m_block: cutlass.Int32,
+        head_idx: cutlass.Int32,
+        batch_idx: cutlass.Int32,
+        is_print_thread_and_tile: bool = False,
+    ):
+        # Make rO from acc_O with dtype cast
+        rO = cute.make_fragment_like(acc_O, self.dtype)
+        rO.store(acc_O.load().to(self.dtype))
+
+        # Make sure all threads have finished reading smem
+        cute.arch.barrier(
+            barrier_id=int(NamedBarrierFwd.Epilogue),
+            number_of_threads=self.num_epilogue_threads,
+        )
+
+        # R2S copy rO to sO
+        smem_copy_atom_O = cutedsl_utils.get_smem_store_atom(self.arch_num, self.dtype)
+        smem_thr_copy_O = cute.make_tiled_copy_C(smem_copy_atom_O, tiled_mma).get_slice(
+            tidx
+        )
+
+        taccOrO = smem_thr_copy_O.retile(rO)
+        taccOsO = smem_thr_copy_O.partition_D(sO)
+        cute.copy(smem_copy_atom_O, taccOrO, taccOsO)
+
+        cO = cute.make_identity_tensor((self.tile_m, self.tile_hdimv))
+        pack_gqa = PackGQA(
+            self.tile_m, self.tile_hdimv, self.check_hdim_v_oob, self.qhead_per_kvhead
+        )
+
+        # R2G copy rLSE to gLSE
+        if const_expr(mLSE is not None):
+            mLSE_cur = seqlen_info.offset_batch_Q(mLSE, batch_idx, dim=2)[
+                None, head_idx
+            ]
+            if const_expr(not self.pack_gqa):
+                gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (m_block,))
+                gLSE_expanded_layout = cute.append(
+                    gLSE.layout, cute.make_layout((self.tile_hdimv,), stride=(0,))
+                )
+                gLSE_expanded = cute.make_tensor(gLSE.iterator, gLSE_expanded_layout)
+                thr_mma = tiled_mma.get_slice(tidx)
+                taccOgLSE = layout_utils.reshape_acc_to_mn(
+                    thr_mma.partition_C(gLSE_expanded)
+                )
+                assert cute.size(taccOgLSE, mode=[0]) == cute.size(lse)
+                taccOcO = layout_utils.reshape_acc_to_mn(thr_mma.partition_C(cO))
+                t0accOcO = layout_utils.reshape_acc_to_mn(
+                    thr_mma.get_slice(0).partition_C(cO)
+                )
+                # Only the thread corresponding to column 0 writes out the lse to gmem
+                if taccOcO[0][1] == 0:
+                    for m in cutlass.range(
+                        cute.size(taccOgLSE.shape[1]), unroll_full=True
+                    ):
+                        if (
+                            t0accOcO[m, 0][0]
+                            < seqlen_info.seqlen_q
+                            - m_block * self.tile_m
+                            - taccOcO[0][0]
+                        ):
+                            taccOgLSE[m, 0] = lse[m]
+            else:
+                pack_gqa.store_LSE(
+                    mLSE_cur, lse, tiled_mma, tidx, m_block, seqlen_info.seqlen_q
+                )
+
+        # S2G copy sO to gO
+        ragged = self.use_tma_O and (
+            seqlen_info.has_cu_seqlens_q or seqlen_info.has_seqused_q
+        )
+        mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3, ragged=ragged)[
+            None, None, head_idx
+        ]
+        if const_expr(self.use_tma_O):
+            # Proxy fence to ensure smem writes are visible to TMA
+            cute.arch.fence_view_async_shared()
+
+            # Notify the TMA-S2G warp that the sO store is ready for TMA copy
+            cute.arch.barrier_arrive(
+                barrier_id=int(NamedBarrierFwd.Epilogue),
+                number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
+            )
+
+            # S2G copy sO to gO via TMA
+            gO = cute.local_tile(mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0))
+            store_O, _, _ = copy_utils.tma_get_copy_fn(
+                tma_atom_O, 0, cute.make_layout(1), sO, gO, single_stage=True
+            )
+            warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+            if warp_idx == 4:  # last warp in the producer WG
+                # Wait for sO store to be ready for TMA copy
+                cute.arch.barrier(
+                    barrier_id=int(NamedBarrierFwd.Epilogue),
+                    number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
+                )
+
+                # Issue TMA store for O
+                store_O()
+
+                # Commit and wait for TMA store to be finished (at least reading sO)
+                cute.arch.cp_async_bulk_commit_group()
+                cute.arch.cp_async_bulk_wait_group(0, read=True)
+        else:
+            # Make sure sO store is ready
+            cute.arch.barrier(
+                barrier_id=int(NamedBarrierFwd.Epilogue),
+                number_of_threads=self.num_epilogue_threads,
+            )
+
+            # S2R copy sO back to rO for wider vectorization
+            gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
+            tOsO = gmem_thr_copy_O.partition_S(sO)
+            tOrO = cute.make_fragment_like(tOsO, self.dtype)
+            cute.autovec_copy(tOsO, tOrO)
+
+            # R2G copy rO to gO
+            sq_limit = seqlen_info.seqlen_q - m_block * self.tile_m
+            if const_expr(not self.pack_gqa):
+                gO = cute.local_tile(
+                    mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0)
+                )
+                tOgO = gmem_thr_copy_O.partition_D(gO)
+                tOcO = gmem_thr_copy_O.partition_S(cO)
+                t0OcO = gmem_tiled_copy_O.get_slice(0).partition_S(cO)
+                tOpO = cutedsl_utils.predicate_k(tOcO, limit=mO.shape[1])
+
+                for rest_m in cutlass.range_constexpr(cute.size(tOrO.shape[1])):
+                    if t0OcO[0, rest_m, 0][0] < sq_limit - tOcO[0][0]:
+                        cute.copy(
+                            gmem_tiled_copy_O,
+                            tOrO[None, rest_m, None],
+                            tOgO[None, rest_m, None],
+                            pred=tOpO[None, rest_m, None]
+                            if const_expr(self.check_hdim_v_oob)
+                            else None,
+                        )
+            else:
+                pack_gqa.store_O(
+                    mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_block, seqlen_info.seqlen_q
+                )
+
+        # --- Debug print ---
+
+        if const_expr(self.debug_print):
+            if is_print_thread_and_tile:
+                prefix = "[fwd_sm90_epilogue] "
+                cute.printf("")
+                cute.printf(
+                    prefix + "m_block={}, head_idx={}, batch_idx={}",
+                    m_block,
+                    head_idx,
+                    batch_idx,
+                )
+                cute.printf(prefix + f"use_tma_O={self.use_tma_O}, {ragged=}")
+                cute.printf(prefix + "acc_O: {}", acc_O.layout)
+                cute.printf(prefix + "rO: {}", rO.layout)
+                cute.printf(prefix + "sO: {}", sO.layout)
+                cute.printf(prefix + "cO: {}", cO.layout)
+                cute.printf(prefix + "mO_cur: {}", mO_cur.layout)
+                cute.printf("")
 
     def warp_scheduler_barrier_sync(self):
         if const_expr(self.use_scheduler_barrier):

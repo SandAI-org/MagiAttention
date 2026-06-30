@@ -32,7 +32,7 @@ from cutlass.cute.nvgpu import cpasync, warp
 from cutlass.cutlass_dsl import Arch, BaseDSL
 
 # isort: split
-from quack import copy_utils, layout_utils
+from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
@@ -105,7 +105,6 @@ class FFAFwdSm80:
         self.score_mod = score_mod
         self.mask_mod = mask_mod
         self.qk_acc_dtype = Float32
-        self.use_tma_O = False  # sm80 does not support TMA, but sm90 does, so this's overridden in FFAFwdSm90
 
         self.vec_size: cutlass.Constexpr = getattr(
             score_mod, "__vec_size__", 1 if cutlass.const_expr(has_aux_tensors) else 2
@@ -140,16 +139,6 @@ class FFAFwdSm80:
             print(f"{prefix}{self.vec_size=} | {has_aux_tensors=}")
             print(f"{prefix}{self.buffer_align_bytes=}")
             print()
-
-    @property
-    def use_stmatrix_O_store(self) -> bool:
-        """Whether the epilogue stores the O accumulator to smem with the StMatrix copy
-        atom. This must follow the *MMA kind*, not the hardware/DSL arch: this kernel
-        always uses the Ampere warp MMA (m16n8k16, permutation_mnk N=16), whose
-        accumulator layout is incompatible with StMatrix. Subclasses that switch to
-        WGMMA (e.g. FFAFwdSm90) override this to True.
-        """
-        return False
 
     @property
     def arch(self) -> Arch:
@@ -485,7 +474,6 @@ class FFAFwdSm80:
         if const_expr(self.debug_print):
             prefix = "[fwd_sm80_setup_attributes] "
             print()
-            print(f"{prefix}{self.use_tma_O=}")
             print(f"{prefix}{self.num_producer_threads=}")
             print(f"{prefix}{self.num_Q_load_threads=}")
             print(f"{prefix}{self.num_epilogue_threads=}")
@@ -1343,7 +1331,6 @@ class FFAFwdSm80:
             sO,
             seqlen_info,
             gmem_tiled_copy_O,
-            None,
             tiled_mma_pv,
             tidx,
             m_block,
@@ -1822,7 +1809,6 @@ class FFAFwdSm80:
         sO: cute.Tensor,
         seqlen_info: SeqlenInfoQK,
         gmem_tiled_copy_O: cute.TiledCopy,
-        tma_atom_O: Optional[cute.CopyAtom],
         tiled_mma: cute.TiledMma,
         tidx: cutlass.Int32,
         m_block: cutlass.Int32,
@@ -1841,8 +1827,8 @@ class FFAFwdSm80:
         )
 
         # R2S copy rO to sO
-        if const_expr(not self.use_stmatrix_O_store):
-            # Ampere warp-MMA path. The O accumulator comes from the warp MMA whose
+        if const_expr(self.arch >= Arch.sm_90):
+            # HACK: Ampere warp-MMA path. The O accumulator comes from the warp MMA whose
             # permutation_mnk N=16 places two n8 atoms per 16-wide head_dim_v tile.
             # cute.make_tiled_copy_C with the StMatrix atom (selected by get_smem_
             # store_atom whenever this kernel is *compiled* for sm90+, even though it
@@ -1905,80 +1891,44 @@ class FFAFwdSm80:
                     mLSE_cur, lse, tiled_mma, tidx, m_block, seqlen_info.seqlen_q
                 )
 
-        # S2G copy sO to gO
-        ragged = self.use_tma_O and (
-            seqlen_info.has_cu_seqlens_q or seqlen_info.has_seqused_q
+        # Make sure sO store is ready
+        cute.arch.barrier(
+            barrier_id=int(NamedBarrierFwd.Epilogue),
+            number_of_threads=self.num_epilogue_threads,
         )
-        mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3, ragged=ragged)[
+
+        # S2R copy sO back to rO for wider vectorization
+        gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
+        tOsO = gmem_thr_copy_O.partition_S(sO)
+        tOrO = cute.make_fragment_like(tOsO, self.dtype)
+        cute.autovec_copy(tOsO, tOrO)
+
+        # R2G copy rO to gO
+        sq_limit = seqlen_info.seqlen_q - m_block * self.tile_m
+        mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3, ragged=False)[
             None, None, head_idx
         ]
-        if const_expr(self.use_tma_O):
-            # Proxy fence to ensure smem writes are visible to TMA
-            cute.arch.fence_view_async_shared()
-
-            # Notify the TMA-S2G warp that the sO store is ready for TMA copy
-            cute.arch.barrier_arrive(
-                barrier_id=int(NamedBarrierFwd.Epilogue),
-                number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
-            )
-
-            # S2G copy sO to gO via TMA
+        if const_expr(not self.pack_gqa):
             gO = cute.local_tile(mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0))
-            store_O, _, _ = copy_utils.tma_get_copy_fn(
-                tma_atom_O, 0, cute.make_layout(1), sO, gO, single_stage=True
-            )
-            warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-            if warp_idx == 4:  # last warp in the producer WG
-                # Wait for sO store to be ready for TMA copy
-                cute.arch.barrier(
-                    barrier_id=int(NamedBarrierFwd.Epilogue),
-                    number_of_threads=self.num_epilogue_threads + cute.arch.WARP_SIZE,
-                )
+            tOgO = gmem_thr_copy_O.partition_D(gO)
+            tOcO = gmem_thr_copy_O.partition_S(cO)
+            t0OcO = gmem_tiled_copy_O.get_slice(0).partition_S(cO)
+            tOpO = cutedsl_utils.predicate_k(tOcO, limit=mO.shape[1])
 
-                # Issue TMA store for O
-                store_O()
-
-                # Commit and wait for TMA store to be finished (at least reading sO)
-                cute.arch.cp_async_bulk_commit_group()
-                cute.arch.cp_async_bulk_wait_group(0, read=True)
+            for rest_m in cutlass.range_constexpr(cute.size(tOrO.shape[1])):
+                if t0OcO[0, rest_m, 0][0] < sq_limit - tOcO[0][0]:
+                    cute.copy(
+                        gmem_tiled_copy_O,
+                        tOrO[None, rest_m, None],
+                        tOgO[None, rest_m, None],
+                        pred=tOpO[None, rest_m, None]
+                        if const_expr(self.check_hdim_v_oob)
+                        else None,
+                    )
         else:
-            # Make sure sO store is ready
-            cute.arch.barrier(
-                barrier_id=int(NamedBarrierFwd.Epilogue),
-                number_of_threads=self.num_epilogue_threads,
+            pack_gqa.store_O(
+                mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_block, seqlen_info.seqlen_q
             )
-
-            # S2R copy sO back to rO for wider vectorization
-            gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
-            tOsO = gmem_thr_copy_O.partition_S(sO)
-            tOrO = cute.make_fragment_like(tOsO, self.dtype)
-            cute.autovec_copy(tOsO, tOrO)
-
-            # R2G copy rO to gO
-            sq_limit = seqlen_info.seqlen_q - m_block * self.tile_m
-            if const_expr(not self.pack_gqa):
-                gO = cute.local_tile(
-                    mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0)
-                )
-                tOgO = gmem_thr_copy_O.partition_D(gO)
-                tOcO = gmem_thr_copy_O.partition_S(cO)
-                t0OcO = gmem_tiled_copy_O.get_slice(0).partition_S(cO)
-                tOpO = cutedsl_utils.predicate_k(tOcO, limit=mO.shape[1])
-
-                for rest_m in cutlass.range_constexpr(cute.size(tOrO.shape[1])):
-                    if t0OcO[0, rest_m, 0][0] < sq_limit - tOcO[0][0]:
-                        cute.copy(
-                            gmem_tiled_copy_O,
-                            tOrO[None, rest_m, None],
-                            tOgO[None, rest_m, None],
-                            pred=tOpO[None, rest_m, None]
-                            if const_expr(self.check_hdim_v_oob)
-                            else None,
-                        )
-            else:
-                pack_gqa.store_O(
-                    mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_block, seqlen_info.seqlen_q
-                )
 
         # --- Debug print ---
 
@@ -1991,12 +1941,6 @@ class FFAFwdSm80:
                     m_block,
                     head_idx,
                     batch_idx,
-                )
-                cute.printf(
-                    prefix
-                    + f"use_tma_O={self.use_tma_O}, "
-                    + f"use_stmatrix_O_store={self.use_stmatrix_O_store}, "
-                    + f"{ragged=}"
                 )
                 cute.printf(prefix + "acc_O: {}", acc_O.layout)
                 cute.printf(prefix + "rO: {}", rO.layout)
