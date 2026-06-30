@@ -1019,7 +1019,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             index_sparse_indices_2d,
         ) = ctx.saved_tensors
 
-        swap_bwd_qk_loop = ctx.swap_bwd_qk_loop if ctx.swap_bwd_qk_loop is not None else False
+        swap_bwd_qk_loop = (
+            ctx.swap_bwd_qk_loop if ctx.swap_bwd_qk_loop is not None else False
+        )
 
         if ctx.disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
             raise RuntimeError(

@@ -455,7 +455,8 @@ struct CollectiveMainloopBwdSm90 {
   // When InnerLoad_Tma && InnerUseScatter, 2D TMA reduce reads the swizzled layout natively.
   // The flat Scatter layout only applies when SparseInnerDxReduceUseTma && !InnerLoad_Tma
   // (1D per-row bulk reduce fallback), and only for the inner dX of this loop.
-  using SmemLayoutdKVaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && SwapBwdQKLoop && !InnerLoad_Tma, SmemLayoutdKVaccumLinear, SmemLayoutdKVaccumSwizzled>;
+  using SmemLayoutdKVaccumStore =
+      std::conditional_t<SparseInnerDxReduceUseTma && SwapBwdQKLoop && !InnerLoad_Tma, SmemLayoutdKVaccumLinear, SmemLayoutdKVaccumSwizzled>;
   using SmemLayoutdQaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && !SwapBwdQKLoop && !InnerLoad_Tma, SmemLayoutdQaccumLinear, SmemLayoutdQaccumSwizzled>;
   using SmemLayoutdKVaccumtStore =
       decltype(cute::composition(SmemLayoutdKVaccumStore{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
@@ -832,51 +833,51 @@ struct CollectiveMainloopBwdSm90 {
 
   // BlockSparse LoopK producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
   using BlockSparseLoopKProducerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
-                                                                RangeMerge,
-                                                                PackGQA,
-                                                                QheadPerKhead,
-                                                                NumRowsPerGroup,
-                                                                GroupSize,
-                                                                NumProducerThreads,
-                                                                kBlockN,
-                                                                InnerDirMaxToMin,
-                                                                /*IsLoopQ=*/false>;
+                                                                        RangeMerge,
+                                                                        PackGQA,
+                                                                        QheadPerKhead,
+                                                                        NumRowsPerGroup,
+                                                                        GroupSize,
+                                                                        NumProducerThreads,
+                                                                        kBlockN,
+                                                                        InnerDirMaxToMin,
+                                                                        /*IsLoopQ=*/false>;
 
   // BlockSparse LoopK consumer (used by mma), no token_indices arrays
   using BlockSparseLoopKConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
-                                                              RangeMerge,
-                                                              PackGQA,
-                                                              QheadPerKhead,
-                                                              NumRowsPerGroup,
-                                                              GroupSize,
-                                                              NumProducerThreads,
-                                                              kBlockN,
-                                                              InnerDirMaxToMin,
-                                                              /*IsLoopQ=*/false>;
+                                                                        RangeMerge,
+                                                                        PackGQA,
+                                                                        QheadPerKhead,
+                                                                        NumRowsPerGroup,
+                                                                        GroupSize,
+                                                                        NumProducerThreads,
+                                                                        kBlockN,
+                                                                        InnerDirMaxToMin,
+                                                                        /*IsLoopQ=*/false>;
 
   // BlockSparse LoopQ producer: scatter Q/dO, token_indices = Q positions
   using BlockSparseLoopQProducerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
-                                                                RangeMerge,
-                                                                PackGQA,
-                                                                QheadPerKhead,
-                                                                NumRowsPerGroup,
-                                                                GroupSize,
-                                                                NumProducerThreads,
-                                                                kBlockM,
-                                                                InnerDirMaxToMin,
-                                                                /*IsLoopQ=*/true>;
+                                                                        RangeMerge,
+                                                                        PackGQA,
+                                                                        QheadPerKhead,
+                                                                        NumRowsPerGroup,
+                                                                        GroupSize,
+                                                                        NumProducerThreads,
+                                                                        kBlockM,
+                                                                        InnerDirMaxToMin,
+                                                                        /*IsLoopQ=*/true>;
 
   // BlockSparse LoopQ consumer: no token_indices arrays
   using BlockSparseLoopQConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
-                                                              RangeMerge,
-                                                              PackGQA,
-                                                              QheadPerKhead,
-                                                              NumRowsPerGroup,
-                                                              GroupSize,
-                                                              NumProducerThreads,
-                                                              kBlockM,
-                                                              InnerDirMaxToMin,
-                                                              /*IsLoopQ=*/true>;
+                                                                        RangeMerge,
+                                                                        PackGQA,
+                                                                        QheadPerKhead,
+                                                                        NumRowsPerGroup,
+                                                                        GroupSize,
+                                                                        NumProducerThreads,
+                                                                        kBlockM,
+                                                                        InnerDirMaxToMin,
+                                                                        /*IsLoopQ=*/true>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     if constexpr (Deterministic) {

@@ -447,27 +447,27 @@ struct CollectiveMainloopFwdSm90 {
 
   // BlockSparse producer (used by load)
   using BlockSparseProducerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
-                                                           RangeMerge,
-                                                           PackGQA,
-                                                           QheadPerKhead,
-                                                           NumRowsPerGroup,
-                                                           GroupSize,
-                                                           NumProducerThreads,
-                                                           kBlockN,
-                                                           InnerDirMaxToMin,
-                                                           /*IsLoopQ=*/false>;
+                                                                   RangeMerge,
+                                                                   PackGQA,
+                                                                   QheadPerKhead,
+                                                                   NumRowsPerGroup,
+                                                                   GroupSize,
+                                                                   NumProducerThreads,
+                                                                   kBlockN,
+                                                                   InnerDirMaxToMin,
+                                                                   /*IsLoopQ=*/false>;
 
   // BlockSparse consumer (used by mma)
   using BlockSparseConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
-                                                         RangeMerge,
-                                                         PackGQA,
-                                                         QheadPerKhead,
-                                                         NumRowsPerGroup,
-                                                         GroupSize,
-                                                         NumProducerThreads,
-                                                         kBlockN,
-                                                         InnerDirMaxToMin,
-                                                         /*IsLoopQ=*/false>;
+                                                                   RangeMerge,
+                                                                   PackGQA,
+                                                                   QheadPerKhead,
+                                                                   NumRowsPerGroup,
+                                                                   GroupSize,
+                                                                   NumProducerThreads,
+                                                                   kBlockN,
+                                                                   InnerDirMaxToMin,
+                                                                   /*IsLoopQ=*/false>;
 
   template <bool IsProducer>
   using IndexSparseBlockMeta = flash::
