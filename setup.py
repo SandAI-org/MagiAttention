@@ -736,7 +736,7 @@ def prebuild_ffa_kernels() -> None:
             swap_ab=False,
             pack_gqa=False,
             cat_gqa=cat_gqa,
-            qhead_per_khead=1,
+            pack_gqa_factor=1,
             block_sparse=False,
             swap_bwd_qk_loop=False,
             profile_mode=False,
