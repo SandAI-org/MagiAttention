@@ -459,11 +459,11 @@ class TestIndexSparseIndicesAttn(DistTestBase):
                 "topk": 128,
                 "pack_gqa": True,
             },
-            # Very short Q (single tile)
+            # Very short Q (sub-tile, still >= kBlockN for inner loop)
             {
                 "name": "tiny_q",
                 "B": 1,
-                "S_q": 8,
+                "S_q": 16,
                 "S_kv": 512,
                 "NHQ": 128,
                 "NHK": 1,
