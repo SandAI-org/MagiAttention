@@ -25,74 +25,19 @@ Run:
 """
 
 import random
-import subprocess
-import sys
 from contextlib import contextmanager
 
 import pytest
 import torch
 from einops import rearrange
 
-
-def _ensure_cutlass_dsl(version: str = "4.4.2") -> None:
-    """Ensure ``cutlass`` (nvidia-cutlass-dsl) is importable.
-
-    In some CI environments an outdated ``nvidia-cutlass-dsl`` may have been
-    installed, and simply reinstalling the new version on top of it leads to a
-    broken install (``ModuleNotFoundError: No module named 'cutlass'``). Since we
-    currently cannot fix this in the CI workflow itself, we work around it here:
-    if ``cutlass`` is missing, purge the old packages and reinstall the pinned
-    version before any ``cutlass.cute`` import happens.
-    """
-    try:
-        import cutlass.cute  # noqa: F401
-
-        return
-    except ModuleNotFoundError:
-        pass
-
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "uninstall",
-            "-y",
-            "nvidia-cutlass-dsl",
-            "nvidia-cutlass-dsl-libs-base",
-            "nvidia-cutlass-dsl-libs-cu13",
-        ]
-    )
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--force-reinstall",
-            f"nvidia-cutlass-dsl=={version}",
-        ]
-    )
-
-
-# HACK: Fix cutedsl import issue here
-# by manually reinstalling the pinned cutedsl version if the import fails.
-# See https://github.com/NVIDIA/cutlass/issues/3001.
-# TODO: Remove this and `noqa: E402` below
-# once the CI workflow is fixed to avoid installing an outdated cutedsl version.
-_ensure_cutlass_dsl()
-
-
-from magi_attention.common import AttnRanges  # noqa: E402
-from magi_attention.kernel.cutedsl import flex_flash_attn_func  # noqa: E402
-from magi_attention.kernel.cutedsl.ffa_utils import (  # noqa: E402
-    MT_MAP,
-    get_device_arch,
-)
-from magi_attention.testing import assert_close, ref_attn_func  # noqa: E402
-from magi_attention.testing.utils import switch_envvars  # noqa: E402
-from magi_attention.utils import make_attn_mask_from_ffa_args  # noqa: E402
-from magi_attention.utils.arch import is_ampere  # noqa: E402
+from magi_attention.common import AttnRanges
+from magi_attention.kernel.cutedsl import flex_flash_attn_func
+from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
+from magi_attention.testing import assert_close, ref_attn_func
+from magi_attention.testing.utils import switch_envvars
+from magi_attention.utils import make_attn_mask_from_ffa_args
+from magi_attention.utils.arch import is_ampere
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
