@@ -89,6 +89,6 @@ exclude = [
 ]
 
 [tool.ruff]
-lint.ignore = ["E731", "F841", "E741"]
+lint.ignore = ["E731"]
 
 [tool.setuptools_scm]

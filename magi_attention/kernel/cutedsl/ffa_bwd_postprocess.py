@@ -409,7 +409,6 @@ class FFABwdPostProcess:
             gdQ = cute.local_tile(mdQ_cur, (self.tile_m, self.tile_hdim), (m_block, 0))
 
             seqlen_q = seqlen.seqlen_q
-            seqlen_q_rounded = cute.round_up(seqlen_q, self.tile_m)
 
             if const_expr(self.arch // 10 == 10 and self.use_2cta_instrs):
                 # 2-CTA: remap dQaccum layout into TMEM view before writing sdQ

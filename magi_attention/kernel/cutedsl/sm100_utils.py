@@ -180,23 +180,21 @@ def make_instr_desc(
     m_dim = M >> 4  # 5-bit field
     n_dim = N >> 3  # 6-bit field
 
-    # fmt: off
     # --- pack the bit-fields -----------------------------------------------------
     desc = 0
-    desc |= (0                 & 0x3) << 0        # sparse_id2 (always 0 here)
-    desc |= (int(is_sparse)    & 0x1) << 2        # sparse_flag
-    desc |= (int(c_sat)        & 0x1) << 3        # saturate
-    desc |= (c_fmt             & 0x3) << 4        # c_format
-    desc |= (a_fmt             & 0x7) << 7        # a_format
-    desc |= (b_fmt             & 0x7) << 10       # b_format
-    desc |= (int(a_neg)        & 0x1) << 13       # a_negate
-    desc |= (int(b_neg)        & 0x1) << 14       # b_negate
-    desc |= (int(a_major)      & 0x1) << 15       # a_major
-    desc |= (int(b_major)      & 0x1) << 16       # b_major
-    desc |= (n_dim             & 0x3F) << 17      # n_dim (6 bits)
-    desc |= (m_dim             & 0x1F) << 24      # m_dim (5 bits)
-    desc |= (int(max_shift)    & 0x3) << 30       # max_shift (2 bits)
-    # fmt: on
+    desc |= (0 & 0x3) << 0  # sparse_id2 (always 0 here)
+    desc |= (int(is_sparse) & 0x1) << 2  # sparse_flag
+    desc |= (int(c_sat) & 0x1) << 3  # saturate
+    desc |= (c_fmt & 0x3) << 4  # c_format
+    desc |= (a_fmt & 0x7) << 7  # a_format
+    desc |= (b_fmt & 0x7) << 10  # b_format
+    desc |= (int(a_neg) & 0x1) << 13  # a_negate
+    desc |= (int(b_neg) & 0x1) << 14  # b_negate
+    desc |= (int(a_major) & 0x1) << 15  # a_major
+    desc |= (int(b_major) & 0x1) << 16  # b_major
+    desc |= (n_dim & 0x3F) << 17  # n_dim (6 bits)
+    desc |= (m_dim & 0x1F) << 24  # m_dim (5 bits)
+    desc |= (int(max_shift) & 0x3) << 30  # max_shift (2 bits)
 
     return desc & 0xFFFF_FFFF  # ensure 32-bit result
 
@@ -809,9 +807,6 @@ def gemm_ptx_partial(
     offset_a = [
         cute.crd2idx((0, 0, k), tCrA_layout) for k in range(cute.size(tCrA.shape[2]))
     ]
-    offset_a_diff = [
-        offset_a[k] - offset_a[k - 1] for k in range(1, cute.size(tCrA.shape[2]))
-    ]
     offset_b = [
         cute.crd2idx((0, 0, k), tCrB.layout) for k in range(cute.size(tCrB.shape[2]))
     ]
@@ -1064,23 +1059,14 @@ def gemm_ptx_partial1(
         offset_b[k] - offset_b[k - 1] for k in range(1, cute.size(tCrB.shape[2]))
     ]
 
-    if const_expr(not is_ts):
-        # smem_desc_start_a_lo = Int32(smem_desc_base_a_lo | make_smem_desc_start_addr(sA[None, None, 0].iterator))
-        smem_desc_start_a_lo = const_expr(smem_desc_base_a_lo)
-    else:
-        smem_desc_start_a_lo = None
-    # smem_desc_start_b_lo = Int32(smem_desc_base_b_lo | make_smem_desc_start_addr(sB[None, None, 0].iterator))
     smem_desc_start_b_lo = const_expr(smem_desc_base_b_lo)
     pred_str = "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
     if const_expr(not is_ts):
         llvm.inline_asm(
             None,
             [
-                # acc.iterator.toint().ir_value(),
-                # Int32(cute.arch.make_warp_uniform(smem_desc_start_a_lo)).ir_value(),
                 Int32(sA_base_addr_for_desc).ir_value(),
                 Int32(sA_stage).ir_value(),
-                # Int32(cute.arch.make_warp_uniform(smem_desc_start_b_lo)).ir_value(),
                 Int32(sB_base_addr_for_desc).ir_value(),
                 Int32(sB_stage).ir_value(),
                 Int32(not zero_init).ir_value(),
@@ -1210,9 +1196,7 @@ def gemm_ptx_precomputed(
         else cute.recast_layout(32, 16, tCrA_layout)
     )
     offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(num_k_tile)]
-    offset_a_diff = [offset_a[k] - offset_a[k - 1] for k in range(1, num_k_tile)]
     offset_b = [cute.crd2idx((0, 0, k), tCrB_layout) for k in range(num_k_tile)]
-    offset_b_diff = [offset_b[k] - offset_b[k - 1] for k in range(1, num_k_tile)]
 
     smem_desc_start_a_lo = None
     if const_expr(not is_ts):
