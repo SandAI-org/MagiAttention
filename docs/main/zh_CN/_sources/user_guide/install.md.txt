@@ -28,7 +28,7 @@ If you insist on using `CUDA-12` based containers, you can set the environment v
 * docker run command:
 
     ```bash
-    # choose one compatible version
+    # choose one compatible version, e.g. 25.10, 25.12, etc.
     MAJOR_VERSION=25
     MINOR_VERSION=10
 
