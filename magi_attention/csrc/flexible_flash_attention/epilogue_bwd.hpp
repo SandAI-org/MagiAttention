@@ -53,7 +53,7 @@ template <
     bool SwapBwdQKLoop_,
     bool PackGQA_,
     bool CatGQA_,
-    int QheadPerKhead_,
+    int PackGQAFactor_,
     bool IndexSparse_ = false,
     int KBlockSize_ = 1>
 struct CollectiveEpilogueBwd {
@@ -81,7 +81,7 @@ struct CollectiveEpilogueBwd {
   static constexpr bool PackGQA = PackGQA_;
   static constexpr bool CatGQA = CatGQA_;
   static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
-  static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
+  static constexpr int PackGQAFactor = PackGQAFactor_; // for non packgqa, PackGQAFactor is always 1.
   static constexpr bool IndexSparse = IndexSparse_;
   static constexpr int KBlockSize = KBlockSize_;
   // IndexSparse LoopQ: outer block = 1 K token in a kBlockN tile; only row 0 is valid.
@@ -174,8 +174,8 @@ struct CollectiveEpilogueBwd {
   using StridedQKV = cute::Stride<int64_t, _1, int64_t>;
 
   // Packed shape/stride for dQ when PackGQA is enabled
-  // ((QheadPerKhead, seqlen_q), head_dim, nheads_kv)
-  using ShapedQPacked = std::conditional_t<!PackGQA, ShapedQKV, cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t, int32_t>>;
+  // ((PackGQAFactor, seqlen_q), head_dim, nheads_kv)
+  using ShapedQPacked = std::conditional_t<!PackGQA, ShapedQKV, cute::Shape<cute::Shape<cute::Int<PackGQAFactor>, int32_t>, int32_t, int32_t>>;
   using StridedQPacked = std::conditional_t<!PackGQA, StridedQKV, cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>>;
 
   using TMA_dQ = std::conditional_t<
@@ -257,12 +257,12 @@ struct CollectiveEpilogueBwd {
     Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), args.shape_dV, args.stride_dV);
 
     // Compute packed shape/stride for dQ when PackGQA is enabled
-    // shape_dQ_packed: ((QheadPerKhead, seqlen_q), head_dim, nheads_kv)
-    // stride_dQ_packed: ((head_stride, seq_stride), 1, head_stride * QheadPerKhead)
+    // shape_dQ_packed: ((PackGQAFactor, seqlen_q), head_dim, nheads_kv)
+    // stride_dQ_packed: ((head_stride, seq_stride), 1, head_stride * PackGQAFactor)
     auto const shape_dQ_packed = cute::conditional_return<!PackGQA>(
-        args.shape_dQ, make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_dQ)), get<1>(args.shape_dQ), args.num_heads_kv));
+        args.shape_dQ, make_shape(make_shape(cute::Int<PackGQAFactor>{}, get<0>(args.shape_dQ)), get<1>(args.shape_dQ), args.num_heads_kv));
     auto const stride_dQ_packed = cute::conditional_return<!PackGQA>(
-        args.stride_dQ, make_stride(make_stride(get<2>(args.stride_dQ), get<0>(args.stride_dQ)), get<1>(args.stride_dQ), get<2>(args.stride_dQ) * QheadPerKhead));
+        args.stride_dQ, make_stride(make_stride(get<2>(args.stride_dQ), get<0>(args.stride_dQ)), get<1>(args.stride_dQ), get<2>(args.stride_dQ) * PackGQAFactor));
 
     TMA_dQ tma_store_dQ = [&] {
       if constexpr (Use_TMA) {
@@ -590,10 +590,10 @@ struct CollectiveEpilogueBwd {
       }
     } else {
       // For PackGQA: use packed TMA descriptor
-      // bidh is KV head index, offset_q needs to be scaled by QheadPerKhead
-      Tensor mdQ_packed = params.tma_store_dQ_packed.get_tma_tensor(params.shape_dQ_packed)(_, _, bidh); // (seqlen_q * QheadPerKhead, head_dim)
+      // bidh is KV head index, offset_q needs to be scaled by PackGQAFactor
+      Tensor mdQ_packed = params.tma_store_dQ_packed.get_tma_tensor(params.shape_dQ_packed)(_, _, bidh); // (seqlen_q * PackGQAFactor, head_dim)
       Tensor gdQ_packed =
-          local_tile(domain_offset(make_coord(offset_q * QheadPerKhead, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+          local_tile(domain_offset(make_coord(offset_q * PackGQAFactor, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
 
       auto block_tma_dQ_packed = params.tma_store_dQ_packed.get_slice(_0{});
       Tensor tdQgdQ_packed = block_tma_dQ_packed.partition_D(gdQ_packed); // (TMA, TMA_M, TMA_K)

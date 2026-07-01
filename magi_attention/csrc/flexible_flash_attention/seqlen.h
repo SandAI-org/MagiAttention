@@ -30,7 +30,7 @@ namespace flash {
 // to compute various things like n_block_min, n_block_max, etc.
 
 // seqlen_q/seqlen_k are always LOGICAL values (q_range.y - q_range.x).
-// PackGQA scaling (logical * QheadPerKhead) is handled externally by callers
+// PackGQA scaling (logical * PackGQAFactor) is handled externally by callers
 // (e.g. mask dispatch functions and block bounds computation).
 struct SeqlenInfo {
   int offset_q, offset_k;

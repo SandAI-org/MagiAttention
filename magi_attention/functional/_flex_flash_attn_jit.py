@@ -173,7 +173,7 @@ def get_ffa_uri(
     swap_ab: bool,
     pack_gqa: bool,
     cat_gqa: bool,
-    qhead_per_khead: int,
+    pack_gqa_factor: int,
     block_sparse: bool,
     index_sparse: bool,
     swap_bwd_qk_loop: bool,
@@ -198,8 +198,8 @@ def get_ffa_uri(
         f"{'_deterministic' if deterministic else ''}"
         f"{'_autorangemerge' if auto_range_merge else ''}"
         f"{'_swapab' if swap_ab else ''}"
-        f"{f'_packgqa{qhead_per_khead}' if pack_gqa else ''}"
-        f"{f'_catgqa{qhead_per_khead}' if cat_gqa else ''}"
+        f"{f'_packgqa{pack_gqa_factor}' if pack_gqa else ''}"
+        f"{f'_catgqa{pack_gqa_factor}' if cat_gqa else ''}"
         f"{'_block_sparse' if block_sparse else ''}"
         f"{'_index_sparse' if index_sparse else ''}"
         f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
@@ -311,7 +311,7 @@ def get_ffa_jit_spec(
     swap_ab: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
-    qhead_per_khead: int = 1,
+    pack_gqa_factor: int = 1,
     block_sparse: bool = False,
     index_sparse: bool = False,
     swap_bwd_qk_loop: bool = False,
@@ -366,7 +366,7 @@ def get_ffa_jit_spec(
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
-        qhead_per_khead=qhead_per_khead,
+        pack_gqa_factor=pack_gqa_factor,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
@@ -380,7 +380,7 @@ def get_ffa_jit_spec(
     logger.info(
         "FFA JIT params: arch=sm%s, direction=%s, head_dim=%d, compute_dtype=%s, "
         "output_dtype=%s, softcap=%s, deterministic=%s, block_size=%s, "
-        "swap_ab=%s, pack_gqa=%s, cat_gqa=%s, qhead_per_khead=%d, "
+        "swap_ab=%s, pack_gqa=%s, cat_gqa=%s, pack_gqa_factor=%d, "
         "block_sparse=%s, index_sparse=%s, profile_mode=%s, return_max_logits=%s",
         arch_sm_num,
         direction,
@@ -393,7 +393,7 @@ def get_ffa_jit_spec(
         swap_ab,
         pack_gqa,
         cat_gqa,
-        qhead_per_khead,
+        pack_gqa_factor,
         block_sparse,
         index_sparse,
         profile_mode,
@@ -451,6 +451,17 @@ def get_ffa_jit_spec(
         ), f"MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER must be true/false, got {_dxp}"
         extra_template_args["inner_dx_store_in_producer"] = _dxp_lower
         uri += f"_dxp{_dxp_lower}"
+    # ─── InnerLoadMode: tma=0 (2D auto), tma1d=1 (bulk per-row, no-swizzle K), cpasync=2 ───
+    if _inner_use_scatter:
+        _load_env = os.environ.get("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD")
+        if _load_env is not None:
+            _load_lower = _load_env.lower()
+            _load_mode_map = {"tma": "0", "tma1d": "1", "cpasync": "2"}
+            assert (
+                _load_lower in _load_mode_map
+            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD must be tma/tma1d/cpasync, got {_load_env}"
+            extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
+            uri += f"_sload{_load_mode_map[_load_lower]}"
     # ─── InnerStoreMode (BWD only): tma1d=1 (bulk reduce-add), cpasync=2 (atomicAdd) ───
     if direction == "bwd" and _inner_use_scatter:
         _store_env = os.environ.get(
@@ -488,7 +499,12 @@ def get_ffa_jit_spec(
 
         # Default LseDpsumUnion=1 for LoopQ (saves ~5 producer spills, zero perf cost).
         # Env MAGI_ATTENTION_FFA_BWD_LSE_UNION overrides (handled above); only set default if not overridden.
-        if "bwd_lse_union" not in extra_template_args and not swap_bwd_qk_loop:
+        # CatGQA has different SMEM layout that is incompatible with LseDpsumUnion.
+        if (
+            "bwd_lse_union" not in extra_template_args
+            and not swap_bwd_qk_loop
+            and not cat_gqa
+        ):
             extra_template_args["bwd_lse_union"] = "1"
             uri += "_lu1"
 
@@ -574,7 +590,7 @@ def get_ffa_jit_spec(
         swap_ab=str(swap_ab).lower(),
         pack_gqa=str(pack_gqa).lower(),
         cat_gqa=str(cat_gqa).lower(),
-        qhead_per_khead=qhead_per_khead,
+        pack_gqa_factor=pack_gqa_factor,
         block_sparse=str(block_sparse).lower(),
         index_sparse=str(index_sparse).lower(),
         swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
@@ -668,6 +684,7 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN",
     "MAGI_ATTENTION_FFA_MASK_MODE",
     "MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER",
+    "MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD",
     "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE",
     "MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE",
     "MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS",
@@ -705,7 +722,7 @@ def get_ffa_jit_mod(
     swap_ab: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
-    qhead_per_khead: int = 1,
+    pack_gqa_factor: int = 1,
     block_sparse: bool = False,
     index_sparse: bool = False,
     swap_bwd_qk_loop: bool = False,
@@ -730,7 +747,7 @@ def get_ffa_jit_mod(
         arch,
     )
 
-    qhead_per_khead = 1 if not pack_gqa and not cat_gqa else qhead_per_khead
+    pack_gqa_factor = 1 if not pack_gqa and not cat_gqa else pack_gqa_factor
 
     spec, _ = get_ffa_jit_spec(
         arch=arch,
@@ -746,7 +763,7 @@ def get_ffa_jit_mod(
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
-        qhead_per_khead=qhead_per_khead,
+        pack_gqa_factor=pack_gqa_factor,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
         swap_bwd_qk_loop=swap_bwd_qk_loop,

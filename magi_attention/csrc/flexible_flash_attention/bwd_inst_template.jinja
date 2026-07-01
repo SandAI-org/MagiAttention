@@ -23,7 +23,7 @@ static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapBwdQKLoop = {{ swap_bwd_qk_loop }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr bool kCatGQA = {{ cat_gqa }};
-static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
+static constexpr int kPackGQAFactor = {{ pack_gqa_factor }};
 static constexpr bool kBlockSparse = {{ block_sparse }};
 static constexpr bool kIndexSparse = {{ index_sparse }};
 static constexpr bool kUseMaskDispatch = {{ use_mask_dispatch | default('true') }};
@@ -35,7 +35,7 @@ static constexpr bool kInnerDxStoreInProducer = {{ inner_dx_store_in_producer | 
 // side (env override: MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS); the kernel only asserts them.
 static constexpr int kBwdProducerRegs = {{ bwd_producer_regs }};
 static constexpr int kBwdConsumerRegs = {{ bwd_consumer_regs }};
-// Inner-loop scatter load mode: 0=Tma(2D,auto), 2=CpAsync(per-row)
+// Inner-loop scatter load mode: 0=Tma(2D,auto), 1=Tma1d(bulk per-row, no-swizzle K), 2=CpAsync(per-row)
 static constexpr int kInnerLoadMode = {{ inner_load_mode | default(2) }};
 // Inner-loop scatter store mode: 1=Tma1d(bulk reduce-add), 2=CpAsync(scalar atomicAdd)
 static constexpr int kInnerStoreMode = {{ inner_store_mode | default(1) }};
@@ -155,7 +155,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kQheadPerKhead, kBlockSparse, kIndexSparse, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kForceMmaDkvSS, kInnerLoadMode, kProfileMode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kForceMmaDkvSS, kInnerLoadMode, kProfileMode>(params, stream);
 
   // Pool reduction: sum pool slices and convert to output dtype
   if (pool_count > 1 && kSwapBwdQKLoop) {

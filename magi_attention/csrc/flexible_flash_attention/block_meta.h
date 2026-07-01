@@ -37,7 +37,7 @@ using namespace cute;
 // InnerLoopQ=true   =>  BWD-LoopQ       (inner loop over m_block/Q).
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool IsProducer, bool InnerLoopQ, bool RangeMerge, bool FlattenGQA, int QheadPerKhead, typename SeqlenInfo_t, typename BlockMN_t>
+template <bool IsProducer, bool InnerLoopQ, bool RangeMerge, bool FlattenGQA, int PackGQAFactor, typename SeqlenInfo_t, typename BlockMN_t>
 struct DenseBlockMeta {
   // All fields are by-value (no reference data members) to avoid register spilling to stack.
   // When !RangeMerge, the batch loop runs exactly once; mark it so callers can elide the while(true).
@@ -65,7 +65,7 @@ struct DenseBlockMeta {
         bidh(get<1>(block_coord)),
         // When FlattenGQA (PackGQA or CatGQA), the scheduler assigns bidh as
         // the kv-head index directly. Otherwise bidh is the q-head index and
-        // we need to divide by QheadPerKhead to get bidh_kv.
+        // we need to divide by PackGQAFactor to get bidh_kv.
         bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
@@ -157,7 +157,7 @@ template <
     bool IsProducer,
     bool RangeMerge,
     bool PackGQA,
-    int QheadPerKhead,
+    int PackGQAFactor,
     int NumRowsPerGroup_,
     int GroupSize_,
     int NumProducerThreads_,
@@ -201,15 +201,15 @@ struct BlockSparseBlockMeta {
 
   // Read scatter range i with endpoints scaled to packed-row space.
   // LoopQ + PackGQA: Q heads are folded into the row dimension, so the scatter
-  // walk operates in PACKED-ROW space — every endpoint is scaled by QheadPerKhead.
+  // walk operates in PACKED-ROW space — every endpoint is scaled by PackGQAFactor.
   // token_indices then hold packed rows p = token * G + g, where g is the q-head
   // index within the kv group. LoopK scatters KV rows (never head-packed, scale 1).
   CUTLASS_DEVICE
   int2 packed_range(int i) const {
     int2 r = (IsLoopQ ? q_ranges : k_ranges)[i];
     if constexpr (IsLoopQ_ && PackGQA) {
-      r.x *= QheadPerKhead;
-      r.y *= QheadPerKhead;
+      r.x *= PackGQAFactor;
+      r.y *= PackGQAFactor;
     }
     return r;
   }
@@ -428,14 +428,14 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 // IsLoopQ_=false (LoopK): outer=Q token (bidb), inner=K from forward topk indices
 //   fill_token_indices fills K physical rows: id * nhk + kv_head_local
 // IsLoopQ_=true  (LoopQ): outer=K block (bidb), inner=Q from inv_indices
-//   fill_token_indices fills Q packed rows: q_token * QheadPerKhead + sub_head
+//   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
     bool IsProducer,
     bool RangeMerge,
     bool PackGQA,
-    int QheadPerKhead,
+    int PackGQAFactor,
     int NumRowsPerGroup_,
     int NumProducerThreads_,
     int GroupSize_,
@@ -477,7 +477,16 @@ struct IndexSparseBlockMeta {
       int thread_idx = 0)
       : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
-        bidh_kv(IsLoopQ ? bidh : (!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh)),
+        bidh_kv([&]() -> int {
+          // When !PackGQA, bidh is a Q-head index; divide by actual Q/KV ratio
+          // to get the KV-head. Must use the runtime divmod (not the template
+          // PackGQAFactor which is 1 when !PackGQA).
+          if constexpr (PackGQA) {
+            return bidh;
+          } else {
+            return params.qhead_per_khead_divmod.divide(bidh);
+          }
+        }()),
         group_token_ptr(nullptr) {
     bidb = [&]() {
       if constexpr (RangeMerge && !IsLoopQ) {
@@ -517,19 +526,24 @@ struct IndexSparseBlockMeta {
       head_local = bidh;
 
       // inv_indices layout: (num_k_blocks, nhk * inv_topk_per_head)
+      // When !PackGQA, bidh is a Q-head index from the scheduler but inv_indices
+      // are partitioned by KV head. Use bidh_kv (already mapped to KV-head above).
       int inv_topk_per_head = max_topk / nhk;
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh) * inv_topk_per_head;
+      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh_kv) * inv_topk_per_head;
       int max_inv_topk = inv_topk_per_head;
 
       actual_topk = max_inv_topk;
       for (int i = max_inv_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
         --actual_topk;
 
-      int total_q_packed_rows = actual_topk * QheadPerKhead;
+      // PackGQA: interleave Q heads into packed rows (token * G + sub_head).
+      // !PackGQA: each bidh from the scheduler already selects one Q head,
+      // so the inner loop iterates over raw Q tokens without head packing.
+      int total_q_rows = PackGQA ? actual_topk * PackGQAFactor : actual_topk;
       seqlen_info.offset_q = 0;
-      seqlen_info.seqlen_q = total_q_packed_rows;
-      inner_block_max = (total_q_packed_rows + kInnerBlockSize_ - 1) / kInnerBlockSize_;
-      num_invalid_token = inner_block_max * kInnerBlockSize_ - total_q_packed_rows;
+      seqlen_info.seqlen_q = total_q_rows;
+      inner_block_max = (total_q_rows + kInnerBlockSize_ - 1) / kInnerBlockSize_;
+      num_invalid_token = inner_block_max * kInnerBlockSize_ - total_q_rows;
     }
 
     inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
@@ -556,7 +570,7 @@ struct IndexSparseBlockMeta {
 
   // Fill token indices into the smem stage slot for the CURRENT tile.
   // LoopK: fills K physical rows (id * nhk + kv_head_local)
-  // LoopQ: fills Q packed rows (q_token * QheadPerKhead + sub_head)
+  // LoopQ: fills Q packed rows (q_token * PackGQAFactor + sub_head)
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
@@ -581,21 +595,35 @@ struct IndexSparseBlockMeta {
         }
       }
     } else {
-      // ── LoopQ: fill Q packed rows ──
-      int tile_first_packed_row = inner_block_cur * kInnerBlockSize_;
-      int base = tile_first_packed_row + group_idx * NumRowsPerGroup_;
-      int total_q_packed = seqlen_info.seqlen_q;
-      int max_inv_topk_val = total_q_packed / QheadPerKhead;
+      // ── LoopQ: fill Q rows ──
+      int tile_first_row = inner_block_cur * kInnerBlockSize_;
+      int base = tile_first_row + group_idx * NumRowsPerGroup_;
+      int total_q = seqlen_info.seqlen_q;
 
-      for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
-        int packed_row = base + j;
-        if (packed_row < total_q_packed) {
-          int q_token_local_idx = packed_row / QheadPerKhead;
-          int sub_head = packed_row % QheadPerKhead;
-          int q_token = (q_token_local_idx < max_inv_topk_val) ? group_token_ptr[q_token_local_idx] : -1;
-          group_rows[j] = (q_token >= 0) ? q_token * QheadPerKhead + sub_head : 0;
-        } else {
-          group_rows[j] = 0;
+      if constexpr (PackGQA) {
+        // PackGQA: interleave Q heads — packed row = token * G + sub_head
+        int max_inv_topk_val = total_q / PackGQAFactor;
+        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+          int packed_row = base + j;
+          if (packed_row < total_q) {
+            int q_token_local_idx = packed_row / PackGQAFactor;
+            int sub_head = packed_row % PackGQAFactor;
+            int q_token = (q_token_local_idx < max_inv_topk_val) ? group_token_ptr[q_token_local_idx] : -1;
+            group_rows[j] = (q_token >= 0) ? q_token * PackGQAFactor + sub_head : 0;
+          } else {
+            group_rows[j] = 0;
+          }
+        }
+      } else {
+        // !PackGQA: each bidh selects one Q head — raw Q token indices only
+        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+          int local_idx = base + j;
+          if (local_idx < total_q) {
+            int q_token = group_token_ptr[local_idx];
+            group_rows[j] = (q_token >= 0) ? q_token : 0;
+          } else {
+            group_rows[j] = 0;
+          }
         }
       }
     }
@@ -608,11 +636,17 @@ struct IndexSparseBlockMeta {
   int get_packed_first_row() const {
     static_assert(IsProducer, "get_packed_first_row() is producer-only");
     if constexpr (IsLoopQ) {
-      int packed_row = inner_block_cur * kInnerBlockSize_;
-      int q_token_local_idx = packed_row / QheadPerKhead;
-      int sub_head_offset = packed_row % QheadPerKhead;
-      int q_token = (q_token_local_idx < seqlen_info.seqlen_q / QheadPerKhead) ? group_token_ptr[q_token_local_idx] : -1;
-      return (q_token >= 0) ? q_token * QheadPerKhead + sub_head_offset : 0;
+      if constexpr (PackGQA) {
+        int packed_row = inner_block_cur * kInnerBlockSize_;
+        int q_token_local_idx = packed_row / PackGQAFactor;
+        int sub_head_offset = packed_row % PackGQAFactor;
+        int q_token = (q_token_local_idx < seqlen_info.seqlen_q / PackGQAFactor) ? group_token_ptr[q_token_local_idx] : -1;
+        return (q_token >= 0) ? q_token * PackGQAFactor + sub_head_offset : 0;
+      } else {
+        int local_idx = inner_block_cur * kInnerBlockSize_;
+        int q_token = (local_idx < seqlen_info.seqlen_q) ? group_token_ptr[local_idx] : -1;
+        return (q_token >= 0) ? q_token : 0;
+      }
     } else {
       static_assert(kKBlockSize >= kInnerBlockSize_, "LoopK get_packed_first_row() requires kbs >= kBlockN");
       return get_n_block_abs() * kInnerBlockSize_;

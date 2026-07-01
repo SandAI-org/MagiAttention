@@ -260,7 +260,7 @@ def _flex_flash_attn_forward_compilable(
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         cat_gqa=False,
-        qhead_per_khead=q.size(1) // k.size(1),
+        pack_gqa_factor=q.size(1) // k.size(1),
         block_sparse=block_sparse,
         index_sparse=index_sparse,
         profile_mode=profile_mode,
@@ -513,7 +513,7 @@ def _flex_flash_attn_backward_compilable(
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
-        qhead_per_khead=q.size(1) // k.size(1),
+        pack_gqa_factor=q.size(1) // k.size(1),
         deterministic=deterministic,
         auto_range_merge=auto_range_merge,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
@@ -1363,7 +1363,7 @@ def flex_flash_attn_func(
             Whether to group query heads sharing the same KV head into a single computation block tile for small
             seqlen_q scenarios. This method significantly improves the computational efficiency
             of block sparse attention when seqlen_q is small. Defaults to ``False``.
-            **Note:** kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).
+            **Note:** kblockm must be divisible by pack_gqa_factor (num_qhead // num_khead).
             For backward pass, this flag is only enabled when swap_bwd_qk_loop is True.
 
         cat_gqa (bool, optional):

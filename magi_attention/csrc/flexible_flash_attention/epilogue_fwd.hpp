@@ -48,7 +48,7 @@ template <
     int NumEpilogueThreads_,
     bool DisableFwdAtomicReduction_,
     bool PackGQA_,
-    int QheadPerKhead_,
+    int PackGQAFactor_,
     bool Deterministic_,
     bool SwapAB_,
     bool ReturnMaxLogits_>
@@ -67,7 +67,7 @@ struct CollectiveEpilogueFwd {
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
   static constexpr bool PackGQA = PackGQA_;
-  static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
+  static constexpr int PackGQAFactor = PackGQAFactor_; // for non packgqa, PackGQAFactor is always 1.
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapAB = SwapAB_;
   static constexpr bool ReturnMaxLogits = ReturnMaxLogits_;
@@ -136,20 +136,20 @@ struct CollectiveEpilogueFwd {
   // TMA O store only when SwapAB=true (SmemLayoutOTMA has no bank conflict with
   // transposed WGMMA output). When SwapAB=false, per-thread STG.128 via SmemLayoutOSTS
   // is faster because SmemLayoutOTMA causes SMEM bank conflicts during R2S copy.
-  static constexpr bool Use_TMA_O = SwapAB && (ArchTag::kMinComputeCapability >= 90) && (!PackGQA || kBlockM % QheadPerKhead == 0);
+  static constexpr bool Use_TMA_O = SwapAB && (ArchTag::kMinComputeCapability >= 90) && (!PackGQA || kBlockM % PackGQAFactor == 0);
   using SmemLayoutO = std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>;
 
   // Define ShapeO and StrideO based on PackGQA
   using ShapeO = std::conditional_t<
       PackGQA,
-      // ((QheadPerKhead, seqlen_q), d, nheads_kv)
-      cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t, int32_t>,
+      // ((PackGQAFactor, seqlen_q), d, nheads_kv)
+      cute::Shape<cute::Shape<cute::Int<PackGQAFactor>, int32_t>, int32_t, int32_t>,
       // (seqlen_q, d, head)
       cute::Shape<int32_t, int32_t, int32_t>>;
 
   using StrideO = std::conditional_t<
       PackGQA,
-      // ((stride_d, stride_s), 1, stride_h * QheadPerKhead)
+      // ((stride_d, stride_s), 1, stride_h * PackGQAFactor)
       cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>,
       // (stride_s, 1, stride_h)
       cute::Stride<int64_t, _1, int64_t>>;
@@ -157,8 +157,8 @@ struct CollectiveEpilogueFwd {
   // Define ShapeLSE and StrideLSE based on PackGQA
   using ShapeLSE = std::conditional_t<
       PackGQA,
-      // ((QheadPerKhead, seqlen_q), nheads_kv)
-      cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t>,
+      // ((PackGQAFactor, seqlen_q), nheads_kv)
+      cute::Shape<cute::Shape<cute::Int<PackGQAFactor>, int32_t>, int32_t>,
       // (seqlen_q, nheads_qo)
       cute::Shape<int32_t, int32_t>>;
 
@@ -180,7 +180,7 @@ struct CollectiveEpilogueFwd {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutO>> smem_o;
   };
 
-  // When Use_TMA_O is false (e.g. PackGQA with QheadPerKhead not dividing kBlockM),
+  // When Use_TMA_O is false (e.g. PackGQA with PackGQAFactor not dividing kBlockM),
   // the PackGQA-reshaped ShapeO is TMA-incompatible. Use a non-PackGQA shape for the
   // type alias so make_tma_copy compiles; the TMA descriptor is never created at runtime.
   using TMA_O_ShapeForType = std::conditional_t<Use_TMA_O, ShapeO, cute::Shape<int32_t, int32_t, int32_t>>;
@@ -233,17 +233,17 @@ struct CollectiveEpilogueFwd {
   static Params to_underlying_arguments(Arguments const& args) {
     // Construct ShapeO and StrideO based on PackGQA
     auto const shape_O = cute::conditional_return<!PackGQA>(
-        args.shape_O, make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
+        args.shape_O, make_shape(make_shape(cute::Int<PackGQAFactor>{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
 
     auto const stride_O = cute::conditional_return<!PackGQA>(
-        args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * QheadPerKhead));
+        args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * PackGQAFactor));
 
     // Construct ShapeLSE and StrideLSE based on PackGQA
     auto const shape_LSE = cute::conditional_return<!PackGQA>(
         select<0, 2>(args.shape_O), // (seqlen, nheads)
-        make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_O)), args.nheads_kv));
+        make_shape(make_shape(cute::Int<PackGQAFactor>{}, get<0>(args.shape_O)), args.nheads_kv));
 
-    auto const stride_LSE = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), QheadPerKhead));
+    auto const stride_LSE = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), PackGQAFactor));
 
     TMA_O tma_store_O = [&]() {
       if constexpr (Use_TMA_O) {
@@ -261,7 +261,7 @@ struct CollectiveEpilogueFwd {
         args.ptr_LSE,
         shape_LSE,
         stride_LSE,
-        cutlass::FastDivmod(QheadPerKhead),
+        cutlass::FastDivmod(PackGQAFactor),
         tma_store_O,
         args.nheads,
         args.nheads_kv,
@@ -368,8 +368,8 @@ struct CollectiveEpilogueFwd {
     // Get offset and seqlen for batch that current tile belongs to
     // In PackGQA, the seqlen info handles packed sequence length.
     // We need to adjust offsets to the packed domain.
-    int offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
-    int seqlen_o = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * QheadPerKhead;
+    int offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
+    int seqlen_o = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * PackGQAFactor;
 
     // Get warp group index for current thread
     int warp_group_idx = warp_uniform(thread_idx / cutlass::NumThreadsPerWarpGroup);
@@ -719,7 +719,7 @@ struct CollectiveEpilogueFwd {
           int const row_batch = m_block * kBlockM + row_block;
           if (row_batch < seqlen_o) {
             // PackGQA qhead is contiguous, calculate the qhead index for the current row
-            int const qhead_idx = bidh * QheadPerKhead + row_block % QheadPerKhead;
+            int const qhead_idx = bidh * PackGQAFactor + row_block % PackGQAFactor;
             atomicMaxFloatOnlyIncrease(&shared_storage.tensors.smem_max_logits[qhead_idx], row_max(mi));
           }
         }
@@ -783,7 +783,7 @@ struct CollectiveEpilogueFwd {
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
-    int const offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    int const offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
 
     if constexpr (!DisableFwdAtomicReduction) {
       if (thread_idx == 0) {

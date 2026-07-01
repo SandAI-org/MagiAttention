@@ -231,6 +231,22 @@ def _build_idx_kbs128(S, topk, device):
     )
 
 
+def _build_idx_kbs128_cpasync(S, topk, device):
+    """Build kbs=128 indices expanded to per-token (kbs=1) for CpAsync path.
+
+    Same contiguous block pattern as kbs=128 TMA, but expressed as token-level
+    indices so the kernel uses CpAsync scatter instead of TMA 2D.
+    """
+    import torch
+
+    block_idx = _build_idx_kbs128(S, topk, device)
+    B_q, nhk, n_blocks = block_idx.shape
+    expanded = block_idx.unsqueeze(-1) * KBS + torch.arange(
+        KBS, device=device, dtype=torch.int32
+    )
+    return expanded.reshape(B_q, nhk, n_blocks * KBS).contiguous()
+
+
 def _build_idx_kbs1(S, topk, device):
     import torch
 
@@ -312,8 +328,12 @@ def _phase2_bench(force=False):
         ("bwd_loopk", "BWD LoopK"),
     ]
     METHODS = [
-        ("dense", "Dense (baseline)"),
+        ("d1b", "Dense-SingleBatch"),
+        ("d1b_nopg", "Dense-SingleBatch-noPackGQA"),
+        ("dense_nb", "Dense-MultiBatch"),
+        ("dense_nb_nopg", "Dense-MultiBatch-noPackGQA"),
         ("is128", "kbs=128 TMA"),
+        ("is128cp", "kbs=128 CpAsync"),
         ("is1", "kbs=1 CpAsync"),
     ]
 
@@ -334,9 +354,12 @@ def _phase2_bench(force=False):
                     )
                     continue
 
+                gc.collect()
+                torch.cuda.empty_cache()
                 torch.manual_seed(42)
                 try:
-                    if method_id == "dense":
+                    if method_id in ("d1b", "d1b_nopg"):
+                        pg = method_id == "d1b"
                         q_ranges = torch.tensor(
                             [[0, S_FULL]], dtype=torch.int32, device=device
                         )
@@ -348,7 +371,32 @@ def _phase2_bench(force=False):
                             q_ranges=q_ranges,
                             k_ranges=k_ranges,
                             attn_type_map=atm,
-                            pack_gqa=True,
+                            pack_gqa=pg,
+                        )
+                        if is_bwd:
+                            kw["swap_bwd_qk_loop"] = True
+                        q, k, v = _make_tensors_kv_short(
+                            S_FULL, topk, device, torch.bfloat16, grad=is_bwd
+                        )
+                        flops = _calc_flops(S_FULL, topk, is_bwd)
+
+                    elif method_id in ("dense_nb", "dense_nb_nopg"):
+                        pg = method_id == "dense_nb"
+                        n_qb = S_FULL // 128
+                        qs = torch.arange(
+                            0, S_FULL, 128, dtype=torch.int32, device=device
+                        )
+                        qe = qs + 128
+                        q_r = torch.stack([qs, qe], dim=-1)
+                        k_r = torch.zeros(n_qb, 2, dtype=torch.int32, device=device)
+                        k_r[:, 1] = topk
+                        atm = torch.zeros(n_qb, dtype=torch.int32, device=device)
+                        kw = dict(
+                            q_ranges=q_r,
+                            k_ranges=k_r,
+                            attn_type_map=atm,
+                            block_sparse=False,
+                            pack_gqa=pg,
                         )
                         if is_bwd:
                             kw["swap_bwd_qk_loop"] = True
@@ -362,6 +410,21 @@ def _phase2_bench(force=False):
                         kw = dict(
                             index_sparse_indices=idx128,
                             k_block_size=128,
+                            index_sparse=True,
+                            pack_gqa=True,
+                        )
+                        if is_bwd:
+                            kw["swap_bwd_qk_loop"] = True
+                        q, k, v = _make_tensors(
+                            S_FULL, device, torch.bfloat16, grad=is_bwd
+                        )
+                        flops = _calc_flops(S_FULL, topk, is_bwd)
+
+                    elif method_id == "is128cp":
+                        idx128cp = _build_idx_kbs128_cpasync(S_FULL, topk, device)
+                        kw = dict(
+                            index_sparse_indices=idx128cp,
+                            k_block_size=1,
                             index_sparse=True,
                             pack_gqa=True,
                         )
@@ -437,15 +500,23 @@ def _phase2_plot():
 
     x = np.arange(len(TOPK_VALS))
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6), dpi=150)
-    bw = 0.25
+    fig, axes = plt.subplots(1, 2, figsize=(18, 7), dpi=150)
+    bw = 0.10
     for ax_idx, (pass_id, title) in enumerate(
         [("fwd", "FWD"), ("bwd_loopk", "BWD LoopK")]
     ):
         ax = axes[ax_idx]
         configs = [
-            (f"{pass_id}/dense", "Dense (baseline)", (0.58, 0.58, 0.58)),
+            (f"{pass_id}/d1b", "Dense-SingleBatch", (0.58, 0.58, 0.58)),
+            (f"{pass_id}/d1b_nopg", "Dense-SingleBatch-noPackGQA", (0.78, 0.78, 0.78)),
+            (f"{pass_id}/dense_nb", "Dense-MultiBatch", (0.22, 0.37, 0.71)),
+            (
+                f"{pass_id}/dense_nb_nopg",
+                "Dense-MultiBatch-noPackGQA",
+                (0.47, 0.62, 0.86),
+            ),
             (f"{pass_id}/is128", "kbs=128 TMA", (0.18, 0.53, 0.76)),
+            (f"{pass_id}/is128cp", "kbs=128 CpAsync", (0.95, 0.55, 0.20)),
             (f"{pass_id}/is1", "kbs=1 CpAsync", (0.91, 0.30, 0.24)),
         ]
         for i, (key, label, color) in enumerate(configs):
@@ -477,7 +548,7 @@ def _phase2_plot():
                         f"{v:.0f}",
                         ha="center",
                         va="bottom",
-                        fontsize=7,
+                        fontsize=6,
                         fontweight="bold",
                     )
 
@@ -492,7 +563,7 @@ def _phase2_plot():
         ax.set_xticklabels([f"{t // 1024}K" for t in TOPK_VALS], fontsize=11)
         ax.tick_params(axis="y", labelsize=11)
         ax.set_ylim(0, 800)
-        ax.legend(loc="upper right", fontsize=9)
+        ax.legend(loc="upper right", fontsize=7)
         ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
@@ -638,20 +709,37 @@ def _phase0_bench(force=False, rerun_filter=None):
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
         return _bench_ffa(topk, topk, pass_type, kw, device)
 
-    def run_dense_nb(topk, pass_type):
-        n_qblocks = topk // 128
-        q_starts = torch.arange(0, topk, 128, dtype=torch.int32, device=device)
+    def _make_nb_ranges(seqlen):
+        n_qblocks = seqlen // 128
+        q_starts = torch.arange(0, seqlen, 128, dtype=torch.int32, device=device)
         q_ends = q_starts + 128
         q_r = torch.stack([q_starts, q_ends], dim=-1)
         k_r = torch.zeros(n_qblocks, 2, dtype=torch.int32, device=device)
-        k_r[:, 1] = topk
+        k_r[:, 1] = seqlen
         atm = torch.zeros(n_qblocks, dtype=torch.int32, device=device)
+        return q_r, k_r, atm
+
+    def run_dense_nb(topk, pass_type):
+        q_r, k_r, atm = _make_nb_ranges(topk)
         kw = dict(
             q_ranges=q_r,
             k_ranges=k_r,
             attn_type_map=atm,
             block_sparse=False,
             pack_gqa=True,
+        )
+        if pass_type != "fwd":
+            kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
+        return _bench_ffa(topk, topk, pass_type, kw, device)
+
+    def run_dense_nb_nopg(topk, pass_type):
+        q_r, k_r, atm = _make_nb_ranges(topk)
+        kw = dict(
+            q_ranges=q_r,
+            k_ranges=k_r,
+            attn_type_map=atm,
+            block_sparse=False,
+            pack_gqa=False,
         )
         if pass_type != "fwd":
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
@@ -679,15 +767,17 @@ def _phase0_bench(force=False, rerun_filter=None):
             block_sparse=True,
             auto_range_merge=True,
             pack_gqa=True,
+            k_block_size=KBS,
         )
         if pass_type != "fwd":
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
         return _bench_ffa(topk, topk, pass_type, kw, device)
 
     METHODS = [
-        ("d1b", "Dense-1B", run_d1b),
-        ("d1b_nopg", "D1B-noPG", run_d1b_nopg),
-        ("dense_nb", "Dense-nB", run_dense_nb),
+        ("d1b", "Dense-SingleBatch", run_d1b),
+        ("d1b_nopg", "Dense-SingleBatch-noPackGQA", run_d1b_nopg),
+        ("dense_nb", "Dense-MultiBatch", run_dense_nb),
+        ("dense_nb_nopg", "Dense-MultiBatch-noPackGQA", run_dense_nb_nopg),
         ("ia", "IndexSparse", run_ia),
         ("sl", "BlockSparse", run_sl),
     ]
@@ -718,6 +808,8 @@ def _phase0_bench(force=False, rerun_filter=None):
                         print(f"    topk={topk:>5d}: SKIP", flush=True)
                     continue
 
+                gc.collect()
+                torch.cuda.empty_cache()
                 try:
                     t0 = time.time()
                     tf, ms = method_fn(topk, pass_id)
@@ -731,10 +823,12 @@ def _phase0_bench(force=False, rerun_filter=None):
                 except Exception as e:
                     _set_entry(results, key, topk, None, None)
                     print(f"    topk={topk:>5d}: FAIL - {e}", flush=True)
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
             _save_results(phase, results)
 
-    print(f"\n[{_ts()}] Phase 1 DONE -> {_results_path(phase)}", flush=True)
+    print(f"\n[{_ts()}] Phase 0 DONE -> {_results_path(phase)}", flush=True)
 
 
 def _phase0_plot():
@@ -755,16 +849,17 @@ def _phase0_plot():
 
     PASSES = [("fwd", "FWD"), ("bwd_loopq", "BWD LoopQ"), ("bwd_loopk", "BWD LoopK")]
     METHODS = [
-        ("d1b", "Dense-1B", (0.58, 0.58, 0.58)),
-        ("d1b_nopg", "D1B-noPG", (0.40, 0.40, 0.40)),
-        ("dense_nb", "Dense-nB", (0.22, 0.37, 0.71)),
+        ("d1b", "Dense-SingleBatch", (0.58, 0.58, 0.58)),
+        ("d1b_nopg", "Dense-SingleBatch-noPackGQA", (0.78, 0.78, 0.78)),
+        ("dense_nb", "Dense-MultiBatch", (0.22, 0.37, 0.71)),
+        ("dense_nb_nopg", "Dense-MultiBatch-noPackGQA", (0.47, 0.62, 0.86)),
         ("ia", "IndexSparse", (0.77, 0.34, 0.49)),
         ("sl", "BlockSparse", (0.29, 0.57, 0.60)),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 6), dpi=150)
+    fig, axes = plt.subplots(1, 3, figsize=(24, 7), dpi=150)
     x = np.arange(len(TOPK_VALS))
-    bw = 0.15
+    bw = 0.12
 
     for col_idx, (pid, pname) in enumerate(PASSES):
         ax = axes[col_idx]
@@ -798,7 +893,7 @@ def _phase0_plot():
                         f"{v:.0f}",
                         ha="center",
                         va="bottom",
-                        fontsize=7,
+                        fontsize=6,
                         fontweight="bold",
                     )
 
@@ -809,7 +904,7 @@ def _phase0_plot():
         ax.set_xticklabels([f"{t // 1024}K" for t in TOPK_VALS], fontsize=11)
         ax.tick_params(axis="y", labelsize=11)
         ax.set_ylim(0, 800)
-        ax.legend(loc="upper right", fontsize=9)
+        ax.legend(loc="upper right", fontsize=7)
         ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle(
@@ -894,6 +989,7 @@ def _phase0_ncu():
                 f"out, _ = flex_flash_attn_func(q, k, v,\n"
                 f"    q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=atm,\n"
                 f"    block_sparse=True, auto_range_merge=True, pack_gqa=True,\n"
+                f"    k_block_size={KBS},\n"
                 f"    {'swap_bwd_qk_loop=' + swap_loopk + ',' if is_bwd else ''})"
             )
         else:
@@ -961,12 +1057,53 @@ def _phase1_bench(force=False, rerun_filter=None):
     device = f"cuda:{gpu}"
     print(f"[{_ts()}] Phase 1: topk-sweep S={S_FULL} (gpu{gpu})", flush=True)
 
-    def run_d1b(topk, pass_type):
+    def _p1_d1b(topk, pass_type, pg):
         kw = dict(
             q_ranges=torch.tensor([[0, S_FULL]], dtype=torch.int32, device=device),
             k_ranges=torch.tensor([[0, topk]], dtype=torch.int32, device=device),
             attn_type_map=torch.zeros(1, dtype=torch.int32, device=device),
-            pack_gqa=True,
+            pack_gqa=pg,
+        )
+        if pass_type != "fwd":
+            kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
+        q, k, v = _make_tensors_kv_short(
+            S_FULL, topk, device, torch.bfloat16, grad=(pass_type != "fwd")
+        )
+        from magi_attention.functional import flex_flash_attn_func
+
+        o, *_ = flex_flash_attn_func(q, k, v, **kw)
+        flops = _calc_flops(S_FULL, topk, pass_type != "fwd")
+        if pass_type == "fwd":
+
+            def fn():
+                flex_flash_attn_func(q, k, v, **kw)  # noqa: F821
+
+        else:
+            do = torch.randn_like(o)
+
+            def fn():  # noqa: F811
+                o.backward(do, retain_graph=True)  # noqa: F821
+
+        tf, ms = _bench_kernel(fn, flops, device)
+        q = k = v = o = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        return tf, ms
+
+    def _p1_nb(topk, pass_type, pg):
+        n_qblocks = S_FULL // 128
+        q_starts = torch.arange(0, S_FULL, 128, dtype=torch.int32, device=device)
+        q_ends = q_starts + 128
+        q_r = torch.stack([q_starts, q_ends], dim=-1)
+        k_r = torch.zeros(n_qblocks, 2, dtype=torch.int32, device=device)
+        k_r[:, 1] = topk
+        atm = torch.zeros(n_qblocks, dtype=torch.int32, device=device)
+        kw = dict(
+            q_ranges=q_r,
+            k_ranges=k_r,
+            attn_type_map=atm,
+            block_sparse=False,
+            pack_gqa=pg,
         )
         if pass_type != "fwd":
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
@@ -1016,13 +1153,21 @@ def _phase1_bench(force=False, rerun_filter=None):
             block_sparse=True,
             auto_range_merge=True,
             pack_gqa=True,
+            k_block_size=KBS,
         )
         if pass_type != "fwd":
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
         return _bench_ffa(S_FULL, topk, pass_type, kw, device)
 
     METHODS = [
-        ("d1b", "Dense-1B", run_d1b),
+        ("d1b", "Dense-SingleBatch", lambda t, p: _p1_d1b(t, p, True)),
+        ("d1b_nopg", "Dense-SingleBatch-noPackGQA", lambda t, p: _p1_d1b(t, p, False)),
+        ("dense_nb", "Dense-MultiBatch", lambda t, p: _p1_nb(t, p, True)),
+        (
+            "dense_nb_nopg",
+            "Dense-MultiBatch-noPackGQA",
+            lambda t, p: _p1_nb(t, p, False),
+        ),
         ("ia", "IndexSparse", run_ia),
         ("sl", "BlockSparse", run_sl),
     ]
@@ -1053,6 +1198,8 @@ def _phase1_bench(force=False, rerun_filter=None):
                         print(f"    topk={topk:>5d}: SKIP", flush=True)
                     continue
 
+                gc.collect()
+                torch.cuda.empty_cache()
                 try:
                     t0 = time.time()
                     tf, ms = method_fn(topk, pass_id)
@@ -1066,10 +1213,12 @@ def _phase1_bench(force=False, rerun_filter=None):
                 except Exception as e:
                     _set_entry(results, key, topk, None, None)
                     print(f"    topk={topk:>5d}: FAIL - {e}", flush=True)
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
             _save_results(phase, results)
 
-    print(f"\n[{_ts()}] Phase 2 DONE -> {_results_path(phase)}", flush=True)
+    print(f"\n[{_ts()}] Phase 1 DONE -> {_results_path(phase)}", flush=True)
 
 
 def _phase1_plot():
@@ -1090,14 +1239,17 @@ def _phase1_plot():
 
     PASSES = [("fwd", "FWD"), ("bwd_loopq", "BWD LoopQ"), ("bwd_loopk", "BWD LoopK")]
     METHODS = [
-        ("d1b", "Dense-1B", (0.58, 0.58, 0.58)),
+        ("d1b", "Dense-SingleBatch", (0.58, 0.58, 0.58)),
+        ("d1b_nopg", "Dense-SingleBatch-noPackGQA", (0.78, 0.78, 0.78)),
+        ("dense_nb", "Dense-MultiBatch", (0.22, 0.37, 0.71)),
+        ("dense_nb_nopg", "Dense-MultiBatch-noPackGQA", (0.47, 0.62, 0.86)),
         ("ia", "IndexSparse", (0.77, 0.34, 0.49)),
         ("sl", "BlockSparse", (0.29, 0.57, 0.60)),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 6), dpi=150)
+    fig, axes = plt.subplots(1, 3, figsize=(24, 7), dpi=150)
     x = np.arange(len(TOPK_VALS))
-    bw = 0.25
+    bw = 0.12
 
     for col_idx, (pid, pname) in enumerate(PASSES):
         ax = axes[col_idx]
@@ -1131,7 +1283,7 @@ def _phase1_plot():
                         f"{v:.0f}",
                         ha="center",
                         va="bottom",
-                        fontsize=7,
+                        fontsize=6,
                         fontweight="bold",
                     )
 
@@ -1146,7 +1298,7 @@ def _phase1_plot():
         ax.set_xticklabels([f"{t // 1024}K" for t in TOPK_VALS], fontsize=11)
         ax.tick_params(axis="y", labelsize=11)
         ax.set_ylim(0, 800)
-        ax.legend(loc="upper right", fontsize=9)
+        ax.legend(loc="upper right", fontsize=7)
         ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle(
@@ -1237,11 +1389,11 @@ q_ranges, k_ranges = generate_ranges_from_topk_indices(ia_3d, block_m=1, block_n
 atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device="cuda")
 out, _ = flex_flash_attn_func(q, k, v, q_ranges=q_ranges, k_ranges=k_ranges,
     attn_type_map=atm, block_sparse=True, auto_range_merge=True, pack_gqa=True,
-    swap_bwd_qk_loop=False)
+    k_block_size={KBS}, swap_bwd_qk_loop=False)
 do = torch.randn_like(out)
 out.backward(do)
 torch.cuda.synchronize()
-print("[DONE] Dense-nB BWD LoopQ S={S} TOPK={TOPK}")
+print("[DONE] Dense-MultiBatch BWD LoopQ S={S} TOPK={TOPK}")
 """
 
     scenarios = [
@@ -1249,25 +1401,25 @@ print("[DONE] Dense-nB BWD LoopQ S={S} TOPK={TOPK}")
             "A_d1b",
             TEMPLATE_D1B_BWD,
             dict(S=8192, TOPK=8192, **fmt),
-            "BWD LoopQ S=topk=8K: D1B",
+            "BWD LoopQ S=topk=8K: Dense-SingleBatch",
         ),
         (
             "A_dense_nb",
             TEMPLATE_DENSE_NB_BWD,
             dict(S=8192, TOPK=8192, **fmt),
-            "BWD LoopQ S=topk=8K: Dense-nB",
+            "BWD LoopQ S=topk=8K: Dense-MultiBatch",
         ),
         (
             "B_d1b",
             TEMPLATE_D1B_BWD,
             dict(S=32768, TOPK=16384, **fmt),
-            "BWD LoopQ S=32K topk=16K: D1B",
+            "BWD LoopQ S=32K topk=16K: Dense-SingleBatch",
         ),
         (
             "B_dense_nb",
             TEMPLATE_DENSE_NB_BWD,
             dict(S=32768, TOPK=16384, **fmt),
-            "BWD LoopQ S=32K topk=16K: Dense-nB",
+            "BWD LoopQ S=32K topk=16K: Dense-MultiBatch",
         ),
     ]
 
