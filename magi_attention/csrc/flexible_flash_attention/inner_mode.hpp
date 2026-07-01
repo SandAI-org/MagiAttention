@@ -18,10 +18,18 @@
 
 namespace flash {
 
-// 2-way inner-loop KV load strategy for sparse attention scatter paths.
+// Inner-loop KV load strategy for sparse attention scatter paths.
 // Tma:     2D TMA descriptor — auto-selected when tiles are physically contiguous
-// CpAsync: cp.async per-row scatter
-enum class InnerLoadMode : int { Tma = 0, CpAsync = 2 };
+// CpAsync: cp.async per-row scatter (8×16B per row for hd=128)
+//
+// Note: Tma1d (cp.async.bulk 1D) was investigated for inner loads but is NOT viable:
+// SM90_BULK_COPY_G2S does a LINEAR memcpy, but WGMMA requires SMEM in atom-tiled
+// layout (even INTER/no-swizzle uses 8×8 atoms). tile_to_shape makes rows non-contiguous
+// across atoms — row 0 spans offsets 0-7, then jumps to 64-71 (next atom), not 8-15.
+// This means cp.async.bulk per-row (256B) would corrupt data. Per-atom copies (16B each)
+// have the same instruction count as cp.async, so no benefit.
+// Tma1d (=1) for InnerLoadMode is reserved but currently falls through to CpAsync.
+enum class InnerLoadMode : int { Tma = 0, Tma1d = 1, CpAsync = 2 };
 
 // 2-way inner-loop scatter store strategy (BWD dX accumulation).
 // Tma1d:   cp.reduce.async.bulk per-row (bulk reduce-add from row-contiguous smem)

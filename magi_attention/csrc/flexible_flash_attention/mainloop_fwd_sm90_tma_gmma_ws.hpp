@@ -56,7 +56,7 @@ template <
     bool IntraWGOverlap_,
     bool RangeMerge_,
     bool PackGQA_,
-    int QheadPerKhead_,
+    int PackGQAFactor_,
     bool SwapAB_,
     bool BlockSparse_,
     bool IndexSparse_,
@@ -82,7 +82,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool SwapAB = SwapAB_;
   static constexpr bool PackGQA = PackGQA_;
-  static constexpr int QheadPerKhead = QheadPerKhead_;
+  static constexpr int PackGQAFactor = PackGQAFactor_;
   static constexpr bool BlockSparse = BlockSparse_;
   static constexpr bool IndexSparse = IndexSparse_;
   static constexpr int KBlockSize = KBlockSize_;
@@ -125,12 +125,15 @@ struct CollectiveMainloopFwdSm90 {
 
   // ─── Inner-Loop KV Load Strategy (InnerLoadMode enum) ───
   // Tma:     physically contiguous tiles → TMA 2D descriptor (auto-detected)
-  // CpAsync: scatter rows → cp.async per-row
+  // Tma1d:   cp.async.bulk per-row (1 instr/row); K uses INTER (no-swizzle) SMEM layout
+  // CpAsync: cp.async per-row scatter (8×16B per row)
   // KBlockSize controls contiguity: when KBlockSize >= kBlockN, each inner tile
   // is a contiguous memory region → TMA 2D. Both IndexSparse and BlockSparse
   // must set KBlockSize appropriately (BlockSparse: kBlockN, IndexSparse: user).
   static constexpr bool Use_TMA_Q = true;
   static constexpr bool _is_contiguous = (!IndexSparse && !BlockSparse) || (KBlockSize >= kBlockN);
+  // Tma1d (=1) falls through to CpAsync: cp.async.bulk 1D is incompatible with WGMMA
+  // atom-tiled SMEM layouts (see inner_mode.hpp for details).
   static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
   static constexpr bool InnerLoad_Tma = (kInnerLoadMode == InnerLoadMode::Tma);
   static constexpr bool InnerLoad_CpAsync = (kInnerLoadMode == InnerLoadMode::CpAsync);
@@ -142,7 +145,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr GMMA::Major TmaMajorV = GMMA::Major::MN;
 
   using SeqlenInfo_t = flash::SeqlenInfo;
-  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, QheadPerKhead>;
+  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, PackGQAFactor>;
 
   // SwapAB RS mode: K in registers (A operand), Q in swizzled SMEM (B operand).
   // When SwapAB is active, the WGMMA computes K @ Q^T = S^T. Putting K in registers
@@ -155,7 +158,7 @@ struct CollectiveMainloopFwdSm90 {
   // or reducing accumulator liveness) before it can provide any benefit.
   static constexpr bool MmaQK_is_RS = false;
 
-  // Scatter paths (TMA 1D or cp.async) need a full warp group (128 threads) for per-row loads.
+  // Scatter paths (CpAsync) need a full warp group (128 threads) for per-row loads.
   // TMA 2D paths issue from a single thread, so a single warp (32 threads) suffices.
   static constexpr int NumProducerThreads = !InnerLoad_Tma ? cutlass::NumThreadsPerWarpGroup : cutlass::NumThreadsPerWarp;
 
@@ -246,9 +249,7 @@ struct CollectiveMainloopFwdSm90 {
 
   // Get the smem layout for K
   // Both TMA2d and CpAsync paths use the same SW128 swizzle for K. WGMMA SS-mode reads benefit
-  // from swizzle for bank-conflict-free access. Tested INTER (no-swizzle) alternative:
-  // correctness OK but ~5% performance regression on kbs=1 due to SmemAlignment change
-  // affecting TensorStorage placement.
+  // from swizzle for bank-conflict-free access.
   using SmemLayoutAtomK = decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
   using SmemLayoutK = decltype(tile_to_shape(SmemLayoutAtomK{}, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}, Int<kStages>{}))); // (kBlockN, kHeadDim, kStages)
 
@@ -292,7 +293,7 @@ struct CollectiveMainloopFwdSm90 {
   using ShapeQPackedTMA = std::conditional_t<
       !PackGQA,
       ShapeQKV,
-      cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t, int32_t> // ((qhead_per_khead, seqlen), headdim, khead)
+      cute::Shape<cute::Shape<cute::Int<PackGQAFactor>, int32_t>, int32_t, int32_t> // ((qhead_per_khead, seqlen), headdim, khead)
       >;
   using StrideQPackedTMA = std::conditional_t<
       !PackGQA,
@@ -336,6 +337,7 @@ struct CollectiveMainloopFwdSm90 {
 
   using PipelineTmaAsync =
       std::conditional_t<CUTE_STATIC_V(size(ClusterShape{})) == 1, typename cutlass::PipelineTmaAsyncNoCluster<kStages>, typename cutlass::PipelineTmaAsync<kStages>>;
+  static constexpr bool _use_tma_pipeline = InnerLoad_Tma;
   using MainloopPipelineK = std::conditional_t<InnerLoad_Tma, PipelineTmaAsync, typename cutlass::PipelineAsync<kStages>>;
   using MainloopPipelineV = std::conditional_t<InnerLoad_Tma, PipelineTmaAsync, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = cutlass::PipelineState<kStages>;
@@ -453,13 +455,13 @@ struct CollectiveMainloopFwdSm90 {
 
   // BlockMeta type aliases — definitions live in block_meta.h
   template <bool IsProducer>
-  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, /*FlattenGQA=*/PackGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
+  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, /*FlattenGQA=*/PackGQA, PackGQAFactor, SeqlenInfo_t, BlockMN_t>;
 
   // BlockSparse producer (used by load)
   using BlockSparseProducerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
                                                                    RangeMerge,
                                                                    PackGQA,
-                                                                   QheadPerKhead,
+                                                                   PackGQAFactor,
                                                                    NumRowsPerGroup,
                                                                    GroupSize,
                                                                    NumProducerThreads,
@@ -471,7 +473,7 @@ struct CollectiveMainloopFwdSm90 {
   using BlockSparseConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
                                                                    RangeMerge,
                                                                    PackGQA,
-                                                                   QheadPerKhead,
+                                                                   PackGQAFactor,
                                                                    NumRowsPerGroup,
                                                                    GroupSize,
                                                                    NumProducerThreads,
@@ -481,7 +483,7 @@ struct CollectiveMainloopFwdSm90 {
 
   template <bool IsProducer>
   using IndexSparseBlockMeta = flash::
-      IndexSparseBlockMeta<IsProducer, RangeMerge, PackGQA, QheadPerKhead, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin, KBlockSize>;
+      IndexSparseBlockMeta<IsProducer, RangeMerge, PackGQA, PackGQAFactor, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin, KBlockSize>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
@@ -494,7 +496,7 @@ struct CollectiveMainloopFwdSm90 {
     auto const shape_Q_packed = cute::conditional_return<!PackGQA>(
         args.shape_Q,
         make_shape(
-            make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+            make_shape(cute::Int<PackGQAFactor>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
             get<1>(args.shape_Q), // headdim
             get<2>(args.shape_K) // numhead_k
             ));
@@ -504,7 +506,7 @@ struct CollectiveMainloopFwdSm90 {
         make_stride(
             make_stride(get<2>(args.stride_Q), get<0>(args.stride_Q)), // (qhead_per_khead, seqlen)
             get<1>(args.stride_Q), // headdim
-            get<2>(args.stride_Q) * QheadPerKhead));
+            get<2>(args.stride_Q) * PackGQAFactor));
 
     auto mQPacked = [&]() {
       if constexpr (!PackGQA) {
@@ -514,7 +516,7 @@ struct CollectiveMainloopFwdSm90 {
             make_gmem_ptr(args.ptr_Q),
             make_layout(
                 make_shape(
-                    make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+                    make_shape(cute::Int<PackGQAFactor>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
                     get<1>(args.shape_Q), // headdim
                     get<2>(args.shape_K) // numhead_k
                     ),
@@ -620,7 +622,7 @@ struct CollectiveMainloopFwdSm90 {
         if constexpr (PackGQA) {
           return local_tile(
               domain_offset(
-                  make_coord(block_meta.seqlen_info.offset_q * QheadPerKhead, _0{}),
+                  make_coord(block_meta.seqlen_info.offset_q * PackGQAFactor, _0{}),
                   mQ_Packed), // for packgqa, we need multiple qhead_per_khead for offset of seqlen;
               select<0, 2>(TileShape_MNK{}),
               make_coord(block_meta.outer_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
@@ -699,7 +701,6 @@ struct CollectiveMainloopFwdSm90 {
     // Dense: TMA 2D tile at relative n_block within batch.
     auto load_K = [&]() {
       if constexpr (InnerLoad_CpAsync) {
-        // Legacy cp.async per-row scatter (for A/B benchmarking against TMA 1D).
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_kv_token_indices[smem_pipe_write_k.index() * kBlockN];
@@ -1179,12 +1180,12 @@ struct CollectiveMainloopFwdSm90 {
     // Mask functions: dense path uses boundary/regular/no_mask;
     // sparse path uses padding_mask for the block containing invalid tokens.
     auto boundary_mask_fn = [&](int n_block) {
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(
           tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto no_mask_fn = [&](int n_block) { /*do nothing*/ };
     auto regular_mask_fn = [&](int n_block) {
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, PackGQAFactor>(
           tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
     };
     auto padding_mask_fn = [&](int /*n_block*/) {
@@ -1423,7 +1424,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (MaskMode == 0) {
         // MaskMode 0 (regular): direct apply with Seqlenk_mask=true on every block.
         auto direct_mask_fn = [&](int n_block) {
-          mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+          mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(
               tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
         flash::iterate_range<kInnerDir>(block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, [&] {
@@ -1431,7 +1432,7 @@ struct CollectiveMainloopFwdSm90 {
         });
       } else if constexpr (MaskMode == 1) {
         // MaskMode 1 (dispatch): 3-lambda zone splitting (current default).
-        mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, DispatchAxis::N, kInnerDir>(
+        mask_dispatch<kBlockM, kBlockN, PackGQA, PackGQAFactor, DispatchAxis::N, kInnerDir>(
             block_meta.inner_block_cur,
             block_meta.inner_block_min,
             block_meta.inner_block_max,
@@ -1445,7 +1446,7 @@ struct CollectiveMainloopFwdSm90 {
             no_mask_fn);
       } else {
         // MaskMode 2 (unified): mask_dispatch_unified with runtime zone dispatch.
-        flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, fwd_step);
+        flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, fwd_step);
       }
     };
 

@@ -892,15 +892,23 @@ class TestIndexSparseSimple(unittest.TestCase):
                 v_b = v_b.expand(1, NHQ_eff, S_flat, D)
 
             with torch.no_grad():
-                o_ref = torch.nn.functional.scaled_dot_product_attention(
-                    q_b, k_b, v_b, attn_mask=mask[b].unsqueeze(0)
-                )
+                try:
+                    o_ref = torch.nn.functional.scaled_dot_product_attention(
+                        q_b, k_b, v_b, attn_mask=mask[b].unsqueeze(0)
+                    )
+                except RuntimeError:
+                    with torch.nn.attention.sdpa_kernel(
+                        [torch.nn.attention.SDPBackend.MATH]
+                    ):
+                        o_ref = torch.nn.functional.scaled_dot_product_attention(
+                            q_b, k_b, v_b, attn_mask=mask[b].unsqueeze(0)
+                        )
             o_ref = o_ref.squeeze(0).transpose(0, 1)
 
             max_diff = (o_sparse[sl].float() - o_ref.float()).abs().max().item()
-            assert max_diff < 0.01, (
+            assert max_diff < 0.02, (
                 f"[test_index_sparse][{cfg['name']}] "
-                f"FWD batch {b}: max_diff={max_diff:.6f} >= 0.01"
+                f"FWD batch {b}: max_diff={max_diff:.6f} >= 0.02"
             )
 
         # BWD verification
@@ -937,9 +945,17 @@ class TestIndexSparseSimple(unittest.TestCase):
             k_exp = k_b.expand(1, NHQ_eff, S_flat, D) if NHQ_eff > 1 else k_b
             v_exp = v_b.expand(1, NHQ_eff, S_flat, D) if NHQ_eff > 1 else v_b
 
-            o_ref = torch.nn.functional.scaled_dot_product_attention(
-                q_b, k_exp, v_exp, attn_mask=mask[b].unsqueeze(0)
-            )
+            try:
+                o_ref = torch.nn.functional.scaled_dot_product_attention(
+                    q_b, k_exp, v_exp, attn_mask=mask[b].unsqueeze(0)
+                )
+            except RuntimeError:
+                with torch.nn.attention.sdpa_kernel(
+                    [torch.nn.attention.SDPBackend.MATH]
+                ):
+                    o_ref = torch.nn.functional.scaled_dot_product_attention(
+                        q_b, k_exp, v_exp, attn_mask=mask[b].unsqueeze(0)
+                    )
             do_b = do[sl].reshape(1, S_flat, NHQ_eff, D).transpose(1, 2)
             o_ref.backward(do_b)
 

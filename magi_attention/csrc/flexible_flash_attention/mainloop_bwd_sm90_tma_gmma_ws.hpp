@@ -72,7 +72,7 @@ template <
     int MaskMode_,
     bool InnerDxStoreInProducer_,
     int InnerStoreMode_,
-    int QheadPerKhead_,
+    int PackGQAFactor_,
     int NumMmaWarpGroups,
     int AtomLayoutMSdP,
     int AtomLayoutNdKV,
@@ -116,7 +116,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool CatGQA = CatGQA_;
   static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
   static constexpr bool RangeMerge = RangeMerge_;
-  static constexpr int QheadPerKhead = QheadPerKhead_;
+  static constexpr int PackGQAFactor = PackGQAFactor_;
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
   static constexpr bool BlockSparse = BlockSparse_;
   static constexpr bool IndexSparse = IndexSparse_;
@@ -162,12 +162,12 @@ struct CollectiveMainloopBwdSm90 {
   //   Dense: always contiguous → Tma.
   //   LoopQ sparse (inner=Q/dO): PackGQA makes tiles contiguous when:
   //     - BlockSparse: always (packed rows = consecutive tokens × heads).
-  //     - IndexSparse: QheadPerKhead >= kBlockM (one Q token fills the tile).
+  //     - IndexSparse: PackGQAFactor >= kBlockM (one Q token fills the tile).
   //   LoopK sparse (inner=K/V): K tiles are contiguous when:
   //     - BlockSparse: KBlockSize >= kBlockN (Python sets kbs=kBlockN for BlockSparse).
-  //     - IndexSparse: PackGQA + QheadPerKhead >= kBlockM + KBlockSize >= kBlockN.
-  static constexpr bool _is_contiguous = !InnerUseScatter || (!SwapBwdQKLoop && PackGQA && (!IndexSparse || QheadPerKhead >= kBlockM)) ||
-      (SwapBwdQKLoop && ((BlockSparse && KBlockSize >= kBlockN) || (IndexSparse && PackGQA && QheadPerKhead >= kBlockM && KBlockSize >= kBlockN)));
+  //     - IndexSparse: PackGQA + PackGQAFactor >= kBlockM + KBlockSize >= kBlockN.
+  static constexpr bool _is_contiguous = !InnerUseScatter || (!SwapBwdQKLoop && PackGQA && (!IndexSparse || PackGQAFactor >= kBlockM)) ||
+      (SwapBwdQKLoop && ((BlockSparse && KBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && KBlockSize >= kBlockN)));
   static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
   static constexpr bool InnerLoad_Tma = (kInnerLoadMode == InnerLoadMode::Tma);
   static constexpr bool InnerLoad_CpAsync = (kInnerLoadMode == InnerLoadMode::CpAsync);
@@ -185,7 +185,7 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
   using SeqlenInfo_t = flash::SeqlenInfo;
-  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, QheadPerKhead>;
+  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, PackGQAFactor>;
 
   static_assert(NumMmaWarpGroups % AtomLayoutMSdP == 0);
   static_assert(NumMmaWarpGroups % AtomLayoutNdKV == 0);
@@ -489,11 +489,11 @@ struct CollectiveMainloopBwdSm90 {
   using ShapeLSETMA = std::conditional_t<
       PackGQA,
       // (4, (qhead_per_khead, seqlen_q), nheads_kv)
-      cute::Shape<_4, cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t>,
+      cute::Shape<_4, cute::Shape<cute::Int<PackGQAFactor>, int32_t>, int32_t>,
       std::conditional_t<
           CatGQA,
           // (4, seqlen_q, (qhead_per_khead, nheads_kv))
-          cute::Shape<_4, int32_t, cute::Shape<cute::Int<QheadPerKhead>, int32_t>>,
+          cute::Shape<_4, int32_t, cute::Shape<cute::Int<PackGQAFactor>, int32_t>>,
           // (4, seqlen_q, num_heads_q)
           ShapeLSE>>;
   using StrideLSETMA = std::conditional_t<
@@ -513,12 +513,12 @@ struct CollectiveMainloopBwdSm90 {
       PackGQA,
       // Case 1: PackGQA is enabled
       // Shape: ((qhead_per_khead, seqlen), headdim, nheads_kv)
-      cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, Int<kHeadDim>, int32_t>,
+      cute::Shape<cute::Shape<cute::Int<PackGQAFactor>, int32_t>, Int<kHeadDim>, int32_t>,
       std::conditional_t<
           CatGQA,
           // Case 2: CatGQA is enabled
           // Shape: (seqlen, headdim, (qhead_per_khead, nheads_kv))
-          cute::Shape<int32_t, Int<kHeadDim>, cute::Shape<cute::Int<QheadPerKhead>, int32_t>>,
+          cute::Shape<int32_t, Int<kHeadDim>, cute::Shape<cute::Int<PackGQAFactor>, int32_t>>,
           // Case 3: Default case (neither Pack nor Cat)
           ShapeQKV>>;
   using StrideQdOdQTMA = std::conditional_t<
@@ -835,7 +835,7 @@ struct CollectiveMainloopBwdSm90 {
   using BlockSparseLoopKProducerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
                                                                         RangeMerge,
                                                                         PackGQA,
-                                                                        QheadPerKhead,
+                                                                        PackGQAFactor,
                                                                         NumRowsPerGroup,
                                                                         GroupSize,
                                                                         NumProducerThreads,
@@ -847,7 +847,7 @@ struct CollectiveMainloopBwdSm90 {
   using BlockSparseLoopKConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
                                                                         RangeMerge,
                                                                         PackGQA,
-                                                                        QheadPerKhead,
+                                                                        PackGQAFactor,
                                                                         NumRowsPerGroup,
                                                                         GroupSize,
                                                                         NumProducerThreads,
@@ -859,7 +859,7 @@ struct CollectiveMainloopBwdSm90 {
   using BlockSparseLoopQProducerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
                                                                         RangeMerge,
                                                                         PackGQA,
-                                                                        QheadPerKhead,
+                                                                        PackGQAFactor,
                                                                         NumRowsPerGroup,
                                                                         GroupSize,
                                                                         NumProducerThreads,
@@ -871,7 +871,7 @@ struct CollectiveMainloopBwdSm90 {
   using BlockSparseLoopQConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
                                                                         RangeMerge,
                                                                         PackGQA,
-                                                                        QheadPerKhead,
+                                                                        PackGQAFactor,
                                                                         NumRowsPerGroup,
                                                                         GroupSize,
                                                                         NumProducerThreads,
@@ -891,7 +891,7 @@ struct CollectiveMainloopBwdSm90 {
     // Create shape for Q, dO and dQ
     auto const shape_QdOdQ = cute::conditional_return<PackGQA>(
         make_shape(
-            make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_QdOdQ)), // (qhead_per_khead, seqlen)
+            make_shape(cute::Int<PackGQAFactor>{}, get<0>(args.shape_QdOdQ)), // (qhead_per_khead, seqlen)
             get<1>(args.shape_QdOdQ), // headdim
             get<2>(args.shape_KVdKdV) // nheads_kv
             ),
@@ -899,7 +899,7 @@ struct CollectiveMainloopBwdSm90 {
             make_shape(
                 get<0>(args.shape_QdOdQ), // seqlen
                 get<1>(args.shape_QdOdQ), // headdim
-                make_shape(cute::Int<QheadPerKhead>{}, get<2>(args.shape_KVdKdV)) // (qhead_per_khead, nheads_kv)
+                make_shape(cute::Int<PackGQAFactor>{}, get<2>(args.shape_KVdKdV)) // (qhead_per_khead, nheads_kv)
                 ),
             args.shape_QdOdQ));
     // Create stride for Q, dO and dQ
@@ -907,39 +907,39 @@ struct CollectiveMainloopBwdSm90 {
         make_stride(
             make_stride(get<2>(args.stride_Q), get<0>(args.stride_Q)), // (q_head_stride, row_stride)
             get<1>(args.stride_Q), // 1
-            get<2>(args.stride_Q) * QheadPerKhead // qhead_per_khead * q_head_stride
+            get<2>(args.stride_Q) * PackGQAFactor // qhead_per_khead * q_head_stride
             ),
         cute::conditional_return<CatGQA>(
             make_stride(
                 get<0>(args.stride_Q), // row_stride
                 get<1>(args.stride_Q), // 1
-                make_stride(get<2>(args.stride_Q), get<2>(args.stride_Q) * QheadPerKhead) // (q_head_stride, qhead_per_khead * q_head_stride)
+                make_stride(get<2>(args.stride_Q), get<2>(args.stride_Q) * PackGQAFactor) // (q_head_stride, qhead_per_khead * q_head_stride)
                 ),
             args.stride_Q));
     auto const stride_dO = cute::conditional_return<PackGQA>(
         make_stride(
             make_stride(get<2>(args.stride_dO), get<0>(args.stride_dO)), // (do_head_stride, row_stride)
             get<1>(args.stride_dO), // 1
-            get<2>(args.stride_dO) * QheadPerKhead // qhead_per_khead * do_head_stride
+            get<2>(args.stride_dO) * PackGQAFactor // qhead_per_khead * do_head_stride
             ),
         cute::conditional_return<CatGQA>(
             make_stride(
                 get<0>(args.stride_dO), // row_stride
                 get<1>(args.stride_dO), // 1
-                make_stride(get<2>(args.stride_dO), get<2>(args.stride_dO) * QheadPerKhead) // (do_head_stride, qhead_per_khead * do_head_stride)
+                make_stride(get<2>(args.stride_dO), get<2>(args.stride_dO) * PackGQAFactor) // (do_head_stride, qhead_per_khead * do_head_stride)
                 ),
             args.stride_dO));
     auto const stride_dQ = cute::conditional_return<PackGQA>(
         make_stride(
             make_stride(get<2>(args.stride_dQ), get<0>(args.stride_dQ)), // (dq_head_stride, row_stride)
             get<1>(args.stride_dQ), // 1
-            get<2>(args.stride_dQ) * QheadPerKhead // qhead_per_khead * dq_head_stride
+            get<2>(args.stride_dQ) * PackGQAFactor // qhead_per_khead * dq_head_stride
             ),
         cute::conditional_return<CatGQA>(
             make_stride(
                 get<0>(args.stride_dQ), // row_stride
                 get<1>(args.stride_dQ), // 1
-                make_stride(get<2>(args.stride_dQ), get<2>(args.stride_dQ) * QheadPerKhead) // (dq_head_stride, qhead_per_khead * dq_head_stride)
+                make_stride(get<2>(args.stride_dQ), get<2>(args.stride_dQ) * PackGQAFactor) // (dq_head_stride, qhead_per_khead * dq_head_stride)
                 ),
             args.stride_dQ));
 
@@ -1005,14 +1005,14 @@ struct CollectiveMainloopBwdSm90 {
     auto const shape_LSEdPsum = cute::conditional_return<PackGQA>(
         make_shape(
             _4{},
-            make_shape(cute::Int<QheadPerKhead>{}, get<1>(args.shape_LSEdPsum)), // (qhead_per_khead, seqlen_q)
+            make_shape(cute::Int<PackGQAFactor>{}, get<1>(args.shape_LSEdPsum)), // (qhead_per_khead, seqlen_q)
             get<2>(args.shape_KVdKdV) // nheads_kv
             ),
         cute::conditional_return<CatGQA>(
             make_shape(
                 _4{},
                 get<1>(args.shape_LSEdPsum), // seqlen_q
-                make_shape(cute::Int<QheadPerKhead>{}, get<2>(args.shape_KVdKdV)) // (qhead_per_khead, nheads_kv)
+                make_shape(cute::Int<PackGQAFactor>{}, get<2>(args.shape_KVdKdV)) // (qhead_per_khead, nheads_kv)
                 ),
             args.shape_LSEdPsum));
     // Create stride for LSE and dPsum
@@ -1020,25 +1020,25 @@ struct CollectiveMainloopBwdSm90 {
         make_stride(
             _1{},
             make_stride(get<2>(args.stride_LSE), get<1>(args.stride_LSE)), // (head_stride, 4)
-            get<2>(args.stride_LSE) * QheadPerKhead // (qhead_per_khead * head_stride)
+            get<2>(args.stride_LSE) * PackGQAFactor // (qhead_per_khead * head_stride)
             ),
         cute::conditional_return<CatGQA>(
             make_stride(
                 _1{},
                 get<1>(args.stride_LSE), // 4
-                make_stride(get<2>(args.stride_LSE), get<2>(args.stride_LSE) * QheadPerKhead) // (head_stride, qhead_per_khead * head_stride)
+                make_stride(get<2>(args.stride_LSE), get<2>(args.stride_LSE) * PackGQAFactor) // (head_stride, qhead_per_khead * head_stride)
                 ),
             args.stride_LSE));
     auto const stride_dPsum = cute::conditional_return<PackGQA>(
         make_stride(
             _1{},
             make_stride(get<2>(args.stride_dPsum), _4{}), // (head_stride, 4)
-            get<2>(args.stride_dPsum) * QheadPerKhead),
+            get<2>(args.stride_dPsum) * PackGQAFactor),
         cute::conditional_return<CatGQA>(
             make_stride(
                 _1{},
                 get<1>(args.stride_dPsum), // 4
-                make_stride(get<2>(args.stride_dPsum), get<2>(args.stride_dPsum) * QheadPerKhead) // (head_stride, qhead_per_khead * head_stride)
+                make_stride(get<2>(args.stride_dPsum), get<2>(args.stride_dPsum) * PackGQAFactor) // (head_stride, qhead_per_khead * head_stride)
                 ),
             args.stride_dPsum));
 
@@ -1106,7 +1106,7 @@ struct CollectiveMainloopBwdSm90 {
   //   SwapBwdQKLoop=false → inner loop over m_block (LoopQ) → InnerLoopQ=true
   // So: InnerLoopQ = !SwapBwdQKLoop
   template <bool IsProducer>
-  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, QheadPerKhead, SeqlenInfo_t, BlockMN_t>;
+  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, PackGQAFactor, SeqlenInfo_t, BlockMN_t>;
 
   // IndexSparse LoopK: outer=Q token, inner=K from forward topk indices
   template <bool IsProducer>
@@ -1114,7 +1114,7 @@ struct CollectiveMainloopBwdSm90 {
       IsProducer,
       RangeMerge,
       PackGQA,
-      QheadPerKhead,
+      PackGQAFactor,
       NumRowsPerGroup,
       NumProducerThreads,
       GroupSize,
@@ -1129,7 +1129,7 @@ struct CollectiveMainloopBwdSm90 {
       IsProducer,
       /*RangeMerge=*/false,
       PackGQA,
-      QheadPerKhead,
+      PackGQAFactor,
       NumRowsPerGroup,
       NumProducerThreads,
       GroupSize,
@@ -1262,8 +1262,8 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sLSE = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSE{});
     Tensor sdPsum = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSE{});
 
-    // For PackGQA, offset needs to be multiplied by QheadPerKhead
-    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    // For PackGQA, offset needs to be multiplied by PackGQAFactor
+    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
 
     // Prepare for TMA loads
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
@@ -1329,7 +1329,7 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (!RangeMerge) {
         return;
       }
-      offset_q = !PackGQA ? si.offset_q : si.offset_q * QheadPerKhead;
+      offset_q = !PackGQA ? si.offset_q : si.offset_q * PackGQAFactor;
       auto const qdo_off = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
       gQ = local_tile(domain_offset(qdo_off, mQ), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
       gdO = local_tile(domain_offset(qdo_off, mdO), select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
@@ -1441,39 +1441,58 @@ struct CollectiveMainloopBwdSm90 {
     int const idx_in_group = thread_idx % GroupSize;
     int const group_idx = thread_idx / GroupSize;
     // PackGQA: the token-index slots hold PACKED rows p = token * G + g (g = q-head
-    // within the kv group, G = QheadPerKhead); bidh is then the kv head index, so head
+    // within the kv group, G = PackGQAFactor); bidh is then the kv head index, so head
     // bases are scaled by G. Q/dO/dQ rows decompose as token*row_stride + g*head_stride
     // (heads within a token are head_stride apart, NOT row-contiguous when nheads_kv > 1).
-    static constexpr int kQPackScale = PackGQA ? QheadPerKhead : 1;
+    // PackGQAFactor: packing scale (= actual Q/KV ratio when PackGQA, else 1)
     int64_t const stride_q_row = get<0>(params.stride_Q);
     int64_t const stride_do_row = get<0>(params.stride_dO);
     int64_t const stride_q_head = get<2>(params.stride_Q);
     int64_t const stride_do_head = get<2>(params.stride_dO);
-    Element const* const ptr_gQ_base = params.ptr_Q + bidh * kQPackScale * stride_q_head + idx_in_group * 8;
-    Element const* const ptr_gdO_base = params.ptr_dO + bidh * kQPackScale * stride_do_head + idx_in_group * 8;
+    Element const* const ptr_gQ_base = params.ptr_Q + bidh * PackGQAFactor * stride_q_head + idx_in_group * 8;
+    Element const* const ptr_gdO_base = params.ptr_dO + bidh * PackGQAFactor * stride_do_head + idx_in_group * 8;
     // Decompose a packed row into a gmem element offset (plain token * row_stride when !PackGQA)
     auto packed_row_offset = [&](int p, int64_t stride_token, int64_t stride_head) -> int64_t {
       if constexpr (PackGQA) {
-        return (p / kQPackScale) * stride_token + (p % kQPackScale) * stride_head;
+        return (p / PackGQAFactor) * stride_token + (p % PackGQAFactor) * stride_head;
       } else {
         return p * stride_token;
       }
     };
-    // LSE/dPsum per-token row is always 4 floats. PackGQA: params.stride_LSE/stride_dPsum
-    // are the packed nested strides (1, (head_stride, 4), G*head_stride), so get<2> already
-    // contains the G factor for the kv-head base, and get<1,0> is the raw per-head stride.
-    float const* const ptr_gLSE_base = params.ptr_LSE_log2 + bidh * get<2>(params.stride_LSE);
-    float const* const ptr_gdPsum_base = params.ptr_dPsum + bidh * get<2>(params.stride_dPsum);
+    // LSE/dPsum per-token row is always 4 floats.
+    // PackGQA: stride is (1, (head_stride, 4), G*head_stride), get<2> is scalar.
+    // CatGQA:  stride is (1, 4, (head_stride, G*head_stride)), get<2> is nested —
+    //          bidh is KV-head index, so base offset = bidh * G * head_stride = get<2,1>.
+    auto const lse_kv_head_stride = [&]() -> int64_t {
+      if constexpr (CatGQA) {
+        return get<2, 1>(params.stride_LSE);
+      } else {
+        return get<2>(params.stride_LSE);
+      }
+    }();
+    auto const dpsum_kv_head_stride = [&]() -> int64_t {
+      if constexpr (CatGQA) {
+        return get<2, 1>(params.stride_dPsum);
+      } else {
+        return get<2>(params.stride_dPsum);
+      }
+    }();
+    float const* const ptr_gLSE_base = params.ptr_LSE_log2 + bidh * lse_kv_head_stride;
+    float const* const ptr_gdPsum_base = params.ptr_dPsum + bidh * dpsum_kv_head_stride;
     auto lse_row_offset = [&](int p) -> int64_t {
       if constexpr (PackGQA) {
-        return (p % kQPackScale) * get<1, 0>(params.stride_LSE) + (p / kQPackScale) * 4;
+        return (p % PackGQAFactor) * get<1, 0>(params.stride_LSE) + (p / PackGQAFactor) * 4;
+      } else if constexpr (CatGQA) {
+        return (p % PackGQAFactor) * get<2, 0>(params.stride_LSE) + (p / PackGQAFactor) * 4;
       } else {
         return p * 4;
       }
     };
     auto dpsum_row_offset = [&](int p) -> int64_t {
       if constexpr (PackGQA) {
-        return (p % kQPackScale) * get<1, 0>(params.stride_dPsum) + (p / kQPackScale) * 4;
+        return (p % PackGQAFactor) * get<1, 0>(params.stride_dPsum) + (p / PackGQAFactor) * 4;
+      } else if constexpr (CatGQA) {
+        return (p % PackGQAFactor) * get<2, 0>(params.stride_dPsum) + (p / PackGQAFactor) * 4;
       } else {
         return p * 4;
       }
@@ -1648,7 +1667,7 @@ struct CollectiveMainloopBwdSm90 {
         load_dO_dPsum();
       } else {
         CUTLASS_PRAGMA_NO_UNROLL
-        for (bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
+        for (bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, PackGQAFactor); ++bidh_kv_cat) {
           rebind_Q_tiles(block_meta.seqlen_info);
           m_block = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
           flash::iterate_range < kInnerDir,
@@ -1751,8 +1770,8 @@ struct CollectiveMainloopBwdSm90 {
     auto mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSEdPsum, params.stride_LSE)(_, _, bidh); // (4, seqlen_q)
     auto mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSEdPsum, params.stride_dPsum)(_, _, bidh); // (4, seqlen_q)
 
-    // For PackGQA, offset needs to be multiplied by QheadPerKhead
-    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    // For PackGQA, offset needs to be multiplied by PackGQAFactor
+    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
     Tensor gQ = local_tile(domain_offset(make_coord(offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
     Tensor gdO = local_tile(domain_offset(make_coord(offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
     Tensor gK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (N, K, _)
@@ -2072,9 +2091,9 @@ struct CollectiveMainloopBwdSm90 {
     int m_block_max;
     int offset_q;
     int last_n_block;
-    // PackGQA: Q heads packed into seqlen → m_block_num includes QheadPerKhead factor.
+    // PackGQA: Q heads packed into seqlen → m_block_num includes PackGQAFactor factor.
     // CatGQA: Q heads stay in head dim → m_block_num is based on raw seqlen_q.
-    int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(QheadPerKhead, 1), kBlockM);
+    int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(PackGQAFactor, 1), kBlockM);
     int bidb_last = 0;
 
     bool const lane_predicate = cute::elect_one_sync();
@@ -2088,7 +2107,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // batch i use [i * n_block_max_num + 1 , i * n_block_max_num + n_block_size - 1] for add rank of same qhead
     // except for the last n_block_id, the last is always (i + 1) * n_block_max_num
-    // PackGQA: offset_q is already scaled by QheadPerKhead (set in the main loop below),
+    // PackGQA: offset_q is already scaled by PackGQAFactor (set in the main loop below),
     // so we use offset_q here to keep conflict indices consistent with the packed m_block range.
     auto m_block_sync = [&](int m_block_id) {
       uint32_t smid = blockIdx.x;
@@ -2128,7 +2147,7 @@ struct CollectiveMainloopBwdSm90 {
     // Scatter store addressing for producer store warp (32 threads).
     // PackGQA: smem_token_indices hold packed rows p = token*G + g; bidh is the kv head,
     // so the head base and the per-row decompose are scaled by G (see scatter_reduce_store_rows).
-    static constexpr int kdQPackScale = PackGQA ? QheadPerKhead : 1;
+    static constexpr int kdQPackScale = PackGQA ? PackGQAFactor : 1;
     [[maybe_unused]] int const store_thread_idx = threadIdx.x % cutlass::NumThreadsPerWarp;
     [[maybe_unused]] int const stride_dq_row = get<0>(params.stride_dQ);
     [[maybe_unused]] int const stride_dq_head = get<2>(params.stride_dQ);
@@ -2143,7 +2162,7 @@ struct CollectiveMainloopBwdSm90 {
 
       if constexpr (InnerLoad_Tma && InnerUseScatter) {
         // 2D TMA reduce: entire tile written in one TMA reduce-add instruction.
-        // LoopQ: all kBlockM packed rows belong to one physical token (QheadPerKhead >= kBlockM).
+        // LoopQ: all kBlockM packed rows belong to one physical token (PackGQAFactor >= kBlockM).
         if (lane_predicate) {
           int const packed_first_row = shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockM];
           int const m_block_abs = packed_first_row / kBlockM;
@@ -2184,7 +2203,7 @@ struct CollectiveMainloopBwdSm90 {
           tma_store_wait<0>();
           if constexpr (Deterministic) {
             if constexpr (CatGQA) {
-              if (bidh_kv_cat == QheadPerKhead - 1) {
+              if (bidh_kv_cat == PackGQAFactor - 1) {
                 m_block_arrive(m_block);
               }
             } else {
@@ -2226,11 +2245,11 @@ struct CollectiveMainloopBwdSm90 {
         while (bidb_last < bidb_cur) {
           // bidb_last_l ~ bidb_last_r is the range of bidb_last
           // PackGQA: q_ranges stores original offsets, but dQ conflict_state is indexed
-          // by packed offsets (seqlen_q * QheadPerKhead), so we must scale accordingly.
+          // by packed offsets (seqlen_q * PackGQAFactor), so we must scale accordingly.
           int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
           if constexpr (PackGQA) {
-            bidb_last_l *= QheadPerKhead;
-            bidb_last_r *= QheadPerKhead;
+            bidb_last_l *= PackGQAFactor;
+            bidb_last_r *= PackGQAFactor;
           }
           int l = bidb_last_l / kBlockM + lane; // bidb_last_l / kBlock is first block id
           int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM); // calc total block num of bidb_last
@@ -2261,16 +2280,16 @@ struct CollectiveMainloopBwdSm90 {
         seqlen_info = block_meta.seqlen_info;
         bidb = block_meta.bidb;
         attn_type = block_meta.attn_type;
-        offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+        offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
         last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
-        m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(QheadPerKhead, 1), kBlockM);
+        m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(PackGQAFactor, 1), kBlockM);
 
         update_conflict_state(bidb_last, bidb);
         bidb_last = bidb;
 
         deterministic_pass_through(0, m_block_min);
 
-        for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
+        for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, PackGQAFactor); ++bidh_kv_cat) {
           int m_block = flash::init_block_cur<kInnerDir>(m_block_min, m_block_max);
           flash::iterate_range<kInnerDir, 2>(m_block, m_block_min, m_block_max, [&] { store_dQ_this_m_block(m_block, bidh_kv_cat, offset_q); });
         }
@@ -2540,7 +2559,7 @@ struct CollectiveMainloopBwdSm90 {
     int const bidh = block_meta.bidh;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
-    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
     // BlockMeta: per-batch values accessed directly via block_meta.inner_block_min/max,
     // block_meta.seqlen_info.seqlen_q/k, block_meta.attn_type.
 
@@ -2656,7 +2675,7 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (!RangeMerge) {
         return;
       }
-      int const new_offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * QheadPerKhead;
+      int const new_offset_q = !PackGQA ? block_meta.seqlen_info.offset_q : block_meta.seqlen_info.offset_q * PackGQAFactor;
       if constexpr (!dQacc_use_smem) {
         auto const new_gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(new_offset_q, _0{}, _0{}), make_coord(new_offset_q, _0{}));
         gdQaccum_ = local_tile(domain_offset(new_gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
@@ -2777,7 +2796,7 @@ struct CollectiveMainloopBwdSm90 {
           if constexpr (BlockSparse) {
             return kBlockM - block_meta.num_invalid_token - thread_row_offset;
           } else {
-            int const seqlen_q_packed_local = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * QheadPerKhead;
+            int const seqlen_q_packed_local = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * PackGQAFactor;
             return seqlen_q_packed_local - m_block * kBlockM - thread_row_offset;
           }
         }();
@@ -2989,7 +3008,7 @@ struct CollectiveMainloopBwdSm90 {
             } else if constexpr (InnerUseScatter) {
               // BlockSparse scatter reduce: per-row 1D bulk reduce
               Tensor sdQ_acc = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumStore{});
-              static constexpr int kdQPackScale = PackGQA ? QheadPerKhead : 1;
+              static constexpr int kdQPackScale = PackGQA ? PackGQAFactor : 1;
               int const stride_dq_row = get<0>(params.stride_dQ);
               int const stride_dq_head = get<2>(params.stride_dQ);
               ElementAccum* const ptr_dQ_base = params.ptr_dQ + block_meta.bidh * kdQPackScale * static_cast<int64_t>(get<2>(params.stride_dQ));
@@ -3138,11 +3157,11 @@ struct CollectiveMainloopBwdSm90 {
       } else {
         rebind_dQ_accum_tiles();
 
-        for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, QheadPerKhead); ++bidh_kv_cat) {
+        for (int bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, PackGQAFactor); ++bidh_kv_cat) {
           if constexpr (MaskMode == 0) {
             // MaskMode 0 (regular): direct apply every block with Seqlenk_mask=true.
             auto mask_fn = [&](int m_block) {
-              mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+              mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(
                   tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
             };
             int mb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
@@ -3150,16 +3169,16 @@ struct CollectiveMainloopBwdSm90 {
           } else if constexpr (MaskMode == 1) {
             // MaskMode 1 (dispatch): 3-lambda zone splitting (compile-time).
             auto boundary_fn = [&](int m_block) {
-              mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+              mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(
                   tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
             };
             auto regular_fn = [&](int m_block) {
-              mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
+              mask.template apply</*Seqlenk_mask=*/false, PackGQA, PackGQAFactor>(
                   tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
             };
             auto no_mask_fn = [&](int /*m_block*/) {};
             int mb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
-            flash::mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::M, kInnerDir>(
+            flash::mask_dispatch<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::M, kInnerDir>(
                 mb,
                 block_meta.inner_block_min,
                 block_meta.inner_block_max,
@@ -3173,7 +3192,7 @@ struct CollectiveMainloopBwdSm90 {
                 no_mask_fn);
           } else {
             // MaskMode 2 (unified): mask_dispatch_unified with runtime zone dispatch.
-            flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::M, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
+            flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::M, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
           }
         }
       }
@@ -3230,7 +3249,7 @@ struct CollectiveMainloopBwdSm90 {
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int const seqlen_q = block_meta.seqlen_info.seqlen_q;
-    int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * QheadPerKhead;
+    int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * PackGQAFactor;
     bool const is_last_m_block_this_batch = seqlen_q_packed - m_block * kBlockM <= kBlockM;
 
     // BlockMeta: per-batch values accessed directly via block_meta.inner_block_min/max,
@@ -3984,7 +4003,7 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (MaskMode == 0) {
         // MaskMode 0 (regular): direct apply every block with Seqlenk_mask=true.
         auto mask_fn = [&](int n_blk) {
-          mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+          mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(
               tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
         int nb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
@@ -3992,16 +4011,16 @@ struct CollectiveMainloopBwdSm90 {
       } else if constexpr (MaskMode == 1) {
         // MaskMode 1 (dispatch): 3-lambda zone splitting.
         auto boundary_fn = [&](int n_blk) {
-          mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(
+          mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(
               tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
         auto regular_fn = [&](int n_blk) {
-          mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(
+          mask.template apply</*Seqlenk_mask=*/false, PackGQA, PackGQAFactor>(
               tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
         auto no_mask_fn = [&](int /*n_blk*/) {};
         int nb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
-        flash::mask_dispatch<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::N, kInnerDir>(
+        flash::mask_dispatch<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::N, kInnerDir>(
             nb,
             block_meta.inner_block_min,
             block_meta.inner_block_max,
@@ -4015,7 +4034,7 @@ struct CollectiveMainloopBwdSm90 {
             no_mask_fn);
       } else {
         // MaskMode 2 (unified): mask_dispatch_unified with runtime zone dispatch.
-        flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, QheadPerKhead, flash::DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
+        flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
       }
     };
 
