@@ -41,28 +41,6 @@ if TYPE_CHECKING:
     from magi_attention.common.ranges import AttnRanges
 
 
-def get_num_sms() -> int:
-    """Return the number of SMs on the current GPU."""
-    return torch.cuda.get_device_properties(0).multi_processor_count
-
-
-def is_hopper() -> bool:
-    """Return True iff the current CUDA device is Hopper (SM90+) but not Blackwell (SM100+)."""
-    capability = torch.cuda.get_device_capability()[0]
-    return capability >= 9 and capability < 10
-
-
-def is_blackwell() -> bool:
-    """Return True iff the current CUDA device is Blackwell (SM100+) or newer."""
-    return torch.cuda.get_device_capability()[0] >= 10
-
-
-def is_ampere() -> bool:
-    """Return True iff the current CUDA device is Ampere (SM80+) but not Hopper (SM90+) or newer."""
-    capability = torch.cuda.get_device_capability()[0]
-    return capability >= 8 and capability < 9
-
-
 def ceil_div(a: int, b: int) -> int:
     """Return the ceiling of integer division *a* / *b* (integer-only, no float)."""
     return (a + b - 1) // b
@@ -1067,51 +1045,6 @@ def make_attn_mask_from_ffa_args(
         ] = slice_mask
 
     return mask
-
-
-def fp_dtype_bits(
-    dtype: torch.dtype,
-) -> int:
-    if dtype == torch.float4_e2m1fn_x2:
-        # NOTE: _x2 suffix for packed representation
-        # of two float4_e2m1f values into one byte
-        # see issue: https://github.com/pytorch/pytorch/issues/146414
-        return 4
-
-    return torch.finfo(dtype).bits
-
-
-def is_fp_dtype_at_least(
-    tensor: torch.Tensor,
-    lowest_precision: torch.dtype,
-) -> bool:
-    return torch.finfo(tensor.dtype).bits >= torch.finfo(lowest_precision).bits
-
-
-def to_higher_fp_dtype(
-    tensor: torch.Tensor,
-    lowest_precision: torch.dtype,
-) -> torch.Tensor:
-    if not is_fp_dtype_at_least(tensor, lowest_precision):
-        return tensor.to(lowest_precision)
-    return tensor
-
-
-def max_fp_dtype(
-    *dtypes: torch.dtype,
-) -> torch.dtype:
-    return max(dtypes, key=lambda dtype: torch.finfo(dtype).bits)
-
-
-def to_triton_dtype(dtype: torch.dtype):
-    import triton.language as tl
-
-    return {
-        torch.float16: tl.float16,
-        torch.bfloat16: tl.bfloat16,
-        torch.float32: tl.float32,
-        torch.float64: tl.float64,
-    }[dtype]
 
 
 def argmin(iterable: Iterable[Any], key: Callable = lambda x: x) -> int:

@@ -277,6 +277,12 @@ class DistTestBase(MultiProcessTestCase):
     def setUp(self) -> None:
         super().setUp()
 
+        # Allow a subclass to override the per-test distributed timeout by
+        # setting a class-level `timeout` attribute. `get_timeout()` reads
+        # `TIMEOUT_OVERRIDE` dynamically at process-join time, so registering
+        # the current test id here takes effect regardless of import order
+        # (unlike the `DISTRIBUTED_TESTS_DEFAULT_TIMEOUT` env var, which
+        # `common_distributed` reads only once at import time).
         timeout = getattr(self, "timeout", None)
         if timeout is not None:
             TIMEOUT_OVERRIDE.update({self.id().split(".")[-1]: timeout})

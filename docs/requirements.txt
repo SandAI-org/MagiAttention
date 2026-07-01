@@ -7,3 +7,4 @@ sphinxcontrib-bibtex
 sphinx-subfigure
 sphinx_design
 sphinx-intl
+babel==2.18.0

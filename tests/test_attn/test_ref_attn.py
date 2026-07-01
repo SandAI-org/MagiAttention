@@ -28,7 +28,8 @@ from magi_attention.functional.utils import (
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import EPSILON, assert_close
-from magi_attention.utils import make_attn_mask_from_ffa_args, max_fp_dtype
+from magi_attention.utils import make_attn_mask_from_ffa_args
+from magi_attention.utils.dtype import max_fp_dtype
 
 
 class TestRefAttnFunc(DistTestBase):

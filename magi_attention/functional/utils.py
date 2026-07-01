@@ -19,7 +19,8 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from magi_attention.common.enum import AttnSinkLayout
-from magi_attention.utils import max_fp_dtype, nvtx, to_higher_fp_dtype, to_triton_dtype
+from magi_attention.utils import nvtx
+from magi_attention.utils.dtype import max_fp_dtype, to_higher_fp_dtype, to_triton_dtype
 
 
 def safe_subtract(

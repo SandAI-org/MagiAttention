@@ -19,7 +19,8 @@ from einops import reduce
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.common.forward_meta import AttnForwardMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
-from magi_attention.utils import make_attn_mask_from_ffa_args, to_higher_fp_dtype
+from magi_attention.utils import make_attn_mask_from_ffa_args
+from magi_attention.utils.dtype import to_higher_fp_dtype
 
 from .utils import correct_attn_out_lse_with_sink, safe_softmax, sink_bwd, softmax_bwd
 

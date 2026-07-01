@@ -70,10 +70,10 @@ from magi_attention.utils import (
     get_calc_cost_factor,
     get_comm_cost_factor,
     make_attn_mask_from_ffa_args,
-    max_fp_dtype,
     str2seed,
     sync_rng,
 )
+from magi_attention.utils.dtype import max_fp_dtype
 
 # tag used in attn_config to mark which backends an attn_config is applicable to
 # (omitted or empty means all backends)

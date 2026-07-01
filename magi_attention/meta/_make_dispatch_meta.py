@@ -34,7 +34,7 @@ from magi_attention.utils import (
     perm_idxs2unperm_idxs,
     wrap_to_list,
 )
-from magi_attention.utils._utils import argsort, ceil_div
+from magi_attention.utils.general import argsort, ceil_div
 
 
 def _compute_chunk_actual_sizes(

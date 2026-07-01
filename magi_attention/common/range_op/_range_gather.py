@@ -18,7 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
-from magi_attention.utils import is_blackwell, nvtx
+from magi_attention.utils import nvtx
+from magi_attention.utils.arch import is_blackwell
 
 from .utils import _calc_cu_range_sizes, _calc_ranges_row_map
 

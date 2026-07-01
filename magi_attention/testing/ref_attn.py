@@ -28,7 +28,7 @@ from magi_attention.functional.utils import (
     safe_softmax,
     sink_bwd,
 )
-from magi_attention.utils import max_fp_dtype, to_higher_fp_dtype
+from magi_attention.utils.dtype import max_fp_dtype, to_higher_fp_dtype
 
 if version.parse(torch.__version__) > version.parse("2.4"):
     # NOTE: in testing, we should explicitly allow bf16/fp16 reduction for sdpa

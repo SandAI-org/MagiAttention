@@ -22,7 +22,11 @@ from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
 from magi_attention.common.range_op import range_reduce
 from magi_attention.functional.utils import correct_attn_lse, correct_attn_out
 from magi_attention.testing import parameterize
-from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype
+from magi_attention.utils.dtype import fp_dtype_ge, max_fp_dtype
+
+
+def is_fp_dtype_at_least(tensor: torch.Tensor, dtype: torch.dtype) -> bool:
+    return fp_dtype_ge(tensor.dtype, dtype)
 
 
 def range_reduce_ref(

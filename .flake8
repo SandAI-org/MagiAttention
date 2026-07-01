@@ -1,7 +1,17 @@
 [flake8]
 # Maximum allowed line length
 max-line-length = 127
-ignore = 
+ignore =
+    # multiple spaces after ','
+    E241
+    # multiple spaces before operator
+    E221
+    # Ambiguous variable name
+    E741
+    # Local variable is assigned to but never used
+    F841
+    # Do not assign a lambda expression, use a def
+    E731
     # Ignore line break before binary operator
     W503  
     # Ignore whitespace before ':'

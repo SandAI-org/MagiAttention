@@ -19,7 +19,7 @@ import torch.distributed as dist
 from packaging import version
 
 from magi_attention.functional.utils import safe_subtract
-from magi_attention.utils import max_fp_dtype
+from magi_attention.utils.dtype import max_fp_dtype
 
 if version.parse(torch.__version__) > version.parse("2.4"):
     # NOTE: in testing, we should explicitly allow bf16/fp16 reduction for sdpa
@@ -88,6 +88,77 @@ def extract_mismatch_threshold(
     )
 
 
+def _side_by_side(str_a: str, str_b: str, col_width: int = 60, sep: str = " | ") -> str:
+    """Format two multi-line strings into a two-column side-by-side layout."""
+    lines_a = str_a.splitlines()
+    lines_b = str_b.splitlines()
+    n = max(len(lines_a), len(lines_b))
+    lines_a += [""] * (n - len(lines_a))
+    lines_b += [""] * (n - len(lines_b))
+    return "\n".join(la.ljust(col_width) + sep + lb for la, lb in zip(lines_a, lines_b))
+
+
+def print_tensor_by_cols(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    label_a: str = "Tensor A",
+    label_b: str = "Tensor B",
+    return_print_str_only: bool = False,
+) -> str | None:
+    """Print (or return) two tensors side-by-side for easy visual comparison.
+
+    Args:
+        a: first tensor.
+        b: second tensor.
+        label_a: header label for the left column.
+        label_b: header label for the right column.
+        return_print_str_only: if True, return the formatted string instead of printing it.
+
+    Returns:
+        The formatted string when ``return_print_str_only=True``, otherwise ``None``.
+    """
+    str_a = f"{label_a}:\n{a}"
+    str_b = f"{label_b}:\n{b}"
+    col_width = max(max(len(line) for line in str_a.splitlines()), len(label_a))
+    result = _side_by_side(str_a, str_b, col_width=col_width)
+    if return_print_str_only:
+        return result
+    print(result)
+    return None
+
+
+def _format_greatest_diff_values(
+    error_msg: str, a: torch.Tensor, b: torch.Tensor
+) -> str:
+    """Parse greatest abs/rel diff indices from a torch assert_close error message
+    and return a string showing the actual tensor values at those positions."""
+    lines = []
+    for label, pattern in [
+        ("abs", r"Greatest absolute difference: (.+?) at index \(([^)]+)\)"),
+        ("rel", r"Greatest relative difference: (.+?) at index \(([^)]+)\)"),
+    ]:
+        m = re.search(pattern, error_msg)
+        if not m:
+            continue
+        diff_val = m.group(1)
+        idx_raw = m.group(2)
+        # index may be a single int (1-D tensor) or comma-separated ints
+        # filter out empty strings caused by trailing commas e.g. "(2,)" -> "2,"
+        idx: tuple[int, ...] = tuple(
+            int(x.strip()) for x in idx_raw.split(",") if x.strip()
+        )
+        try:
+            val_a = a[idx].item()
+            val_b = b[idx].item()
+            lines.append(
+                f"  Greatest {label} diff = {diff_val} at index {idx}:"
+                f"  a={val_a},  b={val_b}"
+            )
+        except Exception:
+            pass
+    return "\n".join(lines) if lines else "(could not extract index info)"
+
+
 @torch.no_grad
 def assert_close(
     a: torch.Tensor,
@@ -96,6 +167,8 @@ def assert_close(
     rtol: float = 1e-5,
     mismatch_threshold: float = 0,
     test_case: str = "",
+    allow_none: bool = True,
+    print_tensor_when_mismatch: bool = True,
     print_rank: int = 0,
 ) -> None:
     """Assert that two tensors are close within given tolerances,
@@ -108,12 +181,21 @@ def assert_close(
         rtol (float, optional): relative tolerance. Defaults to ``1e-5``.
         mismatch_threshold (float, optional): allowed mismatch threshold. Defaults to ``0``.
         test_case (str, optional): test case description. Defaults to "".
+
+        allow_none (bool, optional): if ``True``, allow a or b to be None
+            (and skip assert_close in that case).
+        print_tensor_when_mismatch (bool, optional): if ``True``, print the two tensors
+            side-by-side when mismatch exceeds threshold. Defaults to ``True``.
         print_rank (int, optional): rank to print from. Defaults to ``0``.
             And set to ``-1`` to print from all ranks.
     """
     assert (
         0 <= mismatch_threshold <= 1
     ), f"{mismatch_threshold=} must be between 0 and 1"
+
+    if not allow_none:
+        assert a is not None, f"{test_case=}: Tensor a is None"
+        assert b is not None, f"{test_case=}: Tensor b is None"
 
     if dist.is_initialized():
         rank = dist.get_rank()
@@ -142,10 +224,16 @@ def assert_close(
                 print(mismatch_info)
             return
         else:
-            raise type(e)(
+            diff_values_info = _format_greatest_diff_values(error_msg, a, b)
+            error_details = (
                 f"\n>>>>>>>  Torch Error Message: \n\n{error_msg}\n\n"
+                f">>>>>>>  Greatest Diff Values: \n\n{diff_values_info}\n\n"
                 f">>>>>>>  Mismatch Detailed Info: \n\n{mismatch_info}\n\n"
-            ) from e
+            )
+            if print_tensor_when_mismatch:
+                side_by_side = print_tensor_by_cols(a, b, return_print_str_only=True)
+                error_details += f">>>>> Tensors (A | B):\n{side_by_side}\n\n"
+            raise type(e)(error_details) from None
 
 
 @torch.no_grad

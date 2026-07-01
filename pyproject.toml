@@ -88,4 +88,7 @@ exclude = [
     "*.so",
 ]
 
+[tool.ruff]
+lint.ignore = ["E731", "F841", "E741"]
+
 [tool.setuptools_scm]

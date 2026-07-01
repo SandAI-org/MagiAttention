@@ -19,16 +19,16 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
-from magi_attention.utils import (
-    is_fp_dtype_at_least,
-    max_fp_dtype,
-    nvtx,
-    to_triton_dtype,
-)
+from magi_attention.utils import nvtx
+from magi_attention.utils.dtype import fp_dtype_ge, max_fp_dtype, to_triton_dtype
 
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
 
 __all__ = ["range_reduce"]
+
+
+def is_fp_dtype_at_least(tensor: torch.Tensor, dtype: torch.dtype) -> bool:
+    return fp_dtype_ge(tensor.dtype, dtype)
 
 
 @triton.jit

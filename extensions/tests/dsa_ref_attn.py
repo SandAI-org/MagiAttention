@@ -14,7 +14,7 @@
 
 import torch
 
-from magi_attention.utils import max_fp_dtype
+from magi_attention.utils.dtype import max_fp_dtype
 
 
 def dsa_ref_attn_func(

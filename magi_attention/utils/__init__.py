@@ -12,8 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import metaclass, nvtx, sparse_utils
-from ._utils import *  # noqa
+from . import arch, dtype, metaclass, nvtx, sparse_utils
 from .debug import debugpy_listen
+from .general import *  # noqa
 
-__all__ = ["nvtx", "debugpy_listen", "sparse_utils", "metaclass"]
+__all__ = [
+    "nvtx",
+    "debugpy_listen",
+    "sparse_utils",
+    "metaclass",
+    "arch",
+    "dtype",
+]
