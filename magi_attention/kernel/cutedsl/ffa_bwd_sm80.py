@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="assignment,arg-type,union-attr,misc"
+# mypy: disable-error-code="arg-type,union-attr,misc"
 # pyright: reportInvalidTypeForm=false
 
 

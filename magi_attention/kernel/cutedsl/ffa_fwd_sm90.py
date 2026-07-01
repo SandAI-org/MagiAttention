@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="arg-type,union-attr,index,misc,assignment,attr-defined"
+# mypy: disable-error-code="arg-type,union-attr,index,misc,assignment"
 # pyright: reportInvalidTypeForm=false
 
 # SM90 (Hopper) forward pass for flash attention, extracted from flash_fwd.py.

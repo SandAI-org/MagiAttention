@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,operator,assignment,attr-defined"
+# mypy: disable-error-code="union-attr,assignment,attr-defined"
 
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_bwd_postprocess_kernel.h
 # from Cutlass C++ to Cute-DSL.

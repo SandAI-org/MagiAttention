@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="arg-type,union-attr,attr-defined,unreachable,assignment"
+# mypy: disable-error-code="arg-type,attr-defined,unreachable,assignment"
 
 import math
 

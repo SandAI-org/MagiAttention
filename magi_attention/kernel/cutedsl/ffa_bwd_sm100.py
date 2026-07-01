@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Ted Zadouri, Markus Hoehnerbach, Jay Shah, Tri Dao.
 
-# mypy: disable-error-code="no-redef,union-attr,index,attr-defined,assignment,arg-type,has-type,misc"
+# mypy: disable-error-code="no-redef,union-attr,index,attr-defined,assignment"
 # pyright: reportInvalidTypeForm=false
 
 import math
