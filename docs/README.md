@@ -6,7 +6,7 @@ This guide explains how to build, preview, and contribute to the MagiAttention d
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - `pip` (comes with Python)
 - A terminal (bash, zsh, PowerShell, etc.)
 - A text editor (VS Code, Vim, etc.)

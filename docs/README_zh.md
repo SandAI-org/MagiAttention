@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- Python 3.8+
+- Python 3.10+
 - `pip`（Python 自带）
 - 终端（bash、zsh、PowerShell 等均可）
 - 文本编辑器（VS Code、Vim 等均可）
