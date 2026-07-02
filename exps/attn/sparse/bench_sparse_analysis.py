@@ -62,6 +62,7 @@ PHASES = [
     "1-topk-sweep",
     "2-kbs-compare",
     "3-l2-inflection",
+    "4-loopk-fantasy",
 ]
 
 
@@ -1480,6 +1481,452 @@ print("[DONE] Dense-MultiBatch BWD LoopQ S={S} TOPK={TOPK}")
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Phase 4: loopk-fantasy (LoopK vs LoopQ gap analysis)
+# ═══════════════════════════════════════════════════════════════
+# Fair ablation: PV MMA always preserved. Uses non-bypass (SMEM+TMA) path.
+# SkipVLoad loads V from block 0 (L2 cached) — pipeline intact, minimal BW.
+# SkipDvStore/SkipDkStore only skip the TMA reduce-add, barrier sync preserved.
+#
+# Per-switch env vars (correctness NOT guaranteed):
+#   MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD=1   lightweight V load (block 0, L2 cached)
+#   MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE=1 skip dV TMA store (barrier protocol intact)
+#   MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE=1 skip dK TMA store (barrier protocol intact)
+#   MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA=1   skip dV MMA (unfair but diagnostic)
+
+_FANTASY_ENV_KEYS = [
+    "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD",
+    "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
+    "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",
+    "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA",
+    "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
+    "MAGI_ATTENTION_FFA_BWD_TILE_M",
+    "MAGI_ATTENTION_FFA_BWD_TILE_N",
+    "MAGI_ATTENTION_FFA_BWD_STAGES",
+]
+
+# Symmetric configs: same skip flags on BOTH LoopK and LoopQ.
+# Gap_contribution(X) = cost_in_LoopK(X) - cost_in_LoopQ(X)
+_SKIP_FACTORS = [
+    # (factor_key, env_overrides, short_name)
+    ("baseline", {}, "baseline"),
+    ("light_v_load", {"MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1"}, "light V load"),
+    ("skip_dv_store", {"MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1"}, "no dV store"),
+    ("skip_dk_store", {"MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1"}, "no dK store"),
+    ("skip_dv_mma", {"MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA": "1"}, "no dV MMA"),
+    (
+        "skip_dkdv_store",
+        {
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
+        },
+        "no dK+dV store",
+    ),
+    (
+        "skip_all",
+        {
+            "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA": "1",
+        },
+        "skip all",
+    ),
+]
+
+_FANTASY_CONFIGS = []
+for factor_key, env_ov, short in _SKIP_FACTORS:
+    _FANTASY_CONFIGS.append((f"loopk_{factor_key}", env_ov, False, f"LoopK: {short}"))
+    _FANTASY_CONFIGS.append((f"loopq_{factor_key}", env_ov, True, f"LoopQ: {short}"))
+
+
+def _phase4_bench(force=False):
+    import torch
+
+    from magi_attention.functional import flex_flash_attn_func
+
+    phase = "4-loopk-fantasy"
+    results = _load_results(phase)
+    gpu = _set_gpu()
+    device = f"cuda:{gpu}"
+    print(f"[{_ts()}] Phase 4: LoopK vs LoopQ gap isolation (gpu{gpu})", flush=True)
+    print(f"  S=topk={S_FULL}, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16\n", flush=True)
+
+    for label, env_overrides, is_loopq, desc in _FANTASY_CONFIGS:
+        key = f"bwd/{label}"
+        topk = S_FULL
+
+        if not force and _has_entry(results, key, topk):
+            d = results[key]
+            idx = d["topk"].index(topk)
+            print(f"  {desc}: {d['tflops'][idx]:>7.1f} T (cached)", flush=True)
+            continue
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Clear all relevant env vars
+        for env_key in _FANTASY_ENV_KEYS:
+            os.environ.pop(env_key, None)
+
+        # Set this experiment's env vars
+        for ek, ev in env_overrides.items():
+            os.environ[ek] = ev
+
+        try:
+            torch.manual_seed(42)
+            q = torch.randn(
+                topk, NHQ, HD, dtype=torch.bfloat16, device=device, requires_grad=True
+            )
+            k = torch.randn(
+                topk, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True
+            )
+            v = torch.randn(
+                topk, NHK, HD, dtype=torch.bfloat16, device=device, requires_grad=True
+            )
+            q_ranges = torch.tensor([[0, topk]], dtype=torch.int32, device=device)
+            k_ranges = torch.tensor([[0, topk]], dtype=torch.int32, device=device)
+            atm = torch.zeros(1, dtype=torch.int32, device=device)
+
+            kw = dict(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=atm,
+                pack_gqa=True,
+                swap_bwd_qk_loop=not is_loopq,
+            )
+
+            t0 = time.time()
+            o, *_ = flex_flash_attn_func(q, k, v, **kw)
+            do = torch.randn_like(o)
+            flops = _calc_flops(topk, topk, True)
+
+            def run_fn():
+                o.backward(do, retain_graph=True)
+
+            tf, ms = _bench_kernel(run_fn, flops, device)
+            elapsed = time.time() - t0
+            _set_entry(results, key, topk, round(tf, 1), round(ms, 3))
+            print(f"  {desc}: {tf:>7.1f} T ({ms:.3f}ms, {elapsed:.0f}s)", flush=True)
+        except Exception as e:
+            _set_entry(results, key, topk, None, None)
+            print(f"  {desc}: FAIL - {e}", flush=True)
+        finally:
+            q = k = v = None
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        _save_results(phase, results)
+
+    # Clean up env
+    for env_key in _FANTASY_ENV_KEYS:
+        os.environ.pop(env_key, None)
+
+    print(f"\n[{_ts()}] Phase 4 DONE -> {_results_path(phase)}", flush=True)
+
+    # Print summary table with ms-based gap decomposition
+    results = _load_results(phase)
+    base_ms = None
+    loopq_ms = None
+    for label, _, is_loopq, _ in _FANTASY_CONFIGS:
+        key = f"bwd/{label}"
+        d = results.get(key, {})
+        if S_FULL in d.get("topk", []):
+            idx = d["topk"].index(S_FULL)
+            ms_val = d.get("ms", [None])[idx] if "ms" in d else None
+            if label == "loopk_baseline" and ms_val:
+                base_ms = ms_val
+            elif label == "loopq_baseline" and ms_val:
+                loopq_ms = ms_val
+
+    total_gap = (base_ms - loopq_ms) if base_ms and loopq_ms else None
+    print("\n  ╔══════════════════════════════════════╦═════════╦═════════╦══════════╗")
+    print("  ║ Experiment                           ║  TFLOPS ║   ms    ║ gap frac ║")
+    print("  ╠══════════════════════════════════════╬═════════╬═════════╬══════════╣")
+    for label, _, _, desc in _FANTASY_CONFIGS:
+        key = f"bwd/{label}"
+        d = results.get(key, {})
+        if S_FULL in d.get("topk", []):
+            idx = d["topk"].index(S_FULL)
+            tf = d["tflops"][idx]
+            ms_val = d.get("ms", [None])[idx] if "ms" in d else None
+            if tf is not None and ms_val is not None:
+                saved = base_ms - ms_val if base_ms else 0
+                frac = (
+                    f"{saved / total_gap * 100:+.1f}%"
+                    if total_gap and total_gap > 0
+                    else ""
+                )
+                print(
+                    f"  ║ {desc:<36s} ║ {tf:>5.0f} T ║ {ms_val:>6.1f}  ║ {frac:>8s} ║"
+                )
+            elif tf is not None:
+                print(f"  ║ {desc:<36s} ║ {tf:>5.0f} T ║    N/A  ║          ║")
+            else:
+                print(f"  ║ {desc:<36s} ║  FAIL  ║    N/A  ║          ║")
+        else:
+            print(f"  ║ {desc:<36s} ║   N/A  ║    N/A  ║          ║")
+    print("  ╚══════════════════════════════════════╩═════════╩═════════╩══════════╝")
+    if total_gap:
+        print(f"\n  Total LoopK-LoopQ gap: {total_gap:.1f} ms")
+
+
+def _phase4_plot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    phase = "4-loopk-fantasy"
+    results = _load_results(phase)
+    if not results:
+        print(f"ERROR: {_results_path(phase)} not found. Run --exp first.")
+        return
+
+    out = _out_dir(phase)
+    os.makedirs(out, exist_ok=True)
+
+    # ── Plot 1: Paired bar chart (LoopK cost vs LoopQ cost per factor) ──
+    factor_names, loopk_costs, loopq_costs, gap_contribs = [], [], [], []
+    loopk_base_ms = _get_ms(results, "loopk_baseline")
+    loopq_base_ms = _get_ms(results, "loopq_baseline")
+    total_gap = (
+        (loopk_base_ms - loopq_base_ms) if loopk_base_ms and loopq_base_ms else None
+    )
+
+    for factor_key, _, short in _SKIP_FACTORS:
+        if factor_key == "baseline":
+            continue
+        lk_ms = _get_ms(results, f"loopk_{factor_key}")
+        lq_ms = _get_ms(results, f"loopq_{factor_key}")
+        if lk_ms is None or lq_ms is None:
+            continue
+        cost_lk = loopk_base_ms - lk_ms
+        cost_lq = loopq_base_ms - lq_ms
+        factor_names.append(short)
+        loopk_costs.append(cost_lk)
+        loopq_costs.append(cost_lq)
+        gap_contribs.append(cost_lk - cost_lq)
+
+    if factor_names and total_gap:
+        fig, (ax1, ax2) = plt.subplots(
+            1, 2, figsize=(16, 7), dpi=150, gridspec_kw={"width_ratios": [2, 1]}
+        )
+
+        x = np.arange(len(factor_names))
+        w = 0.35
+        bars_k = ax1.bar(
+            x - w / 2, loopk_costs, w, label="LoopK cost", color="#E53935", alpha=0.8
+        )
+        bars_q = ax1.bar(
+            x + w / 2, loopq_costs, w, label="LoopQ cost", color="#388E3C", alpha=0.8
+        )
+
+        for bar, v in zip(bars_k, loopk_costs):
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2,
+                max(v, 0) + 2,
+                f"{v:.0f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+                color="#B71C1C",
+            )
+        for bar, v in zip(bars_q, loopq_costs):
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2,
+                max(v, 0) + 2,
+                f"{v:.0f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+                color="#1B5E20",
+            )
+
+        ax1.set_title(
+            f"Symmetric Cost Comparison (ms saved by skip)\n"
+            f"S=topk={S_FULL // 1024}K, nhq={NHQ}, hd={HD}, bf16 | gap={total_gap:.0f}ms",
+            fontsize=12,
+            fontweight="bold",
+        )
+        ax1.set_ylabel("Time saved by skip (ms)", fontsize=11)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(factor_names, fontsize=9, rotation=25, ha="right")
+        ax1.legend(fontsize=10)
+        ax1.axhline(y=0, color="black", linewidth=0.5)
+        ax1.grid(axis="y", alpha=0.2)
+
+        # Gap contribution waterfall
+        single_factors = [
+            (n, g)
+            for n, g in zip(factor_names, gap_contribs)
+            if n not in ("no dK+dV store", "skip all")
+        ]
+        residual = total_gap - sum(g for _, g in single_factors)
+        wf_names = [n for n, _ in single_factors] + ["residual\n(tile+reload)"]
+        wf_vals = [g for _, g in single_factors] + [residual]
+
+        sort_idx = sorted(range(len(wf_names)), key=lambda i: -wf_vals[i])
+        wf_names = [wf_names[i] for i in sort_idx]
+        wf_vals = [wf_vals[i] for i in sort_idx]
+        wf_colors = ["#1565C0" if "residual" not in n else "#BDBDBD" for n in wf_names]
+
+        ax2.barh(range(len(wf_names)), wf_vals, color=wf_colors, edgecolor="white")
+        for i, v in enumerate(wf_vals):
+            ax2.text(
+                max(v, 0) + 1,
+                i,
+                f"{v:.0f}ms ({v / total_gap * 100:.0f}%)",
+                va="center",
+                fontsize=9,
+                fontweight="bold",
+            )
+        ax2.set_yticks(range(len(wf_names)))
+        ax2.set_yticklabels(wf_names, fontsize=10)
+        ax2.set_xlabel("Gap contribution (ms)", fontsize=11)
+        ax2.set_title(
+            "Gap Attribution\n(LoopK cost − LoopQ cost)", fontsize=12, fontweight="bold"
+        )
+        ax2.invert_yaxis()
+        ax2.grid(axis="x", alpha=0.2)
+
+        plt.tight_layout()
+        path = os.path.join(out, "loopk_fantasy.png")
+        fig.savefig(path, dpi=180, bbox_inches="tight")
+        plt.close()
+        print(f"[{_ts()}] Plot -> {path}")
+    else:
+        print("Insufficient data for plot. Run --exp first.")
+
+
+def _get_ms(results, label):
+    key = f"bwd/{label}"
+    d = results.get(key, {})
+    if S_FULL in d.get("topk", []) and "ms" in d:
+        idx = d["topk"].index(S_FULL)
+        return d["ms"][idx]
+    return None
+
+
+def _phase4_ncu():
+    phase = "4-loopk-fantasy"
+    out = _out_dir(phase)
+    os.makedirs(out, exist_ok=True)
+
+    ncu_bin = "/usr/local/cuda/bin/ncu"
+    if not os.path.exists(ncu_bin):
+        ncu_bin = os.path.join(
+            os.environ.get("CUDA_HOME", "/usr/local/cuda"), "bin", "ncu"
+        )
+
+    metrics = (
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum,"
+        "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum,"
+        "launch__registers_per_thread,"
+        "sm__cycles_elapsed.avg,"
+        "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,"
+        "smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio,"
+        "smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio,"
+        "smsp__cycles_active.avg.pct_of_peak_sustained_active,"
+        "sm__inst_executed.avg.per_cycle_active"
+    )
+
+    gpu = _find_free_gpu()
+    ncu_configs = [
+        ("loopk_baseline", {}, False),
+        ("loopk_skipDvStore", {"MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1"}, False),
+        ("loopq_baseline", {}, True),
+    ]
+
+    fmt = dict(NHQ=NHQ, NHK=NHK, HD=HD, S=S_FULL, GPU=gpu)
+    script_template = """\
+import os, torch
+os.environ["CUDA_VISIBLE_DEVICES"] = "{GPU}"
+{env_lines}
+from magi_attention.functional import flex_flash_attn_func
+torch.manual_seed(42)
+S = {S}
+q = torch.randn(S, {NHQ}, {HD}, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+k = torch.randn(S, {NHK}, {HD}, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+v = torch.randn(S, {NHK}, {HD}, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+q_ranges = torch.tensor([[0, S]], dtype=torch.int32, device="cuda")
+k_ranges = torch.tensor([[0, S]], dtype=torch.int32, device="cuda")
+atm = torch.zeros(1, dtype=torch.int32, device="cuda")
+out, _ = flex_flash_attn_func(q, k, v, q_ranges=q_ranges, k_ranges=k_ranges,
+    attn_type_map=atm, pack_gqa=True, swap_bwd_qk_loop={swap_qk})
+do = torch.randn_like(out)
+out.backward(do)
+torch.cuda.synchronize()
+print("[DONE]")
+"""
+
+    scripts_dir = os.path.join(out, "ncu_scripts")
+    os.makedirs(scripts_dir, exist_ok=True)
+
+    for name, env_overrides, is_loopq in ncu_configs:
+        env_lines = "\n".join(
+            f'os.environ["{ek}"] = "{ev}"' for ek, ev in env_overrides.items()
+        )
+        swap_qk = "True" if not is_loopq else "False"
+        script_text = script_template.format(
+            **fmt, env_lines=env_lines, swap_qk=swap_qk
+        )
+
+        script_path = os.path.join(scripts_dir, f"ncu_{name}.py")
+        with open(script_path, "w") as f:
+            f.write(script_text)
+
+        rep_path = os.path.join(out, f"ncu_{name}.ncu-rep")
+        csv_path = os.path.join(out, f"ncu_{name}.csv")
+        cmd = [
+            ncu_bin,
+            "--kernel-name",
+            "regex:device_kernel",
+            "--launch-skip",
+            "3",
+            "--launch-count",
+            "1",
+            "--metrics",
+            metrics,
+            "--csv",
+            "-o",
+            rep_path.replace(".ncu-rep", ""),
+            sys.executable,
+            script_path,
+        ]
+        print(f"  [{_ts()}] NCU {name}...", end=" ", flush=True)
+        with open(csv_path, "w") as out_f:
+            subprocess.run(cmd, stdout=out_f, stderr=subprocess.STDOUT, timeout=1200)
+        print("done", flush=True)
+
+    print(f"\n[{_ts()}] Phase 4 NCU results in {out}/ncu_*.csv")
+
+    for name, _, _ in ncu_configs:
+        csv_path = os.path.join(out, f"ncu_{name}.csv")
+        if not os.path.exists(csv_path):
+            print(f"  {name}: NOT FOUND")
+            continue
+        print(f"\n  === {name} ===")
+        with open(csv_path) as f:
+            for line in f:
+                line = line.strip()
+                if any(
+                    k in line
+                    for k in (
+                        "local_op_ld",
+                        "local_op_st",
+                        "registers_per_thread",
+                        "stalled_barrier",
+                        "inst_executed",
+                        "cycles_active",
+                    )
+                ):
+                    print(f"    {line}")
+
+
+# ═══════════════════════════════════════════════════════════════
 #  CLI
 # ═══════════════════════════════════════════════════════════════
 def main():
@@ -1514,6 +1961,8 @@ def main():
             _phase2_bench(force=args.force)
         elif phase == "3-l2-inflection":
             parser.error("Phase 3 has no --exp. Use --ncu 3-l2-inflection")
+        elif phase == "4-loopk-fantasy":
+            _phase4_bench(force=args.force)
     elif args.plot:
         phase = args.plot
         print(f"[{_ts()}] === --plot {phase} ===", flush=True)
@@ -1525,6 +1974,8 @@ def main():
             _phase2_plot()
         elif phase == "3-l2-inflection":
             parser.error("Phase 3 has no --plot. Use --ncu 3-l2-inflection")
+        elif phase == "4-loopk-fantasy":
+            _phase4_plot()
     elif args.ncu:
         phase = args.ncu
         print(f"[{_ts()}] === --ncu {phase} ===", flush=True)
@@ -1536,6 +1987,8 @@ def main():
             _phase2_ncu()
         elif phase == "3-l2-inflection":
             _phase3_ncu()
+        elif phase == "4-loopk-fantasy":
+            _phase4_ncu()
 
     print(f"\n[{_ts()}] ALL DONE", flush=True)
 

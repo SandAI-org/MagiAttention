@@ -459,7 +459,11 @@ class TestIndexSparseIndicesAttn(DistTestBase):
                 "topk": 128,
                 "pack_gqa": True,
             },
-            # Very short Q (sub-tile, still >= kBlockN for inner loop)
+            # Very short Q (sub-tile, still >= kBlockN for inner loop).
+            # NOTE: S_q < ~22 can produce zero-ref K tokens in inner_indices,
+            # causing a potential BWD kernel hang (inner_block_max=0 barrier
+            # deadlock). S_q=16 with SEED=42 has ~3 zero-ref K tokens but
+            # empirically passes. S_q=8 had 49 zero-ref and hung reliably.
             {
                 "name": "tiny_q",
                 "B": 1,

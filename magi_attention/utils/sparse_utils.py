@@ -1257,7 +1257,7 @@ def choose_ref_block(
     }
 
 
-def build_inv_indices(
+def build_index_sparse_inner_indices(
     index_sparse_indices: torch.Tensor,
     seqlen_k: int,
     k_block_size: int = 1,
@@ -1276,19 +1276,19 @@ def build_inv_indices(
         seqlen_k: total number of K tokens.
         k_block_size: K block granularity. 1 = token-level (default).
             When > 1, must divide seqlen_k.
-        pad_multiple: pad inv_topk to this multiple (matches kBlockM).
+        pad_multiple: pad inner_topk to this multiple (matches kBlockM).
 
     Returns:
-        inv_indices: int32 tensor.
-            - k_block_size == 1: (seqlen_k, nhk, inv_topk)
-            - k_block_size > 1: (num_k_blocks, nhk, inv_topk)
-            Inverse K→Q mapping. Each entry is a Q token position.
-            Trailing -1 entries are padding.
-        inv_topk: int — padded max Q count.
+        inner_indices: int32 tensor.
+            - k_block_size == 1: (seqlen_k, nhk, inner_topk)
+            - k_block_size > 1: (num_k_blocks, nhk, inner_topk)
+            Inverse K→Q mapping (inner-loop indices). Each entry is a Q
+            token position. Trailing -1 entries are padding.
+        inner_topk: int — padded max Q count.
     """
     if index_sparse_indices.dim() == 2:
         raise ValueError(
-            "build_inv_indices expects 3D input (seqlen_q, nhk, topk). "
+            "build_index_sparse_inner_indices expects 3D input (seqlen_q, nhk, topk). "
             "Got 2D — reshape before calling."
         )
     assert index_sparse_indices.dim() == 3
@@ -1331,8 +1331,10 @@ def build_inv_indices(
             torch.ones(flat_bh_unique.shape[0], device=device, dtype=torch.int32),
         )
 
-        max_inv_topk = int(counts.max().item())
-        inv_topk = ((max_inv_topk + pad_multiple - 1) // pad_multiple) * pad_multiple
+        max_inner_topk = int(counts.max().item())
+        inner_topk = (
+            (max_inner_topk + pad_multiple - 1) // pad_multiple
+        ) * pad_multiple
 
         sorted_order = flat_bh_unique.argsort(stable=True)
         sorted_q = flat_q_unique[sorted_order]
@@ -1344,11 +1346,11 @@ def build_inv_indices(
         offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
         offsets = offsets - group_starts[sorted_kh.long()]
 
-        inv_indices = torch.full(
-            (num_k_slots, nhk, inv_topk), -1, device=device, dtype=torch.int32
+        inner_indices = torch.full(
+            (num_k_slots, nhk, inner_topk), -1, device=device, dtype=torch.int32
         )
-        inv_flat = inv_indices.reshape(total_slots, inv_topk)
-        inv_flat[sorted_kh.long(), offsets.long()] = sorted_q
+        inner_flat = inner_indices.reshape(total_slots, inner_topk)
+        inner_flat[sorted_kh.long(), offsets.long()] = sorted_q
     else:
         flat_kh = flat_k.long() * nhk + flat_h.long()
         total_kh = seqlen_k * nhk
@@ -1357,8 +1359,10 @@ def build_inv_indices(
             0, flat_kh.int().long(), torch.ones_like(flat_kh, dtype=torch.int32)
         )
 
-        max_inv_topk = int(counts.max().item())
-        inv_topk = ((max_inv_topk + pad_multiple - 1) // pad_multiple) * pad_multiple
+        max_inner_topk = int(counts.max().item())
+        inner_topk = (
+            (max_inner_topk + pad_multiple - 1) // pad_multiple
+        ) * pad_multiple
 
         sorted_order = flat_kh.argsort(stable=True)
         sorted_q = flat_q[sorted_order]
@@ -1370,10 +1374,10 @@ def build_inv_indices(
         offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
         offsets = offsets - group_starts[sorted_kh.long()]
 
-        inv_indices = torch.full(
-            (seqlen_k, nhk, inv_topk), -1, device=device, dtype=torch.int32
+        inner_indices = torch.full(
+            (seqlen_k, nhk, inner_topk), -1, device=device, dtype=torch.int32
         )
-        inv_indices_flat = inv_indices.reshape(total_kh, inv_topk)
-        inv_indices_flat[sorted_kh.long(), offsets.long()] = sorted_q
+        inner_indices_flat = inner_indices.reshape(total_kh, inner_topk)
+        inner_indices_flat[sorted_kh.long(), offsets.long()] = sorted_q
 
-    return inv_indices, inv_topk
+    return inner_indices, inner_topk

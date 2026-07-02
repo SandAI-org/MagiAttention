@@ -436,7 +436,7 @@ def get_ffa_jit_spec(
         uri += "_mmunified"
     # inner_use_scatter mirrors the mainloop predicate (mainloop_bwd_sm90_tma_gmma_ws.hpp):
     # LoopK scatters K/V when block_sparse or index_sparse, LoopQ scatters Q/dO when block_sparse
-    # or index_sparse (inv_indices).
+    # or index_sparse (inner_indices).
     _inner_use_scatter = block_sparse or index_sparse
     _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER")
     # Applies to ALL bwd configs (Dense, IndexSparse, BlockSparse).
@@ -490,6 +490,7 @@ def get_ffa_jit_spec(
             ("MAGI_ATTENTION_FFA_BWD_SCATTER_PAD", "bwd_scatter_pad", "sp"),
             ("MAGI_ATTENTION_FFA_BWD_LSE_UNION", "bwd_lse_union", "lu"),
             ("MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS", "bwd_dkvacc_bypass", "db"),
+            ("MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC", "bwd_ununion_dkvacc", "uu"),
         ]:
             _val = os.environ.get(_env_name)
             if _val is not None:
@@ -513,6 +514,19 @@ def get_ffa_jit_spec(
         if _force_ss is not None and _force_ss == "1":
             extra_template_args["force_mma_dkv_ss"] = "true"
             uri += "_fss1"
+
+        # Per-switch fantasy overrides (LoopK perf isolation, correctness NOT guaranteed).
+        # Require DKVACC_BYPASS=1 for dV/dK store skips.
+        for _env_name, _tpl_key, _uri_key in [
+            ("MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD", "bwd_skip_v_load", "svl"),
+            ("MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE", "bwd_skip_dv_store", "svs"),
+            ("MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE", "bwd_skip_dk_store", "sks"),
+            ("MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA", "bwd_skip_dv_mma", "svm"),
+        ]:
+            _val = os.environ.get(_env_name)
+            if _val is not None and _val != "0":
+                extra_template_args[_tpl_key] = "true"
+                uri += f"_{_uri_key}1"
 
         # IndexSparse LoopQ with block-level K: override tile_n to match k_block_size
         # so that kBlockN = k_block_size (full-tile outer K, no waste).
@@ -697,6 +711,11 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_SCATTER_PAD",
     "MAGI_ATTENTION_FFA_BWD_LSE_UNION",
     "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
+    "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC",
+    "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD",
+    "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
+    "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",
+    "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA",
 )
 
 
