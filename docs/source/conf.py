@@ -26,8 +26,8 @@ sys.path.insert(0, os.path.abspath("../../"))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "MagiAttention"
-copyright = "2025-2026, Sandai"
-author = "Sandai"
+copyright = "2025-2026, SandAI"
+author = "SandAI"
 release = "main"
 
 # -- General configuration ---------------------------------------------------
