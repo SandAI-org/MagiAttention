@@ -1704,8 +1704,15 @@ struct CollectiveMainloopBwdSm90 {
 
     // ─── Unified control flow ───
     // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches.
-    if (block_meta.skip_to_first_valid())
+    if (block_meta.skip_to_first_valid()) {
+      // Zero-ref tile (inner_block_max == 0): signal barrier_KV with 0 expected bytes
+      // so the consumer's barrier_KV.wait() at the top of mma_with_loop_q can unblock.
+      // Without this, the consumer deadlocks waiting for K/V data that was never loaded.
+      if (thread_idx == 0) {
+        shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(0);
+      }
       return false;
+    }
 
     load_KV();
 
