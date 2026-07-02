@@ -1,7 +1,13 @@
 {# Language switcher for multi-language documentation builds. #}
 {# Sphinx 8+ normalises language to BCP 47 (e.g. zh-CN), so match both forms. #}
 {% set is_chinese = language and ("zh" in language) %}
-<div class="dropdown">
+<div
+  class="dropdown"
+  id="doc-language-switcher-root"
+  data-pagename="{{ pagename }}"
+  data-is-chinese="{{ 'true' if is_chinese else 'false' }}"
+  data-zh-segment="zh_CN"
+>
   <button
     class="btn btn-sm btn-outline-primary dropdown-toggle"
     type="button"
@@ -24,45 +30,59 @@
 <script>
   (function () {
     // English lives at the root (no language prefix).
-    // Chinese lives under zh_CN/ inside the same version root.
+    // Chinese lives under zh_CN/ inside the same site root.
     // URL examples:
-    //   English: /MagiAttention/docs/main/user_guide/install.html
-    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
-    var ZH_SEGMENT = "zh_CN";
+    //   English: <site-root>/user_guide/install.html
+    //   Chinese: <site-root>/zh_CN/user_guide/install.html
+    //
+    // The site root is derived from the current page's own `pagename`
+    // (known at build time) instead of a hard-coded "/docs/" marker, so the
+    // switcher works identically when served online (e.g. under
+    // "/MagiAttention/docs/main/") and when the built HTML is downloaded and
+    // opened locally via file:// URLs.
+    //
+    // NOTE: build-time values (pagename / is_chinese) are passed through
+    // `data-*` attributes rather than inlined into JS, so this script stays
+    // valid, lint-clean JavaScript with no template syntax mixed in.
+    var root = document.getElementById("doc-language-switcher-root");
+    if (!root) return;
 
-    function versionRoot() {
-      // Returns the path up to and including the version/branch segment
-      // (i.e. everything up to and including "main", "v1.1.0", etc.)
-      // by looking for the known parent prefix.
-      var pathname = window.location.pathname || "";
-      var marker = "/docs/";
-      var idx = pathname.indexOf(marker);
-      if (idx === -1) return null;
-      // Find the next slash after the version segment.
-      var afterDocs = pathname.indexOf("/", idx + marker.length);
-      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    var ZH_SEGMENT = root.getAttribute("data-zh-segment") || "zh_CN";
+    var PAGENAME = root.getAttribute("data-pagename") || "";
+    var IS_CHINESE = root.getAttribute("data-is-chinese") === "true";
+
+    function currentRoot() {
+      // Strip the trailing "<pagename>.html" from the current URL to obtain
+      // the site root for the *current* language build (always ends with "/").
+      var url = window.location.href;
+      var hashIdx = url.indexOf("#");
+      if (hashIdx !== -1) url = url.slice(0, hashIdx);
+      var qIdx = url.indexOf("?");
+      if (qIdx !== -1) url = url.slice(0, qIdx);
+      var suffix = PAGENAME + ".html";
+      if (url.slice(-suffix.length) === suffix) {
+        return url.slice(0, url.length - suffix.length);
+      }
+      // Fallback: directory of the current file.
+      return url.slice(0, url.lastIndexOf("/") + 1);
+    }
+
+    function enRoot() {
+      // Normalise to the English (top-level) site root.
+      var currRoot = currentRoot();
+      var zhSuffix = ZH_SEGMENT + "/";
+      if (IS_CHINESE && currRoot.slice(-zhSuffix.length) === zhSuffix) {
+        return currRoot.slice(0, currRoot.length - zhSuffix.length);
+      }
+      return currRoot;
     }
 
     function resolvePath(targetLang) {
-      var pathname = window.location.pathname || "";
       var query = window.location.search || "";
       var hash = window.location.hash || "";
-      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
-      if (!root) return "#";
-
-      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
-                                                    //  or "zh_CN/user_guide/install.html"
-
-      // Strip existing zh_CN prefix if present
-      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
-        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
-      }
-
-      if (targetLang === "en") {
-        return root + afterRoot + query + hash;
-      } else {
-        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
-      }
+      var base = enRoot();  // English site root, ends with "/"
+      var target = (targetLang === "en") ? base : base + ZH_SEGMENT + "/";
+      return target + PAGENAME + ".html" + query + hash;
     }
 
     var links = document.querySelectorAll(".doc-lang-link");
