@@ -427,7 +427,7 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 //
 // IsLoopQ_=false (LoopK): outer=Q token (bidb), inner=K from forward topk indices
 //   fill_token_indices fills K physical rows: id * nhk + kv_head_local
-// IsLoopQ_=true  (LoopQ): outer=K block (bidb), inner=Q from inv_indices
+// IsLoopQ_=true  (LoopQ): outer=K block (bidb), inner=Q from inner_indices
 //   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -520,20 +520,20 @@ struct IndexSparseBlockMeta {
       inner_block_max = (effective_k + kInnerBlockSize_ - 1) / kInnerBlockSize_;
       num_invalid_token = inner_block_max * kInnerBlockSize_ - effective_k;
     } else {
-      // ── LoopQ: bidb = K block, indices = inv_indices (K→Q) ──
+      // ── LoopQ: bidb = K block, indices = inner_indices (K→Q) ──
       seqlen_info.offset_k = bidb * kKBlockSize;
       seqlen_info.seqlen_k = kKBlockSize;
       head_local = bidh;
 
-      // inv_indices layout: (num_k_blocks, nhk * inv_topk_per_head)
-      // When !PackGQA, bidh is a Q-head index from the scheduler but inv_indices
+      // inner_indices layout: (num_k_blocks, nhk * inner_topk_per_head)
+      // When !PackGQA, bidh is a Q-head index from the scheduler but inner_indices
       // are partitioned by KV head. Use bidh_kv (already mapped to KV-head above).
-      int inv_topk_per_head = max_topk / nhk;
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh_kv) * inv_topk_per_head;
-      int max_inv_topk = inv_topk_per_head;
+      int inner_topk_per_head = max_topk / nhk;
+      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh_kv) * inner_topk_per_head;
+      int max_inner_topk = inner_topk_per_head;
 
-      actual_topk = max_inv_topk;
-      for (int i = max_inv_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
+      actual_topk = max_inner_topk;
+      for (int i = max_inner_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
         --actual_topk;
 
       // PackGQA: interleave Q heads into packed rows (token * G + sub_head).
@@ -602,13 +602,13 @@ struct IndexSparseBlockMeta {
 
       if constexpr (PackGQA) {
         // PackGQA: interleave Q heads — packed row = token * G + sub_head
-        int max_inv_topk_val = total_q / PackGQAFactor;
+        int max_inner_topk_val = total_q / PackGQAFactor;
         for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
           int packed_row = base + j;
           if (packed_row < total_q) {
             int q_token_local_idx = packed_row / PackGQAFactor;
             int sub_head = packed_row % PackGQAFactor;
-            int q_token = (q_token_local_idx < max_inv_topk_val) ? group_token_ptr[q_token_local_idx] : -1;
+            int q_token = (q_token_local_idx < max_inner_topk_val) ? group_token_ptr[q_token_local_idx] : -1;
             group_rows[j] = (q_token >= 0) ? q_token * PackGQAFactor + sub_head : 0;
           } else {
             group_rows[j] = 0;
@@ -630,7 +630,7 @@ struct IndexSparseBlockMeta {
   }
 
   // Absolute packed row for TMA coordinate computation.
-  // LoopQ: maps inner_block_cur through inv_indices → absolute packed Q row.
+  // LoopQ: maps inner_block_cur through inner_indices → absolute packed Q row.
   // LoopK: maps inner_block_cur through index_sparse_indices → absolute packed K row.
   CUTLASS_DEVICE
   int get_packed_first_row() const {

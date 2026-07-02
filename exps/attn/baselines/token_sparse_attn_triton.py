@@ -30,7 +30,7 @@ BWD: Two-pass architecture with selectable dKV strategy:
        (a) "atomic" (default): LoopK + atomic scatter.
            Grid=(total_q,). Uses tl.dot. Best for RANDOM indices.
            ~36 TFLOPS. Bottleneck: atomic contention.
-       (b) "loopq": LoopQ with BLOCK_N KV tiling + PackGQA + block-level inv_indices.
+       (b) "loopq": LoopQ with BLOCK_N KV tiling + PackGQA + block-level inner_indices.
            Grid=(num_kv_blocks, num_splits). ALL ops use tl.dot (Tensor Core).
            - Structured/local indices: ~150 TFLOPS (4x faster than atomic!)
            - Random indices: ~15 TFLOPS (sparse mask wastes N dimension)

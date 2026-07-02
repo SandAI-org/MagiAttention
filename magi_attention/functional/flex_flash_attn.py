@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from contextlib import contextmanager
 
 import torch
@@ -1048,7 +1049,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_auto_range_merge = False
 
             if not swap_bwd_qk_loop:
-                # IndexSparse BWD LoopQ: outer=K block, inner=Q from inv_indices
+                # IndexSparse BWD LoopQ: outer=K block, inner=Q from inner_indices
                 _loopq_kbs = ctx.k_block_size
                 nhk = k.size(1)
                 seqlen_k = v.size(0)
@@ -1056,7 +1057,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     -1, nhk, index_sparse_indices_2d.size(-1)
                 )
 
-                from magi_attention.utils.sparse_utils import build_inv_indices
+                from magi_attention.utils.sparse_utils import (
+                    build_index_sparse_inner_indices,
+                )
 
                 if _loopq_kbs > 1:
                     assert nhk == 1, (
@@ -1064,27 +1067,44 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         f"got nhk={nhk}. NHK>1 + kbs>1 has a flat-layout mismatch (P8-BUG-NHK)."
                     )
 
-                    _inv_indices, _inv_topk = build_inv_indices(
+                    _inner_indices, _inner_topk = build_index_sparse_inner_indices(
                         _fwd_3d,
                         seqlen_k=seqlen_k,
                         k_block_size=_loopq_kbs,
                         pad_multiple=64,
                     )
                     num_k_blocks = seqlen_k // _loopq_kbs
-                    index_sparse_indices_2d = _inv_indices.reshape(
-                        num_k_blocks, nhk * _inv_topk
+                    index_sparse_indices_2d = _inner_indices.reshape(
+                        num_k_blocks, nhk * _inner_topk
                     ).contiguous()
-                    ctx.index_sparse_max_topk = nhk * _inv_topk
+                    ctx.index_sparse_max_topk = nhk * _inner_topk
                 else:
-                    _inv_indices, _inv_topk = build_inv_indices(
+                    _inner_indices, _inner_topk = build_index_sparse_inner_indices(
                         _fwd_3d,
                         seqlen_k=seqlen_k,
                         pad_multiple=64,
                     )
-                    index_sparse_indices_2d = _inv_indices.reshape(
-                        seqlen_k, nhk * _inv_topk
+                    index_sparse_indices_2d = _inner_indices.reshape(
+                        seqlen_k, nhk * _inner_topk
                     ).contiguous()
-                    ctx.index_sparse_max_topk = nhk * _inv_topk
+                    ctx.index_sparse_max_topk = nhk * _inner_topk
+
+                # Warn if any K slots have zero Q references (all inner_indices
+                # entries == -1). The BWD kernel's IndexSparseBlockMeta computes
+                # inner_block_max=0 for these slots, which can trigger a barrier
+                # deadlock in the persistent scheduler depending on tile/SM layout.
+                # Production workloads have S_q >> kBlockM so this is not expected.
+                _ref_counts = (_inner_indices >= 0).sum(dim=-1)
+                _n_zero_ref = (_ref_counts == 0).sum().item()
+                if _n_zero_ref > 0:
+                    _total_k_slots = _ref_counts.numel()
+                    warnings.warn(
+                        f"IndexSparse BWD LoopQ: {_n_zero_ref}/{_total_k_slots} K slots "
+                        f"have zero Q references in inner_indices. This may cause a kernel "
+                        f"hang (inner_block_max=0 barrier deadlock). Consider increasing "
+                        f"S_q, increasing topk, or using swap_bwd_qk_loop=True (LoopK).",
+                        stacklevel=2,
+                    )
             # else: IndexSparse BWD LoopK — use forward's topk_indices directly
         elif ctx.auto_range_merge:
             bwd_auto_range_merge = True

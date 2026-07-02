@@ -141,7 +141,12 @@ template <
     int KBlockSize,
     bool ForceMmaDkvSS,
     int InnerLoadMode,
-    bool ProfileMode>
+    bool ProfileMode,
+    bool SkipVLoad_ = false,
+    bool SkipDvStore_ = false,
+    bool SkipDkStore_ = false,
+    bool SkipDvMma_ = false,
+    bool UnunionDkvacc = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -206,7 +211,12 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       DkvaccBypassSmem,
       KBlockSize,
       ForceMmaDkvSS,
-      InnerLoadMode>;
+      InnerLoadMode,
+      SkipVLoad_,
+      SkipDvStore_,
+      SkipDkStore_,
+      SkipDvMma_,
+      UnunionDkvacc>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       SwapBwdQKLoop ? kBlockM : kBlockN,
@@ -322,7 +332,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       int sz_pipe = sizeof(typename AttnKernel::SharedStorage) - sz_tensor;
       printf("[BWD] total=%d(%.1fKB) tensor=%d pipe=%d\n", smem_size, smem_size / 1024.0f, sz_tensor, sz_pipe);
       printf(
-          "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d lseU=%d dkvByp=%d SwapQK=%d\n",
+          "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d lseU=%d dkvByp=%d ununion=%d SwapQK=%d\n",
           kBlockM,
           kBlockN,
           kHeadDim,
@@ -332,6 +342,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
           ScatterPad,
           (int)LseDpsumUnionDKVacc,
           (int)DkvaccBypassSmem,
+          (int)UnunionDkvacc,
           (int)SwapBwdQKLoop);
       cudaFuncAttributes func_attrs;
       cudaFuncGetAttributes(&func_attrs, (void*)cutlass::device_kernel<AttnKernel>);
@@ -402,7 +413,12 @@ template <
     int KBlockSize,
     bool ForceMmaDkvSS,
     int InnerLoadMode,
-    bool ProfileMode>
+    bool ProfileMode,
+    bool SkipVLoad = false,
+    bool SkipDvStore = false,
+    bool SkipDkStore = false,
+    bool SkipDvMma = false,
+    int BwdUnunionDkvacc = 0>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr bool IndexSparseInvLoopQ = IndexSparse && !SwapBwdQKLoop;
@@ -419,6 +435,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int ScatterPad = BwdScatterPad;
   static constexpr bool LseDpsumUnionDKVacc = BwdLseUnion != 0;
   static constexpr bool DkvaccBypassSmem = BwdDkvaccBypass != 0;
+  static constexpr bool UnunionDkvacc = BwdUnunionDkvacc != 0;
 
   static constexpr bool SdP_swapAB = kHeadDim <= 128 ? true : false;
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
@@ -487,5 +504,10 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*KBlockSize=*/KBlockSize,
       /*ForceMmaDkvSS=*/ForceMmaDkvSS,
       /*InnerLoadMode=*/InnerLoadMode,
-      /*ProfileMode=*/ProfileMode>(params, stream);
+      /*ProfileMode=*/ProfileMode,
+      /*SkipVLoad_=*/SkipVLoad,
+      /*SkipDvStore_=*/SkipDvStore,
+      /*SkipDkStore_=*/SkipDkStore,
+      /*SkipDvMma_=*/SkipDvMma,
+      /*UnunionDkvacc=*/UnunionDkvacc>(params, stream);
 }
