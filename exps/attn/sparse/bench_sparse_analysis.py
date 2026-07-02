@@ -1502,6 +1502,9 @@ _FANTASY_ENV_KEYS = [
     "MAGI_ATTENTION_FFA_BWD_TILE_M",
     "MAGI_ATTENTION_FFA_BWD_TILE_N",
     "MAGI_ATTENTION_FFA_BWD_STAGES",
+    "MAGI_ATTENTION_FFA_BWD_STAGES_DS",
+    "MAGI_ATTENTION_FFA_BWD_LSE_UNION",
+    "MAGI_ATTENTION_FFA_BWD_STAGES_V",
 ]
 
 # Symmetric configs: same skip flags on BOTH LoopK and LoopQ.
@@ -1537,6 +1540,109 @@ _FANTASY_CONFIGS = []
 for factor_key, env_ov, short in _SKIP_FACTORS:
     _FANTASY_CONFIGS.append((f"loopk_{factor_key}", env_ov, False, f"LoopK: {short}"))
     _FANTASY_CONFIGS.append((f"loopq_{factor_key}", env_ov, True, f"LoopQ: {short}"))
+
+# Phase 4b: structural experiments.
+# Goal: when skip flags free SMEM, previously infeasible tile/staging configs may work.
+# SMEM budget (H100 limit 228KB):
+#   LoopK M128N64 baseline:  198KB (stg=2 stgV=2 stg_dS=1)
+#   LoopK M64N128 baseline:  260KB (EXCEEDS by 32KB without skip)
+#   LoopK M128N64 stg_dS=2:  230KB (EXCEEDS by 2KB without skip)
+# skip_v_load frees ~32KB (smem_v stages), skip_dv may free dvacc buffer.
+_STRUCTURAL_CONFIGS = [
+    # ── Baseline structural params ──
+    ("loopk_lseu1", {"MAGI_ATTENTION_FFA_BWD_LSE_UNION": "1"}, False, "LoopK: lseU=1"),
+    (
+        "loopk_m64n64",
+        {"MAGI_ATTENTION_FFA_BWD_TILE_M": "64", "MAGI_ATTENTION_FFA_BWD_TILE_N": "64"},
+        False,
+        "LoopK: M64N64",
+    ),
+    # ── skip_all + structural (freed SMEM enables new configs) ──
+    (
+        "loopk_skipall_lseu1",
+        {
+            "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA": "1",
+            "MAGI_ATTENTION_FFA_BWD_LSE_UNION": "1",
+        },
+        False,
+        "LoopK: skip all + lseU1",
+    ),
+    # skip_all + M64N128 + stgV=1 + dS=1: force single-stage dS to fit SMEM
+    # (M64N128 heuristic defaults dS=2 → 228KB, barely exceeds with pipeline barriers)
+    (
+        "loopk_skipall_m64n128",
+        {
+            "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA": "1",
+            "MAGI_ATTENTION_FFA_BWD_TILE_M": "64",
+            "MAGI_ATTENTION_FFA_BWD_TILE_N": "128",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_DS": "1",
+        },
+        False,
+        "LoopK: skip all + M64N128",
+    ),
+    # skip_all + dS_stage=2 + stgV=1: stgV1 saves 16KB → 230-16=214KB
+    (
+        "loopk_skipall_ds2",
+        {
+            "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA": "1",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_DS": "2",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
+        },
+        False,
+        "LoopK: skip all + dS=2 stgV1",
+    ),
+    # skip_all + M64N128 + lseU=1 + stgV=1 + dS=1 (closest to LoopQ structural parity)
+    # dS=2 not feasible with M64N128 even with all skips (228KB = at limit)
+    (
+        "loopk_skipall_loopq_struct",
+        {
+            "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA": "1",
+            "MAGI_ATTENTION_FFA_BWD_TILE_M": "64",
+            "MAGI_ATTENTION_FFA_BWD_TILE_N": "128",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_DS": "1",
+            "MAGI_ATTENTION_FFA_BWD_LSE_UNION": "1",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
+        },
+        False,
+        "LoopK: skip all + M64N128 lseU1",
+    ),
+    # ── Fine-grained skip decomposition ──
+    # skip_dv_mma + skip_dv_store together (vs individually) to see interaction
+    (
+        "loopk_skip_dv_both",
+        {
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA": "1",
+        },
+        False,
+        "LoopK: no dV MMA+store",
+    ),
+    # skip_dv_both + skip_dk_store (isolate: with dV path fully eliminated, how much does dK store cost?)
+    (
+        "loopk_skip_dv_both_dk",
+        {
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
+        },
+        False,
+        "LoopK: no dV path + no dK store",
+    ),
+]
+_FANTASY_CONFIGS.extend(_STRUCTURAL_CONFIGS)
 
 
 def _phase4_bench(force=False):
@@ -1824,13 +1930,16 @@ def _phase4_ncu():
     metrics = (
         "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum,"
         "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum,"
+        "l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum,"
         "launch__registers_per_thread,"
         "sm__cycles_elapsed.avg,"
         "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,"
         "smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio,"
         "smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio,"
         "smsp__cycles_active.avg.pct_of_peak_sustained_active,"
-        "sm__inst_executed.avg.per_cycle_active"
+        "sm__inst_executed.avg.per_cycle_active,"
+        "sm__inst_executed_pipe_tensor.avg.pct_of_peak_sustained_active,"
+        "dram__bytes.sum"
     )
 
     gpu = _find_free_gpu()
@@ -1882,6 +1991,7 @@ print("[DONE]")
         csv_path = os.path.join(out, f"ncu_{name}.csv")
         cmd = [
             ncu_bin,
+            "-f",
             "--kernel-name",
             "regex:device_kernel",
             "--launch-skip",
