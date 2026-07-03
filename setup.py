@@ -686,6 +686,7 @@ def prebuild_ffa_kernels() -> None:
         ) from e
 
     # determine the combinations of prebuild options
+    prebuild_level = os.environ.get("MAGI_ATTENTION_PREBUILD_LEVEL", "lite").lower()
     directions = ["fwd", "bwd"]
     head_dims = [64, 128]
     compute_output_dtype_tuples = [
@@ -708,6 +709,116 @@ def prebuild_ffa_kernels() -> None:
         auto_range_merges,
         cat_gqas,
     )
+    # Each combo is a tuple of scalars; extend with sparse/gqa fields below.
+    base_combos = [
+        (
+            *c,
+            False,
+            False,
+            False,
+            1,
+            1,
+        )  # block_sparse, index_sparse, swap_bwd_qk_loop, pack_gqa_factor, k_block_size
+        for c in combos
+    ]
+
+    if prebuild_level == "ci":
+        # CI mode: also prebuild sparse / deterministic / pack_gqa / swap_bwd_qk_loop combos
+        # that are exercised by test_block_sparse.py, test_index_sparse.py, test_deterministic.py.
+        ci_extra = []
+        ci_dtypes = [(torch.bfloat16, torch.float32)]
+        ci_head_dims = [128]
+        for direction in directions:
+            for hd in ci_head_dims:
+                for dt in ci_dtypes:
+                    # BlockSparse: auto_range_merge=True, pack_gqa=True, kbs=128
+                    ci_extra.append(
+                        (
+                            direction,
+                            hd,
+                            dt,
+                            False,
+                            False,
+                            True,
+                            False,
+                            True,
+                            False,
+                            False,
+                            128,
+                            128,
+                        )
+                    )  # block_sparse, !index, !swap, pgf=128, kbs=128
+                    ci_extra.append(
+                        (
+                            direction,
+                            hd,
+                            dt,
+                            False,
+                            False,
+                            True,
+                            False,
+                            True,
+                            False,
+                            True,
+                            128,
+                            128,
+                        )
+                    )  # + swap_bwd_qk_loop
+                    # IndexSparse: pack_gqa=True, kbs=1
+                    ci_extra.append(
+                        (
+                            direction,
+                            hd,
+                            dt,
+                            False,
+                            False,
+                            False,
+                            False,
+                            False,
+                            True,
+                            False,
+                            128,
+                            1,
+                        )
+                    )  # index_sparse, !swap, pgf=128, kbs=1
+                    ci_extra.append(
+                        (
+                            direction,
+                            hd,
+                            dt,
+                            False,
+                            False,
+                            False,
+                            False,
+                            False,
+                            True,
+                            True,
+                            128,
+                            1,
+                        )
+                    )  # + swap_bwd_qk_loop
+                    # Deterministic dense
+                    ci_extra.append(
+                        (
+                            direction,
+                            hd,
+                            dt,
+                            False,
+                            True,
+                            False,
+                            False,
+                            False,
+                            False,
+                            False,
+                            1,
+                            1,
+                        )
+                    )  # deterministic
+        print(
+            f"[prebuild] CI mode: {len(base_combos)} base + {len(ci_extra)} sparse/det combos"
+        )
+    else:
+        ci_extra = []
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
@@ -719,8 +830,14 @@ def prebuild_ffa_kernels() -> None:
             deterministic,
             auto_range_merge,
             cat_gqa,
+            block_sparse,
+            index_sparse,
+            swap_bwd_qk_loop,
+            pack_gqa_factor,
+            k_block_size,
         ) = args
         compute_dtype, output_dtype = compute_output_dtype_tuple
+        pack_gqa = pack_gqa_factor > 1
         spec, uri = get_ffa_jit_spec(
             arch=(9, 0),
             direction=direction,
@@ -734,15 +851,17 @@ def prebuild_ffa_kernels() -> None:
             ref_block_size=None,
             auto_range_merge=auto_range_merge,
             swap_ab=False,
-            pack_gqa=False,
+            pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
-            pack_gqa_factor=1,
-            block_sparse=False,
-            swap_bwd_qk_loop=False,
+            pack_gqa_factor=pack_gqa_factor,
+            block_sparse=block_sparse,
+            index_sparse=index_sparse,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
             profile_mode=False,
             return_max_logits=False,
             dq_dtype=output_dtype if direction == "bwd" else None,
             dkv_dtype=output_dtype if direction == "bwd" else None,
+            k_block_size=k_block_size,
         )
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
@@ -751,15 +870,19 @@ def prebuild_ffa_kernels() -> None:
             shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
         return uri
 
+    all_combos = base_combos + ci_extra
     with ThreadPoolExecutor(max_workers=PREBUILD_FFA_JOBS) as ex:
-        futs = {ex.submit(_build_one, c): c for c in combos}
+        futs = {ex.submit(_build_one, c): c for c in all_combos}
         for fut in as_completed(futs):
             c = futs[fut]
             try:
                 uri = fut.result()
                 print(f"Prebuilt: {uri}")
             except Exception as e:
-                raise RuntimeError(f"Prebuild failed for {c}: {e}") from e
+                if prebuild_level == "ci":
+                    print(f"[prebuild WARNING] Skipping invalid combo {c}: {e}")
+                else:
+                    raise RuntimeError(f"Prebuild failed for {c}: {e}") from e
 
 
 # build ext modules

@@ -241,12 +241,9 @@ struct BlockSparseBlockMeta {
       }
     }();
 
-    // NOTE: no outer_block-vs-K-range validity check is needed for LoopQ.
-    // auto_range_merge dedups with unique_consecutive_pairs, so every sub-batch
-    // in a merged group shares one exact K window, and the scheduler derives the
-    // outer (n_block) tile count from that same window — outer_block is always
-    // in range. The K residual-column mask is computed at the use site in the
-    // mainloop from seqlen_info (symmetric with LoopK's Q residual mask).
+    // No outer_block bounds check needed: the persistent scheduler computes tile
+    // count from the outer-dimension range, so outer_block is always in-range
+    // (symmetric for both LoopQ and LoopK).
 
     int2 const r0 = packed_range(bidb);
     range_size = r0.y - r0.x;
