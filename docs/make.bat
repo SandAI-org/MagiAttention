@@ -38,7 +38,7 @@ if "%1" == "update-po" (
 
 if "%1" == "html-en" (
 	set DOCS_LANGUAGE=en
-	%SPHINXBUILD% -b html %SOURCEDIR% %BUILDDIR%/html/en %SPHINXOPTS% %O%
+	%SPHINXBUILD% -b html %SOURCEDIR% %BUILDDIR%/html %SPHINXOPTS% %O%
 	goto end
 )
 
@@ -50,7 +50,7 @@ if "%1" == "html-zh" (
 
 if "%1" == "html-multilang" (
 	set DOCS_LANGUAGE=en
-	%SPHINXBUILD% -b html %SOURCEDIR% %BUILDDIR%/html/en %SPHINXOPTS% %O%
+	%SPHINXBUILD% -b html %SOURCEDIR% %BUILDDIR%/html %SPHINXOPTS% %O%
 	set DOCS_LANGUAGE=zh_CN
 	%SPHINXBUILD% -b html %SOURCEDIR% %BUILDDIR%/html/zh_CN %SPHINXOPTS% %O%
 	goto end

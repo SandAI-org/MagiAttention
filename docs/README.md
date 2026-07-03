@@ -399,7 +399,7 @@ DOCS_LANGUAGE=zh_CN sphinx-build -b html source/ build/html/zh_CN/
 | `make html` | Build English docs (default, output: `build/html/`) |
 | `make clean` | Remove all build artifacts |
 | `make update-po` | Extract strings and update Chinese `.po` files |
-| `make html-en` | Build English only (output: `build/html/en/`) |
+| `make html-en` | Build English only (output: `build/html/`, site root) |
 | `make html-zh` | Build Chinese only (output: `build/html/zh_CN/`) |
 | `make html-multilang` | Build both English and Chinese |
 
