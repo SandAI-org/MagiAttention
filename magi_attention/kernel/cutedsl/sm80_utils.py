@@ -14,8 +14,6 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="misc"
-
 
 from typing import Callable, Optional, Type
 
@@ -169,6 +167,7 @@ def gemm(
                     )
             cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
             if cutlass.const_expr(k == 0 and hook_fn is not None):
+                assert hook_fn is not None  # mypy
                 hook_fn()
 
 
@@ -232,4 +231,5 @@ def gemm_rs(
             )
         cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
         if cutlass.const_expr(k == 0 and hook_fn is not None):
+            assert hook_fn is not None  # mypy
             hook_fn()

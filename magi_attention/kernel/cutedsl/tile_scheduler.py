@@ -15,7 +15,7 @@
 # Copyright (c) 2025, Tri Dao, Siyu Wang, Shengbin Di, Yuxi Chi, Johnsonms, Linfeng Zheng,
 # Haoyan Huang, Lanbo Li, Yun Zhong, Man Yuan, Minmin Sun, Yong Li, Wei Lin.
 
-# mypy: disable-error-code="attr-defined,index,union-attr,assignment"
+# mypy: disable-error-code="attr-defined"
 
 from dataclasses import dataclass
 from enum import IntEnum, auto
@@ -605,6 +605,7 @@ class SingleTileLPTScheduler:
     @cute.jit
     def get_current_work(self, *, loc=None, ip=None) -> WorkTileInfo:
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
+            assert self.clc is not None  # mypy
             work = self.clc.get_current_work()
             self._tile_idx = work.tile_idx[0]
             return self.clc_work_to_coords(work)
@@ -974,6 +975,7 @@ class SingleTileVarlenScheduler:
         if cutlass.const_expr(params.mSeqUsedQ is not None):
             seqlen = Int32(0)
             if batch_idx < params.num_batch:
+                assert params.mSeqUsedQ is not None  # mypy
                 seqlen = params.mSeqUsedQ[batch_idx]
         else:
             assert params.mCuSeqlensQ is not None
@@ -1110,6 +1112,7 @@ class SingleTileVarlenScheduler:
     @cute.jit
     def get_current_work(self, *, loc=None, ip=None) -> WorkTileInfo:
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
+            assert self.clc is not None  # mypy
             clc_work = self.clc.get_current_work()
             # Default to grid_dim (one past last valid flat index) so _varlen_coord_map
             # returns is_valid=False when CLC is exhausted. CLC tile_idx is garbage when
@@ -1552,7 +1555,7 @@ class Sm100FmhaClcDynamicTileScheduler:
         num_tiles_executed: Int32,
         clc_response_ptr: cute.Pointer,
         block_idx: Tuple,
-        clc: ClcState = None,
+        clc: ClcState | None = None,
         *,
         loc=None,
         ip=None,
@@ -1602,7 +1605,7 @@ class Sm100FmhaClcDynamicTileScheduler:
         block_idx: Tuple,
         grid_dim: Tuple,
         clc_response_ptr: cute.Pointer,
-        clc: ClcState = None,
+        clc: ClcState | None = None,
         *,
         loc=None,
         ip=None,

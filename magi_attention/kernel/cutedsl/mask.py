@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,index,misc,operator"
+# mypy: disable-error-code="misc"
 
 import enum
 from dataclasses import dataclass
@@ -493,6 +493,7 @@ class AttentionMask:
         seqlenk_col_limit = self.seqlen_k - n_block * self.tile_n
 
         if const_expr(rBitmask is not None):
+            assert rBitmask is not None  # mypy
             ncol_packed = const_expr(cute.size(rBitmask.shape[0]))
             for i in cutlass.range_constexpr(ncol_packed):
                 col_start = 32 * i  # mask is bit-packed into uint32
@@ -1378,7 +1379,7 @@ class Sm100FusedMask:
         :return: Number of masked trips.
         :rtype: Int32
         """
-        result = 0
+        result = Int32(0)
 
         if cutlass.const_expr(
             mask_type is not Sm100MaskEnum.RESIDUAL_MASK
@@ -1415,14 +1416,16 @@ class Sm100FusedMask:
                     trailing_mask_begin is not None and trailing_mask_end is not None
                 ):
                     if trailing_mask_begin <= leading_mask_end:
-                        result = max(trailing_mask_end - leading_mask_end, 0)
+                        result = max(trailing_mask_end - leading_mask_end, Int32(0))
                     else:
-                        result = max(trailing_mask_end - trailing_mask_begin + 1, 0)
+                        result = max(
+                            trailing_mask_end - trailing_mask_begin + Int32(1), Int32(0)
+                        )
         else:
             if seqlen_k % tile_shape[1] != 0:
-                result = 1
+                result = Int32(1)
             else:
-                result = 0
+                result = Int32(0)
 
         return result + rem_count
 

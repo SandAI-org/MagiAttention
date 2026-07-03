@@ -14,7 +14,6 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="arg-type,union-attr,misc"
 # pyright: reportInvalidTypeForm=false
 
 
@@ -676,7 +675,7 @@ class FFABwdSm80:
 
         self._check_tile()
         self._check_type(
-            *(
+            *(  # type: ignore[arg-type]
                 t.element_type if t is not None else None
                 for t in (
                     mQ,
@@ -731,7 +730,7 @@ class FFABwdSm80:
                 else mQ.shape[2]
             ),
             num_batch=(
-                mCuSeqlensK.shape[0] - 1
+                mCuSeqlensK.shape[0] - 1  # type: ignore[union-attr]
                 if cutlass.const_expr(mCuSeqlensK is not None)
                 else mK.shape[0]
             ),
@@ -1724,6 +1723,7 @@ class FFABwdSm80:
 
         # Apply score_mod if provided
         if cutlass.const_expr(self.score_mod is not None):
+            assert self.score_mod is not None  # mypy
             for r in cutlass.range(num_rows, unroll_full=True):  # loop over rows
                 acc_S_mn[r, None].store(
                     self.score_mod(
@@ -1739,6 +1739,7 @@ class FFABwdSm80:
 
         # Apply mask if provided
         if cutlass.const_expr(mask_fn is not None):
+            assert mask_fn is not None  # mypy
             mask_fn(acc_S, m_block=m_block)
 
         # Apply softmax with LSE: P = exp(S - LSE)
@@ -1814,6 +1815,7 @@ class FFABwdSm80:
 
             # Apply score_mod_bwd if provided
             if cutlass.const_expr(self.score_mod_bwd is not None):
+                assert self.score_mod_bwd is not None  # mypy
                 assert acc_S_pre_mn is not None  # mypy
                 acc_dS_row = self.score_mod_bwd(
                     acc_dS_row,

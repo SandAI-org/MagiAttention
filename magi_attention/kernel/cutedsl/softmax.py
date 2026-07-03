@@ -14,8 +14,6 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="operator,override"
-
 import math
 import operator
 from dataclasses import dataclass
@@ -154,6 +152,7 @@ class Softmax(ParamsBase):
 
         for r in cutlass.range(cute.size(row_sum), unroll_full=True):
             if cutlass.const_expr(sink_val is not None):
+                assert sink_val is not None  # mypy
                 sink_val_cur = (
                     sink_val if not isinstance(sink_val, cute.Tensor) else sink_val[r]
                 )
@@ -199,7 +198,7 @@ class SoftmaxSm100(Softmax):
     max_offset: cutlass.Constexpr[int] = 0
 
     @staticmethod
-    def create(
+    def create(  # type: ignore[override]
         scale_log2: Float32,
         rescale_threshold: cutlass.Constexpr[float] = 0.0,
         softmax_scale: Float32 | None = None,

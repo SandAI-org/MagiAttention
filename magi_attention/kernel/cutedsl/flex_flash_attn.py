@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="arg-type,attr-defined,unreachable,assignment"
+# mypy: disable-error-code="attr-defined,assignment"
 
 import math
 
@@ -823,7 +823,7 @@ def _flex_flash_attn_bwd(
         softmax_scale = 1.0 / math.sqrt(head_dim)
     qhead_per_kvhead = num_head // num_head_kv
     if pack_gqa is None:
-        pack_gqa = qhead_per_kvhead > 1
+        pack_gqa = qhead_per_kvhead > 1  # type: ignore[unreachable]
     # pack_gqa backward not yet supported in bwd
     pack_gqa = False
 
@@ -1153,7 +1153,7 @@ def _flex_flash_attn_bwd(
                     AtomLayoutMSdP,
                     AtomLayoutNdKV,
                     AtomLayoutMdQ,
-                    **ffa_bwd_kwargs,
+                    **ffa_bwd_kwargs,  # type: ignore[arg-type]
                 )
             case 9:
                 ffa_bwd_obj = FFABwdSm90(

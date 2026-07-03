@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="assignment,arg-type,index"
+# mypy: disable-error-code="arg-type,index"
 
 """
 Block-sparsity utilities for FlexFlashAttention.
@@ -465,8 +465,8 @@ def normalize_block_sparse_config(
             )
         total_m_blocks = tensors.mask_block_cnt.shape[-1]
         total_n_blocks = tensors.mask_block_idx.shape[-1]
-        expected_count_shape = (num_head, total_m_blocks)
-        expected_index_shape = (num_head, total_n_blocks)
+        expected_count_shape: tuple[int, ...] = (num_head, total_m_blocks)
+        expected_index_shape: tuple[int, ...] = (num_head, total_n_blocks)
         q_subtile_factor = 1
     else:
         (
