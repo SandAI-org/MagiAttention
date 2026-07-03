@@ -2204,7 +2204,7 @@ class FFABwdSm80:
             if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
                 mdK_cur, mdV_cur = [t[batch_idx, head_idx_kv, None] for t in (mdK, mdV)]
             else:
-                padded_offset_k = seqlen_info.offset_k + batch_idx * self.n_block_size
+                padded_offset_k = seqlen_info.padded_offset_k
                 mdK_cur = cute.domain_offset(
                     (padded_offset_k * self.head_dim_padded,), mdK[head_idx_kv, None]
                 )
