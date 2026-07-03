@@ -40,6 +40,7 @@ from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwd
+from .range_info_sm90 import create_seqlen_info_from_ranges
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_utils import (
@@ -594,6 +595,8 @@ class FFABwdSm90:
         mdV_semaphore: Optional[cute.Tensor] = None,
         aux_tensors: Optional[list] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -968,6 +971,8 @@ class FFABwdSm90:
             mdV_semaphore,
             window_size_left,
             window_size_right,
+            mQRanges,
+            mKRanges,
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
@@ -1021,6 +1026,8 @@ class FFABwdSm90:
         mdV_semaphore: Optional[cute.Tensor] = None,
         window_size_left: Optional[Int32] = None,
         window_size_right: Optional[Int32] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
     ):
         # /////////////////////////////////////////////////////////////////////////////
         #  Set up before warp specialization
@@ -1136,17 +1143,26 @@ class FFABwdSm90:
             window_size_right,
             qhead_per_kvhead_packgqa=1,
         )
-        SeqlenInfoCls = partial(
-            SeqlenInfoQK.create,
-            seqlen_q_static=mQ.shape[0],
-            seqlen_k_static=mK.shape[0],
-            mCuSeqlensQ=mCuSeqlensQ,
-            mCuSeqlensK=mCuSeqlensK,
-            mSeqUsedQ=mSeqUsedQ,
-            mSeqUsedK=mSeqUsedK,
-            tile_m=self.tile_m,
-            tile_n=self.tile_n,
-        )
+        if const_expr(mQRanges is not None):
+            SeqlenInfoCls = partial(
+                create_seqlen_info_from_ranges,
+                mQRanges=mQRanges,
+                mKRanges=mKRanges,
+                tile_m=self.tile_m,
+                tile_n=self.tile_n,
+            )
+        else:
+            SeqlenInfoCls = partial(
+                SeqlenInfoQK.create,
+                seqlen_q_static=mQ.shape[0],
+                seqlen_k_static=mK.shape[0],
+                mCuSeqlensQ=mCuSeqlensQ,
+                mCuSeqlensK=mCuSeqlensK,
+                mSeqUsedQ=mSeqUsedQ,
+                mSeqUsedK=mSeqUsedK,
+                tile_m=self.tile_m,
+                tile_n=self.tile_n,
+            )
         AttentionMaskCls = partial(
             AttentionMask,
             self.tile_m,

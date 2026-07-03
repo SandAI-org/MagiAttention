@@ -117,9 +117,9 @@ def _flex_flash_attn_fwd(
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
 
-    # Step-1 hack: only q/k ranges equivalent to a cu_seqlens partition are
-    # supported, so collapse them to cu_seqlens here and keep the kernel-facing
-    # internals on cu_seqlens for now.
+    # For host-level layout/TMA/scheduler setup we still derive cu_seqlens from
+    # ranges (valid for dense contiguous ranges).  The SM90 kernel receives the
+    # raw q/k ranges directly so that SeqlenInfo reads offsets natively.
     cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
     cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
 
@@ -339,6 +339,8 @@ def _flex_flash_attn_fwd(
     else:
         aux_tensor_metadata = None
 
+    use_native_ranges_sm90 = major_arch == 9 and q_ranges is not None
+
     compile_key = (
         dtype,
         head_dim,
@@ -368,6 +370,7 @@ def _flex_flash_attn_fwd(
         intra_wg_overlap,
         use_clc_scheduler,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+        use_native_ranges_sm90,
     )
 
     if compile_key not in _flex_flash_attn_fwd.compile_cache:
@@ -381,6 +384,16 @@ def _flex_flash_attn_fwd(
         ]
         seqused_q_tensor = seqused_k_tensor = None
         page_table_tensor = None
+        q_ranges_tensor = (
+            to_cute_tensor(q_ranges, assumed_align=4)
+            if use_native_ranges_sm90
+            else None
+        )
+        k_ranges_tensor = (
+            to_cute_tensor(k_ranges, assumed_align=4)
+            if use_native_ranges_sm90
+            else None
+        )
         q_tensor, k_tensor, v_tensor, o_tensor = [
             to_cute_tensor(t) for t in (q, k, v, out)
         ]
@@ -516,6 +529,8 @@ def _flex_flash_attn_fwd(
                 cute_aux_tensors,
             ]
         )
+        if major_arch == 9:
+            compile_args.extend([q_ranges_tensor, k_ranges_tensor])
         compile_args.append(current_stream)
 
         _flex_flash_attn_fwd.compile_cache[compile_key] = cute.compile(
@@ -548,6 +563,8 @@ def _flex_flash_attn_fwd(
             aux_tensors,
         ]
     )
+    if major_arch == 9:
+        call_args.extend([q_ranges, k_ranges])
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
 
@@ -592,9 +609,9 @@ def _flex_flash_attn_bwd(
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
 
-    # Step-1 hack: only q/k ranges equivalent to a cu_seqlens partition are
-    # supported, so collapse them to cu_seqlens here and keep the kernel-facing
-    # internals on cu_seqlens for now.
+    # For host-level layout/TMA/scheduler setup we still derive cu_seqlens from
+    # ranges (valid for dense contiguous ranges).  The SM90 kernel receives the
+    # raw q/k ranges directly so that SeqlenInfo reads offsets natively.
     cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
     cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
 
@@ -1027,6 +1044,8 @@ def _flex_flash_attn_bwd(
         subtile_factor=subtile_factor,
     )
 
+    use_native_ranges_sm90_bwd = major_arch == 9 and q_ranges is not None
+
     # Backward kernel: compute dk, dv, dq_accum.
     if major_arch in [8, 9, 12]:
         compile_key = (
@@ -1067,6 +1086,7 @@ def _flex_flash_attn_bwd(
             (seqlen_q_rounded // m_block_size == 1),
             (seqlen_k_rounded // n_block_size == 1),
             magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+            use_native_ranges_sm90_bwd,
         )
     else:  # SM100
         compile_key = (
@@ -1117,6 +1137,16 @@ def _flex_flash_attn_bwd(
             for t in (cu_seqlens_q, cu_seqlens_k)
         ]
         seqused_q_tensor = seqused_k_tensor = None
+        q_ranges_bwd_tensor = (
+            to_cute_tensor(q_ranges, assumed_align=4)
+            if use_native_ranges_sm90_bwd
+            else None
+        )
+        k_ranges_bwd_tensor = (
+            to_cute_tensor(k_ranges, assumed_align=4)
+            if use_native_ranges_sm90_bwd
+            else None
+        )
         dQ_semaphore_tensor, dK_semaphore_tensor, dV_semaphore_tensor = [
             convert_from_dlpack_leading_static(
                 t.detach(), leading_dim=3, alignment=4, stride_order=t.dim_order()
@@ -1213,7 +1243,7 @@ def _flex_flash_attn_bwd(
             else None
         )
 
-        _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
+        bwd_compile_args = [
             ffa_bwd_obj,
             q_tensor,
             k_tensor,
@@ -1236,10 +1266,15 @@ def _flex_flash_attn_bwd(
             dV_semaphore_tensor,
             cute_aux_tensors,
             sparse_tensors_compile,
-            current_stream,
+        ]
+        if major_arch == 9:
+            bwd_compile_args.extend([q_ranges_bwd_tensor, k_ranges_bwd_tensor])
+        bwd_compile_args.append(current_stream)
+        _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
+            *bwd_compile_args,
             options="--enable-tvm-ffi",
         )
-    _flex_flash_attn_bwd.compile_cache[compile_key](
+    bwd_call_args = [
         q.detach(),
         k.detach(),
         v.detach(),
@@ -1261,7 +1296,10 @@ def _flex_flash_attn_bwd(
         dV_semaphore,
         aux_tensors,
         block_sparse_call_tuple(normalized_block_sparse_tensors),
-    )
+    ]
+    if major_arch == 9:
+        bwd_call_args.extend([q_ranges, k_ranges])
+    _flex_flash_attn_bwd.compile_cache[compile_key](*bwd_call_args)
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
     match major_arch:

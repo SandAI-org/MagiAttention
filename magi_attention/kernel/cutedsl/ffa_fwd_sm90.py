@@ -49,6 +49,7 @@ from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwd
 from .pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .paged_kv import PagedKVManager
+from .range_info_sm90 import create_seqlen_info_from_ranges
 from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
 from .sparse_utils import (
@@ -561,6 +562,8 @@ class FFAFwdSm90:
         learnable_sink: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -897,6 +900,8 @@ class FFAFwdSm90:
             tile_sched_params,
             aux_tensors,
             fastdiv_mods,
+            mQRanges,
+            mKRanges,
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
@@ -939,6 +944,8 @@ class FFAFwdSm90:
         tile_sched_params: ParamsBase,
         aux_tensors=Optional[list[cute.Tensor]],
         fastdiv_mods=None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
     ):
         # /////////////////////////////////////////////////////////////////////////////
         #  Set up before warp specialization
@@ -1083,30 +1090,46 @@ class FFAFwdSm90:
             if const_expr(self.pack_gqa)
             else 1,
         )
-        SeqlenInfoCls = partial(
-            SeqlenInfoQK.create,
-            seqlen_q_static=mQ.shape[0]
-            if const_expr(not self.pack_gqa)
-            else mQ.shape[0][1],
-            seqlen_k_static=mK.shape[0]
-            if const_expr(mPageTable is None)
-            else mK.shape[0] * mPageTable.shape[1],
-            mCuSeqlensQ=mCuSeqlensQ,
-            mCuSeqlensK=mCuSeqlensK,
-            mSeqUsedQ=mSeqUsedQ,
-            mSeqUsedK=mSeqUsedK,
-            mCuTotalMBlocks=(
-                blocksparse_tensors.cu_total_m_blocks
-                if blocksparse_tensors is not None
-                else None
-            ),
-            mCuBlockIdxOffsets=(
-                blocksparse_tensors.cu_block_idx_offsets
-                if blocksparse_tensors is not None
-                else None
-            ),
-            # Don't need to pass in tile_mn because we won't access offset_padded
-        )
+        if const_expr(mQRanges is not None):
+            SeqlenInfoCls = partial(
+                create_seqlen_info_from_ranges,
+                mQRanges=mQRanges,
+                mKRanges=mKRanges,
+                mCuTotalMBlocks=(
+                    blocksparse_tensors.cu_total_m_blocks
+                    if blocksparse_tensors is not None
+                    else None
+                ),
+                mCuBlockIdxOffsets=(
+                    blocksparse_tensors.cu_block_idx_offsets
+                    if blocksparse_tensors is not None
+                    else None
+                ),
+            )
+        else:
+            SeqlenInfoCls = partial(
+                SeqlenInfoQK.create,
+                seqlen_q_static=mQ.shape[0]
+                if const_expr(not self.pack_gqa)
+                else mQ.shape[0][1],
+                seqlen_k_static=mK.shape[0]
+                if const_expr(mPageTable is None)
+                else mK.shape[0] * mPageTable.shape[1],
+                mCuSeqlensQ=mCuSeqlensQ,
+                mCuSeqlensK=mCuSeqlensK,
+                mSeqUsedQ=mSeqUsedQ,
+                mSeqUsedK=mSeqUsedK,
+                mCuTotalMBlocks=(
+                    blocksparse_tensors.cu_total_m_blocks
+                    if blocksparse_tensors is not None
+                    else None
+                ),
+                mCuBlockIdxOffsets=(
+                    blocksparse_tensors.cu_block_idx_offsets
+                    if blocksparse_tensors is not None
+                    else None
+                ),
+            )
         AttentionMaskCls = partial(
             AttentionMask,
             self.tile_m,
