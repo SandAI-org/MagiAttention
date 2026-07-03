@@ -63,6 +63,7 @@ PHASES = [
     "2-kbs-compare",
     "3-l2-inflection",
     "4-loopk-fantasy",
+    "5-seqlen-sweep",
 ]
 
 
@@ -1927,6 +1928,231 @@ print("[DONE]")
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Phase 5: seqlen-sweep (S varies, topk=2048 fixed)
+# ═══════════════════════════════════════════════════════════════
+# Measures how TFLOPS degrades with increasing S (fixed topk=2048).
+# For BlockSparse (kbs=128): BWD LoopK atomicAdd RED traffic ∝ S/topk → degrades.
+# For IndexSparse (kbs=1): CpAsync scatter + L2 thrashing from large KV pool.
+#
+# Layout: 2 rows (BlockSparse, IndexSparse) × 3 cols (FWD, BWD-LoopQ, BWD-LoopK)
+
+_P5_TOPK = 2048
+_P5_SEQLENS = [32768, 65536, 131072, 262144]
+_P5_KBS_BLOCK = 128
+_P5_KBS_INDEX = 1
+
+
+def _phase5_bench(force=False):
+    import torch
+
+    from magi_attention.functional import flex_flash_attn_func
+    from magi_attention.utils.sparse_utils import generate_ranges_from_block_mask_triton
+
+    phase = "5-seqlen-sweep"
+    results = _load_results(phase)
+    gpu = _set_gpu()
+    device = f"cuda:{gpu}"
+    print(
+        f"[{_ts()}] Phase 5: seqlen-sweep topk={_P5_TOPK} (gpu{gpu})",
+        flush=True,
+    )
+
+    PASSES = [("fwd", "FWD"), ("bwd_loopq", "BWD LoopQ"), ("bwd_loopk", "BWD LoopK")]
+    METHODS = [
+        ("block_sparse", "BlockSparse (kbs=128)"),
+        ("index_sparse", "IndexSparse (kbs=1)"),
+    ]
+
+    for pass_id, pass_name in PASSES:
+        is_bwd = pass_id != "fwd"
+        print(f"\n{'=' * 60}\n[{_ts()}] {pass_name}", flush=True)
+
+        for method_id, method_name in METHODS:
+            print(f"  {method_name}:", flush=True)
+            for S in _P5_SEQLENS:
+                key = f"{pass_id}/{method_id}"
+                if not force and _has_entry(results, key, S):
+                    d = results[key]
+                    idx = d["topk"].index(S)
+                    print(
+                        f"    S={S:>6d}: {d['tflops'][idx]:>7.1f} T (cached)",
+                        flush=True,
+                    )
+                    continue
+
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.manual_seed(42)
+
+                try:
+                    topk = min(_P5_TOPK, S)
+                    flops = _calc_flops(S, topk, is_bwd)
+
+                    if method_id == "block_sparse":
+                        kbs = _P5_KBS_BLOCK
+                        n_q_blocks = S
+                        n_k_blocks = S // kbs
+                        actual_attend = min(topk // kbs, n_k_blocks)
+
+                        block_mask = torch.zeros(
+                            1,
+                            NHK,
+                            n_q_blocks,
+                            n_k_blocks,
+                            dtype=torch.bool,
+                            device=device,
+                        )
+                        for qb in range(n_q_blocks):
+                            perm = torch.randperm(n_k_blocks, device=device)[
+                                :actual_attend
+                            ]
+                            block_mask[0, 0, qb, perm] = True
+
+                        q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
+                            block_mask, 1, kbs
+                        )
+                        atm = torch.zeros(
+                            len(q_ranges), dtype=torch.int32, device=device
+                        )
+                        q, k, v = _make_tensors(S, device, torch.bfloat16, grad=is_bwd)
+
+                        swap = pass_id == "bwd_loopk"
+                        kw = dict(
+                            q_ranges=q_ranges,
+                            k_ranges=k_ranges,
+                            attn_type_map=atm,
+                            block_sparse=True,
+                            auto_range_merge=True,
+                            pack_gqa=True,
+                            swap_bwd_qk_loop=swap,
+                        )
+
+                    else:  # index_sparse
+                        kbs = _P5_KBS_INDEX
+                        idx = _build_idx_kbs1(S, topk, device)
+                        q, k, v = _make_tensors(S, device, torch.bfloat16, grad=is_bwd)
+
+                        swap = pass_id == "bwd_loopk"
+                        kw = dict(
+                            index_sparse_indices=idx,
+                            k_block_size=kbs,
+                            index_sparse=True,
+                            pack_gqa=True,
+                            swap_bwd_qk_loop=swap,
+                        )
+
+                    o, *_ = flex_flash_attn_func(q, k, v, **kw)
+
+                    if not is_bwd:
+
+                        def run_fn():
+                            flex_flash_attn_func(q, k, v, **kw)
+
+                    else:
+                        do = torch.randn_like(o)
+
+                        def run_fn():
+                            o.backward(do, retain_graph=True)
+
+                    tf, ms = _bench_kernel(run_fn, flops, device)
+                    _set_entry(results, key, S, round(tf, 1), round(ms, 3))
+                    print(f"    S={S:>6d}: {tf:>7.1f} T ({ms:.3f}ms)", flush=True)
+
+                except Exception as e:
+                    _set_entry(results, key, S, None, None)
+                    print(f"    S={S:>6d}: FAIL - {e}", flush=True)
+                finally:
+                    q = k = v = None
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                _save_results(phase, results)
+
+    print(f"\n[{_ts()}] Phase 5 DONE -> {_results_path(phase)}", flush=True)
+
+
+def _phase5_plot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    phase = "5-seqlen-sweep"
+    results = _load_results(phase)
+    if not results:
+        print(f"ERROR: {_results_path(phase)} not found. Run --exp first.")
+        return
+
+    out = _out_dir(phase)
+    os.makedirs(out, exist_ok=True)
+
+    PASSES = [("fwd", "FWD"), ("bwd_loopq", "BWD LoopQ"), ("bwd_loopk", "BWD LoopK")]
+    METHODS = [
+        ("block_sparse", "BlockSparse (kbs=128)", "#1565C0", "-o"),
+        ("index_sparse", "IndexSparse (kbs=1)", "#E53935", "-s"),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=150)
+    x_labels = [f"{s // 1024}K" for s in _P5_SEQLENS]
+
+    for col_idx, (pid, pname) in enumerate(PASSES):
+        ax = axes[col_idx]
+        for method_id, method_name, color, marker in METHODS:
+            key = f"{pid}/{method_id}"
+            d = results.get(key, {})
+            vals = []
+            for s in _P5_SEQLENS:
+                if s in d.get("topk", []):
+                    idx = d["topk"].index(s)
+                    v = d["tflops"][idx] if d["tflops"][idx] else 0
+                else:
+                    v = 0
+                vals.append(v)
+            ax.plot(
+                range(len(_P5_SEQLENS)),
+                vals,
+                marker,
+                color=color,
+                label=method_name,
+                linewidth=2,
+                markersize=8,
+            )
+            for i, v in enumerate(vals):
+                if v > 0:
+                    ax.annotate(
+                        f"{v:.0f}",
+                        (i, v),
+                        textcoords="offset points",
+                        xytext=(0, 8),
+                        ha="center",
+                        fontsize=8,
+                        fontweight="bold",
+                        color=color,
+                    )
+
+        ax.set_title(f"{pname}", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Sequence Length (S)", fontsize=11)
+        ax.set_ylabel("TFLOPS", fontsize=11)
+        ax.set_xticks(range(len(_P5_SEQLENS)))
+        ax.set_xticklabels(x_labels, fontsize=10)
+        ax.legend(fontsize=9, loc="upper right")
+        ax.grid(alpha=0.3)
+        ax.set_ylim(0, max(600, ax.get_ylim()[1] * 1.1))
+
+    fig.suptitle(
+        f"Phase 5: Seqlen Sweep (topk={_P5_TOPK}, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16, PackGQA)",
+        fontsize=13,
+        fontweight="bold",
+        y=1.02,
+    )
+    plt.tight_layout()
+    path = os.path.join(out, "seqlen_sweep.png")
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close()
+    print(f"[{_ts()}] Plot -> {path}")
+
+
+# ═══════════════════════════════════════════════════════════════
 #  CLI
 # ═══════════════════════════════════════════════════════════════
 def main():
@@ -1963,6 +2189,8 @@ def main():
             parser.error("Phase 3 has no --exp. Use --ncu 3-l2-inflection")
         elif phase == "4-loopk-fantasy":
             _phase4_bench(force=args.force)
+        elif phase == "5-seqlen-sweep":
+            _phase5_bench(force=args.force)
     elif args.plot:
         phase = args.plot
         print(f"[{_ts()}] === --plot {phase} ===", flush=True)
@@ -1976,6 +2204,8 @@ def main():
             parser.error("Phase 3 has no --plot. Use --ncu 3-l2-inflection")
         elif phase == "4-loopk-fantasy":
             _phase4_plot()
+        elif phase == "5-seqlen-sweep":
+            _phase5_plot()
     elif args.ncu:
         phase = args.ncu
         print(f"[{_ts()}] === --ncu {phase} ===", flush=True)
@@ -1989,6 +2219,8 @@ def main():
             _phase3_ncu()
         elif phase == "4-loopk-fantasy":
             _phase4_ncu()
+        elif phase == "5-seqlen-sweep":
+            parser.error("Phase 5 has no --ncu. Use --exp or --plot")
 
     print(f"\n[{_ts()}] ALL DONE", flush=True)
 

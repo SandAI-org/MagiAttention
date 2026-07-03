@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
 from contextlib import contextmanager
 
 import torch
@@ -1089,22 +1088,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     ).contiguous()
                     ctx.index_sparse_max_topk = nhk * _inner_topk
 
-                # Warn if any K slots have zero Q references (all inner_indices
-                # entries == -1). The BWD kernel's IndexSparseBlockMeta computes
-                # inner_block_max=0 for these slots, which can trigger a barrier
-                # deadlock in the persistent scheduler depending on tile/SM layout.
-                # Production workloads have S_q >> kBlockM so this is not expected.
-                _ref_counts = (_inner_indices >= 0).sum(dim=-1)
-                _n_zero_ref = (_ref_counts == 0).sum().item()
-                if _n_zero_ref > 0:
-                    _total_k_slots = _ref_counts.numel()
-                    warnings.warn(
-                        f"IndexSparse BWD LoopQ: {_n_zero_ref}/{_total_k_slots} K slots "
-                        f"have zero Q references in inner_indices. This may cause a kernel "
-                        f"hang (inner_block_max=0 barrier deadlock). Consider increasing "
-                        f"S_q, increasing topk, or using swap_bwd_qk_loop=True (LoopK).",
-                        stacklevel=2,
-                    )
             # else: IndexSparse BWD LoopK — use forward's topk_indices directly
         elif ctx.auto_range_merge:
             bwd_auto_range_merge = True
