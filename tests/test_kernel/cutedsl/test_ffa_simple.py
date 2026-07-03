@@ -249,16 +249,10 @@ def test_non_varlen_fwd_bwd(
 @pytest.mark.parametrize("seqlen", [128, 512, 1024])
 def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
     """Varlen flex_flash_attn_func (packed q/k ranges): fwd + bwd."""
-    if force_sm80:
-        if is_ampere():
-            pytest.skip(
-                "No need to force SM80 on Ampere+ hardware, the kernel path is selected automatically"
-            )
-        else:
-            # FIXME(sm80-varlen): forcing the SM80 path for varlen crashes
-            # with an illegal memory access when the arch override is toggled mid-process
-            # on hardware with higher capability.
-            pytest.skip("SM80-forced varlen crashes under mid-process arch")
+    if force_sm80 and is_ampere():
+        pytest.skip(
+            "No need to force SM80 on Ampere, the kernel path is selected automatically"
+        )
 
     device = "cuda"
     seed = seqlen + d + mask_types * 5
