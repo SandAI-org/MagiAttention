@@ -78,6 +78,9 @@ class FlashAttnBwdDkvPostprocess {
       int32_t const n_idx = offset_n + i;
       int valid = 0;
       if (n_idx < total_k) {
+        if (params.k_ranges == nullptr) {
+          valid = 1;
+        } else {
         // Binary search to check if n_idx is in any k_range
         int l = 0;
         int r = (params.num_k_ranges_ptr == nullptr) ? params.num_k_ranges : *params.num_k_ranges_ptr;
@@ -95,6 +98,7 @@ class FlashAttnBwdDkvPostprocess {
           if (n_idx < range.y) {
             valid = 1;
           }
+        }
         }
       } else {
         valid = 1; // Prevent OOB access for n_idx >= total_k

@@ -45,7 +45,7 @@ struct DenseBlockMeta {
 
   int const outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
   int const bidh;
-  int const bidh_kv;
+  int const kv_head;
   int bidb;
   int end_batches;
 
@@ -63,10 +63,7 @@ struct DenseBlockMeta {
   CUTLASS_DEVICE DenseBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
       : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
-        // When FlattenGQA (PackGQA or CatGQA), the scheduler assigns bidh as
-        // the kv-head index directly. Otherwise bidh is the q-head index and
-        // we need to divide by PackGQAFactor to get bidh_kv.
-        bidh_kv(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
+        kv_head(!FlattenGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map) {
@@ -172,7 +169,7 @@ struct BlockSparseBlockMeta {
 
   int const outer_block; // m_block for InnerLoopK, n_block for InnerLoopQ
   int const bidh;
-  int const bidh_kv;
+  int const kv_head;
   int bidb;
   int end_batches;
   flash::SeqlenInfo seqlen_info;
@@ -222,7 +219,7 @@ struct BlockSparseBlockMeta {
       int thread_idx = 0)
       : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
-        bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
+        kv_head(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
         k_ranges(params.k_ranges),
         attn_type_map(params.attn_type_map) {
@@ -489,8 +486,11 @@ struct IndexSparseBlockMeta {
         bidh(get<1>(block_coord)),
         bidb([&]() -> int {
           if constexpr (!IsInnerLoopQ) {
-            // InnerLoopK always uses range-merged batch lookup via cu_batches
-            return params.cu_batches[get<2>(block_coord)];
+            // InnerLoopK: resolve batch via cu_batches when range-merge is active;
+            // IndexSparse without range-merge passes cu_batches=nullptr.
+            return (params.cu_batches != nullptr)
+                ? params.cu_batches[get<2>(block_coord)]
+                : get<2>(block_coord);
           } else {
             return get<2>(block_coord);
           }

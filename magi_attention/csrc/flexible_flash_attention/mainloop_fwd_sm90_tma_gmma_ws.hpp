@@ -697,8 +697,8 @@ struct CollectiveMainloopFwdSm90 {
     int const group_idx = idx_in_warpgroup / GroupSize;
     int const stride_kv = get<0>(params.stride_K);
     int const stride_kv_v = get<0>(params.stride_V);
-    Element* const ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + idx_in_group * 8;
-    Element* const ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + idx_in_group * 8;
+    Element* const ptr_gK_base = params.ptr_K + block_meta.kv_head * get<2>(params.stride_K) + idx_in_group * 8;
+    Element* const ptr_gV_base = params.ptr_V + block_meta.kv_head * get<2>(params.stride_V) + idx_in_group * 8;
 
     // Lazy barrier_O: waited on the first V load (smem_v = smem_o).
     // Allows K (and Q) loads to proceed before epilogue finishes reading smem_o.
@@ -742,7 +742,7 @@ struct CollectiveMainloopFwdSm90 {
           }();
           shared_storage.tensors.mainloop.smem_kv_token_indices[smem_pipe_write_k.index()] = n_block_abs;
 
-          Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
+          Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.kv_head);
           Tensor gK = local_tile(mK, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
           Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
@@ -758,7 +758,7 @@ struct CollectiveMainloopFwdSm90 {
           ++smem_pipe_write_k;
         }
       } else {
-        Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
+        Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.kv_head);
         Tensor gK = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
@@ -811,7 +811,7 @@ struct CollectiveMainloopFwdSm90 {
           int const n_block_abs = shared_storage.tensors.mainloop.smem_kv_token_indices[smem_pipe_write_v.index()];
           auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 
-          Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv);
+          Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.kv_head);
           Tensor gVt = local_tile(mVt, select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _));
           Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
@@ -838,7 +838,7 @@ struct CollectiveMainloopFwdSm90 {
 
         auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 
-        Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv);
+        Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.kv_head);
         Tensor gVt = local_tile(domain_offset(make_coord(_0{}, v_offset_k), mVt), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _));
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
