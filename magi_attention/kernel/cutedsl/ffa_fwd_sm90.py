@@ -46,10 +46,15 @@ from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
+from .mask_sm90 import apply_mask_with_runtime_type_sm90
 from .named_barrier import NamedBarrierFwd
 from .pack_gqa import PackGQA, make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .paged_kv import PagedKVManager
-from .range_info_sm90 import create_seqlen_info_from_ranges
+from .range_info_sm90 import (
+    create_seqlen_info_from_ranges,
+    get_n_block_min_max_runtime,
+    read_attn_type_map,
+)
 from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
 from .sparse_utils import (
@@ -87,6 +92,7 @@ class FFAFwdSm90:
         mask_mod: Optional[cutlass.Constexpr] = None,
         has_aux_tensors: bool = False,
         q_subtile_factor: int | None = None,
+        use_per_range_mask: bool = False,
         debug_print: bool = False,
     ):
         self.dtype = dtype
@@ -141,6 +147,7 @@ class FFAFwdSm90:
 
         self.buffer_align_bytes = 1024
 
+        self.use_per_range_mask = use_per_range_mask
         self.debug_print = debug_print
 
         if self.debug_print:
@@ -564,6 +571,7 @@ class FFAFwdSm90:
         aux_tensors: Optional[list] = None,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
+        mAttnTypeMap: cute.Tensor = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -902,6 +910,7 @@ class FFAFwdSm90:
             fastdiv_mods,
             mQRanges,
             mKRanges,
+            mAttnTypeMap,
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
@@ -946,6 +955,7 @@ class FFAFwdSm90:
         fastdiv_mods=None,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
+        mAttnTypeMap: cute.Tensor = None,
     ):
         # /////////////////////////////////////////////////////////////////////////////
         #  Set up before warp specialization
@@ -1209,6 +1219,10 @@ class FFAFwdSm90:
         if warp_idx >= self.mma_warp_ids[0]:  # Consumer
             cute.arch.setmaxregister_increase(self.num_mma_regs)
 
+            _read_mask_type_fn = None
+            if const_expr(self.use_per_range_mask):
+                _read_mask_type_fn = partial(read_attn_type_map, mAttnTypeMap)
+
             self.mma(
                 tiled_mma_qk,
                 tiled_mma_pv,
@@ -1235,6 +1249,7 @@ class FFAFwdSm90:
                 aux_tensors,
                 fastdiv_mods,
                 is_print_block=is_print_block,
+                _read_mask_type_fn=_read_mask_type_fn,
             )
 
     @cute.jit
@@ -1693,6 +1708,7 @@ class FFAFwdSm90:
         aux_tensors: Optional[list],
         fastdiv_mods=None,
         is_print_block: bool = False,
+        _read_mask_type_fn=None,
     ):
         tidx, _, _ = cute.arch.thread_idx()
         tidx -= self.mma_warp_ids[0] * cute.arch.WARP_SIZE
@@ -1849,17 +1865,31 @@ class FFAFwdSm90:
                 )
 
             mask = AttentionMaskCls(seqlen_info)
-            mask_fn = partial(
-                mask.apply_mask,
-                batch_idx=batch_idx,
-                head_idx=head_idx,
-                m_block=m_block,
-                thr_mma=thr_mma_qk,
-                mask_causal=self.is_causal,
-                mask_local=self.is_local,
-                aux_tensors=aux_tensors,
-                fastdiv_mods=fastdiv_mods,
-            )
+            if const_expr(self.use_per_range_mask):
+                mask_type_runtime = _read_mask_type_fn(batch_idx)
+                mask_fn = partial(
+                    apply_mask_with_runtime_type_sm90,
+                    mask=mask,
+                    mask_type=mask_type_runtime,
+                    batch_idx=batch_idx,
+                    head_idx=head_idx,
+                    m_block=m_block,
+                    thr_mma=thr_mma_qk,
+                    aux_tensors=aux_tensors,
+                    fastdiv_mods=fastdiv_mods,
+                )
+            else:
+                mask_fn = partial(
+                    mask.apply_mask,
+                    batch_idx=batch_idx,
+                    head_idx=head_idx,
+                    m_block=m_block,
+                    thr_mma=thr_mma_qk,
+                    mask_causal=self.is_causal,
+                    mask_local=self.is_local,
+                    aux_tensors=aux_tensors,
+                    fastdiv_mods=fastdiv_mods,
+                )
             score_mod_fn = None
             if const_expr(self.score_mod is not None):
                 score_mod_fn = partial(
@@ -1886,9 +1916,21 @@ class FFAFwdSm90:
             # those that need masking on S, and those that don't.
             # We need masking on S for the very last block when K and V has length not multiple of tile_n.
             # We also need masking on S if it's causal, for the last several blocks.
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen_info, m_block
-            )
+            if const_expr(self.use_per_range_mask):
+                n_block_min, n_block_max = get_n_block_min_max_runtime(
+                    seqlen_info,
+                    m_block,
+                    mask_type_runtime,
+                    self.tile_m,
+                    self.tile_n,
+                    qhead_per_kvhead_packgqa=self.qhead_per_kvhead
+                    if const_expr(self.pack_gqa)
+                    else 1,
+                )
+            else:
+                n_block_min, n_block_max = block_info.get_n_block_min_max(
+                    seqlen_info, m_block
+                )
             pipeline_q.consumer_wait_w_index_phase(0, q_consumer_phase)
 
             # softmax.reset()  # Don't need reset as we explicitly call softmax w is_first=True

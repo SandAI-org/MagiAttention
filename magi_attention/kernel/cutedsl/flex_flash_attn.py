@@ -79,7 +79,7 @@ def _flex_flash_attn_fwd(
     lse: torch.Tensor | None = None,
     q_ranges: torch.Tensor | None = None,
     k_ranges: torch.Tensor | None = None,
-    mask_type: int = MT_MAP.full,
+    mask_type: int | torch.Tensor = MT_MAP.full,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
@@ -231,13 +231,24 @@ def _flex_flash_attn_fwd(
     use_block_sparsity = block_sparse_tensors is not None
 
     local = False
-    # NOTE: only a single mask type shared by all q/k ranges is supported for now,
-    # so collapse mask_type down to the legacy causal bool for the host-side
-    # heuristics and for the kernels that still take is_causal (all but SM100).
-    causal = mask_type == MT_MAP.causal
+    # Determine whether any range has causal bounds (for tile sizing / scheduler).
+    # For per-range Tensor, check if any element has causal or bi_causal type.
+    attn_type_map: torch.Tensor | None = None
+    if isinstance(mask_type, torch.Tensor):
+        attn_type_map = mask_type
+        causal = bool(
+            (
+                (attn_type_map == MT_MAP.causal) | (attn_type_map == MT_MAP.bi_causal)
+            ).any()
+        )
+        mask_type_for_kernel = MT_MAP.full
+    else:
+        causal = mask_type in (MT_MAP.causal, MT_MAP.bi_causal)
+        mask_type_for_kernel = mask_type
     if mask_mod is not None:
         causal = False
-        mask_type = MT_MAP.full
+        mask_type_for_kernel = MT_MAP.full
+        attn_type_map = None
 
     requested_use_clc_scheduler = is_ffa_clc_enabled()
     requested_disable_2cta = is_ffa_2cta_disabled(is_fwd=True)
@@ -340,13 +351,14 @@ def _flex_flash_attn_fwd(
         aux_tensor_metadata = None
 
     use_native_ranges_sm90 = major_arch == 9 and q_ranges is not None
+    use_per_range_mask_sm90 = use_native_ranges_sm90 and attn_type_map is not None
 
     compile_key = (
         dtype,
         head_dim,
         head_dim_v,
         qhead_per_kvhead,
-        mask_type,
+        mask_type_for_kernel,
         score_mod_hash,
         mask_mod_hash,
         use_block_sparsity,
@@ -371,6 +383,7 @@ def _flex_flash_attn_fwd(
         use_clc_scheduler,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
         use_native_ranges_sm90,
+        use_per_range_mask_sm90,
     )
 
     if compile_key not in _flex_flash_attn_fwd.compile_cache:
@@ -394,6 +407,15 @@ def _flex_flash_attn_fwd(
             if use_native_ranges_sm90
             else None
         )
+        if use_per_range_mask_sm90:
+            attn_type_map_tensor = to_cute_tensor(
+                attn_type_map, assumed_align=4, leading_dim=0
+            )
+        else:
+            _dummy_attn_type_map = torch.zeros(1, dtype=torch.int32, device=q.device)
+            attn_type_map_tensor = to_cute_tensor(
+                _dummy_attn_type_map, assumed_align=4, leading_dim=0
+            )
         q_tensor, k_tensor, v_tensor, o_tensor = [
             to_cute_tensor(t) for t in (q, k, v, out)
         ]
@@ -439,7 +461,7 @@ def _flex_flash_attn_fwd(
                     head_dim,
                     head_dim_v,
                     qhead_per_kvhead,
-                    mask_type=mask_type,
+                    mask_type=mask_type_for_kernel,
                     is_local=local,
                     pack_gqa=pack_gqa,
                     tile_m=tile_m,
@@ -453,6 +475,7 @@ def _flex_flash_attn_fwd(
                     has_aux_tensors=aux_tensors is not None,
                     q_subtile_factor=q_subtile_factor,
                     paged_kv_non_tma=False,
+                    use_per_range_mask=use_per_range_mask_sm90,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 10 | 11:
@@ -530,7 +553,9 @@ def _flex_flash_attn_fwd(
             ]
         )
         if major_arch == 9:
-            compile_args.extend([q_ranges_tensor, k_ranges_tensor])
+            compile_args.extend(
+                [q_ranges_tensor, k_ranges_tensor, attn_type_map_tensor]
+            )
         compile_args.append(current_stream)
 
         _flex_flash_attn_fwd.compile_cache[compile_key] = cute.compile(
@@ -564,7 +589,12 @@ def _flex_flash_attn_fwd(
         ]
     )
     if major_arch == 9:
-        call_args.extend([q_ranges, k_ranges])
+        _attn_type_map_call = (
+            attn_type_map
+            if attn_type_map is not None
+            else torch.zeros(1, dtype=torch.int32, device=q.device)
+        )
+        call_args.extend([q_ranges, k_ranges, _attn_type_map_call])
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
 
@@ -586,7 +616,7 @@ def _flex_flash_attn_bwd(
     dv: torch.Tensor | None = None,
     q_ranges: torch.Tensor | None = None,
     k_ranges: torch.Tensor | None = None,
-    mask_type: int = MT_MAP.full,
+    mask_type: int | torch.Tensor = MT_MAP.full,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
@@ -625,10 +655,20 @@ def _flex_flash_attn_bwd(
     block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
 
     local = False
-    # NOTE: only a single mask type shared by all q/k ranges is supported for now,
-    # so collapse mask_type down to the legacy causal bool for the host-side
-    # heuristics and for the kernels that still take is_causal (all but SM100).
-    causal = mask_type == MT_MAP.causal
+    attn_type_map_bwd: torch.Tensor | None = None
+    if isinstance(mask_type, torch.Tensor):
+        attn_type_map_bwd = mask_type
+        causal = bool(
+            (
+                (attn_type_map_bwd == MT_MAP.causal)
+                | (attn_type_map_bwd == MT_MAP.bi_causal)
+            ).any()
+        )
+        mask_type_for_kernel_bwd = MT_MAP.full
+    else:
+        causal = mask_type in (MT_MAP.causal, MT_MAP.bi_causal)
+        mask_type_for_kernel_bwd = mask_type
+        attn_type_map_bwd = None
     sparse_q = None
     if block_sparse_tensors is not None and major_arch == 9:
         sparse_q = (
@@ -1045,6 +1085,9 @@ def _flex_flash_attn_bwd(
     )
 
     use_native_ranges_sm90_bwd = major_arch == 9 and q_ranges is not None
+    use_per_range_mask_sm90_bwd = (
+        use_native_ranges_sm90_bwd and attn_type_map_bwd is not None
+    )
 
     # Backward kernel: compute dk, dv, dq_accum.
     if major_arch in [8, 9, 12]:
@@ -1054,7 +1097,7 @@ def _flex_flash_attn_bwd(
             head_dim,
             head_dim_v,
             qhead_per_kvhead,
-            mask_type,
+            mask_type_for_kernel_bwd,
             m_block_size,
             n_block_size,
             num_threads,
@@ -1087,6 +1130,7 @@ def _flex_flash_attn_bwd(
             (seqlen_k_rounded // n_block_size == 1),
             magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             use_native_ranges_sm90_bwd,
+            use_per_range_mask_sm90_bwd,
         )
     else:  # SM100
         compile_key = (
@@ -1147,6 +1191,17 @@ def _flex_flash_attn_bwd(
             if use_native_ranges_sm90_bwd
             else None
         )
+        if use_per_range_mask_sm90_bwd:
+            attn_type_map_bwd_tensor = to_cute_tensor(
+                attn_type_map_bwd, assumed_align=4, leading_dim=0
+            )
+        else:
+            _dummy_attn_type_map_bwd = torch.zeros(
+                1, dtype=torch.int32, device=q.device
+            )
+            attn_type_map_bwd_tensor = to_cute_tensor(
+                _dummy_attn_type_map_bwd, assumed_align=4, leading_dim=0
+            )
         dQ_semaphore_tensor, dK_semaphore_tensor, dV_semaphore_tensor = [
             convert_from_dlpack_leading_static(
                 t.detach(), leading_dim=3, alignment=4, stride_order=t.dim_order()
@@ -1191,7 +1246,7 @@ def _flex_flash_attn_bwd(
                     head_dim,
                     head_dim_v,
                     qhead_per_kvhead,
-                    mask_type,
+                    mask_type_for_kernel_bwd,
                     is_local=local,
                     deterministic=deterministic,
                     tile_m=m_block_size,
@@ -1213,6 +1268,7 @@ def _flex_flash_attn_bwd(
                     has_aux_tensors=aux_tensors is not None,
                     subtile_factor=subtile_factor,
                     dQ_single_wg=dQ_single_wg,
+                    use_per_range_mask=use_per_range_mask_sm90_bwd,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case _:
@@ -1268,7 +1324,9 @@ def _flex_flash_attn_bwd(
             sparse_tensors_compile,
         ]
         if major_arch == 9:
-            bwd_compile_args.extend([q_ranges_bwd_tensor, k_ranges_bwd_tensor])
+            bwd_compile_args.extend(
+                [q_ranges_bwd_tensor, k_ranges_bwd_tensor, attn_type_map_bwd_tensor]
+            )
         bwd_compile_args.append(current_stream)
         _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
             *bwd_compile_args,
@@ -1298,7 +1356,12 @@ def _flex_flash_attn_bwd(
         block_sparse_call_tuple(normalized_block_sparse_tensors),
     ]
     if major_arch == 9:
-        bwd_call_args.extend([q_ranges, k_ranges])
+        _attn_type_map_bwd_call = (
+            attn_type_map_bwd
+            if attn_type_map_bwd is not None
+            else torch.zeros(1, dtype=torch.int32, device=q.device)
+        )
+        bwd_call_args.extend([q_ranges, k_ranges, _attn_type_map_bwd_call])
     _flex_flash_attn_bwd.compile_cache[compile_key](*bwd_call_args)
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
@@ -1433,6 +1496,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         )
 
         aux_tensors = flex_attn_args.aux_tensors if flex_attn_args else None
+        mask_type_tensor = mask_type if isinstance(mask_type, torch.Tensor) else None
         ctx.save_for_backward(
             q,
             k,
@@ -1441,6 +1505,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse,
             q_ranges,
             k_ranges,
+            mask_type_tensor,
             sink,
             *(aux_tensors or ()),
         )
@@ -1471,6 +1536,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse,
             q_ranges,
             k_ranges,
+            mask_type_tensor,
             sink,
             *aux,
         ) = ctx.saved_tensors
@@ -1482,6 +1548,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if flex_attn_args is not None:
             flex_attn_args = flex_attn_args.with_aux_tensors(aux)
 
+        bwd_mask_type = (
+            mask_type_tensor if mask_type_tensor is not None else ctx.mask_type
+        )
         dq, dk, dv = _flex_flash_attn_bwd(
             q=q,
             k=k,
@@ -1490,7 +1559,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse=lse,
             dout=dout,
             softmax_scale=ctx.softmax_scale,
-            mask_type=ctx.mask_type,
+            mask_type=bwd_mask_type,
             sink=sink,
             sink_layout=ctx.sink_layout,
             softcap=ctx.softcap,
@@ -1539,11 +1608,12 @@ def flex_flash_attn_func(
     max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
 
     mask_types: the attention mask type applied to the q/k ranges, using the
-        int keys from ``MT_MAP`` (0=full, 1=causal). It may be:
+        int keys from ``MT_MAP`` (0=full, 1=causal, 2=inv_causal,
+        3=bi_causal). It may be:
         - ``None``: all ranges use full attention (the default).
         - ``int``: all ranges share the same mask type.
-        - ``torch.Tensor`` (cuda int32): a distinct mask type per q/k range
-          (not supported yet).
+        - ``torch.Tensor`` (cuda int32, shape ``[batch_size]``): a distinct
+          mask type per q/k range (SM90 only with native ranges).
 
     softcap: tanh logit soft-capping value. Implemented internally via the
         score_mod machinery, but exposed here as a plain scalar.

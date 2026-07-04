@@ -54,29 +54,25 @@ class _MaskTypeMap:
 
     full: ClassVar[int] = 0
     causal: ClassVar[int] = 1
-
-    # TODO: support inv_causal and bi_causal
-    # inv_causal: ClassVar[int] = 2
-    # bi_causal: ClassVar[int] = 3
+    inv_causal: ClassVar[int] = 2
+    bi_causal: ClassVar[int] = 3
 
     def is_valid(self, mask_type: int) -> bool:
         """Check if the given mask type is valid."""
-        return mask_type in range(2)  # Update if more mask types are added
+        return mask_type in range(4)
 
 
 MT_MAP = _MaskTypeMap()
 
 
-def normalize_mask_types(mask_types: torch.Tensor | int | None) -> int:
-    """Translate the public ``mask_types`` argument into a single mask-type int.
-
-    The full q/k ranges semantics allow a distinct mask type per range, but the
-    current kernels only support a single mask type shared by all ranges. So this
-    helper collapses the supported cases down to one ``MT_MAP`` int:
+def normalize_mask_types(
+    mask_types: torch.Tensor | int | None,
+) -> int | torch.Tensor:
+    """Translate the public ``mask_types`` argument into a mask-type int or Tensor.
 
     - ``None``  -> all ranges use full attention (``MT_MAP.full``).
     - ``int``   -> all ranges share the same mask type (validated against ``MT_MAP``).
-    - ``Tensor``-> per-range mask types (not yet supported by the kernel).
+    - ``Tensor``-> per-range mask types (int32 tensor of shape ``[batch_size]``).
     """
     if mask_types is None:
         return MT_MAP.full
@@ -85,11 +81,11 @@ def normalize_mask_types(mask_types: torch.Tensor | int | None) -> int:
             raise ValueError(f"Invalid mask type: {mask_types}")
         return mask_types
 
-    # TODO: support per-range mask_types (a cuda int32 tensor) once the kernel
-    # can read a distinct mask type for each q/k range.
-    raise NotImplementedError(
-        "Per-range mask_types (torch.Tensor) is not supported yet."
-    )
+    assert isinstance(mask_types, torch.Tensor)
+    if mask_types.dtype != torch.int32:
+        mask_types = mask_types.to(torch.int32)
+    assert mask_types.ndim == 1, f"mask_types tensor must be 1D, got {mask_types.ndim}D"
+    return mask_types.contiguous()
 
 
 def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:

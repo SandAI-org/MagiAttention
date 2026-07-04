@@ -39,8 +39,14 @@ from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
+from .mask_sm90 import apply_mask_with_runtime_type_sm90
 from .named_barrier import NamedBarrierBwd
-from .range_info_sm90 import create_seqlen_info_from_ranges
+from .range_info_sm90 import (
+    create_seqlen_info_from_ranges,
+    get_m_block_min_max_runtime,
+    get_n_block_min_max_runtime,
+    read_attn_type_map,
+)
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_utils import (
@@ -88,6 +94,7 @@ class FFABwdSm90:
         has_aux_tensors: cutlass.Constexpr = False,
         subtile_factor: cutlass.Constexpr[int] = 1,
         dQ_single_wg: bool = False,
+        use_per_range_mask: bool = False,
         debug_print: bool = False,
     ):
         self.dtype = dtype
@@ -177,6 +184,7 @@ class FFABwdSm90:
 
         self.num_wg_dQ = 1 if dQ_single_wg else self.num_wg_mma
 
+        self.use_per_range_mask = use_per_range_mask
         self.debug_print = debug_print
 
         if self.debug_print:
@@ -597,6 +605,7 @@ class FFABwdSm90:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
+        mAttnTypeMap: cute.Tensor = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -973,6 +982,7 @@ class FFABwdSm90:
             window_size_right,
             mQRanges,
             mKRanges,
+            mAttnTypeMap,
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
@@ -1028,6 +1038,7 @@ class FFABwdSm90:
         window_size_right: Optional[Int32] = None,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
+        mAttnTypeMap: cute.Tensor = None,
     ):
         # /////////////////////////////////////////////////////////////////////////////
         #  Set up before warp specialization
@@ -1205,6 +1216,10 @@ class FFABwdSm90:
         if warp_idx <= self.load_warp_ids[-1]:  # Producer
             cute.arch.setmaxregister_decrease(self.num_producer_regs)
 
+            _read_mask_type_fn_load = None
+            if const_expr(self.use_per_range_mask):
+                _read_mask_type_fn_load = partial(read_attn_type_map, mAttnTypeMap)
+
             if warp_idx == 0:  # load
                 self.load(
                     mQ,
@@ -1231,6 +1246,7 @@ class FFABwdSm90:
                     blocksparse_tensors,
                     qhead_per_kvhead_divmod,
                     is_print_block,
+                    _read_mask_type_fn=_read_mask_type_fn_load,
                 )
             elif warp_idx == 1:  # dQacc atomic reduce
                 self.dQacc_store(
@@ -1242,12 +1258,17 @@ class FFABwdSm90:
                     blocksparse_tensors,
                     mdQ_semaphore,
                     is_print_block,
+                    _read_mask_type_fn=_read_mask_type_fn_load,
                 )
 
         # ///////////////////////////////////////////////////////////////////////////////
         #  MMA WarpGroups
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx >= self.mma_warp_ids[0]:  # Consumer
+            _read_mask_type_fn = None
+            if const_expr(self.use_per_range_mask):
+                _read_mask_type_fn = partial(read_attn_type_map, mAttnTypeMap)
+
             mma_args = (
                 tiled_mma_SdP,
                 tiled_mma_dK,
@@ -1286,7 +1307,12 @@ class FFABwdSm90:
             if const_expr(self.num_wg_dQ == self.num_wg_mma):
                 # Both WGs compute dQ
                 cute.arch.setmaxregister_increase(self.num_mma_regs_wg0)
-                self.mma(*mma_args, is_dQ_wg=True, is_print_block=is_print_block)
+                self.mma(
+                    *mma_args,
+                    is_dQ_wg=True,
+                    is_print_block=is_print_block,
+                    _read_mask_type_fn=_read_mask_type_fn,
+                )
             else:
                 # WG0 computes dQ, WG1 skips it
                 warp_idx_in_mma = (
@@ -1295,10 +1321,20 @@ class FFABwdSm90:
                 )
                 if warp_idx_in_mma < self.num_warps_per_wg:
                     cute.arch.setmaxregister_increase(self.num_mma_regs_wg0)
-                    self.mma(*mma_args, is_dQ_wg=True, is_print_block=is_print_block)
+                    self.mma(
+                        *mma_args,
+                        is_dQ_wg=True,
+                        is_print_block=is_print_block,
+                        _read_mask_type_fn=_read_mask_type_fn,
+                    )
                 else:
                     cute.arch.setmaxregister_increase(self.num_mma_regs_wg1)
-                    self.mma(*mma_args, is_dQ_wg=False, is_print_block=is_print_block)
+                    self.mma(
+                        *mma_args,
+                        is_dQ_wg=False,
+                        is_print_block=is_print_block,
+                        _read_mask_type_fn=_read_mask_type_fn,
+                    )
 
     @cute.jit
     def load(
@@ -1327,6 +1363,7 @@ class FFABwdSm90:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
         is_print_block: bool = False,
+        _read_mask_type_fn=None,
     ):
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % len(
             self.load_warp_ids
@@ -1358,9 +1395,19 @@ class FFABwdSm90:
                     else head_idx // qhead_per_kvhead_divmod
                 )
 
-                m_block_min, m_block_max = block_info.get_m_block_min_max(
-                    seqlen_info, n_block
-                )
+                if const_expr(self.use_per_range_mask):
+                    mask_type_runtime_prod = _read_mask_type_fn(batch_idx)
+                    m_block_min, m_block_max = get_m_block_min_max_runtime(
+                        seqlen_info,
+                        n_block,
+                        mask_type_runtime_prod,
+                        self.tile_m,
+                        self.tile_n,
+                    )
+                else:
+                    m_block_min, m_block_max = block_info.get_m_block_min_max(
+                        seqlen_info, n_block
+                    )
 
                 if const_expr(not self.use_block_sparsity):
                     total_m_block_cnt = m_block_max - m_block_min
@@ -1712,6 +1759,7 @@ class FFABwdSm90:
         qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
         is_dQ_wg: cutlass.Constexpr[bool] = True,
         is_print_block: bool = False,
+        _read_mask_type_fn=None,
     ):
         tidx, _, _ = cute.arch.thread_idx()
         tidx -= self.mma_warp_ids[0] * cute.arch.WARP_SIZE
@@ -1963,9 +2011,19 @@ class FFABwdSm90:
                 and (batch_idx == 0)
             )
 
-            m_block_min, m_block_max = block_info.get_m_block_min_max(
-                seqlen_info, n_block
-            )
+            if const_expr(self.use_per_range_mask):
+                mask_type_runtime = _read_mask_type_fn(batch_idx)
+                m_block_min, m_block_max = get_m_block_min_max_runtime(
+                    seqlen_info,
+                    n_block,
+                    mask_type_runtime,
+                    self.tile_m,
+                    self.tile_n,
+                )
+            else:
+                m_block_min, m_block_max = block_info.get_m_block_min_max(
+                    seqlen_info, n_block
+                )
 
             if const_expr(not self.use_block_sparsity):
                 process_tile = (
@@ -2057,19 +2115,33 @@ class FFABwdSm90:
 
             if process_tile:
                 if const_expr(not self.use_block_sparsity):
-                    mask_fn = partial(
-                        mask.apply_mask,
-                        batch_idx=batch_idx,
-                        head_idx=head_idx,
-                        n_block=n_block,
-                        thr_mma=thr_mma_SdP,
-                        mask_seqlen=True,
-                        mask_causal=self.is_causal,
-                        mask_local=self.is_local,
-                        mask_mod=self.mask_mod,
-                        aux_tensors=aux_tensors,
-                        fastdiv_mods=fastdiv_mods,
-                    )
+                    if const_expr(self.use_per_range_mask):
+                        mask_fn = partial(
+                            apply_mask_with_runtime_type_sm90,
+                            n_block=n_block,
+                            mask_seqlen=True,
+                            mask=mask,
+                            mask_type=mask_type_runtime,
+                            batch_idx=batch_idx,
+                            head_idx=head_idx,
+                            thr_mma=thr_mma_SdP,
+                            aux_tensors=aux_tensors,
+                            fastdiv_mods=fastdiv_mods,
+                        )
+                    else:
+                        mask_fn = partial(
+                            mask.apply_mask,
+                            batch_idx=batch_idx,
+                            head_idx=head_idx,
+                            n_block=n_block,
+                            thr_mma=thr_mma_SdP,
+                            mask_seqlen=True,
+                            mask_causal=self.is_causal,
+                            mask_local=self.is_local,
+                            mask_mod=self.mask_mod,
+                            aux_tensors=aux_tensors,
+                            fastdiv_mods=fastdiv_mods,
+                        )
                     dKV_accumulate = False
                     for m_block in cutlass.range(m_block_min, m_block_max, unroll=1):
                         consumer_state_Q, consumer_state_dO = mma_one_m_block_all(
@@ -2678,6 +2750,7 @@ class FFABwdSm90:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mdQ_semaphore: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
+        _read_mask_type_fn=None,
     ):
         tidx, _, _ = cute.arch.thread_idx()
         warp_local_tidx = tidx % cute.arch.WARP_SIZE
@@ -2726,9 +2799,19 @@ class FFABwdSm90:
                 # mdQ_semaphore is (num_m_blocks, cluster_size, num_head, batch) after transpose
                 mdQ_semaphore_cur = mdQ_semaphore[None, None, head_idx, batch_idx]
 
-            m_block_min, m_block_max = block_info.get_m_block_min_max(
-                seqlen_info, n_block
-            )
+            if const_expr(self.use_per_range_mask):
+                mask_type_runtime_dq = _read_mask_type_fn(batch_idx)
+                m_block_min, m_block_max = get_m_block_min_max_runtime(
+                    seqlen_info,
+                    n_block,
+                    mask_type_runtime_dq,
+                    self.tile_m,
+                    self.tile_n,
+                )
+            else:
+                m_block_min, m_block_max = block_info.get_m_block_min_max(
+                    seqlen_info, n_block
+                )
             if const_expr(not self.use_block_sparsity):
                 process_tile = (
                     const_expr(not self.is_local and not self.is_varlen_q)
@@ -2797,12 +2880,24 @@ class FFABwdSm90:
                         # Semaphore acquire: wait for prior n_blocks to finish writing this m_block
                         if const_expr(self.deterministic):
                             if const_expr(self.spt):
-                                (
-                                    _,
-                                    n_block_max_for_m_block,
-                                ) = block_info.get_n_block_min_max(
-                                    seqlen_info, m_block_safe
-                                )
+                                if const_expr(self.use_per_range_mask):
+                                    (
+                                        _,
+                                        n_block_max_for_m_block,
+                                    ) = get_n_block_min_max_runtime(
+                                        seqlen_info,
+                                        m_block_safe,
+                                        mask_type_runtime_dq,
+                                        self.tile_m,
+                                        self.tile_n,
+                                    )
+                                else:
+                                    (
+                                        _,
+                                        n_block_max_for_m_block,
+                                    ) = block_info.get_n_block_min_max(
+                                        seqlen_info, m_block_safe
+                                    )
                                 lock_value = n_block_max_for_m_block - 1 - n_block
                             else:
                                 lock_value = n_block

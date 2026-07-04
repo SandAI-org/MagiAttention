@@ -348,3 +348,160 @@ def test_varlen_fwd_bwd(seqlen, force_sm80, d, mask_types, mha_type, dtype):
             errors.append(str(e))
     if errors:
         raise AssertionError("\n\n".join(errors))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-range mask_type: mixed full/causal per range
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ref_attn_per_range(
+    q_thd: torch.Tensor,
+    k_thd: torch.Tensor,
+    v_thd: torch.Tensor,
+    q_ranges: torch.Tensor,
+    k_ranges: torch.Tensor,
+    mask_types_tensor: torch.Tensor,
+    *,
+    high_precision: bool,
+) -> torch.Tensor:
+    """Reference attention with per-range mask types."""
+    total_q = q_thd.shape[0]
+    total_k = k_thd.shape[0]
+    attn_type_list = mask_types_tensor.tolist()
+    q_ranges_list = q_ranges.tolist()
+    k_ranges_list = k_ranges.tolist()
+    q_ranges_ar = AttnRanges.from_ranges(q_ranges_list)
+    k_ranges_ar = AttnRanges.from_ranges(k_ranges_list)
+    mask = make_attn_mask_from_ffa_args(
+        q_ranges=q_ranges_ar,
+        k_ranges=k_ranges_ar,
+        attn_type_map=attn_type_list,
+        total_seqlen_q=total_q,
+        total_seqlen_k=total_k,
+        device=q_thd.device,
+    )
+    out, _ = ref_attn_func(
+        q=q_thd,
+        k=k_thd,
+        v=v_thd,
+        mask=mask,
+        layout="thd",
+        backend="sdpa",
+        high_precision=high_precision,
+    )
+    return out
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("d", [128])
+@pytest.mark.parametrize("seqlen", [128])
+def test_per_range_mask_type_fwd_bwd(seqlen, d, dtype):
+    """Per-range mask_type (mixed full/causal) via Tensor mask_types: fwd + bwd."""
+    if is_ampere():
+        pytest.skip("Per-range mask_type only supported on SM90+")
+
+    device = "cuda"
+    batch_size = 4
+    nheads = 4
+    nheads_kv = 4
+    seed = seqlen + d + 42
+    torch.random.manual_seed(seed)
+
+    q_bhsd = torch.randn(
+        batch_size, seqlen, nheads, d, device=device, dtype=dtype
+    ).requires_grad_()
+    k_bhsd = torch.randn(
+        batch_size, seqlen, nheads_kv, d, device=device, dtype=dtype
+    ).requires_grad_()
+    v_bhsd = torch.randn(
+        batch_size, seqlen, nheads_kv, d, device=device, dtype=dtype
+    ).requires_grad_()
+
+    cu_seqlens = torch.arange(
+        0, (batch_size + 1) * seqlen, seqlen, device=device, dtype=torch.int32
+    )
+    q_ranges = torch.stack([cu_seqlens[:-1], cu_seqlens[1:]], dim=1)
+    k_ranges = q_ranges.clone()
+
+    mask_types_tensor = torch.tensor(
+        [MT_MAP.full, MT_MAP.causal, MT_MAP.full, MT_MAP.causal],
+        dtype=torch.int32,
+        device=device,
+    )
+
+    q_v = rearrange(q_bhsd.detach(), "b s h d -> (b s) h d").requires_grad_()
+    k_v = rearrange(k_bhsd.detach(), "b s h d -> (b s) h d").requires_grad_()
+    v_v = rearrange(v_bhsd.detach(), "b s h d -> (b s) h d").requires_grad_()
+
+    out_ref = _ref_attn_per_range(
+        rearrange(q_bhsd, "b s h d -> (b s) h d"),
+        rearrange(k_bhsd, "b s h d -> (b s) h d"),
+        rearrange(v_bhsd, "b s h d -> (b s) h d"),
+        q_ranges,
+        k_ranges,
+        mask_types_tensor,
+        high_precision=True,
+    )
+    out_pt = _ref_attn_per_range(
+        rearrange(q_bhsd, "b s h d -> (b s) h d"),
+        rearrange(k_bhsd, "b s h d -> (b s) h d"),
+        rearrange(v_bhsd, "b s h d -> (b s) h d"),
+        q_ranges,
+        k_ranges,
+        mask_types_tensor,
+        high_precision=False,
+    )
+
+    out_v, _ = flex_flash_attn_func(
+        q_v,
+        k_v,
+        v_v,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        mask_types=mask_types_tensor,
+        max_seqlen_q=seqlen,
+        max_seqlen_k=seqlen,
+    )
+
+    atol = _fwd_atol(out_ref, out_pt)
+    assert_close(
+        out_v,
+        out_ref,
+        atol=atol,
+        rtol=0,
+        mismatch_threshold=1e-5,
+        test_case=f"{seqlen=},{d=},{dtype=} => per-range mask_type fwd",
+    )
+
+    g = torch.randn_like(out_v)
+    dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
+    dq_ref, dk_ref, dv_ref = torch.autograd.grad(out_ref, (q_bhsd, k_bhsd, v_bhsd), g)
+    dq_ref = rearrange(dq_ref, "b s h d -> (b s) h d")
+    dk_ref = rearrange(dk_ref, "b s h d -> (b s) h d")
+    dv_ref = rearrange(dv_ref, "b s h d -> (b s) h d")
+
+    dq_pt, dk_pt, dv_pt = torch.autograd.grad(out_pt, (q_bhsd, k_bhsd, v_bhsd), g)
+    dq_pt = rearrange(dq_pt, "b s h d -> (b s) h d")
+    dk_pt = rearrange(dk_pt, "b s h d -> (b s) h d")
+    dv_pt = rearrange(dv_pt, "b s h d -> (b s) h d")
+
+    errors = []
+    for name, tensor, ref_thd, pt_thd in [
+        ("dQ", dq_v, dq_ref, dq_pt),
+        ("dK", dk_v, dk_ref, dk_pt),
+        ("dV", dv_v, dv_ref, dv_pt),
+    ]:
+        try:
+            assert_close(
+                tensor,
+                ref_thd,
+                atol=_bwd_atol(ref_thd, pt_thd),
+                rtol=0,
+                mismatch_threshold=1e-5,
+                test_case=f"{seqlen=},{d=},{dtype=} => per-range mask_type {name}",
+            )
+        except AssertionError as e:
+            errors.append(str(e))
+    if errors:
+        raise AssertionError("\n\n".join(errors))

@@ -325,6 +325,50 @@ git push origin feat/cutedsl-sm90-qkrange
 
 ---
 
+## 执行记录
+
+### Phase 1a+1b 完成 (2026-07-03 23:15)
+
+**Commit**: `3bddf9bb feat(sm90): native qkrange support for FWD+BWD kernels`
+
+**改动汇总**:
+- 新建 `range_info_sm90.py`: `create_seqlen_info_from_ranges()` 从 `[N,2]` ranges 读 offset/seqlen，返回标准 `SeqlenInfoQK`
+- `flex_flash_attn.py`: SM90 FWD+BWD 路径额外传 `q_ranges/k_ranges` cute tensor 到 kernel
+- `ffa_fwd_sm90.py`: `__call__` + `kernel` 增加 `mQRanges/mKRanges` 参数；kernel 内 `const_expr(mQRanges is not None)` 分支用 ranges 创建 SeqlenInfo
+- `ffa_bwd_sm90.py`: 同 FWD 的改动
+
+**设计决策**:
+- host 仍从 ranges 导出 cu_seqlens 用于 layout/TMA/scheduler（dense ranges 情况下等价）
+- kernel 内部通过 ranges 读取 offset/seqlen，不依赖 cu_seqlens
+- `SeqlenInfoQK` 字段不变，下游 BlockInfo/AttentionMask/offset_batch 零改动
+- 非 SM90 / 非 varlen 路径完全不受影响（`mQRanges=None` fallback）
+
+**测试结果**: 216 passed, 72 skipped (SM80-forced), 0 failures
+
+**下一步**: Phase 1c — per-range mask_type + inv_causal/bi_causal
+
+---
+
+### Phase 1c 完成 (2026-07-04 11:50)
+
+**改动汇总**:
+- `ffa_utils.py`: `_MaskTypeMap` 新增 `inv_causal=2`, `bi_causal=3`；`normalize_mask_types` 支持 `torch.Tensor` 输入
+- `range_info_sm90.py`: 新增 `get_n_block_min_max_runtime` / `get_m_block_min_max_runtime`（runtime mask_type block skipping）；新增 `read_attn_type_map`（`partial`-friendly helper）
+- `mask_sm90.py` (新建): R2P bitmask 实现 `_apply_inv_causal_or_bi_causal_mask_sm90` + dispatch 函数 `apply_mask_with_runtime_type_sm90`
+- `ffa_fwd_sm90.py`: `use_per_range_mask` 编译开关；`kernel` 内创建 `partial(read_attn_type_map, mAttnTypeMap)` 传入 `mma` 方法
+- `ffa_bwd_sm90.py`: 同 FWD 模式，`partial` 传入 `load`/`mma`/`dQacc_store` 三个方法
+- `flex_flash_attn.py`: host 端 `attn_type_map` Tensor 处理 + compile key 增加 `use_per_range_mask_sm90` + autograd 保存 + 始终传 `mAttnTypeMap` 参数（避免 JIT 剥离 None）
+- `test_ffa_simple.py`: 新增 `_ref_attn_per_range` helper + `test_per_range_mask_type_fwd_bwd` 测试
+
+**核心技术突破**: CuTe-DSL SCF 框架中 `cute.Tensor`（MLIR value）无法跨 while-loop / dynamic-if 边界。解决方案：`@cute.jit` helper `read_attn_type_map` + `functools.partial` 捕获为 Python 对象，再作为参数传入包含 while-loop 的方法。
+
+**测试结果**: seqlen=128 FWD + dQ/dK/dV 全部 no mismatch ✓
+- seqlen=256 JIT 编译挂起（100% CPU 10h+ 未完成）— CuTe-DSL 编译器层面问题，非代码逻辑错误
+
+**下一步**: Phase 1d — Dense bench 对齐
+
+---
+
 ## 环境备忘
 
 ```
