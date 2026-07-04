@@ -88,6 +88,8 @@ def _flex_flash_attn_fwd(
     sink_layout: AttnSinkLayout = "sh",
     pack_gqa: bool | None = None,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    sparse_load: bool = False,
+    equal_k_range_size: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -120,8 +122,77 @@ def _flex_flash_attn_fwd(
     # For host-level layout/TMA/scheduler setup we still derive cu_seqlens from
     # ranges (valid for dense contiguous ranges).  The SM90 kernel receives the
     # raw q/k ranges directly so that SeqlenInfo reads offsets natively.
+    #
+    # When sparse_load=True, we first merge ranges so that identical Q ranges
+    # are deduplicated and the sorted K ranges + CSR cu_batches index are
+    # produced.  The tile scheduler then sees the merged (unique) Q ranges
+    # while the kernel scatter-loads K/V from the sorted inner ranges.
+    sparse_cu_batches: torch.Tensor | None = None
+    if sparse_load and q_ranges is not None and k_ranges is not None:
+        assert major_arch == 9, "sparse_load only supported on SM90"
+        from magi_attention.functional.flex_flash_attn import merge_ranges
+
+        _attn_type_for_merge = (
+            mask_type
+            if isinstance(mask_type, torch.Tensor)
+            else torch.full(
+                (q_ranges.shape[0],), mask_type, dtype=torch.int32, device=q.device
+            )
+        )
+        (
+            merge_q_ranges,
+            _sorted_outer,
+            sorted_k_ranges,
+            sorted_attn_type_map,
+            range_map,
+            unique_count_tensor,
+        ) = merge_ranges(q_ranges, k_ranges, _attn_type_for_merge)
+
+        unique_count_val = unique_count_tensor.item()
+        num_original_ranges = q_ranges.shape[0]
+
+        # Build CSR cu_batches from sorted_outer run boundaries (more
+        # robust than interpreting range_map values).
+        _so = _sorted_outer[:num_original_ranges]
+        _changes = (_so[1:] != _so[:-1]).any(dim=1)
+        _change_idx = torch.where(_changes)[0] + 1
+        sparse_cu_batches = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int32, device=q.device),
+                _change_idx.to(torch.int32),
+                torch.tensor(
+                    [num_original_ranges], dtype=torch.int32, device=q.device
+                ),
+            ]
+        )
+
+        # Override ranges for the scheduler / kernel.
+        q_ranges = merge_q_ranges[:unique_count_val].contiguous()
+        k_ranges = sorted_k_ranges[:num_original_ranges].contiguous()
+
     cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
-    cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
+    if sparse_load and sparse_cu_batches is not None:
+        # For sparse_load, cu_seqlens_k must give per-batch seqlen_k =
+        # total K tokens across all K ranges for that unique Q range.
+        # This is needed for seqlen masking in the consumer loop.
+        # ranges_to_cu_seqlens cannot be used here because sorted K ranges
+        # are non-contiguous.
+        _k_range_lens = k_ranges[:, 1] - k_ranges[:, 0]
+        _k_per_batch = torch.zeros(
+            unique_count_val, dtype=torch.int32, device=q.device
+        )
+        for _bi in range(unique_count_val):
+            _s = sparse_cu_batches[_bi].item()
+            _e = sparse_cu_batches[_bi + 1].item()
+            _k_per_batch[_bi] = _k_range_lens[_s:_e].sum()
+        cu_seqlens_k = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int32, device=q.device),
+                torch.cumsum(_k_per_batch, dim=0).to(torch.int32),
+            ]
+        )
+    else:
+        cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
 
     # Unpack the torch FlexAttention-style / block-sparse args (fwd uses these).
     flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
@@ -352,6 +423,7 @@ def _flex_flash_attn_fwd(
 
     use_native_ranges_sm90 = major_arch == 9 and q_ranges is not None
     use_per_range_mask_sm90 = use_native_ranges_sm90 and attn_type_map is not None
+    use_sparse_load_sm90 = sparse_load and major_arch == 9
 
     compile_key = (
         dtype,
@@ -384,6 +456,8 @@ def _flex_flash_attn_fwd(
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
         use_native_ranges_sm90,
         use_per_range_mask_sm90,
+        use_sparse_load_sm90,
+        equal_k_range_size if use_sparse_load_sm90 else False,
     )
 
     if compile_key not in _flex_flash_attn_fwd.compile_cache:
@@ -476,6 +550,10 @@ def _flex_flash_attn_fwd(
                     q_subtile_factor=q_subtile_factor,
                     paged_kv_non_tma=False,
                     use_per_range_mask=use_per_range_mask_sm90,
+                    sparse_load=use_sparse_load_sm90,
+                    equal_k_range_size=equal_k_range_size
+                    if use_sparse_load_sm90
+                    else False,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 10 | 11:
@@ -553,9 +631,13 @@ def _flex_flash_attn_fwd(
             ]
         )
         if major_arch == 9:
-            _dummy_cu_batches = torch.zeros(1, dtype=torch.int32, device=q.device)
+            _cu_batches_for_compile = (
+                sparse_cu_batches
+                if use_sparse_load_sm90 and sparse_cu_batches is not None
+                else torch.zeros(1, dtype=torch.int32, device=q.device)
+            )
             cu_batches_tensor = to_cute_tensor(
-                _dummy_cu_batches, assumed_align=4, leading_dim=0
+                _cu_batches_for_compile, assumed_align=4, leading_dim=0
             )
             compile_args.extend(
                 [
@@ -603,8 +685,22 @@ def _flex_flash_attn_fwd(
             if attn_type_map is not None
             else torch.zeros(1, dtype=torch.int32, device=q.device)
         )
-        _cu_batches_call = torch.zeros(1, dtype=torch.int32, device=q.device)
+        _cu_batches_call = (
+            sparse_cu_batches
+            if use_sparse_load_sm90 and sparse_cu_batches is not None
+            else torch.zeros(1, dtype=torch.int32, device=q.device)
+        )
         call_args.extend([q_ranges, k_ranges, _attn_type_map_call, _cu_batches_call])
+        if use_sparse_load_sm90 and sparse_cu_batches is not None:
+            import os
+            if os.getenv("MAGI_SPARSE_DEBUG", "0") == "1":
+                print(f"[sparse_debug] q_ranges={q_ranges.cpu().tolist()}")
+                print(f"[sparse_debug] k_ranges={k_ranges.cpu().tolist()}")
+                print(f"[sparse_debug] cu_batches={sparse_cu_batches.cpu().tolist()}")
+                print(f"[sparse_debug] cu_seqlens_q={cu_seqlens_q.cpu().tolist()}")
+                print(f"[sparse_debug] cu_seqlens_k={cu_seqlens_k.cpu().tolist()}")
+                print(f"[sparse_debug] max_seqlen_q={max_seqlen_q} max_seqlen_k={max_seqlen_k}")
+                print(f"[sparse_debug] q.shape={q.shape} k.shape={k.shape}", flush=True)
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
 
@@ -1486,6 +1582,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         pack_gqa: bool | None = None,
         deterministic: bool = False,
         flex_attn_args: TorchFlexAttnArgs | None = None,
+        sparse_load: bool = False,
+        equal_k_range_size: bool = False,
     ):
         mask_type = normalize_mask_types(mask_types)
         out, lse = _flex_flash_attn_fwd(
@@ -1503,6 +1601,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             softcap=softcap,
             pack_gqa=pack_gqa,
             flex_attn_args=flex_attn_args,
+            sparse_load=sparse_load,
+            equal_k_range_size=equal_k_range_size,
         )
 
         aux_tensors = flex_attn_args.aux_tensors if flex_attn_args else None
@@ -1601,6 +1701,8 @@ def flex_flash_attn_func(
     pack_gqa: bool | None = None,
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    sparse_load: bool = False,
+    equal_k_range_size: bool = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / varlen).
@@ -1650,6 +1752,8 @@ def flex_flash_attn_func(
         pack_gqa,
         deterministic,
         flex_attn_args,
+        sparse_load,
+        equal_k_range_size,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)

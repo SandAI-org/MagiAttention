@@ -134,7 +134,7 @@ class FFAFwdSm90:
         self.mma_pv_is_rs = mma_pv_is_rs
         self.sparse_load = sparse_load
         self.equal_k_range_size = equal_k_range_size
-        self.use_tma_KV = not (paged_kv_non_tma or sparse_load)
+        self.use_tma_KV = not paged_kv_non_tma
         self.cluster_shape_mn = (1, 1)
         self.num_warps_per_wg = 4
         self.num_threads_per_wg = self.num_warps_per_wg * cute.arch.WARP_SIZE
@@ -1370,6 +1370,17 @@ class FFAFwdSm90:
                         gV = cute.local_tile(
                             mV_cur, (self.tile_n, self.tile_hdimv), (0, 0, None)
                         )
+                    elif const_expr(self.sparse_load):
+                        # Sparse load: TMA on the FULL K/V tensor (no batch offset)
+                        # so that absolute n_block indices from K ranges work directly.
+                        mK_cur = mK[None, None, head_idx_kv]
+                        mV_cur = mV[None, None, head_idx_kv]
+                        gK = cute.local_tile(
+                            mK_cur, (self.tile_n, self.tile_hdim), (None, 0)
+                        )
+                        gV = cute.local_tile(
+                            mV_cur, (self.tile_n, self.tile_hdimv), (None, 0)
+                        )
                     else:
                         # mK_cur/mV_cur: (sK,HD):(1@1,1@0)
                         # gK/gV: (tileK128,tileHD128,restK):(1@1,1@0,128@1)
@@ -1482,44 +1493,23 @@ class FFAFwdSm90:
                 if const_expr(not self.use_block_sparsity):
                     if const_expr(self.sparse_load):
                         # //////////////////////////////////////////////////////////
-                        #  Sparse load path: token-walking cp.async scatter
+                        #  Sparse load path: TMA-based range walking
+                        #
+                        #  For each batch, walk through its K ranges (via cu_batches)
+                        #  and use TMA to load kBlockN-aligned blocks from each range.
+                        #  Requires K range start/end to be aligned to tile_n.
                         # //////////////////////////////////////////////////////////
 
                         bidb = mCuBatches[batch_idx]  # type: ignore[index]
                         end_batches_val = mCuBatches[batch_idx + 1]  # type: ignore[index]
 
-                        mK_sparse = mK[None, None, head_idx_kv]
-                        mV_sparse = mV[None, None, head_idx_kv]
-
-                        sparse_engine_k = SparseLoadCopyEngine.create(
-                            tidx,
-                            self.tile_n,
-                            self.tile_hdim,
-                            self.num_threads_per_wg,
-                            mK.element_type,
-                        )
-                        sparse_engine_v = (
-                            sparse_engine_k
-                            if const_expr(self.same_hdim_kv)
-                            else SparseLoadCopyEngine.create(
-                                tidx,
-                                self.tile_n,
-                                self.tile_hdimv,
-                                self.num_threads_per_wg,
-                                mV.element_type,
-                            )
-                        )
-
-                        sparse_state = create_sparse_load_producer_state(
-                            tidx,
+                        total_k_tokens = _compute_total_k_tokens(
                             mKRanges,  # type: ignore[arg-type]
                             bidb,
                             end_batches_val,
                             self.equal_k_range_size,
-                            self.tile_n,
-                            sparse_engine_k.gmem_threads_per_row,
-                            sparse_engine_k.num_rows_per_group,
                         )
+                        total_inner_blocks = (total_k_tokens + self.tile_n - 1) // self.tile_n
 
                         # --- Load Q ---
 
@@ -1550,41 +1540,30 @@ class FFAFwdSm90:
                             pipeline_q.producer_commit_w_index(0)
                             q_producer_phase ^= 1
 
-                        # --- Prologue + Mainloop: scatter load K/V ---
+                        # --- Prologue + Mainloop: TMA load K/V blocks ---
 
                         if is_kv_load_warp:
-                            seqlen_k_total = mK_sparse.shape[0]
+                            k_range_size_val = mKRanges[bidb, 1] - mKRanges[bidb, 0]  # type: ignore[index]
+                            blocks_per_range = k_range_size_val // self.tile_n
+
                             inner_idx = Int32(0)
-                            while inner_idx < sparse_state.inner_block_max:
-                                prefetch_sparse_load(
-                                    sparse_state,
-                                    mKRanges,  # type: ignore[arg-type]
-                                    self.tile_n,
-                                    sparse_engine_k.num_rows_per_group,
-                                )
+                            while inner_idx < total_inner_blocks:
+                                range_local = inner_idx // blocks_per_range
+                                block_in_range = inner_idx % blocks_per_range
+                                cur_range_idx = bidb + range_local
+                                cur_range_start = mKRanges[cur_range_idx, 0]  # type: ignore[index]
+                                n_block_abs = cur_range_start // self.tile_n + block_in_range
 
                                 pipeline_k.producer_acquire(kv_producer_state)
-                                sparse_engine_k.load_scatter(
-                                    sparse_state.prev_token_indices,
-                                    mK_sparse,
-                                    sK[None, None, kv_producer_state.index],
-                                    self.tile_hdim,
-                                    seqlen_k_total,
+                                load_K(
+                                    block=n_block_abs,
+                                    producer_state=kv_producer_state,
                                 )
-                                cute.arch.cp_async_commit_group()
-                                pipeline_k.producer_commit(kv_producer_state)
-
                                 pipeline_v.producer_acquire(kv_producer_state)
-                                sparse_engine_v.load_scatter(
-                                    sparse_state.prev_token_indices,
-                                    mV_sparse,
-                                    sV[None, None, kv_producer_state.index],
-                                    self.tile_hdimv,
-                                    seqlen_k_total,
+                                load_V(
+                                    block=n_block_abs,
+                                    producer_state=kv_producer_state,
                                 )
-                                cute.arch.cp_async_commit_group()
-                                pipeline_v.producer_commit(kv_producer_state)
-
                                 kv_producer_state.advance()
                                 inner_idx += 1
 
@@ -2110,6 +2089,9 @@ class FFAFwdSm90:
                 if const_expr(self.sparse_load):
                     # //////////////////////////////////////////////////////////
                     #  Sparse load consumer: iterate inner_block_max times
+                    #
+                    #  Must follow the same first_half + overlap_loop + last_half
+                    #  protocol as the dense consumer when intra_wg_overlap is on.
                     # //////////////////////////////////////////////////////////
 
                     bidb_c = mCuBatches[batch_idx]  # type: ignore[index]
@@ -2122,32 +2104,108 @@ class FFAFwdSm90:
                     )
                     inner_block_max = (total_k_tokens + self.tile_n - 1) // self.tile_n
 
-                    self.warp_scheduler_barrier_sync()
+                    # Sparse load concatenates all K ranges; mask must use
+                    # total_k_tokens (not the per-range seqlen_k) so that
+                    # n_block > 0 tiles are not incorrectly masked out.
+                    sparse_seqlen_info = SeqlenInfoQK(
+                        seqlen_info.offset_q,
+                        seqlen_info.offset_k,
+                        seqlen_info.padded_offset_q,
+                        seqlen_info.padded_offset_k,
+                        seqlen_info.seqlen_q,
+                        total_k_tokens,
+                        seqlen_info.m_block_offset,
+                        seqlen_info.block_idx_offset,
+                        inner_block_max,
+                        seqlen_info.has_cu_seqlens_q,
+                        seqlen_info.has_cu_seqlens_k,
+                        seqlen_info.has_seqused_q,
+                        seqlen_info.has_seqused_k,
+                    )
+                    sparse_mask = AttentionMaskCls(sparse_seqlen_info)
+                    sparse_mask_fn = partial(
+                        sparse_mask.apply_mask,
+                        batch_idx=batch_idx,
+                        head_idx=head_idx,
+                        m_block=m_block,
+                        thr_mma=thr_mma_qk,
+                        mask_causal=self.is_causal,
+                        mask_local=self.is_local,
+                        aux_tensors=aux_tensors,
+                        fastdiv_mods=fastdiv_mods,
+                    )
 
-                    inner_idx_c = Int32(0)
-                    while inner_idx_c < inner_block_max:
-                        kv_consumer_state = mma_one_n_block(
-                            kv_consumer_state,
-                            n_block=inner_idx_c,
-                            seqlen=seqlen_info,
-                            mma_pv_fn=partial(
-                                mma_pv_fn,
+                    if const_expr(self.intra_wg_overlap):
+                        # First half: consume K[0] via QK GEMM only
+                        if inner_block_max > 0:
+                            kv_consumer_state = process_first_half_block(
+                                n_block=Int32(0),
+                                seqlen=seqlen_info,
+                                kv_consumer_state=kv_consumer_state,
+                                mask_fn=partial(
+                                    sparse_mask_fn, mask_mod=self.mask_mod
+                                ),
+                                score_mod_fn=score_mod_fn,
+                                is_first_block=True,
+                                is_print_thread_and_tile=is_print_thread_and_tile,
+                            )
+
+                        # Middle blocks: overlap PV(i-1) + QK(i)
+                        inner_idx_c = Int32(1)
+                        while inner_idx_c < inner_block_max:
+                            kv_consumer_state = mma_one_n_block(
+                                kv_consumer_state,
+                                n_block=inner_idx_c,
+                                seqlen=seqlen_info,
+                                mma_pv_fn=partial(
+                                    mma_pv_fn,
+                                    zero_init=not O_should_accumulate,
+                                ),
+                                mask_fn=partial(
+                                    sparse_mask_fn,
+                                    mask_mod=self.mask_mod,
+                                    mask_seqlen=True,
+                                ),
+                            )
+                            O_should_accumulate = True
+                            inner_idx_c += 1
+
+                        pipeline_q.consumer_release_w_index(0)
+
+                        # Last half: consume V[last] via PV GEMM only
+                        if inner_block_max > 0:
+                            kv_consumer_state = process_last_half_block(
+                                kv_consumer_state=kv_consumer_state,
                                 zero_init=not O_should_accumulate,
-                            ),
-                            is_first_n_block=inner_idx_c == 0,
-                            mask_fn=partial(
-                                mask_fn,
-                                mask_mod=self.mask_mod,
-                                mask_seqlen=True,
-                            ),
-                        )
-                        O_should_accumulate = True
-                        inner_idx_c += 1
+                                is_print_thread_and_tile=is_print_thread_and_tile,
+                            )
+                            O_should_accumulate = True
 
-                    # Release Q pipeline
-                    pipeline_q.consumer_release_w_index(0)
+                        self.warp_scheduler_barrier_arrive()
+                    else:
+                        self.warp_scheduler_barrier_sync()
 
-                    self.warp_scheduler_barrier_arrive()
+                        inner_idx_c = Int32(0)
+                        while inner_idx_c < inner_block_max:
+                            kv_consumer_state = mma_one_n_block(
+                                kv_consumer_state,
+                                n_block=inner_idx_c,
+                                seqlen=seqlen_info,
+                                mma_pv_fn=partial(
+                                    mma_pv_fn,
+                                    zero_init=not O_should_accumulate,
+                                ),
+                                mask_fn=partial(
+                                    sparse_mask_fn,
+                                    mask_mod=self.mask_mod,
+                                    mask_seqlen=True,
+                                ),
+                            )
+                            O_should_accumulate = True
+                            inner_idx_c += 1
+
+                        pipeline_q.consumer_release_w_index(0)
+                        self.warp_scheduler_barrier_arrive()
 
                     if inner_block_max == 0:
                         softmax.reset()
@@ -2669,7 +2727,6 @@ class FFAFwdSm90:
             score_mod_fn(acc_S, n_block=n_block, seqlen=seqlen)
         if const_expr(mask_fn is not None):
             mask_fn(acc_S=acc_S, n_block=n_block)
-        # if cute.arch.thread_idx()[0] == 128: cute.print_tensor(layout_utils.reshape_acc_to_mn(acc_S))
 
         # --- Online softmax + wait PV(i-1) ---
 

@@ -505,3 +505,83 @@ def test_per_range_mask_type_fwd_bwd(seqlen, d, dtype):
             errors.append(str(e))
     if errors:
         raise AssertionError("\n\n".join(errors))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Block sparse FWD: sparse_load via cp.async scatter
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("d", [128])
+@pytest.mark.parametrize("seqlen", [128])
+def test_sparse_load_fwd(seqlen, d, dtype):
+    """Block sparse FWD with sparse_load (cp.async scatter) via CuTe-DSL SM90."""
+    if is_ampere():
+        pytest.skip("sparse_load only supported on SM90+")
+
+    device = "cuda"
+    nheads = 4
+    nheads_kv = 4
+    total_tokens = seqlen * 4
+    seed = seqlen + d + 99
+    torch.random.manual_seed(seed)
+
+    q = torch.randn(total_tokens, nheads, d, device=device, dtype=dtype)
+    k = torch.randn(total_tokens, nheads_kv, d, device=device, dtype=dtype)
+    v = torch.randn(total_tokens, nheads_kv, d, device=device, dtype=dtype)
+
+    # Block sparse pattern: each Q block attends to itself + next block
+    # Q[0:S] -> K[0:S], K[S:2S]
+    # Q[S:2S] -> K[S:2S], K[2S:3S]
+    # Q[2S:3S] -> K[2S:3S], K[3S:4S]
+    # Q[3S:4S] -> K[3S:4S]
+    S = seqlen
+    q_ranges = torch.tensor(
+        [
+            [0, S], [0, S],
+            [S, 2 * S], [S, 2 * S],
+            [2 * S, 3 * S], [2 * S, 3 * S],
+            [3 * S, 4 * S],
+        ],
+        dtype=torch.int32, device=device,
+    )
+    k_ranges = torch.tensor(
+        [
+            [0, S], [S, 2 * S],
+            [S, 2 * S], [2 * S, 3 * S],
+            [2 * S, 3 * S], [3 * S, 4 * S],
+            [3 * S, 4 * S],
+        ],
+        dtype=torch.int32, device=device,
+    )
+    n_ranges = q_ranges.shape[0]
+
+    out_ref = _ref_attn_per_range(
+        q, k, v, q_ranges, k_ranges,
+        torch.zeros(n_ranges, dtype=torch.int32, device=device),
+        high_precision=True,
+    )
+    out_pt = _ref_attn_per_range(
+        q, k, v, q_ranges, k_ranges,
+        torch.zeros(n_ranges, dtype=torch.int32, device=device),
+        high_precision=False,
+    )
+
+    out_v, _ = flex_flash_attn_func(
+        q, k, v,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        mask_types=0,
+        max_seqlen_q=seqlen,
+        max_seqlen_k=seqlen,
+        sparse_load=True,
+        equal_k_range_size=True,
+    )
+
+    atol = _fwd_atol(out_ref, out_pt)
+    assert_close(
+        out_v, out_ref,
+        atol=atol, rtol=0, mismatch_threshold=1e-5,
+        test_case=f"{seqlen=},{d=},{dtype=} => sparse_load fwd",
+    )

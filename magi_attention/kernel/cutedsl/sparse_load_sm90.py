@@ -30,7 +30,7 @@ from typing import Type
 
 import cutlass
 import cutlass.cute as cute
-from cutlass import Int32, const_expr
+from cutlass import Int32
 from cutlass.cute.nvgpu import cpasync
 
 from . import cutedsl_utils
@@ -72,15 +72,15 @@ def _compute_total_k_tokens(
     is_equal_k_range_size: bool,
 ) -> Int32:
     """Compute total K tokens in the merged [bidb, end_batches) slice."""
-    if const_expr(is_equal_k_range_size):
+    total = Int32(0)
+    if is_equal_k_range_size:
         k_start = mKRanges[bidb, 0]
         k_end = mKRanges[bidb, 1]
         total = (end_batches - bidb) * (k_end - k_start)
     else:
-        total = Int32(0)
         i = bidb
         while i < end_batches:
-            total += mKRanges[i, 1] - mKRanges[i, 0]
+            total = total + (mKRanges[i, 1] - mKRanges[i, 0])
             i += 1
     return total
 
@@ -159,19 +159,23 @@ def _advance_anchor_unequal(
 ):
     """Advance anchor cursor by num_steps tokens (unequal range slow path, MinToMax)."""
     cnt = Int32(0)
-    while cnt < num_steps:
-        if cur_k_range_indices[anchor] >= end_batches:
-            break
-        rest = num_steps - cnt
-        r_start = mKRanges[cur_k_range_indices[anchor], 0]
-        r_end = mKRanges[cur_k_range_indices[anchor], 1]
-        remaining = r_end - r_start - 1 - cur_k_range_inner_indices[anchor]
-        if remaining >= rest:
-            cur_k_range_inner_indices[anchor] = cur_k_range_inner_indices[anchor] + rest
-            break
-        cnt = cnt + remaining + 1
-        cur_k_range_indices[anchor] = cur_k_range_indices[anchor] + 1
-        cur_k_range_inner_indices[anchor] = 0
+    done = Int32(0)
+    while (cnt < num_steps) & (done == 0):
+        boundary_hit = cur_k_range_indices[anchor] >= end_batches
+        if boundary_hit:
+            done = Int32(1)
+        else:
+            rest = num_steps - cnt
+            r_start = mKRanges[cur_k_range_indices[anchor], 0]
+            r_end = mKRanges[cur_k_range_indices[anchor], 1]
+            remaining = r_end - r_start - 1 - cur_k_range_inner_indices[anchor]
+            if remaining >= rest:
+                cur_k_range_inner_indices[anchor] = cur_k_range_inner_indices[anchor] + rest
+                done = Int32(1)
+            else:
+                cnt = cnt + remaining + 1
+                cur_k_range_indices[anchor] = cur_k_range_indices[anchor] + 1
+                cur_k_range_inner_indices[anchor] = 0
 
 
 @cute.jit
@@ -193,7 +197,7 @@ def advance_and_fill(
     """
     anchor = Int32(0)
 
-    if const_expr(is_equal_k_range_size):
+    if is_equal_k_range_size:
         _advance_anchor_equal(
             cur_k_range_indices,
             cur_k_range_inner_indices,
@@ -222,7 +226,7 @@ def advance_and_fill(
     r_start_a = mKRanges[cur_k_range_indices[anchor], 0]
     token_indices[anchor] = r_start_a + cur_k_range_inner_indices[anchor]
 
-    for j in cutlass.range(1, num_rows_per_group, unroll=True):
+    for j in cutlass.range(1, num_rows_per_group, unroll=1):
         _step_one_token_min_to_max(
             cur_k_range_indices,
             cur_k_range_inner_indices,
@@ -261,7 +265,7 @@ def create_sparse_load_producer_state(
     prev_token_indices[NumRowsPerGroup - 1] = -1
 
     k_range_size = Int32(0)
-    if const_expr(is_equal_k_range_size):
+    if is_equal_k_range_size:
         k_range_size = mKRanges[bidb, 1] - mKRanges[bidb, 0]
 
     cur_k_range_indices[0] = bidb
@@ -308,7 +312,7 @@ def prefetch_sparse_load(
     NumRowsPerGroup: cutlass.Constexpr[int],
 ):
     """Save prev_token_indices, advance inner_block_cur, advance_and_fill(kBlockN)."""
-    for i in cutlass.range(NumRowsPerGroup, unroll=True):
+    for i in cutlass.range(NumRowsPerGroup, unroll=1):
         state.prev_token_indices[Int32(i)] = state.token_indices[Int32(i)]
 
     state.inner_block_cur = state.inner_block_cur + 1
@@ -335,13 +339,21 @@ def prefetch_sparse_load(
 
 @dataclass
 class SparseLoadCopyEngine:
-    """Manages cp.async scatter load geometry, mirrors paged_kv.py pattern."""
+    """Manages cp.async scatter load for K/V, following paged_kv.py's pattern.
+
+    Within a warpgroup (128 threads), threads are organized into groups of
+    ``gmem_threads_per_row`` threads.  Each group cooperatively loads one row
+    at a time using 128-bit ``cp.async`` copies.  The ``token_indices`` rmem
+    tensor (shared across all threads in a group) provides absolute row
+    indices for the scatter addresses.
+    """
 
     gmem_tiled_copy_KV: cute.TiledCopy
     gmem_thr_copy_KV: cute.TiledCopy
     async_copy_elems: int
     gmem_threads_per_row: int
     num_rows_per_group: int
+    tXpX: cute.Tensor
 
     @staticmethod
     def create(
@@ -351,14 +363,9 @@ class SparseLoadCopyEngine:
         num_producer_threads: cutlass.Constexpr[int],
         dtype: Type[cutlass.Numeric],
     ) -> SparseLoadCopyEngine:
-        universal_copy_bits = 128
+        universal_copy_bits = 32
         async_copy_elems = universal_copy_bits // dtype.width
-        dtype_bytes = dtype.width // 8
-        gmem_k_block_size = math.gcd(head_dim, 128 // dtype_bytes)
-        gmem_threads_per_row = gmem_k_block_size // async_copy_elems
-        group_size = gmem_threads_per_row
-        num_groups = num_producer_threads // group_size
-        num_rows_per_group = n_block_size // num_groups
+        gmem_threads_per_row = head_dim // async_copy_elems
 
         atom_async_copy = cute.make_copy_atom(
             cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
@@ -375,12 +382,20 @@ class SparseLoadCopyEngine:
         )
         gmem_thr_copy_KV = gmem_tiled_copy_KV.get_slice(thread_idx)
 
+        num_groups = num_producer_threads // gmem_threads_per_row
+        num_rows_per_group = n_block_size // num_groups
+
+        cX = cute.make_identity_tensor((n_block_size, head_dim))
+        tXcX = gmem_thr_copy_KV.partition_S(cX)
+        tXpX = cutedsl_utils.predicate_k(tXcX, limit=head_dim)
+
         return SparseLoadCopyEngine(
             gmem_tiled_copy_KV=gmem_tiled_copy_KV,
             gmem_thr_copy_KV=gmem_thr_copy_KV,
             async_copy_elems=async_copy_elems,
             gmem_threads_per_row=gmem_threads_per_row,
             num_rows_per_group=num_rows_per_group,
+            tXpX=tXpX,
         )
 
     @cute.jit
@@ -391,55 +406,53 @@ class SparseLoadCopyEngine:
         sX: cute.Tensor,
         head_dim: cutlass.Constexpr[int],
         seqlen_k_limit: Int32,
+        tidx: Int32 = Int32(0),
     ):
-        """Load kBlockN rows from scattered token positions into dense smem tile.
+        """Load kBlockN rows from scattered positions into dense smem tile.
 
-        Each thread group loads NumRowsPerGroup rows. Within each row,
-        threads cooperatively load head_dim elements via 128-bit cp.async.
-
-        Args:
-            token_indices: rmem tensor [NumRowsPerGroup] with absolute K row indices
-            mX: global K or V tensor with shape (seqlen, headdim)
-            sX: smem tile for this pipeline stage, shape (kBlockN, headdim)
-            head_dim: head dimension (compile-time)
-            seqlen_k_limit: valid row limit for boundary check
+        Follows paged_kv.py ``load_KV``: for each row in the partition,
+        compute a global pointer from ``token_indices``, broadcast via
+        ``shuffle_sync`` (to break MLIR pointer provenance and preserve
+        ``assumed_align``), create a 1-D gmem tensor, then issue row-wise
+        128-bit ``cp.async`` copies.
         """
         sX_pi = cute.group_modes(sX, 0, 1)
-        cX = cute.make_identity_tensor(
-            (self.num_rows_per_group * (128 // self.gmem_threads_per_row), head_dim)
-        )
         tXsX = self.gmem_thr_copy_KV.partition_D(sX_pi)
-        tXcX = self.gmem_thr_copy_KV.partition_S(cX)
-        tXc0X = self.gmem_thr_copy_KV.get_slice(0).partition_S(cX)
 
         for m in cutlass.range_constexpr(cute.size(tXsX, mode=[1])):
-            row_token = token_indices[m // self.gmem_threads_per_row]
+            row_local_idx = m
+            row_token = token_indices[row_local_idx]
             row_valid = (row_token >= 0) & (row_token < seqlen_k_limit)
-            should_load = cute.make_fragment_like(tXsX[(0, None), m, 0], cute.Boolean)
-            should_load.fill(row_valid)
 
+            raw_ptr_i64 = cutedsl_utils.elem_pointer(
+                mX, (row_token, 0)
+            ).toint()
             x_ptr_i64 = cutedsl_utils.shuffle_sync(
-                cutedsl_utils.elem_pointer(mX, (row_token, 0)).toint(),
-                m % self.gmem_threads_per_row,
-                width=self.gmem_threads_per_row,
+                raw_ptr_i64, 0, width=self.gmem_threads_per_row
             )
+
             x_gmem_ptr = cute.make_ptr(
                 mX.element_type,
                 x_ptr_i64,
                 cute.AddressSpace.gmem,
                 assumed_align=16,
             )
-            mX_row = cute.make_tensor(x_gmem_ptr, cute.make_layout((head_dim,)))
-            mX_row_tiled = cute.tiled_divide(mX_row, (self.async_copy_elems,))
+            mX_cur = cute.make_tensor(x_gmem_ptr, cute.make_layout((head_dim,)))
+            mX_cur_copy = cute.tiled_divide(mX_cur, (self.async_copy_elems,))
+
+            should_load = cute.make_fragment_like(
+                tXsX[(0, None), m, 0], cute.Boolean
+            )
+            should_load.fill(row_valid)
 
             for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
-                ki = tXcX[0, 0, k][1] // self.async_copy_elems
-                mX_row_ki = mX_row_tiled[None, ki]
+                ki = k
+                mX_cur_k = mX_cur_copy[None, ki]
                 tXsX_k = tXsX[None, m, k]
-                mX_row_ki_copy = cute.make_tensor(mX_row_ki.iterator, tXsX_k.layout)
+                mX_cur_k = cute.make_tensor(mX_cur_k.iterator, tXsX_k.layout)
                 cute.copy(
                     self.gmem_tiled_copy_KV,
-                    mX_row_ki_copy,
+                    mX_cur_k,
                     tXsX_k,
                     pred=should_load,
                 )
