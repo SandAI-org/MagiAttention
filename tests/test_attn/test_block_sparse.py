@@ -1987,3 +1987,92 @@ class TestBlockSparseSimple(unittest.TestCase):
 
 if __name__ == "__main__":
     run_tests()
+
+
+class TestBlockSparseDisableAtomic(unittest.TestCase):
+    """Tier 4: Validate disable_atomic auto-set for BlockSparse.
+
+    Verifies that the auto-set logic in flex_flash_attn_func correctly enables
+    disable_fwd_atomic_reduction and disable_bwd_dkv/dq_atomic_reduction for
+    BlockSparse scenarios.
+    """
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
+
+    def _run_block_sparse_disable_atomic(
+        self,
+        S: int = 2048,
+        NHQ: int = 128,
+        NHK: int = 1,
+        D: int = 128,
+        kbs: int = 128,
+        sparsity: float = 0.9,
+        swap_bwd_qk_loop: bool | None = None,
+        pack_gqa: bool = True,
+    ):
+        """Run BlockSparse FWD+BWD with auto-set atomic flags and verify no NaN."""
+        torch.manual_seed(42)
+        q = torch.randn(
+            S, NHQ, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
+        )
+        k = torch.randn(
+            S, NHK, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
+        )
+        v = torch.randn(
+            S, NHK, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
+        )
+
+        num_q_blocks = S // kbs
+        num_kv_blocks = S // kbs
+        block_mask, topk_indices = generate_block_sparse_pattern(
+            num_q_heads=NHQ,
+            num_kv_heads=NHK,
+            num_q_blocks=num_q_blocks,
+            num_kv_blocks=num_kv_blocks,
+            sparsity=sparsity,
+        )
+        from magi_attention.utils.sparse_utils import generate_ranges_from_block_mask
+
+        q_ranges, k_ranges = generate_ranges_from_block_mask(block_mask[0], kbs, kbs)
+        q_ranges = q_ranges.to(self.device)
+        k_ranges = k_ranges.to(self.device)
+
+        out, meta = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            block_sparse=True,
+            auto_range_merge=True,
+            pack_gqa=pack_gqa,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
+            k_block_size=kbs,
+        )
+
+        self.assertEqual(out.shape, (S, NHQ, D))
+        self.assertFalse(out.isnan().any(), "FWD output contains NaN")
+
+        do = torch.randn_like(out)
+        out.backward(do)
+
+        self.assertIsNotNone(q.grad)
+        self.assertIsNotNone(k.grad)
+        self.assertIsNotNone(v.grad)
+        self.assertFalse(q.grad.isnan().any(), "dQ contains NaN")
+        self.assertFalse(k.grad.isnan().any(), "dK contains NaN")
+        self.assertFalse(v.grad.isnan().any(), "dV contains NaN")
+
+    def test_disable_atomic_block_sparse_bwd_innerloopq(self):
+        """InnerLoopQ (default): auto-sets disable_fwd + disable_bwd_dkv_atomic."""
+        self._run_block_sparse_disable_atomic(swap_bwd_qk_loop=None)
+
+    def test_disable_atomic_block_sparse_bwd_innerloopk(self):
+        """InnerLoopK: auto-sets disable_fwd + disable_bwd_dq_atomic."""
+        self._run_block_sparse_disable_atomic(swap_bwd_qk_loop=True)
+
+    def test_disable_atomic_block_sparse_mha(self):
+        """MHA (NHQ == NHK): auto-sets all three disable flags for InnerLoopQ."""
+        self._run_block_sparse_disable_atomic(NHQ=1, NHK=1, pack_gqa=False)

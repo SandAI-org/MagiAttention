@@ -48,7 +48,7 @@ seed_everything()
 
 
 def build_block_sparse_inputs(S, device, requires_grad=False):
-    """Build q/k/v + q_ranges/k_ranges for BlockSparse block-sparse path."""
+    """Build q/k/v + q_ranges/k_ranges for BlockSparse path."""
     n_q_blocks = S // q_block_size  # = S (one block per token)
     n_k_blocks = S // k_block_size
     actual_attend = min(n_attend, n_k_blocks)
@@ -159,7 +159,7 @@ def bench_bwd(S, swap_bwd_qk_loop=True):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="BlockSparse Block-Sparse Benchmark")
+    parser = argparse.ArgumentParser(description="BlockSparse Benchmark")
     parser.add_argument("--bwd", action="store_true", help="Also run BWD benchmark")
     parser.add_argument("--bwd-only", action="store_true", help="Only BWD")
     parser.add_argument(
@@ -179,7 +179,7 @@ if __name__ == "__main__":
 
     if run_fwd:
         print("\n" + "=" * 50)
-        print("FWD Benchmark (BlockSparse block-sparse)")
+        print("FWD Benchmark (BlockSparse)")
         print("=" * 50)
         print(f"{'seqlen':>10} {'TFLOPS':>10}")
         print("-" * 22)
@@ -189,9 +189,9 @@ if __name__ == "__main__":
             torch.cuda.empty_cache()
 
     if run_bwd:
-        loop_tag = "LoopQ" if args.loopq else "LoopK"
+        loop_tag = "InnerLoopQ" if args.loopq else "InnerLoopK"
         print("\n" + "=" * 50)
-        print(f"BWD Benchmark (BlockSparse block-sparse, {loop_tag})")
+        print(f"BWD Benchmark (BlockSparse, {loop_tag})")
         print("=" * 50)
         print(f"{'seqlen':>10} {'TFLOPS':>10}")
         print("-" * 22)
