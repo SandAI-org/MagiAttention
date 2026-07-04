@@ -1575,6 +1575,16 @@ def flex_flash_attn_func(
             _bs_k_size = k_sizes[0].item()
             k_block_size = _bs_k_size
 
+        tile_size_bs = 64 if swap_ab else 128
+        assert k_block_size >= 1 and (k_block_size & (k_block_size - 1)) == 0, (
+            f"block_sparse: k_block_size must be a positive power of 2, "
+            f"got {k_block_size} (auto-derived from k_ranges)"
+        )
+        assert k_block_size == 1 or k_block_size >= tile_size_bs, (
+            f"block_sparse: k_block_size must be 1 or >= tile_size ({tile_size_bs}), "
+            f"got {k_block_size}. Intermediate values cause undefined behavior."
+        )
+
         if is_sanity_check_enable():
             assert q_ranges is not None
             k_sizes = k_ranges[:, 1] - k_ranges[:, 0]
@@ -1600,6 +1610,14 @@ def flex_flash_attn_func(
             f"for index_sparse_indices input, got q_block_size={q_block_size}"
         )
         tile_size = 64 if swap_ab else 128
+        assert (
+            k_block_size >= 1 and (k_block_size & (k_block_size - 1)) == 0
+        ), f"k_block_size must be a positive power of 2, got {k_block_size}"
+        assert k_block_size == 1 or k_block_size >= tile_size, (
+            f"k_block_size must be 1 (token-level) or >= tile_size ({tile_size}), "
+            f"got {k_block_size}. Values in (1, {tile_size}) are not supported — "
+            f"the kernel assumes either per-token scatter or fully contiguous K blocks."
+        )
         max_topk = index_sparse_indices.shape[2]
         if k_block_size > 1:
             # Block-level indices: each value is a K block id.
