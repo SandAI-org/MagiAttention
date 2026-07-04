@@ -187,7 +187,7 @@ def to_pil_image(pic, mode=None):
 
 # copied from
 # https://github.com/pytorch/vision/blob/main/torchvision/utils.py#L25
-@torch.no_grad
+@torch.no_grad()
 def make_grid(
     tensor: torch.Tensor | list[torch.Tensor],
     nrow: int = 8,
