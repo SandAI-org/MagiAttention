@@ -585,3 +585,98 @@ def test_sparse_load_fwd(seqlen, d, dtype):
         atol=atol, rtol=0, mismatch_threshold=1e-5,
         test_case=f"{seqlen=},{d=},{dtype=} => sparse_load fwd",
     )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("d", [64, 128])
+@pytest.mark.parametrize("nheads", [2, 4])
+@pytest.mark.parametrize("seqlen", [128])
+def test_sparse_load_fwd_bwd(seqlen, d, nheads, dtype):
+    """Block sparse FWD+BWD with sparse_load via CuTe-DSL SM90."""
+    if is_ampere():
+        pytest.skip("sparse_load only supported on SM90+")
+
+    device = "cuda"
+    nheads_kv = nheads
+    total_tokens = seqlen * 4
+    seed = seqlen + d + 101
+    torch.random.manual_seed(seed)
+
+    q = torch.randn(total_tokens, nheads, d, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn(total_tokens, nheads_kv, d, device=device, dtype=dtype).requires_grad_()
+    v = torch.randn(total_tokens, nheads_kv, d, device=device, dtype=dtype).requires_grad_()
+
+    S = seqlen
+    q_ranges = torch.tensor(
+        [
+            [0, S], [0, S],
+            [S, 2 * S], [S, 2 * S],
+            [2 * S, 3 * S], [2 * S, 3 * S],
+            [3 * S, 4 * S],
+        ],
+        dtype=torch.int32, device=device,
+    )
+    k_ranges = torch.tensor(
+        [
+            [0, S], [S, 2 * S],
+            [S, 2 * S], [2 * S, 3 * S],
+            [2 * S, 3 * S], [3 * S, 4 * S],
+            [3 * S, 4 * S],
+        ],
+        dtype=torch.int32, device=device,
+    )
+    n_ranges = q_ranges.shape[0]
+    mask_types = torch.zeros(n_ranges, dtype=torch.int32, device=device)
+
+    # --- Reference ---
+    q_ref = q.detach().clone().requires_grad_()
+    k_ref = k.detach().clone().requires_grad_()
+    v_ref = v.detach().clone().requires_grad_()
+    out_ref = _ref_attn_per_range(
+        q_ref, k_ref, v_ref, q_ranges, k_ranges, mask_types, high_precision=True,
+    )
+    dout = torch.randn_like(out_ref)
+    out_ref.backward(dout)
+
+    # --- Kernel under test ---
+    out_v, _ = flex_flash_attn_func(
+        q, k, v,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        mask_types=0,
+        max_seqlen_q=seqlen,
+        max_seqlen_k=seqlen,
+        sparse_load=True,
+        equal_k_range_size=True,
+    )
+    out_v.backward(dout)
+
+    # --- Compare FWD ---
+    out_pt = _ref_attn_per_range(
+        q.detach(), k.detach(), v.detach(), q_ranges, k_ranges, mask_types,
+        high_precision=False,
+    )
+    atol_fwd = _fwd_atol(out_ref, out_pt)
+    assert_close(
+        out_v, out_ref,
+        atol=atol_fwd, rtol=0, mismatch_threshold=1e-5,
+        test_case=f"{seqlen=},{d=},{dtype=} => sparse_load fwd+bwd (fwd check)",
+    )
+
+    # --- Compare BWD ---
+    bwd_atol = 0.02
+    assert_close(
+        q.grad, q_ref.grad,
+        atol=bwd_atol, rtol=0, mismatch_threshold=0.01,
+        test_case=f"{seqlen=},{d=},{dtype=} => sparse_load dQ",
+    )
+    assert_close(
+        k.grad, k_ref.grad,
+        atol=bwd_atol, rtol=0, mismatch_threshold=0.01,
+        test_case=f"{seqlen=},{d=},{dtype=} => sparse_load dK",
+    )
+    assert_close(
+        v.grad, v_ref.grad,
+        atol=bwd_atol, rtol=0, mismatch_threshold=0.01,
+        test_case=f"{seqlen=},{d=},{dtype=} => sparse_load dV",
+    )

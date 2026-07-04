@@ -86,6 +86,41 @@ def _compute_total_k_tokens(
 
 
 @cute.jit
+def _inner_idx_to_abs_n_block(
+    inner_idx: Int32,
+    mKRanges: cute.Tensor,
+    bidb: Int32,
+    tile_n: int,
+    is_equal_k_range_size: bool,
+) -> Int32:
+    """Map a local inner-block index to the absolute n_block in the full K tensor.
+
+    For sparse_load, K tiles are loaded from non-contiguous ranges.
+    This converts a sequential index (0..inner_block_max-1) into the
+    corresponding absolute tile index in the global K tensor.
+    """
+    range_local = Int32(0)
+    block_in_range = Int32(0)
+    if is_equal_k_range_size:
+        k_range_size = mKRanges[bidb, 1] - mKRanges[bidb, 0]
+        blocks_per_range = k_range_size // tile_n
+        range_local = inner_idx // blocks_per_range
+        block_in_range = inner_idx % blocks_per_range
+    else:
+        remaining = inner_idx
+        cur_range_size = mKRanges[bidb, 1] - mKRanges[bidb, 0]
+        blocks_this_range = cur_range_size // tile_n
+        while remaining >= blocks_this_range:
+            remaining = remaining - blocks_this_range
+            range_local = range_local + 1
+            cur_range_size = mKRanges[bidb + range_local, 1] - mKRanges[bidb + range_local, 0]
+            blocks_this_range = cur_range_size // tile_n
+        block_in_range = remaining
+    cur_range_start = mKRanges[bidb + range_local, 0]
+    return cur_range_start // tile_n + block_in_range
+
+
+@cute.jit
 def _clamp_to_boundary_min_to_max(
     cur_k_range_indices: cute.Tensor,
     cur_k_range_inner_indices: cute.Tensor,
