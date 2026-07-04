@@ -221,3 +221,8 @@ __marimo__/
 # Temporary debug/scratch files
 .tmp/
 .clangd
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+detect_cuda_version.cc
+Makefile

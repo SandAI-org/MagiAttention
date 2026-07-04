@@ -825,9 +825,8 @@ class TestIndexSparseSimple(unittest.TestCase):
     def test_index_sparse_simple(self, cfg: dict[str, Any]):
         """IndexSparse FWD+BWD correctness against SDPA reference.
 
-        The view trick flattens K from (B,S,NHK,D) to (B*S*NHK, 1, D), so
-        the kernel sees NHK_eff=1. Indices must be built in this flat token
-        space (NHK=1, S_flat=S*NHK) with logical positions.
+        Q/K/V are passed in natural Dense-style shapes without KV-head flattening.
+        Indices: (total_q, NHK, topk) with logical K positions.
         """
         set_random_seed(42)
         B, S, NHQ, NHK, D, topk = (
@@ -840,27 +839,18 @@ class TestIndexSparseSimple(unittest.TestCase):
         )
         pack_gqa = cfg["pack_gqa"]
         device = self.device
-
         gqa = NHQ // NHK
-        S_flat = S * NHK
-        NHQ_eff = gqa
 
-        indices = build_index_sparse_indices(B, 1, S_flat, S_flat, topk, topk, device)
+        indices = build_index_sparse_indices(B, NHK, S, S, topk, topk, device)
 
         q_raw = torch.randn(B, S, NHQ, D, dtype=torch.bfloat16, device=device)
         k_raw = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
         v_raw = torch.randn(B, S, NHK, D, dtype=torch.bfloat16, device=device)
 
-        q_ffa = (
-            q_raw.reshape(B, S, NHK, gqa, D)
-            .permute(0, 1, 2, 3, 4)
-            .reshape(B * S * NHK, gqa, D)
-            .detach()
-            .clone()
-            .requires_grad_(True)
-        )
-        k_ffa = k_raw.reshape(B * S * NHK, 1, D).detach().clone().requires_grad_(True)
-        v_ffa = v_raw.reshape(B * S * NHK, 1, D).detach().clone().requires_grad_(True)
+        total_q = B * S
+        q_ffa = q_raw.reshape(total_q, NHQ, D).detach().clone().requires_grad_(True)
+        k_ffa = k_raw.reshape(B * S, NHK, D).detach().clone().requires_grad_(True)
+        v_ffa = v_raw.reshape(B * S, NHK, D).detach().clone().requires_grad_(True)
 
         o_sparse, _ = flex_flash_attn_func(
             q_ffa,
@@ -873,17 +863,17 @@ class TestIndexSparseSimple(unittest.TestCase):
         )
 
         mask = get_sdpa_mask_from_index_sparse_indices(
-            indices, B, NHQ_eff, 1, S_flat, S_flat, device
+            indices, B, NHQ, NHK, S, S, device
         )
 
         for b in range(B):
-            sl = slice(b * S_flat, (b + 1) * S_flat)
-            q_b = q_ffa[sl].detach().reshape(1, S_flat, NHQ_eff, D).transpose(1, 2)
-            k_b = k_ffa[sl].detach().reshape(1, S_flat, 1, D).transpose(1, 2)
-            v_b = v_ffa[sl].detach().reshape(1, S_flat, 1, D).transpose(1, 2)
-            if NHQ_eff > 1:
-                k_b = k_b.expand(1, NHQ_eff, S_flat, D)
-                v_b = v_b.expand(1, NHQ_eff, S_flat, D)
+            q_sl = slice(b * S, (b + 1) * S)
+            q_b = q_ffa[q_sl].detach().reshape(1, S, NHQ, D).permute(0, 2, 1, 3)
+            k_b = k_ffa[q_sl].detach().reshape(1, S, NHK, D).permute(0, 2, 1, 3)
+            v_b = v_ffa[q_sl].detach().reshape(1, S, NHK, D).permute(0, 2, 1, 3)
+            if gqa > 1:
+                k_b = k_b.repeat_interleave(gqa, dim=1)
+                v_b = v_b.repeat_interleave(gqa, dim=1)
 
             with torch.no_grad():
                 try:
@@ -897,9 +887,9 @@ class TestIndexSparseSimple(unittest.TestCase):
                         o_ref = torch.nn.functional.scaled_dot_product_attention(
                             q_b, k_b, v_b, attn_mask=mask[b].unsqueeze(0)
                         )
-            o_ref = o_ref.squeeze(0).transpose(0, 1)
+            o_ref = o_ref.squeeze(0).permute(1, 0, 2)
 
-            max_diff = (o_sparse[sl].float() - o_ref.float()).abs().max().item()
+            max_diff = (o_sparse[q_sl].float() - o_ref.float()).abs().max().item()
             assert max_diff < 0.02, (
                 f"[test_index_sparse][{cfg['name']}] "
                 f"FWD batch {b}: max_diff={max_diff:.6f} >= 0.02"
@@ -911,33 +901,33 @@ class TestIndexSparseSimple(unittest.TestCase):
         dq_ffa = q_ffa.grad.clone()
 
         for b in range(B):
-            sl = slice(b * S_flat, (b + 1) * S_flat)
+            q_sl = slice(b * S, (b + 1) * S)
             q_b = (
-                q_ffa[sl]
+                q_ffa[q_sl]
                 .detach()
                 .clone()
-                .reshape(1, S_flat, NHQ_eff, D)
-                .transpose(1, 2)
+                .reshape(1, S, NHQ, D)
+                .permute(0, 2, 1, 3)
                 .requires_grad_(True)
             )
             k_b = (
-                k_ffa[sl]
+                k_ffa[q_sl]
                 .detach()
                 .clone()
-                .reshape(1, S_flat, 1, D)
-                .transpose(1, 2)
+                .reshape(1, S, NHK, D)
+                .permute(0, 2, 1, 3)
                 .requires_grad_(True)
             )
             v_b = (
-                v_ffa[sl]
+                v_ffa[q_sl]
                 .detach()
                 .clone()
-                .reshape(1, S_flat, 1, D)
-                .transpose(1, 2)
+                .reshape(1, S, NHK, D)
+                .permute(0, 2, 1, 3)
                 .requires_grad_(True)
             )
-            k_exp = k_b.expand(1, NHQ_eff, S_flat, D) if NHQ_eff > 1 else k_b
-            v_exp = v_b.expand(1, NHQ_eff, S_flat, D) if NHQ_eff > 1 else v_b
+            k_exp = k_b.repeat_interleave(gqa, dim=1) if gqa > 1 else k_b
+            v_exp = v_b.repeat_interleave(gqa, dim=1) if gqa > 1 else v_b
 
             try:
                 o_ref = torch.nn.functional.scaled_dot_product_attention(
@@ -950,11 +940,11 @@ class TestIndexSparseSimple(unittest.TestCase):
                     o_ref = torch.nn.functional.scaled_dot_product_attention(
                         q_b, k_exp, v_exp, attn_mask=mask[b].unsqueeze(0)
                     )
-            do_b = do[sl].reshape(1, S_flat, NHQ_eff, D).transpose(1, 2)
+            do_b = do[q_sl].reshape(1, S, NHQ, D).permute(0, 2, 1, 3)
             o_ref.backward(do_b)
 
-            dq_ref_b = q_b.grad.squeeze(0).transpose(0, 1)
-            max_dq_diff = (dq_ffa[sl].float() - dq_ref_b.float()).abs().max().item()
+            dq_ref_b = q_b.grad.squeeze(0).permute(1, 0, 2)
+            max_dq_diff = (dq_ffa[q_sl].float() - dq_ref_b.float()).abs().max().item()
             assert max_dq_diff < 0.05, (
                 f"[test_index_sparse][{cfg['name']}] "
                 f"BWD batch {b}: dQ max_diff={max_dq_diff:.6f} >= 0.05"

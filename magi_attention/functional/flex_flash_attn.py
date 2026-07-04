@@ -1629,7 +1629,6 @@ def flex_flash_attn_func(
         index_sparse_indices_2d = index_sparse_indices.reshape(
             total_q_idx, nhk_idx * max_topk_per_head
         )
-        max_topk = nhk_idx * max_topk_per_head
 
         # IndexSparse uses indices, not ranges — assert ranges are not provided
         assert q_ranges is None and k_ranges is None, (
@@ -1694,7 +1693,9 @@ def flex_flash_attn_func(
 
         # BWD InnerLoopQ (swap_bwd_qk_loop != True): dKV is outer accumulation.
         # Safe only when GQA heads are packed (no cross-CTA dKV overlap).
-        if swap_bwd_qk_loop is not True and _gqa_safe:
+        # IndexSparse excluded: the dKV postprocess kernel requires k_ranges
+        # which IndexSparse does not provide.
+        if block_sparse and swap_bwd_qk_loop is not True and _gqa_safe:
             disable_bwd_dkv_atomic_reduction = True
 
         # BWD InnerLoopK (swap_bwd_qk_loop == True): dQ is outer accumulation.
