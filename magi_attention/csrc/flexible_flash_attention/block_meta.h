@@ -426,6 +426,11 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 //   fill_token_indices fills K physical rows: k_token * nhk + kv_head_local
 // IsInnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb), inner=Q from inner_indices
 //   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
+//
+// Fields:
+//   bidh      — head index from scheduler (= KV-head when PackGQA; = Q-head when !PackGQA)
+//   bidh_kv   — KV-head index (derived from bidh); used only in InnerLoopQ for inner_indices offset
+//   kv_head_local — same concept as bidh_kv but computed per-path; used only in InnerLoopK fill_token_indices
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -447,8 +452,8 @@ struct IndexSparseBlockMeta {
   static constexpr bool NeedsBatchLoop = true;
 
   int const outer_block;
-  int const bidh;
-  int const bidh_kv;
+  int const bidh;      // Head index from scheduler (KV-head when PackGQA, Q-head otherwise)
+  int const bidh_kv;   // KV-head index; used in InnerLoopQ to offset into inner_indices
   int bidb;
 
   flash::SeqlenInfo seqlen_info;
@@ -462,9 +467,11 @@ struct IndexSparseBlockMeta {
   static constexpr int inner_block_min = 0;
 
   int const* group_token_ptr;
+  // Total KV-head count; used in fill_token_indices to compute physical row: k_token * nhk + kv_head_local
   int nhk;
-  // InnerLoopK: kv_head for K physical row conversion; InnerLoopQ: unused (Q packed rows are head-agnostic)
-  int head_local;
+  // The specific KV-head this CTA handles. Only used by InnerLoopK in fill_token_indices.
+  // (InnerLoopQ computes Q packed rows which are head-agnostic, so this field is unused there.)
+  int kv_head_local;
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexSparseBlockMeta(
@@ -505,7 +512,7 @@ struct IndexSparseBlockMeta {
       seqlen_info.seqlen_q = 1;
 
       int unique_idx = get<2>(block_coord);
-      head_local = unique_idx % nhk;
+      kv_head_local = unique_idx % nhk;
       row_ptr = params.index_sparse_indices + static_cast<int64_t>(unique_idx) * max_topk;
 
       actual_topk = max_topk;
@@ -520,7 +527,7 @@ struct IndexSparseBlockMeta {
       // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
       seqlen_info.offset_k = bidb * kKBlockSize;
       seqlen_info.seqlen_k = kKBlockSize;
-      head_local = bidh;
+      kv_head_local = bidh;
 
       // inner_indices layout: (num_k_blocks, nhk * inner_topk_per_head)
       // When !PackGQA, bidh is a Q-head index from the scheduler but inner_indices
@@ -566,7 +573,7 @@ struct IndexSparseBlockMeta {
   }
 
   // Fill token indices into the smem stage slot for the CURRENT tile.
-  // InnerLoopK: fills K physical rows (id * nhk + kv_head_local)
+  // InnerLoopK: fills K physical rows (k_token * nhk + kv_head_local)
   // InnerLoopQ: fills Q packed rows (q_token * PackGQAFactor + sub_head)
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
@@ -577,8 +584,8 @@ struct IndexSparseBlockMeta {
       // ── InnerLoopK: fill K positions ──
       if constexpr (kKBlockSize <= 1) {
         for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
-          int const id = group_token_ptr[j];
-          group_rows[j] = (id >= 0) ? id * nhk + head_local : 0;
+          int const k_token = group_token_ptr[j];
+          group_rows[j] = (k_token >= 0) ? k_token * nhk + kv_head_local : 0;
         }
       } else {
         int tile_base = inner_block_cur * kInnerBlockSize_;
@@ -588,7 +595,7 @@ struct IndexSparseBlockMeta {
           int offset_in_block = token_pos % kKBlockSize;
           int block_id = (block_idx < seqlen_info.seqlen_k / kKBlockSize) ? group_token_ptr[block_idx] : -1;
           int logical_k = block_id * kKBlockSize + offset_in_block;
-          group_rows[j] = (block_id >= 0) ? logical_k * nhk + head_local : 0;
+          group_rows[j] = (block_id >= 0) ? logical_k * nhk + kv_head_local : 0;
         }
       }
     } else {
