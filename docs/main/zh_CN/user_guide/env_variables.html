@@ -222,7 +222,13 @@
         <div class="navbar-item">
 
 
-<div class="dropdown">
+<div
+  class="dropdown"
+  id="doc-language-switcher-root"
+  data-pagename="user_guide/env_variables"
+  data-is-chinese="true"
+  data-zh-segment="zh_CN"
+>
   <button
     class="btn btn-sm btn-outline-primary dropdown-toggle"
     type="button"
@@ -251,45 +257,59 @@
 <script>
   (function () {
     // English lives at the root (no language prefix).
-    // Chinese lives under zh_CN/ inside the same version root.
+    // Chinese lives under zh_CN/ inside the same site root.
     // URL examples:
-    //   English: /MagiAttention/docs/main/user_guide/install.html
-    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
-    var ZH_SEGMENT = "zh_CN";
+    //   English: <site-root>/user_guide/install.html
+    //   Chinese: <site-root>/zh_CN/user_guide/install.html
+    //
+    // The site root is derived from the current page's own `pagename`
+    // (known at build time) instead of a hard-coded "/docs/" marker, so the
+    // switcher works identically when served online (e.g. under
+    // "/MagiAttention/docs/main/") and when the built HTML is downloaded and
+    // opened locally via file:// URLs.
+    //
+    // NOTE: build-time values (pagename / is_chinese) are passed through
+    // `data-*` attributes rather than inlined into JS, so this script stays
+    // valid, lint-clean JavaScript with no template syntax mixed in.
+    var root = document.getElementById("doc-language-switcher-root");
+    if (!root) return;
 
-    function versionRoot() {
-      // Returns the path up to and including the version/branch segment
-      // (i.e. everything up to and including "main", "v1.1.0", etc.)
-      // by looking for the known parent prefix.
-      var pathname = window.location.pathname || "";
-      var marker = "/docs/";
-      var idx = pathname.indexOf(marker);
-      if (idx === -1) return null;
-      // Find the next slash after the version segment.
-      var afterDocs = pathname.indexOf("/", idx + marker.length);
-      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    var ZH_SEGMENT = root.getAttribute("data-zh-segment") || "zh_CN";
+    var PAGENAME = root.getAttribute("data-pagename") || "";
+    var IS_CHINESE = root.getAttribute("data-is-chinese") === "true";
+
+    function currentRoot() {
+      // Strip the trailing "<pagename>.html" from the current URL to obtain
+      // the site root for the *current* language build (always ends with "/").
+      var url = window.location.href;
+      var hashIdx = url.indexOf("#");
+      if (hashIdx !== -1) url = url.slice(0, hashIdx);
+      var qIdx = url.indexOf("?");
+      if (qIdx !== -1) url = url.slice(0, qIdx);
+      var suffix = PAGENAME + ".html";
+      if (url.slice(-suffix.length) === suffix) {
+        return url.slice(0, url.length - suffix.length);
+      }
+      // Fallback: directory of the current file.
+      return url.slice(0, url.lastIndexOf("/") + 1);
+    }
+
+    function enRoot() {
+      // Normalise to the English (top-level) site root.
+      var currRoot = currentRoot();
+      var zhSuffix = ZH_SEGMENT + "/";
+      if (IS_CHINESE && currRoot.slice(-zhSuffix.length) === zhSuffix) {
+        return currRoot.slice(0, currRoot.length - zhSuffix.length);
+      }
+      return currRoot;
     }
 
     function resolvePath(targetLang) {
-      var pathname = window.location.pathname || "";
       var query = window.location.search || "";
       var hash = window.location.hash || "";
-      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
-      if (!root) return "#";
-
-      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
-                                                    //  or "zh_CN/user_guide/install.html"
-
-      // Strip existing zh_CN prefix if present
-      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
-        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
-      }
-
-      if (targetLang === "en") {
-        return root + afterRoot + query + hash;
-      } else {
-        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
-      }
+      var base = enRoot();  // English site root, ends with "/"
+      var target = (targetLang === "en") ? base : base + ZH_SEGMENT + "/";
+      return target + PAGENAME + ".html" + query + hash;
     }
 
     var links = document.querySelectorAll(".doc-lang-link");
@@ -413,7 +433,13 @@
           <div class="navbar-item">
 
 
-<div class="dropdown">
+<div
+  class="dropdown"
+  id="doc-language-switcher-root"
+  data-pagename="user_guide/env_variables"
+  data-is-chinese="true"
+  data-zh-segment="zh_CN"
+>
   <button
     class="btn btn-sm btn-outline-primary dropdown-toggle"
     type="button"
@@ -442,45 +468,59 @@
 <script>
   (function () {
     // English lives at the root (no language prefix).
-    // Chinese lives under zh_CN/ inside the same version root.
+    // Chinese lives under zh_CN/ inside the same site root.
     // URL examples:
-    //   English: /MagiAttention/docs/main/user_guide/install.html
-    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
-    var ZH_SEGMENT = "zh_CN";
+    //   English: <site-root>/user_guide/install.html
+    //   Chinese: <site-root>/zh_CN/user_guide/install.html
+    //
+    // The site root is derived from the current page's own `pagename`
+    // (known at build time) instead of a hard-coded "/docs/" marker, so the
+    // switcher works identically when served online (e.g. under
+    // "/MagiAttention/docs/main/") and when the built HTML is downloaded and
+    // opened locally via file:// URLs.
+    //
+    // NOTE: build-time values (pagename / is_chinese) are passed through
+    // `data-*` attributes rather than inlined into JS, so this script stays
+    // valid, lint-clean JavaScript with no template syntax mixed in.
+    var root = document.getElementById("doc-language-switcher-root");
+    if (!root) return;
 
-    function versionRoot() {
-      // Returns the path up to and including the version/branch segment
-      // (i.e. everything up to and including "main", "v1.1.0", etc.)
-      // by looking for the known parent prefix.
-      var pathname = window.location.pathname || "";
-      var marker = "/docs/";
-      var idx = pathname.indexOf(marker);
-      if (idx === -1) return null;
-      // Find the next slash after the version segment.
-      var afterDocs = pathname.indexOf("/", idx + marker.length);
-      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    var ZH_SEGMENT = root.getAttribute("data-zh-segment") || "zh_CN";
+    var PAGENAME = root.getAttribute("data-pagename") || "";
+    var IS_CHINESE = root.getAttribute("data-is-chinese") === "true";
+
+    function currentRoot() {
+      // Strip the trailing "<pagename>.html" from the current URL to obtain
+      // the site root for the *current* language build (always ends with "/").
+      var url = window.location.href;
+      var hashIdx = url.indexOf("#");
+      if (hashIdx !== -1) url = url.slice(0, hashIdx);
+      var qIdx = url.indexOf("?");
+      if (qIdx !== -1) url = url.slice(0, qIdx);
+      var suffix = PAGENAME + ".html";
+      if (url.slice(-suffix.length) === suffix) {
+        return url.slice(0, url.length - suffix.length);
+      }
+      // Fallback: directory of the current file.
+      return url.slice(0, url.lastIndexOf("/") + 1);
+    }
+
+    function enRoot() {
+      // Normalise to the English (top-level) site root.
+      var currRoot = currentRoot();
+      var zhSuffix = ZH_SEGMENT + "/";
+      if (IS_CHINESE && currRoot.slice(-zhSuffix.length) === zhSuffix) {
+        return currRoot.slice(0, currRoot.length - zhSuffix.length);
+      }
+      return currRoot;
     }
 
     function resolvePath(targetLang) {
-      var pathname = window.location.pathname || "";
       var query = window.location.search || "";
       var hash = window.location.hash || "";
-      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
-      if (!root) return "#";
-
-      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
-                                                    //  or "zh_CN/user_guide/install.html"
-
-      // Strip existing zh_CN prefix if present
-      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
-        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
-      }
-
-      if (targetLang === "en") {
-        return root + afterRoot + query + hash;
-      } else {
-        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
-      }
+      var base = enRoot();  // English site root, ends with "/"
+      var target = (targetLang === "en") ? base : base + ZH_SEGMENT + "/";
+      return target + PAGENAME + ".html" + query + hash;
     }
 
     var links = document.querySelectorAll(".doc-lang-link");
@@ -609,20 +649,26 @@
 <nav class="contents local" id="id1">
 <ul class="simple">
 <li><p><a class="reference internal" href="#for-correctness" id="id2">正确性相关</a></p></li>
-<li><p><a class="reference internal" href="#for-performance" id="id3">性能相关</a></p></li>
-<li><p><a class="reference internal" href="#for-debug" id="id4">调试相关</a></p></li>
-<li><p><a class="reference internal" href="#for-build" id="id5">构建相关</a></p>
+<li><p><a class="reference internal" href="#for-runtime" id="id3">运行时相关</a></p></li>
+<li><p><a class="reference internal" href="#for-performance" id="id4">性能相关</a></p></li>
+<li><p><a class="reference internal" href="#for-debug" id="id5">调试相关</a></p></li>
+<li><p><a class="reference internal" href="#for-build" id="id6">构建相关</a></p>
 <ul>
-<li><p><a class="reference internal" href="#jit" id="id6">JIT</a></p></li>
-<li><p><a class="reference internal" href="#aot" id="id7">AOT</a></p></li>
+<li><p><a class="reference internal" href="#jit" id="id7">JIT</a></p></li>
+<li><p><a class="reference internal" href="#aot" id="id8">AOT</a></p></li>
 </ul>
 </li>
+<li><p><a class="reference internal" href="#for-testing" id="id9">测试相关</a></p></li>
 </ul>
 </nav>
 <section id="for-correctness">
 <h2><a class="toc-backref" href="#id2" role="doc-backlink">正确性相关</a><a class="headerlink" href="#for-correctness" title="链接到此标题。">#</a></h2>
 <p><strong>MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 dist-attn 前向传播中 partial out 的高精度（fp32）reduce，以双倍通信开销换取更高精度和更少的 dtype 转换开销。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_fwd_high_precision_reduce_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 dist-attn 前向传播中 partial out 的高精度（fp32）reduce，以双倍通信开销换取更高精度和更少的 dtype 转换开销。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <ol class="arabic simple">
@@ -632,7 +678,11 @@
 </ol>
 </div>
 <p><strong>MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 dist-attn 反向传播中 partial dq,dk,dv 的高精度（fp32）reduce，以双倍通信开销换取更高精度和更少的 dtype 转换开销。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_bwd_high_precision_reduce_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 dist-attn 反向传播中 partial dq,dk,dv 的高精度（fp32）reduce，以双倍通信开销换取更高精度和更少的 dtype 转换开销。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <ol class="arabic simple">
@@ -641,7 +691,11 @@
 </ol>
 </div>
 <p><strong>MAGI_ATTENTION_DSINK_ALL_REDUCE_OP</strong></p>
-<p>设置此环境变量的值以控制涉及 attention sink 时 <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code> 中 sink 梯度的 all-reduce 操作。默认值为 <code class="docutils literal notranslate"><span class="pre">none</span></code>。可选值为 {<code class="docutils literal notranslate"><span class="pre">none</span></code>、<code class="docutils literal notranslate"><span class="pre">sum</span></code>、<code class="docutils literal notranslate"><span class="pre">avg</span></code>}。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">none</span></code>（可选值：<code class="docutils literal notranslate"><span class="pre">none</span></code>、<code class="docutils literal notranslate"><span class="pre">sum</span></code>、<code class="docutils literal notranslate"><span class="pre">avg</span></code>）</p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.dsink_all_reduce_op</span></code></p></li>
+</ul>
+<p>设置此环境变量的值以控制涉及 attention sink 时 <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code> 中 sink 梯度的 all-reduce 操作。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>目前我们仅接受全局复制的 sink 张量作为输入传入 <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code>，每个 cp rank 中的 sink 梯度是部分的，需要在 cp rank 之间进行 sum-reduce。</p>
@@ -652,152 +706,349 @@
 <p>有时 <code class="docutils literal notranslate"><span class="pre">avg</span></code> 也是一个选项，当您需要将 sink 梯度按 <code class="docutils literal notranslate"><span class="pre">1/cp</span></code> 缩放时可以使用。</p>
 </div>
 </section>
-<section id="for-performance">
-<h2><a class="toc-backref" href="#id3" role="doc-backlink">性能相关</a><a class="headerlink" href="#for-performance" title="链接到此标题。">#</a></h2>
-<p><strong>MAGI_ATTENTION_FA4_BACKEND</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以将注意力内核后端从 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 切换到 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>——Flash-Attention 4 的 monkey patch 版本，以临时支持 Blackwell GPU 上的任意掩码。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<section id="for-runtime">
+<h2><a class="toc-backref" href="#id3" role="doc-backlink">运行时相关</a><a class="headerlink" href="#for-runtime" title="链接到此标题。">#</a></h2>
+<p><strong>MAGI_ATTENTION_LOG_LEVEL</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">WARN</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.log_level</span></code></p></li>
+</ul>
+<p>设置此环境变量以控制整个 <code class="docutils literal notranslate"><span class="pre">magi_attention</span></code> 包的日志详细程度。有效值（不区分大小写）为 <code class="docutils literal notranslate"><span class="pre">DEBUG</span></code>、<code class="docutils literal notranslate"><span class="pre">INFO</span></code>、<code class="docutils literal notranslate"><span class="pre">WARN</span></code>、<code class="docutils literal notranslate"><span class="pre">WARNING</span></code>、<code class="docutils literal notranslate"><span class="pre">ERROR</span></code>、<code class="docutils literal notranslate"><span class="pre">CRITICAL</span></code>。</p>
+<p><strong>MAGI_ATTENTION_KERNEL_BACKEND</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">ffa</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.kernel_backend</span></code></p></li>
+</ul>
+<p>设置此环境变量以选择注意力内核后端。有效值为：</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">ffa</span></code>：flex-flash-attention（默认，高性能持久化内核）。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sdpa</span></code>：离线 SDPA 实现（用于测试 / <code class="docutils literal notranslate"><span class="pre">fp32</span></code>、<code class="docutils literal notranslate"><span class="pre">fp64</span></code> 等高精度）。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sdpa_ol</span></code>：在线（分块）SDPA 实现（用于测试，显存占用低于 <code class="docutils literal notranslate"><span class="pre">sdpa</span></code>）。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fa4</span></code>：Flash-Attention 4 monkey patch（Blackwell GPU 的临时方案）。</p></li>
+</ul>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
-<p>这目前是一个临时解决方案，未来可能会被移除或更新。</p>
+<p>此变量取代了旧的 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_SDPA_BACKEND=1</span></code> 和 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FA4_BACKEND=1</span></code> 开关，后者仍受支持，但不得与 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND</span></code> 同时设置。</p>
+</div>
+<p><strong>MAGI_ATTENTION_PRECISION</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> 未设置（保持输入 dtype 不变）</p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.precision</span></code></p></li>
+</ul>
+<p>设置此环境变量以覆盖注意力内核的计算 dtype。有效值为 <code class="docutils literal notranslate"><span class="pre">bf16</span></code>、<code class="docutils literal notranslate"><span class="pre">fp16</span></code>、<code class="docutils literal notranslate"><span class="pre">fp32</span></code>、<code class="docutils literal notranslate"><span class="pre">fp64</span></code>。设置后，输入 Q/K/V 会在注意力计算前转换为指定 dtype，输出再转换回原始输入 dtype。</p>
+</section>
+<section id="for-performance">
+<h2><a class="toc-backref" href="#id4" role="doc-backlink">性能相关</a><a class="headerlink" href="#for-performance" title="链接到此标题。">#</a></h2>
+<p><strong>MAGI_ATTENTION_FA4_BACKEND</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.kernel_backend</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以将注意力内核后端从 <code class="docutils literal notranslate"><span class="pre">FFA</span></code> 切换到 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>——Flash-Attention 4 的 monkey patch 版本，以临时支持 Blackwell GPU 上的任意掩码。</p>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>这是为向后兼容保留的旧开关；推荐使用 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND=fa4</span></code>。这目前是一个临时解决方案，未来可能会被移除或更新。</p>
 </div>
 <p><strong>MAGI_ATTENTION_NATIVE_GRPCOLL</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 group collective 通信的原生内核实现。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_native_grpcoll_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 group collective 通信的原生内核实现。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>此功能目前处于实验阶段并在积极开发中，与许多其他功能不兼容，因此请不要启用，除非您清楚了解其影响。</p>
 </div>
 <p><strong>MAGI_ATTENTION_QO_COMM</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 query/output 通信，包括获取远程 q（前向）、reduce partial out 和 lse（前向）、获取远程 q,o,lse,do（反向）、reduce partial dq（反向），以消除通信仅限于 key/value 的限制。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_qo_comm_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 query/output 通信，包括获取远程 q（前向）、reduce partial out 和 lse（前向）、获取远程 q,o,lse,do（反向）、reduce partial dq（反向），以消除通信仅限于 key/value 的限制。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>此功能目前处于实验阶段并在积极开发中，与许多其他功能不兼容，因此请不要启用，除非您清楚了解其影响。</p>
 </div>
 <p><strong>MAGI_ATTENTION_FLATTEN_HEAD_GROUPS</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以展平 GQA/MQA attention 中的 head groups 来优化 dynamic solver 性能。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_flatten_head_groups_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以展平 GQA/MQA attention 中的 head groups 来优化 dynamic solver 性能。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>此功能目前处于实验阶段并在积极开发中，与许多其他功能不兼容，因此请不要启用，除非您清楚了解其影响。</p>
 </div>
 <p><strong>MAGI_ATTENTION_AUTO_RANGE_MERGE</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 flex-flash-attention 的自动范围合并，通过减少注意力范围的数量来提升性能。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_auto_range_merge_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 flex-flash-attention 的自动范围合并，通过减少注意力范围的数量来提升性能。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>此功能目前处于实验阶段并在积极开发中，因此请不要启用，除非您清楚了解其影响。</p>
 </div>
 <p><strong>MAGI_ATTENTION_CATGQA</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 flex-flash-attention 反向的 CatGQA 模式，通过拼接共享相同 KV head 的多个 Q head 来进一步优化 GQA 设置下的性能。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_cat_gqa_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 flex-flash-attention 反向的 CatGQA 模式，通过拼接共享相同 KV head 的多个 Q head 来进一步优化 GQA 设置下的性能。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>此功能目前处于实验阶段并在积极开发中，因此请不要启用，除非您清楚了解其影响。</p>
 </div>
 <p><strong>MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以牺牲保存最后一个远程 <code class="docutils literal notranslate"><span class="pre">kv</span></code> 激活来重排反向传播中的重叠阶段，将最终的远程 <code class="docutils literal notranslate"><span class="pre">group_reduce</span></code> 隐藏在主机 FFA 阶段中。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.dist_attn_backward_hide_tail_reduce</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以牺牲保存最后一个远程 <code class="docutils literal notranslate"><span class="pre">kv</span></code> 激活来重排反向传播中的重叠阶段，将最终的远程 <code class="docutils literal notranslate"><span class="pre">group_reduce</span></code> 隐藏在主机 FFA 阶段中。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>此功能目前处于实验阶段并在积极开发中，与许多其他功能（如 qo comm）不兼容，因此请不要启用，除非您清楚了解其影响。</p>
 </div>
+<p><strong>MAGI_ATTENTION_MIN_CHUNKS_PER_RANK</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">8</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.min_chunks_per_rank</span></code></p></li>
+</ul>
+<p>设置此环境变量的值以控制每个上下文并行 rank 的最小 chunk 数量，从而控制计算负载均衡的粒度。</p>
 <p><strong>MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN</strong></p>
-<p>设置此环境变量的值以控制 ffa 前向内核为通信内核预留的 SM 数量。当 <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code> 时默认值为 <code class="docutils literal notranslate"><span class="pre">4</span></code>，否则为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> 当 <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code> 时为 <code class="docutils literal notranslate"><span class="pre">4</span></code>，否则为 <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.ffa_fwd_sm_margin_save_for_comm</span></code></p></li>
+</ul>
+<p>设置此环境变量的值以控制 ffa 前向内核为通信内核预留的 SM 数量。</p>
 <p><strong>MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN</strong></p>
-<p>设置此环境变量的值以控制 ffa 反向内核为通信内核预留的 SM 数量。当 <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code> 时默认值为 <code class="docutils literal notranslate"><span class="pre">4</span></code>，否则为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> 当 <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code> 时为 <code class="docutils literal notranslate"><span class="pre">4</span></code>，否则为 <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.ffa_bwd_sm_margin_save_for_comm</span></code></p></li>
+</ul>
+<p>设置此环境变量的值以控制 ffa 反向内核为通信内核预留的 SM 数量。</p>
 <p><strong>MAGI_ATTENTION_CPP_BACKEND</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用核心数据结构（<code class="docutils literal notranslate"><span class="pre">AttnRange</span></code>、<code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code> 等）的 C++ 后端，以避免 Python 开销。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_cpp_backend_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用核心数据结构（<code class="docutils literal notranslate"><span class="pre">AttnRange</span></code>、<code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code> 等）的 C++ 后端，以避免 Python 开销。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>此功能目前处于实验阶段并在积极开发中。如果未找到 C++ 扩展或此变量设为 <code class="docutils literal notranslate"><span class="pre">0</span></code>，将回退到 Python 实现。</p>
 </div>
 <p><strong>MAGI_ATTENTION_HIERARCHICAL_COMM</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用二维 cp group（inter_node group + intra_node group）内的分层 group-collective 通信。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_hierarchical_comm_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用二维 cp group（inter_node group + intra_node group）内的分层 group-collective 通信。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>这目前是减少冗余节点间通信的临时方案，未来可能会被移除或更新。</p>
 </div>
 <p><strong>MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE</strong></p>
-<p>设置此环境变量的值以控制 <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict_mgr</span></code> 的最大 LRU 缓存大小。默认值为 <code class="docutils literal notranslate"><span class="pre">1000</span></code>。</p>
-<p><strong>MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN</strong></p>
-<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> to override the inner-loop iteration direction of the FFA kernel (both FWD and BWD). <code class="docutils literal notranslate"><span class="pre">true</span></code> means MaxToMin (descending), <code class="docutils literal notranslate"><span class="pre">false</span></code> means MinToMax (ascending). If not set, defaults to MinToMax.</p>
-<div class="admonition note">
-<p class="admonition-title">备注</p>
-<p>This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation.</p>
-</div>
-<p><strong>MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP</strong></p>
-<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> to enable or disable intra-warpgroup overlap in the FFA forward kernel. When enabled, the MMA warpgroup pre-loads the next V tile while computing the current softmax, hiding V load latency. If not set, defaults to <code class="docutils literal notranslate"><span class="pre">true</span></code>.</p>
-<div class="admonition note">
-<p class="admonition-title">备注</p>
-<p>This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects FWD.</p>
-</div>
-<p><strong>MAGI_ATTENTION_FFA_USE_MASK_DISPATCH</strong></p>
-<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> to enable or disable the mask-dispatch optimization in the FFA backward kernel. When enabled, the BWD inner loop uses zone-based dispatch (no_mask / causal / boundary) to skip unnecessary mask computations. If not set, defaults to <code class="docutils literal notranslate"><span class="pre">true</span></code>.</p>
-<div class="admonition note">
-<p class="admonition-title">备注</p>
-<p>This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects BWD.</p>
-</div>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">1000</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.dist_attn_runtime_dict_size</span></code></p></li>
+</ul>
+<p>设置此环境变量的值以控制 <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict_mgr</span></code> 的最大 LRU 缓存大小。</p>
 <p><strong>CUDA_DEVICE_MAX_CONNECTIONS</strong></p>
-<p>此环境变量定义了 CUDA stream 可以使用的硬件队列数量。增大此值可以改善通信与计算的重叠，但也可能增加 PCIe 流量。默认值为 <code class="docutils literal notranslate"><span class="pre">8</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">8</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_cuda_device_max_connections_one</span></code></p></li>
+</ul>
+<p>此环境变量定义了 CUDA stream 可以使用的硬件队列数量。增大此值可以改善通信与计算的重叠，但也可能增加 PCIe 流量。</p>
 </section>
 <section id="for-debug">
-<h2><a class="toc-backref" href="#id4" role="doc-backlink">调试相关</a><a class="headerlink" href="#for-debug" title="链接到此标题。">#</a></h2>
+<h2><a class="toc-backref" href="#id5" role="doc-backlink">调试相关</a><a class="headerlink" href="#for-debug" title="链接到此标题。">#</a></h2>
 <p><strong>MAGI_ATTENTION_SANITY_CHECK</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 magi_attention 内部的大量健全性检查代码。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_sanity_check_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 magi_attention 内部的大量健全性检查代码。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>此功能仅用于测试或调试，因为额外的健全性检查开销可能不容忽视。</p>
 </div>
 <p><strong>MAGI_ATTENTION_SDPA_BACKEND</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 可将注意力内核后端从 ffa 切换到 sdpa-math，以支持更高精度（如 <code class="docutils literal notranslate"><span class="pre">fp32</span></code> 或 <code class="docutils literal notranslate"><span class="pre">fp64</span></code>）。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.kernel_backend</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 可将注意力内核后端从 ffa 切换到 sdpa-math，以支持更高精度（如 <code class="docutils literal notranslate"><span class="pre">fp32</span></code> 或 <code class="docutils literal notranslate"><span class="pre">fp64</span></code>）。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
-<p>此功能仅用于测试或调试，因为其性能不可接受。</p>
+<p>这是为向后兼容保留的旧开关；推荐使用 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND=sdpa</span></code>。此功能仅用于测试或调试，因为其性能不可接受。</p>
 </div>
 <p><strong>MAGI_ATTENTION_DETERMINISTIC_MODE</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用确定性模式，对所有 magi_attention 内核使用确定性算法。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_deterministic_mode_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用确定性模式，对所有 magi_attention 内核使用确定性算法。</p>
 <p><strong>MAGI_ATTENTION_PROFILE_MODE</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用性能分析模式，对所有 magi_attention 内核进行性能分析，目前主要针对 ffa 内核（<em>详情请参阅<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa">此处</a></em>）。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_profile_mode_enable</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用性能分析模式，对所有 magi_attention 内核进行性能分析，目前主要针对 ffa 内核（<em>详情请参阅<a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa">此处</a></em>）。</p>
 <div class="admonition note">
 <p class="admonition-title">备注</p>
 <p>此功能仅用于开发，请勿在生产环境中启用。</p>
 </div>
+<p><strong>MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.kernel.cutedsl</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以为 CuteDSL FFA 内核启用调试期检查和诊断。</p>
 </section>
 <section id="for-build">
-<h2><a class="toc-backref" href="#id5" role="doc-backlink">构建相关</a><a class="headerlink" href="#for-build" title="链接到此标题。">#</a></h2>
+<h2><a class="toc-backref" href="#id6" role="doc-backlink">构建相关</a><a class="headerlink" href="#for-build" title="链接到此标题。">#</a></h2>
 <section id="jit">
-<h3><a class="toc-backref" href="#id6" role="doc-backlink">JIT</a><a class="headerlink" href="#jit" title="链接到此标题。">#</a></h3>
+<h3><a class="toc-backref" href="#id7" role="doc-backlink">JIT</a><a class="headerlink" href="#jit" title="链接到此标题。">#</a></h3>
 <p><strong>MAGI_ATTENTION_WORKSPACE_BASE</strong></p>
-<p>指定 MagiAttention 工作空间的基础目录，包含缓存和生成的源文件。如果未设置，默认为用户主目录（<code class="docutils literal notranslate"><span class="pre">~</span></code>）。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">$HOME</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.workspace_base_dir</span></code></p></li>
+</ul>
+<p>指定 MagiAttention 工作空间的基础目录，包含缓存和生成的源文件。</p>
 <p><strong>MAGI_ATTENTION_BUILD_VERBOSE</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 JIT 编译过程中的详细输出，显示正在执行的完整 ninja 构建命令。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.is_build_verbose</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 JIT 编译过程中的详细输出，显示正在执行的完整 ninja 构建命令。</p>
 <p><strong>MAGI_ATTENTION_BUILD_DEBUG</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 C++/CUDA 编译器的调试标志。这包括 <code class="docutils literal notranslate"><span class="pre">-g</span></code>（调试符号）等选项和其他用于获取更详细信息（如寄存器使用情况）的标志。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.is_build_debug</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 C++/CUDA 编译器的调试标志。这包括 <code class="docutils literal notranslate"><span class="pre">-g</span></code>（调试符号）等选项和其他用于获取更详细信息（如寄存器使用情况）的标志。</p>
 <p><strong>MAGI_ATTENTION_NO_BUILD_CACHE</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以禁用已构建 ffa 内核的缓存。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.is_no_build_cache</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以禁用已构建 ffa 内核的缓存。</p>
 <p><strong>MAGI_ATTENTION_FORCE_JIT_BUILD</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以强制以 JIT 模式构建 FFA，即使预构建的 AOT <code class="docutils literal notranslate"><span class="pre">libs</span></code> 已存在。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.is_force_jit_build</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以强制以 JIT 模式构建 FFA，即使预构建的 AOT <code class="docutils literal notranslate"><span class="pre">libs</span></code> 已存在。</p>
 <p><strong>NVCC_THREADS</strong></p>
-<p>设置 <code class="docutils literal notranslate"><span class="pre">nvcc</span></code> 的 <code class="docutils literal notranslate"><span class="pre">--split-compile</span></code> 选项的线程数，可加速 CUDA 内核的 JIT 编译。默认值为 <code class="docutils literal notranslate"><span class="pre">4</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">4</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.nvcc_threads</span></code></p></li>
+</ul>
+<p>设置 <code class="docutils literal notranslate"><span class="pre">nvcc</span></code> 的 <code class="docutils literal notranslate"><span class="pre">--split-compile</span></code> 选项的线程数，可加速 CUDA 内核的 JIT 编译。</p>
+<p><strong>MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.kernel.cutedsl.cache_utils</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用已编译 CuteDSL FFA 内核的磁盘缓存。</p>
+<p><strong>MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> 未设置（使用默认缓存位置）</p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.kernel.cutedsl.cache_utils</span></code></p></li>
+</ul>
+<p>设置此环境变量以指定 CuteDSL FFA 内核缓存的目录。</p>
 </section>
 <section id="aot">
-<h3><a class="toc-backref" href="#id7" role="doc-backlink">AOT</a><a class="headerlink" href="#aot" title="链接到此标题。">#</a></h3>
+<h3><a class="toc-backref" href="#id8" role="doc-backlink">AOT</a><a class="headerlink" href="#aot" title="链接到此标题。">#</a></h3>
 <p><strong>MAGI_ATTENTION_PREBUILD_FFA_JOBS</strong></p>
-<p>设置此环境变量的值以控制预构建 ffa 内核时使用的并行编译任务数。默认值为可用 CPU 核心数的 <code class="docutils literal notranslate"><span class="pre">90%</span></code> 上取整（即 <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code>）。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>设置此环境变量的值以控制预构建 ffa 内核时使用的并行编译任务数。</p>
 <p><strong>MAX_JOBS</strong></p>
-<p>设置此环境变量的值以控制构建 ffa 以外的扩展模块时使用的并行编译任务数。默认值为可用 CPU 核心数的 <code class="docutils literal notranslate"><span class="pre">90%</span></code> 上取整（即 <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code>）。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>设置此环境变量的值以控制构建 ffa 以外的扩展模块时使用的并行编译任务数。</p>
 <p><strong>MAGI_ATTENTION_PREBUILD_FFA</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用对一些 <code class="docutils literal notranslate"><span class="pre">ref_block_size=None</span></code> 的常见选项预构建 ffa 内核，其余选项则以 JIT 模式构建。默认值为 <code class="docutils literal notranslate"><span class="pre">1</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">1</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用对一些 <code class="docutils literal notranslate"><span class="pre">ref_block_size=None</span></code> 的常见选项预构建 ffa 内核，其余选项则以 JIT 模式构建。</p>
+<p><strong>MAGI_ATTENTION_SKIP_CUDA_BUILD</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以完全跳过构建所有 CUDA 扩展模块（例如仅 Python / 文档构建时）。</p>
 <p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 可跳过构建 <code class="docutils literal notranslate"><span class="pre">magi_attn_ext</span></code>。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 可跳过构建 <code class="docutils literal notranslate"><span class="pre">magi_attn_ext</span></code>。</p>
 <p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 可跳过构建 <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code>。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 可跳过构建 <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code>。</p>
+<p><strong>MAGI_ATTENTION_FORCE_CXX11_ABI</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以强制使用 C++11 ABI（<code class="docutils literal notranslate"><span class="pre">_GLIBCXX_USE_CXX11_ABI=1</span></code>）构建扩展模块，以匹配使用新 ABI 编译的 PyTorch。</p>
+<p><strong>MAGI_ATTENTION_DISABLE_SM90_FEATURES</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以在构建扩展模块时禁用 SM90（Hopper）专属特性，例如面向不支持 SM90 的工具链时。</p>
 <p><strong>MAGI_ATTENTION_FFA_FA4_CACHE_DIR</strong></p>
-<p>设置此环境变量以指定预编译 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> 内核的缓存目录。默认值为 <code class="docutils literal notranslate"><span class="pre">magi_attention/lib/ffa_fa4_cache/</span></code>。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention/lib/ffa_fa4_cache/</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.functional.fa4_utils</span></code></p></li>
+</ul>
+<p>设置此环境变量以指定预编译 <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> 内核的缓存目录。</p>
 <p><strong>MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> 未设置（自动检测当前 GPU 设备）</p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
 <p>设置此环境变量以指定构建 MagiAttention 扩展模块时使用的计算能力（影响 <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code> 和 <code class="docutils literal notranslate"><span class="pre">create_block_mask</span></code>）。支持逗号分隔的多架构值，例如 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100</span></code>。如果未设置，我们将尝试检测当前 GPU 设备的计算能力。如果检测失败将抛出错误。</p>
 <p><strong>MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12</strong></p>
-<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以允许使用 <code class="docutils literal notranslate"><span class="pre">CUDA-12</span></code> 构建 MagiAttention 扩展模块，这可能导致与 <code class="docutils literal notranslate"><span class="pre">CUDA-13+</span></code> 相比显著的性能下降。默认值为 <code class="docutils literal notranslate"><span class="pre">0</span></code>，在此情况下，如果 CUDA 版本低于 <code class="docutils literal notranslate"><span class="pre">13.0</span></code>，我们将抛出错误并中止安装。</p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以允许使用 <code class="docutils literal notranslate"><span class="pre">CUDA-12</span></code> 构建 MagiAttention 扩展模块，这可能导致与 <code class="docutils literal notranslate"><span class="pre">CUDA-13+</span></code> 相比显著的性能下降。当为 <code class="docutils literal notranslate"><span class="pre">0</span></code> 时，如果 CUDA 版本低于 <code class="docutils literal notranslate"><span class="pre">13.0</span></code>，我们将抛出错误并中止安装。</p>
 <p><strong>NVSHMEM_DIR</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> 系统模块 <code class="docutils literal notranslate"><span class="pre">nvidia-nvshmem-cu12</span></code>（如 <code class="docutils literal notranslate"><span class="pre">requirements.txt</span></code> 中所列）</p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
 <p>设置此环境变量为自定义 <code class="docutils literal notranslate"><span class="pre">nvshmem</span></code> 安装目录的路径。</p>
-<p>如果未设置，默认查找 <code class="docutils literal notranslate"><span class="pre">requirements.txt</span></code> 中列出的系统模块 <code class="docutils literal notranslate"><span class="pre">nvidia-nvshmem-cu12</span></code>。</p>
 <p>如果在任何位置都未找到，native group collective 通信内核中的所有相关功能将被禁用。</p>
 </section>
+</section>
+<section id="for-testing">
+<h2><a class="toc-backref" href="#id9" role="doc-backlink">测试相关</a><a class="headerlink" href="#for-testing" title="链接到此标题。">#</a></h2>
+<p><strong>MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.testing</span></code> (<code class="docutils literal notranslate"><span class="pre">with_run_in_mp</span></code>)</p></li>
+</ul>
+<p>是否在多进程上下文中运行参数化的分布式测试用例。此变量由 <code class="docutils literal notranslate"><span class="pre">&#64;with_run_in_mp</span></code> 装饰器内部设置，而非由用户直接配置。</p>
+<p><strong>MAGI_ATTENTION_COPYRIGHT_TEST_YEAR</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> 当前日历年份</p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">tools/codestyle/copyright.py</span></code></p></li>
+</ul>
+<p>覆盖版权头检查所使用的“当前年份”。用于对版权工具进行可复现的测试。</p>
 </section>
 </section>
 
@@ -828,6 +1079,7 @@
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-correctness">正确性相关</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-runtime">运行时相关</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">性能相关</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-debug">调试相关</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">构建相关</a><ul class="pst-show_toc_level nav section-nav flex-column">
@@ -835,6 +1087,7 @@
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#aot">AOT</a></li>
 </ul>
 </li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-testing">测试相关</a></li>
 </ul>
   </nav></div>
 
@@ -863,7 +1116,7 @@
 
   <p class="copyright">
     
-      © Copyright 2025-2026, Sandai.
+      © Copyright 2025-2026, SandAI.
       <br/>
     
   </p>

@@ -1,6 +1,7 @@
 # Environment Variables
 
 Below are some environment variables that can be set, along with their descriptions.
+All of the MagiAttention-specific ones are prefixed with `MAGI_ATTENTION_`.
 
 :::{note}
 Since MagiAttention is actively evolving, many advanced but experimental features will be released but enabled through environment variables.
@@ -15,8 +16,11 @@ Since MagiAttention is actively evolving, many advanced but experimental feature
 
 **MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE**
 
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.comm.is_fwd_high_precision_reduce_enable`
+
 Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial out during dist-attn forward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
+to trade-off double comm overhead for increased precision and less dtype-cast overhead.
 
 ```{note}
 1. Inside the ffa forward kernel, we always use high-precision (fp32) accumulation for partial out.
@@ -29,8 +33,11 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 
 **MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE**
 
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.comm.is_bwd_high_precision_reduce_enable`
+
 Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
+to trade-off double comm overhead for increased precision and less dtype-cast overhead.
 
 ```{note}
 1. Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dq,dk,dv.
@@ -41,7 +48,10 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 
 **MAGI_ATTENTION_DSINK_ALL_REDUCE_OP**
 
-Set the value of this env variable to control the all-reduce op for sink gradients within `dist_attn_func` when involving attention sink. The default value is `none`. And options are within {`none`, `sum`, `avg`}.
+- **Defaults to:** `none` (options: `none`, `sum`, `avg`)
+- **Used by:** `magi_attention.env.comm.dsink_all_reduce_op`
+
+Set the value of this env variable to control the all-reduce op for sink gradients within `dist_attn_func` when involving attention sink.
 
 
 ```{note}
@@ -59,19 +69,63 @@ And sometimes, `avg` might also be an option when you need to scale the sink gra
 ```
 
 
+## For Runtime
+
+**MAGI_ATTENTION_LOG_LEVEL**
+
+- **Defaults to:** `WARN`
+- **Used by:** `magi_attention.env.general.log_level`
+
+Set this env variable to control the logging verbosity of the entire `magi_attention` package.
+Valid values (case-insensitive) are `DEBUG`, `INFO`, `WARN`, `WARNING`, `ERROR`, `CRITICAL`.
+
+**MAGI_ATTENTION_KERNEL_BACKEND**
+
+- **Defaults to:** `ffa`
+- **Used by:** `magi_attention.env.general.kernel_backend`
+
+Set this env variable to choose the attn kernel backend. Valid values are:
+
+- `ffa`: flex-flash-attention (default, high-performance persistent kernel).
+- `sdpa`: offline SDPA implementation (for testing / high precision like `fp32`/`fp64`).
+- `sdpa_ol`: online (block-wise) SDPA implementation (for testing, lower memory than `sdpa`).
+- `fa4`: Flash-Attention 4 monkey-patch (workaround for Blackwell GPUs).
+
+```{note}
+This supersedes the legacy `MAGI_ATTENTION_SDPA_BACKEND=1` and `MAGI_ATTENTION_FA4_BACKEND=1`
+toggles, which are still supported but must NOT be set together with `MAGI_ATTENTION_KERNEL_BACKEND`.
+```
+
+**MAGI_ATTENTION_PRECISION**
+
+- **Defaults to:** unset (use the input dtype as-is)
+- **Used by:** `magi_attention.env.general.precision`
+
+Set this env variable to override the compute dtype for attention kernels. Valid values are
+`bf16`, `fp16`, `fp32`, `fp64`. When set, input Q/K/V are cast to the specified dtype before
+attention computation, and the output is cast back to the original input dtype.
+
+
 ## For Performance
 
 **MAGI_ATTENTION_FA4_BACKEND**
 
-Toggle this env variable to ``1`` to switch the attn kernel backend from `FFA` to `FFA_FA4`, a monkey patch version of Flash-Attention 4, to temporarily support arbitrary mask on Blackwell GPUs. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.kernel_backend`
+
+Toggle this env variable to `1` to switch the attn kernel backend from `FFA` to `FFA_FA4`, a monkey patch version of Flash-Attention 4, to temporarily support arbitrary mask on Blackwell GPUs.
 
 ```{note}
+This is a legacy toggle kept for backward compatibility; prefer `MAGI_ATTENTION_KERNEL_BACKEND=fa4`.
 This is for now a workaround solution might be removed or updated in the future.
 ```
 
 **MAGI_ATTENTION_NATIVE_GRPCOLL**
 
-Toggle this env variable to `1` to enable native kernel implementation for group collective comm. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.comm.is_native_grpcoll_enable`
+
+Toggle this env variable to `1` to enable native kernel implementation for group collective comm.
 
 ```{note}
 This feature is experimental and under active development for now, and not compatible with many other features,
@@ -80,7 +134,10 @@ thus please do NOT enable it unless you know exactly what you are doing.
 
 **MAGI_ATTENTION_QO_COMM**
 
-Toggle this env variable to `1` to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.comm.is_qo_comm_enable`
+
+Toggle this env variable to `1` to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value.
 
 ```{note}
 This feature is experimental and under active development for now, and not compatible with many other features,
@@ -89,7 +146,10 @@ thus please do NOT enable it unless you know exactly what you are doing.
 
 **MAGI_ATTENTION_FLATTEN_HEAD_GROUPS**
 
-Toggle this env variable to ``1`` to flatten head groups within GQA/MQA attention to optimize dynamic solver performance. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.is_flatten_head_groups_enable`
+
+Toggle this env variable to `1` to flatten head groups within GQA/MQA attention to optimize dynamic solver performance.
 
 ```{note}
 This feature is experimental and under active development for now, and not compatible with many other features,
@@ -98,8 +158,11 @@ thus please do NOT enable it unless you know exactly what you are doing.
 
 **MAGI_ATTENTION_AUTO_RANGE_MERGE**
 
-Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
-to improve performance by reducing the number of attention ranges. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.is_auto_range_merge_enable`
+
+Toggle this env variable to `1` to enable automatic range merging for flex-flash-attention,
+to improve performance by reducing the number of attention ranges.
 
 ```{note}
 This feature is experimental and under active development for now,
@@ -108,7 +171,10 @@ thus please do NOT enable it unless you know exactly what you are doing.
 
 **MAGI_ATTENTION_CATGQA**
 
-Toggle this env variable to ``1`` to enable CatGQA mode for flex-flash-attention backward, to further optimize the performance under GQA settings by concatenating multiple Q heads sharing the same KV head. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.is_cat_gqa_enable`
+
+Toggle this env variable to `1` to enable CatGQA mode for flex-flash-attention backward, to further optimize the performance under GQA settings by concatenating multiple Q heads sharing the same KV head.
 
 ```{note}
 This feature is experimental and under active development for now,
@@ -117,24 +183,43 @@ thus please do NOT enable it unless you know exactly what you are doing.
 
 **MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE**
 
-Toggle this env variable to ``1`` to trade saving the last remote `kv` activation for reordering overlap stages during backward, hiding the final remote `group_reduce` with the host FFA stage. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.dist_attn_backward_hide_tail_reduce`
+
+Toggle this env variable to `1` to trade saving the last remote `kv` activation for reordering overlap stages during backward, hiding the final remote `group_reduce` with the host FFA stage.
 
 ```{note}
 This feature is experimental and under active development for now, and not compatible with many other features like qo comm,
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
+**MAGI_ATTENTION_MIN_CHUNKS_PER_RANK**
+
+- **Defaults to:** `8`
+- **Used by:** `magi_attention.env.general.min_chunks_per_rank`
+
+Set the value of this env variable to control the minimum number of chunks per context parallel rank, to control the granularity of computational load-balance.
+
 **MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**
 
-Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
+- **Defaults to:** `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`
+- **Used by:** `magi_attention.env.comm.ffa_fwd_sm_margin_save_for_comm`
+
+Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels.
 
 **MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**
 
-Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
+- **Defaults to:** `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`
+- **Used by:** `magi_attention.env.comm.ffa_bwd_sm_margin_save_for_comm`
+
+Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels.
 
 **MAGI_ATTENTION_CPP_BACKEND**
 
-Toggle this env variable to `1` to enable C++ backend for core data structures (`AttnRange`, `AttnMaskType`, etc.) to avoid Python overhead. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.is_cpp_backend_enable`
+
+Toggle this env variable to `1` to enable C++ backend for core data structures (`AttnRange`, `AttnMaskType`, etc.) to avoid Python overhead.
 
 ```{note}
 This feature is experimental and under active development for now.
@@ -143,7 +228,10 @@ If the C++ extension is not found or this variable is set to `0`, it will fall b
 
 **MAGI_ATTENTION_HIERARCHICAL_COMM**
 
-Toggle this env variable to `1` to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group). The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.comm.is_hierarchical_comm_enable`
+
+Toggle this env variable to `1` to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group).
 
 ```{note}
 This is for now a temporary solution to reduce the redundant inter-node communication and might be removed or updated in the future.
@@ -151,42 +239,27 @@ This is for now a temporary solution to reduce the redundant inter-node communic
 
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 
-Set the value of this env variable to control the maximum LRU cache size of `dist_attn_runtime_dict_mgr`. The default value is `1000`.
+- **Defaults to:** `1000`
+- **Used by:** `magi_attention.env.general.dist_attn_runtime_dict_size`
 
-**MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN**
-
-Set this env variable to `true` or `false` to override the inner-loop iteration direction of the FFA kernel (both FWD and BWD). `true` means MaxToMin (descending), `false` means MinToMax (ascending). If not set, defaults to MinToMax.
-
-```{note}
-This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation.
-```
-
-**MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP**
-
-Set this env variable to `true` or `false` to enable or disable intra-warpgroup overlap in the FFA forward kernel. When enabled, the MMA warpgroup pre-loads the next V tile while computing the current softmax, hiding V load latency. If not set, defaults to `true`.
-
-```{note}
-This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects FWD.
-```
-
-**MAGI_ATTENTION_FFA_USE_MASK_DISPATCH**
-
-Set this env variable to `true` or `false` to enable or disable the mask-dispatch optimization in the FFA backward kernel. When enabled, the BWD inner loop uses zone-based dispatch (no_mask / causal / boundary) to skip unnecessary mask computations. If not set, defaults to `true`.
-
-```{note}
-This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects BWD.
-```
+Set the value of this env variable to control the maximum LRU cache size of `dist_attn_runtime_dict_mgr`.
 
 **CUDA_DEVICE_MAX_CONNECTIONS**
 
-This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic. The default value is `8`.
+- **Defaults to:** `8`
+- **Used by:** `magi_attention.env.general.is_cuda_device_max_connections_one`
+
+This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic.
 
 
 ## For Debug
 
 **MAGI_ATTENTION_SANITY_CHECK**
 
-Toggle this env variable to `1` to enable many sanity check codes inside magi_attention. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.is_sanity_check_enable`
+
+Toggle this env variable to `1` to enable many sanity check codes inside magi_attention.
 
 ```{note}
 This is only supposed to be used for testing or debugging, since the extra sanity-check overhead might be non-negligible.
@@ -194,24 +267,41 @@ This is only supposed to be used for testing or debugging, since the extra sanit
 
 **MAGI_ATTENTION_SDPA_BACKEND**
 
-Toggle this env variable to `1` can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like `fp32` or `fp64`. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.kernel_backend`
+
+Toggle this env variable to `1` can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like `fp32` or `fp64`.
 
 ```{note}
+This is a legacy toggle kept for backward compatibility; prefer `MAGI_ATTENTION_KERNEL_BACKEND=sdpa`.
 This is only supposed to be used for testing or debugging, since the performance is not acceptable.
 ```
 
 **MAGI_ATTENTION_DETERMINISTIC_MODE**
 
-Toggle this env variable to `1` to enable deterministic mode to use deterministic algorithms for all magi_attention kernels. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.is_deterministic_mode_enable`
+
+Toggle this env variable to `1` to enable deterministic mode to use deterministic algorithms for all magi_attention kernels.
 
 
 **MAGI_ATTENTION_PROFILE_MODE**
 
-Toggle this env variable to `1` to enable profiling mode to profile all magi_attention kernels, currently mainly for ffa kernels (*see [here](https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa) for more details*). The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.general.is_profile_mode_enable`
+
+Toggle this env variable to `1` to enable profiling mode to profile all magi_attention kernels, currently mainly for ffa kernels (*see [here](https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa) for more details*).
 
 ```{note}
 This is only supposed to be used for development. Please do NOT enable it in production.
 ```
+
+**MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE**
+
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.kernel.cutedsl`
+
+Toggle this env variable to `1` to enable debug-time checks and diagnostics for the CuteDSL FFA kernels.
 
 ## For Build
 
@@ -219,68 +309,162 @@ This is only supposed to be used for development. Please do NOT enable it in pro
 
 **MAGI_ATTENTION_WORKSPACE_BASE**
 
-Specifies the base directory for the MagiAttention workspace, which includes cache and generated source files. If not set, it defaults to the user's home directory (`~`).
+- **Defaults to:** `$HOME`
+- **Used by:** `magi_attention.env.build.workspace_base_dir`
+
+Specifies the base directory for the MagiAttention workspace, which includes cache and generated source files.
 
 **MAGI_ATTENTION_BUILD_VERBOSE**
 
-Toggle this env variable to `1` to enable verbose output during the JIT compilation process, showing the full ninja build commands being executed. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.build.is_build_verbose`
+
+Toggle this env variable to `1` to enable verbose output during the JIT compilation process, showing the full ninja build commands being executed.
 
 **MAGI_ATTENTION_BUILD_DEBUG**
 
-Toggle this env variable to `1` to enable debug flags for the C++/CUDA compiler. This includes options like `-g` (debugging symbols) and other flags to get more detailed information, such as register usage. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.build.is_build_debug`
 
+Toggle this env variable to `1` to enable debug flags for the C++/CUDA compiler. This includes options like `-g` (debugging symbols) and other flags to get more detailed information, such as register usage.
 
 **MAGI_ATTENTION_NO_BUILD_CACHE**
 
-Toggle this env variable to `1` to disable caching for built ffa kernels. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.build.is_no_build_cache`
+
+Toggle this env variable to `1` to disable caching for built ffa kernels.
 
 **MAGI_ATTENTION_FORCE_JIT_BUILD**
 
-Toggle this env variable to `1` to force building FFA in JIT mode, even the pre-built AOT `libs` exists. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.env.build.is_force_jit_build`
+
+Toggle this env variable to `1` to force building FFA in JIT mode, even the pre-built AOT `libs` exists.
 
 **NVCC_THREADS**
 
-Sets the number of threads for `nvcc`'s `--split-compile` option, which can speed up the JIT compilation of CUDA kernels. The default value is `4`.
+- **Defaults to:** `4`
+- **Used by:** `magi_attention.env.build.nvcc_threads`
+
+Sets the number of threads for `nvcc`'s `--split-compile` option, which can speed up the JIT compilation of CUDA kernels.
+
+**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED**
+
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.kernel.cutedsl.cache_utils`
+
+Toggle this env variable to `1` to enable on-disk caching of compiled CuteDSL FFA kernels.
+
+**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR**
+
+- **Defaults to:** unset (use the default cache location)
+- **Used by:** `magi_attention.kernel.cutedsl.cache_utils`
+
+Set this env variable to specify the directory for the CuteDSL FFA kernel cache.
 
 
 ### AOT
 
 **MAGI_ATTENTION_PREBUILD_FFA_JOBS**
 
-Set the value of this env variable to control the number of parallel compilation jobs used to pre-build ffa kernels. The default value is the ceiling of `90%` of the available CPU cores (i.e. `ceil(num_cpu_cores * 0.9)`).
+- **Defaults to:** `ceil(num_cpu_cores * 0.9)`
+- **Used by:** `setup.py`
+
+Set the value of this env variable to control the number of parallel compilation jobs used to pre-build ffa kernels.
 
 **MAX_JOBS**
 
-Set the value of this env variable to control the number of parallel compilation jobs used to build the extension modules other than ffa. The default value is the ceiling of `90%` of the available CPU cores (i.e. `ceil(num_cpu_cores * 0.9)`).
+- **Defaults to:** `ceil(num_cpu_cores * 0.9)`
+- **Used by:** `setup.py`
+
+Set the value of this env variable to control the number of parallel compilation jobs used to build the extension modules other than ffa.
 
 **MAGI_ATTENTION_PREBUILD_FFA**
 
-Toggle this env variable to `1` to enable pre-build ffa kernels for some common options with `ref_block_size=None` and leave others built in jit mode. The default value is `1`.
+- **Defaults to:** `1`
+- **Used by:** `setup.py`
+
+Toggle this env variable to `1` to enable pre-build ffa kernels for some common options with `ref_block_size=None` and leave others built in jit mode.
+
+**MAGI_ATTENTION_SKIP_CUDA_BUILD**
+
+- **Defaults to:** `0`
+- **Used by:** `setup.py`
+
+Toggle this env variable to `1` to skip building all the CUDA extension modules entirely (e.g. for a Python-only / docs build).
 
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD**
 
-Toggle this env variable to `1` can skip building `magi_attn_ext`. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `setup.py`
+
+Toggle this env variable to `1` can skip building `magi_attn_ext`.
 
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD**
 
-Toggle this env variable to `1` can skip building `magi_attn_comm`. The default value is `0`.
+- **Defaults to:** `0`
+- **Used by:** `setup.py`
+
+Toggle this env variable to `1` can skip building `magi_attn_comm`.
+
+**MAGI_ATTENTION_FORCE_CXX11_ABI**
+
+- **Defaults to:** `0`
+- **Used by:** `setup.py`
+
+Toggle this env variable to `1` to force building the extension modules with the C++11 ABI (`_GLIBCXX_USE_CXX11_ABI=1`), to match a PyTorch build compiled with the new ABI.
+
+**MAGI_ATTENTION_DISABLE_SM90_FEATURES**
+
+- **Defaults to:** `0`
+- **Used by:** `setup.py`
+
+Toggle this env variable to `1` to disable the SM90 (Hopper)-specific features when building the extension modules, e.g. when targeting a toolchain without SM90 support.
 
 **MAGI_ATTENTION_FFA_FA4_CACHE_DIR**
 
-Set this env variable to specify the cache directory for pre-compiled `FFA_FA4` kernels. The default value is `magi_attention/lib/ffa_fa4_cache/`.
+- **Defaults to:** `magi_attention/lib/ffa_fa4_cache/`
+- **Used by:** `magi_attention.functional.fa4_utils`
+
+Set this env variable to specify the cache directory for pre-compiled `FFA_FA4` kernels.
 
 **MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**
 
-Set this env variable to specify the compute capability used to build MagiAttention extension modules (affects `magi_attn_comm` and `create_block_mask`). Supports comma-separated values for multi-arch builds, e.g. `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100`. If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.
+- **Defaults to:** unset (auto-detect the current GPU device)
+- **Used by:** `setup.py`
+
+Set this env variable to specify the compute capability used to build MagiAttention extension modules (affects `magi_attn_comm` and `create_block_mask`). Supports comma-separated values for multi-arch builds, e.g. `MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100`. If not set, we will try to detect the compute capability of the current GPU device, and raise an error if detection fails.
 
 **MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12**
 
-Set this env variable to `1` to allow building MagiAttention extension modules with `CUDA-12`, which might cause significant performance degradation compared to `CUDA-13+`. The default value is `0`, in which case we will raise an error and abort the installation if the CUDA version is lower than `13.0`.
+- **Defaults to:** `0`
+- **Used by:** `setup.py`
+
+Set this env variable to `1` to allow building MagiAttention extension modules with `CUDA-12`, which might cause significant performance degradation compared to `CUDA-13+`. When `0`, we will raise an error and abort the installation if the CUDA version is lower than `13.0`.
 
 **NVSHMEM_DIR**
 
+- **Defaults to:** the system module `nvidia-nvshmem-cu12` (as listed in `requirements.txt`)
+- **Used by:** `setup.py`
+
 Set this env variable to the path of the custom `nvshmem` installation directory.
 
-If not set, it defaults to find the system module `nvidia-nvshmem-cu12` as listed in `requirements.txt`.
-
 If not found anywhere, all relative features used in native group collective comm kernels are disabled.
+
+
+## For Testing
+
+**MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP**
+
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.testing` (`with_run_in_mp`)
+
+Whether to run parameterized distributed test cases in a multiprocessing context. This is set internally by the `@with_run_in_mp` decorator rather than being configured by users directly.
+
+**MAGI_ATTENTION_COPYRIGHT_TEST_YEAR**
+
+- **Defaults to:** current calendar year
+- **Used by:** `tools/codestyle/copyright.py`
+
+Overrides the "current year" used by the copyright-header check. Useful for reproducible testing of the copyright tooling.

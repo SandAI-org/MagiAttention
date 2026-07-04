@@ -221,7 +221,13 @@
         <div class="navbar-item">
 
 
-<div class="dropdown">
+<div
+  class="dropdown"
+  id="doc-language-switcher-root"
+  data-pagename="user_guide/env_variables"
+  data-is-chinese="false"
+  data-zh-segment="zh_CN"
+>
   <button
     class="btn btn-sm btn-outline-primary dropdown-toggle"
     type="button"
@@ -250,45 +256,59 @@
 <script>
   (function () {
     // English lives at the root (no language prefix).
-    // Chinese lives under zh_CN/ inside the same version root.
+    // Chinese lives under zh_CN/ inside the same site root.
     // URL examples:
-    //   English: /MagiAttention/docs/main/user_guide/install.html
-    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
-    var ZH_SEGMENT = "zh_CN";
+    //   English: <site-root>/user_guide/install.html
+    //   Chinese: <site-root>/zh_CN/user_guide/install.html
+    //
+    // The site root is derived from the current page's own `pagename`
+    // (known at build time) instead of a hard-coded "/docs/" marker, so the
+    // switcher works identically when served online (e.g. under
+    // "/MagiAttention/docs/main/") and when the built HTML is downloaded and
+    // opened locally via file:// URLs.
+    //
+    // NOTE: build-time values (pagename / is_chinese) are passed through
+    // `data-*` attributes rather than inlined into JS, so this script stays
+    // valid, lint-clean JavaScript with no template syntax mixed in.
+    var root = document.getElementById("doc-language-switcher-root");
+    if (!root) return;
 
-    function versionRoot() {
-      // Returns the path up to and including the version/branch segment
-      // (i.e. everything up to and including "main", "v1.1.0", etc.)
-      // by looking for the known parent prefix.
-      var pathname = window.location.pathname || "";
-      var marker = "/docs/";
-      var idx = pathname.indexOf(marker);
-      if (idx === -1) return null;
-      // Find the next slash after the version segment.
-      var afterDocs = pathname.indexOf("/", idx + marker.length);
-      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    var ZH_SEGMENT = root.getAttribute("data-zh-segment") || "zh_CN";
+    var PAGENAME = root.getAttribute("data-pagename") || "";
+    var IS_CHINESE = root.getAttribute("data-is-chinese") === "true";
+
+    function currentRoot() {
+      // Strip the trailing "<pagename>.html" from the current URL to obtain
+      // the site root for the *current* language build (always ends with "/").
+      var url = window.location.href;
+      var hashIdx = url.indexOf("#");
+      if (hashIdx !== -1) url = url.slice(0, hashIdx);
+      var qIdx = url.indexOf("?");
+      if (qIdx !== -1) url = url.slice(0, qIdx);
+      var suffix = PAGENAME + ".html";
+      if (url.slice(-suffix.length) === suffix) {
+        return url.slice(0, url.length - suffix.length);
+      }
+      // Fallback: directory of the current file.
+      return url.slice(0, url.lastIndexOf("/") + 1);
+    }
+
+    function enRoot() {
+      // Normalise to the English (top-level) site root.
+      var currRoot = currentRoot();
+      var zhSuffix = ZH_SEGMENT + "/";
+      if (IS_CHINESE && currRoot.slice(-zhSuffix.length) === zhSuffix) {
+        return currRoot.slice(0, currRoot.length - zhSuffix.length);
+      }
+      return currRoot;
     }
 
     function resolvePath(targetLang) {
-      var pathname = window.location.pathname || "";
       var query = window.location.search || "";
       var hash = window.location.hash || "";
-      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
-      if (!root) return "#";
-
-      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
-                                                    //  or "zh_CN/user_guide/install.html"
-
-      // Strip existing zh_CN prefix if present
-      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
-        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
-      }
-
-      if (targetLang === "en") {
-        return root + afterRoot + query + hash;
-      } else {
-        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
-      }
+      var base = enRoot();  // English site root, ends with "/"
+      var target = (targetLang === "en") ? base : base + ZH_SEGMENT + "/";
+      return target + PAGENAME + ".html" + query + hash;
     }
 
     var links = document.querySelectorAll(".doc-lang-link");
@@ -412,7 +432,13 @@
           <div class="navbar-item">
 
 
-<div class="dropdown">
+<div
+  class="dropdown"
+  id="doc-language-switcher-root"
+  data-pagename="user_guide/env_variables"
+  data-is-chinese="false"
+  data-zh-segment="zh_CN"
+>
   <button
     class="btn btn-sm btn-outline-primary dropdown-toggle"
     type="button"
@@ -441,45 +467,59 @@
 <script>
   (function () {
     // English lives at the root (no language prefix).
-    // Chinese lives under zh_CN/ inside the same version root.
+    // Chinese lives under zh_CN/ inside the same site root.
     // URL examples:
-    //   English: /MagiAttention/docs/main/user_guide/install.html
-    //   Chinese: /MagiAttention/docs/main/zh_CN/user_guide/install.html
-    var ZH_SEGMENT = "zh_CN";
+    //   English: <site-root>/user_guide/install.html
+    //   Chinese: <site-root>/zh_CN/user_guide/install.html
+    //
+    // The site root is derived from the current page's own `pagename`
+    // (known at build time) instead of a hard-coded "/docs/" marker, so the
+    // switcher works identically when served online (e.g. under
+    // "/MagiAttention/docs/main/") and when the built HTML is downloaded and
+    // opened locally via file:// URLs.
+    //
+    // NOTE: build-time values (pagename / is_chinese) are passed through
+    // `data-*` attributes rather than inlined into JS, so this script stays
+    // valid, lint-clean JavaScript with no template syntax mixed in.
+    var root = document.getElementById("doc-language-switcher-root");
+    if (!root) return;
 
-    function versionRoot() {
-      // Returns the path up to and including the version/branch segment
-      // (i.e. everything up to and including "main", "v1.1.0", etc.)
-      // by looking for the known parent prefix.
-      var pathname = window.location.pathname || "";
-      var marker = "/docs/";
-      var idx = pathname.indexOf(marker);
-      if (idx === -1) return null;
-      // Find the next slash after the version segment.
-      var afterDocs = pathname.indexOf("/", idx + marker.length);
-      return afterDocs === -1 ? pathname : pathname.slice(0, afterDocs + 1);
+    var ZH_SEGMENT = root.getAttribute("data-zh-segment") || "zh_CN";
+    var PAGENAME = root.getAttribute("data-pagename") || "";
+    var IS_CHINESE = root.getAttribute("data-is-chinese") === "true";
+
+    function currentRoot() {
+      // Strip the trailing "<pagename>.html" from the current URL to obtain
+      // the site root for the *current* language build (always ends with "/").
+      var url = window.location.href;
+      var hashIdx = url.indexOf("#");
+      if (hashIdx !== -1) url = url.slice(0, hashIdx);
+      var qIdx = url.indexOf("?");
+      if (qIdx !== -1) url = url.slice(0, qIdx);
+      var suffix = PAGENAME + ".html";
+      if (url.slice(-suffix.length) === suffix) {
+        return url.slice(0, url.length - suffix.length);
+      }
+      // Fallback: directory of the current file.
+      return url.slice(0, url.lastIndexOf("/") + 1);
+    }
+
+    function enRoot() {
+      // Normalise to the English (top-level) site root.
+      var currRoot = currentRoot();
+      var zhSuffix = ZH_SEGMENT + "/";
+      if (IS_CHINESE && currRoot.slice(-zhSuffix.length) === zhSuffix) {
+        return currRoot.slice(0, currRoot.length - zhSuffix.length);
+      }
+      return currRoot;
     }
 
     function resolvePath(targetLang) {
-      var pathname = window.location.pathname || "";
       var query = window.location.search || "";
       var hash = window.location.hash || "";
-      var root = versionRoot();  // e.g. "/MagiAttention/docs/main/"
-      if (!root) return "#";
-
-      var afterRoot = pathname.slice(root.length);  // e.g. "user_guide/install.html"
-                                                    //  or "zh_CN/user_guide/install.html"
-
-      // Strip existing zh_CN prefix if present
-      if (afterRoot.startsWith(ZH_SEGMENT + "/")) {
-        afterRoot = afterRoot.slice(ZH_SEGMENT.length + 1);
-      }
-
-      if (targetLang === "en") {
-        return root + afterRoot + query + hash;
-      } else {
-        return root + ZH_SEGMENT + "/" + afterRoot + query + hash;
-      }
+      var base = enRoot();  // English site root, ends with "/"
+      var target = (targetLang === "en") ? base : base + ZH_SEGMENT + "/";
+      return target + PAGENAME + ".html" + query + hash;
     }
 
     var links = document.querySelectorAll(".doc-lang-link");
@@ -600,7 +640,8 @@
                 <article class="bd-article">
                    <section id="environment-variables">
 <h1>Environment Variables<a class="headerlink" href="#environment-variables" title="Link to this heading">#</a></h1>
-<p>Below are some environment variables that can be set, along with their descriptions.</p>
+<p>Below are some environment variables that can be set, along with their descriptions.
+All of the MagiAttention-specific ones are prefixed with <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>Since MagiAttention is actively evolving, many advanced but experimental features will be released but enabled through environment variables.</p>
@@ -608,21 +649,27 @@
 <nav class="contents local" id="contents">
 <ul class="simple">
 <li><p><a class="reference internal" href="#for-correctness" id="id1">For Correctness</a></p></li>
-<li><p><a class="reference internal" href="#for-performance" id="id2">For Performance</a></p></li>
-<li><p><a class="reference internal" href="#for-debug" id="id3">For Debug</a></p></li>
-<li><p><a class="reference internal" href="#for-build" id="id4">For Build</a></p>
+<li><p><a class="reference internal" href="#for-runtime" id="id2">For Runtime</a></p></li>
+<li><p><a class="reference internal" href="#for-performance" id="id3">For Performance</a></p></li>
+<li><p><a class="reference internal" href="#for-debug" id="id4">For Debug</a></p></li>
+<li><p><a class="reference internal" href="#for-build" id="id5">For Build</a></p>
 <ul>
-<li><p><a class="reference internal" href="#jit" id="id5">JIT</a></p></li>
-<li><p><a class="reference internal" href="#aot" id="id6">AOT</a></p></li>
+<li><p><a class="reference internal" href="#jit" id="id6">JIT</a></p></li>
+<li><p><a class="reference internal" href="#aot" id="id7">AOT</a></p></li>
 </ul>
 </li>
+<li><p><a class="reference internal" href="#for-testing" id="id8">For Testing</a></p></li>
 </ul>
 </nav>
 <section id="for-correctness">
 <h2><a class="toc-backref" href="#id1" role="doc-backlink">For Correctness</a><a class="headerlink" href="#for-correctness" title="Link to this heading">#</a></h2>
 <p><strong>MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_fwd_high_precision_reduce_enable</span></code></p></li>
+</ul>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable high-precision (fp32) reduce for partial out during dist-attn forward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+to trade-off double comm overhead for increased precision and less dtype-cast overhead.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <ol class="arabic simple">
@@ -632,8 +679,12 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 </ol>
 </div>
 <p><strong>MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_bwd_high_precision_reduce_enable</span></code></p></li>
+</ul>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+to trade-off double comm overhead for increased precision and less dtype-cast overhead.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <ol class="arabic simple">
@@ -642,7 +693,11 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 </ol>
 </div>
 <p><strong>MAGI_ATTENTION_DSINK_ALL_REDUCE_OP</strong></p>
-<p>Set the value of this env variable to control the all-reduce op for sink gradients within <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code> when involving attention sink. The default value is <code class="docutils literal notranslate"><span class="pre">none</span></code>. And options are within {<code class="docutils literal notranslate"><span class="pre">none</span></code>, <code class="docutils literal notranslate"><span class="pre">sum</span></code>, <code class="docutils literal notranslate"><span class="pre">avg</span></code>}.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">none</span></code> (options: <code class="docutils literal notranslate"><span class="pre">none</span></code>, <code class="docutils literal notranslate"><span class="pre">sum</span></code>, <code class="docutils literal notranslate"><span class="pre">avg</span></code>)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.dsink_all_reduce_op</span></code></p></li>
+</ul>
+<p>Set the value of this env variable to control the all-reduce op for sink gradients within <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code> when involving attention sink.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>For now we only accept global replicated sink tensor as input to feed into <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code>, and the gradients of sink in each cp rank are partial and requires to be sum-reduced across cp ranks.</p>
@@ -653,160 +708,363 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 <p>And sometimes, <code class="docutils literal notranslate"><span class="pre">avg</span></code> might also be an option when you need to scale the sink gradients by <code class="docutils literal notranslate"><span class="pre">1/cp</span></code>.</p>
 </div>
 </section>
-<section id="for-performance">
-<h2><a class="toc-backref" href="#id2" role="doc-backlink">For Performance</a><a class="headerlink" href="#for-performance" title="Link to this heading">#</a></h2>
-<p><strong>MAGI_ATTENTION_FA4_BACKEND</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to switch the attn kernel backend from <code class="docutils literal notranslate"><span class="pre">FFA</span></code> to <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>, a monkey patch version of Flash-Attention 4, to temporarily support arbitrary mask on Blackwell GPUs. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<section id="for-runtime">
+<h2><a class="toc-backref" href="#id2" role="doc-backlink">For Runtime</a><a class="headerlink" href="#for-runtime" title="Link to this heading">#</a></h2>
+<p><strong>MAGI_ATTENTION_LOG_LEVEL</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">WARN</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.log_level</span></code></p></li>
+</ul>
+<p>Set this env variable to control the logging verbosity of the entire <code class="docutils literal notranslate"><span class="pre">magi_attention</span></code> package.
+Valid values (case-insensitive) are <code class="docutils literal notranslate"><span class="pre">DEBUG</span></code>, <code class="docutils literal notranslate"><span class="pre">INFO</span></code>, <code class="docutils literal notranslate"><span class="pre">WARN</span></code>, <code class="docutils literal notranslate"><span class="pre">WARNING</span></code>, <code class="docutils literal notranslate"><span class="pre">ERROR</span></code>, <code class="docutils literal notranslate"><span class="pre">CRITICAL</span></code>.</p>
+<p><strong>MAGI_ATTENTION_KERNEL_BACKEND</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">ffa</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.kernel_backend</span></code></p></li>
+</ul>
+<p>Set this env variable to choose the attn kernel backend. Valid values are:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">ffa</span></code>: flex-flash-attention (default, high-performance persistent kernel).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sdpa</span></code>: offline SDPA implementation (for testing / high precision like <code class="docutils literal notranslate"><span class="pre">fp32</span></code>/<code class="docutils literal notranslate"><span class="pre">fp64</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sdpa_ol</span></code>: online (block-wise) SDPA implementation (for testing, lower memory than <code class="docutils literal notranslate"><span class="pre">sdpa</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fa4</span></code>: Flash-Attention 4 monkey-patch (workaround for Blackwell GPUs).</p></li>
+</ul>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>This is for now a workaround solution might be removed or updated in the future.</p>
+<p>This supersedes the legacy <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_SDPA_BACKEND=1</span></code> and <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FA4_BACKEND=1</span></code>
+toggles, which are still supported but must NOT be set together with <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND</span></code>.</p>
+</div>
+<p><strong>MAGI_ATTENTION_PRECISION</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> unset (use the input dtype as-is)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.precision</span></code></p></li>
+</ul>
+<p>Set this env variable to override the compute dtype for attention kernels. Valid values are
+<code class="docutils literal notranslate"><span class="pre">bf16</span></code>, <code class="docutils literal notranslate"><span class="pre">fp16</span></code>, <code class="docutils literal notranslate"><span class="pre">fp32</span></code>, <code class="docutils literal notranslate"><span class="pre">fp64</span></code>. When set, input Q/K/V are cast to the specified dtype before
+attention computation, and the output is cast back to the original input dtype.</p>
+</section>
+<section id="for-performance">
+<h2><a class="toc-backref" href="#id3" role="doc-backlink">For Performance</a><a class="headerlink" href="#for-performance" title="Link to this heading">#</a></h2>
+<p><strong>MAGI_ATTENTION_FA4_BACKEND</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.kernel_backend</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to switch the attn kernel backend from <code class="docutils literal notranslate"><span class="pre">FFA</span></code> to <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code>, a monkey patch version of Flash-Attention 4, to temporarily support arbitrary mask on Blackwell GPUs.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This is a legacy toggle kept for backward compatibility; prefer <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND=fa4</span></code>.
+This is for now a workaround solution might be removed or updated in the future.</p>
 </div>
 <p><strong>MAGI_ATTENTION_NATIVE_GRPCOLL</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable native kernel implementation for group collective comm. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_native_grpcoll_enable</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable native kernel implementation for group collective comm.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This feature is experimental and under active development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
 <p><strong>MAGI_ATTENTION_QO_COMM</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_qo_comm_enable</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This feature is experimental and under active development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
 <p><strong>MAGI_ATTENTION_FLATTEN_HEAD_GROUPS</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to flatten head groups within GQA/MQA attention to optimize dynamic solver performance. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_flatten_head_groups_enable</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to flatten head groups within GQA/MQA attention to optimize dynamic solver performance.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This feature is experimental and under active development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
 <p><strong>MAGI_ATTENTION_AUTO_RANGE_MERGE</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_auto_range_merge_enable</span></code></p></li>
+</ul>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable automatic range merging for flex-flash-attention,
-to improve performance by reducing the number of attention ranges. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+to improve performance by reducing the number of attention ranges.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This feature is experimental and under active development for now,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
 <p><strong>MAGI_ATTENTION_CATGQA</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable CatGQA mode for flex-flash-attention backward, to further optimize the performance under GQA settings by concatenating multiple Q heads sharing the same KV head. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_cat_gqa_enable</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable CatGQA mode for flex-flash-attention backward, to further optimize the performance under GQA settings by concatenating multiple Q heads sharing the same KV head.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This feature is experimental and under active development for now,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
 <p><strong>MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to trade saving the last remote <code class="docutils literal notranslate"><span class="pre">kv</span></code> activation for reordering overlap stages during backward, hiding the final remote <code class="docutils literal notranslate"><span class="pre">group_reduce</span></code> with the host FFA stage. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.dist_attn_backward_hide_tail_reduce</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to trade saving the last remote <code class="docutils literal notranslate"><span class="pre">kv</span></code> activation for reordering overlap stages during backward, hiding the final remote <code class="docutils literal notranslate"><span class="pre">group_reduce</span></code> with the host FFA stage.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This feature is experimental and under active development for now, and not compatible with many other features like qo comm,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
+<p><strong>MAGI_ATTENTION_MIN_CHUNKS_PER_RANK</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">8</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.min_chunks_per_rank</span></code></p></li>
+</ul>
+<p>Set the value of this env variable to control the minimum number of chunks per context parallel rank, to control the granularity of computational load-balance.</p>
 <p><strong>MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN</strong></p>
-<p>Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. The default value is <code class="docutils literal notranslate"><span class="pre">4</span></code> if <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code>, otherwise <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">4</span></code> if <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code>, otherwise <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.ffa_fwd_sm_margin_save_for_comm</span></code></p></li>
+</ul>
+<p>Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels.</p>
 <p><strong>MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN</strong></p>
-<p>Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels. The default value is <code class="docutils literal notranslate"><span class="pre">4</span></code> if <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code>, otherwise <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">4</span></code> if <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code>, otherwise <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.ffa_bwd_sm_margin_save_for_comm</span></code></p></li>
+</ul>
+<p>Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels.</p>
 <p><strong>MAGI_ATTENTION_CPP_BACKEND</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable C++ backend for core data structures (<code class="docutils literal notranslate"><span class="pre">AttnRange</span></code>, <code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code>, etc.) to avoid Python overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_cpp_backend_enable</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable C++ backend for core data structures (<code class="docutils literal notranslate"><span class="pre">AttnRange</span></code>, <code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code>, etc.) to avoid Python overhead.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This feature is experimental and under active development for now.
 If the C++ extension is not found or this variable is set to <code class="docutils literal notranslate"><span class="pre">0</span></code>, it will fall back to the Python implementation.</p>
 </div>
 <p><strong>MAGI_ATTENTION_HIERARCHICAL_COMM</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group). The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.comm.is_hierarchical_comm_enable</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group).</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This is for now a temporary solution to reduce the redundant inter-node communication and might be removed or updated in the future.</p>
 </div>
 <p><strong>MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE</strong></p>
-<p>Set the value of this env variable to control the maximum LRU cache size of <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict_mgr</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">1000</span></code>.</p>
-<p><strong>MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN</strong></p>
-<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> to override the inner-loop iteration direction of the FFA kernel (both FWD and BWD). <code class="docutils literal notranslate"><span class="pre">true</span></code> means MaxToMin (descending), <code class="docutils literal notranslate"><span class="pre">false</span></code> means MinToMax (ascending). If not set, defaults to MinToMax.</p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation.</p>
-</div>
-<p><strong>MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP</strong></p>
-<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> to enable or disable intra-warpgroup overlap in the FFA forward kernel. When enabled, the MMA warpgroup pre-loads the next V tile while computing the current softmax, hiding V load latency. If not set, defaults to <code class="docutils literal notranslate"><span class="pre">true</span></code>.</p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects FWD.</p>
-</div>
-<p><strong>MAGI_ATTENTION_FFA_USE_MASK_DISPATCH</strong></p>
-<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">true</span></code> or <code class="docutils literal notranslate"><span class="pre">false</span></code> to enable or disable the mask-dispatch optimization in the FFA backward kernel. When enabled, the BWD inner loop uses zone-based dispatch (no_mask / causal / boundary) to skip unnecessary mask computations. If not set, defaults to <code class="docutils literal notranslate"><span class="pre">true</span></code>.</p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects BWD.</p>
-</div>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">1000</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.dist_attn_runtime_dict_size</span></code></p></li>
+</ul>
+<p>Set the value of this env variable to control the maximum LRU cache size of <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict_mgr</span></code>.</p>
 <p><strong>CUDA_DEVICE_MAX_CONNECTIONS</strong></p>
-<p>This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic. The default value is <code class="docutils literal notranslate"><span class="pre">8</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">8</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_cuda_device_max_connections_one</span></code></p></li>
+</ul>
+<p>This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic.</p>
 </section>
 <section id="for-debug">
-<h2><a class="toc-backref" href="#id3" role="doc-backlink">For Debug</a><a class="headerlink" href="#for-debug" title="Link to this heading">#</a></h2>
+<h2><a class="toc-backref" href="#id4" role="doc-backlink">For Debug</a><a class="headerlink" href="#for-debug" title="Link to this heading">#</a></h2>
 <p><strong>MAGI_ATTENTION_SANITY_CHECK</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable many sanity check codes inside magi_attention. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_sanity_check_enable</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable many sanity check codes inside magi_attention.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This is only supposed to be used for testing or debugging, since the extra sanity-check overhead might be non-negligible.</p>
 </div>
 <p><strong>MAGI_ATTENTION_SDPA_BACKEND</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like <code class="docutils literal notranslate"><span class="pre">fp32</span></code> or <code class="docutils literal notranslate"><span class="pre">fp64</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.kernel_backend</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like <code class="docutils literal notranslate"><span class="pre">fp32</span></code> or <code class="docutils literal notranslate"><span class="pre">fp64</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>This is only supposed to be used for testing or debugging, since the performance is not acceptable.</p>
+<p>This is a legacy toggle kept for backward compatibility; prefer <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND=sdpa</span></code>.
+This is only supposed to be used for testing or debugging, since the performance is not acceptable.</p>
 </div>
 <p><strong>MAGI_ATTENTION_DETERMINISTIC_MODE</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable deterministic mode to use deterministic algorithms for all magi_attention kernels. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_deterministic_mode_enable</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable deterministic mode to use deterministic algorithms for all magi_attention kernels.</p>
 <p><strong>MAGI_ATTENTION_PROFILE_MODE</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable profiling mode to profile all magi_attention kernels, currently mainly for ffa kernels (<em>see <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa">here</a> for more details</em>). The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_profile_mode_enable</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable profiling mode to profile all magi_attention kernels, currently mainly for ffa kernels (<em>see <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa">here</a> for more details</em>).</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This is only supposed to be used for development. Please do NOT enable it in production.</p>
 </div>
+<p><strong>MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.kernel.cutedsl</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable debug-time checks and diagnostics for the CuteDSL FFA kernels.</p>
 </section>
 <section id="for-build">
-<h2><a class="toc-backref" href="#id4" role="doc-backlink">For Build</a><a class="headerlink" href="#for-build" title="Link to this heading">#</a></h2>
+<h2><a class="toc-backref" href="#id5" role="doc-backlink">For Build</a><a class="headerlink" href="#for-build" title="Link to this heading">#</a></h2>
 <section id="jit">
-<h3><a class="toc-backref" href="#id5" role="doc-backlink">JIT</a><a class="headerlink" href="#jit" title="Link to this heading">#</a></h3>
+<h3><a class="toc-backref" href="#id6" role="doc-backlink">JIT</a><a class="headerlink" href="#jit" title="Link to this heading">#</a></h3>
 <p><strong>MAGI_ATTENTION_WORKSPACE_BASE</strong></p>
-<p>Specifies the base directory for the MagiAttention workspace, which includes cache and generated source files. If not set, it defaults to the user’s home directory (<code class="docutils literal notranslate"><span class="pre">~</span></code>).</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">$HOME</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.workspace_base_dir</span></code></p></li>
+</ul>
+<p>Specifies the base directory for the MagiAttention workspace, which includes cache and generated source files.</p>
 <p><strong>MAGI_ATTENTION_BUILD_VERBOSE</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable verbose output during the JIT compilation process, showing the full ninja build commands being executed. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.is_build_verbose</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable verbose output during the JIT compilation process, showing the full ninja build commands being executed.</p>
 <p><strong>MAGI_ATTENTION_BUILD_DEBUG</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable debug flags for the C++/CUDA compiler. This includes options like <code class="docutils literal notranslate"><span class="pre">-g</span></code> (debugging symbols) and other flags to get more detailed information, such as register usage. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.is_build_debug</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable debug flags for the C++/CUDA compiler. This includes options like <code class="docutils literal notranslate"><span class="pre">-g</span></code> (debugging symbols) and other flags to get more detailed information, such as register usage.</p>
 <p><strong>MAGI_ATTENTION_NO_BUILD_CACHE</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to disable caching for built ffa kernels. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.is_no_build_cache</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to disable caching for built ffa kernels.</p>
 <p><strong>MAGI_ATTENTION_FORCE_JIT_BUILD</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to force building FFA in JIT mode, even the pre-built AOT <code class="docutils literal notranslate"><span class="pre">libs</span></code> exists. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.is_force_jit_build</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to force building FFA in JIT mode, even the pre-built AOT <code class="docutils literal notranslate"><span class="pre">libs</span></code> exists.</p>
 <p><strong>NVCC_THREADS</strong></p>
-<p>Sets the number of threads for <code class="docutils literal notranslate"><span class="pre">nvcc</span></code>’s <code class="docutils literal notranslate"><span class="pre">--split-compile</span></code> option, which can speed up the JIT compilation of CUDA kernels. The default value is <code class="docutils literal notranslate"><span class="pre">4</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">4</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.nvcc_threads</span></code></p></li>
+</ul>
+<p>Sets the number of threads for <code class="docutils literal notranslate"><span class="pre">nvcc</span></code>’s <code class="docutils literal notranslate"><span class="pre">--split-compile</span></code> option, which can speed up the JIT compilation of CUDA kernels.</p>
+<p><strong>MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.kernel.cutedsl.cache_utils</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable on-disk caching of compiled CuteDSL FFA kernels.</p>
+<p><strong>MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> unset (use the default cache location)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.kernel.cutedsl.cache_utils</span></code></p></li>
+</ul>
+<p>Set this env variable to specify the directory for the CuteDSL FFA kernel cache.</p>
 </section>
 <section id="aot">
-<h3><a class="toc-backref" href="#id6" role="doc-backlink">AOT</a><a class="headerlink" href="#aot" title="Link to this heading">#</a></h3>
+<h3><a class="toc-backref" href="#id7" role="doc-backlink">AOT</a><a class="headerlink" href="#aot" title="Link to this heading">#</a></h3>
 <p><strong>MAGI_ATTENTION_PREBUILD_FFA_JOBS</strong></p>
-<p>Set the value of this env variable to control the number of parallel compilation jobs used to pre-build ffa kernels. The default value is the ceiling of <code class="docutils literal notranslate"><span class="pre">90%</span></code> of the available CPU cores (i.e. <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code>).</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Set the value of this env variable to control the number of parallel compilation jobs used to pre-build ffa kernels.</p>
 <p><strong>MAX_JOBS</strong></p>
-<p>Set the value of this env variable to control the number of parallel compilation jobs used to build the extension modules other than ffa. The default value is the ceiling of <code class="docutils literal notranslate"><span class="pre">90%</span></code> of the available CPU cores (i.e. <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code>).</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Set the value of this env variable to control the number of parallel compilation jobs used to build the extension modules other than ffa.</p>
 <p><strong>MAGI_ATTENTION_PREBUILD_FFA</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable pre-build ffa kernels for some common options with <code class="docutils literal notranslate"><span class="pre">ref_block_size=None</span></code> and leave others built in jit mode. The default value is <code class="docutils literal notranslate"><span class="pre">1</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">1</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable pre-build ffa kernels for some common options with <code class="docutils literal notranslate"><span class="pre">ref_block_size=None</span></code> and leave others built in jit mode.</p>
+<p><strong>MAGI_ATTENTION_SKIP_CUDA_BUILD</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to skip building all the CUDA extension modules entirely (e.g. for a Python-only / docs build).</p>
 <p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">magi_attn_ext</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">magi_attn_ext</span></code>.</p>
 <p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code>.</p>
+<p><strong>MAGI_ATTENTION_FORCE_CXX11_ABI</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to force building the extension modules with the C++11 ABI (<code class="docutils literal notranslate"><span class="pre">_GLIBCXX_USE_CXX11_ABI=1</span></code>), to match a PyTorch build compiled with the new ABI.</p>
+<p><strong>MAGI_ATTENTION_DISABLE_SM90_FEATURES</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to disable the SM90 (Hopper)-specific features when building the extension modules, e.g. when targeting a toolchain without SM90 support.</p>
 <p><strong>MAGI_ATTENTION_FFA_FA4_CACHE_DIR</strong></p>
-<p>Set this env variable to specify the cache directory for pre-compiled <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> kernels. The default value is <code class="docutils literal notranslate"><span class="pre">magi_attention/lib/ffa_fa4_cache/</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention/lib/ffa_fa4_cache/</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.functional.fa4_utils</span></code></p></li>
+</ul>
+<p>Set this env variable to specify the cache directory for pre-compiled <code class="docutils literal notranslate"><span class="pre">FFA_FA4</span></code> kernels.</p>
 <p><strong>MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY</strong></p>
-<p>Set this env variable to specify the compute capability used to build MagiAttention extension modules (affects <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code> and <code class="docutils literal notranslate"><span class="pre">create_block_mask</span></code>). Supports comma-separated values for multi-arch builds, e.g. <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100</span></code>. If not set, we will try to detect the compute capability of the current GPU device. And we will raise an error if detection fails.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> unset (auto-detect the current GPU device)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Set this env variable to specify the compute capability used to build MagiAttention extension modules (affects <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code> and <code class="docutils literal notranslate"><span class="pre">create_block_mask</span></code>). Supports comma-separated values for multi-arch builds, e.g. <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100</span></code>. If not set, we will try to detect the compute capability of the current GPU device, and raise an error if detection fails.</p>
 <p><strong>MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12</strong></p>
-<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to allow building MagiAttention extension modules with <code class="docutils literal notranslate"><span class="pre">CUDA-12</span></code>, which might cause significant performance degradation compared to <code class="docutils literal notranslate"><span class="pre">CUDA-13+</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>, in which case we will raise an error and abort the installation if the CUDA version is lower than <code class="docutils literal notranslate"><span class="pre">13.0</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Set this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to allow building MagiAttention extension modules with <code class="docutils literal notranslate"><span class="pre">CUDA-12</span></code>, which might cause significant performance degradation compared to <code class="docutils literal notranslate"><span class="pre">CUDA-13+</span></code>. When <code class="docutils literal notranslate"><span class="pre">0</span></code>, we will raise an error and abort the installation if the CUDA version is lower than <code class="docutils literal notranslate"><span class="pre">13.0</span></code>.</p>
 <p><strong>NVSHMEM_DIR</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> the system module <code class="docutils literal notranslate"><span class="pre">nvidia-nvshmem-cu12</span></code> (as listed in <code class="docutils literal notranslate"><span class="pre">requirements.txt</span></code>)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
 <p>Set this env variable to the path of the custom <code class="docutils literal notranslate"><span class="pre">nvshmem</span></code> installation directory.</p>
-<p>If not set, it defaults to find the system module <code class="docutils literal notranslate"><span class="pre">nvidia-nvshmem-cu12</span></code> as listed in <code class="docutils literal notranslate"><span class="pre">requirements.txt</span></code>.</p>
 <p>If not found anywhere, all relative features used in native group collective comm kernels are disabled.</p>
 </section>
+</section>
+<section id="for-testing">
+<h2><a class="toc-backref" href="#id8" role="doc-backlink">For Testing</a><a class="headerlink" href="#for-testing" title="Link to this heading">#</a></h2>
+<p><strong>MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.testing</span></code> (<code class="docutils literal notranslate"><span class="pre">with_run_in_mp</span></code>)</p></li>
+</ul>
+<p>Whether to run parameterized distributed test cases in a multiprocessing context. This is set internally by the <code class="docutils literal notranslate"><span class="pre">&#64;with_run_in_mp</span></code> decorator rather than being configured by users directly.</p>
+<p><strong>MAGI_ATTENTION_COPYRIGHT_TEST_YEAR</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> current calendar year</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">tools/codestyle/copyright.py</span></code></p></li>
+</ul>
+<p>Overrides the “current year” used by the copyright-header check. Useful for reproducible testing of the copyright tooling.</p>
 </section>
 </section>
 
@@ -837,6 +1095,7 @@ If the C++ extension is not found or this variable is set to <code class="docuti
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-correctness">For Correctness</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-runtime">For Runtime</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">For Performance</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-debug">For Debug</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">For Build</a><ul class="pst-show_toc_level nav section-nav flex-column">
@@ -844,6 +1103,7 @@ If the C++ extension is not found or this variable is set to <code class="docuti
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#aot">AOT</a></li>
 </ul>
 </li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-testing">For Testing</a></li>
 </ul>
   </nav></div>
 
@@ -872,7 +1132,7 @@ If the C++ extension is not found or this variable is set to <code class="docuti
 
   <p class="copyright">
     
-      © Copyright 2025-2026, Sandai.
+      © Copyright 2025-2026, SandAI.
       <br/>
     
   </p>
