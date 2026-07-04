@@ -57,6 +57,12 @@ from .range_info_sm90 import (
 )
 from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
+from .sparse_load_sm90 import (
+    SparseLoadCopyEngine,
+    _compute_total_k_tokens,
+    create_sparse_load_producer_state,
+    prefetch_sparse_load,
+)
 from .sparse_utils import (
     BlockSparseTensors,
     consume_block_sparse_loads,
@@ -88,6 +94,8 @@ class FFAFwdSm90:
         intra_wg_overlap: bool = True,
         mma_pv_is_rs: bool = True,
         paged_kv_non_tma: bool = False,
+        sparse_load: bool = False,
+        equal_k_range_size: bool = False,
         score_mod: Optional[cutlass.Constexpr] = None,
         mask_mod: Optional[cutlass.Constexpr] = None,
         has_aux_tensors: bool = False,
@@ -124,7 +132,9 @@ class FFAFwdSm90:
 
         self.intra_wg_overlap = intra_wg_overlap
         self.mma_pv_is_rs = mma_pv_is_rs
-        self.use_tma_KV = not paged_kv_non_tma
+        self.sparse_load = sparse_load
+        self.equal_k_range_size = equal_k_range_size
+        self.use_tma_KV = not (paged_kv_non_tma or sparse_load)
         self.cluster_shape_mn = (1, 1)
         self.num_warps_per_wg = 4
         self.num_threads_per_wg = self.num_warps_per_wg * cute.arch.WARP_SIZE
@@ -572,6 +582,7 @@ class FFAFwdSm90:
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
         mAttnTypeMap: cute.Tensor = None,
+        mCuBatches: cute.Tensor = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -911,6 +922,7 @@ class FFAFwdSm90:
             mQRanges,
             mKRanges,
             mAttnTypeMap,
+            mCuBatches,
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
@@ -956,6 +968,7 @@ class FFAFwdSm90:
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
         mAttnTypeMap: cute.Tensor = None,
+        mCuBatches: cute.Tensor = None,
     ):
         # /////////////////////////////////////////////////////////////////////////////
         #  Set up before warp specialization
@@ -1211,6 +1224,8 @@ class FFAFwdSm90:
                 SeqlenInfoCls,
                 tile_scheduler=tile_scheduler,
                 is_print_block=is_print_block,
+                mKRanges=mKRanges,
+                mCuBatches=mCuBatches,
             )
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1250,6 +1265,8 @@ class FFAFwdSm90:
                 fastdiv_mods,
                 is_print_block=is_print_block,
                 _read_mask_type_fn=_read_mask_type_fn,
+                mKRanges=mKRanges,
+                mCuBatches=mCuBatches,
             )
 
     @cute.jit
@@ -1274,6 +1291,8 @@ class FFAFwdSm90:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
         is_print_block: bool = False,
+        mKRanges: Optional[cute.Tensor] = None,
+        mCuBatches: cute.Tensor = None,
     ):
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % len(
             self.load_warp_ids
@@ -1381,23 +1400,26 @@ class FFAFwdSm90:
                         tma_load_V_fn, pipeline_v
                     )
                 else:  # cp.async path
-                    paged_kv_manager = PagedKVManager.create(
-                        mPageTable,
-                        mK,
-                        mV,
-                        FastDivmodDivisor(mK.shape[0]),
-                        batch_idx,
-                        head_idx_kv,
-                        tidx,
-                        seqlen_info.seqlen_k,
-                        0,  # leftpad_k
-                        self.tile_n,
-                        self.tile_hdim,
-                        self.tile_hdimv,
-                        self.num_threads_per_wg,
-                        mK.element_type,
-                        arch=self.arch_num,
-                    )
+                    if const_expr(not self.sparse_load):
+                        paged_kv_manager = PagedKVManager.create(
+                            mPageTable,
+                            mK,
+                            mV,
+                            FastDivmodDivisor(mK.shape[0]),
+                            batch_idx,
+                            head_idx_kv,
+                            tidx,
+                            seqlen_info.seqlen_k,
+                            0,  # leftpad_k
+                            self.tile_n,
+                            self.tile_hdim,
+                            self.tile_hdimv,
+                            self.num_threads_per_wg,
+                            mK.element_type,
+                            arch=self.arch_num,
+                        )
+                    else:
+                        paged_kv_manager = None
 
                 load_K = partial(
                     self.load_KV,
@@ -1458,94 +1480,261 @@ class FFAFwdSm90:
                     )
 
                 if const_expr(not self.use_block_sparsity):
-                    n_block_min, n_block_max = block_info.get_n_block_min_max(
-                        seqlen_info, m_block
-                    )
+                    if const_expr(self.sparse_load):
+                        # //////////////////////////////////////////////////////////
+                        #  Sparse load path: token-walking cp.async scatter
+                        # //////////////////////////////////////////////////////////
 
-                    # Clamp n_block to 0 when n_block_max == 0
-                    # (can happen with causal + pack_gqa when seqlen_k < tile_n).
-                    # TMA handles n_block=-1 gracefully (fills zeros),
-                    # but cp.async would crash on out-of-bounds page table access.
-                    n_block = (
-                        n_block_max - 1
-                        if const_expr(self.use_tma_KV)
-                        else cutlass.max(n_block_max - 1, 0)
-                    )
-                    page_idx = (
-                        mPageTable[batch_idx, n_block]
-                        if const_expr(mPageTable is not None and self.use_tma_KV)
-                        else None
-                    )
+                        bidb = mCuBatches[batch_idx]  # type: ignore[index]
+                        end_batches_val = mCuBatches[batch_idx + 1]  # type: ignore[index]
 
-                    # --- Prologue: load Q,K0 ---
+                        mK_sparse = mK[None, None, head_idx_kv]
+                        mV_sparse = mV[None, None, head_idx_kv]
 
-                    # First iteration: load K on pipeline_k, Q on pipeline_q
-                    if is_kv_load_warp:
-                        pipeline_k.producer_acquire(kv_producer_state)
-                        if const_expr(not self.use_tma_KV):
-                            paged_kv_manager.load_page_table(n_block)
-                        load_K(
-                            block=n_block,
-                            producer_state=kv_producer_state,
-                            page_idx=page_idx,
+                        sparse_engine_k = SparseLoadCopyEngine.create(
+                            tidx,
+                            self.tile_n,
+                            self.tile_hdim,
+                            self.num_threads_per_wg,
+                            mK.element_type,
                         )
-                    if const_expr(self.use_tma_Q):
-                        if warp_idx_in_wg == 0:
+                        sparse_engine_v = (
+                            sparse_engine_k
+                            if const_expr(self.same_hdim_kv)
+                            else SparseLoadCopyEngine.create(
+                                tidx,
+                                self.tile_n,
+                                self.tile_hdimv,
+                                self.num_threads_per_wg,
+                                mV.element_type,
+                            )
+                        )
+
+                        sparse_state = create_sparse_load_producer_state(
+                            tidx,
+                            mKRanges,  # type: ignore[arg-type]
+                            bidb,
+                            end_batches_val,
+                            self.equal_k_range_size,
+                            self.tile_n,
+                            sparse_engine_k.gmem_threads_per_row,
+                            sparse_engine_k.num_rows_per_group,
+                        )
+
+                        # --- Load Q ---
+
+                        if const_expr(self.use_tma_Q):
+                            if warp_idx_in_wg == 0:
+                                pipeline_q.producer_acquire_w_index_phase(
+                                    0, q_producer_phase
+                                )
+                                load_Q(
+                                    tma_bar_ptr=pipeline_q.sync_object_full.get_barrier(
+                                        0
+                                    )
+                                )
+                                q_producer_phase ^= 1
+                        else:
                             pipeline_q.producer_acquire_w_index_phase(
                                 0, q_producer_phase
                             )
-                            load_Q(
-                                tma_bar_ptr=pipeline_q.sync_object_full.get_barrier(0)
+                            pack_gqa.load_Q(
+                                mQ_cur,
+                                sQ,
+                                gmem_tiled_copy_Q,
+                                tidx,
+                                m_block,
+                                seqlen_info.seqlen_q,
                             )
+                            cute.arch.cp_async_commit_group()
+                            pipeline_q.producer_commit_w_index(0)
                             q_producer_phase ^= 1
+
+                        # --- Prologue + Mainloop: scatter load K/V ---
+
+                        if is_kv_load_warp:
+                            seqlen_k_total = mK_sparse.shape[0]
+                            inner_idx = Int32(0)
+                            while inner_idx < sparse_state.inner_block_max:
+                                prefetch_sparse_load(
+                                    sparse_state,
+                                    mKRanges,  # type: ignore[arg-type]
+                                    self.tile_n,
+                                    sparse_engine_k.num_rows_per_group,
+                                )
+
+                                pipeline_k.producer_acquire(kv_producer_state)
+                                sparse_engine_k.load_scatter(
+                                    sparse_state.prev_token_indices,
+                                    mK_sparse,
+                                    sK[None, None, kv_producer_state.index],
+                                    self.tile_hdim,
+                                    seqlen_k_total,
+                                )
+                                cute.arch.cp_async_commit_group()
+                                pipeline_k.producer_commit(kv_producer_state)
+
+                                pipeline_v.producer_acquire(kv_producer_state)
+                                sparse_engine_v.load_scatter(
+                                    sparse_state.prev_token_indices,
+                                    mV_sparse,
+                                    sV[None, None, kv_producer_state.index],
+                                    self.tile_hdimv,
+                                    seqlen_k_total,
+                                )
+                                cute.arch.cp_async_commit_group()
+                                pipeline_v.producer_commit(kv_producer_state)
+
+                                kv_producer_state.advance()
+                                inner_idx += 1
+
                     else:
-                        pipeline_q.producer_acquire_w_index_phase(0, q_producer_phase)
-                        pack_gqa.load_Q(
-                            mQ_cur,
-                            sQ,
-                            gmem_tiled_copy_Q,
-                            tidx,
-                            m_block,
-                            seqlen_info.seqlen_q,
+                        # //////////////////////////////////////////////////////////
+                        #  Dense path (TMA or paged_kv cp.async)
+                        # //////////////////////////////////////////////////////////
+
+                        n_block_min, n_block_max = block_info.get_n_block_min_max(
+                            seqlen_info, m_block
                         )
-                        cute.arch.cp_async_commit_group()
-                        pipeline_q.producer_commit_w_index(0)
-                        q_producer_phase ^= 1
 
-                    # --- Mainloop/Epilogue: load Ki,Vi ---
+                        # Clamp n_block to 0 when n_block_max == 0
+                        # (can happen with causal + pack_gqa when seqlen_k < tile_n).
+                        # TMA handles n_block=-1 gracefully (fills zeros),
+                        # but cp.async would crash on out-of-bounds page table access.
+                        n_block = (
+                            n_block_max - 1
+                            if const_expr(self.use_tma_KV)
+                            else cutlass.max(n_block_max - 1, 0)
+                        )
+                        page_idx = (
+                            mPageTable[batch_idx, n_block]
+                            if const_expr(mPageTable is not None and self.use_tma_KV)
+                            else None
+                        )
 
-                    if is_kv_load_warp:
-                        if const_expr(not self.intra_wg_overlap or not self.use_tma_KV):
-                            # --- Mainloop0: load V0 ---
+                        # --- Prologue: load Q,K0 ---
 
-                            pipeline_v.producer_acquire(kv_producer_state)
-                            load_V(
+                        # First iteration: load K on pipeline_k, Q on pipeline_q
+                        if is_kv_load_warp:
+                            pipeline_k.producer_acquire(kv_producer_state)
+                            if const_expr(not self.use_tma_KV):
+                                paged_kv_manager.load_page_table(n_block)
+                            load_K(
                                 block=n_block,
                                 producer_state=kv_producer_state,
                                 page_idx=page_idx,
                             )
-                            kv_producer_state.advance()
-
-                            # --- Mainloop1: load Ki,Vi ---
-
-                            for i in cutlass.range(
-                                n_block_max - 1 - n_block_min, unroll=1
-                            ):
-                                n_block = n_block_max - 1 - i - 1
-                                page_idx = (
-                                    mPageTable[batch_idx, n_block]
-                                    if const_expr(
-                                        mPageTable is not None and self.use_tma_KV
-                                    )
-                                    else None
+                        if const_expr(self.use_tma_Q):
+                            if warp_idx_in_wg == 0:
+                                pipeline_q.producer_acquire_w_index_phase(
+                                    0, q_producer_phase
                                 )
-                                if const_expr(not self.use_tma_KV):
-                                    paged_kv_manager.load_page_table(n_block)
-                                pipeline_k.producer_acquire(kv_producer_state)
-                                load_K(
+                                load_Q(
+                                    tma_bar_ptr=pipeline_q.sync_object_full.get_barrier(
+                                        0
+                                    )
+                                )
+                                q_producer_phase ^= 1
+                        else:
+                            pipeline_q.producer_acquire_w_index_phase(
+                                0, q_producer_phase
+                            )
+                            pack_gqa.load_Q(
+                                mQ_cur,
+                                sQ,
+                                gmem_tiled_copy_Q,
+                                tidx,
+                                m_block,
+                                seqlen_info.seqlen_q,
+                            )
+                            cute.arch.cp_async_commit_group()
+                            pipeline_q.producer_commit_w_index(0)
+                            q_producer_phase ^= 1
+
+                        # --- Mainloop/Epilogue: load Ki,Vi ---
+
+                        if is_kv_load_warp:
+                            if const_expr(
+                                not self.intra_wg_overlap or not self.use_tma_KV
+                            ):
+                                # --- Mainloop0: load V0 ---
+
+                                pipeline_v.producer_acquire(kv_producer_state)
+                                load_V(
                                     block=n_block,
                                     producer_state=kv_producer_state,
                                     page_idx=page_idx,
+                                )
+                                kv_producer_state.advance()
+
+                                # --- Mainloop1: load Ki,Vi ---
+
+                                for i in cutlass.range(
+                                    n_block_max - 1 - n_block_min, unroll=1
+                                ):
+                                    n_block = n_block_max - 1 - i - 1
+                                    page_idx = (
+                                        mPageTable[batch_idx, n_block]
+                                        if const_expr(
+                                            mPageTable is not None and self.use_tma_KV
+                                        )
+                                        else None
+                                    )
+                                    if const_expr(not self.use_tma_KV):
+                                        paged_kv_manager.load_page_table(n_block)
+                                    pipeline_k.producer_acquire(kv_producer_state)
+                                    load_K(
+                                        block=n_block,
+                                        producer_state=kv_producer_state,
+                                        page_idx=page_idx,
+                                    )
+                                    pipeline_v.producer_acquire(kv_producer_state)
+                                    load_V(
+                                        block=n_block,
+                                        producer_state=kv_producer_state,
+                                        page_idx=page_idx,
+                                    )
+                                    kv_producer_state.advance()
+                            else:
+                                # --- Mainloop: load Ki,V(i-1) ---
+
+                                for i in cutlass.range(
+                                    n_block_max - 1 - n_block_min, unroll=1
+                                ):
+                                    n_block_prev = n_block_max - i - 1
+                                    n_block = n_block_prev - 1
+                                    page_idx = (
+                                        mPageTable[batch_idx, n_block]
+                                        if const_expr(mPageTable is not None)
+                                        else None
+                                    )
+                                    page_idx_prev = (
+                                        mPageTable[batch_idx, n_block_prev]
+                                        if const_expr(mPageTable is not None)
+                                        else None
+                                    )
+                                    kv_producer_state_prev = kv_producer_state.clone()
+                                    kv_producer_state.advance()
+                                    pipeline_k.producer_acquire(kv_producer_state)
+                                    load_K(
+                                        block=n_block,
+                                        producer_state=kv_producer_state,
+                                        page_idx=page_idx,
+                                    )
+                                    pipeline_v.producer_acquire(kv_producer_state_prev)
+                                    load_V(
+                                        block=n_block_prev,
+                                        producer_state=kv_producer_state_prev,
+                                        page_idx=page_idx_prev,
+                                    )
+
+                                # --- Epilogue: load V(-1) ---
+
+                                n_block = n_block_min
+                                page_idx = (
+                                    mPageTable[batch_idx, n_block]
+                                    if const_expr(mPageTable is not None)
+                                    else None
                                 )
                                 pipeline_v.producer_acquire(kv_producer_state)
                                 load_V(
@@ -1554,54 +1743,6 @@ class FFAFwdSm90:
                                     page_idx=page_idx,
                                 )
                                 kv_producer_state.advance()
-                        else:
-                            # --- Mainloop: load Ki,V(i-1) ---
-
-                            for i in cutlass.range(
-                                n_block_max - 1 - n_block_min, unroll=1
-                            ):
-                                n_block_prev = n_block_max - i - 1
-                                n_block = n_block_prev - 1
-                                page_idx = (
-                                    mPageTable[batch_idx, n_block]
-                                    if const_expr(mPageTable is not None)
-                                    else None
-                                )
-                                page_idx_prev = (
-                                    mPageTable[batch_idx, n_block_prev]
-                                    if const_expr(mPageTable is not None)
-                                    else None
-                                )
-                                kv_producer_state_prev = kv_producer_state.clone()
-                                kv_producer_state.advance()
-                                pipeline_k.producer_acquire(kv_producer_state)
-                                load_K(
-                                    block=n_block,
-                                    producer_state=kv_producer_state,
-                                    page_idx=page_idx,
-                                )
-                                pipeline_v.producer_acquire(kv_producer_state_prev)
-                                load_V(
-                                    block=n_block_prev,
-                                    producer_state=kv_producer_state_prev,
-                                    page_idx=page_idx_prev,
-                                )
-
-                            # --- Epilogue: load V(-1) ---
-
-                            n_block = n_block_min
-                            page_idx = (
-                                mPageTable[batch_idx, n_block]
-                                if const_expr(mPageTable is not None)
-                                else None
-                            )
-                            pipeline_v.producer_acquire(kv_producer_state)
-                            load_V(
-                                block=n_block,
-                                producer_state=kv_producer_state,
-                                page_idx=page_idx,
-                            )
-                            kv_producer_state.advance()
                 else:  # block sparse load (TODO: review the logics)
                     # Block sparsity: use TMA closures directly (not paged)
                     # Load Q on pipeline_q, separate from K/V pipeline
@@ -1709,6 +1850,8 @@ class FFAFwdSm90:
         fastdiv_mods=None,
         is_print_block: bool = False,
         _read_mask_type_fn=None,
+        mKRanges: Optional[cute.Tensor] = None,
+        mCuBatches: cute.Tensor = None,
     ):
         tidx, _, _ = cute.arch.thread_idx()
         tidx -= self.mma_warp_ids[0] * cute.arch.WARP_SIZE
@@ -1964,44 +2107,122 @@ class FFAFwdSm90:
             # --- Mainloop ---
 
             if const_expr(not self.use_block_sparsity):
-                # --- First ("half") iteration with seqlen masking ---
+                if const_expr(self.sparse_load):
+                    # //////////////////////////////////////////////////////////
+                    #  Sparse load consumer: iterate inner_block_max times
+                    # //////////////////////////////////////////////////////////
 
-                if const_expr(self.intra_wg_overlap):
-                    kv_consumer_state = process_first_half_block(
-                        n_block=n_block_max - 1,
-                        seqlen=seqlen_info,
-                        kv_consumer_state=kv_consumer_state,
-                        mask_fn=partial(mask_fn, mask_mod=self.mask_mod),
-                        score_mod_fn=score_mod_fn,
-                        is_first_block=True,
-                        is_print_thread_and_tile=is_print_thread_and_tile,
+                    bidb_c = mCuBatches[batch_idx]  # type: ignore[index]
+                    end_batches_c = mCuBatches[batch_idx + 1]  # type: ignore[index]
+                    total_k_tokens = _compute_total_k_tokens(
+                        mKRanges,  # type: ignore[arg-type]
+                        bidb_c,
+                        end_batches_c,
+                        self.equal_k_range_size,
                     )
-                else:
+                    inner_block_max = (total_k_tokens + self.tile_n - 1) // self.tile_n
+
                     self.warp_scheduler_barrier_sync()
-                    kv_consumer_state = mma_one_n_block(
-                        kv_consumer_state,
-                        n_block=n_block_max - 1,
-                        seqlen=seqlen_info,
-                        mma_pv_fn=partial(mma_pv_fn, zero_init=True),
-                        is_first_n_block=True,
-                        mask_fn=partial(
-                            mask_fn, mask_mod=self.mask_mod, mask_seqlen=True
-                        ),
-                    )
-                    O_should_accumulate = True
 
-                n_block_max -= 1
+                    inner_idx_c = Int32(0)
+                    while inner_idx_c < inner_block_max:
+                        kv_consumer_state = mma_one_n_block(
+                            kv_consumer_state,
+                            n_block=inner_idx_c,
+                            seqlen=seqlen_info,
+                            mma_pv_fn=partial(
+                                mma_pv_fn,
+                                zero_init=not O_should_accumulate,
+                            ),
+                            is_first_n_block=inner_idx_c == 0,
+                            mask_fn=partial(
+                                mask_fn,
+                                mask_mod=self.mask_mod,
+                                mask_seqlen=True,
+                            ),
+                        )
+                        O_should_accumulate = True
+                        inner_idx_c += 1
 
-                # --- Next couple of iterations with causal/local masking ---
+                    # Release Q pipeline
+                    pipeline_q.consumer_release_w_index(0)
 
-                if const_expr(self.is_causal or self.is_local):
-                    n_block_min_causal_local_mask = (
-                        block_info.get_n_block_min_causal_local_mask(
+                    self.warp_scheduler_barrier_arrive()
+
+                    if inner_block_max == 0:
+                        softmax.reset()
+                        acc_O.fill(0.0)
+
+                else:
+                    # //////////////////////////////////////////////////////////
+                    #  Dense consumer (TMA or paged_kv cp.async)
+                    # //////////////////////////////////////////////////////////
+
+                    # --- First ("half") iteration with seqlen masking ---
+
+                    if const_expr(self.intra_wg_overlap):
+                        kv_consumer_state = process_first_half_block(
+                            n_block=n_block_max - 1,
+                            seqlen=seqlen_info,
+                            kv_consumer_state=kv_consumer_state,
+                            mask_fn=partial(mask_fn, mask_mod=self.mask_mod),
+                            score_mod_fn=score_mod_fn,
+                            is_first_block=True,
+                            is_print_thread_and_tile=is_print_thread_and_tile,
+                        )
+                    else:
+                        self.warp_scheduler_barrier_sync()
+                        kv_consumer_state = mma_one_n_block(
+                            kv_consumer_state,
+                            n_block=n_block_max - 1,
+                            seqlen=seqlen_info,
+                            mma_pv_fn=partial(mma_pv_fn, zero_init=True),
+                            is_first_n_block=True,
+                            mask_fn=partial(
+                                mask_fn, mask_mod=self.mask_mod, mask_seqlen=True
+                            ),
+                        )
+                        O_should_accumulate = True
+
+                    n_block_max -= 1
+
+                    # --- Next couple of iterations with causal/local masking ---
+
+                    if const_expr(self.is_causal or self.is_local):
+                        n_block_min_causal_local_mask = (
+                            block_info.get_n_block_min_causal_local_mask(
+                                seqlen_info, m_block, n_block_min
+                            )
+                        )
+                        for n_tile in cutlass.range(
+                            n_block_max - n_block_min_causal_local_mask, unroll=1
+                        ):
+                            kv_consumer_state = mma_one_n_block(
+                                kv_consumer_state,
+                                n_block=n_block_max - 1 - n_tile,
+                                seqlen=seqlen_info,
+                                mma_pv_fn=partial(
+                                    mma_pv_fn, zero_init=not O_should_accumulate
+                                ),
+                                mask_fn=partial(
+                                    mask_fn, mask_mod=self.mask_mod, mask_seqlen=False
+                                ),
+                            )
+                            O_should_accumulate = True
+                        n_block_max = cutlass.min(
+                            n_block_max, n_block_min_causal_local_mask
+                        )
+
+                    # --- The remaining iterations have no masking ---
+
+                    n_block_min_before_local_mask = (
+                        block_info.get_n_block_min_before_local_mask(
                             seqlen_info, m_block, n_block_min
                         )
                     )
+
                     for n_tile in cutlass.range(
-                        n_block_max - n_block_min_causal_local_mask, unroll=1
+                        n_block_max - n_block_min_before_local_mask, unroll=1
                     ):
                         kv_consumer_state = mma_one_n_block(
                             kv_consumer_state,
@@ -2013,73 +2234,52 @@ class FFAFwdSm90:
                             mask_fn=partial(
                                 mask_fn, mask_mod=self.mask_mod, mask_seqlen=False
                             ),
-                        )
-                        O_should_accumulate = True
-                    n_block_max = cutlass.min(
-                        n_block_max, n_block_min_causal_local_mask
-                    )
-
-                # --- The remaining iterations have no masking ---
-
-                n_block_min_before_local_mask = (
-                    block_info.get_n_block_min_before_local_mask(
-                        seqlen_info, m_block, n_block_min
-                    )
-                )
-
-                for n_tile in cutlass.range(
-                    n_block_max - n_block_min_before_local_mask, unroll=1
-                ):
-                    kv_consumer_state = mma_one_n_block(
-                        kv_consumer_state,
-                        n_block=n_block_max - 1 - n_tile,
-                        seqlen=seqlen_info,
-                        mma_pv_fn=partial(mma_pv_fn, zero_init=not O_should_accumulate),
-                        mask_fn=partial(
-                            mask_fn, mask_mod=self.mask_mod, mask_seqlen=False
-                        ),
-                        is_print_thread_and_tile=(
-                            is_print_thread_and_tile and n_tile == 0
-                        ),
-                    )
-                    O_should_accumulate = True
-
-                # --- Separate iterations with local masking on the left ---
-
-                if const_expr(
-                    self.is_local and block_info.window_size_left is not None
-                ):
-                    n_block_max = cutlass.min(
-                        n_block_max, n_block_min_before_local_mask
-                    )
-                    for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
-                        kv_consumer_state = mma_one_n_block(
-                            kv_consumer_state,
-                            n_block=n_block_max - 1 - n_tile,
-                            seqlen=seqlen_info,
-                            mma_pv_fn=partial(
-                                mma_pv_fn, zero_init=not O_should_accumulate
-                            ),
-                            mask_fn=partial(
-                                mask_fn, mask_mod=self.mask_mod, mask_seqlen=False
+                            is_print_thread_and_tile=(
+                                is_print_thread_and_tile and n_tile == 0
                             ),
                         )
                         O_should_accumulate = True
 
-                # Release Q pipeline so the producer can load the next tile's Q
-                pipeline_q.consumer_release_w_index(0)
+                    # --- Separate iterations with local masking on the left ---
 
-                # --- Last "half" iteration ---
+                    if const_expr(
+                        self.is_local and block_info.window_size_left is not None
+                    ):
+                        n_block_max = cutlass.min(
+                            n_block_max, n_block_min_before_local_mask
+                        )
+                        for n_tile in cutlass.range(
+                            n_block_max - n_block_min, unroll=1
+                        ):
+                            kv_consumer_state = mma_one_n_block(
+                                kv_consumer_state,
+                                n_block=n_block_max - 1 - n_tile,
+                                seqlen=seqlen_info,
+                                mma_pv_fn=partial(
+                                    mma_pv_fn, zero_init=not O_should_accumulate
+                                ),
+                                mask_fn=partial(
+                                    mask_fn,
+                                    mask_mod=self.mask_mod,
+                                    mask_seqlen=False,
+                                ),
+                            )
+                            O_should_accumulate = True
 
-                if const_expr(self.intra_wg_overlap):
-                    kv_consumer_state = process_last_half_block(
-                        kv_consumer_state=kv_consumer_state,
-                        zero_init=not O_should_accumulate,
-                        is_print_thread_and_tile=is_print_thread_and_tile,
-                    )
-                    O_should_accumulate = True
-                else:
-                    self.warp_scheduler_barrier_arrive()
+                    # Release Q pipeline so the producer can load the next tile's Q
+                    pipeline_q.consumer_release_w_index(0)
+
+                    # --- Last "half" iteration ---
+
+                    if const_expr(self.intra_wg_overlap):
+                        kv_consumer_state = process_last_half_block(
+                            kv_consumer_state=kv_consumer_state,
+                            zero_init=not O_should_accumulate,
+                            is_print_thread_and_tile=is_print_thread_and_tile,
+                        )
+                        O_should_accumulate = True
+                    else:
+                        self.warp_scheduler_barrier_arrive()
 
             else:  # block sparse mma (TODO: review the logics)
                 (

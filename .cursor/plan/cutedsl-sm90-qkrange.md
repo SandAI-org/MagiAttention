@@ -78,39 +78,57 @@ kernel 内部直接接收 q_ranges/k_ranges + attn_type_map，不经过 cu_seqle
 
 ---
 
-## Phase 2: Block Sparse (qkrange 体系)
+## Phase 2: Block Sparse (qkrange sparse_load)
 
-### 2.1 核心目标
-用 MagiAttention 原生的 q_ranges + sparse_load 体系（不是 FA4 的 block lists）。
-kernel 内部用 BlockMeta 式结构 + cpasync/TMA1d inner load/store。
+### 2.1 Architecture
 
-### 2.2 需要新建/修改的文件
+**C++ Reference**: `SparseLoadBlockMeta` (block_meta.h) + cp.async scatter mainloop
+**CuTe-DSL Parallel**: paged_kv.py (cpasync.CopyG2SOp scatter pattern)
 
-| 文件 | 动作 | 内容 |
-|------|------|------|
-| `block_meta_sm90.py` | 新建 | BlockSparseBlockMeta (NamedTuple) |
-| `inner_load_sm90.py` | 新建 | TMA 2D / TMA 1D / cpasync scatter load 模式 |
-| `inner_store_sm90.py` | 新建 | TMA reduce-add / cpasync atomic store |
-| `sparse_utils_sm90.py` | 新建 | SM90 独有的 sparse producer/consumer |
-| `ffa_fwd_sm90.py` | 修改 | block sparse inner loop |
-| `ffa_bwd_sm90.py` | 修改 | block sparse BWD (LoopK + LoopQ) |
+Core idea: outer loop = Q tiles (m_block); inner loop = K tokens across merged k_ranges, loaded in kBlockN-wide windows via cp.async per-row scatter (not TMA 2D).
 
-### 2.3 关键 feature
+Host: reuse `merge_ranges()` from `functional/flex_flash_attn.py` (already available, uses magi_attn_ext C++ ops).
 
-| 优先级 | Feature | 说明 |
-|--------|---------|------|
-| P0 | Block Sparse FWD (LoopK) | inner K scatter load by ranges |
-| P0 | Block Sparse BWD (LoopK) | outer Q, inner K scatter |
-| P1 | Block Sparse BWD (LoopQ) | outer K, inner Q scatter（需 swap_qk） |
-| P1 | TMA 2D inner load | k_block_size >= tile_n 时 |
-| P1 | cpasync scatter inner load | k_block_size < tile_n 时 |
-| P2 | range merge | auto_range_merge for block sparse |
-| P2 | inner store mode | TMA reduce-add vs cpasync atomic |
+### 2.2 Implementation Steps
 
-### 2.4 验收标准
+| Step | File | Content |
+|------|------|---------|
+| 2a | `sparse_load_sm90.py` NEW | SparseLoadBlockMeta dataclass + token walk logic |
+| 2b | `sparse_load_sm90.py` | cp.async scatter load_KV() following paged_kv.py pattern |
+| 2c | `flex_flash_attn.py` cutedsl | Add sparse_load routing to SM90 kernel |
+| 2d | `ffa_fwd_sm90.py` | FWD producer: sparse load inner loop |
+| 2e | `ffa_fwd_sm90.py` | FWD consumer: sparse MMA with padding mask |
+| 2f | `ffa_bwd_sm90.py` | BWD LoopK: scatter load K/V + atomicAdd dK/dV |
+| 2g | test | CuTe-DSL block sparse correctness test |
 
-- Block Sparse FWD+BWD correctness（参考 test_block_sparse.py TestBlockSparseSimple）
-- TFLOPS vs Cutlass block sparse（同 density 场景，bench_sparse_analysis.py）
+### 2.3 Key Data Structures
+
+**SparseLoadBlockMeta** (per thread group, 8 threads):
+- Producer: token_indices[8], prev_token_indices[8], cur_k_range_indices[8], cur_k_range_inner_indices[8]
+- Both: inner_block_cur, inner_block_max, num_invalid_token, bidb, end_batches
+- Consumer: only counters (no arrays)
+
+**Host tensors passed to kernel**:
+- `mQRanges[unique_count, 2]` - merged unique Q ranges
+- `mKRanges[N, 2]` - reordered K ranges (sorted by Q)
+- `mCuBatches[unique_count+1]` - CSR index into K ranges (=qk_map)
+- `mAttnTypeMap[N]` - reordered attn types
+- `equal_k_range_size: bool` - fast-path flag
+
+### 2.4 cp.async scatter mechanics (from paged_kv.py)
+```python
+atom_async_copy = cute.make_copy_atom(
+    cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL), dtype, num_bits_per_copy=128)
+# Each thread does 128-bit cp.async per row × NumCpAsyncTilesPerRow
+cute.copy(gmem_tiled_copy_KV, gmem_row_tensor, smem_row_tensor, pred=should_load)
+cute.arch.cp_async_commit_group()
+```
+
+### 2.5 Constraints
+- sparse_load requires auto_range_merge + swap_bwd_qk_loop (BWD)
+- sparse_load and swap_ab are mutually exclusive
+- kBlockN in {64, 128}; NumGroups = 128/GroupSize(=8) = 16; NumRowsPerGroup = kBlockN/16
+- Last iteration: padding mask on columns >= kBlockN - num_invalid_token
 
 ---
 
@@ -366,6 +384,83 @@ git push origin feat/cutedsl-sm90-qkrange
 - seqlen=256 JIT 编译挂起（100% CPU 10h+ 未完成）— CuTe-DSL 编译器层面问题，非代码逻辑错误
 
 **下一步**: Phase 1d — Dense bench 对齐
+
+---
+
+### Phase 1d bench 验证 (2026-07-04 12:20)
+
+FWD bench (ffa vs fa3, nhq=48 MHA, hd=128, bf16):
+
+| Config | seqlen | ffa TFLOPS | fa3 TFLOPS | ratio |
+|--------|--------|-----------|-----------|-------|
+| full | 4096 | 625.4 | 682.8 | 91.6% |
+| varlen_full | 4096 | 525.3 | 616.2 | 85.3% |
+| causal | 4096 | 497.6 | 608.2 | 81.8% |
+| varlen_causal | 4096 | 397.2 | 535.8 | 74.1% |
+| full | 8192 | 680.1 | 662.7 | 102.6% |
+| varlen_full | 8192 | 555.0 | 629.1 | 88.2% |
+| causal | 8192 | 548.6 | 660.4 | 83.1% |
+| varlen_causal | 8192 | 211.4 | 295.9 | 71.4% |
+
+**Conclusion**: ffa vs fa3 gap is **pre-existing** CuTe-DSL kernel characteristic, unrelated to native qkrange changes. Our modifications only change how SeqlenInfoQK is created (from ranges vs cu_seqlens), resulting struct has identical fields. Zero compute/TMA/pipeline logic was touched. Full 8K actually shows ffa beating fa3 (102.6%).
+
+**下一步**: Phase 2 — Block Sparse
+
+---
+
+### Phase 2a: sparse_load_sm90.py created (2026-07-04 12:40)
+
+New file: `magi_attention/kernel/cutedsl/sparse_load_sm90.py`
+
+**SparseLoadProducerState**: dataclass with rmem tensors for token walk state:
+- `cur_k_range_indices/inner_indices[NumRowsPerGroup]` - which k_range, offset within
+- `token_indices/prev_token_indices[NumRowsPerGroup]` - absolute K row indices
+- `inner_block_cur/max`, `num_invalid_token` - iteration counters
+
+**Token walk functions** (all @cute.jit):
+- `_compute_total_k_tokens()` - equal/unequal k_range paths
+- `_advance_anchor_equal()` - O(1) integer div/mod seek
+- `_advance_anchor_unequal()` - while-loop slow path
+- `advance_and_fill()` - advance anchor + fill NumRowsPerGroup positions via step_one_token
+- `_step_one_token_min_to_max()` - single token advance with range boundary handling
+- `_clamp_to_boundary_min_to_max()` - prevent overflow past end_batches
+- `create_sparse_load_producer_state()` - factory with thread stagger init
+- `prefetch_sparse_load()` - save prev_token_indices + advance by kBlockN
+
+**SparseLoadCopyEngine**: cp.async scatter load engine following paged_kv.py pattern:
+- `create()` - configure 128-bit cp.async copy atom, tiled copy, thread layout
+- `load_scatter()` - per-row cp.async scatter from token_indices into dense smem tile
+
+**Integration plan**: Follow existing `paged_kv_non_tma` path — use `PipelineAsync` for K/V, all 128 producer threads participate.
+
+**下一步**: 2b — Integrate sparse_load into FWD kernel
+
+---
+
+### Phase 2b: FWD kernel sparse load integration (2026-07-04 12:50)
+
+**Producer changes** (`ffa_fwd_sm90.py`):
+- `FFAFwdSm90.__init__`: added `sparse_load`, `equal_k_range_size`; `use_tma_KV = not (paged_kv_non_tma or sparse_load)`
+- `__call__` / `kernel`: added `mCuBatches: cute.Tensor` parameter
+- `load` method: 3-way branch in `not use_block_sparsity`:
+  1. `self.sparse_load` → new scatter path: create `SparseLoadCopyEngine` + `SparseLoadProducerState`, while-loop `inner_block_max` iterations with `prefetch_sparse_load` → `load_scatter(K)` → `load_scatter(V)` → `producer_commit`
+  2. Dense TMA/paged_kv path (unchanged)
+  3. FA4 block sparse TMA path (unchanged)
+- cp.async branch: split `PagedKVManager.create` vs `paged_kv_manager = None` for sparse_load
+
+**Consumer changes** (`ffa_fwd_sm90.py`):
+- `mma` method: 3-way branch in `not use_block_sparsity`:
+  1. `self.sparse_load` → compute `inner_block_max` from `mKRanges`/`mCuBatches` via `_compute_total_k_tokens`; while-loop consume all blocks with `mask_seqlen=True`
+  2. Dense path (unchanged)
+  3. FA4 block sparse (unchanged)
+
+**Host-side** (`flex_flash_attn.py`):
+- FWD compile/call args: always pass dummy `mCuBatches` tensor to prevent cute.kernel parameter stripping
+- `mEqualKRangeSize` moved to `FFAFwdSm90.__init__` as `equal_k_range_size` (compile-time constant for `const_expr`)
+
+**Regression**: 216 passed, 72 skipped, 0 failures
+
+**下一步**: 2c — Host-side routing in `flex_flash_attn.py` (`merge_ranges` → `mCuBatches`, `FFAFwdSm90(sparse_load=True)`)
 
 ---
 

@@ -26,7 +26,7 @@ from typing import Callable, Optional
 
 import cutlass
 import cutlass.cute as cute
-from cutlass import Float32, Int32, Uint32, const_expr
+from cutlass import Float32, Int32, const_expr
 from quack import layout_utils
 
 from . import cutedsl_utils
@@ -37,7 +37,6 @@ from .mask import (
     r2p_bitmask_below,
     sm90_col_to_r2p_idx,
 )
-from .seqlen_info import SeqlenInfoQK
 
 
 @cute.jit
@@ -69,9 +68,7 @@ def _apply_inv_causal_or_bi_causal_mask_sm90(
     COL = 1 if const_expr(not attn_mask.swap_AB) else 0
     thr_col_offset = tScS_mn[0][COL]
 
-    seqlenk_col_limit = (
-        attn_mask.seqlen_k - n_block * attn_mask.tile_n - thr_col_offset
-    )
+    seqlenk_col_limit = attn_mask.seqlen_k - n_block * attn_mask.tile_n - thr_col_offset
 
     inv_causal_row_offset = (
         attn_mask.seqlen_k
@@ -87,8 +84,7 @@ def _apply_inv_causal_or_bi_causal_mask_sm90(
         if const_expr(attn_mask.qhead_per_kvhead_packgqa != 1):
             tidx = thr_mma.thr_idx
             mma_m_idx = (
-                m_block * attn_mask.tile_m
-                + tScS_mn[tidx % threads_per_row, 0][0]
+                m_block * attn_mask.tile_m + tScS_mn[tidx % threads_per_row, 0][0]
             ) // attn_mask.qhead_per_kvhead_packgqa
 
         for r in cutlass.range(cute.size(tScS_mn.shape[0]), unroll_full=True):
@@ -132,7 +128,9 @@ def _apply_inv_causal_or_bi_causal_mask_sm90(
         assert attn_mask.qhead_per_kvhead_packgqa == 1
         ROW = 1 if const_expr(not attn_mask.swap_AB) else 0
         thr_row_offset = tScS_mn[0][ROW]
-        seqlenq_row_limit = attn_mask.seqlen_q - m_block * attn_mask.tile_m - thr_row_offset
+        seqlenq_row_limit = (
+            attn_mask.seqlen_q - m_block * attn_mask.tile_m - thr_row_offset
+        )
         for c in cutlass.range(cute.size(tScS_mn.shape[1]), unroll_full=True):
             col_idx = t0ScS_mn[0, c][COL] + thr_col_offset + n_block * attn_mask.tile_n
             row_limit_inv = col_idx + attn_mask.seqlen_q - attn_mask.seqlen_k
@@ -176,23 +174,51 @@ def apply_mask_with_runtime_type_sm90(
     """
     if mask_type == 0:
         mask.apply_mask(
-            acc_S, batch_idx, head_idx, m_block, n_block, thr_mma,
-            mask_seqlen=mask_seqlen, mask_causal=False, mask_local=False,
-            mask_mod=mask_mod, aux_tensors=aux_tensors, fastdiv_mods=fastdiv_mods,
+            acc_S,
+            batch_idx,
+            head_idx,
+            m_block,
+            n_block,
+            thr_mma,
+            mask_seqlen=mask_seqlen,
+            mask_causal=False,
+            mask_local=False,
+            mask_mod=mask_mod,
+            aux_tensors=aux_tensors,
+            fastdiv_mods=fastdiv_mods,
         )
     elif mask_type == 1:
         mask.apply_mask(
-            acc_S, batch_idx, head_idx, m_block, n_block, thr_mma,
-            mask_seqlen=mask_seqlen, mask_causal=True, mask_local=False,
-            mask_mod=mask_mod, aux_tensors=aux_tensors, fastdiv_mods=fastdiv_mods,
+            acc_S,
+            batch_idx,
+            head_idx,
+            m_block,
+            n_block,
+            thr_mma,
+            mask_seqlen=mask_seqlen,
+            mask_causal=True,
+            mask_local=False,
+            mask_mod=mask_mod,
+            aux_tensors=aux_tensors,
+            fastdiv_mods=fastdiv_mods,
         )
     elif mask_type == 2:
         _apply_inv_causal_or_bi_causal_mask_sm90(
-            acc_S, mask, m_block, n_block, thr_mma,
-            mask_seqlen=mask_seqlen, is_bi_causal=False,
+            acc_S,
+            mask,
+            m_block,
+            n_block,
+            thr_mma,
+            mask_seqlen=mask_seqlen,
+            is_bi_causal=False,
         )
     else:
         _apply_inv_causal_or_bi_causal_mask_sm90(
-            acc_S, mask, m_block, n_block, thr_mma,
-            mask_seqlen=mask_seqlen, is_bi_causal=True,
+            acc_S,
+            mask,
+            m_block,
+            n_block,
+            thr_mma,
+            mask_seqlen=mask_seqlen,
+            is_bi_causal=True,
         )

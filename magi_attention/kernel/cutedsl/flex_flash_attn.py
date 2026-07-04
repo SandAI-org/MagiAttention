@@ -553,8 +553,17 @@ def _flex_flash_attn_fwd(
             ]
         )
         if major_arch == 9:
+            _dummy_cu_batches = torch.zeros(1, dtype=torch.int32, device=q.device)
+            cu_batches_tensor = to_cute_tensor(
+                _dummy_cu_batches, assumed_align=4, leading_dim=0
+            )
             compile_args.extend(
-                [q_ranges_tensor, k_ranges_tensor, attn_type_map_tensor]
+                [
+                    q_ranges_tensor,
+                    k_ranges_tensor,
+                    attn_type_map_tensor,
+                    cu_batches_tensor,
+                ]
             )
         compile_args.append(current_stream)
 
@@ -594,7 +603,8 @@ def _flex_flash_attn_fwd(
             if attn_type_map is not None
             else torch.zeros(1, dtype=torch.int32, device=q.device)
         )
-        call_args.extend([q_ranges, k_ranges, _attn_type_map_call])
+        _cu_batches_call = torch.zeros(1, dtype=torch.int32, device=q.device)
+        call_args.extend([q_ranges, k_ranges, _attn_type_map_call, _cu_batches_call])
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
 
