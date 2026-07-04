@@ -33,8 +33,8 @@ using namespace cute;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // DenseBlockMeta: Unified FWD + BWD Dense path BlockMeta.
 //
-// InnerLoopQ=false  =>  FWD / BWD-LoopK (inner loop over n_block/K).
-// InnerLoopQ=true   =>  BWD-LoopQ       (inner loop over m_block/Q).
+// InnerLoopQ=false  =>  FWD / BWD-InnerLoopK (inner loop over n_block/K).
+// InnerLoopQ=true   =>  BWD-InnerLoopQ  (inner loop over m_block/Q).
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <bool IsProducer, bool InnerLoopQ, bool RangeMerge, bool FlattenGQA, int PackGQAFactor, typename SeqlenInfo_t, typename BlockMN_t>
@@ -149,8 +149,8 @@ struct DenseBlockMeta {
 // BlockSparseBlockMeta: Unified producer/consumer via IsProducer template parameter.
 // Used by both producer (IsProducer=true) and consumer (IsProducer=false) aliases.
 //
-// IsLoopQ_=false (LoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
-// IsLoopQ_=true  (LoopQ): outer=KV (TMA), inner=Q (scatter),  token_indices = Q positions
+// IsLoopQ_=false (InnerLoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
+// IsLoopQ_=true  (InnerLoopQ): outer=KV (TMA), inner=Q (scatter),  token_indices = Q positions
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -170,7 +170,7 @@ struct BlockSparseBlockMeta {
   static constexpr bool IsLoopQ = IsLoopQ_;
   static constexpr int InnerBlockSize = kBlockN_;
 
-  int const outer_block; // m_block for LoopK, n_block for LoopQ
+  int const outer_block; // m_block for InnerLoopK, n_block for InnerLoopQ
   int const bidh;
   int const bidh_kv;
   int bidb;
@@ -200,10 +200,10 @@ struct BlockSparseBlockMeta {
   int range_size;
 
   // Read scatter range i with endpoints scaled to packed-row space.
-  // LoopQ + PackGQA: Q heads are folded into the row dimension, so the scatter
+  // InnerLoopQ + PackGQA: Q heads are folded into the row dimension, so the scatter
   // walk operates in PACKED-ROW space — every endpoint is scaled by PackGQAFactor.
   // token_indices then hold packed rows p = token * G + g, where g is the q-head
-  // index within the kv group. LoopK scatters KV rows (never head-packed, scale 1).
+  // index within the kv group. InnerLoopK scatters KV rows (never head-packed, scale 1).
   CUTLASS_DEVICE
   int2 packed_range(int i) const {
     int2 r = (IsLoopQ ? q_ranges : k_ranges)[i];
@@ -243,7 +243,7 @@ struct BlockSparseBlockMeta {
 
     // No outer_block bounds check needed: the persistent scheduler computes tile
     // count from the outer-dimension range, so outer_block is always in-range
-    // (symmetric for both LoopQ and LoopK).
+    // (symmetric for both InnerLoopQ and InnerLoopK).
 
     int2 const r0 = packed_range(bidb);
     range_size = r0.y - r0.x;
@@ -420,11 +420,11 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // IndexSparseBlockMeta: Unified sparse block metadata for index-based attention.
-// Handles both LoopK and LoopQ via the IsLoopQ_ template parameter (like BlockSparseBlockMeta).
+// Handles both InnerLoopK and InnerLoopQ via the IsLoopQ_ template parameter (like BlockSparseBlockMeta).
 //
-// IsLoopQ_=false (LoopK): outer=Q token (bidb), inner=K from forward topk indices
+// IsLoopQ_=false (InnerLoopK): outer=Q token (bidb), inner=K from forward topk indices
 //   fill_token_indices fills K physical rows: id * nhk + kv_head_local
-// IsLoopQ_=true  (LoopQ): outer=K block (bidb), inner=Q from inner_indices
+// IsLoopQ_=true  (InnerLoopQ): outer=K block (bidb), inner=Q from inner_indices
 //   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -463,7 +463,7 @@ struct IndexSparseBlockMeta {
 
   int const* group_token_ptr;
   int nhk;
-  // LoopK: kv_head for K physical row conversion; LoopQ: unused (Q packed rows are head-agnostic)
+  // InnerLoopK: kv_head for K physical row conversion; InnerLoopQ: unused (Q packed rows are head-agnostic)
   int head_local;
 
   template <typename ParamsT, typename SharedStorage>
@@ -500,7 +500,7 @@ struct IndexSparseBlockMeta {
     int actual_topk;
 
     if constexpr (!IsLoopQ) {
-      // ── LoopK: bidb = Q token, indices = forward topk (Q→K) ──
+      // ── InnerLoopK: bidb = Q token, indices = forward topk (Q→K) ──
       seqlen_info.offset_q = bidb;
       seqlen_info.seqlen_q = 1;
 
@@ -517,7 +517,7 @@ struct IndexSparseBlockMeta {
       inner_block_max = (effective_k + kInnerBlockSize_ - 1) / kInnerBlockSize_;
       num_invalid_token = inner_block_max * kInnerBlockSize_ - effective_k;
     } else {
-      // ── LoopQ: bidb = K block, indices = inner_indices (K→Q) ──
+      // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
       seqlen_info.offset_k = bidb * kKBlockSize;
       seqlen_info.seqlen_k = kKBlockSize;
       head_local = bidh;
@@ -548,7 +548,7 @@ struct IndexSparseBlockMeta {
 
     if constexpr (IsProducer) {
       if constexpr (!IsLoopQ && kKBlockSize <= 1) {
-        // Token-level LoopK: pointer walks kInnerBlockSize_ entries per tile
+        // Token-level InnerLoopK: pointer walks kInnerBlockSize_ entries per tile
         int aligned_total = inner_block_max * kInnerBlockSize_;
         int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
         int group_offset;
@@ -559,22 +559,22 @@ struct IndexSparseBlockMeta {
         }
         group_token_ptr = row_ptr + group_offset;
       } else {
-        // Block-level LoopK or any LoopQ: absolute indexing from row_ptr
+        // Block-level InnerLoopK or InnerLoopQ: absolute indexing from row_ptr
         group_token_ptr = row_ptr;
       }
     }
   }
 
   // Fill token indices into the smem stage slot for the CURRENT tile.
-  // LoopK: fills K physical rows (id * nhk + kv_head_local)
-  // LoopQ: fills Q packed rows (q_token * PackGQAFactor + sub_head)
+  // InnerLoopK: fills K physical rows (id * nhk + kv_head_local)
+  // InnerLoopQ: fills Q packed rows (q_token * PackGQAFactor + sub_head)
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
     int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
 
     if constexpr (!IsLoopQ) {
-      // ── LoopK: fill K positions ──
+      // ── InnerLoopK: fill K positions ──
       if constexpr (kKBlockSize <= 1) {
         for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
           int const id = group_token_ptr[j];
@@ -592,7 +592,7 @@ struct IndexSparseBlockMeta {
         }
       }
     } else {
-      // ── LoopQ: fill Q rows ──
+      // ── InnerLoopQ: fill Q rows ──
       int tile_first_row = inner_block_cur * kInnerBlockSize_;
       int base = tile_first_row + group_idx * NumRowsPerGroup_;
       int total_q = seqlen_info.seqlen_q;
@@ -627,8 +627,8 @@ struct IndexSparseBlockMeta {
   }
 
   // Absolute packed row for TMA coordinate computation.
-  // LoopQ: maps inner_block_cur through inner_indices → absolute packed Q row.
-  // LoopK: maps inner_block_cur through index_sparse_indices → absolute packed K row.
+  // InnerLoopQ: maps inner_block_cur through inner_indices → absolute packed Q row.
+  // InnerLoopK: maps inner_block_cur through index_sparse_indices → absolute packed K row.
   CUTLASS_DEVICE
   int get_packed_first_row() const {
     static_assert(IsProducer, "get_packed_first_row() is producer-only");
@@ -645,7 +645,7 @@ struct IndexSparseBlockMeta {
         return (q_token >= 0) ? q_token : 0;
       }
     } else {
-      static_assert(kKBlockSize >= kInnerBlockSize_, "LoopK get_packed_first_row() requires kbs >= kBlockN");
+      static_assert(kKBlockSize >= kInnerBlockSize_, "InnerLoopK get_packed_first_row() requires kbs >= kBlockN");
       return get_n_block_abs() * kInnerBlockSize_;
     }
   }

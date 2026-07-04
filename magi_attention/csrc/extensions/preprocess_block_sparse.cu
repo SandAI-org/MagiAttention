@@ -27,7 +27,7 @@
  *
  * @param k_ranges K ranges tensor [N, 2]
  * @param cu_k_ranges_num Cumulative count [unique_count+1]
- * @param block_sparse_loads Output: load loop counts [unique_count]
+ * @param block_sparse_inner_iters Output: load loop counts [unique_count]
  * @param last_loop_invalid_count Output: number of invalid (masked) tokens in the last loop [unique_count]
  * @param is_equal Output: global consistency flag (1 if all k_ranges have same length, 0 otherwise)
  * @param tile_size Tile size
@@ -37,7 +37,7 @@ __global__ void compute_block_sparse_kernel(
     const int* k_ranges,
     const int* cu_k_ranges_num,
     const int* attn_type_map,
-    int* block_sparse_loads,
+    int* block_sparse_inner_iters,
     uint8_t* last_loop_invalid_count,
     int* is_equal, // Global consistency flag
     int tile_size,
@@ -101,7 +101,7 @@ __global__ void compute_block_sparse_kernel(
 
       // Compute ceil_div(total_k_range, tile_size)
       int load_count = (total_k_range + tile_size - 1) / tile_size;
-      block_sparse_loads[unique_idx] = load_count;
+      block_sparse_inner_iters[unique_idx] = load_count;
 
       // Calculate invalid tokens in the last loop (mask needed)
       // Logic: Total Capacity (aligned to tile size) - Actual Tokens
@@ -154,7 +154,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_block_sparse_met
   }
 
   // Allocate output tensors
-  auto block_sparse_loads = torch::empty({num_ranges}, options);
+  auto block_sparse_inner_iters = torch::empty({num_ranges}, options);
   // at most tile_size - 1 invalid tokens in the last loop, tile_size is fixed to 128 currently
   auto last_loop_invalid_count = torch::empty({num_ranges}, options_uint8);
 
@@ -166,7 +166,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_block_sparse_met
       k_ranges.data_ptr<int>(),
       cu_k_ranges_num.data_ptr<int>(),
       attn_type_map_ptr,
-      block_sparse_loads.data_ptr<int>(),
+      block_sparse_inner_iters.data_ptr<int>(),
       last_loop_invalid_count.data_ptr<uint8_t>(),
       is_equal_tensor.data_ptr<int>(),
       tile_size,
@@ -174,5 +174,5 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_block_sparse_met
 
   CHECK_CUDA_KERNEL_LAUNCH();
 
-  return {block_sparse_loads, last_loop_invalid_count, is_equal_tensor};
+  return {block_sparse_inner_iters, last_loop_invalid_count, is_equal_tensor};
 }

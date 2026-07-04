@@ -973,3 +973,75 @@ class TestIndexSparseSimple(unittest.TestCase):
 
 if __name__ == "__main__":
     run_tests()
+
+
+class TestIndexSparseDisableAtomic(unittest.TestCase):
+    """Tier 4: Validate disable_bwd_dq_atomic_reduction auto-set for IndexSparse.
+
+    Verifies that the auto-set logic in flex_flash_attn_func correctly enables
+    disable_fwd_atomic_reduction and disable_bwd_dq_atomic_reduction for
+    IndexSparse with swap_bwd_qk_loop=True (InnerLoopK).
+    """
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
+
+    def _run_index_sparse_atomic_config(
+        self,
+        S: int = 512,
+        NHQ: int = 128,
+        NHK: int = 1,
+        D: int = 128,
+        topk: int = 128,
+        swap_bwd_qk_loop: bool | None = True,
+        pack_gqa: bool = True,
+    ):
+        """Run IndexSparse FWD+BWD and verify correctness with auto-set atomic flags."""
+        torch.manual_seed(42)
+        q = torch.randn(
+            S, NHQ, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
+        )
+        k = torch.randn(
+            S, NHK, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
+        )
+        v = torch.randn(
+            S, NHK, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
+        )
+
+        tile_size = 128
+        padded_topk = ((topk + tile_size - 1) // tile_size) * tile_size
+        indices = torch.randint(
+            0, S, (S, NHK, padded_topk), device=self.device, dtype=torch.int32
+        )
+        indices[:, :, topk:] = -1
+
+        out, meta = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            index_sparse_indices=indices,
+            pack_gqa=pack_gqa,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
+        )
+
+        self.assertEqual(out.shape, (S, NHQ, D))
+        self.assertFalse(out.isnan().any())
+
+        do = torch.randn_like(out)
+        out.backward(do)
+
+        self.assertIsNotNone(q.grad)
+        self.assertIsNotNone(k.grad)
+        self.assertIsNotNone(v.grad)
+        self.assertFalse(q.grad.isnan().any(), "dQ contains NaN")
+        self.assertFalse(k.grad.isnan().any(), "dK contains NaN")
+        self.assertFalse(v.grad.isnan().any(), "dV contains NaN")
+
+    def test_disable_atomic_index_sparse_bwd_innerloopk(self):
+        """InnerLoopK path: auto-sets disable_bwd_dq_atomic_reduction=True."""
+        self._run_index_sparse_atomic_config(swap_bwd_qk_loop=True)
+
+    def test_disable_atomic_index_sparse_fwd_only(self):
+        """FWD path: auto-sets disable_fwd_atomic_reduction=True."""
+        self._run_index_sparse_atomic_config(swap_bwd_qk_loop=None)

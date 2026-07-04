@@ -250,6 +250,7 @@ def _flex_flash_attn_forward_compilable(
         or (q.dtype if disable_fwd_atomic_reduction else torch.float32),
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_fwd_atomic_reduction,
+        disable_dq_atomic_reduction=False,
         deterministic=deterministic,
         # NOTE: since torch compile does not support tuple args,
         # we make a detour to reconstruct ref_block_size here
@@ -489,6 +490,7 @@ def _flex_flash_attn_backward_compilable(
     dk_type: torch.dtype | None,
     dv_type: torch.dtype | None,
     disable_bwd_dkv_atomic_reduction: bool,
+    disable_bwd_dq_atomic_reduction: bool,
     deterministic: bool,
     sm_margin: int,
     auto_range_merge: bool,
@@ -511,6 +513,7 @@ def _flex_flash_attn_backward_compilable(
         output_dtype=None,
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
+        disable_dq_atomic_reduction=disable_bwd_dq_atomic_reduction,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
         pack_gqa_factor=q.size(1) // k.size(1),
@@ -520,7 +523,8 @@ def _flex_flash_attn_backward_compilable(
         block_sparse=block_sparse,
         index_sparse=index_sparse,
         profile_mode=profile_mode,
-        dq_dtype=dq_type or torch.float32,
+        dq_dtype=dq_type
+        or (q.dtype if disable_bwd_dq_atomic_reduction else torch.float32),
         dkv_dtype=dk_type
         or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
         k_block_size=_ffa_k_block_size,
@@ -592,6 +596,7 @@ def _flex_flash_attn_backward_compilable_fake(
     dk_type: torch.dtype | None,
     dv_type: torch.dtype | None,
     disable_bwd_dkv_atomic_reduction: bool,
+    disable_bwd_dq_atomic_reduction: bool,
     deterministic: bool,
     sm_margin: int,
     auto_range_merge: bool,
@@ -632,8 +637,9 @@ def _flex_flash_attn_backward(
     dk_type: torch.dtype | None,
     dv_type: torch.dtype | None,
     disable_bwd_dkv_atomic_reduction: bool,
+    disable_bwd_dq_atomic_reduction: bool,
     deterministic: bool,
-    sm_margin: int,
+    sm_margin: int = 0,
     auto_range_merge: bool = False,
     merge_k_ranges: torch.Tensor | None = None,
     bwd_kq_map: torch.Tensor | None = None,
@@ -670,7 +676,15 @@ def _flex_flash_attn_backward(
             )
         ]
 
-    dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
+    dq = (
+        (
+            torch.empty_like(q, dtype=dq_type or q.dtype)
+            if disable_bwd_dq_atomic_reduction
+            else torch.zeros_like(q, dtype=dq_type or torch.float32)
+        )
+        if dq is None
+        else dq
+    )
 
     clear_dkv = dk is None and dv is None
     if clear_dkv:
@@ -718,6 +732,7 @@ def _flex_flash_attn_backward(
         dk_type=dk_type,
         dv_type=dv_type,
         disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
+        disable_bwd_dq_atomic_reduction=disable_bwd_dq_atomic_reduction,
         deterministic=deterministic,
         sm_margin=sm_margin,
         auto_range_merge=auto_range_merge,
@@ -757,6 +772,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         sm_margin: int = 0,
         disable_fwd_atomic_reduction: bool = False,
         disable_bwd_dkv_atomic_reduction: bool = False,
+        disable_bwd_dq_atomic_reduction: bool = False,
         ref_block_size: tuple[int, int] | None = None,
         max_seqlen_q: int | None = None,
         auto_range_merge: bool = False,
@@ -949,6 +965,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.k_block_size = k_block_size
         ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
         ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
+        ctx.disable_bwd_dq_atomic_reduction = disable_bwd_dq_atomic_reduction
         ctx.pack_gqa = pack_gqa
         ctx.cat_gqa = cat_gqa
 
@@ -989,6 +1006,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # sm_margin
                 None,  # disable_fwd_atomic_reduction
                 None,  # disable_bwd_dkv_atomic_reduction
+                None,  # disable_bwd_dq_atomic_reduction
                 None,  # ref_block_size
                 None,  # max_seqlen_q
                 None,  # auto_range_merge
@@ -1031,7 +1049,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if ctx.disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
             raise RuntimeError(
-                "disable_bwd_dkv_atomic_reduction is incompatible with swap_bwd_qk_loop=True (LoopK)."
+                "disable_bwd_dkv_atomic_reduction is incompatible with swap_bwd_qk_loop=True (InnerLoopK)."
             )
 
         if ctx.index_sparse:
@@ -1048,7 +1066,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_auto_range_merge = False
 
             if not swap_bwd_qk_loop:
-                # IndexSparse BWD LoopQ: outer=K block, inner=Q from inner_indices
+                # IndexSparse BWD InnerLoopQ: outer=K block, inner=Q from inner_indices
                 _loopq_kbs = ctx.k_block_size
                 nhk = k.size(1)
                 seqlen_k = v.size(0)
@@ -1062,7 +1080,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
                 if _loopq_kbs > 1:
                     assert nhk == 1, (
-                        f"IndexSparse BWD LoopQ with k_block_size>1 currently only supports nhk=1, "
+                        f"IndexSparse BWD InnerLoopQ with k_block_size>1 currently only supports nhk=1, "
                         f"got nhk={nhk}. NHK>1 + kbs>1 has a flat-layout mismatch (P8-BUG-NHK)."
                     )
 
@@ -1088,7 +1106,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     ).contiguous()
                     ctx.index_sparse_max_topk = nhk * _inner_topk
 
-            # else: IndexSparse BWD LoopK — use forward's topk_indices directly
+            # else: IndexSparse BWD InnerLoopK — use forward's topk_indices directly
         elif ctx.auto_range_merge:
             bwd_auto_range_merge = True
             with maybe_profile_ffa_ctx("bwd_range_merge"):
@@ -1111,7 +1129,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                             fwd_unique_count,
                         )
                     else:
-                        # LoopK: outer loop is Q (m_blocks), merge by Q ranges
+                        # InnerLoopK: outer loop is Q (m_blocks), merge by Q ranges
                         (
                             merge_k_ranges,
                             bwd_q_ranges,
@@ -1123,7 +1141,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                             q_ranges, k_ranges, attn_type_map=attn_type_map
                         )
                 else:
-                    # LoopQ: outer loop is K (n_blocks), merge by K ranges
+                    # InnerLoopQ: outer loop is K (n_blocks), merge by K ranges
                     (
                         merge_k_ranges,
                         bwd_k_ranges,
@@ -1163,10 +1181,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             attn_type_map=bwd_attn_type_map,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
-            dq_type=torch.float32,
+            dq_type=q.dtype if ctx.disable_bwd_dq_atomic_reduction else torch.float32,
             dk_type=torch.float32,
             dv_type=torch.float32,
             disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
+            disable_bwd_dq_atomic_reduction=ctx.disable_bwd_dq_atomic_reduction,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
             auto_range_merge=bwd_auto_range_merge,
@@ -1207,6 +1226,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
             None,  # disable_bwd_dkv_atomic_reduction
+            None,  # disable_bwd_dq_atomic_reduction
             None,  # ref_block_size
             None,  # max_seqlen_q
             None,  # auto_range_merge
@@ -1245,6 +1265,7 @@ def flex_flash_attn_func(
     sm_margin: int = 0,
     disable_fwd_atomic_reduction: bool = False,
     disable_bwd_dkv_atomic_reduction: bool = False,
+    disable_bwd_dq_atomic_reduction: bool = False,
     ref_block_size: tuple[int, int] | None = None,
     max_seqlen_q: int | None = None,
     auto_range_merge: bool = False,
@@ -1343,6 +1364,15 @@ def flex_flash_attn_func(
                 since ``k_range1`` = ``[0, 15]`` and ``k_range2`` = ``[10, 20]`` intersect,
                 while ``k_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` then is non-overlapped.
                 **Note:** This flag can only be enabled with MHA or catGQA.
+
+        disable_bwd_dq_atomic_reduction (bool, optional):
+            Whether to disable backward dQ atomic reduction for BWD InnerLoopK
+            (``swap_bwd_qk_loop=True``). Defaults to ``False``.
+
+                When enabled, dQ uses the input dtype (bf16/fp16) instead of float32 and
+                skips zero-initialization (uses ``empty_like``). Safe when outer Q ranges
+                are non-overlapping (guaranteed by BlockSparse/IndexSparse).
+                Auto-set to ``True`` for sparse scenarios with ``swap_bwd_qk_loop=True``.
 
         ref_block_size (tuple[int, int], optional):
             Reference block size (M, N) for kernel selection.
@@ -1637,6 +1667,26 @@ def flex_flash_attn_func(
     index_sparse_indices_2d = index_sparse_indices_2d if _has_index_sparse else None
     index_sparse_max_topk = index_sparse_indices_2d.shape[1] if _has_index_sparse else 0
 
+    # ── Auto-set atomic reduction flags for sparse scenarios ──
+    # BlockSparse and IndexSparse guarantee non-overlapping outer ranges after
+    # range_merge, so atomic reduction can be safely disabled for better perf.
+    _is_sparse = block_sparse or index_sparse
+    if _is_sparse:
+        disable_fwd_atomic_reduction = True
+
+        _is_mha = q.size(1) == k.size(1)
+        _gqa_safe = _is_mha or pack_gqa or cat_gqa
+
+        # BWD InnerLoopQ (swap_bwd_qk_loop != True): dKV is outer accumulation.
+        # Safe only when GQA heads are packed (no cross-CTA dKV overlap).
+        if swap_bwd_qk_loop is not True and _gqa_safe:
+            disable_bwd_dkv_atomic_reduction = True
+
+        # BWD InnerLoopK (swap_bwd_qk_loop == True): dQ is outer accumulation.
+        # Each CTA owns a unique Q block — safe regardless of GQA config.
+        if swap_bwd_qk_loop is True:
+            disable_bwd_dq_atomic_reduction = True
+
     out, lse, max_logits = FlexFlashAttnFunc.apply(
         q,
         k,
@@ -1652,6 +1702,7 @@ def flex_flash_attn_func(
         sm_margin,
         disable_fwd_atomic_reduction,
         disable_bwd_dkv_atomic_reduction,
+        disable_bwd_dq_atomic_reduction,
         ref_block_size,
         max_seqlen_q,
         auto_range_merge,

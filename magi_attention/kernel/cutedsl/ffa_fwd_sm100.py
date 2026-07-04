@@ -58,7 +58,7 @@ from .sparse_utils import (
     BlockSparseTensors,
     get_total_block_count,
     handle_block_sparse_empty_tile_correction_sm100,
-    produce_block_sparse_loads_sm100,
+    produce_block_sparse_inner_iters_sm100,
     softmax_block_sparse_sm100,
 )
 from .tile_scheduler import (
@@ -2452,7 +2452,10 @@ class FFAFwdSm100:
                             )
                             kv_producer_state.advance()
             else:  # block sparse load (TODO: review the logics)
-                kv_producer_state, q_producer_phase = produce_block_sparse_loads_sm100(
+                (
+                    kv_producer_state,
+                    q_producer_phase,
+                ) = produce_block_sparse_inner_iters_sm100(
                     blocksparse_tensors,
                     batch_idx,
                     head_idx,

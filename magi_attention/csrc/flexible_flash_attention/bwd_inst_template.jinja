@@ -1,7 +1,6 @@
 // Auto-generated minimal backward instantiation module (JIT).
 // Single-variant compilation bound to URI parameters: arch, compute dtype, DKV output dtype, head dim, softcap, and dkv-atomic options.
 
-#include <cstdlib>
 #include <torch/python.h>
 
 #include "flex_flash_common.hpp"
@@ -17,6 +16,7 @@ using TDkv     = {{ dkv_t }};
 static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableDkvAtomic = {{ disable_atomic }};
+static constexpr bool kDisableDqAtomic = {{ disable_dq_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
@@ -59,7 +59,7 @@ static constexpr int kBwdUnunionDkvacc = {{ bwd_ununion_dkvacc | default(0) }};
 static constexpr int kKBlockSize = {{ k_block_size | default(1) }};
 // Force Mma_dKV to SS mode (SMEM-SMEM) instead of RS for benchmarking register pressure.
 static constexpr bool kForceMmaDkvSS = {{ force_mma_dkv_ss | default('false') }};
-// Per-switch perf isolation overrides (LoopK only, correctness NOT guaranteed).
+// Per-switch perf isolation overrides (InnerLoopK only, correctness NOT guaranteed).
 static constexpr bool kBwdSkipVLoad   = {{ bwd_skip_v_load   | default('false') }};
 static constexpr bool kBwdSkipDvStore = {{ bwd_skip_dv_store | default('false') }};
 static constexpr bool kBwdSkipDkStore = {{ bwd_skip_dk_store | default('false') }};
@@ -129,7 +129,7 @@ std::vector<at::Tensor> mha_bwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kSwapBwdQKLoop, kPackGQA, kCatGQA, kIndexSparse>(
+  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kDisableDqAtomic, kSwapBwdQKLoop, kPackGQA, kCatGQA, kIndexSparse>(
       dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
       q_ranges_, k_ranges_, attn_type_map_, 
       merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 
@@ -138,40 +138,11 @@ std::vector<at::Tensor> mha_bwd(
       dq_type_, dk_type_, dv_type_, 
       sink_layout_, sm_margin);
 
-  // dKV pool: split dK/dV accum into pool_count slices to reduce L2 contention
-  int pool_count = 1;
-  at::Tensor dk_pool, dv_pool;
-  const char* pool_env = std::getenv("MAGI_ATTENTION_FFA_BWD_DKV_POOL_COUNT");
-  if (pool_env) pool_count = std::max(1, std::atoi(pool_env));
-  if (pool_count > 1 && kSwapBwdQKLoop) {
-    auto opts = dk.options().dtype(torch::kFloat);
-    int total_k = params.total_k;
-    dk_pool = torch::zeros({(int64_t)pool_count * total_k, params.h_kv, params.d}, opts);
-    dv_pool = torch::zeros({(int64_t)pool_count * total_k, params.h_kv, params.d}, opts);
-    params.dk_ptr = dk_pool.data_ptr();
-    params.dv_ptr = dv_pool.data_ptr();
-    params.dk_row_stride = dk_pool.stride(0);
-    params.dk_head_stride = dk_pool.stride(1);
-    params.dv_row_stride = dv_pool.stride(0);
-    params.dv_head_stride = dv_pool.stride(1);
-    params.pool_count = pool_count;
-    params.pool_seqlen_k = total_k;
-  }
-  
   if constexpr (kProfileMode)
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
   run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kForceMmaDkvSS, kInnerLoadMode, kProfileMode, kBwdSkipVLoad, kBwdSkipDvStore, kBwdSkipDkStore, kBwdSkipDvMma, kBwdUnunionDkvacc>(params, stream);
-
-  // Pool reduction: sum pool slices and convert to output dtype
-  if (pool_count > 1 && kSwapBwdQKLoop) {
-    int total_k = params.pool_seqlen_k;
-    auto dk_summed = dk_pool.view({pool_count, total_k, params.h_kv, params.d}).sum(0);
-    auto dv_summed = dv_pool.view({pool_count, total_k, params.h_kv, params.d}).sum(0);
-    dk.copy_(dk_summed.to(dk.dtype()));
-    dv.copy_(dv_summed.to(dv.dtype()));
-  }
 
   return {dq, dk, dv, dsink};
 }

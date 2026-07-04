@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-template <bool Deterministic, bool DisableDkvAtomic, bool SwapBwdQKLoop, bool PackGQA, bool CatGQA, bool IndexSparse = false>
+template <bool Deterministic, bool DisableDkvAtomic, bool DisableDqAtomic, bool SwapBwdQKLoop, bool PackGQA, bool CatGQA, bool IndexSparse = false>
 std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
@@ -273,7 +273,14 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
 
   // Determine output dtype for dq
   at::ScalarType dq_type = dq_type_.has_value() ? dq_type_.value() : (dq_.has_value() ? dq_.value().scalar_type() : at::ScalarType::Float);
-  TORCH_CHECK(dq_type == at::ScalarType::Float);
+  if constexpr (DisableDqAtomic) {
+    TORCH_CHECK(SwapBwdQKLoop, "DisableDqAtomic requires SwapBwdQKLoop (BWD InnerLoopK)");
+    TORCH_CHECK(
+        dq_type == at::ScalarType::Float || dq_type == at::ScalarType::BFloat16 || dq_type == at::ScalarType::Half,
+        "Flexible Flash Attention only supports float, bf16 and fp16 for dq when DisableDqAtomic is enabled");
+  } else {
+    TORCH_CHECK(dq_type == at::ScalarType::Float);
+  }
   if (dq_.has_value()) {
     TORCH_CHECK(dq_.value().scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
   }
@@ -309,7 +316,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     CHECK_SHAPE(dq, total_q, num_heads_qo, head_size);
     TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
   } else {
-    dq = torch::zeros_like(q, opts.dtype(dq_type));
+    dq = DisableDqAtomic ? torch::empty_like(q, opts.dtype(dq_type)) : torch::zeros_like(q, opts.dtype(dq_type));
   }
   if (dk_.has_value()) {
     dk = dk_.value();

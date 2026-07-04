@@ -166,6 +166,7 @@ def get_ffa_uri(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    disable_dq_atomic_reduction: bool,
     deterministic: bool,
     kblock_m: int | None,
     kblock_n: int | None,
@@ -195,6 +196,7 @@ def get_ffa_uri(
         f"{f'_dkv_{_dtype_name(dkv_dtype)}' if dkv_dtype is not None else ''}"
         f"{'_softcap' if softcap else ''}"
         f"{'' if disable_atomic_reduction else '_atomic'}"
+        f"{'' if not disable_dq_atomic_reduction else '_nodqatomic'}"
         f"{'_deterministic' if deterministic else ''}"
         f"{'_autorangemerge' if auto_range_merge else ''}"
         f"{'_swapab' if swap_ab else ''}"
@@ -305,6 +307,7 @@ def get_ffa_jit_spec(
     output_dtype: torch.dtype | None,
     softcap: bool,
     disable_atomic_reduction: bool,
+    disable_dq_atomic_reduction: bool,
     deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
     auto_range_merge: bool = False,
@@ -359,6 +362,7 @@ def get_ffa_jit_spec(
         output_dtype=output_dtype,
         softcap=softcap,
         disable_atomic_reduction=disable_atomic_reduction,
+        disable_dq_atomic_reduction=disable_dq_atomic_reduction,
         deterministic=deterministic,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
@@ -435,7 +439,7 @@ def get_ffa_jit_spec(
         extra_template_args["mask_mode_int"] = _mask_mode_map["unified"]
         uri += "_mmunified"
     # inner_use_scatter mirrors the mainloop predicate (mainloop_bwd_sm90_tma_gmma_ws.hpp):
-    # LoopK scatters K/V when block_sparse or index_sparse, LoopQ scatters Q/dO when block_sparse
+    # InnerLoopK scatters K/V when block_sparse or index_sparse, InnerLoopQ scatters Q/dO when block_sparse
     # or index_sparse (inner_indices).
     _inner_use_scatter = block_sparse or index_sparse
     _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER")
@@ -498,7 +502,7 @@ def get_ffa_jit_spec(
                 _uri_val = _val.replace("-", "n")
                 uri += f"_{_uri_key}{_uri_val}"
 
-        # Default LseDpsumUnion=1 for LoopQ (saves ~5 producer spills, zero perf cost).
+        # Default LseDpsumUnion=1 for InnerLoopQ (saves ~5 producer spills, zero perf cost).
         # Env MAGI_ATTENTION_FFA_BWD_LSE_UNION overrides (handled above); only set default if not overridden.
         # CatGQA has different SMEM layout that is incompatible with LseDpsumUnion.
         if (
@@ -515,7 +519,7 @@ def get_ffa_jit_spec(
             extra_template_args["force_mma_dkv_ss"] = "true"
             uri += "_fss1"
 
-        # Per-switch fantasy overrides (LoopK perf isolation, correctness NOT guaranteed).
+        # Per-switch fantasy overrides (InnerLoopK perf isolation, correctness NOT guaranteed).
         # Require DKVACC_BYPASS=1 for dV/dK store skips.
         for _env_name, _tpl_key, _uri_key in [
             ("MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD", "bwd_skip_v_load", "svl"),
@@ -528,7 +532,7 @@ def get_ffa_jit_spec(
                 extra_template_args[_tpl_key] = "true"
                 uri += f"_{_uri_key}1"
 
-        # IndexSparse LoopQ with block-level K: override tile_n to match k_block_size
+        # IndexSparse InnerLoopQ with block-level K: override tile_n to match k_block_size
         # so that kBlockN = k_block_size (full-tile outer K, no waste).
         if (
             index_sparse
@@ -578,6 +582,7 @@ def get_ffa_jit_spec(
     dkv_t = _DTYPE_TO_CUTLASS[dkv_dtype] if dkv_dtype is not None else out_t
     has_softcap = bool(softcap)
     disable_atomic = bool(disable_atomic_reduction)
+    disable_dq_atomic = bool(disable_dq_atomic_reduction)
     deterministic = bool(deterministic)
     profile_mode = bool(profile_mode)
     auto_range_merge = bool(auto_range_merge)
@@ -596,6 +601,7 @@ def get_ffa_jit_spec(
         head_dim=head_dim,
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
+        disable_dq_atomic=str(disable_dq_atomic).lower(),
         deterministic=str(deterministic).lower(),
         profile_mode=str(profile_mode).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
@@ -735,6 +741,7 @@ def get_ffa_jit_mod(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    disable_dq_atomic_reduction: bool,
     deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
     auto_range_merge: bool = False,
@@ -776,6 +783,7 @@ def get_ffa_jit_mod(
         output_dtype=output_dtype,
         softcap=softcap,
         disable_atomic_reduction=disable_atomic_reduction,
+        disable_dq_atomic_reduction=disable_dq_atomic_reduction,
         deterministic=deterministic,
         ref_block_size=ref_block_size,
         auto_range_merge=auto_range_merge,
