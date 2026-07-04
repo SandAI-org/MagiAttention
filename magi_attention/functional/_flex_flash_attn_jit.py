@@ -515,13 +515,24 @@ def get_ffa_jit_spec(
             extra_template_args["force_mma_dkv_ss"] = "true"
             uri += "_fss1"
 
-        # Per-switch fantasy overrides (LoopK perf isolation, correctness NOT guaranteed).
+        # Per-switch debug overrides (LoopK perf isolation, correctness NOT guaranteed).
         # Require DKVACC_BYPASS=1 for dV/dK store skips.
         for _env_name, _tpl_key, _uri_key in [
             ("MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD", "bwd_skip_v_load", "svl"),
             ("MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE", "bwd_skip_dv_store", "svs"),
             ("MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE", "bwd_skip_dk_store", "sks"),
             ("MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA", "bwd_skip_dv_mma", "svm"),
+            (
+                "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK",
+                "bwd_skip_dv_writeback",
+                "svw",
+            ),
+            (
+                "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK",
+                "bwd_skip_dk_writeback",
+                "skw",
+            ),
+            ("MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S", "bwd_defer_dv_r2s", "ddv"),
         ]:
             _val = os.environ.get(_env_name)
             if _val is not None and _val != "0":
@@ -716,6 +727,9 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA",
+    "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK",
+    "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK",
+    "MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S",
 )
 
 

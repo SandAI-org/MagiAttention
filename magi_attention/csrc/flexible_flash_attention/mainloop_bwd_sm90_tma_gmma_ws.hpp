@@ -89,7 +89,10 @@ template <
     bool SkipDvStore_ = false,
     bool SkipDkStore_ = false,
     bool SkipDvMma_ = false,
-    bool UnunionDkvacc_ = false>
+    bool SkipDvWriteback_ = false,
+    bool SkipDkWriteback_ = false,
+    bool UnunionDkvacc_ = false,
+    bool DeferDvR2S_ = false>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -112,11 +115,14 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool LseDpsumUnionDKVacc = LseDpsumUnionDKVacc_;
   static constexpr bool DkvaccBypassSmem = DkvaccBypassSmem_;
 
-  static constexpr bool FantasySkipVLoad = SkipVLoad_;
-  static constexpr bool FantasySkipDvStore = SkipDvStore_;
-  static constexpr bool FantasySkipDkStore = SkipDkStore_;
-  static constexpr bool FantasySkipDvMma = SkipDvMma_;
+  static constexpr bool PerfPerfDebugSkipVLoad = SkipVLoad_;
+  static constexpr bool PerfPerfDebugSkipDvStore = SkipDvStore_;
+  static constexpr bool PerfPerfDebugSkipDkStore = SkipDkStore_;
+  static constexpr bool PerfPerfDebugSkipDvMma = SkipDvMma_;
+  static constexpr bool PerfPerfDebugSkipDvWriteback = SkipDvWriteback_;
+  static constexpr bool PerfPerfDebugSkipDkWriteback = SkipDkWriteback_;
   static constexpr bool UnunionDkvacc = UnunionDkvacc_;
+  static constexpr bool PerfPerfDebugDeferDvR2S = DeferDvR2S_;
 
   static constexpr bool Has_softcap = Has_softcap_;
   static constexpr bool SdP_swapAB = SdP_swapAB_;
@@ -1963,8 +1969,8 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_V = [&]() {
-      if constexpr (FantasySkipVLoad) {
-        // Fantasy: lightweight V load placeholder. Performs a real TMA/cp.async
+      if constexpr (PerfDebugSkipVLoad) {
+        // Debug: lightweight V load placeholder. Performs a real TMA/cp.async
         // copy from a FIXED block (block 0) so the pipeline stays intact and
         // PV MMA runs on real (but wrong) data. After the first iteration the
         // load hits L2 cache, minimizing actual GMEM bandwidth.
@@ -1985,8 +1991,20 @@ struct CollectiveMainloopBwdSm90 {
           }
           pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
           ++smem_pipe_write_v;
+        } else if constexpr (InnerLoad_Tma && InnerUseScatter) {
+          // Scatter-TMA: mirror the real scatter path — only thread 0 issues TMA.
+          if (!lane_predicate)
+            return;
+          pipeline_v.producer_acquire(smem_pipe_write_v);
+          if (thread_idx == 0) {
+            copy(
+                params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+                tVgV_abs(_, 0),
+                tVsV(_, smem_pipe_write_v.index()));
+          }
+          ++smem_pipe_write_v;
         } else {
-          // TMA path: load V block 0 every iteration (L2 cached after first).
+          // Non-scatter TMA: load V block 0 every iteration (L2 cached after first).
           if (!lane_predicate)
             return;
           Tensor gV_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
@@ -2441,11 +2459,13 @@ struct CollectiveMainloopBwdSm90 {
         if (warp_idx_in_warpgroup != 1)
           return;
       }
+      // Wait for consumer to signal dV R2S complete (or empty handshake for perf-debug skip).
+      // Must always sync here to prevent warp 1 from racing ahead of warp 2 in iterate_range.
 #pragma unroll
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
-      if constexpr (!FantasySkipDvStore) {
+      if constexpr (!PerfDebugSkipDvStore && !PerfDebugSkipDvWriteback) {
         if constexpr (InnerLoad_Tma && InnerUseScatter) {
           if (lane_predicate && warp_idx_in_warpgroup == ProducerWarpRoles::kNumLoaderWarps) {
             int const packed_first_row = idx_staging[0];
@@ -2468,7 +2488,7 @@ struct CollectiveMainloopBwdSm90 {
             tma_store_wait<0>();
           }
         }
-      } // !FantasySkipDvStore
+      } // !PerfDebugSkipDvStore
       // Union: signal dKEmpty (TMA dV done → consumer can r2s dK into shared buffer)
       // Un-union: signal dVEmpty (TMA dV done → consumer can r2s next dV into its own buffer)
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -2489,7 +2509,7 @@ struct CollectiveMainloopBwdSm90 {
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
-      if constexpr (!FantasySkipDkStore) {
+      if constexpr (!PerfDebugSkipDkStore && !PerfDebugSkipDkWriteback) {
         if constexpr (InnerLoad_Tma && InnerUseScatter) {
           if (lane_predicate && warp_idx_in_warpgroup == ProducerWarpRoles::kNumLoaderWarps) {
             int const packed_first_row = idx_staging[kBlockN];
@@ -2512,7 +2532,7 @@ struct CollectiveMainloopBwdSm90 {
             tma_store_wait<0>();
           }
         }
-      } // !FantasySkipDkStore
+      } // !PerfDebugSkipDkStore && !PerfDebugSkipDkWriteback
       // Union: signal dVEmpty (TMA dK done → consumer can r2s next dV into shared buffer)
       // Un-union: signal dKEmpty (TMA dK done → consumer can r2s next dK into its own buffer)
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -3699,8 +3719,8 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (!Slice_dQKV_Mma) { // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
         // MMA3 (RS or SS if not Mma_dKV_is_RS): apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
         Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
-        if constexpr (FantasySkipDvMma) {
-          // Fantasy: skip dV MMA entirely; tdVrdV stays zero-initialized.
+        if constexpr (PerfDebugSkipDvMma) {
+          // Debug: skip dV MMA entirely; tdVrdV stays zero-initialized.
           // No WGMMA issued, so MMA4's wg_wait=1 is trivially satisfied (0 pending <= 1).
         } else if constexpr (Mma_dKV_is_RS) {
           Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
@@ -3733,7 +3753,7 @@ struct CollectiveMainloopBwdSm90 {
         // Atomic reduce-add partial dV
         // after MMA3 finished (wg_wait<1> in MMA4)
         if constexpr (DkvaccBypassSmem) {
-          if constexpr (!(FantasySkipDvStore || FantasySkipDvMma)) {
+          if constexpr (!(PerfDebugSkipDvStore || PerfDebugSkipDvMma)) {
             static_assert(!DkvaccBypassSmem || !dKV_swapAB, "DkvaccBypassSmem scatter requires !dKV_swapAB (kHeadDim<=128)");
             Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
             if constexpr (InnerUseScatter) {
@@ -3752,35 +3772,42 @@ struct CollectiveMainloopBwdSm90 {
                 atomicAdd(ptr_gdV + (pool_offset + token_idx) * stride_dV_row + col, taccdVrdV(i));
               }
             } else {
-              Tensor tdVrdV_atomic = recast<float4>(taccdVrdV);
-              Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
+              Tensor tdVgdVaccum_cur = tdVgdVaccum(_, _, _, _, _, n_block);
 #pragma unroll
-              for (int i = 0; i < size(tdVrdV_atomic); ++i) {
-                atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
+              for (int i = 0; i < size(taccdVrdV); ++i) {
+                atomicAdd(&tdVgdVaccum_cur(i), taccdVrdV(i));
               }
             }
-          } // !FantasySkipDvStore
+          } // !PerfDebugSkipDvStore
         } else if constexpr (dKVacc_use_smem && InnerDxStoreInProducer) {
-          // Write to smem, signal producer store warp for TMA/scatter reduce-add
-          int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+          // Write dV to smem, signal producer store warp for TMA/scatter reduce-add.
+          // When PerfDebugSkipDvWriteback: skip R2S but keep barrier handshake to prevent
+          // producer warp 1 from racing ahead of warp 2 in the iterate_range loop.
+          // When PerfDebugDeferDvR2S: skip entirely here, do sync+R2S+arrive after MMA5.
+          if constexpr (!PerfDebugDeferDvR2S) {
+            int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
-          if constexpr (InnerUseScatter) {
-            if (warp_group_idx == 0) {
-              int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
-              int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockN];
-              for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockN; r += cutlass::NumThreadsPerWarpGroup) {
-                dst[r] = src[r];
+            if constexpr (!PerfDebugSkipDvWriteback) {
+              if constexpr (InnerUseScatter) {
+                if (warp_group_idx == 0) {
+                  int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
+                  int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockN];
+                  for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockN; r += cutlass::NumThreadsPerWarpGroup) {
+                    dst[r] = src[r];
+                  }
+                }
               }
-            }
-          }
 
-          Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
-          cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+              Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
+              cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
 
-          cutlass::arch::fence_view_async_shared();
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
+              cutlass::arch::fence_view_async_shared();
+            } // !PerfDebugSkipDvWriteback
+
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
+          } // !PerfDebugDeferDvR2S
         } else {
           // Consumer store path: dispatch on the store mechanism
           if constexpr (InnerLoad_Tma && InnerUseScatter) {
@@ -3848,10 +3875,35 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK(_, _, _, smem_pipe_read_k.index()), tdQrdQ);
 
+        // Deferred dV R2S: moved here (after MMA4+MMA5) to give the producer's TMA_dV
+        // more consumer MMA overlap time, reducing the dVEmpty barrier stall.
+        if constexpr (dKVacc_use_smem && InnerDxStoreInProducer && PerfDebugDeferDvR2S && !PerfDebugSkipDvWriteback) {
+          int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+
+          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+
+          if constexpr (InnerUseScatter) {
+            if (warp_group_idx == 0) {
+              int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
+              int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockN];
+              for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockN; r += cutlass::NumThreadsPerWarpGroup) {
+                dst[r] = src[r];
+              }
+            }
+          }
+
+          Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
+          cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+
+          cutlass::arch::fence_view_async_shared();
+
+          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
+        }
+
         // Atomic reduce-add partial dK
         // after MMA4 finished (wg_wait<1> in MMA5)
         if constexpr (DkvaccBypassSmem) {
-          if constexpr (!FantasySkipDkStore) {
+          if constexpr (!PerfDebugSkipDkStore) {
             Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
 #pragma unroll
             for (int dki = 0; dki < size(taccdKrdK); ++dki) {
@@ -3873,37 +3925,39 @@ struct CollectiveMainloopBwdSm90 {
                 atomicAdd(ptr_gdK + (pool_offset + token_idx) * stride_dK_row + col, taccdKrdK(i));
               }
             } else {
-              Tensor tdKrdK_atomic = recast<float4>(taccdKrdK);
-              Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
+              Tensor tdKgdKaccum_cur = tdKgdKaccum(_, _, _, _, _, n_block);
 #pragma unroll
-              for (int i = 0; i < size(tdKrdK_atomic); ++i) {
-                atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
+              for (int i = 0; i < size(taccdKrdK); ++i) {
+                atomicAdd(&tdKgdKaccum_cur(i), taccdKrdK(i));
               }
             }
-          } // !FantasySkipDkStore
+          } // !PerfDebugSkipDkStore
         } else if constexpr (dKVacc_use_smem && InnerDxStoreInProducer) {
           // Write to smem, signal producer store warp for TMA/scatter reduce-add
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
           BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
-          if constexpr (InnerUseScatter) {
-            if (warp_group_idx == 0) {
-              int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
-              int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[(kStages + 1) * kBlockN];
-              for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockN; r += cutlass::NumThreadsPerWarpGroup) {
-                dst[r] = src[r];
+          if constexpr (!PerfDebugSkipDkWriteback) {
+            if constexpr (InnerUseScatter) {
+              if (warp_group_idx == 0) {
+                int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
+                int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[(kStages + 1) * kBlockN];
+                for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockN; r += cutlass::NumThreadsPerWarpGroup) {
+                  dst[r] = src[r];
+                }
               }
             }
-          }
 
-          Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
-          for (int dki = 0; dki < size(taccdKrdK); ++dki) {
-            taccdKrdK(dki) *= params.softmax_scale;
-          }
-          cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
+            Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
+            for (int dki = 0; dki < size(taccdKrdK); ++dki) {
+              taccdKrdK(dki) *= params.softmax_scale;
+            }
+            cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
 
-          cutlass::arch::fence_view_async_shared();
+            cutlass::arch::fence_view_async_shared();
+          } // !PerfDebugSkipDkWriteback
+
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
         } else {
           // Consumer store path: dispatch on the store mechanism

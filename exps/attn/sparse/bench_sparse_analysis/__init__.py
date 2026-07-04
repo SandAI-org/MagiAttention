@@ -12,25 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unified sparse attention benchmark & analysis.
+"""Sparse attention benchmark & analysis — modular package.
 
-Phases (TFLOPS high->low, ideal->realistic):
+Phases:
   0-method-parity  : 5 methods at S=topk (sparse framework overhead baseline)
   1-topk-sweep     : Fixed S=32K varying topk (L2 cache / CTA starvation)
   2-kbs-compare    : kbs=1 (CpAsync) vs kbs=128 (TMA2D) TFLOPS (FWD+BWD)
   3-l2-inflection  : NCU at specific TFLOPS inflection points
-  4-loopk-debug    : LoopK vs LoopQ gap analysis with debug skip flags
+  4-loopk-debug    : LoopK vs LoopQ gap analysis with perf-debug skip flags
 
-Usage (both forms work):
-  python bench_sparse_analysis.py          --plot 4-loopk-debug
-  python -m bench_sparse_analysis          --plot 4-loopk-debug
-
-Options:
-  --force           Re-run all (ignore cached results)
-  --rerun FILTER    Re-run subset: 'pass/method' or 'pass/method/topk'
+Usage:
+  python -m bench_sparse_analysis --exp  0-method-parity
+  python -m bench_sparse_analysis --plot 4-loopk-debug
 """
-
-from bench_sparse_analysis.__main__ import main  # noqa: F401
-
-if __name__ == "__main__":
-    main()
