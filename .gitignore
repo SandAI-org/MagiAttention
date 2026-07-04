@@ -1,4 +1,5 @@
 # magi_attention
+.cursor/
 magi_attention/_version.py
 magi_attention/csrc/comm/grpcoll/instantiations/
 *.nsys-rep
