@@ -1070,9 +1070,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 _loopq_kbs = ctx.k_block_size
                 nhk = k.size(1)
                 seqlen_k = v.size(0)
-                _fwd_3d = index_sparse_indices_2d.reshape(
-                    -1, nhk, index_sparse_indices_2d.size(-1)
-                )
+                # indices_2d: (total_q, nhk * topk_per_head) → 3D: (total_q, nhk, topk_per_head)
+                max_topk_per_head = index_sparse_indices_2d.size(-1) // nhk
+                _fwd_3d = index_sparse_indices_2d.reshape(-1, nhk, max_topk_per_head)
 
                 from magi_attention.utils.sparse_utils import (
                     build_index_sparse_inner_indices,
@@ -1612,21 +1612,24 @@ def flex_flash_attn_func(
             f"got {k_block_size}. Values in (1, {tile_size}) are not supported — "
             f"the kernel assumes either per-token scatter or fully contiguous K blocks."
         )
-        max_topk = index_sparse_indices.shape[2]
+        total_q_idx, nhk_idx, max_topk_per_head = index_sparse_indices.shape
         if k_block_size > 1:
-            # Block-level indices: each value is a K block id.
-            # Effective topk in tokens = max_topk * k_block_size.
-            effective_topk = max_topk * k_block_size
+            effective_topk = max_topk_per_head * k_block_size
             assert effective_topk % tile_size == 0, (
-                f"effective topk (max_topk={max_topk} * k_block_size={k_block_size} "
+                f"effective topk (max_topk_per_head={max_topk_per_head} * k_block_size={k_block_size} "
                 f"= {effective_topk}) must be a multiple of tile_size={tile_size}."
             )
         else:
-            assert max_topk % tile_size == 0, (
-                f"index_sparse_indices last dim (max_topk={max_topk}) must be a multiple "
+            assert max_topk_per_head % tile_size == 0, (
+                f"index_sparse_indices last dim (max_topk_per_head={max_topk_per_head}) must be a multiple "
                 f"of tile_size={tile_size}. Pad with -1 if needed."
             )
-        index_sparse_indices_2d = index_sparse_indices.view(-1, max_topk)
+        # Concatenate per-head topk along last dim: (total_q, nhk * topk_per_head)
+        # Kernel uses bidh_kv to slice into the correct head's region.
+        index_sparse_indices_2d = index_sparse_indices.reshape(
+            total_q_idx, nhk_idx * max_topk_per_head
+        )
+        max_topk = nhk_idx * max_topk_per_head
 
         # IndexSparse uses indices, not ranges — assert ranges are not provided
         assert q_ranges is None and k_ranges is None, (

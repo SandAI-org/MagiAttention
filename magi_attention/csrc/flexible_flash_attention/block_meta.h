@@ -428,17 +428,19 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 //                        (1 = token-level index sparse, ≥InnerBlockSize = block-level)
 //
 // IsInnerLoopQ_=false (InnerLoopK): outer=Q token (bidb), inner=K from forward topk indices
-//   fill_token_indices fills K physical rows: k_token * nhk + kv_head
-//   bidb resolved via cu_batches (range-merge is inherent to InnerLoopK)
+//   fill_token_indices fills K logical rows (k_token); head offset handled by ptr_gK_base
+//   bidb = block_coord[2] = q_token; kv_head from scheduler bidh (intergroup)
+//   indices layout: (total_q, nhk * topk_per_head) — per-head slice via bidh_kv * per_head_topk
 // IsInnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb), inner=Q from inner_indices
 //   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
+//   indices layout: (num_k_blocks, nhk * inner_topk_per_head)
 //
 // Fields (all const, computed in constructor init-list):
 //   outer_block — tile index along the outer loop dimension
 //   bidh        — head index from scheduler (= KV-head when PackGQA; = Q-head when !PackGQA)
 //   bidb        — batch/token index (Q token for InnerLoopK, K block for InnerLoopQ)
 //   nhk         — total KV-head count
-//   kv_head     — resolved KV-head for this CTA
+//   bidh_kv     — resolved KV-head for this CTA (consistent with DenseBlockMeta/BlockSparseBlockMeta)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -464,7 +466,7 @@ struct IndexSparseBlockMeta {
   int const bidh; // Head index from scheduler (KV-head when PackGQA, Q-head otherwise)
   int const bidb;
   int const nhk; // Total KV-head count
-  int const kv_head; // Resolved KV-head for this CTA
+  int const bidh_kv; // Resolved KV-head for this CTA (matches DenseBlockMeta/BlockSparseBlockMeta)
 
   // ─── Mutable state (set in constructor body) ───
   flash::SeqlenInfo seqlen_info;
@@ -485,21 +487,8 @@ struct IndexSparseBlockMeta {
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,
       int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
-        bidh(get<1>(block_coord)),
-        bidb([&]() -> int {
-          if constexpr (!IsInnerLoopQ) {
-            // InnerLoopK always uses range-merged batch lookup via cu_batches
-            return params.cu_batches[get<2>(block_coord)];
-          } else {
-            return get<2>(block_coord);
-          }
-        }()),
-        nhk(detail::nhk_of<ParamsT>::get(params)),
-        kv_head([&]() -> int {
-          if constexpr (!IsInnerLoopQ) {
-            return get<2>(block_coord) % nhk;
-          } else if constexpr (PackGQA) {
+      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidb(get<2>(block_coord)), nhk(detail::nhk_of<ParamsT>::get(params)), bidh_kv([&]() -> int {
+          if constexpr (PackGQA) {
             return bidh;
           } else {
             return params.qhead_per_khead_divmod.divide(bidh);
@@ -511,14 +500,15 @@ struct IndexSparseBlockMeta {
 
     if constexpr (!IsInnerLoopQ) {
       // ── InnerLoopK: bidb = Q token, indices = forward topk (Q→K) ──
+      // indices layout: (total_q, nhk * topk_per_head) — slice by bidh_kv
       seqlen_info.offset_q = bidb;
       seqlen_info.seqlen_q = 1;
 
-      int unique_idx = get<2>(block_coord); // raw scheduler coord (≠ bidb: InnerLoopK remaps via cu_batches)
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(unique_idx) * max_topk;
+      int per_head_topk = max_topk / nhk;
+      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh_kv) * per_head_topk;
 
-      actual_topk = max_topk;
-      for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
+      actual_topk = per_head_topk;
+      for (int i = per_head_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
         --actual_topk;
 
       int effective_k = actual_topk * SparseKBlockSize;
@@ -532,7 +522,7 @@ struct IndexSparseBlockMeta {
 
       // inner_indices layout: (num_k_blocks, nhk * inner_topk_per_head)
       int inner_topk_per_head = max_topk / nhk;
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(kv_head) * inner_topk_per_head;
+      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh_kv) * inner_topk_per_head;
       int max_inner_topk = inner_topk_per_head;
 
       actual_topk = max_inner_topk;
@@ -572,7 +562,7 @@ struct IndexSparseBlockMeta {
   }
 
   // Fill token indices into the smem stage slot for the CURRENT tile.
-  // InnerLoopK: fills K physical rows (k_token * nhk + kv_head)
+  // InnerLoopK: fills logical K positions (head offset handled by ptr_gK_base)
   // InnerLoopQ: fills Q packed rows (q_token * PackGQAFactor + sub_head)
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
@@ -580,11 +570,13 @@ struct IndexSparseBlockMeta {
     int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
 
     if constexpr (!IsInnerLoopQ) {
-      // ── InnerLoopK: fill K positions ──
+      // ── InnerLoopK: fill logical K positions ──
+      // Head selection is done by ptr_gK_base = K_ptr + bidh_kv * head_stride,
+      // so row indices are positions within the per-head K space [0, total_k).
       if constexpr (SparseKBlockSize <= 1) {
         for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
           int const k_token = group_token_ptr[j];
-          group_rows[j] = (k_token >= 0) ? k_token * nhk + kv_head : 0;
+          group_rows[j] = (k_token >= 0) ? k_token : 0;
         }
       } else {
         int tile_base = inner_block_cur * InnerBlockSize;
@@ -594,7 +586,7 @@ struct IndexSparseBlockMeta {
           int offset_in_block = token_pos % SparseKBlockSize;
           int block_id = (block_idx < seqlen_info.seqlen_k / SparseKBlockSize) ? group_token_ptr[block_idx] : -1;
           int logical_k = block_id * SparseKBlockSize + offset_in_block;
-          group_rows[j] = (block_id >= 0) ? logical_k * nhk + kv_head : 0;
+          group_rows[j] = (block_id >= 0) ? logical_k : 0;
         }
       }
     } else {

@@ -101,35 +101,17 @@ def ffa_index_sparse_fwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Forward pass using flex_flash_attn IndexSparse path (index_sparse_indices direct to kernel).
+
+    Q/K/V are passed in natural Dense-style shapes without KV-head flattening.
+    index_map: (nhkv, sq, topk) with logical K positions (0..skv-1).
     """
     sq, nhq, hd = q.shape
     skv, nhkv, _ = k.shape
     topk = index_map.shape[-1]
-
     group_size = nhq // nhkv
 
-    # q_flat: (nhkv * sq, group_size, hd)
-    q_flat = rearrange(
-        q,
-        "sq (nhkv group_size) hd -> (nhkv sq) group_size hd",
-        nhkv=nhkv,
-        group_size=group_size,
-    )
-    # k_flat/v_flat: (nhkv * skv, 1, hd)
-    k_flat = rearrange(k, "skv nhkv hd -> (nhkv skv) 1 hd")
-    v_flat = rearrange(v, "skv nhkv hd -> (nhkv skv) 1 hd")
-
-    # Build index_sparse_indices: (total_q, nhkv, topk) with global KV row ids
-    # index_map is (nhkv, sq, topk) with local K indices (0..skv-1)
-    # k_flat layout is (nhkv * skv, 1, hd), so global row id = head_idx * skv + local_k_idx
-    h_kv_offset = rearrange(
-        torch.arange(nhkv, device=q.device, dtype=torch.int32) * skv, "nhkv -> nhkv 1 1"
-    )
-    # (nhkv, sq, topk) with global row ids
-    global_indices = (index_map + h_kv_offset).to(torch.int32)
-    # q_flat layout is (nhkv * sq, group_size, hd) with nhkv-major order,
-    # so index_sparse_indices shape = (nhkv * sq, 1, topk) where nhk=1 (fused view)
-    index_sparse_indices = global_indices.reshape(nhkv * sq, 1, topk).contiguous()
+    # index_map: (nhkv, sq, topk) → index_sparse_indices: (sq, nhkv, topk)
+    index_sparse_indices = index_map.permute(1, 0, 2).to(torch.int32).contiguous()
 
     tile_size = 128
     if topk % tile_size != 0:
@@ -138,10 +120,10 @@ def ffa_index_sparse_fwd(
             index_sparse_indices, (0, pad_size), value=-1
         )
 
-    out_flat, meta = flex_flash_attn_func(
-        q_flat,
-        k_flat,
-        v_flat,
+    out, meta = flex_flash_attn_func(
+        q,
+        k,
+        v,
         index_sparse_indices=index_sparse_indices,
         q_block_size=1,
         k_block_size=1,
@@ -149,12 +131,8 @@ def ffa_index_sparse_fwd(
         pack_gqa=True if group_size > 1 else False,
     )
 
-    # out_flat: (nhkv * sq, group_size, hd) -> (sq, nhq, hd)
-    o = out_flat.view(nhkv, sq, group_size, hd).transpose(0, 1).reshape(sq, nhq, hd)
     assert meta.lse is not None
-    lse = meta.lse.view(nhkv, sq, group_size).transpose(0, 1).reshape(sq, nhq)
-
-    return o, lse
+    return out, meta.lse
 
 
 @torch.compile

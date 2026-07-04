@@ -544,7 +544,7 @@ def build_index_sparse_indices(
     """Build random index_sparse_indices (total_q, NHK, max_topk) with logical KV token positions.
 
     Values are logical token positions: ``b * S_kv + token_idx``.
-    The kernel internally converts to physical row via ``logical_pos * NHK + kv_head``.
+    Head selection is handled by the kernel's intergroup mechanism (bidh_kv).
 
     Args:
         topk: int or list[int]. If list, per-batch topk (length must be B).

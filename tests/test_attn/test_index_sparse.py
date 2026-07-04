@@ -39,7 +39,7 @@ Known limitations:
   - k_block_size > 1 tests commented out, kernel support is WIP (future: 32/64/128)
   - No distributed sparse yet
   - max_topk must be multiples of tile_size (asserted in flex_flash_attn_func)
-  - Q/K/V are packed in (b, s, h) order to match index_sparse_indices view layout
+  - Q/K/V are passed in natural Dense-style shapes without KV-head flattening
 """
 
 import os
@@ -91,11 +91,16 @@ def _run_sparse_attn_and_get_output(
 ):
     """Run FFA with index_sparse_indices and return reshaped output [B, S_q, NHQ, D].
 
+    Q/K/V are passed in natural (Dense-style) shapes without KV-head flattening:
+      q: (B, S_q, NHQ, D) → q_ffa: (B*S_q, NHQ, D)
+      k: (B, S_kv, NHK, D) → k_ffa: (B*S_kv, NHK, D)
+
     When test_bwd=True, returns (output, q_ffa, k_ffa, v_ffa) with gradients enabled.
     """
-    q_ffa = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
-    k_ffa = rearrange(k, "b s h d -> (b s h) 1 d")
-    v_ffa = rearrange(v, "b s h d -> (b s h) 1 d")
+    D = q.shape[-1]
+    q_ffa = q.reshape(B * S_q, NHQ, D)
+    k_ffa = k.reshape(B * S_kv, NHK, D)
+    v_ffa = v.reshape(B * S_kv, NHK, D)
 
     if test_bwd:
         q_ffa = q_ffa.detach().clone().requires_grad_(True)
@@ -113,9 +118,7 @@ def _run_sparse_attn_and_get_output(
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
         )
-        o_reshaped = rearrange(
-            o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q
-        )
+        o_reshaped = o_sparse.reshape(B, S_q, NHQ, D)
         return o_reshaped, o_sparse, q_ffa, k_ffa, v_ffa
     else:
         with torch.no_grad():
@@ -130,7 +133,7 @@ def _run_sparse_attn_and_get_output(
                 swap_ab=swap_ab,
                 ref_block_size=ref_block_size,
             )
-        return rearrange(o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q)
+        return o_sparse.reshape(B, S_q, NHQ, D)
 
 
 def _compare_against_sdpa(
@@ -220,17 +223,6 @@ class TestIndexSparseIndicesAttn(DistTestBase):
         k = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
         v = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
 
-        if NHK > 1:
-            # View trick: fold NHK into the token dimension so the kernel
-            # sees nhk=1.  Indices must be built in this flat space.
-            q = rearrange(q, "b s (h1 h2) d -> b (s h1) h2 d", h1=NHK)
-            k = rearrange(k, "b s h d -> b (s h) 1 d")
-            v = rearrange(v, "b s h d -> b (s h) 1 d")
-            S_q = S_q * NHK
-            S_kv = S_kv * NHK
-            NHQ = NHQ // NHK
-            NHK = 1
-
         index_sparse_indices = _build_index_sparse_indices(
             B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=k_block_size
         )
@@ -269,10 +261,9 @@ class TestIndexSparseIndicesAttn(DistTestBase):
         )
 
         test_case = (
-            f"[NHQ={cfg['NHQ']},NHK={cfg['NHK']},S_q={cfg.get('S_q', cfg.get('S'))},S_kv={cfg.get('S_kv', cfg.get('S'))},"
+            f"[NHQ={NHQ},NHK={NHK},S_q={S_q},S_kv={S_kv},"
             f"B={B},D={D},topk={topk},max_topk={max_topk},pack_gqa={pack_gqa},"
-            f"swap_ab={swap_ab},k_block_size={k_block_size},dtype={dtype},"
-            f"flat:NHQ_eff={NHQ},S_q_eff={S_q},S_kv_eff={S_kv}]"
+            f"swap_ab={swap_ab},k_block_size={k_block_size},dtype={dtype}]"
         )
 
         _compare_against_sdpa(o_ffa, q, k, v, sdpa_mask, B, NHQ, NHK, atol, test_case)
@@ -283,23 +274,33 @@ class TestIndexSparseIndicesAttn(DistTestBase):
             dq_ffa = q_ffa.grad.clone()
 
             gqa = NHQ // NHK
-            total_q = B * S_q
+            # dq_ffa: (B*S_q, NHQ, D) → (B, S_q, NHQ, D) → (B, NHQ, S_q, D)
+            dq_ffa_4d = dq_ffa.reshape(B, S_q, NHQ, D).permute(0, 2, 1, 3)
+            # do: (B*S_q, NHQ, D) → (B, S_q, NHQ, D) → (B, NHQ, S_q, D)
+            do_4d = do.reshape(B, S_q, NHQ, D).permute(0, 2, 1, 3)
+
             dq_ref_list = []
             for b_idx in range(B):
                 q_sdpa = (
-                    rearrange(q[b_idx], "s h d -> 1 h s d")
+                    q[b_idx]
+                    .permute(1, 0, 2)
+                    .unsqueeze(0)
                     .detach()
                     .clone()
                     .requires_grad_(True)
                 )
                 k_sdpa = (
-                    rearrange(k[b_idx], "s h d -> 1 h s d")
+                    k[b_idx]
+                    .permute(1, 0, 2)
+                    .unsqueeze(0)
                     .detach()
                     .clone()
                     .requires_grad_(True)
                 )
                 v_sdpa = (
-                    rearrange(v[b_idx], "s h d -> 1 h s d")
+                    v[b_idx]
+                    .permute(1, 0, 2)
+                    .unsqueeze(0)
                     .detach()
                     .clone()
                     .requires_grad_(True)
@@ -316,25 +317,14 @@ class TestIndexSparseIndicesAttn(DistTestBase):
                     v_sdpa_exp,
                     attn_mask=sdpa_mask[b_idx].unsqueeze(0),
                 )
-                do_reshaped = rearrange(
-                    do, "(b s h1) h2 d -> b 1 (h1 h2) s d", b=B, h1=NHK, s=S_q
-                )[b_idx]
-                o_ref.backward(do_reshaped)
-                dq_ref_list.append(q_sdpa.grad)
-
-            dq_ref = torch.cat(dq_ref_list, dim=0)
-            dq_ref = rearrange(dq_ref, "b h s d -> (b s) h d", b=B)[:total_q]
-
-            dq_ffa_reshaped = rearrange(
-                dq_ffa, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q
-            )
-            dq_ref_reshaped = rearrange(dq_ref, "(b s) h d -> b h s d", b=B, s=S_q)
+                o_ref.backward(do_4d[b_idx].unsqueeze(0))
+                dq_ref_list.append(q_sdpa.grad.squeeze(0))
 
             bwd_atol = cfg.get("bwd_atol", 0.05)
             err_msgs = []
             for b_idx in range(B):
                 max_dq_diff = (
-                    (dq_ffa_reshaped[b_idx].float() - dq_ref_reshaped[b_idx].float())
+                    (dq_ffa_4d[b_idx].float() - dq_ref_list[b_idx].float())
                     .abs()
                     .max()
                     .item()
