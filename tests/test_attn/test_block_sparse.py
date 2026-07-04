@@ -1010,8 +1010,39 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize(
         "block_config",
         [
-            # Uniform blocks — all block_sparse=True (this file tests the
-            # BlockSparse kernel path; range-merge+dense is covered by test_flex_flash_attn)
+            # Uniform blocks with same Q/K block size
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 64,
+                "swap_ab": False,
+                "block_sparse": False,
+                "ref_block_size": (64, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 128,
+                "swap_ab": False,
+                "block_sparse": False,
+                "ref_block_size": (128, 128),
+            },
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 64,
+                "swap_ab": True,
+                "block_sparse": False,
+                "ref_block_size": (64, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 128,
+                "swap_ab": True,
+                "block_sparse": False,
+                "ref_block_size": (64, 64),
+            },
             {
                 "type": "uniform",
                 "q_size": 64,
@@ -1020,30 +1051,22 @@ class TestBlockSparseAttn(DistTestBase):
                 "block_sparse": True,
                 "ref_block_size": (64, 128),
             },
-            {
-                "type": "uniform",
-                "q_size": 128,
-                "k_size": 128,
-                "swap_ab": False,
-                "block_sparse": True,
-                "ref_block_size": (128, 128),
-            },
             # Small Q block sizes
             {
                 "type": "uniform",
                 "q_size": 32,
                 "k_size": 64,
-                "swap_ab": False,
-                "block_sparse": True,
-                "ref_block_size": (64, 128),
+                "swap_ab": True,
+                "block_sparse": False,
+                "ref_block_size": (32, 64),
             },
             {
                 "type": "uniform",
                 "q_size": 16,
                 "k_size": 64,
                 "swap_ab": False,
-                "block_sparse": True,
-                "ref_block_size": (64, 128),
+                "block_sparse": False,
+                "ref_block_size": (64, 64),
             },
             # Small K block sizes
             {
@@ -1287,7 +1310,23 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize(
         "block_config",
         [
-            # Uniform blocks — all block_sparse=True
+            # Uniform blocks with same Q/K block size
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 64,
+                "swap_ab": True,
+                "block_sparse": False,
+                "ref_block_size": (64, 64),
+            },
+            {
+                "type": "uniform",
+                "q_size": 128,
+                "k_size": 128,
+                "swap_ab": True,
+                "block_sparse": False,
+                "ref_block_size": (64, 64),
+            },
             {
                 "type": "uniform",
                 "q_size": 64,
@@ -1296,15 +1335,15 @@ class TestBlockSparseAttn(DistTestBase):
                 "block_sparse": True,
                 "ref_block_size": (64, 128),
             },
+            # Small Q block sizes
             {
                 "type": "uniform",
-                "q_size": 128,
-                "k_size": 128,
-                "swap_ab": False,
-                "block_sparse": True,
-                "ref_block_size": (128, 128),
+                "q_size": 32,
+                "k_size": 64,
+                "swap_ab": True,
+                "block_sparse": False,
+                "ref_block_size": (32, 64),
             },
-            # Small Q block sizes
             {
                 "type": "uniform",
                 "q_size": 32,
@@ -1314,6 +1353,14 @@ class TestBlockSparseAttn(DistTestBase):
                 "ref_block_size": (64, 128),
             },
             # Small K block sizes
+            {
+                "type": "uniform",
+                "q_size": 64,
+                "k_size": 8,
+                "swap_ab": True,
+                "block_sparse": False,
+                "ref_block_size": (64, 64),
+            },
             {
                 "type": "uniform",
                 "q_size": 64,
