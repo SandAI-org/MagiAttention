@@ -423,14 +423,13 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 // Handles both InnerLoopK and InnerLoopQ via the IsInnerLoopQ_ template parameter (like BlockSparseBlockMeta).
 //
 // IsInnerLoopQ_=false (InnerLoopK): outer=Q token (bidb), inner=K from forward topk indices
-//   fill_token_indices fills K physical rows: k_token * nhk + kv_head_local
+//   fill_token_indices fills K physical rows: k_token * nhk + kv_head
 // IsInnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb), inner=Q from inner_indices
 //   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
 //
 // Fields:
-//   bidh      — head index from scheduler (= KV-head when PackGQA; = Q-head when !PackGQA)
-//   bidh_kv   — KV-head index (derived from bidh); used only in InnerLoopQ for inner_indices offset
-//   kv_head_local — same concept as bidh_kv but computed per-path; used only in InnerLoopK fill_token_indices
+//   bidh    — head index from scheduler (= KV-head when PackGQA; = Q-head when !PackGQA)
+//   kv_head — resolved KV-head for this CTA (computed per-path in constructor body)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -453,7 +452,6 @@ struct IndexSparseBlockMeta {
 
   int const outer_block;
   int const bidh;      // Head index from scheduler (KV-head when PackGQA, Q-head otherwise)
-  int const bidh_kv;   // KV-head index; used in InnerLoopQ to offset into inner_indices
   int bidb;
 
   flash::SeqlenInfo seqlen_info;
@@ -467,11 +465,9 @@ struct IndexSparseBlockMeta {
   static constexpr int inner_block_min = 0;
 
   int const* group_token_ptr;
-  // Total KV-head count; used in fill_token_indices to compute physical row: k_token * nhk + kv_head_local
-  int nhk;
-  // The specific KV-head this CTA handles. Only used by InnerLoopK in fill_token_indices.
-  // (InnerLoopQ computes Q packed rows which are head-agnostic, so this field is unused there.)
-  int kv_head_local;
+  int nhk;       // Total KV-head count
+  int kv_head;   // Resolved KV-head for this CTA; InnerLoopK uses in fill_token_indices,
+                 // InnerLoopQ uses for inner_indices offset
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexSparseBlockMeta(
@@ -481,16 +477,6 @@ struct IndexSparseBlockMeta {
       int thread_idx = 0)
       : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
-        bidh_kv([&]() -> int {
-          // When !PackGQA, bidh is a Q-head index; divide by actual Q/KV ratio
-          // to get the KV-head. Must use the runtime divmod (not the template
-          // PackGQAFactor which is 1 when !PackGQA).
-          if constexpr (PackGQA) {
-            return bidh;
-          } else {
-            return params.qhead_per_khead_divmod.divide(bidh);
-          }
-        }()),
         group_token_ptr(nullptr) {
     bidb = [&]() {
       if constexpr (RangeMerge && !IsInnerLoopQ) {
@@ -512,7 +498,7 @@ struct IndexSparseBlockMeta {
       seqlen_info.seqlen_q = 1;
 
       int unique_idx = get<2>(block_coord);
-      kv_head_local = unique_idx % nhk;
+      kv_head = unique_idx % nhk;
       row_ptr = params.index_sparse_indices + static_cast<int64_t>(unique_idx) * max_topk;
 
       actual_topk = max_topk;
@@ -527,13 +513,17 @@ struct IndexSparseBlockMeta {
       // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
       seqlen_info.offset_k = bidb * kKBlockSize;
       seqlen_info.seqlen_k = kKBlockSize;
-      kv_head_local = bidh;
+
+      // Resolve KV-head: PackGQA → bidh is already KV-head; otherwise divide by GQA ratio
+      if constexpr (PackGQA) {
+        kv_head = bidh;
+      } else {
+        kv_head = params.qhead_per_khead_divmod.divide(bidh);
+      }
 
       // inner_indices layout: (num_k_blocks, nhk * inner_topk_per_head)
-      // When !PackGQA, bidh is a Q-head index from the scheduler but inner_indices
-      // are partitioned by KV head. Use bidh_kv (already mapped to KV-head above).
       int inner_topk_per_head = max_topk / nhk;
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh_kv) * inner_topk_per_head;
+      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(kv_head) * inner_topk_per_head;
       int max_inner_topk = inner_topk_per_head;
 
       actual_topk = max_inner_topk;
@@ -573,7 +563,7 @@ struct IndexSparseBlockMeta {
   }
 
   // Fill token indices into the smem stage slot for the CURRENT tile.
-  // InnerLoopK: fills K physical rows (k_token * nhk + kv_head_local)
+  // InnerLoopK: fills K physical rows (k_token * nhk + kv_head)
   // InnerLoopQ: fills Q packed rows (q_token * PackGQAFactor + sub_head)
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
@@ -585,7 +575,7 @@ struct IndexSparseBlockMeta {
       if constexpr (kKBlockSize <= 1) {
         for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
           int const k_token = group_token_ptr[j];
-          group_rows[j] = (k_token >= 0) ? k_token * nhk + kv_head_local : 0;
+          group_rows[j] = (k_token >= 0) ? k_token * nhk + kv_head : 0;
         }
       } else {
         int tile_base = inner_block_cur * kInnerBlockSize_;
@@ -595,7 +585,7 @@ struct IndexSparseBlockMeta {
           int offset_in_block = token_pos % kKBlockSize;
           int block_id = (block_idx < seqlen_info.seqlen_k / kKBlockSize) ? group_token_ptr[block_idx] : -1;
           int logical_k = block_id * kKBlockSize + offset_in_block;
-          group_rows[j] = (block_id >= 0) ? logical_k * nhk + kv_head_local : 0;
+          group_rows[j] = (block_id >= 0) ? logical_k * nhk + kv_head : 0;
         }
       }
     } else {
