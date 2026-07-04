@@ -244,92 +244,6 @@ This is for now a temporary solution to reduce the redundant inter-node communic
 
 Set the value of this env variable to control the maximum LRU cache size of `dist_attn_runtime_dict_mgr`.
 
-**MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN**
-
-- **Defaults to:** `false` (MinToMax / ascending)
-- **Used by:** `magi_attention.functional._flex_flash_attn_jit`
-
-Set this env variable to `true` or `false` to override the inner-loop iteration direction of the FFA kernel (both FWD and BWD). `true` means MaxToMin (descending), `false` means MinToMax (ascending).
-
-```{note}
-This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation.
-```
-
-**MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP**
-
-- **Defaults to:** `true`
-- **Used by:** `magi_attention.functional._flex_flash_attn_jit`
-
-Set this env variable to `true` or `false` to enable or disable intra-warpgroup overlap in the FFA forward kernel. When enabled, the MMA warpgroup pre-loads the next V tile while computing the current softmax, hiding V load latency.
-
-```{note}
-This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects FWD.
-```
-
-**MAGI_ATTENTION_FFA_USE_MASK_DISPATCH**
-
-- **Defaults to:** `true`
-- **Used by:** `magi_attention.functional._flex_flash_attn_jit`
-
-Set this env variable to `true` or `false` to enable or disable the mask-dispatch optimization in the FFA backward kernel. When enabled, the BWD inner loop uses zone-based dispatch (no_mask / causal / boundary) to skip unnecessary mask computations.
-
-```{note}
-This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation. Only affects BWD.
-```
-
-**MAGI_ATTENTION_FFA_MASK_MODE**
-
-- **Defaults to:** unset (kernel default)
-- **Used by:** `magi_attention.functional._flex_flash_attn_jit`
-
-Set this env variable to override the FFA mask application mode. Valid values are `regular` (direct apply), `dispatch` (3-lambda dispatch), and `unified`.
-
-```{note}
-This is a compile-time knob for internal kernel tuning. Changing this value triggers JIT recompilation.
-```
-
-**MAGI_ATTENTION_FFA_CUTEDSL_ARCH**
-
-- **Defaults to:** unset (auto-detect the current GPU's compute capability)
-- **Used by:** `magi_attention.kernel.cutedsl.ffa_utils`
-
-Set this env variable to override the target compute capability used to compile the CuteDSL FFA kernels (e.g. `90`, `100`).
-
-**MAGI_ATTENTION_FFA_CUTEDSL_CLC**
-
-- **Defaults to:** `0`
-- **Used by:** `magi_attention.kernel.cutedsl.ffa_utils`
-
-Toggle this env variable to `1` to enable the CLC (cluster launch control) persistent scheduling for the CuteDSL FFA kernels.
-
-**MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA**
-
-- **Defaults to:** `0`
-- **Used by:** `magi_attention.kernel.cutedsl.ffa_utils`
-
-Toggle this env variable to `1` to disable the 2-CTA cooperative kernel variant for the CuteDSL FFA kernels.
-
-**MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE**
-
-- **Defaults to:** `0`
-- **Used by:** `magi_attention.kernel.cutedsl`
-
-Toggle this env variable to `1` to enable debug-time checks and diagnostics for the CuteDSL FFA kernels.
-
-**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED**
-
-- **Defaults to:** `0`
-- **Used by:** `magi_attention.kernel.cutedsl.cache_utils`
-
-Toggle this env variable to `1` to enable on-disk caching of compiled CuteDSL FFA kernels.
-
-**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR**
-
-- **Defaults to:** unset (use the default cache location)
-- **Used by:** `magi_attention.kernel.cutedsl.cache_utils`
-
-Set this env variable to specify the directory for the CuteDSL FFA kernel cache.
-
 **CUDA_DEVICE_MAX_CONNECTIONS**
 
 - **Defaults to:** `8`
@@ -382,6 +296,13 @@ Toggle this env variable to `1` to enable profiling mode to profile all magi_att
 This is only supposed to be used for development. Please do NOT enable it in production.
 ```
 
+**MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE**
+
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.kernel.cutedsl`
+
+Toggle this env variable to `1` to enable debug-time checks and diagnostics for the CuteDSL FFA kernels.
+
 ## For Build
 
 ### JIT
@@ -427,6 +348,20 @@ Toggle this env variable to `1` to force building FFA in JIT mode, even the pre-
 - **Used by:** `magi_attention.env.build.nvcc_threads`
 
 Sets the number of threads for `nvcc`'s `--split-compile` option, which can speed up the JIT compilation of CUDA kernels.
+
+**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED**
+
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.kernel.cutedsl.cache_utils`
+
+Toggle this env variable to `1` to enable on-disk caching of compiled CuteDSL FFA kernels.
+
+**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR**
+
+- **Defaults to:** unset (use the default cache location)
+- **Used by:** `magi_attention.kernel.cutedsl.cache_utils`
+
+Set this env variable to specify the directory for the CuteDSL FFA kernel cache.
 
 
 ### AOT
