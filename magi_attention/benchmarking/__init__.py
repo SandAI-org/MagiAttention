@@ -36,8 +36,6 @@ __all__ = [
     "do_bench",
     "make_img_grid",
     "gen_save_path",
-    "__version__",
 ]
 
-
-__version__ = "1.0.0"
+__version__ = "1.1.0"

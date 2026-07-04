@@ -34,8 +34,8 @@ from .utils import (
     BENCH_CASE_NOT_SUPPORTED,
     BENCH_CASE_OOM,
     MemRecorder,
+    MemRecordMode,
     StatsConfig,
-    build_color_palette,
     collect_best_legend,
     maybe_dist_sync,
 )
@@ -43,8 +43,6 @@ from .utils import (
 # -------------------       benchmark wrapper     ------------------- #
 
 
-# copied and modified from triton.testing.do_bench to add flops report with peak memory report
-# see https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L79
 def do_bench(
     fn: Callable,
     warmup_iters: int = 25,
@@ -53,14 +51,22 @@ def do_bench(
     quantiles: Optional[list[float]] = None,
     fast_flush: bool = True,
     return_mode: str = "mean",
-    return_flops: bool = True,
-    return_mem: bool = True,
-    mem_record_mode: str = "allocated",
+    record_time: bool = True,
+    mem_record_mode: Optional[MemRecordMode] = "peak",
     device_idx: int = 0,
     to_gc_collect: bool = True,
     to_empty_cache: bool = True,
 ) -> dict:
-    """Benchmark the FLOPS and/or peak memory of the provided function.
+    """Benchmark the timing and/or peak memory of the provided function.
+
+    Timing and memory recording are controlled independently:
+
+    - Timing (the ``"flops"`` key, in milliseconds) is measured with CUDA
+      events whenever ``record_time`` is ``True``.
+    - Memory (the ``"mem"`` key, in bytes) is recorded via :class:`MemRecorder`
+      whenever ``mem_record_mode`` is not ``None``. When ``None``, no
+      :class:`MemRecorder` is entered at all, so no host-side work pollutes the
+      timing window.
 
     Args:
         fn: The zero-argument callable to benchmark.
@@ -80,12 +86,13 @@ def do_bench(
         return_mode: Aggregation mode used when ``quantiles`` is ``None``.
             One of ``"min"``, ``"max"``, ``"mean"``, ``"median"``.
             Defaults to ``"mean"``.
-        return_flops: Include a ``"flops"`` key (timing in ms) in the
-            returned dict. Defaults to ``True``.
-        return_mem: Include a ``"mem"`` key (peak allocated memory in bytes)
-            in the returned dict. Defaults to ``True``.
+        record_time: When ``True`` (default), measure kernel timing with CUDA
+            events and include a ``"flops"`` key (timing in ms) in the result.
+            Set to ``False`` for pure memory benchmarks.
         mem_record_mode: Memory recording mode forwarded to
-            :class:`MemRecorder`. Defaults to ``"allocated"``.
+            :class:`MemRecorder`, one of ``"allocated"`` / ``"peak"``, or
+            ``None`` to skip memory recording entirely. Defaults to
+            ``"peak"``.
         device_idx: CUDA device index used for memory recording.
             Defaults to ``0``.
         to_gc_collect: Call ``gc.collect()`` after the run to free Python
@@ -96,22 +103,30 @@ def do_bench(
     Returns:
         A dict containing one or both of:
 
-        - ``"flops"``: timing in milliseconds (scalar or per-quantile list).
-        - ``"mem"``: peak allocated memory in bytes (scalar or per-quantile
-          list).
+        - ``"flops"``: timing in milliseconds (scalar or per-quantile list),
+          present when ``record_time`` is ``True``.
+        - ``"mem"``: peak/allocated memory in bytes (scalar or per-quantile
+          list), present when ``mem_record_mode`` is not ``None``.
 
-        Exactly which keys are present depends on ``return_flops`` and
-        ``return_mem``.
+    Originally copied and modified from triton.testing.do_bench to add flops report with peak memory report.
+
+    See https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L79
     """
     assert return_mode in ["min", "max", "mean", "median"]
-    assert return_flops or return_mem
+    assert record_time or mem_record_mode is not None, (
+        "do_bench must record at least one of time or memory: "
+        "record_time=True and/or mem_record_mode is not None"
+    )
+
+    record_mem = mem_record_mode is not None
 
     def _get_ret(flops, mem):
-        return (
-            dict(flops=flops, mem=mem)
-            if return_flops and return_mem
-            else (dict(flops=flops) if return_flops else dict(mem=mem))
-        )
+        ret: dict = {}
+        if record_time:
+            ret["flops"] = flops
+        if record_mem:
+            ret["mem"] = mem
+        return ret
 
     def _get_item(ret):
         return ret[0] if len(ret) == 1 else ret
@@ -119,7 +134,7 @@ def do_bench(
     fn()
     torch.cuda.synchronize()
 
-    # We maintain a buffer of 256 MB that we clear
+    # NOTE: We maintain a buffer of 256 MB that we clear
     # before each kernel call to make sure that the L2
     # doesn't contain any input data before the run
     if fast_flush:
@@ -128,8 +143,16 @@ def do_bench(
         cache = torch.empty(int(256e6), dtype=torch.int8, device="cuda")
 
     # Init events and memory buffer for recording per-iteration stats
-    start_event = [torch.cuda.Event(enable_timing=True) for _ in range(rep_iters)]
-    end_event = [torch.cuda.Event(enable_timing=True) for _ in range(rep_iters)]
+    start_event = (
+        [torch.cuda.Event(enable_timing=True) for _ in range(rep_iters)]
+        if record_time
+        else []
+    )
+    end_event = (
+        [torch.cuda.Event(enable_timing=True) for _ in range(rep_iters)]
+        if record_time
+        else []
+    )
     mems = [0.0] * rep_iters
 
     # Warm-up
@@ -144,30 +167,36 @@ def do_bench(
 
     # Benchmark
     for i in range(rep_iters):
-        # we don't want `fn` to accumulate gradient values
-        # if it contains a backward pass. So we clear the
-        # provided gradients
+        # NOTE: We don't want `fn` to accumulate gradient values
+        # if it contains a backward pass.
+        # So we clear the provided gradients
         if grad_to_none is not None:
             for x in grad_to_none:
                 x.grad = None
-        # we clear the L2 cache before each run
+        # We clear the L2 cache before each run
         cache.zero_()
 
-        # HACK: get attn-impl and workload names for fn with iters as profile range
+        # HACK: Get attn-impl and workload names for fn with iters as profile range
         profile_range = getattr(fn, "profile_range", "") + f"_iter{i}"
 
-        # barrier before starting timing
+        # Barrier before starting timing
         if dist.is_initialized():
             dist.all_reduce(cache, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
         torch.cuda.nvtx.range_push(profile_range)
 
-        start_event[i].record()
-        # record mem of `fn`
-        with MemRecorder(mode=mem_record_mode, device_idx=device_idx) as recoder:
+        if record_time:
+            start_event[i].record()
+        # Only enter MemRecorder when memory recording is requested; otherwise
+        # keep the timing window free of any host-side memory-query overhead.
+        if record_mem:
+            assert mem_record_mode is not None  # mypy
+            with MemRecorder(mode=mem_record_mode, device_idx=device_idx) as recoder:
+                fn()
+            mems[i] = recoder.memory
+        else:
             fn()
-
-        mems[i] = recoder.memory
-        end_event[i].record()
+        if record_time:
+            end_event[i].record()
         torch.cuda.nvtx.range_pop()
 
     # Synchronize before recording clocks
@@ -176,16 +205,18 @@ def do_bench(
 
     # Record clocks across different runs
     torch.cuda.synchronize()
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-        device=torch.device("cuda"),
-    )
-
-    # Reduce clocks across ranks (worst-case) when in distributed mode
-    if dist.is_initialized():
-        dist.all_reduce(times, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
-    times = times.to(device=torch.device("cpu"))
+    if record_time:
+        times = torch.tensor(
+            [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
+            dtype=torch.float,
+            device=torch.device("cuda"),
+        )
+        # Reduce clocks across ranks (worst-case) when in distributed mode
+        if dist.is_initialized():
+            dist.all_reduce(times, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+        times = times.to(device=torch.device("cpu"))
+    else:
+        times = torch.zeros(rep_iters, dtype=torch.float)
     mems = torch.tensor(mems, dtype=torch.float)
 
     # Clean up
@@ -219,15 +250,16 @@ def do_bench_flops(
     quantiles: Optional[list[float]] = None,
     fast_flush: bool = True,
     return_mode: str = "mean",
-    mem_record_mode: str = "allocated",
     device_idx: int = 0,
     to_gc_collect: bool = True,
     to_empty_cache: bool = True,
 ) -> dict:
-    """Benchmark the FLOPS of the provided function (memory recording disabled).
+    """Benchmark the timing of the provided function (memory recording disabled).
 
-    Thin wrapper around :func:`do_bench` with ``return_flops=True`` and
-    ``return_mem=False`` fixed.  All other parameters are forwarded verbatim.
+    Thin wrapper around :func:`do_bench` with ``record_time=True`` and
+    ``mem_record_mode=None`` fixed, so no :class:`MemRecorder` is ever entered
+    and the timing window is free of host-side memory-query overhead. All other
+    parameters are forwarded verbatim.
 
     Args:
         fn (Callable): Function to benchmark.
@@ -245,10 +277,7 @@ def do_bench_flops(
         return_mode (str): Aggregation mode when ``quantiles`` is ``None``.
             One of ``"min"``, ``"max"``, ``"mean"``, ``"median"``.
             Defaults to ``"mean"``.
-        mem_record_mode (str): Memory recording mode passed to
-            :class:`MemRecorder`. Defaults to ``"allocated"``.
-        device_idx (int): CUDA device index for memory recording.
-            Defaults to ``0``.
+        device_idx (int): CUDA device index. Defaults to ``0``.
         to_gc_collect (bool): Call ``gc.collect()`` after the run.
             Defaults to ``True``.
         to_empty_cache (bool): Call ``torch.cuda.empty_cache()`` after the
@@ -266,9 +295,8 @@ def do_bench_flops(
         quantiles=quantiles,
         fast_flush=fast_flush,
         return_mode=return_mode,
-        return_flops=True,
-        return_mem=False,
-        mem_record_mode=mem_record_mode,
+        record_time=True,
+        mem_record_mode=None,
         device_idx=device_idx,
         to_gc_collect=to_gc_collect,
         to_empty_cache=to_empty_cache,
@@ -283,15 +311,16 @@ def do_bench_mem(
     quantiles: Optional[list[float]] = None,
     fast_flush: bool = True,
     return_mode: str = "mean",
-    mem_record_mode: str = "allocated",
+    mem_record_mode: MemRecordMode = "peak",
     device_idx: int = 0,
     to_gc_collect: bool = True,
     to_empty_cache: bool = True,
 ) -> dict:
-    """Benchmark the peak memory of the provided function (FLOPS recording disabled).
+    """Benchmark the peak memory of the provided function (timing disabled).
 
-    Thin wrapper around :func:`do_bench` with ``return_flops=False`` and
-    ``return_mem=True`` fixed.  All other parameters are forwarded verbatim.
+    Thin wrapper around :func:`do_bench` with ``record_time=False`` fixed, so
+    no CUDA-event timing is performed. All other parameters are forwarded
+    verbatim.
 
     Args:
         fn (Callable): Function to benchmark.
@@ -310,7 +339,8 @@ def do_bench_mem(
             One of ``"min"``, ``"max"``, ``"mean"``, ``"median"``.
             Defaults to ``"mean"``.
         mem_record_mode (str): Memory recording mode passed to
-            :class:`MemRecorder`. Defaults to ``"allocated"``.
+            :class:`MemRecorder`, one of ``"allocated"`` / ``"peak"``.
+            Defaults to ``"peak"``.
         device_idx (int): CUDA device index for memory recording.
             Defaults to ``0``.
         to_gc_collect (bool): Call ``gc.collect()`` after the run.
@@ -330,8 +360,7 @@ def do_bench_mem(
         quantiles=quantiles,
         fast_flush=fast_flush,
         return_mode=return_mode,
-        return_flops=False,
-        return_mem=True,
+        record_time=False,
         mem_record_mode=mem_record_mode,
         device_idx=device_idx,
         to_gc_collect=to_gc_collect,
@@ -339,11 +368,11 @@ def do_bench_mem(
     )
 
 
-# copied from triton.testing.Benchmark
-# see https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L192
 class Benchmark:
     """
-    This class is used by the :code:`perf_report` function to generate line plots with a concise API.
+    Originally copied from ``triton.testing.Benchmark``.
+
+    See https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L192
     """
 
     def __init__(
@@ -443,9 +472,14 @@ class Benchmark:
         )
 
 
-# copied and modified from triton.testing.Mark to add flops report with peak memory report
-# see https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L258
 class Mark:
+    """
+    Originally copied and modified from ``triton.testing.Mark``.
+
+    See https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L258
+
+    """
+
     def __init__(self, fn, benchmarks):
         self.fn = fn
         self.benchmarks = benchmarks
@@ -522,27 +556,36 @@ class Mark:
                 "axes.titlesize": 14,
                 "axes.labelsize": 12,
                 "legend.fontsize": 10,
-                "xtick.labelsize": 16,
-                "ytick.labelsize": 16,
+                "xtick.labelsize": 15,
+                "ytick.labelsize": 15,
                 "grid.linewidth": 1.2,
             },
         )
-        COLOR_PALETTE = build_color_palette(len(bench.line_names))
+        COLOR_PALETTE = sns.color_palette("viridis", n_colors=len(bench.line_names))
 
         for perf_key in dfs:
-            plt.figure(figsize=(16, 8), dpi=150)
+            plt.figure(figsize=(14, 8), dpi=100)
             ax = plt.gca()
 
             all_data = []
             labels = bench.line_names
-            xvars = list(bench.x_vals)
+            xvars = bench.x_vals
             x_indices = np.arange(len(xvars))
-            # Each group of bars occupies GROUP_FILL of the unit x-spacing,
-            # guaranteeing a visible gap between consecutive x-groups regardless
-            # of the number of labels.  Individual bars are capped at 0.6 so a
-            # single-label plot doesn't produce an overly fat bar.
-            _GROUP_FILL = 0.75
-            bar_width = min(_GROUP_FILL / max(len(labels), 1), 0.6)
+            _bar_width_map = {
+                1: 0.65,
+                2: 0.40,
+                3: 0.30,
+                4: 0.25,
+                6: 0.20,
+                8: 0.15,
+                12: 0.12,
+                18: 0.09,
+                24: 0.07,
+            }
+            bar_width = next(
+                (v for k, v in sorted(_bar_width_map.items()) if len(labels) <= k),
+                0.06,
+            )
 
             for provider in bench.line_names:
                 data = dfs[perf_key][provider].dropna().values
@@ -550,43 +593,45 @@ class Mark:
 
             # draw bar plots
             for i, (data, label) in enumerate(zip(all_data, labels)):
-                color = COLOR_PALETTE[i]
+                edge_color = COLOR_PALETTE[i] + (0.7,)
                 ax.bar(
                     x_indices + i * bar_width,
                     data,
                     width=bar_width,
                     label=label,
-                    color=color,
-                    edgecolor=None,
-                    linewidth=0,
+                    color=COLOR_PALETTE[i],
+                    edgecolor=edge_color,
+                    linewidth=1.5,
                     alpha=0.65,
                     zorder=2,
                 )
 
                 # Annotate bars
                 for idx, value in enumerate(data):
-                    if value == BENCH_CASE_OOM:  # OOM — ran but crashed
+                    if value == BENCH_CASE_OOM:  # OOM
                         ax.text(
                             x_indices[idx] + i * bar_width,
                             value + 0.2,  # Position text slightly above the bar
                             "E",  # "OOM",
                             ha="center",
                             va="bottom",
-                            fontsize=14,
-                            fontweight="bold",
-                            color="#d63031",  # warning red: tried but failed
+                            fontsize=15,
+                            fontweight="bold",  # Add this line to make the text bold
+                            # color=COLOR_PALETTE[i],
+                            color="red",
                             zorder=4,
                         )
-                    elif value == BENCH_CASE_NOT_SUPPORTED:  # not supported — N/A
+                    elif value == BENCH_CASE_NOT_SUPPORTED:  # not supported
                         ax.text(
                             x_indices[idx] + i * bar_width,
                             value + 0.2,
                             "X",
                             ha="center",
                             va="bottom",
-                            fontsize=14,
-                            fontweight="bold",
-                            color="#636e72",  # neutral grey: not applicable
+                            fontsize=15,
+                            fontweight="bold",  # Add this line to make the text bold
+                            # color=COLOR_PALETTE[i],
+                            color="red",
                             zorder=4,
                         )
                     elif print_value_on_bar:  # normal value
@@ -596,48 +641,51 @@ class Mark:
                             f"{value:.2f}",
                             ha="center",
                             va="bottom",
-                            fontsize=7,
+                            fontsize=10,
+                            # color=COLOR_PALETTE[i],
                             color="black",
                             zorder=4,
                         )
 
-            # draw line plots — diamond markers with white-stroke path effect
+            # draw line plots
             for i, (data, label) in enumerate(zip(all_data, labels)):
+                # Create a copy of the data to modify
                 plot_data = data.copy().astype(float)
-                # Break the line at OOM / not-supported sentinels
-                plot_data[
-                    (plot_data == BENCH_CASE_OOM)
-                    | (plot_data == BENCH_CASE_NOT_SUPPORTED)
-                ] = np.nan
+
+                # Insert np.nan where value is -1 or -2 to break the line
+                plot_data[(plot_data == -1) | (plot_data == -2)] = np.nan
 
                 ax.plot(
                     x_indices + i * bar_width,
                     plot_data,
                     color=COLOR_PALETTE[i],
-                    marker="D",
+                    # label=label, # ignore the plot label
+                    marker="o",
                     markersize=4,
                     markerfacecolor="white",
-                    markeredgewidth=1.5,
+                    markeredgewidth=1.2,
                     linestyle="-",
-                    linewidth=1.5,
+                    linewidth=2.5,
                     path_effects=[
-                        pe.Stroke(linewidth=1, foreground="white"),
+                        pe.Stroke(linewidth=4, foreground="white"),
                         pe.Normal(),
                     ],
                     zorder=3,
                 )
 
-            # always start y from zero
+            # y_min, y_max = np.min(all_data) * 0.9, np.max(all_data) * 1.15
+            # always start from zero
             y_min, y_max = 0.0, np.max(all_data) * 1.15
             ax.set_ylim(y_min, y_max)
+
+            ax.legend()
 
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
             ax.spines["left"].set_linewidth(1.5)
-            ax.grid(axis="y", alpha=0.4, linestyle="-", linewidth=1.2)
-            ax.grid(axis="x", visible=False)
+            ax.grid(axis="y", alpha=0.3, linestyle=":", linewidth=1.2)
 
-            # set the xticks at the center of each group
+            # set the xticks t the center of each group with right xticklabels
             ax.set_xticks(x_indices + bar_width * (len(all_data) - 1) / 2)
 
             short_for_xlables = kwargs.get("short_for_xlables", None)
@@ -656,9 +704,7 @@ class Mark:
             use_extend_labels = kwargs.get("use_extend_labels", True)
             if not use_extend_labels:
                 xvars = [x.split("-")[0] for x in xvars]
-            ax.set_xticklabels(xvars, rotation=0, fontsize=16)
-
-            ax.tick_params(axis="y", labelsize=16)
+            ax.set_xticklabels(xvars, rotation=0)
 
             # set xlabel and ylabel
             ax.set_xlabel(
@@ -677,50 +723,28 @@ class Mark:
             )
 
             ax.set_title(
-                f"Benchmark of {bench.plot_name} — {perf_key}",
+                f"The benchmark of {perf_key}\n{bench.plot_name}",
                 fontsize=19,
                 pad=18,
                 fontweight="bold",
-                color="#2d3436",
+                color="#34495e",  # dark blue gray
             )
 
-            # Legend placement: use a top-centred single row when labels are
-            # short enough to fit comfortably (≤ 60 total chars); fall back to
-            # a right-side vertical legend for longer / more numerous labels.
-            _label_chars = sum(len(label) for label in labels)
-            if _label_chars <= 60:
-                legend = ax.legend(
-                    frameon=True,
-                    fontsize=11,
-                    title=bench.line_arg,
-                    title_fontsize="11",
-                    loc="upper center",
-                    bbox_to_anchor=(0.5, 1.0),
-                    ncol=len(labels),
-                    borderpad=0.5,
-                )
-                legend.get_frame().set_facecolor("#FFFFFFDD")
-                legend.get_frame().set_edgecolor("#dfe6e9")
-                legend.get_frame().set_linewidth(1.5)
-                plt.tight_layout()
-            else:
-                legend = ax.legend(
-                    frameon=True,
-                    fontsize=11,
-                    title=bench.line_arg,
-                    title_fontsize="11",
-                    loc="upper left",
-                    bbox_to_anchor=(1.02, 1),
-                    borderaxespad=0,
-                    borderpad=0.6,
-                )
-                legend.get_frame().set_facecolor("#FFFFFFDD")
-                legend.get_frame().set_edgecolor("#dfe6e9")
-                legend.get_frame().set_linewidth(1.5)
-                # Reserve room for the right-side legend without clipping it.
-                plt.tight_layout()
-                plt.subplots_adjust(right=0.78)
+            legend = ax.legend(
+                frameon=True,
+                shadow=True,
+                fontsize=15,
+                borderpad=1,
+                title=bench.line_arg,
+                title_fontsize="18",
+                loc="upper left",
+                bbox_to_anchor=(1, 1),
+            )
+            legend.get_frame().set_facecolor("#FFFFFFDD")
+            legend.get_frame().set_edgecolor("#dfe6e9")
+            legend.get_frame().set_linewidth(1.5)
 
+            plt.tight_layout()
             if save_path:
                 if save_pdf:
                     plt.savefig(
@@ -1322,14 +1346,17 @@ class Mark:
         )
 
 
-# copied from triton.testing.perf_report
-# see https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L357
-def perf_report(benchmarks):
+def perf_report(benchmarks: list[Benchmark]) -> Callable[[Callable[..., Any]], Mark]:
     """
-    Mark a function for benchmarking. The benchmark can then be executed by using the :code:`.run` method on the return value.
+    Mark a function for benchmarking.
+    The benchmark can then be executed by using the :code:`.run` method on the return value.
 
-    :param benchmarks: Benchmarking configurations.
-    :type benchmarks: List of :class:`Benchmark`
+    Args:
+        benchmarks: A list of :class:`Benchmark` objects that define the benchmarking configurations.
+
+    Originally copied from ``triton.testing.perf_report``.
+
+    See https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L357
     """
 
     def wrapper(fn):
@@ -1344,7 +1371,7 @@ def report_all_from_perf(
     save_pdf: bool = False,
     save_stats: bool = True,
     stats_config: StatsConfig | None = None,
-):
+) -> None:
     """Generate a combined image grid and a JSON stats file.
 
     Args:
