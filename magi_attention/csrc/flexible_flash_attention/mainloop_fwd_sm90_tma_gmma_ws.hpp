@@ -467,7 +467,7 @@ struct CollectiveMainloopFwdSm90 {
                                                                    NumProducerThreads,
                                                                    kBlockN,
                                                                    InnerDirMaxToMin,
-                                                                   /*IsLoopQ=*/false>;
+                                                                   /*IsInnerLoopQ=*/false>;
 
   // BlockSparse consumer (used by mma)
   using BlockSparseConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
@@ -479,7 +479,7 @@ struct CollectiveMainloopFwdSm90 {
                                                                    NumProducerThreads,
                                                                    kBlockN,
                                                                    InnerDirMaxToMin,
-                                                                   /*IsLoopQ=*/false>;
+                                                                   /*IsInnerLoopQ=*/false>;
 
   template <bool IsProducer>
   using IndexSparseBlockMeta = flash::

@@ -24,7 +24,7 @@ flex_attn_func = torch.compile(flex_attention)
 
 
 @torch.compile
-def fa_per_token_sparse_ffa_sparse_load_fwd(
+def ffa_block_sparse_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -92,7 +92,7 @@ def fa_per_token_sparse_ffa_sparse_load_fwd(
 
 
 @torch.compile
-def fa_per_token_sparse_ffa_index_sparse_fwd(
+def ffa_index_sparse_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -158,7 +158,7 @@ def fa_per_token_sparse_ffa_index_sparse_fwd(
 
 
 @torch.compile
-def fa_per_token_sparse_flex_fwd(
+def flex_attn_sparse_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -221,7 +221,7 @@ def fa_per_token_sparse_flex_fwd(
 
 
 @torch.compile
-def fa_per_token_sparse_sdpa_fwd(
+def sdpa_sparse_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -296,16 +296,12 @@ def dsa_attn_func(
         backend: str, one of "flex", "ffa_sparse_load", "ffa_index_sparse", "sdpa".
     """
     if backend == "flex":
-        return fa_per_token_sparse_flex_fwd(q, k, v, index_map, softmax_scale)
+        return flex_attn_sparse_fwd(q, k, v, index_map, softmax_scale)
     elif backend == "ffa_sparse_load":
-        return fa_per_token_sparse_ffa_sparse_load_fwd(
-            q, k, v, index_map, softmax_scale
-        )
+        return ffa_block_sparse_fwd(q, k, v, index_map, softmax_scale)
     elif backend == "ffa_index_sparse":
-        return fa_per_token_sparse_ffa_index_sparse_fwd(
-            q, k, v, index_map, softmax_scale
-        )
+        return ffa_index_sparse_fwd(q, k, v, index_map, softmax_scale)
     elif backend == "sdpa":
-        return fa_per_token_sparse_sdpa_fwd(q, k, v, index_map, softmax_scale)
+        return sdpa_sparse_fwd(q, k, v, index_map, softmax_scale)
     else:
         raise ValueError(f"Invalid backend: {backend}")
