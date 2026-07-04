@@ -1123,7 +1123,6 @@ struct CollectiveMainloopBwdSm90 {
   template <bool IsProducer>
   using IndexSparseLoopKBlockMeta = flash::IndexSparseBlockMeta<
       IsProducer,
-      RangeMerge,
       PackGQA,
       PackGQAFactor,
       NumRowsPerGroup,
@@ -1138,7 +1137,6 @@ struct CollectiveMainloopBwdSm90 {
   template <bool IsProducer>
   using IndexSparseLoopQBlockMeta = flash::IndexSparseBlockMeta<
       IsProducer,
-      /*RangeMerge=*/false,
       PackGQA,
       PackGQAFactor,
       NumRowsPerGroup,

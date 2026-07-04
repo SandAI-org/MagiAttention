@@ -482,8 +482,17 @@ struct CollectiveMainloopFwdSm90 {
                                                                    /*IsInnerLoopQ=*/false>;
 
   template <bool IsProducer>
-  using IndexSparseBlockMeta = flash::
-      IndexSparseBlockMeta<IsProducer, RangeMerge, PackGQA, PackGQAFactor, NumRowsPerGroup, NumProducerThreads, GroupSize, kBlockN, InnerDirMaxToMin, KBlockSize>;
+  using IndexSparseBlockMeta = flash::IndexSparseBlockMeta<
+      IsProducer,
+      PackGQA,
+      PackGQAFactor,
+      NumRowsPerGroup,
+      NumProducerThreads,
+      GroupSize,
+      kBlockN,
+      InnerDirMaxToMin,
+      KBlockSize,
+      /*IsInnerLoopQ=*/false>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
