@@ -16,16 +16,15 @@ import inspect
 import os
 import re
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal, TypeAlias
 
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
 import torch.distributed as dist
-from py3nvml import py3nvml
 
 # -------------------       sentinel values     ------------------- #
 
@@ -101,128 +100,46 @@ class TimeManager:
         print(f"elapsed time: {self.elapsed_time:.3e}")
 
 
-@contextmanager
-def nvml_context():
-    py3nvml.nvmlInit()
-    yield
-    py3nvml.nvmlShutdown()
+MemRecordMode: TypeAlias = Literal["allocated", "peak"]
 
 
 class MemRecorder:
-    def __init__(self, mode="allocated", device_idx=0) -> None:
+    """Records GPU memory around a code block
+    using the PyTorch CUDA caching allocator.
+
+    Modes:
+        - ``"peak"`` *(default)*: reset the allocator's peak-memory counter on
+          entry and report ``torch.cuda.max_memory_allocated()`` on exit — the
+          peak allocated bytes reached inside the block.
+        - ``"allocated"``: report the currently allocated bytes
+          (``torch.cuda.memory_allocated()``) on exit.
+
+    Both paths are pure Python/torch calls with negligible host overhead, so
+    the recorder is safe to place inside a timing window.
+    """
+
+    def __init__(self, mode: MemRecordMode = "peak", device_idx: int = 0) -> None:
         self.memory = None
         self.mode = mode
         self.device_idx = device_idx
 
-    def get_alloc_memory_from_torch(self):
-        return torch.cuda.memory_allocated()
-
-    @nvml_context()
-    def get_alloc_memory_from_nvml(self):
-        handle = py3nvml.nvmlDeviceGetHandleByIndex(self.device_idx)
-        meminfo = py3nvml.nvmlDeviceGetMemoryInfo(handle)
-        return meminfo.used
-
     def __enter__(self):
         if self.mode == "peak":
             torch.cuda.reset_peak_memory_stats()
-        elif self.mode == "allocated":
-            # self.memory = self.get_alloc_memory_from_torch()
-            self.memory = self.get_alloc_memory_from_nvml()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.mode == "peak":
             self.memory = torch.cuda.max_memory_allocated()
         elif self.mode == "allocated":
-            # self.memory = self.get_alloc_memory_from_torch() - self.memory
-            # self.memory = self.get_alloc_memory_from_nvml() - self.memory
-            self.memory = self.get_alloc_memory_from_nvml()
+            self.memory = torch.cuda.memory_allocated()
 
 
-def info_str(center_content: str = "", side_str: str = "=", side_num: int = 15) -> str:
-    return (
-        "\n"
-        + side_str * side_num
-        + " "
-        + center_content
-        + " "
-        + side_str * side_num
-        + "\n"
-    )
-
-
-@contextmanager
-def time_manager(name: str = ""):
-    start_time = time.time()
-    suffix = f" for {name}" if name != "" else ""
-    try:
-        print(info_str(f"Timing Begins{suffix}"))
-        yield
-    finally:
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-
-        hours, remainder = divmod(elapsed_time, 3600)
-        minutes, seconds = divmod(remainder, 60)
-
-        print(
-            info_str(
-                f"Time Costed{suffix}: {int(hours)} hours {int(minutes)} minutes {seconds:.2f} seconds"
-            )
-        )
-
-
-# to sync before each sweep for distributed bench
 def maybe_dist_sync():
+    """Sync before each sweep for distributed bench"""
     if dist.is_initialized():
         torch.cuda.synchronize()
         dist.barrier()
-
-
-def get_max_diff(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    ref: torch.Tensor | None = None,
-    times: float = 1.0,
-):
-    """get the maximum difference between a and b if ref is None,
-    otherwise get the maximum difference between (a-ref) and times * (b-ref)
-
-    Args:
-        a (tensor.Tensor): tensor a
-        b (tensor.Tensor): tensor b
-        ref (tensor.Tensor, optional): reference tensor. Defaults to None.
-        times (float, optional): times of the (b-ref). Defaults to 1.0.
-
-    Returns:
-        diff (float): the maximum difference value
-    """
-    if ref is None:
-        return (a - b).abs().max().item()
-    return get_max_diff(a, ref) - times * get_max_diff(b, ref)
-
-
-def get_mean_diff(a: torch.Tensor, b: torch.Tensor):
-    return (a - b).abs().mean().item()
-
-
-def is_allclose(a: torch.Tensor, b: torch.Tensor):
-    if torch.allclose(a, b):
-        print("✅ All close!!")
-    else:
-        print(
-            f"❌ Not all close! The maximum difference is {torch.max(torch.abs(a - b))}"
-        )
-
-
-def compare_speed(s1: str, t1: float, s2: str, t2: float):
-    if t1 > t2:
-        print(f"The {s2} is {t1 / t2:.2f} times faster than {s1}!!")
-    elif t1 < t2:
-        print(f"The {s1} is {t2 / t1:.2f} times faster than {s2}!!")
-    else:
-        print(f"The {s1} and {s2} are the same fast!!")
 
 
 def get_timestamp():
