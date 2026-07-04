@@ -118,7 +118,6 @@ def head_group_benchmark(ratio, line_label):
         perf_dict = do_bench_flops(
             fn,
             quantiles=quantiles,
-            mem_record_mode="peak",
         )
 
         def ms_to_tflops(ms: float) -> float:

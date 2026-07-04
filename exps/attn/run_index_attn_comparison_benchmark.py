@@ -323,7 +323,7 @@ def comparison_benchmark(S, method):
         else:
             raise ValueError(f"Unknown method: {method}")
 
-        perf_dict = do_bench_flops(fn, quantiles=quantiles, mem_record_mode="peak")
+        perf_dict = do_bench_flops(fn, quantiles=quantiles)
 
         def ms_to_tflops(ms: float) -> float:
             return sparse_flops / ms * 1e-9
@@ -645,7 +645,7 @@ def bwd_benchmark(S, method):
         else:
             raise ValueError(f"Unknown BWD method: {method}")
 
-        perf_dict = do_bench_flops(fn, quantiles=quantiles, mem_record_mode="peak")
+        perf_dict = do_bench_flops(fn, quantiles=quantiles)
 
         def ms_to_tflops(ms: float) -> float:
             return sparse_flops / ms * 1e-9

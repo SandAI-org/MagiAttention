@@ -756,7 +756,6 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                 perf_dict = do_bench_flops(
                     fn,
                     quantiles=quantiles,
-                    mem_record_mode="peak",
                 )
 
                 # --------- process report --------- #

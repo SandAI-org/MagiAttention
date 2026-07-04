@@ -465,7 +465,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
         return {"flops": [BENCH_CASE_OOM] * 3}
 
     try:
-        perf_dict = do_bench_flops(fn, quantiles=quantiles, mem_record_mode="peak")
+        perf_dict = do_bench_flops(fn, quantiles=quantiles)
 
         def ms_to_tflops(ms):
             return attn_flops / ms * 1e-9

@@ -318,7 +318,6 @@ def sparse_attn_benchmark(
                 perf_dict = do_bench_flops(
                     fn,
                     quantiles=quantiles,
-                    mem_record_mode="peak",
                 )
 
                 # --------- process report --------- #

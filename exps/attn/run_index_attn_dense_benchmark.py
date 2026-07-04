@@ -322,7 +322,6 @@ def attn_benchmark(seqlen, hd, wd, mask_type, index_attn):
         perf_dict = do_bench_flops(
             bench_fn,
             quantiles=quantiles,
-            mem_record_mode="peak",
         )
 
         def ms_to_tflops(ms: float) -> float:
