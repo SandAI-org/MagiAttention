@@ -427,9 +427,12 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 // IsInnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb), inner=Q from inner_indices
 //   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
 //
-// Fields:
-//   bidh    — head index from scheduler (= KV-head when PackGQA; = Q-head when !PackGQA)
-//   kv_head — resolved KV-head for this CTA (computed per-path in constructor body)
+// Fields (all const, computed in constructor init-list):
+//   outer_block — tile index along the outer loop dimension
+//   bidh        — head index from scheduler (= KV-head when PackGQA; = Q-head when !PackGQA)
+//   bidb        — batch/token index (Q token for InnerLoopK, K block for InnerLoopQ)
+//   nhk         — total KV-head count
+//   kv_head     — resolved KV-head for this CTA
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -450,10 +453,14 @@ struct IndexSparseBlockMeta {
   static constexpr bool IsInnerLoopQ = IsInnerLoopQ_;
   static constexpr bool NeedsBatchLoop = true;
 
+  // ─── Scheduler-assigned coordinates (const, computed in init-list) ───
   int const outer_block;
   int const bidh;      // Head index from scheduler (KV-head when PackGQA, Q-head otherwise)
-  int bidb;
+  int const bidb;
+  int const nhk;       // Total KV-head count
+  int const kv_head;   // Resolved KV-head for this CTA
 
+  // ─── Mutable state (set in constructor body) ───
   flash::SeqlenInfo seqlen_info;
 
   flash::AttnType attn_type = flash::AttnType::Full;
@@ -464,10 +471,7 @@ struct IndexSparseBlockMeta {
   int num_invalid_token;
   static constexpr int inner_block_min = 0;
 
-  int const* group_token_ptr;
-  int nhk;       // Total KV-head count
-  int kv_head;   // Resolved KV-head for this CTA; InnerLoopK uses in fill_token_indices,
-                 // InnerLoopQ uses for inner_indices offset
+  int const* group_token_ptr = nullptr;
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexSparseBlockMeta(
@@ -477,16 +481,23 @@ struct IndexSparseBlockMeta {
       int thread_idx = 0)
       : outer_block(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
-        group_token_ptr(nullptr) {
-    bidb = [&]() {
-      if constexpr (RangeMerge && !IsInnerLoopQ) {
-        return params.cu_batches[get<2>(block_coord)];
-      } else {
-        return get<2>(block_coord);
-      }
-    }();
-
-    nhk = detail::nhk_of<ParamsT>::get(params);
+        bidb([&]() -> int {
+          if constexpr (RangeMerge && !IsInnerLoopQ) {
+            return params.cu_batches[get<2>(block_coord)];
+          } else {
+            return get<2>(block_coord);
+          }
+        }()),
+        nhk(detail::nhk_of<ParamsT>::get(params)),
+        kv_head([&]() -> int {
+          if constexpr (!IsInnerLoopQ) {
+            return get<2>(block_coord) % nhk;
+          } else if constexpr (PackGQA) {
+            return bidh;
+          } else {
+            return params.qhead_per_khead_divmod.divide(bidh);
+          }
+        }()) {
 
     int max_topk = params.index_sparse_max_topk;
     int const* row_ptr;
@@ -497,8 +508,7 @@ struct IndexSparseBlockMeta {
       seqlen_info.offset_q = bidb;
       seqlen_info.seqlen_q = 1;
 
-      int unique_idx = get<2>(block_coord);
-      kv_head = unique_idx % nhk;
+      int unique_idx = get<2>(block_coord);  // raw scheduler coord (≠ bidb when RangeMerge remaps batch)
       row_ptr = params.index_sparse_indices + static_cast<int64_t>(unique_idx) * max_topk;
 
       actual_topk = max_topk;
@@ -513,13 +523,6 @@ struct IndexSparseBlockMeta {
       // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
       seqlen_info.offset_k = bidb * kKBlockSize;
       seqlen_info.seqlen_k = kKBlockSize;
-
-      // Resolve KV-head: PackGQA → bidh is already KV-head; otherwise divide by GQA ratio
-      if constexpr (PackGQA) {
-        kv_head = bidh;
-      } else {
-        kv_head = params.qhead_per_khead_divmod.divide(bidh);
-      }
 
       // inner_indices layout: (num_k_blocks, nhk * inner_topk_per_head)
       int inner_topk_per_head = max_topk / nhk;
