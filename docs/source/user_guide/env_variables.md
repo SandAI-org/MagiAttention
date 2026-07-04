@@ -366,6 +366,22 @@ Set this env variable to specify the directory for the CuteDSL FFA kernel cache.
 
 ### AOT
 
+**MAGI_ATTENTION_PREBUILD_LEVEL**
+
+- **Defaults to:** `lite`
+- **Used by:** `setup.py`
+
+Controls the breadth of FFA kernel configurations pre-built during `pip install`.
+
+- `lite` (default): Pre-builds only the basic Dense kernels (fwd/bwd × head_dim 64/128 × fp16/bf16 × atomic/non-atomic). Sufficient for most inference and training workloads.
+- `ci`: Additionally pre-builds BlockSparse, IndexSparse, deterministic, PackGQA, and `swap_bwd_qk_loop` kernel variants exercised by CI tests (`test_block_sparse.py`, `test_index_sparse.py`, `test_deterministic.py`). Eliminates JIT compilation during test runs.
+
+```{note}
+Setting `MAGI_ATTENTION_PREBUILD_LEVEL=ci` in your CI pipeline's `pip install` step
+ensures that subsequent tests do not trigger JIT compilation, giving faster and more
+predictable test execution times.
+```
+
 **MAGI_ATTENTION_PREBUILD_FFA_JOBS**
 
 - **Defaults to:** `ceil(num_cpu_cores * 0.9)`

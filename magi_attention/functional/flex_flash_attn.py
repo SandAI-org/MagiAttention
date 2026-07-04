@@ -676,9 +676,13 @@ def _flex_flash_attn_backward(
             )
         ]
 
+    # zeros_like is required even when disable_bwd_dq_atomic_reduction=True because the
+    # kernel always uses SM90_TMA_REDUCE_ADD (gmem[i] += smem[i]) for dQ stores.
+    # empty_like would leave garbage that gets accumulated into the result.
+    # The optimization from disable_bwd_dq_atomic_reduction is the dtype change (bf16 vs fp32).
     dq = (
         (
-            torch.empty_like(q, dtype=dq_type or q.dtype)
+            torch.zeros_like(q, dtype=dq_type or q.dtype)
             if disable_bwd_dq_atomic_reduction
             else torch.zeros_like(q, dtype=dq_type or torch.float32)
         )

@@ -316,7 +316,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     CHECK_SHAPE(dq, total_q, num_heads_qo, head_size);
     TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
   } else {
-    dq = DisableDqAtomic ? torch::empty_like(q, opts.dtype(dq_type)) : torch::zeros_like(q, opts.dtype(dq_type));
+    // Always zeros: kernel uses SM90_TMA_REDUCE_ADD for dQ (gmem[i] += smem[i]),
+    // so the initial value must be zero regardless of DisableDqAtomic.
+    dq = torch::zeros_like(q, opts.dtype(dq_type));
   }
   if (dk_.has_value()) {
     dk = dk_.value();
