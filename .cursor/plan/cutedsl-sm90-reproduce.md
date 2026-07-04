@@ -332,7 +332,21 @@ atom_async_copy = cute.make_copy_atom(
   ```
 - 同时保证 `k_block_size` 是 2 的幂次（`k_block_size & (k_block_size - 1) == 0`）
 
-**P3（低，后续）：支持中间 kbs (8/16/32/64)**
-- 需要让 fill_token_indices 在 kbs<kBlockN 时走 scatter 分支而非 block-level 分支
-- 需要单独的 tile packing 逻辑（一个 tile 跨多个 K block）
-- 复杂度高，优先级低——当前 kbs=1 和 kbs=128 已覆盖实际需求
+**P3（已澄清）：中间 kbs (8/16/32/64) 的实际支持情况**
+
+| 路径 | kbs=8/64 | 原因 |
+|---|---|---|
+| **BlockSparse** | ✅ 安全 | `BlockSparseBlockMeta` 用 range-based cursor，不依赖 kbs 做除法；kbs 只影响 `_is_contiguous`（TMA vs scatter 选择） |
+| **IndexSparse FWD** | ✅ scatter 路径能工作 | `fill_token_indices` 的 `kbs>1` 分支做 `token_pos / kbs`、`token_pos % kbs`（kbs 是除数），不会除零 |
+| **IndexSparse BWD LoopK** | ✅ scatter 同上 | 同 FWD |
+| **IndexSparse BWD LoopQ** | ⚠ 限制 nhk=1 | `_loopq_kbs > 1` 时有 `assert nhk == 1` |
+| **TMA 路径** | ❌ 需要 kbs≥kBlockN | `get_n_block_abs()` 有 `static_assert(SparseKBlockSize >= InnerBlockSize)` |
+
+结论：BlockSparse 的中间 kbs 从来都是能工作的（k_size=8/64 的测试一直在跑且 CI 通过）。
+IndexSparse 的中间 kbs 在 scatter 路径理论上可工作但无测试——Python 校验保持严格（`kbs==1 or kbs>=tile_size`）。
+
+CI 覆盖：`test_block_sparse.py` 的 `VERY_SIMPLE_BLOCK_SPARSE_CONFIGS` 包含 `k_size=64, block_sparse=True`，
+以及 `TestBlockSparseAttn` 的大量 configs 包含 `k_size=8/64/128/1`。
+
+Python 校验修正：BlockSparse 路径仅 assert `k_block_size >= 1`（不限制 power-of-2 或 >= tile_size），
+IndexSparse 路径保持严格（`k_block_size == 1 or k_block_size >= tile_size`，且必须 power-of-2）。
