@@ -81,24 +81,24 @@ class FlashAttnBwdDkvPostprocess {
         if (params.k_ranges == nullptr) {
           valid = 1;
         } else {
-        // Binary search to check if n_idx is in any k_range
-        int l = 0;
-        int r = (params.num_k_ranges_ptr == nullptr) ? params.num_k_ranges : *params.num_k_ranges_ptr;
-        while (l < r) {
-          int mid = (l + r) / 2;
-          if (params.k_ranges[mid].x <= n_idx) {
-            l = mid + 1;
-          } else {
-            r = mid;
+          // Binary search to check if n_idx is in any k_range
+          int l = 0;
+          int r = (params.num_k_ranges_ptr == nullptr) ? params.num_k_ranges : *params.num_k_ranges_ptr;
+          while (l < r) {
+            int mid = (l + r) / 2;
+            if (params.k_ranges[mid].x <= n_idx) {
+              l = mid + 1;
+            } else {
+              r = mid;
+            }
           }
-        }
-        // l-1 is the potential range index
-        if (l > 0) {
-          int2 range = params.k_ranges[l - 1];
-          if (n_idx < range.y) {
-            valid = 1;
+          // l-1 is the potential range index
+          if (l > 0) {
+            int2 range = params.k_ranges[l - 1];
+            if (n_idx < range.y) {
+              valid = 1;
+            }
           }
-        }
         }
       } else {
         valid = 1; // Prevent OOB access for n_idx >= total_k

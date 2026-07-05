@@ -488,9 +488,7 @@ struct IndexSparseBlockMeta {
           if constexpr (!IsInnerLoopQ) {
             // InnerLoopK: resolve batch via cu_batches when range-merge is active;
             // IndexSparse without range-merge passes cu_batches=nullptr.
-            return (params.cu_batches != nullptr)
-                ? params.cu_batches[get<2>(block_coord)]
-                : get<2>(block_coord);
+            return (params.cu_batches != nullptr) ? params.cu_batches[get<2>(block_coord)] : get<2>(block_coord);
           } else {
             return get<2>(block_coord);
           }
