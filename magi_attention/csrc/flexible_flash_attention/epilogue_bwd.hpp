@@ -95,7 +95,7 @@ struct CollectiveEpilogueBwd {
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
-  using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD; // TODO: maybe also add DisableBwdDqAtomicReduction flag ?
+  using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD;
   using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
