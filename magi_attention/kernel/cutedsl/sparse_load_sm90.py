@@ -24,7 +24,6 @@ Reference: paged_kv.py for CuTe-DSL cp.async scatter pattern.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Type
 
@@ -113,7 +112,9 @@ def _inner_idx_to_abs_n_block(
         while remaining >= blocks_this_range:
             remaining = remaining - blocks_this_range
             range_local = range_local + 1
-            cur_range_size = mKRanges[bidb + range_local, 1] - mKRanges[bidb + range_local, 0]
+            cur_range_size = (
+                mKRanges[bidb + range_local, 1] - mKRanges[bidb + range_local, 0]
+            )
             blocks_this_range = cur_range_size // tile_n
         block_in_range = remaining
     cur_range_start = mKRanges[bidb + range_local, 0]
@@ -205,7 +206,9 @@ def _advance_anchor_unequal(
             r_end = mKRanges[cur_k_range_indices[anchor], 1]
             remaining = r_end - r_start - 1 - cur_k_range_inner_indices[anchor]
             if remaining >= rest:
-                cur_k_range_inner_indices[anchor] = cur_k_range_inner_indices[anchor] + rest
+                cur_k_range_inner_indices[anchor] = (
+                    cur_k_range_inner_indices[anchor] + rest
+                )
                 done = Int32(1)
             else:
                 cnt = cnt + remaining + 1
@@ -459,9 +462,7 @@ class SparseLoadCopyEngine:
             row_token = token_indices[row_local_idx]
             row_valid = (row_token >= 0) & (row_token < seqlen_k_limit)
 
-            raw_ptr_i64 = cutedsl_utils.elem_pointer(
-                mX, (row_token, 0)
-            ).toint()
+            raw_ptr_i64 = cutedsl_utils.elem_pointer(mX, (row_token, 0)).toint()
             x_ptr_i64 = cutedsl_utils.shuffle_sync(
                 raw_ptr_i64, 0, width=self.gmem_threads_per_row
             )
@@ -475,9 +476,7 @@ class SparseLoadCopyEngine:
             mX_cur = cute.make_tensor(x_gmem_ptr, cute.make_layout((head_dim,)))
             mX_cur_copy = cute.tiled_divide(mX_cur, (self.async_copy_elems,))
 
-            should_load = cute.make_fragment_like(
-                tXsX[(0, None), m, 0], cute.Boolean
-            )
+            should_load = cute.make_fragment_like(tXsX[(0, None), m, 0], cute.Boolean)
             should_load.fill(row_valid)
 
             for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):

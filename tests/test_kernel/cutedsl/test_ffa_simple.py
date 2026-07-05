@@ -539,37 +539,55 @@ def test_sparse_load_fwd(seqlen, d, dtype):
     S = seqlen
     q_ranges = torch.tensor(
         [
-            [0, S], [0, S],
-            [S, 2 * S], [S, 2 * S],
-            [2 * S, 3 * S], [2 * S, 3 * S],
+            [0, S],
+            [0, S],
+            [S, 2 * S],
+            [S, 2 * S],
+            [2 * S, 3 * S],
+            [2 * S, 3 * S],
             [3 * S, 4 * S],
         ],
-        dtype=torch.int32, device=device,
+        dtype=torch.int32,
+        device=device,
     )
     k_ranges = torch.tensor(
         [
-            [0, S], [S, 2 * S],
-            [S, 2 * S], [2 * S, 3 * S],
-            [2 * S, 3 * S], [3 * S, 4 * S],
+            [0, S],
+            [S, 2 * S],
+            [S, 2 * S],
+            [2 * S, 3 * S],
+            [2 * S, 3 * S],
+            [3 * S, 4 * S],
             [3 * S, 4 * S],
         ],
-        dtype=torch.int32, device=device,
+        dtype=torch.int32,
+        device=device,
     )
     n_ranges = q_ranges.shape[0]
 
     out_ref = _ref_attn_per_range(
-        q, k, v, q_ranges, k_ranges,
+        q,
+        k,
+        v,
+        q_ranges,
+        k_ranges,
         torch.zeros(n_ranges, dtype=torch.int32, device=device),
         high_precision=True,
     )
     out_pt = _ref_attn_per_range(
-        q, k, v, q_ranges, k_ranges,
+        q,
+        k,
+        v,
+        q_ranges,
+        k_ranges,
         torch.zeros(n_ranges, dtype=torch.int32, device=device),
         high_precision=False,
     )
 
     out_v, _ = flex_flash_attn_func(
-        q, k, v,
+        q,
+        k,
+        v,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         mask_types=0,
@@ -581,8 +599,11 @@ def test_sparse_load_fwd(seqlen, d, dtype):
 
     atol = _fwd_atol(out_ref, out_pt)
     assert_close(
-        out_v, out_ref,
-        atol=atol, rtol=0, mismatch_threshold=1e-5,
+        out_v,
+        out_ref,
+        atol=atol,
+        rtol=0,
+        mismatch_threshold=1e-5,
         test_case=f"{seqlen=},{d=},{dtype=} => sparse_load fwd",
     )
 
@@ -602,28 +623,42 @@ def test_sparse_load_fwd_bwd(seqlen, d, nheads, dtype):
     seed = seqlen + d + 101
     torch.random.manual_seed(seed)
 
-    q = torch.randn(total_tokens, nheads, d, device=device, dtype=dtype).requires_grad_()
-    k = torch.randn(total_tokens, nheads_kv, d, device=device, dtype=dtype).requires_grad_()
-    v = torch.randn(total_tokens, nheads_kv, d, device=device, dtype=dtype).requires_grad_()
+    q = torch.randn(
+        total_tokens, nheads, d, device=device, dtype=dtype
+    ).requires_grad_()
+    k = torch.randn(
+        total_tokens, nheads_kv, d, device=device, dtype=dtype
+    ).requires_grad_()
+    v = torch.randn(
+        total_tokens, nheads_kv, d, device=device, dtype=dtype
+    ).requires_grad_()
 
     S = seqlen
     q_ranges = torch.tensor(
         [
-            [0, S], [0, S],
-            [S, 2 * S], [S, 2 * S],
-            [2 * S, 3 * S], [2 * S, 3 * S],
+            [0, S],
+            [0, S],
+            [S, 2 * S],
+            [S, 2 * S],
+            [2 * S, 3 * S],
+            [2 * S, 3 * S],
             [3 * S, 4 * S],
         ],
-        dtype=torch.int32, device=device,
+        dtype=torch.int32,
+        device=device,
     )
     k_ranges = torch.tensor(
         [
-            [0, S], [S, 2 * S],
-            [S, 2 * S], [2 * S, 3 * S],
-            [2 * S, 3 * S], [3 * S, 4 * S],
+            [0, S],
+            [S, 2 * S],
+            [S, 2 * S],
+            [2 * S, 3 * S],
+            [2 * S, 3 * S],
+            [3 * S, 4 * S],
             [3 * S, 4 * S],
         ],
-        dtype=torch.int32, device=device,
+        dtype=torch.int32,
+        device=device,
     )
     n_ranges = q_ranges.shape[0]
     mask_types = torch.zeros(n_ranges, dtype=torch.int32, device=device)
@@ -633,14 +668,22 @@ def test_sparse_load_fwd_bwd(seqlen, d, nheads, dtype):
     k_ref = k.detach().clone().requires_grad_()
     v_ref = v.detach().clone().requires_grad_()
     out_ref = _ref_attn_per_range(
-        q_ref, k_ref, v_ref, q_ranges, k_ranges, mask_types, high_precision=True,
+        q_ref,
+        k_ref,
+        v_ref,
+        q_ranges,
+        k_ranges,
+        mask_types,
+        high_precision=True,
     )
     dout = torch.randn_like(out_ref)
     out_ref.backward(dout)
 
     # --- Kernel under test ---
     out_v, _ = flex_flash_attn_func(
-        q, k, v,
+        q,
+        k,
+        v,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         mask_types=0,
@@ -653,30 +696,47 @@ def test_sparse_load_fwd_bwd(seqlen, d, nheads, dtype):
 
     # --- Compare FWD ---
     out_pt = _ref_attn_per_range(
-        q.detach(), k.detach(), v.detach(), q_ranges, k_ranges, mask_types,
+        q.detach(),
+        k.detach(),
+        v.detach(),
+        q_ranges,
+        k_ranges,
+        mask_types,
         high_precision=False,
     )
     atol_fwd = _fwd_atol(out_ref, out_pt)
     assert_close(
-        out_v, out_ref,
-        atol=atol_fwd, rtol=0, mismatch_threshold=1e-5,
+        out_v,
+        out_ref,
+        atol=atol_fwd,
+        rtol=0,
+        mismatch_threshold=1e-5,
         test_case=f"{seqlen=},{d=},{dtype=} => sparse_load fwd+bwd (fwd check)",
     )
 
     # --- Compare BWD ---
     bwd_atol = 0.02
     assert_close(
-        q.grad, q_ref.grad,
-        atol=bwd_atol, rtol=0, mismatch_threshold=0.01,
+        q.grad,
+        q_ref.grad,
+        atol=bwd_atol,
+        rtol=0,
+        mismatch_threshold=0.01,
         test_case=f"{seqlen=},{d=},{dtype=} => sparse_load dQ",
     )
     assert_close(
-        k.grad, k_ref.grad,
-        atol=bwd_atol, rtol=0, mismatch_threshold=0.01,
+        k.grad,
+        k_ref.grad,
+        atol=bwd_atol,
+        rtol=0,
+        mismatch_threshold=0.01,
         test_case=f"{seqlen=},{d=},{dtype=} => sparse_load dK",
     )
     assert_close(
-        v.grad, v_ref.grad,
-        atol=bwd_atol, rtol=0, mismatch_threshold=0.01,
+        v.grad,
+        v_ref.grad,
+        atol=bwd_atol,
+        rtol=0,
+        mismatch_threshold=0.01,
         test_case=f"{seqlen=},{d=},{dtype=} => sparse_load dV",
     )

@@ -47,7 +47,6 @@ from .range_info_sm90 import (
     get_n_block_min_max_runtime,
     read_attn_type_map,
 )
-from .index_sparse_sm90 import compute_actual_topk
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_load_sm90 import _compute_total_k_tokens, _inner_idx_to_abs_n_block
@@ -754,7 +753,9 @@ class FFABwdSm90:
             (self.tile_m, self.tile_hdimv),
         )
         if const_expr(self.qhead_per_kvhead == 1):
-            use_ragged_dkv = self.varlen_k and not self.sparse_load and not self.index_sparse
+            use_ragged_dkv = (
+                self.varlen_k and not self.sparse_load and not self.index_sparse
+            )
             mdK_tma = (
                 copy_utils.create_ragged_tensor_for_tma(
                     mdK, ragged_dim=0, ptr_shift=True
@@ -808,7 +809,11 @@ class FFABwdSm90:
         self.spt = (self.is_causal or self.is_local) and self.deterministic
         if const_expr(self.index_sparse):
             _n_block_count = self.index_sparse_max_topk
-            _total_q_sched = cute.size(mCuSeqlensK.shape[0] - 1) * self.index_sparse_max_topk * self.tile_n
+            _total_q_sched = (
+                cute.size(mCuSeqlensK.shape[0] - 1)
+                * self.index_sparse_max_topk
+                * self.tile_n
+            )
         else:
             _n_block_count = cute.ceil_div(cute.size(mK.shape[0]), self.tile_n)
             _total_q_sched = (
@@ -1483,8 +1488,11 @@ class FFABwdSm90:
                     # so that absolute n_block indices from K ranges work.
                     bidb_load = mCuBatches[batch_idx]  # type: ignore[index]
                     n_block_abs = _inner_idx_to_abs_n_block(
-                        n_block, mKRanges, bidb_load,  # type: ignore[arg-type]
-                        self.tile_n, self.equal_k_range_size,
+                        n_block,
+                        mKRanges,
+                        bidb_load,  # type: ignore[arg-type]
+                        self.tile_n,
+                        self.equal_k_range_size,
                     )
                     mK_cur = mK[None, None, head_idx_kv]
                     mV_cur = mV[None, None, head_idx_kv]
@@ -1495,7 +1503,8 @@ class FFABwdSm90:
                         mV_cur, (self.tile_n, self.tile_hdimv), (n_block_abs, 0)
                     )
                 elif const_expr(self.index_sparse):
-                    idx_n_block_abs = mIndexSparseIndices[batch_idx * self.index_sparse_max_topk + n_block]  # type: ignore[index]
+                    idx_offset = batch_idx * self.index_sparse_max_topk + n_block
+                    idx_n_block_abs = mIndexSparseIndices[idx_offset]  # type: ignore[index]
                     mK_cur = mK[None, None, head_idx_kv]
                     mV_cur = mV[None, None, head_idx_kv]
                     gK = cute.local_tile(
@@ -2115,7 +2124,9 @@ class FFABwdSm90:
                 bidb_c = mCuBatches[batch_idx]  # type: ignore[index]
                 end_batches_c = mCuBatches[batch_idx + 1]  # type: ignore[index]
                 total_k_tokens = _compute_total_k_tokens(
-                    mKRanges, bidb_c, end_batches_c,  # type: ignore[arg-type]
+                    mKRanges,
+                    bidb_c,
+                    end_batches_c,  # type: ignore[arg-type]
                     self.equal_k_range_size,
                 )
                 sparse_seqlen_info = SeqlenInfoQK(
@@ -2299,11 +2310,15 @@ class FFABwdSm90:
                 epi_n_block_abs = None
                 if const_expr(self.sparse_load):
                     epi_n_block_abs = _inner_idx_to_abs_n_block(
-                        n_block, mKRanges, bidb_c,  # type: ignore[arg-type]
-                        self.tile_n, self.equal_k_range_size,
+                        n_block,
+                        mKRanges,
+                        bidb_c,  # type: ignore[arg-type]
+                        self.tile_n,
+                        self.equal_k_range_size,
                     )
                 elif const_expr(self.index_sparse):
-                    epi_n_block_abs = mIndexSparseIndices[batch_idx * self.index_sparse_max_topk + n_block]  # type: ignore[index]
+                    epi_idx = batch_idx * self.index_sparse_max_topk + n_block
+                    epi_n_block_abs = mIndexSparseIndices[epi_idx]  # type: ignore[index]
                 self.epilogue_dKV(
                     acc_dV,
                     mdV,
@@ -2335,11 +2350,15 @@ class FFABwdSm90:
                     zero_n_block_abs = None
                     if const_expr(self.sparse_load):
                         zero_n_block_abs = _inner_idx_to_abs_n_block(
-                            n_block, mKRanges, bidb_c,  # type: ignore[arg-type]
-                            self.tile_n, self.equal_k_range_size,
+                            n_block,
+                            mKRanges,
+                            bidb_c,  # type: ignore[arg-type]
+                            self.tile_n,
+                            self.equal_k_range_size,
                         )
                     elif const_expr(self.index_sparse):
-                        zero_n_block_abs = mIndexSparseIndices[batch_idx * self.index_sparse_max_topk + n_block]  # type: ignore[index]
+                        zero_idx = batch_idx * self.index_sparse_max_topk + n_block
+                        zero_n_block_abs = mIndexSparseIndices[zero_idx]  # type: ignore[index]
                     self.epilogue_dKV(
                         acc_dV,
                         mdV,

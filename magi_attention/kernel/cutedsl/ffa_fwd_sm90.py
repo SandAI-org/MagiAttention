@@ -45,6 +45,7 @@ from . import pipeline as ffa_pipeline
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_utils import MT_MAP
+from .index_sparse_sm90 import compute_actual_topk
 from .mask import AttentionMask
 from .mask_sm90 import apply_mask_with_runtime_type_sm90
 from .named_barrier import NamedBarrierFwd
@@ -57,19 +58,7 @@ from .range_info_sm90 import (
 )
 from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
-from .index_sparse_sm90 import (
-    IndexSparseProducerState,
-    compute_actual_topk,
-    create_index_sparse_state,
-    index_sparse_fill_token_indices,
-    index_sparse_prefetch,
-)
-from .sparse_load_sm90 import (
-    SparseLoadCopyEngine,
-    _compute_total_k_tokens,
-    create_sparse_load_producer_state,
-    prefetch_sparse_load,
-)
+from .sparse_load_sm90 import _compute_total_k_tokens
 from .sparse_utils import (
     BlockSparseTensors,
     consume_block_sparse_loads,
@@ -1526,7 +1515,9 @@ class FFAFwdSm90:
                             end_batches_val,
                             self.equal_k_range_size,
                         )
-                        total_inner_blocks = (total_k_tokens + self.tile_n - 1) // self.tile_n
+                        total_inner_blocks = (
+                            total_k_tokens + self.tile_n - 1
+                        ) // self.tile_n
 
                         # --- Load Q ---
 
@@ -1569,7 +1560,9 @@ class FFAFwdSm90:
                                 block_in_range = inner_idx % blocks_per_range
                                 cur_range_idx = bidb + range_local
                                 cur_range_start = mKRanges[cur_range_idx, 0]  # type: ignore[index]
-                                n_block_abs = cur_range_start // self.tile_n + block_in_range
+                                n_block_abs = (
+                                    cur_range_start // self.tile_n + block_in_range
+                                )
 
                                 pipeline_k.producer_acquire(kv_producer_state)
                                 load_K(
@@ -2250,9 +2243,7 @@ class FFAFwdSm90:
                                 n_block=Int32(0),
                                 seqlen=seqlen_info,
                                 kv_consumer_state=kv_consumer_state,
-                                mask_fn=partial(
-                                    sparse_mask_fn, mask_mod=self.mask_mod
-                                ),
+                                mask_fn=partial(sparse_mask_fn, mask_mod=self.mask_mod),
                                 score_mod_fn=score_mod_fn,
                                 is_first_block=True,
                                 is_print_thread_and_tile=is_print_thread_and_tile,
@@ -2371,9 +2362,7 @@ class FFAFwdSm90:
                                 n_block=Int32(0),
                                 seqlen=seqlen_info,
                                 kv_consumer_state=kv_consumer_state,
-                                mask_fn=partial(
-                                    idx_mask_fn, mask_mod=self.mask_mod
-                                ),
+                                mask_fn=partial(idx_mask_fn, mask_mod=self.mask_mod),
                                 score_mod_fn=score_mod_fn,
                                 is_first_block=True,
                                 is_print_thread_and_tile=is_print_thread_and_tile,

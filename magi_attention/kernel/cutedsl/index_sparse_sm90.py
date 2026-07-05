@@ -34,7 +34,6 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Int32
 
-
 # ---------------------------------------------------------------------------
 # IndexSparseProducerState: register state for FWD LoopK token-level path
 # ---------------------------------------------------------------------------
@@ -141,7 +140,9 @@ def index_sparse_fill_token_indices(
     token_indices: (num_rows_per_group,) rmem tensor, output.
     The caller (SparseLoadCopyEngine.load_scatter) uses these as scatter addresses.
     """
-    ptr_offset = state.row_base_offset + state.group_offset + state.inner_block_cur * kBlockN
+    ptr_offset = (
+        state.row_base_offset + state.group_offset + state.inner_block_cur * kBlockN
+    )
     for j in cutlass.range(num_rows_per_group, unroll=1):
         idx = mIndices[ptr_offset + Int32(j)]
         # C++ L584: group_rows[j] = (id >= 0) ? id * nhk + head_local : 0

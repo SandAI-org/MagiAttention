@@ -163,9 +163,7 @@ def _flex_flash_attn_fwd(
             [
                 torch.zeros(1, dtype=torch.int32, device=q.device),
                 _change_idx.to(torch.int32),
-                torch.tensor(
-                    [num_original_ranges], dtype=torch.int32, device=q.device
-                ),
+                torch.tensor([num_original_ranges], dtype=torch.int32, device=q.device),
             ]
         )
 
@@ -180,10 +178,9 @@ def _flex_flash_attn_fwd(
         # This is needed for seqlen masking in the consumer loop.
         # ranges_to_cu_seqlens cannot be used here because sorted K ranges
         # are non-contiguous.
+        assert k_ranges is not None
         _k_range_lens = k_ranges[:, 1] - k_ranges[:, 0]
-        _k_per_batch = torch.zeros(
-            unique_count_val, dtype=torch.int32, device=q.device
-        )
+        _k_per_batch = torch.zeros(unique_count_val, dtype=torch.int32, device=q.device)
         for _bi in range(unique_count_val):
             _s = sparse_cu_batches[_bi].item()
             _e = sparse_cu_batches[_bi + 1].item()
@@ -210,21 +207,13 @@ def _flex_flash_attn_fwd(
         index_sparse_max_topk = index_sparse_indices.shape[1]
         # Flatten to 1D for simple linear indexing in the kernel
         index_sparse_indices = index_sparse_indices.reshape(-1).contiguous()
-        cu_seqlens_q = torch.arange(
-            num_batches + 1, dtype=torch.int32, device=q.device
-        )
-        cu_seqlens_k = torch.zeros(
-            num_batches + 1, dtype=torch.int32, device=q.device
-        )
-        q_ranges = torch.stack(
-            [cu_seqlens_q[:-1], cu_seqlens_q[1:]], dim=1
-        )
+        cu_seqlens_q = torch.arange(num_batches + 1, dtype=torch.int32, device=q.device)
+        cu_seqlens_k = torch.zeros(num_batches + 1, dtype=torch.int32, device=q.device)
+        q_ranges = torch.stack([cu_seqlens_q[:-1], cu_seqlens_q[1:]], dim=1)
         # Dummy k_ranges: offset_k=0, seqlen_k=total_k for each batch.
         # The kernel's IndexSparse consumer overrides seqlen_k with actual_topk * tile_n.
         total_k = k.shape[0]
-        k_ranges = torch.zeros(
-            num_batches, 2, dtype=torch.int32, device=q.device
-        )
+        k_ranges = torch.zeros(num_batches, 2, dtype=torch.int32, device=q.device)
         k_ranges[:, 1] = total_k
     else:
         cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
@@ -750,16 +739,27 @@ def _flex_flash_attn_fwd(
             if use_index_sparse_sm90 and index_sparse_indices is not None
             else torch.zeros(1, dtype=torch.int32, device=q.device)
         )
-        call_args.extend([q_ranges, k_ranges, _attn_type_map_call, _cu_batches_call, _idx_sparse_call])
+        call_args.extend(
+            [
+                q_ranges,
+                k_ranges,
+                _attn_type_map_call,
+                _cu_batches_call,
+                _idx_sparse_call,
+            ]
+        )
         if use_sparse_load_sm90 and sparse_cu_batches is not None:
             import os
+
             if os.getenv("MAGI_SPARSE_DEBUG", "0") == "1":
                 print(f"[sparse_debug] q_ranges={q_ranges.cpu().tolist()}")
                 print(f"[sparse_debug] k_ranges={k_ranges.cpu().tolist()}")
                 print(f"[sparse_debug] cu_batches={sparse_cu_batches.cpu().tolist()}")
                 print(f"[sparse_debug] cu_seqlens_q={cu_seqlens_q.cpu().tolist()}")
                 print(f"[sparse_debug] cu_seqlens_k={cu_seqlens_k.cpu().tolist()}")
-                print(f"[sparse_debug] max_seqlen_q={max_seqlen_q} max_seqlen_k={max_seqlen_k}")
+                print(
+                    f"[sparse_debug] max_seqlen_q={max_seqlen_q} max_seqlen_k={max_seqlen_k}"
+                )
                 print(f"[sparse_debug] q.shape={q.shape} k.shape={k.shape}", flush=True)
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
@@ -848,9 +848,7 @@ def _flex_flash_attn_bwd(
             [
                 torch.zeros(1, dtype=torch.int32, device=q.device),
                 _change_idx.to(torch.int32),
-                torch.tensor(
-                    [num_original_ranges], dtype=torch.int32, device=q.device
-                ),
+                torch.tensor([num_original_ranges], dtype=torch.int32, device=q.device),
             ]
         )
 
@@ -879,20 +877,21 @@ def _flex_flash_attn_bwd(
             torch.arange(num_batches_idx + 1, dtype=torch.int32, device=q.device)
             * seqlen_k_per_batch
         )
-        k_range_offsets = torch.zeros(num_batches_idx, dtype=torch.int32, device=q.device)
+        k_range_offsets = torch.zeros(
+            num_batches_idx, dtype=torch.int32, device=q.device
+        )
         k_range_seqlens = torch.full(
             (num_batches_idx,), total_k, dtype=torch.int32, device=q.device
         )
         k_ranges = torch.stack([k_range_offsets, k_range_seqlens], dim=1)
-        q_ranges = torch.stack(
-            [cu_seqlens_q[:-1], cu_seqlens_q[1:]], dim=1
-        )
+        q_ranges = torch.stack([cu_seqlens_q[:-1], cu_seqlens_q[1:]], dim=1)
         max_seqlen_q = 1
         max_seqlen_k = seqlen_k_per_batch
     else:
         cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
 
     if not index_sparse and sparse_load and sparse_cu_batches_bwd is not None:
+        assert k_ranges is not None
         _k_range_lens = k_ranges[:, 1] - k_ranges[:, 0]
         unique_count_val_bwd = sparse_cu_batches_bwd.shape[0] - 1
         _k_per_batch = torch.zeros(
@@ -1177,12 +1176,20 @@ def _flex_flash_attn_bwd(
         validate_tensor(dq, "dq", q.shape, out_torch_dtype, device)
 
     if dk is None:
-        dk = torch.zeros_like(k) if (sparse_load or index_sparse) else torch.empty_like(k)
+        dk = (
+            torch.zeros_like(k)
+            if (sparse_load or index_sparse)
+            else torch.empty_like(k)
+        )
     else:
         validate_tensor(dk, "dk", k.shape, out_torch_dtype, device)
 
     if dv is None:
-        dv = torch.zeros_like(v) if (sparse_load or index_sparse) else torch.empty_like(v)
+        dv = (
+            torch.zeros_like(v)
+            if (sparse_load or index_sparse)
+            else torch.empty_like(v)
+        )
     else:
         validate_tensor(dv, "dv", v.shape, out_torch_dtype, device)
 
@@ -1542,9 +1549,13 @@ def _flex_flash_attn_bwd(
                     dQ_single_wg=dQ_single_wg,
                     use_per_range_mask=use_per_range_mask_sm90_bwd,
                     sparse_load=use_sparse_load_sm90_bwd,
-                    equal_k_range_size=equal_k_range_size if use_sparse_load_sm90_bwd else False,
+                    equal_k_range_size=equal_k_range_size
+                    if use_sparse_load_sm90_bwd
+                    else False,
                     index_sparse=use_index_sparse_sm90_bwd,
-                    index_sparse_max_topk=index_sparse_max_topk if use_index_sparse_sm90_bwd else 0,
+                    index_sparse_max_topk=index_sparse_max_topk
+                    if use_index_sparse_sm90_bwd
+                    else 0,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case _:
@@ -1669,7 +1680,13 @@ def _flex_flash_attn_bwd(
             else torch.zeros(1, dtype=torch.int32, device=q.device)
         )
         bwd_call_args.extend(
-            [q_ranges, k_ranges, _attn_type_map_bwd_call, _cu_batches_bwd_call, _idx_sparse_bwd_call]
+            [
+                q_ranges,
+                k_ranges,
+                _attn_type_map_bwd_call,
+                _cu_batches_bwd_call,
+                _idx_sparse_bwd_call,
+            ]
         )
     _flex_flash_attn_bwd.compile_cache[compile_key](*bwd_call_args)
 
