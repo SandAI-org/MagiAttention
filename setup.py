@@ -846,6 +846,7 @@ def prebuild_ffa_kernels() -> None:
             output_dtype=output_dtype if direction == "fwd" else None,
             softcap=False,
             disable_atomic_reduction=disable_atomic_reduction,
+            disable_dq_atomic_reduction=False,
             deterministic=deterministic,
             # optional args below mainly for sparse attn
             ref_block_size=None,
