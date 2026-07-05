@@ -676,14 +676,13 @@ def _flex_flash_attn_backward(
             )
         ]
 
-    # zeros_like is required even when disable_bwd_dq_atomic_reduction=True because the
-    # kernel always uses SM90_TMA_REDUCE_ADD (gmem[i] += smem[i]) for dQ stores.
-    # empty_like would leave garbage that gets accumulated into the result.
-    # The optimization from disable_bwd_dq_atomic_reduction is the dtype change (bf16 vs fp32).
+    # InnerLoopK + disable_bwd_dq_atomic_reduction: dQ is outer, epilogue uses per-element
+    # direct store (one CTA per Q block) → empty_like is safe, no zero-init needed.
+    # Otherwise dQ is inner → mainloop uses TMA_REDUCE_ADD → must be zeros.
     dq = (
         (
-            torch.zeros_like(q, dtype=dq_type or q.dtype)
-            if disable_bwd_dq_atomic_reduction
+            torch.empty_like(q, dtype=dq_type or q.dtype)
+            if disable_bwd_dq_atomic_reduction and swap_bwd_qk_loop
             else torch.zeros_like(q, dtype=dq_type or torch.float32)
         )
         if dq is None
@@ -1373,9 +1372,10 @@ def flex_flash_attn_func(
             Whether to disable backward dQ atomic reduction for BWD InnerLoopK
             (``swap_bwd_qk_loop=True``). Defaults to ``False``.
 
-                When enabled, dQ uses the input dtype (bf16/fp16) instead of float32 and
-                skips zero-initialization (uses ``empty_like``). Safe when outer Q ranges
-                are non-overlapping (guaranteed by BlockSparse/IndexSparse).
+                When enabled, dQ uses the input dtype (bf16/fp16) instead of float32,
+                skips zero-initialization (``empty_like``), and the epilogue uses per-element
+                direct store instead of TMA atomic reduce-add. Safe when outer Q ranges
+                are non-overlapping (guaranteed by BlockSparse/IndexSparse with RangeMerge).
                 Auto-set to ``True`` for sparse scenarios with ``swap_bwd_qk_loop=True``.
 
         ref_block_size (tuple[int, int], optional):
