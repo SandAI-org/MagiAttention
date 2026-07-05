@@ -19,23 +19,23 @@ import sys
 import time
 
 from bench_sparse_analysis._common import (
-    NHQ,
-    NHK,
     HD,
     KBS,
+    NHK,
+    NHQ,
     S_FULL,
     TOPK_VALS,
-    _ts,
-    _out_dir,
-    _results_path,
-    _load_results,
-    _save_results,
-    _has_entry,
-    _set_entry,
     _bench_ffa,
     _build_idx_kbs128,
+    _has_entry,
     _indices_to_ranges,
+    _load_results,
+    _out_dir,
+    _results_path,
+    _save_results,
+    _set_entry,
     _set_gpu,
+    _ts,
 )
 
 

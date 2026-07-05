@@ -1139,13 +1139,65 @@ TODO: 移除 `_phase4_plot()` 或标记为 deprecated。
 - Python `_flex_flash_attn_jit.py`: env var key (不变)
 - Bench `_DEBUG_ENV_KEYS` / `_DEBUG_CONFIGS` dict keys (不变)
 
+### Bench 重测 + NCU Spill 验证 (2026-07-05 00:22)
+
+PerfDebug 重命名后全量重测 40 configs，数据与之前一致（±5T 噪声）。
+
+**核心数据** (S=topk=32K, nhq=128, nhk=1, hd=128, bf16, H100):
+
+| 实验 | TFLOPS | ms | gap% | 说明 |
+|------|--------|-----|------|------|
+| LoopK baseline | 341 | 516.3 | 0% | M128N64, stg=2, stgV=2 |
+| **LoopQ baseline** | **534** | **329.4** | **100%** | M64N128 |
+| stgV1 only | 338 | 521.3 | -2.7% | V stage 性能中性，省 16KB SMEM |
+| **O1 (ununion+stgV1)** | **378** | **464.9** | **+27.5%** | 可落地优化 |
+| O1+SVL | 384 | 457.9 | +31.3% | V load 无影响 |
+| O1+DDV | 376 | 468.3 | +25.7% | defer R2S 无效 |
+| O1+SVS (skip dV store) | 410 | 428.8 | +46.8% | dV TMA = 36ms |
+| O1+SKS (skip dK store) | 407 | 432.2 | +45.0% | dK TMA = 33ms (对称) |
+| O1+SKW (skip dK wb) | 488 | 360.6 | +83.3% | dK R2S+TMA = 104ms |
+| **O1+SVW (skip dV wb)** | **536** | **328.3** | **+100.6%** | dV R2S+TMA = 137ms |
+| **O1+SVW+SKW** | **710** | **247.8** | **+143.7%** | 无 writeback 天花板 |
+| stgK1 only | 246 | 713.8 | -105.7% | K pipeline 灾难性下降 |
+| bypass atomicAdd | 156 | 1128.3 | -327.6% | scalar atomicAdd 太慢 |
+
+**NCU Spill 验证** (2026-07-05 23:12):
+
+| Config | Regs/Thread | Local LD | Local ST | Spill |
+|--------|-------------|----------|----------|-------|
+| LoopK baseline | 168 | 0 | 0 | NO |
+| LoopQ baseline | 168 | 256 | 256 | YES (轻微) |
+| O1 (ununion+stgV1) | 168 | 0 | 0 | NO |
+| O1+SVW | 168 | 0 | 0 | NO |
+| O1+SKW | 168 | 0 | 0 | NO |
+| O1+SVS | 168 | 0 | 0 | NO |
+| O1+SKS | 168 | 0 | 0 | NO |
+| O1+SVW+SKW | 168 | 0 | 0 | NO |
+| O1+DDV | 168 | 0 | 0 | NO |
+
+所有 InnerLoopK 变体无 spill。LoopQ 反而有轻微 spill (256 sectors)，
+说明 LoopK 的性能差距不是寄存器问题。
+
+**结论**:
+- Gap 根因 = dV writeback pipeline（R2S 32KB + fence + barrier + TMA reduce-add），每 inner iteration 0.5ms × 256 iterations = 137ms
+- O1+SVW (536T) ≈ LoopQ (534T) → **去掉 dV writeback 后 InnerLoopK 追平 InnerLoopQ**
+- O1 是唯一可落地优化 (+37T, +11%)，通过分离 dKV SMEM buffer 部分并行化 writeback
+- dV/dK store 对称 (SVS ≈ SKS)，writeback 不对称 (SVW > SKW) — dV 在 critical path 更早期
+
+**图表清理** (已完成):
+- 删除过时的 `loopk_fantasy.png` 和 `loopk_gap_waterfall.png`
+- 保留 `loopk_optimization_summary.png` (landscape + waterfall) 和 `loopk_optimization_symmetry.png` (dV/dK 对称)
+
 ### 下一步探索方向 (优先级排序)
 
 1. **P1: 修复 consumer atomicAdd 路径** — 修复 `recast<float4>` partition 不匹配，
    使 `InnerDxStoreInProducer=false` 可编译。可省 smem_dkacc+dvacc (64KB)。
    优先级中等：修复工作量 ~1天，且需验证 atomicAdd 性能是否可接受。
 
-2. **P2: NCU 批量验证所有 O1 变体的 spill 状态** — 对 O1/SVW/SKW/SVS/SKS 做 NCU，
-   确认所有配置无 spill，补全证据链。
+2. ~~P2: NCU 批量验证~~ **已完成** — 所有 O1 变体无 spill。
 
-3. **P3: 图表清理** — 移除过时的 debug_skip 对称图，保留 summary + symmetry 两张图。
+3. ~~P3: 图表清理~~ **已完成** — 保留 summary + symmetry 两张图。
+
+4. **P4: 跨迭代 dV 累加探索** — 每 2 次 inner iteration 做 1 次 dV writeback。
+   需评估：额外 dV accum 寄存器 (~32 regs/thread) 是否导致 spill (168→~200)。
+   理论收益：dV writeback 频率减半 → ~68ms 节省 → ~460T (+82T)。

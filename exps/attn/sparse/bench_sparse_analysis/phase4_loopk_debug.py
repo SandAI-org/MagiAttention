@@ -21,9 +21,21 @@ import sys
 import time
 
 from bench_sparse_analysis._common import (
-    NHQ, NHK, HD, S_FULL,
-    _ts, _out_dir, _results_path, _load_results, _save_results,
-    _has_entry, _set_entry, _bench_kernel, _calc_flops, _set_gpu, _find_free_gpu,
+    HD,
+    NHK,
+    NHQ,
+    S_FULL,
+    _bench_kernel,
+    _calc_flops,
+    _find_free_gpu,
+    _has_entry,
+    _load_results,
+    _out_dir,
+    _results_path,
+    _save_results,
+    _set_entry,
+    _set_gpu,
+    _ts,
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -533,7 +545,9 @@ def _phase4_bench(force=False):
 
 def _phase4_plot():
     """Deprecated: symmetric cost comparison was misleading. Use _phase4_summary_plot() instead."""
-    print("[SKIP] _phase4_plot() deprecated — use --plot to generate summary + symmetry charts only.")
+    print(
+        "[SKIP] _phase4_plot() deprecated — use --plot to generate summary + symmetry charts only."
+    )
 
 
 def _get_ms(results, label):
@@ -598,32 +612,57 @@ def _phase4_opt_plot():
     bw = 0.30
 
     # ── Left: Writeback symmetry (R2S + barrier + TMA) ──
-    groups_wb = ["O1\nbaseline", "Skip dV\nwriteback", "Skip dK\nwriteback", "Skip\nboth"]
+    groups_wb = [
+        "O1\nbaseline",
+        "Skip dV\nwriteback",
+        "Skip dK\nwriteback",
+        "Skip\nboth",
+    ]
     vals_wb = [o1_tf, svw_tf, skw_tf, both_tf if both_tf else 0]
     cols_wb = [COL_O1, COL_DV, COL_DK, COL_BOTH]
 
     x_wb = np.arange(len(groups_wb))
     bars_wb = ax1.bar(
-        x_wb, vals_wb, width=0.55, color=cols_wb,
-        edgecolor="white", linewidth=0.5, alpha=0.85,
+        x_wb,
+        vals_wb,
+        width=0.55,
+        color=cols_wb,
+        edgecolor="white",
+        linewidth=0.5,
+        alpha=0.85,
     )
     for bar, v in zip(bars_wb, vals_wb):
         if v > 0:
             ax1.text(
                 bar.get_x() + bar.get_width() / 2,
-                v + 8, f"{v:.0f}",
-                ha="center", va="bottom", fontsize=11, fontweight="bold",
+                v + 8,
+                f"{v:.0f}",
+                ha="center",
+                va="bottom",
+                fontsize=11,
+                fontweight="bold",
             )
 
     if lk_tf:
-        ax1.axhline(y=lk_tf, color=(0.78, 0.22, 0.22), linestyle="--",
-                     linewidth=1.2, label=f"LoopK no-opt ({lk_tf:.0f}T)")
+        ax1.axhline(
+            y=lk_tf,
+            color=(0.78, 0.22, 0.22),
+            linestyle="--",
+            linewidth=1.2,
+            label=f"LoopK no-opt ({lk_tf:.0f}T)",
+        )
     if lq_tf:
-        ax1.axhline(y=lq_tf, color=(0.20, 0.50, 0.20), linestyle="--",
-                     linewidth=1.2, label=f"LoopQ ({lq_tf:.0f}T)")
+        ax1.axhline(
+            y=lq_tf,
+            color=(0.20, 0.50, 0.20),
+            linestyle="--",
+            linewidth=1.2,
+            label=f"LoopQ ({lq_tf:.0f}T)",
+        )
     ax1.set_title(
         "Writeback Symmetry: dV vs dK\n(R2S + barrier + TMA store)",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     ax1.set_ylabel("TFLOPS", fontsize=12)
     ax1.set_xticks(x_wb)
@@ -640,26 +679,46 @@ def _phase4_opt_plot():
 
     x_st = np.arange(len(groups_st))
     bars_st = ax2.bar(
-        x_st, vals_st, width=0.55, color=cols_st,
-        edgecolor="white", linewidth=0.5, alpha=0.85,
+        x_st,
+        vals_st,
+        width=0.55,
+        color=cols_st,
+        edgecolor="white",
+        linewidth=0.5,
+        alpha=0.85,
     )
     for bar, v in zip(bars_st, vals_st):
         if v > 0:
             ax2.text(
                 bar.get_x() + bar.get_width() / 2,
-                v + 8, f"{v:.0f}",
-                ha="center", va="bottom", fontsize=11, fontweight="bold",
+                v + 8,
+                f"{v:.0f}",
+                ha="center",
+                va="bottom",
+                fontsize=11,
+                fontweight="bold",
             )
 
     if lk_tf:
-        ax2.axhline(y=lk_tf, color=(0.78, 0.22, 0.22), linestyle="--",
-                     linewidth=1.2, label=f"LoopK no-opt ({lk_tf:.0f}T)")
+        ax2.axhline(
+            y=lk_tf,
+            color=(0.78, 0.22, 0.22),
+            linestyle="--",
+            linewidth=1.2,
+            label=f"LoopK no-opt ({lk_tf:.0f}T)",
+        )
     if lq_tf:
-        ax2.axhline(y=lq_tf, color=(0.20, 0.50, 0.20), linestyle="--",
-                     linewidth=1.2, label=f"LoopQ ({lq_tf:.0f}T)")
+        ax2.axhline(
+            y=lq_tf,
+            color=(0.20, 0.50, 0.20),
+            linestyle="--",
+            linewidth=1.2,
+            label=f"LoopQ ({lq_tf:.0f}T)",
+        )
     ax2.set_title(
         "Store Symmetry: dV vs dK\n(TMA store only, R2S still runs)",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     ax2.set_ylabel("TFLOPS", fontsize=12)
     ax2.set_xticks(x_st)
@@ -672,7 +731,9 @@ def _phase4_opt_plot():
     fig.suptitle(
         f"dV/dK Pipeline Symmetry on O1 (ununion+stgV1)\n"
         f"S=topk={S_FULL // 1024}K, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16",
-        fontsize=14, fontweight="bold", y=1.02,
+        fontsize=14,
+        fontweight="bold",
+        y=1.02,
     )
     plt.tight_layout()
     path = os.path.join(out, "loopk_optimization_symmetry.png")
@@ -686,13 +747,13 @@ def _phase4_opt_plot():
     svs_ms = _get_ms(results, "loopk_ununion_stgv1_svs")
     sks_ms = _get_ms(results, "loopk_ununion_stgv1_sks")
     if svw_ms and skw_ms:
-        print(f"\n  ── dV/dK Writeback Symmetry ──")
+        print("\n  ── dV/dK Writeback Symmetry ──")
         print(f"    O1+SVW (skip dV writeback): {svw_ms:.1f} ms")
         print(f"    O1+SKW (skip dK writeback): {skw_ms:.1f} ms")
         delta = abs(svw_ms - skw_ms)
         print(f"    Delta: {delta:.1f} ms ({delta / max(svw_ms, skw_ms) * 100:.1f}%)")
     if svs_ms and sks_ms:
-        print(f"\n  ── dV/dK Store Symmetry ──")
+        print("\n  ── dV/dK Store Symmetry ──")
         print(f"    O1+SVS (skip dV store): {svs_ms:.1f} ms")
         print(f"    O1+SKS (skip dK store): {sks_ms:.1f} ms")
         delta = abs(svs_ms - sks_ms)
@@ -750,8 +811,9 @@ def _phase4_summary_plot():
         print("Insufficient data for summary plot.")
         return
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(22, 8), dpi=150,
-                                    gridspec_kw={"width_ratios": [3, 2]})
+    fig, (ax1, ax2) = plt.subplots(
+        1, 2, figsize=(22, 8), dpi=150, gridspec_kw={"width_ratios": [3, 2]}
+    )
 
     # ── Left: Optimization landscape bar chart ──
     configs = []
@@ -790,8 +852,15 @@ def _phase4_summary_plot():
     colors = [c[2] for c in configs]
 
     x = np.arange(len(configs))
-    bars = ax1.bar(x, values, width=0.65, color=colors,
-                   edgecolor="white", linewidth=0.8, alpha=0.88)
+    bars = ax1.bar(
+        x,
+        values,
+        width=0.65,
+        color=colors,
+        edgecolor="white",
+        linewidth=0.8,
+        alpha=0.88,
+    )
     for bar, v, cfg in zip(bars, values, configs):
         if not v:
             continue
@@ -799,19 +868,44 @@ def _phase4_summary_plot():
         delta_str = f"+{delta:.0f}" if delta >= 0 else f"{delta:.0f}"
         tag = cfg[3]
         if tag in ("baseline", "ref"):
-            ax1.text(bar.get_x() + bar.get_width() / 2, v + 5,
-                     f"{v:.0f}T", ha="center", va="bottom",
-                     fontsize=10, fontweight="bold",
-                     color="white" if tag == "ref" else "#333")
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2,
+                v + 5,
+                f"{v:.0f}T",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+                fontweight="bold",
+                color="white" if tag == "ref" else "#333",
+            )
         else:
-            ax1.text(bar.get_x() + bar.get_width() / 2, v + 5,
-                     f"{v:.0f}T\n({delta_str})", ha="center", va="bottom",
-                     fontsize=9, fontweight="bold", color="#333")
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2,
+                v + 5,
+                f"{v:.0f}T\n({delta_str})",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+                color="#333",
+            )
 
-    ax1.axhline(y=lk, color="#D32F2F", linestyle="--", linewidth=1, alpha=0.5,
-                label=f"LoopK baseline ({lk:.0f}T)")
-    ax1.axhline(y=lq, color="#212121", linestyle="--", linewidth=1.2, alpha=0.6,
-                label=f"LoopQ baseline ({lq:.0f}T)")
+    ax1.axhline(
+        y=lk,
+        color="#D32F2F",
+        linestyle="--",
+        linewidth=1,
+        alpha=0.5,
+        label=f"LoopK baseline ({lk:.0f}T)",
+    )
+    ax1.axhline(
+        y=lq,
+        color="#212121",
+        linestyle="--",
+        linewidth=1.2,
+        alpha=0.6,
+        label=f"LoopQ baseline ({lq:.0f}T)",
+    )
     if svw:
         ax1.axhline(y=svw, color="#C62828", linestyle=":", linewidth=1, alpha=0.4)
 
@@ -819,10 +913,12 @@ def _phase4_summary_plot():
     if stgv1_only:
         stgv1_idx = next(i for i, c in enumerate(configs) if c[0].startswith("stgV1"))
         ax1.annotate(
-            f"V stage 2→1: perf neutral\n(-16KB SMEM saved)\n→ V load NOT bottleneck",
+            "V stage 2→1: perf neutral\n(-16KB SMEM saved)\n→ V load NOT bottleneck",
             xy=(stgv1_idx, stgv1_only),
             xytext=(stgv1_idx + 1.5, stgv1_only + 60),
-            fontsize=9, fontweight="bold", color="#1565C0",
+            fontsize=9,
+            fontweight="bold",
+            color="#1565C0",
             arrowprops=dict(arrowstyle="->", color="#1565C0", lw=1.5),
             ha="center",
         )
@@ -830,7 +926,8 @@ def _phase4_summary_plot():
     ax1.set_title(
         f"InnerLoopK Optimization Landscape\n"
         f"S=topk={S_FULL // 1024}K, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16, H100",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     ax1.set_ylabel("TFLOPS (BWD)", fontsize=12)
     ax1.set_xticks(x)
@@ -877,24 +974,56 @@ def _phase4_summary_plot():
     colors_wf.append("#2E7D32")
 
     y_pos = np.arange(len(labels_wf))
-    bars_wf = ax2.barh(y_pos, vals_wf, left=bottoms, color=colors_wf,
-                        edgecolor="white", linewidth=0.8, alpha=0.85, height=0.6)
+    bars_wf = ax2.barh(
+        y_pos,
+        vals_wf,
+        left=bottoms,
+        color=colors_wf,
+        edgecolor="white",
+        linewidth=0.8,
+        alpha=0.85,
+        height=0.6,
+    )
 
     for i, (v, b) in enumerate(zip(vals_wf, bottoms)):
         if v > 0:
-            ax2.text(b + v + 5, i, f"+{v:.0f}T", va="center", fontsize=10,
-                     fontweight="bold", color=colors_wf[i])
+            ax2.text(
+                b + v + 5,
+                i,
+                f"+{v:.0f}T",
+                va="center",
+                fontsize=10,
+                fontweight="bold",
+                color=colors_wf[i],
+            )
         elif i == 0:
-            ax2.text(b + v / 2, i, f"{v:.0f}T", va="center", ha="center",
-                     fontsize=10, fontweight="bold", color="white")
+            ax2.text(
+                b + v / 2,
+                i,
+                f"{v:.0f}T",
+                va="center",
+                ha="center",
+                fontsize=10,
+                fontweight="bold",
+                color="white",
+            )
 
-    ax2.axvline(x=lq, color="#2E7D32", linestyle="--", linewidth=1.5, alpha=0.7,
-                label=f"LoopQ ({lq:.0f}T)")
+    ax2.axvline(
+        x=lq,
+        color="#2E7D32",
+        linestyle="--",
+        linewidth=1.5,
+        alpha=0.7,
+        label=f"LoopQ ({lq:.0f}T)",
+    )
     ax2.set_yticks(y_pos)
     ax2.set_yticklabels(labels_wf, fontsize=10)
     ax2.set_xlabel("TFLOPS", fontsize=11)
-    ax2.set_title("Gap Decomposition: LoopK → LoopQ\n(cumulative optimization)",
-                   fontsize=13, fontweight="bold")
+    ax2.set_title(
+        "Gap Decomposition: LoopK → LoopQ\n(cumulative optimization)",
+        fontsize=13,
+        fontweight="bold",
+    )
     ax2.legend(fontsize=10)
     ax2.invert_yaxis()
     ax2.grid(axis="x", alpha=0.2)
@@ -907,32 +1036,44 @@ def _phase4_summary_plot():
     print(f"[{_ts()}] Summary plot -> {path}")
 
     # Print legend
-    print(f"\n  ── Abbreviations ──")
-    print(f"    O1    = Ununion dKV accumulators + dS_stage=1 (landable optimization)")
-    print(f"    SVL   = Skip V Load (debug: lightweight TMA load V)")
-    print(f"    DDV   = Defer dV R2S (move R2S after MMA5)")
-    print(f"    SVS   = Skip dV Store (debug: no TMA reduce-add dV)")
-    print(f"    SKS   = Skip dK Store (debug: no TMA reduce-add dK)")
-    print(f"    SKW   = Skip dK Writeback (debug: no dK R2S+barrier+TMA)")
-    print(f"    SVW   = Skip dV Writeback (debug: no dV R2S+barrier+TMA)")
+    print("\n  ── Abbreviations ──")
+    print("    O1    = Ununion dKV accumulators + dS_stage=1 (landable optimization)")
+    print("    SVL   = Skip V Load (debug: lightweight TMA load V)")
+    print("    DDV   = Defer dV R2S (move R2S after MMA5)")
+    print("    SVS   = Skip dV Store (debug: no TMA reduce-add dV)")
+    print("    SKS   = Skip dK Store (debug: no TMA reduce-add dK)")
+    print("    SKW   = Skip dK Writeback (debug: no dK R2S+barrier+TMA)")
+    print("    SVW   = Skip dV Writeback (debug: no dV R2S+barrier+TMA)")
 
     # Print key conclusions
-    print(f"\n  ── Key Conclusions ──")
+    print("\n  ── Key Conclusions ──")
     print(f"    LoopK baseline:         {lk:.0f} TFLOPS")
     print(f"    LoopQ baseline:         {lq:.0f} TFLOPS")
-    print(f"    Gap:                    {gap:.0f} TFLOPS ({gap / lq * 100:.0f}% of LoopQ)")
+    print(
+        f"    Gap:                    {gap:.0f} TFLOPS ({gap / lq * 100:.0f}% of LoopQ)"
+    )
     if stgv1_only:
-        print(f"    stgV1 only (no ununion): {stgv1_only - lk:+.0f}T (noise) — V load stages perf-neutral, saves 16KB SMEM")
+        print(
+            f"    stgV1 only (no ununion): {stgv1_only - lk:+.0f}T (noise) — V load stages perf-neutral, saves 16KB SMEM"
+        )
     if o1:
         ununion_delta = (o1 - stgv1_only) if stgv1_only else (o1 - lk)
-        print(f"    O1 (ununion+stgV1):     +{o1 - lk:.0f}T ({(o1 - lk) / gap * 100:.0f}% of gap) — landable")
+        print(
+            f"    O1 (ununion+stgV1):     +{o1 - lk:.0f}T ({(o1 - lk) / gap * 100:.0f}% of gap) — landable"
+        )
         if stgv1_only:
             print(f"      ├─ stgV1 贡献: +{stgv1_only - lk:.0f}T (V pipeline 2→1)")
             print(f"      └─ ununion 贡献: +{ununion_delta:.0f}T (dKV accumulator 分离)")
     if svw:
-        print(f"    SVW ceiling (no dV wb): +{svw - lk:.0f}T ({(svw - lk) / gap * 100:.0f}% of gap) — debug only")
-    print(f"    Root cause: 2 writebacks/iter (dV+dK) vs 1 (dQ) in LoopQ")
-    print(f"    dV writeback (R2S+barrier+TMA) = {(svw - o1):.0f}T of gap" if svw and o1 else "")
+        print(
+            f"    SVW ceiling (no dV wb): +{svw - lk:.0f}T ({(svw - lk) / gap * 100:.0f}% of gap) — debug only"
+        )
+    print("    Root cause: 2 writebacks/iter (dV+dK) vs 1 (dQ) in LoopQ")
+    print(
+        f"    dV writeback (R2S+barrier+TMA) = {(svw - o1):.0f}T of gap"
+        if svw and o1
+        else ""
+    )
 
 
 def _phase4_ncu():
@@ -1053,5 +1194,3 @@ print("[DONE]")
                     )
                 ):
                     print(f"    {line}")
-
-

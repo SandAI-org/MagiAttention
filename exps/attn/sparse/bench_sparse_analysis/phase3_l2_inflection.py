@@ -16,14 +16,7 @@ import os
 import subprocess
 import sys
 
-from bench_sparse_analysis._common import (
-    NHQ,
-    NHK,
-    HD,
-    KBS,
-    _ts,
-    _out_dir,
-)
+from bench_sparse_analysis._common import HD, KBS, NHK, NHQ, _out_dir, _ts
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -17,26 +17,26 @@ import os
 import time
 
 from bench_sparse_analysis._common import (
-    NHQ,
-    NHK,
     HD,
     KBS,
+    NHK,
+    NHQ,
     S_FULL,
     TOPK_VALS,
-    _ts,
+    _bench_ffa,
+    _bench_kernel,
+    _build_idx_kbs128,
+    _calc_flops,
+    _has_entry,
+    _indices_to_ranges,
+    _load_results,
+    _make_tensors_kv_short,
     _out_dir,
     _results_path,
-    _load_results,
     _save_results,
-    _has_entry,
     _set_entry,
-    _bench_kernel,
-    _make_tensors_kv_short,
-    _calc_flops,
-    _bench_ffa,
-    _build_idx_kbs128,
-    _indices_to_ranges,
     _set_gpu,
+    _ts,
 )
 
 
