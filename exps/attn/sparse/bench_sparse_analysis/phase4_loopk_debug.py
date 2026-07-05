@@ -203,19 +203,19 @@ _STRUCTURAL_CONFIGS = [
         False,
         "LoopK: no dV path + no dK store",
     ),
-    # ══════ P5-v2: 正确的对称实验 ══════
-    # 目标：逐步消除 InnerLoopK 相对 InnerLoopQ 的额外开销，保留全部 MMA（公平比较）。
-    # 额外开销 = V load (inner) + dV writeback pipeline (R2S+barrier+TMA)
-    # 对称基准：InnerLoopQ inner = load Q,dO + MMA(S,P,dS,dV,dK,dQ) + store dQ(atomicAdd)
+    # ══════ P5-v2: Symmetric ablation experiments ══════
+    # Goal: progressively remove InnerLoopK's extra overhead vs InnerLoopQ, keeping all MMA.
+    # Extra overhead = V load (inner) + dV writeback pipeline (R2S+barrier+TMA)
+    # Symmetric baseline: InnerLoopQ inner = load Q,dO + MMA(S,P,dS,dV,dK,dQ) + store dQ(atomicAdd)
     #
-    # Config A: 仅消除 dV writeback（R2S+barrier+TMA），保留 V load
+    # Config A: remove dV writeback only (R2S+barrier+TMA), keep V load
     (
         "loopk_skip_dv_writeback",
         {"MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1"},
         False,
         "InnerLoopK: no dV writeback",
     ),
-    # Config B (核心): 消除 V load + dV writeback → InnerLoopK ≈ symmetric InnerLoopQ
+    # Config B (core): remove V load + dV writeback -> InnerLoopK ~ symmetric InnerLoopQ
     (
         "loopk_symmetric",
         {
@@ -225,7 +225,7 @@ _STRUCTURAL_CONFIGS = [
         False,
         "InnerLoopK: symmetric (no V, no dV wb)",
     ),
-    # Config C: 消除 V load + dV writeback + dK store → 只剩 MMA 和 K load（上界）
+    # Config C: remove V load + dV writeback + dK store -> only MMA + K load (upper bound)
     (
         "loopk_symmetric_no_dk_store",
         {
@@ -238,8 +238,8 @@ _STRUCTURAL_CONFIGS = [
     ),
 ]
 
-# ══════ P5-v3: 实际优化方案验证 ══════
-# O1: ununion SMEM — dV/dK 使用独立 SMEM buffer → 解除串行化 → dV TMA 和 dK R2S 可并行
+# ══════ P5-v3: Optimization validation ══════
+# O1: ununion SMEM -- dV/dK use independent SMEM buffers -> deserialization -> dV TMA and dK R2S can overlap
 # O2: DkvaccBypassSmem — register atomicAdd to GMEM (dense = scalar, scatter = per-element)
 _OPTIMIZATION_CONFIGS = [
     # O1: ununion + stgV=1 (214KB fits 228KB limit)
@@ -283,10 +283,10 @@ _OPTIMIZATION_CONFIGS = [
     ),
 ]
 
-# ══════ P5-v4: dV/dK 对称性验证 ══════
-# 目标：验证 ununion 后 dV 和 dK writeback pipeline 的开销是否对称。
-# 如果 O1+SVW ≈ O1+SKW，说明 ununion 消除了 dV/dK 串行化 → 两条路径独立且等价。
-# 如果 O1+SVW ≠ O1+SKW，说明 dV 和 dK 有内在的非对称性（如 softmax_scale、barrier 顺序）。
+# ══════ P5-v4: dV/dK symmetry verification ══════
+# Goal: verify whether dV and dK writeback pipeline costs are symmetric after ununion.
+# If O1+SVW ~ O1+SKW, ununion fully deserialized dV/dK -> both paths independent and equivalent.
+# If O1+SVW != O1+SKW, dV and dK have intrinsic asymmetry (softmax_scale, barrier ordering).
 _SYMMETRY_CONFIGS = [
     # O1 + skip dK writeback (symmetric to O1 + SVW)
     (
@@ -1062,8 +1062,10 @@ def _phase4_summary_plot():
             f"    O1 (ununion+stgV1):     +{o1 - lk:.0f}T ({(o1 - lk) / gap * 100:.0f}% of gap) — landable"
         )
         if stgv1_only:
-            print(f"      ├─ stgV1 贡献: +{stgv1_only - lk:.0f}T (V pipeline 2→1)")
-            print(f"      └─ ununion 贡献: +{ununion_delta:.0f}T (dKV accumulator 分离)")
+            print(f"      stgV1 contrib: +{stgv1_only - lk:.0f}T (V pipeline 2->1)")
+            print(
+                f"      ununion contrib: +{ununion_delta:.0f}T (dKV accumulator split)"
+            )
     if svw:
         print(
             f"    SVW ceiling (no dV wb): +{svw - lk:.0f}T ({(svw - lk) / gap * 100:.0f}% of gap) — debug only"

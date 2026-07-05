@@ -1199,5 +1199,45 @@ PerfDebug 重命名后全量重测 40 configs，数据与之前一致（±5T 噪
 3. ~~P3: 图表清理~~ **已完成** — 保留 summary + symmetry 两张图。
 
 4. **P4: 跨迭代 dV 累加探索** — 每 2 次 inner iteration 做 1 次 dV writeback。
-   需评估：额外 dV accum 寄存器 (~32 regs/thread) 是否导致 spill (168→~200)。
-   理论收益：dV writeback 频率减半 → ~68ms 节省 → ~460T (+82T)。
+
+   **寄存器可行性分析** (2026-07-06 02:50):
+   - dV accum fragment = kBlockN × kHeadDim / (NumMmaWarpGroups × 128) = 64×128/(2×128) = **32 fp32 regs/thread**
+   - 双缓冲需额外 32 regs → 从 168 → ~200 regs/thread
+   - H100 限制: 65536 regs/SM, 当前 1 CTA/SM (受 SMEM 214KB 限制)
+   - 1 CTA × 256 threads × 200 regs = 51200 << 65536 → **寄存器可行**
+   - 理论收益: dV writeback 频率减半 → ~68ms 节省 → ~460T (+82T)
+
+   **实现路径** (代码分析 2026-07-06):
+   - `tdVrdV` 当前在 inner loop 内每次迭代声明 (line 3721)，MMA3 用 `zero_init=true`
+   - 核心改法：声明移到 loop 外，首次手动 `clear()`，后续 MMA3 用 `zero_init=false` 累加
+   - 每 N 次迭代做一次 R2S writeback + `clear()`
+   - 不需要两份 accumulator —— 同一个 fragment 原地累加，writeback 后 clear 即可
+   - 但 `zero_init` 是 WGMMA template param（编译时），Slice_dQKV_Mma 路径的 MMA3
+     已经用 `zero_init=true` → 需改为 `false` 并手动在 loop 外 clear
+   - Edge case: inner loop 结束后 flush 最后累积的 dV
+   - Barrier 修改：每 N 次 iteration 才 sync/arrive dVEmpty/dVFull
+   - 预计工作量 ~1-2 天，实现较直接
+
+---
+
+## P4 Cross-iteration dV Accumulation — Implementation (2026-07-06 03:00)
+
+### CI Fix
+- `.pre-commit-config.yaml`: merge duplicate `exclude` keys for `chinese_checker`,
+  add `^\.cursor/` exclusion to allow Chinese in plan/rules files.
+- `phase4_loopk_debug.py`: translate Chinese comments to English.
+
+### P4 Implementation Plan
+1. **Add compile-time flag**: `MAGI_ATTENTION_FFA_BWD_DV_CROSS_ITER_ACCUM` env var
+   → template param `kBwdDvCrossIterAccum` (bool, default false)
+2. **Kernel code changes** (`mainloop_bwd_sm90_tma_gmma_ws.hpp`):
+   a. Move `tdVrdV` declaration outside inner loop (before iteration starts)
+   b. First iteration: manual `clear()` on the fragment
+   c. MMA3 (dV): change `zero_init` from `true` to `false` (accumulate across iterations)
+   d. Every `kDvFlushInterval` (=2) iterations: perform R2S + barrier + TMA writeback, then `clear()`
+   e. End of inner loop: flush any remaining accumulated dV
+   f. Barrier protocol: sync/arrive dVEmpty/dVFull only on flush iterations
+3. **JIT + template integration**: `_flex_flash_attn_jit.py`, `bwd_inst_template.jinja`,
+   `flash_bwd_launch_template.h` — add `kBwdDvCrossIterAccum` param
+4. **Bench integration**: Add cross-iter config to `phase4_loopk_debug.py`
+5. **Validate**: precompile → correctness → TFLOPS benchmark
