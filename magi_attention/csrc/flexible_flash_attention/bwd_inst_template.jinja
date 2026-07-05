@@ -67,6 +67,7 @@ static constexpr bool kBwdSkipDvMma   = {{ bwd_skip_dv_mma   | default('false') 
 static constexpr bool kBwdSkipDvWriteback = {{ bwd_skip_dv_writeback | default('false') }};
 static constexpr bool kBwdSkipDkWriteback = {{ bwd_skip_dk_writeback | default('false') }};
 static constexpr bool kBwdDeferDvR2S = {{ bwd_defer_dv_r2s | default('false') }};
+static constexpr bool kBwdDvCrossIterAccum = {{ bwd_dv_cross_iter_accum | default('false') }};
 
 static_assert(!kSwapBwdQKLoop || !kDeterministic, "Deterministic mode is not supported when SwapBwdQKLoop is enabled.");
 static_assert(!(kBlockSparse && kIndexSparse), "BlockSparse and IndexSparse are mutually exclusive.");
@@ -165,7 +166,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kForceMmaDkvSS, kInnerLoadMode, kProfileMode, kBwdSkipVLoad, kBwdSkipDvStore, kBwdSkipDkStore, kBwdSkipDvMma, kBwdSkipDvWriteback, kBwdSkipDkWriteback, kBwdUnunionDkvacc, kBwdDeferDvR2S>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kForceMmaDkvSS, kInnerLoadMode, kProfileMode, kBwdSkipVLoad, kBwdSkipDvStore, kBwdSkipDkStore, kBwdSkipDvMma, kBwdSkipDvWriteback, kBwdSkipDkWriteback, kBwdUnunionDkvacc, kBwdDeferDvR2S, kBwdDvCrossIterAccum>(params, stream);
 
   // Pool reduction: sum pool slices and convert to output dtype
   if (pool_count > 1 && kSwapBwdQKLoop) {

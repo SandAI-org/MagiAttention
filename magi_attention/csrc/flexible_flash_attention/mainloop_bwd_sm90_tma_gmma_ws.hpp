@@ -92,7 +92,8 @@ template <
     bool SkipDvWriteback_ = false,
     bool SkipDkWriteback_ = false,
     bool UnunionDkvacc_ = false,
-    bool DeferDvR2S_ = false>
+    bool DeferDvR2S_ = false,
+    bool DvCrossIterAccum_ = false>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -115,14 +116,16 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool LseDpsumUnionDKVacc = LseDpsumUnionDKVacc_;
   static constexpr bool DkvaccBypassSmem = DkvaccBypassSmem_;
 
-  static constexpr bool PerfPerfDebugSkipVLoad = SkipVLoad_;
-  static constexpr bool PerfPerfDebugSkipDvStore = SkipDvStore_;
-  static constexpr bool PerfPerfDebugSkipDkStore = SkipDkStore_;
-  static constexpr bool PerfPerfDebugSkipDvMma = SkipDvMma_;
-  static constexpr bool PerfPerfDebugSkipDvWriteback = SkipDvWriteback_;
-  static constexpr bool PerfPerfDebugSkipDkWriteback = SkipDkWriteback_;
+  static constexpr bool PerfDebugSkipVLoad = SkipVLoad_;
+  static constexpr bool PerfDebugSkipDvStore = SkipDvStore_;
+  static constexpr bool PerfDebugSkipDkStore = SkipDkStore_;
+  static constexpr bool PerfDebugSkipDvMma = SkipDvMma_;
+  static constexpr bool PerfDebugSkipDvWriteback = SkipDvWriteback_;
+  static constexpr bool PerfDebugSkipDkWriteback = SkipDkWriteback_;
   static constexpr bool UnunionDkvacc = UnunionDkvacc_;
-  static constexpr bool PerfPerfDebugDeferDvR2S = DeferDvR2S_;
+  static constexpr bool PerfDebugDeferDvR2S = DeferDvR2S_;
+  static constexpr bool PerfDebugDvCrossIterAccum = DvCrossIterAccum_;
+  static constexpr int kDvFlushInterval = PerfDebugDvCrossIterAccum ? 2 : 1;
 
   static constexpr bool Has_softcap = Has_softcap_;
   static constexpr bool SdP_swapAB = SdP_swapAB_;
@@ -3567,6 +3570,17 @@ struct CollectiveMainloopBwdSm90 {
 
     Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
 
+    // Cross-iteration dV accumulation: declare dV fragment outside the inner loop so it
+    // persists across iterations. MMA3 uses zero_init=false to accumulate, and we only
+    // flush (R2S + barrier + TMA) every kDvFlushInterval iterations.
+    using FrgTensordKV_CI = decltype(partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{})));
+    FrgTensordKV_CI tdVrdV_cross;
+    int dv_cross_iter_count = 0;
+    if constexpr (PerfDebugDvCrossIterAccum && !Slice_dQKV_Mma) {
+      tdVrdV_cross = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
+      clear(tdVrdV_cross);
+    }
+
     // Define backward step lambda func
     auto bwd_step = [&](int n_block, auto mask_fn, auto /*is_no_mask*/ = cute::false_type{}) {
       // MMA1 (SS): apply S = QK^T (or S^T = KQ^T if SdP_swapAB)
@@ -3718,17 +3732,29 @@ struct CollectiveMainloopBwdSm90 {
       // Apply MMA for dQ,dK,dV
       if constexpr (!Slice_dQKV_Mma) { // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
         // MMA3 (RS or SS if not Mma_dKV_is_RS): apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
-        Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
+        // When PerfDebugDvCrossIterAccum: use the cross-iteration accumulator (zero_init=false),
+        // flushing only every kDvFlushInterval iterations.
+        auto& tdVrdV = [&]() -> auto& {
+          if constexpr (PerfDebugDvCrossIterAccum) {
+            return tdVrdV_cross;
+          } else {
+            // Original path: declare fresh fragment each iteration (zero_init=true in gemm below)
+            static thread_local FrgTensordKV_CI tdVrdV_local;
+            tdVrdV_local = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
+            return tdVrdV_local;
+          }
+        }();
+        static constexpr bool dv_zero_init = !PerfDebugDvCrossIterAccum;
         if constexpr (PerfDebugSkipDvMma) {
           // Debug: skip dV MMA entirely; tdVrdV stays zero-initialized.
           // No WGMMA issued, so MMA4's wg_wait=1 is trivially satisfied (0 pending <= 1).
         } else if constexpr (Mma_dKV_is_RS) {
           Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
-          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO, tdVrdV);
+          flash::gemm</*zero_init=*/dv_zero_init, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO, tdVrdV);
         } else {
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
           Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
+          flash::gemm</*zero_init=*/dv_zero_init, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
         }
 
         // MMA4 (RS or SS if not Mma_dKV_is_RS): apply dK = dS^TQ (or dK^T = Q^TdS if dKV_swapAB)

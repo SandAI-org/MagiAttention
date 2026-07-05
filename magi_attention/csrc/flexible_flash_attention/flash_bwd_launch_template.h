@@ -149,7 +149,8 @@ template <
     bool SkipDvWriteback_ = false,
     bool SkipDkWriteback_ = false,
     bool UnunionDkvacc = false,
-    bool DeferDvR2S_ = false>
+    bool DeferDvR2S_ = false,
+    bool DvCrossIterAccum_ = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -222,7 +223,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       SkipDvWriteback_,
       SkipDkWriteback_,
       UnunionDkvacc,
-      DeferDvR2S_>;
+      DeferDvR2S_,
+      DvCrossIterAccum_>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       SwapBwdQKLoop ? kBlockM : kBlockN,
@@ -427,7 +429,8 @@ template <
     bool SkipDvWriteback = false,
     bool SkipDkWriteback = false,
     int BwdUnunionDkvacc = 0,
-    bool DeferDvR2S = false>
+    bool DeferDvR2S = false,
+    bool DvCrossIterAccum = false>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr bool IndexSparseInvLoopQ = IndexSparse && !SwapBwdQKLoop;
@@ -521,5 +524,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*SkipDvWriteback_=*/SkipDvWriteback,
       /*SkipDkWriteback_=*/SkipDkWriteback,
       /*UnunionDkvacc=*/UnunionDkvacc,
-      /*DeferDvR2S_=*/DeferDvR2S>(params, stream);
+      /*DeferDvR2S_=*/DeferDvR2S,
+      /*DvCrossIterAccum_=*/DvCrossIterAccum>(params, stream);
 }
