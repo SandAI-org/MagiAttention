@@ -47,6 +47,7 @@ from .range_info_sm90 import (
     get_n_block_min_max_runtime,
     read_attn_type_map,
 )
+from .index_sparse_sm90 import compute_actual_topk
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_load_sm90 import _compute_total_k_tokens, _inner_idx_to_abs_n_block
@@ -98,6 +99,8 @@ class FFABwdSm90:
         use_per_range_mask: bool = False,
         sparse_load: bool = False,
         equal_k_range_size: bool = False,
+        index_sparse: bool = False,
+        index_sparse_max_topk: int = 0,
         debug_print: bool = False,
     ):
         self.dtype = dtype
@@ -190,6 +193,8 @@ class FFABwdSm90:
         self.use_per_range_mask = use_per_range_mask
         self.sparse_load = sparse_load
         self.equal_k_range_size = equal_k_range_size
+        self.index_sparse = index_sparse
+        self.index_sparse_max_topk = index_sparse_max_topk
         self.debug_print = debug_print
 
         if self.debug_print:
@@ -612,6 +617,7 @@ class FFABwdSm90:
         mKRanges: Optional[cute.Tensor] = None,
         mAttnTypeMap: cute.Tensor = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -748,10 +754,7 @@ class FFABwdSm90:
             (self.tile_m, self.tile_hdimv),
         )
         if const_expr(self.qhead_per_kvhead == 1):
-            # For sparse_load, dK/dV are stored at absolute positions in the
-            # full tensor; skip ragged tensor creation so the TMA descriptor
-            # covers the entire sK dimension.
-            use_ragged_dkv = self.varlen_k and not self.sparse_load
+            use_ragged_dkv = self.varlen_k and not self.sparse_load and not self.index_sparse
             mdK_tma = (
                 copy_utils.create_ragged_tensor_for_tma(
                     mdK, ragged_dim=0, ptr_shift=True
@@ -766,13 +769,9 @@ class FFABwdSm90:
                 if use_ragged_dkv
                 else mdV
             )
-            # For sparse_load, multiple thread blocks may write the same K
-            # block's gradients (different Q blocks). Use TMA atomic-add
-            # (CopyReduceBulkTensorTileS2GOp) so contributions accumulate
-            # correctly instead of overwriting.
             s2g_copy_op_dKV = (
                 cpasync.CopyReduceBulkTensorTileS2GOp(cpasync.ReductionOp.ADD)
-                if self.sparse_load
+                if self.sparse_load or self.index_sparse
                 else cpasync.CopyBulkTensorTileS2GOp()
             )
             # tma_atom_dK: layout_src_tv=(1,tileN*tileHD):(0,1), layout_dst_tv=(1,tileN*tileHD):(0,1)
@@ -807,8 +806,18 @@ class FFABwdSm90:
         else:
             self.tile_scheduler_cls = SingleTileScheduler
         self.spt = (self.is_causal or self.is_local) and self.deterministic
+        if const_expr(self.index_sparse):
+            _n_block_count = self.index_sparse_max_topk
+            _total_q_sched = cute.size(mCuSeqlensK.shape[0] - 1) * self.index_sparse_max_topk * self.tile_n
+        else:
+            _n_block_count = cute.ceil_div(cute.size(mK.shape[0]), self.tile_n)
+            _total_q_sched = (
+                cute.size(mK.shape[0])
+                if const_expr(mCuSeqlensK is not None)
+                else cute.size(mK.shape[0]) * cute.size(mK.shape[3])
+            )
         tile_sched_args = TileSchedulerArguments(
-            cute.ceil_div(cute.size(mK.shape[0]), self.tile_n),
+            _n_block_count,
             cute.size(mQ.shape[2]),
             cute.size(mK.shape[3])
             if const_expr(mCuSeqlensK is None)
@@ -817,9 +826,7 @@ class FFABwdSm90:
             cute.size(mQ.shape[0]),  # pass seqlen_q or total_q for seqlen_k
             mQ.shape[1],  # headdim
             mV.shape[1],  # headdim_v
-            total_q=cute.size(mK.shape[0])
-            if const_expr(mCuSeqlensK is not None)
-            else cute.size(mK.shape[0]) * cute.size(mK.shape[3]),
+            total_q=_total_q_sched,
             tile_shape_mn=(self.tile_n, self.tile_m),  # Swapping the role of Q & K
             mCuSeqlensQ=mCuSeqlensK,
             mSeqUsedQ=mSeqUsedK,
@@ -1003,6 +1010,7 @@ class FFABwdSm90:
             mKRanges,
             mAttnTypeMap,
             mCuBatches,
+            mIndexSparseIndices,
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
@@ -1060,6 +1068,7 @@ class FFABwdSm90:
         mKRanges: Optional[cute.Tensor] = None,
         mAttnTypeMap: cute.Tensor = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
     ):
         # /////////////////////////////////////////////////////////////////////////////
         #  Set up before warp specialization
@@ -1270,6 +1279,7 @@ class FFABwdSm90:
                     _read_mask_type_fn=_read_mask_type_fn_load,
                     mKRanges=mKRanges,
                     mCuBatches=mCuBatches,
+                    mIndexSparseIndices=mIndexSparseIndices,
                 )
             elif warp_idx == 1:  # dQacc atomic reduce
                 self.dQacc_store(
@@ -1327,6 +1337,7 @@ class FFABwdSm90:
                 qhead_per_kvhead_divmod,
                 mKRanges,
                 mCuBatches,
+                mIndexSparseIndices,
             )
 
             if const_expr(self.num_wg_dQ == self.num_wg_mma):
@@ -1391,6 +1402,7 @@ class FFABwdSm90:
         _read_mask_type_fn=None,
         mKRanges: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
     ):
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % len(
             self.load_warp_ids
@@ -1481,6 +1493,16 @@ class FFABwdSm90:
                     )
                     gV = cute.local_tile(
                         mV_cur, (self.tile_n, self.tile_hdimv), (n_block_abs, 0)
+                    )
+                elif const_expr(self.index_sparse):
+                    idx_n_block_abs = mIndexSparseIndices[batch_idx * self.index_sparse_max_topk + n_block]  # type: ignore[index]
+                    mK_cur = mK[None, None, head_idx_kv]
+                    mV_cur = mV[None, None, head_idx_kv]
+                    gK = cute.local_tile(
+                        mK_cur, (self.tile_n, self.tile_hdim), (idx_n_block_abs, 0)
+                    )
+                    gV = cute.local_tile(
+                        mV_cur, (self.tile_n, self.tile_hdimv), (idx_n_block_abs, 0)
                     )
                 else:
                     # mK_cur/mV_cur: (sK,HD):(1@1,1@0)
@@ -1802,6 +1824,7 @@ class FFABwdSm90:
         qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
         mKRanges: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
         is_dQ_wg: cutlass.Constexpr[bool] = True,
         is_print_block: bool = False,
         _read_mask_type_fn=None,
@@ -2111,6 +2134,24 @@ class FFABwdSm90:
                     seqlen_info.has_seqused_k,
                 )
                 mask = AttentionMaskCls(sparse_seqlen_info)
+            elif const_expr(self.index_sparse):
+                idx_total_k = self.index_sparse_max_topk * self.tile_n
+                idx_seqlen_info = SeqlenInfoQK(
+                    seqlen_info.offset_q,
+                    Int32(0),
+                    seqlen_info.padded_offset_q,
+                    Int32(0),
+                    seqlen_info.seqlen_q,
+                    Int32(idx_total_k),
+                    seqlen_info.m_block_offset,
+                    seqlen_info.block_idx_offset,
+                    Int32(self.index_sparse_max_topk),
+                    seqlen_info.has_cu_seqlens_q,
+                    seqlen_info.has_cu_seqlens_k,
+                    seqlen_info.has_seqused_q,
+                    seqlen_info.has_seqused_k,
+                )
+                mask = AttentionMaskCls(idx_seqlen_info)
             else:
                 mask = AttentionMaskCls(seqlen_info)
             score_mod_fn_cur = partial(
@@ -2261,6 +2302,8 @@ class FFABwdSm90:
                         n_block, mKRanges, bidb_c,  # type: ignore[arg-type]
                         self.tile_n, self.equal_k_range_size,
                     )
+                elif const_expr(self.index_sparse):
+                    epi_n_block_abs = mIndexSparseIndices[batch_idx * self.index_sparse_max_topk + n_block]  # type: ignore[index]
                 self.epilogue_dKV(
                     acc_dV,
                     mdV,
@@ -2295,6 +2338,8 @@ class FFABwdSm90:
                             n_block, mKRanges, bidb_c,  # type: ignore[arg-type]
                             self.tile_n, self.equal_k_range_size,
                         )
+                    elif const_expr(self.index_sparse):
+                        zero_n_block_abs = mIndexSparseIndices[batch_idx * self.index_sparse_max_topk + n_block]  # type: ignore[index]
                     self.epilogue_dKV(
                         acc_dV,
                         mdV,
@@ -2639,8 +2684,7 @@ class FFABwdSm90:
         # --- Write dK/dV back to gmem ---
 
         if const_expr(self.qhead_per_kvhead == 1):  # store
-            if const_expr(self.sparse_load):
-                # Sparse load: store dK/dV at absolute position in full tensor
+            if const_expr(self.sparse_load or self.index_sparse):
                 mdK_cur = mdK[None, None, head_idx]
                 mdV_cur = mdV[None, None, head_idx]
                 gdK = cute.local_tile(

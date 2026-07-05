@@ -57,6 +57,13 @@ from .range_info_sm90 import (
 )
 from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
+from .index_sparse_sm90 import (
+    IndexSparseProducerState,
+    compute_actual_topk,
+    create_index_sparse_state,
+    index_sparse_fill_token_indices,
+    index_sparse_prefetch,
+)
 from .sparse_load_sm90 import (
     SparseLoadCopyEngine,
     _compute_total_k_tokens,
@@ -96,6 +103,8 @@ class FFAFwdSm90:
         paged_kv_non_tma: bool = False,
         sparse_load: bool = False,
         equal_k_range_size: bool = False,
+        index_sparse: bool = False,
+        index_sparse_max_topk: int = 0,
         score_mod: Optional[cutlass.Constexpr] = None,
         mask_mod: Optional[cutlass.Constexpr] = None,
         has_aux_tensors: bool = False,
@@ -134,6 +143,8 @@ class FFAFwdSm90:
         self.mma_pv_is_rs = mma_pv_is_rs
         self.sparse_load = sparse_load
         self.equal_k_range_size = equal_k_range_size
+        self.index_sparse = index_sparse
+        self.index_sparse_max_topk = index_sparse_max_topk
         self.use_tma_KV = not paged_kv_non_tma
         self.cluster_shape_mn = (1, 1)
         self.num_warps_per_wg = 4
@@ -583,6 +594,7 @@ class FFAFwdSm90:
         mKRanges: Optional[cute.Tensor] = None,
         mAttnTypeMap: cute.Tensor = None,
         mCuBatches: cute.Tensor = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -923,6 +935,7 @@ class FFAFwdSm90:
             mKRanges,
             mAttnTypeMap,
             mCuBatches,
+            mIndexSparseIndices,
         ).launch(
             grid=grid_dim,
             block=[self.num_threads, 1, 1],
@@ -969,6 +982,7 @@ class FFAFwdSm90:
         mKRanges: Optional[cute.Tensor] = None,
         mAttnTypeMap: cute.Tensor = None,
         mCuBatches: cute.Tensor = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
     ):
         # /////////////////////////////////////////////////////////////////////////////
         #  Set up before warp specialization
@@ -1226,6 +1240,7 @@ class FFAFwdSm90:
                 is_print_block=is_print_block,
                 mKRanges=mKRanges,
                 mCuBatches=mCuBatches,
+                mIndexSparseIndices=mIndexSparseIndices,
             )
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1267,6 +1282,7 @@ class FFAFwdSm90:
                 _read_mask_type_fn=_read_mask_type_fn,
                 mKRanges=mKRanges,
                 mCuBatches=mCuBatches,
+                mIndexSparseIndices=mIndexSparseIndices,
             )
 
     @cute.jit
@@ -1293,6 +1309,7 @@ class FFAFwdSm90:
         is_print_block: bool = False,
         mKRanges: Optional[cute.Tensor] = None,
         mCuBatches: cute.Tensor = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
     ):
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % len(
             self.load_warp_ids
@@ -1567,6 +1584,96 @@ class FFAFwdSm90:
                                 kv_producer_state.advance()
                                 inner_idx += 1
 
+                    elif const_expr(self.index_sparse):
+                        # //////////////////////////////////////////////////////////
+                        #  IndexSparse path: TMA-based index-driven K/V loading
+                        #
+                        #  For each Q token, read indices from mIndexSparseIndices
+                        #  and TMA-load K/V blocks at absolute positions.
+                        #  Requires kbs >= kBlockN (block-level IndexSparse).
+                        # //////////////////////////////////////////////////////////
+
+                        max_topk = self.index_sparse_max_topk
+                        idx_row_start = batch_idx * max_topk
+                        actual_topk = compute_actual_topk(
+                            mIndexSparseIndices, idx_row_start, max_topk  # type: ignore[arg-type]
+                        )
+                        inner_block_max = actual_topk
+
+                        # --- Load Q ---
+
+                        if const_expr(self.use_tma_Q):
+                            if warp_idx_in_wg == 0:
+                                pipeline_q.producer_acquire_w_index_phase(
+                                    0, q_producer_phase
+                                )
+                                load_Q(
+                                    tma_bar_ptr=pipeline_q.sync_object_full.get_barrier(
+                                        0
+                                    )
+                                )
+                                q_producer_phase ^= 1
+                        else:
+                            pipeline_q.producer_acquire_w_index_phase(
+                                0, q_producer_phase
+                            )
+                            pack_gqa.load_Q(
+                                mQ_cur,
+                                sQ,
+                                gmem_tiled_copy_Q,
+                                tidx,
+                                m_block,
+                                seqlen_info.seqlen_q,
+                            )
+                            cute.arch.cp_async_commit_group()
+                            pipeline_q.producer_commit_w_index(0)
+                            q_producer_phase ^= 1
+
+                        # --- Create K/V TMA loaders without batch offset ---
+                        # n_block_abs from indices is absolute (no batch offset)
+
+                        if is_kv_load_warp:
+                            mK_global = mK[None, None, head_idx_kv]
+                            gK_global = cute.local_tile(
+                                mK_global, (self.tile_n, self.tile_hdim), (None, 0)
+                            )
+                            tma_load_K_idx, _, _ = copy_utils.tma_get_copy_fn(
+                                tma_atom_K, 0, cute.make_layout(1), gK_global, sK
+                            )
+                            tma_load_K_idx = copy_utils.tma_producer_copy_fn(
+                                tma_load_K_idx, pipeline_k
+                            )
+
+                            mV_global = mV[None, None, head_idx_kv]
+                            gV_global = cute.local_tile(
+                                mV_global, (self.tile_n, self.tile_hdimv), (None, 0)
+                            )
+                            tma_load_V_idx, _, _ = copy_utils.tma_get_copy_fn(
+                                tma_atom_V, 0, cute.make_layout(1), gV_global, sV
+                            )
+                            tma_load_V_idx = copy_utils.tma_producer_copy_fn(
+                                tma_load_V_idx, pipeline_v
+                            )
+
+                            # --- Prologue + Mainloop: TMA load K/V at index positions ---
+
+                            inner_idx = Int32(0)
+                            while inner_idx < inner_block_max:
+                                n_block_abs = mIndexSparseIndices[idx_row_start + inner_idx]  # type: ignore[index]
+
+                                pipeline_k.producer_acquire(kv_producer_state)
+                                tma_load_K_idx(
+                                    src_idx=n_block_abs,
+                                    producer_state=kv_producer_state,
+                                )
+                                pipeline_v.producer_acquire(kv_producer_state)
+                                tma_load_V_idx(
+                                    src_idx=n_block_abs,
+                                    producer_state=kv_producer_state,
+                                )
+                                kv_producer_state.advance()
+                                inner_idx += 1
+
                     else:
                         # //////////////////////////////////////////////////////////
                         #  Dense path (TMA or paged_kv cp.async)
@@ -1831,6 +1938,7 @@ class FFAFwdSm90:
         _read_mask_type_fn=None,
         mKRanges: Optional[cute.Tensor] = None,
         mCuBatches: cute.Tensor = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
     ):
         tidx, _, _ = cute.arch.thread_idx()
         tidx -= self.mma_warp_ids[0] * cute.arch.WARP_SIZE
@@ -2208,6 +2316,125 @@ class FFAFwdSm90:
                         self.warp_scheduler_barrier_arrive()
 
                     if inner_block_max == 0:
+                        softmax.reset()
+                        acc_O.fill(0.0)
+
+                elif const_expr(self.index_sparse):
+                    # //////////////////////////////////////////////////////////
+                    #  IndexSparse consumer: iterate actual_topk times
+                    #
+                    #  Each K block loaded by producer is a kBlockN-sized tile.
+                    #  actual_topk = number of valid index entries.
+                    #  total_k_tokens = actual_topk * tile_n.
+                    #  Mask uses total_k_tokens as seqlen_k (full mask, no causal).
+                    # //////////////////////////////////////////////////////////
+
+                    max_topk_c = self.index_sparse_max_topk
+                    idx_row_start_c = batch_idx * max_topk_c
+                    actual_topk_c = compute_actual_topk(
+                        mIndexSparseIndices, idx_row_start_c, max_topk_c  # type: ignore[arg-type]
+                    )
+                    inner_block_max_c = actual_topk_c
+                    total_k_tokens_c = actual_topk_c * self.tile_n
+
+                    idx_seqlen_info = SeqlenInfoQK(
+                        seqlen_info.offset_q,
+                        Int32(0),
+                        seqlen_info.padded_offset_q,
+                        Int32(0),
+                        seqlen_info.seqlen_q,
+                        total_k_tokens_c,
+                        seqlen_info.m_block_offset,
+                        seqlen_info.block_idx_offset,
+                        inner_block_max_c,
+                        seqlen_info.has_cu_seqlens_q,
+                        seqlen_info.has_cu_seqlens_k,
+                        seqlen_info.has_seqused_q,
+                        seqlen_info.has_seqused_k,
+                    )
+                    idx_mask = AttentionMaskCls(idx_seqlen_info)
+                    idx_mask_fn = partial(
+                        idx_mask.apply_mask,
+                        batch_idx=batch_idx,
+                        head_idx=head_idx,
+                        m_block=m_block,
+                        thr_mma=thr_mma_qk,
+                        mask_causal=False,
+                        mask_local=False,
+                        aux_tensors=aux_tensors,
+                        fastdiv_mods=fastdiv_mods,
+                    )
+
+                    if const_expr(self.intra_wg_overlap):
+                        if inner_block_max_c > 0:
+                            kv_consumer_state = process_first_half_block(
+                                n_block=Int32(0),
+                                seqlen=seqlen_info,
+                                kv_consumer_state=kv_consumer_state,
+                                mask_fn=partial(
+                                    idx_mask_fn, mask_mod=self.mask_mod
+                                ),
+                                score_mod_fn=score_mod_fn,
+                                is_first_block=True,
+                                is_print_thread_and_tile=is_print_thread_and_tile,
+                            )
+
+                        inner_idx_c = Int32(1)
+                        while inner_idx_c < inner_block_max_c:
+                            kv_consumer_state = mma_one_n_block(
+                                kv_consumer_state,
+                                n_block=inner_idx_c,
+                                seqlen=seqlen_info,
+                                mma_pv_fn=partial(
+                                    mma_pv_fn,
+                                    zero_init=not O_should_accumulate,
+                                ),
+                                mask_fn=partial(
+                                    idx_mask_fn,
+                                    mask_mod=self.mask_mod,
+                                    mask_seqlen=True,
+                                ),
+                            )
+                            O_should_accumulate = True
+                            inner_idx_c += 1
+
+                        pipeline_q.consumer_release_w_index(0)
+
+                        if inner_block_max_c > 0:
+                            kv_consumer_state = process_last_half_block(
+                                kv_consumer_state=kv_consumer_state,
+                                zero_init=not O_should_accumulate,
+                                is_print_thread_and_tile=is_print_thread_and_tile,
+                            )
+                            O_should_accumulate = True
+
+                        self.warp_scheduler_barrier_arrive()
+                    else:
+                        self.warp_scheduler_barrier_sync()
+
+                        inner_idx_c = Int32(0)
+                        while inner_idx_c < inner_block_max_c:
+                            kv_consumer_state = mma_one_n_block(
+                                kv_consumer_state,
+                                n_block=inner_idx_c,
+                                seqlen=seqlen_info,
+                                mma_pv_fn=partial(
+                                    mma_pv_fn,
+                                    zero_init=not O_should_accumulate,
+                                ),
+                                mask_fn=partial(
+                                    idx_mask_fn,
+                                    mask_mod=self.mask_mod,
+                                    mask_seqlen=True,
+                                ),
+                            )
+                            O_should_accumulate = True
+                            inner_idx_c += 1
+
+                        pipeline_q.consumer_release_w_index(0)
+                        self.warp_scheduler_barrier_arrive()
+
+                    if inner_block_max_c == 0:
                         softmax.reset()
                         acc_O.fill(0.0)
 

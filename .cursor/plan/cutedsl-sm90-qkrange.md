@@ -464,6 +464,30 @@ New file: `magi_attention/kernel/cutedsl/sparse_load_sm90.py`
 
 ---
 
+### Phase 2c design notes (2026-07-04 13:45)
+
+**Goal**: Wire `sparse_load` through CuTe-DSL `flex_flash_attn.py` host-side dispatch.
+
+**Key components**:
+1. **Public API** (`flex_flash_attn_func`): add `sparse_load: bool = False`, `auto_range_merge: bool = False`, `equal_k_range_size: bool = True`
+2. **Autograd wrapper** (`FlexFlashAttnFunc`): pass through to `_flex_flash_attn_fwd`
+3. **Host-side preprocessing** in `_flex_flash_attn_fwd`:
+   - When `sparse_load=True`, import and call `merge_ranges(q_ranges, k_ranges, attn_type_map)` from `magi_attention.functional.flex_flash_attn`
+   - Convert `range_map` to CSR `cu_batches`: `counts = bincount(range_map[:unique_count_inner], minlength=unique_count); cu_batches = cat([zeros(1), cumsum(counts)])`
+   - Use `merge_q_ranges[:unique_count]` as the Q ranges for the kernel
+   - Use `sorted_inner_ranges` as the K ranges
+4. **Compile key**: add `sparse_load`, `equal_k_range_size`
+5. **FFAFwdSm90**: `FFAFwdSm90(..., sparse_load=True, equal_k_range_size=equal_k_range_size)`
+6. **Compile/call args**: pass real `cu_batches_tensor` instead of dummy; pass merged Q/K ranges
+7. **Tile scheduler**: use `unique_count` as batch count for `SingleTileVarlenScheduler`
+8. **SeqlenInfoQK**: `seqlen_k` should be total K tokens per merged batch, not single range
+
+**Dependencies**: `merge_ranges` uses C++ extensions (`magi_attn_ext.argsort_ranges`, `unique_consecutive_pairs`, `reorder_ranges_and_attn_type_maps`). Requires `magi_attn_ext` to be built or available.
+
+**Test strategy**: standalone test that manually calls `merge_ranges` + creates CuTe tensors + invokes `FFAFwdSm90.__call__` directly, bypassing the full dispatch.
+
+---
+
 ## 环境备忘
 
 ```

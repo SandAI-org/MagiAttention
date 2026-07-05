@@ -90,6 +90,9 @@ def _flex_flash_attn_fwd(
     flex_attn_args: TorchFlexAttnArgs | None = None,
     sparse_load: bool = False,
     equal_k_range_size: bool = False,
+    index_sparse: bool = False,
+    index_sparse_indices: torch.Tensor | None = None,
+    index_sparse_max_topk: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -191,6 +194,38 @@ def _flex_flash_attn_fwd(
                 torch.cumsum(_k_per_batch, dim=0).to(torch.int32),
             ]
         )
+    elif index_sparse and index_sparse_indices is not None:
+        assert major_arch == 9, "index_sparse only supported on SM90"
+        total_q = q.shape[0]
+        nhk = k.shape[-2]
+        # Each Q token is one batch element.
+        # indices: (total_q, nhk, max_topk) → reshape to 2D (total_q * nhk, max_topk)
+        # For nhk=1: (total_q, max_topk)
+        if index_sparse_indices.dim() == 3:
+            index_sparse_indices = index_sparse_indices.reshape(
+                total_q * nhk, index_sparse_indices.shape[-1]
+            )
+        assert index_sparse_indices.dim() == 2
+        num_batches = index_sparse_indices.shape[0]  # total_q * nhk
+        index_sparse_max_topk = index_sparse_indices.shape[1]
+        # Flatten to 1D for simple linear indexing in the kernel
+        index_sparse_indices = index_sparse_indices.reshape(-1).contiguous()
+        cu_seqlens_q = torch.arange(
+            num_batches + 1, dtype=torch.int32, device=q.device
+        )
+        cu_seqlens_k = torch.zeros(
+            num_batches + 1, dtype=torch.int32, device=q.device
+        )
+        q_ranges = torch.stack(
+            [cu_seqlens_q[:-1], cu_seqlens_q[1:]], dim=1
+        )
+        # Dummy k_ranges: offset_k=0, seqlen_k=total_k for each batch.
+        # The kernel's IndexSparse consumer overrides seqlen_k with actual_topk * tile_n.
+        total_k = k.shape[0]
+        k_ranges = torch.zeros(
+            num_batches, 2, dtype=torch.int32, device=q.device
+        )
+        k_ranges[:, 1] = total_k
     else:
         cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
 
@@ -351,7 +386,10 @@ def _flex_flash_attn_fwd(
             intra_wg_overlap = fwd_cfg.intra_wg_overlap
 
     if max_seqlen_q is None:
-        max_seqlen_q = seqlen_q if cu_seqlens_q is None else total_q
+        if index_sparse:
+            max_seqlen_q = 1
+        else:
+            max_seqlen_q = seqlen_q if cu_seqlens_q is None else total_q
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
     seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
@@ -424,6 +462,7 @@ def _flex_flash_attn_fwd(
     use_native_ranges_sm90 = major_arch == 9 and q_ranges is not None
     use_per_range_mask_sm90 = use_native_ranges_sm90 and attn_type_map is not None
     use_sparse_load_sm90 = sparse_load and major_arch == 9
+    use_index_sparse_sm90 = index_sparse and major_arch == 9
 
     compile_key = (
         dtype,
@@ -458,6 +497,8 @@ def _flex_flash_attn_fwd(
         use_per_range_mask_sm90,
         use_sparse_load_sm90,
         equal_k_range_size if use_sparse_load_sm90 else False,
+        use_index_sparse_sm90,
+        index_sparse_max_topk if use_index_sparse_sm90 else 0,
     )
 
     if compile_key not in _flex_flash_attn_fwd.compile_cache:
@@ -554,6 +595,10 @@ def _flex_flash_attn_fwd(
                     equal_k_range_size=equal_k_range_size
                     if use_sparse_load_sm90
                     else False,
+                    index_sparse=use_index_sparse_sm90,
+                    index_sparse_max_topk=index_sparse_max_topk
+                    if use_index_sparse_sm90
+                    else 0,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 10 | 11:
@@ -639,12 +684,22 @@ def _flex_flash_attn_fwd(
             cu_batches_tensor = to_cute_tensor(
                 _cu_batches_for_compile, assumed_align=4, leading_dim=0
             )
+            if use_index_sparse_sm90 and index_sparse_indices is not None:
+                idx_sparse_tensor = to_cute_tensor(
+                    index_sparse_indices.contiguous(), assumed_align=4
+                )
+            else:
+                idx_sparse_tensor = to_cute_tensor(
+                    torch.zeros(1, dtype=torch.int32, device=q.device),
+                    assumed_align=4,
+                )
             compile_args.extend(
                 [
                     q_ranges_tensor,
                     k_ranges_tensor,
                     attn_type_map_tensor,
                     cu_batches_tensor,
+                    idx_sparse_tensor,
                 ]
             )
         compile_args.append(current_stream)
@@ -690,7 +745,12 @@ def _flex_flash_attn_fwd(
             if use_sparse_load_sm90 and sparse_cu_batches is not None
             else torch.zeros(1, dtype=torch.int32, device=q.device)
         )
-        call_args.extend([q_ranges, k_ranges, _attn_type_map_call, _cu_batches_call])
+        _idx_sparse_call = (
+            index_sparse_indices.contiguous()
+            if use_index_sparse_sm90 and index_sparse_indices is not None
+            else torch.zeros(1, dtype=torch.int32, device=q.device)
+        )
+        call_args.extend([q_ranges, k_ranges, _attn_type_map_call, _cu_batches_call, _idx_sparse_call])
         if use_sparse_load_sm90 and sparse_cu_batches is not None:
             import os
             if os.getenv("MAGI_SPARSE_DEBUG", "0") == "1":
@@ -734,6 +794,9 @@ def _flex_flash_attn_bwd(
     flex_attn_args: TorchFlexAttnArgs | None = None,
     sparse_load: bool = False,
     equal_k_range_size: bool = False,
+    index_sparse: bool = False,
+    index_sparse_indices: torch.Tensor | None = None,
+    index_sparse_max_topk: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
@@ -794,8 +857,42 @@ def _flex_flash_attn_bwd(
         q_ranges = merge_q_ranges[:unique_count_val].contiguous()
         k_ranges = sorted_k_ranges[:num_original_ranges].contiguous()
 
-    cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
-    if sparse_load and sparse_cu_batches_bwd is not None:
+    if index_sparse and index_sparse_indices is not None:
+        assert major_arch == 9, "index_sparse BWD only supported on SM90"
+        total_q = q.shape[0]
+        nhk = k.shape[-2]
+        total_k = k.shape[0]
+        n_block_size_bwd = 128
+        if index_sparse_indices.dim() == 3:
+            index_sparse_indices = index_sparse_indices.reshape(
+                total_q * nhk, index_sparse_indices.shape[-1]
+            )
+        assert index_sparse_indices.dim() == 2
+        num_batches_idx = index_sparse_indices.shape[0]
+        index_sparse_max_topk = index_sparse_indices.shape[1]
+        index_sparse_indices = index_sparse_indices.reshape(-1).contiguous()
+        cu_seqlens_q = torch.arange(
+            num_batches_idx + 1, dtype=torch.int32, device=q.device
+        )
+        seqlen_k_per_batch = index_sparse_max_topk * n_block_size_bwd
+        cu_seqlens_k = (
+            torch.arange(num_batches_idx + 1, dtype=torch.int32, device=q.device)
+            * seqlen_k_per_batch
+        )
+        k_range_offsets = torch.zeros(num_batches_idx, dtype=torch.int32, device=q.device)
+        k_range_seqlens = torch.full(
+            (num_batches_idx,), total_k, dtype=torch.int32, device=q.device
+        )
+        k_ranges = torch.stack([k_range_offsets, k_range_seqlens], dim=1)
+        q_ranges = torch.stack(
+            [cu_seqlens_q[:-1], cu_seqlens_q[1:]], dim=1
+        )
+        max_seqlen_q = 1
+        max_seqlen_k = seqlen_k_per_batch
+    else:
+        cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
+
+    if not index_sparse and sparse_load and sparse_cu_batches_bwd is not None:
         _k_range_lens = k_ranges[:, 1] - k_ranges[:, 0]
         unique_count_val_bwd = sparse_cu_batches_bwd.shape[0] - 1
         _k_per_batch = torch.zeros(
@@ -811,7 +908,7 @@ def _flex_flash_attn_bwd(
                 _k_per_batch.cumsum(0),
             ]
         ).to(torch.int32)
-    else:
+    elif not index_sparse:
         cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
 
     # Unpack the torch FlexAttention-style / block-sparse args (bwd uses these;
@@ -1080,14 +1177,12 @@ def _flex_flash_attn_bwd(
         validate_tensor(dq, "dq", q.shape, out_torch_dtype, device)
 
     if dk is None:
-        # sparse_load uses TMA atomic-add for dK/dV stores (multiple thread
-        # blocks may accumulate into the same K block), so zero-init is required.
-        dk = torch.zeros_like(k) if sparse_load else torch.empty_like(k)
+        dk = torch.zeros_like(k) if (sparse_load or index_sparse) else torch.empty_like(k)
     else:
         validate_tensor(dk, "dk", k.shape, out_torch_dtype, device)
 
     if dv is None:
-        dv = torch.zeros_like(v) if sparse_load else torch.empty_like(v)
+        dv = torch.zeros_like(v) if (sparse_load or index_sparse) else torch.empty_like(v)
     else:
         validate_tensor(dv, "dv", v.shape, out_torch_dtype, device)
 
@@ -1260,6 +1355,7 @@ def _flex_flash_attn_bwd(
         use_native_ranges_sm90_bwd and attn_type_map_bwd is not None
     )
     use_sparse_load_sm90_bwd = sparse_load and major_arch == 9
+    use_index_sparse_sm90_bwd = index_sparse and major_arch == 9
 
     # Backward kernel: compute dk, dv, dq_accum.
     if major_arch in [8, 9, 12]:
@@ -1305,6 +1401,8 @@ def _flex_flash_attn_bwd(
             use_per_range_mask_sm90_bwd,
             use_sparse_load_sm90_bwd,
             equal_k_range_size if use_sparse_load_sm90_bwd else False,
+            use_index_sparse_sm90_bwd,
+            index_sparse_max_topk if use_index_sparse_sm90_bwd else 0,
         )
     else:  # SM100
         compile_key = (
@@ -1445,6 +1543,8 @@ def _flex_flash_attn_bwd(
                     use_per_range_mask=use_per_range_mask_sm90_bwd,
                     sparse_load=use_sparse_load_sm90_bwd,
                     equal_k_range_size=equal_k_range_size if use_sparse_load_sm90_bwd else False,
+                    index_sparse=use_index_sparse_sm90_bwd,
+                    index_sparse_max_topk=index_sparse_max_topk if use_index_sparse_sm90_bwd else 0,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case _:
@@ -1507,12 +1607,21 @@ def _flex_flash_attn_bwd(
                     torch.zeros(1, dtype=torch.int32, device=q.device), assumed_align=4
                 )
             )
+            if use_index_sparse_sm90_bwd and index_sparse_indices is not None:
+                idx_sparse_bwd_tensor = to_cute_tensor(
+                    index_sparse_indices.contiguous(), assumed_align=4
+                )
+            else:
+                idx_sparse_bwd_tensor = to_cute_tensor(
+                    torch.zeros(1, dtype=torch.int32, device=q.device), assumed_align=4
+                )
             bwd_compile_args.extend(
                 [
                     q_ranges_bwd_tensor,
                     k_ranges_bwd_tensor,
                     attn_type_map_bwd_tensor,
                     cu_batches_bwd_tensor,
+                    idx_sparse_bwd_tensor,
                 ]
             )
         bwd_compile_args.append(current_stream)
@@ -1554,8 +1663,13 @@ def _flex_flash_attn_bwd(
             if use_sparse_load_sm90_bwd and sparse_cu_batches_bwd is not None
             else torch.zeros(1, dtype=torch.int32, device=q.device)
         )
+        _idx_sparse_bwd_call = (
+            index_sparse_indices.contiguous()
+            if use_index_sparse_sm90_bwd and index_sparse_indices is not None
+            else torch.zeros(1, dtype=torch.int32, device=q.device)
+        )
         bwd_call_args.extend(
-            [q_ranges, k_ranges, _attn_type_map_bwd_call, _cu_batches_bwd_call]
+            [q_ranges, k_ranges, _attn_type_map_bwd_call, _cu_batches_bwd_call, _idx_sparse_bwd_call]
         )
     _flex_flash_attn_bwd.compile_cache[compile_key](*bwd_call_args)
 
