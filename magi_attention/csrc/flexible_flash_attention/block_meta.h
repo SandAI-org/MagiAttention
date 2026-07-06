@@ -158,8 +158,8 @@ template <
     bool RangeMerge,
     bool PackGQA,
     int PackGQAFactor,
-    int NumRowsPerGroup_,
-    int GroupSize_,
+    int NumTokensPerLdstGroup_,
+    int LdstLdstGroupSize_,
     int NumProducerThreads_,
     int kBlockN_,
     bool InnerDirMaxToMin_,
@@ -254,7 +254,7 @@ struct BlockSparseBlockMeta {
 
     if constexpr (IsProducer) {
       int idx_in_warpgroup = thread_idx % 128;
-      int group_idx = idx_in_warpgroup / GroupSize_;
+      int ldst_group_idx = idx_in_warpgroup / LdstGroupSize_;
 
       if (!is_finish()) {
         seqlen_info = flash::SeqlenInfo{bidb, q_ranges, k_ranges};
@@ -266,11 +266,11 @@ struct BlockSparseBlockMeta {
           int2 const r_last = packed_range(end_batches - 1);
           cur_range_idx = end_batches - 1;
           cur_range_inner_idx = r_last.y - r_last.x - 1;
-          advance_token_idx(cur_range_idx, cur_range_inner_idx, kBlockN_ - (group_idx + 1) * NumRowsPerGroup_);
+          advance_token_idx(cur_range_idx, cur_range_inner_idx, kBlockN_ - (ldst_group_idx + 1) * NumTokensPerLdstGroup_);
         } else {
           cur_range_idx = bidb;
           cur_range_inner_idx = 0;
-          advance_token_idx(cur_range_idx, cur_range_inner_idx, group_idx * NumRowsPerGroup_);
+          advance_token_idx(cur_range_idx, cur_range_inner_idx, ldst_group_idx * NumTokensPerLdstGroup_);
         }
       }
     } else {
@@ -325,22 +325,22 @@ struct BlockSparseBlockMeta {
     }
   }
 
-  // Write this group's NumRowsPerGroup_ token indices for the CURRENT tile into the
-  // smem stage slot (rows [group_idx*NumRowsPerGroup_, +NumRowsPerGroup_)).
+  // Write this group's NumTokensPerLdstGroup_ token indices for the CURRENT tile into the
+  // smem stage slot (rows [ldst_group_idx*NumTokensPerLdstGroup_, +NumTokensPerLdstGroup_)).
   // Called after producer_acquire (the held stage makes the slot writable). Lane j of
-  // the group computes row j (strided by GroupSize_) from a cursor copy of the anchor —
+  // the group computes row j (strided by LdstGroupSize_) from a cursor copy of the anchor —
   // O(1) per row on the equal-range fast path. Caller must __syncwarp() before reading
   // the slot back (writer lanes ≠ reader lanes, but always within the same warp).
   CUTLASS_DEVICE
-  void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
+  void fill_token_indices(int* slot_rows, int token_idx_in_ldst_group, int ldst_group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
-    int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
-    for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+    int* const group_rows = slot_rows + ldst_group_idx * NumTokensPerLdstGroup_;
+    for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
       int range_idx = cur_range_idx;
       int inner_idx = cur_range_inner_idx;
       advance_token_idx(range_idx, inner_idx, j);
       // MaxToMin walks backward from the high-end anchor: j steps back = row (last - j)
-      int const dst = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - 1 - j) : j;
+      int const dst = InnerDirMaxToMin_ ? (NumTokensPerLdstGroup_ - 1 - j) : j;
       group_rows[dst] = packed_range(range_idx).x + inner_idx;
     }
   }
@@ -447,9 +447,9 @@ template <
     bool IsProducer,
     bool PackGQA,
     int PackGQAFactor,
-    int NumRowsPerGroup_,
+    int NumTokensPerLdstGroup_,
     int NumProducerThreads_,
-    int GroupSize_,
+    int LdstLdstGroupSize_,
     int InnerBlockSize_,
     bool InnerDirMaxToMin_,
     int SparseKBlockSize_,
@@ -546,12 +546,12 @@ struct IndexSparseBlockMeta {
       if constexpr (!IsInnerLoopQ && SparseKBlockSize <= 1) {
         // Token-level InnerLoopK: pointer walks InnerBlockSize entries per tile
         int aligned_total = inner_block_cnt * InnerBlockSize;
-        int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
+        int ldst_group_idx = (thread_idx % NumProducerThreads_) / LdstGroupSize_;
         int group_offset;
         if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          group_offset = (aligned_total - InnerBlockSize) + group_idx * NumRowsPerGroup_;
+          group_offset = (aligned_total - InnerBlockSize) + ldst_group_idx * NumTokensPerLdstGroup_;
         } else {
-          group_offset = group_idx * NumRowsPerGroup_;
+          group_offset = ldst_group_idx * NumTokensPerLdstGroup_;
         }
         group_token_ptr = row_ptr + group_offset;
       } else {
@@ -565,23 +565,23 @@ struct IndexSparseBlockMeta {
   // InnerLoopK: fills logical K positions (head offset handled by ptr_gK_base)
   // InnerLoopQ: fills Q packed rows (q_token * PackGQAFactor + sub_head)
   CUTLASS_DEVICE
-  void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
+  void fill_token_indices(int* slot_rows, int token_idx_in_ldst_group, int ldst_group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
-    int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
+    int* const group_rows = slot_rows + ldst_group_idx * NumTokensPerLdstGroup_;
 
     if constexpr (!IsInnerLoopQ) {
       // ── InnerLoopK: fill logical K positions ──
       // Head selection is done by ptr_gK_base = K_ptr + bidh_kv * head_stride,
       // so row indices are positions within the per-head K space [0, total_k).
       if constexpr (SparseKBlockSize <= 1) {
-        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+        for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
           int const k_token = group_token_ptr[j];
           group_rows[j] = (k_token >= 0) ? k_token : 0;
         }
       } else {
         int tile_base = inner_block_idx * InnerBlockSize;
-        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
-          int token_pos = tile_base + group_idx * NumRowsPerGroup_ + j;
+        for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
+          int token_pos = tile_base + ldst_group_idx * NumTokensPerLdstGroup_ + j;
           int block_idx = token_pos / SparseKBlockSize;
           int offset_in_block = token_pos % SparseKBlockSize;
           int block_id = (block_idx < seqlen_info.seqlen_k / SparseKBlockSize) ? group_token_ptr[block_idx] : -1;
@@ -592,13 +592,13 @@ struct IndexSparseBlockMeta {
     } else {
       // ── InnerLoopQ: fill Q rows ──
       int tile_first_row = inner_block_idx * InnerBlockSize;
-      int base = tile_first_row + group_idx * NumRowsPerGroup_;
+      int base = tile_first_row + ldst_group_idx * NumTokensPerLdstGroup_;
       int total_q = seqlen_info.seqlen_q;
 
       if constexpr (PackGQA) {
         // PackGQA: interleave Q heads — packed row = token * G + sub_head
         int max_inner_topk_val = total_q / PackGQAFactor;
-        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+        for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
           int packed_row = base + j;
           if (packed_row < total_q) {
             int q_token_local_idx = packed_row / PackGQAFactor;
@@ -611,7 +611,7 @@ struct IndexSparseBlockMeta {
         }
       } else {
         // !PackGQA: each bidh selects one Q head — raw Q token indices only
-        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+        for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
           int local_idx = base + j;
           if (local_idx < total_q) {
             int q_token = group_token_ptr[local_idx];
