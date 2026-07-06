@@ -810,8 +810,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     f"but got {attn_type_map.size(0)} and {q_ranges.size(0)} respectively."
                 )
 
-        if block_sparse and not auto_range_merge:
-            raise RuntimeError("When using sparse load, range merge must be enabled.")
+        if block_sparse:
+            auto_range_merge = True
 
         if disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop is True:
             raise RuntimeError(
@@ -1409,7 +1409,7 @@ def flex_flash_attn_func(
 
         block_sparse (bool, optional):
             Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
-            Must be used together with ``auto_range_merge=True`` for enhanced performance. Defaults to ``False``.
+            Automatically enables ``auto_range_merge``. Defaults to ``False``.
             Mutually exclusive with ``index_sparse_indices``.
             When enabled, ``k_block_size`` is auto-set to ``tile_N`` (128 or 64 with swap_ab)
             so that inner KV loads use TMA 2D — without this, the kernel falls back to CpAsync
@@ -1685,9 +1685,10 @@ def flex_flash_attn_func(
     index_sparse_indices_2d = index_sparse_indices_2d if _has_index_sparse else None
     index_sparse_max_topk = index_sparse_indices_2d.shape[1] if _has_index_sparse else 0
 
-    # ── Auto-set atomic reduction flags for sparse scenarios ──
-    # BlockSparse and IndexSparse guarantee non-overlapping outer ranges after
-    # range_merge, so atomic reduction can be safely disabled for better perf.
+    # ── Auto-set sparse flags ──
+    if block_sparse:
+        auto_range_merge = True
+
     _is_sparse = block_sparse or index_sparse
     if _is_sparse:
         disable_fwd_atomic_reduction = True
