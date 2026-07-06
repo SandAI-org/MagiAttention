@@ -32,7 +32,7 @@ def ffa_block_sparse_fwd(
     softmax_scale: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Forward pass using flex_flash_attn SparseLoad path (q_ranges/k_ranges + sparse_load=True).
+    Forward pass using flex_flash_attn BlockSparse path (q_ranges/k_ranges + block_sparse=True).
     """
     sq, nhq, hd = q.shape
     skv, nhkv, _ = k.shape
@@ -271,11 +271,11 @@ def dsa_attn_func(
         v: (skv, nhkv, hd)
         index_map: (nhkv, sq, topk) - Stores the topk K-token indices for each KV-head.
         softmax_scale: float, scaling factor.
-        backend: str, one of "flex", "ffa_sparse_load", "ffa_index_sparse", "sdpa".
+        backend: str, one of "flex", "ffa_block_sparse", "ffa_index_sparse", "sdpa".
     """
     if backend == "flex":
         return flex_attn_sparse_fwd(q, k, v, index_map, softmax_scale)
-    elif backend == "ffa_sparse_load":
+    elif backend == "ffa_block_sparse":
         return ffa_block_sparse_fwd(q, k, v, index_map, softmax_scale)
     elif backend == "ffa_index_sparse":
         return ffa_index_sparse_fwd(q, k, v, index_map, softmax_scale)
