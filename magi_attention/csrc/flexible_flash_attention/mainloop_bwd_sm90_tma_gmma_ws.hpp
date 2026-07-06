@@ -4158,7 +4158,6 @@ struct CollectiveMainloopBwdSm90 {
         // MaskMode 2 (unified): mask_dispatch_unified with runtime zone dispatch.
         flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
       }
-
     };
 
     // --- Unified MMA control flow ---
