@@ -1261,6 +1261,8 @@ class TestBlockSparseSweep(unittest.TestCase):
             generate_ranges_from_block_mask_triton,
         )
 
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
         torch.manual_seed(42)
         device = self.device
         nhq, nhk, head_dim = 128, 1, 128
