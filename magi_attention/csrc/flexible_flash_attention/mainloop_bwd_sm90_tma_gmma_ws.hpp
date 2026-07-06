@@ -1255,7 +1255,7 @@ struct CollectiveMainloopBwdSm90 {
     // BlockMeta: fixed per function call
     int const n_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
-    int const bidh_kv = block_meta.kv_head;
+    int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
     int m_block;
@@ -1742,7 +1742,7 @@ struct CollectiveMainloopBwdSm90 {
     // BlockMeta: fixed per function call
     int const m_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
-    int const bidh_kv = block_meta.kv_head;
+    int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
 
@@ -2385,7 +2385,7 @@ struct CollectiveMainloopBwdSm90 {
     //     BlockSparse/IndexSparse scatter-store path. All are pure (layout / scalar) computations,
     //     so whatever is unused on a given path is DCE'd away (no runtime cost / no descriptor deref). ───
     // BlockMeta: fixed per function call
-    int const bidh_kv = block_meta.kv_head;
+    int const bidh_kv = block_meta.bidh_kv;
 
     bool const lane_predicate = cute::elect_one_sync();
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
@@ -3300,7 +3300,7 @@ struct CollectiveMainloopBwdSm90 {
     // BlockMeta: fixed per function call
     int const m_block = block_meta.outer_block;
     int const bidh = block_meta.bidh;
-    int const bidh_kv = block_meta.kv_head;
+    int const bidh_kv = block_meta.bidh_kv;
     int const seqlen_q = block_meta.seqlen_info.seqlen_q;
     int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * PackGQAFactor;
     bool const is_last_m_block_this_batch = seqlen_q_packed - m_block * kBlockM <= kBlockM;
