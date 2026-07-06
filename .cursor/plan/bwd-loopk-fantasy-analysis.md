@@ -1333,5 +1333,65 @@ OuterUseAtomicReduction、TMA 1D bulk load 等。本分支最终要合回 feat/�
    load 对 TFLOPS 的综合影响
 
 **当前需要验证**:
-- [ ] CI 通过 (merge 后的综合 lint)
+- [x] CI 通过 (merge 后的综合 lint) — ✅ 2026-07-06 12:42
 - [ ] 合并后 correctness: `test_block_sparse.py` + `test_index_sparse.py`
+
+---
+
+## Post-merge Benchmark Results (2026-07-06 18:05)
+
+Phase 4 full-power re-run after merge. GPU: H100, S=topk=32K, nhq=128, nhk=1, hd=128, bf16, PackGQA.
+**Note**: Baseline now auto-applies O1 (ununion+stgV1) via JIT default.
+
+### Core numbers
+
+| Config | TFLOPS | ms | Δ vs baseline |
+|--------|--------|----|---------------|
+| **LoopK baseline (=O1)** | **371.9** | 473 | — |
+| LoopQ baseline | 527.3 | 334 | +155.4T (gap=100%) |
+| O1+SVW (no dV writeback) | 535.9 | 328 | +164.0T |
+| O1+SKW (no dK writeback) | 487.9 | 361 | +116.0T |
+| O1+SVW+SKW (no wb at all) | 709.9 | 248 | +338.0T |
+| Skip dV writeback only | 546.1 | 322 | +174.2T |
+| Symmetric (no V, no dV wb) | 547.2 | 321 | +175.3T |
+| Light V load | 383.2 | 459 | +11.3T |
+| No dV store | 410.1 | 429 | +38.2T |
+| No dK store | 408.3 | 431 | +36.4T |
+| No dV MMA | 472.8 | 372 | +100.9T |
+| No dV MMA+store | 486.9 | 361 | +115.0T |
+| Skip all | 516.3 | 341 | +144.4T |
+| Bypass atomicAdd | 155.9 | 1128 | -216.0T ❌ |
+| StgK1 only | 246.5 | 713 | -125.4T ❌ |
+| StgV1 only | 337.5 | 521 | -34.4T |
+
+### Gap decomposition (LoopK baseline=O1 → LoopQ)
+
+Gap = 527.3 - 371.9 = **155.4 T**
+
+| Factor | TFLOPS recovered | % of gap |
+|--------|-----------------|----------|
+| dV writeback pipeline (SVW) | 164.0T | **105%** (> gap!) |
+| dK writeback pipeline (SKW) | 116.0T | 75% |
+| V inner load (SVL) | 11.3T | 7% |
+| dV MMA (no compute) | 100.9T | 65% |
+
+**Key findings**:
+1. dV writeback alone (**164T**) exceeds the entire LoopK-LoopQ gap (155T).
+   This means LoopQ has its own overhead (dQ atomicAdd) that partially offsets.
+2. dK writeback is also expensive (116T) — but LoopK baseline already uses
+   ununion (independent dV/dK buffers), so both pipelines run in parallel to some extent.
+3. When BOTH writebacks are removed (709.9T), LoopK actually exceeds LoopQ
+   by 182.6T — confirming LoopK's core MMA path is fundamentally faster.
+4. The "symmetric" config (no V load + no dV writeback) = 547.2T ≈ LoopQ (527.3T),
+   confirming these two factors fully explain the gap.
+5. O1 (ununion+stgV1) is now the DEFAULT. Previous runs without it showed ~339T baseline;
+   current 371.9T confirms the +38T improvement is baked in.
+
+### Remaining optimization space
+
+The dV writeback pipeline (R2S + barrier + TMA reduce-add) is the dominant bottleneck.
+Given P4 (cross-iter accum) is invalid, remaining options:
+- **Pipeline overlap**: Can dV R2S overlap with MMA4(dK)? Currently barrier-serialized.
+- **Reduce R2S data**: fp16 dV accumulator → halve transfer, but accuracy loss risk.
+- **Better MMA/pipeline scheduling**: Defer dV R2S was already tested (DeferDvR2S) → no gain.
+- **Architectural**: M64N128 tile reduces writeback iterations but needs 282KB SMEM.
