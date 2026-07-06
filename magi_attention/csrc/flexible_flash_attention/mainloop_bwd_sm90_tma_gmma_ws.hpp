@@ -261,16 +261,16 @@ struct CollectiveMainloopBwdSm90 {
 
   // Const parameters for scatter load/store
   static constexpr int kCpAsyncTransactionBytes = 128;
-  static constexpr int LdstGroupSize = kCpAsyncTransactionBytes / 16;
-  static constexpr int NumLdstGroups = NumBlockSparseThreads / LdstGroupSize;
+  static constexpr int NumThreadsPerLdstGroup = kCpAsyncTransactionBytes / 16;
+  static constexpr int NumLdstGroups = NumBlockSparseThreads / NumThreadsPerLdstGroup;
   // Only the inner (scatter-side) tensor is gathered row-by-row, so the per-group token
   // count is sized by the inner tile: kBlockN (KV) for InnerLoopK, kBlockM (Q/dO) for InnerLoopQ.
   // The smem token-index array (SmemTokenIndices_t below) is sized by the same dimension.
   static constexpr int kInnerScatterRows = SwapBwdQKLoop ? kBlockN : kBlockM;
   static constexpr int NumTokensPerLdstGroup = kInnerScatterRows / NumLdstGroups;
   static constexpr int NumCpAsyncTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-  static constexpr int kStoreVecWidth = kCpAsyncTransactionBytes / (LdstGroupSize * sizeof(ElementAccum));
-  static constexpr int kNumStoreTiles = kHeadDim / (LdstGroupSize * kStoreVecWidth);
+  static constexpr int kStoreVecWidth = kCpAsyncTransactionBytes / (NumThreadsPerLdstGroup * sizeof(ElementAccum));
+  static constexpr int kNumStoreTiles = kHeadDim / (NumThreadsPerLdstGroup * kStoreVecWidth);
 
   static_assert(!InnerUseScatter || kInnerScatterRows % NumLdstGroups == 0, "Scatter requires the inner tile rows divisible by NumLdstGroups");
 
@@ -850,7 +850,7 @@ struct CollectiveMainloopBwdSm90 {
                                                                         PackGQA,
                                                                         PackGQAFactor,
                                                                         NumTokensPerLdstGroup,
-                                                                        LdstGroupSize,
+                                                                        NumThreadsPerLdstGroup,
                                                                         NumProducerThreads,
                                                                         kBlockN,
                                                                         InnerDirMaxToMin,
@@ -862,7 +862,7 @@ struct CollectiveMainloopBwdSm90 {
                                                                         PackGQA,
                                                                         PackGQAFactor,
                                                                         NumTokensPerLdstGroup,
-                                                                        LdstGroupSize,
+                                                                        NumThreadsPerLdstGroup,
                                                                         NumProducerThreads,
                                                                         kBlockN,
                                                                         InnerDirMaxToMin,
@@ -874,7 +874,7 @@ struct CollectiveMainloopBwdSm90 {
                                                                         PackGQA,
                                                                         PackGQAFactor,
                                                                         NumTokensPerLdstGroup,
-                                                                        LdstGroupSize,
+                                                                        NumThreadsPerLdstGroup,
                                                                         NumProducerThreads,
                                                                         kBlockM,
                                                                         InnerDirMaxToMin,
@@ -886,7 +886,7 @@ struct CollectiveMainloopBwdSm90 {
                                                                         PackGQA,
                                                                         PackGQAFactor,
                                                                         NumTokensPerLdstGroup,
-                                                                        LdstGroupSize,
+                                                                        NumThreadsPerLdstGroup,
                                                                         NumProducerThreads,
                                                                         kBlockM,
                                                                         InnerDirMaxToMin,
@@ -1127,7 +1127,7 @@ struct CollectiveMainloopBwdSm90 {
       PackGQAFactor,
       NumTokensPerLdstGroup,
       NumProducerThreads,
-      LdstGroupSize,
+      NumThreadsPerLdstGroup,
       kBlockN,
       InnerDirMaxToMin,
       KBlockSize,
@@ -1141,7 +1141,7 @@ struct CollectiveMainloopBwdSm90 {
       PackGQAFactor,
       NumTokensPerLdstGroup,
       NumProducerThreads,
-      LdstGroupSize,
+      NumThreadsPerLdstGroup,
       kBlockM,
       InnerDirMaxToMin,
       KBlockSize,
@@ -1176,7 +1176,7 @@ struct CollectiveMainloopBwdSm90 {
   // and waits its own bulk group before returning, so smem is reusable on return. Threads with
   // thread_idx >= kRows issue nothing. Requires the row-contiguous *Store smem layout.
   //
-  // SparseInnerDxReduceUseTma=false: original scalar geometry — LdstGroupSize threads per row, each
+  // SparseInnerDxReduceUseTma=false: original scalar geometry — NumThreadsPerLdstGroup threads per row, each
   // covering kStoreVecWidth floats per store tile via per-4B atomicAdd.
   //
   // kRowPackScale > 1 (InnerLoopQ + PackGQA dQ store): smem_token_indices hold PACKED rows
@@ -1211,19 +1211,19 @@ struct CollectiveMainloopBwdSm90 {
         cute::tma_store_wait<0>();
       }
     } else {
-      static_assert(kNumThreads % LdstGroupSize == 0);
-      static constexpr int kNumGroups_ = kNumThreads / LdstGroupSize;
+      static_assert(kNumThreads % NumThreadsPerLdstGroup == 0);
+      static constexpr int kNumGroups_ = kNumThreads / NumThreadsPerLdstGroup;
       static_assert(kRows % kNumGroups_ == 0, "scalar scatter store requires kRows divisible by thread groups");
       static constexpr int kRowsPerGroup_ = kRows / kNumGroups_;
-      int const ldst_group_idx = thread_idx / LdstGroupSize;
-      int const ldst_group_inner_idx = thread_idx % LdstGroupSize;
+      int const ldst_group_idx = thread_idx / NumThreadsPerLdstGroup;
+      int const ldst_group_inner_idx = thread_idx % NumThreadsPerLdstGroup;
       CUTE_UNROLL
       for (int local_row = 0; local_row < kRowsPerGroup_; ++local_row) {
         int const row = ldst_group_idx * kRowsPerGroup_ + local_row;
         ElementAccum* const dst = gmem_row(smem_token_indices[row]);
         CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < kNumStoreTiles; ++tile_idx) {
-          int const col_base = ldst_group_inner_idx * kStoreVecWidth + tile_idx * LdstGroupSize * kStoreVecWidth;
+          int const col_base = ldst_group_inner_idx * kStoreVecWidth + tile_idx * NumThreadsPerLdstGroup * kStoreVecWidth;
           CUTE_UNROLL
           for (int v = 0; v < kStoreVecWidth; ++v) {
             atomicAdd(dst + col_base + v, s_acc(row_offset + row, col_base + v));
@@ -1447,8 +1447,8 @@ struct CollectiveMainloopBwdSm90 {
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
     int const thread_idx = threadIdx.x % NumBlockSparseThreads;
-    int const ldst_group_inner_idx = thread_idx % LdstGroupSize;
-    int const ldst_group_idx = thread_idx / LdstGroupSize;
+    int const ldst_group_inner_idx = thread_idx % NumThreadsPerLdstGroup;
+    int const ldst_group_idx = thread_idx / NumThreadsPerLdstGroup;
     // PackGQA: the token-index slots hold PACKED rows p = token * G + g (g = q-head
     // within the kv group, G = PackGQAFactor); bidh is then the kv head index, so head
     // bases are scaled by G. Q/dO/dQ rows decompose as token*row_stride + g*head_stride
@@ -1551,7 +1551,7 @@ struct CollectiveMainloopBwdSm90 {
             }
           }
         }
-        for (int i = ldst_group_inner_idx; i < NumTokensPerLdstGroup; i += LdstGroupSize) {
+        for (int i = ldst_group_inner_idx; i < NumTokensPerLdstGroup; i += NumThreadsPerLdstGroup) {
           float* lse_dst = &sLSE(_0{}, ldst_group_idx * NumTokensPerLdstGroup + i, stage);
           auto gLSE_src = make_tensor(
               make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gLSE_base + lse_row_offset(idx_slot[ldst_group_idx * NumTokensPerLdstGroup + i]))),
@@ -1617,7 +1617,7 @@ struct CollectiveMainloopBwdSm90 {
             }
           }
         }
-        for (int i = ldst_group_inner_idx; i < NumTokensPerLdstGroup; i += LdstGroupSize) {
+        for (int i = ldst_group_inner_idx; i < NumTokensPerLdstGroup; i += NumThreadsPerLdstGroup) {
           float* dpsum_dst = &sdPsum(_0{}, ldst_group_idx * NumTokensPerLdstGroup + i, smem_pipe_write_do_cur.index());
           auto gdPsum_src = make_tensor(
               make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdPsum_base + dpsum_row_offset(idx_slot[ldst_group_idx * NumTokensPerLdstGroup + i]))),
@@ -1834,8 +1834,8 @@ struct CollectiveMainloopBwdSm90 {
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
     int const thread_idx = threadIdx.x % NumBlockSparseThreads;
-    int const ldst_group_inner_idx = thread_idx % LdstGroupSize;
-    int const ldst_group_idx = thread_idx / LdstGroupSize;
+    int const ldst_group_inner_idx = thread_idx % NumThreadsPerLdstGroup;
+    int const ldst_group_idx = thread_idx / NumThreadsPerLdstGroup;
     int const stride_kv_row = get<0>(params.stride_K);
     int const stride_kv_row_v = get<0>(params.stride_V);
     Element const* const ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + ldst_group_inner_idx * 8;

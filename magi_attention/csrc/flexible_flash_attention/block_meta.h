@@ -159,7 +159,7 @@ template <
     bool PackGQA,
     int PackGQAFactor,
     int NumTokensPerLdstGroup_,
-    int LdstGroupSize_,
+    int NumThreadsPerLdstGroup_,
     int NumProducerThreads_,
     int kBlockN_,
     bool InnerDirMaxToMin_,
@@ -255,7 +255,7 @@ struct BlockSparseBlockMeta {
 
     if constexpr (IsProducer) {
       int idx_in_warpgroup = thread_idx % 128;
-      int ldst_group_idx = idx_in_warpgroup / LdstGroupSize_;
+      int ldst_group_idx = idx_in_warpgroup / NumThreadsPerLdstGroup_;
 
       if (!is_finish()) {
         seqlen_info = flash::SeqlenInfo{bidb, q_ranges, k_ranges};
@@ -329,14 +329,14 @@ struct BlockSparseBlockMeta {
   // Write this group's NumTokensPerLdstGroup_ token indices for the CURRENT tile into the
   // smem stage slot (rows [ldst_group_idx*NumTokensPerLdstGroup_, +NumTokensPerLdstGroup_)).
   // Called after producer_acquire (the held stage makes the slot writable). Lane j of
-  // the group computes row j (strided by LdstGroupSize_) from a cursor copy of the anchor —
+  // the group computes row j (strided by NumThreadsPerLdstGroup_) from a cursor copy of the anchor —
   // O(1) per row on the equal-range fast path. Caller must __syncwarp() before reading
   // the slot back (writer lanes ≠ reader lanes, but always within the same warp).
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int token_idx_in_ldst_group, int ldst_group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
     int* const group_rows = slot_rows + ldst_group_idx * NumTokensPerLdstGroup_;
-    for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
+    for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += NumThreadsPerLdstGroup_) {
       int range_idx = cur_range_idx;
       int inner_idx = cur_range_inner_idx;
       advance_token_idx(range_idx, inner_idx, j);
@@ -449,7 +449,7 @@ template <
     int PackGQAFactor,
     int NumTokensPerLdstGroup_,
     int NumProducerThreads_,
-    int LdstGroupSize_,
+    int NumThreadsPerLdstGroup_,
     int InnerBlockSize_,
     bool InnerDirMaxToMin_,
     int SparseKBlockSize_,
@@ -545,7 +545,7 @@ struct IndexSparseBlockMeta {
     int const base = inner_block_idx * InnerBlockSize + ldst_group_idx * NumTokensPerLdstGroup_;
     int const total = InnerLoopQ ? seqlen_info.seqlen_q : seqlen_info.seqlen_k;
 
-    for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
+    for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += NumThreadsPerLdstGroup_) {
       int const pos = base + j;
       int const indices_slot = pos / kStride;
       int const logical_block_idx = (pos < total) ? sparse_indices_ptr[indices_slot] : -1;

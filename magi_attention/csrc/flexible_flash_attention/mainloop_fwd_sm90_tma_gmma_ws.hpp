@@ -166,8 +166,8 @@ struct CollectiveMainloopFwdSm90 {
   // SMEM bank row width: 32 banks * 4 bytes = 128 bytes
   static constexpr int kCpAsyncTransactionBytes = 128;
   // A load-store group of 8 threads form one memory transaction (8 * 16B = 128B)
-  static constexpr int LdstGroupSize = kCpAsyncTransactionBytes / 16; // 16B per cp.async instruction
-  static constexpr int NumLdstGroups = NumProducerThreads / LdstGroupSize;
+  static constexpr int NumThreadsPerLdstGroup = kCpAsyncTransactionBytes / 16; // 16B per cp.async instruction
+  static constexpr int NumLdstGroups = NumProducerThreads / NumThreadsPerLdstGroup;
   // Number of tokens to load per ldst group
   static constexpr int NumTokensPerLdstGroup = kBlockN / NumLdstGroups;
   // Number of cp.async tiles per row: each tile covers kCpAsyncTransactionBytes of the row
@@ -463,7 +463,7 @@ struct CollectiveMainloopFwdSm90 {
                                                                    PackGQA,
                                                                    PackGQAFactor,
                                                                    NumTokensPerLdstGroup,
-                                                                   LdstGroupSize,
+                                                                   NumThreadsPerLdstGroup,
                                                                    NumProducerThreads,
                                                                    kBlockN,
                                                                    InnerDirMaxToMin,
@@ -475,7 +475,7 @@ struct CollectiveMainloopFwdSm90 {
                                                                    PackGQA,
                                                                    PackGQAFactor,
                                                                    NumTokensPerLdstGroup,
-                                                                   LdstGroupSize,
+                                                                   NumThreadsPerLdstGroup,
                                                                    NumProducerThreads,
                                                                    kBlockN,
                                                                    InnerDirMaxToMin,
@@ -488,7 +488,7 @@ struct CollectiveMainloopFwdSm90 {
       PackGQAFactor,
       NumTokensPerLdstGroup,
       NumProducerThreads,
-      LdstGroupSize,
+      NumThreadsPerLdstGroup,
       kBlockN,
       InnerDirMaxToMin,
       KBlockSize,
@@ -693,8 +693,8 @@ struct CollectiveMainloopFwdSm90 {
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
     int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
-    int const ldst_group_inner_idx = idx_in_warpgroup % LdstGroupSize;
-    int const ldst_group_idx = idx_in_warpgroup / LdstGroupSize;
+    int const ldst_group_inner_idx = idx_in_warpgroup % NumThreadsPerLdstGroup;
+    int const ldst_group_idx = idx_in_warpgroup / NumThreadsPerLdstGroup;
     int const stride_kv = get<0>(params.stride_K);
     int const stride_kv_v = get<0>(params.stride_V);
     Element* const ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + ldst_group_inner_idx * 8;
