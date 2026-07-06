@@ -1249,3 +1249,41 @@ and was kept.
   `dV` SMEM buffer to overlap R2S/TMA with the next MMA) remains the theoretically
   correct approach, but requires +32KB SMEM which exceeds the 228KB H100 limit
   under current tile/stage settings.
+
+---
+
+## O1 Landing + InnerDxStoreInProducer 分析 (2026-07-06 14:15)
+
+### T1: O1 落地 — ununion+stgV1 作为 LoopK 默认 [P0]
+
+**目标**: InnerLoopK BWD 默认启用 ununion+stgV1 (+38T, +11%)，提供 PerfDebug 开关恢复旧行为。
+
+**实现方案**: 仿照 `bwd_lse_union` 对 LoopQ 的默认处理 (L501-510)：
+1. `_flex_flash_attn_jit.py`: LoopK 时自动注入 `bwd_ununion_dkvacc=1` + `bwd_stages_v=1`（除非 env 显式覆盖）
+2. 新增 `MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2=1` — 一键恢复 union+stgV2
+3. C++/jinja/template 层无需改动（defaults 仍为 0，由 JIT 注入）
+4. 仅影响 LoopK (SwapBwdQKLoop=true)，LoopQ 不受影响
+
+**验证**: 远程 precompile → 跑 `test_block_sparse.py` + `test_index_sparse.py` 正确性
+
+### T2: InnerDxStoreInProducer=false 可行性分析 [不可行，存档]
+
+**机制**: consumer MMA WG 直接 atomicAdd dK/dV 到 GMEM → 省 smem_dkacc+dvacc (64KB)，
+消除 producer store warps。
+
+**结论: 对 dense LoopK 不可行**：
+- 代码路径不完整: `recast<float4>` partition 不匹配导致 static_assert 失败
+- 即使修复: consumer atomicAdd 对 dense = O2 bypass 的等价路径 → -51.6% (161T)
+- atomicAdd 128 floats/row vs TMA 1 次 bulk reduce-add/row → 128× 更多 L2 transactions
+- SMEM 节省 64KB 虽大，但无法抵消 atomicAdd 的 3.8× 性能惩罚
+- 仅对 IndexSparse scatter 路径有潜在价值（scatter 本身就是 per-token atomicAdd）
+
+### T3: dKV Pool 删除 [DEFERRED — 待合并时处理]
+
+feat/bwd-loopq-sparse-load 可能已清理。合并时确认，如未删则一并清理。
+
+### 执行顺序
+
+1. **T1 实现** → JIT 默认值 + PerfDebug 开关 + commit
+2. **T1 验证** → 远程 precompile + correctness test
+3. **T1 benchmark** → 验证 O1 默认 TFLOPS 与之前一致

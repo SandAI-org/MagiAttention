@@ -509,6 +509,23 @@ def get_ffa_jit_spec(
             extra_template_args["bwd_lse_union"] = "1"
             uri += "_lu1"
 
+        # Default Ununion+stgV1 for LoopK: separates dK/dV SMEM buffers (+38T, +11%).
+        # SMEM: 198KB → 214KB (stgV=1 frees 16KB for ununion's +32KB). No register change.
+        # Convenience override: MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2=1 restores legacy behavior.
+        # Fine-grained overrides: BWD_UNUNION_DKVACC / BWD_STAGES_V still work individually.
+        _perf_union = os.environ.get("MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2")
+        if _perf_union is not None and _perf_union != "0":
+            extra_template_args.setdefault("bwd_ununion_dkvacc", "0")
+            extra_template_args.setdefault("bwd_stages_v", "2")
+            uri += "_pus1"
+        elif swap_bwd_qk_loop:
+            if "bwd_ununion_dkvacc" not in extra_template_args:
+                extra_template_args["bwd_ununion_dkvacc"] = "1"
+                uri += "_uu1"
+            if "bwd_stages_v" not in extra_template_args:
+                extra_template_args["bwd_stages_v"] = "1"
+                uri += "_stv1"
+
         # Force Mma_dKV to SS mode (SMEM-SMEM) for benchmarking register pressure
         _force_ss = os.environ.get("MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS")
         if _force_ss is not None and _force_ss == "1":
@@ -730,6 +747,7 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK",
     "MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S",
+    "MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2",
 )
 
 
