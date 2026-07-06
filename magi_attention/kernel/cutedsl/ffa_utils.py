@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, Callable, ClassVar, Tuple
 
+import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass import Float32
@@ -627,6 +628,101 @@ def create_softcap_scoremod_bwd(softcap_val):
         return grad_out_SSA * (1.0 - tanh_scores * tanh_scores)
 
     return scoremod_bwd_fn
+
+
+def _create_index_sparse_mask_mod():
+    """Create a mask_mod that looks up a precomputed dense boolean mask.
+
+    The mask tensor (int32, shape ``(S_q, S_kv)``) is passed as ``aux_tensors[0]``.
+    A nonzero value means the (q, kv) pair is attended; zero means masked out.
+    """
+    from .cutedsl_utils import scalar_to_ssa
+
+    @cute.jit
+    def _mask_mod(batch_idx, head_idx, q_idx, kv_idx, seqlen_info, aux_tensors):
+        mask_tensor = aux_tensors[0]
+        q_s = q_idx[0]
+        kv_s = kv_idx[0]
+        val = mask_tensor[q_s, kv_s]
+        return scalar_to_ssa(val > cutlass.Int32(0), cutlass.Boolean)
+
+    return _mask_mod
+
+
+_INDEX_SPARSE_MASK_MOD = None
+
+
+def get_index_sparse_mask_mod():
+    """Singleton accessor for the index-sparse mask_mod."""
+    global _INDEX_SPARSE_MASK_MOD  # noqa: PLW0603
+    if _INDEX_SPARSE_MASK_MOD is None:
+        _INDEX_SPARSE_MASK_MOD = _create_index_sparse_mask_mod()
+    return _INDEX_SPARSE_MASK_MOD
+
+
+def index_sparse_to_dense_mask(
+    index_sparse_indices: torch.Tensor,
+    seqlen_q: int,
+    seqlen_k: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Convert ``index_sparse_indices`` to a dense boolean mask (int32).
+
+    Args:
+        index_sparse_indices: ``(total_q, num_kv_heads, max_topk)`` int32 tensor.
+            Currently only ``num_kv_heads == 1`` is supported (MQA layout or
+            the NHK-folded view trick).
+        seqlen_q: Q sequence length.
+        seqlen_k: K sequence length.
+        device: Target device.
+
+    Returns:
+        Int32 tensor of shape ``(seqlen_q, seqlen_k)`` where nonzero means
+        the pair is attended.
+    """
+    nhk = index_sparse_indices.shape[1]
+    assert nhk == 1, f"CuTe-DSL IndexSparse currently only supports NHK=1, got {nhk}"
+    topk = index_sparse_indices.shape[2]
+    indices = index_sparse_indices[:seqlen_q, 0, :]  # (seqlen_q, topk)
+
+    mask = torch.zeros(seqlen_q, seqlen_k, dtype=torch.int32, device=device)
+    q_indices = (
+        torch.arange(seqlen_q, device=device).unsqueeze(1).expand(-1, topk).reshape(-1)
+    )
+    kv_indices = indices.reshape(-1).long()
+    valid = (kv_indices >= 0) & (kv_indices < seqlen_k)
+    mask[q_indices[valid], kv_indices[valid]] = 1
+    return mask
+
+
+def prepare_index_sparse_flex_args(
+    index_sparse_indices: torch.Tensor,
+    seqlen_q: int,
+    seqlen_k: int,
+    device: torch.device,
+    existing_flex_args: "TorchFlexAttnArgs | None" = None,
+) -> "TorchFlexAttnArgs":
+    """Convert IndexSparse indices into a :class:`TorchFlexAttnArgs` with mask_mod.
+
+    Builds a dense boolean mask from the index and wires it through
+    ``mask_mod`` + ``aux_tensors`` so the existing CuTe-DSL kernel handles the
+    sparse attention pattern without any kernel-level changes.
+
+    If *existing_flex_args* is given, its ``score_mod`` / ``block_sparse_tensors``
+    etc. are preserved; only ``mask_mod`` and ``aux_tensors`` are overwritten.
+    """
+    dense_mask = index_sparse_to_dense_mask(
+        index_sparse_indices, seqlen_q, seqlen_k, device
+    )
+    mask_mod = get_index_sparse_mask_mod()
+
+    if existing_flex_args is not None:
+        return replace(
+            existing_flex_args,
+            mask_mod=mask_mod,
+            aux_tensors=[dense_mask],
+        )
+    return TorchFlexAttnArgs(mask_mod=mask_mod, aux_tensors=[dense_mask])
 
 
 def convert_from_dlpack_leading_static(
