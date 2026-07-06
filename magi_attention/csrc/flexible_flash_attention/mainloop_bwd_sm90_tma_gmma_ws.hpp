@@ -1678,12 +1678,12 @@ struct CollectiveMainloopBwdSm90 {
         CUTLASS_PRAGMA_NO_UNROLL
         for (bidh_kv_cat = 0; bidh_kv_cat < cute::conditional_return<!CatGQA>(1, PackGQAFactor); ++bidh_kv_cat) {
           rebind_Q_tiles(block_meta.seqlen_info);
-          m_block = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
+          m_block = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_cnt);
           flash::iterate_range < kInnerDir,
               kHeadDim<256 ? 2 : 1>(
                   m_block,
                   block_meta.inner_block_min,
-                  block_meta.inner_block_max,
+                  block_meta.inner_block_cnt,
                   [&] {
                     load_Q_LSE();
                     load_dO_dPsum();
@@ -1695,7 +1695,7 @@ struct CollectiveMainloopBwdSm90 {
     // ─── Unified control flow ───
     // K/V are loaded once (fixed n_block), Q/dO are streamed across merged batches.
     if (block_meta.skip_to_first_valid()) {
-      // Zero-ref tile (inner_block_max == 0): signal barrier_KV with 0 expected bytes
+      // Zero-ref tile (inner_block_cnt == 0): signal barrier_KV with 0 expected bytes
       // so the consumer's barrier_KV.wait() at the top of mma_with_loop_q can unblock.
       // Without this, the consumer deadlocks waiting for K/V data that was never loaded.
       if (thread_idx == 0) {
@@ -1946,7 +1946,7 @@ struct CollectiveMainloopBwdSm90 {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         copy(
             params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tKgK_(_, block_meta.inner_block_cur),
+            tKgK_(_, block_meta.inner_block_idx),
             tKsK(_, smem_pipe_write_k.index()));
         ++smem_pipe_write_k;
       }
@@ -2030,7 +2030,7 @@ struct CollectiveMainloopBwdSm90 {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         copy(
             params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tVgV_(_, block_meta.inner_block_cur),
+            tVgV_(_, block_meta.inner_block_idx),
             tVsV(_, smem_pipe_write_v.index()));
         ++smem_pipe_write_v;
       }
@@ -2043,9 +2043,9 @@ struct CollectiveMainloopBwdSm90 {
       } else {
         flash::iterate_range < kInnerDir,
             kHeadDim<256 ? 2 : 1>(
-                block_meta.inner_block_cur,
+                block_meta.inner_block_idx,
                 block_meta.inner_block_min,
-                block_meta.inner_block_max,
+                block_meta.inner_block_cnt,
                 [&] {
                   load_K();
                   load_V();
@@ -2324,10 +2324,10 @@ struct CollectiveMainloopBwdSm90 {
         // call; prefetch() advances a single block — mirrors store_dkv). The handshake count
         // thus matches the MMA consumer's ceil(gathered_tokens / kBlockM) tile count exactly.
         // m_block / bidh_kv_cat / off_q are unused by the scatter branch.
-        store_dQ_this_m_block(block_meta.inner_block_cur, 0, 0);
+        store_dQ_this_m_block(block_meta.inner_block_idx, 0, 0);
       } else {
         m_block_min = block_meta.inner_block_min;
-        m_block_max = block_meta.inner_block_max;
+        m_block_max = block_meta.inner_block_cnt;
         seqlen_info = block_meta.seqlen_info;
         bidb = block_meta.bidb;
         attn_type = block_meta.attn_type;
@@ -2449,7 +2449,7 @@ struct CollectiveMainloopBwdSm90 {
           if (lane_predicate) {
             Tensor gdVaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
             Tensor tdVgdV = block_tma_dV.partition_D(gdVaccum);
-            cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, block_meta.inner_block_cur));
+            cute::copy(params.tma_add_dV, tdVsdV, tdVgdV(_, _, _, block_meta.inner_block_idx));
             tma_store_arrive();
             tma_store_wait<0>();
           }
@@ -2492,7 +2492,7 @@ struct CollectiveMainloopBwdSm90 {
           if (lane_predicate) {
             Tensor gdKaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
             Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum);
-            cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, block_meta.inner_block_cur));
+            cute::copy(params.tma_add_dK, tdKsdK, tdKgdK(_, _, _, block_meta.inner_block_idx));
             tma_store_arrive();
             tma_store_wait<0>();
           }
@@ -2519,7 +2519,7 @@ struct CollectiveMainloopBwdSm90 {
         store_dV();
         store_dK();
       } else {
-        flash::iterate_range<kInnerDir, 2>(block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, [&] {
+        flash::iterate_range<kInnerDir, 2>(block_meta.inner_block_idx, block_meta.inner_block_min, block_meta.inner_block_cnt, [&] {
           store_dV();
           store_dK();
         });
@@ -2770,7 +2770,7 @@ struct CollectiveMainloopBwdSm90 {
         if constexpr (BlockSparse) {
           return m_block == block_meta.padding_block() && block_meta.num_invalid_token > 0;
         } else {
-          return (m_block == block_meta.inner_block_max - 1);
+          return (m_block == block_meta.inner_block_cnt - 1);
         }
       }();
 
@@ -3190,7 +3190,7 @@ struct CollectiveMainloopBwdSm90 {
         // (last tile may hold fewer than kBlockM valid tokens) and columns are
         // the contiguous K window (last n_block may overhang seqlen_k) —
         // symmetric with InnerLoopK, where the roles of rows/columns are swapped.
-        bool const need_row_mask = block_meta.inner_block_cur == block_meta.padding_block() && block_meta.num_invalid_token > 0;
+        bool const need_row_mask = block_meta.inner_block_idx == block_meta.padding_block() && block_meta.num_invalid_token > 0;
         int const num_invalid_k_token = !SwapBwdQKLoop ? cute::max(0, (block_meta.outer_block + 1) * kBlockN - block_meta.seqlen_info.seqlen_k) : 0;
         bool const need_col_mask = num_invalid_k_token > 0;
         auto combined_mask_fn = [&](int /*m_blk*/) {
@@ -3203,9 +3203,9 @@ struct CollectiveMainloopBwdSm90 {
         };
         auto sparse_no_mask_fn = [&](int /*m_blk*/) {};
         if (need_row_mask || need_col_mask) {
-          bwd_step(block_meta.inner_block_cur, combined_mask_fn, cute::false_type{});
+          bwd_step(block_meta.inner_block_idx, combined_mask_fn, cute::false_type{});
         } else {
-          bwd_step(block_meta.inner_block_cur, sparse_no_mask_fn, cute::false_type{});
+          bwd_step(block_meta.inner_block_idx, sparse_no_mask_fn, cute::false_type{});
         }
       } else {
         rebind_dQ_accum_tiles();
@@ -3217,8 +3217,8 @@ struct CollectiveMainloopBwdSm90 {
               mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(
                   tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
             };
-            int mb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
-            flash::iterate_range<kInnerDir>(mb, block_meta.inner_block_min, block_meta.inner_block_max, [&] { bwd_step(mb, mask_fn, cute::false_type{}); });
+            int mb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_cnt);
+            flash::iterate_range<kInnerDir>(mb, block_meta.inner_block_min, block_meta.inner_block_cnt, [&] { bwd_step(mb, mask_fn, cute::false_type{}); });
           } else if constexpr (MaskMode == 1) {
             // MaskMode 1 (dispatch): 3-lambda zone splitting (compile-time).
             auto boundary_fn = [&](int m_block) {
@@ -3230,11 +3230,11 @@ struct CollectiveMainloopBwdSm90 {
                   tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
             };
             auto no_mask_fn = [&](int /*m_block*/) {};
-            int mb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
+            int mb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_cnt);
             flash::mask_dispatch<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::M, kInnerDir>(
                 mb,
                 block_meta.inner_block_min,
-                block_meta.inner_block_max,
+                block_meta.inner_block_cnt,
                 n_block,
                 block_meta.seqlen_info.seqlen_q,
                 block_meta.seqlen_info.seqlen_k,
@@ -4041,10 +4041,10 @@ struct CollectiveMainloopBwdSm90 {
     // dense iterates over all n_blocks in the range with a single bwd_step instantiation.
     auto mma_body = [&]() {
       if constexpr (InnerUseScatter) {
-        if (block_meta.inner_block_cur == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
-          bwd_step(block_meta.inner_block_cur, padding_mask_fn, cute::false_type{});
+        if (block_meta.inner_block_idx == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
+          bwd_step(block_meta.inner_block_idx, padding_mask_fn, cute::false_type{});
         } else {
-          bwd_step(block_meta.inner_block_cur, sparse_no_mask_fn, cute::false_type{});
+          bwd_step(block_meta.inner_block_idx, sparse_no_mask_fn, cute::false_type{});
         }
         return;
       }
@@ -4056,8 +4056,8 @@ struct CollectiveMainloopBwdSm90 {
           mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(
               tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
-        int nb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
-        flash::iterate_range<kInnerDir>(nb, block_meta.inner_block_min, block_meta.inner_block_max, [&] { bwd_step(nb, mask_fn, cute::false_type{}); });
+        int nb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_cnt);
+        flash::iterate_range<kInnerDir>(nb, block_meta.inner_block_min, block_meta.inner_block_cnt, [&] { bwd_step(nb, mask_fn, cute::false_type{}); });
       } else if constexpr (MaskMode == 1) {
         // MaskMode 1 (dispatch): 3-lambda zone splitting.
         auto boundary_fn = [&](int n_blk) {
@@ -4069,11 +4069,11 @@ struct CollectiveMainloopBwdSm90 {
               tSrS, m_block, n_blk, block_meta.attn_type, thread_idx, seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
         auto no_mask_fn = [&](int /*n_blk*/) {};
-        int nb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_max);
+        int nb = flash::init_block_cur<kInnerDir>(block_meta.inner_block_min, block_meta.inner_block_cnt);
         flash::mask_dispatch<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::N, kInnerDir>(
             nb,
             block_meta.inner_block_min,
-            block_meta.inner_block_max,
+            block_meta.inner_block_cnt,
             m_block,
             seqlen_q,
             block_meta.seqlen_info.seqlen_k,

@@ -110,10 +110,10 @@ struct Flash_fwd_params : public Qkv_params {
   int num_sm;
   int* __restrict__ tile_count_semaphore;
 
-  // IndexSparse indices direct path params
+  // IndexSparse indices direct path params (3D: batch × nhk × topk_per_head).
   // Kernel scans trailing -1 entries to compute loop_count / invalid_count.
-  int* __restrict__ index_sparse_indices; // [num_unique_q, max_topk] int32, global KV row ids
-  int index_sparse_max_topk; // width of index_sparse_indices last dim
+  int* __restrict__ index_sparse_indices; // [batch, nhk, topk_per_head] int32, global KV row ids
+  int index_sparse_max_topk; // per-head topk width (dim-2 of 3D tensor)
 
   // Optimization params for tile scheduling
   // for each batch, we assume the seqlen is the same(max_seqlen_q).
@@ -182,9 +182,9 @@ struct Flash_bwd_params : public Flash_fwd_params {
   int* __restrict__ dq_determin_conflict_state;
   int* __restrict__ dq_determin_range_locks;
 
-  // IndexSparse params
+  // IndexSparse params (3D: batch × nhk × topk_per_head)
   int* __restrict__ index_sparse_indices;
-  int index_sparse_max_topk;
+  int index_sparse_max_topk; // per-head topk width (dim-2 of 3D tensor)
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

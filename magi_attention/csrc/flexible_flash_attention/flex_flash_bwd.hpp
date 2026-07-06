@@ -253,11 +253,21 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       (has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count),
       "merge_k_ranges, bwd_kq_map, and bwd_unique_count must all be provided together or all be omitted");
 
+  // Validate IndexSparse indices if provided (3D: batch_size × nhk × topk_per_head)
   at::Tensor index_sparse_indices;
   if (has_index_sparse) {
     index_sparse_indices = index_sparse_indices_.value();
-    TORCH_CHECK(index_sparse_indices.dtype() == torch::kInt32);
+    TORCH_CHECK(index_sparse_indices.dtype() == torch::kInt32, "index_sparse_indices must be int32");
     CHECK_DEVICE(index_sparse_indices);
+    TORCH_CHECK(index_sparse_indices.dim() == 3, "index_sparse_indices must be 3D (batch, nhk, topk_per_head), got ", index_sparse_indices.dim(), "D");
+    TORCH_CHECK(
+        index_sparse_indices.size(1) == num_heads_kv, "index_sparse_indices dim-1 must equal num_heads_kv (", num_heads_kv, "), got ", index_sparse_indices.size(1));
+    TORCH_CHECK(
+        index_sparse_indices.size(2) == index_sparse_max_topk,
+        "index_sparse_indices dim-2 must equal index_sparse_max_topk (",
+        index_sparse_max_topk,
+        "), got ",
+        index_sparse_indices.size(2));
     CHECK_CONTIGUOUS(index_sparse_indices);
   }
 

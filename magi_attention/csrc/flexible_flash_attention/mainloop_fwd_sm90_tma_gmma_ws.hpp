@@ -770,7 +770,7 @@ struct CollectiveMainloopFwdSm90 {
           pipeline_k.producer_acquire(smem_pipe_write_k);
           copy(
               params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tKgK(_, block_meta.inner_block_cur),
+              tKgK(_, block_meta.inner_block_idx),
               tKsK(_, smem_pipe_write_k.index()));
           ++smem_pipe_write_k;
         }
@@ -828,11 +828,11 @@ struct CollectiveMainloopFwdSm90 {
         }
       } else {
         int const v_block_idx_raw =
-            InnerDirMaxToMin ? (block_meta.inner_block_cur + decltype(use_prev)::value) : (block_meta.inner_block_cur - decltype(use_prev)::value);
+            InnerDirMaxToMin ? (block_meta.inner_block_idx + decltype(use_prev)::value) : (block_meta.inner_block_idx - decltype(use_prev)::value);
         // Cross-batch detection: staggered V index exceeds current batch's range,
         // meaning we need the tail V from the previous batch (prev_offset_k).
         bool const is_cross_batch = IntraWGOverlap && BlockMetaT::NeedsBatchLoop &&
-            (InnerDirMaxToMin ? (v_block_idx_raw >= block_meta.inner_block_max) : (v_block_idx_raw < block_meta.inner_block_min));
+            (InnerDirMaxToMin ? (v_block_idx_raw >= block_meta.inner_block_cnt) : (v_block_idx_raw < block_meta.inner_block_min));
         int const v_block_idx = is_cross_batch ? prev_v_tail_idx : v_block_idx_raw;
         int const v_offset_k = is_cross_batch ? prev_offset_k : block_meta.seqlen_info.offset_k;
 
@@ -869,7 +869,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (BlockSparse || IndexSparse) {
         block_meta.prefetch();
       } else {
-        flash::advance_block_cur<kInnerDir>(block_meta.inner_block_cur);
+        flash::advance_block_cur<kInnerDir>(block_meta.inner_block_idx);
       }
     };
 
@@ -890,7 +890,7 @@ struct CollectiveMainloopFwdSm90 {
         load_step();
       } else {
         flash::iterate_range<kInnerDir, InnerLoad_Tma ? 2 : 1>(
-            block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, [&] { load_step(); });
+            block_meta.inner_block_idx, block_meta.inner_block_min, block_meta.inner_block_cnt, [&] { load_step(); });
       }
     };
 
@@ -933,7 +933,7 @@ struct CollectiveMainloopFwdSm90 {
         load_body();
         if constexpr (IntraWGOverlap) {
           prev_offset_k = block_meta.seqlen_info.offset_k;
-          prev_v_tail_idx = InnerDirMaxToMin ? block_meta.inner_block_min : (block_meta.inner_block_max - 1);
+          prev_v_tail_idx = InnerDirMaxToMin ? block_meta.inner_block_min : (block_meta.inner_block_cnt - 1);
         }
         block_meta.prefetch();
         if (block_meta.skip_to_first_valid())
@@ -1309,13 +1309,13 @@ struct CollectiveMainloopFwdSm90 {
       // Head mask: dense → boundary; sparse MaxToMin → padding (head is always max-end);
       // sparse MinToMax → runtime check (head is min-end, but single-block case is also padding block).
       if constexpr (!(BlockSparse || IndexSparse)) {
-        apply_mask_softmax(block_meta.inner_block_cur, boundary_mask_fn, cute::true_type{}, /*is_first=*/true);
+        apply_mask_softmax(block_meta.inner_block_idx, boundary_mask_fn, cute::true_type{}, /*is_first=*/true);
       } else if constexpr (InnerDirMaxToMin) {
-        apply_mask_softmax(block_meta.inner_block_cur, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
-      } else if (block_meta.num_invalid_token > 0 && block_meta.inner_block_cur == block_meta.padding_block()) {
-        apply_mask_softmax(block_meta.inner_block_cur, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
+        apply_mask_softmax(block_meta.inner_block_idx, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
+      } else if (block_meta.num_invalid_token > 0 && block_meta.inner_block_idx == block_meta.padding_block()) {
+        apply_mask_softmax(block_meta.inner_block_idx, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
       } else {
-        apply_mask_softmax(block_meta.inner_block_cur, no_mask_fn, cute::true_type{}, /*is_first=*/true);
+        apply_mask_softmax(block_meta.inner_block_idx, no_mask_fn, cute::true_type{}, /*is_first=*/true);
       }
       write_P();
 
@@ -1333,7 +1333,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (BlockSparse || IndexSparse) {
         block_meta.prefetch();
       } else {
-        flash::advance_block_cur<kInnerDir>(block_meta.inner_block_cur);
+        flash::advance_block_cur<kInnerDir>(block_meta.inner_block_idx);
       }
     };
 
@@ -1422,11 +1422,11 @@ struct CollectiveMainloopFwdSm90 {
         if (block_meta.is_finish())
           return;
         if constexpr (InnerDirMaxToMin) {
-          fwd_step(block_meta.inner_block_cur, no_mask_fn, cute::false_type{});
-        } else if (block_meta.inner_block_cur == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
-          fwd_step(block_meta.inner_block_cur, padding_mask_fn, cute::false_type{});
+          fwd_step(block_meta.inner_block_idx, no_mask_fn, cute::false_type{});
+        } else if (block_meta.inner_block_idx == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
+          fwd_step(block_meta.inner_block_idx, padding_mask_fn, cute::false_type{});
         } else {
-          fwd_step(block_meta.inner_block_cur, no_mask_fn, cute::false_type{});
+          fwd_step(block_meta.inner_block_idx, no_mask_fn, cute::false_type{});
         }
         return;
       }
@@ -1436,15 +1436,15 @@ struct CollectiveMainloopFwdSm90 {
           mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(
               tSrS, m_block, n_block, block_meta.attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
         };
-        flash::iterate_range<kInnerDir>(block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, [&] {
-          fwd_step(block_meta.inner_block_cur, direct_mask_fn, cute::false_type{});
+        flash::iterate_range<kInnerDir>(block_meta.inner_block_idx, block_meta.inner_block_min, block_meta.inner_block_cnt, [&] {
+          fwd_step(block_meta.inner_block_idx, direct_mask_fn, cute::false_type{});
         });
       } else if constexpr (MaskMode == 1) {
         // MaskMode 1 (dispatch): 3-lambda zone splitting (current default).
         mask_dispatch<kBlockM, kBlockN, PackGQA, PackGQAFactor, DispatchAxis::N, kInnerDir>(
-            block_meta.inner_block_cur,
+            block_meta.inner_block_idx,
             block_meta.inner_block_min,
-            block_meta.inner_block_max,
+            block_meta.inner_block_cnt,
             m_block,
             block_meta.seqlen_info.seqlen_q,
             block_meta.seqlen_info.seqlen_k,
