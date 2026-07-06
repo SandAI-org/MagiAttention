@@ -21,7 +21,7 @@ static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kSwapBwdQKLoop = {{ swap_bwd_qk_loop }};
-static constexpr bool kDisableOuterAtomic = kSwapBwdQKLoop ? kDisableDqAtomic : kDisableDkvAtomic;
+static constexpr bool kOuterUseAtomicReduction = !(kSwapBwdQKLoop ? kDisableDqAtomic : kDisableDkvAtomic);
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr bool kCatGQA = {{ cat_gqa }};
 static constexpr int kPackGQAFactor = {{ pack_gqa_factor }};
@@ -143,7 +143,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kDisableOuterAtomic, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kForceMmaDkvSS, kInnerLoadMode, kProfileMode, kBwdSkipVLoad, kBwdSkipDvStore, kBwdSkipDkStore, kBwdSkipDvMma, kBwdUnunionDkvacc>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterUseAtomicReduction, kDeterministic, kRangeMerge, kSwapBwdQKLoop, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kUseMaskDispatch, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kForceMmaDkvSS, kInnerLoadMode, kProfileMode, kBwdSkipVLoad, kBwdSkipDvStore, kBwdSkipDkStore, kBwdSkipDvMma, kBwdUnunionDkvacc>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

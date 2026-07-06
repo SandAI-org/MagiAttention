@@ -48,7 +48,7 @@ template <
     int NumMmaWarpGroups,
     int AtomLayoutMdQ,
     int AtomLayoutNdKV,
-    bool DisableOuterAtomicReduction_,
+    bool OuterUseAtomicReduction_,
     bool Deterministic_,
     bool SwapBwdQKLoop_,
     bool PackGQA_,
@@ -71,7 +71,7 @@ struct CollectiveEpilogueBwd {
 
   static constexpr bool IsSameTypeDq = cute::is_same_v<ElementDq, ElementAccum>;
   static constexpr bool IsSameTypeDkv = cute::is_same_v<ElementDkv, ElementAccum>;
-  static constexpr bool DisableOuterAtomicReduction = DisableOuterAtomicReduction_;
+  static constexpr bool OuterUseAtomicReduction = OuterUseAtomicReduction_;
 
   static constexpr bool dQ_swapAB = dQ_swapAB_;
   static constexpr bool dKV_swapAB = dKV_swapAB_;
@@ -95,10 +95,10 @@ struct CollectiveEpilogueBwd {
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
-  // TMA type for dQ: only used when DisableOuterAtomicReduction=false (atomic reduce-add path).
-  // When DisableOuterAtomicReduction=true, store_dq() uses per-element flash::copy instead.
+  // TMA type for dQ: only used when OuterUseAtomicReduction=true (atomic reduce-add path).
+  // When OuterUseAtomicReduction=false, store_dq() uses per-element flash::copy instead.
   using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD;
-  using GmemTiledCopydKVTMA = std::conditional_t<!SwapBwdQKLoop && DisableOuterAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
+  using GmemTiledCopydKVTMA = std::conditional_t<!SwapBwdQKLoop && !OuterUseAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
@@ -326,8 +326,8 @@ struct CollectiveEpilogueBwd {
   static void prefetch_tma_descriptors(Params const& params) {
     if constexpr (Use_TMA) {
       if constexpr (SwapBwdQKLoop) {
-        // DisableOuterAtomicReduction: store_dq() uses per-element path, skip TMA prefetch
-        if constexpr (!DisableOuterAtomicReduction) {
+        // !OuterUseAtomicReduction: store_dq() uses per-element path, skip TMA prefetch
+        if constexpr (OuterUseAtomicReduction) {
           if constexpr (PackGQA) {
             cute::prefetch_tma_descriptor(params.tma_store_dQ_packed.get_tma_descriptor());
           } else {
@@ -335,8 +335,8 @@ struct CollectiveEpilogueBwd {
           }
         }
       } else {
-        // DisableOuterAtomicReduction: store_dkv() uses per-element path, skip TMA prefetch
-        if constexpr (!DisableOuterAtomicReduction) {
+        // !OuterUseAtomicReduction: store_dkv() uses per-element path, skip TMA prefetch
+        if constexpr (OuterUseAtomicReduction) {
           cute::prefetch_tma_descriptor(params.tma_store_dK.get_tma_descriptor());
           cute::prefetch_tma_descriptor(params.tma_store_dV.get_tma_descriptor());
         }
@@ -416,7 +416,7 @@ struct CollectiveEpilogueBwd {
     // IndexSparse LoopQ with KBlockSize < kBlockN: only partial rows valid in the tile,
     // TMA full-tile store would corrupt neighbors. Use per-element path with residual guard.
     // When KBlockSize >= kBlockN the full tile is valid and can use TMA store.
-    if constexpr (!DisableOuterAtomicReduction && !IndexSparseInvLoopQ) {
+    if constexpr (OuterUseAtomicReduction && !IndexSparseInvLoopQ) {
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
       cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
 
@@ -574,7 +574,7 @@ struct CollectiveEpilogueBwd {
     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     cute::copy(smem_tiled_copy_dQ, taccdQrdQ, taccdQsdQ);
 
-    if constexpr (DisableOuterAtomicReduction) {
+    if constexpr (!OuterUseAtomicReduction) {
       // Per-element direct store: outer Q range is unique per CTA (rangemerge / sparse),
       // so no atomic reduction needed.  Mirrors store_dkv()'s per-element path.
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
