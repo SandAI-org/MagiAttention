@@ -431,10 +431,10 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 // IsInnerLoopQ_=false (InnerLoopK): outer=Q token (bidb), inner=K from forward topk indices
 //   fill_token_indices fills K logical rows (k_token); head offset handled by ptr_gK_base
 //   bidb = block_coord[2] = q_token; kv_head from scheduler bidh (intergroup)
-//   indices layout: (total_q, nhk * topk_per_head) — per-head slice via bidh_kv * per_head_topk
+//   indices layout: (total_q, nhk, max_topk) — per-head slice via bidh_kv * max_topk
 // IsInnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb), inner=Q from inner_indices
 //   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
-//   indices layout: (num_k_blocks, nhk * inner_topk_per_head)
+//   indices layout: (num_k_blocks, nhk, inner_max_topk)
 //
 // Fields (all const, computed in constructor init-list):
 //   outer_tile_idx — tile index along the outer loop dimension
@@ -495,23 +495,20 @@ struct IndexSparseBlockMeta {
             return params.qhead_per_khead_divmod.divide(bidh);
           }
         }()) {
-    // index_sparse_max_topk is now per-head topk width (dim-2 of 3D tensor).
-    // Row stride in the flattened buffer = nhk * topk_per_head.
-    int const topk_per_head = params.index_sparse_max_topk;
-    int const row_stride = nhk * topk_per_head;
+    int const max_topk = params.index_sparse_max_topk;
     int const* row_ptr;
     int actual_topk;
 
     if constexpr (!IsInnerLoopQ) {
       // ── InnerLoopK: bidb = Q token, indices = forward topk (Q→K) ──
-      // indices layout: (total_q, nhk, topk_per_head) — contiguous 3D
+      // indices layout: (total_q, nhk, max_topk) — contiguous 3D
       seqlen_info.offset_q = bidb;
       seqlen_info.seqlen_q = 1;
 
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * row_stride + static_cast<int64_t>(bidh_kv) * topk_per_head;
+      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * nhk * max_topk + static_cast<int64_t>(bidh_kv) * max_topk;
 
-      actual_topk = topk_per_head;
-      for (int i = topk_per_head - 1; i >= 0 && row_ptr[i] < 0; --i)
+      actual_topk = max_topk;
+      for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
         --actual_topk;
 
       int effective_k = actual_topk * SparseKBlockSize;
@@ -521,14 +518,14 @@ struct IndexSparseBlockMeta {
       num_invalid_token = inner_block_cnt * InnerBlockSize - effective_k;
     } else {
       // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
-      // indices layout: (num_k_blocks, nhk, inner_topk_per_head) — contiguous 3D
+      // indices layout: (num_k_blocks, nhk, max_topk) — contiguous 3D
       seqlen_info.offset_k = bidb * SparseKBlockSize;
       seqlen_info.seqlen_k = SparseKBlockSize;
 
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * row_stride + static_cast<int64_t>(bidh_kv) * topk_per_head;
+      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * nhk * max_topk + static_cast<int64_t>(bidh_kv) * max_topk;
 
-      actual_topk = topk_per_head;
-      for (int i = topk_per_head - 1; i >= 0 && row_ptr[i] < 0; --i)
+      actual_topk = max_topk;
+      for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
         --actual_topk;
 
       // PackGQA: interleave Q heads into packed rows (token * G + sub_head).
