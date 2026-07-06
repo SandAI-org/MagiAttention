@@ -1287,3 +1287,51 @@ feat/bwd-loopq-sparse-load 可能已清理。合并时确认，如未删则一�
 1. **T1 实现** → JIT 默认值 + PerfDebug 开关 + commit
 2. **T1 验证** → 远程 precompile + correctness test
 3. **T1 benchmark** → 验证 O1 默认 TFLOPS 与之前一致
+
+---
+
+## Merge feat/bwd-loopq-sparse-load (2026-07-06 16:20)
+
+### 动机
+feat/ 分支有大量新进展 (121 commits): 测试重组、crash fixes、rename、dKV pool 删除、
+OuterUseAtomicReduction、TMA 1D bulk load 等。本分支最终要合回 feat/，先拉入保持同步。
+
+### 合并结果
+- **Merge commit**: `c7196214`
+- **冲突 (4个, 全部解决)**:
+  1. `.pre-commit-config.yaml` — 保留 `.cursor/` 排除
+  2. `bench_sparse_analysis.py` — 接受我方删除 (已有 package 版本)
+  3. `bwd_inst_template.jinja` — 取 feat/ 新增 (`kOuterUseAtomicReduction`, `kDisableDqAtomic`, 删除 dKV pool) + 保留我方 perf debug flags
+  4. `_flex_flash_attn_jit.py` — 自动解决 (注释措辞)
+
+### feat/ 带来的关键变更
+| 分类 | 变更 |
+|------|------|
+| **架构** | DisableOuterAtomicReduction → OuterUseAtomicReduction; disable_bwd_dq_atomic_reduction |
+| **dKV pool** | 已删除 — 用 sparse outer dx store+empty 模式替代 |
+| **KV head** | IndexSparse KV head 3D 表达 (unflatten) |
+| **测试** | 3-tier BlockSparse + IndexSparse test suites; crash fixes |
+| **TMA** | TMA 1D bulk load for BWD scatter paths |
+| **Naming** | SparseLoad→BlockSparse, IndexAttn→IndexSparse, IsLoopQ→IsInnerLoopQ |
+| **Infra** | clang-format-20, .cursor/ in .gitignore |
+
+### 后续任务方向 (优先级排序)
+
+**已确认无效方向 (不再探索)**:
+- ~~P4 跨迭代 dV 累加~~ — 数值错误 (inner 每轮不同 K-block)
+- ~~smem_dvacc double-buffer~~ — SMEM 超 228KB 限制
+- ~~InnerDxStoreInProducer=false~~ — atomicAdd = -51.6%
+- ~~DeferDvR2S~~ — 已验证无效
+
+**可继续探索的优化方向**:
+1. **Pipeline overlap 改进**: 探索 dK writeback 与下一轮 MMA overlap 的可能性
+   (dK 和 dV 是独立位置，barrier 独立 → 有空间)
+2. **Tile shape 调优**: M=64/N=128 vs M=128/N=64 → SMEM/register trade-off
+3. **InnerLoopK specific**: dV R2S 延迟方案 — 不是跨迭代累加，而是利用
+   SMEM 双 stage 让 R2S 和 MMA4(dK) 真正 overlap (需 feat/ 新 SMEM budget)
+4. **Benchmark with feat/ new features**: O1 (ununion+stgV1) + feat/'s TMA 1D
+   load 对 TFLOPS 的综合影响
+
+**当前需要验证**:
+- [ ] CI 通过 (merge 后的综合 lint)
+- [ ] 合并后 correctness: `test_block_sparse.py` + `test_index_sparse.py`
