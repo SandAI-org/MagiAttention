@@ -511,11 +511,18 @@ struct IndexSparseBlockMeta {
       for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
         --actual_topk;
 
-      int effective_k = actual_topk * SparseKBlockSize;
-      seqlen_info.seqlen_k = effective_k;
-      inner_block_cnt = (effective_k + InnerBlockSize - 1) / InnerBlockSize;
-      // Tile padding: last tile may extend past actual tokens; mask zeros these rows.
-      num_invalid_token = inner_block_cnt * InnerBlockSize - effective_k;
+      if constexpr (SparseKBlockSize >= InnerBlockSize) {
+        // Block-level: each topk entry fills complete tile(s), no tail padding.
+        constexpr int kTilesPerKBlock = SparseKBlockSize / InnerBlockSize;
+        inner_block_cnt = actual_topk * kTilesPerKBlock;
+        num_invalid_token = 0;
+        seqlen_info.seqlen_k = inner_block_cnt * InnerBlockSize;
+      } else {
+        // Token-level (kbs=1): topk entries are individual tokens, last tile may pad.
+        seqlen_info.seqlen_k = actual_topk;
+        inner_block_cnt = (actual_topk + InnerBlockSize - 1) / InnerBlockSize;
+        num_invalid_token = inner_block_cnt * InnerBlockSize - actual_topk;
+      }
     } else {
       // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
       // indices layout: (num_k_blocks, nhk, max_topk) — contiguous 3D
