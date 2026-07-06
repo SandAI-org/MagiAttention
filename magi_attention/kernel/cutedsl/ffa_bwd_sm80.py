@@ -206,8 +206,8 @@ class FFABwdSm80:
         mdQacc_type: Type[cutlass.Numeric],
         mdK_type: Type[cutlass.Numeric],
         mdV_type: Type[cutlass.Numeric],
-        mCuSeqlensQ_type: Type[cutlass.Numeric] | None,
-        mCuSeqlensK_type: Type[cutlass.Numeric] | None,
+        mRangesQ_type: Type[cutlass.Numeric] | None,
+        mRangesK_type: Type[cutlass.Numeric] | None,
         mSeqUsedQ_type: Type[cutlass.Numeric] | None,
         mSeqUsedK_type: Type[cutlass.Numeric] | None,
     ):
@@ -231,9 +231,9 @@ class FFABwdSm80:
             raise TypeError("dPsum tensor must be Float32")
         if cutlass.const_expr(mdQacc_type not in [cutlass.Float32]):
             raise TypeError("dQacc tensor must be Float32")
-        if cutlass.const_expr(mCuSeqlensQ_type not in [None, cutlass.Int32]):
+        if cutlass.const_expr(mRangesQ_type not in [None, cutlass.Int32]):
             raise TypeError("cuSeqlensQ tensor must be Int32")
-        if cutlass.const_expr(mCuSeqlensK_type not in [None, cutlass.Int32]):
+        if cutlass.const_expr(mRangesK_type not in [None, cutlass.Int32]):
             raise TypeError("cuSeqlensK tensor must be Int32")
         if cutlass.const_expr(mSeqUsedQ_type not in [None, cutlass.Int32]):
             raise TypeError("SeqUsedQ tensor must be Int32")
@@ -643,8 +643,8 @@ class FFABwdSm80:
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         softmax_scale: cutlass.Float32,
-        mCuSeqlensQ: Optional[cute.Tensor] = None,
-        mCuSeqlensK: Optional[cute.Tensor] = None,
+        mRangesQ: Optional[cute.Tensor] = None,
+        mRangesK: Optional[cute.Tensor] = None,
         mSeqUsedQ: Optional[cute.Tensor] = None,
         mSeqUsedK: Optional[cute.Tensor] = None,
         window_size_left: Int32 | int | None = None,
@@ -688,8 +688,8 @@ class FFABwdSm80:
                     mdQacc,
                     mdK,
                     mdV,
-                    mCuSeqlensQ,
-                    mCuSeqlensK,
+                    mRangesQ,
+                    mRangesK,
                     mSeqUsedQ,
                     mSeqUsedK,
                 )
@@ -698,7 +698,7 @@ class FFABwdSm80:
 
         # --- Set up attributes ---
 
-        self.varlen_q = mCuSeqlensQ is not None
+        self.varlen_q = mRangesQ is not None
         self._setup_attributes()
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -719,7 +719,7 @@ class FFABwdSm80:
 
         self.tile_scheduler_cls = (
             SingleTileVarlenScheduler
-            if cutlass.const_expr(mCuSeqlensK is not None)
+            if cutlass.const_expr(mRangesK is not None)
             else SingleTileScheduler
         )
         tile_sched_args = TileSchedulerArguments(
@@ -727,12 +727,12 @@ class FFABwdSm80:
             num_block=cute.ceil_div(mK.shape[1], self.n_block_size),
             num_head=(
                 mQ.shape[1]
-                if cutlass.const_expr(mCuSeqlensQ is not None)
+                if cutlass.const_expr(mRangesQ is not None)
                 else mQ.shape[2]
             ),
             num_batch=(
-                mCuSeqlensK.shape[0] - 1
-                if cutlass.const_expr(mCuSeqlensK is not None)
+                mRangesK.shape[0] - 1
+                if cutlass.const_expr(mRangesK is not None)
                 else mK.shape[0]
             ),
             num_splits=1,
@@ -744,7 +744,7 @@ class FFABwdSm80:
             qhead_per_kvhead_packgqa=self.qhead_per_kvhead
             if cutlass.const_expr(self.pack_gqa)
             else 1,
-            mCuSeqlensQ=mCuSeqlensK,
+            mRangesQ=mRangesK,
             mSeqUsedQ=mSeqUsedK,
         )
         tile_sched_params = self.tile_scheduler_cls.to_underlying_arguments(
@@ -810,8 +810,8 @@ class FFABwdSm80:
             mdQacc,
             mdK,
             mdV,
-            mCuSeqlensQ,
-            mCuSeqlensK,
+            mRangesQ,
+            mRangesK,
             mSeqUsedQ,
             mSeqUsedK,
             softmax_scale,
@@ -852,8 +852,8 @@ class FFABwdSm80:
         mdQacc: cute.Tensor,
         mdK: cute.Tensor,
         mdV: cute.Tensor,
-        mCuSeqlensQ: Optional[cute.Tensor],
-        mCuSeqlensK: Optional[cute.Tensor],
+        mRangesQ: Optional[cute.Tensor],
+        mRangesK: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mSeqUsedK: Optional[cute.Tensor],
         softmax_scale: cutlass.Float32,
@@ -906,8 +906,8 @@ class FFABwdSm80:
             batch_idx,
             mQ.shape[1],
             mK.shape[1],
-            mCuSeqlensQ=mCuSeqlensQ,
-            mCuSeqlensK=mCuSeqlensK,
+            mRangesQ=mRangesQ,
+            mRangesK=mRangesK,
             mSeqUsedQ=mSeqUsedQ,
             mSeqUsedK=mSeqUsedK,
             tile_m=self.m_block_size,
@@ -951,7 +951,7 @@ class FFABwdSm80:
         blkK_shape = (self.n_block_size, self.head_dim_padded)
         blkV_shape = (self.n_block_size, self.head_dim_v_padded)
         blkdO_shape = (self.m_block_size, self.head_dim_v_padded)
-        if cutlass.const_expr(not seqlen_info.has_cu_seqlens_q):
+        if cutlass.const_expr(not seqlen_info.has_ranges_q):
             mQ_cur = mQ[batch_idx, None, head_idx, None]
             mLSE_cur = mLSE[batch_idx, head_idx, None]
             mdO_cur = mdO[batch_idx, None, head_idx, None]
@@ -970,7 +970,7 @@ class FFABwdSm80:
             mdQacc_cur = cute.domain_offset(
                 (padded_offset_q * self.head_dim_padded,), mdQacc[head_idx, None]
             )
-        if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
+        if cutlass.const_expr(not seqlen_info.has_ranges_k):
             mK_cur, mV_cur = [t[batch_idx, None, head_idx_kv, None] for t in (mK, mV)]
         else:
             mK_cur, mV_cur = [
@@ -2110,7 +2110,7 @@ class FFABwdSm80:
             cute.copy(smem_copy_atom_dKV, taccdVrdV, taccdVsdV)
 
             # Make gdK/gdV and rdK/rdV for R2G copy
-            if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
+            if cutlass.const_expr(not seqlen_info.has_ranges_k):
                 mdK_cur, mdV_cur = [
                     t[batch_idx, None, head_idx_kv, None] for t in (mdK, mdV)
                 ]
@@ -2199,7 +2199,7 @@ class FFABwdSm80:
                     )
         else:  # qhead_per_kvhead > 1 => atomic add
             # Make fp32 gdK/gdV buffer for atomic add
-            if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
+            if cutlass.const_expr(not seqlen_info.has_ranges_k):
                 mdK_cur, mdV_cur = [t[batch_idx, head_idx_kv, None] for t in (mdK, mdV)]
             else:
                 padded_offset_k = seqlen_info.offset_k + batch_idx * self.n_block_size

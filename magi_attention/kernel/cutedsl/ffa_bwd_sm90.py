@@ -601,8 +601,8 @@ class FFABwdSm90:
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         softmax_scale: Float32,
-        mCuSeqlensQ: Optional[cute.Tensor] = None,
-        mCuSeqlensK: Optional[cute.Tensor] = None,
+        mRangesQ: Optional[cute.Tensor] = None,
+        mRangesK: Optional[cute.Tensor] = None,
         mSeqUsedQ: Optional[cute.Tensor] = None,
         mSeqUsedK: Optional[cute.Tensor] = None,
         window_size_left: Int32 | int | None = None,
@@ -634,11 +634,11 @@ class FFABwdSm90:
             )
         )
 
-        self.is_varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
+        self.is_varlen_q = mRangesQ is not None or mSeqUsedQ is not None
         # For GQA (qhead_per_kvhead > 1), multiple Q heads accumulate into the same dK/dV,
         # so we need the float32 accum path + postprocess.
         # For varlen_k with qhead_per_kvhead == 1, we use ragged TMA tensors.
-        self.varlen_k = mCuSeqlensK is not None or mSeqUsedK is not None
+        self.varlen_k = mRangesK is not None or mSeqUsedK is not None
 
         # --- Set up attributes ---
 
@@ -800,7 +800,7 @@ class FFABwdSm90:
 
         # --- Make tile scheduler class/args ---
 
-        if const_expr(mCuSeqlensK is not None or mSeqUsedK is not None):
+        if const_expr(mRangesK is not None or mSeqUsedK is not None):
             self.tile_scheduler_cls = SingleTileVarlenScheduler
         elif const_expr(self.deterministic):
             self.tile_scheduler_cls = SingleTileLPTBwdScheduler
@@ -810,7 +810,7 @@ class FFABwdSm90:
         if const_expr(self.index_sparse):
             _n_block_count = self.index_sparse_max_topk
             _total_q_sched = (
-                cute.size(mCuSeqlensK.shape[0] - 1)
+                cute.size(mRangesK.shape[0] - 1)
                 * self.index_sparse_max_topk
                 * self.tile_n
             )
@@ -818,22 +818,22 @@ class FFABwdSm90:
             _n_block_count = cute.ceil_div(cute.size(mK.shape[0]), self.tile_n)
             _total_q_sched = (
                 cute.size(mK.shape[0])
-                if const_expr(mCuSeqlensK is not None)
+                if const_expr(mRangesK is not None)
                 else cute.size(mK.shape[0]) * cute.size(mK.shape[3])
             )
         tile_sched_args = TileSchedulerArguments(
             _n_block_count,
             cute.size(mQ.shape[2]),
             cute.size(mK.shape[3])
-            if const_expr(mCuSeqlensK is None)
-            else cute.size(mCuSeqlensK.shape[0] - 1),  # num_batch
+            if const_expr(mRangesK is None)
+            else cute.size(mRangesK.shape[0] - 1),  # num_batch
             1,  # num_splits
             cute.size(mQ.shape[0]),  # pass seqlen_q or total_q for seqlen_k
             mQ.shape[1],  # headdim
             mV.shape[1],  # headdim_v
             total_q=_total_q_sched,
             tile_shape_mn=(self.tile_n, self.tile_m),  # Swapping the role of Q & K
-            mCuSeqlensQ=mCuSeqlensK,
+            mRangesQ=mRangesK,
             mSeqUsedQ=mSeqUsedK,
             qhead_per_kvhead_packgqa=1,
             element_size=self.dtype.width // 8,
@@ -984,8 +984,8 @@ class FFABwdSm90:
             mLSE,
             mdPsum,
             mdQacc,
-            mCuSeqlensQ,
-            mCuSeqlensK,
+            mRangesQ,
+            mRangesK,
             mSeqUsedQ,
             mSeqUsedK,
             self.sQ_layout,
@@ -1042,8 +1042,8 @@ class FFABwdSm90:
         mLSE: cute.Tensor,
         mdPsum: cute.Tensor,
         mdQacc: cute.Tensor,
-        mCuSeqlensQ: Optional[cute.Tensor],
-        mCuSeqlensK: Optional[cute.Tensor],
+        mRangesQ: Optional[cute.Tensor],
+        mRangesK: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mSeqUsedK: Optional[cute.Tensor],
         sQ_layout: cute.ComposedLayout,
@@ -1202,8 +1202,8 @@ class FFABwdSm90:
                 SeqlenInfoQK.create,
                 seqlen_q_static=mQ.shape[0],
                 seqlen_k_static=mK.shape[0],
-                mCuSeqlensQ=mCuSeqlensQ,
-                mCuSeqlensK=mCuSeqlensK,
+                mRangesQ=mRangesQ,
+                mRangesK=mRangesK,
                 mSeqUsedQ=mSeqUsedQ,
                 mSeqUsedK=mSeqUsedK,
                 tile_m=self.tile_m,
@@ -2139,8 +2139,8 @@ class FFABwdSm90:
                     seqlen_info.m_block_offset,
                     seqlen_info.block_idx_offset,
                     (total_k_tokens + self.tile_n - 1) // self.tile_n,
-                    seqlen_info.has_cu_seqlens_q,
-                    seqlen_info.has_cu_seqlens_k,
+                    seqlen_info.has_ranges_q,
+                    seqlen_info.has_ranges_k,
                     seqlen_info.has_seqused_q,
                     seqlen_info.has_seqused_k,
                 )
@@ -2157,8 +2157,8 @@ class FFABwdSm90:
                     seqlen_info.m_block_offset,
                     seqlen_info.block_idx_offset,
                     Int32(self.index_sparse_max_topk),
-                    seqlen_info.has_cu_seqlens_q,
-                    seqlen_info.has_cu_seqlens_k,
+                    seqlen_info.has_ranges_q,
+                    seqlen_info.has_ranges_k,
                     seqlen_info.has_seqused_q,
                     seqlen_info.has_seqused_k,
                 )
@@ -2936,7 +2936,7 @@ class FFABwdSm90:
             )
 
             # mdQacc_cur: (sQpad*tileHD):(1)
-            if const_expr(not seqlen_info.has_cu_seqlens_q):
+            if const_expr(not seqlen_info.has_ranges_q):
                 mdQacc_cur = mdQacc[None, head_idx, batch_idx]
             else:
                 mdQacc_cur = cute.domain_offset(

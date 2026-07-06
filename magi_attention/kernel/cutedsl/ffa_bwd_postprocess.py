@@ -238,7 +238,7 @@ class FFABwdPostProcess:
         mdQaccum: cute.Tensor,
         mdQ: cute.Tensor,
         scale: cutlass.Float32,
-        mCuSeqlensQ: Optional[cute.Tensor],
+        mRangesQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
@@ -263,10 +263,10 @@ class FFABwdPostProcess:
             cute.size_in_bytes(self.dtype, self.sdQ_layout),
         )
 
-        if const_expr(mCuSeqlensQ is not None):
+        if const_expr(mRangesQ is not None):
             TileScheduler = SingleTileVarlenScheduler
             num_head = mdQ.shape[1]
-            num_batch = mCuSeqlensQ.shape[0] - 1
+            num_batch = mRangesQ.shape[0]
             num_block = cute.ceil_div(mdQ.shape[0], self.tile_m)
         else:
             TileScheduler = SingleTileScheduler
@@ -284,7 +284,7 @@ class FFABwdPostProcess:
             headdim_v=0,
             total_q=mdQ.shape[0],
             tile_shape_mn=(self.tile_m, 1),
-            mCuSeqlensQ=mCuSeqlensQ,
+            mRangesQ=mRangesQ,
             mSeqUsedQ=mSeqUsedQ,
         )
 
@@ -295,7 +295,7 @@ class FFABwdPostProcess:
         self.kernel(
             mdQaccum,
             mdQ,
-            mCuSeqlensQ,
+            mRangesQ,
             mSeqUsedQ,
             scale,
             self.tiled_mma,
@@ -319,7 +319,7 @@ class FFABwdPostProcess:
         self,
         mdQaccum: cute.Tensor,
         mdQ: cute.Tensor,
-        mCuSeqlensQ: Optional[cute.Tensor],
+        mRangesQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         scale: cutlass.Float32,
         tiled_mma: cute.TiledMma,
@@ -371,13 +371,13 @@ class FFABwdPostProcess:
                 batch_idx,
                 mdQ.shape[1],
                 0,
-                mCuSeqlensQ=mCuSeqlensQ,
-                mCuSeqlensK=None,
+                mRangesQ=mRangesQ,
+                mRangesK=None,
                 mSeqUsedQ=mSeqUsedQ,
                 mSeqUsedK=None,
                 tile_m=self.tile_m * self.cluster_size,
             )
-            if const_expr(not seqlen.has_cu_seqlens_q):
+            if const_expr(not seqlen.has_ranges_q):
                 mdQ_cur = mdQ[batch_idx, None, head_idx, None]
                 mdQaccum_cur = mdQaccum[batch_idx, head_idx, None]
                 head_dim = mdQ.shape[3]
@@ -656,7 +656,7 @@ def _compile_bwd_postprocess(
     num_threads,
     atom_layout,
     swap_ab,
-    has_cuseqlens_q,
+    has_ranges_q,
     has_seqused_q,
     use_2cta_instrs,
     cluster_size,
@@ -679,13 +679,12 @@ def _compile_bwd_postprocess(
         mdKaccum,
         mdVaccum,
     ) = make_fake_bwd_tensors(
-        dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False
+        dtype, has_gqa=True, varlen_q=has_ranges_q, varlen_k=False
     )
-    batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
-    batchp1 = cute.sym_int()
-    mCuSeqlensQ = (
-        fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
-        if has_cuseqlens_q
+    batch = mQ.shape[0] if not has_ranges_q else cute.sym_int()
+    mRangesQ = (
+        fake_tensor(cutlass.Int32, (batch, 2), divisibility=1)
+        if has_ranges_q
         else None
     )
     mSeqUsedQ = (
@@ -707,7 +706,7 @@ def _compile_bwd_postprocess(
         mdQaccum,
         mdQ,
         cutlass.Float32(0.0),
-        mCuSeqlensQ,
+        mRangesQ,
         mSeqUsedQ,
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--enable-tvm-ffi",
@@ -718,7 +717,7 @@ def bwd_postprocess(
     accum,
     output,
     scale,
-    cu_seqlens,
+    ranges,
     seqused,
     arch,
     dtype,
@@ -738,7 +737,7 @@ def bwd_postprocess(
         num_threads,
         atom_layout,
         swap_ab,
-        cu_seqlens is not None,
+        ranges is not None,
         seqused is not None,
         use_2cta_instrs,
         cluster_size,
@@ -752,7 +751,7 @@ def bwd_postprocess(
         accum,
         output,
         scale,
-        cu_seqlens,
+        ranges,
         seqused,
     )
 

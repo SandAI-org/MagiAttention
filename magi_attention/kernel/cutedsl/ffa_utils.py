@@ -88,34 +88,28 @@ def normalize_mask_types(
     return mask_types.contiguous()
 
 
-def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
-    """Collapse q/k ranges down to a cu_seqlens tensor (step-1 hack).
+def pad_ranges_for_kernel(ranges: torch.Tensor | None) -> torch.Tensor | None:
+    """Add a sentinel row so the kernel can safely read ranges[num_batch].
 
-    The full q/k ranges semantics allow arbitrary (possibly overlapping /
-    non-contiguous) per-range [start, end) intervals, but the current kernels
-    only understand the varlen cu_seqlens layout. So as a first step we only
-    accept ranges that are *equivalent* to a cu_seqlens partition, i.e.
-    contiguous, non-overlapping intervals starting at 0:
-    ``[[0, e0], [e0, e1], ...]`` -> ``[0, e0, e1, ...]``.
-
-    The caller is responsible for guaranteeing this equivalence (no validating
-    device sync is done here); a non-conforming input silently produces a
-    wrong cu_seqlens.
+    Non-persistent single-tile kernels (e.g. SM80) may launch padding CTAs
+    with ``batch_idx == num_batch``. The sentinel ``[total, total]``
+    gives ``offset = total`` and ``seqlen = 0``, making the padding tile
+    a safe no-op — matching the old cu_seqlens[num_batch] behaviour.
 
     Args:
         ranges: an ``[N, 2]`` int32 cuda tensor of [start, end) intervals, or
             ``None`` for the dense (non-varlen) path.
 
     Returns:
-        An ``[N + 1]`` int32 cu_seqlens tensor, or ``None`` if ``ranges`` is None.
+        An ``[N + 1, 2]`` int32 tensor with the sentinel appended, or ``None``.
     """
     if ranges is None:
         return None
     assert (
         ranges.dim() == 2 and ranges.shape[1] == 2
     ), f"ranges must be an [N, 2] tensor, got shape {tuple(ranges.shape)}"
-    cu_seqlens = torch.cat([ranges[:1, 0], ranges[:, 1]]).to(torch.int32)
-    return cu_seqlens.contiguous()
+    sentinel = ranges[-1:, 1:2].expand(-1, 2)
+    return torch.cat([ranges, sentinel], dim=0).contiguous()
 
 
 # ---------------------------------------------------------------------------

@@ -14,8 +14,8 @@
 
 """SM90-specific range info and runtime mask-type block skipping.
 
-- ``create_seqlen_info_from_ranges``: reads q_ranges/k_ranges [N,2] directly
-  instead of cu_seqlens, returning a standard SeqlenInfoQK.
+- ``create_seqlen_info_from_ranges``: reads q_ranges/k_ranges [N,2] ranges
+  and returns a standard SeqlenInfoQK.
 - ``get_n_block_min_max_runtime`` / ``get_m_block_min_max_runtime``:
   per-range block-skipping using a runtime ``mask_type`` (full=0, causal=1,
   inv_causal=2, bi_causal=3).
@@ -51,11 +51,11 @@ def create_seqlen_info_from_ranges(
     mCuTotalMBlocks: Optional[cute.Tensor] = None,
     mCuBlockIdxOffsets: Optional[cute.Tensor] = None,
 ) -> SeqlenInfoQK:
-    """Create a SeqlenInfoQK from [N,2] q/k range tensors instead of cu_seqlens.
+    """Create a SeqlenInfoQK from [N,2] q/k range tensors.
 
-    The returned object is a standard SeqlenInfoQK with has_cu_seqlens=True,
+    The returned object is a standard SeqlenInfoQK with has_ranges=True,
     so all downstream consumers (BlockInfo, AttentionMask, offset_batch_Q/K,
-    TMA ragged tensors) behave identically to the cu_seqlens path.
+    TMA ragged tensors) behave identically to the ranges path.
 
     Args:
         batch_idx: Current batch (range) index.
@@ -99,8 +99,8 @@ def create_seqlen_info_from_ranges(
         m_block_offset,
         block_idx_offset,
         num_n_blocks,
-        has_cu_seqlens_q=True,
-        has_cu_seqlens_k=True,
+        has_ranges_q=True,
+        has_ranges_k=True,
         has_seqused_q=False,
         has_seqused_k=False,
     )

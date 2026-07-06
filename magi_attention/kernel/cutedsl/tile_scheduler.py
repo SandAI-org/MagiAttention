@@ -172,7 +172,7 @@ class TileSchedulerArguments(ParamsBase):
     total_q: Int32
     tile_shape_mn: cutlass.Constexpr[Tuple[int, int]]
     cluster_shape_mn: cutlass.Constexpr[Tuple[int, int]] = (1, 1)
-    mCuSeqlensQ: Optional[cute.Tensor] = None
+    mRangesQ: Optional[cute.Tensor] = None
     mSeqUsedQ: Optional[cute.Tensor] = None
     qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
     element_size: cutlass.Constexpr[int] = 2
@@ -829,7 +829,7 @@ class SingleTileVarlenScheduler:
         num_splits: Int32
         max_kvblock_in_l2: Int32
         tile_shape_mn: cutlass.Constexpr[Tuple[int, int]]
-        mCuSeqlensQ: Optional[cute.Tensor] = None
+        mRangesQ: Optional[cute.Tensor] = None
         mSeqUsedQ: Optional[cute.Tensor] = None
         qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
         lpt: cutlass.Constexpr[bool] = False
@@ -863,8 +863,8 @@ class SingleTileVarlenScheduler:
                 kv_block_size += args.headdim * 4 * args.tile_shape_mn[1]
             max_kvblock_in_l2 = size_l2 // kv_block_size
             assert (
-                args.mCuSeqlensQ is not None or args.mSeqUsedQ is not None
-            ), "At least one of mCuSeqlensQ or mSeqUsedQ must be provided"
+                args.mRangesQ is not None or args.mSeqUsedQ is not None
+            ), "At least one of mRangesQ or mSeqUsedQ must be provided"
             assert (
                 args.cluster_shape_mn[1] == 1
             ), "Only cluster_shape_mn[1] == 1 is supported"
@@ -880,7 +880,7 @@ class SingleTileVarlenScheduler:
                 num_splits=args.num_splits,
                 max_kvblock_in_l2=max_kvblock_in_l2,
                 tile_shape_mn=args.tile_shape_mn,
-                mCuSeqlensQ=args.mCuSeqlensQ,
+                mRangesQ=args.mRangesQ,
                 mSeqUsedQ=args.mSeqUsedQ,
                 qhead_per_kvhead_packgqa=args.qhead_per_kvhead_packgqa,
                 lpt=args.lpt,
@@ -976,12 +976,10 @@ class SingleTileVarlenScheduler:
             if batch_idx < params.num_batch:
                 seqlen = params.mSeqUsedQ[batch_idx]
         else:
-            assert params.mCuSeqlensQ is not None
-            cur_cu_seqlen = Int32(0)
-            if batch_idx <= params.num_batch:
-                cur_cu_seqlen = params.mCuSeqlensQ[batch_idx]
-            next_cu_seqlen = cute.arch.shuffle_sync_down(cur_cu_seqlen, offset=1)
-            seqlen = next_cu_seqlen - cur_cu_seqlen
+            assert params.mRangesQ is not None
+            seqlen = Int32(0)
+            if batch_idx < params.num_batch:
+                seqlen = params.mRangesQ[batch_idx, 1] - params.mRangesQ[batch_idx, 0]
         if cutlass.const_expr(params.qhead_per_kvhead_packgqa > 1):
             seqlen *= params.qhead_per_kvhead_packgqa
         return (

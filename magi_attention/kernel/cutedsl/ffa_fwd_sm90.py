@@ -210,8 +210,8 @@ class FFAFwdSm90:
         mV_type: Type[cutlass.Numeric],
         mO_type: Type[cutlass.Numeric],
         mLSE_type: Type[cutlass.Numeric] | None,
-        mCuSeqlensQ_type: Type[cutlass.Numeric] | None,
-        mCuSeqlensK_type: Type[cutlass.Numeric] | None,
+        mRangesQ_type: Type[cutlass.Numeric] | None,
+        mRangesK_type: Type[cutlass.Numeric] | None,
         mSeqUsedQ_type: Type[cutlass.Numeric] | None,
         mSeqUsedK_type: Type[cutlass.Numeric] | None,
     ):
@@ -224,10 +224,10 @@ class FFAFwdSm90:
             raise TypeError("Only Float16 or BFloat16 is supported")
         if const_expr(mLSE_type not in [None, Float32]):
             raise TypeError("LSE tensor must be Float32")
-        if const_expr(mCuSeqlensQ_type not in [None, Int32]):
-            raise TypeError("cu_seqlens_q tensor must be Int32")
-        if const_expr(mCuSeqlensK_type not in [None, Int32]):
-            raise TypeError("cu_seqlens_k tensor must be Int32")
+        if const_expr(mRangesQ_type not in [None, Int32]):
+            raise TypeError("ranges_q tensor must be Int32")
+        if const_expr(mRangesK_type not in [None, Int32]):
+            raise TypeError("ranges_k tensor must be Int32")
         if const_expr(mSeqUsedQ_type not in [None, Int32]):
             raise TypeError("seqused_q tensor must be Int32")
         if const_expr(mSeqUsedK_type not in [None, Int32]):
@@ -569,8 +569,8 @@ class FFAFwdSm90:
         mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
         softmax_scale: Float32,
-        mCuSeqlensQ: Optional[cute.Tensor] = None,
-        mCuSeqlensK: Optional[cute.Tensor] = None,
+        mRangesQ: Optional[cute.Tensor] = None,
+        mRangesK: Optional[cute.Tensor] = None,
         mSeqUsedQ: Optional[cute.Tensor] = None,
         mSeqUsedK: Optional[cute.Tensor] = None,
         mPageTable: Optional[cute.Tensor] = None,  # (b_k, max_num_pages_per_seq)
@@ -602,15 +602,15 @@ class FFAFwdSm90:
                     mV,
                     mO,
                     mLSE,
-                    mCuSeqlensQ,
-                    mCuSeqlensK,
+                    mRangesQ,
+                    mRangesK,
                     mSeqUsedQ,
                     mSeqUsedK,
                 )
             )
         )
 
-        self.varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
+        self.varlen_q = mRangesQ is not None or mSeqUsedQ is not None
         self.use_block_sparsity = cutlass.const_expr(blocksparse_tensors is not None)
 
         # --- Set up attributes ---
@@ -630,16 +630,16 @@ class FFAFwdSm90:
             cutedsl_utils.assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)
         ]
         QO_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
+            [1, 3, 2, 0] if const_expr(mRangesQ is None) else [0, 2, 1]
         )
         mQ, mO = [layout_utils.select(t, QO_layout_transpose) for t in (mQ, mO)]
         KV_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
+            [1, 3, 2, 0] if const_expr(mRangesK is None) else [0, 2, 1]
         )
         mK, mV = [layout_utils.select(t, KV_layout_transpose) for t in (mK, mV)]
 
         # mLSE: (sQ,nhQ,batch):(1,sQ,sQ*nhQ)
-        LSE_layout_transpose = [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
+        LSE_layout_transpose = [2, 1, 0] if const_expr(mRangesQ is None) else [1, 0]
         mLSE = (
             layout_utils.select(mLSE, LSE_layout_transpose)
             if const_expr(mLSE is not None)
@@ -760,7 +760,7 @@ class FFAFwdSm90:
 
         # --- Make tile scheduler class/args ---
 
-        if const_expr(mCuSeqlensQ is not None or mSeqUsedQ is not None):
+        if const_expr(mRangesQ is not None or mSeqUsedQ is not None):
             self.tile_scheduler_cls = SingleTileVarlenScheduler
         else:
             self.tile_scheduler_cls = (
@@ -772,8 +772,8 @@ class FFAFwdSm90:
             cute.ceil_div(cute.size(mQ.shape[0]), self.tile_m),
             cute.size(mQ.shape[2]),
             cute.size(mQ.shape[3])
-            if const_expr(mCuSeqlensQ is None)
-            else cute.size(mCuSeqlensQ.shape[0] - 1),
+            if const_expr(mRangesQ is None)
+            else cute.size(mRangesQ.shape[0] - 1),
             1,  # num_splits
             cute.size(mK.shape[0])
             if const_expr(mPageTable is None)
@@ -781,10 +781,10 @@ class FFAFwdSm90:
             mQ.shape[1],
             mV.shape[1],
             total_q=cute.size(mQ.shape[0])
-            if const_expr(mCuSeqlensQ is not None)
+            if const_expr(mRangesQ is not None)
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=(self.tile_m, self.tile_n),
-            mCuSeqlensQ=mCuSeqlensQ,
+            mRangesQ=mRangesQ,
             mSeqUsedQ=mSeqUsedQ,
             qhead_per_kvhead_packgqa=self.qhead_per_kvhead
             if const_expr(self.pack_gqa)
@@ -893,8 +893,8 @@ class FFAFwdSm90:
             tma_tensor_V if const_expr(self.use_tma_KV) else mV,
             tma_tensor_O if const_expr(self.use_tma_O) else mO,
             mLSE,
-            mCuSeqlensQ,
-            mCuSeqlensK,
+            mRangesQ,
+            mRangesK,
             mSeqUsedQ,
             mSeqUsedK,
             mPageTable,
@@ -940,8 +940,8 @@ class FFAFwdSm90:
         mV: cute.Tensor,
         mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
-        mCuSeqlensQ: Optional[cute.Tensor],
-        mCuSeqlensK: Optional[cute.Tensor],
+        mRangesQ: Optional[cute.Tensor],
+        mRangesK: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mSeqUsedK: Optional[cute.Tensor],
         mPageTable: Optional[cute.Tensor],
@@ -1141,8 +1141,8 @@ class FFAFwdSm90:
                 seqlen_k_static=mK.shape[0]
                 if const_expr(mPageTable is None)
                 else mK.shape[0] * mPageTable.shape[1],
-                mCuSeqlensQ=mCuSeqlensQ,
-                mCuSeqlensK=mCuSeqlensK,
+                mRangesQ=mRangesQ,
+                mRangesK=mRangesK,
                 mSeqUsedQ=mSeqUsedQ,
                 mSeqUsedK=mSeqUsedK,
                 mCuTotalMBlocks=(
@@ -2070,11 +2070,11 @@ class FFAFwdSm90:
             # Recompute fastdiv_mods if necessary for varlen with aux_tensors
             recompute_fastdiv_mods_q = cutlass.const_expr(
                 aux_tensors is not None
-                and (seqlen_info.has_cu_seqlens_q or seqlen_info.has_seqused_q)
+                and (seqlen_info.has_ranges_q or seqlen_info.has_seqused_q)
             )
             recompute_fastdiv_mods_k = cutlass.const_expr(
                 aux_tensors is not None
-                and (seqlen_info.has_cu_seqlens_k or seqlen_info.has_seqused_k)
+                and (seqlen_info.has_ranges_k or seqlen_info.has_seqused_k)
             )
             if cutlass.const_expr(fastdiv_mods is not None):
                 seqlen_q_divmod, seqlen_k_divmod = fastdiv_mods
@@ -2218,8 +2218,8 @@ class FFAFwdSm90:
                         seqlen_info.m_block_offset,
                         seqlen_info.block_idx_offset,
                         inner_block_max,
-                        seqlen_info.has_cu_seqlens_q,
-                        seqlen_info.has_cu_seqlens_k,
+                        seqlen_info.has_ranges_q,
+                        seqlen_info.has_ranges_k,
                         seqlen_info.has_seqused_q,
                         seqlen_info.has_seqused_k,
                     )
@@ -2338,8 +2338,8 @@ class FFAFwdSm90:
                         seqlen_info.m_block_offset,
                         seqlen_info.block_idx_offset,
                         inner_block_max_c,
-                        seqlen_info.has_cu_seqlens_q,
-                        seqlen_info.has_cu_seqlens_k,
+                        seqlen_info.has_ranges_q,
+                        seqlen_info.has_ranges_k,
                         seqlen_info.has_seqused_q,
                         seqlen_info.has_seqused_k,
                     )
@@ -3106,7 +3106,7 @@ class FFAFwdSm90:
 
         # S2G copy sO to gO
         ragged = self.use_tma_O and (
-            seqlen_info.has_cu_seqlens_q or seqlen_info.has_seqused_q
+            seqlen_info.has_ranges_q or seqlen_info.has_seqused_q
         )
         mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3, ragged=ragged)[
             None, None, head_idx

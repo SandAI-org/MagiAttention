@@ -998,8 +998,8 @@ class Sm100FusedMask:
             m_block_offset=Int32(0),
             block_idx_offset=Int32(0),
             num_n_blocks=cute.ceil_div(seqlen_k, tile_shape[1]),
-            has_cu_seqlens_q=False,
-            has_cu_seqlens_k=False,
+            has_ranges_q=False,
+            has_ranges_k=False,
             has_seqused_q=False,
             has_seqused_k=False,
         )
@@ -1043,8 +1043,8 @@ class Sm100FusedMask:
             m_block_offset=Int32(0),
             block_idx_offset=Int32(0),
             num_n_blocks=cute.ceil_div(seqlen_k, tile_shape[1]),
-            has_cu_seqlens_q=False,
-            has_cu_seqlens_k=False,
+            has_ranges_q=False,
+            has_ranges_k=False,
             has_seqused_q=False,
             has_seqused_k=False,
         )

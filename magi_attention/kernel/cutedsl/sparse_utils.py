@@ -599,7 +599,7 @@ def prepare_block_sparse_fwd(
     block_sparse_tensors: BlockSparseTensorsTorch | None,
     *,
     pack_gqa: bool,
-    cu_seqlens_q: torch.Tensor | None,
+    is_varlen: bool,
     batch_size: int,
     num_head: int,
     seqlen_q: int,
@@ -623,7 +623,7 @@ def prepare_block_sparse_fwd(
     head_dim_idx = 0 if block_sparse_tensors.mask_block_cnt.ndim == 2 else 1
     if pack_gqa and block_sparse_tensors.mask_block_cnt.shape[head_dim_idx] != 1:
         pack_gqa = False
-    if cu_seqlens_q is not None:
+    if is_varlen:
         assert (
             block_sparse_tensors.cu_total_m_blocks is not None
         ), "Varlen block sparsity requires block_sparse_tensors.cu_total_m_blocks."
