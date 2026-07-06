@@ -609,7 +609,7 @@ def _phase4_opt_plot():
     COL_BOTH = (0.45, 0.20, 0.55)  # both (purple)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7), dpi=150)
-    bw = 0.30
+    bw = 0.30  # noqa: F841
 
     # ── Left: Writeback symmetry (R2S + barrier + TMA) ──
     groups_wb = [
@@ -799,7 +799,7 @@ def _phase4_summary_plot():
     sks = _tf("loopk_ununion_stgv1_sks")
     svw_skw = _tf("loopk_ununion_stgv1_svw_skw")
     ddv = _tf("loopk_ununion_stgv1_ddv")
-    bypass = _tf("loopk_bypass")
+    bypass = _tf("loopk_bypass")  # noqa: F841
     svl = _tf("loopk_ununion_stgv1_svl")
     # Stage alternatives
     o1k = _tf("loopk_ununion_stgk1")
@@ -974,7 +974,7 @@ def _phase4_summary_plot():
     colors_wf.append("#2E7D32")
 
     y_pos = np.arange(len(labels_wf))
-    bars_wf = ax2.barh(
+    bars_wf = ax2.barh(  # noqa: F841
         y_pos,
         vals_wf,
         left=bottoms,
