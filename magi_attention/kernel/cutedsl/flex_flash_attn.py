@@ -55,6 +55,7 @@ from .ffa_utils import (
     is_ffa_clc_enabled,
     maybe_contiguous,
     normalize_mask_types,
+    prepare_index_sparse_flex_args,
     ranges_to_cu_seqlens,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
@@ -1484,9 +1485,10 @@ def flex_flash_attn_func(
     pack_gqa: bool | None = None,
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    index_sparse_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
-    Flex-flash-attention interface (dense / varlen).
+    Flex-flash-attention interface (dense / varlen / index-sparse).
 
     Explanation of some optional arguments:
 
@@ -1515,7 +1517,28 @@ def flex_flash_attn_func(
         ``mask_mod`` / ``aux_tensors``) and block-sparse
         (``block_sparse_tensors`` / ``block_sparse_tensors_bwd``) capabilities.
         Leave as ``None`` for the plain dense / varlen path.
+
+    index_sparse_indices: optional ``(total_q, num_kv_heads, max_topk)`` int32
+        tensor specifying, for each Q token, the KV indices it attends to.
+        Internally converted to a dense boolean mask + ``mask_mod`` so the
+        existing kernel handles the sparse pattern.  Currently only
+        ``num_kv_heads == 1`` is supported (MQA or view-trick layout).
+        Mutually exclusive with ``mask_mod`` inside *flex_attn_args*.
     """
+    if index_sparse_indices is not None:
+        assert q.ndim == 4, "index_sparse_indices requires batch-mode q (B, S, H, D)"
+        seqlen_q = q.shape[1]
+        seqlen_k = k.shape[1]
+        flex_attn_args = prepare_index_sparse_flex_args(
+            index_sparse_indices,
+            seqlen_q,
+            seqlen_k,
+            q.device,
+            existing_flex_args=flex_attn_args,
+        )
+        if mask_types is None:
+            mask_types = MT_MAP.full
+
     out, lse = FlexFlashAttnFunc.apply(
         q,
         k,
