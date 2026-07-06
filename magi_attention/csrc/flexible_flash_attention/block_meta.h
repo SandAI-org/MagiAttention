@@ -532,8 +532,10 @@ struct IndexSparseBlockMeta {
   }
 
   // Fill token indices into the smem stage slot for the CURRENT tile.
-  // Unified loop: maps each position in the tile to a physical token via
-  //   entry_idx = pos / kStride; result = indices[entry_idx] * kStride + pos % kStride
+  // Unified loop: maps each tile position to a logical token row via:
+  //   slot = pos / kStride          (which indices array element covers this pos)
+  //   logical_block = indices[slot] (logical block index from sparse indices)
+  //   row = logical_block * kStride + pos % kStride  (expand to token granularity)
   // kStride is compile-time: SparseKBlockSize (LoopK), PackGQAFactor (LoopQ+GQA), or 1.
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int token_idx_in_ldst_group, int ldst_group_idx) const {
@@ -545,9 +547,9 @@ struct IndexSparseBlockMeta {
 
     for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
       int const pos = base + j;
-      int const entry_idx = pos / kStride;
-      int const entry = (pos < total) ? sparse_indices_ptr[entry_idx] : -1;
-      group_rows[j] = (entry >= 0) ? entry * kStride + pos % kStride : 0;
+      int const indices_slot = pos / kStride;
+      int const logical_block_idx = (pos < total) ? sparse_indices_ptr[indices_slot] : -1;
+      group_rows[j] = (logical_block_idx >= 0) ? logical_block_idx * kStride + pos % kStride : 0;
     }
   }
 
@@ -559,9 +561,9 @@ struct IndexSparseBlockMeta {
     if constexpr (InnerLoopQ) {
       constexpr int kStride = PackGQA ? PackGQAFactor : 1;
       int const pos = inner_block_idx * InnerBlockSize;
-      int const entry_idx = pos / kStride;
-      int const entry = (pos < seqlen_info.seqlen_q) ? sparse_indices_ptr[entry_idx] : -1;
-      return (entry >= 0) ? entry * kStride + pos % kStride : 0;
+      int const indices_slot = pos / kStride;
+      int const logical_block_idx = (pos < seqlen_info.seqlen_q) ? sparse_indices_ptr[indices_slot] : -1;
+      return (logical_block_idx >= 0) ? logical_block_idx * kStride + pos % kStride : 0;
     } else {
       static_assert(SparseKBlockSize >= InnerBlockSize, "InnerLoopK get_packed_first_row() requires kbs >= kBlockN");
       return get_n_block_abs() * InnerBlockSize;
