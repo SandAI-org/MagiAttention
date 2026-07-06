@@ -346,24 +346,6 @@ _SYMMETRY_CONFIGS = [
     ),
 ]
 
-# ══════ P5-v5: Cross-iteration dV accumulation ══════
-# Accumulate dV over 2 inner iterations before flushing (R2S + barrier + TMA).
-# Reduces dV writeback frequency by 50%, theoretical gain ~68ms -> ~460T (+82T).
-# Requires ununion (independent dV/dK SMEM buffers) for barrier independence.
-_CROSS_ITER_CONFIGS = [
-    # O1 + cross-iteration dV accumulation (flush every 2 iterations)
-    (
-        "loopk_ununion_stgv1_dci",
-        {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
-            "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
-            "MAGI_ATTENTION_FFA_BWD_DV_CROSS_ITER_ACCUM": "1",
-        },
-        False,
-        "LoopK: O1+CrossIterDV",
-    ),
-]
-
 # ══════ P5-v6: Stage alternatives — stgK=1 vs stgV=1 ══════
 # Ununion needs +32KB → 230KB > 228KB. We freed SMEM via stgV=1 (O1).
 # But stgK=1 (Stages=1, K pipeline 2→1) saves the same 16KB.
@@ -427,7 +409,6 @@ _STAGE_CONFIGS = [
 _DEBUG_CONFIGS.extend(_STRUCTURAL_CONFIGS)
 _DEBUG_CONFIGS.extend(_OPTIMIZATION_CONFIGS)
 _DEBUG_CONFIGS.extend(_SYMMETRY_CONFIGS)
-_DEBUG_CONFIGS.extend(_CROSS_ITER_CONFIGS)
 _DEBUG_CONFIGS.extend(_STAGE_CONFIGS)
 
 

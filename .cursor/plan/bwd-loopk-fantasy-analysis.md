@@ -682,7 +682,7 @@ sync(dVFull) → TMA_dV → arrive(dVEmpty) → sync(dKFull) → TMA_dK → arri
 | 优先级 | 方向 | 预期收益 | 可行性 |
 |--------|------|---------|--------|
 | ~~P1~~ | ~~DeferDvR2S~~ | 0T | ❌ 已验证无效 |
-| **P2** | 减少 R2S 频率 | 中 | ❌ 不可行：inner 每轮写不同 K block 的 dV/dK |
+| **P2** | 减少 R2S 频率 (cross-iter accum) | 中 | ❌ 不可行：inner 每轮写不同 K block 的 dV/dK (实现后验证：数值错误，已 revert) |
 | ~~P3~~ | 调换 store_dV/dK 顺序 | 0T | ❌ dense 模式 warp 已并行 |
 | ~~P4~~ | smem_dvacc double-buffer | 中 | ❌ SMEM 超限 |
 | **NEW-1** | 减少 R2S 数据量 | 低-中 | 需 fp16 dV 累积器或更小 tile |
@@ -1198,100 +1198,54 @@ PerfDebug 重命名后全量重测 40 configs，数据与之前一致（±5T 噪
 
 3. ~~P3: 图表清理~~ **已完成** — 保留 summary + symmetry 两张图。
 
-4. **P4: 跨迭代 dV 累加探索** — 每 2 次 inner iteration 做 1 次 dV writeback。
-
-   **寄存器可行性分析** (2026-07-06 02:50):
-   - dV accum fragment = kBlockN × kHeadDim / (NumMmaWarpGroups × 128) = 64×128/(2×128) = **32 fp32 regs/thread**
-   - 双缓冲需额外 32 regs → 从 168 → ~200 regs/thread
-   - H100 限制: 65536 regs/SM, 当前 1 CTA/SM (受 SMEM 214KB 限制)
-   - 1 CTA × 256 threads × 200 regs = 51200 << 65536 → **寄存器可行**
-   - 理论收益: dV writeback 频率减半 → ~68ms 节省 → ~460T (+82T)
-
-   **实现路径** (代码分析 2026-07-06):
-   - `tdVrdV` 当前在 inner loop 内每次迭代声明 (line 3721)，MMA3 用 `zero_init=true`
-   - 核心改法：声明移到 loop 外，首次手动 `clear()`，后续 MMA3 用 `zero_init=false` 累加
-   - 每 N 次迭代做一次 R2S writeback + `clear()`
-   - 不需要两份 accumulator —— 同一个 fragment 原地累加，writeback 后 clear 即可
-   - 但 `zero_init` 是 WGMMA template param（编译时），Slice_dQKV_Mma 路径的 MMA3
-     已经用 `zero_init=true` → 需改为 `false` 并手动在 loop 外 clear
-   - Edge case: inner loop 结束后 flush 最后累积的 dV
-   - Barrier 修改：每 N 次 iteration 才 sync/arrive dVEmpty/dVFull
-   - 预计工作量 ~1-2 天，实现较直接
+4. ~~**P4: 跨迭代 dV 累加探索**~~ **❌ 已实现并 revert** — 数值错误。
+   InnerLoopK 每次 inner iteration 处理不同 K-block position 的 dV，不能累加到同一个
+   register fragment。实现后 benchmark 显示 TFLOPS 提升（因为少做了 writeback），但
+   结果数值错误。详见下方 "P4 Cross-iteration dV Accumulation — REVERTED" 章节。
 
 ---
 
-## P4 Cross-iteration dV Accumulation — Implementation (2026-07-06 03:00)
+## P4 Cross-iteration dV Accumulation — REVERTED (2026-07-06)
 
-### CI Fix
+### CI Fix (kept)
 - `.pre-commit-config.yaml`: merge duplicate `exclude` keys for `chinese_checker`,
   add `^\.cursor/` exclusion to allow Chinese in plan/rules files.
 - `phase4_loopk_debug.py`: translate Chinese comments to English.
 
-### P4 Implementation Plan
-1. **Add compile-time flag**: `MAGI_ATTENTION_FFA_BWD_DV_CROSS_ITER_ACCUM` env var
-   → template param `kBwdDvCrossIterAccum` (bool, default false)
-2. **Kernel code changes** (`mainloop_bwd_sm90_tma_gmma_ws.hpp`):
-   a. Move `tdVrdV` declaration outside inner loop (before iteration starts)
-   b. First iteration: manual `clear()` on the fragment
-   c. MMA3 (dV): change `zero_init` from `true` to `false` (accumulate across iterations)
-   d. Every `kDvFlushInterval` (=2) iterations: perform R2S + barrier + TMA writeback, then `clear()`
-   e. End of inner loop: flush any remaining accumulated dV
-   f. Barrier protocol: sync/arrive dVEmpty/dVFull only on flush iterations
-3. **JIT + template integration**: `_flex_flash_attn_jit.py`, `bwd_inst_template.jinja`,
-   `flash_bwd_launch_template.h` — add `kBwdDvCrossIterAccum` param
-4. **Bench integration**: Add cross-iter config to `phase4_loopk_debug.py`
-5. **Validate**: precompile → correctness → TFLOPS benchmark
+### P4 Status: ❌ REVERTED — Fundamentally incorrect for InnerLoopK
 
-### P4 Implementation Details (2026-07-06 03:30)
+**Root cause**: In InnerLoopK, each inner iteration processes a **different K-block
+position**. The `dV` computed in iteration `i` belongs to K-block `n_block_i`, while
+`dV` in iteration `i+1` belongs to K-block `n_block_{i+1}`. Accumulating these in a
+single register fragment (`tdVrdV_persist`) mixes gradients for different memory
+locations, producing numerically incorrect results.
 
-**Bug fix during implementation**: Initial `tdVrdV = tdVrdV_cross` was copy-by-value (CUTE ArrayEngine semantics),
-WGMMA would write to `tdVrdV`'s own registers, not the persistent accumulator. Fixed by:
-- Declare `Tensor tdVrdV_persist` OUTSIDE `bwd_step` lambda (before inner loop)
-- `clear(tdVrdV_persist)` when `PerfDebugDvCrossIterAccum=true`
-- Inside `bwd_step`: `auto& tdVrdV = tdVrdV_persist;` (reference alias)
-- `gemm<zero_init=true>` (normal case) clears the fragment before use → safe to reuse
-- `gemm<zero_init=false>` (cross-iter case) accumulates on existing data → correct
+The earlier plan had flagged this as "不可行!" (not feasible!) in the initial analysis,
+but the flag was overlooked during implementation.
 
-**Producer-consumer sync**:
-- Consumer: `dv_cross_iter_count` increments each iter; flush only when `count % kDvFlushInterval == 0`
-- Producer: `dv_producer_iter` mirrors; `store_dV()` only on flush iters
-- Both sides have residual flush after the inner loop for non-multiple-of-interval iterations
+**Why the benchmark showed improvement**: The implementation performed fewer writebacks
+(50% reduction), so wall-clock time decreased. However, the accumulated values were
+wrong — each flush wrote the sum of `dV` from 2 different K-block positions into just
+one of them.
 
-**Status**: Complete. Compiled and benchmarked successfully.
+**What was reverted (2026-07-06 12:00)**:
+- `mainloop_bwd_sm90_tma_gmma_ws.hpp`: removed `DvCrossIterAccum_` template param,
+  `PerfDebugDvCrossIterAccum`, `kDvFlushInterval`, `tdVrdV_persist`, flush gating logic,
+  and residual flush. Restored per-iteration `tdVrdV` allocation with `zero_init=true`.
+- `_flex_flash_attn_jit.py`: removed `MAGI_ATTENTION_FFA_BWD_DV_CROSS_ITER_ACCUM` env var.
+- `bwd_inst_template.jinja`: removed `kBwdDvCrossIterAccum` constexpr and template arg.
+- `flash_bwd_launch_template.h`: removed `DvCrossIterAccum` from both `run_flash_bwd`
+  and `run_mha_bwd_` templates.
+- `phase4_loopk_debug.py`: removed `_CROSS_ITER_CONFIGS`.
 
-### P4 Benchmark Results (2026-07-06 03:52)
+**Note**: The PerfPerfDebug→PerfDebug rename (from the same commit) is a valid fix
+and was kept.
 
-BWD-only timing, S=topk=32K, nhq=128, nhk=1, hd=128, bf16, PackGQA, GPU3.
-Note: Absolute TFLOPS depressed by node power throttling (~40% of normal);
-relative comparisons are valid.
-
-| Config | TFLOPS | ms | Δ vs O1 | Δ vs baseline | gap% |
-|--------|--------|----|---------|---------------|------|
-| LoopK baseline | 134.3 | 523.9 | — | — | 0% |
-| O1 (ununion+stgV1) | 151.0 | 466.1 | — | +16.7T (+12.4%) | 21% |
-| **O1+CrossIterDV** | **168.1** | **418.5** | **+17.2T** | **+33.8T (+25.2%)** | **43%** |
-| LoopQ baseline | 212.6 | 331.0 | +61.6T | +78.3T | 100% |
-
-gap% = Δ_baseline / (LoopQ - LoopK) = Δ / 78.3T
-
-**Key findings**:
-1. CrossIterDV adds +17.2T on top of O1 (+11.4%) — nearly equal to O1's own +16.7T
-2. Combined O1+CrossIterDV closes **43%** of the LoopK-LoopQ gap (vs O1 alone = 21%)
-3. No register pressure increase (168 regs across all configs)
-4. BWD time: 523.9ms → 418.5ms = **-105.4ms (-20.1%)**
-
-**Analysis**: Cross-iteration dV accumulation reduces the number of dV R2S + barrier +
-TMA writeback operations by 50% (from every iteration to every 2 iterations). The
-+17.2T gain is consistent with the theoretical model: dV writeback per iteration costs
-~1μs (R2S + fence + barrier), accumulated over 128 iterations → ~128μs saved per outer
-tile. With 256 outer tiles, total saving ≈ 32ms → maps to the observed 47.6ms improvement
-(466.1ms → 418.5ms) when accounting for reduced barrier contention.
-
-### Next Steps
-
-1. **Validate on non-throttled node**: Re-run when GPU is at full power to confirm
-   proportional gains hold (~380T for O1+CrossIterDV at full power)
-2. **Correctness test**: Run `test_flex_flash_attn.py` and `test_block_sparse.py`
-   with `MAGI_ATTENTION_FFA_BWD_DV_CROSS_ITER_ACCUM=1` to verify numerical correctness
-3. **Explore kDvFlushInterval=4**: Further reduce flush frequency (current=2)
-4. **Consider making O1+CrossIterDV the default for InnerLoopK**: If correctness passes
+### Lessons learned
+- Cross-iteration register accumulation is only valid when consecutive iterations
+  write to the **same** output position (e.g., InnerLoopQ where all inner iterations
+  contribute to the same Q-block's `dQ`).
+- For InnerLoopK, the alternative "double-buffer SMEM" approach (allocating a second
+  `dV` SMEM buffer to overlap R2S/TMA with the next MMA) remains the theoretically
+  correct approach, but requires +32KB SMEM which exceeds the 228KB H100 limit
+  under current tile/stage settings.

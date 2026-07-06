@@ -533,11 +533,6 @@ def get_ffa_jit_spec(
                 "skw",
             ),
             ("MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S", "bwd_defer_dv_r2s", "ddv"),
-            (
-                "MAGI_ATTENTION_FFA_BWD_DV_CROSS_ITER_ACCUM",
-                "bwd_dv_cross_iter_accum",
-                "dci",
-            ),
         ]:
             _val = os.environ.get(_env_name)
             if _val is not None and _val != "0":
@@ -735,7 +730,6 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK",
     "MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S",
-    "MAGI_ATTENTION_FFA_BWD_DV_CROSS_ITER_ACCUM",
 )
 
 

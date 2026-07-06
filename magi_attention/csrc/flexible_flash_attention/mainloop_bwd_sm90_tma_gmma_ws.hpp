@@ -92,8 +92,7 @@ template <
     bool SkipDvWriteback_ = false,
     bool SkipDkWriteback_ = false,
     bool UnunionDkvacc_ = false,
-    bool DeferDvR2S_ = false,
-    bool DvCrossIterAccum_ = false>
+    bool DeferDvR2S_ = false>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -124,9 +123,6 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool PerfDebugSkipDkWriteback = SkipDkWriteback_;
   static constexpr bool UnunionDkvacc = UnunionDkvacc_;
   static constexpr bool PerfDebugDeferDvR2S = DeferDvR2S_;
-  static constexpr bool PerfDebugDvCrossIterAccum = DvCrossIterAccum_;
-  static constexpr int kDvFlushInterval = PerfDebugDvCrossIterAccum ? 2 : 1;
-  static_assert(!(PerfDebugDvCrossIterAccum && PerfDebugDeferDvR2S), "DvCrossIterAccum and DeferDvR2S are mutually exclusive");
 
   static constexpr bool Has_softcap = Has_softcap_;
   static constexpr bool SdP_swapAB = SdP_swapAB_;
@@ -2558,19 +2554,10 @@ struct CollectiveMainloopBwdSm90 {
         store_dV();
         store_dK();
       } else {
-        int dv_producer_iter = 0;
         flash::iterate_range<kInnerDir, 2>(block_meta.inner_block_cur, block_meta.inner_block_min, block_meta.inner_block_max, [&] {
-          ++dv_producer_iter;
-          if (!PerfDebugDvCrossIterAccum || (dv_producer_iter % kDvFlushInterval == 0)) {
-            store_dV();
-          }
+          store_dV();
           store_dK();
         });
-        if constexpr (PerfDebugDvCrossIterAccum) {
-          if (dv_producer_iter % kDvFlushInterval != 0) {
-            store_dV();
-          }
-        }
       }
     };
 
@@ -3580,15 +3567,6 @@ struct CollectiveMainloopBwdSm90 {
 
     Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
 
-    // Cross-iteration dV accumulation: when enabled, tdVrdV_persist lives outside the inner
-    // loop so it persists across iterations. MMA3 uses zero_init=false; R2S flush every
-    // kDvFlushInterval iters. When disabled, a fresh fragment is allocated each iteration.
-    Tensor tdVrdV_persist = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
-    int dv_cross_iter_count = 0;
-    if constexpr (PerfDebugDvCrossIterAccum) {
-      clear(tdVrdV_persist);
-    }
-
     // Define backward step lambda func
     auto bwd_step = [&](int n_block, auto mask_fn, auto /*is_no_mask*/ = cute::false_type{}) {
       // MMA1 (SS): apply S = QK^T (or S^T = KQ^T if SdP_swapAB)
@@ -3739,20 +3717,18 @@ struct CollectiveMainloopBwdSm90 {
 
       // Apply MMA for dQ,dK,dV
       if constexpr (!Slice_dQKV_Mma) { // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
-        // MMA3: dV = P^T @ dO. When cross-iter, zero_init=false accumulates into tdVrdV_persist
-        // across iterations; flush to SMEM every kDvFlushInterval. Normal: zero_init=true.
-        auto& tdVrdV = tdVrdV_persist;
-        static constexpr bool dv_zero_init = !PerfDebugDvCrossIterAccum;
+        // MMA3 (RS or SS if not Mma_dKV_is_RS): apply dV = P^TdO (or dV^T = dO^TP if dKV_swapAB)
+        Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
         if constexpr (PerfDebugSkipDvMma) {
           // Debug: skip dV MMA entirely; tdVrdV stays zero-initialized.
           // No WGMMA issued, so MMA4's wg_wait=1 is trivially satisfied (0 pending <= 1).
         } else if constexpr (Mma_dKV_is_RS) {
           Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
-          flash::gemm</*zero_init=*/dv_zero_init, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO, tdVrdV);
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO, tdVrdV);
         } else {
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
           Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read_k.index()));
-          flash::gemm</*zero_init=*/dv_zero_init, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO, tdVrdV);
         }
 
         // MMA4 (RS or SS if not Mma_dKV_is_RS): apply dK = dS^TQ (or dK^T = Q^TdS if dKV_swapAB)
@@ -3808,39 +3784,29 @@ struct CollectiveMainloopBwdSm90 {
           // When PerfDebugSkipDvWriteback: skip R2S but keep barrier handshake to prevent
           // producer warp 1 from racing ahead of warp 2 in the iterate_range loop.
           // When PerfDebugDeferDvR2S: skip entirely here, do sync+R2S+arrive after MMA5.
-          // When PerfDebugDvCrossIterAccum: only flush every kDvFlushInterval iterations;
-          // on non-flush iterations, skip sync/R2S/arrive entirely (dV accumulates in regs).
           if constexpr (!PerfDebugDeferDvR2S) {
-            ++dv_cross_iter_count;
-            bool const dv_should_flush = !PerfDebugDvCrossIterAccum || (dv_cross_iter_count % kDvFlushInterval == 0);
-            if (dv_should_flush) {
-              int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+            int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
-              BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
-              if constexpr (!PerfDebugSkipDvWriteback) {
-                if constexpr (InnerUseScatter) {
-                  if (warp_group_idx == 0) {
-                    int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
-                    int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockN];
-                    for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockN; r += cutlass::NumThreadsPerWarpGroup) {
-                      dst[r] = src[r];
-                    }
+            if constexpr (!PerfDebugSkipDvWriteback) {
+              if constexpr (InnerUseScatter) {
+                if (warp_group_idx == 0) {
+                  int const* const src = &shared_storage.tensors.mainloop.smem_token_indices[smem_pipe_read_k.index() * kBlockN];
+                  int* const dst = &shared_storage.tensors.mainloop.smem_token_indices[kStages * kBlockN];
+                  for (int r = thread_idx % cutlass::NumThreadsPerWarpGroup; r < kBlockN; r += cutlass::NumThreadsPerWarpGroup) {
+                    dst[r] = src[r];
                   }
                 }
-
-                Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
-                cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
-
-                cutlass::arch::fence_view_async_shared();
-              } // !PerfDebugSkipDvWriteback
-
-              BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
-
-              if constexpr (PerfDebugDvCrossIterAccum) {
-                clear(tdVrdV_persist);
               }
-            } // dv_should_flush
+
+              Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
+              cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+
+              cutlass::arch::fence_view_async_shared();
+            } // !PerfDebugSkipDvWriteback
+
+            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
           } // !PerfDebugDeferDvR2S
         } else {
           // Consumer store path: dispatch on the store mechanism
@@ -4193,22 +4159,6 @@ struct CollectiveMainloopBwdSm90 {
         flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::N, kInnerDir>(block_meta, mask, tSrS, thread_idx, bwd_step);
       }
 
-      // Cross-iteration dV accumulation: flush any remaining accumulated dV after the inner loop.
-      if constexpr (PerfDebugDvCrossIterAccum && !Slice_dQKV_Mma && dKVacc_use_smem && InnerDxStoreInProducer && !PerfDebugDeferDvR2S) {
-        if (dv_cross_iter_count % kDvFlushInterval != 0) {
-          int const warp_group_idx_flush = flash::canonical_warp_group_idx_nosync() - 1;
-
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx_flush);
-
-          if constexpr (!PerfDebugSkipDvWriteback) {
-            Tensor taccdVrdV_flush = r2s_thr_copy_dKVaccum.retile_S(tdVrdV_persist);
-            cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV_flush, tdVsdVaccum);
-            cutlass::arch::fence_view_async_shared();
-          }
-
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx_flush);
-        }
-      }
     };
 
     // --- Unified MMA control flow ---
