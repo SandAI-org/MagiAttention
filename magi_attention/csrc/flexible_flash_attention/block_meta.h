@@ -43,7 +43,7 @@ struct DenseBlockMeta {
   // When !RangeMerge, the batch loop runs exactly once; mark it so callers can elide the while(true).
   static constexpr bool NeedsBatchLoop = RangeMerge;
 
-  int const outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
+  int const outer_tile_idx; // m_block when !InnerLoopQ, n_block when InnerLoopQ
   int const bidh;
   int const bidh_kv;
   int bidb;
@@ -61,7 +61,7 @@ struct DenseBlockMeta {
 
   template <typename ParamsT, typename BlockCoordT, typename SharedStorage>
   CUTLASS_DEVICE DenseBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
+      : outer_tile_idx(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
         // When FlattenGQA (PackGQA or CatGQA), the scheduler assigns bidh as
         // the kv-head index directly. Otherwise bidh is the q-head index and
@@ -95,8 +95,8 @@ struct DenseBlockMeta {
   CUTLASS_DEVICE
   void update_attn_and_bounds() {
     attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
-    auto [min_, max_] = InnerLoopQ ? BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type)
-                                   : BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+    auto [min_, max_] = InnerLoopQ ? BlockMN_t::get_m_block_min_max(seqlen_info, outer_tile_idx, bidb, attn_type)
+                                   : BlockMN_t::get_n_block_min_max(seqlen_info, outer_tile_idx, bidb, attn_type);
     inner_block_min = min_;
     inner_block_cnt = max_;
   }
@@ -118,7 +118,7 @@ struct DenseBlockMeta {
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(outer_block, bidh, bidb);
+    return cute::make_tuple(outer_tile_idx, bidh, bidb);
   }
 
   CUTLASS_DEVICE
@@ -159,7 +159,7 @@ template <
     bool PackGQA,
     int PackGQAFactor,
     int NumTokensPerLdstGroup_,
-    int LdstLdstGroupSize_,
+    int LdstGroupSize_,
     int NumProducerThreads_,
     int kBlockN_,
     bool InnerDirMaxToMin_,
@@ -170,7 +170,7 @@ struct BlockSparseBlockMeta {
   static constexpr bool IsInnerLoopQ = IsInnerLoopQ_;
   static constexpr int InnerBlockSize = kBlockN_;
 
-  int const outer_block; // m_block for InnerLoopK, n_block for InnerLoopQ
+  int const outer_tile_idx; // m_block for InnerLoopK, n_block for InnerLoopQ
   int const bidh;
   int const bidh_kv;
   int bidb;
@@ -220,7 +220,7 @@ struct BlockSparseBlockMeta {
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,
       int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
+      : outer_tile_idx(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
         bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
@@ -241,14 +241,15 @@ struct BlockSparseBlockMeta {
       }
     }();
 
-    // No outer_block bounds check needed: the persistent scheduler computes tile
-    // count from the outer-dimension range, so outer_block is always in-range
+    // No outer_tile_idx bounds check needed: the persistent scheduler computes tile
+    // count from the outer-dimension range, so outer_tile_idx is always in-range
     // (symmetric for both InnerLoopQ and InnerLoopK).
 
     int2 const r0 = packed_range(bidb);
     range_size = r0.y - r0.x;
     int const total_tokens = (end_batches - bidb) * range_size;
     inner_block_cnt = (total_tokens + InnerBlockSize - 1) / InnerBlockSize;
+    // Tile padding: last tile may extend past actual tokens; mask zeros these rows.
     num_invalid_token = inner_block_cnt * InnerBlockSize - total_tokens;
     inner_block_idx = flash::init_block_cur<kDir>(inner_block_min, inner_block_cnt);
 
@@ -355,7 +356,7 @@ struct BlockSparseBlockMeta {
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(outer_block, bidh, bidb);
+    return cute::make_tuple(outer_tile_idx, bidh, bidb);
   }
 
   CUTLASS_DEVICE
@@ -436,7 +437,7 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 //   indices layout: (num_k_blocks, nhk * inner_topk_per_head)
 //
 // Fields (all const, computed in constructor init-list):
-//   outer_block — tile index along the outer loop dimension
+//   outer_tile_idx — tile index along the outer loop dimension
 //   bidh        — head index from scheduler (= KV-head when PackGQA; = Q-head when !PackGQA)
 //   bidb        — batch/token index (Q token for InnerLoopK, K block for InnerLoopQ)
 //   nhk         — total KV-head count
@@ -449,7 +450,7 @@ template <
     int PackGQAFactor,
     int NumTokensPerLdstGroup_,
     int NumProducerThreads_,
-    int LdstLdstGroupSize_,
+    int LdstGroupSize_,
     int InnerBlockSize_,
     bool InnerDirMaxToMin_,
     int SparseKBlockSize_,
@@ -462,7 +463,7 @@ struct IndexSparseBlockMeta {
   static constexpr bool NeedsBatchLoop = true;
 
   // ─── Scheduler-assigned coordinates (const, computed in init-list) ───
-  int const outer_block;
+  int const outer_tile_idx;
   int const bidh; // Head index from scheduler (KV-head when PackGQA, Q-head otherwise)
   int const bidb;
   int const nhk; // Total KV-head count
@@ -487,7 +488,7 @@ struct IndexSparseBlockMeta {
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,
       int thread_idx = 0)
-      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidb(get<2>(block_coord)), nhk(detail::nhk_of<ParamsT>::get(params)), bidh_kv([&]() -> int {
+      : outer_tile_idx(get<0>(block_coord)), bidh(get<1>(block_coord)), bidb(get<2>(block_coord)), nhk(detail::nhk_of<ParamsT>::get(params)), bidh_kv([&]() -> int {
           if constexpr (PackGQA) {
             return bidh;
           } else {
@@ -516,6 +517,7 @@ struct IndexSparseBlockMeta {
       int effective_k = actual_topk * SparseKBlockSize;
       seqlen_info.seqlen_k = effective_k;
       inner_block_cnt = (effective_k + InnerBlockSize - 1) / InnerBlockSize;
+      // Tile padding: last tile may extend past actual tokens; mask zeros these rows.
       num_invalid_token = inner_block_cnt * InnerBlockSize - effective_k;
     } else {
       // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
@@ -536,6 +538,7 @@ struct IndexSparseBlockMeta {
       seqlen_info.offset_q = 0;
       seqlen_info.seqlen_q = total_q_rows;
       inner_block_cnt = (total_q_rows + InnerBlockSize - 1) / InnerBlockSize;
+      // Tile padding: last tile may extend past actual tokens; mask zeros these rows.
       num_invalid_token = inner_block_cnt * InnerBlockSize - total_q_rows;
     }
 
@@ -627,6 +630,10 @@ struct IndexSparseBlockMeta {
   // Absolute packed row for TMA coordinate computation.
   // InnerLoopQ: maps inner_block_idx through inner_indices → absolute packed Q row.
   // InnerLoopK: maps inner_block_idx through index_sparse_indices → absolute packed K row.
+  // NOTE: The bounds check (local_idx < seqlen_q) handles tile tail padding —
+  // inner_block_cnt * InnerBlockSize may exceed actual token count; out-of-bounds
+  // positions return 0 (a safe dummy row). The consumer's mask uses num_invalid_token
+  // to zero these padding rows' attention scores, and the epilogue skips writing them.
   CUTLASS_DEVICE
   int get_packed_first_row() const {
     static_assert(IsProducer, "get_packed_first_row() is producer-only");
@@ -663,7 +670,7 @@ struct IndexSparseBlockMeta {
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(outer_block, bidh, bidb);
+    return cute::make_tuple(outer_tile_idx, bidh, bidb);
   }
 
   CUTLASS_DEVICE

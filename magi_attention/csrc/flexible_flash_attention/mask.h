@@ -304,7 +304,7 @@ CUTLASS_DEVICE void iterate_range(int& cursor, int lo, int hi, BodyFn body) {
 // and cause register spill (local_ld/st). BWD uses a direct mask_fn(tSrS, block) instead.
 // This function is retained for FWD use only.
 //
-// BlockMetaT must provide: outer_block, inner_block_min, inner_block_cnt,
+// BlockMetaT must provide: outer_tile_idx, inner_block_min, inner_block_cnt,
 //   seqlen_info.seqlen_q, seqlen_info.seqlen_k, attn_type.
 // MaskT must provide: apply<Seqlenk_mask, PackGQA, PackGQAFactor>(tSrS, m_block, n_block, ...).
 template <
@@ -324,7 +324,7 @@ CUTLASS_DEVICE void mask_dispatch_unified(BlockMetaT const& block_meta, MaskT co
 
   int const block_lo = block_meta.inner_block_min;
   int const block_hi = block_meta.inner_block_cnt;
-  int const fixed_block = block_meta.outer_block;
+  int const fixed_block = block_meta.outer_tile_idx;
   int const seqlen_q = block_meta.seqlen_info.seqlen_q;
   int const seqlen_k = block_meta.seqlen_info.seqlen_k;
   auto const attn_type = block_meta.attn_type;

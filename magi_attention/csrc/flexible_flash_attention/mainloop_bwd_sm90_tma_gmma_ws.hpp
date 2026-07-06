@@ -1253,7 +1253,7 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(!(BlockSparse && CatGQA), "BlockSparse InnerLoopQ does not support CatGQA");
 
     // BlockMeta: fixed per function call
-    int const n_block = block_meta.outer_block;
+    int const n_block = block_meta.outer_tile_idx;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
@@ -1742,7 +1742,7 @@ struct CollectiveMainloopBwdSm90 {
     static_assert(!CatGQA, "load_with_loop_k() is not compatible with CatGQA");
 
     // BlockMeta: fixed per function call
-    int const m_block = block_meta.outer_block;
+    int const m_block = block_meta.outer_tile_idx;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int bidb = block_meta.bidb;
@@ -2134,7 +2134,7 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockN = CollectiveMainloopBwdSm90::kBlockN;
 
     // BlockMeta: fixed per function call
-    int const n_block = block_meta.outer_block;
+    int const n_block = block_meta.outer_tile_idx;
     int const bidh = block_meta.bidh;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
@@ -2610,7 +2610,7 @@ struct CollectiveMainloopBwdSm90 {
     // debug_print_mma();
 
     // BlockMeta: fixed per function call
-    int const n_block = block_meta.outer_block;
+    int const n_block = block_meta.outer_tile_idx;
     int const bidh = block_meta.bidh;
     int bidb = block_meta.bidb;
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
@@ -3193,7 +3193,7 @@ struct CollectiveMainloopBwdSm90 {
         // the contiguous K window (last n_block may overhang seqlen_k) —
         // symmetric with InnerLoopK, where the roles of rows/columns are swapped.
         bool const need_row_mask = block_meta.inner_block_idx == block_meta.padding_block() && block_meta.num_invalid_token > 0;
-        int const num_invalid_k_token = !SwapBwdQKLoop ? cute::max(0, (block_meta.outer_block + 1) * kBlockN - block_meta.seqlen_info.seqlen_k) : 0;
+        int const num_invalid_k_token = !SwapBwdQKLoop ? cute::max(0, (block_meta.outer_tile_idx + 1) * kBlockN - block_meta.seqlen_info.seqlen_k) : 0;
         bool const need_col_mask = num_invalid_k_token > 0;
         auto combined_mask_fn = [&](int /*m_blk*/) {
           if (need_col_mask) {
@@ -3300,7 +3300,7 @@ struct CollectiveMainloopBwdSm90 {
     // debug_print_mma();
 
     // BlockMeta: fixed per function call
-    int const m_block = block_meta.outer_block;
+    int const m_block = block_meta.outer_tile_idx;
     int const bidh = block_meta.bidh;
     int const bidh_kv = block_meta.bidh_kv;
     int const seqlen_q = block_meta.seqlen_info.seqlen_q;

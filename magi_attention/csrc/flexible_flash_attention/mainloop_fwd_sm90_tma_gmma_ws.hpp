@@ -626,7 +626,7 @@ struct CollectiveMainloopFwdSm90 {
       }();
 
       Tensor gQ = local_tile(
-          domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.outer_block, _0{})); // (M, K)
+          domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.outer_tile_idx, _0{})); // (M, K)
       Tensor gQ_Packed = [&]() {
         if constexpr (PackGQA) {
           return local_tile(
@@ -634,7 +634,7 @@ struct CollectiveMainloopFwdSm90 {
                   make_coord(block_meta.seqlen_info.offset_q * PackGQAFactor, _0{}),
                   mQ_Packed), // for packgqa, we need multiple qhead_per_khead for offset of seqlen;
               select<0, 2>(TileShape_MNK{}),
-              make_coord(block_meta.outer_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
+              make_coord(block_meta.outer_tile_idx, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
         } else {
           return gQ;
         }
@@ -1185,7 +1185,7 @@ struct CollectiveMainloopFwdSm90 {
 
     flash::Mask<kBlockM, kBlockN, TiledMmaQK_Active, SwapAB> mask;
 
-    int m_block = block_meta.outer_block;
+    int m_block = block_meta.outer_tile_idx;
     // Mask functions: dense path uses boundary/regular/no_mask;
     // sparse path uses padding_mask for the block containing invalid tokens.
     auto boundary_mask_fn = [&](int n_block) {
