@@ -1684,7 +1684,11 @@ def flex_flash_attn_func(
         )
 
     # Per-head topk width (dim-2 of the 3D tensor), NOT nhk * topk_per_head.
-    index_sparse_max_topk = index_sparse_indices.shape[2] if index_sparse else 0
+    index_sparse_max_topk = (
+        index_sparse_indices.shape[2]
+        if index_sparse and index_sparse_indices is not None
+        else 0
+    )
 
     # ── Auto-set sparse flags ──
     if block_sparse:
