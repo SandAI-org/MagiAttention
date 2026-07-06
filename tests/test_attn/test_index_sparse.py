@@ -401,11 +401,17 @@ def _run_view_trick(
     )
     k_ffa, v_ffa = _pack_kv(k_raw, v_raw)
 
+    # indices_block is contiguous (from torch.full), so view is safe here.
+    # If indices_block were non-contiguous (e.g. from slicing), reshape would be needed.
+    # View trick flattens K to (B*S*NHK, 1, D), so kernel sees 1 KV head.
+    # The flat order matches Q's rearrange("b s (h1 h2) d -> (b s h1) h2 d", h1=NHK).
+    indices_for_kernel = indices_block.view(-1, 1, indices_block.shape[-1])
+
     o_sparse, _ = flex_flash_attn_func(
         q_ffa,
         k_ffa,
         v_ffa,
-        index_sparse_indices=indices_block,
+        index_sparse_indices=indices_for_kernel,
         q_block_size=1,
         k_block_size=1,
         pack_gqa=True,
