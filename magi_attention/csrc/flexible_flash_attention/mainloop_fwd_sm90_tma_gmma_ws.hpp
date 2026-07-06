@@ -368,7 +368,7 @@ struct CollectiveMainloopFwdSm90 {
       std::conditional_t<(BlockSparse || IndexSparse) && InnerLoad_Tma, cute::array<int, kStages>, cute::array<int, 0>>>;
 
   // OPT-5: SMEM cache for K block indices. IndexSparse with TMA prefetches
-  // group_token_ptr here once per outer tile so inner loop reads from SMEM (L1).
+  // sparse_indices_ptr here once per outer tile so inner loop reads from SMEM (L1).
   static constexpr int MaxKBlockIdxPrefetch = (IndexSparse && InnerLoad_Tma) ? 1024 : 0;
   using KBlockIdxPrefetch_t = cute::array<int, MaxKBlockIdxPrefetch>;
 
@@ -909,7 +909,7 @@ struct CollectiveMainloopFwdSm90 {
     block_meta.template update_block_cur<kInnerDir>();
 
     // OPT-5: Prefetch all K block indices from GMEM to SMEM once per outer tile.
-    // The TMA issue thread reads group_token_ptr[kblock_idx] every inner iteration
+    // The TMA issue thread reads sparse_indices_ptr[kblock_idx] every inner iteration
     // via get_n_block_abs(); redirecting that pointer to SMEM eliminates per-tile
     // GMEM latency on the producer critical path.
     if constexpr (IndexSparse && InnerLoad_Tma) {
@@ -918,10 +918,10 @@ struct CollectiveMainloopFwdSm90 {
         int* const cache = shared_storage.tensors.mainloop.smem_kblock_idx_cache.data();
         if (idx_in_warpgroup == 0) {
           for (int i = 0; i < num_kblocks; ++i) {
-            cache[i] = block_meta.group_token_ptr[i];
+            cache[i] = block_meta.sparse_indices_ptr[i];
           }
         }
-        block_meta.group_token_ptr = cache;
+        block_meta.sparse_indices_ptr = cache;
       }
     }
 

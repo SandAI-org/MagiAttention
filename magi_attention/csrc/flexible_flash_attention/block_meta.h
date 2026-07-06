@@ -480,7 +480,7 @@ struct IndexSparseBlockMeta {
   int num_invalid_token;
   static constexpr int inner_block_min = 0;
 
-  int const* group_token_ptr = nullptr;
+  int const* sparse_indices_ptr = nullptr;
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexSparseBlockMeta(
@@ -556,10 +556,10 @@ struct IndexSparseBlockMeta {
         } else {
           group_offset = ldst_group_idx * NumTokensPerLdstGroup_;
         }
-        group_token_ptr = row_ptr + group_offset;
+        sparse_indices_ptr = row_ptr + group_offset;
       } else {
         // Block-level InnerLoopK or InnerLoopQ: absolute indexing from row_ptr
-        group_token_ptr = row_ptr;
+        sparse_indices_ptr = row_ptr;
       }
     }
   }
@@ -578,7 +578,7 @@ struct IndexSparseBlockMeta {
       // so row indices are positions within the per-head K space [0, total_k).
       if constexpr (SparseKBlockSize <= 1) {
         for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
-          int const k_token = group_token_ptr[j];
+          int const k_token = sparse_indices_ptr[j];
           group_rows[j] = (k_token >= 0) ? k_token : 0;
         }
       } else {
@@ -587,7 +587,7 @@ struct IndexSparseBlockMeta {
           int token_pos = tile_base + ldst_group_idx * NumTokensPerLdstGroup_ + j;
           int block_idx = token_pos / SparseKBlockSize;
           int offset_in_block = token_pos % SparseKBlockSize;
-          int block_id = (block_idx < seqlen_info.seqlen_k / SparseKBlockSize) ? group_token_ptr[block_idx] : -1;
+          int block_id = (block_idx < seqlen_info.seqlen_k / SparseKBlockSize) ? sparse_indices_ptr[block_idx] : -1;
           int logical_k = block_id * SparseKBlockSize + offset_in_block;
           group_rows[j] = (block_id >= 0) ? logical_k : 0;
         }
@@ -606,7 +606,7 @@ struct IndexSparseBlockMeta {
           if (packed_row < total_q) {
             int q_token_local_idx = packed_row / PackGQAFactor;
             int sub_head = packed_row % PackGQAFactor;
-            int q_token = (q_token_local_idx < max_inner_topk_val) ? group_token_ptr[q_token_local_idx] : -1;
+            int q_token = (q_token_local_idx < max_inner_topk_val) ? sparse_indices_ptr[q_token_local_idx] : -1;
             group_rows[j] = (q_token >= 0) ? q_token * PackGQAFactor + sub_head : 0;
           } else {
             group_rows[j] = 0;
@@ -617,7 +617,7 @@ struct IndexSparseBlockMeta {
         for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
           int local_idx = base + j;
           if (local_idx < total_q) {
-            int q_token = group_token_ptr[local_idx];
+            int q_token = sparse_indices_ptr[local_idx];
             group_rows[j] = (q_token >= 0) ? q_token : 0;
           } else {
             group_rows[j] = 0;
@@ -642,11 +642,11 @@ struct IndexSparseBlockMeta {
         int packed_row = inner_block_idx * InnerBlockSize;
         int q_token_local_idx = packed_row / PackGQAFactor;
         int sub_head_offset = packed_row % PackGQAFactor;
-        int q_token = (q_token_local_idx < seqlen_info.seqlen_q / PackGQAFactor) ? group_token_ptr[q_token_local_idx] : -1;
+        int q_token = (q_token_local_idx < seqlen_info.seqlen_q / PackGQAFactor) ? sparse_indices_ptr[q_token_local_idx] : -1;
         return (q_token >= 0) ? q_token * PackGQAFactor + sub_head_offset : 0;
       } else {
         int local_idx = inner_block_idx * InnerBlockSize;
-        int q_token = (local_idx < seqlen_info.seqlen_q) ? group_token_ptr[local_idx] : -1;
+        int q_token = (local_idx < seqlen_info.seqlen_q) ? sparse_indices_ptr[local_idx] : -1;
         return (q_token >= 0) ? q_token : 0;
       }
     } else {
@@ -664,7 +664,7 @@ struct IndexSparseBlockMeta {
     int tiles_per_kblock = SparseKBlockSize / InnerBlockSize;
     int kblock_idx = inner_block_idx / tiles_per_kblock;
     int tile_within_kblock = inner_block_idx % tiles_per_kblock;
-    int block_id = group_token_ptr[kblock_idx];
+    int block_id = sparse_indices_ptr[kblock_idx];
     return (block_id >= 0) ? block_id * tiles_per_kblock + tile_within_kblock : 0;
   }
 
@@ -680,9 +680,9 @@ struct IndexSparseBlockMeta {
       // Token-level LoopK: sliding window — advance pointer
       if (!is_finish()) {
         if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          group_token_ptr -= InnerBlockSize;
+          sparse_indices_ptr -= InnerBlockSize;
         } else {
-          group_token_ptr += InnerBlockSize;
+          sparse_indices_ptr += InnerBlockSize;
         }
       }
     }
