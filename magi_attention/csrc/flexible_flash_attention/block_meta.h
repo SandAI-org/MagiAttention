@@ -149,8 +149,8 @@ struct DenseBlockMeta {
 // BlockSparseBlockMeta: Unified producer/consumer via IsProducer template parameter.
 // Used by both producer (IsProducer=true) and consumer (IsProducer=false) aliases.
 //
-// IsInnerLoopQ_=false (InnerLoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
-// IsInnerLoopQ_=true  (InnerLoopQ): outer=KV (TMA), inner=Q (scatter),  token_indices = Q positions
+// InnerLoopQ_=false (InnerLoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
+// InnerLoopQ_=true  (InnerLoopQ): outer=KV (TMA), inner=Q (scatter),  token_indices = Q positions
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -163,11 +163,11 @@ template <
     int NumProducerThreads_,
     int kBlockN_,
     bool InnerDirMaxToMin_,
-    bool IsInnerLoopQ_>
+    bool InnerLoopQ_>
 struct BlockSparseBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr bool NeedsBatchLoop = true;
-  static constexpr bool IsInnerLoopQ = IsInnerLoopQ_;
+  static constexpr bool InnerLoopQ = InnerLoopQ_;
   static constexpr int InnerBlockSize = kBlockN_;
 
   int const outer_tile_idx; // m_block for InnerLoopK, n_block for InnerLoopQ
@@ -206,8 +206,8 @@ struct BlockSparseBlockMeta {
   // index within the kv group. InnerLoopK scatters KV rows (never head-packed, scale 1).
   CUTLASS_DEVICE
   int2 packed_range(int i) const {
-    int2 r = (IsInnerLoopQ ? q_ranges : k_ranges)[i];
-    if constexpr (IsInnerLoopQ && PackGQA) {
+    int2 r = (InnerLoopQ ? q_ranges : k_ranges)[i];
+    if constexpr (InnerLoopQ && PackGQA) {
       r.x *= PackGQAFactor;
       r.y *= PackGQAFactor;
     }
@@ -421,19 +421,18 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // IndexSparseBlockMeta: Unified sparse block metadata for index-based attention.
-// Handles both InnerLoopK and InnerLoopQ via the IsInnerLoopQ_ template parameter (like BlockSparseBlockMeta).
+// Handles both InnerLoopK and InnerLoopQ via the InnerLoopQ_ template parameter (like BlockSparseBlockMeta).
 //
 // Template params:
 //   InnerBlockSize_    — inner scatter tile size (kBlockN for InnerLoopK, kBlockM for InnerLoopQ)
 //   SparseKBlockSize_  — sparse K block size (kbs): how many K tokens each index entry covers
 //                        (1 = token-level index sparse, ≥InnerBlockSize = block-level)
 //
-// IsInnerLoopQ_=false (InnerLoopK): outer=Q token (bidb), inner=K from sparse indices
-//   fill_token_indices fills K logical rows; head offset handled by ptr_gK_base
-//   bidb = block_coord[2] = q_token; kv_head from scheduler bidh (intergroup)
-//   indices layout: (total_q, nhk, inner_indices_cnt)
-// IsInnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb), inner=Q from inner_indices
-//   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
+// InnerLoopQ_=false (InnerLoopK): outer=Q token (bidb=q_token_idx), inner=K from sparse indices
+//   fill_token_indices maps tile positions to K token addresses
+//   indices layout: (num_q_tokens, nhk, inner_indices_cnt)
+// InnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb=k_block_idx), inner=Q from inner_indices
+//   fill_token_indices maps tile positions to packed Q row addresses
 //   indices layout: (num_k_blocks, nhk, inner_indices_cnt)
 //
 // Fields (all const, computed in constructor init-list):
@@ -454,12 +453,12 @@ template <
     int InnerBlockSize_,
     bool InnerDirMaxToMin_,
     int SparseKBlockSize_,
-    bool IsInnerLoopQ_>
+    bool InnerLoopQ_>
 struct IndexSparseBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr int InnerBlockSize = InnerBlockSize_;
   static constexpr int SparseKBlockSize = SparseKBlockSize_;
-  static constexpr bool IsInnerLoopQ = IsInnerLoopQ_;
+  static constexpr bool InnerLoopQ = InnerLoopQ_;
   static constexpr bool NeedsBatchLoop = true;
 
   // ─── Scheduler-assigned coordinates (const, computed in init-list) ───
@@ -506,14 +505,14 @@ struct IndexSparseBlockMeta {
       --num_valid_indices;
 
     int total_inner_tokens;
-    if constexpr (!IsInnerLoopQ) {
-      // ── InnerLoopK: bidb = Q token, indices = forward topk (Q→K) ──
+    if constexpr (!InnerLoopQ) {
+      // ── InnerLoopK: bidb = q_token_idx, inner K from sparse indices ──
       seqlen_info.offset_q = bidb;
       seqlen_info.seqlen_q = 1;
       total_inner_tokens = num_valid_indices * SparseKBlockSize;
       seqlen_info.seqlen_k = total_inner_tokens;
     } else {
-      // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
+      // ── InnerLoopQ: bidb = k_block_idx, inner Q from inner_indices ──
       seqlen_info.offset_k = bidb * SparseKBlockSize;
       seqlen_info.seqlen_k = SparseKBlockSize;
       total_inner_tokens = PackGQA ? num_valid_indices * PackGQAFactor : num_valid_indices;
@@ -540,9 +539,9 @@ struct IndexSparseBlockMeta {
   void fill_token_indices(int* slot_rows, int token_idx_in_ldst_group, int ldst_group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
     int* const group_rows = slot_rows + ldst_group_idx * NumTokensPerLdstGroup_;
-    constexpr int kStride = IsInnerLoopQ ? (PackGQA ? PackGQAFactor : 1) : SparseKBlockSize;
+    constexpr int kStride = InnerLoopQ ? (PackGQA ? PackGQAFactor : 1) : SparseKBlockSize;
     int const base = inner_block_idx * InnerBlockSize + ldst_group_idx * NumTokensPerLdstGroup_;
-    int const total = IsInnerLoopQ ? seqlen_info.seqlen_q : seqlen_info.seqlen_k;
+    int const total = InnerLoopQ ? seqlen_info.seqlen_q : seqlen_info.seqlen_k;
 
     for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
       int const pos = base + j;
@@ -557,7 +556,7 @@ struct IndexSparseBlockMeta {
   CUTLASS_DEVICE
   int get_packed_first_row() const {
     static_assert(IsProducer, "get_packed_first_row() is producer-only");
-    if constexpr (IsInnerLoopQ) {
+    if constexpr (InnerLoopQ) {
       constexpr int kStride = PackGQA ? PackGQAFactor : 1;
       int const pos = inner_block_idx * InnerBlockSize;
       int const entry_idx = pos / kStride;
@@ -574,7 +573,7 @@ struct IndexSparseBlockMeta {
   // from index_sparse_indices, and the tile is physically contiguous.
   CUTLASS_DEVICE
   int get_n_block_abs() const {
-    static_assert(IsProducer && !IsInnerLoopQ && SparseKBlockSize >= InnerBlockSize, "get_n_block_abs() requires block-level LoopK with kbs >= kBlockN");
+    static_assert(IsProducer && !InnerLoopQ && SparseKBlockSize >= InnerBlockSize, "get_n_block_abs() requires block-level LoopK with kbs >= kBlockN");
     int tiles_per_kblock = SparseKBlockSize / InnerBlockSize;
     int kblock_idx = inner_block_idx / tiles_per_kblock;
     int tile_within_kblock = inner_block_idx % tiles_per_kblock;

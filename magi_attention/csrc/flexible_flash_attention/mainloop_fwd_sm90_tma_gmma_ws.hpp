@@ -467,7 +467,7 @@ struct CollectiveMainloopFwdSm90 {
                                                                    NumProducerThreads,
                                                                    kBlockN,
                                                                    InnerDirMaxToMin,
-                                                                   /*IsInnerLoopQ=*/false>;
+                                                                   /*InnerLoopQ=*/false>;
 
   // BlockSparse consumer (used by mma)
   using BlockSparseConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
@@ -479,7 +479,7 @@ struct CollectiveMainloopFwdSm90 {
                                                                    NumProducerThreads,
                                                                    kBlockN,
                                                                    InnerDirMaxToMin,
-                                                                   /*IsInnerLoopQ=*/false>;
+                                                                   /*InnerLoopQ=*/false>;
 
   template <bool IsProducer>
   using IndexSparseBlockMeta = flash::IndexSparseBlockMeta<
@@ -492,7 +492,7 @@ struct CollectiveMainloopFwdSm90 {
       kBlockN,
       InnerDirMaxToMin,
       KBlockSize,
-      /*IsInnerLoopQ=*/false>;
+      /*InnerLoopQ=*/false>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);

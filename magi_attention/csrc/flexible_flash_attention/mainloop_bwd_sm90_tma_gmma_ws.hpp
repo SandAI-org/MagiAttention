@@ -854,7 +854,7 @@ struct CollectiveMainloopBwdSm90 {
                                                                         NumProducerThreads,
                                                                         kBlockN,
                                                                         InnerDirMaxToMin,
-                                                                        /*IsInnerLoopQ=*/false>;
+                                                                        /*InnerLoopQ=*/false>;
 
   // BlockSparse InnerLoopK consumer (used by mma), no token_indices arrays
   using BlockSparseLoopKConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
@@ -866,7 +866,7 @@ struct CollectiveMainloopBwdSm90 {
                                                                         NumProducerThreads,
                                                                         kBlockN,
                                                                         InnerDirMaxToMin,
-                                                                        /*IsInnerLoopQ=*/false>;
+                                                                        /*InnerLoopQ=*/false>;
 
   // BlockSparse InnerLoopQ producer: scatter Q/dO, token_indices = Q positions
   using BlockSparseLoopQProducerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
@@ -878,7 +878,7 @@ struct CollectiveMainloopBwdSm90 {
                                                                         NumProducerThreads,
                                                                         kBlockM,
                                                                         InnerDirMaxToMin,
-                                                                        /*IsInnerLoopQ=*/true>;
+                                                                        /*InnerLoopQ=*/true>;
 
   // BlockSparse InnerLoopQ consumer: no token_indices arrays
   using BlockSparseLoopQConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
@@ -890,7 +890,7 @@ struct CollectiveMainloopBwdSm90 {
                                                                         NumProducerThreads,
                                                                         kBlockM,
                                                                         InnerDirMaxToMin,
-                                                                        /*IsInnerLoopQ=*/true>;
+                                                                        /*InnerLoopQ=*/true>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     if constexpr (Deterministic) {
@@ -1131,7 +1131,7 @@ struct CollectiveMainloopBwdSm90 {
       kBlockN,
       InnerDirMaxToMin,
       KBlockSize,
-      /*IsInnerLoopQ=*/false>;
+      /*InnerLoopQ=*/false>;
 
   // IndexSparse InnerLoopQ: outer=K block, inner=Q from inner_indices
   template <bool IsProducer>
@@ -1145,7 +1145,7 @@ struct CollectiveMainloopBwdSm90 {
       kBlockM,
       InnerDirMaxToMin,
       KBlockSize,
-      /*IsInnerLoopQ=*/true>;
+      /*InnerLoopQ=*/true>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
