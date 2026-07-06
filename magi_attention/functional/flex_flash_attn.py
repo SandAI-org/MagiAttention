@@ -1407,7 +1407,7 @@ def flex_flash_attn_func(
             Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
             Automatically enables ``auto_range_merge``. Defaults to ``False``.
             Mutually exclusive with ``index_sparse_indices``.
-            When enabled, ``k_block_size`` is auto-set to ``tile_N`` (128 or 64 with swap_ab)
+            When enabled, ``k_block_size`` is auto-set to ``tile_N`` (128)
             so that inner KV loads use TMA 2D — without this, the kernel falls back to CpAsync
             scatter load with ~40% performance loss.
             **Contract:** all k_ranges (and, for ``swap_bwd_qk_loop=False`` backward, all q_ranges)
@@ -1549,19 +1549,21 @@ def flex_flash_attn_func(
     """
 
     # ── Sparse mask input validation ──
+    # Auto-infer index_sparse from tensor presence.
+    if index_sparse_indices is not None:
+        index_sparse = True
     _has_ranges = q_ranges is not None
-    _has_index_sparse = index_sparse_indices is not None
-    _num_sparse_inputs = int(_has_ranges) + int(_has_index_sparse)
+    _num_sparse_inputs = int(_has_ranges) + int(index_sparse)
     assert _num_sparse_inputs == 1, (
         "Exactly one of (q_ranges + k_ranges) or index_sparse_indices must be provided. "
         f"Got: q_ranges={'set' if _has_ranges else 'None'}, "
-        f"index_sparse_indices={'set' if _has_index_sparse else 'None'}"
+        f"index_sparse_indices={'set' if index_sparse else 'None'}"
     )
     assert not (
-        block_sparse and _has_index_sparse
+        block_sparse and index_sparse
     ), "block_sparse and index_sparse_indices are mutually exclusive."
     assert not (
-        swap_ab and (block_sparse or _has_index_sparse)
+        swap_ab and (block_sparse or index_sparse)
     ), "swap_ab is not supported with sparse attention (block_sparse or index_sparse)."
     if _has_ranges:
         assert k_ranges is not None, "k_ranges must be provided together with q_ranges"
@@ -1600,7 +1602,7 @@ def flex_flash_attn_func(
                 )
 
     # ── index_sparse_indices direct path: kernel reads indices directly ──
-    if _has_index_sparse:
+    if index_sparse:
         assert index_sparse_indices is not None
         assert index_sparse_indices.dim() == 3, (
             f"index_sparse_indices must be 3D (total_q, num_kv_heads, max_topk), "
@@ -1641,7 +1643,6 @@ def flex_flash_attn_func(
         )
 
         auto_range_merge = False
-        index_sparse = True
         if max_seqlen_q is None:
             max_seqlen_q = q_block_size
         if ref_block_size is not None:
@@ -1682,11 +1683,8 @@ def flex_flash_attn_func(
             f"(unset MAGI_ATTENTION_FA4_BACKEND)."
         )
 
-    index_sparse_indices = index_sparse_indices if _has_index_sparse else None
     # Per-head topk width (dim-2 of the 3D tensor), NOT nhk * topk_per_head.
-    index_sparse_max_topk = (
-        index_sparse_indices.shape[2] if index_sparse_indices is not None else 0
-    )
+    index_sparse_max_topk = index_sparse_indices.shape[2] if index_sparse else 0
 
     # ── Auto-set sparse flags ──
     if block_sparse:
