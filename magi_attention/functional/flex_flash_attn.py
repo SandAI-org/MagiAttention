@@ -1302,13 +1302,14 @@ def flex_flash_attn_func(
         q_block_size (int, optional): Q block size. Defaults to ``1``.
             Currently only ``1`` (per-token Q granularity) is supported.
         k_block_size (int, optional): K block size for inner-loop contiguity. Defaults to ``1``.
+            Must be a positive power of 2 (1, 2, 4, 8, 16, 32, 64, 128, 256, ...).
             For ``index_sparse``: specifies the granularity of K indices (each index covers
-            ``k_block_size`` tokens). When ``k_block_size >= tile_N`` (128), inner KV loads
-            use TMA 2D instead of CpAsync scatter — critical for performance.
+            ``k_block_size`` tokens). When ``k_block_size >= 128``, inner KV loads use TMA 2D;
+            when ``k_block_size < 128``, inner KV loads use CpAsync scatter with per-token
+            gather. Both paths are correct; TMA 2D is faster for large contiguous blocks.
             For ``block_sparse``: auto-derived from the uniform k_range size if left at
-            default. When k_range_size >= tile_N, inner loads use TMA 2D for best perf.
-            Explicitly setting ``k_block_size`` to match your k_range tile size is
-            recommended to avoid the (minor) cost of computing it from k_ranges.
+            default. When k_range_size >= 128, inner loads use TMA 2D for best perf.
+            Not compatible with ``swap_ab``.
 
         max_seqlen_q (int | None, optional): Maximum sequence length for query. Defaults to ``None``.
             If provided, enables optimization for tile_scheduler. Most recommended to set this when using
@@ -1388,7 +1389,8 @@ def flex_flash_attn_func(
 
         swap_ab (bool, optional): Whether to swap the order of A and B operands for the matmul operation
             (i.e. transpose `C=A x B^T` to `C^T= B x A^T`) in attention forward passes. Defaults to ``False``.
-            **Note:** This flag is useful for sparse attention scenarios but still under development.
+            **Not compatible with sparse attention** (``block_sparse`` or ``index_sparse``).
+            Only applicable to dense attention with very small Q sequences.
 
         pack_gqa (bool, optional):
             Whether to group query heads sharing the same KV head into a single computation block tile for small
@@ -1558,10 +1560,17 @@ def flex_flash_attn_func(
     assert not (
         block_sparse and _has_index_sparse
     ), "block_sparse and index_sparse_indices are mutually exclusive."
+    assert not (
+        swap_ab and (block_sparse or _has_index_sparse)
+    ), "swap_ab is not supported with sparse attention (block_sparse or index_sparse)."
     if _has_ranges:
         assert k_ranges is not None, "k_ranges must be provided together with q_ranges"
 
     if block_sparse:
+        assert not swap_ab, (
+            "swap_ab is not supported with block_sparse — sparse paths use scatter/TMA "
+            "load modes that are incompatible with the swapped matmul layout."
+        )
         # BlockSparse uses the same k_block_size mechanism as IndexSparse to
         # tell the kernel that inner KV tiles are contiguous (KBlockSize >= kBlockN
         # → TMA 2D load). When k_block_size is left at default (1), derive it
@@ -1601,15 +1610,14 @@ def flex_flash_attn_func(
             "Currently only q_block_size=1 (per-token Q granularity) is supported "
             f"for index_sparse_indices input, got q_block_size={q_block_size}"
         )
-        tile_size = 64 if swap_ab else 128
+        tile_size = 128
         assert (
             k_block_size >= 1 and (k_block_size & (k_block_size - 1)) == 0
         ), f"k_block_size must be a positive power of 2, got {k_block_size}"
-        assert k_block_size == 1 or k_block_size >= tile_size, (
-            f"k_block_size must be 1 (token-level) or >= tile_size ({tile_size}), "
-            f"got {k_block_size}. Values in (1, {tile_size}) are not supported — "
-            f"the kernel assumes either per-token scatter or fully contiguous K blocks."
-        )
+        if k_block_size > 128:
+            assert (
+                k_block_size % 128 == 0
+            ), f"k_block_size > 128 must be a multiple of 128, got {k_block_size}"
         total_q_idx, nhk_idx, max_topk_per_head = index_sparse_indices.shape
         if k_block_size > 1:
             effective_topk = max_topk_per_head * k_block_size
@@ -1639,7 +1647,7 @@ def flex_flash_attn_func(
         if ref_block_size is not None:
             ref_block_size = (ref_block_size[0], tile_size)
         else:
-            ref_block_size = (64 if swap_ab else 128, tile_size)
+            ref_block_size = (128, tile_size)
 
     assert not (
         swap_bwd_qk_loop is True and deterministic

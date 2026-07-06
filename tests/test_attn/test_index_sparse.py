@@ -36,7 +36,7 @@ Tier 3 (Slow):
   3e. k_block_size > 1 (commented out, kernel WIP)
 
 Known limitations:
-  - k_block_size > 1 tests commented out, kernel support is WIP (future: 32/64/128)
+  - swap_ab is blocked for sparse paths (asserted in flex_flash_attn_func)
   - No distributed sparse yet
   - max_topk must be multiples of tile_size (asserted in flex_flash_attn_func)
   - Q/K/V are packed in (b, s, h) order to match index_sparse_indices view layout
@@ -1173,6 +1173,30 @@ class TestIndexSparseSlowSweep(DistTestBase):
     @parameterize(
         "config",
         [
+            # kbs=8: sub-tile scatter — 8 tokens per entry, 16 entries per tile
+            {
+                "name": "mqa128_kblock8",
+                "B": 1,
+                "S": 1024,
+                "NHQ": 128,
+                "NHK": 1,
+                "topk": 16,
+                "max_topk": 16,
+                "pack_gqa": True,
+                "k_block_size": 8,
+            },
+            # kbs=32: sub-tile scatter — 32 tokens per entry, 4 entries per tile
+            {
+                "name": "mqa128_kblock32",
+                "B": 1,
+                "S": 1024,
+                "NHQ": 128,
+                "NHK": 1,
+                "topk": 8,
+                "max_topk": 8,
+                "pack_gqa": True,
+                "k_block_size": 32,
+            },
             # kbs=128: canonical 128×128 block — topk=2, S=256 → 2 K blocks (full)
             {
                 "name": "mqa128_kblock128",
