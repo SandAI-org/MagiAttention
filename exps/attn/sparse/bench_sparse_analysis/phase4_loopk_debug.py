@@ -67,13 +67,18 @@ _DEBUG_ENV_KEYS = [
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK",
     "MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S",
+    "MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2",
 ]
 
 # Symmetric configs: same skip flags on BOTH LoopK and LoopQ.
 # Gap_contribution(X) = cost_in_LoopK(X) - cost_in_LoopQ(X)
+#
+# NOTE (post-merge 2026-07): JIT now auto-applies ununion+stgV1 for InnerLoopK (swap_bwd_qk_loop=True).
+# The "baseline" below ({} env) IS ununion+stgV1 — this is the true InnerLoopK baseline.
+# Legacy behavior (union+stgV2) can be restored via MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2=1.
 _SKIP_FACTORS = [
     # (factor_key, env_overrides, short_name)
-    ("baseline", {}, "baseline"),
+    ("baseline", {}, "baseline (ununion+stgV1)"),
     ("light_v_load", {"MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1"}, "light V load"),
     ("skip_dv_store", {"MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1"}, "no dV store"),
     ("skip_dk_store", {"MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1"}, "no dK store"),
@@ -239,20 +244,18 @@ _STRUCTURAL_CONFIGS = [
 ]
 
 # ══════ P5-v3: Optimization validation ══════
-# O1: ununion SMEM -- dV/dK use independent SMEM buffers -> deserialization -> dV TMA and dK R2S can overlap
-# O2: DkvaccBypassSmem — register atomicAdd to GMEM (dense = scalar, scatter = per-element)
+# Post-merge: baseline IS ununion+stgV1 (JIT default for InnerLoopK).
+# Legacy config: force union+stgV2 to show the pre-optimization regression.
+# Remaining configs: additional optimizations ON TOP of the new baseline.
 _OPTIMIZATION_CONFIGS = [
-    # O1: ununion + stgV=1 (214KB fits 228KB limit)
+    # Legacy: force old union+stgV2 behavior (pre-merge baseline, ~-38T regression)
     (
-        "loopk_ununion_stgv1",
-        {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
-            "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
-        },
+        "loopk_legacy_union_stgv2",
+        {"MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2": "1"},
         False,
-        "LoopK: ununion+stgV1 (O1)",
+        "LoopK: legacy (union+stgV2)",
     ),
-    # O1 + SVL: ununion with lightweight V load
+    # baseline + lightweight V load (diagnostic)
     (
         "loopk_ununion_stgv1_svl",
         {
@@ -261,9 +264,9 @@ _OPTIMIZATION_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
         },
         False,
-        "LoopK: ununion+stgV1+SVL",
+        "LoopK: baseline+SVL",
     ),
-    # O1 + SVW: ununion + skip dV writeback (theoretical ceiling of ununion)
+    # baseline + skip dV writeback (theoretical ceiling — shows dV wb cost)
     (
         "loopk_ununion_stgv1_svw",
         {
@@ -272,7 +275,7 @@ _OPTIMIZATION_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
         },
         False,
-        "LoopK: ununion+stgV1+SVW",
+        "LoopK: baseline+SVW",
     ),
     # O2: bypass scalar atomicAdd (correct but slow for dense)
     (
@@ -285,10 +288,11 @@ _OPTIMIZATION_CONFIGS = [
 
 # ══════ P5-v4: dV/dK symmetry verification ══════
 # Goal: verify whether dV and dK writeback pipeline costs are symmetric after ununion.
-# If O1+SVW ~ O1+SKW, ununion fully deserialized dV/dK -> both paths independent and equivalent.
-# If O1+SVW != O1+SKW, dV and dK have intrinsic asymmetry (softmax_scale, barrier ordering).
+# NOTE: baseline IS ununion+stgV1 now. All configs below operate on top of baseline.
+# If baseline+SVW ~ baseline+SKW, ununion fully deserialized dV/dK -> both paths independent and equivalent.
+# If baseline+SVW != baseline+SKW, dV and dK have intrinsic asymmetry (softmax_scale, barrier ordering).
 _SYMMETRY_CONFIGS = [
-    # O1 + skip dK writeback (symmetric to O1 + SVW)
+    # baseline + skip dK writeback (symmetric to baseline+SVW)
     (
         "loopk_ununion_stgv1_skw",
         {
@@ -297,9 +301,9 @@ _SYMMETRY_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK": "1",
         },
         False,
-        "LoopK: ununion+stgV1+SKW",
+        "LoopK: baseline+SKW",
     ),
-    # O1 + skip dV store only (isolate TMA vs full writeback)
+    # baseline + skip dV store only (isolate TMA vs full writeback)
     (
         "loopk_ununion_stgv1_svs",
         {
@@ -308,9 +312,9 @@ _SYMMETRY_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
         },
         False,
-        "LoopK: ununion+stgV1+SVS",
+        "LoopK: baseline+SVS",
     ),
-    # O1 + skip dK store only (symmetric to O1+SVS)
+    # baseline + skip dK store only (symmetric to baseline+SVS)
     (
         "loopk_ununion_stgv1_sks",
         {
@@ -319,9 +323,9 @@ _SYMMETRY_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
         },
         False,
-        "LoopK: ununion+stgV1+SKS",
+        "LoopK: baseline+SKS",
     ),
-    # O1 + skip both writebacks (ceiling: no writeback overhead)
+    # baseline + skip both writebacks (ceiling: no writeback overhead)
     (
         "loopk_ununion_stgv1_svw_skw",
         {
@@ -331,9 +335,9 @@ _SYMMETRY_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK": "1",
         },
         False,
-        "LoopK: ununion+stgV1+SVW+SKW",
+        "LoopK: baseline+SVW+SKW",
     ),
-    # O1 + defer dV R2S after MMA5 (test pipeline reorder)
+    # baseline + defer dV R2S after MMA5 (test pipeline reorder)
     (
         "loopk_ununion_stgv1_ddv",
         {
@@ -342,15 +346,15 @@ _SYMMETRY_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S": "1",
         },
         False,
-        "LoopK: ununion+stgV1+DeferDvR2S",
+        "LoopK: baseline+DeferDvR2S",
     ),
 ]
 
 # ══════ P5-v6: Stage alternatives — stgK=1 vs stgV=1 ══════
-# Ununion needs +32KB → 230KB > 228KB. We freed SMEM via stgV=1 (O1).
-# But stgK=1 (Stages=1, K pipeline 2→1) saves the same 16KB.
-# Question: is stgK=1 better/worse than stgV=1?
-# Also: stgK=1+stgV=1 saves 32KB → ununion fits at baseline 198KB!
+# NOTE: baseline already applies ununion+stgV1. Some configs below are NOW REDUNDANT:
+#   - "stgV1 only" = baseline (JIT default already sets both ununion+stgV1)
+#   - "stgK1 only" = ununion+stgK1+stgV1 (JIT adds ununion+stgV1 on top)
+# Kept for backward compat with cached results, marked accordingly.
 _STAGE_CONFIGS = [
     (
         "loopk_ununion_stgk1",
@@ -359,7 +363,7 @@ _STAGE_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_STAGES": "1",
         },
         False,
-        "LoopK: ununion+stgK1",
+        "LoopK: baseline+stgK1",
     ),
     (
         "loopk_ununion_stgk1_stgv1",
@@ -369,19 +373,19 @@ _STAGE_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
         },
         False,
-        "LoopK: ununion+stgK1+stgV1",
+        "LoopK: baseline+stgK1+stgV1",
     ),
     (
         "loopk_stgv1_only",
         {"MAGI_ATTENTION_FFA_BWD_STAGES_V": "1"},
         False,
-        "LoopK: stgV1 only (no ununion)",
+        "LoopK: stgV1 only (=baseline, redundant)",
     ),
     (
         "loopk_stgk1_only",
         {"MAGI_ATTENTION_FFA_BWD_STAGES": "1"},
         False,
-        "LoopK: stgK1 only (no ununion)",
+        "LoopK: stgK1 only (+JIT ununion+stgV1)",
     ),
     (
         "loopk_ununion_stgk1_svw",
@@ -391,7 +395,7 @@ _STAGE_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
         },
         False,
-        "LoopK: ununion+stgK1+SVW",
+        "LoopK: baseline+stgK1+SVW",
     ),
     (
         "loopk_ununion_stgk1_stgv1_svw",
@@ -402,7 +406,7 @@ _STAGE_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
         },
         False,
-        "LoopK: ununion+stgK1V1+SVW",
+        "LoopK: baseline+stgK1V1+SVW",
     ),
 ]
 
@@ -560,7 +564,7 @@ def _get_ms(results, label):
 
 
 def _phase4_opt_plot():
-    """Focused paired bar chart: dV vs dK writeback/store symmetry on O1 (ununion+stgV1).
+    """Focused paired bar chart: dV vs dK writeback/store symmetry on baseline (ununion+stgV1).
 
     Left: Writeback symmetry (R2S + barrier + TMA) — dV vs dK
     Right: Store symmetry (TMA only) — dV vs dK
@@ -588,8 +592,8 @@ def _phase4_opt_plot():
             return d["tflops"][idx]
         return None
 
-    # Collect data
-    o1_tf = _get_tf("loopk_ununion_stgv1")
+    # baseline IS ununion+stgV1 post-merge; fall back to old key for cached data
+    o1_tf = _get_tf("loopk_baseline")
     svw_tf = _get_tf("loopk_ununion_stgv1_svw")
     skw_tf = _get_tf("loopk_ununion_stgv1_skw")
     svs_tf = _get_tf("loopk_ununion_stgv1_svs")
@@ -597,6 +601,7 @@ def _phase4_opt_plot():
     both_tf = _get_tf("loopk_ununion_stgv1_svw_skw")
     lk_tf = _get_tf("loopk_baseline")
     lq_tf = _get_tf("loopq_baseline")
+    legacy_tf = _get_tf("loopk_legacy_union_stgv2")
 
     if not all([o1_tf, svw_tf, skw_tf, svs_tf, sks_tf]):
         print("Insufficient symmetry data for plot.")
@@ -613,7 +618,7 @@ def _phase4_opt_plot():
 
     # ── Left: Writeback symmetry (R2S + barrier + TMA) ──
     groups_wb = [
-        "O1\nbaseline",
+        "Baseline\n(ununion+stgV1)",
         "Skip dV\nwriteback",
         "Skip dK\nwriteback",
         "Skip\nboth",
@@ -649,7 +654,15 @@ def _phase4_opt_plot():
             color=(0.78, 0.22, 0.22),
             linestyle="--",
             linewidth=1.2,
-            label=f"LoopK no-opt ({lk_tf:.0f}T)",
+            label=f"LoopK baseline ({lk_tf:.0f}T)",
+        )
+    if legacy_tf:
+        ax1.axhline(
+            y=legacy_tf,
+            color=(0.85, 0.55, 0.22),
+            linestyle="-.",
+            linewidth=1.0,
+            label=f"Legacy union+stgV2 ({legacy_tf:.0f}T)",
         )
     if lq_tf:
         ax1.axhline(
@@ -673,7 +686,7 @@ def _phase4_opt_plot():
     ax1.set_ylim(0, max(vals_wb) * 1.18)
 
     # ── Right: Store symmetry (TMA only) ──
-    groups_st = ["O1\nbaseline", "Skip dV\nstore", "Skip dK\nstore"]
+    groups_st = ["Baseline\n(ununion+stgV1)", "Skip dV\nstore", "Skip dK\nstore"]
     vals_st = [o1_tf, svs_tf, sks_tf]
     cols_st = [COL_O1, COL_DV, COL_DK]
 
@@ -705,7 +718,15 @@ def _phase4_opt_plot():
             color=(0.78, 0.22, 0.22),
             linestyle="--",
             linewidth=1.2,
-            label=f"LoopK no-opt ({lk_tf:.0f}T)",
+            label=f"LoopK baseline ({lk_tf:.0f}T)",
+        )
+    if legacy_tf:
+        ax2.axhline(
+            y=legacy_tf,
+            color=(0.85, 0.55, 0.22),
+            linestyle="-.",
+            linewidth=1.0,
+            label=f"Legacy union+stgV2 ({legacy_tf:.0f}T)",
         )
     if lq_tf:
         ax2.axhline(
@@ -729,7 +750,7 @@ def _phase4_opt_plot():
     ax2.set_ylim(0, max(vals_st) * 1.18)
 
     fig.suptitle(
-        f"dV/dK Pipeline Symmetry on O1 (ununion+stgV1)\n"
+        f"dV/dK Pipeline Symmetry (baseline = ununion+stgV1)\n"
         f"S=topk={S_FULL // 1024}K, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16",
         fontsize=14,
         fontweight="bold",
@@ -763,8 +784,8 @@ def _phase4_opt_plot():
 def _phase4_summary_plot():
     """Comprehensive summary: LoopK optimization landscape.
 
-    Shows 3 tiers: baseline → O1 (ununion) → SVW ceiling, with key experiments
-    annotated to show what works, what doesn't, and why.
+    Baseline = ununion+stgV1 (JIT default post-merge).
+    Shows baseline → SVW ceiling, with key experiments and legacy regression.
     """
     import matplotlib
 
@@ -792,7 +813,7 @@ def _phase4_summary_plot():
     # Collect key data points
     lk = _tf("loopk_baseline")
     lq = _tf("loopq_baseline")
-    o1 = _tf("loopk_ununion_stgv1")
+    legacy = _tf("loopk_legacy_union_stgv2")
     svw = _tf("loopk_ununion_stgv1_svw")
     skw = _tf("loopk_ununion_stgv1_skw")
     svs = _tf("loopk_ununion_stgv1_svs")
@@ -804,10 +825,8 @@ def _phase4_summary_plot():
     # Stage alternatives
     o1k = _tf("loopk_ununion_stgk1")
     o1kv = _tf("loopk_ununion_stgk1_stgv1")
-    stgv1_only = _tf("loopk_stgv1_only")
-    stgk1_only = _tf("loopk_stgk1_only")
 
-    if not all([lk, lq, o1, svw]):
+    if not all([lk, lq, svw]):
         print("Insufficient data for summary plot.")
         return
 
@@ -817,35 +836,33 @@ def _phase4_summary_plot():
 
     # ── Left: Optimization landscape bar chart ──
     configs = []
-    # Reference baseline (leftmost, dark)
+    # Reference: LoopQ (leftmost)
     configs.append(("LoopQ\nbaseline", lq, "#212121", "ref"))
-    # Tier 0: Stage alternatives (bad ones)
-    if stgk1_only:
-        configs.append(("stgK1\nonly", stgk1_only, "#FFCDD2", "bad"))
+    # Legacy regression (union+stgV2)
+    if legacy:
+        configs.append(("Legacy\n(union+stgV2)", legacy, "#FF8A65", "legacy"))
+    # Tier 0: Stage alternatives (worse than baseline)
     if o1k:
-        configs.append(("ununion\n+stgK1", o1k, "#EF9A9A", "bad"))
+        configs.append(("baseline\n+stgK1", o1k, "#EF9A9A", "bad"))
     if o1kv:
-        configs.append(("ununion\n+stgK1V1", o1kv, "#E57373", "bad"))
-    # Tier 1: LoopK baseline
-    configs.append(("LoopK\nbaseline", lk, "#D32F2F", "baseline"))
-    if stgv1_only:
-        configs.append(("stgV1\nonly", stgv1_only, "#90CAF9", "neutral"))
-    # Tier 2: O1 variants
-    configs.append(("O1\n(ununion\n+stgV1)", o1, "#1565C0", "O1"))
+        configs.append(("baseline\n+stgK1V1", o1kv, "#E57373", "bad"))
+    # Tier 1: LoopK baseline (= ununion+stgV1)
+    configs.append(("LoopK\nbaseline", lk, "#1565C0", "baseline"))
+    # Tier 2: baseline variants
     if svl:
-        configs.append(("O1\n+SVL", svl, "#42A5F5", "O1"))
+        configs.append(("baseline\n+SVL", svl, "#42A5F5", "variant"))
     if ddv:
-        configs.append(("O1\n+DDV", ddv, "#64B5F6", "O1"))
-    # Tier 3: Writeback/Store skip
+        configs.append(("baseline\n+DDV", ddv, "#64B5F6", "variant"))
+    # Tier 3: Writeback/Store skip (diagnostic ceiling)
     if svs:
-        configs.append(("O1\n+SVS", svs, "#F57C00", "store"))
+        configs.append(("baseline\n+SVS", svs, "#F57C00", "store"))
     if sks:
-        configs.append(("O1\n+SKS", sks, "#FFB74D", "store"))
+        configs.append(("baseline\n+SKS", sks, "#FFB74D", "store"))
     if skw:
-        configs.append(("O1\n+SKW", skw, "#7B1FA2", "writeback"))
-    configs.append(("O1\n+SVW", svw, "#C62828", "ceiling"))
+        configs.append(("baseline\n+SKW", skw, "#7B1FA2", "writeback"))
+    configs.append(("baseline\n+SVW", svw, "#C62828", "ceiling"))
     if svw_skw:
-        configs.append(("O1\n+SVW\n+SKW", svw_skw, "#880E4F", "ceiling"))
+        configs.append(("baseline\n+SVW+SKW", svw_skw, "#880E4F", "ceiling"))
 
     labels = [c[0] for c in configs]
     values = [c[1] for c in configs]
@@ -876,7 +893,7 @@ def _phase4_summary_plot():
                 va="bottom",
                 fontsize=10,
                 fontweight="bold",
-                color="white" if tag == "ref" else "#333",
+                color="#333",
             )
         else:
             ax1.text(
@@ -892,9 +909,9 @@ def _phase4_summary_plot():
 
     ax1.axhline(
         y=lk,
-        color="#D32F2F",
+        color="#1565C0",
         linestyle="--",
-        linewidth=1,
+        linewidth=1.2,
         alpha=0.5,
         label=f"LoopK baseline ({lk:.0f}T)",
     )
@@ -906,25 +923,20 @@ def _phase4_summary_plot():
         alpha=0.6,
         label=f"LoopQ baseline ({lq:.0f}T)",
     )
+    if legacy:
+        ax1.axhline(
+            y=legacy,
+            color="#FF8A65",
+            linestyle="-.",
+            linewidth=1,
+            alpha=0.4,
+            label=f"Legacy union+stgV2 ({legacy:.0f}T)",
+        )
     if svw:
         ax1.axhline(y=svw, color="#C62828", linestyle=":", linewidth=1, alpha=0.4)
 
-    # Annotate stgV1-only ablation story
-    if stgv1_only:
-        stgv1_idx = next(i for i, c in enumerate(configs) if c[0].startswith("stgV1"))
-        ax1.annotate(
-            "V stage 2→1: perf neutral\n(-16KB SMEM saved)\n→ V load NOT bottleneck",
-            xy=(stgv1_idx, stgv1_only),
-            xytext=(stgv1_idx + 1.5, stgv1_only + 60),
-            fontsize=9,
-            fontweight="bold",
-            color="#1565C0",
-            arrowprops=dict(arrowstyle="->", color="#1565C0", lw=1.5),
-            ha="center",
-        )
-
     ax1.set_title(
-        f"InnerLoopK Optimization Landscape\n"
+        f"InnerLoopK Optimization Landscape (baseline = ununion+stgV1)\n"
         f"S=topk={S_FULL // 1024}K, nhq={NHQ}, nhk={NHK}, hd={HD}, bf16, H100",
         fontsize=13,
         fontweight="bold",
@@ -940,11 +952,9 @@ def _phase4_summary_plot():
     # ── Right: Gap decomposition waterfall ──
     gap = lq - lk if lq and lk else 0
     items = []
-    items.append(("LoopK baseline", lk, "#D32F2F"))
-    if o1:
-        items.append(("+ O1 ununion", o1 - lk, "#1565C0"))
-    if svw and o1:
-        items.append(("+ skip dV wb\n(R2S+barr+TMA)", svw - o1, "#C62828"))
+    items.append(("LoopK baseline\n(ununion+stgV1)", lk, "#1565C0"))
+    if svw:
+        items.append(("+ skip dV wb\n(R2S+barr+TMA)", svw - lk, "#C62828"))
     if svw_skw and svw:
         items.append(("+ skip dK wb", svw_skw - svw, "#7B1FA2"))
 
@@ -955,7 +965,7 @@ def _phase4_summary_plot():
     colors_wf = []
 
     for name, delta, col in items:
-        if name == "LoopK baseline":
+        if name.startswith("LoopK baseline"):
             labels_wf.append(name)
             vals_wf.append(delta)
             bottoms.append(0)
@@ -1020,7 +1030,7 @@ def _phase4_summary_plot():
     ax2.set_yticklabels(labels_wf, fontsize=10)
     ax2.set_xlabel("TFLOPS", fontsize=11)
     ax2.set_title(
-        "Gap Decomposition: LoopK → LoopQ\n(cumulative optimization)",
+        "Gap Decomposition: LoopK → LoopQ\n(cumulative skip experiments)",
         fontsize=13,
         fontweight="bold",
     )
@@ -1037,44 +1047,34 @@ def _phase4_summary_plot():
 
     # Print legend
     print("\n  ── Abbreviations ──")
-    print("    O1    = Ununion dKV accumulators + dS_stage=1 (landable optimization)")
-    print("    SVL   = Skip V Load (debug: lightweight TMA load V)")
-    print("    DDV   = Defer dV R2S (move R2S after MMA5)")
-    print("    SVS   = Skip dV Store (debug: no TMA reduce-add dV)")
-    print("    SKS   = Skip dK Store (debug: no TMA reduce-add dK)")
-    print("    SKW   = Skip dK Writeback (debug: no dK R2S+barrier+TMA)")
-    print("    SVW   = Skip dV Writeback (debug: no dV R2S+barrier+TMA)")
+    print("    Baseline = ununion+stgV1 (JIT default for InnerLoopK post-merge)")
+    print("    Legacy   = union+stgV2 (pre-merge default, ~-38T regression)")
+    print("    SVL      = Skip V Load (debug: lightweight TMA load V)")
+    print("    DDV      = Defer dV R2S (move R2S after MMA5)")
+    print("    SVS      = Skip dV Store (debug: no TMA reduce-add dV)")
+    print("    SKS      = Skip dK Store (debug: no TMA reduce-add dK)")
+    print("    SKW      = Skip dK Writeback (debug: no dK R2S+barrier+TMA)")
+    print("    SVW      = Skip dV Writeback (debug: no dV R2S+barrier+TMA)")
 
     # Print key conclusions
     print("\n  ── Key Conclusions ──")
-    print(f"    LoopK baseline:         {lk:.0f} TFLOPS")
-    print(f"    LoopQ baseline:         {lq:.0f} TFLOPS")
+    print(f"    LoopK baseline (ununion+stgV1): {lk:.0f} TFLOPS")
+    print(f"    LoopQ baseline:                 {lq:.0f} TFLOPS")
+    gap = lq - lk
     print(
-        f"    Gap:                    {gap:.0f} TFLOPS ({gap / lq * 100:.0f}% of LoopQ)"
+        f"    Gap:                            {gap:.0f} TFLOPS ({gap / lq * 100:.0f}% of LoopQ)"
     )
-    if stgv1_only:
+    if legacy:
         print(
-            f"    stgV1 only (no ununion): {stgv1_only - lk:+.0f}T (noise) — V load stages perf-neutral, saves 16KB SMEM"
+            f"    Legacy (union+stgV2):           {legacy:.0f}T ({legacy - lk:+.0f}T vs baseline)"
         )
-    if o1:
-        ununion_delta = (o1 - stgv1_only) if stgv1_only else (o1 - lk)
-        print(
-            f"    O1 (ununion+stgV1):     +{o1 - lk:.0f}T ({(o1 - lk) / gap * 100:.0f}% of gap) — landable"
-        )
-        if stgv1_only:
-            print(f"      stgV1 contrib: +{stgv1_only - lk:.0f}T (V pipeline 2->1)")
-            print(
-                f"      ununion contrib: +{ununion_delta:.0f}T (dKV accumulator split)"
-            )
     if svw:
         print(
-            f"    SVW ceiling (no dV wb): +{svw - lk:.0f}T ({(svw - lk) / gap * 100:.0f}% of gap) — debug only"
+            f"    SVW ceiling (no dV wb):         +{svw - lk:.0f}T ({(svw - lk) / gap * 100:.0f}% of gap) — debug only"
         )
     print("    Root cause: 2 writebacks/iter (dV+dK) vs 1 (dQ) in LoopQ")
     print(
-        f"    dV writeback (R2S+barrier+TMA) = {(svw - o1):.0f}T of gap"
-        if svw and o1
-        else ""
+        f"    dV writeback (R2S+barrier+TMA) = {(svw - lk):.0f}T of gap" if svw else ""
     )
 
 

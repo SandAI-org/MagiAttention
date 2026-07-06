@@ -1395,3 +1395,22 @@ Given P4 (cross-iter accum) is invalid, remaining options:
 - **Reduce R2S data**: fp16 dV accumulator → halve transfer, but accuracy loss risk.
 - **Better MMA/pipeline scheduling**: Defer dV R2S was already tested (DeferDvR2S) → no gain.
 - **Architectural**: M64N128 tile reduces writeback iterations but needs 282KB SMEM.
+
+---
+
+## 2026-07-06 19:33 — Baseline reclassification
+
+**Key change**: `loopk_baseline` in bench_sparse_analysis IS `ununion+stgV1` (JIT default).
+The redundant `loopk_ununion_stgv1` config (old O1) has been removed.
+
+### Benchmark file changes (`phase4_loopk_debug.py`):
+1. **Baseline**: `{}` env → JIT auto-applies ununion+stgV1. Clarified in comments.
+2. **Added**: `loopk_legacy_union_stgv2` — forces old behavior via `MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2=1` to show the ~-38T regression.
+3. **Removed**: `loopk_ununion_stgv1` (redundant with baseline).
+4. **Renamed** all "O1+" descriptions → "baseline+" (e.g., SVW, SKW, SVS, SKS, DDV).
+5. **Plots**: Updated `_phase4_summary_plot()` and `_phase4_opt_plot()` to use baseline semantics, legacy reference line added.
+6. **Stage configs**: Annotated which are now redundant due to JIT defaults (e.g., `stgV1_only` = baseline).
+
+### Next steps:
+- [ ] Re-run benchmark with updated configs to get legacy TFLOPS data point.
+- [ ] Generate updated plots showing new baseline context.
