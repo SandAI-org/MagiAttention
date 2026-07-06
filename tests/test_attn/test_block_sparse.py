@@ -29,6 +29,7 @@ from magi_attention.functional.flex_flash_attn import (
 )
 from magi_attention.functional.utils import correct_attn_out_lse
 from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import (
     EPSILON,
     MAX_MISMATCH_THRES,
@@ -1238,20 +1239,24 @@ class TestBlockSparseSimple(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
-class TestBlockSparseSweep(unittest.TestCase):
+class TestBlockSparseSweep(DistTestBase):
     """Unified BlockSparse parametric sweep — CI gate.
 
     Covers: MQA/GQA canonical (nhq=128, nhk=1, kbs=128), LoopK/LoopQ,
-    varying seqlen and sparsity. Uses empty_cache isolation for TMA safety.
-    Also covers SwapAB block sizes for GQA(16:4).
+    varying seqlen and sparsity. Uses subprocess isolation via @with_run_in_mp.
     """
 
     @property
     def device(self):
         return torch.cuda.current_device()
 
+    @property
+    def world_size(self) -> int:
+        return 1
+
     # ─── Core sweep: MQA canonical (nhq=128, nhk=1, kbs=128) ───
 
+    @with_run_in_mp
     @parameterize("seqlen", [512, 2048])
     @parameterize("sparsity", [0.1, 0.5, 0.9])
     @parameterize("swap_bwd_qk_loop", [False, True])
@@ -1329,7 +1334,7 @@ class TestBlockSparseSweep(unittest.TestCase):
 
 
 @pytest.mark.slow
-class TestBlockSparseSlowSweep(unittest.TestCase):
+class TestBlockSparseSlowSweep(DistTestBase):
     """Deep BlockSparse sweep — @slow, not in CI.
 
     Tests non-prebuild combinations: different GQA ratios, head dims, block sizes.
@@ -1338,6 +1343,10 @@ class TestBlockSparseSlowSweep(unittest.TestCase):
     @property
     def device(self):
         return torch.cuda.current_device()
+
+    @property
+    def world_size(self) -> int:
+        return 1
 
     SLOW_CONFIGS = [
         {
@@ -1405,6 +1414,7 @@ class TestBlockSparseSlowSweep(unittest.TestCase):
         },
     ]
 
+    @with_run_in_mp
     @parameterize("cfg", SLOW_CONFIGS)
     @parameterize("sparsity_ratio", [0.5])
     @parameterize("pack_gqa", [True])
