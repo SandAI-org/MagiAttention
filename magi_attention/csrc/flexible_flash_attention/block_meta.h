@@ -532,55 +532,41 @@ struct IndexSparseBlockMeta {
   }
 
   // Fill token indices into the smem stage slot for the CURRENT tile.
-  // Unified loop: maps each tile position to a logical token row via:
-  //   slot = pos / kStride          (which indices array element covers this pos)
-  //   logical_block = indices[slot] (logical block index from sparse indices)
-  //   row = logical_block * kStride + pos % kStride  (expand to token granularity)
+  // Each tile position maps to a logical token row:
+  //   indices_idx     = tile_pos / kStride   (which indices array entry covers this position)
+  //   offset_in_block = tile_pos % kStride   (position within that logical block)
+  //   row = logical_block_idx * kStride + offset_in_block
   // kStride is compile-time: SparseKBlockSize (LoopK), PackGQAFactor (LoopQ+GQA), or 1.
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int token_idx_in_ldst_group, int ldst_group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
-    int* const group_rows = slot_rows + ldst_group_idx * NumTokensPerLdstGroup_;
+    int* const token_rows = slot_rows + ldst_group_idx * NumTokensPerLdstGroup_;
     constexpr int kStride = InnerLoopQ ? (PackGQA ? PackGQAFactor : 1) : SparseKBlockSize;
     int const base = inner_block_idx * InnerBlockSize + ldst_group_idx * NumTokensPerLdstGroup_;
     int const total = InnerLoopQ ? seqlen_info.seqlen_q : seqlen_info.seqlen_k;
 
     for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += NumThreadsPerLdstGroup_) {
-      int const pos = base + j;
-      int const indices_slot = pos / kStride;
-      int const logical_block_idx = (pos < total) ? sparse_indices_ptr[indices_slot] : -1;
-      group_rows[j] = (logical_block_idx >= 0) ? logical_block_idx * kStride + pos % kStride : 0;
+      int const tile_pos = base + j;
+      int const indices_idx = tile_pos / kStride;
+      int const offset_in_block = tile_pos % kStride;
+      int const logical_block_idx = (tile_pos < total) ? sparse_indices_ptr[indices_idx] : -1;
+      token_rows[j] = (logical_block_idx >= 0) ? logical_block_idx * kStride + offset_in_block : 0;
     }
   }
 
-  // Absolute packed row for TMA coordinate computation.
-  // Uses the same kStride logic as fill_token_indices but only for position 0 of the tile.
+  // First token row of the current tile — unified kStride formula for both directions.
+  // LoopK (kbs >= kBlockN): TMA caller divides by InnerBlockSize to get tile coordinate.
+  // LoopQ: result is the packed Q row directly.
   CUTLASS_DEVICE
   int get_packed_first_row() const {
     static_assert(IsProducer, "get_packed_first_row() is producer-only");
-    if constexpr (InnerLoopQ) {
-      constexpr int kStride = PackGQA ? PackGQAFactor : 1;
-      int const pos = inner_block_idx * InnerBlockSize;
-      int const indices_slot = pos / kStride;
-      int const logical_block_idx = (pos < seqlen_info.seqlen_q) ? sparse_indices_ptr[indices_slot] : -1;
-      return (logical_block_idx >= 0) ? logical_block_idx * kStride + pos % kStride : 0;
-    } else {
-      static_assert(SparseKBlockSize >= InnerBlockSize, "InnerLoopK get_packed_first_row() requires kbs >= kBlockN");
-      return get_n_block_abs() * InnerBlockSize;
-    }
-  }
-
-  // LoopK block-level only: absolute K block index for TMA tile load.
-  // When kbs >= kBlockN, each inner_block_idx maps to exactly one K block index
-  // from index_sparse_indices, and the tile is physically contiguous.
-  CUTLASS_DEVICE
-  int get_n_block_abs() const {
-    static_assert(IsProducer && !InnerLoopQ && SparseKBlockSize >= InnerBlockSize, "get_n_block_abs() requires block-level LoopK with kbs >= kBlockN");
-    int tiles_per_kblock = SparseKBlockSize / InnerBlockSize;
-    int kblock_idx = inner_block_idx / tiles_per_kblock;
-    int tile_within_kblock = inner_block_idx % tiles_per_kblock;
-    int block_id = sparse_indices_ptr[kblock_idx];
-    return (block_id >= 0) ? block_id * tiles_per_kblock + tile_within_kblock : 0;
+    constexpr int kStride = InnerLoopQ ? (PackGQA ? PackGQAFactor : 1) : SparseKBlockSize;
+    int const tile_pos = inner_block_idx * InnerBlockSize;
+    int const indices_idx = tile_pos / kStride;
+    int const offset_in_block = tile_pos % kStride;
+    int const total = InnerLoopQ ? seqlen_info.seqlen_q : seqlen_info.seqlen_k;
+    int const logical_block_idx = (tile_pos < total) ? sparse_indices_ptr[indices_idx] : -1;
+    return (logical_block_idx >= 0) ? logical_block_idx * kStride + offset_in_block : 0;
   }
 
   CUTLASS_DEVICE
