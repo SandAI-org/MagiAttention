@@ -428,13 +428,13 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 //   SparseKBlockSize_  — sparse K block size (kbs): how many K tokens each index entry covers
 //                        (1 = token-level index sparse, ≥InnerBlockSize = block-level)
 //
-// IsInnerLoopQ_=false (InnerLoopK): outer=Q token (bidb), inner=K from forward topk indices
-//   fill_token_indices fills K logical rows (k_token); head offset handled by ptr_gK_base
+// IsInnerLoopQ_=false (InnerLoopK): outer=Q token (bidb), inner=K from sparse indices
+//   fill_token_indices fills K logical rows; head offset handled by ptr_gK_base
 //   bidb = block_coord[2] = q_token; kv_head from scheduler bidh (intergroup)
-//   indices layout: (total_q, nhk, max_topk) — per-head slice via bidh_kv * max_topk
+//   indices layout: (total_q, nhk, inner_indices_cnt)
 // IsInnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb), inner=Q from inner_indices
 //   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
-//   indices layout: (num_k_blocks, nhk, inner_max_topk)
+//   indices layout: (num_k_blocks, nhk, inner_indices_cnt)
 //
 // Fields (all const, computed in constructor init-list):
 //   outer_tile_idx — tile index along the outer loop dimension
@@ -495,28 +495,28 @@ struct IndexSparseBlockMeta {
             return params.qhead_per_khead_divmod.divide(bidh);
           }
         }()) {
-    int const max_topk = params.index_sparse_max_topk;
+    int const inner_indices_cnt = params.index_sparse_max_topk;
     int const* row_ptr;
-    int actual_topk;
+    int num_valid_indices;
 
-    // Common: compute row_ptr and actual_topk (both branches use same layout)
-    row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * nhk * max_topk + static_cast<int64_t>(bidh_kv) * max_topk;
-    actual_topk = max_topk;
-    for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
-      --actual_topk;
+    // Common: compute row_ptr and num_valid_indices (both branches use same layout)
+    row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * nhk * inner_indices_cnt + static_cast<int64_t>(bidh_kv) * inner_indices_cnt;
+    num_valid_indices = inner_indices_cnt;
+    for (int i = inner_indices_cnt - 1; i >= 0 && row_ptr[i] < 0; --i)
+      --num_valid_indices;
 
     int total_inner_tokens;
     if constexpr (!IsInnerLoopQ) {
       // ── InnerLoopK: bidb = Q token, indices = forward topk (Q→K) ──
       seqlen_info.offset_q = bidb;
       seqlen_info.seqlen_q = 1;
-      total_inner_tokens = actual_topk * SparseKBlockSize;
+      total_inner_tokens = num_valid_indices * SparseKBlockSize;
       seqlen_info.seqlen_k = total_inner_tokens;
     } else {
       // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
       seqlen_info.offset_k = bidb * SparseKBlockSize;
       seqlen_info.seqlen_k = SparseKBlockSize;
-      total_inner_tokens = PackGQA ? actual_topk * PackGQAFactor : actual_topk;
+      total_inner_tokens = PackGQA ? num_valid_indices * PackGQAFactor : num_valid_indices;
       seqlen_info.offset_q = 0;
       seqlen_info.seqlen_q = total_inner_tokens;
     }
@@ -533,91 +533,36 @@ struct IndexSparseBlockMeta {
   }
 
   // Fill token indices into the smem stage slot for the CURRENT tile.
-  // InnerLoopK: fills logical K positions (head offset handled by ptr_gK_base)
-  // InnerLoopQ: fills Q packed rows (q_token * PackGQAFactor + sub_head)
+  // Unified loop: maps each position in the tile to a physical token via
+  //   entry_idx = pos / kStride; result = indices[entry_idx] * kStride + pos % kStride
+  // kStride is compile-time: SparseKBlockSize (LoopK), PackGQAFactor (LoopQ+GQA), or 1.
   CUTLASS_DEVICE
   void fill_token_indices(int* slot_rows, int token_idx_in_ldst_group, int ldst_group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
     int* const group_rows = slot_rows + ldst_group_idx * NumTokensPerLdstGroup_;
+    constexpr int kStride = IsInnerLoopQ ? (PackGQA ? PackGQAFactor : 1) : SparseKBlockSize;
+    int const base = inner_block_idx * InnerBlockSize + ldst_group_idx * NumTokensPerLdstGroup_;
+    int const total = IsInnerLoopQ ? seqlen_info.seqlen_q : seqlen_info.seqlen_k;
 
-    if constexpr (!IsInnerLoopQ) {
-      // ── InnerLoopK: fill logical K positions ──
-      // Head selection is done by ptr_gK_base = K_ptr + bidh_kv * head_stride,
-      // so row indices are positions within the per-head K space [0, total_k).
-      int tile_base = inner_block_idx * InnerBlockSize;
-      if constexpr (SparseKBlockSize <= 1) {
-        for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
-          int abs_idx = tile_base + ldst_group_idx * NumTokensPerLdstGroup_ + j;
-          int const k_token = sparse_indices_ptr[abs_idx];
-          group_rows[j] = (k_token >= 0) ? k_token : 0;
-        }
-      } else {
-        for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
-          int token_pos = tile_base + ldst_group_idx * NumTokensPerLdstGroup_ + j;
-          int block_idx = token_pos / SparseKBlockSize;
-          int offset_in_block = token_pos % SparseKBlockSize;
-          int block_id = (block_idx < seqlen_info.seqlen_k / SparseKBlockSize) ? sparse_indices_ptr[block_idx] : -1;
-          int logical_k = block_id * SparseKBlockSize + offset_in_block;
-          group_rows[j] = (block_id >= 0) ? logical_k : 0;
-        }
-      }
-    } else {
-      // ── InnerLoopQ: fill Q rows ──
-      int tile_first_row = inner_block_idx * InnerBlockSize;
-      int base = tile_first_row + ldst_group_idx * NumTokensPerLdstGroup_;
-      int total_q = seqlen_info.seqlen_q;
-
-      if constexpr (PackGQA) {
-        // PackGQA: interleave Q heads — packed row = token * G + sub_head
-        int max_inner_topk_val = total_q / PackGQAFactor;
-        for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
-          int packed_row = base + j;
-          if (packed_row < total_q) {
-            int q_token_local_idx = packed_row / PackGQAFactor;
-            int sub_head = packed_row % PackGQAFactor;
-            int q_token = (q_token_local_idx < max_inner_topk_val) ? sparse_indices_ptr[q_token_local_idx] : -1;
-            group_rows[j] = (q_token >= 0) ? q_token * PackGQAFactor + sub_head : 0;
-          } else {
-            group_rows[j] = 0;
-          }
-        }
-      } else {
-        // !PackGQA: each bidh selects one Q head — raw Q token indices only
-        for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
-          int local_idx = base + j;
-          if (local_idx < total_q) {
-            int q_token = sparse_indices_ptr[local_idx];
-            group_rows[j] = (q_token >= 0) ? q_token : 0;
-          } else {
-            group_rows[j] = 0;
-          }
-        }
-      }
+    for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
+      int const pos = base + j;
+      int const entry_idx = pos / kStride;
+      int const entry = (pos < total) ? sparse_indices_ptr[entry_idx] : -1;
+      group_rows[j] = (entry >= 0) ? entry * kStride + pos % kStride : 0;
     }
   }
 
   // Absolute packed row for TMA coordinate computation.
-  // InnerLoopQ: maps inner_block_idx through inner_indices → absolute packed Q row.
-  // InnerLoopK: maps inner_block_idx through index_sparse_indices → absolute packed K row.
-  // NOTE: The bounds check (local_idx < seqlen_q) handles tile tail padding —
-  // inner_block_cnt * InnerBlockSize may exceed actual token count; out-of-bounds
-  // positions return 0 (a safe dummy row). The consumer's mask uses num_invalid_token
-  // to zero these padding rows' attention scores, and the epilogue skips writing them.
+  // Uses the same kStride logic as fill_token_indices but only for position 0 of the tile.
   CUTLASS_DEVICE
   int get_packed_first_row() const {
     static_assert(IsProducer, "get_packed_first_row() is producer-only");
     if constexpr (IsInnerLoopQ) {
-      if constexpr (PackGQA) {
-        int packed_row = inner_block_idx * InnerBlockSize;
-        int q_token_local_idx = packed_row / PackGQAFactor;
-        int sub_head_offset = packed_row % PackGQAFactor;
-        int q_token = (q_token_local_idx < seqlen_info.seqlen_q / PackGQAFactor) ? sparse_indices_ptr[q_token_local_idx] : -1;
-        return (q_token >= 0) ? q_token * PackGQAFactor + sub_head_offset : 0;
-      } else {
-        int local_idx = inner_block_idx * InnerBlockSize;
-        int q_token = (local_idx < seqlen_info.seqlen_q) ? sparse_indices_ptr[local_idx] : -1;
-        return (q_token >= 0) ? q_token : 0;
-      }
+      constexpr int kStride = PackGQA ? PackGQAFactor : 1;
+      int const pos = inner_block_idx * InnerBlockSize;
+      int const entry_idx = pos / kStride;
+      int const entry = (pos < seqlen_info.seqlen_q) ? sparse_indices_ptr[entry_idx] : -1;
+      return (entry >= 0) ? entry * kStride + pos % kStride : 0;
     } else {
       static_assert(SparseKBlockSize >= InnerBlockSize, "InnerLoopK get_packed_first_row() requires kbs >= kBlockN");
       return get_n_block_abs() * InnerBlockSize;
