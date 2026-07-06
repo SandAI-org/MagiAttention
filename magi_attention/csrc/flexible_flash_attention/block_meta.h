@@ -528,21 +528,7 @@ struct IndexSparseBlockMeta {
     end_batches = bidb + 1;
 
     if constexpr (IsProducer) {
-      if constexpr (!IsInnerLoopQ && SparseKBlockSize <= 1) {
-        // Token-level InnerLoopK: pointer walks InnerBlockSize entries per tile
-        int aligned_total = inner_block_cnt * InnerBlockSize;
-        int ldst_group_idx = (thread_idx % NumProducerThreads_) / LdstGroupSize_;
-        int group_offset;
-        if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          group_offset = (aligned_total - InnerBlockSize) + ldst_group_idx * NumTokensPerLdstGroup_;
-        } else {
-          group_offset = ldst_group_idx * NumTokensPerLdstGroup_;
-        }
-        sparse_indices_ptr = row_ptr + group_offset;
-      } else {
-        // Block-level InnerLoopK or InnerLoopQ: absolute indexing from row_ptr
-        sparse_indices_ptr = row_ptr;
-      }
+      sparse_indices_ptr = row_ptr;
     }
   }
 
@@ -558,13 +544,14 @@ struct IndexSparseBlockMeta {
       // ── InnerLoopK: fill logical K positions ──
       // Head selection is done by ptr_gK_base = K_ptr + bidh_kv * head_stride,
       // so row indices are positions within the per-head K space [0, total_k).
+      int tile_base = inner_block_idx * InnerBlockSize;
       if constexpr (SparseKBlockSize <= 1) {
         for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
-          int const k_token = sparse_indices_ptr[j];
+          int abs_idx = tile_base + ldst_group_idx * NumTokensPerLdstGroup_ + j;
+          int const k_token = sparse_indices_ptr[abs_idx];
           group_rows[j] = (k_token >= 0) ? k_token : 0;
         }
       } else {
-        int tile_base = inner_block_idx * InnerBlockSize;
         for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += LdstGroupSize_) {
           int token_pos = tile_base + ldst_group_idx * NumTokensPerLdstGroup_ + j;
           int block_idx = token_pos / SparseKBlockSize;
@@ -658,16 +645,6 @@ struct IndexSparseBlockMeta {
   CUTLASS_DEVICE
   void prefetch() {
     flash::advance_block_cur<kDir>(inner_block_idx);
-    if constexpr (IsProducer && !IsInnerLoopQ && SparseKBlockSize <= 1) {
-      // Token-level LoopK: sliding window — advance pointer
-      if (!is_finish()) {
-        if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          sparse_indices_ptr -= InnerBlockSize;
-        } else {
-          sparse_indices_ptr += InnerBlockSize;
-        }
-      }
-    }
   }
 
   CUTLASS_DEVICE
