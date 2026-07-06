@@ -499,44 +499,30 @@ struct IndexSparseBlockMeta {
     int const* row_ptr;
     int actual_topk;
 
+    // Common: compute row_ptr and actual_topk (both branches use same layout)
+    row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * nhk * max_topk + static_cast<int64_t>(bidh_kv) * max_topk;
+    actual_topk = max_topk;
+    for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
+      --actual_topk;
+
+    int total_inner_tokens;
     if constexpr (!IsInnerLoopQ) {
       // ── InnerLoopK: bidb = Q token, indices = forward topk (Q→K) ──
-      // indices layout: (total_q, nhk, max_topk) — contiguous 3D
       seqlen_info.offset_q = bidb;
       seqlen_info.seqlen_q = 1;
-
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * nhk * max_topk + static_cast<int64_t>(bidh_kv) * max_topk;
-
-      actual_topk = max_topk;
-      for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
-        --actual_topk;
-
-      int const total_k_tokens = actual_topk * SparseKBlockSize;
-      seqlen_info.seqlen_k = total_k_tokens;
-      inner_block_cnt = (total_k_tokens + InnerBlockSize - 1) / InnerBlockSize;
-      num_invalid_token = inner_block_cnt * InnerBlockSize - total_k_tokens;
+      total_inner_tokens = actual_topk * SparseKBlockSize;
+      seqlen_info.seqlen_k = total_inner_tokens;
     } else {
       // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
-      // indices layout: (num_k_blocks, nhk, max_topk) — contiguous 3D
       seqlen_info.offset_k = bidb * SparseKBlockSize;
       seqlen_info.seqlen_k = SparseKBlockSize;
-
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * nhk * max_topk + static_cast<int64_t>(bidh_kv) * max_topk;
-
-      actual_topk = max_topk;
-      for (int i = max_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
-        --actual_topk;
-
-      // PackGQA: interleave Q heads into packed rows (token * G + sub_head).
-      // !PackGQA: each bidh from the scheduler already selects one Q head,
-      // so the inner loop iterates over raw Q tokens without head packing.
-      int total_q_rows = PackGQA ? actual_topk * PackGQAFactor : actual_topk;
+      total_inner_tokens = PackGQA ? actual_topk * PackGQAFactor : actual_topk;
       seqlen_info.offset_q = 0;
-      seqlen_info.seqlen_q = total_q_rows;
-      inner_block_cnt = (total_q_rows + InnerBlockSize - 1) / InnerBlockSize;
-      // Tile padding: last tile may extend past actual tokens; mask zeros these rows.
-      num_invalid_token = inner_block_cnt * InnerBlockSize - total_q_rows;
+      seqlen_info.seqlen_q = total_inner_tokens;
     }
+
+    inner_block_cnt = (total_inner_tokens + InnerBlockSize - 1) / InnerBlockSize;
+    num_invalid_token = inner_block_cnt * InnerBlockSize - total_inner_tokens;
 
     inner_block_idx = flash::init_block_cur<kDir>(inner_block_min, inner_block_cnt);
     end_batches = bidb + 1;
