@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- Python 3.8+
+- Python 3.10+
 - `pip`（Python 自带）
 - 终端（bash、zsh、PowerShell 等均可）
 - 文本编辑器（VS Code、Vim 等均可）
@@ -398,7 +398,7 @@ DOCS_LANGUAGE=zh_CN sphinx-build -b html source/ build/html/zh_CN/
 | `make html` | 构建英文文档（默认，输出到 `build/html/`） |
 | `make clean` | 清除所有构建产物 |
 | `make update-po` | 提取字符串并更新中文 `.po` 文件 |
-| `make html-en` | 仅构建英文（输出到 `build/html/en/`） |
+| `make html-en` | 仅构建英文（输出到 `build/html/`，站点根目录） |
 | `make html-zh` | 仅构建中文（输出到 `build/html/zh_CN/`） |
 | `make html-multilang` | 同时构建英文和中文 |
 

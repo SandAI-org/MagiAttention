@@ -48,7 +48,7 @@ template <
     int NumMmaWarpGroups,
     int AtomLayoutMdQ,
     int AtomLayoutNdKV,
-    bool DisableBwdDkvAtomicReduction_,
+    bool OuterUseAtomicReduction_,
     bool Deterministic_,
     bool SwapBwdQKLoop_,
     bool PackGQA_,
@@ -71,7 +71,7 @@ struct CollectiveEpilogueBwd {
 
   static constexpr bool IsSameTypeDq = cute::is_same_v<ElementDq, ElementAccum>;
   static constexpr bool IsSameTypeDkv = cute::is_same_v<ElementDkv, ElementAccum>;
-  static constexpr bool DisableBwdDkvAtomicReduction = DisableBwdDkvAtomicReduction_;
+  static constexpr bool OuterUseAtomicReduction = OuterUseAtomicReduction_;
 
   static constexpr bool dQ_swapAB = dQ_swapAB_;
   static constexpr bool dKV_swapAB = dKV_swapAB_;
@@ -95,8 +95,10 @@ struct CollectiveEpilogueBwd {
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
-  using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD; // TODO: maybe also add DisableBwdDqAtomicReduction flag ?
-  using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
+  // TMA type for dQ: only used when OuterUseAtomicReduction=true (atomic reduce-add path).
+  // When OuterUseAtomicReduction=false, store_dq() uses per-element flash::copy instead.
+  using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD;
+  using GmemTiledCopydKVTMA = std::conditional_t<!SwapBwdQKLoop && !OuterUseAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
   using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
@@ -324,14 +326,20 @@ struct CollectiveEpilogueBwd {
   static void prefetch_tma_descriptors(Params const& params) {
     if constexpr (Use_TMA) {
       if constexpr (SwapBwdQKLoop) {
-        if constexpr (PackGQA) {
-          cute::prefetch_tma_descriptor(params.tma_store_dQ_packed.get_tma_descriptor());
-        } else {
-          cute::prefetch_tma_descriptor(params.tma_store_dQ.get_tma_descriptor());
+        // !OuterUseAtomicReduction: store_dq() uses per-element path, skip TMA prefetch
+        if constexpr (OuterUseAtomicReduction) {
+          if constexpr (PackGQA) {
+            cute::prefetch_tma_descriptor(params.tma_store_dQ_packed.get_tma_descriptor());
+          } else {
+            cute::prefetch_tma_descriptor(params.tma_store_dQ.get_tma_descriptor());
+          }
         }
       } else {
-        cute::prefetch_tma_descriptor(params.tma_store_dK.get_tma_descriptor());
-        cute::prefetch_tma_descriptor(params.tma_store_dV.get_tma_descriptor());
+        // !OuterUseAtomicReduction: store_dkv() uses per-element path, skip TMA prefetch
+        if constexpr (OuterUseAtomicReduction) {
+          cute::prefetch_tma_descriptor(params.tma_store_dK.get_tma_descriptor());
+          cute::prefetch_tma_descriptor(params.tma_store_dV.get_tma_descriptor());
+        }
       }
     }
   }
@@ -408,7 +416,7 @@ struct CollectiveEpilogueBwd {
     // IndexSparse LoopQ with KBlockSize < kBlockN: only partial rows valid in the tile,
     // TMA full-tile store would corrupt neighbors. Use per-element path with residual guard.
     // When KBlockSize >= kBlockN the full tile is valid and can use TMA store.
-    if constexpr (!DisableBwdDkvAtomicReduction && !IndexSparseInvLoopQ) {
+    if constexpr (OuterUseAtomicReduction && !IndexSparseInvLoopQ) {
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
       cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
 
@@ -566,49 +574,90 @@ struct CollectiveEpilogueBwd {
     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     cute::copy(smem_tiled_copy_dQ, taccdQrdQ, taccdQsdQ);
 
-    cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
-    BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
+    if constexpr (!OuterUseAtomicReduction) {
+      // Per-element direct store: outer Q range is unique per CTA (rangemerge / sparse),
+      // so no atomic reduction needed.  Mirrors store_dkv()'s per-element path.
+      BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
-    int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
+      GmemTiledCopydQ gmem_tiled_copy_dQ;
+      auto gmem_thr_copy_dQ = gmem_tiled_copy_dQ.get_thread_slice(thread_idx);
 
-    // For PackGQA, use packed TMA descriptor and packed offset
-    // For non-PackGQA, use original TMA descriptor and offset
-    if constexpr (!PackGQA) {
-      Tensor mdQ = params.tma_store_dQ.get_tma_tensor(params.shape_dQ)(_, _, bidh); // (seqlen_q, head_dim)
-      Tensor gdQ = local_tile(domain_offset(make_coord(offset_q, _0{}), mdQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+      if constexpr (!PackGQA) {
+        Tensor mdQ = make_tensor(make_gmem_ptr(params.ptr_dQ), params.shape_dQ, params.stride_dQ)(_, _, bidh);
+        Tensor gdQ = local_tile(domain_offset(make_coord(offset_q, _0{}), mdQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
 
-      auto block_tma_dQ = params.tma_store_dQ.get_slice(_0{});
-      Tensor tdQgdQ = block_tma_dQ.partition_D(gdQ); // (TMA, TMA_M, TMA_K)
-      Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
+        Tensor tdQgdQ = gmem_thr_copy_dQ.partition_D(gdQ);
+        Tensor tdQsdQ_e = gmem_thr_copy_dQ.partition_S(sdQ);
 
-      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-        BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-        if (cute::elect_one_sync()) {
-          cute::copy(params.tma_store_dQ, tdQsdQ, tdQgdQ);
-          tma_store_arrive();
-        }
+        int residual_m = get_batch_range(params.q_ranges, bidb).y - offset_q - m_block * kBlockM;
+
+        flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+            gmem_tiled_copy_dQ,
+            tdQsdQ_e,
+            tdQgdQ,
+            gmem_thr_copy_dQ.partition_D(make_identity_tensor(select<0, 2>(TileShape_MNK{}))),
+            gmem_thr_copy_dQ.partition_D(make_tensor<bool>(make_shape(Int<kBlockM>{}, Int<kHeadDim>{}))),
+            residual_m);
+      } else {
+        Tensor mdQ_packed = make_tensor(make_gmem_ptr(params.ptr_dQ), params.shape_dQ_packed, params.stride_dQ_packed)(_, _, bidh);
+        Tensor gdQ_packed =
+            local_tile(domain_offset(make_coord(offset_q * PackGQAFactor, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+
+        Tensor tdQgdQ = gmem_thr_copy_dQ.partition_D(gdQ_packed);
+        Tensor tdQsdQ_e = gmem_thr_copy_dQ.partition_S(sdQ);
+
+        int residual_m = get_batch_range(params.q_ranges, bidb).y * PackGQAFactor - offset_q * PackGQAFactor - m_block * kBlockM;
+
+        flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+            gmem_tiled_copy_dQ,
+            tdQsdQ_e,
+            tdQgdQ,
+            gmem_thr_copy_dQ.partition_D(make_identity_tensor(select<0, 2>(TileShape_MNK{}))),
+            gmem_thr_copy_dQ.partition_D(make_tensor<bool>(make_shape(Int<kBlockM>{}, Int<kHeadDim>{}))),
+            residual_m);
       }
     } else {
-      // For PackGQA: use packed TMA descriptor
-      // bidh is KV head index, offset_q needs to be scaled by PackGQAFactor
-      Tensor mdQ_packed = params.tma_store_dQ_packed.get_tma_tensor(params.shape_dQ_packed)(_, _, bidh); // (seqlen_q * PackGQAFactor, head_dim)
-      Tensor gdQ_packed =
-          local_tile(domain_offset(make_coord(offset_q * PackGQAFactor, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+      // TMA atomic reduce-add: multiple CTAs may contribute to the same outer Q position.
+      cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
+      BarrierManager::arrive<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
 
-      auto block_tma_dQ_packed = params.tma_store_dQ_packed.get_slice(_0{});
-      Tensor tdQgdQ_packed = block_tma_dQ_packed.partition_D(gdQ_packed); // (TMA, TMA_M, TMA_K)
-      Tensor tdQsdQ_packed = block_tma_dQ_packed.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
+      int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
 
-      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-        BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-        if (cute::elect_one_sync()) {
-          cute::copy(params.tma_store_dQ_packed, tdQsdQ_packed, tdQgdQ_packed);
-          tma_store_arrive();
+      if constexpr (!PackGQA) {
+        Tensor mdQ = params.tma_store_dQ.get_tma_tensor(params.shape_dQ)(_, _, bidh); // (seqlen_q, head_dim)
+        Tensor gdQ = local_tile(domain_offset(make_coord(offset_q, _0{}), mdQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+
+        auto block_tma_dQ = params.tma_store_dQ.get_slice(_0{});
+        Tensor tdQgdQ = block_tma_dQ.partition_D(gdQ); // (TMA, TMA_M, TMA_K)
+        Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
+
+        if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+          BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
+          if (cute::elect_one_sync()) {
+            cute::copy(params.tma_store_dQ, tdQsdQ, tdQgdQ);
+            tma_store_arrive();
+          }
+        }
+      } else {
+        Tensor mdQ_packed = params.tma_store_dQ_packed.get_tma_tensor(params.shape_dQ_packed)(_, _, bidh); // (seqlen_q * PackGQAFactor, head_dim)
+        Tensor gdQ_packed =
+            local_tile(domain_offset(make_coord(offset_q * PackGQAFactor, _0{}), mdQ_packed), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{})); // (M, K)
+
+        auto block_tma_dQ_packed = params.tma_store_dQ_packed.get_slice(_0{});
+        Tensor tdQgdQ_packed = block_tma_dQ_packed.partition_D(gdQ_packed); // (TMA, TMA_M, TMA_K)
+        Tensor tdQsdQ_packed = block_tma_dQ_packed.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
+
+        if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+          BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
+          if (cute::elect_one_sync()) {
+            cute::copy(params.tma_store_dQ_packed, tdQsdQ_packed, tdQgdQ_packed);
+            tma_store_arrive();
+          }
         }
       }
-    }
 
-    tma_store_wait<0>();
+      tma_store_wait<0>();
+    }
   }
 
   CUTLASS_DEVICE void store_tail() {

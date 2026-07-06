@@ -65,7 +65,7 @@ class TestDSASparseInterface(TestCase):
         ],
     )
     @parameterize("dtype", [torch.float16, torch.bfloat16])
-    @parameterize("backend", ["flex", "ffa_sparse_load", "ffa_index_attn", "sdpa"])
+    @parameterize("backend", ["flex", "ffa_block_sparse", "ffa_index_sparse", "sdpa"])
     def test_sparse_flex_vs_ref(
         self,
         attn_config: dict[str, Any],

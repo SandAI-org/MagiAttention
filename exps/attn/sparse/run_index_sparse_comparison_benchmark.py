@@ -43,7 +43,6 @@ import torch
 from baselines.attn_impl import ffa_func
 from baselines.token_sparse_attn_triton import token_sparse_attn, token_sparse_fwd
 from baselines.utils import seed_everything
-from einops import rearrange
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from magi_attention.benchmarking import (
@@ -82,13 +81,13 @@ HAS_TILELANG = False  # Lazy-imported on first use to avoid CUDA context conflic
 
 
 def build_index_sparse_indices(b, S, nhk, topk, device):
-    """Build index_sparse_indices: (b*S, nhk, topk) int32 for token-sparse FFA."""
+    """Build index_sparse_indices: (b*S, nhk, topk) int32 with logical K positions."""
     total_q = b * S
     local_pos = torch.randint(0, S, (total_q, topk), device=device).sort(dim=1).values
     batch_idx = torch.arange(total_q, device=device) // S
     global_pos = batch_idx.unsqueeze(1) * S + local_pos
-    h_offsets = torch.arange(nhk, device=device).view(1, -1, 1)
-    return (global_pos.unsqueeze(1) * nhk + h_offsets).int()
+    # Expand to (total_q, nhk, topk) — same logical K positions per head
+    return global_pos.unsqueeze(1).expand(-1, nhk, -1).int().contiguous()
 
 
 def build_flex_sparse_block_mask(b, S, topk, nhq, device="cuda"):
@@ -218,9 +217,9 @@ def comparison_benchmark(S, method):
             v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
 
             index_sparse_indices = build_index_sparse_indices(b, S, nhk, topk, device)
-            q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
-            k_t = rearrange(k, "b s h d -> (b s h) 1 d")
-            v_t = rearrange(v, "b s h d -> (b s h) 1 d")
+            q_t = q.reshape(b * S, nhq, hd)
+            k_t = k.reshape(b * S, nhk, hd)
+            v_t = v.reshape(b * S, nhk, hd)
             del q, k, v
             torch.cuda.empty_cache()
 
@@ -323,7 +322,7 @@ def comparison_benchmark(S, method):
         else:
             raise ValueError(f"Unknown method: {method}")
 
-        perf_dict = do_bench_flops(fn, quantiles=quantiles, mem_record_mode="peak")
+        perf_dict = do_bench_flops(fn, quantiles=quantiles)
 
         def ms_to_tflops(ms: float) -> float:
             return sparse_flops / ms * 1e-9
@@ -538,9 +537,9 @@ def bwd_benchmark(S, method):
             v = torch.randn(b, S, nhk, hd, device=device, dtype=dtype)
 
             index_sparse_indices = build_index_sparse_indices(b, S, nhk, topk, device)
-            q_t = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk)
-            k_t = rearrange(k, "b s h d -> (b s h) 1 d")
-            v_t = rearrange(v, "b s h d -> (b s h) 1 d")
+            q_t = q.reshape(b * S, nhq, hd)
+            k_t = k.reshape(b * S, nhk, hd)
+            v_t = v.reshape(b * S, nhk, hd)
             del q, k, v
             torch.cuda.empty_cache()
 
@@ -645,7 +644,7 @@ def bwd_benchmark(S, method):
         else:
             raise ValueError(f"Unknown BWD method: {method}")
 
-        perf_dict = do_bench_flops(fn, quantiles=quantiles, mem_record_mode="peak")
+        perf_dict = do_bench_flops(fn, quantiles=quantiles)
 
         def ms_to_tflops(ms: float) -> float:
             return sparse_flops / ms * 1e-9

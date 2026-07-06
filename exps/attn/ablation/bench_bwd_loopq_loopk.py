@@ -178,7 +178,7 @@ def bwd_loop_benchmark(seqlen, method):
         else:
             raise ValueError(f"Unknown method: {method}")
 
-        perf_dict = do_bench_flops(fn, quantiles=quantiles, mem_record_mode="peak")
+        perf_dict = do_bench_flops(fn, quantiles=quantiles)
 
         def ms_to_tflops(ms: float) -> float:
             return attn_flops / ms * 1e-9

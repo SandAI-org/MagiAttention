@@ -14,8 +14,6 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="assignment"
-
 import ctypes
 import fcntl
 import hashlib
@@ -131,7 +129,7 @@ class FileLock:
         self.exclusive: bool = exclusive
         self.timeout: float = timeout
         self.label: str = label
-        self._fd: int = -1
+        self._fd: int | None = -1
 
     @property
     def _lock_label(self) -> str:

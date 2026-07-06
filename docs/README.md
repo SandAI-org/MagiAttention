@@ -6,7 +6,7 @@ This guide explains how to build, preview, and contribute to the MagiAttention d
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - `pip` (comes with Python)
 - A terminal (bash, zsh, PowerShell, etc.)
 - A text editor (VS Code, Vim, etc.)
@@ -399,7 +399,7 @@ DOCS_LANGUAGE=zh_CN sphinx-build -b html source/ build/html/zh_CN/
 | `make html` | Build English docs (default, output: `build/html/`) |
 | `make clean` | Remove all build artifacts |
 | `make update-po` | Extract strings and update Chinese `.po` files |
-| `make html-en` | Build English only (output: `build/html/en/`) |
+| `make html-en` | Build English only (output: `build/html/`, site root) |
 | `make html-zh` | Build Chinese only (output: `build/html/zh_CN/`) |
 | `make html-multilang` | Build both English and Chinese |
 

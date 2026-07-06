@@ -133,19 +133,27 @@ class SeqlenInfoQK:
         if const_expr(mSeqUsedQ is not None):
             seqlen_q = mSeqUsedQ[batch_idx]
         else:
-            seqlen_q = (
-                seqlen_q_static
-                if const_expr(mCuSeqlensQ is None)
-                else mCuSeqlensQ[batch_idx + 1] - offset_q
-            )
+            if const_expr(mCuSeqlensQ is None):
+                seqlen_q = seqlen_q_static
+            else:
+                assert mCuSeqlensQ is not None  # mypy
+                # NOTE: Clamp the +1 lookup to the last valid cu_seqlens entry.
+                # since non-persistent single-tile kernels (e.g. sm80)
+                # launch padding tiles with `batch_idx == num_batch`;
+                # without this clamp, `mCuSeqlensQ[batch_idx + 1]` reads one element
+                # out of bounds, yielding a garbage seqlen and illegal K/V loads.
+                # While for every real tile (batch_idx < num_batch), this clamp is a no-op.
+                last_q = mCuSeqlensQ.shape[0] - 1
+                seqlen_q = mCuSeqlensQ[cutlass.min(batch_idx + 1, last_q)] - offset_q
         if const_expr(mSeqUsedK is not None):
             seqlen_k = mSeqUsedK[batch_idx]
         else:
-            seqlen_k = (
-                seqlen_k_static
-                if const_expr(mCuSeqlensK is None)
-                else mCuSeqlensK[batch_idx + 1] - offset_k
-            )
+            if const_expr(mCuSeqlensK is None):
+                seqlen_k = seqlen_k_static
+            else:
+                assert mCuSeqlensK is not None  # mypy
+                last_k = mCuSeqlensK.shape[0] - 1
+                seqlen_k = mCuSeqlensK[cutlass.min(batch_idx + 1, last_k)] - offset_k
         m_block_offset = (
             0 if const_expr(mCuTotalMBlocks is None) else mCuTotalMBlocks[batch_idx]
         )

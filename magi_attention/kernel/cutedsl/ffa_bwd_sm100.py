@@ -14,7 +14,6 @@
 
 # Copyright (c) 2025, Ted Zadouri, Markus Hoehnerbach, Jay Shah, Tri Dao.
 
-# mypy: disable-error-code="no-redef,union-attr,index,attr-defined,assignment,arg-type,has-type,misc"
 # pyright: reportInvalidTypeForm=false
 
 import math
@@ -155,7 +154,7 @@ class FFABwdSm100:
         if cutlass.const_expr(has_aux_tensors):
             self.vec_size: cutlass.Constexpr = 1
         else:
-            self.vec_size: cutlass.Constexpr = 4
+            self.vec_size = 4
         self.qk_acc_dtype = Float32
 
         # Speed optimizations, does not affect correctness
@@ -979,9 +978,9 @@ class FFABwdSm100:
         if const_expr(self.is_varlen_k):
             TileScheduler = SingleTileVarlenScheduler
         elif const_expr(self.deterministic):
-            TileScheduler = SingleTileLPTBwdScheduler
+            TileScheduler = SingleTileLPTBwdScheduler  # type: ignore[assignment]
         else:
-            TileScheduler = SingleTileScheduler
+            TileScheduler = SingleTileScheduler  # type: ignore[assignment]
         if const_expr(self.spt_override is None):
             self.spt = (self.is_causal or self.is_local) and self.deterministic
         else:
@@ -989,16 +988,16 @@ class FFABwdSm100:
             self.spt = self.spt_override and self.deterministic
 
         tile_sched_args = TileSchedulerArguments(
-            cute.ceil_div(cute.size(mK.shape[0]), self.cta_tiler[0]),  # num_blocks
-            cute.size(mQ.shape[2]),  # num_heads = num_query_heads
-            cute.size(mK.shape[3])
+            num_block=cute.ceil_div(cute.size(mK.shape[0]), self.cta_tiler[0]),
+            num_head=cute.size(mQ.shape[2]),
+            num_batch=cute.size(mK.shape[3])
             if const_expr(mCuSeqlensK is None)
-            else cute.size(mCuSeqlensK.shape[0] - 1),  # num_batches
-            1,  # num_splits
-            cute.size(mQ.shape[0]),  # pass seqlen_q or total_q for seqlen_k
-            mQ.shape[1],  # headdim
-            mV.shape[1],  # headdim_v
-            total_q=cute.size(mK.shape[0])  # pass total_k for total_q
+            else cute.size(mCuSeqlensK.shape[0] - 1),  # type: ignore[union-attr]
+            num_splits=1,
+            seqlen_k=cute.size(mQ.shape[0]),
+            headdim=mQ.shape[1],
+            headdim_v=mV.shape[1],
+            total_q=cute.size(mK.shape[0])
             if const_expr(mCuSeqlensK is not None)
             else cute.size(mK.shape[0]) * cute.size(mK.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],  # (tile_n, tile_m)
@@ -1155,7 +1154,7 @@ class FFABwdSm100:
         else:
 
             @cute.struct
-            class SharedStorage:
+            class SharedStorage:  # type: ignore[no-redef]
                 # ---  mbarriers for pipelines ---
 
                 Q_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
@@ -1405,7 +1404,7 @@ class FFABwdSm100:
             cluster=self.cluster_shape_mnk
             if cute.size(self.cluster_shape_mnk) > 1
             else None,
-            smem=self.shared_storage.size_in_bytes(),
+            smem=self.shared_storage.size_in_bytes(),  # type: ignore[attr-defined]
             stream=stream,
             min_blocks_per_mp=1,
         )
@@ -2484,6 +2483,7 @@ class FFABwdSm100:
             # mKt_cur: (HD,seqK):(1@0,1@1)
             # mdOt_cur: (seqQ,HD):(1@1,1@0) => actually dO
             if const_expr(self.use_2cta_instrs):
+                assert mQt is not None and mKt is not None and mdOt is not None  # mypy
                 if const_expr(not seqlen_info.has_cu_seqlens_q):
                     mQt_cur = mQt[None, None, head_idx, batch_idx]
                     mdOt_cur = mdOt[None, None, head_idx, batch_idx]
@@ -2679,10 +2679,13 @@ class FFABwdSm100:
                     cute.printf(prefix + "gLSE.layout: {}", gLSE.layout)
                     cute.printf(prefix + "gdPsum.layout: {}", gdPsum.layout)
                     if const_expr(tma_atom_dOt is not None):
+                        assert gdOt is not None  # mypy
                         cute.printf(prefix + "gdOt.layout: {}", gdOt.layout)
                     if const_expr(tma_atom_Qt is not None):
+                        assert gQt is not None  # mypy
                         cute.printf(prefix + "gQt.layout: {}", gQt.layout)
                     if const_expr(self.use_2cta_instrs):
+                        assert gKt is not None  # mypy
                         cute.printf(prefix + "gKt.layout: {}", gKt.layout)
                     cute.printf("")
 
@@ -4849,6 +4852,7 @@ class FFABwdSm100:
                         is_print_block=is_print_block,
                     )
                 else:  # TMA store dK/dV
+                    assert tiled_copy_r2s_dKV is not None  # mypy
                     thr_copy_r2s_dKV = tiled_copy_r2s_dKV.get_slice(dp_idx)
                     # TMA store dV
                     consumer_state_dKV = self.epilogue_dK_or_dV_tma(
@@ -5101,7 +5105,7 @@ class FFABwdSm100:
             pipeline.PipelineUserType.Consumer, 1
         )
         dQ_tma_store_producer_state = ffa_pipeline.make_pipeline_state(
-            ffa_pipeline.PipelineUserType.Producer, self.sdQacc_stage
+            pipeline.PipelineUserType.Producer, self.sdQacc_stage
         )
         read_flag = const_expr(not self.deterministic)
 

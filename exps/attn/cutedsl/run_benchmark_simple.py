@@ -103,10 +103,6 @@ else:
 
 # Scenarios: full / causal (non-varlen) and varlen_full / varlen_causal (packed)
 mask_types = ["full", "causal", "varlen_full", "varlen_causal"]
-if IS_SM80:
-    # FIXME: for now, ffa_bwd_sm80 will encounter IMA error with varlen mask
-    mask_types.remove("varlen_full")
-    mask_types.remove("varlen_causal")
 
 # Simple varlen seqlen distribution (doc length intervals -> weight). Each
 # benchmarked seqlen is split into a list of doc lengths following this.
@@ -469,7 +465,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
         return {"flops": [BENCH_CASE_OOM] * 3}
 
     try:
-        perf_dict = do_bench_flops(fn, quantiles=quantiles, mem_record_mode="peak")
+        perf_dict = do_bench_flops(fn, quantiles=quantiles)
 
         def ms_to_tflops(ms):
             return attn_flops / ms * 1e-9

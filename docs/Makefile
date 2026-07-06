@@ -24,8 +24,12 @@ gettext:
 update-po: gettext
 	@sphinx-intl update -p "$(GETTEXTDIR)" -d "$(LOCALEDIR)" -l zh_CN
 
+# Multi-language docs layout: English lives at the site root ($(BUILDDIR)/html/),
+# Chinese lives under $(BUILDDIR)/html/zh_CN/. This keeps single- and
+# multi-language builds consistent with the language switcher and the CI deploy
+# layout ("English at root, Chinese under zh_CN/").
 html-en:
-	@DOCS_LANGUAGE=en $(SPHINXBUILD) -b html "$(SOURCEDIR)" "$(BUILDDIR)/html/en" $(SPHINXOPTS) $(O)
+	@DOCS_LANGUAGE=en $(SPHINXBUILD) -b html "$(SOURCEDIR)" "$(BUILDDIR)/html" $(SPHINXOPTS) $(O)
 
 html-zh:
 	@DOCS_LANGUAGE=zh_CN $(SPHINXBUILD) -b html "$(SOURCEDIR)" "$(BUILDDIR)/html/zh_CN" $(SPHINXOPTS) $(O)

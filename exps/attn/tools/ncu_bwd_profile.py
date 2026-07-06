@@ -16,14 +16,14 @@
 
 Usage:
     # Full profile (kernel-level metrics)
-    ncu --set full -o /tmp/bwd_profile python exps/attn/visualize/ncu_bwd_profile.py --mode dense_loopq
-    ncu --set full -o /tmp/bwd_idx_profile python exps/attn/visualize/ncu_bwd_profile.py --mode index_sparse
+    ncu --set full -o /tmp/bwd_profile python exps/attn/tools/ncu_bwd_profile.py --mode dense_loopq
+    ncu --set full -o /tmp/bwd_idx_profile python exps/attn/tools/ncu_bwd_profile.py --mode index_sparse
 
     # Quick summary (SM throughput, memory, occupancy)
     ncu --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed,\
 dram__throughput.avg.pct_of_peak_sustained_elapsed,\
 sm__warps_active.avg.pct_of_peak_sustained_active \
-    python exps/attn/visualize/ncu_bwd_profile.py --mode dense_loopq
+    python exps/attn/tools/ncu_bwd_profile.py --mode dense_loopq
 """
 
 import argparse

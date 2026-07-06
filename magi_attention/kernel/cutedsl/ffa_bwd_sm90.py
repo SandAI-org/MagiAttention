@@ -14,7 +14,6 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="arg-type,union-attr,index,misc,no-redef,assignment,attr-defined"
 # pyright: reportInvalidTypeForm=false
 
 import math
@@ -165,7 +164,7 @@ class FFABwdSm90:
         if cutlass.const_expr(has_aux_tensors):
             self.vec_size: cutlass.Constexpr = 1
         else:
-            self.vec_size: cutlass.Constexpr = 4
+            self.vec_size = 4
 
         self.qk_acc_dtype = Float32
 
@@ -605,7 +604,7 @@ class FFABwdSm90:
 
         self._check_tile()
         self._check_type(
-            *(
+            *(  # type: ignore[arg-type]
                 t.element_type if t is not None else None
                 for t in (mQ, mK, mV, mdO, mLSE, mdPsum, mdQacc, mdK, mdV)
             )
@@ -772,20 +771,20 @@ class FFABwdSm90:
         if const_expr(mCuSeqlensK is not None or mSeqUsedK is not None):
             self.tile_scheduler_cls = SingleTileVarlenScheduler
         elif const_expr(self.deterministic):
-            self.tile_scheduler_cls = SingleTileLPTBwdScheduler
+            self.tile_scheduler_cls = SingleTileLPTBwdScheduler  # type: ignore[assignment]
         else:
-            self.tile_scheduler_cls = SingleTileScheduler
+            self.tile_scheduler_cls = SingleTileScheduler  # type: ignore[assignment]
         self.spt = (self.is_causal or self.is_local) and self.deterministic
         tile_sched_args = TileSchedulerArguments(
-            cute.ceil_div(cute.size(mK.shape[0]), self.tile_n),
-            cute.size(mQ.shape[2]),
-            cute.size(mK.shape[3])
+            num_block=cute.ceil_div(cute.size(mK.shape[0]), self.tile_n),
+            num_head=cute.size(mQ.shape[2]),
+            num_batch=cute.size(mK.shape[3])
             if const_expr(mCuSeqlensK is None)
-            else cute.size(mCuSeqlensK.shape[0] - 1),  # num_batch
-            1,  # num_splits
-            cute.size(mQ.shape[0]),  # pass seqlen_q or total_q for seqlen_k
-            mQ.shape[1],  # headdim
-            mV.shape[1],  # headdim_v
+            else cute.size(mCuSeqlensK.shape[0] - 1),  # type:ignore[union-attr]
+            num_splits=1,
+            seqlen_k=cute.size(mQ.shape[0]),
+            headdim=mQ.shape[1],
+            headdim_v=mV.shape[1],
             total_q=cute.size(mK.shape[0])
             if const_expr(mCuSeqlensK is not None)
             else cute.size(mK.shape[0]) * cute.size(mK.shape[3]),
@@ -1176,6 +1175,7 @@ class FFABwdSm90:
                 cute.printf(prefix + "sK.layout: {}", sK.layout)
                 cute.printf(prefix + "sV.layout: {}", sV.layout)
                 if const_expr(sP is not None):
+                    assert sP is not None  # mypy
                     cute.printf(prefix + "sP.layout: {}", sP.layout)
                 cute.printf(prefix + "sdS.layout: {}", sdS.layout)
                 cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
@@ -2003,6 +2003,7 @@ class FFABwdSm90:
                     cute.printf(prefix + "sV.layout: {}", sV.layout)
                     cute.printf(prefix + "sdO.layout: {}", sdO.layout)
                     if const_expr(sP is not None):
+                        assert sP is not None  # mypy
                         cute.printf(prefix + "sP.layout: {}", sP.layout)
                     cute.printf(prefix + "sdS.layout: {}", sdS.layout)
                     cute.printf(prefix + "sLSE.layout: {}", sLSE.layout)
@@ -2032,6 +2033,7 @@ class FFABwdSm90:
                     cute.printf("")
                     # dQ = dS @ K
                     if const_expr(is_dQ_wg):
+                        assert tdQsdQacc is not None  # mypy
                         cute.printf(prefix + "tdQrdS.layout: {}", tdQrdS.layout)
                         cute.printf(prefix + "tdQrKt.layout: {}", tdQrKt.layout)
                         cute.printf(prefix + "tdQsdQacc.layout: {}", tdQsdQacc.layout)
@@ -2249,11 +2251,13 @@ class FFABwdSm90:
             cute.autovec_copy(acc_S, acc_S_pre)
 
         if const_expr(self.score_mod is not None):
+            assert score_mod_fn is not None  # mypy
             score_mod_fn(acc_S, m_block=m_block)
 
-        # --- Apply P = softmax(S) = exp(S - LSE) ---
+        # --- Apply P = softmax(S) = exp2(S * scale - LSE) ---
 
         if cutlass.const_expr(mask_fn is not None):
+            assert mask_fn is not None  # mypy
             mask_fn(acc_S, m_block=m_block)
         # acc_S_mn: ((ATOM_Q2,MMA_Q8,1),(ATOM_K2,1)):((1,4,0),(2,0))
         acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S, transpose=self.SdP_swapAB)
@@ -2274,6 +2278,7 @@ class FFABwdSm90:
 
         # R2S for P
         if const_expr(not self.mma_dkv_is_rs):
+            assert copy_P_r2s is not None  # mypy
             # sync to ensure P has already been used in the previous iteration before overwriting
             if const_expr(self.PdS_stage == 1):
                 PdS_barrier.arrive_and_wait()
@@ -2292,6 +2297,7 @@ class FFABwdSm90:
                 acc_dP_mn[r, c] = acc_S_mn[r, c] * (acc_dP_mn[r, c] - dpsum_val)
 
         if const_expr(self.score_mod_bwd is not None):
+            assert score_mod_bwd_fn is not None  # mypy
             score_mod_bwd_fn(acc_dP, acc_S_pre, m_block=m_block)
 
         # Convert dS from f32 -> f16
@@ -2335,6 +2341,8 @@ class FFABwdSm90:
         PdS_barrier.arrive_and_wait()
 
         if const_expr(is_dQ_wg):
+            assert tdQsdQacc is not None  # mypy
+
             # --- Apply dQ = dS @ K ---
 
             # acc_dQ: (MMA_ATOM=(2,2,8),MMA_Q1,MMA_HD1):((1,2,4),0,0)
@@ -2707,6 +2715,7 @@ class FFABwdSm90:
             )
 
             if const_expr(mdQ_semaphore is not None):
+                assert mdQ_semaphore is not None  # mypy
                 # mdQ_semaphore is (num_m_blocks, cluster_size, num_head, batch) after transpose
                 mdQ_semaphore_cur = mdQ_semaphore[None, None, head_idx, batch_idx]
 

@@ -1028,10 +1028,9 @@ if __name__ == "__main__":
                 perf_dict = do_bench(
                     fn,
                     quantiles=quantiles,
-                    mem_record_mode="peak",
                     return_mode=BENCH_CONFIG.bench_mode,
-                    return_flops=BENCH_CONFIG.bench_flops,
-                    return_mem=BENCH_CONFIG.bench_mem,
+                    record_time=BENCH_CONFIG.bench_flops,
+                    mem_record_mode="peak" if BENCH_CONFIG.bench_mem else None,
                     warmup_iters=warmup_iters,
                     rep_iters=rep_iters,
                     to_gc_collect=BENCH_CONFIG.gc_per_iter
@@ -1157,9 +1156,8 @@ if __name__ == "__main__":
             run_benchmark.run(
                 print_data=False,
                 print_value_on_bar=False,
-                save_path=None,
+                save_path="",
                 is_profile=True,
-                **{"warmup_iters": 1, "rep_iters": 1},
             )
             torch.cuda.synchronize()
             if dist.is_initialized():
@@ -1171,7 +1169,7 @@ if __name__ == "__main__":
         run_benchmark.run(
             print_data=False,
             print_value_on_bar=False,
-            save_path=None,
+            save_path="",
             is_profile=True,
         )
 

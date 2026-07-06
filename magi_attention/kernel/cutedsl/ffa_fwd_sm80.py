@@ -14,7 +14,6 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,arg-type,no-redef,attr-defined,misc,assignment"
 # pyright: reportInvalidTypeForm=false
 
 
@@ -564,7 +563,7 @@ class FFAFwdSm80:
 
         self._check_tile()
         self._check_type(
-            *(
+            *(  # type: ignore[arg-type]
                 t.element_type if t is not None else None
                 for t in (
                     mQ,
@@ -618,6 +617,7 @@ class FFAFwdSm80:
         # 3D non-varlen: (b, nh, s) -> (s, nh, b)
         # 2D varlen: (nh, t) -> (t, nh)
         if const_expr(mLSE is not None):
+            assert mLSE is not None  # mypy
             LSE_layout_transpose = (
                 [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
             )
@@ -640,7 +640,7 @@ class FFAFwdSm80:
             num_block=cute.ceil_div(mQ.shape[0], self.tile_m),
             num_head=cute.size(mQ.shape[2]),
             num_batch=(
-                mCuSeqlensQ.shape[0] - 1
+                mCuSeqlensQ.shape[0] - 1  # type: ignore[union-attr]
                 if const_expr(mCuSeqlensQ is not None)
                 else mQ.shape[3]
             ),
@@ -1704,6 +1704,7 @@ class FFAFwdSm80:
 
         # Apply mask_fn if provided
         if const_expr(mask_fn is not None):
+            assert mask_fn is not None  # mypy
             mask_fn(acc_S, n_block=n_block)
 
         # Apply softmax to acc_S and rescale acc_O

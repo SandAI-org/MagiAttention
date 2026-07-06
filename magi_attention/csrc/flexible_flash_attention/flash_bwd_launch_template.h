@@ -133,7 +133,7 @@ template <
     int BwdProducerRegs,
     int BwdConsumerRegs,
     int InnerStoreMode,
-    bool DisableBwdDkvAtomicReduction,
+    bool OuterUseAtomicReduction,
     int Stages_V,
     int ScatterPad,
     bool LseDpsumUnionDKVacc,
@@ -246,7 +246,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       NumMmaWarpGroups,
       AtomLayoutMdQ,
       AtomLayoutNdKV,
-      DisableBwdDkvAtomicReduction,
+      OuterUseAtomicReduction,
       Deterministic,
       SwapBwdQKLoop,
       /*PackGQA=*/PackGQA,
@@ -270,7 +270,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       static_cast<ElementAccum*>(params.dk_ptr),
       static_cast<ElementAccum*>(params.dv_ptr),
       {params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_KVdKdV
-      {params.pool_count > 1 ? params.pool_count * params.pool_seqlen_k : params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_dKdV (pooled)
+      {params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_dKdV
       {params.k_row_stride, _1{}, Int<kHeadDim>{}}, // stride_K
       {params.v_row_stride, _1{}, Int<kHeadDim>{}}, // stride_V
       {params.dk_row_stride, _1{}, Int<kHeadDim>{}}, // stride_dK
@@ -289,9 +289,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.dq_determin_conflict_state,
       params.dq_determin_range_locks,
       params.index_sparse_indices,
-      params.index_sparse_max_topk,
-      params.pool_count,
-      params.pool_seqlen_k};
+      params.index_sparse_max_topk};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop
@@ -371,7 +369,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   }
   CHECK_CUDA_KERNEL_LAUNCH();
 
-  if constexpr (DisableBwdDkvAtomicReduction) {
+  if constexpr (!SwapBwdQKLoop && !OuterUseAtomicReduction) {
     if constexpr (ProfileMode)
       MagiEvents::start("bwd_postprocess");
 
@@ -392,7 +390,7 @@ template <
     typename TDkv,
     int kHeadDim,
     bool Has_softcap,
-    bool DisableBwdDkvAtomicReduction,
+    bool OuterUseAtomicReduction,
     bool Deterministic,
     bool RangeMerge,
     bool SwapBwdQKLoop,
@@ -505,7 +503,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*BwdProducerRegs=*/BwdProducerRegs,
       /*BwdConsumerRegs=*/BwdConsumerRegs,
       /*InnerStoreMode=*/InnerStoreMode,
-      /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
+      /*OuterUseAtomicReduction=*/OuterUseAtomicReduction,
       /*Stages_V=*/Stages_V,
       /*ScatterPad=*/ScatterPad,
       /*LseDpsumUnionDKVacc=*/LseDpsumUnionDKVacc,

@@ -185,9 +185,7 @@ def to_pil_image(pic, mode=None):
     return Image.fromarray(npimg, mode=mode)
 
 
-# copied from
-# https://github.com/pytorch/vision/blob/main/torchvision/utils.py#L25
-@torch.no_grad()
+@torch.no_grad
 def make_grid(
     tensor: torch.Tensor | list[torch.Tensor],
     nrow: int = 8,
@@ -217,6 +215,9 @@ def make_grid(
 
     Returns:
         grid (Tensor): the tensor containing grid of images.
+
+    Originally copied from
+    https://github.com/pytorch/vision/blob/main/torchvision/utils.py#L25
     """
     if not torch.jit.is_scripting() and not torch.jit.is_tracing():
         # _log_api_usage_once(make_grid)
@@ -296,8 +297,6 @@ def make_grid(
     return grid
 
 
-# copied from
-# https://github.com/pytorch/vision/blob/main/torchvision/transforms/transforms.py#L107
 class ToTensor:
     """Convert a PIL Image or ndarray to tensor and scale the values accordingly.
 
@@ -315,6 +314,9 @@ class ToTensor:
         transforming target image masks. See the `references`_ for implementing the transforms for image masks.
 
     .. _references: https://github.com/pytorch/vision/tree/main/references/segmentation
+
+    Originally copied from
+    https://github.com/pytorch/vision/blob/main/torchvision/transforms/transforms.py#L107
     """
 
     def __init__(self) -> None:
@@ -335,8 +337,6 @@ class ToTensor:
         return f"{self.__class__.__name__}()"
 
 
-# copied from
-# https://github.com/pytorch/vision/blob/main/torchvision/transforms/transforms.py#L201
 class ToPILImage:
     """Convert a tensor or an ndarray to PIL Image
 
@@ -355,6 +355,9 @@ class ToPILImage:
             - If the input has 1 channel, the ``mode`` is determined by the data type (i.e ``int``, ``float``, ``short``).
 
     .. _PIL.Image mode: https://pillow.readthedocs.io/en/latest/handbook/concepts.html#concept-modes
+
+    Originally copied from
+    https://github.com/pytorch/vision/blob/main/torchvision/transforms/transforms.py#L201
     """
 
     def __init__(self, mode=None):

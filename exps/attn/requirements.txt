@@ -4,4 +4,3 @@ flash_attn_3==3.0.0b1
 mpi4py==4.0.3
 pandas==2.3.3
 seaborn==0.13.2
-py3nvml==0.2.7

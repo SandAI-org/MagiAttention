@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,index,operator,assignment,attr-defined"
+# mypy: disable-error-code="attr-defined"
 
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_bwd_preprocess_kernel.h
 # from Cutlass C++ to Cute-DSL.
@@ -164,9 +164,11 @@ class FFABwdPreProcess:
         if const_expr(mPdPsum.element_type not in [Float32]):
             raise TypeError("PdPsum tensor must be Float32")
         if const_expr(mdQaccum is not None):
+            assert mdQaccum is not None  # mypy
             if const_expr(mdQaccum.element_type not in [Float32]):
                 raise TypeError("dQaccum tensor must be Float32")
         if const_expr(mLSE is not None):
+            assert mLSE is not None  # mypy
             assert (
                 mLSElog2 is not None
             ), "If mLSE is provided, mLSElog2 must also be provided"
@@ -175,6 +177,7 @@ class FFABwdPreProcess:
             if const_expr(mLSElog2.element_type not in [Float32]):
                 raise TypeError("LSElog2 tensor must be Float32")
         if const_expr(mdLSE is not None):
+            assert mdLSE is not None  # mypy
             if const_expr(mdLSE.element_type not in [Float32]):
                 raise TypeError("dLSE tensor must be Float32")
 
@@ -193,11 +196,12 @@ class FFABwdPreProcess:
             mdQaccum = layout_utils.select(mdQaccum, transpose)
 
         if const_expr(mCuSeqlensQ is not None):
+            assert mCuSeqlensQ is not None  # mypy
             TileScheduler = SingleTileVarlenScheduler
             num_head = mO.shape[1]
             num_batch = mCuSeqlensQ.shape[0] - 1
         else:
-            TileScheduler = SingleTileScheduler
+            TileScheduler = SingleTileScheduler  # type: ignore[assignment]
             num_head = mO.shape[2]
             num_batch = mO.shape[0]
 
@@ -362,6 +366,7 @@ class FFABwdPreProcess:
                     if row < seqlen_limit:
                         PdPsum_val = PdP_sum[m]
                         if const_expr(mdLSE is not None):
+                            assert gdLSE is not None  # mypy
                             PdPsum_val -= gdLSE[row]
                     gPdPsum[row] = PdPsum_val
 
@@ -383,6 +388,7 @@ class FFABwdPreProcess:
                 cute.copy(gmem_tiled_copy_dQaccum, zero, tdQgdQaccum)
 
             if const_expr(mLSE is not None):
+                assert lse is not None  # mypy
                 mLSElog2_cur = seqlen.offset_batch(
                     mLSElog2, batch_idx, dim=2, padded=stats_use_padded_offsets
                 )[None, head_idx]

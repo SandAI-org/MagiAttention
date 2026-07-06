@@ -14,7 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-# mypy: disable-error-code="union-attr,operator,assignment,attr-defined"
+# mypy: disable-error-code="attr-defined"
 
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_bwd_postprocess_kernel.h
 # from Cutlass C++ to Cute-DSL.
@@ -264,12 +264,13 @@ class FFABwdPostProcess:
         )
 
         if const_expr(mCuSeqlensQ is not None):
+            assert mCuSeqlensQ is not None  # mypy
             TileScheduler = SingleTileVarlenScheduler
             num_head = mdQ.shape[1]
             num_batch = mCuSeqlensQ.shape[0] - 1
             num_block = cute.ceil_div(mdQ.shape[0], self.tile_m)
         else:
-            TileScheduler = SingleTileScheduler
+            TileScheduler = SingleTileScheduler  # type: ignore[assignment]
             num_head = mdQ.shape[2]
             num_batch = mdQ.shape[0]
             num_block = cute.ceil_div(mdQ.shape[1], self.tile_m)
@@ -409,7 +410,6 @@ class FFABwdPostProcess:
             gdQ = cute.local_tile(mdQ_cur, (self.tile_m, self.tile_hdim), (m_block, 0))
 
             seqlen_q = seqlen.seqlen_q
-            seqlen_q_rounded = cute.round_up(seqlen_q, self.tile_m)
 
             if const_expr(self.arch // 10 == 10 and self.use_2cta_instrs):
                 # 2-CTA: remap dQaccum layout into TMEM view before writing sdQ
