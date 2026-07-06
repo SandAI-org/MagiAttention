@@ -67,6 +67,14 @@ def main():
             from bench_sparse_analysis.phase4_loopk_debug import _phase4_bench
 
             _phase4_bench(force=args.force)
+        elif phase == "5-scaling":
+            from bench_sparse_analysis.phase5_scaling import _phase5_bench
+
+            _phase5_bench(force=args.force)
+        elif phase == "6-video-production":
+            from bench_sparse_analysis.phase6_video_production import _phase6_bench
+
+            _phase6_bench(force=args.force)
     elif args.plot:
         phase = args.plot
         print(f"[{_ts()}] === --plot {phase} ===", flush=True)
@@ -94,6 +102,14 @@ def main():
             _phase4_plot()
             _phase4_opt_plot()
             _phase4_summary_plot()
+        elif phase == "5-scaling":
+            from bench_sparse_analysis.phase5_scaling import _phase5_plot
+
+            _phase5_plot()
+        elif phase == "6-video-production":
+            from bench_sparse_analysis.phase6_video_production import _phase6_plot
+
+            _phase6_plot()
     elif args.ncu:
         phase = args.ncu
         print(f"[{_ts()}] === --ncu {phase} ===", flush=True)
@@ -115,6 +131,14 @@ def main():
             from bench_sparse_analysis.phase4_loopk_debug import _phase4_ncu
 
             _phase4_ncu()
+        elif phase == "5-scaling":
+            from bench_sparse_analysis.phase5_scaling import _phase5_ncu
+
+            _phase5_ncu()
+        elif phase == "6-video-production":
+            from bench_sparse_analysis.phase6_video_production import _phase6_ncu
+
+            _phase6_ncu()
 
     print(f"\n[{_ts()}] ALL DONE", flush=True)
 

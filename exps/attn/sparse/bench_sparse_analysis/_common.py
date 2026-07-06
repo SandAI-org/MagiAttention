@@ -34,6 +34,8 @@ PHASES = [
     "2-kbs-compare",
     "3-l2-inflection",
     "4-loopk-debug",
+    "5-scaling",
+    "6-video-production",
 ]
 
 
