@@ -17,7 +17,8 @@
 Production config: 1080p, qhead=32, kvhead=8, hd=128.
 32-GPU training: 8 KV-heads distributed → per-rank nhk=1, nhq=128/8*32=128 (4 Q-ranks share 1 KV-head).
 Per-rank: qseqlen = kvseqlen/64, topk = kvseqlen/4.
-Post-distribution: NHQ=128, NHK=1, PackGQA, q_block_size=1, kbs=128(block)/1(index).
+Post-distribution: NHQ=128, NHK=1, PackGQA, q_block_size=1.
+Methods: Dense(d1b/d1b_nopg/dense_nb/dense_nb_rm), BlockSparse(kbs=128), IndexSparse(kbs=1).
 
 Key question: does small qseqlen cause LoopQ outer-parallelism starvation?
 """
@@ -65,7 +66,7 @@ SCENARIOS = [
 ]
 
 PASSES = ["fwd", "bwd_loopk", "bwd_loopq"]
-METHODS = ["d1b", "d1b_nopg", "dense_nb", "block_sparse", "index_sparse"]
+METHODS = ["d1b", "d1b_nopg", "dense_nb", "dense_nb_rm", "block_sparse", "index_sparse"]
 
 
 def _phase6_bench(force=False, max_kvseqlen=None):
@@ -107,7 +108,7 @@ def _phase6_bench(force=False, max_kvseqlen=None):
         atm = torch.zeros(n_qblocks, dtype=torch.int32, device=device)
         return q_r, k_r, atm
 
-    def _build_sparse_indices(qseqlen_l, kvseqlen_l, topk_l):
+    def _build_block_indices(qseqlen_l, kvseqlen_l, topk_l):
         """Build per-Q-position block indices selecting topk_l/KBS blocks from kvseqlen_l/KBS."""
         n_kv_blocks = kvseqlen_l // KBS
         n_topk_blocks = topk_l // KBS
@@ -117,6 +118,21 @@ def _phase6_bench(force=False, max_kvseqlen=None):
         gen = torch.Generator().manual_seed(42)
         rand_vals = torch.rand(qseqlen_l, n_kv_blocks, generator=gen)
         perms = rand_vals.argsort(dim=1)[:, :n_topk_blocks].sort(dim=1).values
+        return (
+            perms.unsqueeze(1)
+            .expand(-1, NHK, -1)
+            .to(dtype=torch.int32, device=device)
+            .contiguous()
+        )
+
+    def _build_token_indices(qseqlen_l, kvseqlen_l, topk_l):
+        """Build per-Q-position token-level indices (kbs=1)."""
+        if topk_l >= kvseqlen_l:
+            idx = torch.arange(kvseqlen_l, dtype=torch.int32, device=device)
+            return idx.unsqueeze(0).unsqueeze(0).expand(qseqlen_l, NHK, -1).contiguous()
+        gen = torch.Generator().manual_seed(42)
+        rand_vals = torch.rand(qseqlen_l, kvseqlen_l, generator=gen)
+        perms = rand_vals.argsort(dim=1)[:, :topk_l].sort(dim=1).values
         return (
             perms.unsqueeze(1)
             .expand(-1, NHK, -1)
@@ -255,6 +271,31 @@ def _phase6_bench(force=False, max_kvseqlen=None):
                         )
                         flops_S = topk
 
+                    elif method == "dense_nb_rm":
+                        # Dense-MultiBatch-RangeMerge: per-Qblock ranges + auto_range_merge
+                        q = torch.randn(
+                            topk, NHQ, HD, dtype=torch.bfloat16, device=device
+                        )
+                        k = torch.randn(
+                            topk, NHK, HD, dtype=torch.bfloat16, device=device
+                        )
+                        v = torch.randn(
+                            topk, NHK, HD, dtype=torch.bfloat16, device=device
+                        )
+                        if is_bwd:
+                            q.requires_grad_(True)
+                            k.requires_grad_(True)
+                            v.requires_grad_(True)
+                        q_ranges, k_ranges, atm = _make_nb_ranges(topk)
+                        kw = dict(
+                            q_ranges=q_ranges,
+                            k_ranges=k_ranges,
+                            attn_type_map=atm,
+                            pack_gqa=True,
+                            auto_range_merge=True,
+                        )
+                        flops_S = topk
+
                     elif method == "block_sparse":
                         # BlockSparse: Q=qseqlen, K=kvseqlen, kbs=128
                         q = torch.randn(
@@ -270,7 +311,7 @@ def _phase6_bench(force=False, max_kvseqlen=None):
                             q.requires_grad_(True)
                             k.requires_grad_(True)
                             v.requires_grad_(True)
-                        indices = _build_sparse_indices(qseqlen, kvseqlen, topk)
+                        indices = _build_block_indices(qseqlen, kvseqlen, topk)
                         q_ranges, k_ranges, atm = _to_ranges(indices, kvseqlen)
                         kw = dict(
                             q_ranges=q_ranges,
@@ -278,12 +319,12 @@ def _phase6_bench(force=False, max_kvseqlen=None):
                             attn_type_map=atm,
                             pack_gqa=True,
                             block_sparse=True,
-                            k_block_size=KBS,
+                            sparse_k_block_size=KBS,
                         )
                         flops_S = qseqlen
 
                     else:  # index_sparse
-                        # IndexSparse: Q=qseqlen, K=kvseqlen, kbs=128
+                        # IndexSparse: Q=qseqlen, K=kvseqlen, kbs=1 (token-level)
                         q = torch.randn(
                             qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device
                         )
@@ -297,11 +338,11 @@ def _phase6_bench(force=False, max_kvseqlen=None):
                             q.requires_grad_(True)
                             k.requires_grad_(True)
                             v.requires_grad_(True)
-                        indices = _build_sparse_indices(qseqlen, kvseqlen, topk)
+                        indices = _build_token_indices(qseqlen, kvseqlen, topk)
                         kw = dict(
                             index_sparse_indices=indices,
                             pack_gqa=True,
-                            k_block_size=KBS,
+                            sparse_k_block_size=1,
                         )
                         flops_S = qseqlen
 
@@ -376,7 +417,7 @@ def _print_summary(results):
         print(" ║")
     print("  ╚══════════════════════════════╩══════════════════════════════════════╝")
     print(
-        "  (columns per pass: d1b / d1b_nopg / dense_nb / block_sparse / index_sparse)"
+        "  (columns per pass: d1b / d1b_nopg / dense_nb / dense_nb_rm / bs-kbs128 / is-kbs1)"
     )
 
 
@@ -407,19 +448,20 @@ def _phase6_plot():
         ("bwd_loopk", "BWD InnerLoopK"),
     ]
     PLOT_METHODS = [
-        ("d1b", "Dense-1Batch", (0.58, 0.58, 0.58)),
-        ("d1b_nopg", "Dense-1Batch-noGQA", (0.78, 0.78, 0.78)),
-        ("dense_nb", "Dense-MultiBatch", (0.22, 0.37, 0.71)),
-        ("block_sparse", "BlockSparse", (0.29, 0.57, 0.60)),
-        ("index_sparse", "IndexSparse", (0.77, 0.34, 0.49)),
+        ("d1b", "Dense-1B", (0.58, 0.58, 0.58)),
+        ("d1b_nopg", "Dense-1B-noPG", (0.78, 0.78, 0.78)),
+        ("dense_nb", "Dense-NB", (0.22, 0.37, 0.71)),
+        ("dense_nb_rm", "Dense-NB-RM", (0.45, 0.55, 0.85)),
+        ("block_sparse", "BS-kbs128", (0.29, 0.57, 0.60)),
+        ("index_sparse", "IS-kbs1", (0.77, 0.34, 0.49)),
     ]
 
     kvseqlens = [s[0] for s in SCENARIOS]
     x = np.arange(len(kvseqlens))
     n_methods = len(PLOT_METHODS)
-    bw = 0.15
+    bw = 0.12
 
-    fig, axes = plt.subplots(1, 3, figsize=(24, 7), dpi=150)
+    fig, axes = plt.subplots(1, 3, figsize=(26, 7), dpi=150)
 
     for col_idx, (pid, pname) in enumerate(PLOT_PASSES):
         ax = axes[col_idx]
@@ -547,7 +589,7 @@ q_ranges, k_ranges = generate_ranges_from_topk_indices(
 )
 atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device=device)
 kw = dict(q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=atm,
-    pack_gqa=True, block_sparse=True, k_block_size=KBS, swap_bwd_qk_loop={SWAP_QK})
+    pack_gqa=True, block_sparse=True, sparse_k_block_size=KBS, swap_bwd_qk_loop={SWAP_QK})
 out, _ = flex_flash_attn_func(q, k, v, **kw)
 do = torch.randn_like(out)
 out.backward(do)

@@ -217,7 +217,7 @@ def _phase5_bench(force=False, max_kvseqlen=None):
                             attn_type_map=atm,
                             pack_gqa=True,
                             block_sparse=True,
-                            k_block_size=KBS,
+                            sparse_k_block_size=KBS,
                         )
                         flops_S = S
 
@@ -233,7 +233,7 @@ def _phase5_bench(force=False, max_kvseqlen=None):
                         kw = dict(
                             index_sparse_indices=indices,
                             pack_gqa=True,
-                            k_block_size=KBS,
+                            sparse_k_block_size=KBS,
                         )
                         flops_S = S
 
@@ -516,11 +516,11 @@ v = torch.randn(topk, NHK, HD, dtype=torch.bfloat16, device=device, requires_gra
 indices = _build_idx_kbs128(S, topk, device)
 q_ranges, k_ranges, atm = _indices_to_ranges(indices, S)
 kw = dict(q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=atm,
-    pack_gqa=True, block_sparse=True, k_block_size=KBS, swap_bwd_qk_loop={SWAP_QK})"""
+    pack_gqa=True, block_sparse=True, sparse_k_block_size=KBS, swap_bwd_qk_loop={SWAP_QK})"""
 
     setup_is = """\
 indices = _build_idx_kbs128(S, topk, device)
-kw = dict(index_sparse_indices=indices, pack_gqa=True, k_block_size=KBS, swap_bwd_qk_loop={SWAP_QK})"""
+kw = dict(index_sparse_indices=indices, pack_gqa=True, sparse_k_block_size=KBS, swap_bwd_qk_loop={SWAP_QK})"""
 
     for name, method, pass_type in ncu_configs:
         swap_qk = "True" if pass_type == "bwd_loopk" else "False"

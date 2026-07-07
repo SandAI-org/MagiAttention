@@ -130,7 +130,7 @@ def _phase1_bench(force=False, rerun_filter=None):
         indices = _build_idx_kbs128(S_FULL, topk, device)
         kw = dict(
             index_sparse_indices=indices,
-            k_block_size=KBS,
+            sparse_k_block_size=KBS,
             index_sparse=True,
             pack_gqa=True,
         )
@@ -148,7 +148,7 @@ def _phase1_bench(force=False, rerun_filter=None):
             block_sparse=True,
             auto_range_merge=True,
             pack_gqa=True,
-            k_block_size=KBS,
+            sparse_k_block_size=KBS,
         )
         if pass_type != "fwd":
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"

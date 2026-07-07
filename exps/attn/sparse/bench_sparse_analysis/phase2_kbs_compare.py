@@ -142,7 +142,7 @@ def _phase2_bench(force=False):
                         idx128 = _build_idx_kbs128(S_FULL, topk, device)
                         kw = dict(
                             index_sparse_indices=idx128,
-                            k_block_size=128,
+                            sparse_k_block_size=128,
                             index_sparse=True,
                             pack_gqa=True,
                         )
@@ -157,7 +157,7 @@ def _phase2_bench(force=False):
                         idx128cp = _build_idx_kbs128_cpasync(S_FULL, topk, device)
                         kw = dict(
                             index_sparse_indices=idx128cp,
-                            k_block_size=1,
+                            sparse_k_block_size=1,
                             index_sparse=True,
                             pack_gqa=True,
                         )
@@ -172,7 +172,7 @@ def _phase2_bench(force=False):
                         idx1 = _build_idx_kbs1(S_FULL, topk, device)
                         kw = dict(
                             index_sparse_indices=idx1,
-                            k_block_size=1,
+                            sparse_k_block_size=1,
                             index_sparse=True,
                             pack_gqa=True,
                         )
@@ -375,7 +375,7 @@ v = torch.randn({S}, {NHK}, {HD}, dtype=torch.bfloat16, device='cuda')
 {grad_line}
 {idx_code}
 out, _ = flex_flash_attn_func(q, k, v,
-    index_sparse_indices=idx, k_block_size={kbs},
+    index_sparse_indices=idx, sparse_k_block_size={kbs},
     index_sparse=True, pack_gqa=True, {swap_arg})
 {bwd_code}
 torch.cuda.synchronize()

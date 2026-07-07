@@ -113,7 +113,7 @@ def _phase0_bench(force=False, rerun_filter=None):
         indices = _build_idx_kbs128(topk, topk, device)
         kw = dict(
             index_sparse_indices=indices,
-            k_block_size=KBS,
+            sparse_k_block_size=KBS,
             index_sparse=True,
             pack_gqa=True,
         )
@@ -131,7 +131,7 @@ def _phase0_bench(force=False, rerun_filter=None):
             block_sparse=True,
             auto_range_merge=True,
             pack_gqa=True,
-            k_block_size=KBS,
+            sparse_k_block_size=KBS,
         )
         if pass_type != "fwd":
             kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
@@ -337,7 +337,7 @@ def _phase0_ncu():
                 f"idx = torch.arange({S}//{KBS}, dtype=torch.int32, device='cuda')\n"
                 f"idx = idx.unsqueeze(0).unsqueeze(0).expand({S}, {NHK}, -1).contiguous()\n"
                 f"out, _ = flex_flash_attn_func(q, k, v,\n"
-                f"    index_sparse_indices=idx, k_block_size={KBS},\n"
+                f"    index_sparse_indices=idx, sparse_k_block_size={KBS},\n"
                 f"    index_sparse=True, pack_gqa=True,\n"
                 f"    {'swap_bwd_qk_loop=' + swap_loopk + ',' if is_bwd else ''})"
             )
@@ -353,7 +353,7 @@ def _phase0_ncu():
                 f"out, _ = flex_flash_attn_func(q, k, v,\n"
                 f"    q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=atm,\n"
                 f"    block_sparse=True, auto_range_merge=True, pack_gqa=True,\n"
-                f"    k_block_size={KBS},\n"
+                f"    sparse_k_block_size={KBS},\n"
                 f"    {'swap_bwd_qk_loop=' + swap_loopk + ',' if is_bwd else ''})"
             )
         else:

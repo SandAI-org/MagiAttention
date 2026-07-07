@@ -77,20 +77,20 @@ template <
     int AtomLayoutNdKV,
     int AtomLayoutMdQ,
     bool Mma_dP_is_RS,
-    int Stages_V_ = Stages,
-    int ScatterPad_ = -1,
-    bool LseDpsumUnionDKVacc_ = false,
-    int SparseKBlockSize_ = 1,
-    bool ForceMmaDkvSS_ = false,
-    int InnerLoadMode_ = 2,
-    bool SkipVLoad_ = false,
-    bool SkipDvStore_ = false,
-    bool SkipDkStore_ = false,
-    bool SkipDvMma_ = false,
-    bool SkipDvWriteback_ = false,
-    bool SkipDkWriteback_ = false,
-    bool UnionDkvacc_ = false,
-    bool DeferDvR2S_ = false>
+    int Stages_V_,
+    int ScatterPad_,
+    bool LseDpsumUnionDKVacc_,
+    int SparseKBlockSize_,
+    bool PerfDebugForceMmaDkvSS_,
+    int InnerLoadMode_,
+    bool PerfDebugSkipVLoad_,
+    bool PerfDebugSkipDvStore_,
+    bool PerfDebugSkipDkStore_,
+    bool PerfDebugSkipDvMma_,
+    bool PerfDebugSkipDvWriteback_,
+    bool PerfDebugSkipDkWriteback_,
+    bool UnionDkvacc_,
+    bool PerfDebugDeferDvR2S_>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -112,14 +112,14 @@ struct CollectiveMainloopBwdSm90 {
 
   static constexpr bool LseDpsumUnionDKVacc = LseDpsumUnionDKVacc_;
 
-  static constexpr bool PerfDebugSkipVLoad = SkipVLoad_;
-  static constexpr bool PerfDebugSkipDvStore = SkipDvStore_;
-  static constexpr bool PerfDebugSkipDkStore = SkipDkStore_;
-  static constexpr bool PerfDebugSkipDvMma = SkipDvMma_;
-  static constexpr bool PerfDebugSkipDvWriteback = SkipDvWriteback_;
-  static constexpr bool PerfDebugSkipDkWriteback = SkipDkWriteback_;
+  static constexpr bool PerfDebugSkipVLoad = PerfDebugSkipVLoad_;
+  static constexpr bool PerfDebugSkipDvStore = PerfDebugSkipDvStore_;
+  static constexpr bool PerfDebugSkipDkStore = PerfDebugSkipDkStore_;
+  static constexpr bool PerfDebugSkipDvMma = PerfDebugSkipDvMma_;
+  static constexpr bool PerfDebugSkipDvWriteback = PerfDebugSkipDvWriteback_;
+  static constexpr bool PerfDebugSkipDkWriteback = PerfDebugSkipDkWriteback_;
   static constexpr bool UnionDkvacc = UnionDkvacc_;
-  static constexpr bool PerfDebugDeferDvR2S = DeferDvR2S_;
+  static constexpr bool PerfDebugDeferDvR2S = PerfDebugDeferDvR2S_;
 
   static constexpr bool Has_softcap = Has_softcap_;
   static constexpr bool SdP_swapAB = SdP_swapAB_;
@@ -185,15 +185,16 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool _is_contiguous = !IsSparse || (!BwdInnerLoopK && PackGQA && (!IndexSparse || PackGQAFactor >= kBlockM)) ||
       (BwdInnerLoopK && ((BlockSparse && SparseKBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && SparseKBlockSize >= kBlockN)));
   static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
-  static constexpr bool InnerLoad_Tma = (kInnerLoadMode == InnerLoadMode::Tma);
-  static constexpr bool InnerLoad_CpAsync = (kInnerLoadMode == InnerLoadMode::CpAsync);
-  static_assert(InnerLoad_Tma + InnerLoad_CpAsync == 1);
+  static_assert(kInnerLoadMode == InnerLoadMode::Tma || kInnerLoadMode == InnerLoadMode::CpAsync);
 
-  using MainloopPipeline = std::conditional_t<InnerLoad_Tma, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
+  using MainloopPipeline =
+      std::conditional_t<kInnerLoadMode == InnerLoadMode::Tma, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = typename MainloopPipeline::PipelineState;
-  using MainloopPipeline_dO = std::conditional_t<InnerLoad_Tma, typename cutlass::PipelineTmaAsync<kStages_dO>, typename cutlass::PipelineAsync<kStages_dO>>;
+  using MainloopPipeline_dO =
+      std::conditional_t<kInnerLoadMode == InnerLoadMode::Tma, typename cutlass::PipelineTmaAsync<kStages_dO>, typename cutlass::PipelineAsync<kStages_dO>>;
   using PipelineState_dO = typename MainloopPipeline_dO::PipelineState;
-  using MainloopPipeline_V = std::conditional_t<InnerLoad_Tma, typename cutlass::PipelineTmaAsync<kStages_V>, typename cutlass::PipelineAsync<kStages_V>>;
+  using MainloopPipeline_V =
+      std::conditional_t<kInnerLoadMode == InnerLoadMode::Tma, typename cutlass::PipelineTmaAsync<kStages_V>, typename cutlass::PipelineAsync<kStages_V>>;
   using PipelineState_V = typename MainloopPipeline_V::PipelineState;
   using TMAClusterBarrier_t = cutlass::arch::ClusterTransactionBarrier::ValueType;
   using BwdNamedBarriers = std::conditional_t<BwdInnerLoopK, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
@@ -279,7 +280,7 @@ struct CollectiveMainloopBwdSm90 {
 
   static_assert(!IsSparse || kInnerScatterRows % NumLdstGroups == 0, "Scatter requires the inner tile rows divisible by NumLdstGroups");
 
-  static constexpr bool Mma_dKV_is_RS = !ForceMmaDkvSS_ && AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB;
+  static constexpr bool Mma_dKV_is_RS = !PerfDebugForceMmaDkvSS_ && AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB;
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
 
   static constexpr GMMA::Major PdS_Major = GMMA::Major::K;
@@ -461,19 +462,20 @@ struct CollectiveMainloopBwdSm90 {
   // are 8*128B apart. So the 1D bulk-reduce path uses a row-contiguous layout.
   // A 4-float (16B) row pad keeps rows 16B-aligned (bulk reduce requirement) while breaking
   // the worst r2s store bank conflicts (8-way unpadded -> <=2-way padded).
-  // InnerLoad_Tma && IsSparse bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
+  // kInnerLoadMode == InnerLoadMode::Tma && IsSparse bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
   // keeping the swizzled TMA layout → no bank conflicts, no padding needed.
   static constexpr int kScatterAccRowPad = ScatterPad_ >= 0 ? ScatterPad_ : 4; // floats; -1 = auto (default 4)
   using SmemLayoutdKVaccumLinear = Layout<Shape<Int<kBlockN>, Int<kHeadDim>>, Stride<Int<kHeadDim + kScatterAccRowPad>, _1>>;
   using SmemLayoutdQaccumLinear = Layout<Shape<Int<kBlockM>, Int<kHeadDim>>, Stride<Int<kHeadDim + kScatterAccRowPad>, _1>>;
   // Store-side accum layouts: r2s writes and scatter-store reads go through these.
   // They alias SmemLayoutd*accumSwizzled unless the 1D bulk-reduce path is active.
-  // When InnerLoad_Tma && IsSparse, 2D TMA reduce reads the swizzled layout natively.
-  // The flat Scatter layout only applies when SparseInnerDxReduceUseTma && !InnerLoad_Tma
+  // When kInnerLoadMode == InnerLoadMode::Tma && IsSparse, 2D TMA reduce reads the swizzled layout natively.
+  // The flat Scatter layout only applies when SparseInnerDxReduceUseTma && kInnerLoadMode != InnerLoadMode::Tma
   // (1D per-row bulk reduce fallback), and only for the inner dX of this loop.
   using SmemLayoutdKVaccumStore =
-      std::conditional_t<SparseInnerDxReduceUseTma && BwdInnerLoopK && !InnerLoad_Tma, SmemLayoutdKVaccumLinear, SmemLayoutdKVaccumSwizzled>;
-  using SmemLayoutdQaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && !BwdInnerLoopK && !InnerLoad_Tma, SmemLayoutdQaccumLinear, SmemLayoutdQaccumSwizzled>;
+      std::conditional_t<SparseInnerDxReduceUseTma && BwdInnerLoopK && kInnerLoadMode != InnerLoadMode::Tma, SmemLayoutdKVaccumLinear, SmemLayoutdKVaccumSwizzled>;
+  using SmemLayoutdQaccumStore =
+      std::conditional_t<SparseInnerDxReduceUseTma && !BwdInnerLoopK && kInnerLoadMode != InnerLoadMode::Tma, SmemLayoutdQaccumLinear, SmemLayoutdQaccumSwizzled>;
   using SmemLayoutdKVaccumtStore =
       decltype(cute::composition(SmemLayoutdKVaccumStore{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
   using SmemLayoutdQaccumtStore =
@@ -1163,9 +1165,9 @@ struct CollectiveMainloopBwdSm90 {
       cute::prefetch_tma_descriptor(params.tma_load_Q_packed.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_dO_packed.get_tma_descriptor());
     }
-    // K/V TMA descriptors needed for dense and scatter-TMA paths (InnerLoad_Tma).
+    // K/V TMA descriptors needed for dense and scatter-TMA paths (kInnerLoadMode == InnerLoadMode::Tma).
     // Only cp.async-only scatter (IndexSparse etc) skips the prefetch.
-    if constexpr (!IsSparse || InnerLoad_Tma) {
+    if constexpr (!IsSparse || kInnerLoadMode == InnerLoadMode::Tma) {
       cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
     }
@@ -1355,10 +1357,10 @@ struct CollectiveMainloopBwdSm90 {
       gdPsum = local_tile(cute::domain_offset(lse_off, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
     };
 
-    // InnerLoad_Tma && IsSparse: absolute-coordinate TMA tensors (no domain_offset by offset_q)
+    // kInnerLoadMode == InnerLoadMode::Tma && IsSparse: absolute-coordinate TMA tensors (no domain_offset by offset_q)
     // for issuing TMA loads at runtime-computed token positions.
     auto tQgQ_abs = [&]() {
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         auto gQ_abs = local_tile(mQ, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
         return group_modes<0, 3>(block_tma_Q.partition_S(gQ_abs));
       } else {
@@ -1366,7 +1368,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     }();
     auto tdOgdO_abs = [&]() {
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         auto gdO_abs = local_tile(mdO, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
         return group_modes<0, 3>(block_tma_dO.partition_S(gdO_abs));
       } else {
@@ -1374,14 +1376,14 @@ struct CollectiveMainloopBwdSm90 {
       }
     }();
     auto gLSE_abs = [&]() {
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         return local_tile(mLSE, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
       } else {
         return cute::make_tuple();
       }
     }();
     auto gdPsum_abs = [&]() {
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         return local_tile(mdPsum, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
       } else {
         return cute::make_tuple();
@@ -1519,7 +1521,7 @@ struct CollectiveMainloopBwdSm90 {
     // Q and dO share the same pipe slot when Q_dO_same_stages=true, so pipe advance
     // happens in load_dO_dPsum (the second of each pair) to keep the slot index in sync.
     auto load_Q_LSE = [&]() {
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         // All elected threads (lane_predicate) participate in pipe state advance,
         // but only thread 0 has the correct block_meta cursor and issues TMA.
         // (Each thread's block_meta.cur_range_inner_idx is group-offset-shifted
@@ -1536,7 +1538,7 @@ struct CollectiveMainloopBwdSm90 {
           copy(tma_Q_desc, tQgQ_abs(_, m_block_abs), tQsQ(_, stage));
           copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE_abs(_, _, m_block_abs), sLSE(_, _, stage));
         }
-      } else if constexpr (InnerLoad_CpAsync) {
+      } else if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
         // Legacy cp.async per-row scatter for Q + LSE (A/B benchmarking).
         pipeline_q.producer_acquire(smem_pipe_write_q);
         int const stage = smem_pipe_write_q.index();
@@ -1588,7 +1590,7 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto load_dO_dPsum = [&]() {
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         if (!lane_predicate)
           return;
         PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
@@ -1604,7 +1606,7 @@ struct CollectiveMainloopBwdSm90 {
           ++smem_pipe_write_do;
         }
         ++smem_pipe_write_q;
-      } else if constexpr (InnerLoad_CpAsync) {
+      } else if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
         // Legacy cp.async per-row scatter for dO + dPsum (A/B benchmarking).
         PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
@@ -1875,10 +1877,10 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
-    // InnerLoad_Tma && IsSparse (InnerLoopK scatter TMA): absolute-coordinate
+    // kInnerLoadMode == InnerLoadMode::Tma && IsSparse (InnerLoopK scatter TMA): absolute-coordinate
     // K/V tensors for issuing TMA at runtime-computed positions from block_meta.
     auto tKgK_abs = [&]() {
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         auto gK_abs = local_tile(mK, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
         return group_modes<0, 3>(block_tma_K.partition_S(gK_abs));
       } else {
@@ -1886,7 +1888,7 @@ struct CollectiveMainloopBwdSm90 {
       }
     }();
     auto tVgV_abs = [&]() {
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         auto gV_abs = local_tile(mV, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
         return group_modes<0, 3>(block_tma_V.partition_S(gV_abs));
       } else {
@@ -1900,7 +1902,7 @@ struct CollectiveMainloopBwdSm90 {
     int last_k_write_stage = 0;
 
     auto load_K = [&]() {
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         // Scatter TMA: BlockSparse K tiles are contiguous within each k_range.
         // All elected threads participate in pipe state; only thread 0 issues TMA.
         if (!lane_predicate)
@@ -1923,7 +1925,7 @@ struct CollectiveMainloopBwdSm90 {
         }
         last_k_write_stage = smem_pipe_write_k.index();
         ++smem_pipe_write_k;
-      } else if constexpr (InnerLoad_CpAsync) {
+      } else if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
         // Legacy cp.async per-row scatter (for A/B benchmarking against TMA 1D).
         pipeline_k.producer_acquire(smem_pipe_write_k);
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_inner_token_indices[smem_pipe_write_k.index() * kBlockN];
@@ -1966,7 +1968,7 @@ struct CollectiveMainloopBwdSm90 {
         // copy from a FIXED block (block 0) so the pipeline stays intact and
         // PV MMA runs on real (but wrong) data. After the first iteration the
         // load hits L2 cache, minimizing actual GMEM bandwidth.
-        if constexpr (InnerLoad_CpAsync) {
+        if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
           pipeline_v.producer_acquire(smem_pipe_write_v);
           CUTE_UNROLL
           for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
@@ -1983,7 +1985,7 @@ struct CollectiveMainloopBwdSm90 {
           }
           pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
           ++smem_pipe_write_v;
-        } else if constexpr (InnerLoad_Tma && IsSparse) {
+        } else if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
           // Scatter-TMA: mirror the real scatter path — only thread 0 issues TMA.
           if (!lane_predicate)
             return;
@@ -2008,7 +2010,7 @@ struct CollectiveMainloopBwdSm90 {
               tVsV(_, smem_pipe_write_v.index()));
           ++smem_pipe_write_v;
         }
-      } else if constexpr (InnerLoad_Tma && IsSparse) {
+      } else if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         if (!lane_predicate)
           return;
         pipeline_v.producer_acquire(smem_pipe_write_v);
@@ -2023,7 +2025,7 @@ struct CollectiveMainloopBwdSm90 {
               tVsV(_, v_stage));
         }
         ++smem_pipe_write_v;
-      } else if constexpr (InnerLoad_CpAsync) {
+      } else if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
         // Legacy cp.async per-row scatter for V (A/B benchmarking).
         pipeline_v.producer_acquire(smem_pipe_write_v);
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_inner_token_indices[last_k_write_stage * kBlockN];
@@ -2108,7 +2110,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // PipelineAsync (kCpAsync): all threads must arrive.
     // PipelineTmaAsync (kTmaDense/kTma2D): single-thread arrive suffices.
-    if (!InnerLoad_Tma || cute::elect_one_sync()) {
+    if (kInnerLoadMode != InnerLoadMode::Tma || cute::elect_one_sync()) {
       pipeline_q.producer_tail(smem_pipe_write_q);
       pipeline_do.producer_tail(smem_pipe_write_do);
     }
@@ -2125,7 +2127,7 @@ struct CollectiveMainloopBwdSm90 {
 
     // PipelineAsync (kCpAsync): all threads must arrive.
     // PipelineTmaAsync (kTma): single-thread arrive suffices.
-    if (!InnerLoad_Tma || cute::elect_one_sync()) {
+    if (kInnerLoadMode != InnerLoadMode::Tma || cute::elect_one_sync()) {
       pipeline_k.producer_tail(smem_pipe_write_k);
       pipeline_v.producer_tail(smem_pipe_write_v);
     }
@@ -2231,7 +2233,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
 
-      if constexpr (InnerLoad_Tma && IsSparse) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         // 2D TMA reduce: entire tile written in one TMA reduce-add instruction.
         // InnerLoopQ: all kBlockM packed rows belong to one physical token (PackGQAFactor >= kBlockM).
         if (lane_predicate) {
@@ -2455,7 +2457,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (!PerfDebugSkipDvStore && !PerfDebugSkipDvWriteback) {
-        if constexpr (InnerLoad_Tma && IsSparse) {
+        if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
           if (lane_predicate && warp_idx_in_warpgroup == ProducerWarpRoles::kNumLoaderWarps) {
             int const packed_first_row = idx_staging[0];
             int const n_block_abs = (packed_first_row) / kBlockN;
@@ -2498,7 +2500,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (!PerfDebugSkipDkStore && !PerfDebugSkipDkWriteback) {
-        if constexpr (InnerLoad_Tma && IsSparse) {
+        if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
           if (lane_predicate && warp_idx_in_warpgroup == ProducerWarpRoles::kNumLoaderWarps) {
             int const packed_first_row = idx_staging[kBlockN];
             int const n_block_abs = (packed_first_row) / kBlockN;
@@ -3065,7 +3067,7 @@ struct CollectiveMainloopBwdSm90 {
             // dQFull/dQEmpty barriers are NOT sufficient.
             BarrierManager::sync<NumMmaThreads>(BwdNamedBarriers::PdS);
 
-            if constexpr (InnerLoad_Tma && IsSparse) {
+            if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
               // IndexSparse TMA reduce: single thread issues one 2D TMA reduce-add instruction
               if (thread_idx == 0) {
                 Tensor sdQ_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumSwizzled{});
@@ -3794,7 +3796,7 @@ struct CollectiveMainloopBwdSm90 {
           } // !PerfDebugDeferDvR2S
         } else {
           // Consumer store path: dispatch on the store mechanism
-          if constexpr (InnerLoad_Tma && IsSparse) {
+          if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
             static_assert(dKVacc_use_smem, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
             Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
@@ -3945,7 +3947,7 @@ struct CollectiveMainloopBwdSm90 {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
         } else {
           // Consumer store path: dispatch on the store mechanism
-          if constexpr (InnerLoad_Tma && IsSparse) {
+          if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
             static_assert(dKVacc_use_smem, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
             Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);

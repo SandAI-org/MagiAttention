@@ -137,17 +137,17 @@ template <
     int ScatterPad,
     bool LseDpsumUnionDKVacc,
     int SparseKBlockSize,
-    bool ForceMmaDkvSS,
+    bool PerfDebugForceMmaDkvSS,
     int InnerLoadMode,
     bool ProfileMode,
-    bool SkipVLoad_ = false,
-    bool SkipDvStore_ = false,
-    bool SkipDkStore_ = false,
-    bool SkipDvMma_ = false,
-    bool SkipDvWriteback_ = false,
-    bool SkipDkWriteback_ = false,
+    bool PerfDebugSkipVLoad_ = false,
+    bool PerfDebugSkipDvStore_ = false,
+    bool PerfDebugSkipDkStore_ = false,
+    bool PerfDebugSkipDvMma_ = false,
+    bool PerfDebugSkipDvWriteback_ = false,
+    bool PerfDebugSkipDkWriteback_ = false,
     bool UnionDkvacc = false,
-    bool DeferDvR2S_ = false>
+    bool PerfDebugDeferDvR2S_ = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -209,16 +209,16 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       ScatterPad,
       LseDpsumUnionDKVacc,
       SparseKBlockSize,
-      ForceMmaDkvSS,
+      PerfDebugForceMmaDkvSS,
       InnerLoadMode,
-      SkipVLoad_,
-      SkipDvStore_,
-      SkipDkStore_,
-      SkipDvMma_,
-      SkipDvWriteback_,
-      SkipDkWriteback_,
+      PerfDebugSkipVLoad_,
+      PerfDebugSkipDvStore_,
+      PerfDebugSkipDkStore_,
+      PerfDebugSkipDvMma_,
+      PerfDebugSkipDvWriteback_,
+      PerfDebugSkipDkWriteback_,
       UnionDkvacc,
-      DeferDvR2S_>;
+      PerfDebugDeferDvR2S_>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       BwdInnerLoopK ? kBlockM : kBlockN,
@@ -409,17 +409,17 @@ template <
     int BwdScatterPad,
     int BwdLseUnion,
     int SparseKBlockSize,
-    bool ForceMmaDkvSS,
+    bool PerfDebugForceMmaDkvSS,
     int InnerLoadMode,
     bool ProfileMode,
-    bool SkipVLoad = false,
-    bool SkipDvStore = false,
-    bool SkipDkStore = false,
-    bool SkipDvMma = false,
-    bool SkipDvWriteback = false,
-    bool SkipDkWriteback = false,
+    bool PerfDebugSkipVLoad = false,
+    bool PerfDebugSkipDvStore = false,
+    bool PerfDebugSkipDkStore = false,
+    bool PerfDebugSkipDvMma = false,
+    bool PerfDebugSkipDvWriteback = false,
+    bool PerfDebugSkipDkWriteback = false,
     bool BwdUnionDkvacc = false,
-    bool DeferDvR2S = false>
+    bool PerfDebugDeferDvR2S = false>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // BwdTileM/N, BwdStages/Ds: 0 = use default, >0 = override (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS).
@@ -499,15 +499,14 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*ScatterPad=*/ScatterPad,
       /*LseDpsumUnionDKVacc=*/LseDpsumUnionDKVacc,
       /*SparseKBlockSize=*/SparseKBlockSize,
-      /*ForceMmaDkvSS=*/ForceMmaDkvSS,
+      /*PerfDebugForceMmaDkvSS_=*/PerfDebugForceMmaDkvSS,
       /*InnerLoadMode=*/InnerLoadMode,
-      /*ProfileMode=*/ProfileMode,
-      /*SkipVLoad_=*/SkipVLoad,
-      /*SkipDvStore_=*/SkipDvStore,
-      /*SkipDkStore_=*/SkipDkStore,
-      /*SkipDvMma_=*/SkipDvMma,
-      /*SkipDvWriteback_=*/SkipDvWriteback,
-      /*SkipDkWriteback_=*/SkipDkWriteback,
+      /*PerfDebugSkipVLoad_=*/PerfDebugSkipVLoad,
+      /*PerfDebugSkipDvStore_=*/PerfDebugSkipDvStore,
+      /*PerfDebugSkipDkStore_=*/PerfDebugSkipDkStore,
+      /*PerfDebugSkipDvMma_=*/PerfDebugSkipDvMma,
+      /*PerfDebugSkipDvWriteback_=*/PerfDebugSkipDvWriteback,
+      /*PerfDebugSkipDkWriteback_=*/PerfDebugSkipDkWriteback,
       /*UnionDkvacc=*/UnionDkvacc,
-      /*DeferDvR2S_=*/DeferDvR2S>(params, stream);
+      /*PerfDebugDeferDvR2S_=*/PerfDebugDeferDvR2S>(params, stream);
 }
