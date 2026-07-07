@@ -1440,6 +1440,7 @@ class DistAttnRuntime:
                     dk_type=self.hp_dtype,
                     dv_type=self.hp_dtype,
                     disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
+                    disable_bwd_dq_atomic_reduction=False,
                     deterministic=self.deterministic,
                     sm_margin=self.bwd_sm_margin,
                     # optional args below mainly for sparse attn
