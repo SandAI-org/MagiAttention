@@ -216,8 +216,10 @@ struct CollectiveMainloopBwdSm90 {
   // ─── ProducerWarpRoles: centralized producer warp role configuration ───
   // Replaces scattered magic-number warp_idx checks and hand-written barrier widths.
   struct ProducerWarpRoles {
-    // Loader warps: scatter paths need 2 warps for cp.async bandwidth, else 1 (TMA)
-    static constexpr int kNumLoaderWarps = IsSparse ? 2 : 1;
+    // Loader warps: scatter (CpAsync) paths need multiple warps for cp.async bandwidth.
+    // TMA paths need only 1 warp (hardware-initiated). When !InnerStoreInProducer,
+    // no storer warps exist so all remaining producer warps go to loading.
+    static constexpr int kNumLoaderWarps = IsSparse ? (!InnerStoreInProducer ? 4 : 2) : 1;
     // DxStorer warps: 0 if !InnerStoreInProducer (consumer handles store),
     //                 else 2 (InnerLoopK: dK+dV) or 1 (InnerLoopQ: dQ)
     static constexpr int kNumInnerStorerWarps = !InnerStoreInProducer ? 0 : (BwdInnerLoopK ? 2 : 1);
@@ -228,18 +230,10 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kInnerStorerThreads = kNumInnerStorerWarps * cutlass::NumThreadsPerWarp;
     static constexpr int kTotalThreads = kNumTotalWarps * cutlass::NumThreadsPerWarp;
 
-    // Per-direction store thread count for dKV barriers:
-    //   IsSparse: all DxStorer warps participate in BOTH dV and dK → kInnerStorerThreads
-    //   Dense InnerLoopK: warp1→dV, warp2→dK, each barrier involves 1 warp → NumThreadsPerWarp
-    static constexpr int kPerDirDkvStoreThreads = !InnerStoreInProducer ? 0 : (IsSparse ? kInnerStorerThreads : cutlass::NumThreadsPerWarp);
-
-    // Barrier participant counts (THE source of truth)
-    // Outer-empty (KVEmpty for InnerLoopQ, QdOEmpty for InnerLoopK): loader threads only
-    static constexpr int kOuterEmptyBarrierThreads = kNumLoaderThreads;
-    // dQ barrier (InnerLoopQ): consumer WG + dQ store warp (if InnerStoreInProducer)
-    static constexpr int kDqBarrierThreads = cutlass::NumThreadsPerWarpGroup + (BwdInnerLoopK ? 0 : kInnerStorerThreads);
-    // dKV per-direction barrier (InnerLoopK): consumer WG + per-dir store threads
-    static constexpr int kDkvBarrierThreads = cutlass::NumThreadsPerWarpGroup + (BwdInnerLoopK ? kPerDirDkvStoreThreads : 0);
+    // Inner store barrier width = consumer WG + all storer threads.
+    // All storer warps participate in each barrier direction (dQ or dK/dV).
+    // InnerLoopQ: 1 warp (32 threads), InnerLoopK: 2 warps (64 threads).
+    static constexpr int kInnerStoreBarrierThreads = cutlass::NumThreadsPerWarpGroup + kInnerStorerThreads;
 
     // Role predicates (warp_idx is 0-based within the producer warp group)
     static CUTLASS_DEVICE bool is_loader(int warp_idx) {
@@ -256,9 +250,7 @@ struct CollectiveMainloopBwdSm90 {
   // Thread counts promoted from ProducerWarpRoles for use in barrier template args.
   static constexpr int NumProducerThreads = ProducerWarpRoles::kTotalThreads;
   static constexpr int NumProducerLoaderThreads = ProducerWarpRoles::kNumLoaderThreads;
-  static constexpr int NumdKVStoreThreads = ProducerWarpRoles::kPerDirDkvStoreThreads;
-  static constexpr int NumKVEmptyProducerThreads = ProducerWarpRoles::kOuterEmptyBarrierThreads;
-  static constexpr int NumdQBarrierThreads = ProducerWarpRoles::kDqBarrierThreads;
+  static constexpr int NumInnerStoreBarrierThreads = ProducerWarpRoles::kInnerStoreBarrierThreads;
 
   static_assert(!InnerStoreInProducer || ProducerWarpRoles::kNumInnerStorerWarps > 0);
   static_assert(InnerStoreInProducer || ProducerWarpRoles::kNumInnerStorerWarps == 0);
@@ -2229,7 +2221,7 @@ struct CollectiveMainloopBwdSm90 {
 #pragma unroll
       // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
       for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
-        BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
+        BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
 
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
@@ -2287,7 +2279,7 @@ struct CollectiveMainloopBwdSm90 {
 
       // Arrive at sdQ empty barrier
       for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
-        BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+        BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
       }
     };
 
@@ -2453,7 +2445,7 @@ struct CollectiveMainloopBwdSm90 {
       // Must always sync here to prevent warp 1 from racing ahead of warp 2 in iterate_range.
 #pragma unroll
       for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
-        BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
+        BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (!PerfDebugSkipDvStore && !PerfDebugSkipDvWriteback) {
         if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
@@ -2482,9 +2474,9 @@ struct CollectiveMainloopBwdSm90 {
       // Un-union: signal dVEmpty (TMA dV done → consumer can r2s next dV into its own buffer)
       for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
         if constexpr (!UnionDkvacc) {
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+          BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         } else {
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+          BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         }
       }
     };
@@ -2496,7 +2488,7 @@ struct CollectiveMainloopBwdSm90 {
       }
 #pragma unroll
       for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
-        BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
+        BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (!PerfDebugSkipDkStore && !PerfDebugSkipDkWriteback) {
         if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
@@ -2525,9 +2517,9 @@ struct CollectiveMainloopBwdSm90 {
       // Un-union: signal dKEmpty (TMA dK done → consumer can r2s next dK into its own buffer)
       for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
         if constexpr (!UnionDkvacc) {
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+          BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         } else {
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
+          BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         }
       }
     };
@@ -2572,7 +2564,7 @@ struct CollectiveMainloopBwdSm90 {
   CUTLASS_DEVICE void mma_init() {
     if constexpr (BwdInnerLoopK) { // q for outer-loop and k for inner-loop
       // Tell producer that smem_q and smem_do are ready
-      BarrierManager::arrive<NumConsumerThreads + NumKVEmptyProducerThreads>(BwdNamedBarriers::QdOEmpty);
+      BarrierManager::arrive<NumConsumerThreads + NumProducerLoaderThreads>(BwdNamedBarriers::QdOEmpty);
 
       int warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
@@ -2582,16 +2574,16 @@ struct CollectiveMainloopBwdSm90 {
         // Union: only dVEmpty (dK r2s waits for first TMA dV via dKEmpty from store_dV).
         // Un-union: both dVEmpty and dKEmpty (separate buffers → both r2s start immediately).
         if (warp_idx_in_warpgroup == 0 || (IsSparse && warp_idx_in_warpgroup == 1)) {
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
           if constexpr (!UnionDkvacc) {
-            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
           }
         }
       }
     } else { // k for outer-loop and q for inner-loop
       // We're not currently using this bc we're not using persistent scheduler
       // Tell producer (warp 0) that smem_k and smem_v are ready
-      BarrierManager::arrive<NumConsumerThreads + NumKVEmptyProducerThreads>(BwdNamedBarriers::KVEmpty);
+      BarrierManager::arrive<NumConsumerThreads + NumProducerLoaderThreads>(BwdNamedBarriers::KVEmpty);
 
       int warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
@@ -2599,10 +2591,10 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (dQacc_use_smem) {
         if constexpr (!InnerStoreInProducer) {
           // Consumer handles dQ store: all threads in WG arrive (no separate store warp)
-          BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warp_group_idx);
         } else {
           if (warp_idx_in_warpgroup == 0) {
-            BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warp_group_idx);
           }
         }
       }
@@ -3033,7 +3025,7 @@ struct CollectiveMainloopBwdSm90 {
           // finished the previous tile's store. The consumer store mode instead relies on its
           // trailing cross-WG sync below to guarantee sdQ is free.
           if constexpr (InnerStoreInProducer) {
-            BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warp_group_idx);
             if constexpr (IsSparse) {
               // Copy this tile's token indices from the stage slot (still held — Q is
               // released only after MMA5) into the staging area for the store warp.
@@ -3120,7 +3112,7 @@ struct CollectiveMainloopBwdSm90 {
           if constexpr (InnerStoreInProducer) {
             // Producer store path: signal the producer store warp (TMA or scatter) that
             // sdQ is full; pairs with the dQEmpty sync at the top of this block.
-            BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warp_group_idx);
           }
         } else { // directly atomic reduce-add to global memory
           static_assert(!(IsSparse && !BwdInnerLoopK), "BlockSparse InnerLoopQ requires dQacc_use_smem (kHeadDim <= 128)");
@@ -3772,7 +3764,7 @@ struct CollectiveMainloopBwdSm90 {
           if constexpr (!PerfDebugDeferDvR2S) {
             int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
-            BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
             if constexpr (!PerfDebugSkipDvWriteback) {
               if constexpr (IsSparse) {
@@ -3791,7 +3783,7 @@ struct CollectiveMainloopBwdSm90 {
               cutlass::arch::fence_view_async_shared();
             } // !PerfDebugSkipDvWriteback
 
-            BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
+            BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
           } // !PerfDebugDeferDvR2S
         } else {
           // Consumer store path: dispatch on the store mechanism
@@ -3865,7 +3857,7 @@ struct CollectiveMainloopBwdSm90 {
         if constexpr (dKVacc_use_smem && InnerStoreInProducer && PerfDebugDeferDvR2S && !PerfDebugSkipDvWriteback) {
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
           if constexpr (IsSparse) {
             if (warp_group_idx == 0) {
@@ -3882,7 +3874,7 @@ struct CollectiveMainloopBwdSm90 {
 
           cutlass::arch::fence_view_async_shared();
 
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
         }
 
         // Atomic reduce-add partial dK
@@ -3921,7 +3913,7 @@ struct CollectiveMainloopBwdSm90 {
           // Write to smem, signal producer store warp for TMA/scatter reduce-add
           int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
 
-          BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
 
           if constexpr (!PerfDebugSkipDkWriteback) {
             if constexpr (IsSparse) {
@@ -3943,7 +3935,7 @@ struct CollectiveMainloopBwdSm90 {
             cutlass::arch::fence_view_async_shared();
           } // !PerfDebugSkipDkWriteback
 
-          BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
+          BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
         } else {
           // Consumer store path: dispatch on the store mechanism
           if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
@@ -4175,9 +4167,9 @@ struct CollectiveMainloopBwdSm90 {
     // (mirroring mma_init).
     if constexpr (LseDpsumUnionEffective && dKVacc_use_smem && InnerStoreInProducer) {
       int const warp_idx_in_wg = canonical_warp_idx_in_warpgroup_sync();
-      BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+      BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
       if (warp_idx_in_wg == 0 || (IsSparse && warp_idx_in_wg == 1)) {
-        BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
+        BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
       }
     }
 

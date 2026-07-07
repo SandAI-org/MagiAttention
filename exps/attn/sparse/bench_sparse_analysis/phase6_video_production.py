@@ -463,14 +463,17 @@ def _phase6_plot():
 
     kvseqlens = [s[0] for s in SCENARIOS]
     x = np.arange(len(kvseqlens))
-    n_methods = len(PLOT_METHODS)
     bw = 0.12
 
     fig, axes = plt.subplots(1, 3, figsize=(26, 7), dpi=150)
 
     for col_idx, (pid, pname) in enumerate(PLOT_PASSES):
         ax = axes[col_idx]
-        plot_methods = [m for m in PLOT_METHODS if not (m[0] == "index_sparse" and pid == "bwd_loopq")]
+        plot_methods = [
+            m
+            for m in PLOT_METHODS
+            if not (m[0] == "index_sparse" and pid == "bwd_loopq")
+        ]
         n_m = len(plot_methods)
         for i, (mid, lbl, col) in enumerate(plot_methods):
             key = f"{pid}/{mid}"
