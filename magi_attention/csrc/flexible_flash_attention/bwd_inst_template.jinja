@@ -16,13 +16,14 @@ using TDq      = {{ dq_t }};
 using TDkv     = {{ dkv_t }};
 static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
-static constexpr bool kDisableDkvAtomic = {{ disable_atomic }};
-static constexpr bool kDisableDqAtomic = {{ disable_dq_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kRangeMerge = {{ auto_range_merge }};
 static constexpr bool kBwdInnerLoopK = {{ bwd_inner_loop_k }};
-static constexpr bool kOuterStoreNeedReduction = !(kBwdInnerLoopK ? kDisableDqAtomic : kDisableDkvAtomic);
+// OuterStoreNoReduction: the outer-direction output (dQ for InnerLoopK, dKV for InnerLoopQ)
+// uses direct per-element store without atomic reduction.
+static constexpr bool kOuterStoreNoReduction = kBwdInnerLoopK ? {{ disable_dq_atomic }} : {{ disable_atomic }};
+static constexpr bool kOuterStoreNeedReduction = !kOuterStoreNoReduction;
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr bool kCatGQA = {{ cat_gqa }};
 static constexpr int kPackGQAFactor = {{ pack_gqa_factor }};
@@ -48,10 +49,10 @@ static constexpr int kBwdStages = {{bwd_stages | default(0)}};
 static constexpr int kBwdStagesDs = {{bwd_stages_ds | default(0)}};
 static constexpr int kBwdStagesV = {{bwd_stages_v | default(0)}};
 // SMEM-saving overrides (env: MAGI_ATTENTION_FFA_BWD_LSE_UNION).
-// tma1d_acc_row_pad: row padding (floats) for the Tma1d bulk-reduce linear layout to avoid bank conflicts.
+// tma1d_smem_row_pad: row padding (floats) for the Tma1d bulk-reduce linear layout to avoid bank conflicts.
 //   -1 = auto (default 4), >=0 = override.
 // lse_union: 0 = separate smem_lse/smem_dpsum, 1 = union with dKVacc buffer.
-static constexpr int kBwdTma1dAccRowPad = {{bwd_tma1d_acc_row_pad | default(-1)}};
+static constexpr int kBwdTma1dSmemRowPad = {{bwd_tma1d_acc_row_pad | default(-1)}};
 static constexpr int kBwdLseUnion = {{bwd_lse_union | default(0)}};
 // Union dKV accumulators: false(0) = separate smem_dkacc/smem_dvacc (optimized, requires stgV=1)
 //                         true(1) = union into single buffer (legacy, needed for LoopQ with stgV=2)
@@ -131,7 +132,7 @@ std::vector<at::Tensor> mha_bwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kDisableDkvAtomic, kDisableDqAtomic, kBwdInnerLoopK, kPackGQA, kCatGQA, kIndexSparse>(
+  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kOuterStoreNoReduction, kBwdInnerLoopK, kPackGQA, kCatGQA, kIndexSparse>(
       dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
       q_ranges_, k_ranges_, attn_type_map_, 
       merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 
@@ -144,7 +145,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
 
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdTma1dAccRowPad, kBwdLseUnion, kSparseKBlockSize, kInnerLoadMode, kBwdUnionDkvacc, kProfileMode, kPerfDebugForceMmaDkvSS, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma, kPerfDebugSkipDvWriteback, kPerfDebugSkipDkWriteback, kPerfDebugDeferDvR2S>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdTma1dSmemRowPad, kBwdLseUnion, kSparseKBlockSize, kInnerLoadMode, kBwdUnionDkvacc, kProfileMode, kPerfDebugForceMmaDkvSS, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma, kPerfDebugSkipDvWriteback, kPerfDebugSkipDkWriteback, kPerfDebugDeferDvR2S>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

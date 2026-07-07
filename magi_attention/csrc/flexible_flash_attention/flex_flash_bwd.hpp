@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-template <bool Deterministic, bool DisableDkvAtomic, bool DisableDqAtomic, bool BwdInnerLoopK, bool PackGQA, bool CatGQA, bool IndexSparse = false>
+template <bool Deterministic, bool OuterStoreNoReduction, bool BwdInnerLoopK, bool PackGQA, bool CatGQA, bool IndexSparse = false>
 std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
@@ -144,8 +144,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
   TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1 && out.stride(-1) == 1 && dout.stride(-1) == 1);
   TORCH_CHECK(
-      !DisableDkvAtomic or (num_heads_qo == num_heads_kv or PackGQA or CatGQA),
-      "disable_bwd_dkv_atomic_reduction can only be enabled when num_heads_qo == num_heads_kv, or when PackGQA or CatGQA is enabled");
+      BwdInnerLoopK || !OuterStoreNoReduction || (num_heads_qo == num_heads_kv || PackGQA || CatGQA),
+      "InnerLoopQ + OuterStoreNoReduction requires num_heads_qo == num_heads_kv, or PackGQA/CatGQA enabled");
 
   // check softmax_lse (dtype, device, layout)
   TORCH_CHECK(softmax_lse.dtype() == at::kFloat);
@@ -253,13 +253,13 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       (has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count),
       "merge_k_ranges, bwd_kq_map, and bwd_unique_count must all be provided together or all be omitted");
 
-  // Validate IndexSparse indices if provided (3D: batch_size × nhk × topk_per_head)
+  // Validate IndexSparse indices if provided (3D: batch_size × nhk × inner_indices_cnt)
   at::Tensor index_sparse_indices;
   if (has_index_sparse) {
     index_sparse_indices = index_sparse_indices_.value();
     TORCH_CHECK(index_sparse_indices.dtype() == torch::kInt32, "index_sparse_indices must be int32");
     CHECK_DEVICE(index_sparse_indices);
-    TORCH_CHECK(index_sparse_indices.dim() == 3, "index_sparse_indices must be 3D (batch, nhk, topk_per_head), got ", index_sparse_indices.dim(), "D");
+    TORCH_CHECK(index_sparse_indices.dim() == 3, "index_sparse_indices must be 3D (batch, nhk, inner_indices_cnt), got ", index_sparse_indices.dim(), "D");
     TORCH_CHECK(
         index_sparse_indices.size(1) == num_heads_kv, "index_sparse_indices dim-1 must equal num_heads_kv (", num_heads_kv, "), got ", index_sparse_indices.size(1));
     TORCH_CHECK(
@@ -281,12 +281,14 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
 
   // Determine output dtype for dq
+  // InnerLoopK + OuterStoreNoReduction: dQ is outer, per-element store → native dtype ok
+  // Otherwise: dQ is inner, uses atomic reduction → must be float32
+  constexpr bool dq_is_outer_no_reduction = (BwdInnerLoopK && OuterStoreNoReduction);
   at::ScalarType dq_type = dq_type_.has_value() ? dq_type_.value() : (dq_.has_value() ? dq_.value().scalar_type() : at::ScalarType::Float);
-  if constexpr (DisableDqAtomic) {
-    TORCH_CHECK(BwdInnerLoopK, "DisableDqAtomic requires BwdInnerLoopK (BWD InnerLoopK)");
+  if constexpr (dq_is_outer_no_reduction) {
     TORCH_CHECK(
         dq_type == at::ScalarType::Float || dq_type == at::ScalarType::BFloat16 || dq_type == at::ScalarType::Half,
-        "Flexible Flash Attention only supports float, bf16 and fp16 for dq when DisableDqAtomic is enabled");
+        "dq only supports float, bf16 and fp16 when outer store has no reduction");
   } else {
     TORCH_CHECK(dq_type == at::ScalarType::Float);
   }
@@ -294,8 +296,10 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     TORCH_CHECK(dq_.value().scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
   }
   // Determine output dtype for dk
+  // InnerLoopQ + OuterStoreNoReduction: dKV is outer, per-element store → native dtype ok
+  constexpr bool dkv_is_outer_no_reduction = (!BwdInnerLoopK && OuterStoreNoReduction);
   at::ScalarType dk_type =
-      dk_type_.has_value() ? dk_type_.value() : (dk_.has_value() ? dk_.value().scalar_type() : (!DisableDkvAtomic ? at::ScalarType::Float : q_type));
+      dk_type_.has_value() ? dk_type_.value() : (dk_.has_value() ? dk_.value().scalar_type() : (!dkv_is_outer_no_reduction ? at::ScalarType::Float : q_type));
   TORCH_CHECK(
       dk_type == at::ScalarType::Float || dk_type == at::ScalarType::BFloat16 || dk_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dk");
@@ -304,7 +308,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   }
   // Determine output dtype for dv
   at::ScalarType dv_type =
-      dv_type_.has_value() ? dv_type_.value() : (dv_.has_value() ? dv_.value().scalar_type() : (!DisableDkvAtomic ? at::ScalarType::Float : q_type));
+      dv_type_.has_value() ? dv_type_.value() : (dv_.has_value() ? dv_.value().scalar_type() : (!dkv_is_outer_no_reduction ? at::ScalarType::Float : q_type));
   TORCH_CHECK(
       dv_type == at::ScalarType::Float || dv_type == at::ScalarType::BFloat16 || dv_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dv");
@@ -325,9 +329,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     CHECK_SHAPE(dq, total_q, num_heads_qo, head_size);
     TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
   } else {
-    if constexpr (DisableDqAtomic && BwdInnerLoopK) {
-      // InnerLoopK + DisableDqAtomic: dQ is the outer result, epilogue uses per-element
-      // direct store (single CTA writes each Q position), so no zero-init needed.
+    if constexpr (dq_is_outer_no_reduction) {
+      // dQ is outer, per-element direct store (single CTA writes each Q position) → no zero-init.
       dq = torch::empty_like(q, opts.dtype(dq_type));
     } else {
       // InnerLoopQ or disabled: dQ is the inner result, mainloop uses TMA_REDUCE_ADD
@@ -466,7 +469,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*dq_determin_range_locks=*/dq_determin_range_locks.data_ptr(),
       /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
-      /*disable_bwd_dkv_atomic_reduction=*/DisableDkvAtomic);
+      /*disable_bwd_dkv_atomic_reduction=*/dkv_is_outer_no_reduction);
 
   params.index_sparse_indices = has_index_sparse ? static_cast<int*>(index_sparse_indices.data_ptr()) : nullptr;
   params.inner_indices_cnt = inner_indices_cnt;

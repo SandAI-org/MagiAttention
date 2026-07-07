@@ -78,7 +78,7 @@ template <
     int AtomLayoutMdQ,
     bool Mma_dP_is_RS,
     int Stages_V_,
-    int Tma1dAccRowPad_,
+    int Tma1dSmemRowPad_,
     bool LseDpsumUnionDKVacc_,
     int SparseKBlockSize_,
     int InnerLoadMode_,
@@ -468,9 +468,9 @@ struct CollectiveMainloopBwdSm90 {
   // the worst r2s store bank conflicts (8-way unpadded -> <=2-way padded).
   // kInnerLoadMode == InnerLoadMode::Tma && IsSparse bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
   // keeping the swizzled TMA layout → no bank conflicts, no padding needed.
-  static constexpr int kTma1dAccRowPad = Tma1dAccRowPad_ >= 0 ? Tma1dAccRowPad_ : 4; // floats; -1 = auto (default 4)
-  using SmemLayoutdKVaccumLinear = Layout<Shape<Int<kBlockN>, Int<kHeadDim>>, Stride<Int<kHeadDim + kTma1dAccRowPad>, _1>>;
-  using SmemLayoutdQaccumLinear = Layout<Shape<Int<kBlockM>, Int<kHeadDim>>, Stride<Int<kHeadDim + kTma1dAccRowPad>, _1>>;
+  static constexpr int kTma1dSmemRowPad = Tma1dSmemRowPad_ >= 0 ? Tma1dSmemRowPad_ : 4; // floats; -1 = auto (default 4)
+  using SmemLayoutdKVaccumLinear = Layout<Shape<Int<kBlockN>, Int<kHeadDim>>, Stride<Int<kHeadDim + kTma1dSmemRowPad>, _1>>;
+  using SmemLayoutdQaccumLinear = Layout<Shape<Int<kBlockM>, Int<kHeadDim>>, Stride<Int<kHeadDim + kTma1dSmemRowPad>, _1>>;
   // Store-side accum layouts: r2s writes and scatter-store reads go through these.
   // They alias SmemLayoutd*accumSwizzled unless the 1D bulk-reduce path is active.
   // When kInnerLoadMode == InnerLoadMode::Tma && IsSparse, 2D TMA reduce reads the swizzled layout natively.

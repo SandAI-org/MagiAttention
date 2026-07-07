@@ -109,13 +109,13 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     CHECK_CONTIGUOUS(k_ranges);
   }
 
-  // Validate IndexSparse indices if provided (3D: batch_size × nhk × topk_per_head)
+  // Validate IndexSparse indices if provided (3D: batch_size × nhk × inner_indices_cnt)
   at::Tensor index_sparse_indices;
   if (has_index_sparse) {
     index_sparse_indices = index_sparse_indices_.value();
     TORCH_CHECK(index_sparse_indices.dtype() == torch::kInt32, "index_sparse_indices must be int32");
     CHECK_DEVICE(index_sparse_indices);
-    TORCH_CHECK(index_sparse_indices.dim() == 3, "index_sparse_indices must be 3D (batch, nhk, topk_per_head), got ", index_sparse_indices.dim(), "D");
+    TORCH_CHECK(index_sparse_indices.dim() == 3, "index_sparse_indices must be 3D (batch, nhk, inner_indices_cnt), got ", index_sparse_indices.dim(), "D");
     TORCH_CHECK(
         index_sparse_indices.size(1) == num_heads_kv, "index_sparse_indices dim-1 must equal num_heads_kv (", num_heads_kv, "), got ", index_sparse_indices.size(1));
     TORCH_CHECK(

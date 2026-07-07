@@ -134,7 +134,7 @@ template <
     int InnerStoreMode,
     bool OuterStoreNeedReduction,
     int Stages_V,
-    int Tma1dAccRowPad,
+    int Tma1dSmemRowPad,
     bool LseDpsumUnionDKVacc,
     int SparseKBlockSize,
     int InnerLoadMode,
@@ -206,7 +206,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutMdQ,
       V_in_regs,
       Stages_V,
-      Tma1dAccRowPad,
+      Tma1dSmemRowPad,
       LseDpsumUnionDKVacc,
       SparseKBlockSize,
       InnerLoadMode,
@@ -339,7 +339,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
           Stages,
           Stages_V,
           Stages_dS,
-          Tma1dAccRowPad,
+          Tma1dSmemRowPad,
           (int)LseDpsumUnionDKVacc,
           InnerStoreMode,
           (int)UnionDkvacc,
@@ -406,7 +406,7 @@ template <
     int BwdStages,
     int BwdStagesDs,
     int BwdStagesV,
-    int BwdTma1dAccRowPad,
+    int BwdTma1dSmemRowPad,
     int BwdLseUnion,
     int SparseKBlockSize,
     int InnerLoadMode,
@@ -432,7 +432,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int Stages_dO = Stages >= 2 ? (kHeadDim <= 128 ? 2 : 1) : 1;
   static constexpr int Stages_dS = BwdStagesDs > 0 ? BwdStagesDs : (kHeadDim <= 128 ? (kBlockM <= 64 ? 2 : 1) : 1);
   static constexpr int Stages_V = BwdStagesV > 0 ? BwdStagesV : Stages;
-  static constexpr int Tma1dAccRowPad = BwdTma1dAccRowPad;
+  static constexpr int Tma1dSmemRowPad = BwdTma1dSmemRowPad;
   static constexpr bool LseDpsumUnionDKVacc = BwdLseUnion != 0;
   static constexpr bool UnionDkvacc = BwdUnionDkvacc;
 
@@ -496,7 +496,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*InnerStoreMode=*/InnerStoreMode,
       /*OuterStoreNeedReduction=*/OuterStoreNeedReduction,
       /*Stages_V=*/Stages_V,
-      /*Tma1dAccRowPad=*/Tma1dAccRowPad,
+      /*Tma1dSmemRowPad=*/Tma1dSmemRowPad,
       /*LseDpsumUnionDKVacc=*/LseDpsumUnionDKVacc,
       /*SparseKBlockSize=*/SparseKBlockSize,
       /*InnerLoadMode=*/InnerLoadMode,
