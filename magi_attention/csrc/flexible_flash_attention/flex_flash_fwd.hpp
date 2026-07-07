@@ -177,9 +177,16 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
   TORCH_CHECK(head_size <= max_headdim);
   TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
-  // check PackGQA, the group_size of gqa should be divisible by kblockm in FFA.
+  // check PackGQA, the group_size of gqa should be divisible by kblockm in FFA,
+  // OR kblockm should be divisible by group_size (one group spans multiple tiles).
   if constexpr (PackGQA) {
-    TORCH_CHECK(kBlockM % qhead_per_khead == 0, "the qhead_per_khead must be divisible by kblockm");
+    TORCH_CHECK(
+        kBlockM % qhead_per_khead == 0 || qhead_per_khead % kBlockM == 0,
+        "pack_gqa requires kBlockM and qhead_per_khead to be divisible by each other, "
+        "got kBlockM=",
+        kBlockM,
+        " qhead_per_khead=",
+        qhead_per_khead);
   }
 
   // Define a helper function to round up to multiple of m
