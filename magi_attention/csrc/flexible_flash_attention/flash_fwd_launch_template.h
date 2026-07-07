@@ -145,7 +145,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
         params.attn_type_map,
         params.qk_map,
         params.index_sparse_indices,
-        params.index_sparse_max_topk};
+        params.inner_indices_cnt};
   }();
 
   typename CollectiveEpilogue::Arguments epilogue_args{

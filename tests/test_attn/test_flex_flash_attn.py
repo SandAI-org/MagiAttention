@@ -2469,7 +2469,7 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
                 v_ffa,
                 index_sparse_indices=indices,
                 q_block_size=1,
-                k_block_size=1,
+                sparse_k_block_size=1,
                 pack_gqa=True,
             )
 

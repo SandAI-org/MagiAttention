@@ -285,7 +285,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.dq_determin_conflict_state,
       params.dq_determin_range_locks,
       params.index_sparse_indices,
-      params.index_sparse_max_topk};
+      params.inner_indices_cnt};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop

@@ -126,7 +126,7 @@ def ffa_index_sparse_fwd(
         v,
         index_sparse_indices=index_sparse_indices,
         q_block_size=1,
-        k_block_size=1,
+        sparse_k_block_size=1,
         softmax_scale=softmax_scale,
         pack_gqa=True if group_size > 1 else False,
     )

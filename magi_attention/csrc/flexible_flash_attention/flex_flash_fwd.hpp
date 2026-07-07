@@ -59,8 +59,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
     std::optional<const at::Tensor>& index_sparse_indices_,
-    int const index_sparse_max_topk,
-    int const index_sparse_k_block_size,
+    int const inner_indices_cnt,
+    int const sparse_k_block_size,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> out_type_,
@@ -119,9 +119,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     TORCH_CHECK(
         index_sparse_indices.size(1) == num_heads_kv, "index_sparse_indices dim-1 must equal num_heads_kv (", num_heads_kv, "), got ", index_sparse_indices.size(1));
     TORCH_CHECK(
-        index_sparse_indices.size(2) == index_sparse_max_topk,
-        "index_sparse_indices dim-2 must equal index_sparse_max_topk (",
-        index_sparse_max_topk,
+        index_sparse_indices.size(2) == inner_indices_cnt,
+        "index_sparse_indices dim-2 must equal inner_indices_cnt (",
+        inner_indices_cnt,
         "), got ",
         index_sparse_indices.size(2));
     CHECK_CONTIGUOUS(index_sparse_indices);
@@ -373,7 +373,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       /*tiles_per_batch_per_intergroup=*/tiles_per_batch_per_intergroup,
       /*max_tile_idx=*/max_tile_idx,
       /*index_sparse_indices=*/has_index_sparse ? index_sparse_indices.data_ptr() : nullptr,
-      /*index_sparse_max_topk=*/index_sparse_max_topk);
+      /*inner_indices_cnt=*/inner_indices_cnt);
 
   return {params, out, softmax_lse, max_logits};
 }

@@ -85,7 +85,7 @@ def _ffa_register_quota(
     block_sparse: bool,
     index_sparse: bool,
     sparse_dx_tma_reduce: bool,
-    k_block_size: int = 1,
+    sparse_k_block_size: int = 1,
 ) -> tuple[int, int]:
     """Select the setmaxnreg quotas (producer/load WG, consumer/mma WG) for one variant.
 
@@ -121,7 +121,9 @@ def _ffa_register_quota(
         # CpAsync scatter path is used when _is_contiguous is false:
         #   _is_contiguous = (!IndexSparse && !BlockSparse) || (KBlockSize >= kBlockN)
         # So scatter is needed when (IndexSparse || BlockSparse) && KBlockSize < kBlockN.
-        uses_scatter = (index_sparse or block_sparse) and k_block_size < kblock_n_fwd
+        uses_scatter = (
+            index_sparse or block_sparse
+        ) and sparse_k_block_size < kblock_n_fwd
         if uses_scatter:
             producer_regs, consumer_regs = 64, 216
         else:
@@ -322,7 +324,7 @@ def get_ffa_jit_spec(
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
-    k_block_size: int = 1,
+    sparse_k_block_size: int = 1,
 ) -> tuple[JitSpec, str]:
     # TODO: add more sanity checks for the combinations of options
     sanity_check(
@@ -404,13 +406,15 @@ def get_ffa_jit_spec(
         return_max_logits,
     )
 
-    # k_block_size is a compile-time constant baked into the kernel.
+    # sparse_k_block_size is a compile-time constant baked into the kernel.
     # Different values produce separate JIT cache entries.
-    if k_block_size > 1:
-        uri += f"_kbs{k_block_size}"
+    if sparse_k_block_size > 1:
+        uri += f"_kbs{sparse_k_block_size}"
 
     # Optional compile-time overrides for internal kernel tuning knobs (test/bench only)
-    extra_template_args: dict[str, str] = {"k_block_size": str(k_block_size)}
+    extra_template_args: dict[str, str] = {
+        "sparse_k_block_size": str(sparse_k_block_size)
+    }
     _iwg = os.environ.get("MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP")
     if _iwg is not None and direction == "fwd":
         extra_template_args["intra_wg_overlap"] = _iwg.lower()
@@ -498,7 +502,6 @@ def get_ffa_jit_spec(
             ("MAGI_ATTENTION_FFA_BWD_STAGES", "bwd_stages", "stg"),
             ("MAGI_ATTENTION_FFA_BWD_STAGES_DS", "bwd_stages_ds", "stds"),
             ("MAGI_ATTENTION_FFA_BWD_STAGES_V", "bwd_stages_v", "stv"),
-            ("MAGI_ATTENTION_FFA_BWD_SCATTER_PAD", "bwd_scatter_pad", "sp"),
             ("MAGI_ATTENTION_FFA_BWD_LSE_UNION", "bwd_lse_union", "lu"),
         ]:
             _val = os.environ.get(_env_name)
@@ -568,16 +571,16 @@ def get_ffa_jit_spec(
                 extra_template_args[_tpl_key] = "true"
                 uri += f"_{_uri_key}1"
 
-        # IndexSparse InnerLoopQ with block-level K: override tile_n to match k_block_size
-        # so that kBlockN = k_block_size (full-tile outer K, no waste).
+        # IndexSparse InnerLoopQ with block-level K: override tile_n to match sparse_k_block_size
+        # so that kBlockN = sparse_k_block_size (full-tile outer K, no waste).
         if (
             index_sparse
             and not bwd_inner_loop_k
             and "bwd_tile_n" not in extra_template_args
         ):
-            if k_block_size >= 128:
-                extra_template_args["bwd_tile_n"] = str(k_block_size)
-                uri += f"_tn{k_block_size}"
+            if sparse_k_block_size >= 128:
+                extra_template_args["bwd_tile_n"] = str(sparse_k_block_size)
+                uri += f"_tn{sparse_k_block_size}"
 
     # Register quota selection (single source of truth, kernels only assert)
     _producer_regs, _consumer_regs = _ffa_register_quota(
@@ -589,7 +592,7 @@ def get_ffa_jit_spec(
         block_sparse=block_sparse,
         index_sparse=index_sparse,
         sparse_dx_tma_reduce=extra_template_args.get("inner_store_mode", "2") == "1",
-        k_block_size=k_block_size,
+        sparse_k_block_size=sparse_k_block_size,
     )
     extra_template_args[f"{direction}_producer_regs"] = str(_producer_regs)
     extra_template_args[f"{direction}_consumer_regs"] = str(_consumer_regs)
@@ -750,7 +753,6 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_STAGES",
     "MAGI_ATTENTION_FFA_BWD_STAGES_DS",
     "MAGI_ATTENTION_FFA_BWD_STAGES_V",
-    "MAGI_ATTENTION_FFA_BWD_SCATTER_PAD",
     "MAGI_ATTENTION_FFA_BWD_LSE_UNION",
     "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
     "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC",
@@ -796,7 +798,7 @@ def get_ffa_jit_mod(
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
-    k_block_size: int = 1,
+    sparse_k_block_size: int = 1,
     _env_snapshot: tuple[tuple[str, str | None], ...] = (),
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
@@ -838,7 +840,7 @@ def get_ffa_jit_mod(
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
-        k_block_size=k_block_size,
+        sparse_k_block_size=sparse_k_block_size,
     )
 
     logger.info(

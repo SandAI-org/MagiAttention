@@ -792,7 +792,7 @@ struct CollectiveMainloopBwdSm90 {
     int* dq_determin_range_locks;
     /* index_sparse */
     int const* const index_sparse_indices;
-    int index_sparse_max_topk;
+    int inner_indices_cnt;
   };
 
   // Device side kernel params
@@ -847,7 +847,7 @@ struct CollectiveMainloopBwdSm90 {
     StrideQKV const stride_dQ;
     /* index_sparse */
     int const* const index_sparse_indices;
-    int index_sparse_max_topk;
+    int inner_indices_cnt;
   };
 
   // BlockSparse InnerLoopK producer (used by load and store). token_indices stores raw IDs; stride multiplication is in the load/store lambdas.
@@ -1114,7 +1114,7 @@ struct CollectiveMainloopBwdSm90 {
         /*ptr_dQ=*/args.ptr_dQ,
         /*stride_dQ=*/args.stride_dQ,
         /*index_sparse_indices=*/args.index_sparse_indices,
-        /*index_sparse_max_topk=*/args.index_sparse_max_topk};
+        /*inner_indices_cnt=*/args.inner_indices_cnt};
   }
 
   // BlockMeta type alias — definition lives in block_meta.h

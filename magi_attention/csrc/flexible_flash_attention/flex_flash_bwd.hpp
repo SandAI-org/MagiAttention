@@ -100,8 +100,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& bwd_kq_map_,
     std::optional<const at::Tensor>& bwd_unique_count_,
     std::optional<const at::Tensor>& index_sparse_indices_,
-    int index_sparse_max_topk,
-    int index_sparse_k_block_size,
+    int inner_indices_cnt,
+    int sparse_k_block_size,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> dq_type_,
@@ -263,9 +263,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     TORCH_CHECK(
         index_sparse_indices.size(1) == num_heads_kv, "index_sparse_indices dim-1 must equal num_heads_kv (", num_heads_kv, "), got ", index_sparse_indices.size(1));
     TORCH_CHECK(
-        index_sparse_indices.size(2) == index_sparse_max_topk,
-        "index_sparse_indices dim-2 must equal index_sparse_max_topk (",
-        index_sparse_max_topk,
+        index_sparse_indices.size(2) == inner_indices_cnt,
+        "index_sparse_indices dim-2 must equal inner_indices_cnt (",
+        inner_indices_cnt,
         "), got ",
         index_sparse_indices.size(2));
     CHECK_CONTIGUOUS(index_sparse_indices);
@@ -469,7 +469,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*disable_bwd_dkv_atomic_reduction=*/DisableDkvAtomic);
 
   params.index_sparse_indices = has_index_sparse ? static_cast<int*>(index_sparse_indices.data_ptr()) : nullptr;
-  params.index_sparse_max_topk = index_sparse_max_topk;
+  params.inner_indices_cnt = inner_indices_cnt;
 
   return {params, dq, dk, dv, dsink};
 }

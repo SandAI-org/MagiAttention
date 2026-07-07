@@ -494,7 +494,7 @@ struct IndexSparseBlockMeta {
             return params.qhead_per_khead_divmod.divide(bidh);
           }
         }()) {
-    int const inner_indices_cnt = params.index_sparse_max_topk;
+    int const inner_indices_cnt = params.inner_indices_cnt;
     int const* row_ptr;
     int num_valid_indices;
 

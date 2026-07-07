@@ -79,7 +79,7 @@ void set_params_fprop(
     int const tiles_per_batch_per_intergroup = 0,
     int const max_tile_idx = 0,
     void* index_sparse_indices_d = nullptr,
-    int const index_sparse_max_topk = 0);
+    int const inner_indices_cnt = 0);
 
 void set_params_dgrad(
     Flash_bwd_params& params,

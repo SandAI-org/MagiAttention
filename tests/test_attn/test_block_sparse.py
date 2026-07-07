@@ -372,12 +372,12 @@ class _BlockSparseTestHelper(unittest.TestCase):
         v.retain_grad()
         q.grad, k.grad, v.grad = None, None, None
         # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
-        q_block_size, k_block_size = block_size
+        q_block_size, sparse_k_block_size = block_size
         (
             q_ranges_tensor,
             k_ranges_tensor,
         ) = generate_ranges_from_block_mask_triton(
-            block_mask, q_block_size, k_block_size
+            block_mask, q_block_size, sparse_k_block_size
         )
         attn_type_map_tensor = torch.zeros(
             len(q_ranges_tensor), dtype=torch.int32, device="cuda"
@@ -467,9 +467,9 @@ class _BlockSparseTestHelper(unittest.TestCase):
         q = rearrange(q, "1 s h d -> s h d")  # shd
         k = rearrange(k, "1 s h d -> s h d")
         v = rearrange(v, "1 s h d -> s h d")
-        q_block_size, k_block_size = block_size
+        q_block_size, sparse_k_block_size = block_size
         sdpa_mask_4d = get_sdpa_mask_from_block_sparse_mask(
-            block_mask, seqlen, seqlen, q_block_size, k_block_size, q.size(1)
+            block_mask, seqlen, seqlen, q_block_size, sparse_k_block_size, q.size(1)
         )
         sdpa_mask = rearrange(
             sdpa_mask_4d, "1 h seqlen_q seqlen_k -> h seqlen_q seqlen_k"
@@ -878,9 +878,9 @@ class _BlockSparseTestHelper(unittest.TestCase):
                 block_size is not None
             ), "`block_size` is required for 'uniform' test type."
 
-            q_block_size, k_block_size = block_size
+            q_block_size, sparse_k_block_size = block_size
             num_q_blocks = seqlen // q_block_size
-            num_kv_blocks = seqlen // k_block_size
+            num_kv_blocks = seqlen // sparse_k_block_size
             block_mask, _ = generate_block_sparse_pattern(
                 num_q_heads=num_heads_q,
                 num_kv_heads=num_heads_kv,
@@ -968,13 +968,13 @@ class TestBlockSparseSimple(unittest.TestCase):
         head_dim = 128
 
         q_block_size = cfg["q_size"]
-        k_block_size = cfg["k_size"]
+        sparse_k_block_size = cfg["k_size"]
         swap_ab = cfg["swap_ab"]
         block_sparse = cfg["block_sparse"]
         swap_bwd_qk_loop = cfg.get("swap_bwd_qk_loop", block_sparse)
         pack_gqa = cfg.get("pack_gqa", True)
         ref_block_size = cfg["ref_block_size"]
-        block_size = (q_block_size, k_block_size)
+        block_size = (q_block_size, sparse_k_block_size)
         max_seqlen_q = q_block_size
 
         helper = self._get_block_sparse_helper()
@@ -1204,7 +1204,7 @@ class TestBlockSparseSimple(unittest.TestCase):
             auto_range_merge=True,
             pack_gqa=pack_gqa,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
-            k_block_size=kbs,
+            sparse_k_block_size=kbs,
         )
 
         self.assertEqual(out.shape, (S, NHQ, D))

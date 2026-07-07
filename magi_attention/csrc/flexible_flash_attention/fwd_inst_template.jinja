@@ -34,7 +34,7 @@ static constexpr int kMaskMode = {{ mask_mode_int | default('1') }};
 static constexpr int kFwdProducerRegs = {{ fwd_producer_regs }};
 static constexpr int kFwdConsumerRegs = {{ fwd_consumer_regs }};
 // Sparse K block size: 1 = token-level indices, >1 = block-level (each index covers SparseKBlockSize tokens)
-static constexpr int kSparseKBlockSize = {{ k_block_size | default(1) }};
+static constexpr int kSparseKBlockSize = {{ sparse_k_block_size | default(1) }};
 // Inner-loop scatter load mode: 0=Tma(2D,auto), 1=Tma1d(bulk per-row, no-swizzle K), 2=CpAsync(per-row)
 static constexpr int kInnerLoadMode = {{ inner_load_mode | default(2) }};
 
@@ -92,8 +92,8 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
     std::optional<const at::Tensor>& index_sparse_indices_,
-    int const index_sparse_max_topk,
-    int index_sparse_k_block_size,
+    int const inner_indices_cnt,
+    int sparse_k_block_size,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> out_type_,
@@ -106,8 +106,8 @@ std::vector<at::Tensor> mha_fwd(
       q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, max_logit_,
       q_ranges_, k_ranges_, attn_type_map_, 
       merge_q_ranges_, qk_map_, unique_count_, 
-      index_sparse_indices_, index_sparse_max_topk,
-      index_sparse_k_block_size,
+      index_sparse_indices_, inner_indices_cnt,
+      sparse_k_block_size,
       softmax_scale, softcap,
       out_type_, sink_layout_, sm_margin);
   

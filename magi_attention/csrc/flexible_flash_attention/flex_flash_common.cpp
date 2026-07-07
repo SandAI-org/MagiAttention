@@ -56,7 +56,7 @@ void set_params_fprop(
     int const tiles_per_batch_per_intergroup,
     int const max_tile_idx,
     void* index_sparse_indices_d,
-    int const index_sparse_max_topk) {
+    int const inner_indices_cnt) {
   // Reset the parameters
   params = {};
 
@@ -143,7 +143,7 @@ void set_params_fprop(
 
   // Set IndexSparse indices direct path params
   params.index_sparse_indices = static_cast<int*>(index_sparse_indices_d);
-  params.index_sparse_max_topk = index_sparse_max_topk;
+  params.inner_indices_cnt = inner_indices_cnt;
 }
 
 void set_params_dgrad(

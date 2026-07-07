@@ -422,7 +422,7 @@ struct CollectiveMainloopFwdSm90 {
     int const* const attn_type_map;
     int const* const cu_batches;
     int const* const index_sparse_indices;
-    int const index_sparse_max_topk;
+    int const inner_indices_cnt;
   };
 
   // Device side kernel params
@@ -450,7 +450,7 @@ struct CollectiveMainloopFwdSm90 {
     int const* const attn_type_map;
     int const* const cu_batches;
     int const* const index_sparse_indices;
-    int const index_sparse_max_topk;
+    int const inner_indices_cnt;
   };
 
   // BlockMeta type aliases — definitions live in block_meta.h
@@ -564,7 +564,7 @@ struct CollectiveMainloopFwdSm90 {
         args.attn_type_map,
         args.cu_batches,
         args.index_sparse_indices,
-        args.index_sparse_max_topk};
+        args.inner_indices_cnt};
   }
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance

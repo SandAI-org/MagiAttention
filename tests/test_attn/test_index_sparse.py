@@ -31,7 +31,7 @@ Comprehensive sweep (@slow):
   - GQA mode: MQA(128:1, 64:1, 32:1, 16:1, 4:1), GQA(128:2, 32:4, 8:2, 4:2), MHA(4:4, 8:8)
   - PackGQA: True / False
   - D: 64, 128
-  - k_block_size: 1, 8, 32, 128, 256
+  - sparse_k_block_size: 1, 8, 32, 128, 256
 
 Known limitations:
   - swap_ab is prohibited for IndexSparse (asserted in flex_flash_attn_func)
@@ -83,7 +83,7 @@ def _run_sparse_attn_and_get_output(
     pack_gqa,
     swap_ab=False,
     ref_block_size=None,
-    k_block_size=1,
+    sparse_k_block_size=1,
     test_bwd=False,
 ):
     """Run FFA with index_sparse_indices and return reshaped output [B, S_q, NHQ, D].
@@ -105,7 +105,7 @@ def _run_sparse_attn_and_get_output(
             v_ffa,
             index_sparse_indices=index_sparse_indices,
             q_block_size=1,
-            k_block_size=k_block_size,
+            sparse_k_block_size=sparse_k_block_size,
             pack_gqa=pack_gqa,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
@@ -122,7 +122,7 @@ def _run_sparse_attn_and_get_output(
                 v_ffa.clone(),
                 index_sparse_indices=index_sparse_indices,
                 q_block_size=1,
-                k_block_size=k_block_size,
+                sparse_k_block_size=sparse_k_block_size,
                 pack_gqa=pack_gqa,
                 swap_ab=swap_ab,
                 ref_block_size=ref_block_size,
@@ -185,7 +185,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
     pack_gqa = cfg.get("pack_gqa", True)
     swap_ab = cfg.get("swap_ab", False)
     ref_block_size = cfg.get("ref_block_size", None)
-    k_block_size = cfg.get("k_block_size", 1)
+    sparse_k_block_size = cfg.get("sparse_k_block_size", 1)
     dtype = cfg.get("dtype", torch.bfloat16)
     atol = cfg.get("atol", DEFAULT_ATOL)
 
@@ -203,7 +203,14 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
         NHK = 1
 
     index_sparse_indices = _build_index_sparse_indices(
-        B, NHK, S_q, S_kv, topk, max_topk, device, k_block_size=k_block_size
+        B,
+        NHK,
+        S_q,
+        S_kv,
+        topk,
+        max_topk,
+        device,
+        sparse_k_block_size=sparse_k_block_size,
     )
 
     result = _run_sparse_attn_and_get_output(
@@ -219,7 +226,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
         pack_gqa=pack_gqa,
         swap_ab=swap_ab,
         ref_block_size=ref_block_size,
-        k_block_size=k_block_size,
+        sparse_k_block_size=sparse_k_block_size,
         test_bwd=test_bwd,
     )
 
@@ -236,13 +243,13 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
         S_q,
         S_kv,
         device,
-        k_block_size=k_block_size,
+        sparse_k_block_size=sparse_k_block_size,
     )
 
     test_case = (
         f"[NHQ={cfg['NHQ']},NHK={cfg['NHK']},S_q={cfg.get('S_q', cfg.get('S'))},S_kv={cfg.get('S_kv', cfg.get('S'))},"
         f"B={B},D={D},topk={topk},max_topk={max_topk},pack_gqa={pack_gqa},"
-        f"swap_ab={swap_ab},k_block_size={k_block_size},dtype={dtype},"
+        f"swap_ab={swap_ab},sparse_k_block_size={sparse_k_block_size},dtype={dtype},"
         f"flat:NHQ_eff={NHQ},S_q_eff={S_q},S_kv_eff={S_kv}]"
     )
 
@@ -409,7 +416,7 @@ def _run_view_trick(
         v_ffa,
         index_sparse_indices=indices_for_kernel,
         q_block_size=1,
-        k_block_size=1,
+        sparse_k_block_size=1,
         pack_gqa=True,
     )
 
@@ -576,7 +583,7 @@ class TestIndexSparseSimple(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 # Representative configs covering all key dimensions:
-#   GQA mode, PackGQA, D, seqlen alignment, Q/KV length, k_block_size, batch
+#   GQA mode, PackGQA, D, seqlen alignment, Q/KV length, sparse_k_block_size, batch
 INDEX_SPARSE_CLASSIC_CONFIGS = [
     # Classic: NHQ=128, NHK=1 (MQA), D=128, PackGQA=True, kbs=1
     # Varies: seqlen alignment, Q/KV length, batch, topk
@@ -793,7 +800,7 @@ INDEX_SPARSE_COMPREHENSIVE_CONFIGS = [
         "topk": 128,
         "pack_gqa": True,
     },
-    # ─── k_block_size variants ───
+    # ─── sparse_k_block_size variants ───
     {
         "name": "mqa128_kbs8",
         "B": 1,
@@ -804,7 +811,7 @@ INDEX_SPARSE_COMPREHENSIVE_CONFIGS = [
         "topk": 16,
         "max_topk": 16,
         "pack_gqa": True,
-        "k_block_size": 8,
+        "sparse_k_block_size": 8,
     },
     {
         "name": "mqa128_kbs32",
@@ -816,7 +823,7 @@ INDEX_SPARSE_COMPREHENSIVE_CONFIGS = [
         "topk": 4,
         "max_topk": 4,
         "pack_gqa": True,
-        "k_block_size": 32,
+        "sparse_k_block_size": 32,
     },
     {
         "name": "mqa128_kbs128",
@@ -827,7 +834,7 @@ INDEX_SPARSE_COMPREHENSIVE_CONFIGS = [
         "D": 128,
         "topk": 2,
         "pack_gqa": True,
-        "k_block_size": 128,
+        "sparse_k_block_size": 128,
     },
     {
         "name": "mqa128_kbs128_s1024",
@@ -838,7 +845,7 @@ INDEX_SPARSE_COMPREHENSIVE_CONFIGS = [
         "D": 128,
         "topk": 4,
         "pack_gqa": True,
-        "k_block_size": 128,
+        "sparse_k_block_size": 128,
     },
     {
         "name": "mqa128_kbs256",
@@ -850,7 +857,7 @@ INDEX_SPARSE_COMPREHENSIVE_CONFIGS = [
         "topk": 2,
         "max_topk": 2,
         "pack_gqa": True,
-        "k_block_size": 256,
+        "sparse_k_block_size": 256,
     },
     # ─── Seqlen unaligned + non-MQA ───
     {
@@ -1007,7 +1014,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     @parameterize("config", INDEX_SPARSE_COMPREHENSIVE_CONFIGS)
     def test_index_sparse_comprehensive(self, config: dict[str, Any]):
         """Comprehensive sweep: varies compile-time params (GQA, D, kbs, inner modes)."""
-        kbs = config.get("k_block_size", 1)
+        kbs = config.get("sparse_k_block_size", 1)
         env_overrides = config.get("_env", {})
         # BWD with kbs>=256 exceeds SM90 smem limit (BwdTileN=256 → >228KB)
         if kbs >= 256:

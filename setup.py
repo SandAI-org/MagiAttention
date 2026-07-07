@@ -718,7 +718,7 @@ def prebuild_ffa_kernels() -> None:
             False,
             1,
             1,
-        )  # block_sparse, index_sparse, bwd_inner_loop_k, pack_gqa_factor, k_block_size
+        )  # block_sparse, index_sparse, bwd_inner_loop_k, pack_gqa_factor, sparse_k_block_size
         for c in combos
     ]
 
@@ -925,7 +925,7 @@ def prebuild_ffa_kernels() -> None:
                 index_sparse,
                 bwd_inner_loop_k,
                 pack_gqa_factor,
-                k_block_size,
+                sparse_k_block_size,
                 return_max_logits,
             ) = args
         else:
@@ -941,7 +941,7 @@ def prebuild_ffa_kernels() -> None:
                 index_sparse,
                 bwd_inner_loop_k,
                 pack_gqa_factor,
-                k_block_size,
+                sparse_k_block_size,
             ) = args
             return_max_logits = False
 
@@ -992,7 +992,7 @@ def prebuild_ffa_kernels() -> None:
             return_max_logits=return_max_logits,
             dq_dtype=dq_dtype,
             dkv_dtype=dkv_dtype,
-            k_block_size=k_block_size,
+            sparse_k_block_size=sparse_k_block_size,
         )
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
