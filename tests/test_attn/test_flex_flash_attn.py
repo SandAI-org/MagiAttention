@@ -1245,6 +1245,12 @@ class TestFlexFlashAttn(DistTestBase):
             return
 
         # run ffa forward
+        # TMA descriptor reuse: if block_sparse + TMA, stale descriptors from prior
+        # allocations can cause garbage output. Isolate with empty_cache().
+        if block_sparse:
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
         o, meta = flex_flash_attn_func(
             q=q,
             k=k,

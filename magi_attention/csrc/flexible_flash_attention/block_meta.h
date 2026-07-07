@@ -43,7 +43,7 @@ struct DenseBlockMeta {
   // When !RangeMerge, the batch loop runs exactly once; mark it so callers can elide the while(true).
   static constexpr bool NeedsBatchLoop = RangeMerge;
 
-  int const outer_block; // m_block when !InnerLoopQ, n_block when InnerLoopQ
+  int const outer_tile_idx; // m_block when !InnerLoopQ, n_block when InnerLoopQ
   int const bidh;
   int const bidh_kv;
   int bidb;
@@ -52,8 +52,8 @@ struct DenseBlockMeta {
   SeqlenInfo_t seqlen_info;
   flash::AttnType attn_type;
   int inner_block_min; // n_block_min when !InnerLoopQ, m_block_min when InnerLoopQ
-  int inner_block_max; // n_block_max when !InnerLoopQ, m_block_max when InnerLoopQ
-  int inner_block_cur;
+  int inner_block_cnt; // n_block_max when !InnerLoopQ, m_block_max when InnerLoopQ
+  int inner_block_idx;
 
   int2 const* const q_ranges;
   int2 const* const k_ranges;
@@ -61,7 +61,7 @@ struct DenseBlockMeta {
 
   template <typename ParamsT, typename BlockCoordT, typename SharedStorage>
   CUTLASS_DEVICE DenseBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
+      : outer_tile_idx(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
         // When FlattenGQA (PackGQA or CatGQA), the scheduler assigns bidh as
         // the kv-head index directly. Otherwise bidh is the q-head index and
@@ -95,10 +95,10 @@ struct DenseBlockMeta {
   CUTLASS_DEVICE
   void update_attn_and_bounds() {
     attn_type = static_cast<flash::AttnType>(attn_type_map ? load_and_broadcast<1>(&attn_type_map[bidb]) : 0);
-    auto [min_, max_] = InnerLoopQ ? BlockMN_t::get_m_block_min_max(seqlen_info, outer_block, bidb, attn_type)
-                                   : BlockMN_t::get_n_block_min_max(seqlen_info, outer_block, bidb, attn_type);
+    auto [min_, max_] = InnerLoopQ ? BlockMN_t::get_m_block_min_max(seqlen_info, outer_tile_idx, bidb, attn_type)
+                                   : BlockMN_t::get_n_block_min_max(seqlen_info, outer_tile_idx, bidb, attn_type);
     inner_block_min = min_;
-    inner_block_max = max_;
+    inner_block_cnt = max_;
   }
 
   CUTLASS_DEVICE
@@ -118,12 +118,12 @@ struct DenseBlockMeta {
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(outer_block, bidh, bidb);
+    return cute::make_tuple(outer_tile_idx, bidh, bidb);
   }
 
   CUTLASS_DEVICE
   bool is_valid() {
-    return inner_block_min < inner_block_max;
+    return inner_block_min < inner_block_cnt;
   }
 
   CUTLASS_DEVICE
@@ -133,7 +133,7 @@ struct DenseBlockMeta {
 
   template <flash::DispatchDirection Dir>
   CUTLASS_DEVICE void update_block_cur() {
-    inner_block_cur = flash::init_block_cur<Dir>(inner_block_min, inner_block_max);
+    inner_block_idx = flash::init_block_cur<Dir>(inner_block_min, inner_block_cnt);
   }
 
   CUTLASS_DEVICE
@@ -149,8 +149,8 @@ struct DenseBlockMeta {
 // BlockSparseBlockMeta: Unified producer/consumer via IsProducer template parameter.
 // Used by both producer (IsProducer=true) and consumer (IsProducer=false) aliases.
 //
-// IsInnerLoopQ_=false (InnerLoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
-// IsInnerLoopQ_=true  (InnerLoopQ): outer=KV (TMA), inner=Q (scatter),  token_indices = Q positions
+// InnerLoopQ_=false (InnerLoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
+// InnerLoopQ_=true  (InnerLoopQ): outer=KV (TMA), inner=Q (scatter),  token_indices = Q positions
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -158,19 +158,19 @@ template <
     bool RangeMerge,
     bool PackGQA,
     int PackGQAFactor,
-    int NumRowsPerGroup_,
-    int GroupSize_,
+    int NumTokensPerLdstGroup_,
+    int NumThreadsPerLdstGroup_,
     int NumProducerThreads_,
     int kBlockN_,
     bool InnerDirMaxToMin_,
-    bool IsInnerLoopQ_>
+    bool InnerLoopQ_>
 struct BlockSparseBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr bool NeedsBatchLoop = true;
-  static constexpr bool IsInnerLoopQ = IsInnerLoopQ_;
+  static constexpr bool InnerLoopQ = InnerLoopQ_;
   static constexpr int InnerBlockSize = kBlockN_;
 
-  int const outer_block; // m_block for InnerLoopK, n_block for InnerLoopQ
+  int const outer_tile_idx; // m_block for InnerLoopK, n_block for InnerLoopQ
   int const bidh;
   int const bidh_kv;
   int bidb;
@@ -179,8 +179,8 @@ struct BlockSparseBlockMeta {
   flash::AttnType attn_type;
 
   int num_invalid_token;
-  int inner_block_cur;
-  int inner_block_max;
+  int inner_block_idx;
+  int inner_block_cnt;
 
   static constexpr int inner_block_min = 0;
 
@@ -206,8 +206,8 @@ struct BlockSparseBlockMeta {
   // index within the kv group. InnerLoopK scatters KV rows (never head-packed, scale 1).
   CUTLASS_DEVICE
   int2 packed_range(int i) const {
-    int2 r = (IsInnerLoopQ ? q_ranges : k_ranges)[i];
-    if constexpr (IsInnerLoopQ_ && PackGQA) {
+    int2 r = (InnerLoopQ ? q_ranges : k_ranges)[i];
+    if constexpr (InnerLoopQ && PackGQA) {
       r.x *= PackGQAFactor;
       r.y *= PackGQAFactor;
     }
@@ -220,7 +220,7 @@ struct BlockSparseBlockMeta {
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,
       int thread_idx = 0)
-      : outer_block(get<0>(block_coord)),
+      : outer_tile_idx(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
         bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
         q_ranges(params.q_ranges),
@@ -241,20 +241,21 @@ struct BlockSparseBlockMeta {
       }
     }();
 
-    // No outer_block bounds check needed: the persistent scheduler computes tile
-    // count from the outer-dimension range, so outer_block is always in-range
+    // No outer_tile_idx bounds check needed: the persistent scheduler computes tile
+    // count from the outer-dimension range, so outer_tile_idx is always in-range
     // (symmetric for both InnerLoopQ and InnerLoopK).
 
     int2 const r0 = packed_range(bidb);
     range_size = r0.y - r0.x;
     int const total_tokens = (end_batches - bidb) * range_size;
-    inner_block_max = (total_tokens + InnerBlockSize - 1) / InnerBlockSize;
-    num_invalid_token = inner_block_max * InnerBlockSize - total_tokens;
-    inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
+    inner_block_cnt = (total_tokens + InnerBlockSize - 1) / InnerBlockSize;
+    // Tile padding: last tile may extend past actual tokens; mask zeros these rows.
+    num_invalid_token = inner_block_cnt * InnerBlockSize - total_tokens;
+    inner_block_idx = flash::init_block_cur<kDir>(inner_block_min, inner_block_cnt);
 
     if constexpr (IsProducer) {
       int idx_in_warpgroup = thread_idx % 128;
-      int group_idx = idx_in_warpgroup / GroupSize_;
+      int ldst_group_idx = idx_in_warpgroup / NumThreadsPerLdstGroup_;
 
       if (!is_finish()) {
         seqlen_info = flash::SeqlenInfo{bidb, q_ranges, k_ranges};
@@ -266,11 +267,11 @@ struct BlockSparseBlockMeta {
           int2 const r_last = packed_range(end_batches - 1);
           cur_range_idx = end_batches - 1;
           cur_range_inner_idx = r_last.y - r_last.x - 1;
-          advance_token_idx(cur_range_idx, cur_range_inner_idx, kBlockN_ - (group_idx + 1) * NumRowsPerGroup_);
+          advance_token_idx(cur_range_idx, cur_range_inner_idx, kBlockN_ - (ldst_group_idx + 1) * NumTokensPerLdstGroup_);
         } else {
           cur_range_idx = bidb;
           cur_range_inner_idx = 0;
-          advance_token_idx(cur_range_idx, cur_range_inner_idx, group_idx * NumRowsPerGroup_);
+          advance_token_idx(cur_range_idx, cur_range_inner_idx, ldst_group_idx * NumTokensPerLdstGroup_);
         }
       }
     } else {
@@ -325,22 +326,22 @@ struct BlockSparseBlockMeta {
     }
   }
 
-  // Write this group's NumRowsPerGroup_ token indices for the CURRENT tile into the
-  // smem stage slot (rows [group_idx*NumRowsPerGroup_, +NumRowsPerGroup_)).
+  // Write this group's NumTokensPerLdstGroup_ token indices for the CURRENT tile into the
+  // smem stage slot (rows [ldst_group_idx*NumTokensPerLdstGroup_, +NumTokensPerLdstGroup_)).
   // Called after producer_acquire (the held stage makes the slot writable). Lane j of
-  // the group computes row j (strided by GroupSize_) from a cursor copy of the anchor —
+  // the group computes row j (strided by NumThreadsPerLdstGroup_) from a cursor copy of the anchor —
   // O(1) per row on the equal-range fast path. Caller must __syncwarp() before reading
   // the slot back (writer lanes ≠ reader lanes, but always within the same warp).
   CUTLASS_DEVICE
-  void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
+  void fill_token_indices(int* slot_rows, int token_idx_in_ldst_group, int ldst_group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
-    int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
-    for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
+    int* const group_rows = slot_rows + ldst_group_idx * NumTokensPerLdstGroup_;
+    for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += NumThreadsPerLdstGroup_) {
       int range_idx = cur_range_idx;
       int inner_idx = cur_range_inner_idx;
       advance_token_idx(range_idx, inner_idx, j);
       // MaxToMin walks backward from the high-end anchor: j steps back = row (last - j)
-      int const dst = InnerDirMaxToMin_ ? (NumRowsPerGroup_ - 1 - j) : j;
+      int const dst = InnerDirMaxToMin_ ? (NumTokensPerLdstGroup_ - 1 - j) : j;
       group_rows[dst] = packed_range(range_idx).x + inner_idx;
     }
   }
@@ -355,12 +356,12 @@ struct BlockSparseBlockMeta {
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(outer_block, bidh, bidb);
+    return cute::make_tuple(outer_tile_idx, bidh, bidb);
   }
 
   CUTLASS_DEVICE
   void prefetch() {
-    flash::advance_block_cur<kDir>(inner_block_cur);
+    flash::advance_block_cur<kDir>(inner_block_idx);
     if constexpr (IsProducer) {
       if (!is_finish()) {
         advance_token_idx(cur_range_idx, cur_range_inner_idx, kBlockN_);
@@ -371,15 +372,15 @@ struct BlockSparseBlockMeta {
   CUTLASS_DEVICE
   bool is_finish() {
     if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-      return inner_block_cur < inner_block_min;
+      return inner_block_idx < inner_block_min;
     } else {
-      return inner_block_cur >= inner_block_max;
+      return inner_block_idx >= inner_block_cnt;
     }
   }
 
   CUTLASS_DEVICE
   int padding_block() const {
-    return inner_block_max - 1;
+    return inner_block_cnt - 1;
   }
 
   template <flash::DispatchDirection>
@@ -420,23 +421,22 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // IndexSparseBlockMeta: Unified sparse block metadata for index-based attention.
-// Handles both InnerLoopK and InnerLoopQ via the IsInnerLoopQ_ template parameter (like BlockSparseBlockMeta).
+// Handles both InnerLoopK and InnerLoopQ via the InnerLoopQ_ template parameter (like BlockSparseBlockMeta).
 //
 // Template params:
 //   InnerBlockSize_    — inner scatter tile size (kBlockN for InnerLoopK, kBlockM for InnerLoopQ)
 //   SparseKBlockSize_  — sparse K block size (kbs): how many K tokens each index entry covers
 //                        (1 = token-level index sparse, ≥InnerBlockSize = block-level)
 //
-// IsInnerLoopQ_=false (InnerLoopK): outer=Q token (bidb), inner=K from forward topk indices
-//   fill_token_indices fills K logical rows (k_token); head offset handled by ptr_gK_base
-//   bidb = block_coord[2] = q_token; kv_head from scheduler bidh (intergroup)
-//   indices layout: (total_q, nhk * topk_per_head) — per-head slice via bidh_kv * per_head_topk
-// IsInnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb), inner=Q from inner_indices
-//   fill_token_indices fills Q packed rows: q_token * PackGQAFactor + sub_head
-//   indices layout: (num_k_blocks, nhk * inner_topk_per_head)
+// InnerLoopQ_=false (InnerLoopK): outer=Q token (bidb=q_token_idx), inner=K from sparse indices
+//   fill_token_indices maps tile positions to K token addresses
+//   indices layout: (num_q_tokens, nhk, inner_indices_cnt)
+// InnerLoopQ_=true  (InnerLoopQ): outer=K block (bidb=k_block_idx), inner=Q from inner_indices
+//   fill_token_indices maps tile positions to packed Q row addresses
+//   indices layout: (num_k_blocks, nhk, inner_indices_cnt)
 //
 // Fields (all const, computed in constructor init-list):
-//   outer_block — tile index along the outer loop dimension
+//   outer_tile_idx — tile index along the outer loop dimension
 //   bidh        — head index from scheduler (= KV-head when PackGQA; = Q-head when !PackGQA)
 //   bidb        — batch/token index (Q token for InnerLoopK, K block for InnerLoopQ)
 //   nhk         — total KV-head count
@@ -447,22 +447,22 @@ template <
     bool IsProducer,
     bool PackGQA,
     int PackGQAFactor,
-    int NumRowsPerGroup_,
+    int NumTokensPerLdstGroup_,
     int NumProducerThreads_,
-    int GroupSize_,
+    int NumThreadsPerLdstGroup_,
     int InnerBlockSize_,
     bool InnerDirMaxToMin_,
     int SparseKBlockSize_,
-    bool IsInnerLoopQ_>
+    bool InnerLoopQ_>
 struct IndexSparseBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr int InnerBlockSize = InnerBlockSize_;
   static constexpr int SparseKBlockSize = SparseKBlockSize_;
-  static constexpr bool IsInnerLoopQ = IsInnerLoopQ_;
+  static constexpr bool InnerLoopQ = InnerLoopQ_;
   static constexpr bool NeedsBatchLoop = true;
 
   // ─── Scheduler-assigned coordinates (const, computed in init-list) ───
-  int const outer_block;
+  int const outer_tile_idx;
   int const bidh; // Head index from scheduler (KV-head when PackGQA, Q-head otherwise)
   int const bidb;
   int const nhk; // Total KV-head count
@@ -474,12 +474,12 @@ struct IndexSparseBlockMeta {
   flash::AttnType attn_type = flash::AttnType::Full;
   int end_batches;
 
-  int inner_block_cur;
-  int inner_block_max;
+  int inner_block_idx;
+  int inner_block_cnt;
   int num_invalid_token;
   static constexpr int inner_block_min = 0;
 
-  int const* group_token_ptr = nullptr;
+  int const* sparse_indices_ptr = nullptr;
 
   template <typename ParamsT, typename SharedStorage>
   CUTLASS_DEVICE IndexSparseBlockMeta(
@@ -487,212 +487,110 @@ struct IndexSparseBlockMeta {
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,
       int thread_idx = 0)
-      : outer_block(get<0>(block_coord)), bidh(get<1>(block_coord)), bidb(get<2>(block_coord)), nhk(detail::nhk_of<ParamsT>::get(params)), bidh_kv([&]() -> int {
+      : outer_tile_idx(get<0>(block_coord)), bidh(get<1>(block_coord)), bidb(get<2>(block_coord)), nhk(detail::nhk_of<ParamsT>::get(params)), bidh_kv([&]() -> int {
           if constexpr (PackGQA) {
             return bidh;
           } else {
             return params.qhead_per_khead_divmod.divide(bidh);
           }
         }()) {
-    int max_topk = params.index_sparse_max_topk;
+    int const inner_indices_cnt = params.index_sparse_max_topk;
     int const* row_ptr;
-    int actual_topk;
+    int num_valid_indices;
 
-    if constexpr (!IsInnerLoopQ) {
-      // ── InnerLoopK: bidb = Q token, indices = forward topk (Q→K) ──
-      // indices layout: (total_q, nhk * topk_per_head) — slice by bidh_kv
+    // Common: compute row_ptr and num_valid_indices (both branches use same layout)
+    row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * nhk * inner_indices_cnt + static_cast<int64_t>(bidh_kv) * inner_indices_cnt;
+    num_valid_indices = inner_indices_cnt;
+    for (int i = inner_indices_cnt - 1; i >= 0 && row_ptr[i] < 0; --i)
+      --num_valid_indices;
+
+    int total_inner_tokens;
+    if constexpr (!InnerLoopQ) {
+      // ── InnerLoopK: bidb = q_token_idx, inner K from sparse indices ──
       seqlen_info.offset_q = bidb;
       seqlen_info.seqlen_q = 1;
-
-      int per_head_topk = max_topk / nhk;
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh_kv) * per_head_topk;
-
-      actual_topk = per_head_topk;
-      for (int i = per_head_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
-        --actual_topk;
-
-      int effective_k = actual_topk * SparseKBlockSize;
-      seqlen_info.seqlen_k = effective_k;
-      inner_block_max = (effective_k + InnerBlockSize - 1) / InnerBlockSize;
-      num_invalid_token = inner_block_max * InnerBlockSize - effective_k;
+      total_inner_tokens = num_valid_indices * SparseKBlockSize;
+      seqlen_info.seqlen_k = total_inner_tokens;
     } else {
-      // ── InnerLoopQ: bidb = K block, indices = inner_indices (K→Q) ──
+      // ── InnerLoopQ: bidb = k_block_idx, inner Q from inner_indices ──
       seqlen_info.offset_k = bidb * SparseKBlockSize;
       seqlen_info.seqlen_k = SparseKBlockSize;
-
-      // inner_indices layout: (num_k_blocks, nhk * inner_topk_per_head)
-      int inner_topk_per_head = max_topk / nhk;
-      row_ptr = params.index_sparse_indices + static_cast<int64_t>(bidb) * max_topk + static_cast<int64_t>(bidh_kv) * inner_topk_per_head;
-      int max_inner_topk = inner_topk_per_head;
-
-      actual_topk = max_inner_topk;
-      for (int i = max_inner_topk - 1; i >= 0 && row_ptr[i] < 0; --i)
-        --actual_topk;
-
-      // PackGQA: interleave Q heads into packed rows (token * G + sub_head).
-      // !PackGQA: each bidh from the scheduler already selects one Q head,
-      // so the inner loop iterates over raw Q tokens without head packing.
-      int total_q_rows = PackGQA ? actual_topk * PackGQAFactor : actual_topk;
+      total_inner_tokens = PackGQA ? num_valid_indices * PackGQAFactor : num_valid_indices;
       seqlen_info.offset_q = 0;
-      seqlen_info.seqlen_q = total_q_rows;
-      inner_block_max = (total_q_rows + InnerBlockSize - 1) / InnerBlockSize;
-      num_invalid_token = inner_block_max * InnerBlockSize - total_q_rows;
+      seqlen_info.seqlen_q = total_inner_tokens;
     }
 
-    inner_block_cur = flash::init_block_cur<kDir>(inner_block_min, inner_block_max);
+    inner_block_cnt = (total_inner_tokens + InnerBlockSize - 1) / InnerBlockSize;
+    num_invalid_token = inner_block_cnt * InnerBlockSize - total_inner_tokens;
+
+    inner_block_idx = flash::init_block_cur<kDir>(inner_block_min, inner_block_cnt);
     end_batches = bidb + 1;
 
     if constexpr (IsProducer) {
-      if constexpr (!IsInnerLoopQ && SparseKBlockSize <= 1) {
-        // Token-level InnerLoopK: pointer walks InnerBlockSize entries per tile
-        int aligned_total = inner_block_max * InnerBlockSize;
-        int group_idx = (thread_idx % NumProducerThreads_) / GroupSize_;
-        int group_offset;
-        if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          group_offset = (aligned_total - InnerBlockSize) + group_idx * NumRowsPerGroup_;
-        } else {
-          group_offset = group_idx * NumRowsPerGroup_;
-        }
-        group_token_ptr = row_ptr + group_offset;
-      } else {
-        // Block-level InnerLoopK or InnerLoopQ: absolute indexing from row_ptr
-        group_token_ptr = row_ptr;
-      }
+      sparse_indices_ptr = row_ptr;
     }
   }
 
   // Fill token indices into the smem stage slot for the CURRENT tile.
-  // InnerLoopK: fills logical K positions (head offset handled by ptr_gK_base)
-  // InnerLoopQ: fills Q packed rows (q_token * PackGQAFactor + sub_head)
+  // Each tile position maps to a logical token row:
+  //   indices_idx     = tile_pos / kStride   (which indices array entry covers this position)
+  //   offset_in_block = tile_pos % kStride   (position within that logical block)
+  //   row = logical_block_idx * kStride + offset_in_block
+  // kStride is compile-time: SparseKBlockSize (LoopK), PackGQAFactor (LoopQ+GQA), or 1.
   CUTLASS_DEVICE
-  void fill_token_indices(int* slot_rows, int idx_in_group, int group_idx) const {
+  void fill_token_indices(int* slot_rows, int token_idx_in_ldst_group, int ldst_group_idx) const {
     static_assert(IsProducer, "fill_token_indices() is producer-only");
-    int* const group_rows = slot_rows + group_idx * NumRowsPerGroup_;
+    int* const token_rows = slot_rows + ldst_group_idx * NumTokensPerLdstGroup_;
+    constexpr int kStride = InnerLoopQ ? (PackGQA ? PackGQAFactor : 1) : SparseKBlockSize;
+    int const base = inner_block_idx * InnerBlockSize + ldst_group_idx * NumTokensPerLdstGroup_;
+    int const total = InnerLoopQ ? seqlen_info.seqlen_q : seqlen_info.seqlen_k;
 
-    if constexpr (!IsInnerLoopQ) {
-      // ── InnerLoopK: fill logical K positions ──
-      // Head selection is done by ptr_gK_base = K_ptr + bidh_kv * head_stride,
-      // so row indices are positions within the per-head K space [0, total_k).
-      if constexpr (SparseKBlockSize <= 1) {
-        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
-          int const k_token = group_token_ptr[j];
-          group_rows[j] = (k_token >= 0) ? k_token : 0;
-        }
-      } else {
-        int tile_base = inner_block_cur * InnerBlockSize;
-        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
-          int token_pos = tile_base + group_idx * NumRowsPerGroup_ + j;
-          int block_idx = token_pos / SparseKBlockSize;
-          int offset_in_block = token_pos % SparseKBlockSize;
-          int block_id = (block_idx < seqlen_info.seqlen_k / SparseKBlockSize) ? group_token_ptr[block_idx] : -1;
-          int logical_k = block_id * SparseKBlockSize + offset_in_block;
-          group_rows[j] = (block_id >= 0) ? logical_k : 0;
-        }
-      }
-    } else {
-      // ── InnerLoopQ: fill Q rows ──
-      int tile_first_row = inner_block_cur * InnerBlockSize;
-      int base = tile_first_row + group_idx * NumRowsPerGroup_;
-      int total_q = seqlen_info.seqlen_q;
-
-      if constexpr (PackGQA) {
-        // PackGQA: interleave Q heads — packed row = token * G + sub_head
-        int max_inner_topk_val = total_q / PackGQAFactor;
-        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
-          int packed_row = base + j;
-          if (packed_row < total_q) {
-            int q_token_local_idx = packed_row / PackGQAFactor;
-            int sub_head = packed_row % PackGQAFactor;
-            int q_token = (q_token_local_idx < max_inner_topk_val) ? group_token_ptr[q_token_local_idx] : -1;
-            group_rows[j] = (q_token >= 0) ? q_token * PackGQAFactor + sub_head : 0;
-          } else {
-            group_rows[j] = 0;
-          }
-        }
-      } else {
-        // !PackGQA: each bidh selects one Q head — raw Q token indices only
-        for (int j = idx_in_group; j < NumRowsPerGroup_; j += GroupSize_) {
-          int local_idx = base + j;
-          if (local_idx < total_q) {
-            int q_token = group_token_ptr[local_idx];
-            group_rows[j] = (q_token >= 0) ? q_token : 0;
-          } else {
-            group_rows[j] = 0;
-          }
-        }
-      }
+    for (int j = token_idx_in_ldst_group; j < NumTokensPerLdstGroup_; j += NumThreadsPerLdstGroup_) {
+      int const tile_pos = base + j;
+      int const indices_idx = tile_pos / kStride;
+      int const offset_in_block = tile_pos % kStride;
+      int const logical_block_idx = (tile_pos < total) ? sparse_indices_ptr[indices_idx] : -1;
+      token_rows[j] = (logical_block_idx >= 0) ? logical_block_idx * kStride + offset_in_block : 0;
     }
   }
 
-  // Absolute packed row for TMA coordinate computation.
-  // InnerLoopQ: maps inner_block_cur through inner_indices → absolute packed Q row.
-  // InnerLoopK: maps inner_block_cur through index_sparse_indices → absolute packed K row.
+  // First token row of the current tile — unified kStride formula for both directions.
+  // LoopK (kbs >= kBlockN): TMA caller divides by InnerBlockSize to get tile coordinate.
+  // LoopQ: result is the packed Q row directly.
   CUTLASS_DEVICE
   int get_packed_first_row() const {
     static_assert(IsProducer, "get_packed_first_row() is producer-only");
-    if constexpr (IsInnerLoopQ) {
-      if constexpr (PackGQA) {
-        int packed_row = inner_block_cur * InnerBlockSize;
-        int q_token_local_idx = packed_row / PackGQAFactor;
-        int sub_head_offset = packed_row % PackGQAFactor;
-        int q_token = (q_token_local_idx < seqlen_info.seqlen_q / PackGQAFactor) ? group_token_ptr[q_token_local_idx] : -1;
-        return (q_token >= 0) ? q_token * PackGQAFactor + sub_head_offset : 0;
-      } else {
-        int local_idx = inner_block_cur * InnerBlockSize;
-        int q_token = (local_idx < seqlen_info.seqlen_q) ? group_token_ptr[local_idx] : -1;
-        return (q_token >= 0) ? q_token : 0;
-      }
-    } else {
-      static_assert(SparseKBlockSize >= InnerBlockSize, "InnerLoopK get_packed_first_row() requires kbs >= kBlockN");
-      return get_n_block_abs() * InnerBlockSize;
-    }
-  }
-
-  // LoopK block-level only: absolute K block index for TMA tile load.
-  // When kbs >= kBlockN, each inner_block_cur maps to exactly one K block index
-  // from index_sparse_indices, and the tile is physically contiguous.
-  CUTLASS_DEVICE
-  int get_n_block_abs() const {
-    static_assert(IsProducer && !IsInnerLoopQ && SparseKBlockSize >= InnerBlockSize, "get_n_block_abs() requires block-level LoopK with kbs >= kBlockN");
-    int tiles_per_kblock = SparseKBlockSize / InnerBlockSize;
-    int kblock_idx = inner_block_cur / tiles_per_kblock;
-    int tile_within_kblock = inner_block_cur % tiles_per_kblock;
-    int block_id = group_token_ptr[kblock_idx];
-    return (block_id >= 0) ? block_id * tiles_per_kblock + tile_within_kblock : 0;
+    constexpr int kStride = InnerLoopQ ? (PackGQA ? PackGQAFactor : 1) : SparseKBlockSize;
+    int const tile_pos = inner_block_idx * InnerBlockSize;
+    int const indices_idx = tile_pos / kStride;
+    int const offset_in_block = tile_pos % kStride;
+    int const total = InnerLoopQ ? seqlen_info.seqlen_q : seqlen_info.seqlen_k;
+    int const logical_block_idx = (tile_pos < total) ? sparse_indices_ptr[indices_idx] : -1;
+    return (logical_block_idx >= 0) ? logical_block_idx * kStride + offset_in_block : 0;
   }
 
   CUTLASS_DEVICE
   auto get_epilogue_coord() const {
-    return cute::make_tuple(outer_block, bidh, bidb);
+    return cute::make_tuple(outer_tile_idx, bidh, bidb);
   }
 
   CUTLASS_DEVICE
   void prefetch() {
-    flash::advance_block_cur<kDir>(inner_block_cur);
-    if constexpr (IsProducer && !IsInnerLoopQ && SparseKBlockSize <= 1) {
-      // Token-level LoopK: sliding window — advance pointer
-      if (!is_finish()) {
-        if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-          group_token_ptr -= InnerBlockSize;
-        } else {
-          group_token_ptr += InnerBlockSize;
-        }
-      }
-    }
+    flash::advance_block_cur<kDir>(inner_block_idx);
   }
 
   CUTLASS_DEVICE
   bool is_finish() {
     if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
-      return inner_block_cur < inner_block_min;
+      return inner_block_idx < inner_block_min;
     } else {
-      return inner_block_cur >= inner_block_max;
+      return inner_block_idx >= inner_block_cnt;
     }
   }
 
   CUTLASS_DEVICE
   int padding_block() const {
-    return inner_block_max - 1;
+    return inner_block_cnt - 1;
   }
 
   template <flash::DispatchDirection>

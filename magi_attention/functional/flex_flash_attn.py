@@ -236,7 +236,7 @@ def _flex_flash_attn_forward_compilable(
     pack_gqa: bool,
     block_sparse: bool,
     index_sparse: bool,
-    index_sparse_indices_2d: torch.Tensor | None,
+    index_sparse_indices: torch.Tensor | None,
     index_sparse_max_topk: int,
     return_max_logits: bool,
     max_logits: torch.Tensor | None,
@@ -287,7 +287,7 @@ def _flex_flash_attn_forward_compilable(
         fwd_qk_map,
         fwd_unique_count,
         # for IndexSparse direct path
-        index_sparse_indices_2d,
+        index_sparse_indices,
         index_sparse_max_topk,
         _ffa_k_block_size if index_sparse else 1,
         # for others
@@ -328,7 +328,7 @@ def _flex_flash_attn_forward_compilable_fake(
     pack_gqa: bool,
     block_sparse: bool,
     index_sparse: bool,
-    index_sparse_indices_2d: torch.Tensor | None,
+    index_sparse_indices: torch.Tensor | None,
     index_sparse_max_topk: int,
     return_max_logits: bool,
     max_logits: torch.Tensor | None,
@@ -364,7 +364,7 @@ def _flex_flash_attn_forward(
     pack_gqa: bool = False,
     block_sparse: bool = False,
     index_sparse: bool = False,
-    index_sparse_indices_2d: torch.Tensor | None = None,
+    index_sparse_indices: torch.Tensor | None = None,
     index_sparse_max_topk: int = 0,
     k_block_size: int = 1,
     return_max_logits: bool = False,
@@ -451,7 +451,7 @@ def _flex_flash_attn_forward(
         pack_gqa=pack_gqa,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
-        index_sparse_indices_2d=index_sparse_indices_2d,
+        index_sparse_indices=index_sparse_indices,
         index_sparse_max_topk=index_sparse_max_topk,
         return_max_logits=return_max_logits,
         max_logits=max_logits,
@@ -502,7 +502,7 @@ def _flex_flash_attn_backward_compilable(
     cat_gqa: bool,
     block_sparse: bool,
     index_sparse: bool,
-    index_sparse_indices_2d: torch.Tensor | None,
+    index_sparse_indices: torch.Tensor | None,
     index_sparse_max_topk: int,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
@@ -559,7 +559,7 @@ def _flex_flash_attn_backward_compilable(
         bwd_kq_map,
         bwd_unique_count,
         # for index attn
-        index_sparse_indices_2d,
+        index_sparse_indices,
         index_sparse_max_topk,
         _ffa_k_block_size,
         # for others
@@ -608,7 +608,7 @@ def _flex_flash_attn_backward_compilable_fake(
     cat_gqa: bool,
     block_sparse: bool,
     index_sparse: bool,
-    index_sparse_indices_2d: torch.Tensor | None,
+    index_sparse_indices: torch.Tensor | None,
     index_sparse_max_topk: int,
 ) -> None:
     pass
@@ -649,7 +649,7 @@ def _flex_flash_attn_backward(
     cat_gqa: bool = False,
     block_sparse: bool = False,
     index_sparse: bool = False,
-    index_sparse_indices_2d: torch.Tensor | None = None,
+    index_sparse_indices: torch.Tensor | None = None,
     index_sparse_max_topk: int = 0,
     k_block_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -747,7 +747,7 @@ def _flex_flash_attn_backward(
         cat_gqa=cat_gqa,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
-        index_sparse_indices_2d=index_sparse_indices_2d,
+        index_sparse_indices=index_sparse_indices,
         index_sparse_max_topk=index_sparse_max_topk,
     )
 
@@ -786,7 +786,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         index_sparse: bool = False,
         swap_bwd_qk_loop: bool | None = None,
         return_max_logits: bool = False,
-        index_sparse_indices_2d: torch.Tensor | None = None,
+        index_sparse_indices: torch.Tensor | None = None,
         index_sparse_max_topk: int = 0,
         k_block_size: int = 1,
     ):
@@ -795,8 +795,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         )
 
         assert not (
-            block_sparse and index_sparse_indices_2d is not None
-        ), "block_sparse and index_sparse_indices_2d are mutually exclusive."
+            block_sparse and index_sparse_indices is not None
+        ), "block_sparse and index_sparse_indices are mutually exclusive."
 
         if q_ranges is not None:
             assert q_ranges.size(0) == k_ranges.size(0), (
@@ -918,7 +918,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             pack_gqa=pack_gqa,
             block_sparse=block_sparse,
             index_sparse=index_sparse,
-            index_sparse_indices_2d=index_sparse_indices_2d,
+            index_sparse_indices=index_sparse_indices,
             index_sparse_max_topk=index_sparse_max_topk,
             k_block_size=k_block_size,
             return_max_logits=return_max_logits,
@@ -949,7 +949,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_qk_map if save_merge_info else None,
             fwd_unique_count if save_merge_info else None,
             # 3. IndexSparse Tensors
-            index_sparse_indices_2d if index_sparse else None,
+            index_sparse_indices if index_sparse else None,
         ]
 
         ctx.save_for_backward(*tensors_to_save)
@@ -1020,7 +1020,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # index_sparse
                 None,  # swap_bwd_qk_loop
                 None,  # return_max_logits
-                None,  # index_sparse_indices_2d
+                None,  # index_sparse_indices
                 None,  # index_sparse_max_topk
                 None,  # k_block_size
             )
@@ -1043,7 +1043,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_qk_map,
             fwd_unique_count,
             # 3. IndexSparse Tensors
-            index_sparse_indices_2d,
+            index_sparse_indices,
         ) = ctx.saved_tensors
 
         swap_bwd_qk_loop = (
@@ -1073,9 +1073,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 _loopq_kbs = ctx.k_block_size
                 nhk = k.size(1)
                 seqlen_k = v.size(0)
-                # indices_2d: (total_q, nhk * topk_per_head) → 3D: (total_q, nhk, topk_per_head)
-                max_topk_per_head = index_sparse_indices_2d.size(-1) // nhk
-                _fwd_3d = index_sparse_indices_2d.reshape(-1, nhk, max_topk_per_head)
 
                 from magi_attention.utils.sparse_utils import (
                     build_index_sparse_inner_indices,
@@ -1088,26 +1085,23 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     )
 
                     _inner_indices, _inner_topk = build_index_sparse_inner_indices(
-                        _fwd_3d,
+                        index_sparse_indices,
                         seqlen_k=seqlen_k,
                         k_block_size=_loopq_kbs,
                         pad_multiple=64,
                     )
-                    num_k_blocks = seqlen_k // _loopq_kbs
-                    index_sparse_indices_2d = _inner_indices.reshape(
-                        num_k_blocks, nhk * _inner_topk
-                    ).contiguous()
-                    ctx.index_sparse_max_topk = nhk * _inner_topk
+                    # _inner_indices: (num_k_blocks, nhk, inner_topk) — already 3D
+                    index_sparse_indices = _inner_indices.contiguous()
+                    ctx.index_sparse_max_topk = _inner_topk
                 else:
                     _inner_indices, _inner_topk = build_index_sparse_inner_indices(
-                        _fwd_3d,
+                        index_sparse_indices,
                         seqlen_k=seqlen_k,
                         pad_multiple=64,
                     )
-                    index_sparse_indices_2d = _inner_indices.reshape(
-                        seqlen_k, nhk * _inner_topk
-                    ).contiguous()
-                    ctx.index_sparse_max_topk = nhk * _inner_topk
+                    # _inner_indices: (seqlen_k, nhk, inner_topk) — already 3D
+                    index_sparse_indices = _inner_indices.contiguous()
+                    ctx.index_sparse_max_topk = _inner_topk
 
             # else: IndexSparse BWD InnerLoopK — use forward's topk_indices directly
         elif ctx.auto_range_merge:
@@ -1200,7 +1194,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             cat_gqa=ctx.cat_gqa,
             block_sparse=ctx.block_sparse,
             index_sparse=ctx.index_sparse,
-            index_sparse_indices_2d=index_sparse_indices_2d,
+            index_sparse_indices=index_sparse_indices,
             index_sparse_max_topk=ctx.index_sparse_max_topk,
             k_block_size=ctx.k_block_size,
         )
@@ -1240,7 +1234,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # index_sparse
             None,  # swap_bwd_qk_loop
             None,  # return_max_logits
-            None,  # index_sparse_indices_2d
+            None,  # index_sparse_indices
             None,  # index_sparse_max_topk
             None,  # k_block_size
         )
@@ -1308,13 +1302,14 @@ def flex_flash_attn_func(
         q_block_size (int, optional): Q block size. Defaults to ``1``.
             Currently only ``1`` (per-token Q granularity) is supported.
         k_block_size (int, optional): K block size for inner-loop contiguity. Defaults to ``1``.
+            Must be a positive power of 2 (1, 2, 4, 8, 16, 32, 64, 128, 256, ...).
             For ``index_sparse``: specifies the granularity of K indices (each index covers
-            ``k_block_size`` tokens). When ``k_block_size >= tile_N`` (128), inner KV loads
-            use TMA 2D instead of CpAsync scatter — critical for performance.
+            ``k_block_size`` tokens). When ``k_block_size >= 128``, inner KV loads use TMA 2D;
+            when ``k_block_size < 128``, inner KV loads use CpAsync scatter with per-token
+            gather. Both paths are correct; TMA 2D is faster for large contiguous blocks.
             For ``block_sparse``: auto-derived from the uniform k_range size if left at
-            default. When k_range_size >= tile_N, inner loads use TMA 2D for best perf.
-            Explicitly setting ``k_block_size`` to match your k_range tile size is
-            recommended to avoid the (minor) cost of computing it from k_ranges.
+            default. When k_range_size >= 128, inner loads use TMA 2D for best perf.
+            Not compatible with ``swap_ab``.
 
         max_seqlen_q (int | None, optional): Maximum sequence length for query. Defaults to ``None``.
             If provided, enables optimization for tile_scheduler. Most recommended to set this when using
@@ -1394,7 +1389,8 @@ def flex_flash_attn_func(
 
         swap_ab (bool, optional): Whether to swap the order of A and B operands for the matmul operation
             (i.e. transpose `C=A x B^T` to `C^T= B x A^T`) in attention forward passes. Defaults to ``False``.
-            **Note:** This flag is useful for sparse attention scenarios but still under development.
+            **Not compatible with sparse attention** (``block_sparse`` or ``index_sparse``).
+            Only applicable to dense attention with very small Q sequences.
 
         pack_gqa (bool, optional):
             Whether to group query heads sharing the same KV head into a single computation block tile for small
@@ -1411,7 +1407,7 @@ def flex_flash_attn_func(
             Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
             Automatically enables ``auto_range_merge``. Defaults to ``False``.
             Mutually exclusive with ``index_sparse_indices``.
-            When enabled, ``k_block_size`` is auto-set to ``tile_N`` (128 or 64 with swap_ab)
+            When enabled, ``k_block_size`` is auto-set to ``tile_N`` (128)
             so that inner KV loads use TMA 2D — without this, the kernel falls back to CpAsync
             scatter load with ~40% performance loss.
             **Contract:** all k_ranges (and, for ``swap_bwd_qk_loop=False`` backward, all q_ranges)
@@ -1553,21 +1549,30 @@ def flex_flash_attn_func(
     """
 
     # ── Sparse mask input validation ──
+    # Auto-infer index_sparse from tensor presence.
+    if index_sparse_indices is not None:
+        index_sparse = True
     _has_ranges = q_ranges is not None
-    _has_index_sparse = index_sparse_indices is not None
-    _num_sparse_inputs = int(_has_ranges) + int(_has_index_sparse)
+    _num_sparse_inputs = int(_has_ranges) + int(index_sparse)
     assert _num_sparse_inputs == 1, (
         "Exactly one of (q_ranges + k_ranges) or index_sparse_indices must be provided. "
         f"Got: q_ranges={'set' if _has_ranges else 'None'}, "
-        f"index_sparse_indices={'set' if _has_index_sparse else 'None'}"
+        f"index_sparse_indices={'set' if index_sparse else 'None'}"
     )
     assert not (
-        block_sparse and _has_index_sparse
+        block_sparse and index_sparse
     ), "block_sparse and index_sparse_indices are mutually exclusive."
+    assert not (
+        swap_ab and (block_sparse or index_sparse)
+    ), "swap_ab is not supported with sparse attention (block_sparse or index_sparse)."
     if _has_ranges:
         assert k_ranges is not None, "k_ranges must be provided together with q_ranges"
 
     if block_sparse:
+        assert not swap_ab, (
+            "swap_ab is not supported with block_sparse — sparse paths use scatter/TMA "
+            "load modes that are incompatible with the swapped matmul layout."
+        )
         # BlockSparse uses the same k_block_size mechanism as IndexSparse to
         # tell the kernel that inner KV tiles are contiguous (KBlockSize >= kBlockN
         # → TMA 2D load). When k_block_size is left at default (1), derive it
@@ -1597,7 +1602,7 @@ def flex_flash_attn_func(
                 )
 
     # ── index_sparse_indices direct path: kernel reads indices directly ──
-    if _has_index_sparse:
+    if index_sparse:
         assert index_sparse_indices is not None
         assert index_sparse_indices.dim() == 3, (
             f"index_sparse_indices must be 3D (total_q, num_kv_heads, max_topk), "
@@ -1607,15 +1612,14 @@ def flex_flash_attn_func(
             "Currently only q_block_size=1 (per-token Q granularity) is supported "
             f"for index_sparse_indices input, got q_block_size={q_block_size}"
         )
-        tile_size = 64 if swap_ab else 128
+        tile_size = 128
         assert (
             k_block_size >= 1 and (k_block_size & (k_block_size - 1)) == 0
         ), f"k_block_size must be a positive power of 2, got {k_block_size}"
-        assert k_block_size == 1 or k_block_size >= tile_size, (
-            f"k_block_size must be 1 (token-level) or >= tile_size ({tile_size}), "
-            f"got {k_block_size}. Values in (1, {tile_size}) are not supported — "
-            f"the kernel assumes either per-token scatter or fully contiguous K blocks."
-        )
+        if k_block_size > 128:
+            assert (
+                k_block_size % 128 == 0
+            ), f"k_block_size > 128 must be a multiple of 128, got {k_block_size}"
         total_q_idx, nhk_idx, max_topk_per_head = index_sparse_indices.shape
         if k_block_size > 1:
             effective_topk = max_topk_per_head * k_block_size
@@ -1628,11 +1632,9 @@ def flex_flash_attn_func(
                 f"index_sparse_indices last dim (max_topk_per_head={max_topk_per_head}) must be a multiple "
                 f"of tile_size={tile_size}. Pad with -1 if needed."
             )
-        # Concatenate per-head topk along last dim: (total_q, nhk * topk_per_head)
-        # Kernel uses bidh_kv to slice into the correct head's region.
-        index_sparse_indices_2d = index_sparse_indices.reshape(
-            total_q_idx, nhk_idx * max_topk_per_head
-        )
+        # Keep 3D: kernel uses nhk (from shape_K) and bidh_kv to index
+        # directly into dim-1 — no flatten/unflatten needed.
+        index_sparse_indices = index_sparse_indices.contiguous()
 
         # IndexSparse uses indices, not ranges — assert ranges are not provided
         assert q_ranges is None and k_ranges is None, (
@@ -1641,13 +1643,12 @@ def flex_flash_attn_func(
         )
 
         auto_range_merge = False
-        index_sparse = True
         if max_seqlen_q is None:
             max_seqlen_q = q_block_size
         if ref_block_size is not None:
             ref_block_size = (ref_block_size[0], tile_size)
         else:
-            ref_block_size = (64 if swap_ab else 128, tile_size)
+            ref_block_size = (128, tile_size)
 
     assert not (
         swap_bwd_qk_loop is True and deterministic
@@ -1682,8 +1683,12 @@ def flex_flash_attn_func(
             f"(unset MAGI_ATTENTION_FA4_BACKEND)."
         )
 
-    index_sparse_indices_2d = index_sparse_indices_2d if _has_index_sparse else None
-    index_sparse_max_topk = index_sparse_indices_2d.shape[1] if _has_index_sparse else 0
+    # Per-head topk width (dim-2 of the 3D tensor), NOT nhk * topk_per_head.
+    index_sparse_max_topk = (
+        index_sparse_indices.shape[2]
+        if index_sparse and index_sparse_indices is not None
+        else 0
+    )
 
     # ── Auto-set sparse flags ──
     if block_sparse:
@@ -1735,7 +1740,7 @@ def flex_flash_attn_func(
         swap_bwd_qk_loop,
         return_max_logits,
         # for IndexSparse direct path
-        index_sparse_indices_2d,
+        index_sparse_indices,
         index_sparse_max_topk,
         k_block_size,
     )
