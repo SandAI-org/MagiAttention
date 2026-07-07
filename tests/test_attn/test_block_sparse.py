@@ -1254,6 +1254,10 @@ class TestBlockSparseSweep(DistTestBase):
     def world_size(self) -> int:
         return 1
 
+    @property
+    def timeout(self) -> int:
+        return 600
+
     # ─── Core sweep: MQA canonical (nhq=128, nhk=1, kbs=128) ───
 
     @with_run_in_mp
@@ -1347,6 +1351,10 @@ class TestBlockSparseSlowSweep(DistTestBase):
     @property
     def world_size(self) -> int:
         return 1
+
+    @property
+    def timeout(self) -> int:
+        return 1200
 
     SLOW_CONFIGS = [
         {

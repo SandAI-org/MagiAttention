@@ -907,7 +907,6 @@ INDEX_SPARSE_SLOW_CONFIGS = [
         "max_topk": 16,
         "pack_gqa": True,
         "k_block_size": 8,
-        "_xfail": "kernel asserts k_block_size >= tile_size(128), pending support",
     },
     {
         "name": "mqa128_kblock32",
@@ -920,7 +919,6 @@ INDEX_SPARSE_SLOW_CONFIGS = [
         "max_topk": 4,
         "pack_gqa": True,
         "k_block_size": 32,
-        "_xfail": "kernel asserts k_block_size >= tile_size(128), pending support",
     },
     # ─── Very short Q (sub-tile) ───
     {
@@ -965,7 +963,6 @@ class TestIndexSparseSlowSweep(DistTestBase):
     @parameterize("config", INDEX_SPARSE_SLOW_CONFIGS)
     def test_index_sparse_slow_sweep(self, config: dict[str, Any]):
         """Slow sweep: covers extreme and edge-case configs."""
-        xfail_reason = config.pop("_xfail", None)
         kbs = config.get("k_block_size", 1)
         if kbs > 1:
             os.environ["MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q"] = "1"
@@ -975,19 +972,9 @@ class TestIndexSparseSlowSweep(DistTestBase):
             test_bwd = True
         try:
             _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
-        except (AssertionError, RuntimeError) as e:
-            if xfail_reason:
-                print(f"  [xfail] {config.get('name')}: {e}")
-                return
-            raise
         finally:
             os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q", None)
             os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_K_BLOCK_SIZE", None)
-        if xfail_reason:
-            raise AssertionError(
-                f"xfail config '{config.get('name')}' unexpectedly passed! "
-                f"Remove _xfail flag. (reason was: {xfail_reason})"
-            )
 
 
 if __name__ == "__main__":
