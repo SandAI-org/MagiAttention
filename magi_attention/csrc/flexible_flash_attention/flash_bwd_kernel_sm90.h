@@ -289,14 +289,14 @@ class FlashAttnBwdSm90 {
 
     using Roles = typename CollectiveMainloop::ProducerWarpRoles;
     static constexpr int NumLoaderWarps = Roles::kNumLoaderWarps;
-    static constexpr int NumProducerLoaderThreads = Roles::kLoaderThreads;
+    static constexpr int NumProducerLoaderThreads = Roles::kNumLoaderThreads;
 
     if (warp_group_idx == 0) { // Producer
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
       bool const is_loader = Roles::is_loader(warp_idx_in_warpgroup);
-      bool const is_inner_dx_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);
+      bool const is_inner_dx_storer = Roles::is_inner_storer(warp_idx_in_warpgroup);
 
       if (is_loader) { // Load K,V and pipeline Q,dO
         // Initialize producer write pipeline states of Q,dO
@@ -547,7 +547,7 @@ class FlashAttnBwdSm90 {
 
       using Roles = typename CollectiveMainloop::ProducerWarpRoles;
       static constexpr int NumLoaderWarps = Roles::kNumLoaderWarps;
-      static constexpr int NumProducerLoaderThreads = Roles::kLoaderThreads;
+      static constexpr int NumProducerLoaderThreads = Roles::kNumLoaderThreads;
 
       using ProducerBlockMetaT = std::conditional_t<
           BlockSparse,
@@ -555,7 +555,7 @@ class FlashAttnBwdSm90 {
           std::conditional_t<IndexSparse, typename CollectiveMainloop::template IndexSparseLoopKBlockMeta</*IsProducer=*/true>, BlockMetaT>>;
 
       bool const is_loader = Roles::is_loader(warp_idx_in_warpgroup);
-      bool const is_inner_dx_storer = Roles::is_dx_storer(warp_idx_in_warpgroup);
+      bool const is_inner_dx_storer = Roles::is_inner_storer(warp_idx_in_warpgroup);
 
       if (is_loader) { // Load Q,dO and pipeline K,V
         // Initialize producer write pipeline states of K,V
@@ -633,7 +633,7 @@ class FlashAttnBwdSm90 {
       mainloop.mma_init();
       scheduler.init_consumer();
 
-      static constexpr int NumProducerLoaderThreads = CollectiveMainloop::ProducerWarpRoles::kLoaderThreads;
+      static constexpr int NumProducerLoaderThreads = CollectiveMainloop::ProducerWarpRoles::kNumLoaderThreads;
 
       // For each work tile job:
       //  1. run mma consumer to compute partial dQ,dK,dV as the consumer prologue/mainloop
