@@ -141,7 +141,9 @@ struct CollectiveMainloopBwdSm90 {
 
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
-  // IsSparse: inner-loop uses scatter gather load/store (BlockSparse or IndexSparse).
+  // IsSparse: inner-loop direction data uses scatter load/store (vs TMA):
+  // InnerLoopK (BwdInnerLoopK=true):  KV scatter when BlockSparse or IndexSparse
+  // InnerLoopQ (BwdInnerLoopK=false): Q/dO scatter when BlockSparse or IndexSparse (inner_indices)
   static constexpr bool IsSparse = BlockSparse || IndexSparse;
   // InnerLoopQ scatter does not support CatGQA (the dense InnerLoopQ load iterates bidh_kv_cat
   // per merged sub-range; the scatter load path has no such loop).
@@ -1447,7 +1449,7 @@ struct CollectiveMainloopBwdSm90 {
     auto bulk_copy = Copy_Traits<SM90_BULK_COPY_AUTO>{};
     int const lane_predicate = cute::elect_one_sync();
 
-    // ─── Sparse InnerLoopQ scatter infra (DCE'd on dense path) ───
+    // ─── BlockSparse InnerLoopQ scatter infra (DCE'd on dense path) ───
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
     int const thread_idx = threadIdx.x % NumScatterThreads;

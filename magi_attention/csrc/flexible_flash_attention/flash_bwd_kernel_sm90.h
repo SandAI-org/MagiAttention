@@ -103,13 +103,10 @@ class FlashAttnBwdSm90 {
   static constexpr uint32_t MmaRegisterRequirement = ConsumerRegs_;
   static_assert(LoadRegisterRequirement % 8 == 0 && LoadRegisterRequirement >= 24 && LoadRegisterRequirement <= 256);
   static_assert(MmaRegisterRequirement % 8 == 0 && MmaRegisterRequirement >= 24 && MmaRegisterRequirement <= 256);
-  // SM90 has 65536 registers/SM. With MinBlocksPerMultiprocessor=1 and TotalWarpGroups WGs
-  // (each 128 threads), the per-thread budget = floor(65536 / (TotalWGs * 128) / 8) * 8.
-  // For 3 WGs: floor(65536 / 384 / 8) * 8 = 168; for 4 WGs: floor(65536 / 512 / 8) * 8 = 128.
+  // SM90: 65536 regs/SM, 128 threads/WG, MinBlocksPerSM=1 → avg regs/thread =
+  // floor(65536 / (TotalWGs * 128) / 8) * 8.  For 3 WGs: floor(65536/384/8)*8 = 168.
   static constexpr uint32_t kTotalWarpGroups = NumLoadWarpGroups + NumMmaWarpGroups;
-  static constexpr uint32_t kRegsPerSM = 65536;
-  static constexpr uint32_t kThreadsPerWG = 128;
-  static constexpr uint32_t kAvgRegsPerThread = (kRegsPerSM / (kTotalWarpGroups * kThreadsPerWG) / 8) * 8;
+  static constexpr uint32_t kAvgRegsPerThread = (65536 / (kTotalWarpGroups * 128) / 8) * 8;
   static_assert(NumLoadWarpGroups * LoadRegisterRequirement + NumMmaWarpGroups * MmaRegisterRequirement <= kAvgRegsPerThread * kTotalWarpGroups);
 
   // Kernel level shared memory storage
