@@ -52,6 +52,10 @@ def _results_path(phase):
 
 
 # ── GPU selection ──────────────────────────────────────────────
+_GPU_IDLE_MEM_THRESHOLD_MB = 600  # below this = idle (daemon context ~533MB)
+_GPU_UTIL_WARN_THRESHOLD = 5  # percent
+
+
 def _find_free_gpu():
     import torch
 
@@ -67,11 +71,56 @@ def _find_free_gpu():
     return best_idx
 
 
+def _check_gpu_isolation(gpu: int) -> bool:
+    """Check that the selected GPU is truly idle. Returns True if clean."""
+    import subprocess
+    import warnings
+
+    clean = True
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used,utilization.gpu",
+                "--format=csv,noheader,nounits",
+                f"--id={gpu}",
+            ],
+            text=True,
+            timeout=5,
+        ).strip()
+        mem_used, util = [float(x) for x in out.split(",")]
+        if mem_used > _GPU_IDLE_MEM_THRESHOLD_MB:
+            warnings.warn(
+                f"\n⚠️  GPU {gpu} has {mem_used:.0f}MB used "
+                f"(threshold {_GPU_IDLE_MEM_THRESHOLD_MB}MB). "
+                f"Results may be noisy due to co-tenant processes!",
+                stacklevel=2,
+            )
+            clean = False
+        if util > _GPU_UTIL_WARN_THRESHOLD:
+            warnings.warn(
+                f"\n⚠️  GPU {gpu} utilization is {util:.0f}% "
+                f"(threshold {_GPU_UTIL_WARN_THRESHOLD}%). "
+                f"Another workload is active — benchmark will be inaccurate!",
+                stacklevel=2,
+            )
+            clean = False
+    except Exception:
+        pass
+    return clean
+
+
 def _set_gpu():
     import torch
 
     gpu = _find_free_gpu()
     torch.cuda.set_device(gpu)
+    if not _check_gpu_isolation(gpu):
+        print(
+            f"  [WARN] GPU {gpu} is NOT fully idle. "
+            f"Use CUDA_VISIBLE_DEVICES=<free_gpu> for stable results.",
+            flush=True,
+        )
     return gpu
 
 
@@ -136,6 +185,9 @@ def _parse_rerun(s):
 # ── Timing infrastructure ─────────────────────────────────────
 def _bench_kernel(run_fn, flops, device):
     import torch
+
+    gpu_idx = torch.cuda.current_device()
+    _check_gpu_isolation(gpu_idx)
 
     for _ in range(WARMUP):
         run_fn()
