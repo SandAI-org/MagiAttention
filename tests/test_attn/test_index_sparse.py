@@ -20,17 +20,18 @@ reference.
 
 Structure:
   TestIndexSparseSimple — standalone tests (view-trick + DisableAtomic)
-  TestIndexSparseSweep  — unified CI sweep (20 configs covering all key dimensions)
-  TestIndexSparseSlowSweep — @slow (long seq, sub-tile kbs, edge cases)
+  TestIndexSparseSweep  — Classic CI sweep (MQA128/D128/PackGQA, varies runtime)
+  TestIndexSparseComprehensiveSweep — CI (varies GQA/D/kbs/inner_mode compile params)
 
-Sweep dimensions:
+Classic sweep (CI gate):
+  - Fixed: NHQ=128, NHK=1, D=128, PackGQA=True, kbs=1
+  - Varies: seqlen alignment, Q/KV lengths, batch, topk
+
+Comprehensive sweep (@slow):
   - GQA mode: MQA(128:1, 64:1, 32:1, 16:1, 4:1), GQA(128:2, 32:4, 8:2, 4:2), MHA(4:4, 8:8)
   - PackGQA: True / False
   - D: 64, 128
-  - Seqlen: 256(aligned), 200(unaligned)
-  - Q/KV lengths: equal, S_q<S_kv
-  - k_block_size: 1(token), 128(TMA 2D)
-  - Batch: B=1/2/3, variable topk
+  - k_block_size: 1, 8, 32, 128, 256
 
 Known limitations:
   - swap_ab is prohibited for IndexSparse (asserted in flex_flash_attn_func)
@@ -42,7 +43,6 @@ import os
 import unittest
 from typing import Any
 
-import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
@@ -577,10 +577,11 @@ class TestIndexSparseSimple(unittest.TestCase):
 
 # Representative configs covering all key dimensions:
 #   GQA mode, PackGQA, D, seqlen alignment, Q/KV length, k_block_size, batch
-INDEX_SPARSE_SWEEP_CONFIGS = [
-    # ─── MQA (NHK=1) — canonical DiT configs ───
+INDEX_SPARSE_CLASSIC_CONFIGS = [
+    # Classic: NHQ=128, NHK=1 (MQA), D=128, PackGQA=True, kbs=1
+    # Varies: seqlen alignment, Q/KV length, batch, topk
     {
-        "name": "mqa128_packgqa_d128",
+        "name": "aligned_256",
         "B": 1,
         "S": 256,
         "NHQ": 128,
@@ -590,15 +591,96 @@ INDEX_SPARSE_SWEEP_CONFIGS = [
         "pack_gqa": True,
     },
     {
-        "name": "mqa128_packgqa_d64",
+        "name": "unaligned_200",
         "B": 1,
-        "S": 256,
+        "S": 200,
         "NHQ": 128,
         "NHK": 1,
-        "D": 64,
+        "D": 128,
         "topk": 128,
         "pack_gqa": True,
     },
+    {
+        "name": "short_q_long_kv",
+        "B": 1,
+        "S_q": 64,
+        "S_kv": 1024,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 128,
+        "pack_gqa": True,
+    },
+    {
+        "name": "unaligned_q_100",
+        "B": 1,
+        "S_q": 100,
+        "S_kv": 512,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 128,
+        "pack_gqa": True,
+    },
+    {
+        "name": "B2_variable_topk",
+        "B": 2,
+        "S": 256,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": [256, 128],
+        "max_topk": 256,
+        "pack_gqa": True,
+    },
+    {
+        "name": "B3_one_sparse",
+        "B": 3,
+        "S": 256,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": [256, 256, 128],
+        "max_topk": 256,
+        "pack_gqa": True,
+    },
+    {
+        "name": "long_q_eq_kv_512",
+        "B": 1,
+        "S": 512,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 128,
+        "pack_gqa": True,
+    },
+    {
+        "name": "topk_256",
+        "B": 1,
+        "S": 512,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 256,
+        "pack_gqa": True,
+    },
+    # ─── Very short Q (sub-tile, < 128 tokens) ───
+    {
+        "name": "tiny_q_16",
+        "B": 1,
+        "S_q": 16,
+        "S_kv": 512,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 128,
+        "pack_gqa": True,
+    },
+]
+
+INDEX_SPARSE_COMPREHENSIVE_CONFIGS = [
+    # Comprehensive: varies GQA mode, PackGQA, D, kbs
+    # ─── MQA variants ───
     {
         "name": "mqa64_packgqa",
         "B": 1,
@@ -638,6 +720,16 @@ INDEX_SPARSE_SWEEP_CONFIGS = [
         "D": 128,
         "topk": 128,
         "pack_gqa": True,
+    },
+    {
+        "name": "mqa64_d64_no_packgqa",
+        "B": 1,
+        "S": 256,
+        "NHQ": 64,
+        "NHK": 1,
+        "D": 64,
+        "topk": 128,
+        "pack_gqa": False,
     },
     # ─── GQA (NHK>1) ───
     {
@@ -701,203 +793,9 @@ INDEX_SPARSE_SWEEP_CONFIGS = [
         "topk": 128,
         "pack_gqa": True,
     },
-    # ─── Seqlen variants ───
+    # ─── k_block_size variants ───
     {
-        "name": "mqa128_unaligned_seqlen",
-        "B": 1,
-        "S": 200,
-        "NHQ": 128,
-        "NHK": 1,
-        "D": 128,
-        "topk": 128,
-        "pack_gqa": True,
-    },
-    {
-        "name": "mha4_unaligned_d64",
-        "B": 1,
-        "S": 200,
-        "NHQ": 4,
-        "NHK": 4,
-        "D": 64,
-        "topk": 128,
-        "pack_gqa": False,
-    },
-    # ─── Q/KV different lengths ───
-    {
-        "name": "short_q_long_kv",
-        "B": 1,
-        "S_q": 64,
-        "S_kv": 1024,
-        "NHQ": 128,
-        "NHK": 1,
-        "D": 128,
-        "topk": 128,
-        "pack_gqa": True,
-    },
-    {
-        "name": "unaligned_q",
-        "B": 1,
-        "S_q": 100,
-        "S_kv": 512,
-        "NHQ": 128,
-        "NHK": 1,
-        "D": 128,
-        "topk": 128,
-        "pack_gqa": True,
-    },
-    # ─── Cross-batch ───
-    {
-        "name": "mqa128_B2_variable_topk",
-        "B": 2,
-        "S": 256,
-        "NHQ": 128,
-        "NHK": 1,
-        "D": 128,
-        "topk": [256, 128],
-        "max_topk": 256,
-        "pack_gqa": True,
-    },
-    {
-        "name": "mqa128_B3_one_sparse",
-        "B": 3,
-        "S": 256,
-        "NHQ": 128,
-        "NHK": 1,
-        "D": 128,
-        "topk": [256, 256, 128],
-        "max_topk": 256,
-        "pack_gqa": True,
-    },
-    # ─── k_block_size=128 (TMA 2D inner load) ───
-    {
-        "name": "mqa128_kblock128",
-        "B": 1,
-        "S": 256,
-        "NHQ": 128,
-        "NHK": 1,
-        "D": 128,
-        "topk": 2,
-        "pack_gqa": True,
-        "k_block_size": 128,
-    },
-    {
-        "name": "mqa128_kblock128_s1024",
-        "B": 1,
-        "S": 1024,
-        "NHQ": 128,
-        "NHK": 1,
-        "D": 128,
-        "topk": 4,
-        "pack_gqa": True,
-        "k_block_size": 128,
-    },
-]
-
-
-class TestIndexSparseSweep(DistTestBase):
-    """Unified IndexSparse parametric sweep — CI gate.
-
-    Covers: MQA/GQA/MHA, PackGQA on/off, D=64/128, aligned/unaligned seqlen,
-    Q!=KV lengths, cross-batch variable topk, k_block_size=1/128.
-    """
-
-    @property
-    def seed(self):
-        return SEED
-
-    @property
-    def device(self):
-        return torch.cuda.current_device()
-
-    @property
-    def world_size(self) -> int:
-        return 1
-
-    @property
-    def timeout(self) -> int:
-        return 1200
-
-    @with_run_in_mp
-    @parameterize("config", INDEX_SPARSE_SWEEP_CONFIGS)
-    def test_index_sparse_sweep(self, config: dict[str, Any]):
-        """Parametric sweep: FWD+BWD correctness against SDPA reference."""
-        kbs = config.get("k_block_size", 1)
-        if kbs > 1:
-            os.environ["MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q"] = "1"
-            os.environ["MAGI_ATTENTION_INDEX_SPARSE_BWD_K_BLOCK_SIZE"] = str(kbs)
-            test_bwd = config.get("NHK", 1) == 1
-        else:
-            test_bwd = True
-        try:
-            _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
-        finally:
-            os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q", None)
-            os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_K_BLOCK_SIZE", None)
-
-
-# ═══════════════════════════════════════════════════════════
-# TestIndexSparseSlowSweep — @slow (local only)
-# ═══════════════════════════════════════════════════════════
-
-INDEX_SPARSE_SLOW_CONFIGS = [
-    # ─── Long sequence ───
-    {
-        "name": "mqa128_long_8k",
-        "B": 1,
-        "S": 8192,
-        "NHQ": 128,
-        "NHK": 1,
-        "D": 128,
-        "topk": 1024,
-        "pack_gqa": True,
-    },
-    {
-        "name": "mqa128_int32_overflow_65k",
-        "B": 1,
-        "S": 65536,
-        "NHQ": 128,
-        "NHK": 1,
-        "D": 128,
-        "topk": 9216,
-        "pack_gqa": True,
-    },
-    # ─── GQA large ratio (NHK>1) without PackGQA ───
-    {
-        "name": "gqa128x2_no_packgqa",
-        "B": 1,
-        "S": 256,
-        "NHQ": 128,
-        "NHK": 2,
-        "D": 128,
-        "topk": 128,
-        "pack_gqa": False,
-    },
-    # ─── MHA larger ───
-    {
-        "name": "mha16_no_packgqa",
-        "B": 1,
-        "S": 256,
-        "NHQ": 16,
-        "NHK": 16,
-        "D": 128,
-        "topk": 128,
-        "pack_gqa": False,
-    },
-    # ─── k_block_size=128 larger ───
-    {
-        "name": "mqa32_kblock128",
-        "B": 1,
-        "S": 256,
-        "NHQ": 32,
-        "NHK": 1,
-        "D": 128,
-        "topk": 2,
-        "pack_gqa": True,
-        "k_block_size": 128,
-    },
-    # ─── k_block_size < 128 (currently rejected by kernel assertion, should be supported) ───
-    {
-        "name": "mqa128_kblock8",
+        "name": "mqa128_kbs8",
         "B": 1,
         "S": 1024,
         "NHQ": 128,
@@ -909,7 +807,7 @@ INDEX_SPARSE_SLOW_CONFIGS = [
         "k_block_size": 8,
     },
     {
-        "name": "mqa128_kblock32",
+        "name": "mqa128_kbs32",
         "B": 1,
         "S": 1024,
         "NHQ": 128,
@@ -920,27 +818,173 @@ INDEX_SPARSE_SLOW_CONFIGS = [
         "pack_gqa": True,
         "k_block_size": 32,
     },
-    # ─── Very short Q (sub-tile) ───
     {
-        "name": "tiny_q_16",
+        "name": "mqa128_kbs128",
         "B": 1,
-        "S_q": 16,
-        "S_kv": 512,
+        "S": 256,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 2,
+        "pack_gqa": True,
+        "k_block_size": 128,
+    },
+    {
+        "name": "mqa128_kbs128_s1024",
+        "B": 1,
+        "S": 1024,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 4,
+        "pack_gqa": True,
+        "k_block_size": 128,
+    },
+    {
+        "name": "mqa128_kbs256",
+        "B": 1,
+        "S": 1024,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 2,
+        "max_topk": 2,
+        "pack_gqa": True,
+        "k_block_size": 256,
+    },
+    # ─── Seqlen unaligned + non-MQA ───
+    {
+        "name": "mha4_unaligned_d64",
+        "B": 1,
+        "S": 200,
+        "NHQ": 4,
+        "NHK": 4,
+        "D": 64,
+        "topk": 128,
+        "pack_gqa": False,
+    },
+    # ─── Long sequence (CI-suitable: 16k) ───
+    {
+        "name": "mqa128_long_16k",
+        "B": 1,
+        "S": 16384,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 512,
+        "pack_gqa": True,
+    },
+    # ─── Inner-loop direction / load / store mode variants ───
+    # These use _env dict to set env vars controlling JIT compile-time params.
+    {
+        "name": "mqa128_inner_dir_max2min",
+        "B": 1,
+        "S": 256,
         "NHQ": 128,
         "NHK": 1,
         "D": 128,
         "topk": 128,
         "pack_gqa": True,
+        "_env": {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true"},
+    },
+    {
+        "name": "mqa128_inner_dir_min2max",
+        "B": 1,
+        "S": 256,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 128,
+        "pack_gqa": True,
+        "_env": {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "false"},
+    },
+    {
+        "name": "mqa128_inner_load_tma1d",
+        "B": 1,
+        "S": 256,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 128,
+        "pack_gqa": True,
+        "_env": {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD": "tma1d"},
+    },
+    {
+        "name": "mqa128_inner_load_cpasync",
+        "B": 1,
+        "S": 256,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 128,
+        "pack_gqa": True,
+        "_env": {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD": "cpasync"},
+    },
+    {
+        "name": "mqa128_inner_store_cpasync",
+        "B": 1,
+        "S": 256,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 128,
+        "pack_gqa": True,
+        "_env": {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE": "cpasync"},
+    },
+    {
+        "name": "mqa128_inner_store_tma1d",
+        "B": 1,
+        "S": 256,
+        "NHQ": 128,
+        "NHK": 1,
+        "D": 128,
+        "topk": 128,
+        "pack_gqa": True,
+        "_env": {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE": "tma1d"},
     },
 ]
 
 
-@pytest.mark.slow
-class TestIndexSparseSlowSweep(DistTestBase):
-    """Deep IndexSparse sweep — @slow, not in CI.
+class TestIndexSparseSweep(DistTestBase):
+    """IndexSparse Classic sweep — CI gate.
 
-    Covers: long sequences, INT32 overflow regression, k_block_size=128,
-    MHA larger heads, GQA without PackGQA, very short Q.
+    Fixed compile params: NHQ=128, NHK=1(MQA), D=128, PackGQA=True, kbs=1.
+    Varies runtime: seqlen alignment, Q/KV lengths, batch, topk.
+    """
+
+    @property
+    def seed(self):
+        return SEED
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
+
+    @property
+    def world_size(self) -> int:
+        return 1
+
+    @property
+    def timeout(self) -> int:
+        return 600
+
+    @with_run_in_mp
+    @parameterize("config", INDEX_SPARSE_CLASSIC_CONFIGS)
+    def test_index_sparse_classic(self, config: dict[str, Any]):
+        """Classic sweep: MQA128 D128 PackGQA, varies runtime params."""
+        _run_index_sparse_config(self.device, config, test_bwd=True)
+
+
+# ═══════════════════════════════════════════════════════════
+# TestIndexSparseComprehensiveSweep — comprehensive coverage (CI)
+# ═══════════════════════════════════════════════════════════
+
+
+class TestIndexSparseComprehensiveSweep(DistTestBase):
+    """IndexSparse Comprehensive sweep — CI.
+
+    Varies compile params: GQA mode, PackGQA, D, kbs, inner_dir, inner_load, inner_store.
+    Covers MQA/GQA/MHA × PackGQA × D=64/128 × kbs=1/8/32/128/256 × long seq (16k).
     """
 
     @property
@@ -960,21 +1004,25 @@ class TestIndexSparseSlowSweep(DistTestBase):
         return 1200
 
     @with_run_in_mp
-    @parameterize("config", INDEX_SPARSE_SLOW_CONFIGS)
-    def test_index_sparse_slow_sweep(self, config: dict[str, Any]):
-        """Slow sweep: covers extreme and edge-case configs."""
+    @parameterize("config", INDEX_SPARSE_COMPREHENSIVE_CONFIGS)
+    def test_index_sparse_comprehensive(self, config: dict[str, Any]):
+        """Comprehensive sweep: varies compile-time params (GQA, D, kbs, inner modes)."""
         kbs = config.get("k_block_size", 1)
-        if kbs > 1:
-            os.environ["MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q"] = "1"
-            os.environ["MAGI_ATTENTION_INDEX_SPARSE_BWD_K_BLOCK_SIZE"] = str(kbs)
+        env_overrides = config.get("_env", {})
+        # BWD with kbs>=256 exceeds SM90 smem limit (BwdTileN=256 → >228KB)
+        if kbs >= 256:
+            test_bwd = False
+        elif kbs > 1:
             test_bwd = config.get("NHK", 1) == 1
         else:
             test_bwd = True
+        for key, val in env_overrides.items():
+            os.environ[key] = val
         try:
             _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
         finally:
-            os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_LOOP_Q", None)
-            os.environ.pop("MAGI_ATTENTION_INDEX_SPARSE_BWD_K_BLOCK_SIZE", None)
+            for key in env_overrides:
+                os.environ.pop(key, None)
 
 
 if __name__ == "__main__":

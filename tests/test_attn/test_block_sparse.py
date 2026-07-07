@@ -16,7 +16,6 @@ import time
 import unittest
 from typing import Optional, Tuple
 
-import pytest
 import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
@@ -1235,15 +1234,15 @@ class TestBlockSparseSimple(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════
-# TestBlockSparseSweep — unified CI sweep
+# TestBlockSparseSweep — Classic CI sweep
 # ═══════════════════════════════════════════════════════════
 
 
 class TestBlockSparseSweep(DistTestBase):
-    """Unified BlockSparse parametric sweep — CI gate.
+    """BlockSparse Classic sweep — CI gate.
 
-    Covers: MQA/GQA canonical (nhq=128, nhk=1, kbs=128), LoopK/LoopQ,
-    varying seqlen and sparsity. Uses subprocess isolation via @with_run_in_mp.
+    Fixed compile params: NHQ=128, NHK=1(MQA), D=128, q_block=1, kbs=128, PackGQA=True.
+    Varies runtime: seqlen × sparsity × swap_bwd_qk_loop(LoopK/LoopQ).
     """
 
     @property
@@ -1333,15 +1332,15 @@ class TestBlockSparseSweep(DistTestBase):
 
 
 # ═══════════════════════════════════════════════════════════
-# TestBlockSparseSlowSweep — @slow (local only)
+# TestBlockSparseComprehensiveSweep — comprehensive coverage (CI)
 # ═══════════════════════════════════════════════════════════
 
 
-@pytest.mark.slow
-class TestBlockSparseSlowSweep(DistTestBase):
-    """Deep BlockSparse sweep — @slow, not in CI.
+class TestBlockSparseComprehensiveSweep(DistTestBase):
+    """BlockSparse Comprehensive sweep — CI.
 
-    Tests non-prebuild combinations: different GQA ratios, head dims, block sizes.
+    Varies compile params: GQA mode, D, q_size(block_mask granularity), k_size.
+    Covers MQA/GQA/MHA × D=64/128 × q_size=1/16/32/64/128 × k_size=1/8/64/128.
     """
 
     @property
@@ -1356,7 +1355,8 @@ class TestBlockSparseSlowSweep(DistTestBase):
     def timeout(self) -> int:
         return 1200
 
-    SLOW_CONFIGS = [
+    COMPREHENSIVE_CONFIGS = [
+        # ─── MHA (NHQ==NHK) — varies q_size/k_size ───
         {
             "name": "mha8_q64k64",
             "nhq": 8,
@@ -1382,8 +1382,27 @@ class TestBlockSparseSlowSweep(DistTestBase):
             "hd": 128,
             "q_size": 128,
             "k_size": 1,
-            "ref_block_size": (128, 128),
+            "ref_block_size": (64, 128),
         },
+        {
+            "name": "mha8_q32k64",
+            "nhq": 8,
+            "nhk": 8,
+            "hd": 128,
+            "q_size": 32,
+            "k_size": 64,
+            "ref_block_size": (64, 128),
+        },
+        {
+            "name": "mha8_q16k128",
+            "nhq": 8,
+            "nhk": 8,
+            "hd": 128,
+            "q_size": 16,
+            "k_size": 128,
+            "ref_block_size": (64, 128),
+        },
+        # ─── GQA (NHQ>NHK) ───
         {
             "name": "gqa16x4_q64k64",
             "nhq": 16,
@@ -1403,6 +1422,16 @@ class TestBlockSparseSlowSweep(DistTestBase):
             "ref_block_size": (64, 128),
         },
         {
+            "name": "gqa16x4_q128k1",
+            "nhq": 16,
+            "nhk": 4,
+            "hd": 128,
+            "q_size": 128,
+            "k_size": 1,
+            "ref_block_size": (64, 128),
+        },
+        # ─── D=64 ───
+        {
             "name": "mha1_hd64_q64k64",
             "nhq": 1,
             "nhk": 1,
@@ -1420,13 +1449,51 @@ class TestBlockSparseSlowSweep(DistTestBase):
             "k_size": 64,
             "ref_block_size": (64, 128),
         },
+        # ─── MQA (NHK=1) — pack_gqa: scheduler splits 128 heads into kBlockM-sized tiles ───
+        # With assertion fix, kBlockM=64 works for qhead_per_khead=128 (128%64==0)
+        {
+            "name": "mqa128_q64k64",
+            "nhq": 128,
+            "nhk": 1,
+            "hd": 128,
+            "q_size": 64,
+            "k_size": 64,
+            "ref_block_size": (64, 128),
+        },
+        {
+            "name": "mqa128_q32k64",
+            "nhq": 128,
+            "nhk": 1,
+            "hd": 128,
+            "q_size": 32,
+            "k_size": 64,
+            "ref_block_size": (64, 128),
+        },
+        {
+            "name": "mqa128_q16k128",
+            "nhq": 128,
+            "nhk": 1,
+            "hd": 128,
+            "q_size": 16,
+            "k_size": 128,
+            "ref_block_size": (64, 128),
+        },
+        {
+            "name": "mqa128_q128k1",
+            "nhq": 128,
+            "nhk": 1,
+            "hd": 128,
+            "q_size": 128,
+            "k_size": 1,
+            "ref_block_size": (64, 128),
+        },
     ]
 
     @with_run_in_mp
-    @parameterize("cfg", SLOW_CONFIGS)
+    @parameterize("cfg", COMPREHENSIVE_CONFIGS)
     @parameterize("sparsity_ratio", [0.5])
     @parameterize("pack_gqa", [True])
-    def test_block_sparse_slow_sweep(self, cfg, sparsity_ratio, pack_gqa):
+    def test_block_sparse_comprehensive_sweep(self, cfg, sparsity_ratio, pack_gqa):
         torch.manual_seed(42)
         seqlen = 2048
         dtype = torch.bfloat16
