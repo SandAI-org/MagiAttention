@@ -250,6 +250,57 @@ def assert_close(
 
 
 @torch.no_grad
+def assert_equal(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    test_case: str = "",
+    allow_none: bool = True,
+    print_tensor_when_mismatch: bool = True,
+    print_rank: int = 0,
+    print_no_mismatch: bool = True,
+) -> None:
+    """Assert that two tensors are exactly equal (bit-for-bit).
+
+    This is the exact-equality counterpart of :func:`assert_close` with ``atol=rtol=mismatch_threshold=0``.
+
+    Prefer this over a bare ``assert torch.equal(a, b)``: ``torch.equal`` is a weaker
+    check. Per the torch docs, ``torch.equal`` treats tensors containing NaNs as never
+    equal (so it can spuriously fail on legitimately-identical NaN payloads), and it does
+    NOT differentiate the dtypes of the two tensors during comparison. Building on
+    ``torch.testing.assert_close`` (with ``equal_nan``/dtype checking) gives stricter,
+    more meaningful equality semantics.
+
+    Args:
+        a (torch.Tensor): tensor a.
+        b (torch.Tensor): tensor b.
+        test_case (str, optional): test case description. Defaults to "".
+        allow_none (bool, optional): if ``True``, allow a or b to be None
+            (and skip the check in that case).
+        print_tensor_when_mismatch (bool, optional): if ``True``, print the two tensors
+            side-by-side on mismatch. Defaults to ``True``.
+        print_rank (int, optional): rank to print from. Defaults to ``0``.
+            And set to ``-1`` to print from all ranks.
+        print_no_mismatch (bool, optional): if ``True``, print a message when there is no mismatch.
+            Defaults to ``True``.
+
+            NOTE: Set ``MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0`` to force disable printing no-mismatch messages,
+            mainly used to reduce logging noise in CI.
+    """
+    assert_close(
+        a,
+        b,
+        atol=0,
+        rtol=0,
+        mismatch_threshold=0,
+        test_case=test_case,
+        allow_none=allow_none,
+        print_tensor_when_mismatch=print_tensor_when_mismatch,
+        print_rank=print_rank,
+        print_no_mismatch=print_no_mismatch,
+    )
+
+
+@torch.no_grad
 def calc_inf_norm(
     a: torch.Tensor,
     b: torch.Tensor,
