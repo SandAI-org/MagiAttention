@@ -186,6 +186,8 @@ struct CollectiveMainloopBwdSm90 {
       (BwdInnerLoopK && ((BlockSparse && SparseKBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && SparseKBlockSize >= kBlockN)));
   static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
   static_assert(kInnerLoadMode == InnerLoadMode::Tma || kInnerLoadMode == InnerLoadMode::CpAsync);
+  static constexpr bool InnerLoad_Tma = (kInnerLoadMode == InnerLoadMode::Tma);
+  static constexpr bool InnerLoad_CpAsync = (kInnerLoadMode == InnerLoadMode::CpAsync);
 
   using MainloopPipeline =
       std::conditional_t<kInnerLoadMode == InnerLoadMode::Tma, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;

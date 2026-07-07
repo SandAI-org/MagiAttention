@@ -871,11 +871,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
 
             if block_sparse:
-                kblockn = 64 if swap_ab else 128
-                if ref_block_size is not None:
-                    ref_block_size = (ref_block_size[0], kblockn)
-                else:
-                    ref_block_size = (64 if swap_ab else 128, kblockn)
+                # Sparse paths always use (128, 128) tile — swap_ab is forbidden.
+                # TODO: tune tile size for sparse TFLOPS (kBlockM=64 with small q_block_size)
+                ref_block_size = (128, 128)
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -1648,10 +1646,9 @@ def flex_flash_attn_func(
         auto_range_merge = False
         if max_seqlen_q is None:
             max_seqlen_q = q_block_size
-        if ref_block_size is not None:
-            ref_block_size = (ref_block_size[0], tile_size)
-        else:
-            ref_block_size = (128, tile_size)
+        # IndexSparse: fixed (128, tile_size) tile — q_block_size=1 means PackGQA fills M dim.
+        # TODO: tune kBlockM for non-PackGQA or small-head scenarios
+        ref_block_size = (128, tile_size)
 
     assert not (
         bwd_inner_loop_k is True and deterministic
