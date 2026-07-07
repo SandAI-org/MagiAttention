@@ -81,7 +81,7 @@ def _ffa_register_quota(
     head_dim: int,
     kblock_m: int | None,
     swap_ab: bool,
-    swap_bwd_qk_loop: bool,
+    bwd_inner_loop_k: bool,
     block_sparse: bool,
     index_sparse: bool,
     sparse_dx_tma_reduce: bool,
@@ -133,7 +133,7 @@ def _ffa_register_quota(
             ]
     else:
         # mirrors NumMmaWarpGroups in run_mha_bwd_ (flash_bwd_launch_template.h)
-        num_mma_wgs = 2 if swap_bwd_qk_loop else (3 if head_dim == 192 else 2)
+        num_mma_wgs = 2 if bwd_inner_loop_k else (3 if head_dim == 192 else 2)
         inner_use_scatter = block_sparse or index_sparse
         budget = 168 * (1 + num_mma_wgs)
         if inner_use_scatter:
@@ -177,7 +177,7 @@ def get_ffa_uri(
     pack_gqa_factor: int,
     block_sparse: bool,
     index_sparse: bool,
-    swap_bwd_qk_loop: bool,
+    bwd_inner_loop_k: bool,
     profile_mode: bool,
     return_max_logits: bool,
     dq_dtype: torch.dtype | None = None,
@@ -204,7 +204,7 @@ def get_ffa_uri(
         f"{f'_catgqa{pack_gqa_factor}' if cat_gqa else ''}"
         f"{'_block_sparse' if block_sparse else ''}"
         f"{'_index_sparse' if index_sparse else ''}"
-        f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
+        f"{'_bwdinnerloopk' if bwd_inner_loop_k else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_return_max_logits' if return_max_logits else ''}"
         + (
@@ -229,7 +229,7 @@ def sanity_check(
     swap_ab: bool = False,
     block_sparse: bool = False,
     index_sparse: bool = False,
-    swap_bwd_qk_loop: bool = False,
+    bwd_inner_loop_k: bool = False,
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
@@ -286,10 +286,10 @@ def sanity_check(
             assert (
                 kblock_n % 16 == 0 and kblock_n <= 256
             ), "ref_block_size: (kblock_m, kblock_n), kblock_n <= 256 and kblock_n % 16 == 0 must be True"
-    if swap_bwd_qk_loop:
+    if bwd_inner_loop_k:
         assert (
             direction == "bwd"
-        ), "swap_bwd_qk_loop only take effect when direction == 'bwd'"
+        ), "bwd_inner_loop_k only take effect when direction == 'bwd'"
     if return_max_logits:
         assert (
             direction == "fwd"
@@ -317,7 +317,7 @@ def get_ffa_jit_spec(
     pack_gqa_factor: int = 1,
     block_sparse: bool = False,
     index_sparse: bool = False,
-    swap_bwd_qk_loop: bool = False,
+    bwd_inner_loop_k: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
@@ -335,7 +335,7 @@ def get_ffa_jit_spec(
         swap_ab=swap_ab,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
@@ -373,7 +373,7 @@ def get_ffa_jit_spec(
         pack_gqa_factor=pack_gqa_factor,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,
@@ -507,7 +507,7 @@ def get_ffa_jit_spec(
         # CatGQA has different SMEM layout that is incompatible with LseDpsumUnion.
         if (
             "bwd_lse_union" not in extra_template_args
-            and not swap_bwd_qk_loop
+            and not bwd_inner_loop_k
             and not cat_gqa
         ):
             extra_template_args["bwd_lse_union"] = "1"
@@ -522,7 +522,7 @@ def get_ffa_jit_spec(
             extra_template_args.setdefault("bwd_ununion_dkvacc", "0")
             extra_template_args.setdefault("bwd_stages_v", "2")
             uri += "_pus1"
-        elif swap_bwd_qk_loop:
+        elif bwd_inner_loop_k:
             if "bwd_ununion_dkvacc" not in extra_template_args:
                 extra_template_args["bwd_ununion_dkvacc"] = "1"
                 uri += "_uu1"
@@ -564,7 +564,7 @@ def get_ffa_jit_spec(
         # so that kBlockN = k_block_size (full-tile outer K, no waste).
         if (
             index_sparse
-            and not swap_bwd_qk_loop
+            and not bwd_inner_loop_k
             and "bwd_tile_n" not in extra_template_args
         ):
             if k_block_size >= 128:
@@ -577,7 +577,7 @@ def get_ffa_jit_spec(
         head_dim=head_dim,
         kblock_m=kblock_m,
         swap_ab=swap_ab,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
         sparse_dx_tma_reduce=extra_template_args.get("inner_store_mode", "2") == "1",
@@ -618,7 +618,7 @@ def get_ffa_jit_spec(
     pack_gqa = bool(pack_gqa)
     cat_gqa = bool(cat_gqa)
     block_sparse = bool(block_sparse)
-    swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
+    bwd_inner_loop_k = bool(bwd_inner_loop_k)
 
     rendered = template.render(
         arch_sm_num=arch_sm_num,
@@ -641,7 +641,7 @@ def get_ffa_jit_spec(
         pack_gqa_factor=pack_gqa_factor,
         block_sparse=str(block_sparse).lower(),
         index_sparse=str(index_sparse).lower(),
-        swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
+        bwd_inner_loop_k=str(bwd_inner_loop_k).lower(),
         return_max_logits=str(bool(return_max_logits)).lower(),
         **extra_template_args,
     )
@@ -783,7 +783,7 @@ def get_ffa_jit_mod(
     pack_gqa_factor: int = 1,
     block_sparse: bool = False,
     index_sparse: bool = False,
-    swap_bwd_qk_loop: bool = False,
+    bwd_inner_loop_k: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
@@ -825,7 +825,7 @@ def get_ffa_jit_mod(
         pack_gqa_factor=pack_gqa_factor,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,

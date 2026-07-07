@@ -32,7 +32,7 @@ using namespace cute;
 
 /**
  * Kernel to zero out dK and dV rows that were not covered by the backward pass.
- * This is used when OuterUseAtomicReduction is false (InnerLoopQ, dKV is outer).
+ * This is used when OuterStoreNeedReduction is false (InnerLoopQ, dKV is outer).
  * Threads are parallel in head_dim dimension,
  * so when zeroing a row, threads access contiguous dK/dV elements (stride 1).
  */

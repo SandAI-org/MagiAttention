@@ -47,7 +47,7 @@ struct TileSchedulerArguments {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <int kBlock, int NumMmaThreads, int NumProducerThreads, bool WarpSpecialized, bool PackGQA, bool CatGQA, bool SwapBwdQKLoop, bool Deterministic>
+template <int kBlock, int NumMmaThreads, int NumProducerThreads, bool WarpSpecialized, bool PackGQA, bool CatGQA, bool BwdInnerLoopK, bool Deterministic>
 class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
@@ -78,7 +78,7 @@ class DynamicPersistentTileSchedulerBwd {
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
     // FlattenGQA: seqlen_scale_factor = num_heads_q / num_heads_kv, otherwise 1
-    int seqlen_scale_factor = FlattenGQA && SwapBwdQKLoop ? (args.num_heads_q / args.num_heads_kv) : 1;
+    int seqlen_scale_factor = FlattenGQA && BwdInnerLoopK ? (args.num_heads_q / args.num_heads_kv) : 1;
     // FlattenGQA: num_heads = num_heads_kv, otherwise num_heads_q
     int num_heads = !FlattenGQA ? args.num_heads_q : args.num_heads_kv;
 

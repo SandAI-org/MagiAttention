@@ -1445,7 +1445,7 @@ class DistAttnRuntime:
                     sm_margin=self.bwd_sm_margin,
                     # optional args below mainly for sparse attn
                     auto_range_merge=env.general.is_auto_range_merge_enable(),
-                    swap_bwd_qk_loop=False,
+                    bwd_inner_loop_k=False,
                     cat_gqa=env.general.is_cat_gqa_enable(),
                 )
 

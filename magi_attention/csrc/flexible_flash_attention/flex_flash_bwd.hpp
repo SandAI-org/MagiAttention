@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-template <bool Deterministic, bool DisableDkvAtomic, bool DisableDqAtomic, bool SwapBwdQKLoop, bool PackGQA, bool CatGQA, bool IndexSparse = false>
+template <bool Deterministic, bool DisableDkvAtomic, bool DisableDqAtomic, bool BwdInnerLoopK, bool PackGQA, bool CatGQA, bool IndexSparse = false>
 std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
@@ -275,16 +275,15 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   TORCH_CHECK(head_size % 8 == 0 && head_size <= max_headdim);
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0);
   int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
-  static constexpr bool IndexSparseInvLoopQ = IndexSparse && !SwapBwdQKLoop;
-  int const kBlockM = std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexSparseInvLoopQ>(head_size, element_size, softcap > 0.0));
-  int const kBlockN = std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexSparseInvLoopQ>(head_size, element_size, softcap > 0.0));
+  int const kBlockM = std::get<0>(tile_size_bwd_sm90<BwdInnerLoopK, (IndexSparse && !BwdInnerLoopK)>(head_size, element_size, softcap > 0.0));
+  int const kBlockN = std::get<1>(tile_size_bwd_sm90<BwdInnerLoopK, (IndexSparse && !BwdInnerLoopK)>(head_size, element_size, softcap > 0.0));
   // Get rounded max_seqlen
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
 
   // Determine output dtype for dq
   at::ScalarType dq_type = dq_type_.has_value() ? dq_type_.value() : (dq_.has_value() ? dq_.value().scalar_type() : at::ScalarType::Float);
   if constexpr (DisableDqAtomic) {
-    TORCH_CHECK(SwapBwdQKLoop, "DisableDqAtomic requires SwapBwdQKLoop (BWD InnerLoopK)");
+    TORCH_CHECK(BwdInnerLoopK, "DisableDqAtomic requires BwdInnerLoopK (BWD InnerLoopK)");
     TORCH_CHECK(
         dq_type == at::ScalarType::Float || dq_type == at::ScalarType::BFloat16 || dq_type == at::ScalarType::Half,
         "Flexible Flash Attention only supports float, bf16 and fp16 for dq when DisableDqAtomic is enabled");
@@ -326,7 +325,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     CHECK_SHAPE(dq, total_q, num_heads_qo, head_size);
     TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
   } else {
-    if constexpr (DisableDqAtomic && SwapBwdQKLoop) {
+    if constexpr (DisableDqAtomic && BwdInnerLoopK) {
       // InnerLoopK + DisableDqAtomic: dQ is the outer result, epilogue uses per-element
       // direct store (single CTA writes each Q position), so no zero-init needed.
       dq = torch::empty_like(q, opts.dtype(dq_type));

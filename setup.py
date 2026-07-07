@@ -718,12 +718,12 @@ def prebuild_ffa_kernels() -> None:
             False,
             1,
             1,
-        )  # block_sparse, index_sparse, swap_bwd_qk_loop, pack_gqa_factor, k_block_size
+        )  # block_sparse, index_sparse, bwd_inner_loop_k, pack_gqa_factor, k_block_size
         for c in combos
     ]
 
     if prebuild_level == "ci":
-        # CI mode: prebuild sparse / deterministic / pack_gqa / swap_bwd_qk_loop combos
+        # CI mode: prebuild sparse / deterministic / pack_gqa / bwd_inner_loop_k combos
         # exercised by test_block_sparse.py, test_index_sparse.py, test_pipeline.py, etc.
         ci_extra = []
 
@@ -751,7 +751,7 @@ def prebuild_ffa_kernels() -> None:
                             False,
                         )
                     )
-                    # BWD (swap_bwd_qk_loop variants)
+                    # BWD (bwd_inner_loop_k variants)
                     ci_extra.append(
                         (
                             "bwd",
@@ -856,11 +856,11 @@ def prebuild_ffa_kernels() -> None:
         # ── Dense extras needed by test_pipeline / test_flex_flash_attn ──
         ci_dense_features = [
             # (disable_atomic, deterministic, auto_range_merge, cat_gqa,
-            #  swap_bwd_qk_loop, pack_gqa_factor, return_max_logits)
+            #  bwd_inner_loop_k, pack_gqa_factor, return_max_logits)
             (False, True, False, False, False, 1, False),  # deterministic
             (False, False, True, False, False, 1, False),  # auto_range_merge
             (False, False, True, False, False, 128, False),  # ARM + packgqa128
-            (False, False, False, False, True, 1, False),  # swap_bwd_qk_loop
+            (False, False, False, False, True, 1, False),  # bwd_inner_loop_k
             (False, False, False, False, True, 8, False),  # swap + packgqa8
             (False, False, True, False, True, 8, False),  # ARM + swap + packgqa8
             (False, False, True, False, True, 128, False),  # ARM + swap + packgqa128
@@ -923,7 +923,7 @@ def prebuild_ffa_kernels() -> None:
                 cat_gqa,
                 block_sparse,
                 index_sparse,
-                swap_bwd_qk_loop,
+                bwd_inner_loop_k,
                 pack_gqa_factor,
                 k_block_size,
                 return_max_logits,
@@ -939,7 +939,7 @@ def prebuild_ffa_kernels() -> None:
                 cat_gqa,
                 block_sparse,
                 index_sparse,
-                swap_bwd_qk_loop,
+                bwd_inner_loop_k,
                 pack_gqa_factor,
                 k_block_size,
             ) = args
@@ -961,7 +961,7 @@ def prebuild_ffa_kernels() -> None:
         # For sparse BWD: derive dq/dkv dtypes to match runtime dispatch
         disable_dq_atomic_reduction = False
         if direction == "bwd":
-            if _is_sparse and swap_bwd_qk_loop:
+            if _is_sparse and bwd_inner_loop_k:
                 disable_dq_atomic_reduction = True
             dq_dtype = compute_dtype if disable_dq_atomic_reduction else torch.float32
             dkv_dtype = torch.float32
@@ -987,7 +987,7 @@ def prebuild_ffa_kernels() -> None:
             pack_gqa_factor=pack_gqa_factor,
             block_sparse=block_sparse,
             index_sparse=index_sparse,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
+            bwd_inner_loop_k=bwd_inner_loop_k,
             profile_mode=False,
             return_max_logits=return_max_logits,
             dq_dtype=dq_dtype,

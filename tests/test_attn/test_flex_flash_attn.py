@@ -584,7 +584,7 @@ class TestFlexFlashAttn(DistTestBase):
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
+            bwd_inner_loop_k=swap_bwd_qk_loop,
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
         )
@@ -622,7 +622,7 @@ class TestFlexFlashAttn(DistTestBase):
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
+            bwd_inner_loop_k=swap_bwd_qk_loop,
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
         )

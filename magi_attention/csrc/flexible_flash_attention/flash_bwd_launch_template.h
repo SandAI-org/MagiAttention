@@ -108,7 +108,7 @@ template <
     typename ElementDq,
     typename ElementDkv,
     bool Deterministic,
-    bool SwapBwdQKLoop,
+    bool BwdInnerLoopK,
     bool PackGQA,
     bool CatGQA,
     int PackGQAFactor,
@@ -133,7 +133,7 @@ template <
     int BwdProducerRegs,
     int BwdConsumerRegs,
     int InnerStoreMode,
-    bool OuterUseAtomicReduction,
+    bool OuterStoreNeedReduction,
     int Stages_V,
     int ScatterPad,
     bool LseDpsumUnionDKVacc,
@@ -188,7 +188,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       cutlass::arch::Sm90,
       Has_softcap,
       Deterministic,
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       SdP_swapAB,
       dKV_swapAB,
       dQ_swapAB,
@@ -225,13 +225,13 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       DeferDvR2S_>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
-      SwapBwdQKLoop ? kBlockM : kBlockN,
+      BwdInnerLoopK ? kBlockM : kBlockN,
       CollectiveMainloop::NumMmaThreads,
       CollectiveMainloop::NumProducerThreads,
       /*WarpSpecialized=*/Arch >= 90,
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
-      /*SwapBwdQKLoop*/ SwapBwdQKLoop,
+      /*BwdInnerLoopK*/ BwdInnerLoopK,
       /*Deterministic=*/Deterministic>;
 
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
@@ -246,9 +246,9 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       NumMmaWarpGroups,
       AtomLayoutMdQ,
       AtomLayoutNdKV,
-      OuterUseAtomicReduction,
+      OuterStoreNeedReduction,
       Deterministic,
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
       /*PackGQAFactor=*/PackGQAFactor,
@@ -314,7 +314,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
                                                         /*num_heads_kv=*/params.h_kv,
                                                         /*num_batches=*/params.merge_batch_size,
                                                         /*tile_count_semaphore=*/params.tile_count_semaphore,
-                                                        /*ranges=*/SwapBwdQKLoop ? params.q_ranges : params.k_ranges,
+                                                        /*ranges=*/BwdInnerLoopK ? params.q_ranges : params.k_ranges,
                                                         /*merge_ranges=*/params.merge_k_ranges,
                                                         /*range_map=*/params.bwd_kq_map,
                                                         /*determin_conflict_state=*/params.determin_conflict_state,
@@ -347,7 +347,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
           (int)LseDpsumUnionDKVacc,
           (int)DkvaccBypassSmem,
           (int)UnunionDkvacc,
-          (int)SwapBwdQKLoop);
+          (int)BwdInnerLoopK);
       cudaFuncAttributes func_attrs;
       cudaFuncGetAttributes(&func_attrs, (void*)cutlass::device_kernel<AttnKernel>);
       printf("[BWD] static_smem=%zu regs=%d\n", func_attrs.sharedSizeBytes, func_attrs.numRegs);
@@ -369,7 +369,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   }
   CHECK_CUDA_KERNEL_LAUNCH();
 
-  if constexpr (!SwapBwdQKLoop && !OuterUseAtomicReduction) {
+  if constexpr (!BwdInnerLoopK && !OuterStoreNeedReduction) {
     if constexpr (ProfileMode)
       MagiEvents::start("bwd_postprocess");
 
@@ -390,10 +390,10 @@ template <
     typename TDkv,
     int kHeadDim,
     bool Has_softcap,
-    bool OuterUseAtomicReduction,
+    bool OuterStoreNeedReduction,
     bool Deterministic,
     bool RangeMerge,
-    bool SwapBwdQKLoop,
+    bool BwdInnerLoopK,
     bool PackGQA,
     bool CatGQA,
     int PackGQAFactor,
@@ -428,12 +428,11 @@ template <
     bool DeferDvR2S = false>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  static constexpr bool IndexSparseInvLoopQ = IndexSparse && !SwapBwdQKLoop;
   // BwdTileM/N, BwdStages/Ds: 0 = use default, >0 = override (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS).
   static constexpr int kBlockM =
-      BwdTileM > 0 ? BwdTileM : std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexSparseInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+      BwdTileM > 0 ? BwdTileM : std::get<0>(tile_size_bwd_sm90<BwdInnerLoopK, (IndexSparse && !BwdInnerLoopK)>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
   static constexpr int kBlockN =
-      BwdTileN > 0 ? BwdTileN : std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop, IndexSparseInvLoopQ>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+      BwdTileN > 0 ? BwdTileN : std::get<1>(tile_size_bwd_sm90<BwdInnerLoopK, (IndexSparse && !BwdInnerLoopK)>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
 
   static constexpr int Stages = BwdStages > 0 ? BwdStages : 2;
   static constexpr int Stages_dO = Stages >= 2 ? (kHeadDim <= 128 ? 2 : 1) : 1;
@@ -448,13 +447,13 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
   static constexpr bool dQ_swapAB = kHeadDim <= 64 ? false : true;
 
-  // NOTE: when SwapBwdQKLoop is true, we only support 2 NumMmaWarpGroups,
+  // NOTE: when BwdInnerLoopK is true, we only support 2 NumMmaWarpGroups,
   // since no more named barriers for more groups
-  static constexpr int NumMmaWarpGroups = SwapBwdQKLoop ? 2 : (kHeadDim == 192 ? 3 : 2);
+  static constexpr int NumMmaWarpGroups = BwdInnerLoopK ? 2 : (kHeadDim == 192 ? 3 : 2);
 
-  // NOTE: when SwapBwdQKLoop is not supported (i.e. always false),
+  // NOTE: when BwdInnerLoopK is not supported (i.e. always false),
   // all the atom layouts are set specifically for tile size (128, 128, 64) and (64, 128, 64),
-  // however, when SwapBwdQKLoop is true, we need to use new tile size due to shared memory limits,
+  // however, when BwdInnerLoopK is true, we need to use new tile size due to shared memory limits,
   // including (64, 128, 64) and (64, 64, 128),
   // thus the atom layouts are accordingly adjusted here case-by-case,
   // but we need to find a better way to set these layout parameters.
@@ -478,7 +477,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*ElementDq=*/TDq,
       /*ElementDkv=*/TDkv,
       /*Deterministic=*/Deterministic,
-      /*SwapBwdQKLoop=*/SwapBwdQKLoop,
+      /*BwdInnerLoopK=*/BwdInnerLoopK,
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
       /*PackGQAFactor=*/PackGQAFactor,
@@ -503,7 +502,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*BwdProducerRegs=*/BwdProducerRegs,
       /*BwdConsumerRegs=*/BwdConsumerRegs,
       /*InnerStoreMode=*/InnerStoreMode,
-      /*OuterUseAtomicReduction=*/OuterUseAtomicReduction,
+      /*OuterStoreNeedReduction=*/OuterStoreNeedReduction,
       /*Stages_V=*/Stages_V,
       /*ScatterPad=*/ScatterPad,
       /*LseDpsumUnionDKVacc=*/LseDpsumUnionDKVacc,

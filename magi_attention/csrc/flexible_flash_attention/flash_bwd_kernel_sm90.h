@@ -54,7 +54,7 @@ class FlashAttnBwdSm90 {
 
   static constexpr bool dKV_swapAB = CollectiveMainloop::dKV_swapAB;
   static constexpr bool dQ_swapAB = CollectiveMainloop::dQ_swapAB;
-  static constexpr bool SwapBwdQKLoop = CollectiveMainloop::SwapBwdQKLoop;
+  static constexpr bool BwdInnerLoopK = CollectiveMainloop::BwdInnerLoopK;
   static constexpr bool BlockSparse = CollectiveMainloop::BlockSparse;
   static constexpr bool IndexSparse = CollectiveMainloop::IndexSparse;
   static constexpr bool InnerUseScatter = CollectiveMainloop::InnerUseScatter;
@@ -84,7 +84,7 @@ class FlashAttnBwdSm90 {
   using TileScheduler = TileScheduler_;
   using TileSchedulerArguments = typename flash::TileSchedulerArguments;
   using TileSchedulerParams = typename TileScheduler::Params;
-  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
+  using BwdNamedBarriers = std::conditional_t<BwdInnerLoopK, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr auto kInnerDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
@@ -130,7 +130,7 @@ class FlashAttnBwdSm90 {
       alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
     };
 
-    using PipelineStorage = std::conditional_t<SwapBwdQKLoop, PipelineStorageLoopK, PipelineStorageLoopQ>;
+    using PipelineStorage = std::conditional_t<BwdInnerLoopK, PipelineStorageLoopK, PipelineStorageLoopQ>;
 
     PipelineStorage pipelines;
   };
@@ -193,7 +193,7 @@ class FlashAttnBwdSm90 {
   // Entry point
   CUTLASS_DEVICE
   void operator()(Params const& params, char* smem_buf) {
-    if constexpr (SwapBwdQKLoop) { // q for outer-loop and k for inner-loop
+    if constexpr (BwdInnerLoopK) { // q for outer-loop and k for inner-loop
       run_bwd_with_loop_k(params, smem_buf);
     } else { // k for outer-loop and q for inner-loop
       run_bwd_with_loop_q(params, smem_buf);
@@ -204,7 +204,7 @@ class FlashAttnBwdSm90 {
   // k for outer-loop and q for inner-loop
   CUTLASS_DEVICE
   void run_bwd_with_loop_q(Params const& params, char* smem_buf) {
-    static_assert(!SwapBwdQKLoop, "run_bwd_with_loop_q() must be called when SwapBwdQKLoop is false");
+    static_assert(!BwdInnerLoopK, "run_bwd_with_loop_q() must be called when BwdInnerLoopK is false");
 
     static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int NumCopyThreads = NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup;
@@ -453,7 +453,7 @@ class FlashAttnBwdSm90 {
   // q for outer-loop and k for inner-loop
   CUTLASS_DEVICE
   void run_bwd_with_loop_k(Params const& params, char* smem_buf) {
-    static_assert(SwapBwdQKLoop, "run_bwd_with_loop_k() must be called when SwapBwdQKLoop is true");
+    static_assert(BwdInnerLoopK, "run_bwd_with_loop_k() must be called when BwdInnerLoopK is true");
 
     static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int NumCopyThreads = NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup;
@@ -661,14 +661,14 @@ class FlashAttnBwdSm90 {
           if constexpr (!Deterministic) {
             epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord);
           } else {
-            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
+            static_assert(!Deterministic, "Deterministic mode is not supported yet when BwdInnerLoopK is true.");
           }
           BarrierManager::arrive<NumMmaThreads + NumProducerSyncThreads>(BwdNamedBarriers::QdOEmpty);
         } else {
           if constexpr (!Deterministic) {
             epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, epilogue_block_coord);
           } else {
-            static_assert(!Deterministic, "Deterministic mode is not supported yet when SwapBwdQKLoop is true.");
+            static_assert(!Deterministic, "Deterministic mode is not supported yet when BwdInnerLoopK is true.");
           }
         }
       }

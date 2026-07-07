@@ -497,7 +497,7 @@ def _flex_flash_attn_backward_compilable(
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
-    swap_bwd_qk_loop: bool,
+    bwd_inner_loop_k: bool,
     pack_gqa: bool,
     cat_gqa: bool,
     block_sparse: bool,
@@ -519,7 +519,7 @@ def _flex_flash_attn_backward_compilable(
         pack_gqa_factor=q.size(1) // k.size(1),
         deterministic=deterministic,
         auto_range_merge=auto_range_merge,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
         profile_mode=profile_mode,
@@ -603,7 +603,7 @@ def _flex_flash_attn_backward_compilable_fake(
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
-    swap_bwd_qk_loop: bool,
+    bwd_inner_loop_k: bool,
     pack_gqa: bool,
     cat_gqa: bool,
     block_sparse: bool,
@@ -644,7 +644,7 @@ def _flex_flash_attn_backward(
     merge_k_ranges: torch.Tensor | None = None,
     bwd_kq_map: torch.Tensor | None = None,
     bwd_unique_count: torch.Tensor | None = None,
-    swap_bwd_qk_loop: bool = False,
+    bwd_inner_loop_k: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
     block_sparse: bool = False,
@@ -682,7 +682,7 @@ def _flex_flash_attn_backward(
     dq = (
         (
             torch.empty_like(q, dtype=dq_type or q.dtype)
-            if disable_bwd_dq_atomic_reduction and swap_bwd_qk_loop
+            if disable_bwd_dq_atomic_reduction and bwd_inner_loop_k
             else torch.zeros_like(q, dtype=dq_type or torch.float32)
         )
         if dq is None
@@ -742,7 +742,7 @@ def _flex_flash_attn_backward(
         merge_k_ranges=merge_k_ranges,
         bwd_kq_map=bwd_kq_map,
         bwd_unique_count=bwd_unique_count,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
         block_sparse=block_sparse,
@@ -784,7 +784,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         cat_gqa: bool = False,
         block_sparse: bool = False,
         index_sparse: bool = False,
-        swap_bwd_qk_loop: bool | None = None,
+        bwd_inner_loop_k: bool | None = None,
         return_max_logits: bool = False,
         index_sparse_indices: torch.Tensor | None = None,
         index_sparse_max_topk: int = 0,
@@ -813,9 +813,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if block_sparse:
             auto_range_merge = True
 
-        if disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop is True:
+        if disable_bwd_dkv_atomic_reduction and bwd_inner_loop_k is True:
             raise RuntimeError(
-                "When disable_bwd_dkv_atomic_reduction is true, swap_bwd_qk_loop must not be True."
+                "When disable_bwd_dkv_atomic_reduction is true, bwd_inner_loop_k must not be True."
             )
 
         # ---- FA4 backend fast path ---- #
@@ -931,7 +931,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         with maybe_profile_ffa_ctx("fwd_cast"):
             out = out.to(q.dtype)
 
-        save_merge_info = (swap_bwd_qk_loop is True) and auto_range_merge
+        save_merge_info = (bwd_inner_loop_k is True) and auto_range_merge
 
         tensors_to_save = [
             # 1. Base Tensors
@@ -966,7 +966,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.index_sparse = index_sparse
         ctx.index_sparse_max_topk = index_sparse_max_topk
         ctx.k_block_size = k_block_size
-        ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
+        ctx.bwd_inner_loop_k = bwd_inner_loop_k
         ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
         ctx.disable_bwd_dq_atomic_reduction = disable_bwd_dq_atomic_reduction
         ctx.pack_gqa = pack_gqa
@@ -1018,7 +1018,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # cat_gqa
                 None,  # block_sparse
                 None,  # index_sparse
-                None,  # swap_bwd_qk_loop
+                None,  # bwd_inner_loop_k
                 None,  # return_max_logits
                 None,  # index_sparse_indices
                 None,  # index_sparse_max_topk
@@ -1046,13 +1046,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             index_sparse_indices,
         ) = ctx.saved_tensors
 
-        swap_bwd_qk_loop = (
-            ctx.swap_bwd_qk_loop if ctx.swap_bwd_qk_loop is not None else False
+        bwd_inner_loop_k = (
+            ctx.bwd_inner_loop_k if ctx.bwd_inner_loop_k is not None else False
         )
 
-        if ctx.disable_bwd_dkv_atomic_reduction and swap_bwd_qk_loop:
+        if ctx.disable_bwd_dkv_atomic_reduction and bwd_inner_loop_k:
             raise RuntimeError(
-                "disable_bwd_dkv_atomic_reduction is incompatible with swap_bwd_qk_loop=True (InnerLoopK)."
+                "disable_bwd_dkv_atomic_reduction is incompatible with bwd_inner_loop_k=True (InnerLoopK)."
             )
 
         if ctx.index_sparse:
@@ -1068,7 +1068,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_unique_count = None
             bwd_auto_range_merge = False
 
-            if not swap_bwd_qk_loop:
+            if not bwd_inner_loop_k:
                 # IndexSparse BWD InnerLoopQ: outer=K block, inner=Q from inner_indices
                 _loopq_kbs = ctx.k_block_size
                 nhk = k.size(1)
@@ -1107,7 +1107,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         elif ctx.auto_range_merge:
             bwd_auto_range_merge = True
             with maybe_profile_ffa_ctx("bwd_range_merge"):
-                if swap_bwd_qk_loop:
+                if bwd_inner_loop_k:
                     if merge_q_ranges is not None:
                         # Reuse the forward range merge results directly
                         (
@@ -1189,7 +1189,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
+            bwd_inner_loop_k=bwd_inner_loop_k,
             pack_gqa=ctx.pack_gqa,
             cat_gqa=ctx.cat_gqa,
             block_sparse=ctx.block_sparse,
@@ -1232,7 +1232,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # cat_gqa
             None,  # block_sparse
             None,  # index_sparse
-            None,  # swap_bwd_qk_loop
+            None,  # bwd_inner_loop_k
             None,  # return_max_logits
             None,  # index_sparse_indices
             None,  # index_sparse_max_topk
@@ -1548,6 +1548,8 @@ def flex_flash_attn_func(
                 0 0 0 0 1
     """
 
+    bwd_inner_loop_k = swap_bwd_qk_loop
+
     # ── Sparse mask input validation ──
     # Auto-infer index_sparse from tensor presence.
     if index_sparse_indices is not None:
@@ -1651,8 +1653,8 @@ def flex_flash_attn_func(
             ref_block_size = (128, tile_size)
 
     assert not (
-        swap_bwd_qk_loop is True and deterministic
-    ), "Deterministic mode is not supported when swap_bwd_qk_loop is True."
+        bwd_inner_loop_k is True and deterministic
+    ), "Deterministic mode is not supported when bwd_inner_loop_k is True."
 
     if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert is_fa4_installed, (
@@ -1673,7 +1675,7 @@ def flex_flash_attn_func(
             "cat_gqa": cat_gqa,
             "block_sparse": block_sparse,
             "index_sparse": index_sparse,
-            "swap_bwd_qk_loop": swap_bwd_qk_loop,
+            "bwd_inner_loop_k": bwd_inner_loop_k,
             "return_max_logits": return_max_logits,
         }
         bad = [name for name, active in _FA4_UNSUPPORTED.items() if active]
@@ -1701,16 +1703,16 @@ def flex_flash_attn_func(
         _is_mha = q.size(1) == k.size(1)
         _gqa_safe = _is_mha or pack_gqa or cat_gqa
 
-        # BWD InnerLoopQ (swap_bwd_qk_loop != True): dKV is outer accumulation.
+        # BWD InnerLoopQ (bwd_inner_loop_k != True): dKV is outer accumulation.
         # Safe only when GQA heads are packed (no cross-CTA dKV overlap).
         # IndexSparse excluded: the dKV postprocess kernel requires k_ranges
         # which IndexSparse does not provide.
-        if block_sparse and swap_bwd_qk_loop is not True and _gqa_safe:
+        if block_sparse and bwd_inner_loop_k is not True and _gqa_safe:
             disable_bwd_dkv_atomic_reduction = True
 
-        # BWD InnerLoopK (swap_bwd_qk_loop == True): dQ is outer accumulation.
+        # BWD InnerLoopK (bwd_inner_loop_k == True): dQ is outer accumulation.
         # Each CTA owns a unique Q block — safe regardless of GQA config.
-        if swap_bwd_qk_loop is True:
+        if bwd_inner_loop_k is True:
             disable_bwd_dq_atomic_reduction = True
 
     out, lse, max_logits = FlexFlashAttnFunc.apply(
@@ -1737,7 +1739,7 @@ def flex_flash_attn_func(
         cat_gqa,
         block_sparse,
         index_sparse,
-        swap_bwd_qk_loop,
+        bwd_inner_loop_k,
         return_max_logits,
         # for IndexSparse direct path
         index_sparse_indices,

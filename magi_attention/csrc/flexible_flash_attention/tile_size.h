@@ -70,13 +70,13 @@ constexpr std::tuple<int, int, bool> tile_size_fwd_sm90(int headdim, int element
  * @param element_size Element size, defaults to 2 bytes (FP16/BF16)
  * @return std::tuple<int, int> Returns a tuple of tile configuration, {kBlockM, kBlockN}
  *
- * NOTE: when SwapBwdQKLoop is true, the shared memory usage pattern changes,
+ * NOTE: when BwdInnerLoopK is true, the shared memory usage pattern changes,
  * and theoretically, the shared memory storage of mainloop will discard `dq_acc` and add `dk_acc`, `dv_acc`,
  * accordingly, the shared memory storage of epilogue will discard `dk` and `dv`, and add `dq`,
  * so the total shared memory usage may increase `(2 * kBlockN - kBlockM) * kHeadDim * ElementSize` bytes,
  * which might be unacceptable for some cases like `kBlockM=64, kBlockN=128, kHeadDim=128, ElementSize=2`.
  */
-template <bool SwapBwdQKLoop, bool IndexSparseInvLoopQ = false>
+template <bool BwdInnerLoopK, bool IndexSparseLoopQ = false>
 constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size = 2, bool softcap = false) {
   // Currently only support FP16/BF16
   assert(element_size == 2);
@@ -84,8 +84,8 @@ constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size 
   // IndexSparse LoopQ (inv-indices): outer=K token (1 valid row), inner=Q tiles.
   // K can't be packed → minimize kBlockN. Use {64, 64} which satisfies all WGMMA
   // constraints with the default hd=128 swapAB flags (SdP_swapAB=true → M=kBlockN=64≥64).
-  if constexpr (IndexSparseInvLoopQ) {
-    static_assert(!SwapBwdQKLoop, "IndexSparseInvLoopQ requires SwapBwdQKLoop=false (LoopQ)");
+  if constexpr (IndexSparseLoopQ) {
+    static_assert(!BwdInnerLoopK, "IndexSparseLoopQ requires BwdInnerLoopK=false (LoopQ)");
     if (headdim <= 128)
       return {64, 64};
     else
@@ -93,12 +93,12 @@ constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size 
   }
 
   if (headdim <= 64) {
-    if constexpr (SwapBwdQKLoop)
+    if constexpr (BwdInnerLoopK)
       return {64, 128}; // {128, 128, 64} => {64, 128, 64}
     else
       return {128, 128};
   } else if (headdim <= 128) {
-    if constexpr (SwapBwdQKLoop)
+    if constexpr (BwdInnerLoopK)
       return {128, 64}; // dK_acc/dV_acc union + kStages_dS=1 → 196 KB fits 228 KB SMEM limit
     else
       return {64, 128};

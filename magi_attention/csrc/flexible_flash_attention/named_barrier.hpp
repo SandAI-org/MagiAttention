@@ -103,7 +103,7 @@ enum class BwdNamedBarriersLoopK {
 
 template <>
 struct BarrierTraits<BwdNamedBarriersLoopK> {
-  // NOTE: since SwapBwdQKLoop is true, we require 10 barriers for 2 consumer WGs
+  // NOTE: since BwdInnerLoopK is true, we require 10 barriers for 2 consumer WGs
   // which exceeds the maximum number of user-named barriers (8).
   // Therefore, we have to use raw barrier IDs in this case.
   // And to avoid potential conflicts with reserved barriers,

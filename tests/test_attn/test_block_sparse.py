@@ -264,7 +264,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
-            swap_bwd_qk_loop=False,  # TODO: test when it's `True`
+            bwd_inner_loop_k=False,  # TODO: test when it's `True`
         )
         dq_ref += dq_acc
         dk_ref += dk_acc
@@ -297,7 +297,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
-            swap_bwd_qk_loop=False,  # TODO: test when it's `True`
+            bwd_inner_loop_k=False,  # TODO: test when it's `True`
         )
 
         assert_close(

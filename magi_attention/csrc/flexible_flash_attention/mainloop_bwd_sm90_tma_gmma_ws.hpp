@@ -58,7 +58,7 @@ template <
     class ArchTag_,
     bool Has_softcap_,
     bool Deterministic,
-    bool SwapBwdQKLoop_,
+    bool BwdInnerLoopK_,
     bool SdP_swapAB_,
     bool dKV_swapAB_,
     bool dQ_swapAB_,
@@ -128,7 +128,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool SdP_swapAB = SdP_swapAB_;
   static constexpr bool dKV_swapAB = dKV_swapAB_;
   static constexpr bool dQ_swapAB = dQ_swapAB_;
-  static constexpr bool SwapBwdQKLoop = SwapBwdQKLoop_;
+  static constexpr bool BwdInnerLoopK = BwdInnerLoopK_;
   static constexpr bool PackGQA = PackGQA_;
   static constexpr bool CatGQA = CatGQA_;
   static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
@@ -146,12 +146,12 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
   // InnerUseScatter: inner-loop direction data uses scatter load/store (vs TMA):
-  // InnerLoopK (SwapBwdQKLoop=true):  KV scatter when BlockSparse or IndexSparse
-  // InnerLoopQ (SwapBwdQKLoop=false): Q/dO scatter when BlockSparse or IndexSparse (inner_indices)
+  // InnerLoopK (BwdInnerLoopK=true):  KV scatter when BlockSparse or IndexSparse
+  // InnerLoopQ (BwdInnerLoopK=false): Q/dO scatter when BlockSparse or IndexSparse (inner_indices)
   static constexpr bool InnerUseScatter = BlockSparse || IndexSparse;
   // InnerLoopQ scatter does not support CatGQA (the dense InnerLoopQ load iterates bidh_kv_cat
   // per merged sub-range; the scatter load path has no such loop).
-  static_assert(!(InnerUseScatter && !SwapBwdQKLoop && CatGQA), "bwd InnerLoopQ scatter (block_sparse) does not support cat_gqa");
+  static_assert(!(InnerUseScatter && !BwdInnerLoopK && CatGQA), "bwd InnerLoopQ scatter (block_sparse) does not support cat_gqa");
 
   // InnerDxStoreInProducer: who performs the inner-loop dX (dKV for InnerLoopK / dQ for InnerLoopQ)
   // store. Pure pass-through of the template/env toggle; the python JIT entry only emits
@@ -183,8 +183,8 @@ struct CollectiveMainloopBwdSm90 {
   //   InnerLoopK sparse (inner=K/V): K tiles are contiguous when:
   //     - BlockSparse: KBlockSize >= kBlockN (Python sets kbs=kBlockN for BlockSparse).
   //     - IndexSparse: PackGQA + PackGQAFactor >= kBlockM + KBlockSize >= kBlockN.
-  static constexpr bool _is_contiguous = !InnerUseScatter || (!SwapBwdQKLoop && PackGQA && (!IndexSparse || PackGQAFactor >= kBlockM)) ||
-      (SwapBwdQKLoop && ((BlockSparse && KBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && KBlockSize >= kBlockN)));
+  static constexpr bool _is_contiguous = !InnerUseScatter || (!BwdInnerLoopK && PackGQA && (!IndexSparse || PackGQAFactor >= kBlockM)) ||
+      (BwdInnerLoopK && ((BlockSparse && KBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && KBlockSize >= kBlockN)));
   static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
   static constexpr bool InnerLoad_Tma = (kInnerLoadMode == InnerLoadMode::Tma);
   static constexpr bool InnerLoad_CpAsync = (kInnerLoadMode == InnerLoadMode::CpAsync);
@@ -197,7 +197,7 @@ struct CollectiveMainloopBwdSm90 {
   using MainloopPipeline_V = std::conditional_t<InnerLoad_Tma, typename cutlass::PipelineTmaAsync<kStages_V>, typename cutlass::PipelineAsync<kStages_V>>;
   using PipelineState_V = typename MainloopPipeline_V::PipelineState;
   using TMAClusterBarrier_t = cutlass::arch::ClusterTransactionBarrier::ValueType;
-  using BwdNamedBarriers = std::conditional_t<SwapBwdQKLoop, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
+  using BwdNamedBarriers = std::conditional_t<BwdInnerLoopK, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
   static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
 
@@ -220,7 +220,7 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kNumLoaderWarps = InnerUseScatter ? 2 : 1;
     // DxStorer warps: 0 if !InnerDxStoreInProducer (consumer handles store),
     //                 else 2 (InnerLoopK: dK+dV) or 1 (InnerLoopQ: dQ)
-    static constexpr int kNumDxStorerWarps = !InnerDxStoreInProducer ? 0 : (SwapBwdQKLoop ? 2 : 1);
+    static constexpr int kNumDxStorerWarps = !InnerDxStoreInProducer ? 0 : (BwdInnerLoopK ? 2 : 1);
     static constexpr int kNumTotalWarps = kNumLoaderWarps + kNumDxStorerWarps;
 
     // Thread counts (derived)
@@ -237,9 +237,9 @@ struct CollectiveMainloopBwdSm90 {
     // Outer-empty (KVEmpty for InnerLoopQ, QdOEmpty for InnerLoopK): loader threads only
     static constexpr int kOuterEmptyBarrierThreads = kLoaderThreads;
     // dQ barrier (InnerLoopQ): consumer WG + dQ store warp (if InnerDxStoreInProducer)
-    static constexpr int kDqBarrierThreads = cutlass::NumThreadsPerWarpGroup + (SwapBwdQKLoop ? 0 : kDxStorerThreads);
+    static constexpr int kDqBarrierThreads = cutlass::NumThreadsPerWarpGroup + (BwdInnerLoopK ? 0 : kDxStorerThreads);
     // dKV per-direction barrier (InnerLoopK): consumer WG + per-dir store threads
-    static constexpr int kDkvBarrierThreads = cutlass::NumThreadsPerWarpGroup + (SwapBwdQKLoop ? kPerDirDkvStoreThreads : 0);
+    static constexpr int kDkvBarrierThreads = cutlass::NumThreadsPerWarpGroup + (BwdInnerLoopK ? kPerDirDkvStoreThreads : 0);
 
     // Role predicates (warp_idx is 0-based within the producer warp group)
     static CUTLASS_DEVICE bool is_loader(int warp_idx) {
@@ -272,7 +272,7 @@ struct CollectiveMainloopBwdSm90 {
   // Only the inner (scatter-side) tensor is gathered row-by-row, so the per-group token
   // count is sized by the inner tile: kBlockN (KV) for InnerLoopK, kBlockM (Q/dO) for InnerLoopQ.
   // The smem token-index array (SmemTokenIndices_t below) is sized by the same dimension.
-  static constexpr int kInnerScatterRows = SwapBwdQKLoop ? kBlockN : kBlockM;
+  static constexpr int kInnerScatterRows = BwdInnerLoopK ? kBlockN : kBlockM;
   static constexpr int NumTokensPerLdstGroup = kInnerScatterRows / NumLdstGroups;
   static constexpr int NumCpAsyncTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
   static constexpr int kStoreVecWidth = kCpAsyncTransactionBytes / (NumThreadsPerLdstGroup * sizeof(ElementAccum));
@@ -343,23 +343,23 @@ struct CollectiveMainloopBwdSm90 {
   // only the K dimension changes the layout.
   using SmemLayoutAtomQdO = decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockM>, Int<kHeadDim / AtomLayoutMdKV>>()); // for dKV_Mma
   using SmemLayoutQ = std::conditional_t<
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       decltype(tile_to_shape(SmemLayoutAtomQdO{}, select<0, 2>(TileShape_MNK{}))), // (kBlockM, kHeadDim)
       decltype(tile_to_shape(SmemLayoutAtomQdO{}, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}, Int<kStages>{})))>; // (kBlockM, kHeadDim, kStages)
   using SmemLayoutdO = std::conditional_t<
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       decltype(tile_to_shape(SmemLayoutAtomQdO{}, select<0, 2>(TileShape_MNK{}))), // (kBlockM, kHeadDim)
       decltype(tile_to_shape(SmemLayoutAtomQdO{}, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}, Int<kStages_dO>{})))>; // (kBlockM, kHeadDim, kStages_dO)
 
   using SmemLayoutAtomK = decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim / AtomLayoutNdQ>>());
   using SmemLayoutK = std::conditional_t<
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       decltype(tile_to_shape(SmemLayoutAtomK{}, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}, Int<kStages>{}))), // (kBlockN, kHeadDim, kStages)
       decltype(tile_to_shape(SmemLayoutAtomK{}, select<1, 2>(TileShape_MNK{})))>; // (kBlockN, kHeadDim)
 
   using SmemLayoutAtomV = decltype(gcd::ss_smem_selector<GMMA::Major::K, Element, Int<kBlockN>, Int<kHeadDim>>());
   using SmemLayoutV = std::conditional_t<
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       decltype(tile_to_shape(SmemLayoutAtomV{}, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}, Int<kStages_V>{}))), // (kBlockN, kHeadDim, kStages_V)
       decltype(tile_to_shape(SmemLayoutAtomV{}, select<1, 2>(TileShape_MNK{})))>; // (kBlockN, kHeadDim)
 
@@ -374,7 +374,7 @@ struct CollectiveMainloopBwdSm90 {
   // it's still a valid smem address.
   static constexpr int LSEStageStride = 4 * cute::round_up(kBlockM, 64);
   using SmemLayoutLSE = std::conditional_t<
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       cute::Layout<cute::Shape<_4, Int<kBlockM>>, cute::Stride<_1, _4>>, // (4, kBlockM)
       cute::Layout<cute::Shape<_4, Int<kBlockM>, Int<kStages>>, cute::Stride<_1, _4, Int<LSEStageStride>>>>; // (4, kBlockM, kStages)
   using SmemLayoutLSEMmaLoopQ = std::conditional_t<
@@ -385,11 +385,11 @@ struct CollectiveMainloopBwdSm90 {
       SdP_swapAB,
       cute::Layout<cute::Shape<_4, Int<kBlockN>, Int<kBlockM>>, cute::Stride<_1, _0, _4>>, // (4, kBlockN, kBlockM)
       cute::Layout<cute::Shape<_4, Int<kBlockM>, Int<kBlockN>>, cute::Stride<_1, _4, _0>>>; // (4, kBlockM, kBlockN)
-  using SmemLayoutLSEMma = std::conditional_t<SwapBwdQKLoop, SmemLayoutLSEMmaLoopK, SmemLayoutLSEMmaLoopQ>;
+  using SmemLayoutLSEMma = std::conditional_t<BwdInnerLoopK, SmemLayoutLSEMmaLoopK, SmemLayoutLSEMmaLoopQ>;
 
   // Note this is the transpose in terms of the view, not in terms of memory.
   using SmemLayoutQt_ = std::conditional_t<
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       decltype(make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockM>{}), make_stride(Int<kBlockM>{}, _1{}))), // (kHeadDim, kBlockM)
       decltype(make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockM>{}, Int<kStages>{}), make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kHeadDim>{})))>; // (kHeadDim,
                                                                                                                                                          // kBlockM,
@@ -397,7 +397,7 @@ struct CollectiveMainloopBwdSm90 {
   using SmemLayoutQt = decltype(cute::composition(SmemLayoutQ{}, SmemLayoutQt_{}));
 
   using SmemLayoutdOt_ = std::conditional_t<
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       decltype(make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockM>{}), make_stride(Int<kBlockM>{}, _1{}))), // (kHeadDim, kBlockM)
       decltype(make_layout(
           make_shape(Int<kHeadDim>{}, Int<kBlockM>{}, Int<kStages_dO>{}),
@@ -405,7 +405,7 @@ struct CollectiveMainloopBwdSm90 {
   using SmemLayoutdOt = decltype(cute::composition(SmemLayoutdO{}, SmemLayoutdOt_{}));
 
   using SmemLayoutKt_ = std::conditional_t<
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       decltype(make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}, Int<kStages>{}), make_stride(Int<kBlockN>{}, _1{}, Int<kBlockN * kHeadDim>{}))), // (kHeadDim,
                                                                                                                                                         // kBlockN,
                                                                                                                                                         // kStages)
@@ -473,8 +473,8 @@ struct CollectiveMainloopBwdSm90 {
   // The flat Scatter layout only applies when SparseInnerDxReduceUseTma && !InnerLoad_Tma
   // (1D per-row bulk reduce fallback), and only for the inner dX of this loop.
   using SmemLayoutdKVaccumStore =
-      std::conditional_t<SparseInnerDxReduceUseTma && SwapBwdQKLoop && !InnerLoad_Tma, SmemLayoutdKVaccumLinear, SmemLayoutdKVaccumSwizzled>;
-  using SmemLayoutdQaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && !SwapBwdQKLoop && !InnerLoad_Tma, SmemLayoutdQaccumLinear, SmemLayoutdQaccumSwizzled>;
+      std::conditional_t<SparseInnerDxReduceUseTma && BwdInnerLoopK && !InnerLoad_Tma, SmemLayoutdKVaccumLinear, SmemLayoutdKVaccumSwizzled>;
+  using SmemLayoutdQaccumStore = std::conditional_t<SparseInnerDxReduceUseTma && !BwdInnerLoopK && !InnerLoad_Tma, SmemLayoutdQaccumLinear, SmemLayoutdQaccumSwizzled>;
   using SmemLayoutdKVaccumtStore =
       decltype(cute::composition(SmemLayoutdKVaccumStore{}, make_layout(make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_stride(Int<kBlockN>{}, _1{}))));
   using SmemLayoutdQaccumtStore =
@@ -491,8 +491,8 @@ struct CollectiveMainloopBwdSm90 {
           std::conditional_t<kNumPdSStore % 8 == 0, cute::SM90_U16x8_STSM_T, cute::SM90_U16x4_STSM_T>>,
       Element>;
 
-  using GmemTiledCopyQdO = std::conditional_t<SwapBwdQKLoop, cute::SM90_TMA_LOAD, decltype(gcd::sm90_cluster_shape_to_tma_atom(shape<1>(ClusterShape{})))>;
-  using GmemTiledCopyKV = std::conditional_t<SwapBwdQKLoop, decltype(gcd::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{}))), cute::SM90_TMA_LOAD>;
+  using GmemTiledCopyQdO = std::conditional_t<BwdInnerLoopK, cute::SM90_TMA_LOAD, decltype(gcd::sm90_cluster_shape_to_tma_atom(shape<1>(ClusterShape{})))>;
+  using GmemTiledCopyKV = std::conditional_t<BwdInnerLoopK, decltype(gcd::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{}))), cute::SM90_TMA_LOAD>;
   using GmemTiledCopydQaccum = cute::SM90_TMA_REDUCE_ADD;
   using GmemTiledCopydKVaccum = cute::SM90_TMA_REDUCE_ADD;
 
@@ -671,12 +671,12 @@ struct CollectiveMainloopBwdSm90 {
   // there, and the store warp is blocked on dXFull). InnerLoopK needs separate dV/dK staging:
   // store_dV's dVEmpty arrive lets the consumer's next-iteration dV r2s overwrite a shared
   // staging while store_dK would still be reading it. See .tmp/058 NOTES P7.
-  static constexpr int kIdxStagingSlots = !InnerDxStoreInProducer ? 0 : (SwapBwdQKLoop ? 2 : 1);
+  static constexpr int kIdxStagingSlots = !InnerDxStoreInProducer ? 0 : (BwdInnerLoopK ? 2 : 1);
 
   // Only the inner (scatter-side) tensor has token indices at all — the outer tensor is dense
   // TMA-loaded — so a single array suffices, sized by the inner tile:
-  //   InnerLoopQ (!SwapBwdQKLoop): inner = Q  (kBlockM rows) → read by the dQ scatter store.
-  //   InnerLoopK ( SwapBwdQKLoop): inner = KV (kBlockN rows) → read by the dKV scatter store.
+  //   InnerLoopQ (!BwdInnerLoopK): inner = Q  (kBlockM rows) → read by the dQ scatter store.
+  //   InnerLoopK ( BwdInnerLoopK): inner = KV (kBlockN rows) → read by the dKV scatter store.
   // Layout: [kStages stage slots][staging_dq | staging_dv, staging_dk].
   using SmemTokenIndices_t = std::conditional_t<InnerUseScatter, cute::array<int, kInnerScatterRows*(kStages + kIdxStagingSlots)>, cute::array<int, 0>>;
 
@@ -745,7 +745,7 @@ struct CollectiveMainloopBwdSm90 {
     [[no_unique_address]] SmemP_LoopK_t smem_p;
   };
 
-  using TensorStorage = std::conditional_t<SwapBwdQKLoop, TensorStorageLoopK, TensorStorageLoopQ>;
+  using TensorStorage = std::conditional_t<BwdInnerLoopK, TensorStorageLoopK, TensorStorageLoopQ>;
 
   // Host side kernel arguments
   struct Arguments {
@@ -1102,7 +1102,7 @@ struct CollectiveMainloopBwdSm90 {
         /*softcap_val=*/!Has_softcap ? 0.f : args.softmax_scale / args.softcap_val,
         /*q_ranges=*/args.q_ranges,
         /*k_ranges=*/args.k_ranges,
-        /*n_block_max_num=*/!SwapBwdQKLoop ? cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN) : cute::ceil_div(get<0>(args.shape_QdOdQ), kBlockM),
+        /*n_block_max_num=*/!BwdInnerLoopK ? cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN) : cute::ceil_div(get<0>(args.shape_QdOdQ), kBlockM),
         /*attn_type_map=*/args.attn_type_map,
         /*cu_batches=*/args.cu_batches,
         /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,
@@ -1119,11 +1119,11 @@ struct CollectiveMainloopBwdSm90 {
 
   // BlockMeta type alias — definition lives in block_meta.h
   // InnerLoopQ mapping:
-  //   SwapBwdQKLoop=true  → inner loop over n_block (InnerLoopK) → InnerLoopQ=false
-  //   SwapBwdQKLoop=false → inner loop over m_block (InnerLoopQ) → InnerLoopQ=true
-  // So: InnerLoopQ = !SwapBwdQKLoop
+  //   BwdInnerLoopK=true  → inner loop over n_block (InnerLoopK) → InnerLoopQ=false
+  //   BwdInnerLoopK=false → inner loop over m_block (InnerLoopQ) → InnerLoopQ=true
+  // So: InnerLoopQ = !BwdInnerLoopK
   template <bool IsProducer>
-  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!SwapBwdQKLoop, RangeMerge, /*FlattenGQA=*/FlattenGQA, PackGQAFactor, SeqlenInfo_t, BlockMN_t>;
+  using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/!BwdInnerLoopK, RangeMerge, /*FlattenGQA=*/FlattenGQA, PackGQAFactor, SeqlenInfo_t, BlockMN_t>;
 
   // IndexSparse InnerLoopK: outer=Q token, inner=K from forward topk indices
   template <bool IsProducer>
@@ -1252,7 +1252,7 @@ struct CollectiveMainloopBwdSm90 {
       SharedStorage& shared_storage,
       BlockMetaT& block_meta) {
     // Compile Guard Clause
-    static_assert(!SwapBwdQKLoop, "load_with_loop_q() must be called when SwapBwdQKLoop is false");
+    static_assert(!BwdInnerLoopK, "load_with_loop_q() must be called when BwdInnerLoopK is false");
     // The BlockSparse scatter loader has no per-q-head (bidh_kv_cat) loop, so CatGQA cannot
     // be expressed on this path yet. PackGQA is supported by walking q_ranges in packed-row
     // space instead (see BlockSparseBlockMeta::kScatterScale).
@@ -1744,7 +1744,7 @@ struct CollectiveMainloopBwdSm90 {
       SharedStorage& shared_storage,
       BlockMetaT& block_meta) {
     // Compile Guard Clause
-    static_assert(SwapBwdQKLoop, "load_with_loop_k() must be called when SwapBwdQKLoop is true");
+    static_assert(BwdInnerLoopK, "load_with_loop_k() must be called when BwdInnerLoopK is true");
     static_assert(!CatGQA, "load_with_loop_k() is not compatible with CatGQA");
 
     // BlockMeta: fixed per function call
@@ -2104,7 +2104,7 @@ struct CollectiveMainloopBwdSm90 {
       MainloopPipeline_dO pipeline_do,
       PipelineState& smem_pipe_write_q,
       PipelineState_dO& smem_pipe_write_do) {
-    static_assert(!SwapBwdQKLoop, "load_tail_with_loop_q() must be called when SwapBwdQKLoop is false");
+    static_assert(!BwdInnerLoopK, "load_tail_with_loop_q() must be called when BwdInnerLoopK is false");
 
     // PipelineAsync (kCpAsync): all threads must arrive.
     // PipelineTmaAsync (kTmaDense/kTma2D): single-thread arrive suffices.
@@ -2121,7 +2121,7 @@ struct CollectiveMainloopBwdSm90 {
       MainloopPipeline_V pipeline_v,
       PipelineState& smem_pipe_write_k,
       PipelineState_V& smem_pipe_write_v) {
-    static_assert(SwapBwdQKLoop, "load_tail_with_loop_k() must be called when SwapBwdQKLoop is true");
+    static_assert(BwdInnerLoopK, "load_tail_with_loop_k() must be called when BwdInnerLoopK is true");
 
     // PipelineAsync (kCpAsync): all threads must arrive.
     // PipelineTmaAsync (kTma): single-thread arrive suffices.
@@ -2137,7 +2137,7 @@ struct CollectiveMainloopBwdSm90 {
   // consumer WG0 under the dQEmpty/dQFull handshake (no pipeline state needed here).
   template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
-    static_assert(!SwapBwdQKLoop, "store_dq() must be called when SwapBwdQKLoop is false");
+    static_assert(!BwdInnerLoopK, "store_dq() must be called when BwdInnerLoopK is false");
 
     // !InnerDxStoreInProducer: dQ store is handled by the MMA consumer threads, not by producer.
     if constexpr (!InnerDxStoreInProducer) {
@@ -2394,7 +2394,7 @@ struct CollectiveMainloopBwdSm90 {
   // copied there by consumer WG0 under the respective Empty/Full handshakes.
   template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename BlockMetaT>
   CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, BlockMetaT& block_meta) {
-    static_assert(SwapBwdQKLoop, "store_dkv() must be called when SwapBwdQKLoop is true");
+    static_assert(BwdInnerLoopK, "store_dkv() must be called when BwdInnerLoopK is true");
     static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
     if constexpr (!dKVacc_use_smem || DkvaccBypassSmem) {
@@ -2569,7 +2569,7 @@ struct CollectiveMainloopBwdSm90 {
 
   // Initialize MMA consumers
   CUTLASS_DEVICE void mma_init() {
-    if constexpr (SwapBwdQKLoop) { // q for outer-loop and k for inner-loop
+    if constexpr (BwdInnerLoopK) { // q for outer-loop and k for inner-loop
       // Tell producer that smem_q and smem_do are ready
       BarrierManager::arrive<NumMmaThreads + NumKVEmptyProducerThreads>(BwdNamedBarriers::QdOEmpty);
 
@@ -2623,7 +2623,7 @@ struct CollectiveMainloopBwdSm90 {
       int& work_idx,
       BlockMetaT& block_meta,
       SharedStorage& shared_storage) {
-    static_assert(!SwapBwdQKLoop, "mma_with_loop_q() must be called when SwapBwdQKLoop is false");
+    static_assert(!BwdInnerLoopK, "mma_with_loop_q() must be called when BwdInnerLoopK is false");
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
     /* DEBUG */
@@ -3122,7 +3122,7 @@ struct CollectiveMainloopBwdSm90 {
             BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warp_group_idx);
           }
         } else { // directly atomic reduce-add to global memory
-          static_assert(!(InnerUseScatter && !SwapBwdQKLoop), "BlockSparse InnerLoopQ requires dQacc_use_smem (kHeadDim <= 128)");
+          static_assert(!(InnerUseScatter && !BwdInnerLoopK), "BlockSparse InnerLoopQ requires dQacc_use_smem (kHeadDim <= 128)");
           // We can reuse r2s_thr_copy_dQaccum for this partitioning
           Tensor tdQrdQ_atomic = recast<float4>(r2s_thr_copy_dQaccum.retile_S(tdQrdQ));
           Tensor tdQgdQaccum_atomic = recast<float4>(tdQgdQaccum(_, _, _, _, _, m_block));
@@ -3213,7 +3213,7 @@ struct CollectiveMainloopBwdSm90 {
         // the contiguous K window (last n_block may overhang seqlen_k) —
         // symmetric with InnerLoopK, where the roles of rows/columns are swapped.
         bool const need_row_mask = block_meta.inner_block_idx == block_meta.padding_block() && block_meta.num_invalid_token > 0;
-        int const num_invalid_k_token = !SwapBwdQKLoop ? cute::max(0, (block_meta.outer_tile_idx + 1) * kBlockN - block_meta.seqlen_info.seqlen_k) : 0;
+        int const num_invalid_k_token = !BwdInnerLoopK ? cute::max(0, (block_meta.outer_tile_idx + 1) * kBlockN - block_meta.seqlen_info.seqlen_k) : 0;
         bool const need_col_mask = num_invalid_k_token > 0;
         auto combined_mask_fn = [&](int /*m_blk*/) {
           if (need_col_mask) {
@@ -3312,7 +3312,7 @@ struct CollectiveMainloopBwdSm90 {
       int& work_idx,
       BlockMetaT& block_meta,
       SharedStorage& shared_storage) {
-    static_assert(SwapBwdQKLoop, "mma_with_loop_k() must be called when SwapBwdQKLoop is true");
+    static_assert(BwdInnerLoopK, "mma_with_loop_k() must be called when BwdInnerLoopK is true");
     static_assert(!CatGQA, "mma_with_loop_k() is not implemented for CatGQA");
     static_assert(is_rmem<FrgTensordQ>::value, "dQ tensor must be rmem resident.");
 
@@ -3546,7 +3546,7 @@ struct CollectiveMainloopBwdSm90 {
       // NOTE: if Mma_dP_is_RS, then SdP_SwapAB must be true,
       // then we have to copy current n block of V to registers every iteration,
       // which seems unacceptable for loop-k settings
-      static_assert(!Mma_dP_is_RS, "Mma_dP_is_RS is not supported yet when SwapBwdQKLoop is true.");
+      static_assert(!Mma_dP_is_RS, "Mma_dP_is_RS is not supported yet when BwdInnerLoopK is true.");
     }
 
     Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
