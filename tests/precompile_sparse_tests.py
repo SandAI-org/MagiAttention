@@ -47,7 +47,7 @@ def _spec(
     pack_gqa_factor=1,
     block_sparse=False,
     index_sparse=False,
-    swap_bwd_qk_loop=False,
+    bwd_inner_loop_k=False,
     sparse_k_block_size=1,
     deterministic=False,
     bwd_dq_bf16=False,
@@ -75,7 +75,7 @@ def _spec(
         pack_gqa_factor=pack_gqa_factor,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
         sparse_k_block_size=sparse_k_block_size,
@@ -109,7 +109,7 @@ def collect_specs():
                         pack_gqa_factor=pack_f,
                         block_sparse=True,
                         auto_range_merge=True,
-                        swap_bwd_qk_loop=sbql,
+                        bwd_inner_loop_k=sbql,
                         sparse_k_block_size=kbs,
                     )
                 )
@@ -121,7 +121,7 @@ def collect_specs():
                         pack_gqa_factor=1,
                         block_sparse=True,
                         auto_range_merge=True,
-                        swap_bwd_qk_loop=False,
+                        bwd_inner_loop_k=False,
                         sparse_k_block_size=kbs,
                     )
                 )
@@ -138,7 +138,7 @@ def collect_specs():
                     auto_range_merge=True,
                 )
             )
-            # sparse loopq (bwd only uses swap_bwd_qk_loop=False for loopq)
+            # sparse loopq (bwd only uses bwd_inner_loop_k=False for loopq)
             specs.append(
                 _spec(
                     direction=d,
@@ -175,7 +175,7 @@ def collect_specs():
                 direction="bwd",
                 block_sparse=True,
                 auto_range_merge=True,
-                swap_bwd_qk_loop=True,
+                bwd_inner_loop_k=True,
             )
         )
 
@@ -198,7 +198,7 @@ def collect_specs():
                     pack_gqa_factor=pack_f,
                     block_sparse=True,
                     auto_range_merge=True,
-                    swap_bwd_qk_loop=sbql,
+                    bwd_inner_loop_k=sbql,
                     disable_atomic=True,
                     disable_dq_atomic=(d == "bwd" and swap_bwd),
                     sparse_k_block_size=1,
@@ -233,7 +233,7 @@ def collect_specs():
                     pack_gqa=pgqa,
                     pack_gqa_factor=pack_f,
                     index_sparse=True,
-                    swap_bwd_qk_loop=sbql,
+                    bwd_inner_loop_k=sbql,
                     sparse_k_block_size=1,
                 )
             )
@@ -251,7 +251,7 @@ def collect_specs():
                     pack_gqa=pgqa,
                     pack_gqa_factor=pack_f,
                     index_sparse=True,
-                    swap_bwd_qk_loop=sbql,
+                    bwd_inner_loop_k=sbql,
                     sparse_k_block_size=1,
                 )
             )
@@ -271,7 +271,7 @@ def collect_specs():
                     pack_gqa=True,
                     pack_gqa_factor=128,
                     index_sparse=True,
-                    swap_bwd_qk_loop=sbql,
+                    bwd_inner_loop_k=sbql,
                     disable_atomic=True,
                     disable_dq_atomic=(d == "bwd" and swap_bwd is True),
                     sparse_k_block_size=1,
@@ -281,123 +281,104 @@ def collect_specs():
             )
 
     # ── TestBlockSparseComprehensiveSweep ──
-
-    # MQA128 configs: pack_gqa_factor=128, kBlockM=64 (assertion-fixed)
-    for d in ("fwd", "bwd"):
-        sbql = True if d == "bwd" else False
-        specs.append(
-            _spec(
-                direction=d,
-                ref_block_size=(64, 128) if d == "fwd" else None,
-                pack_gqa=True,
-                pack_gqa_factor=128,
-                block_sparse=True,
-                auto_range_merge=True,
-                swap_bwd_qk_loop=sbql,
-                sparse_k_block_size=1,
-            )
-        )
-
-    # D=64 variants
-    for d in ("fwd", "bwd"):
-        sbql = True if d == "bwd" else False
-        # MHA D=64
-        specs.append(
-            _spec(
-                direction=d,
-                head_dim=64,
-                ref_block_size=(64, 128) if d == "fwd" else None,
-                pack_gqa=False,
-                pack_gqa_factor=1,
-                block_sparse=True,
-                auto_range_merge=True,
-                swap_bwd_qk_loop=sbql,
-            )
-        )
-        # GQA D=64
-        specs.append(
-            _spec(
-                direction=d,
-                head_dim=64,
-                ref_block_size=(64, 128) if d == "fwd" else None,
-                pack_gqa=True,
-                pack_gqa_factor=2,
-                block_sparse=True,
-                auto_range_merge=True,
-                swap_bwd_qk_loop=sbql,
-            )
-        )
-
-    # ── TestIndexSparseComprehensiveSweep ──
-
-    # kbs=256 (FWD only — BWD BwdTileN=256 exceeds SM90 smem limit)
-    specs.append(
-        _spec(
-            direction="fwd",
-            pack_gqa=True,
-            pack_gqa_factor=128,
-            index_sparse=True,
-            swap_bwd_qk_loop=False,
-            sparse_k_block_size=256,
-        )
-    )
-
-    # kbs=128 (already in Simple, but ensure included)
-    for d in ("fwd", "bwd"):
-        specs.append(
-            _spec(
-                direction=d,
-                pack_gqa=True,
-                pack_gqa_factor=128,
-                index_sparse=True,
-                swap_bwd_qk_loop=False,
-                sparse_k_block_size=128,
-            )
-        )
-
-    # kbs=8, kbs=32
-    for kbs in (8, 32):
-        for d in ("fwd", "bwd"):
+    # Runtime auto-flags for block_sparse (flex_flash_attn_func):
+    #   FWD: disable_atomic=True, ref_block_size overridden to (128,128)
+    #   BWD: disable_dq_atomic=True + dq_dtype=bf16 when bwd_inner_loop_k=True
+    #   sparse_k_block_size: auto-derived from k_ranges (= k_size in block config)
+    comprehensive_block_sparse = [
+        # (pack_gqa_factor, sparse_k_block_size_list, head_dim)
+        # Cross-product: nhq_nhk_hd × q_size_k_size → kbs from k_size
+        (1, [1, 8, 64, 128], 128),  # MHA8 (nhq=8,nhk=8)
+        (4, [1, 8, 64, 128], 128),  # GQA16x4 (nhq=16,nhk=4)
+        (128, [1, 8, 64, 128], 128),  # MQA128 (nhq=128,nhk=1)
+        (1, [1, 8, 64, 128], 64),  # MHA1 D=64 (nhq=1,nhk=1)
+        (2, [1, 8, 64, 128], 64),  # GQA4x2 D=64 (nhq=4,nhk=2)
+    ]
+    for pgqa, kbs_list, hd in comprehensive_block_sparse:
+        for kbs in kbs_list:
             specs.append(
                 _spec(
-                    direction=d,
+                    direction="fwd",
+                    head_dim=hd,
+                    ref_block_size=(128, 128),
+                    disable_atomic=True,
                     pack_gqa=True,
-                    pack_gqa_factor=128,
-                    index_sparse=True,
-                    swap_bwd_qk_loop=False,
+                    pack_gqa_factor=pgqa,
+                    block_sparse=True,
+                    auto_range_merge=True,
                     sparse_k_block_size=kbs,
                 )
             )
-
-    # Various GQA factors for IndexSparse comprehensive
-    for nhq, nhk in [(64, 1), (32, 1), (16, 1), (4, 1), (128, 2), (32, 4), (4, 2)]:
-        pack_f = nhq // nhk
-        for d in ("fwd", "bwd"):
             specs.append(
                 _spec(
-                    direction=d,
+                    direction="bwd",
+                    head_dim=hd,
+                    disable_dq_atomic=True,
                     pack_gqa=True,
-                    pack_gqa_factor=pack_f,
-                    index_sparse=True,
-                    swap_bwd_qk_loop=False,
-                    sparse_k_block_size=1,
+                    pack_gqa_factor=pgqa,
+                    block_sparse=True,
+                    auto_range_merge=True,
+                    bwd_inner_loop_k=True,
+                    sparse_k_block_size=kbs,
+                    bwd_dq_bf16=True,
                 )
             )
 
-    # D=64 IndexSparse variants (D=64 uses kBlockM=192, PackGQA epilogue not supported)
-    for nhq, nhk in [(64, 1), (8, 2), (4, 4)]:
+    # ── TestIndexSparseComprehensiveSweep ──
+    # Cross-product: nhq_nhk_hd_packgqa × kbs
+    # kbs>1 only for NHK=1, pack_gqa=True, D=128
+
+    # kbs=1: all unique (pack_gqa, pack_gqa_factor, head_dim) after view-trick
+    idx_comp_kbs1 = [
+        (True, 128, 128),  # MQA128
+        (True, 64, 128),  # MQA64 / GQA128x2 rearranged
+        (True, 32, 128),  # MQA32
+        (True, 16, 128),  # MQA16
+        (True, 8, 128),  # GQA32x4 rearranged
+        (True, 4, 128),  # MQA4
+        (True, 2, 128),  # GQA4x2 rearranged
+        (True, 1, 128),  # MHA8 rearranged
+        (False, 1, 64),  # D=64 no packgqa
+    ]
+    for pgqa_on, pgqa_f, hd in idx_comp_kbs1:
         for d in ("fwd", "bwd"):
             specs.append(
                 _spec(
                     direction=d,
-                    head_dim=64,
-                    pack_gqa=False,
-                    pack_gqa_factor=1,
+                    head_dim=hd,
+                    pack_gqa=pgqa_on,
+                    pack_gqa_factor=pgqa_f,
                     index_sparse=True,
-                    swap_bwd_qk_loop=False,
+                    bwd_inner_loop_k=False,
                     sparse_k_block_size=1,
                 )
             )
+
+    # kbs>1: MQA configs (NHK=1, pack_gqa=True, D=128)
+    for pgqa_f in [128, 64, 32, 16, 4]:
+        for kbs in [8, 32, 128]:
+            for d in ("fwd", "bwd"):
+                specs.append(
+                    _spec(
+                        direction=d,
+                        pack_gqa=True,
+                        pack_gqa_factor=pgqa_f,
+                        index_sparse=True,
+                        bwd_inner_loop_k=False,
+                        sparse_k_block_size=kbs,
+                    )
+                )
+        # kbs=256: FWD only (BWD exceeds SM90 smem limit)
+        specs.append(
+            _spec(
+                direction="fwd",
+                pack_gqa=True,
+                pack_gqa_factor=pgqa_f,
+                index_sparse=True,
+                bwd_inner_loop_k=False,
+                sparse_k_block_size=256,
+            )
+        )
 
     # Inner-mode variants: require env vars set during spec generation
     inner_mode_envs = [
@@ -418,7 +399,7 @@ def collect_specs():
                     pack_gqa=True,
                     pack_gqa_factor=128,
                     index_sparse=True,
-                    swap_bwd_qk_loop=False,
+                    bwd_inner_loop_k=False,
                     sparse_k_block_size=1,
                 )
             )

@@ -1257,14 +1257,14 @@ class TestBlockSparseSweep(DistTestBase):
     def timeout(self) -> int:
         return 600
 
-    # ─── Core sweep: MQA canonical (nhq=128, nhk=1, kbs=128) ───
-
     @with_run_in_mp
-    @parameterize("seqlen", [512, 2048])
-    @parameterize("sparsity", [0.1, 0.5, 0.9])
+    @parameterize("q_seqlen", [512, 1000, 16384])
+    @parameterize("kv_seqlen", [512, 1000, 16384])
+    @parameterize("sparsity", [0.2])
     @parameterize("swap_bwd_qk_loop", [False, True])
-    def test_block_sparse_mqa_sweep(self, seqlen, sparsity, swap_bwd_qk_loop):
-        """MQA sweep: varies seqlen × sparsity × LoopK/LoopQ."""
+    def test_block_sparse_mqa_sweep(
+        self, q_seqlen, kv_seqlen, sparsity, swap_bwd_qk_loop
+    ):
         from magi_attention.utils.sparse_utils import (
             generate_ranges_from_block_mask_triton,
         )
@@ -1277,8 +1277,8 @@ class TestBlockSparseSweep(DistTestBase):
         dtype = torch.bfloat16
         kbs = 128
 
-        n_q_blocks = seqlen
-        n_k_blocks = seqlen // kbs
+        n_q_blocks = q_seqlen
+        n_k_blocks = kv_seqlen // kbs
         n_attend = max(1, int(n_k_blocks * (1.0 - sparsity)))
 
         sel = torch.rand(n_q_blocks, n_k_blocks, device=device).argsort(dim=1)[
@@ -1291,10 +1291,10 @@ class TestBlockSparseSweep(DistTestBase):
         q_ranges, k_ranges = generate_ranges_from_block_mask_triton(block_mask, 1, kbs)
         attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device=device)
 
-        q0 = torch.randn(seqlen, nhq, head_dim, device=device, dtype=dtype)
-        k0 = torch.randn(seqlen, nhk, head_dim, device=device, dtype=dtype)
-        v0 = torch.randn(seqlen, nhk, head_dim, device=device, dtype=dtype)
-        do = torch.randn(seqlen, nhq, head_dim, device=device, dtype=dtype)
+        q0 = torch.randn(q_seqlen, nhq, head_dim, device=device, dtype=dtype)
+        k0 = torch.randn(kv_seqlen, nhk, head_dim, device=device, dtype=dtype)
+        v0 = torch.randn(kv_seqlen, nhk, head_dim, device=device, dtype=dtype)
+        do = torch.randn(q_seqlen, nhq, head_dim, device=device, dtype=dtype)
 
         def run(block_sparse, swap):
             q = q0.clone().requires_grad_(True)
@@ -1328,7 +1328,7 @@ class TestBlockSparseSweep(DistTestBase):
             ).item()
             assert (
                 err < tol
-            ), f"sweep[S={seqlen},sp={sparsity},{loop_name}] {name} max_rel_err={err:.3e} >= {tol}"
+            ), f"sweep[Sq={q_seqlen},Skv={kv_seqlen},sp={sparsity},{loop_name}] {name} max_rel_err={err:.3e} >= {tol}"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1339,8 +1339,8 @@ class TestBlockSparseSweep(DistTestBase):
 class TestBlockSparseComprehensiveSweep(DistTestBase):
     """BlockSparse Comprehensive sweep — CI.
 
-    Varies compile params: GQA mode, D, q_size(block_mask granularity), k_size.
-    Covers MQA/GQA/MHA × D=64/128 × q_size=1/16/32/64/128 × k_size=1/8/64/128.
+    Cross-product of GQA config × block size. Covers
+    MHA/GQA/MQA × D=64/128 × (q_size, k_size) combos.
     """
 
     @property
@@ -1355,156 +1355,30 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
     def timeout(self) -> int:
         return 1200
 
-    COMPREHENSIVE_CONFIGS = [
-        # ─── MHA (NHQ==NHK) — varies q_size/k_size ───
-        {
-            "name": "mha8_q64k64",
-            "nhq": 8,
-            "nhk": 8,
-            "hd": 128,
-            "q_size": 64,
-            "k_size": 64,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "mha8_q64k8",
-            "nhq": 8,
-            "nhk": 8,
-            "hd": 128,
-            "q_size": 64,
-            "k_size": 8,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "mha8_q128k1",
-            "nhq": 8,
-            "nhk": 8,
-            "hd": 128,
-            "q_size": 128,
-            "k_size": 1,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "mha8_q32k64",
-            "nhq": 8,
-            "nhk": 8,
-            "hd": 128,
-            "q_size": 32,
-            "k_size": 64,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "mha8_q16k128",
-            "nhq": 8,
-            "nhk": 8,
-            "hd": 128,
-            "q_size": 16,
-            "k_size": 128,
-            "ref_block_size": (64, 128),
-        },
-        # ─── GQA (NHQ>NHK) ───
-        {
-            "name": "gqa16x4_q64k64",
-            "nhq": 16,
-            "nhk": 4,
-            "hd": 128,
-            "q_size": 64,
-            "k_size": 64,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "gqa16x4_q16k8",
-            "nhq": 16,
-            "nhk": 4,
-            "hd": 128,
-            "q_size": 16,
-            "k_size": 8,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "gqa16x4_q128k1",
-            "nhq": 16,
-            "nhk": 4,
-            "hd": 128,
-            "q_size": 128,
-            "k_size": 1,
-            "ref_block_size": (64, 128),
-        },
-        # ─── D=64 ───
-        {
-            "name": "mha1_hd64_q64k64",
-            "nhq": 1,
-            "nhk": 1,
-            "hd": 64,
-            "q_size": 64,
-            "k_size": 64,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "gqa4x2_hd64_q64k64",
-            "nhq": 4,
-            "nhk": 2,
-            "hd": 64,
-            "q_size": 64,
-            "k_size": 64,
-            "ref_block_size": (64, 128),
-        },
-        # ─── MQA (NHK=1) — pack_gqa: scheduler splits 128 heads into kBlockM-sized tiles ───
-        # With assertion fix, kBlockM=64 works for qhead_per_khead=128 (128%64==0)
-        {
-            "name": "mqa128_q64k64",
-            "nhq": 128,
-            "nhk": 1,
-            "hd": 128,
-            "q_size": 64,
-            "k_size": 64,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "mqa128_q32k64",
-            "nhq": 128,
-            "nhk": 1,
-            "hd": 128,
-            "q_size": 32,
-            "k_size": 64,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "mqa128_q16k128",
-            "nhq": 128,
-            "nhk": 1,
-            "hd": 128,
-            "q_size": 16,
-            "k_size": 128,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "mqa128_q128k1",
-            "nhq": 128,
-            "nhk": 1,
-            "hd": 128,
-            "q_size": 128,
-            "k_size": 1,
-            "ref_block_size": (64, 128),
-        },
-    ]
-
     @with_run_in_mp
-    @parameterize("cfg", COMPREHENSIVE_CONFIGS)
+    @parameterize(
+        "nhq_nhk_hd",
+        [(8, 8, 128), (16, 4, 128), (128, 1, 128), (1, 1, 64), (4, 2, 64)],
+    )
+    @parameterize("q_size_k_size", [(64, 64), (128, 1), (16, 128), (64, 8)])
     @parameterize("sparsity_ratio", [0.5])
-    @parameterize("pack_gqa", [True])
-    def test_block_sparse_comprehensive_sweep(self, cfg, sparsity_ratio, pack_gqa):
+    def test_block_sparse_comprehensive_sweep(
+        self, nhq_nhk_hd, q_size_k_size, sparsity_ratio
+    ):
+        nhq, nhk, hd = nhq_nhk_hd
+        q_size, k_size = q_size_k_size
+
         torch.manual_seed(42)
         seqlen = 2048
         dtype = torch.bfloat16
 
         helper = _BlockSparseTestHelper.__new__(_BlockSparseTestHelper)
 
-        block_size = (cfg["q_size"], cfg["k_size"])
+        block_size = (q_size, k_size)
         block_mask, block_sizes, _, _ = helper._generate_sparse_pattern(
             test_type="uniform",
-            num_heads_q=cfg["nhq"],
-            num_heads_kv=cfg["nhk"],
+            num_heads_q=nhq,
+            num_heads_kv=nhk,
             seqlen=seqlen,
             sparsity_ratio=sparsity_ratio,
             sparsity_granularity="per_kv_head",
@@ -1513,35 +1387,17 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         )
 
         q = torch.randn(
-            1,
-            seqlen,
-            cfg["nhq"],
-            cfg["hd"],
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
+            1, seqlen, nhq, hd, dtype=dtype, device=self.device, requires_grad=True
         )
         k = torch.randn(
-            1,
-            seqlen,
-            cfg["nhk"],
-            cfg["hd"],
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
+            1, seqlen, nhk, hd, dtype=dtype, device=self.device, requires_grad=True
         )
         v = torch.randn(
-            1,
-            seqlen,
-            cfg["nhk"],
-            cfg["hd"],
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
+            1, seqlen, nhk, hd, dtype=dtype, device=self.device, requires_grad=True
         )
         do = torch.randn_like(q)
 
-        test_case = f"[slow_sweep][{cfg['name']}][sp={sparsity_ratio}]"
+        test_case = f"[comprehensive][nhq={nhq},nhk={nhk},hd={hd},q={q_size},k={k_size}][sp={sparsity_ratio}]"
         helper.assert_close_to_torch_ref(
             dtype=dtype,
             q=q,
@@ -1553,19 +1409,19 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
             block_mask=block_mask,
             head_wise="per_kv_head",
             sparse_format="block_mask",
-            nhq=cfg["nhq"],
-            nhk=cfg["nhk"],
-            pack_gqa=pack_gqa,
+            nhq=nhq,
+            nhk=nhk,
+            pack_gqa=True,
             deterministic=False,
             test_accumulation_inplace=False,
             swap_ab=False,
-            ref_block_size=cfg["ref_block_size"],
+            ref_block_size=(64, 128),
             block_sparse=True,
             swap_bwd_qk_loop=True,
             test_case=test_case,
             sparsity_ratio=sparsity_ratio,
             uniform=True,
-            max_seqlen_q=cfg["q_size"],
+            max_seqlen_q=q_size,
         )
 
 

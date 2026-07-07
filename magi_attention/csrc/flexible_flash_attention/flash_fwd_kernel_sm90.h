@@ -35,6 +35,7 @@
 #include <cutlass/arch/grid_dependency_control.h>
 
 #include "fwd_tile_scheduler.hpp"
+#include "inner_mode.hpp"
 #include "mask.h"
 #include "softmax.h"
 #include "utils.h"
