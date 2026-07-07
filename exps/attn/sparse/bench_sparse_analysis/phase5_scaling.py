@@ -197,15 +197,9 @@ def _phase5_bench(force=False):
 
                     elif method == "block_sparse":
                         # BlockSparse: S=4×topk, per-Q selects topk KV
-                        q = torch.randn(
-                            S, NHQ, HD, dtype=torch.bfloat16, device=device
-                        )
-                        k = torch.randn(
-                            S, NHK, HD, dtype=torch.bfloat16, device=device
-                        )
-                        v = torch.randn(
-                            S, NHK, HD, dtype=torch.bfloat16, device=device
-                        )
+                        q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
+                        k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+                        v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
                         if is_bwd:
                             q.requires_grad_(True)
                             k.requires_grad_(True)
@@ -223,15 +217,9 @@ def _phase5_bench(force=False):
                         flops_S = S
 
                     else:  # index_sparse
-                        q = torch.randn(
-                            S, NHQ, HD, dtype=torch.bfloat16, device=device
-                        )
-                        k = torch.randn(
-                            S, NHK, HD, dtype=torch.bfloat16, device=device
-                        )
-                        v = torch.randn(
-                            S, NHK, HD, dtype=torch.bfloat16, device=device
-                        )
+                        q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
+                        k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+                        v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
                         if is_bwd:
                             q.requires_grad_(True)
                             k.requires_grad_(True)
@@ -289,12 +277,18 @@ def _phase5_bench(force=False):
 
 def _print_summary(results):
     """Print a summary table of all S × pass × method."""
-    print("\n  ╔════════════╦════════════════════════════════════════"
-          "════════════════════════════════════════════════════════════╗")
-    print("  ║   S (topk) ║  fwd                          "
-          "bwd_loopk                    bwd_loopq                   ║")
-    print("  ╠════════════╬════════════════════════════════════════"
-          "════════════════════════════════════════════════════════════╣")
+    print(
+        "\n  ╔════════════╦════════════════════════════════════════"
+        "════════════════════════════════════════════════════════════╗"
+    )
+    print(
+        "  ║   S (topk) ║  fwd                          "
+        "bwd_loopk                    bwd_loopq                   ║"
+    )
+    print(
+        "  ╠════════════╬════════════════════════════════════════"
+        "════════════════════════════════════════════════════════════╣"
+    )
     for S in S_VALUES:
         topk = S // TOPK_RATIO
         print(f"  ║ {S // 1024:>3d}k ({topk // 1024:>2d}k) ║", end="")
@@ -313,9 +307,13 @@ def _print_summary(results):
                     print("     -", end="")
             print(" │", end="")
         print(" ║")
-    print("  ╚════════════╩════════════════════════════════════════"
-          "════════════════════════════════════════════════════════════╝")
-    print("  (columns per pass: d1b / d1b_nopg / dense_nb / block_sparse / index_sparse)")
+    print(
+        "  ╚════════════╩════════════════════════════════════════"
+        "════════════════════════════════════════════════════════════╝"
+    )
+    print(
+        "  (columns per pass: d1b / d1b_nopg / dense_nb / block_sparse / index_sparse)"
+    )
 
 
 def _phase5_plot():
@@ -402,10 +400,7 @@ def _phase5_plot():
         ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
         ax.set_xticklabels(
-            [
-                f"{t // 1024}K\n(S={S // 1024}K)"
-                for t, S in zip(topk_values, S_VALUES)
-            ],
+            [f"{t // 1024}K\n(S={S // 1024}K)" for t, S in zip(topk_values, S_VALUES)],
             fontsize=10,
         )
         ax.tick_params(axis="y", labelsize=11)
@@ -434,6 +429,8 @@ def _phase5_ncu():
     os.makedirs(out, exist_ok=True)
 
     ncu_bin = "/usr/local/cuda/bin/ncu"
+    if not os.path.exists(ncu_bin):
+        ncu_bin = "/usr/local/cuda-12.8/bin/ncu"
     if not os.path.exists(ncu_bin):
         ncu_bin = os.path.join(
             os.environ.get("CUDA_HOME", "/usr/local/cuda"), "bin", "ncu"
