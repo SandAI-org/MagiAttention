@@ -96,6 +96,52 @@ class BlockInfo:
         return m_block_min, m_block_max
 
     @cute.jit
+    def get_m_block_causal_nomask_start(
+        self,
+        seqlen_info: SeqlenInfoQK,
+        n_block: Int32,
+        m_block_min: Int32,
+        m_block_max: Int32,
+    ) -> Int32:
+        """First M block entirely below the causal diagonal (no mask needed).
+
+        For BWD LoopK MaskMode zone dispatch (matching C++ mask_dispatch Axis=M).
+        Blocks in [m_block_min, result) need causal mask;
+        blocks in [result, m_block_max) are fully valid and can skip mask.
+        """
+        if const_expr(not self.is_causal):
+            result = m_block_min
+        else:
+            n_idx_max = (n_block + 1) * self.tile_n
+            cv = n_idx_max + seqlen_info.seqlen_q - seqlen_info.seqlen_k
+            result = cutlass.min(
+                m_block_max,
+                cutlass.max(m_block_min, cute.ceil_div(cutlass.max(cv, 1), self.tile_m)),
+            )
+        return result
+
+    @cute.jit
+    def get_m_block_local_nomask_end(
+        self,
+        seqlen_info: SeqlenInfoQK,
+        n_block: Int32,
+        m_block_max: Int32,
+    ) -> Int32:
+        """Last M block before local window_left masking kicks in.
+
+        For BWD LoopK with local masking: blocks in [result, m_block_max) need
+        local mask re-applied.  When not using local, returns m_block_max.
+        """
+        if const_expr(not self.is_local or self.window_size_left is None):
+            result = m_block_max
+        else:
+            n_idx_min = n_block * self.tile_n
+            m_idx = n_idx_min + seqlen_info.seqlen_q - seqlen_info.seqlen_k
+            m_idx_left = m_idx + self.window_size_left
+            result = cutlass.min(m_block_max, cutlass.max(0, m_idx_left // self.tile_m))
+        return result
+
+    @cute.jit
     def get_n_block_k_new_min_max(
         self,
         seqlen_info: SeqlenInfoQKNewK,

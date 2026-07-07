@@ -2488,6 +2488,10 @@ class FFAFwdSm90:
                         )
 
                     # --- The remaining iterations have no masking ---
+                    # When mask_mod is None, skip mask entirely and disable
+                    # the -inf check in softmax (MaskMode dispatch optimization,
+                    # matching C++ kMaskMode=1 no_mask_fn + Check_inf=false).
+                    _no_mask_skip = const_expr(self.mask_mod is None)
 
                     n_block_min_before_local_mask = (
                         block_info.get_n_block_min_before_local_mask(
@@ -2505,9 +2509,14 @@ class FFAFwdSm90:
                             mma_pv_fn=partial(
                                 mma_pv_fn, zero_init=not O_should_accumulate
                             ),
-                            mask_fn=partial(
-                                mask_fn, mask_mod=self.mask_mod, mask_seqlen=False
+                            mask_fn=None
+                            if _no_mask_skip
+                            else partial(
+                                mask_fn,
+                                mask_mod=self.mask_mod,
+                                mask_seqlen=False,
                             ),
+                            check_inf=not _no_mask_skip,
                             is_print_thread_and_tile=(
                                 is_print_thread_and_tile and n_tile == 0
                             ),

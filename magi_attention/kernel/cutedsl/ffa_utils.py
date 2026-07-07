@@ -310,6 +310,41 @@ class BwdConfig:
     dQ_single_wg: bool = False
 
 
+def tile_size_bwd_sm90_loopq(head_dim: int) -> BwdConfig:
+    """Return BwdConfig for SM90 BWD LoopQ (SwapBwdQKLoop=true).
+
+    Matches C++ ``tile_size_bwd_sm90<true>`` in tile_size.h: smaller tile_n
+    to fit smem_dkacc/smem_dvacc alongside pipelined K/V.
+    """
+    if head_dim <= 64:
+        return BwdConfig(
+            m_block_size=64,
+            n_block_size=128,
+            num_stages_Q=1,
+            num_stages_dO=1,
+            num_stages_PdS=1,
+            SdP_swapAB=True,
+            dKV_swapAB=False,
+            dQ_swapAB=False,
+            AtomLayoutMSdP=1,
+            AtomLayoutNdKV=2,
+            AtomLayoutMdQ=1,
+        )
+    return BwdConfig(
+        m_block_size=64,
+        n_block_size=64,
+        num_stages_Q=1,
+        num_stages_dO=1,
+        num_stages_PdS=1,
+        SdP_swapAB=True,
+        dKV_swapAB=False,
+        dQ_swapAB=False,
+        AtomLayoutMSdP=1,
+        AtomLayoutNdKV=1,
+        AtomLayoutMdQ=1,
+    )
+
+
 def tile_size_bwd_sm90(head_dim, head_dim_v, causal, local, sparse_block_size_q=None):
     """Return BwdConfig for SM90.
 
@@ -530,6 +565,40 @@ def is_ffa_2cta_disabled(is_fwd: bool = False) -> bool:
         return _ffa_disable_2cta_enabled or _is_cuda_12()
     else:
         return _ffa_disable_2cta_enabled
+
+
+def get_ffa_inner_dir_max_to_min() -> bool:
+    """Inner loop traversal direction for sparse/causal attention.
+
+    True (default)  = MaxToMin — process most-recent K blocks first.
+    False           = MinToMax — process oldest K blocks first.
+    Maps to C++ ``kInnerDirMaxToMin``.
+    """
+    return os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_INNER_DIR_MAX_TO_MIN", "1") != "0"
+
+
+def get_ffa_inner_load_mode() -> int:
+    """Sparse inner load strategy: 0=TMA-2D, 1=TMA-1D, 2=CpAsync (default=2).
+
+    Maps to C++ ``kInnerLoadMode``.
+    """
+    return int(os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_INNER_LOAD_MODE", "2"))
+
+
+def get_ffa_inner_store_mode() -> int:
+    """BWD sparse inner dX store strategy: 1=TMA-1D-reduce-add, 2=CpAsync-atomic (default=1).
+
+    Maps to C++ ``kInnerStoreMode``.
+    """
+    return int(os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_INNER_STORE_MODE", "1"))
+
+
+def get_ffa_swap_bwd_qk_loop() -> bool:
+    """BWD loop strategy: True=LoopQ (outer Q, inner K), False=LoopK (default).
+
+    LoopQ gives +27-65% speedup for sparse BWD at S>=64K.
+    Maps to C++ ``SwapBwdQKLoop``."""
+    return os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_SWAP_BWD_QK_LOOP", "0") != "0"
 
 
 def _compute_base_hash(func: Callable) -> str:

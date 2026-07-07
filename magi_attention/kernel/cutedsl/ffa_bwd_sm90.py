@@ -49,6 +49,7 @@ from .range_info_sm90 import (
 )
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
+from .index_sparse_sm90 import compute_actual_topk
 from .sparse_load_sm90 import _compute_total_k_tokens, _inner_idx_to_abs_n_block
 from .sparse_utils import (
     BlockSparseTensors,
@@ -100,6 +101,7 @@ class FFABwdSm90:
         equal_k_range_size: bool = False,
         index_sparse: bool = False,
         index_sparse_max_topk: int = 0,
+        swap_bwd_qk_loop: bool = False,
         debug_print: bool = False,
     ):
         self.dtype = dtype
@@ -132,7 +134,8 @@ class FFABwdSm90:
         self.dO_stage = dO_stage
         self.PdS_stage = PdS_stage
         assert self.dO_stage in [1, self.Q_stage]
-        assert self.PdS_stage in [1, self.Q_stage]
+        if not swap_bwd_qk_loop:
+            assert self.PdS_stage in [1, self.Q_stage]
 
         self.SdP_swapAB = SdP_swapAB
         self.dKV_swapAB = dKV_swapAB
@@ -194,6 +197,7 @@ class FFABwdSm90:
         self.equal_k_range_size = equal_k_range_size
         self.index_sparse = index_sparse
         self.index_sparse_max_topk = index_sparse_max_topk
+        self.swap_bwd_qk_loop = swap_bwd_qk_loop
         self.debug_print = debug_print
 
         if self.debug_print:
@@ -421,27 +425,65 @@ class FFABwdSm90:
             128,
         ]
 
-        @cute.struct
-        class SharedStorageQKV:
-            mbar_ptr_Q: cute.struct.MemRange[cutlass.Int64, self.Q_stage * 2]
-            mbar_ptr_dO: cute.struct.MemRange[cutlass.Int64, self.dO_stage * 2]
-            sLSE: sLSE_struct
-            sdPsum: sdPsum_struct
-            sQ: sQ_struct
-            sV: sV_struct
-            sK: sK_struct
-            sdO: sdO_struct
-            sP: cute.struct.Align[
-                cute.struct.MemRange[self.dtype, cosize_sP], self.buffer_align_bytes
+        if self.swap_bwd_qk_loop:
+            sdKacc_struct, sdVacc_struct = [
+                cute.struct.Align[
+                    cute.struct.MemRange[t, cute.cosize(layout)], self.buffer_align_bytes
+                ]
+                for (layout, t) in [
+                    (self.sdKacc_layout, self.dtype),
+                    (self.sdVacc_layout, self.dtype),
+                ]
             ]
-            sdS: cute.struct.Align[
-                cute.struct.MemRange[self.dtype, cosize_sdS], self.buffer_align_bytes
-            ]
-            sdQacc: sdQacc_struct
+
+            @cute.struct
+            class SharedStorageQKV:
+                mbar_ptr_Q: cute.struct.MemRange[cutlass.Int64, self.Q_stage * 2]
+                mbar_ptr_dO: cute.struct.MemRange[cutlass.Int64, self.dO_stage * 2]
+                mbar_ptr_KV: cute.struct.MemRange[cutlass.Int64, self.KV_stage * 2]
+                sLSE: sLSE_struct
+                sdPsum: sdPsum_struct
+                sQ: sQ_struct
+                sV: sV_struct
+                sK: sK_struct
+                sdO: sdO_struct
+                sP: cute.struct.Align[
+                    cute.struct.MemRange[self.dtype, cosize_sP], self.buffer_align_bytes
+                ]
+                sdS: cute.struct.Align[
+                    cute.struct.MemRange[self.dtype, cosize_sdS], self.buffer_align_bytes
+                ]
+                sdKacc: sdKacc_struct
+                sdVacc: sdVacc_struct
+                sdQacc: sdQacc_struct
+        else:
+            @cute.struct
+            class SharedStorageQKV:
+                mbar_ptr_Q: cute.struct.MemRange[cutlass.Int64, self.Q_stage * 2]
+                mbar_ptr_dO: cute.struct.MemRange[cutlass.Int64, self.dO_stage * 2]
+                sLSE: sLSE_struct
+                sdPsum: sdPsum_struct
+                sQ: sQ_struct
+                sV: sV_struct
+                sK: sK_struct
+                sdO: sdO_struct
+                sP: cute.struct.Align[
+                    cute.struct.MemRange[self.dtype, cosize_sP], self.buffer_align_bytes
+                ]
+                sdS: cute.struct.Align[
+                    cute.struct.MemRange[self.dtype, cosize_sdS], self.buffer_align_bytes
+                ]
+                sdQacc: sdQacc_struct
 
         self.shared_storage_cls = SharedStorageQKV
 
     def _setup_attributes(self):
+        if self.swap_bwd_qk_loop:
+            # LoopQ: Q/dO single-stage; P/dS single-stage; K/V pipelined.
+            self.Q_stage = 1
+            self.dO_stage = 1
+            self.PdS_stage = 1
+
         # --- Set up tiled MMA ---
 
         (
@@ -500,38 +542,75 @@ class FFABwdSm90:
         # Q & dO are used in the SdP Mma and Q^T and dO^T are used in the dKV Mma.
         # The M dimension (tile_m) doesn't matter for the layout, only the K dimension
         wg_d_dKV = self.num_wg_mma // self.AtomLayoutNdKV
-        self.sQ_layout, self.sdO_layout = [
-            # Need to set major_mode_size (mms) to accommodate Q and Q.T
-            sm90_utils.make_smem_layout(
-                self.dtype, LayoutEnum.ROW_MAJOR, shape, stage, mms
-            )
-            for shape, stage, mms in [
-                (
-                    (self.tile_m, self.tile_hdim),
-                    self.Q_stage,
-                    self.tile_hdim // wg_d_dKV,
-                ),
-                (
-                    (self.tile_m, self.tile_hdimv),
-                    self.dO_stage,
-                    self.tile_hdim // wg_d_dKV,
-                ),
-            ]
-        ]
         wg_d_dQ = self.num_wg_dQ // self.AtomLayoutMdQ
 
-        # Accomodate both K and K.T
-        self.sK_layout = sm90_utils.make_smem_layout(
-            self.dtype,
-            LayoutEnum.ROW_MAJOR,
-            (self.tile_n, self.tile_hdim),
-            stage=None,
-            major_mode_size=self.tile_hdim // wg_d_dQ,
-        )
-        # There's only V, no V.T, so layout is normal
-        self.sV_layout = sm90_utils.make_smem_layout(
-            self.dtype, LayoutEnum.ROW_MAJOR, (self.tile_n, self.tile_hdimv), None
-        )
+        if self.swap_bwd_qk_loop:
+            self.KV_stage = 2
+            # LoopQ: Q/dO are single-stage SMEM (loaded once per outer Q tile),
+            # K/V are 2-stage pipelined (inner loop).
+            self.sQ_layout, self.sdO_layout = [
+                sm90_utils.make_smem_layout(
+                    self.dtype, LayoutEnum.ROW_MAJOR, shape, stage=None,
+                    major_mode_size=mms,
+                )
+                for shape, mms in [
+                    ((self.tile_m, self.tile_hdim), self.tile_hdim // wg_d_dKV),
+                    ((self.tile_m, self.tile_hdimv), self.tile_hdim // wg_d_dKV),
+                ]
+            ]
+            self.sK_layout = sm90_utils.make_smem_layout(
+                self.dtype,
+                LayoutEnum.ROW_MAJOR,
+                (self.tile_n, self.tile_hdim),
+                stage=self.KV_stage,
+                major_mode_size=self.tile_hdim // wg_d_dQ,
+            )
+            self.sV_layout = sm90_utils.make_smem_layout(
+                self.dtype, LayoutEnum.ROW_MAJOR,
+                (self.tile_n, self.tile_hdimv), self.KV_stage,
+            )
+            # Separate dK/dV accum buffers (C++ smem_dkacc/smem_dvacc).
+            # Never write dK/dV into pipelined sK/sV — that corrupts K/V loads.
+            self.sdKacc_layout = sm90_utils.make_smem_layout(
+                self.dtype,
+                LayoutEnum.ROW_MAJOR,
+                (self.tile_n, self.tile_hdim),
+                stage=None,
+                major_mode_size=self.tile_hdim // wg_d_dQ,
+            )
+            self.sdVacc_layout = sm90_utils.make_smem_layout(
+                self.dtype, LayoutEnum.ROW_MAJOR,
+                (self.tile_n, self.tile_hdimv), stage=None,
+            )
+        else:
+            # LoopK: Q/dO multi-stage pipelined (inner loop), K/V single-stage (outer tile)
+            self.sQ_layout, self.sdO_layout = [
+                sm90_utils.make_smem_layout(
+                    self.dtype, LayoutEnum.ROW_MAJOR, shape, stage, mms
+                )
+                for shape, stage, mms in [
+                    (
+                        (self.tile_m, self.tile_hdim),
+                        self.Q_stage,
+                        self.tile_hdim // wg_d_dKV,
+                    ),
+                    (
+                        (self.tile_m, self.tile_hdimv),
+                        self.dO_stage,
+                        self.tile_hdim // wg_d_dKV,
+                    ),
+                ]
+            ]
+            self.sK_layout = sm90_utils.make_smem_layout(
+                self.dtype,
+                LayoutEnum.ROW_MAJOR,
+                (self.tile_n, self.tile_hdim),
+                stage=None,
+                major_mode_size=self.tile_hdim // wg_d_dQ,
+            )
+            self.sV_layout = sm90_utils.make_smem_layout(
+                self.dtype, LayoutEnum.ROW_MAJOR, (self.tile_n, self.tile_hdimv), None
+            )
 
         # Accomodate both S and S.T
         wg_n_SdP = self.num_wg_mma // self.AtomLayoutMSdP
@@ -772,15 +851,25 @@ class FFABwdSm90:
             )
             s2g_copy_op_dKV = (
                 cpasync.CopyReduceBulkTensorTileS2GOp(cpasync.ReductionOp.ADD)
-                if self.sparse_load or self.index_sparse
+                if self.sparse_load or self.index_sparse or self.swap_bwd_qk_loop
                 else cpasync.CopyBulkTensorTileS2GOp()
+            )
+            dKV_smem_layout_K = (
+                cute.select(self.sdKacc_layout, mode=[0, 1])
+                if self.swap_bwd_qk_loop
+                else cute.select(self.sK_layout, mode=[0, 1])
+            )
+            dKV_smem_layout_V = (
+                cute.select(self.sdVacc_layout, mode=[0, 1])
+                if self.swap_bwd_qk_loop
+                else cute.select(self.sV_layout, mode=[0, 1])
             )
             # tma_atom_dK: layout_src_tv=(1,tileN*tileHD):(0,1), layout_dst_tv=(1,tileN*tileHD):(0,1)
             # tma_tensor_dK: (sK,HD,nhK,batch):(1@1,1@0,1@2,1@3)
             tma_atom_dK, tma_tensor_dK = cpasync.make_tiled_tma_atom(
                 s2g_copy_op_dKV,
                 mdK_tma,
-                cute.select(self.sK_layout, mode=[0, 1]),
+                dKV_smem_layout_K,
                 (self.tile_n, self.tile_hdim),
             )
             # tma_atom_dV: layout_src_tv=(1,tileN*tileHD):(0,1), layout_dst_tv=(1,tileN*tileHD):(0,1)
@@ -788,7 +877,7 @@ class FFABwdSm90:
             tma_atom_dV, tma_tensor_dV = cpasync.make_tiled_tma_atom(
                 s2g_copy_op_dKV,
                 mdV_tma,
-                cute.select(self.sV_layout, mode=[0, 1]),
+                dKV_smem_layout_V,
                 (self.tile_n, self.tile_hdimv),
             )
         else:
@@ -800,47 +889,82 @@ class FFABwdSm90:
 
         # --- Make tile scheduler class/args ---
 
-        if const_expr(mRangesK is not None or mSeqUsedK is not None):
-            self.tile_scheduler_cls = SingleTileVarlenScheduler
-        elif const_expr(self.deterministic):
-            self.tile_scheduler_cls = SingleTileLPTBwdScheduler
-        else:
-            self.tile_scheduler_cls = SingleTileScheduler
-        self.spt = (self.is_causal or self.is_local) and self.deterministic
-        if const_expr(self.index_sparse):
-            _n_block_count = self.index_sparse_max_topk
+        if const_expr(self.swap_bwd_qk_loop):
+            # LoopQ: scheduler tiles over Q blocks (outer=Q, inner=K)
+            if const_expr(mRangesQ is not None or mSeqUsedQ is not None):
+                self.tile_scheduler_cls = SingleTileVarlenScheduler
+            else:
+                self.tile_scheduler_cls = SingleTileScheduler
+            self.spt = False
+            _n_block_count = cute.ceil_div(cute.size(mQ.shape[0]), self.tile_m)
             _total_q_sched = (
-                cute.size(mRangesK.shape[0] - 1)
-                * self.index_sparse_max_topk
-                * self.tile_n
+                cute.size(mQ.shape[0])
+                if const_expr(mRangesQ is not None)
+                else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3])
+            )
+            tile_sched_args = TileSchedulerArguments(
+                _n_block_count,
+                cute.size(mQ.shape[2]),  # num_head
+                cute.size(mQ.shape[3])
+                if const_expr(mRangesQ is None)
+                else cute.size(mRangesQ.shape[0] - 1),  # num_batch
+                1,  # num_splits
+                cute.size(mQ.shape[0]),  # seqlen_q
+                mQ.shape[1],  # headdim
+                mV.shape[1],  # headdim_v
+                total_q=_total_q_sched,
+                tile_shape_mn=(self.tile_m, self.tile_n),
+                mRangesQ=mRangesQ,
+                mSeqUsedQ=mSeqUsedQ,
+                qhead_per_kvhead_packgqa=1,
+                element_size=self.dtype.width // 8,
+                is_persistent=False,
+                lpt=False,
+                head_swizzle=False,
             )
         else:
-            _n_block_count = cute.ceil_div(cute.size(mK.shape[0]), self.tile_n)
-            _total_q_sched = (
-                cute.size(mK.shape[0])
-                if const_expr(mRangesK is not None)
-                else cute.size(mK.shape[0]) * cute.size(mK.shape[3])
+            # LoopK: scheduler tiles over K blocks (outer=K, inner=Q)
+            if const_expr(mRangesK is not None or mSeqUsedK is not None):
+                self.tile_scheduler_cls = SingleTileVarlenScheduler
+            elif const_expr(self.deterministic):
+                self.tile_scheduler_cls = SingleTileLPTBwdScheduler
+            else:
+                self.tile_scheduler_cls = SingleTileScheduler
+            self.spt = (self.is_causal or self.is_local) and self.deterministic
+            if const_expr(self.index_sparse):
+                _n_block_count = self.index_sparse_max_topk
+                _total_q_sched = (
+                    cute.size(mRangesK.shape[0] - 1)
+                    * self.index_sparse_max_topk
+                    * self.tile_n
+                )
+            else:
+                _n_block_count = cute.ceil_div(cute.size(mK.shape[0]), self.tile_n)
+                _total_q_sched = (
+                    cute.size(mK.shape[0])
+                    if const_expr(mRangesK is not None)
+                    else cute.size(mK.shape[0]) * cute.size(mK.shape[3])
+                )
+            tile_sched_args = TileSchedulerArguments(
+                _n_block_count,
+                cute.size(mQ.shape[2]),
+                cute.size(mK.shape[3])
+                if const_expr(mRangesK is None)
+                else cute.size(mRangesK.shape[0] - 1),  # num_batch
+                1,  # num_splits
+                cute.size(mQ.shape[0]),  # pass seqlen_q or total_q for seqlen_k
+                mQ.shape[1],  # headdim
+                mV.shape[1],  # headdim_v
+                total_q=_total_q_sched,
+                tile_shape_mn=(self.tile_n, self.tile_m),  # Swapping the role of Q & K
+                mRangesQ=mRangesK,
+                mSeqUsedQ=mSeqUsedK,
+                qhead_per_kvhead_packgqa=1,
+                element_size=self.dtype.width // 8,
+                is_persistent=False,
+                lpt=self.spt,
+                head_swizzle=self.deterministic,
             )
-        tile_sched_args = TileSchedulerArguments(
-            _n_block_count,
-            cute.size(mQ.shape[2]),
-            cute.size(mK.shape[3])
-            if const_expr(mRangesK is None)
-            else cute.size(mRangesK.shape[0] - 1),  # num_batch
-            1,  # num_splits
-            cute.size(mQ.shape[0]),  # pass seqlen_q or total_q for seqlen_k
-            mQ.shape[1],  # headdim
-            mV.shape[1],  # headdim_v
-            total_q=_total_q_sched,
-            tile_shape_mn=(self.tile_n, self.tile_m),  # Swapping the role of Q & K
-            mRangesQ=mRangesK,
-            mSeqUsedQ=mSeqUsedK,
-            qhead_per_kvhead_packgqa=1,
-            element_size=self.dtype.width // 8,
-            is_persistent=False,
-            lpt=self.spt,
-            head_swizzle=self.deterministic,
-        )
         tile_sched_params = self.tile_scheduler_cls.to_underlying_arguments(
             tile_sched_args
         )
@@ -994,6 +1118,8 @@ class FFABwdSm90:
             self.sPdS_layout,
             self.sdO_layout,
             self.sdQacc_layout,
+            self.sdKacc_layout if self.swap_bwd_qk_loop else None,
+            self.sdVacc_layout if self.swap_bwd_qk_loop else None,
             self.r2s_tiled_copy_dQacc,
             self.tiled_mma_SdP,
             self.tiled_mma_dK,
@@ -1052,6 +1178,8 @@ class FFABwdSm90:
         sPdS_layout: cute.ComposedLayout,
         sdO_layout: cute.ComposedLayout,
         sdQacc_layout: cute.Layout,
+        sdKacc_layout: Optional[cute.ComposedLayout],
+        sdVacc_layout: Optional[cute.ComposedLayout],
         r2s_tiled_copy_dQacc: cute.TiledCopy,
         tiled_mma_SdP: cute.TiledMma,
         tiled_mma_dK: cute.TiledMma,
@@ -1135,6 +1263,16 @@ class FFABwdSm90:
             tx_count=self.tma_copy_bytes["dO"] + self.tma_copy_bytes["dPsum"],
             defer_sync=False,
         )
+        pipeline_KV = None
+        if const_expr(self.swap_bwd_qk_loop):
+            pipeline_KV = ffa_pipeline.PipelineTmaAsync.create(
+                barrier_storage=storage.mbar_ptr_KV.data_ptr(),
+                num_stages=self.KV_stage,
+                producer_group=pipeline_producer_group,
+                consumer_group=pipeline_consumer_group,
+                tx_count=self.tma_copy_bytes["K"] + self.tma_copy_bytes["V"],
+                defer_sync=False,
+            )
 
         # --- Make smem tensors of sQ/sK/sV/sO/sP/sdS/sLSE/sdPsum/sdQacc ---
 
@@ -1176,6 +1314,17 @@ class FFABwdSm90:
             )
         )
         sdQacc: cute.Tensor = storage.sdQacc.get_tensor(sdQacc_layout)
+
+        # LoopQ: separate dK/dV accum buffers (not aliased with sK/sV)
+        sdKacc: cute.Tensor | None = None
+        sdVacc: cute.Tensor | None = None
+        if const_expr(self.swap_bwd_qk_loop):
+            sdKacc = storage.sdKacc.get_tensor(
+                sdKacc_layout.outer, swizzle=sdKacc_layout.inner
+            )
+            sdVacc = storage.sdVacc.get_tensor(
+                sdVacc_layout.outer, swizzle=sdVacc_layout.inner
+            )
 
         # --- Make other info dataclass ---
 
@@ -1255,49 +1404,66 @@ class FFABwdSm90:
             if const_expr(self.use_per_range_mask):
                 _read_mask_type_fn_load = partial(read_attn_type_map, mAttnTypeMap)
 
-            if warp_idx == 0:  # load
-                self.load(
-                    mQ,
-                    mK,
-                    mV,
-                    mdO,
-                    mLSE,
-                    mdPsum,
-                    sQ,
-                    sK,
-                    sV,
-                    sdO,
-                    sLSE,
-                    sdPsum,
-                    tma_atom_Q,
-                    tma_atom_K,
-                    tma_atom_V,
-                    tma_atom_dO,
-                    pipeline_Q,
-                    pipeline_dO,
-                    block_info,
-                    SeqlenInfoCls,
-                    tile_scheduler,
-                    blocksparse_tensors,
-                    qhead_per_kvhead_divmod,
-                    is_print_block,
-                    _read_mask_type_fn=_read_mask_type_fn_load,
-                    mKRanges=mKRanges,
-                    mCuBatches=mCuBatches,
-                    mIndexSparseIndices=mIndexSparseIndices,
-                )
-            elif warp_idx == 1:  # dQacc atomic reduce
-                self.dQacc_store(
-                    mdQacc,
-                    sdQacc,
-                    block_info,
-                    tile_scheduler,
-                    SeqlenInfoCls,
-                    blocksparse_tensors,
-                    mdQ_semaphore,
-                    is_print_block,
-                    _read_mask_type_fn=_read_mask_type_fn_load,
-                )
+            if const_expr(self.swap_bwd_qk_loop):
+                if warp_idx == 0:
+                    self.load_loop_q(
+                        mQ, mK, mV, mdO, mLSE, mdPsum,
+                        sQ, sK, sV, sdO, sLSE, sdPsum,
+                        tma_atom_Q, tma_atom_K, tma_atom_V, tma_atom_dO,
+                        pipeline_Q, pipeline_dO, pipeline_KV,
+                        block_info, SeqlenInfoCls, tile_scheduler,
+                        qhead_per_kvhead_divmod=qhead_per_kvhead_divmod,
+                        is_print_block=is_print_block,
+                        _read_mask_type_fn=_read_mask_type_fn_load,
+                        mKRanges=mKRanges,
+                        mCuBatches=mCuBatches,
+                        mIndexSparseIndices=mIndexSparseIndices,
+                    )
+                # warp_idx == 1: idle for LoopQ (no dQacc_store needed)
+            else:
+                if warp_idx == 0:  # load
+                    self.load(
+                        mQ,
+                        mK,
+                        mV,
+                        mdO,
+                        mLSE,
+                        mdPsum,
+                        sQ,
+                        sK,
+                        sV,
+                        sdO,
+                        sLSE,
+                        sdPsum,
+                        tma_atom_Q,
+                        tma_atom_K,
+                        tma_atom_V,
+                        tma_atom_dO,
+                        pipeline_Q,
+                        pipeline_dO,
+                        block_info,
+                        SeqlenInfoCls,
+                        tile_scheduler,
+                        blocksparse_tensors,
+                        qhead_per_kvhead_divmod,
+                        is_print_block,
+                        _read_mask_type_fn=_read_mask_type_fn_load,
+                        mKRanges=mKRanges,
+                        mCuBatches=mCuBatches,
+                        mIndexSparseIndices=mIndexSparseIndices,
+                    )
+                elif warp_idx == 1:  # dQacc atomic reduce
+                    self.dQacc_store(
+                        mdQacc,
+                        sdQacc,
+                        block_info,
+                        tile_scheduler,
+                        SeqlenInfoCls,
+                        blocksparse_tensors,
+                        mdQ_semaphore,
+                        is_print_block,
+                        _read_mask_type_fn=_read_mask_type_fn_load,
+                    )
 
         # ///////////////////////////////////////////////////////////////////////////////
         #  MMA WarpGroups
@@ -1307,60 +1473,68 @@ class FFABwdSm90:
             if const_expr(self.use_per_range_mask):
                 _read_mask_type_fn = partial(read_attn_type_map, mAttnTypeMap)
 
-            mma_args = (
-                tiled_mma_SdP,
-                tiled_mma_dK,
-                tiled_mma_dV,
-                tiled_mma_dQ,
-                mdK,
-                mdV,
-                mdK_semaphore,
-                mdV_semaphore,
-                sQ,
-                sK,
-                sV,
-                sdO,
-                sP,
-                sdS,
-                sLSE,
-                sdPsum,
-                sdQacc,
-                pipeline_Q,
-                pipeline_dO,
-                tma_atom_dK,
-                tma_atom_dV,
-                r2s_tiled_copy_dQacc,
-                softmax_scale_log2,
-                softmax_scale,
-                block_info,
-                SeqlenInfoCls,
-                AttentionMaskCls,
-                tile_scheduler,
-                aux_tensors,
-                fastdiv_mods,
-                blocksparse_tensors,
-                qhead_per_kvhead_divmod,
-                mKRanges,
-                mCuBatches,
-                mIndexSparseIndices,
-            )
-
-            if const_expr(self.num_wg_dQ == self.num_wg_mma):
-                # Both WGs compute dQ
+            if const_expr(self.swap_bwd_qk_loop):
                 cute.arch.setmaxregister_increase(self.num_mma_regs_wg0)
-                self.mma(
-                    *mma_args,
-                    is_dQ_wg=True,
+                self.mma_loop_q(
+                    tiled_mma_SdP, tiled_mma_dK, tiled_mma_dV, tiled_mma_dQ,
+                    mdK, mdV, mdQacc,
+                    sQ, sK, sV, sdO, sP, sdS, sLSE, sdPsum, sdQacc,
+                    sdKacc, sdVacc,
+                    pipeline_Q, pipeline_dO, pipeline_KV,
+                    tma_atom_dK, tma_atom_dV,
+                    r2s_tiled_copy_dQacc,
+                    softmax_scale_log2, softmax_scale,
+                    block_info, SeqlenInfoCls, AttentionMaskCls, tile_scheduler,
+                    aux_tensors=aux_tensors,
+                    fastdiv_mods=fastdiv_mods,
+                    qhead_per_kvhead_divmod=qhead_per_kvhead_divmod,
+                    mKRanges=mKRanges,
+                    mCuBatches=mCuBatches,
+                    mIndexSparseIndices=mIndexSparseIndices,
                     is_print_block=is_print_block,
                     _read_mask_type_fn=_read_mask_type_fn,
                 )
             else:
-                # WG0 computes dQ, WG1 skips it
-                warp_idx_in_mma = (
-                    cute.arch.make_warp_uniform(cute.arch.warp_idx())
-                    - self.mma_warp_ids[0] * cute.arch.WARP_SIZE
+                mma_args = (
+                    tiled_mma_SdP,
+                    tiled_mma_dK,
+                    tiled_mma_dV,
+                    tiled_mma_dQ,
+                    mdK,
+                    mdV,
+                    mdK_semaphore,
+                    mdV_semaphore,
+                    sQ,
+                    sK,
+                    sV,
+                    sdO,
+                    sP,
+                    sdS,
+                    sLSE,
+                    sdPsum,
+                    sdQacc,
+                    pipeline_Q,
+                    pipeline_dO,
+                    tma_atom_dK,
+                    tma_atom_dV,
+                    r2s_tiled_copy_dQacc,
+                    softmax_scale_log2,
+                    softmax_scale,
+                    block_info,
+                    SeqlenInfoCls,
+                    AttentionMaskCls,
+                    tile_scheduler,
+                    aux_tensors,
+                    fastdiv_mods,
+                    blocksparse_tensors,
+                    qhead_per_kvhead_divmod,
+                    mKRanges,
+                    mCuBatches,
+                    mIndexSparseIndices,
                 )
-                if warp_idx_in_mma < self.num_warps_per_wg:
+
+                if const_expr(self.num_wg_dQ == self.num_wg_mma):
+                    # Both WGs compute dQ
                     cute.arch.setmaxregister_increase(self.num_mma_regs_wg0)
                     self.mma(
                         *mma_args,
@@ -1369,13 +1543,27 @@ class FFABwdSm90:
                         _read_mask_type_fn=_read_mask_type_fn,
                     )
                 else:
-                    cute.arch.setmaxregister_increase(self.num_mma_regs_wg1)
-                    self.mma(
-                        *mma_args,
-                        is_dQ_wg=False,
-                        is_print_block=is_print_block,
-                        _read_mask_type_fn=_read_mask_type_fn,
+                    # WG0 computes dQ, WG1 skips it
+                    warp_idx_in_mma = (
+                        cute.arch.make_warp_uniform(cute.arch.warp_idx())
+                        - self.mma_warp_ids[0] * cute.arch.WARP_SIZE
                     )
+                    if warp_idx_in_mma < self.num_warps_per_wg:
+                        cute.arch.setmaxregister_increase(self.num_mma_regs_wg0)
+                        self.mma(
+                            *mma_args,
+                            is_dQ_wg=True,
+                            is_print_block=is_print_block,
+                            _read_mask_type_fn=_read_mask_type_fn,
+                        )
+                    else:
+                        cute.arch.setmaxregister_increase(self.num_mma_regs_wg1)
+                        self.mma(
+                            *mma_args,
+                            is_dQ_wg=False,
+                            is_print_block=is_print_block,
+                            _read_mask_type_fn=_read_mask_type_fn,
+                        )
 
     @cute.jit
     def load(
@@ -2263,21 +2451,129 @@ class FFABwdSm90:
                             aux_tensors=aux_tensors,
                             fastdiv_mods=fastdiv_mods,
                         )
+                    _can_zone_dispatch = const_expr(
+                        (self.is_causal or self.is_local)
+                        and self.mask_mod is None
+                        and not self.use_per_range_mask
+                    )
                     dKV_accumulate = False
-                    for m_block in cutlass.range(m_block_min, m_block_max, unroll=1):
-                        consumer_state_Q, consumer_state_dO = mma_one_m_block_all(
-                            m_block,
-                            consumer_state_Q,
-                            consumer_state_dO,
-                            mask_fn=mask_fn,
-                            score_mod_fn=score_mod_fn_cur,
-                            score_mod_bwd_fn=score_mod_bwd_fn_cur,
-                            dKV_accumulate=dKV_accumulate,
-                            is_print_thread_and_tile=(
-                                is_print_thread_and_tile and m_block == m_block_min
-                            ),
+                    if const_expr(not _can_zone_dispatch):
+                        for m_block in cutlass.range(m_block_min, m_block_max, unroll=1):
+                            consumer_state_Q, consumer_state_dO = mma_one_m_block_all(
+                                m_block,
+                                consumer_state_Q,
+                                consumer_state_dO,
+                                mask_fn=mask_fn,
+                                score_mod_fn=score_mod_fn_cur,
+                                score_mod_bwd_fn=score_mod_bwd_fn_cur,
+                                dKV_accumulate=dKV_accumulate,
+                                is_print_thread_and_tile=(
+                                    is_print_thread_and_tile and m_block == m_block_min
+                                ),
+                            )
+                            dKV_accumulate = True
+                    else:
+                        cross_axis_boundary = (
+                            (n_block + 1) * self.tile_n > seqlen_info.seqlen_k
                         )
-                        dKV_accumulate = True
+                        if cross_axis_boundary:
+                            for m_block in cutlass.range(
+                                m_block_min, m_block_max, unroll=1
+                            ):
+                                consumer_state_Q, consumer_state_dO = mma_one_m_block_all(
+                                    m_block,
+                                    consumer_state_Q,
+                                    consumer_state_dO,
+                                    mask_fn=mask_fn,
+                                    score_mod_fn=score_mod_fn_cur,
+                                    score_mod_bwd_fn=score_mod_bwd_fn_cur,
+                                    dKV_accumulate=dKV_accumulate,
+                                    is_print_thread_and_tile=(
+                                        is_print_thread_and_tile
+                                        and m_block == m_block_min
+                                    ),
+                                )
+                                dKV_accumulate = True
+                        else:
+                            m_block_nomask = (
+                                block_info.get_m_block_causal_nomask_start(
+                                    seqlen_info, n_block,
+                                    m_block_min, m_block_max,
+                                )
+                            )
+                            m_block_local_end = (
+                                block_info.get_m_block_local_nomask_end(
+                                    seqlen_info, n_block, m_block_max,
+                                )
+                            )
+                            mask_fn_regular = partial(
+                                mask.apply_mask,
+                                batch_idx=batch_idx,
+                                head_idx=head_idx,
+                                n_block=n_block,
+                                thr_mma=thr_mma_SdP,
+                                mask_seqlen=False,
+                                mask_causal=self.is_causal,
+                                mask_local=self.is_local,
+                                mask_mod=None,
+                                aux_tensors=aux_tensors,
+                                fastdiv_mods=fastdiv_mods,
+                            )
+                            for m_block in cutlass.range(
+                                m_block_min, m_block_nomask, unroll=1
+                            ):
+                                consumer_state_Q, consumer_state_dO = (
+                                    mma_one_m_block_all(
+                                        m_block,
+                                        consumer_state_Q,
+                                        consumer_state_dO,
+                                        mask_fn=mask_fn_regular,
+                                        score_mod_fn=score_mod_fn_cur,
+                                        score_mod_bwd_fn=score_mod_bwd_fn_cur,
+                                        dKV_accumulate=dKV_accumulate,
+                                        is_print_thread_and_tile=(
+                                            is_print_thread_and_tile
+                                            and m_block == m_block_min
+                                        ),
+                                    )
+                                )
+                                dKV_accumulate = True
+                            for m_block in cutlass.range(
+                                m_block_nomask, m_block_local_end, unroll=1
+                            ):
+                                consumer_state_Q, consumer_state_dO = (
+                                    mma_one_m_block_all(
+                                        m_block,
+                                        consumer_state_Q,
+                                        consumer_state_dO,
+                                        mask_fn=None,
+                                        score_mod_fn=score_mod_fn_cur,
+                                        score_mod_bwd_fn=score_mod_bwd_fn_cur,
+                                        dKV_accumulate=dKV_accumulate,
+                                        is_print_thread_and_tile=False,
+                                    )
+                                )
+                                dKV_accumulate = True
+                            if const_expr(
+                                self.is_local
+                                and self.window_size_left is not None
+                            ):
+                                for m_block in cutlass.range(
+                                    m_block_local_end, m_block_max, unroll=1
+                                ):
+                                    consumer_state_Q, consumer_state_dO = (
+                                        mma_one_m_block_all(
+                                            m_block,
+                                            consumer_state_Q,
+                                            consumer_state_dO,
+                                            mask_fn=mask_fn_regular,
+                                            score_mod_fn=score_mod_fn_cur,
+                                            score_mod_bwd_fn=score_mod_bwd_fn_cur,
+                                            dKV_accumulate=dKV_accumulate,
+                                            is_print_thread_and_tile=False,
+                                        )
+                                    )
+                                    dKV_accumulate = True
                 else:  # block sparse mma (TODO: review the logics)
                     (
                         consumer_state_Q,
@@ -3134,3 +3430,877 @@ class FFABwdSm90:
 
         if const_expr(not self.deterministic):
             cute.arch.cp_async_bulk_wait_group(0, read=True)
+
+    # ///////////////////////////////////////////////////////////////////////////
+    #  LoopQ: load_loop_q (producer warp for SwapBwdQKLoop)
+    # ///////////////////////////////////////////////////////////////////////////
+
+    @cute.jit
+    def load_loop_q(
+        self,
+        mQ: cute.Tensor,
+        mK: cute.Tensor,
+        mV: cute.Tensor,
+        mdO: cute.Tensor,
+        mLSE: cute.Tensor,
+        mdPsum: cute.Tensor,
+        sQ: cute.Tensor,
+        sK: cute.Tensor,
+        sV: cute.Tensor,
+        sdO: cute.Tensor,
+        sLSE: cute.Tensor,
+        sdPsum: cute.Tensor,
+        tma_atom_Q: cute.CopyAtom,
+        tma_atom_K: cute.CopyAtom,
+        tma_atom_V: cute.CopyAtom,
+        tma_atom_dO: cute.CopyAtom,
+        pipeline_Q: pipeline.PipelineAsync,
+        pipeline_dO: pipeline.PipelineAsync,
+        pipeline_KV: pipeline.PipelineAsync,
+        block_info: BlockInfo,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
+        tile_scheduler: TileSchedulerProtocol,
+        qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
+        is_print_block: bool = False,
+        _read_mask_type_fn=None,
+        mKRanges: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
+    ):
+        warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % len(
+            self.load_warp_ids
+        )
+        is_load_warp = warp_idx_in_wg == 0
+
+        if is_load_warp:
+            producer_state_Q = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Producer, self.Q_stage
+            )
+            producer_state_dO = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Producer, self.dO_stage
+            )
+            producer_state_KV = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Producer, self.KV_stage
+            )
+
+            work_tile = tile_scheduler.initial_work_tile_info()
+            while work_tile.is_valid_tile:
+                m_block, head_idx, batch_idx, _ = work_tile.tile_idx
+                seqlen_info = SeqlenInfoCls(batch_idx)
+                head_idx_kv = (
+                    head_idx
+                    if const_expr(self.qhead_per_kvhead == 1)
+                    else head_idx // qhead_per_kvhead_divmod
+                )
+
+                # Compute inner K block range
+                if const_expr(self.sparse_load):
+                    bidb_load = mCuBatches[batch_idx]  # type: ignore[index]
+                    end_batches_load = mCuBatches[batch_idx + 1]  # type: ignore[index]
+                    total_k = _compute_total_k_tokens(
+                        mKRanges, bidb_load, end_batches_load,
+                        self.equal_k_range_size,
+                    )
+                    n_block_min = Int32(0)
+                    n_block_max = (total_k + self.tile_n - 1) // self.tile_n
+                elif const_expr(self.index_sparse):
+                    n_block_min = Int32(0)
+                    n_block_max = compute_actual_topk(
+                        mIndexSparseIndices,
+                        batch_idx * self.index_sparse_max_topk,
+                        self.index_sparse_max_topk,
+                    )
+                else:
+                    if const_expr(self.use_per_range_mask):
+                        mask_type_rt = _read_mask_type_fn(batch_idx)
+                        n_block_min, n_block_max = get_n_block_min_max_runtime(
+                            seqlen_info, m_block, mask_type_rt,
+                            self.tile_m, self.tile_n,
+                        )
+                    else:
+                        n_block_min, n_block_max = block_info.get_n_block_min_max(
+                            seqlen_info, m_block
+                        )
+
+                process_tile = n_block_min < n_block_max
+
+                # Make gQ/gdO/gLSE/gdPsum for the outer Q tile
+                mQ_cur = seqlen_info.offset_batch_Q(mQ, batch_idx, dim=3)[
+                    None, None, head_idx
+                ]
+                mLSE_cur = seqlen_info.offset_batch_Q(
+                    mLSE, batch_idx, dim=2, padded=True
+                )[None, head_idx]
+                mdO_cur = seqlen_info.offset_batch_Q(mdO, batch_idx, dim=3)[
+                    None, None, head_idx
+                ]
+                mdPsum_cur = seqlen_info.offset_batch_Q(
+                    mdPsum, batch_idx, dim=2, padded=True
+                )[None, head_idx]
+                gQ = cute.local_tile(
+                    mQ_cur, (self.tile_m, self.tile_hdim), (m_block, 0)
+                )
+                gdO = cute.local_tile(
+                    mdO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0)
+                )
+                gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (m_block,))
+                gdPsum = cute.local_tile(mdPsum_cur, (self.tile_m,), (m_block,))
+
+                load_Q, _, _ = copy_utils.tma_get_copy_fn(
+                    tma_atom_Q, 0, cute.make_layout(1), gQ, sQ, single_stage=True,
+                )
+                load_dO, _, _ = copy_utils.tma_get_copy_fn(
+                    tma_atom_dO, 0, cute.make_layout(1), gdO, sdO, single_stage=True,
+                )
+                load_LSE = copy_utils.cpasync_bulk_get_copy_fn(
+                    gLSE, sLSE, single_stage=True,
+                )
+                load_dPsum = copy_utils.cpasync_bulk_get_copy_fn(
+                    gdPsum, sdPsum, single_stage=True,
+                )
+
+                if process_tile:
+                    # Load Q + LSE once into single-stage sQ/sLSE
+                    pipeline_Q.producer_acquire(producer_state_Q)
+                    q_bar = pipeline_Q.producer_get_barrier(producer_state_Q)
+                    load_Q(tma_bar_ptr=q_bar)
+                    cute.arch.griddepcontrol_wait()
+                    load_LSE(tma_bar_ptr=q_bar)
+
+                    # Load dO + dPsum once into single-stage sdO/sdPsum
+                    producer_state_dO_cur = (
+                        producer_state_dO
+                        if const_expr(self.Q_stage != self.dO_stage)
+                        else producer_state_Q
+                    )
+                    pipeline_dO.producer_acquire(producer_state_dO_cur)
+                    do_bar = pipeline_dO.producer_get_barrier(producer_state_dO_cur)
+                    load_dO(tma_bar_ptr=do_bar)
+                    load_dPsum(tma_bar_ptr=do_bar)
+                    producer_state_Q.advance()
+                    producer_state_dO.advance()
+
+                    # Make gK/gV with (None, 0) to keep all K blocks as a
+                    # "rest" mode matching the SMEM stage dimension.
+                    if const_expr(self.sparse_load or self.index_sparse):
+                        mK_cur = mK[None, None, head_idx_kv]
+                        mV_cur = mV[None, None, head_idx_kv]
+                    else:
+                        mK_cur = seqlen_info.offset_batch_K(
+                            mK, batch_idx, dim=3
+                        )[None, None, head_idx_kv]
+                        mV_cur = seqlen_info.offset_batch_K(
+                            mV, batch_idx, dim=3
+                        )[None, None, head_idx_kv]
+                    gK_all = cute.local_tile(
+                        mK_cur, (self.tile_n, self.tile_hdim), (None, 0)
+                    )
+                    gV_all = cute.local_tile(
+                        mV_cur, (self.tile_n, self.tile_hdimv), (None, 0)
+                    )
+                    load_K, _, _ = copy_utils.tma_get_copy_fn(
+                        tma_atom_K, 0, cute.make_layout(1), gK_all, sK
+                    )
+                    load_V, _, _ = copy_utils.tma_get_copy_fn(
+                        tma_atom_V, 0, cute.make_layout(1), gV_all, sV
+                    )
+
+                    # Inner loop: load K/V for each n_block via pipeline_KV
+                    for n_block_inner in cutlass.range(
+                        n_block_min, n_block_max, unroll=1
+                    ):
+                        pipeline_KV.producer_acquire(producer_state_KV)
+
+                        # Determine the absolute K block position
+                        if const_expr(self.sparse_load):
+                            n_block_abs = _inner_idx_to_abs_n_block(
+                                n_block_inner, mKRanges, bidb_load,
+                                self.tile_n, self.equal_k_range_size,
+                            )
+                        elif const_expr(self.index_sparse):
+                            idx_offset = (
+                                batch_idx * self.index_sparse_max_topk + n_block_inner
+                            )
+                            n_block_abs = mIndexSparseIndices[idx_offset]  # type: ignore[index]
+                        else:
+                            n_block_abs = n_block_inner
+
+                        kv_bar = pipeline_KV.producer_get_barrier(producer_state_KV)
+                        load_K(
+                            n_block_abs, producer_state_KV.index,
+                            tma_bar_ptr=kv_bar,
+                        )
+                        load_V(
+                            n_block_abs, producer_state_KV.index,
+                            tma_bar_ptr=kv_bar,
+                        )
+                        producer_state_KV.advance()
+
+                tile_scheduler.prefetch_next_work()
+                tile_scheduler.advance_to_next_work()
+                work_tile = tile_scheduler.get_current_work()
+
+    # ///////////////////////////////////////////////////////////////////////////
+    #  LoopQ: mma_loop_q (consumer MMA warps for SwapBwdQKLoop)
+    # ///////////////////////////////////////////////////////////////////////////
+
+    @cute.jit
+    def mma_loop_q(
+        self,
+        tiled_mma_SdP: cute.TiledMma,
+        tiled_mma_dK: cute.TiledMma,
+        tiled_mma_dV: cute.TiledMma,
+        tiled_mma_dQ: cute.TiledMma,
+        mdK: cute.Tensor,
+        mdV: cute.Tensor,
+        mdQacc: cute.Tensor,
+        sQ: cute.Tensor,
+        sK: cute.Tensor,
+        sV: cute.Tensor,
+        sdO: cute.Tensor,
+        sP: Optional[cute.Tensor],
+        sdS: cute.Tensor,
+        sLSE: cute.Tensor,
+        sdPsum: cute.Tensor,
+        sdQacc: cute.Tensor,
+        sdKacc: cute.Tensor,
+        sdVacc: cute.Tensor,
+        pipeline_Q: pipeline.PipelineAsync,
+        pipeline_dO: pipeline.PipelineAsync,
+        pipeline_KV: pipeline.PipelineAsync,
+        tma_atom_dK: cute.CopyAtom,
+        tma_atom_dV: cute.CopyAtom,
+        r2s_tiled_copy_dQacc: cute.TiledCopy,
+        softmax_scale_log2: Float32,
+        softmax_scale: Float32,
+        block_info: BlockInfo,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
+        AttentionMaskCls: Callable[..., AttentionMask],
+        tile_scheduler: TileSchedulerProtocol,
+        aux_tensors: Optional[list] = None,
+        fastdiv_mods=(None, None),
+        qhead_per_kvhead_divmod: Optional[FastDivmodDivisor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
+        mIndexSparseIndices: Optional[cute.Tensor] = None,
+        is_print_block: bool = False,
+        _read_mask_type_fn=None,
+    ):
+        tidx, _, _ = cute.arch.thread_idx()
+        tidx -= self.mma_warp_ids[0] * cute.arch.WARP_SIZE
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        warp_group_idx = cute.arch.make_warp_uniform(tidx // self.num_threads_per_wg)
+        warp_group_thread_layout = cute.make_layout(
+            self.num_wg_mma, stride=self.num_threads_per_wg
+        )
+
+        # /////////////////////////////////////////////////////////////////////
+        # Tiled MMA partitions — same as LoopK mma, but K/V are now staged
+        # /////////////////////////////////////////////////////////////////////
+
+        # --- S = Q @ K^T ---
+        thr_mma_SdP = tiled_mma_SdP.get_slice(tidx)
+        wg_mma_SdP = tiled_mma_SdP.get_slice(
+            warp_group_thread_layout(warp_group_idx)
+        )
+        shape_mnk_S = (self.tile_m, self.tile_n, self.tile_hdim)
+        _, tSrQ, tSrK = sm90_utils.partition_fragment_ABC(
+            wg_mma_SdP, shape_mnk_S, sQ, sK, swap_AB=self.SdP_swapAB
+        )
+        mma_qk_fn = partial(
+            gemm_zero_init, tiled_mma_SdP, shape_mnk_S[:2],
+            tSrQ, tSrK, swap_AB=self.SdP_swapAB,
+        )
+
+        # LSE / dPsum smem partitions
+        tLSEsLSE = layout_utils.mma_partition_C_vec(
+            sLSE, thr_mma_SdP, expand_shape=self.tile_n,
+            is_colvec=not self.SdP_swapAB,
+        )
+        tLSEsdPsum = layout_utils.mma_partition_C_vec(
+            sdPsum, thr_mma_SdP, expand_shape=self.tile_n,
+            is_colvec=not self.SdP_swapAB,
+        )
+        shfl_copy = copy_utils.tiled_copy_1d(
+            sLSE.element_type, num_threads=8, num_copy_elems=2
+        )
+        if const_expr(self.shuffle_LSE):
+            tLSEsLSE = shfl_copy.get_slice(cute.arch.lane_idx() // 4).partition_S(
+                tLSEsLSE
+            )
+            tLSEsLSE = cute.group_modes(tLSEsLSE, 0, 2)
+        if const_expr(self.shuffle_dPsum):
+            tLSEsdPsum = shfl_copy.get_slice(cute.arch.lane_idx() // 4).partition_S(
+                tLSEsdPsum
+            )
+            tLSEsdPsum = cute.group_modes(tLSEsdPsum, 0, 2)
+
+        # --- dP = dO @ V^T ---
+        shape_mnk_dP = (self.tile_m, self.tile_n, self.tile_hdimv)
+        _, tdPrdO, tdPrV = sm90_utils.partition_fragment_ABC(
+            wg_mma_SdP, shape_mnk_dP, sdO, sV, swap_AB=self.SdP_swapAB
+        )
+        mma_dov_fn = partial(
+            gemm_zero_init, tiled_mma_SdP, shape_mnk_dP[:2],
+            tdPrdO, tdPrV, swap_AB=self.SdP_swapAB,
+        )
+
+        # --- dV = P^T @ dO ---
+        wg_mma_dV = tiled_mma_dV.get_slice(
+            warp_group_thread_layout(warp_group_idx)
+        )
+        sPt = layout_utils.transpose_view(sP) if sP is not None else None
+        sdOt = layout_utils.transpose_view(sdO)
+        shape_mnk_dV = (self.tile_n, self.tile_hdimv, self.tile_m)
+        acc_dV, tdVrPt, tdVrdOt = sm90_utils.partition_fragment_ABC(
+            wg_mma_dV, shape_mnk_dV, sPt, sdOt, swap_AB=self.dKV_swapAB
+        )
+        if const_expr(not self.mma_dkv_is_rs):
+            mma_pdo_fn = partial(
+                gemm_w_idx, tiled_mma_dV, acc_dV, tdVrPt, tdVrdOt,
+                swap_AB=self.dKV_swapAB,
+            )
+        else:
+            mma_pdo_fn = partial(
+                gemm_w_idx, tiled_mma_dV, acc_dV, tCrB=tdVrdOt,
+            )
+
+        # --- dK = dS^T @ Q ---
+        wg_mma_dK = tiled_mma_dK.get_slice(
+            warp_group_thread_layout(warp_group_idx)
+        )
+        sdSt = layout_utils.transpose_view(sdS)
+        sQt = layout_utils.transpose_view(sQ)
+        shape_mnk_dK = (self.tile_n, self.tile_hdim, self.tile_m)
+        acc_dK, tdKrdSt, tdKrQt = sm90_utils.partition_fragment_ABC(
+            wg_mma_dK, shape_mnk_dK, sdSt, sQt, swap_AB=self.dKV_swapAB
+        )
+        if const_expr(not self.mma_dkv_is_rs):
+            mma_dsq_fn = partial(
+                gemm_w_idx, tiled_mma_dK, acc_dK, tdKrdSt, tdKrQt,
+                swap_AB=self.dKV_swapAB,
+            )
+        else:
+            mma_dsq_fn = partial(
+                gemm_w_idx, tiled_mma_dK, acc_dK, tCrB=tdKrQt,
+            )
+
+        # --- dQ = dS @ K (accumulated across inner K blocks) ---
+        wg_mma_dQ = tiled_mma_dQ.get_slice(
+            warp_group_thread_layout(
+                0 if const_expr(self.num_wg_dQ == 1) else warp_group_idx
+            )
+        )
+        sKt = layout_utils.transpose_view(sK)
+        shape_mnk_dQ = (self.tile_m, self.tile_hdim, self.tile_n)
+        acc_dQ, tdQrdS, tdQrKt = sm90_utils.partition_fragment_ABC(
+            wg_mma_dQ, shape_mnk_dQ, sdS, sKt, swap_AB=self.dQ_swapAB
+        )
+        mma_dsk_fn = partial(
+            gemm_w_idx, tiled_mma_dQ, acc_dQ,
+            tdQrdS, tdQrKt, swap_AB=self.dQ_swapAB,
+        )
+
+        # /////////////////////////////////////////////////////////////////////
+        # R2S tiled copy partitions for P, dS, dK, dV, dQ
+        # /////////////////////////////////////////////////////////////////////
+
+        mms_PdS = self.tile_n // (self.num_wg_mma // self.AtomLayoutMSdP)
+        copy_P_r2s = None
+        if const_expr(sP is not None):
+            sP_cpy = sP if const_expr(not self.SdP_swapAB) else sPt
+            copy_P_r2s, _, _ = copy_utils.get_smem_store_C(
+                tiled_mma_SdP, sP_cpy, tidx,
+                transpose=self.SdP_swapAB, position_independent=True,
+                major_mode_size=mms_PdS,
+            )
+        sdS_cpy = sdS if const_expr(not self.SdP_swapAB) else sdSt
+        copy_dS_r2s, _, _ = copy_utils.get_smem_store_C(
+            tiled_mma_SdP, sdS_cpy, tidx,
+            transpose=self.SdP_swapAB, position_independent=True,
+            major_mode_size=mms_PdS,
+        )
+
+        # dK/dV R2S into sdKacc/sdVacc (separate from pipeline sK/sV)
+        sdVacc_cpy = (
+            sdVacc if const_expr(not self.dKV_swapAB)
+            else layout_utils.transpose_view(sdVacc)
+        )
+        sdKacc_cpy = (
+            sdKacc if const_expr(not self.dKV_swapAB)
+            else layout_utils.transpose_view(sdKacc)
+        )
+        copy_dV_r2s, _, _ = copy_utils.get_smem_store_C(
+            tiled_mma_dV, sdVacc_cpy, tidx,
+            transpose=self.dKV_swapAB, position_independent=True,
+        )
+        copy_dK_r2s, _, _ = copy_utils.get_smem_store_C(
+            tiled_mma_dK, sdKacc_cpy, tidx,
+            transpose=self.dKV_swapAB, position_independent=True,
+        )
+
+        # dQacc R2S partition
+        smem_thr_copy_dQacc = r2s_tiled_copy_dQacc.get_slice(tidx)
+        tdQsdQacc = smem_thr_copy_dQacc.partition_D(sdQacc)
+
+        # /////////////////////////////////////////////////////////////////////
+        # Barriers and pipeline states
+        # /////////////////////////////////////////////////////////////////////
+
+        PdS_barrier = pipeline.NamedBarrier(
+            barrier_id=int(NamedBarrierBwd.PdS),
+            num_threads=self.num_mma_threads,
+        )
+        dKV_epi_barrier = pipeline.NamedBarrier(
+            barrier_id=int(NamedBarrierBwd.dKVEpilogue),
+            num_threads=self.num_mma_threads,
+        )
+        score_mod_fn = partial(
+            self.apply_score_mod,
+            thr_mma_SdP=thr_mma_SdP,
+            softmax_scale=softmax_scale,
+            aux_tensors=aux_tensors,
+            fastdiv_mods=fastdiv_mods,
+        )
+        score_mod_bwd_fn = partial(
+            self.apply_score_mod_bwd,
+            thr_mma_SdP=thr_mma_SdP,
+            softmax_scale=softmax_scale,
+            aux_tensors=aux_tensors,
+            fastdiv_mods=fastdiv_mods,
+        )
+
+        consumer_state_Q = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.Q_stage
+        )
+        consumer_state_dO = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.dO_stage
+        )
+        consumer_state_KV = pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.KV_stage
+        )
+
+        # /////////////////////////////////////////////////////////////////////
+        # Persistent tile scheduler loop (outer = Q tiles)
+        # /////////////////////////////////////////////////////////////////////
+
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            m_block, head_idx, batch_idx, _ = work_tile.tile_idx
+            seqlen_info = SeqlenInfoCls(batch_idx)
+
+            # Compute inner K block range
+            if const_expr(self.sparse_load):
+                bidb_c = mCuBatches[batch_idx]  # type: ignore[index]
+                end_batches_c = mCuBatches[batch_idx + 1]  # type: ignore[index]
+                total_k_tokens = _compute_total_k_tokens(
+                    mKRanges, bidb_c, end_batches_c,
+                    self.equal_k_range_size,
+                )
+                n_block_min = Int32(0)
+                n_block_max = (total_k_tokens + self.tile_n - 1) // self.tile_n
+                sparse_seqlen_info = SeqlenInfoQK(
+                    seqlen_info.offset_q, seqlen_info.offset_k,
+                    seqlen_info.padded_offset_q, seqlen_info.padded_offset_k,
+                    seqlen_info.seqlen_q, total_k_tokens,
+                    seqlen_info.m_block_offset, seqlen_info.block_idx_offset,
+                    (total_k_tokens + self.tile_n - 1) // self.tile_n,
+                    seqlen_info.has_ranges_q, seqlen_info.has_ranges_k,
+                    seqlen_info.has_seqused_q, seqlen_info.has_seqused_k,
+                )
+                mask = AttentionMaskCls(sparse_seqlen_info)
+            elif const_expr(self.index_sparse):
+                n_block_min = Int32(0)
+                n_block_max = compute_actual_topk(
+                    mIndexSparseIndices,
+                    batch_idx * self.index_sparse_max_topk,
+                    self.index_sparse_max_topk,
+                )
+                idx_total_k = self.index_sparse_max_topk * self.tile_n
+                idx_seqlen_info = SeqlenInfoQK(
+                    seqlen_info.offset_q, Int32(0),
+                    seqlen_info.padded_offset_q, Int32(0),
+                    seqlen_info.seqlen_q, Int32(idx_total_k),
+                    seqlen_info.m_block_offset, seqlen_info.block_idx_offset,
+                    Int32(self.index_sparse_max_topk),
+                    seqlen_info.has_ranges_q, seqlen_info.has_ranges_k,
+                    seqlen_info.has_seqused_q, seqlen_info.has_seqused_k,
+                )
+                mask = AttentionMaskCls(idx_seqlen_info)
+            else:
+                if const_expr(self.use_per_range_mask):
+                    mask_type_runtime = _read_mask_type_fn(batch_idx)
+                    n_block_min, n_block_max = get_n_block_min_max_runtime(
+                        seqlen_info, m_block, mask_type_runtime,
+                        self.tile_m, self.tile_n,
+                    )
+                else:
+                    n_block_min, n_block_max = block_info.get_n_block_min_max(
+                        seqlen_info, m_block
+                    )
+                mask = AttentionMaskCls(seqlen_info)
+
+            process_tile = n_block_min < n_block_max
+            head_idx_kv = (
+                head_idx
+                if const_expr(self.qhead_per_kvhead == 1)
+                else head_idx // qhead_per_kvhead_divmod
+            )
+
+            score_mod_fn_cur = partial(
+                score_mod_fn, batch_idx=batch_idx, head_idx=head_idx,
+                seqlen_info=seqlen_info,
+            )
+            score_mod_bwd_fn_cur = partial(
+                score_mod_bwd_fn, batch_idx=batch_idx, head_idx=head_idx,
+                seqlen_info=seqlen_info,
+            )
+
+            if process_tile:
+                # Wait for Q/dO from producer
+                pipeline_Q.consumer_wait(
+                    consumer_state_Q,
+                    pipeline_Q.consumer_try_wait(consumer_state_Q),
+                )
+                consumer_state_dO_cur = (
+                    consumer_state_Q
+                    if const_expr(self.Q_stage == self.dO_stage)
+                    else consumer_state_dO
+                )
+                pipeline_dO.consumer_wait(
+                    consumer_state_dO_cur,
+                    pipeline_dO.consumer_try_wait(consumer_state_dO_cur),
+                )
+
+                lane_idx = cute.arch.lane_idx()
+                # sLSE/sdPsum are single-stage (1 mode); use [None, 0]
+                tLSErLSE = copy_utils.load_s2r(tLSEsLSE[None, 0])
+                tLSErdPsum = copy_utils.load_s2r(tLSEsdPsum[None, 0])
+
+                # gdK/gdV: global memory for TMA reduce-add (LoopK-style)
+                if const_expr(self.sparse_load or self.index_sparse):
+                    mdK_cur = mdK[None, None, head_idx_kv]
+                    mdV_cur = mdV[None, None, head_idx_kv]
+                else:
+                    mdK_cur = seqlen_info.offset_batch_K(
+                        mdK, batch_idx, dim=3, ragged=self.varlen_k
+                    )[None, None, head_idx_kv]
+                    mdV_cur = seqlen_info.offset_batch_K(
+                        mdV, batch_idx, dim=3, ragged=self.varlen_k
+                    )[None, None, head_idx_kv]
+
+                # /////////////////////////////////////////////////////////////
+                # Inner loop over K blocks
+                # /////////////////////////////////////////////////////////////
+
+                _can_zone_dispatch_loopq = const_expr(
+                    (self.is_causal or self.is_local)
+                    and self.mask_mod is None
+                    and not self.use_per_range_mask
+                )
+                if const_expr(_can_zone_dispatch_loopq):
+                    n_block_nomask_loopq = block_info.get_n_block_min_causal_local_mask(
+                        seqlen_info, m_block, n_block_min,
+                    )
+                    k_seqlen_boundary = (
+                        n_block_max * self.tile_n > seqlen_info.seqlen_k
+                    )
+                else:
+                    n_block_nomask_loopq = n_block_min
+                    k_seqlen_boundary = False
+
+                dQ_accumulate = False
+                for n_block_inner in cutlass.range(
+                    n_block_min, n_block_max, unroll=1
+                ):
+                    pipeline_KV.consumer_wait(
+                        consumer_state_KV,
+                        pipeline_KV.consumer_try_wait(consumer_state_KV),
+                    )
+                    smem_idx_KV = consumer_state_KV.index
+                    smem_idx_PdS = (
+                        smem_idx_KV if const_expr(self.PdS_stage > 1) else 0
+                    )
+
+                    # ----- GEMM 1: S = Q @ K^T -----
+                    # sQ is single-stage (no A_idx), sK is staged (B_idx)
+                    acc_S = mma_qk_fn(B_idx=smem_idx_KV, wg_wait=-1)
+
+                    # ----- GEMM 2: dP = dO @ V^T -----
+                    # sdO is single-stage (no A_idx), sV is staged (B_idx)
+                    acc_dP = mma_dov_fn(B_idx=smem_idx_KV, wg_wait=1)
+
+                    if const_expr(self.score_mod_bwd is not None):
+                        acc_S_pre = cute.make_fragment_like(acc_S)
+                        cute.autovec_copy(acc_S, acc_S_pre)
+
+                    if const_expr(self.score_mod is not None):
+                        score_mod_fn_cur(
+                            acc_S, m_block=m_block, n_block=n_block_inner,
+                        )
+
+                    # ----- Pointwise 1: P = softmax(S) -----
+                    if const_expr(_can_zone_dispatch_loopq):
+                        is_last_k_block = (
+                            n_block_inner == n_block_max - 1
+                        )
+                        if k_seqlen_boundary and is_last_k_block:
+                            mask.apply_mask(
+                                acc_S, m_block=m_block,
+                                batch_idx=batch_idx, head_idx=head_idx,
+                                n_block=n_block_inner, thr_mma=thr_mma_SdP,
+                                mask_seqlen=True,
+                                mask_causal=self.is_causal,
+                                mask_local=self.is_local,
+                                mask_mod=None,
+                                aux_tensors=aux_tensors, fastdiv_mods=fastdiv_mods,
+                            )
+                        elif n_block_inner < n_block_nomask_loopq:
+                            mask.apply_mask(
+                                acc_S, m_block=m_block,
+                                batch_idx=batch_idx, head_idx=head_idx,
+                                n_block=n_block_inner, thr_mma=thr_mma_SdP,
+                                mask_seqlen=False,
+                                mask_causal=self.is_causal,
+                                mask_local=self.is_local,
+                                mask_mod=None,
+                                aux_tensors=aux_tensors, fastdiv_mods=fastdiv_mods,
+                            )
+                    elif const_expr(self.use_per_range_mask):
+                        apply_mask_with_runtime_type_sm90(
+                            acc_S, m_block=m_block,
+                            n_block=n_block_inner, mask_seqlen=True,
+                            mask=mask, mask_type=mask_type_runtime,
+                            batch_idx=batch_idx, head_idx=head_idx,
+                            thr_mma=thr_mma_SdP,
+                            aux_tensors=aux_tensors, fastdiv_mods=fastdiv_mods,
+                        )
+                    else:
+                        mask.apply_mask(
+                            acc_S, m_block=m_block,
+                            batch_idx=batch_idx, head_idx=head_idx,
+                            n_block=n_block_inner, thr_mma=thr_mma_SdP,
+                            mask_seqlen=True,
+                            mask_causal=self.is_causal, mask_local=self.is_local,
+                            mask_mod=self.mask_mod,
+                            aux_tensors=aux_tensors, fastdiv_mods=fastdiv_mods,
+                        )
+
+                    acc_S_mn = layout_utils.reshape_acc_to_mn(
+                        acc_S, transpose=self.SdP_swapAB
+                    )
+                    for r in cutlass.range_constexpr(
+                        cute.size(acc_S_mn, mode=[0])
+                    ):
+                        lse_val = self._get_stat(
+                            tLSErLSE, r, lane_idx, shuffle=self.shuffle_LSE
+                        )
+                        for c in cutlass.range(
+                            cute.size(acc_S_mn, mode=[1]), unroll_full=True
+                        ):
+                            acc_S_mn[r, c] = cute.math.exp2(
+                                acc_S_mn[r, c] * softmax_scale_log2 - lse_val,
+                                fastmath=True,
+                            )
+
+                    tdVrP = cutedsl_utils.cvt_f16(
+                        layout_utils.reshape_acc_to_frgA(acc_S), self.dtype
+                    )
+
+                    if const_expr(not self.mma_dkv_is_rs):
+                        if const_expr(self.PdS_stage == 1):
+                            PdS_barrier.arrive_and_wait()
+                        copy_P_r2s(tdVrP, dst_idx=smem_idx_PdS)
+
+                    # ----- Pointwise 2: dS = P * (dP - dPsum) -----
+                    warpgroup.wait_group(0)
+                    acc_dP_mn = layout_utils.reshape_acc_to_mn(
+                        acc_dP, transpose=self.SdP_swapAB
+                    )
+                    for r in cutlass.range_constexpr(
+                        cute.size(acc_dP_mn, mode=[0])
+                    ):
+                        dpsum_val = self._get_stat(
+                            tLSErdPsum, r, lane_idx,
+                            shuffle=self.shuffle_dPsum,
+                        )
+                        for c in cutlass.range(
+                            cute.size(acc_dP_mn, mode=[1]), unroll_full=True
+                        ):
+                            acc_dP_mn[r, c] = acc_S_mn[r, c] * (
+                                acc_dP_mn[r, c] - dpsum_val
+                            )
+
+                    if const_expr(self.score_mod_bwd is not None):
+                        score_mod_bwd_fn_cur(
+                            acc_dP, acc_S_pre,
+                            m_block=m_block, n_block=n_block_inner,
+                        )
+
+                    tdKrdS = cutedsl_utils.cvt_f16(
+                        layout_utils.reshape_acc_to_frgA(acc_dP), self.dtype
+                    )
+
+                    if const_expr(
+                        not self.mma_dkv_is_rs
+                        or (self.PdS_stage == 1 and self.mma_dkv_is_rs)
+                    ):
+                        cute.arch.fence_view_async_shared()
+                        PdS_barrier.arrive_and_wait()
+
+                    copy_dS_r2s(tdKrdS, dst_idx=smem_idx_PdS)
+
+                    # ----- GEMM 3: dV = P^T @ dO (zero_init each step) -----
+                    # B=sdOt is single-stage (no B_idx needed)
+                    if const_expr(not self.mma_dkv_is_rs):
+                        mma_pdo_fn(
+                            A_idx=smem_idx_PdS, zero_init=True, wg_wait=-1,
+                        )
+                    else:
+                        mma_pdo_fn(
+                            tCrA=tdVrP, zero_init=True, wg_wait=-1,
+                        )
+
+                    cute.arch.fence_view_async_shared()
+                    PdS_barrier.arrive_and_wait()
+
+                    # ----- GEMM 4: dQ += dS @ K (accumulated) -----
+                    mma_dsk_fn(
+                        A_idx=smem_idx_PdS, B_idx=smem_idx_KV,
+                        zero_init=not dQ_accumulate, wg_wait=1,
+                    )
+
+                    # ----- GEMM 5: dK = dS^T @ Q (zero_init each step) -----
+                    # B=sQt is single-stage (no B_idx needed)
+                    if const_expr(not self.mma_dkv_is_rs):
+                        mma_dsq_fn(
+                            A_idx=smem_idx_PdS, zero_init=True, wg_wait=1,
+                        )
+                    else:
+                        mma_dsq_fn(
+                            tCrA=tdKrdS, zero_init=True, wg_wait=1,
+                        )
+
+                    warpgroup.wait_group(0)
+
+                    # Scale dK by softmax_scale
+                    if const_expr(self.qhead_per_kvhead == 1):
+                        acc_dK.store(acc_dK.load() * softmax_scale)
+
+                    # /////////////////////////////////////////////////////////
+                    # dK/dV epilogue per inner step: R2S + TMA reduce-add
+                    # /////////////////////////////////////////////////////////
+
+                    if const_expr(self.sparse_load):
+                        n_block_abs_c = _inner_idx_to_abs_n_block(
+                            n_block_inner, mKRanges, bidb_c,
+                            self.tile_n, self.equal_k_range_size,
+                        )
+                    elif const_expr(self.index_sparse):
+                        idx_off_c = (
+                            batch_idx * self.index_sparse_max_topk + n_block_inner
+                        )
+                        n_block_abs_c = mIndexSparseIndices[idx_off_c]  # type: ignore[index]
+                    else:
+                        n_block_abs_c = n_block_inner
+
+                    # R2S dV → sdVacc (single-stage)
+                    dKV_epi_barrier.arrive_and_wait()
+                    copy_dV_r2s(acc_dV, dst_idx=None)
+                    cute.arch.fence_view_async_shared()
+                    dKV_epi_barrier.arrive_and_wait()
+                    if warp_idx == self.mma_warp_ids[0]:
+                        gdV = cute.local_tile(
+                            mdV_cur,
+                            (self.tile_n, self.tile_hdimv),
+                            (n_block_abs_c, 0),
+                        )
+                        store_dV, _, _ = copy_utils.tma_get_copy_fn(
+                            tma_atom_dV, 0, cute.make_layout(1),
+                            sdVacc, gdV, single_stage=True,
+                        )
+                        store_dV()
+                        cute.arch.cp_async_bulk_commit_group()
+                    cute.arch.cp_async_bulk_wait_group(0, read=True)
+
+                    # R2S dK → sdKacc (single-stage)
+                    dKV_epi_barrier.arrive_and_wait()
+                    copy_dK_r2s(acc_dK, dst_idx=None)
+                    cute.arch.fence_view_async_shared()
+                    dKV_epi_barrier.arrive_and_wait()
+                    if warp_idx == self.mma_warp_ids[0]:
+                        gdK = cute.local_tile(
+                            mdK_cur,
+                            (self.tile_n, self.tile_hdim),
+                            (n_block_abs_c, 0),
+                        )
+                        store_dK, _, _ = copy_utils.tma_get_copy_fn(
+                            tma_atom_dK, 0, cute.make_layout(1),
+                            sdKacc, gdK, single_stage=True,
+                        )
+                        store_dK()
+                        cute.arch.cp_async_bulk_commit_group()
+                    cute.arch.cp_async_bulk_wait_group(0, read=True)
+
+                    # Release K/V pipeline stage (now safe)
+                    pipeline_KV.consumer_release(consumer_state_KV)
+                    consumer_state_KV.advance()
+                    dQ_accumulate = True
+
+                # /////////////////////////////////////////////////////////////
+                # Epilogue dQ: accumulated dQ → sdQacc → mdQacc
+                # /////////////////////////////////////////////////////////////
+
+                # mdQacc addressing (keep rest mode with (None,))
+                if const_expr(not seqlen_info.has_ranges_q):
+                    mdQacc_cur = mdQacc[None, head_idx, batch_idx]
+                else:
+                    mdQacc_cur = cute.domain_offset(
+                        (seqlen_info.padded_offset_q * self.tile_hdim,),
+                        mdQacc[None, head_idx],
+                    )
+                gdQacc = cute.local_tile(
+                    mdQacc_cur,
+                    (
+                        cute.make_layout(
+                            (
+                                self.tile_m * self.tile_hdim // self.num_wg_dQ,
+                                self.num_wg_dQ,
+                            )
+                        ),
+                    ),
+                    (None,),
+                )
+
+                # R2S: acc_dQ → sdQacc
+                tdQrdQacc_flat = cute.make_tensor(
+                    acc_dQ.iterator, cute.make_layout(tdQsdQacc.shape)
+                )
+                cute.autovec_copy(tdQrdQacc_flat, tdQsdQacc)
+                cute.arch.fence_view_async_shared()
+                dKV_epi_barrier.arrive_and_wait()
+
+                # TMA store sdQacc → mdQacc (reduce-add on zero-init buffer)
+                if warp_idx == self.mma_warp_ids[0]:
+                    with cute.arch.elect_one():
+                        for wg_idx in cutlass.range_constexpr(self.num_wg_dQ):
+                            copy_utils.cpasync_reduce_bulk_add_f32(
+                                sdQacc[None, wg_idx].iterator,
+                                gdQacc[
+                                    (None, wg_idx), m_block
+                                ].iterator,
+                                self.tma_copy_bytes["dQ"],
+                            )
+                    cute.arch.cp_async_bulk_commit_group()
+
+                # Release Q/dO pipelines
+                pipeline_Q.consumer_release(consumer_state_Q)
+                pipeline_dO.consumer_release(consumer_state_dO_cur)
+
+                consumer_state_Q.advance()
+                consumer_state_dO.advance()
+
+            tile_scheduler.advance_to_next_work()
+            work_tile = tile_scheduler.get_current_work()
+
+        cute.arch.cp_async_bulk_wait_group(0, read=True)

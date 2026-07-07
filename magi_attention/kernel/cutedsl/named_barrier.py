@@ -51,6 +51,8 @@ class NamedBarrierBwd(enum.IntEnum):
     dQEmptyWG0 = enum.auto()
     dQEmptyWG1 = enum.auto()
     dQEmptyWG2 = enum.auto()
+    # LoopQ barriers (SwapBwdQKLoop=true): inner K/V epilogue sync
+    dKVEpilogue = enum.auto()
 
 
 class NamedBarrierBwdSm100(enum.IntEnum):

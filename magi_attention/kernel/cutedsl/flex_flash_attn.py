@@ -50,6 +50,7 @@ from .ffa_utils import (
     create_softcap_scoremod,
     create_softcap_scoremod_bwd,
     get_device_arch,
+    get_ffa_swap_bwd_qk_loop,
     hash_callable,
     is_ffa_2cta_disabled,
     is_ffa_clc_enabled,
@@ -57,6 +58,7 @@ from .ffa_utils import (
     normalize_mask_types,
     pad_ranges_for_kernel,
     tile_size_bwd_sm90,
+    tile_size_bwd_sm90_loopq,
     tile_size_fwd_sm90,
     validate_arch,
     validate_head_dims,
@@ -235,10 +237,11 @@ def _flex_flash_attn_fwd(
     else:
         assert k.shape == (seqlen_k, num_head_kv, head_dim)
         assert v.shape == (seqlen_k, num_head_kv, head_dim_v)
-        assert k_ranges.shape == (
-            batch_size,
-            2,
-        ), "k_ranges must have shape (batch_size, 2)"
+        if not sparse_load:
+            assert k_ranges.shape == (
+                batch_size,
+                2,
+            ), "k_ranges must have shape (batch_size, 2)"
 
     if q_ranges is not None:
         assert q_ranges.shape == (
@@ -797,6 +800,7 @@ def _flex_flash_attn_bwd(
     index_sparse: bool = False,
     index_sparse_indices: torch.Tensor | None = None,
     index_sparse_max_topk: int = 0,
+    swap_bwd_qk_loop: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
@@ -1008,13 +1012,16 @@ def _flex_flash_attn_bwd(
                 deterministic is False
             ), "deterministic backward not supported on SM 12.0"
         case 9:
-            cfg = tile_size_bwd_sm90(
-                head_dim,
-                head_dim_v,
-                causal,
-                local,
-                sparse_block_size_q=sparse_q,
-            )
+            if swap_bwd_qk_loop:
+                cfg = tile_size_bwd_sm90_loopq(head_dim)
+            else:
+                cfg = tile_size_bwd_sm90(
+                    head_dim,
+                    head_dim_v,
+                    causal,
+                    local,
+                    sparse_block_size_q=sparse_q,
+                )
             m_block_size = cfg.m_block_size
             n_block_size = cfg.n_block_size
             num_stages_Q = cfg.num_stages_Q
@@ -1094,16 +1101,18 @@ def _flex_flash_attn_bwd(
     else:
         assert k.shape == (total_k, num_head_kv, head_dim)
         assert v.shape == (total_k, num_head_kv, head_dim_v)
-        assert k_ranges.shape == (
-            batch_size,
-            2,
-        ), "k_ranges must have shape (batch_size, 2)"
+        if not sparse_load:
+            assert k_ranges.shape == (
+                batch_size,
+                2,
+            ), "k_ranges must have shape (batch_size, 2)"
 
     if q_ranges is not None:
-        assert q_ranges.shape == (
-            batch_size,
-            2,
-        ), "q_ranges must have shape (batch_size, 2)"
+        if not sparse_load:
+            assert q_ranges.shape == (
+                batch_size,
+                2,
+            ), "q_ranges must have shape (batch_size, 2)"
 
         assert out.shape == (total_q, num_head, head_dim_v)
         assert dout.shape == (total_q, num_head, head_dim_v)
@@ -1169,21 +1178,14 @@ def _flex_flash_attn_bwd(
     else:
         validate_tensor(dq, "dq", q.shape, out_torch_dtype, device)
 
+    _need_zero_dkv = sparse_load or index_sparse or swap_bwd_qk_loop
     if dk is None:
-        dk = (
-            torch.zeros_like(k)
-            if (sparse_load or index_sparse)
-            else torch.empty_like(k)
-        )
+        dk = torch.zeros_like(k) if _need_zero_dkv else torch.empty_like(k)
     else:
         validate_tensor(dk, "dk", k.shape, out_torch_dtype, device)
 
     if dv is None:
-        dv = (
-            torch.zeros_like(v)
-            if (sparse_load or index_sparse)
-            else torch.empty_like(v)
-        )
+        dv = torch.zeros_like(v) if _need_zero_dkv else torch.empty_like(v)
     else:
         validate_tensor(dv, "dv", v.shape, out_torch_dtype, device)
 
@@ -1404,6 +1406,7 @@ def _flex_flash_attn_bwd(
             equal_k_range_size if use_sparse_load_sm90_bwd else False,
             use_index_sparse_sm90_bwd,
             index_sparse_max_topk if use_index_sparse_sm90_bwd else 0,
+            swap_bwd_qk_loop and major_arch == 9,
         )
     else:  # SM100
         compile_key = (
@@ -1556,6 +1559,7 @@ def _flex_flash_attn_bwd(
                     index_sparse_max_topk=index_sparse_max_topk
                     if use_index_sparse_sm90_bwd
                     else 0,
+                    swap_bwd_qk_loop=swap_bwd_qk_loop,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case _:
@@ -1804,6 +1808,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         flex_attn_args: TorchFlexAttnArgs | None = None,
         sparse_load: bool = False,
         equal_k_range_size: bool = False,
+        swap_bwd_qk_loop: bool = False,
     ):
         mask_type = normalize_mask_types(mask_types)
         out, lse = _flex_flash_attn_fwd(
@@ -1848,6 +1853,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.max_seqlen_k = max_seqlen_k
         ctx.sparse_load = sparse_load
         ctx.equal_k_range_size = equal_k_range_size
+        ctx.swap_bwd_qk_loop = swap_bwd_qk_loop
         # Drop the direct aux_tensors reference on ctx; the real tensors are
         # tracked via save_for_backward and restored in backward. Keeping them
         # here too would bypass autograd's save_for_backward bookkeeping.
@@ -1903,6 +1909,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             flex_attn_args=flex_attn_args,
             sparse_load=ctx.sparse_load,
             equal_k_range_size=ctx.equal_k_range_size,
+            swap_bwd_qk_loop=ctx.swap_bwd_qk_loop,
         )
 
         return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
@@ -1927,6 +1934,7 @@ def flex_flash_attn_func(
     flex_attn_args: TorchFlexAttnArgs | None = None,
     sparse_load: bool = False,
     equal_k_range_size: bool = False,
+    swap_bwd_qk_loop: bool | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / varlen).
@@ -1959,6 +1967,8 @@ def flex_flash_attn_func(
         (``block_sparse_tensors`` / ``block_sparse_tensors_bwd``) capabilities.
         Leave as ``None`` for the plain dense / varlen path.
     """
+    if swap_bwd_qk_loop is None:
+        swap_bwd_qk_loop = get_ffa_swap_bwd_qk_loop()
     out, lse = FlexFlashAttnFunc.apply(
         q,
         k,
@@ -1977,6 +1987,7 @@ def flex_flash_attn_func(
         flex_attn_args,
         sparse_load,
         equal_k_range_size,
+        swap_bwd_qk_loop,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)
