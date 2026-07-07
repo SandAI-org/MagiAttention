@@ -67,7 +67,6 @@ template <
     bool RangeMerge_,
     bool BlockSparse_,
     bool IndexSparse_,
-    bool UseMaskDispatch_,
     bool InnerDirMaxToMin_,
     int MaskMode_,
     bool InnerDxStoreInProducer_,
@@ -91,7 +90,7 @@ template <
     bool SkipDvMma_ = false,
     bool SkipDvWriteback_ = false,
     bool SkipDkWriteback_ = false,
-    bool UnunionDkvacc_ = false,
+    bool SeparateDkvacc_ = false,
     bool DeferDvR2S_ = false>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
@@ -121,7 +120,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool PerfDebugSkipDvMma = SkipDvMma_;
   static constexpr bool PerfDebugSkipDvWriteback = SkipDvWriteback_;
   static constexpr bool PerfDebugSkipDkWriteback = SkipDkWriteback_;
-  static constexpr bool UnunionDkvacc = UnunionDkvacc_;
+  static constexpr bool SeparateDkvacc = SeparateDkvacc_;
   static constexpr bool PerfDebugDeferDvR2S = DeferDvR2S_;
 
   static constexpr bool Has_softcap = Has_softcap_;
@@ -142,7 +141,6 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(!(BlockSparse && IndexSparse));
   static_assert(!IndexSparse || KBlockSize >= 1, "KBlockSize must be >= 1 for IndexSparse");
 
-  static constexpr bool UseMaskDispatch = UseMaskDispatch_;
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
   // InnerUseScatter: inner-loop direction data uses scatter load/store (vs TMA):
@@ -718,12 +716,12 @@ struct CollectiveMainloopBwdSm90 {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQKVdO> smem_q;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutdO>, SmemAlignmentQKVdO> smem_do;
-    // dK and dV accumulators: when UnunionDkvacc, separate buffers allow dV/dK r2s
+    // dK and dV accumulators: when SeparateDkvacc = true, uses separate buffers allow dV/dK r2s
     // to overlap (independent barrier paths). Otherwise union saves 32 KB but forces
     // serialized stores via the swapped dVEmpty/dKEmpty barrier protocol in store_dkv().
     // When LseDpsumUnionDKVacc: the first bytes of smem_dkacc are also aliased as
     // smem_lse (512B) + smem_dpsum (512B) during outer-loop LSE/dPsum TMA loads.
-    struct UnunionedDkvacc {
+    struct SeparatedDkvacc {
       SmemdKVacc_t smem_dkacc;
       SmemdKVacc_t smem_dvacc;
     };
@@ -733,7 +731,7 @@ struct CollectiveMainloopBwdSm90 {
         SmemdKVacc_t smem_dvacc;
       };
     };
-    using DkvaccStorage = std::conditional_t<UnunionDkvacc, UnunionedDkvacc, UnionedDkvacc>;
+    using DkvaccStorage = std::conditional_t<SeparateDkvacc, SeparatedDkvacc, UnionedDkvacc>;
     DkvaccStorage dkvacc_storage;
     SmemTokenIndices_t smem_inner_token_indices;
     // Zero-sized fields placed AFTER all data buffers so they fall in struct tail padding
@@ -2480,7 +2478,7 @@ struct CollectiveMainloopBwdSm90 {
       // Union: signal dKEmpty (TMA dV done → consumer can r2s dK into shared buffer)
       // Un-union: signal dVEmpty (TMA dV done → consumer can r2s next dV into its own buffer)
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        if constexpr (UnunionDkvacc) {
+        if constexpr (SeparateDkvacc) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         } else {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
@@ -2523,7 +2521,7 @@ struct CollectiveMainloopBwdSm90 {
       // Union: signal dVEmpty (TMA dK done → consumer can r2s next dV into shared buffer)
       // Un-union: signal dKEmpty (TMA dK done → consumer can r2s next dK into its own buffer)
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        if constexpr (UnunionDkvacc) {
+        if constexpr (SeparateDkvacc) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         } else {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
@@ -2582,7 +2580,7 @@ struct CollectiveMainloopBwdSm90 {
         // Un-union: both dVEmpty and dKEmpty (separate buffers → both r2s start immediately).
         if (warp_idx_in_warpgroup == 0 || (InnerUseScatter && warp_idx_in_warpgroup == 1)) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
-          if constexpr (UnunionDkvacc) {
+          if constexpr (SeparateDkvacc) {
             BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
           }
         }

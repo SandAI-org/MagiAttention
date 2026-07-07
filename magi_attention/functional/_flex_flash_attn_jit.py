@@ -415,10 +415,6 @@ def get_ffa_jit_spec(
     if _iwg is not None and direction == "fwd":
         extra_template_args["intra_wg_overlap"] = _iwg.lower()
         uri += f"_iwg{_iwg}"
-    _umd = os.environ.get("MAGI_ATTENTION_FFA_USE_MASK_DISPATCH")
-    if _umd is not None and direction == "bwd":
-        extra_template_args["use_mask_dispatch"] = _umd.lower()
-        uri += f"_umd{_umd}"
     _idm = os.environ.get("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
     if _idm is not None:
         extra_template_args["inner_dir_max_to_min"] = _idm.lower()
@@ -494,7 +490,7 @@ def get_ffa_jit_spec(
             ("MAGI_ATTENTION_FFA_BWD_SCATTER_PAD", "bwd_scatter_pad", "sp"),
             ("MAGI_ATTENTION_FFA_BWD_LSE_UNION", "bwd_lse_union", "lu"),
             ("MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS", "bwd_dkvacc_bypass", "db"),
-            ("MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC", "bwd_ununion_dkvacc", "uu"),
+            ("MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC", "bwd_separate_dkvacc", "uu"),
         ]:
             _val = os.environ.get(_env_name)
             if _val is not None:
@@ -513,18 +509,18 @@ def get_ffa_jit_spec(
             extra_template_args["bwd_lse_union"] = "1"
             uri += "_lu1"
 
-        # Default Ununion+stgV1 for LoopK: separates dK/dV SMEM buffers (+38T, +11%).
-        # SMEM: 198KB → 214KB (stgV=1 frees 16KB for ununion's +32KB). No register change.
+        # Default SeparateDkvacc+stgV1 for LoopK: separates dK/dV SMEM buffers (+38T, +11%).
+        # SMEM: 198KB → 214KB (stgV=1 frees 16KB for separate's +32KB). No register change.
         # Convenience override: MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2=1 restores legacy behavior.
-        # Fine-grained overrides: BWD_UNUNION_DKVACC / BWD_STAGES_V still work individually.
+        # Fine-grained overrides: BWD_SEPARATE_DKVACC / BWD_STAGES_V still work individually.
         _perf_union = os.environ.get("MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2")
         if _perf_union is not None and _perf_union != "0":
-            extra_template_args.setdefault("bwd_ununion_dkvacc", "0")
+            extra_template_args.setdefault("bwd_separate_dkvacc", "0")
             extra_template_args.setdefault("bwd_stages_v", "2")
             uri += "_pus1"
         elif bwd_inner_loop_k:
-            if "bwd_ununion_dkvacc" not in extra_template_args:
-                extra_template_args["bwd_ununion_dkvacc"] = "1"
+            if "bwd_separate_dkvacc" not in extra_template_args:
+                extra_template_args["bwd_separate_dkvacc"] = "1"
                 uri += "_uu1"
             if "bwd_stages_v" not in extra_template_args:
                 extra_template_args["bwd_stages_v"] = "1"
@@ -745,7 +741,7 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_SCATTER_PAD",
     "MAGI_ATTENTION_FFA_BWD_LSE_UNION",
     "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
-    "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC",
+    "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC",
     "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",

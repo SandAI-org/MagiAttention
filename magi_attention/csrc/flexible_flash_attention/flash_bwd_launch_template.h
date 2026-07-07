@@ -126,7 +126,6 @@ template <
     bool RangeMerge,
     bool BlockSparse,
     bool IndexSparse,
-    bool UseMaskDispatch,
     bool InnerDirMaxToMin,
     int MaskMode,
     bool InnerDxStoreInProducer,
@@ -148,7 +147,7 @@ template <
     bool SkipDvMma_ = false,
     bool SkipDvWriteback_ = false,
     bool SkipDkWriteback_ = false,
-    bool UnunionDkvacc = false,
+    bool SeparateDkvacc = false,
     bool DeferDvR2S_ = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
@@ -197,7 +196,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       RangeMerge,
       BlockSparse,
       IndexSparse,
-      UseMaskDispatch,
       InnerDirMaxToMin,
       MaskMode,
       InnerDxStoreInProducer,
@@ -221,7 +219,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       SkipDvMma_,
       SkipDvWriteback_,
       SkipDkWriteback_,
-      UnunionDkvacc,
+      SeparateDkvacc,
       DeferDvR2S_>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
@@ -346,7 +344,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
           ScatterPad,
           (int)LseDpsumUnionDKVacc,
           (int)DkvaccBypassSmem,
-          (int)UnunionDkvacc,
+          (int)SeparateDkvacc,
           (int)BwdInnerLoopK);
       cudaFuncAttributes func_attrs;
       cudaFuncGetAttributes(&func_attrs, (void*)cutlass::device_kernel<AttnKernel>);
@@ -399,7 +397,6 @@ template <
     int PackGQAFactor,
     bool BlockSparse,
     bool IndexSparse,
-    bool UseMaskDispatch,
     bool InnerDirMaxToMin,
     int MaskMode,
     bool InnerDxStoreInProducer,
@@ -424,7 +421,7 @@ template <
     bool SkipDvMma = false,
     bool SkipDvWriteback = false,
     bool SkipDkWriteback = false,
-    int BwdUnunionDkvacc = 0,
+    int BwdSeparateDkvacc = 0,
     bool DeferDvR2S = false>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -441,7 +438,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int ScatterPad = BwdScatterPad;
   static constexpr bool LseDpsumUnionDKVacc = BwdLseUnion != 0;
   static constexpr bool DkvaccBypassSmem = BwdDkvaccBypass != 0;
-  static constexpr bool UnunionDkvacc = BwdUnunionDkvacc != 0;
+  static constexpr bool SeparateDkvacc = BwdSeparateDkvacc != 0;
 
   static constexpr bool SdP_swapAB = kHeadDim <= 128 ? true : false;
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
@@ -495,7 +492,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*RangeMerge=*/RangeMerge,
       /*BlockSparse=*/BlockSparse,
       /*IndexSparse=*/IndexSparse,
-      /*UseMaskDispatch=*/UseMaskDispatch,
       /*InnerDirMaxToMin=*/InnerDirMaxToMin,
       /*MaskMode=*/MaskMode,
       /*InnerDxStoreInProducer=*/InnerDxStoreInProducer,
@@ -517,6 +513,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*SkipDvMma_=*/SkipDvMma,
       /*SkipDvWriteback_=*/SkipDvWriteback,
       /*SkipDkWriteback_=*/SkipDkWriteback,
-      /*UnunionDkvacc=*/UnunionDkvacc,
+      /*SeparateDkvacc=*/SeparateDkvacc,
       /*DeferDvR2S_=*/DeferDvR2S>(params, stream);
 }

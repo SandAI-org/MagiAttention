@@ -57,7 +57,7 @@ _DEBUG_ENV_KEYS = [
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA",
     "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
-    "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC",
+    "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC",
     "MAGI_ATTENTION_FFA_BWD_TILE_M",
     "MAGI_ATTENTION_FFA_BWD_TILE_N",
     "MAGI_ATTENTION_FFA_BWD_STAGES",
@@ -259,7 +259,7 @@ _OPTIMIZATION_CONFIGS = [
     (
         "loopk_ununion_stgv1_svl",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
         },
@@ -270,7 +270,7 @@ _OPTIMIZATION_CONFIGS = [
     (
         "loopk_ununion_stgv1_svw",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
         },
@@ -296,7 +296,7 @@ _SYMMETRY_CONFIGS = [
     (
         "loopk_ununion_stgv1_skw",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK": "1",
         },
@@ -307,7 +307,7 @@ _SYMMETRY_CONFIGS = [
     (
         "loopk_ununion_stgv1_svs",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
         },
@@ -318,7 +318,7 @@ _SYMMETRY_CONFIGS = [
     (
         "loopk_ununion_stgv1_sks",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
         },
@@ -329,7 +329,7 @@ _SYMMETRY_CONFIGS = [
     (
         "loopk_ununion_stgv1_svw_skw",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK": "1",
@@ -341,7 +341,7 @@ _SYMMETRY_CONFIGS = [
     (
         "loopk_ununion_stgv1_ddv",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
             "MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S": "1",
         },
@@ -359,7 +359,7 @@ _STAGE_CONFIGS = [
     (
         "loopk_ununion_stgk1",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES": "1",
         },
         False,
@@ -368,7 +368,7 @@ _STAGE_CONFIGS = [
     (
         "loopk_ununion_stgk1_stgv1",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
         },
@@ -390,7 +390,7 @@ _STAGE_CONFIGS = [
     (
         "loopk_ununion_stgk1_svw",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
         },
@@ -400,7 +400,7 @@ _STAGE_CONFIGS = [
     (
         "loopk_ununion_stgk1_stgv1_svw",
         {
-            "MAGI_ATTENTION_FFA_BWD_UNUNION_DKVACC": "1",
+            "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
