@@ -74,7 +74,7 @@ def _phase5_bench(force=False, max_kvseqlen=None):
         s_values = [s for s in S_VALUES if s <= max_kvseqlen]
 
     print(
-        f"[{_ts()}] Phase 5: Scaling (S=32k..{s_values[-1]//1024}k, topk=S/4, gpu{gpu})",
+        f"[{_ts()}] Phase 5: Scaling (S=32k..{s_values[-1] // 1024}k, topk=S/4, gpu{gpu})",
         flush=True,
     )
     print(f"  nhq={NHQ}, nhk={NHK}, hd={HD}, kbs={KBS}, bf16, PackGQA\n", flush=True)

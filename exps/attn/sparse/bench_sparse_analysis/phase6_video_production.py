@@ -93,7 +93,7 @@ def _phase6_bench(force=False, max_kvseqlen=None):
     print(
         f"  nhq={NHQ}, nhk={NHK}, hd={HD}, kbs={KBS}, "
         f"q_block_size=1, PackGQA, bf16"
-        f"{f', max_kvseqlen={max_kvseqlen//1024}k' if max_kvseqlen else ''}\n",
+        f"{f', max_kvseqlen={max_kvseqlen // 1024}k' if max_kvseqlen else ''}\n",
         flush=True,
     )
 
