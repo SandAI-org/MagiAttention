@@ -444,8 +444,13 @@ class FlashAttnFwdSm90 {
           epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, epilogue_block_coord, block_meta.seqlen_info, det_msg);
         }
       }
-      // Idle CTAs (no tiles processed) must still signal barrier_O so the
-      // producer's load_tail doesn't deadlock waiting for phase advancement.
+      // barrier_O guards smem_o/smem_v union: producer waits before V load,
+      // consumer arrives after O store. work_idx counts *valid* tiles (incremented
+      // only when epilogue.store() runs, which arrives barrier_O internally).
+      // Invalid tiles go through store_zero() which intentionally does NOT arrive
+      // barrier_O (the producer never loaded V for invalid tiles either).
+      // If the entire loop had zero valid tiles, nobody arrived → producer's
+      // load_tail would deadlock in barrier_O.wait(0). Manually arrive here.
       if (work_idx == 0) {
 #pragma unroll
         for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
