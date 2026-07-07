@@ -36,6 +36,8 @@ __all__ = [
     "parameterize",
 ]
 
+__version__ = "1.0.1"
+
 
 def parameterize(argument: str, values: list[Any]) -> Callable:
     """

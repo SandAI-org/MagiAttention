@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import re
 
 import torch
@@ -30,6 +31,8 @@ if version.parse(torch.__version__) > version.parse("2.4"):
 
 # usage: to avoid division by zero in numerical calculation and assert-close testing
 EPSILON = 1e-8
+
+PRINT_NO_MISMATCH = "MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH"
 
 # NOTE: an experimental value from fa/ffa/magi_attention testing
 MISMATCH_THRES_RATIO: float = 2.0
@@ -170,6 +173,7 @@ def assert_close(
     allow_none: bool = True,
     print_tensor_when_mismatch: bool = True,
     print_rank: int = 0,
+    print_no_mismatch: bool = True,
 ) -> None:
     """Assert that two tensors are close within given tolerances,
     with a mismatch threshold to allow some degree of mismatch.
@@ -188,6 +192,11 @@ def assert_close(
             side-by-side when mismatch exceeds threshold. Defaults to ``True``.
         print_rank (int, optional): rank to print from. Defaults to ``0``.
             And set to ``-1`` to print from all ranks.
+        print_no_mismatch (bool, optional): if ``True``, print a message when there is no mismatch.
+            Defaults to ``True``.
+
+            NOTE: Set ``MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0`` to force disable printing no-mismatch messages,
+            mainly used to reduce logging noise in CI.
     """
     assert (
         0 <= mismatch_threshold <= 1
@@ -207,7 +216,11 @@ def assert_close(
         torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
         no_mismatch_info = f"[{test_case}]: has no mismatch"
         if is_this_print_rank:
-            print(no_mismatch_info)
+            print_no_mismatch = (
+                os.environ.get(PRINT_NO_MISMATCH, "1") == "1" and print_no_mismatch
+            )
+            if print_no_mismatch:
+                print(no_mismatch_info)
     except AssertionError as e:
         error_msg = str(e)
         mismatched_elements, total_elements, mismatch_ratio = extract_mismatch_info(
