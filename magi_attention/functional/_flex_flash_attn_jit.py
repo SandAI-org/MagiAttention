@@ -481,6 +481,7 @@ def get_ffa_jit_spec(
             _store_lower = _store_env.lower()
             _store_mode_map = {
                 "tma1d": "1",
+                "atomicadd": "2",
                 "cpasync": "2",
                 "bypass": "3",
                 "true": "1",
@@ -488,7 +489,7 @@ def get_ffa_jit_spec(
             }
             assert (
                 _store_lower in _store_mode_map
-            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE must be tma1d/cpasync/bypass, got {_store_env}"
+            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE must be tma1d/atomicadd/bypass, got {_store_env}"
             extra_template_args["inner_store_mode"] = _store_mode_map[_store_lower]
             uri += f"_sstore{_store_mode_map[_store_lower]}"
         elif _inner_use_scatter:

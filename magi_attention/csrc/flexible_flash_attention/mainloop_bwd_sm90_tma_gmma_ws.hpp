@@ -72,7 +72,7 @@ template <
     bool InnerStoreInProducer_,
     int InnerStoreMode_,
     int PackGQAFactor_,
-    int NumMmaWarpGroups,
+    int NumConsumerWarpGroups,
     int AtomLayoutMSdP,
     int AtomLayoutNdKV,
     int AtomLayoutMdQ,
@@ -164,7 +164,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr InnerStoreMode kInnerStoreMode = static_cast<InnerStoreMode>(InnerStoreMode_);
   static constexpr bool DkvaccBypassSmem = (kInnerStoreMode == InnerStoreMode::BypassSmem);
   static constexpr bool SparseInnerDxReduceUseTma = (kInnerStoreMode == InnerStoreMode::Tma1d);
-  static_assert(kInnerStoreMode == InnerStoreMode::Tma1d || kInnerStoreMode == InnerStoreMode::CpAsync || kInnerStoreMode == InnerStoreMode::BypassSmem);
+  static_assert(kInnerStoreMode == InnerStoreMode::Tma1d || kInnerStoreMode == InnerStoreMode::AtomicAdd || kInnerStoreMode == InnerStoreMode::BypassSmem);
   static_assert(IsSparse || kInnerStoreMode != InnerStoreMode::Tma1d, "Tma1d store requires scatter (sparse) path");
 
   static constexpr int kBlockM = get<0>(TileShape_MNK{});
@@ -172,20 +172,20 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
   // ─── Inner-Loop Load Strategy (InnerLoadMode enum) ───
-  // Tma:     physically contiguous tiles → TMA 2D descriptor (auto-detected)
-  // CpAsync: scatter rows → cp.async per-row
-  // Auto-detect contiguity:
-  //   Dense: always contiguous → Tma.
-  //   InnerLoopQ sparse (inner=Q/dO): PackGQA makes tiles contiguous when:
-  //     - BlockSparse: always (packed rows = consecutive tokens × heads).
-  //     - IndexSparse: PackGQAFactor >= kBlockM (one Q token fills the tile).
-  //   InnerLoopK sparse (inner=K/V): K tiles are contiguous when:
-  //     - BlockSparse: SparseKBlockSize >= kBlockN (Python sets kbs=kBlockN for BlockSparse).
-  //     - IndexSparse: PackGQA + PackGQAFactor >= kBlockM + SparseKBlockSize >= kBlockN.
-  static constexpr bool _is_contiguous = !IsSparse || (!BwdInnerLoopK && PackGQA && (!IndexSparse || PackGQAFactor >= kBlockM)) ||
+  // Tma:     physically contiguous tiles → TMA 2D descriptor (hardware scatter-free)
+  // CpAsync: non-contiguous rows → cp.async per-row (software scatter)
+  //
+  // TMA requires tiles physically contiguous in gmem. Conditions:
+  //   Dense: always contiguous.
+  //   InnerLoopQ (inner=Q/dO): PackGQA packs heads into consecutive rows:
+  //     BlockSparse: always contiguous (packed rows = token × heads, sequential).
+  //     IndexSparse: contiguous only if one Q token fills a tile (PackGQAFactor >= kBlockM).
+  //   InnerLoopK (inner=K/V): each tile maps to one K block:
+  //     BlockSparse: contiguous when kbs >= kBlockN (one block = one tile).
+  //     IndexSparse: contiguous when kbs >= kBlockN AND PackGQAFactor >= kBlockM.
+  static constexpr bool kInnerTilesContiguous = !IsSparse || (!BwdInnerLoopK && PackGQA && (!IndexSparse || PackGQAFactor >= kBlockM)) ||
       (BwdInnerLoopK && ((BlockSparse && SparseKBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && SparseKBlockSize >= kBlockN)));
-  static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
-  static_assert(kInnerLoadMode == InnerLoadMode::Tma || kInnerLoadMode == InnerLoadMode::CpAsync);
+  static constexpr InnerLoadMode kInnerLoadMode = kInnerTilesContiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
 
   using MainloopPipeline =
       std::conditional_t<kInnerLoadMode == InnerLoadMode::Tma, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
@@ -199,19 +199,19 @@ struct CollectiveMainloopBwdSm90 {
   using TMAClusterBarrier_t = cutlass::arch::ClusterTransactionBarrier::ValueType;
   using BwdNamedBarriers = std::conditional_t<BwdInnerLoopK, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
 
-  static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
+  static_assert(BarrierManager::check<BwdNamedBarriers, NumConsumerWarpGroups>());
 
   using SeqlenInfo_t = flash::SeqlenInfo;
   using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, PackGQAFactor>;
 
-  static_assert(NumMmaWarpGroups % AtomLayoutMSdP == 0);
-  static_assert(NumMmaWarpGroups % AtomLayoutNdKV == 0);
-  static_assert(NumMmaWarpGroups % AtomLayoutMdQ == 0);
-  static constexpr int AtomLayoutNSdP = NumMmaWarpGroups / AtomLayoutMSdP;
-  static constexpr int AtomLayoutMdKV = NumMmaWarpGroups / AtomLayoutNdKV;
-  static constexpr int AtomLayoutNdQ = NumMmaWarpGroups / AtomLayoutMdQ;
+  static_assert(NumConsumerWarpGroups % AtomLayoutMSdP == 0);
+  static_assert(NumConsumerWarpGroups % AtomLayoutNdKV == 0);
+  static_assert(NumConsumerWarpGroups % AtomLayoutMdQ == 0);
+  static constexpr int AtomLayoutNSdP = NumConsumerWarpGroups / AtomLayoutMSdP;
+  static constexpr int AtomLayoutMdKV = NumConsumerWarpGroups / AtomLayoutNdKV;
+  static constexpr int AtomLayoutNdQ = NumConsumerWarpGroups / AtomLayoutMdQ;
 
-  static constexpr int NumConsumerThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
+  static constexpr int NumConsumerThreads = NumConsumerWarpGroups * cutlass::NumThreadsPerWarpGroup;
 
   // ─── ProducerWarpRoles: centralized producer warp role configuration ───
   // Replaces scattered magic-number warp_idx checks and hand-written barrier widths.
@@ -220,24 +220,24 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kNumLoaderWarps = IsSparse ? 2 : 1;
     // DxStorer warps: 0 if !InnerStoreInProducer (consumer handles store),
     //                 else 2 (InnerLoopK: dK+dV) or 1 (InnerLoopQ: dQ)
-    static constexpr int kNumDxStorerWarps = !InnerStoreInProducer ? 0 : (BwdInnerLoopK ? 2 : 1);
-    static constexpr int kNumTotalWarps = kNumLoaderWarps + kNumDxStorerWarps;
+    static constexpr int kNumInnerStorerWarps = !InnerStoreInProducer ? 0 : (BwdInnerLoopK ? 2 : 1);
+    static constexpr int kNumTotalWarps = kNumLoaderWarps + kNumInnerStorerWarps;
 
     // Thread counts (derived)
-    static constexpr int kLoaderThreads = kNumLoaderWarps * cutlass::NumThreadsPerWarp;
-    static constexpr int kDxStorerThreads = kNumDxStorerWarps * cutlass::NumThreadsPerWarp;
+    static constexpr int kNumLoaderThreads = kNumLoaderWarps * cutlass::NumThreadsPerWarp;
+    static constexpr int kInnerStorerThreads = kNumInnerStorerWarps * cutlass::NumThreadsPerWarp;
     static constexpr int kTotalThreads = kNumTotalWarps * cutlass::NumThreadsPerWarp;
 
     // Per-direction store thread count for dKV barriers:
-    //   IsSparse: all DxStorer warps participate in BOTH dV and dK → kDxStorerThreads
+    //   IsSparse: all DxStorer warps participate in BOTH dV and dK → kInnerStorerThreads
     //   Dense InnerLoopK: warp1→dV, warp2→dK, each barrier involves 1 warp → NumThreadsPerWarp
-    static constexpr int kPerDirDkvStoreThreads = !InnerStoreInProducer ? 0 : (IsSparse ? kDxStorerThreads : cutlass::NumThreadsPerWarp);
+    static constexpr int kPerDirDkvStoreThreads = !InnerStoreInProducer ? 0 : (IsSparse ? kInnerStorerThreads : cutlass::NumThreadsPerWarp);
 
     // Barrier participant counts (THE source of truth)
     // Outer-empty (KVEmpty for InnerLoopQ, QdOEmpty for InnerLoopK): loader threads only
-    static constexpr int kOuterEmptyBarrierThreads = kLoaderThreads;
+    static constexpr int kOuterEmptyBarrierThreads = kNumLoaderThreads;
     // dQ barrier (InnerLoopQ): consumer WG + dQ store warp (if InnerStoreInProducer)
-    static constexpr int kDqBarrierThreads = cutlass::NumThreadsPerWarpGroup + (BwdInnerLoopK ? 0 : kDxStorerThreads);
+    static constexpr int kDqBarrierThreads = cutlass::NumThreadsPerWarpGroup + (BwdInnerLoopK ? 0 : kInnerStorerThreads);
     // dKV per-direction barrier (InnerLoopK): consumer WG + per-dir store threads
     static constexpr int kDkvBarrierThreads = cutlass::NumThreadsPerWarpGroup + (BwdInnerLoopK ? kPerDirDkvStoreThreads : 0);
 
@@ -245,7 +245,7 @@ struct CollectiveMainloopBwdSm90 {
     static CUTLASS_DEVICE bool is_loader(int warp_idx) {
       return warp_idx < kNumLoaderWarps;
     }
-    static CUTLASS_DEVICE bool is_dx_storer(int warp_idx) {
+    static CUTLASS_DEVICE bool is_inner_storer(int warp_idx) {
       return InnerStoreInProducer && warp_idx >= kNumLoaderWarps && warp_idx < kNumTotalWarps;
     }
     static CUTLASS_DEVICE bool is_leader_loader(int warp_idx) {
@@ -253,20 +253,15 @@ struct CollectiveMainloopBwdSm90 {
     }
   };
 
-  // Aliases for backward compatibility with existing code references
+  // Thread counts promoted from ProducerWarpRoles for use in barrier template args.
   static constexpr int NumProducerThreads = ProducerWarpRoles::kTotalThreads;
-  static constexpr int NumProducerLoaderThreads = ProducerWarpRoles::kLoaderThreads;
-  static constexpr int NumScatterThreads = NumProducerLoaderThreads;
-  static constexpr bool InnerLoad_Tma = (kInnerLoadMode == InnerLoadMode::Tma);
-  static constexpr bool InnerLoad_CpAsync = (kInnerLoadMode == InnerLoadMode::CpAsync);
-  static constexpr bool InnerDxStoreInProducer = InnerStoreInProducer;
-  // Per-direction store barrier width (NOT total DxStorer threads)
+  static constexpr int NumProducerLoaderThreads = ProducerWarpRoles::kNumLoaderThreads;
   static constexpr int NumdKVStoreThreads = ProducerWarpRoles::kPerDirDkvStoreThreads;
   static constexpr int NumKVEmptyProducerThreads = ProducerWarpRoles::kOuterEmptyBarrierThreads;
   static constexpr int NumdQBarrierThreads = ProducerWarpRoles::kDqBarrierThreads;
 
-  static_assert(!InnerStoreInProducer || ProducerWarpRoles::kNumDxStorerWarps > 0);
-  static_assert(InnerStoreInProducer || ProducerWarpRoles::kNumDxStorerWarps == 0);
+  static_assert(!InnerStoreInProducer || ProducerWarpRoles::kNumInnerStorerWarps > 0);
+  static_assert(InnerStoreInProducer || ProducerWarpRoles::kNumInnerStorerWarps == 0);
   static_assert(ProducerWarpRoles::kNumTotalWarps * cutlass::NumThreadsPerWarp == NumProducerThreads);
 
   // Const parameters for scatter load/store
@@ -278,7 +273,7 @@ struct CollectiveMainloopBwdSm90 {
   // The smem token-index array (SmemTokenIndices_t below) is sized by the same dimension.
   static constexpr int kInnerScatterRows = BwdInnerLoopK ? kBlockN : kBlockM;
   static constexpr int NumTokensPerLdstGroup = kInnerScatterRows / NumLdstGroups;
-  static constexpr int NumCpAsyncTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
+  static constexpr int kNumLoadTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
   static constexpr int kStoreVecWidth = kCpAsyncTransactionBytes / (NumThreadsPerLdstGroup * sizeof(ElementAccum));
   static constexpr int kNumStoreTiles = kHeadDim / (NumThreadsPerLdstGroup * kStoreVecWidth);
 
@@ -431,14 +426,14 @@ struct CollectiveMainloopBwdSm90 {
 
   // k for outer-loop and q for inner-loop
   // Thread layout, 256 or 384 threads per row
-  // We split into NumMmaWarpGroups so that we can do Bulk reduce add for each WG separately.
+  // We split into NumConsumerWarpGroups so that we can do Bulk reduce add for each WG separately.
   using TileShape_dQaccum = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
-  using R2SLayoutAtomdQaccum = Layout<Shape<Int<cutlass::NumThreadsPerWarpGroup>, Int<NumMmaWarpGroups>>>;
+  using R2SLayoutAtomdQaccum = Layout<Shape<Int<cutlass::NumThreadsPerWarpGroup>, Int<NumConsumerWarpGroups>>>;
   using R2STiledCopydQaccum = decltype(make_tiled_copy(
       Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
       R2SLayoutAtomdQaccum{},
       Layout<Shape<_4>>{})); // Val layout, 4 vals per store
-  using SmemLayoutdQaccum = Layout<Shape<Int<kBlockM * kHeadDim / NumMmaWarpGroups>, Int<NumMmaWarpGroups>>>;
+  using SmemLayoutdQaccum = Layout<Shape<Int<kBlockM * kHeadDim / NumConsumerWarpGroups>, Int<NumConsumerWarpGroups>>>;
   using SmemLayoutAtomdQaccumSwizzled = decltype(gcd::ss_smem_selector<GMMA::Major::K, ElementAccum, Int<kBlockM>, Int<kHeadDim / AtomLayoutMdQ>>());
   using SmemLayoutdQaccumSwizzled = decltype(tile_to_shape(SmemLayoutAtomdQaccumSwizzled{}, TileShape_dQaccum{}));
   using SmemLayoutdQaccumtSwizzled =
@@ -446,14 +441,14 @@ struct CollectiveMainloopBwdSm90 {
 
   // q for outer-loop and k for inner-loop
   // Thread layout, 256 or 384 threads per row
-  // We split into NumMmaWarpGroups so that we can do Bulk reduce add for each WG separately.
+  // We split into NumConsumerWarpGroups so that we can do Bulk reduce add for each WG separately.
   using TileShape_dKVaccum = cute::Shape<Int<kBlockN>, Int<kHeadDim>>;
-  using R2SLayoutAtomdKVaccum = Layout<Shape<Int<cutlass::NumThreadsPerWarpGroup>, Int<NumMmaWarpGroups>>>;
+  using R2SLayoutAtomdKVaccum = Layout<Shape<Int<cutlass::NumThreadsPerWarpGroup>, Int<NumConsumerWarpGroups>>>;
   using R2STiledCopydKVaccum = decltype(make_tiled_copy(
       Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
       R2SLayoutAtomdKVaccum{},
       Layout<Shape<_4>>{})); // Val layout, 4 vals per store
-  using SmemLayoutdKVaccum = Layout<Shape<Int<kBlockN * kHeadDim / NumMmaWarpGroups>, Int<NumMmaWarpGroups>>>;
+  using SmemLayoutdKVaccum = Layout<Shape<Int<kBlockN * kHeadDim / NumConsumerWarpGroups>, Int<NumConsumerWarpGroups>>>;
   using SmemLayoutAtomdKVaccumSwizzled = decltype(gcd::ss_smem_selector<GMMA::Major::K, ElementAccum, Int<kBlockN>, Int<kHeadDim / AtomLayoutNdKV>>());
   using SmemLayoutdKVaccumSwizzled = decltype(tile_to_shape(SmemLayoutAtomdKVaccumSwizzled{}, TileShape_dKVaccum{}));
   using SmemLayoutdKVaccumtSwizzled =
@@ -635,7 +630,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool dKVacc_use_smem = kHeadDim < 256;
   // For hdim256, we want to slice the dQ MMA (64 x 256 on 2 WGs) into two (64 x 128 on 2 WGs) so that we can
   // do atomic add on one half before doing the other half of the MMA, to reduce register pressure.
-  static constexpr bool Slice_dQKV_Mma = kHeadDim == 256 && !dQacc_use_smem && dQ_swapAB && AtomLayoutMdQ == 1 && NumMmaWarpGroups == 2;
+  static constexpr bool Slice_dQKV_Mma = kHeadDim == 256 && !dQacc_use_smem && dQ_swapAB && AtomLayoutMdQ == 1 && NumConsumerWarpGroups == 2;
   static_assert(!(Deterministic && Slice_dQKV_Mma), "Deterministic mode not supported with Slice_dQKV_Mma");
   static_assert(!(Slice_dQKV_Mma && Mma_dKV_is_RS), "When enabling Slice_dQKV_Mma, we can't use Mma_dKV_is_RS");
 
@@ -1554,7 +1549,7 @@ struct CollectiveMainloopBwdSm90 {
           int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
           int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_q_row, stride_q_head);
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
+          for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
             if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
               Element* dst_ptr = &sQ(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, stage);
               auto gQ_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gQ_base + token_offset + tile_idx * 64)), Layout<_1>{});
@@ -1620,7 +1615,7 @@ struct CollectiveMainloopBwdSm90 {
           int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
           int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_do_row, stride_do_head);
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
+          for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
             if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
               Element* dst_ptr = &sdO(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_do_cur.index());
               auto gdO_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdO_base + token_offset + tile_idx * 64)), Layout<_1>{});
@@ -1940,7 +1935,7 @@ struct CollectiveMainloopBwdSm90 {
           int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
           int token_idx = idx_slot[smem_row] * stride_kv_row;
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
+          for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
             if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
               Element* dst_ptr = &sK(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_k.index());
               auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_idx + tile_idx * 64)), Layout<_1>{});
@@ -1978,7 +1973,7 @@ struct CollectiveMainloopBwdSm90 {
           for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
             int token_idx = (ldst_group_idx * NumTokensPerLdstGroup + local_row) * stride_kv_row_v;
             CUTE_UNROLL
-            for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
+            for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
               if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
                 Element* dst_ptr = &sV(ldst_group_idx * NumTokensPerLdstGroup + local_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_v.index());
                 auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_idx + tile_idx * 64)), Layout<_1>{});
@@ -2037,7 +2032,7 @@ struct CollectiveMainloopBwdSm90 {
         for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
           int token_idx = idx_slot[ldst_group_idx * NumTokensPerLdstGroup + local_row] * stride_kv_row_v;
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
+          for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
             if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
               Element* dst_ptr = &sV(ldst_group_idx * NumTokensPerLdstGroup + local_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_v.index());
               auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_idx + tile_idx * 64)), Layout<_1>{});
@@ -2233,7 +2228,7 @@ struct CollectiveMainloopBwdSm90 {
     auto store_dQ_this_m_block = [&](int const m_block, int const bidh_kv_cat, int const off_q) {
 #pragma unroll
       // Sync at sdQ full barrier, to wait for all consumer WGs to finish dQ r2s-copy
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+      for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<NumdQBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
 
@@ -2291,7 +2286,7 @@ struct CollectiveMainloopBwdSm90 {
       }
 
       // Arrive at sdQ empty barrier
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+      for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
         BarrierManager::arrive<NumdQBarrierThreads>(BwdNamedBarriers::dQEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
       }
     };
@@ -2457,7 +2452,7 @@ struct CollectiveMainloopBwdSm90 {
       // Wait for consumer to signal dV R2S complete (or empty handshake for perf-debug skip).
       // Must always sync here to prevent warp 1 from racing ahead of warp 2 in iterate_range.
 #pragma unroll
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+      for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (!PerfDebugSkipDvStore && !PerfDebugSkipDvWriteback) {
@@ -2485,7 +2480,7 @@ struct CollectiveMainloopBwdSm90 {
       } // !PerfDebugSkipDvStore
       // Union: signal dKEmpty (TMA dV done → consumer can r2s dK into shared buffer)
       // Un-union: signal dVEmpty (TMA dV done → consumer can r2s next dV into its own buffer)
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+      for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
         if constexpr (!UnionDkvacc) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         } else {
@@ -2500,7 +2495,7 @@ struct CollectiveMainloopBwdSm90 {
           return;
       }
 #pragma unroll
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+      for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
         BarrierManager::sync<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (!PerfDebugSkipDkStore && !PerfDebugSkipDkWriteback) {
@@ -2528,7 +2523,7 @@ struct CollectiveMainloopBwdSm90 {
       } // !PerfDebugSkipDkStore && !PerfDebugSkipDkWriteback
       // Union: signal dVEmpty (TMA dK done → consumer can r2s next dV into shared buffer)
       // Un-union: signal dKEmpty (TMA dK done → consumer can r2s next dK into its own buffer)
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+      for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
         if constexpr (!UnionDkvacc) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         } else {
@@ -2674,7 +2669,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdPsumMma = sdPsumMma_full(_0{}, _, _, _); // slice dummy dim 0 with size of 4
 
     int warp_group_idx = warp_uniform(thread_idx / cutlass::NumThreadsPerWarpGroup);
-    Layout warp_group_thread_layout = make_layout(make_shape(Int<NumMmaWarpGroups>{}), make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
+    Layout warp_group_thread_layout = make_layout(make_shape(Int<NumConsumerWarpGroups>{}), make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
 
     TiledMmaSdP tiled_mma_SdP;
     TiledMmadP tiled_mma_dP;
@@ -2748,7 +2743,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor mdQaccum = params.tma_add_dQ.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
     auto const gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(offset_q, _0{}, _0{}), make_coord(offset_q, _0{}));
     Tensor gdQaccum_ = local_tile(domain_offset(gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord); // (M, K, _)
-    Tensor gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (M / WG, K, WG, 1, _)
+    Tensor gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumConsumerWarpGroups>{}, Int<kHeadDim>{})); // (M / WG, K, WG, 1, _)
     // We can reuse r2s_thr_copy_dQaccum for this partitioning
     Tensor tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
 
@@ -2760,7 +2755,7 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (!dQacc_use_smem) {
         auto const new_gQdO_offset_q_coord = cute::conditional_return<CatGQA>(make_coord(new_offset_q, _0{}, _0{}), make_coord(new_offset_q, _0{}));
         gdQaccum_ = local_tile(domain_offset(new_gQdO_offset_q_coord, mdQaccum), TileShape_dQaccum{}, gQdOdQ_coord);
-        gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+        gdQaccum = cute::flat_divide(gdQaccum_, make_shape(Int<kBlockM / NumConsumerWarpGroups>{}, Int<kHeadDim>{}));
         tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
       }
     };
@@ -3379,7 +3374,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdPsumMma = sdPsumMma_full(_0{}, _, _); // slice dummy dim 0 with size of 4
 
     int warp_group_idx = warp_uniform(thread_idx / cutlass::NumThreadsPerWarpGroup);
-    Layout warp_group_thread_layout = make_layout(make_shape(Int<NumMmaWarpGroups>{}), make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
+    Layout warp_group_thread_layout = make_layout(make_shape(Int<NumConsumerWarpGroups>{}), make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
 
     TiledMmaSdP tiled_mma_SdP;
     TiledMmadP tiled_mma_dP;
@@ -3469,11 +3464,11 @@ struct CollectiveMainloopBwdSm90 {
     // For the case where we do atomicAdd directly to gdKaccum,gdVaccum instead of using TMA
     Tensor mdKaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dK)), params.shape_dKdV, params.stride_dK)(_, _, bidh_kv);
     Tensor gdKaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
-    Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
+    Tensor gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumConsumerWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
     Tensor mdVaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dV)), params.shape_dKdV, params.stride_dV)(_, _, bidh_kv);
     Tensor gdVaccum_ = local_tile(domain_offset(make_coord(offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{})); // (N, K, _)
-    Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
+    Tensor gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumConsumerWarpGroups>{}, Int<kHeadDim>{})); // (N / WG, K, WG, 1, _)
 
     // TMA partitions go through the swizzled TMA-layout views (dense path only; the r2s
     // targets sdK/sdV above may carry the row-contiguous Store layout instead)
@@ -3498,9 +3493,9 @@ struct CollectiveMainloopBwdSm90 {
       int const new_offset_k = block_meta.seqlen_info.offset_k;
       if constexpr (!dKVacc_use_smem || (DkvaccBypassSmem && !IsSparse)) {
         gdKaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
-        gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+        gdKaccum = cute::flat_divide(gdKaccum_, make_shape(Int<kBlockN / NumConsumerWarpGroups>{}, Int<kHeadDim>{}));
         gdVaccum_ = local_tile(domain_offset(make_coord(new_offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
-        gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+        gdVaccum = cute::flat_divide(gdVaccum_, make_shape(Int<kBlockN / NumConsumerWarpGroups>{}, Int<kHeadDim>{}));
         tdKgdKaccum = r2s_thr_copy_dKVaccum.partition_D(gdKaccum);
         tdVgdVaccum = r2s_thr_copy_dKVaccum.partition_D(gdVaccum);
       }
@@ -3751,7 +3746,7 @@ struct CollectiveMainloopBwdSm90 {
               int const stride_dV_row = get<0>(params.stride_dV);
               auto* ptr_gdV = reinterpret_cast<ElementAccum*>(params.ptr_dV) + bidh_kv * get<2>(params.stride_dV);
               Tensor cdKV = make_identity_tensor(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}));
-              Tensor cdKV_div = cute::flat_divide(cdKV, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+              Tensor cdKV_div = cute::flat_divide(cdKV, make_shape(Int<kBlockN / NumConsumerWarpGroups>{}, Int<kHeadDim>{}));
               Tensor thr_cdKV = r2s_thr_copy_dKVaccum.partition_D(cdKV_div);
 #pragma unroll
               for (int i = 0; i < size(taccdVrdV); ++i) {
@@ -3904,7 +3899,7 @@ struct CollectiveMainloopBwdSm90 {
               int const stride_dK_row = get<0>(params.stride_dK);
               auto* ptr_gdK = reinterpret_cast<ElementAccum*>(params.ptr_dK) + bidh_kv * get<2>(params.stride_dK);
               Tensor cdKV = make_identity_tensor(make_shape(Int<kBlockN>{}, Int<kHeadDim>{}));
-              Tensor cdKV_div = cute::flat_divide(cdKV, make_shape(Int<kBlockN / NumMmaWarpGroups>{}, Int<kHeadDim>{}));
+              Tensor cdKV_div = cute::flat_divide(cdKV, make_shape(Int<kBlockN / NumConsumerWarpGroups>{}, Int<kHeadDim>{}));
               Tensor thr_cdKV = r2s_thr_copy_dKVaccum.partition_D(cdKV_div);
 #pragma unroll
               for (int i = 0; i < size(taccdKrdK); ++i) {

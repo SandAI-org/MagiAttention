@@ -695,7 +695,7 @@ def prebuild_ffa_kernels() -> None:
         (torch.float16, torch.float32),
         (torch.bfloat16, torch.float32),
     ]
-    disable_atomic_reductions = [False, True]
+    disable_dkv_atomic_reductions = [False, True]
     deterministics = [False]
     auto_range_merges = [False]
     cat_gqas = [False]
@@ -704,7 +704,7 @@ def prebuild_ffa_kernels() -> None:
         directions,
         head_dims,
         compute_output_dtype_tuples,
-        disable_atomic_reductions,
+        disable_dkv_atomic_reductions,
         deterministics,
         auto_range_merges,
         cat_gqas,
@@ -916,7 +916,7 @@ def prebuild_ffa_kernels() -> None:
             direction,
             head_dim,
             compute_output_dtype_tuple,
-            disable_atomic_reduction,
+            disable_dkv_atomic_reduction,
             deterministic,
             auto_range_merge,
             cat_gqa,
@@ -933,15 +933,17 @@ def prebuild_ffa_kernels() -> None:
         _is_sparse = block_sparse or index_sparse
 
         # Sparse FWD: output_dtype=compute_dtype (no fp32 accum needed since no atomic),
-        # disable_atomic_reduction=True (each Q only processed by one CTA),
+        # disable_dkv_atomic_reduction=True (each Q only processed by one CTA),
         # ref_block_size=(128,128) forced (sparse paths fix tile size).
         ref_block_size = None
         if direction == "fwd" and _is_sparse:
             output_dtype = compute_dtype
-            disable_atomic_reduction = True
+            disable_dkv_atomic_reduction = True
             ref_block_size = (128, 128)
 
-        # For sparse BWD: derive dq/dkv dtypes to match runtime dispatch
+        # Sparse BWD dtype derivation:
+        #   dq_dtype: fp32 (inner, needs atomic) or native (outer, direct store)
+        #   dkv_dtype: fp32 (inner for InnerLoopK) — prebuild doesn't generate InnerLoopQ+no_atomic combo
         disable_dq_atomic_reduction = False
         if direction == "bwd":
             if _is_sparse and bwd_inner_loop_k:
@@ -959,7 +961,7 @@ def prebuild_ffa_kernels() -> None:
             compute_dtype=compute_dtype,
             output_dtype=output_dtype if direction == "fwd" else None,
             softcap=False,
-            disable_atomic_reduction=disable_atomic_reduction,
+            disable_atomic_reduction=disable_dkv_atomic_reduction,
             disable_dq_atomic_reduction=disable_dq_atomic_reduction,
             deterministic=deterministic,
             ref_block_size=ref_block_size,

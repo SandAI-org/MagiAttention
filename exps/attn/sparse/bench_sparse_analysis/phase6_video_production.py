@@ -163,6 +163,9 @@ def _phase6_bench(force=False, max_kvseqlen=None):
             swap_qk = pass_type == "bwd_loopk"
 
             for method in METHODS:
+                if method == "index_sparse" and pass_type == "bwd_loopq":
+                    continue
+
                 key = f"{pass_type}/{method}"
                 if not force and _has_entry(results, key, kvseqlen):
                     d = results[key]
@@ -402,6 +405,8 @@ def _print_summary(results):
         print(f"  ║ {label:<28s} ║", end="")
         for pass_type in PASSES:
             for method in METHODS:
+                if method == "index_sparse" and pass_type == "bwd_loopq":
+                    continue
                 key = f"{pass_type}/{method}"
                 d = results.get(key, {})
                 if kvseqlen in d.get("topk", []):
@@ -417,7 +422,7 @@ def _print_summary(results):
         print(" ║")
     print("  ╚══════════════════════════════╩══════════════════════════════════════╝")
     print(
-        "  (columns per pass: d1b / d1b_nopg / dense_nb / dense_nb_rm / bs-kbs128 / is-kbs1)"
+        "  (columns: d1b/d1b_nopg/dense_nb/dense_nb_rm/bs-kbs128/is-kbs1; bwd_loopq excludes is-kbs1)"
     )
 
 
@@ -465,7 +470,9 @@ def _phase6_plot():
 
     for col_idx, (pid, pname) in enumerate(PLOT_PASSES):
         ax = axes[col_idx]
-        for i, (mid, lbl, col) in enumerate(PLOT_METHODS):
+        plot_methods = [m for m in PLOT_METHODS if not (m[0] == "index_sparse" and pid == "bwd_loopq")]
+        n_m = len(plot_methods)
+        for i, (mid, lbl, col) in enumerate(plot_methods):
             key = f"{pid}/{mid}"
             d = results.get(key, {})
             vals = []
@@ -476,7 +483,7 @@ def _phase6_plot():
                 else:
                     v = 0
                 vals.append(v)
-            off = (i - n_methods / 2 + 0.5) * bw
+            off = (i - n_m / 2 + 0.5) * bw
             bars = ax.bar(
                 x + off,
                 vals,

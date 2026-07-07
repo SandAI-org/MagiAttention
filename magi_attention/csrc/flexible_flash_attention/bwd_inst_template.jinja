@@ -39,7 +39,7 @@ static constexpr int kBwdProducerRegs = {{bwd_producer_regs}};
 static constexpr int kBwdConsumerRegs = {{bwd_consumer_regs}};
 // Inner-loop scatter load mode: 0=Tma(2D,auto), 1=Tma1d(bulk per-row, no-swizzle K), 2=CpAsync(per-row)
 static constexpr int kInnerLoadMode = {{inner_load_mode | default(2)}};
-// Inner-loop store mode: 1=Tma1d(bulk reduce-add), 2=CpAsync(scalar atomicAdd), 3=BypassSmem(register atomicAdd, skip SMEM)
+// Inner-loop store mode: 1=Tma1d(bulk reduce-add), 2=AtomicAdd(scalar atomicAdd from SMEM), 3=BypassSmem(register atomicAdd, skip SMEM)
 static constexpr int kInnerStoreMode = {{inner_store_mode | default(2)}};
 // Tile/stage overrides for A/B benchmarking (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS/V).
 // 0 = use default from tile_size_bwd_sm90(); >0 = override.

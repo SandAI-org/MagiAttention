@@ -58,14 +58,13 @@ class FlashAttnBwdSm90 {
   static constexpr bool BlockSparse = CollectiveMainloop::BlockSparse;
   static constexpr bool IndexSparse = CollectiveMainloop::IndexSparse;
   static constexpr bool IsSparse = CollectiveMainloop::IsSparse;
-  static constexpr bool InnerDxStoreInProducer = CollectiveMainloop::InnerDxStoreInProducer;
-  static constexpr int NumScatterThreads = CollectiveMainloop::NumScatterThreads;
-  static constexpr bool InnerLoad_Tma = CollectiveMainloop::InnerLoad_Tma;
-  static constexpr bool InnerLoad_CpAsync = CollectiveMainloop::InnerLoad_CpAsync;
+  static constexpr bool InnerStoreInProducer = CollectiveMainloop::InnerStoreInProducer;
+  static constexpr bool kInnerTilesContiguous = CollectiveMainloop::kInnerTilesContiguous;
+  static constexpr int NumProducerLoaderThreads = CollectiveMainloop::ProducerWarpRoles::kNumLoaderThreads;
 
   template <typename Pipeline, typename Storage, typename PipelineParamsT>
   CUTLASS_DEVICE static Pipeline make_inner_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
-    if constexpr (InnerLoad_Tma) {
+    if constexpr (kInnerTilesContiguous) {
       return Pipeline(storage, pipeline_params, ClusterShape{});
     } else {
       return Pipeline(storage, pipeline_params);
@@ -89,11 +88,11 @@ class FlashAttnBwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr auto kInnerDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr uint32_t NumLoadWarpGroups = 1;
-  static constexpr uint32_t NumMmaWarpGroups = CUTE_STATIC_V(size(TiledMmaSdP{})) / cutlass::NumThreadsPerWarpGroup;
+  static constexpr uint32_t NumConsumerWarpGroups = CUTE_STATIC_V(size(TiledMmaSdP{})) / cutlass::NumThreadsPerWarpGroup;
   static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaSdP{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
   static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
-  static_assert(NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
-  static_assert(BarrierManager::check<BwdNamedBarriers, NumMmaWarpGroups>());
+  static_assert(NumConsumerWarpGroups == 2 || NumConsumerWarpGroups == 3);
+  static_assert(BarrierManager::check<BwdNamedBarriers, NumConsumerWarpGroups>());
 
   // Register quotas for the Load/Mma WGs are selected in Python (_ffa_register_quota in
   // functional/_flex_flash_attn_jit.py, where the tuning notes live) and passed down the
@@ -105,9 +104,9 @@ class FlashAttnBwdSm90 {
   static_assert(MmaRegisterRequirement % 8 == 0 && MmaRegisterRequirement >= 24 && MmaRegisterRequirement <= 256);
   // SM90: 65536 regs/SM, 128 threads/WG, MinBlocksPerSM=1 → avg regs/thread =
   // floor(65536 / (TotalWGs * 128) / 8) * 8.  For 3 WGs: floor(65536/384/8)*8 = 168.
-  static constexpr uint32_t kTotalWarpGroups = NumLoadWarpGroups + NumMmaWarpGroups;
+  static constexpr uint32_t kTotalWarpGroups = NumLoadWarpGroups + NumConsumerWarpGroups;
   static constexpr uint32_t kAvgRegsPerThread = (65536 / (kTotalWarpGroups * 128) / 8) * 8;
-  static_assert(NumLoadWarpGroups * LoadRegisterRequirement + NumMmaWarpGroups * MmaRegisterRequirement <= kAvgRegsPerThread * kTotalWarpGroups);
+  static_assert(NumLoadWarpGroups * LoadRegisterRequirement + NumConsumerWarpGroups * MmaRegisterRequirement <= kAvgRegsPerThread * kTotalWarpGroups);
 
   // Kernel level shared memory storage
   struct SharedStorage {
@@ -210,7 +209,7 @@ class FlashAttnBwdSm90 {
   void run_bwd_with_loop_q(Params const& params, char* smem_buf) {
     static_assert(!BwdInnerLoopK, "run_bwd_with_loop_q() must be called when BwdInnerLoopK is false");
 
-    static constexpr int NumConsumerThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
+    static constexpr int NumConsumerThreads = NumConsumerWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int NumCopyThreads = NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
@@ -245,27 +244,27 @@ class FlashAttnBwdSm90 {
     }
 
     PipelineParams pipeline_params_q;
-    if constexpr (InnerLoad_Tma) {
+    if constexpr (kInnerTilesContiguous) {
       pipeline_params_q.transaction_bytes = CollectiveMainloop::TmaTransactionBytesQ + CollectiveMainloop::TmaTransactionBytesLSE;
       pipeline_params_q.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
       pipeline_params_q.is_leader = warp_group_thread_idx == 0;
       pipeline_params_q.num_consumers = NumConsumerThreads;
     } else {
       pipeline_params_q.consumer_arv_count = NumConsumerThreads;
-      pipeline_params_q.producer_arv_count = NumScatterThreads;
+      pipeline_params_q.producer_arv_count = NumProducerLoaderThreads;
     }
     MainloopPipeline pipeline_q = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_q, pipeline_params_q);
 
     PipelineParams_dO pipeline_params_do;
-    if constexpr (InnerLoad_Tma) {
+    if constexpr (kInnerTilesContiguous) {
       auto role_do = warp_group_idx == 0 ? MainloopPipeline_dO::ThreadCategory::Producer : MainloopPipeline_dO::ThreadCategory::Consumer;
       pipeline_params_do = {pipeline_params_q.transaction_bytes, role_do, pipeline_params_q.is_leader, pipeline_params_q.num_consumers};
     } else {
       pipeline_params_do.consumer_arv_count = NumConsumerThreads;
-      pipeline_params_do.producer_arv_count = NumScatterThreads;
+      pipeline_params_do.producer_arv_count = NumProducerLoaderThreads;
     }
     MainloopPipeline_dO pipeline_do = make_inner_pipeline<MainloopPipeline_dO>(
-        shared_storage.pipelines.pipeline_do, cute::conditional_return < Q_dO_same_stages && InnerLoad_Tma > (pipeline_params_q, pipeline_params_do));
+        shared_storage.pipelines.pipeline_do, cute::conditional_return < Q_dO_same_stages && kInnerTilesContiguous > (pipeline_params_q, pipeline_params_do));
 
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
@@ -329,7 +328,7 @@ class FlashAttnBwdSm90 {
           // Run the producer load pipeline
           bool tile_valid;
           if constexpr (IsSparse) {
-            int thread_idx = threadIdx.x % NumScatterThreads;
+            int thread_idx = threadIdx.x % NumProducerLoaderThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
             tile_valid = mainloop.template load_with_loop_q<kInnerDir>(
                 params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_meta);
@@ -462,7 +461,7 @@ class FlashAttnBwdSm90 {
   void run_bwd_with_loop_k(Params const& params, char* smem_buf) {
     static_assert(BwdInnerLoopK, "run_bwd_with_loop_k() must be called when BwdInnerLoopK is true");
 
-    static constexpr int NumConsumerThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
+    static constexpr int NumConsumerThreads = NumConsumerWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int NumCopyThreads = NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
@@ -498,24 +497,24 @@ class FlashAttnBwdSm90 {
     // NOTE: we're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParams pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;
-    if constexpr (InnerLoad_Tma) {
+    if constexpr (kInnerTilesContiguous) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
       pipeline_params_k.num_consumers = NumConsumerThreads;
     } else {
       pipeline_params_k.consumer_arv_count = NumConsumerThreads;
-      pipeline_params_k.producer_arv_count = NumScatterThreads;
+      pipeline_params_k.producer_arv_count = NumProducerLoaderThreads;
     }
     using PipelineParams_V = typename CollectiveMainloop::MainloopPipeline_V::Params;
     PipelineParams_V pipeline_params_v;
     pipeline_params_v.role = warp_group_idx == 0 ? MainloopPipeline_V::ThreadCategory::Producer : MainloopPipeline_V::ThreadCategory::Consumer;
-    if constexpr (InnerLoad_Tma) {
+    if constexpr (kInnerTilesContiguous) {
       pipeline_params_v.transaction_bytes = CollectiveMainloop::TmaTransactionBytesV;
       pipeline_params_v.is_leader = warp_group_thread_idx == 0;
       pipeline_params_v.num_consumers = NumConsumerThreads;
     } else {
       pipeline_params_v.consumer_arv_count = NumConsumerThreads;
-      pipeline_params_v.producer_arv_count = NumScatterThreads;
+      pipeline_params_v.producer_arv_count = NumProducerLoaderThreads;
     }
 
     MainloopPipeline pipeline_k = make_inner_pipeline<MainloopPipeline>(shared_storage.pipelines.pipeline_k, pipeline_params_k);
@@ -582,7 +581,7 @@ class FlashAttnBwdSm90 {
           // Run the producer load pipeline
           bool has_tile_valid;
           if constexpr (IsSparse) {
-            int thread_idx = threadIdx.x % NumScatterThreads;
+            int thread_idx = threadIdx.x % NumProducerLoaderThreads;
             ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
             has_tile_valid = mainloop.template load_with_loop_k<kInnerDir>(
                 params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);

@@ -118,7 +118,7 @@ template <
     bool SdP_swapAB,
     bool dKV_swapAB,
     bool dQ_swapAB,
-    int NumMmaWarpGroups,
+    int NumConsumerWarpGroups,
     int AtomLayoutMSdP,
     int AtomLayoutNdKV,
     int AtomLayoutMdQ,
@@ -200,7 +200,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       InnerStoreInProducer,
       InnerStoreMode,
       PackGQAFactor,
-      NumMmaWarpGroups,
+      NumConsumerWarpGroups,
       AtomLayoutMSdP,
       AtomLayoutNdKV,
       AtomLayoutMdQ,
@@ -239,7 +239,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       typename Scheduler::BlockCoordType,
       dQ_swapAB,
       dKV_swapAB,
-      NumMmaWarpGroups,
+      NumConsumerWarpGroups,
       AtomLayoutMdQ,
       AtomLayoutNdKV,
       OuterStoreNeedReduction,
@@ -440,9 +440,9 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
   static constexpr bool dQ_swapAB = kHeadDim <= 64 ? false : true;
 
-  // NOTE: when BwdInnerLoopK is true, we only support 2 NumMmaWarpGroups,
+  // NOTE: when BwdInnerLoopK is true, we only support 2 NumConsumerWarpGroups,
   // since no more named barriers for more groups
-  static constexpr int NumMmaWarpGroups = BwdInnerLoopK ? 2 : (kHeadDim == 192 ? 3 : 2);
+  static constexpr int NumConsumerWarpGroups = BwdInnerLoopK ? 2 : (kHeadDim == 192 ? 3 : 2);
 
   // NOTE: when BwdInnerLoopK is not supported (i.e. always false),
   // all the atom layouts are set specifically for tile size (128, 128, 64) and (64, 128, 64),
@@ -480,7 +480,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*SdP_swapAB=*/SdP_swapAB,
       /*dKV_swapAB=*/dKV_swapAB,
       /*dQ_swapAB=*/dQ_swapAB,
-      /*NumMmaWarpGroups=*/NumMmaWarpGroups,
+      /*NumConsumerWarpGroups=*/NumConsumerWarpGroups,
       /*AtomLayoutMSdP=*/AtomLayoutMSdP,
       /*AtomLayoutNdKV=*/AtomLayoutNdKV,
       /*AtomLayoutMdQ=*/AtomLayoutMdQ,
