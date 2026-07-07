@@ -613,6 +613,9 @@ class TestIndexSparseSweep(DistTestBase):
     def test_index_sparse_classic(self, q_seqlen, kv_seqlen, topk):
         if topk > kv_seqlen:
             return
+        # SDPA reference builds (NHQ, S_q, S_kv) mask — OOM when both are large
+        if q_seqlen >= 16384 and kv_seqlen >= 16384:
+            return
         config = {
             "B": 1,
             "S_q": q_seqlen,
