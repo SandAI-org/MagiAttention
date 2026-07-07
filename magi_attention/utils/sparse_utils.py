@@ -1259,13 +1259,13 @@ def choose_ref_block(
     }
 
 
-def build_index_sparse_inner_indices(
+def invert_index_sparse_indices(
     index_sparse_indices: torch.Tensor,
     seqlen_k: int,
     sparse_k_block_size: int = 1,
     pad_multiple: int = 64,
 ) -> tuple[torch.Tensor, int]:
-    """Build inverse indices from forward IndexSparse indices (Q→K to K→Q).
+    """Invert forward IndexSparse indices: Q→K mapping becomes K→Q mapping.
 
     When ``sparse_k_block_size == 1`` (default), produces a token-level inverse mapping.
     When ``sparse_k_block_size > 1``, groups K tokens into blocks and deduplicates,
@@ -1290,7 +1290,7 @@ def build_index_sparse_inner_indices(
     """
     if index_sparse_indices.dim() == 2:
         raise ValueError(
-            "build_index_sparse_inner_indices expects 3D input (seqlen_q, nhk, topk). "
+            "invert_index_sparse_indices expects 3D input (seqlen_q, nhk, topk). "
             "Got 2D — reshape before calling."
         )
     assert index_sparse_indices.dim() == 3

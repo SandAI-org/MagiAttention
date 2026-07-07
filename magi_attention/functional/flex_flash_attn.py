@@ -1073,7 +1073,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 seqlen_k = v.size(0)
 
                 from magi_attention.utils.sparse_utils import (
-                    build_index_sparse_inner_indices,
+                    invert_index_sparse_indices,
                 )
 
                 if _loopq_kbs > 1:
@@ -1082,7 +1082,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         f"got nhk={nhk}. NHK>1 + kbs>1 has a flat-layout mismatch (P8-BUG-NHK)."
                     )
 
-                    _inner_indices, _inner_topk = build_index_sparse_inner_indices(
+                    _inner_indices, _inner_topk = invert_index_sparse_indices(
                         index_sparse_indices,
                         seqlen_k=seqlen_k,
                         sparse_k_block_size=_loopq_kbs,
@@ -1092,7 +1092,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     index_sparse_indices = _inner_indices.contiguous()
                     ctx.inner_indices_cnt = _inner_topk
                 else:
-                    _inner_indices, _inner_topk = build_index_sparse_inner_indices(
+                    _inner_indices, _inner_topk = invert_index_sparse_indices(
                         index_sparse_indices,
                         seqlen_k=seqlen_k,
                         pad_multiple=64,

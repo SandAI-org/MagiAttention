@@ -718,7 +718,8 @@ def prebuild_ffa_kernels() -> None:
             False,
             1,
             1,
-        )  # block_sparse, index_sparse, bwd_inner_loop_k, pack_gqa_factor, sparse_k_block_size
+            False,
+        )  # block_sparse, index_sparse, bwd_inner_loop_k, pack_gqa_factor, sparse_k_block_size, return_max_logits
         for c in combos
     ]
 
@@ -911,52 +912,34 @@ def prebuild_ffa_kernels() -> None:
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
-        # Support both 12-element (base) and 13-element (ci_extra with return_max_logits) tuples
-        if len(args) == 13:
-            (
-                direction,
-                head_dim,
-                compute_output_dtype_tuple,
-                disable_atomic_reduction,
-                deterministic,
-                auto_range_merge,
-                cat_gqa,
-                block_sparse,
-                index_sparse,
-                bwd_inner_loop_k,
-                pack_gqa_factor,
-                sparse_k_block_size,
-                return_max_logits,
-            ) = args
-        else:
-            (
-                direction,
-                head_dim,
-                compute_output_dtype_tuple,
-                disable_atomic_reduction,
-                deterministic,
-                auto_range_merge,
-                cat_gqa,
-                block_sparse,
-                index_sparse,
-                bwd_inner_loop_k,
-                pack_gqa_factor,
-                sparse_k_block_size,
-            ) = args
-            return_max_logits = False
+        (
+            direction,
+            head_dim,
+            compute_output_dtype_tuple,
+            disable_atomic_reduction,
+            deterministic,
+            auto_range_merge,
+            cat_gqa,
+            block_sparse,
+            index_sparse,
+            bwd_inner_loop_k,
+            pack_gqa_factor,
+            sparse_k_block_size,
+            return_max_logits,
+        ) = args
 
         compute_dtype, output_dtype = compute_output_dtype_tuple
         pack_gqa = pack_gqa_factor > 1
         _is_sparse = block_sparse or index_sparse
 
-        # For sparse FWD: tests use output_dtype=compute_dtype (not fp32)
-        # Sparse paths in flex_flash_attn_func force ref_block_size=(128,128)
-        # regardless of head_dim (unlike dense which uses tile_size_fwd_sm90).
-        fwd_ref_block_size = None
+        # Sparse FWD: output_dtype=compute_dtype (no fp32 accum needed since no atomic),
+        # disable_atomic_reduction=True (each Q only processed by one CTA),
+        # ref_block_size=(128,128) forced (sparse paths fix tile size).
+        ref_block_size = None
         if direction == "fwd" and _is_sparse:
             output_dtype = compute_dtype
             disable_atomic_reduction = True
-            fwd_ref_block_size = (128, 128)
+            ref_block_size = (128, 128)
 
         # For sparse BWD: derive dq/dkv dtypes to match runtime dispatch
         disable_dq_atomic_reduction = False
@@ -979,7 +962,7 @@ def prebuild_ffa_kernels() -> None:
             disable_atomic_reduction=disable_atomic_reduction,
             disable_dq_atomic_reduction=disable_dq_atomic_reduction,
             deterministic=deterministic,
-            ref_block_size=fwd_ref_block_size,
+            ref_block_size=ref_block_size,
             auto_range_merge=auto_range_merge,
             swap_ab=False,
             pack_gqa=pack_gqa,
