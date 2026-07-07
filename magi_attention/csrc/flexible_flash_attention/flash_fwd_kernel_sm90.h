@@ -52,15 +52,14 @@ class FlashAttnFwdSm90 {
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool Has_softcap = CollectiveMainloop::Has_softcap;
   static constexpr bool Use_TMA_Q = CollectiveMainloop::Use_TMA_Q;
-  static constexpr bool InnerLoad_Tma = CollectiveMainloop::InnerLoad_Tma;
-  static constexpr bool InnerLoad_CpAsync = CollectiveMainloop::InnerLoad_CpAsync;
+  static constexpr InnerLoadMode kInnerLoadMode = CollectiveMainloop::kInnerLoadMode;
 
   // KV pipelines come in two flavors with different constructor signatures: dense TMA
   // (PipelineTmaAsync, takes ClusterShape) and scatter cp.async (PipelineAsync, no
   // cluster argument). This helper hides the difference at every construction site.
   template <typename Pipeline, typename Storage, typename PipelineParamsT>
   CUTLASS_DEVICE static Pipeline make_kv_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
-    if constexpr (InnerLoad_Tma) {
+    if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
       return Pipeline(storage, pipeline_params, ClusterShape{});
     } else {
       return Pipeline(storage, pipeline_params);
@@ -245,7 +244,7 @@ class FlashAttnFwdSm90 {
     // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParamsK pipeline_params_k;
     pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipelineK::ThreadCategory::Producer : MainloopPipelineK::ThreadCategory::Consumer;
-    if constexpr (InnerLoad_Tma) {
+    if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
       pipeline_params_k.num_consumers = NumMmaThreads;

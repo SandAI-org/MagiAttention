@@ -135,10 +135,8 @@ struct CollectiveMainloopFwdSm90 {
   // Tma1d (=1) falls through to CpAsync: cp.async.bulk 1D is incompatible with WGMMA
   // atom-tiled SMEM layouts (see inner_mode.hpp for details).
   static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
-  static constexpr bool InnerLoad_Tma = (kInnerLoadMode == InnerLoadMode::Tma);
-  static constexpr bool InnerLoad_CpAsync = (kInnerLoadMode == InnerLoadMode::CpAsync);
-  static_assert(InnerLoad_Tma + InnerLoad_CpAsync == 1);
-  static_assert(InnerLoad_Tma || CUTE_STATIC_V(size(ClusterShape{})) == 1, "Scatter load requires ClusterShape == 1");
+  static_assert(kInnerLoadMode == InnerLoadMode::Tma || kInnerLoadMode == InnerLoadMode::CpAsync);
+  static_assert(kInnerLoadMode == InnerLoadMode::Tma || CUTE_STATIC_V(size(ClusterShape{})) == 1, "Scatter load requires ClusterShape == 1");
 
   // By default, V is always row-major
   static constexpr GMMA::Major MmaMajorV = GMMA::Major::MN;
@@ -160,7 +158,7 @@ struct CollectiveMainloopFwdSm90 {
 
   // Scatter paths (CpAsync) need a full warp group (128 threads) for per-row loads.
   // TMA 2D paths issue from a single thread, so a single warp (32 threads) suffices.
-  static constexpr int NumProducerThreads = !InnerLoad_Tma ? cutlass::NumThreadsPerWarpGroup : cutlass::NumThreadsPerWarp;
+  static constexpr int NumProducerThreads = kInnerLoadMode != InnerLoadMode::Tma ? cutlass::NumThreadsPerWarpGroup : cutlass::NumThreadsPerWarp;
 
   // Const parameters for scatter load (CpAsync path)
   // SMEM bank row width: 32 banks * 4 bytes = 128 bytes
@@ -172,7 +170,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int NumTokensPerLdstGroup = kBlockN / NumLdstGroups;
   // Number of cp.async tiles per row: each tile covers kCpAsyncTransactionBytes of the row
   static constexpr int NumCpAsyncTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-  static_assert(InnerLoad_Tma || kBlockN % NumLdstGroups == 0, "Scatter KV load requires kBlockN divisible by NumLdstGroups");
+  static_assert(kInnerLoadMode == InnerLoadMode::Tma || kBlockN % NumLdstGroups == 0, "Scatter KV load requires kBlockN divisible by NumLdstGroups");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 
@@ -337,17 +335,16 @@ struct CollectiveMainloopFwdSm90 {
 
   using PipelineTmaAsync =
       std::conditional_t<CUTE_STATIC_V(size(ClusterShape{})) == 1, typename cutlass::PipelineTmaAsyncNoCluster<kStages>, typename cutlass::PipelineTmaAsync<kStages>>;
-  static constexpr bool _use_tma_pipeline = InnerLoad_Tma;
-  using MainloopPipelineK = std::conditional_t<InnerLoad_Tma, PipelineTmaAsync, typename cutlass::PipelineAsync<kStages>>;
-  using MainloopPipelineV = std::conditional_t<InnerLoad_Tma, PipelineTmaAsync, typename cutlass::PipelineAsync<kStages>>;
+  using MainloopPipelineK = std::conditional_t<kInnerLoadMode == InnerLoadMode::Tma, PipelineTmaAsync, typename cutlass::PipelineAsync<kStages>>;
+  using MainloopPipelineV = std::conditional_t<kInnerLoadMode == InnerLoadMode::Tma, PipelineTmaAsync, typename cutlass::PipelineAsync<kStages>>;
   using PipelineState = cutlass::PipelineState<kStages>;
 
   // If PackGQA, we use cp.async (instead of TMA) to load Q, so we want smem_q to be aligned
   // and have sQ being position_independent_swizzle_tensor.
-  // If !InnerLoad_Tma (scatter path), smem_k and smem_v need alignment for swizzled access.
+  // If kInnerLoadMode != InnerLoadMode::Tma (scatter path), smem_k and smem_v need alignment for swizzled access.
   // Q needs 128B alignment for TMA unless it's the RS A operand (non-SwapAB case only)
   static constexpr size_t SmemAlignmentQ = (MmaQK_is_RS && !SwapAB) ? cutlass::detail::alignment_for_swizzle(SmemLayoutQ{}) : 128;
-  static constexpr size_t SmemAlignmentK = InnerLoad_Tma ? 128 : cutlass::detail::alignment_for_swizzle(SmemLayoutK{});
+  static constexpr size_t SmemAlignmentK = kInnerLoadMode == InnerLoadMode::Tma ? 128 : cutlass::detail::alignment_for_swizzle(SmemLayoutK{});
   static constexpr size_t SmemAlignmentVtNoTranspose = cutlass::detail::alignment_for_swizzle(SmemLayoutVt{});
   static constexpr size_t SmemAlignmentP = cutlass::detail::alignment_for_swizzle(SmemLayoutP{});
   static constexpr size_t maxSmemAlignmentWithoutP = cute::max(SmemAlignmentQ, SmemAlignmentK, SmemAlignmentVtNoTranspose);
@@ -360,16 +357,16 @@ struct CollectiveMainloopFwdSm90 {
   // smem size to go from 227KB to 228KB and we get "invalid argument".
 
   // Scatter-load index slots, 1:1 with the K pipeline buffers.
-  // Scatter (InnerLoad_CpAsync): kBlockN per-row token indices per stage.
+  // Scatter (kInnerLoadMode == InnerLoadMode::CpAsync): kBlockN per-row token indices per stage.
   // TMA 2D sparse (kbs>=kBlockN): 1 absolute block index per stage. Dense: nothing.
   using KVTokenIndices_t = std::conditional_t<
-      !InnerLoad_Tma,
+      kInnerLoadMode != InnerLoadMode::Tma,
       cute::array<int, kBlockN * kStages>,
-      std::conditional_t<(BlockSparse || IndexSparse) && InnerLoad_Tma, cute::array<int, kStages>, cute::array<int, 0>>>;
+      std::conditional_t<(BlockSparse || IndexSparse) && kInnerLoadMode == InnerLoadMode::Tma, cute::array<int, kStages>, cute::array<int, 0>>>;
 
   // OPT-5: SMEM cache for K block indices. IndexSparse with TMA prefetches
   // sparse_indices_ptr here once per outer tile so inner loop reads from SMEM (L1).
-  static constexpr int MaxKBlockIdxPrefetch = (IndexSparse && InnerLoad_Tma) ? 1024 : 0;
+  static constexpr int MaxKBlockIdxPrefetch = (IndexSparse && kInnerLoadMode == InnerLoadMode::Tma) ? 1024 : 0;
   using KBlockIdxPrefetch_t = cute::array<int, MaxKBlockIdxPrefetch>;
 
   struct TensorStorageWithoutP : cute::aligned_struct<maxSmemAlignmentWithoutP, _0> {
@@ -576,7 +573,7 @@ struct CollectiveMainloopFwdSm90 {
       else
         cute::prefetch_tma_descriptor(params.tma_load_Q_packed.get_tma_descriptor());
     }
-    if constexpr (InnerLoad_Tma) {
+    if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
       cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_V.get_tma_descriptor());
     }
@@ -709,7 +706,7 @@ struct CollectiveMainloopFwdSm90 {
     // IndexSparse (TMA) / BlockSparse: TMA 2D tile at absolute block coordinate from block_meta.
     // Dense: TMA 2D tile at relative n_block within batch.
     auto load_K = [&]() {
-      if constexpr (InnerLoad_CpAsync) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_inner_token_indices[smem_pipe_write_k.index() * kBlockN];
@@ -731,7 +728,7 @@ struct CollectiveMainloopFwdSm90 {
         }
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_k;
-      } else if constexpr ((BlockSparse || IndexSparse) && InnerLoad_Tma) {
+      } else if constexpr ((BlockSparse || IndexSparse) && kInnerLoadMode == InnerLoadMode::Tma) {
         // BlockSparse / IndexSparse TMA: tiles are contiguous → use absolute coords.
         if (is_tma_issue_thread()) {
           int const n_block_abs = block_meta.get_packed_first_row() / kBlockN;
@@ -781,7 +778,7 @@ struct CollectiveMainloopFwdSm90 {
         shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
         first_v_loaded = true;
       }
-      if constexpr (InnerLoad_CpAsync) {
+      if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_inner_token_indices[smem_pipe_write_v.index() * kBlockN];
@@ -800,7 +797,7 @@ struct CollectiveMainloopFwdSm90 {
         }
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
-      } else if constexpr ((BlockSparse || IndexSparse) && InnerLoad_Tma) {
+      } else if constexpr ((BlockSparse || IndexSparse) && kInnerLoadMode == InnerLoadMode::Tma) {
         // BlockSparse / IndexSparse TMA: read n_block_abs written by the matching load_K.
         if (is_tma_issue_thread()) {
           int const n_block_abs = shared_storage.tensors.mainloop.smem_inner_token_indices[smem_pipe_write_v.index()];
@@ -884,7 +881,7 @@ struct CollectiveMainloopFwdSm90 {
           return;
         load_step();
       } else {
-        flash::iterate_range<kInnerDir, InnerLoad_Tma ? 2 : 1>(
+        flash::iterate_range<kInnerDir, kInnerLoadMode == InnerLoadMode::Tma ? 2 : 1>(
             block_meta.inner_block_idx, block_meta.inner_block_min, block_meta.inner_block_cnt, [&] { load_step(); });
       }
     };
@@ -907,7 +904,7 @@ struct CollectiveMainloopFwdSm90 {
     // The TMA issue thread reads sparse_indices_ptr[indices_idx] every inner iteration
     // via get_packed_first_row(); redirecting that pointer to SMEM eliminates per-tile
     // GMEM latency on the producer critical path.
-    if constexpr (IndexSparse && InnerLoad_Tma) {
+    if constexpr (IndexSparse && kInnerLoadMode == InnerLoadMode::Tma) {
       int const num_kblocks = block_meta.seqlen_info.seqlen_k / SparseKBlockSize;
       if (num_kblocks <= MaxKBlockIdxPrefetch) {
         int* const cache = shared_storage.tensors.mainloop.smem_kblock_idx_cache.data();

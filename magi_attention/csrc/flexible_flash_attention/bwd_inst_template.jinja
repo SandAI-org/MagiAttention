@@ -31,7 +31,7 @@ static constexpr bool kIndexSparse = {{ index_sparse }};
 static constexpr bool kInnerDirMaxToMin = {{ inner_dir_max_to_min | default('false') }};
 // mask_mode: 0=regular(direct apply every block), 1=dispatch(3-lambda zone split), 2=unified(runtime zone dispatch)
 static constexpr int kMaskMode = {{mask_mode_int | default('1')}};
-static constexpr bool kInnerDxStoreInProducer = {{inner_dx_store_in_producer | default('true')}};
+static constexpr bool kInnerStoreInProducer = {{inner_store_in_producer | default('true')}};
 // setmaxnreg quotas for the Load/Mma WGs, selected by _ffa_register_quota on the Python
 // side (env override: MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS); the kernel only asserts them.
 static constexpr int kBwdProducerRegs = {{bwd_producer_regs}};
@@ -48,9 +48,9 @@ static constexpr int kBwdStages = {{bwd_stages | default(0)}};
 static constexpr int kBwdStagesDs = {{bwd_stages_ds | default(0)}};
 static constexpr int kBwdStagesV = {{bwd_stages_v | default(0)}};
 // SMEM-saving overrides (env: MAGI_ATTENTION_FFA_BWD_SCATTER_PAD, MAGI_ATTENTION_FFA_BWD_LSE_UNION).
-// scatter_pad: -1 = auto (4 for kBlockN<=64, 0 for kBlockN>=128), >=0 = override.
+// smem_acc_row_pad: -1 = auto (4 for kBlockN<=64, 0 for kBlockN>=128), >=0 = override.
 // lse_union: 0 = separate smem_lse/smem_dpsum, 1 = union with dKVacc buffer.
-static constexpr int kBwdScatterPad = {{bwd_scatter_pad | default(-1)}};
+static constexpr int kBwdSmemAccRowPad = {{bwd_smem_acc_row_pad | default(-1)}};
 static constexpr int kBwdLseUnion = {{bwd_lse_union | default(0)}};
 // Union dKV accumulators: false(0) = separate smem_dkacc/smem_dvacc (optimized, requires stgV=1)
 //                         true(1) = union into single buffer (legacy, needed for LoopQ with stgV=2)
@@ -143,7 +143,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
 
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kSparseKBlockSize, kPerfDebugForceMmaDkvSS, kInnerLoadMode, kProfileMode, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma, kPerfDebugSkipDvWriteback, kPerfDebugSkipDkWriteback, kBwdUnionDkvacc, kPerfDebugDeferDvR2S>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdSmemAccRowPad, kBwdLseUnion, kSparseKBlockSize, kInnerLoadMode, kBwdUnionDkvacc, kProfileMode, kPerfDebugForceMmaDkvSS, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma, kPerfDebugSkipDvWriteback, kPerfDebugSkipDkWriteback, kPerfDebugDeferDvR2S>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

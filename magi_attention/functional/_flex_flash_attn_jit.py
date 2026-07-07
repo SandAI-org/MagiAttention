@@ -453,7 +453,7 @@ def get_ffa_jit_spec(
             "true",
             "false",
         ), f"MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER must be true/false, got {_dxp}"
-        extra_template_args["inner_dx_store_in_producer"] = _dxp_lower
+        extra_template_args["inner_store_in_producer"] = _dxp_lower
         uri += f"_dxp{_dxp_lower}"
     # ─── InnerLoadMode: tma=0 (2D auto), tma1d=1 (bulk per-row, no-swizzle K), cpasync=2 ───
     if _inner_use_scatter:
