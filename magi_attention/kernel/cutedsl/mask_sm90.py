@@ -171,54 +171,71 @@ def apply_mask_with_runtime_type_sm90(
 
     Delegates FULL and CAUSAL to the existing AttentionMask.apply_mask, and
     handles INV_CAUSAL / BI_CAUSAL with dedicated SM90 R2P logic.
+
+    Zone dispatch (matching C++ mask_dispatch_unified): for FULL and CAUSAL
+    ranges, skip mask computation for blocks entirely within seqlen bounds
+    and outside the causal diagonal zone.
     """
-    if mask_type == 0:
-        mask.apply_mask(
-            acc_S,
-            batch_idx,
-            head_idx,
-            m_block,
-            n_block,
-            thr_mma,
-            mask_seqlen=mask_seqlen,
-            mask_causal=False,
-            mask_local=False,
-            mask_mod=mask_mod,
-            aux_tensors=aux_tensors,
-            fastdiv_mods=fastdiv_mods,
-        )
-    elif mask_type == 1:
-        mask.apply_mask(
-            acc_S,
-            batch_idx,
-            head_idx,
-            m_block,
-            n_block,
-            thr_mma,
-            mask_seqlen=mask_seqlen,
-            mask_causal=True,
-            mask_local=False,
-            mask_mod=mask_mod,
-            aux_tensors=aux_tensors,
-            fastdiv_mods=fastdiv_mods,
-        )
-    elif mask_type == 2:
-        _apply_inv_causal_or_bi_causal_mask_sm90(
-            acc_S,
-            mask,
-            m_block,
-            n_block,
-            thr_mma,
-            mask_seqlen=mask_seqlen,
-            is_bi_causal=False,
-        )
-    else:
-        _apply_inv_causal_or_bi_causal_mask_sm90(
-            acc_S,
-            mask,
-            m_block,
-            n_block,
-            thr_mma,
-            mask_seqlen=mask_seqlen,
-            is_bi_causal=True,
-        )
+    skip_mask = False
+    if const_expr(mask_seqlen and mask_mod is None):
+        at_q_boundary = (m_block + 1) * mask.tile_m > mask.seqlen_q
+        at_k_boundary = (n_block + 1) * mask.tile_n > mask.seqlen_k
+        at_boundary = at_q_boundary or at_k_boundary
+
+        if mask_type == 0:
+            skip_mask = not at_boundary
+        elif mask_type == 1:
+            below_diagonal = m_block * mask.tile_m >= (n_block + 1) * mask.tile_n
+            skip_mask = below_diagonal and not at_boundary
+
+    if not skip_mask:
+        if mask_type == 0:
+            mask.apply_mask(
+                acc_S,
+                batch_idx,
+                head_idx,
+                m_block,
+                n_block,
+                thr_mma,
+                mask_seqlen=mask_seqlen,
+                mask_causal=False,
+                mask_local=False,
+                mask_mod=mask_mod,
+                aux_tensors=aux_tensors,
+                fastdiv_mods=fastdiv_mods,
+            )
+        elif mask_type == 1:
+            mask.apply_mask(
+                acc_S,
+                batch_idx,
+                head_idx,
+                m_block,
+                n_block,
+                thr_mma,
+                mask_seqlen=mask_seqlen,
+                mask_causal=True,
+                mask_local=False,
+                mask_mod=mask_mod,
+                aux_tensors=aux_tensors,
+                fastdiv_mods=fastdiv_mods,
+            )
+        elif mask_type == 2:
+            _apply_inv_causal_or_bi_causal_mask_sm90(
+                acc_S,
+                mask,
+                m_block,
+                n_block,
+                thr_mma,
+                mask_seqlen=mask_seqlen,
+                is_bi_causal=False,
+            )
+        else:
+            _apply_inv_causal_or_bi_causal_mask_sm90(
+                acc_S,
+                mask,
+                m_block,
+                n_block,
+                thr_mma,
+                mask_seqlen=mask_seqlen,
+                is_bi_causal=True,
+            )
