@@ -723,67 +723,38 @@ def prebuild_ffa_kernels() -> None:
     ]
 
     if prebuild_level == "ci":
-        # CI mode: also prebuild sparse / deterministic / pack_gqa / swap_bwd_qk_loop combos
-        # that are exercised by test_block_sparse.py, test_index_sparse.py, test_deterministic.py.
+        # CI mode: prebuild sparse / deterministic / pack_gqa / swap_bwd_qk_loop combos
+        # exercised by test_block_sparse.py, test_index_sparse.py, test_pipeline.py, etc.
         ci_extra = []
-        ci_dtypes = [(torch.bfloat16, torch.float32)]
-        ci_head_dims = [128]
-        for direction in directions:
-            for hd in ci_head_dims:
-                for dt in ci_dtypes:
-                    # BlockSparse: auto_range_merge=True, pack_gqa=True, kbs=128
+
+        # ── IndexSparse: all PackGQA factors tested in CI ──
+        # test_index_sparse.py exercises pgf ∈ {1,2,4,8,16,32,64,128} × hd ∈ {64,128}
+        for pgf in [1, 2, 4, 8, 16, 32, 64, 128]:
+            for hd in [64, 128]:
+                dt = (torch.bfloat16, torch.bfloat16)
+                for swap in [False, True]:
+                    # FWD
                     ci_extra.append(
                         (
-                            direction,
+                            "fwd",
                             hd,
                             dt,
-                            False,
-                            False,
                             True,
-                            False,
-                            True,
-                            False,
-                            False,
-                            128,
-                            128,
-                        )
-                    )  # block_sparse, !index, !swap, pgf=128, kbs=128
-                    ci_extra.append(
-                        (
-                            direction,
-                            hd,
-                            dt,
-                            False,
-                            False,
-                            True,
-                            False,
-                            True,
-                            False,
-                            True,
-                            128,
-                            128,
-                        )
-                    )  # + swap_bwd_qk_loop
-                    # IndexSparse: pack_gqa=True, kbs=1
-                    ci_extra.append(
-                        (
-                            direction,
-                            hd,
-                            dt,
-                            False,
                             False,
                             False,
                             False,
                             False,
                             True,
                             False,
-                            128,
+                            pgf,
                             1,
+                            False,
                         )
-                    )  # index_sparse, !swap, pgf=128, kbs=1
+                    )
+                    # BWD (swap_bwd_qk_loop variants)
                     ci_extra.append(
                         (
-                            direction,
+                            "bwd",
                             hd,
                             dt,
                             False,
@@ -792,28 +763,146 @@ def prebuild_ffa_kernels() -> None:
                             False,
                             False,
                             True,
-                            True,
-                            128,
+                            swap,
+                            pgf,
                             1,
+                            False,
                         )
-                    )  # + swap_bwd_qk_loop
-                    # Deterministic dense
+                    )
+
+        # ── BlockSparse: test_block_sparse.py parameter space ──
+        # kbs ∈ {16,64,96,128}, pgf ∈ {1,4,128}, hd ∈ {64,128}, swap ∈ {False,True}
+        bs_kbs_values = [16, 64, 96, 128]
+        bs_pgf_values = [1, 4, 128]
+        for hd in [64, 128]:
+            for kbs in bs_kbs_values:
+                for pgf in bs_pgf_values:
+                    compute_dt = torch.float16 if hd == 64 else torch.bfloat16
+                    dt = (compute_dt, compute_dt)
+                    # FWD
                     ci_extra.append(
                         (
-                            direction,
+                            "fwd",
+                            hd,
+                            dt,
+                            True,
+                            False,
+                            True,
+                            False,
+                            True,
+                            False,
+                            False,
+                            pgf,
+                            kbs,
+                            False,
+                        )
+                    )
+                    # BWD LoopQ (swap=False)
+                    ci_extra.append(
+                        (
+                            "bwd",
                             hd,
                             dt,
                             False,
+                            False,
+                            True,
+                            False,
                             True,
                             False,
                             False,
+                            pgf,
+                            kbs,
                             False,
-                            False,
-                            False,
-                            1,
-                            1,
                         )
-                    )  # deterministic
+                    )
+                    # BWD LoopQ non-atomic (pack_gqa path)
+                    if pgf > 1:
+                        ci_extra.append(
+                            (
+                                "bwd",
+                                hd,
+                                dt,
+                                True,
+                                False,
+                                True,
+                                False,
+                                True,
+                                False,
+                                False,
+                                pgf,
+                                kbs,
+                                False,
+                            )
+                        )
+                    # BWD LoopK (swap=True)
+                    ci_extra.append(
+                        (
+                            "bwd",
+                            hd,
+                            dt,
+                            False,
+                            False,
+                            True,
+                            False,
+                            True,
+                            False,
+                            True,
+                            pgf,
+                            kbs,
+                            False,
+                        )
+                    )
+
+        # ── Dense extras needed by test_pipeline / test_flex_flash_attn ──
+        ci_dense_features = [
+            # (disable_atomic, deterministic, auto_range_merge, cat_gqa,
+            #  swap_bwd_qk_loop, pack_gqa_factor, return_max_logits)
+            (False, True, False, False, False, 1, False),  # deterministic
+            (False, False, True, False, False, 1, False),  # auto_range_merge
+            (False, False, True, False, False, 128, False),  # ARM + packgqa128
+            (False, False, False, False, True, 1, False),  # swap_bwd_qk_loop
+            (False, False, False, False, True, 8, False),  # swap + packgqa8
+            (False, False, True, False, True, 8, False),  # ARM + swap + packgqa8
+            (False, False, True, False, True, 128, False),  # ARM + swap + packgqa128
+            (False, False, False, False, False, 1, True),  # return_max_logits
+            (False, False, False, False, False, 8, True),  # RML + packgqa8
+            (False, False, True, False, False, 1, True),  # ARM + RML
+            (False, False, True, False, False, 8, True),  # ARM + RML + packgqa8
+            (False, True, False, False, False, 1, True),  # det + RML
+            (False, True, False, False, False, 8, True),  # det + RML + packgqa8
+            (False, True, True, False, False, 1, True),  # det + ARM + RML
+            (False, False, False, True, False, 8, False),  # catgqa8
+            (False, False, True, True, False, 8, False),  # ARM + catgqa8
+            (False, True, False, True, False, 8, False),  # det + catgqa8
+            (False, True, True, True, False, 8, False),  # det + ARM + catgqa8
+        ]
+        for hd in [64, 128]:
+            for compute_dt in [torch.float16, torch.bfloat16]:
+                out_dt = torch.float32
+                dt = (compute_dt, out_dt)
+                for dis_at, det, arm, cat, swap, pgf, rml in ci_dense_features:
+                    valid_dirs = ["fwd"] if rml else directions
+                    for direction in valid_dirs:
+                        ci_extra.append(
+                            (
+                                direction,
+                                hd,
+                                dt,
+                                dis_at,
+                                det,
+                                arm,
+                                cat,
+                                False,
+                                False,
+                                swap,
+                                pgf,
+                                1,
+                                rml,
+                            )
+                        )
+
+        # Deduplicate
+        ci_extra = list(set(ci_extra))
         print(
             f"[prebuild] CI mode: {len(base_combos)} base + {len(ci_extra)} sparse/det combos"
         )
@@ -822,22 +911,64 @@ def prebuild_ffa_kernels() -> None:
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
-        (
-            direction,
-            head_dim,
-            compute_output_dtype_tuple,
-            disable_atomic_reduction,
-            deterministic,
-            auto_range_merge,
-            cat_gqa,
-            block_sparse,
-            index_sparse,
-            swap_bwd_qk_loop,
-            pack_gqa_factor,
-            k_block_size,
-        ) = args
+        # Support both 12-element (base) and 13-element (ci_extra with return_max_logits) tuples
+        if len(args) == 13:
+            (
+                direction,
+                head_dim,
+                compute_output_dtype_tuple,
+                disable_atomic_reduction,
+                deterministic,
+                auto_range_merge,
+                cat_gqa,
+                block_sparse,
+                index_sparse,
+                swap_bwd_qk_loop,
+                pack_gqa_factor,
+                k_block_size,
+                return_max_logits,
+            ) = args
+        else:
+            (
+                direction,
+                head_dim,
+                compute_output_dtype_tuple,
+                disable_atomic_reduction,
+                deterministic,
+                auto_range_merge,
+                cat_gqa,
+                block_sparse,
+                index_sparse,
+                swap_bwd_qk_loop,
+                pack_gqa_factor,
+                k_block_size,
+            ) = args
+            return_max_logits = False
+
         compute_dtype, output_dtype = compute_output_dtype_tuple
         pack_gqa = pack_gqa_factor > 1
+        _is_sparse = block_sparse or index_sparse
+
+        # For sparse FWD: tests use output_dtype=compute_dtype (not fp32)
+        # Sparse paths in flex_flash_attn_func force ref_block_size=(128,128)
+        # regardless of head_dim (unlike dense which uses tile_size_fwd_sm90).
+        fwd_ref_block_size = None
+        if direction == "fwd" and _is_sparse:
+            output_dtype = compute_dtype
+            disable_atomic_reduction = True
+            fwd_ref_block_size = (128, 128)
+
+        # For sparse BWD: derive dq/dkv dtypes to match runtime dispatch
+        disable_dq_atomic_reduction = False
+        if direction == "bwd":
+            if _is_sparse and swap_bwd_qk_loop:
+                disable_dq_atomic_reduction = True
+            dq_dtype = compute_dtype if disable_dq_atomic_reduction else torch.float32
+            dkv_dtype = torch.float32
+        else:
+            dq_dtype = None
+            dkv_dtype = None
+
         spec, uri = get_ffa_jit_spec(
             arch=(9, 0),
             direction=direction,
@@ -846,10 +977,9 @@ def prebuild_ffa_kernels() -> None:
             output_dtype=output_dtype if direction == "fwd" else None,
             softcap=False,
             disable_atomic_reduction=disable_atomic_reduction,
-            disable_dq_atomic_reduction=False,
+            disable_dq_atomic_reduction=disable_dq_atomic_reduction,
             deterministic=deterministic,
-            # optional args below mainly for sparse attn
-            ref_block_size=None,
+            ref_block_size=fwd_ref_block_size,
             auto_range_merge=auto_range_merge,
             swap_ab=False,
             pack_gqa=pack_gqa,
@@ -859,9 +989,9 @@ def prebuild_ffa_kernels() -> None:
             index_sparse=index_sparse,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
             profile_mode=False,
-            return_max_logits=False,
-            dq_dtype=output_dtype if direction == "bwd" else None,
-            dkv_dtype=output_dtype if direction == "bwd" else None,
+            return_max_logits=return_max_logits,
+            dq_dtype=dq_dtype,
+            dkv_dtype=dkv_dtype,
             k_block_size=k_block_size,
         )
         spec.build()
