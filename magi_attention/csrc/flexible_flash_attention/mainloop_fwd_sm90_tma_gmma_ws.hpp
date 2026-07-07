@@ -62,7 +62,7 @@ template <
     bool IndexSparse_,
     bool InnerDirMaxToMin_,
     int MaskMode_,
-    int KBlockSize_ = 1,
+    int SparseKBlockSize_ = 1,
     int InnerLoadMode_ = 2>
 struct CollectiveMainloopFwdSm90 {
   using ClusterShape = ClusterShape_;
@@ -85,7 +85,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int PackGQAFactor = PackGQAFactor_;
   static constexpr bool BlockSparse = BlockSparse_;
   static constexpr bool IndexSparse = IndexSparse_;
-  static constexpr int KBlockSize = KBlockSize_;
+  static constexpr int SparseKBlockSize = SparseKBlockSize_;
   static_assert(!(BlockSparse && IndexSparse), "BlockSparse and IndexSparse cannot be enabled at the same time");
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
@@ -127,11 +127,11 @@ struct CollectiveMainloopFwdSm90 {
   // Tma:     physically contiguous tiles → TMA 2D descriptor (auto-detected)
   // Tma1d:   cp.async.bulk per-row (1 instr/row); K uses INTER (no-swizzle) SMEM layout
   // CpAsync: cp.async per-row scatter (8×16B per row)
-  // KBlockSize controls contiguity: when KBlockSize >= kBlockN, each inner tile
+  // SparseKBlockSize controls contiguity: when SparseKBlockSize >= kBlockN, each inner tile
   // is a contiguous memory region → TMA 2D. Both IndexSparse and BlockSparse
-  // must set KBlockSize appropriately (BlockSparse: kBlockN, IndexSparse: user).
+  // must set SparseKBlockSize appropriately (BlockSparse: kBlockN, IndexSparse: user).
   static constexpr bool Use_TMA_Q = true;
-  static constexpr bool _is_contiguous = (!IndexSparse && !BlockSparse) || (KBlockSize >= kBlockN);
+  static constexpr bool _is_contiguous = (!IndexSparse && !BlockSparse) || (SparseKBlockSize >= kBlockN);
   // Tma1d (=1) falls through to CpAsync: cp.async.bulk 1D is incompatible with WGMMA
   // atom-tiled SMEM layouts (see inner_mode.hpp for details).
   static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
@@ -491,7 +491,7 @@ struct CollectiveMainloopFwdSm90 {
       NumThreadsPerLdstGroup,
       kBlockN,
       InnerDirMaxToMin,
-      KBlockSize,
+      SparseKBlockSize,
       /*InnerLoopQ=*/false>;
 
   static Params to_underlying_arguments(Arguments const& args) {
@@ -908,7 +908,7 @@ struct CollectiveMainloopFwdSm90 {
     // via get_packed_first_row(); redirecting that pointer to SMEM eliminates per-tile
     // GMEM latency on the producer critical path.
     if constexpr (IndexSparse && InnerLoad_Tma) {
-      int const num_kblocks = block_meta.seqlen_info.seqlen_k / KBlockSize;
+      int const num_kblocks = block_meta.seqlen_info.seqlen_k / SparseKBlockSize;
       if (num_kblocks <= MaxKBlockIdxPrefetch) {
         int* const cache = shared_storage.tensors.mainloop.smem_kblock_idx_cache.data();
         if (idx_in_warpgroup == 0) {

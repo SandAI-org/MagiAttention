@@ -52,10 +52,6 @@ def _results_path(phase):
 
 
 # ── GPU selection ──────────────────────────────────────────────
-_GPU_IDLE_MEM_THRESHOLD_MB = 600  # below this = idle (daemon context ~533MB)
-_GPU_UTIL_WARN_THRESHOLD = 5  # percent
-
-
 def _find_free_gpu():
     import torch
 
@@ -72,39 +68,47 @@ def _find_free_gpu():
 
 
 def _check_gpu_isolation(gpu: int) -> bool:
-    """Check that the selected GPU is truly idle. Returns True if clean."""
+    """Check that the selected GPU has no other compute processes. Returns True if clean."""
     import subprocess
     import warnings
 
     clean = True
     try:
-        out = subprocess.check_output(
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if cvd:
+            physical_gpu = cvd.split(",")[gpu]
+        else:
+            physical_gpu = str(gpu)
+
+        procs = subprocess.check_output(
             [
                 "nvidia-smi",
-                "--query-gpu=memory.used,utilization.gpu",
+                "--query-compute-apps=pid,used_memory",
                 "--format=csv,noheader,nounits",
-                f"--id={gpu}",
+                f"--id={physical_gpu}",
             ],
             text=True,
             timeout=5,
         ).strip()
-        mem_used, util = [float(x) for x in out.split(",")]
-        if mem_used > _GPU_IDLE_MEM_THRESHOLD_MB:
+
+        our_pid = os.getpid()
+        other_procs = []
+        for line in procs.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split(",")
+            pid = int(parts[0].strip())
+            if pid != our_pid:
+                other_procs.append(line.strip())
+
+        if other_procs:
             warnings.warn(
-                f"\n⚠️  GPU {gpu} has {mem_used:.0f}MB used "
-                f"(threshold {_GPU_IDLE_MEM_THRESHOLD_MB}MB). "
-                f"Results may be noisy due to co-tenant processes!",
+                f"\n⚠️  GPU {physical_gpu} has other compute processes: "
+                f"{other_procs}. Benchmark will be inaccurate!",
                 stacklevel=2,
             )
             clean = False
-        if util > _GPU_UTIL_WARN_THRESHOLD:
-            warnings.warn(
-                f"\n⚠️  GPU {gpu} utilization is {util:.0f}% "
-                f"(threshold {_GPU_UTIL_WARN_THRESHOLD}%). "
-                f"Another workload is active — benchmark will be inaccurate!",
-                stacklevel=2,
-            )
-            clean = False
+
     except Exception:
         pass
     return clean
@@ -185,9 +189,6 @@ def _parse_rerun(s):
 # ── Timing infrastructure ─────────────────────────────────────
 def _bench_kernel(run_fn, flops, device):
     import torch
-
-    gpu_idx = torch.cuda.current_device()
-    _check_gpu_isolation(gpu_idx)
 
     for _ in range(WARMUP):
         run_fn()

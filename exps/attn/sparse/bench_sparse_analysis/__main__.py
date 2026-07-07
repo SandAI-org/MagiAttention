@@ -42,9 +42,24 @@ def main():
         default=None,
         help="Re-run subset: 'pass/method' or 'pass/method/topk', comma-separated",
     )
+    parser.add_argument(
+        "--max-kvseqlen",
+        type=str,
+        default=None,
+        help="Max kvseqlen to test (e.g. '256k', '512k', or raw int). "
+        "Applies to phase5/phase6.",
+    )
 
     args = parser.parse_args()
     rerun_filter = _parse_rerun(args.rerun) if args.rerun else None
+
+    max_kvseqlen = None
+    if args.max_kvseqlen:
+        s = args.max_kvseqlen.lower().strip()
+        if s.endswith("k"):
+            max_kvseqlen = int(s[:-1]) * 1024
+        else:
+            max_kvseqlen = int(s)
 
     if args.exp:
         phase = args.exp
@@ -70,11 +85,11 @@ def main():
         elif phase == "5-scaling":
             from bench_sparse_analysis.phase5_scaling import _phase5_bench
 
-            _phase5_bench(force=args.force)
+            _phase5_bench(force=args.force, max_kvseqlen=max_kvseqlen)
         elif phase == "6-video-production":
             from bench_sparse_analysis.phase6_video_production import _phase6_bench
 
-            _phase6_bench(force=args.force)
+            _phase6_bench(force=args.force, max_kvseqlen=max_kvseqlen)
     elif args.plot:
         phase = args.plot
         print(f"[{_ts()}] === --plot {phase} ===", flush=True)

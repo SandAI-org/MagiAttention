@@ -59,7 +59,7 @@ PASSES = ["fwd", "bwd_loopk", "bwd_loopq"]
 METHODS = ["d1b", "d1b_nopg", "dense_nb", "block_sparse", "index_sparse"]
 
 
-def _phase5_bench(force=False):
+def _phase5_bench(force=False, max_kvseqlen=None):
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
@@ -68,8 +68,13 @@ def _phase5_bench(force=False):
     results = _load_results(phase)
     gpu = _set_gpu()
     device = f"cuda:{gpu}"
+
+    s_values = S_VALUES
+    if max_kvseqlen is not None:
+        s_values = [s for s in S_VALUES if s <= max_kvseqlen]
+
     print(
-        f"[{_ts()}] Phase 5: Scaling (S=32k..256k, topk=S/4, gpu{gpu})",
+        f"[{_ts()}] Phase 5: Scaling (S=32k..{s_values[-1]//1024}k, topk=S/4, gpu{gpu})",
         flush=True,
     )
     print(f"  nhq={NHQ}, nhk={NHK}, hd={HD}, kbs={KBS}, bf16, PackGQA\n", flush=True)
@@ -85,7 +90,7 @@ def _phase5_bench(force=False):
         atm = torch.zeros(n_qblocks, dtype=torch.int32, device=device)
         return q_r, k_r, atm
 
-    for S in S_VALUES:
+    for S in s_values:
         topk = S // TOPK_RATIO
         print(f"  ── S={S // 1024}k, topk={topk // 1024}k ──", flush=True)
 

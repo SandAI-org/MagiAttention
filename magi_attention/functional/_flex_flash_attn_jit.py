@@ -462,21 +462,32 @@ def get_ffa_jit_spec(
             ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD must be tma/tma1d/cpasync, got {_load_env}"
             extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
             uri += f"_sload{_load_mode_map[_load_lower]}"
-    # ─── InnerStoreMode (BWD only): tma1d=1 (bulk reduce-add), cpasync=2 (atomicAdd) ───
-    if direction == "bwd" and _inner_use_scatter:
+    # ─── InnerStoreMode (BWD only): 1=tma1d, 2=cpasync, 3=bypass_smem ───
+    # Applies to both scatter and dense paths. Tma1d requires scatter (sparse) path.
+    if direction == "bwd":
         _store_env = os.environ.get(
             "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE",
             os.environ.get("MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"),
         )
-        if _store_env is not None:
+        _bypass_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS")
+        if _bypass_env is not None and _bypass_env != "0":
+            extra_template_args["inner_store_mode"] = "3"
+            uri += "_sstore3"
+        elif _store_env is not None:
             _store_lower = _store_env.lower()
-            _store_mode_map = {"tma1d": "1", "cpasync": "2", "true": "1", "false": "2"}
+            _store_mode_map = {
+                "tma1d": "1",
+                "cpasync": "2",
+                "bypass": "3",
+                "true": "1",
+                "false": "2",
+            }
             assert (
                 _store_lower in _store_mode_map
-            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE must be tma1d/cpasync, got {_store_env}"
+            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE must be tma1d/cpasync/bypass, got {_store_env}"
             extra_template_args["inner_store_mode"] = _store_mode_map[_store_lower]
             uri += f"_sstore{_store_mode_map[_store_lower]}"
-        else:
+        elif _inner_use_scatter:
             extra_template_args["inner_store_mode"] = "1"
     # Tile/stage overrides for A/B benchmarking (BWD only).
     # Each distinct combo produces a separate JIT URI → separate .so cache.
@@ -489,8 +500,6 @@ def get_ffa_jit_spec(
             ("MAGI_ATTENTION_FFA_BWD_STAGES_V", "bwd_stages_v", "stv"),
             ("MAGI_ATTENTION_FFA_BWD_SCATTER_PAD", "bwd_scatter_pad", "sp"),
             ("MAGI_ATTENTION_FFA_BWD_LSE_UNION", "bwd_lse_union", "lu"),
-            ("MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS", "bwd_dkvacc_bypass", "db"),
-            ("MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC", "bwd_separate_dkvacc", "uu"),
         ]:
             _val = os.environ.get(_env_name)
             if _val is not None:
@@ -509,19 +518,22 @@ def get_ffa_jit_spec(
             extra_template_args["bwd_lse_union"] = "1"
             uri += "_lu1"
 
-        # Default SeparateDkvacc+stgV1 for LoopK: separates dK/dV SMEM buffers (+38T, +11%).
-        # SMEM: 198KB → 214KB (stgV=1 frees 16KB for separate's +32KB). No register change.
-        # Convenience override: MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2=1 restores legacy behavior.
-        # Fine-grained overrides: BWD_SEPARATE_DKVACC / BWD_STAGES_V still work individually.
+        # Default for LoopK: separate dK/dV SMEM buffers (UnionDkvacc=false) + stgV=1.
+        # Separate mode (+38T, +11%): SMEM 198KB → 214KB (stgV=1 frees 16KB for +32KB).
+        # Convenience override: MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2=1 restores legacy union.
+        # Fine-grained: BWD_UNION_DKVACC / BWD_STAGES_V still work individually.
+        _union_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_UNION_DKVACC")
+        if _union_env is not None:
+            extra_template_args["bwd_union_dkvacc"] = (
+                "true" if _union_env != "0" else "false"
+            )
+            uri += f"_ud{_union_env}"
         _perf_union = os.environ.get("MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2")
         if _perf_union is not None and _perf_union != "0":
-            extra_template_args.setdefault("bwd_separate_dkvacc", "0")
+            extra_template_args.setdefault("bwd_union_dkvacc", "true")
             extra_template_args.setdefault("bwd_stages_v", "2")
             uri += "_pus1"
         elif bwd_inner_loop_k:
-            if "bwd_separate_dkvacc" not in extra_template_args:
-                extra_template_args["bwd_separate_dkvacc"] = "1"
-                uri += "_uu1"
             if "bwd_stages_v" not in extra_template_args:
                 extra_template_args["bwd_stages_v"] = "1"
                 uri += "_stv1"
@@ -741,7 +753,7 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_SCATTER_PAD",
     "MAGI_ATTENTION_FFA_BWD_LSE_UNION",
     "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
-    "MAGI_ATTENTION_FFA_BWD_SEPARATE_DKVACC",
+    "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC",
     "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",

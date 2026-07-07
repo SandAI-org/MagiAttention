@@ -38,8 +38,8 @@ static constexpr int kBwdProducerRegs = {{bwd_producer_regs}};
 static constexpr int kBwdConsumerRegs = {{bwd_consumer_regs}};
 // Inner-loop scatter load mode: 0=Tma(2D,auto), 1=Tma1d(bulk per-row, no-swizzle K), 2=CpAsync(per-row)
 static constexpr int kInnerLoadMode = {{inner_load_mode | default(2)}};
-// Inner-loop scatter store mode: 1=Tma1d(bulk reduce-add), 2=CpAsync(scalar atomicAdd)
-static constexpr int kInnerStoreMode = {{inner_store_mode | default(1)}};
+// Inner-loop store mode: 1=Tma1d(bulk reduce-add), 2=CpAsync(scalar atomicAdd), 3=BypassSmem(register atomicAdd, skip SMEM)
+static constexpr int kInnerStoreMode = {{inner_store_mode | default(2)}};
 // Tile/stage overrides for A/B benchmarking (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS/V).
 // 0 = use default from tile_size_bwd_sm90(); >0 = override.
 static constexpr int kBwdTileM = {{bwd_tile_m | default(0)}};
@@ -52,12 +52,11 @@ static constexpr int kBwdStagesV = {{bwd_stages_v | default(0)}};
 // lse_union: 0 = separate smem_lse/smem_dpsum, 1 = union with dKVacc buffer.
 static constexpr int kBwdScatterPad = {{bwd_scatter_pad | default(-1)}};
 static constexpr int kBwdLseUnion = {{bwd_lse_union | default(0)}};
-// dKVacc bypass: 0 = normal SMEM roundtrip, 1 = consumer register atomicAdd (bypass SMEM)
-static constexpr int kBwdDkvaccBypass = {{bwd_dkvacc_bypass | default(0)}};
-// Un-union dKVacc: 1 = separate smem_dkacc/smem_dvacc (requires stgV=1 to fit SMEM)
-static constexpr int kBwdSeparateDkvacc = {{bwd_ununion_dkvacc | default(0)}};
-// IndexSparse K block size: 1 = token-level indices, >1 = block-level (each index covers KBlockSize tokens)
-static constexpr int kKBlockSize = {{k_block_size | default(1)}};
+// Union dKV accumulators: false(0) = separate smem_dkacc/smem_dvacc (optimized, requires stgV=1)
+//                         true(1) = union into single buffer (legacy, needed for LoopQ with stgV=2)
+static constexpr bool kBwdUnionDkvacc = {{ bwd_union_dkvacc | default('false') }};
+// Sparse K block size: 1 = token-level indices, >1 = block-level (each index covers SparseKBlockSize tokens)
+static constexpr int kSparseKBlockSize = {{k_block_size | default(1)}};
 // Force Mma_dKV to SS mode (SMEM-SMEM) instead of RS for benchmarking register pressure.
 static constexpr bool kPerfDebugForceMmaDkvSS = {{ force_mma_dkv_ss | default('false') }};
 // Per-switch perf isolation overrides (InnerLoopK only, correctness NOT guaranteed).
@@ -144,7 +143,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
 
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kBwdDkvaccBypass, kKBlockSize, kPerfDebugForceMmaDkvSS, kInnerLoadMode, kProfileMode, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma, kPerfDebugSkipDvWriteback, kPerfDebugSkipDkWriteback, kBwdSeparateDkvacc, kPerfDebugDeferDvR2S>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerDxStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdScatterPad, kBwdLseUnion, kSparseKBlockSize, kPerfDebugForceMmaDkvSS, kInnerLoadMode, kProfileMode, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma, kPerfDebugSkipDvWriteback, kPerfDebugSkipDkWriteback, kBwdUnionDkvacc, kPerfDebugDeferDvR2S>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

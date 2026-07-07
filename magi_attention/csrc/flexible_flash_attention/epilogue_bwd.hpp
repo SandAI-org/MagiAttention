@@ -55,7 +55,7 @@ template <
     bool CatGQA_,
     int PackGQAFactor_,
     bool IndexSparse_ = false,
-    int KBlockSize_ = 1>
+    int SparseKBlockSize_ = 1>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using ElementDq = ElementDq_;
@@ -83,7 +83,7 @@ struct CollectiveEpilogueBwd {
   static constexpr bool FlattenGQA = PackGQA_ || CatGQA_;
   static constexpr int PackGQAFactor = PackGQAFactor_; // for non packgqa, PackGQAFactor is always 1.
   static constexpr bool IndexSparse = IndexSparse_;
-  static constexpr int KBlockSize = KBlockSize_;
+  static constexpr int SparseKBlockSize = SparseKBlockSize_;
   // IndexSparse LoopQ: outer block = 1 K token in a kBlockN tile; only row 0 is valid.
 
   static constexpr int NumEpilogueThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
@@ -407,14 +407,14 @@ struct CollectiveEpilogueBwd {
 
     int offset_k;
     if constexpr ((IndexSparse && !BwdInnerLoopK)) {
-      offset_k = bidb * KBlockSize;
+      offset_k = bidb * SparseKBlockSize;
     } else {
       offset_k = get_batch_range(params.k_ranges, bidb).x;
     }
 
-    // IndexSparse LoopQ with KBlockSize < kBlockN: only partial rows valid in the tile,
+    // IndexSparse LoopQ with SparseKBlockSize < kBlockN: only partial rows valid in the tile,
     // TMA full-tile store would corrupt neighbors. Use per-element path with residual guard.
-    // When KBlockSize >= kBlockN the full tile is valid and can use TMA store.
+    // When SparseKBlockSize >= kBlockN the full tile is valid and can use TMA store.
     if constexpr (OuterStoreNeedReduction && !(IndexSparse && !BwdInnerLoopK)) {
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
       cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
@@ -502,7 +502,7 @@ struct CollectiveEpilogueBwd {
       Tensor tdVsdV = gmem_thr_copy_dKV.partition_S(sdV);
       int residual_n;
       if constexpr ((IndexSparse && !BwdInnerLoopK)) {
-        residual_n = KBlockSize - n_block * kBlockN;
+        residual_n = SparseKBlockSize - n_block * kBlockN;
       } else {
         residual_n = get_batch_range(params.k_ranges, bidb).y - offset_k - n_block * kBlockN;
       }

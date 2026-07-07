@@ -31,9 +31,11 @@ namespace flash {
 // Tma1d (=1) for InnerLoadMode is reserved but currently falls through to CpAsync.
 enum class InnerLoadMode : int { Tma = 0, Tma1d = 1, CpAsync = 2 };
 
-// 2-way inner-loop scatter store strategy (BWD dX accumulation).
-// Tma1d:   cp.reduce.async.bulk per-row (bulk reduce-add from row-contiguous smem)
-// CpAsync: scalar atomicAdd fallback
-enum class InnerStoreMode : int { Tma1d = 1, CpAsync = 2 };
+// Inner-loop store strategy (BWD dX accumulation to global memory).
+// Tma1d:       cp.reduce.async.bulk per-row from SMEM (requires scatter path)
+// CpAsync:     scalar atomicAdd from SMEM (scatter or dense fallback)
+// BypassSmem:  skip SMEM accumulator entirely — consumer does register atomicAdd to gmem
+//              (eliminates dKVacc buffer, barriers, and store warps; works for both dense/scatter)
+enum class InnerStoreMode : int { Tma1d = 1, CpAsync = 2, BypassSmem = 3 };
 
 } // namespace flash

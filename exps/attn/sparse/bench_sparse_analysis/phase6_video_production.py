@@ -68,7 +68,7 @@ PASSES = ["fwd", "bwd_loopk", "bwd_loopq"]
 METHODS = ["d1b", "d1b_nopg", "dense_nb", "block_sparse", "index_sparse"]
 
 
-def _phase6_bench(force=False):
+def _phase6_bench(force=False, max_kvseqlen=None):
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
@@ -77,13 +77,22 @@ def _phase6_bench(force=False):
     results = _load_results(phase)
     gpu = _set_gpu()
     device = f"cuda:{gpu}"
+
+    scenarios = SCENARIOS
+    if max_kvseqlen is not None:
+        scenarios = [(kv, q, t) for kv, q, t in SCENARIOS if kv <= max_kvseqlen]
+        if not scenarios:
+            print(f"  [WARN] max_kvseqlen={max_kvseqlen} filters out all scenarios!")
+            return
+
     print(
         f"[{_ts()}] Phase 6: Video Production (gpu{gpu})",
         flush=True,
     )
     print(
         f"  nhq={NHQ}, nhk={NHK}, hd={HD}, kbs={KBS}, "
-        f"q_block_size=1, PackGQA, bf16\n",
+        f"q_block_size=1, PackGQA, bf16"
+        f"{f', max_kvseqlen={max_kvseqlen//1024}k' if max_kvseqlen else ''}\n",
         flush=True,
     )
 
@@ -126,7 +135,7 @@ def _phase6_bench(force=False):
         atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device=indices.device)
         return q_ranges, k_ranges, atm
 
-    for kvseqlen, qseqlen, topk in SCENARIOS:
+    for kvseqlen, qseqlen, topk in scenarios:
         print(
             f"  ── kvseqlen={kvseqlen // 1024}k, "
             f"qseqlen={qseqlen}, topk={topk // 1024}k ──",

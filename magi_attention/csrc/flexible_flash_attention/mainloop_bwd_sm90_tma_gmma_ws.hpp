@@ -80,8 +80,7 @@ template <
     int Stages_V_ = Stages,
     int ScatterPad_ = -1,
     bool LseDpsumUnionDKVacc_ = false,
-    bool DkvaccBypassSmem_ = false,
-    int KBlockSize_ = 1,
+    int SparseKBlockSize_ = 1,
     bool ForceMmaDkvSS_ = false,
     int InnerLoadMode_ = 2,
     bool SkipVLoad_ = false,
@@ -90,7 +89,7 @@ template <
     bool SkipDvMma_ = false,
     bool SkipDvWriteback_ = false,
     bool SkipDkWriteback_ = false,
-    bool SeparateDkvacc_ = false,
+    bool UnionDkvacc_ = false,
     bool DeferDvR2S_ = false>
 struct CollectiveMainloopBwdSm90 {
   using ClusterShape = ClusterShape_;
@@ -112,7 +111,6 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(!Mma_dP_is_RS || SdP_swapAB_); // If Mma_dP_is_RS, we need SdP_SwapAB
 
   static constexpr bool LseDpsumUnionDKVacc = LseDpsumUnionDKVacc_;
-  static constexpr bool DkvaccBypassSmem = DkvaccBypassSmem_;
 
   static constexpr bool PerfDebugSkipVLoad = SkipVLoad_;
   static constexpr bool PerfDebugSkipDvStore = SkipDvStore_;
@@ -120,7 +118,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool PerfDebugSkipDvMma = SkipDvMma_;
   static constexpr bool PerfDebugSkipDvWriteback = SkipDvWriteback_;
   static constexpr bool PerfDebugSkipDkWriteback = SkipDkWriteback_;
-  static constexpr bool SeparateDkvacc = SeparateDkvacc_;
+  static constexpr bool UnionDkvacc = UnionDkvacc_;
   static constexpr bool PerfDebugDeferDvR2S = DeferDvR2S_;
 
   static constexpr bool Has_softcap = Has_softcap_;
@@ -136,10 +134,10 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool Q_dO_same_stages = kStages == kStages_dO;
   static constexpr bool BlockSparse = BlockSparse_;
   static constexpr bool IndexSparse = IndexSparse_;
-  static constexpr int KBlockSize = KBlockSize_;
+  static constexpr int SparseKBlockSize = SparseKBlockSize_;
   static_assert(!BlockSparse || RangeMerge); // If BlockSparse, we need RangeMerge
   static_assert(!(BlockSparse && IndexSparse));
-  static_assert(!IndexSparse || KBlockSize >= 1, "KBlockSize must be >= 1 for IndexSparse");
+  static_assert(!IndexSparse || SparseKBlockSize >= 1, "SparseKBlockSize must be >= 1 for IndexSparse");
 
   static constexpr bool InnerDirMaxToMin = InnerDirMaxToMin_;
   static constexpr int MaskMode = MaskMode_;
@@ -159,12 +157,15 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool InnerDxStoreInProducer = InnerDxStoreInProducer_;
 
   // ─── Inner-Loop Store Strategy (InnerStoreMode enum) ───
-  // Tma1d:   cp.reduce.async.bulk per-row (bulk reduce-add from row-contiguous smem)
-  // CpAsync: scalar atomicAdd fallback
-  // Non-scatter (Dense) paths ignore InnerStoreMode; auto-resolve to CpAsync to avoid static_assert.
-  static constexpr InnerStoreMode kInnerStoreMode = InnerUseScatter ? static_cast<InnerStoreMode>(InnerStoreMode_) : InnerStoreMode::CpAsync;
+  // Tma1d:       cp.reduce.async.bulk per-row (bulk reduce-add from row-contiguous smem; scatter only)
+  // CpAsync:     scalar atomicAdd from SMEM (scatter or dense fallback)
+  // BypassSmem:  skip SMEM accumulator entirely — consumer register atomicAdd to gmem
+  //              (eliminates dKVacc buffer, barriers, and store warps; works for both dense/scatter)
+  static constexpr InnerStoreMode kInnerStoreMode = static_cast<InnerStoreMode>(InnerStoreMode_);
+  static constexpr bool DkvaccBypassSmem = (kInnerStoreMode == InnerStoreMode::BypassSmem);
   static constexpr bool SparseInnerDxReduceUseTma = (kInnerStoreMode == InnerStoreMode::Tma1d);
-  static_assert(kInnerStoreMode == InnerStoreMode::Tma1d || kInnerStoreMode == InnerStoreMode::CpAsync);
+  static_assert(kInnerStoreMode == InnerStoreMode::Tma1d || kInnerStoreMode == InnerStoreMode::CpAsync || kInnerStoreMode == InnerStoreMode::BypassSmem);
+  static_assert(InnerUseScatter || kInnerStoreMode != InnerStoreMode::Tma1d, "Tma1d store requires scatter (sparse) path");
 
   static constexpr int kBlockM = get<0>(TileShape_MNK{});
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
@@ -179,10 +180,10 @@ struct CollectiveMainloopBwdSm90 {
   //     - BlockSparse: always (packed rows = consecutive tokens × heads).
   //     - IndexSparse: PackGQAFactor >= kBlockM (one Q token fills the tile).
   //   InnerLoopK sparse (inner=K/V): K tiles are contiguous when:
-  //     - BlockSparse: KBlockSize >= kBlockN (Python sets kbs=kBlockN for BlockSparse).
-  //     - IndexSparse: PackGQA + PackGQAFactor >= kBlockM + KBlockSize >= kBlockN.
+  //     - BlockSparse: SparseKBlockSize >= kBlockN (Python sets kbs=kBlockN for BlockSparse).
+  //     - IndexSparse: PackGQA + PackGQAFactor >= kBlockM + SparseKBlockSize >= kBlockN.
   static constexpr bool _is_contiguous = !InnerUseScatter || (!BwdInnerLoopK && PackGQA && (!IndexSparse || PackGQAFactor >= kBlockM)) ||
-      (BwdInnerLoopK && ((BlockSparse && KBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && KBlockSize >= kBlockN)));
+      (BwdInnerLoopK && ((BlockSparse && SparseKBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && SparseKBlockSize >= kBlockN)));
   static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
   static constexpr bool InnerLoad_Tma = (kInnerLoadMode == InnerLoadMode::Tma);
   static constexpr bool InnerLoad_CpAsync = (kInnerLoadMode == InnerLoadMode::CpAsync);
@@ -716,9 +717,10 @@ struct CollectiveMainloopBwdSm90 {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentdS> smem_ds;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQKVdO> smem_q;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutdO>, SmemAlignmentQKVdO> smem_do;
-    // dK and dV accumulators: when SeparateDkvacc = true, uses separate buffers allow dV/dK r2s
-    // to overlap (independent barrier paths). Otherwise union saves 32 KB but forces
-    // serialized stores via the swapped dVEmpty/dKEmpty barrier protocol in store_dkv().
+    // dK and dV accumulators: when UnionDkvacc = false (default), uses separate buffers
+    // allowing dV/dK r2s to overlap (independent barrier paths, +11% perf).
+    // UnionDkvacc = true: union saves 32 KB but forces serialized stores via the swapped
+    // dVEmpty/dKEmpty barrier protocol in store_dkv().
     // When LseDpsumUnionDKVacc: the first bytes of smem_dkacc are also aliased as
     // smem_lse (512B) + smem_dpsum (512B) during outer-loop LSE/dPsum TMA loads.
     struct SeparatedDkvacc {
@@ -731,7 +733,7 @@ struct CollectiveMainloopBwdSm90 {
         SmemdKVacc_t smem_dvacc;
       };
     };
-    using DkvaccStorage = std::conditional_t<SeparateDkvacc, SeparatedDkvacc, UnionedDkvacc>;
+    using DkvaccStorage = std::conditional_t<UnionDkvacc, UnionedDkvacc, SeparatedDkvacc>;
     DkvaccStorage dkvacc_storage;
     SmemTokenIndices_t smem_inner_token_indices;
     // Zero-sized fields placed AFTER all data buffers so they fall in struct tail padding
@@ -1134,7 +1136,7 @@ struct CollectiveMainloopBwdSm90 {
       NumThreadsPerLdstGroup,
       kBlockN,
       InnerDirMaxToMin,
-      KBlockSize,
+      SparseKBlockSize,
       /*InnerLoopQ=*/false>;
 
   // IndexSparse InnerLoopQ: outer=K block, inner=Q from inner_indices
@@ -1148,7 +1150,7 @@ struct CollectiveMainloopBwdSm90 {
       NumThreadsPerLdstGroup,
       kBlockM,
       InnerDirMaxToMin,
-      KBlockSize,
+      SparseKBlockSize,
       /*InnerLoopQ=*/true>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -2478,7 +2480,7 @@ struct CollectiveMainloopBwdSm90 {
       // Union: signal dKEmpty (TMA dV done → consumer can r2s dK into shared buffer)
       // Un-union: signal dVEmpty (TMA dV done → consumer can r2s next dV into its own buffer)
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        if constexpr (SeparateDkvacc) {
+        if constexpr (!UnionDkvacc) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         } else {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
@@ -2521,7 +2523,7 @@ struct CollectiveMainloopBwdSm90 {
       // Union: signal dVEmpty (TMA dK done → consumer can r2s next dV into shared buffer)
       // Un-union: signal dKEmpty (TMA dK done → consumer can r2s next dK into its own buffer)
       for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        if constexpr (SeparateDkvacc) {
+        if constexpr (!UnionDkvacc) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
         } else {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warpgroup_idx);
@@ -2580,7 +2582,7 @@ struct CollectiveMainloopBwdSm90 {
         // Un-union: both dVEmpty and dKEmpty (separate buffers → both r2s start immediately).
         if (warp_idx_in_warpgroup == 0 || (InnerUseScatter && warp_idx_in_warpgroup == 1)) {
           BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
-          if constexpr (SeparateDkvacc) {
+          if constexpr (!UnionDkvacc) {
             BarrierManager::arrive<cutlass::NumThreadsPerWarpGroup + NumdKVStoreThreads>(BwdNamedBarriers::dKEmptyWG1, /*warp_group_idx=*/warp_group_idx);
           }
         }

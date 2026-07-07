@@ -33,8 +33,8 @@ static constexpr int kMaskMode = {{ mask_mode_int | default('1') }};
 // side; the kernel only asserts them.
 static constexpr int kFwdProducerRegs = {{ fwd_producer_regs }};
 static constexpr int kFwdConsumerRegs = {{ fwd_consumer_regs }};
-// IndexSparse K block size: 1 = token-level indices, >1 = block-level (each index covers KBlockSize tokens)
-static constexpr int kKBlockSize = {{ k_block_size | default(1) }};
+// Sparse K block size: 1 = token-level indices, >1 = block-level (each index covers SparseKBlockSize tokens)
+static constexpr int kSparseKBlockSize = {{ k_block_size | default(1) }};
 // Inner-loop scatter load mode: 0=Tma(2D,auto), 1=Tma1d(bulk per-row, no-swizzle K), 2=CpAsync(per-row)
 static constexpr int kInnerLoadMode = {{ inner_load_mode | default(2) }};
 
@@ -120,7 +120,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kPackGQAFactor, kDeterministic, kRangeMerge, kSwapAB, kBlockSparse, kIndexSparse, kIntraWGOverlap, kInnerDirMaxToMin, kMaskMode, kReturnMaxLogits, kFwdProducerRegs, kFwdConsumerRegs, kKBlockSize, kInnerLoadMode, kProfileMode>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kPackGQAFactor, kDeterministic, kRangeMerge, kSwapAB, kBlockSparse, kIndexSparse, kIntraWGOverlap, kInnerDirMaxToMin, kMaskMode, kReturnMaxLogits, kFwdProducerRegs, kFwdConsumerRegs, kSparseKBlockSize, kInnerLoadMode, kProfileMode>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");
