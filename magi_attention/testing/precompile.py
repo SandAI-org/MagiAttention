@@ -150,6 +150,8 @@ def add_ffa_spec(
             dkv_dtype=dkv_dtype,
             sparse_k_block_size=sparse_k_block_size,
         )
+    except ValueError:
+        return
     finally:
         for key, old in saved_env.items():
             if old is None:
