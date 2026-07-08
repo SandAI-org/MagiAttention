@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -686,7 +687,21 @@ def prebuild_ffa_kernels() -> None:
         ) from e
 
     # determine the combinations of prebuild options
-    prebuild_level = os.environ.get("MAGI_ATTENTION_PREBUILD_LEVEL", "lite").lower()
+    # NOTE: the CI workflow is triggered by `pull_request_target`, so GitHub runs
+    # the workflow yaml from the BASE branch — env vars set in the PR branch's yaml
+    # (e.g. MAGI_ATTENTION_PREBUILD_LEVEL=ci) do NOT take effect. Hence we
+    # auto-detect GitHub Actions here and default to "ci" level in that case.
+    _level_env = os.environ.get("MAGI_ATTENTION_PREBUILD_LEVEL")
+    if _level_env is not None:
+        prebuild_level = _level_env.lower()
+        _level_source = "env MAGI_ATTENTION_PREBUILD_LEVEL"
+    elif os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("CI") == "true":
+        prebuild_level = "ci"
+        _level_source = "auto-detected CI environment (GITHUB_ACTIONS/CI)"
+    else:
+        prebuild_level = "lite"
+        _level_source = "default"
+    print(f"[prebuild] level={prebuild_level!r} (source: {_level_source})", flush=True)
     directions = ["fwd", "bwd"]
     head_dims = [64, 128]
     compute_output_dtype_tuples = [
@@ -723,137 +738,43 @@ def prebuild_ffa_kernels() -> None:
         for c in combos
     ]
 
+    # CI mode: additionally prebuild the exact sparse kernel set exercised by
+    # test_block_sparse.py / test_index_sparse.py, plus dense extras for
+    # test_pipeline / test_flex_flash_attn.
+    # The sparse specs are imported from tests/precompile_sparse_tests.py — the
+    # single source of truth kept in sync with the test parameter space — instead
+    # of duplicating (and inevitably de-syncing) the combo lists here.
+    ci_test_specs = []
     if prebuild_level == "ci":
-        # CI mode: prebuild sparse / deterministic / pack_gqa / bwd_inner_loop_k combos
-        # exercised by test_block_sparse.py, test_index_sparse.py, test_pipeline.py, etc.
+        try:
+            import importlib.util as _ilu
+
+            _pst_path = Path(project_root) / "tests" / "precompile_sparse_tests.py"
+            _mod_spec = _ilu.spec_from_file_location(
+                "_precompile_sparse_tests", _pst_path
+            )
+            assert _mod_spec is not None and _mod_spec.loader is not None
+            _mod = _ilu.module_from_spec(_mod_spec)
+            _mod_spec.loader.exec_module(_mod)
+            _seen_uris = set()
+            for _spec, _uri in _mod.collect_specs():
+                if _uri not in _seen_uris:
+                    _seen_uris.add(_uri)
+                    ci_test_specs.append((_spec, _uri))
+            print(
+                f"[prebuild] CI mode: +{len(ci_test_specs)} sparse-test kernels "
+                f"from {_pst_path}",
+                flush=True,
+            )
+        except Exception as e:
+            print(
+                f"[prebuild WARNING] failed to load sparse test specs "
+                f"from tests/precompile_sparse_tests.py: {e}",
+                flush=True,
+            )
+
+    if prebuild_level == "ci":
         ci_extra = []
-
-        # ── IndexSparse: all PackGQA factors tested in CI ──
-        # test_index_sparse.py exercises pgf ∈ {1,2,4,8,16,32,64,128} × hd ∈ {64,128}
-        for pgf in [1, 2, 4, 8, 16, 32, 64, 128]:
-            for hd in [64, 128]:
-                dt = (torch.bfloat16, torch.bfloat16)
-                for swap in [False, True]:
-                    # FWD
-                    ci_extra.append(
-                        (
-                            "fwd",
-                            hd,
-                            dt,
-                            True,
-                            False,
-                            False,
-                            False,
-                            False,
-                            True,
-                            False,
-                            pgf,
-                            1,
-                            False,
-                        )
-                    )
-                    # BWD (bwd_inner_loop_k variants)
-                    ci_extra.append(
-                        (
-                            "bwd",
-                            hd,
-                            dt,
-                            False,
-                            False,
-                            False,
-                            False,
-                            False,
-                            True,
-                            swap,
-                            pgf,
-                            1,
-                            False,
-                        )
-                    )
-
-        # ── BlockSparse: test_block_sparse.py parameter space ──
-        # kbs ∈ {16,64,96,128}, pgf ∈ {1,4,128}, hd ∈ {64,128}, swap ∈ {False,True}
-        bs_kbs_values = [16, 64, 96, 128]
-        bs_pgf_values = [1, 4, 128]
-        for hd in [64, 128]:
-            for kbs in bs_kbs_values:
-                for pgf in bs_pgf_values:
-                    compute_dt = torch.float16 if hd == 64 else torch.bfloat16
-                    dt = (compute_dt, compute_dt)
-                    # FWD
-                    ci_extra.append(
-                        (
-                            "fwd",
-                            hd,
-                            dt,
-                            True,
-                            False,
-                            True,
-                            False,
-                            True,
-                            False,
-                            False,
-                            pgf,
-                            kbs,
-                            False,
-                        )
-                    )
-                    # BWD LoopQ (swap=False)
-                    ci_extra.append(
-                        (
-                            "bwd",
-                            hd,
-                            dt,
-                            False,
-                            False,
-                            True,
-                            False,
-                            True,
-                            False,
-                            False,
-                            pgf,
-                            kbs,
-                            False,
-                        )
-                    )
-                    # BWD LoopQ non-atomic (pack_gqa path)
-                    if pgf > 1:
-                        ci_extra.append(
-                            (
-                                "bwd",
-                                hd,
-                                dt,
-                                True,
-                                False,
-                                True,
-                                False,
-                                True,
-                                False,
-                                False,
-                                pgf,
-                                kbs,
-                                False,
-                            )
-                        )
-                    # BWD LoopK (swap=True)
-                    ci_extra.append(
-                        (
-                            "bwd",
-                            hd,
-                            dt,
-                            False,
-                            False,
-                            True,
-                            False,
-                            True,
-                            False,
-                            True,
-                            pgf,
-                            kbs,
-                            False,
-                        )
-                    )
-
         # ── Dense extras needed by test_pipeline / test_flex_flash_attn ──
         ci_dense_features = [
             # (disable_atomic, deterministic, auto_range_merge, cat_gqa,
@@ -905,10 +826,16 @@ def prebuild_ffa_kernels() -> None:
         # Deduplicate
         ci_extra = list(set(ci_extra))
         print(
-            f"[prebuild] CI mode: {len(base_combos)} base + {len(ci_extra)} sparse/det combos"
+            f"[prebuild] CI mode: {len(base_combos)} base + "
+            f"{len(ci_extra)} dense-extra combos",
+            flush=True,
         )
     else:
         ci_extra = []
+
+    # URIs already covered by the sparse-test specs — skip duplicates to avoid
+    # two concurrent ninja builds racing in the same kernel directory.
+    _ci_test_uri_set = {uri for _, uri in ci_test_specs}
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
@@ -979,6 +906,19 @@ def prebuild_ffa_kernels() -> None:
             dkv_dtype=dkv_dtype,
             sparse_k_block_size=sparse_k_block_size,
         )
+        if uri in _ci_test_uri_set:
+            # already built by the sparse-test spec path; avoid a racing
+            # duplicate ninja build in the same directory
+            return f"{uri} (deduped with sparse-test spec)"
+        spec.build()
+        src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
+        dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
+        if src_dir.exists():
+            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+        return uri
+
+    def _build_test_spec(args):
+        spec, uri = args
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
@@ -987,18 +927,52 @@ def prebuild_ffa_kernels() -> None:
         return uri
 
     all_combos = base_combos + ci_extra
+    n_total = len(all_combos) + len(ci_test_specs)
+    n_done = 0
+    n_failed = 0
+    t_start = time.time()
+    print(
+        f"[prebuild] building {n_total} kernels "
+        f"({len(base_combos)} base + {len(ci_extra)} ci-dense-extra "
+        f"+ {len(ci_test_specs)} ci-sparse-test) "
+        f"with {PREBUILD_FFA_JOBS} parallel jobs",
+        flush=True,
+    )
     with ThreadPoolExecutor(max_workers=PREBUILD_FFA_JOBS) as ex:
         futs = {ex.submit(_build_one, c): c for c in all_combos}
+        futs.update({ex.submit(_build_test_spec, s): s[1] for s in ci_test_specs})
         for fut in as_completed(futs):
             c = futs[fut]
+            n_done += 1
+            elapsed = time.time() - t_start
             try:
                 uri = fut.result()
-                print(f"Prebuilt: {uri}")
+                print(
+                    f"[prebuild {n_done}/{n_total}] ({elapsed:.0f}s) OK: {uri}",
+                    flush=True,
+                )
             except Exception as e:
+                n_failed += 1
                 if prebuild_level == "ci":
-                    print(f"[prebuild WARNING] Skipping invalid combo {c}: {e}")
+                    print(
+                        f"[prebuild {n_done}/{n_total}] ({elapsed:.0f}s) "
+                        f"WARNING: skipping invalid combo {c}: {e}",
+                        flush=True,
+                    )
                 else:
                     raise RuntimeError(f"Prebuild failed for {c}: {e}") from e
+    print(
+        f"[prebuild] finished: {n_done - n_failed}/{n_total} ok, "
+        f"{n_failed} failed/skipped, total {time.time() - t_start:.0f}s",
+        flush=True,
+    )
+    if n_failed and prebuild_level == "ci":
+        print(
+            "[prebuild WARNING] some kernels failed to prebuild — the "
+            "corresponding tests will JIT-compile at runtime and may be slow "
+            "or time out.",
+            flush=True,
+        )
 
 
 # build ext modules
