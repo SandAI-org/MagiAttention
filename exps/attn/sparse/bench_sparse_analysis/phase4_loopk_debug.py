@@ -63,9 +63,6 @@ _DEBUG_ENV_KEYS = [
     "MAGI_ATTENTION_FFA_BWD_STAGES",
     "MAGI_ATTENTION_FFA_BWD_STAGES_DS",
     "MAGI_ATTENTION_FFA_BWD_STAGES_V",
-    "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK",
-    "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK",
-    "MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S",
     "MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2",
 ]
 
@@ -213,7 +210,7 @@ _STRUCTURAL_CONFIGS = [
     # Config A: remove dV writeback only (R2S+barrier+TMA), keep V load
     (
         "loopk_skip_dv_writeback",
-        {"MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1"},
+        {"MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1"},
         False,
         "InnerLoopK: no dV writeback",
     ),
@@ -222,7 +219,7 @@ _STRUCTURAL_CONFIGS = [
         "loopk_symmetric",
         {
             "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
-            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
         },
         False,
         "InnerLoopK: symmetric (no V, no dV wb)",
@@ -232,7 +229,7 @@ _STRUCTURAL_CONFIGS = [
         "loopk_symmetric_no_dk_store",
         {
             "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
-            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
         },
         False,
@@ -269,7 +266,7 @@ _OPTIMIZATION_CONFIGS = [
         {
             "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "0",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
-            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
         },
         False,
         "LoopK: baseline+SVW",
@@ -295,7 +292,7 @@ _SYMMETRY_CONFIGS = [
         {
             "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "0",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
-            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
         },
         False,
         "LoopK: baseline+SKW",
@@ -328,23 +325,13 @@ _SYMMETRY_CONFIGS = [
         {
             "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "0",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
-            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
-            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
         },
         False,
         "LoopK: baseline+SVW+SKW",
     ),
     # baseline + defer dV R2S after MMA5 (test pipeline reorder)
-    (
-        "loopk_ununion_stgv1_ddv",
-        {
-            "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "0",
-            "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
-            "MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S": "1",
-        },
-        False,
-        "LoopK: baseline+DeferDvR2S",
-    ),
 ]
 
 # ══════ P5-v6: Stage alternatives — stgK=1 vs stgV=1 ══════
@@ -389,7 +376,7 @@ _STAGE_CONFIGS = [
         {
             "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "0",
             "MAGI_ATTENTION_FFA_BWD_STAGES": "1",
-            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
         },
         False,
         "LoopK: baseline+stgK1+SVW",
@@ -400,7 +387,7 @@ _STAGE_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "0",
             "MAGI_ATTENTION_FFA_BWD_STAGES": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
-            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK": "1",
+            "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
         },
         False,
         "LoopK: baseline+stgK1V1+SVW",

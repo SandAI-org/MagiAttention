@@ -59,16 +59,11 @@ static constexpr bool kBwdUnionDkvacc = {{ bwd_union_dkvacc | default('false') }
 static constexpr int kInnerStoreStages = {{inner_store_stages | default(1)}};
 // Sparse K block size: 1 = token-level indices, >1 = block-level (each index covers SparseKBlockSize tokens)
 static constexpr int kSparseKBlockSize = {{sparse_k_block_size | default(1)}};
-// Force Mma_dKV to SS mode (SMEM-SMEM) instead of RS for benchmarking register pressure.
-static constexpr bool kPerfDebugForceMmaDkvSS = {{ force_mma_dkv_ss | default('false') }};
 // Per-switch perf isolation overrides (InnerLoopK only, correctness NOT guaranteed).
-static constexpr bool kPerfDebugSkipVLoad       = {{ bwd_skip_v_load       | default('false') }};
-static constexpr bool kPerfDebugSkipDvStore     = {{ bwd_skip_dv_store     | default('false') }};
-static constexpr bool kPerfDebugSkipDkStore     = {{ bwd_skip_dk_store     | default('false') }};
-static constexpr bool kPerfDebugSkipDvMma       = {{ bwd_skip_dv_mma       | default('false') }};
-static constexpr bool kPerfDebugSkipDvWriteback = {{ bwd_skip_dv_writeback | default('false') }};
-static constexpr bool kPerfDebugSkipDkWriteback = {{ bwd_skip_dk_writeback | default('false') }};
-static constexpr bool kPerfDebugDeferDvR2S      = {{ bwd_defer_dv_r2s      | default('false') }};
+static constexpr bool kPerfDebugSkipVLoad   = {{ bwd_skip_v_load   | default('false') }};
+static constexpr bool kPerfDebugSkipDvStore = {{ bwd_skip_dv_store | default('false') }};
+static constexpr bool kPerfDebugSkipDkStore = {{ bwd_skip_dk_store | default('false') }};
+static constexpr bool kPerfDebugSkipDvMma   = {{ bwd_skip_dv_mma   | default('false') }};
 
 static_assert(!kBwdInnerLoopK || !kDeterministic, "Deterministic mode is not supported when BwdInnerLoopK is enabled.");
 static_assert(!(kBlockSparse && kIndexSparse), "BlockSparse and IndexSparse are mutually exclusive.");
@@ -145,7 +140,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
 
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdTma1dSmemRowPad, kSparseKBlockSize, kInnerLoadMode, kBwdUnionDkvacc, kInnerStoreStages, kProfileMode, kPerfDebugForceMmaDkvSS, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma, kPerfDebugSkipDvWriteback, kPerfDebugSkipDkWriteback, kPerfDebugDeferDvR2S>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdTma1dSmemRowPad, kSparseKBlockSize, kInnerLoadMode, kBwdUnionDkvacc, kInnerStoreStages, kProfileMode, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

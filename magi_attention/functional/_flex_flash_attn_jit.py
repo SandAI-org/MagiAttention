@@ -561,30 +561,12 @@ def get_ffa_jit_spec(
             extra_template_args["inner_store_stages"] = _inner_store_stages
             uri += f"_iss{_inner_store_stages}"
 
-        # Force Mma_dKV to SS mode (SMEM-SMEM) for benchmarking register pressure
-        _force_ss = os.environ.get("MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS")
-        if _force_ss is not None and _force_ss == "1":
-            extra_template_args["force_mma_dkv_ss"] = "true"
-            uri += "_fss1"
-
         # Per-switch debug overrides (LoopK perf isolation, correctness NOT guaranteed).
-        # Require DKVACC_BYPASS=1 for dV/dK store skips.
         for _env_name, _tpl_key, _uri_key in [
             ("MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD", "bwd_skip_v_load", "svl"),
             ("MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE", "bwd_skip_dv_store", "svs"),
             ("MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE", "bwd_skip_dk_store", "sks"),
             ("MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA", "bwd_skip_dv_mma", "svm"),
-            (
-                "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK",
-                "bwd_skip_dv_writeback",
-                "svw",
-            ),
-            (
-                "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK",
-                "bwd_skip_dk_writeback",
-                "skw",
-            ),
-            ("MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S", "bwd_defer_dv_r2s", "ddv"),
         ]:
             _val = os.environ.get(_env_name)
             if _val is not None and _val != "0":

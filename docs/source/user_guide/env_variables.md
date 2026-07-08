@@ -180,13 +180,6 @@ but increases consumer register pressure).
 
 Set to `false` to iterate the inner loop from min to max instead of max to min.
 
-**MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS**
-
-- **Defaults to:** `false`
-- **Used by:** `PerfDebugForceMmaDkvSS`
-
-Force Mma_dKV to SS (SMEM-SMEM) mode instead of RS. For benchmarking register pressure.
-
 ### FFA BWD PerfDebug Switches (Isolation Testing)
 
 These switches disable specific operations in the backward kernel for performance isolation.
@@ -195,12 +188,9 @@ These switches disable specific operations in the backward kernel for performanc
 | Env Variable | Kernel Flag | Effect |
 |---|---|---|
 | `MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD` | `PerfDebugSkipVLoad` | Skip V tile load |
-| `MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE` | `PerfDebugSkipDvStore` | Skip dV GMEM store |
-| `MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE` | `PerfDebugSkipDkStore` | Skip dK GMEM store |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE` | `PerfDebugSkipDvStore` | Skip dV GMEM store (all paths) |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE` | `PerfDebugSkipDkStore` | Skip dK GMEM store (all paths) |
 | `MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA` | `PerfDebugSkipDvMma` | Skip dV MMA |
-| `MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK` | `PerfDebugSkipDvWriteback` | Skip dV r2s writeback |
-| `MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK` | `PerfDebugSkipDkWriteback` | Skip dK r2s writeback |
-| `MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S` | `PerfDebugDeferDvR2S` | Defer dV register-to-SMEM |
 
 ---
 

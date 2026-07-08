@@ -140,14 +140,10 @@ template <
     bool UnionDkvacc,
     int InnerStoreStages,
     bool ProfileMode,
-    bool PerfDebugForceMmaDkvSS = false,
     bool PerfDebugSkipVLoad_ = false,
     bool PerfDebugSkipDvStore_ = false,
     bool PerfDebugSkipDkStore_ = false,
-    bool PerfDebugSkipDvMma_ = false,
-    bool PerfDebugSkipDvWriteback_ = false,
-    bool PerfDebugSkipDkWriteback_ = false,
-    bool PerfDebugDeferDvR2S_ = false>
+    bool PerfDebugSkipDvMma_ = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -211,14 +207,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       InnerLoadMode,
       UnionDkvacc,
       InnerStoreStages,
-      PerfDebugForceMmaDkvSS,
       PerfDebugSkipVLoad_,
       PerfDebugSkipDvStore_,
       PerfDebugSkipDkStore_,
-      PerfDebugSkipDvMma_,
-      PerfDebugSkipDvWriteback_,
-      PerfDebugSkipDkWriteback_,
-      PerfDebugDeferDvR2S_>;
+      PerfDebugSkipDvMma_>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
       BwdInnerLoopK ? kBlockM : kBlockN,
@@ -411,14 +403,10 @@ template <
     bool BwdUnionDkvacc,
     int InnerStoreStages,
     bool ProfileMode,
-    bool PerfDebugForceMmaDkvSS = false,
     bool PerfDebugSkipVLoad = false,
     bool PerfDebugSkipDvStore = false,
     bool PerfDebugSkipDkStore = false,
-    bool PerfDebugSkipDvMma = false,
-    bool PerfDebugSkipDvWriteback = false,
-    bool PerfDebugSkipDkWriteback = false,
-    bool PerfDebugDeferDvR2S = false>
+    bool PerfDebugSkipDvMma = false>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // BwdTileM/N, BwdStages/Ds: 0 = use default, >0 = override (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS).
@@ -499,12 +487,8 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*InnerLoadMode=*/InnerLoadMode,
       /*UnionDkvacc=*/UnionDkvacc,
       /*InnerStoreStages=*/InnerStoreStages,
-      /*PerfDebugForceMmaDkvSS=*/PerfDebugForceMmaDkvSS,
       /*PerfDebugSkipVLoad=*/PerfDebugSkipVLoad,
       /*PerfDebugSkipDvStore=*/PerfDebugSkipDvStore,
       /*PerfDebugSkipDkStore=*/PerfDebugSkipDkStore,
-      /*PerfDebugSkipDvMma=*/PerfDebugSkipDvMma,
-      /*PerfDebugSkipDvWriteback=*/PerfDebugSkipDvWriteback,
-      /*PerfDebugSkipDkWriteback=*/PerfDebugSkipDkWriteback,
-      /*PerfDebugDeferDvR2S=*/PerfDebugDeferDvR2S>(params, stream);
+      /*PerfDebugSkipDvMma=*/PerfDebugSkipDvMma>(params, stream);
 }
