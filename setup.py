@@ -15,7 +15,6 @@
 import importlib
 import importlib.resources
 import itertools
-import math
 import os
 import shutil
 import subprocess
@@ -76,10 +75,11 @@ DISABLE_AGGRESSIVE_PTX_INSTRS = os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1") 
 # and leave others built in jit mode
 PREBUILD_FFA = os.getenv("MAGI_ATTENTION_PREBUILD_FFA", "1") == "1"
 
-# Set this environment variable to control the number of parallel compilation jobs
-# including pre-build FFA jobs and other ext modules jobs
-# defaults to the ceiling of 90% of the available CPU cores
-default_jobs = math.ceil(os.cpu_count() * 0.9)  # type: ignore[operator]
+# Each JIT kernel uses --split-compile N (NVCC_THREADS, default 4), so total
+# CPU threads ≈ PREBUILD_FFA_JOBS × split_compile.  Default to cpu_count //
+# split_compile so total threads ≈ cpu_count, avoiding heavy oversubscription.
+_nvcc_split_compile = int(os.getenv("NVCC_THREADS", "4"))
+default_jobs = max(1, os.cpu_count() // _nvcc_split_compile)  # type: ignore[operator]
 PREBUILD_FFA_JOBS = int(
     os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", str(default_jobs))
 )

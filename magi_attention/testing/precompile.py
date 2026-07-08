@@ -111,6 +111,11 @@ def add_ffa_spec(
     """
     from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_spec
 
+    # flex_flash_attn_func forces ref_block_size=(128,128) for sparse FWD paths;
+    # BWD never passes ref_block_size (tile is inferred from head_dim alone).
+    if direction == "fwd" and (index_sparse or block_sparse) and ref_block_size is None:
+        ref_block_size = (128, 128)
+
     if direction == "fwd":
         out_dtype = output_dtype if output_dtype is not None else compute_dtype
         dq_dtype = None

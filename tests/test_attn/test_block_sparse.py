@@ -990,7 +990,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                 auto_range_merge=True,
                 sparse_k_block_size=kbs,
             )
-            # sparse BWD LoopQ: PackGQA → disable_dkv_atomic → dkv native
+            # sparse BWD LoopQ: PackGQA → disable_dkv_atomic
             add_ffa_spec(
                 specs,
                 direction="bwd",
@@ -1000,7 +1000,6 @@ class TestBlockSparseSimple(unittest.TestCase):
                 block_sparse=True,
                 auto_range_merge=True,
                 sparse_k_block_size=kbs,
-                bwd_dkv_bf16=True,
             )
             if kbs == 128:
                 # sparse BWD LoopK case
@@ -1046,7 +1045,6 @@ class TestBlockSparseSimple(unittest.TestCase):
                 bwd_inner_loop_k=inner_loop_k,
                 sparse_k_block_size=128,
                 bwd_dq_bf16=inner_loop_k,
-                bwd_dkv_bf16=not inner_loop_k,
             )
 
         return specs
@@ -1460,7 +1458,6 @@ class TestBlockSparseSweep(DistTestBase):
                 bwd_inner_loop_k=swap,
                 sparse_k_block_size=128,
                 bwd_dq_bf16=swap,
-                bwd_dkv_bf16=not swap,
             )
         return specs
 
