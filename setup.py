@@ -738,104 +738,32 @@ def prebuild_ffa_kernels() -> None:
         for c in combos
     ]
 
-    # CI mode: additionally prebuild the exact sparse kernel set exercised by
-    # test_block_sparse.py / test_index_sparse.py, plus dense extras for
-    # test_pipeline / test_flex_flash_attn.
-    # The sparse specs are imported from tests/precompile_sparse_tests.py — the
-    # single source of truth kept in sync with the test parameter space — instead
-    # of duplicating (and inevitably de-syncing) the combo lists here.
-    ci_test_specs = []
+    # CI mode: collect the exact kernel specs declared by test classes via
+    # the standard precompile_kernel_specs() interface. This replaces the old
+    # hand-maintained lists (precompile_sparse_tests.py + ci_dense_features)
+    # and stays in sync with test @parameterize sweeps automatically.
+    ci_test_specs: dict[str, object] = {}
     if prebuild_level == "ci":
         try:
-            import importlib.util as _ilu
+            from magi_attention.testing.precompile import collect_test_kernel_specs
 
-            _pst_path = Path(project_root) / "tests" / "precompile_sparse_tests.py"
-            _mod_spec = _ilu.spec_from_file_location(
-                "_precompile_sparse_tests", _pst_path
-            )
-            assert _mod_spec is not None and _mod_spec.loader is not None
-            _mod = _ilu.module_from_spec(_mod_spec)
-            _mod_spec.loader.exec_module(_mod)
-            _seen_uris = set()
-            for _spec, _uri in _mod.collect_specs():
-                if _uri not in _seen_uris:
-                    _seen_uris.add(_uri)
-                    ci_test_specs.append((_spec, _uri))
+            ci_test_specs = collect_test_kernel_specs(repo_root=project_root)
             print(
-                f"[prebuild] CI mode: +{len(ci_test_specs)} sparse-test kernels "
-                f"from {_pst_path}",
+                f"[prebuild] CI mode: collected {len(ci_test_specs)} test kernel specs "
+                f"via collect_test_kernel_specs()",
                 flush=True,
             )
         except Exception as e:
             print(
-                f"[prebuild WARNING] failed to load sparse test specs "
-                f"from tests/precompile_sparse_tests.py: {e}",
+                f"[prebuild WARNING] failed to collect test kernel specs: {e}",
                 flush=True,
             )
 
-    if prebuild_level == "ci":
-        ci_extra = []
-        # ── Dense extras needed by test_pipeline / test_flex_flash_attn ──
-        ci_dense_features = [
-            # (disable_atomic, deterministic, auto_range_merge, cat_gqa,
-            #  bwd_inner_loop_k, pack_gqa_factor, return_max_logits)
-            (False, True, False, False, False, 1, False),  # deterministic
-            (False, False, True, False, False, 1, False),  # auto_range_merge
-            (False, False, True, False, False, 128, False),  # ARM + packgqa128
-            (False, False, False, False, True, 1, False),  # bwd_inner_loop_k
-            (False, False, False, False, True, 8, False),  # swap + packgqa8
-            (False, False, True, False, True, 8, False),  # ARM + swap + packgqa8
-            (False, False, True, False, True, 128, False),  # ARM + swap + packgqa128
-            (False, False, False, False, False, 1, True),  # return_max_logits
-            (False, False, False, False, False, 8, True),  # RML + packgqa8
-            (False, False, True, False, False, 1, True),  # ARM + RML
-            (False, False, True, False, False, 8, True),  # ARM + RML + packgqa8
-            (False, True, False, False, False, 1, True),  # det + RML
-            (False, True, False, False, False, 8, True),  # det + RML + packgqa8
-            (False, True, True, False, False, 1, True),  # det + ARM + RML
-            (False, False, False, True, False, 8, False),  # catgqa8
-            (False, False, True, True, False, 8, False),  # ARM + catgqa8
-            (False, True, False, True, False, 8, False),  # det + catgqa8
-            (False, True, True, True, False, 8, False),  # det + ARM + catgqa8
-        ]
-        for hd in [64, 128]:
-            for compute_dt in [torch.float16, torch.bfloat16]:
-                out_dt = torch.float32
-                dt = (compute_dt, out_dt)
-                for dis_at, det, arm, cat, swap, pgf, rml in ci_dense_features:
-                    valid_dirs = ["fwd"] if rml else directions
-                    for direction in valid_dirs:
-                        ci_extra.append(
-                            (
-                                direction,
-                                hd,
-                                dt,
-                                dis_at,
-                                det,
-                                arm,
-                                cat,
-                                False,
-                                False,
-                                swap,
-                                pgf,
-                                1,
-                                rml,
-                            )
-                        )
+    ci_extra: list = []
 
-        # Deduplicate
-        ci_extra = list(set(ci_extra))
-        print(
-            f"[prebuild] CI mode: {len(base_combos)} base + "
-            f"{len(ci_extra)} dense-extra combos",
-            flush=True,
-        )
-    else:
-        ci_extra = []
-
-    # URIs already covered by the sparse-test specs — skip duplicates to avoid
+    # URIs already covered by the test specs — skip duplicates to avoid
     # two concurrent ninja builds racing in the same kernel directory.
-    _ci_test_uri_set = {uri for _, uri in ci_test_specs}
+    _ci_test_uri_set = set(ci_test_specs.keys())
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
@@ -907,9 +835,7 @@ def prebuild_ffa_kernels() -> None:
             sparse_k_block_size=sparse_k_block_size,
         )
         if uri in _ci_test_uri_set:
-            # already built by the sparse-test spec path; avoid a racing
-            # duplicate ninja build in the same directory
-            return f"{uri} (deduped with sparse-test spec)"
+            return f"{uri} (deduped with test spec)"
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
@@ -917,8 +843,7 @@ def prebuild_ffa_kernels() -> None:
             shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
         return uri
 
-    def _build_test_spec(args):
-        spec, uri = args
+    def _build_test_spec(uri, spec):
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
@@ -933,14 +858,18 @@ def prebuild_ffa_kernels() -> None:
     t_start = time.time()
     print(
         f"[prebuild] building {n_total} kernels "
-        f"({len(base_combos)} base + {len(ci_extra)} ci-dense-extra "
-        f"+ {len(ci_test_specs)} ci-sparse-test) "
+        f"({len(base_combos)} base + {len(ci_test_specs)} ci-test) "
         f"with {PREBUILD_FFA_JOBS} parallel jobs",
         flush=True,
     )
     with ThreadPoolExecutor(max_workers=PREBUILD_FFA_JOBS) as ex:
         futs = {ex.submit(_build_one, c): c for c in all_combos}
-        futs.update({ex.submit(_build_test_spec, s): s[1] for s in ci_test_specs})
+        futs.update(
+            {
+                ex.submit(_build_test_spec, uri, spec): uri
+                for uri, spec in ci_test_specs.items()
+            }
+        )
         for fut in as_completed(futs):
             c = futs[fut]
             n_done += 1

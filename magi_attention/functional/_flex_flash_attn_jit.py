@@ -356,6 +356,29 @@ def get_ffa_jit_spec(
         else:
             kblock_m, kblock_n = None, None
 
+    # PackGQA packs Q heads into ((pack_gqa_factor, seqlen), headdim, nheads_kv).
+    # TMA requires kBlockM to divide cleanly within this hierarchy:
+    #   kBlockM % pack_gqa_factor == 0  OR  pack_gqa_factor % kBlockM == 0
+    # When neither holds (e.g. kBlockM=192, pgf=128: 192 straddles the (128,
+    # seqlen) mode boundary), reduce kBlockM to pack_gqa_factor.  The adjusted
+    # value is clamped to [64, 128] — the valid tile range for SM90 FWD kernels
+    # (64 = 1 MMA warp-group, 128 = 2 MMA warp-groups).
+    if pack_gqa and kblock_m is not None and pack_gqa_factor > 1:
+        if kblock_m % pack_gqa_factor != 0 and pack_gqa_factor % kblock_m != 0:
+            old_kblock_m = kblock_m
+            kblock_m = max(64, min(128, pack_gqa_factor))
+            assert kblock_m % pack_gqa_factor == 0 or pack_gqa_factor % kblock_m == 0, (
+                f"pack_gqa: adjusted kBlockM={kblock_m} still incompatible "
+                f"with pack_gqa_factor={pack_gqa_factor}"
+            )
+            logger.info(
+                "pack_gqa: kBlockM %d -> %d for pack_gqa_factor=%d (head_dim=%d)",
+                old_kblock_m,
+                kblock_m,
+                pack_gqa_factor,
+                head_dim,
+            )
+
     uri = get_ffa_uri(
         arch_sm_num=arch_sm_num,
         direction=direction,

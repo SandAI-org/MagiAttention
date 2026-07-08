@@ -142,21 +142,28 @@ def _compare_against_sdpa(
     atol,
     test_case,
 ):
-    """Compare FFA output against SDPA reference, batch by batch."""
+    """Compare FFA output against SDPA reference, batch by batch, head by head.
+
+    Loops per Q-head to avoid materializing the full (NHQ, S_q, S_kv)
+    attention matrix which is catastrophic for large MQA configs.
+    sdpa_mask: compact (B, NHK, S_q, S_kv) — broadcasts across GQA heads.
+    """
     gqa = NHQ // NHK
     err_msgs = []
     for b_idx in range(B):
-        q_sdpa = rearrange(q[b_idx], "s h d -> 1 h s d")
-        k_sdpa = rearrange(k[b_idx], "s h d -> 1 h s d")
-        v_sdpa = rearrange(v[b_idx], "s h d -> 1 h s d")
-        if gqa > 1:
-            k_sdpa = k_sdpa.repeat_interleave(gqa, dim=1)
-            v_sdpa = v_sdpa.repeat_interleave(gqa, dim=1)
-
+        o_ref_heads = []
         with torch.no_grad():
-            o_ref = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa, k_sdpa, v_sdpa, attn_mask=sdpa_mask[b_idx].unsqueeze(0)
-            )
+            for h_q in range(NHQ):
+                h_kv = h_q // gqa
+                q_h = q[b_idx, :, h_q : h_q + 1, :].unsqueeze(0).transpose(1, 2)
+                k_h = k[b_idx, :, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+                v_h = v[b_idx, :, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+                mask_h = sdpa_mask[b_idx, h_kv : h_kv + 1].unsqueeze(0)
+                o_h = torch.nn.functional.scaled_dot_product_attention(
+                    q_h, k_h, v_h, attn_mask=mask_h
+                )
+                o_ref_heads.append(o_h)
+        o_ref = torch.cat(o_ref_heads, dim=1)
         o_ref = rearrange(o_ref, "1 h s d -> s h d")
 
         max_diff = (o_ffa[b_idx].float() - o_ref.float()).abs().max().item()
@@ -262,43 +269,44 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
 
         gqa = NHQ // NHK
         total_q = B * S_q
+        do_reshaped_all = rearrange(
+            do, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q
+        )
         dq_ref_list = []
         for b_idx in range(B):
-            q_sdpa = (
-                rearrange(q[b_idx], "s h d -> 1 h s d")
-                .detach()
-                .clone()
-                .requires_grad_(True)
-            )
-            k_sdpa = (
-                rearrange(k[b_idx], "s h d -> 1 h s d")
-                .detach()
-                .clone()
-                .requires_grad_(True)
-            )
-            v_sdpa = (
-                rearrange(v[b_idx], "s h d -> 1 h s d")
-                .detach()
-                .clone()
-                .requires_grad_(True)
-            )
-            if gqa > 1:
-                k_sdpa_exp = k_sdpa.repeat_interleave(gqa, dim=1)
-                v_sdpa_exp = v_sdpa.repeat_interleave(gqa, dim=1)
-            else:
-                k_sdpa_exp, v_sdpa_exp = k_sdpa, v_sdpa
-
-            o_ref = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa,
-                k_sdpa_exp,
-                v_sdpa_exp,
-                attn_mask=sdpa_mask[b_idx].unsqueeze(0),
-            )
-            do_reshaped = rearrange(
-                do, "(b s h1) h2 d -> b 1 (h1 h2) s d", b=B, h1=NHK, s=S_q
-            )[b_idx]
-            o_ref.backward(do_reshaped)
-            dq_ref_list.append(q_sdpa.grad)
+            dq_heads = []
+            for h_q in range(NHQ):
+                h_kv = h_q // gqa
+                q_h = (
+                    q[b_idx, :, h_q : h_q + 1, :]
+                    .unsqueeze(0)
+                    .transpose(1, 2)
+                    .detach()
+                    .clone()
+                    .requires_grad_(True)
+                )
+                k_h = (
+                    k[b_idx, :, h_kv : h_kv + 1, :]
+                    .unsqueeze(0)
+                    .transpose(1, 2)
+                    .detach()
+                    .clone()
+                )
+                v_h = (
+                    v[b_idx, :, h_kv : h_kv + 1, :]
+                    .unsqueeze(0)
+                    .transpose(1, 2)
+                    .detach()
+                    .clone()
+                )
+                mask_h = sdpa_mask[b_idx, h_kv : h_kv + 1].unsqueeze(0)
+                o_h = torch.nn.functional.scaled_dot_product_attention(
+                    q_h, k_h, v_h, attn_mask=mask_h
+                )
+                do_h = do_reshaped_all[b_idx, h_q : h_q + 1].unsqueeze(0)
+                o_h.backward(do_h)
+                dq_heads.append(q_h.grad)
+            dq_ref_list.append(torch.cat(dq_heads, dim=1))
 
         dq_ref = torch.cat(dq_ref_list, dim=0)
         dq_ref = rearrange(dq_ref, "b h s d -> (b s) h d", b=B)[:total_q]

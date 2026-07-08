@@ -122,8 +122,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             for compute_dt in [torch.float16, torch.bfloat16]:
                 for dis_at, det, arm, cat, swap, pgf, rml in cls.CI_DENSE_FEATURES:
                     directions = ["fwd"] if rml else ["fwd", "bwd"]
-                    pack_gqa = pgf > 1
                     for direction in directions:
+                        use_cat = cat and direction == "bwd"
+                        pack_gqa = pgf > 1 and not use_cat
                         add_ffa_spec(
                             specs,
                             direction=direction,
@@ -133,8 +134,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                             deterministic=det,
                             auto_range_merge=arm,
                             pack_gqa=pack_gqa,
-                            cat_gqa=cat,
-                            pack_gqa_factor=pgf,
+                            cat_gqa=use_cat,
+                            pack_gqa_factor=pgf if not use_cat else 1,
                             bwd_inner_loop_k=swap and direction == "bwd",
                             return_max_logits=rml,
                         )
