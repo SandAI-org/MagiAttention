@@ -587,13 +587,15 @@ def get_sdpa_mask_from_index_sparse_indices(
     device: str | torch.device = "cuda",
     sparse_k_block_size: int = 1,
 ) -> torch.Tensor:
-    """Build dense boolean mask [B, NHQ, S_q, S_kv] from index_sparse_indices for SDPA ref.
+    """Build dense boolean mask [B, NHK, S_q, S_kv] from index_sparse_indices for SDPA ref.
 
+    Returns the compact per-KV-head mask — SDPA broadcasts from NHK to NHQ.
+    NHQ is accepted for call-site compatibility but unused (no GQA expansion).
     index_sparse_indices: (total_q, NHK, max_topk) with logical KV token positions.
     Logical position = b * S_kv + local_token (no head encoding).
     Vectorized: no Python loops.
     """
-    gqa = NHQ // NHK
+    del NHQ
     total_q = B * S_q
     max_topk = index_sparse_indices.shape[2]
 
@@ -634,10 +636,11 @@ def get_sdpa_mask_from_index_sparse_indices(
     mask = mask_int > 0
 
     mask = mask.reshape(B, S_q, NHK, S_kv)
-    if gqa > 1:
-        mask = (
-            mask.unsqueeze(3).expand(B, S_q, NHK, gqa, S_kv).reshape(B, S_q, NHQ, S_kv)
-        )
+    # Return compact (B, NHK, S_q, S_kv) — no GQA expansion.
+    # All Q heads within a KV group share the same sparsity pattern,
+    # so SDPA can broadcast the mask from NHK to NHQ.
+    # Expanding here used to materialize O(NHQ × S_q × S_kv) memory
+    # which is catastrophic for large MQA configs (e.g. 128 × 16384²).
     mask = mask.permute(0, 2, 1, 3).contiguous()
     return mask
 
