@@ -1267,23 +1267,33 @@ def _phase4_iss_bench(force=False):
 
                 torch.manual_seed(42)
                 q = torch.randn(
-                    _ISS_QSEQLEN, NHQ, HD,
-                    dtype=torch.bfloat16, device=device, requires_grad=True,
+                    _ISS_QSEQLEN,
+                    NHQ,
+                    HD,
+                    dtype=torch.bfloat16,
+                    device=device,
+                    requires_grad=True,
                 )
                 k = torch.randn(
-                    kvseqlen, NHK, HD,
-                    dtype=torch.bfloat16, device=device, requires_grad=True,
+                    kvseqlen,
+                    NHK,
+                    HD,
+                    dtype=torch.bfloat16,
+                    device=device,
+                    requires_grad=True,
                 )
                 v = torch.randn(
-                    kvseqlen, NHK, HD,
-                    dtype=torch.bfloat16, device=device, requires_grad=True,
+                    kvseqlen,
+                    NHK,
+                    HD,
+                    dtype=torch.bfloat16,
+                    device=device,
+                    requires_grad=True,
                 )
 
                 gen = torch.Generator().manual_seed(42)
                 rand_vals = torch.rand(_ISS_QSEQLEN, n_kv_blocks, generator=gen)
-                perms = (
-                    rand_vals.argsort(dim=1)[:, :n_topk_blocks].sort(dim=1).values
-                )
+                perms = rand_vals.argsort(dim=1)[:, :n_topk_blocks].sort(dim=1).values
                 indices = (
                     perms.unsqueeze(1)
                     .expand(-1, NHK, -1)
@@ -1295,9 +1305,7 @@ def _phase4_iss_bench(force=False):
                 q_ranges, k_ranges = generate_ranges_from_topk_indices(
                     ia_3d, block_m=1, block_n=KBS, num_k_blocks=n_kv_blocks
                 )
-                atm = torch.zeros(
-                    q_ranges.size(0), dtype=torch.int32, device=device
-                )
+                atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device=device)
 
                 kw = dict(
                     q_ranges=q_ranges,
@@ -1453,22 +1461,33 @@ def _phase4_iss_plot():
         vals = [tf if tf is not None else 0 for tf in tfs]
         offset = (i - (n_bars - 1) / 2) * bar_w
         bars = ax.bar(
-            x + offset, vals, width=bar_w * 0.9, label=desc,
-            color=colors[i % len(colors)], edgecolor="white",
-            linewidth=0.5, alpha=0.88,
+            x + offset,
+            vals,
+            width=bar_w * 0.9,
+            label=desc,
+            color=colors[i % len(colors)],
+            edgecolor="white",
+            linewidth=0.5,
+            alpha=0.88,
         )
         for bar, v in zip(bars, vals):
             if v > 0:
                 ax.text(
-                    bar.get_x() + bar.get_width() / 2, v + 3, f"{v:.0f}",
-                    ha="center", va="bottom", fontsize=8, fontweight="bold",
+                    bar.get_x() + bar.get_width() / 2,
+                    v + 3,
+                    f"{v:.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    fontweight="bold",
                 )
 
     ax.set_title(
         "InnerStoreStages Double-Buffer: Sparse LoopK BWD\n"
         f"qseqlen={_ISS_QSEQLEN}, topk=kvseqlen/4, nhq={NHQ}, kbs={KBS}, "
         f"pack_gqa, bf16, H100",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     ax.set_ylabel("TFLOPS (BWD)", fontsize=12)
     ax.set_xlabel("kvseqlen", fontsize=12)
