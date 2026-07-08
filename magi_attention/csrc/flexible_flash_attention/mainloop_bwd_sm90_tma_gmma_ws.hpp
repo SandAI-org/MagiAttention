@@ -1230,6 +1230,77 @@ struct CollectiveMainloopBwdSm90 {
     }
   }
 
+  // ─── CpAsync scatter load: load-side counterpart of sparse_inner_store ───
+  // Scatter-loads kInnerTileSize tokens from non-contiguous GMEM positions into pipelined SMEM.
+  // kHeadPackFactor: GQA compound index factor (>1 → compound_idx = token_idx*G+g decomposition).
+  // Main tensor: Element-typed, kHeadDim wide. Thread decomposition mirrors sparse_inner_store.
+  // ptr_main_base: pre-offset to current head + group_lane * 8 (128 bits per thread per tile).
+  template <int kHeadPackFactor = 1, typename SmemMainT>
+  CUTLASS_DEVICE static void sparse_inner_load(
+      SmemMainT& smem_main,
+      Element const* ptr_main_base,
+      int64_t stride_token,
+      int64_t stride_head,
+      int const* compound_indices,
+      int stage,
+      int thread_idx) {
+    using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
+    CpAsyncCg const cp_async_cg{};
+    int const group_lane = thread_idx % NumThreadsPerLdstGroup;
+    int const group_idx = thread_idx / NumThreadsPerLdstGroup;
+
+    CUTE_UNROLL
+    for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
+      int smem_row = group_idx * NumTokensPerLdstGroup + local_row;
+      int64_t token_offset;
+      if constexpr (kHeadPackFactor > 1) {
+        int const ci = compound_indices[smem_row];
+        token_offset = static_cast<int64_t>(ci / kHeadPackFactor) * stride_token + (ci % kHeadPackFactor) * stride_head;
+      } else {
+        token_offset = static_cast<int64_t>(compound_indices[smem_row]) * stride_token;
+      }
+      CUTE_UNROLL
+      for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
+        if (group_lane * 8 + tile_idx * 64 < kHeadDim) {
+          Element* dst_ptr = &smem_main(smem_row, group_lane * 8 + tile_idx * 64, stage);
+          auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_main_base + token_offset + tile_idx * 64)), Layout<_1>{});
+          auto s_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+          cute::copy(cp_async_cg, g_src, s_dst);
+        }
+      }
+    }
+  }
+
+  // Extended overload: main tensor + scalar tensor (LSE/dPsum, 4 floats per token).
+  // scalar_offset_fn: callable taking compound_idx, returning byte offset into ptr_scalar_base.
+  template <int kHeadPackFactor, typename SmemMainT, typename SmemScalarT, typename ScalarOffsetFn>
+  CUTLASS_DEVICE static void sparse_inner_load(
+      SmemMainT& smem_main,
+      Element const* ptr_main_base,
+      int64_t stride_token,
+      int64_t stride_head,
+      int const* compound_indices,
+      int stage,
+      int thread_idx,
+      SmemScalarT& smem_scalar,
+      float const* ptr_scalar_base,
+      ScalarOffsetFn&& scalar_offset_fn) {
+    sparse_inner_load<kHeadPackFactor>(smem_main, ptr_main_base, stride_token, stride_head, compound_indices, stage, thread_idx);
+
+    using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
+    CpAsyncCg const cp_async_cg{};
+    int const group_lane = thread_idx % NumThreadsPerLdstGroup;
+    int const group_idx = thread_idx / NumThreadsPerLdstGroup;
+
+    for (int i = group_lane; i < NumTokensPerLdstGroup; i += NumThreadsPerLdstGroup) {
+      int smem_idx = group_idx * NumTokensPerLdstGroup + i;
+      float* s_dst = &smem_scalar(_0{}, smem_idx, stage);
+      auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_scalar_base + scalar_offset_fn(compound_indices[smem_idx]))), Layout<_1>{});
+      auto s_dst_t = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(s_dst)), Layout<_1>{});
+      cute::copy(cp_async_cg, g_src, s_dst_t);
+    }
+  }
+
   // Perform a Producer Prologue/Mainloop -- TMA Load for K,V, with pipelining multi-stage TMA load for Q,dO,LSE,dPsum
   // k for outer-loop and q for inner-loop
   // When BlockSparse (InnerLoopQ): Q/dO/LSE/dPsum are scatter-loaded via cp.async, K/V are still TMA.
@@ -1412,8 +1483,6 @@ struct CollectiveMainloopBwdSm90 {
     int const lane_predicate = cute::elect_one_sync();
 
     // ─── BlockSparse InnerLoopQ scatter infra (DCE'd on dense path) ───
-    using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
-    CpAsyncCg const cp_async_cg{};
     int const thread_idx = threadIdx.x % NumProducerLoaderThreads;
     int const ldst_group_inner_idx = thread_idx % NumThreadsPerLdstGroup;
     int const ldst_group_idx = thread_idx / NumThreadsPerLdstGroup;
@@ -1457,41 +1526,6 @@ struct CollectiveMainloopBwdSm90 {
     // LSE/dPsum per-token offset: token_stride=4 (fixed), head_stride from GQA decomposition.
     auto lse_row_offset = [&](int ci) -> int64_t { return compound_idx_to_offset(ci, 4, lse_q_head_in_group_stride); };
     auto dpsum_row_offset = [&](int ci) -> int64_t { return compound_idx_to_offset(ci, 4, dpsum_q_head_in_group_stride); };
-
-    // ─── CpAsync scatter load helper (load-side counterpart of sparse_inner_store) ───
-    // Scatter-loads kBlockM tokens of a main tensor (Q/dO, kHeadDim wide) and its associated
-    // scalar tensor (LSE/dPsum, 4 floats wide) from GMEM into SMEM using cp.async.
-    auto cpasync_scatter_load = [&](auto& smem_main,
-                                    Element const* ptr_main_base,
-                                    int64_t stride_token,
-                                    int64_t stride_head,
-                                    auto& smem_scalar,
-                                    float const* ptr_scalar_base,
-                                    auto scalar_offset_fn,
-                                    int const* idx_slot,
-                                    int stage) {
-      CUTE_UNROLL
-      for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-        int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
-        int64_t token_offset = compound_idx_to_offset(idx_slot[smem_row], stride_token, stride_head);
-        CUTE_UNROLL
-        for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
-          if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-            Element* dst_ptr = &smem_main(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, stage);
-            auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_main_base + token_offset + tile_idx * 64)), Layout<_1>{});
-            auto s_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, g_src, s_dst);
-          }
-        }
-      }
-      for (int i = ldst_group_inner_idx; i < NumTokensPerLdstGroup; i += NumThreadsPerLdstGroup) {
-        int smem_idx = ldst_group_idx * NumTokensPerLdstGroup + i;
-        float* s_dst = &smem_scalar(_0{}, smem_idx, stage);
-        auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_scalar_base + scalar_offset_fn(idx_slot[smem_idx]))), Layout<_1>{});
-        auto s_dst_t = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(s_dst)), Layout<_1>{});
-        cute::copy(cp_async_cg, g_src, s_dst_t);
-      }
-    };
 
     // ─── Load lambdas: two branches — TMA 2D (dense + contiguous sparse) and CpAsync (sparse fallback) ───
     // Q and dO share the same pipe slot when Q_dO_same_stages=true, so pipe advance
@@ -1539,7 +1573,7 @@ struct CollectiveMainloopBwdSm90 {
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockM];
         block_meta.fill_token_indices(idx_slot, ldst_group_inner_idx, ldst_group_idx);
         __syncwarp();
-        cpasync_scatter_load(sQ, ptr_gQ_base, stride_q_token, stride_q_head, sLSE, ptr_gLSE_base, lse_row_offset, idx_slot, stage);
+        sparse_inner_load<PackGQAFactor>(sQ, ptr_gQ_base, stride_q_token, stride_q_head, idx_slot, stage, thread_idx, sLSE, ptr_gLSE_base, lse_row_offset);
         pipeline_q.producer_commit(smem_pipe_write_q, cutlass::arch::cpasync_barrier_arrive);
       }
     };
@@ -1584,7 +1618,8 @@ struct CollectiveMainloopBwdSm90 {
       } else {
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_q.index() * kBlockM];
-        cpasync_scatter_load(sdO, ptr_gdO_base, stride_do_token, stride_do_head, sdPsum, ptr_gdPsum_base, dpsum_row_offset, idx_slot, smem_pipe_write_do_cur.index());
+        sparse_inner_load<PackGQAFactor>(
+            sdO, ptr_gdO_base, stride_do_token, stride_do_head, idx_slot, smem_pipe_write_do_cur.index(), thread_idx, sdPsum, ptr_gdPsum_base, dpsum_row_offset);
         pipeline_do.producer_commit(smem_pipe_write_do_cur, cutlass::arch::cpasync_barrier_arrive);
       }
       if constexpr (!Q_dO_same_stages) {
@@ -1810,24 +1845,6 @@ struct CollectiveMainloopBwdSm90 {
           tVsV(_, stage));
     };
 
-    // ─── CpAsync scatter load helper for K/V (no scalar, no GQA decomposition) ───
-    auto cpasync_scatter_load_kv = [&](auto& smem, Element const* ptr_base, int stride_row, int const* idx_slot, int stage) {
-      CUTE_UNROLL
-      for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-        int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
-        int token_idx = idx_slot[smem_row] * stride_row;
-        CUTE_UNROLL
-        for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
-          if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-            Element* dst_ptr = &smem(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, stage);
-            auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_base + token_idx + tile_idx * 64)), Layout<_1>{});
-            auto s_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-            cute::copy(cp_async_cg, g_src, s_dst);
-          }
-        }
-      }
-    };
-
     // ─── load_K / load_V: two branches — TMA (dense + sparse) and CpAsync (sparse fallback) ───
     // When kStages_V != kStages, V pipeline's stage index differs from K's.
     // V needs K's stage to read smem_sparse_inner_indices (populated by load_K).
@@ -1860,7 +1877,7 @@ struct CollectiveMainloopBwdSm90 {
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_k.index() * kBlockN];
         block_meta.fill_token_indices(idx_slot, ldst_group_inner_idx, ldst_group_idx);
         __syncwarp();
-        cpasync_scatter_load_kv(sK, ptr_gK_base, stride_kv_row, idx_slot, smem_pipe_write_k.index());
+        sparse_inner_load(sK, ptr_gK_base, static_cast<int64_t>(stride_kv_row), int64_t(0), idx_slot, smem_pipe_write_k.index(), thread_idx);
         last_k_write_stage = smem_pipe_write_k.index();
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_k;
@@ -1921,7 +1938,7 @@ struct CollectiveMainloopBwdSm90 {
         // CpAsync scatter: reuse K's token indices from last_k_write_stage.
         pipeline_v.producer_acquire(smem_pipe_write_v);
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[last_k_write_stage * kBlockN];
-        cpasync_scatter_load_kv(sV, ptr_gV_base, stride_kv_row_v, idx_slot, smem_pipe_write_v.index());
+        sparse_inner_load(sV, ptr_gV_base, static_cast<int64_t>(stride_kv_row_v), int64_t(0), idx_slot, smem_pipe_write_v.index(), thread_idx);
         pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       }
