@@ -49,6 +49,11 @@ def main():
         help="Max kvseqlen to test (e.g. '256k', '512k', or raw int). "
         "Applies to phase5/phase6.",
     )
+    parser.add_argument(
+        "--iss",
+        action="store_true",
+        help="Run ISS (InnerStoreStages) sub-benchmark for phase4",
+    )
 
     args = parser.parse_args()
     rerun_filter = _parse_rerun(args.rerun) if args.rerun else None
@@ -79,9 +84,14 @@ def main():
         elif phase == "3-l2-inflection":
             parser.error("Phase 3 has no --exp. Use --ncu 3-l2-inflection")
         elif phase == "4-loopk-debug":
-            from bench_sparse_analysis.phase4_loopk_debug import _phase4_bench
+            if args.iss:
+                from bench_sparse_analysis.phase4_loopk_debug import _phase4_iss_bench
 
-            _phase4_bench(force=args.force)
+                _phase4_iss_bench(force=args.force)
+            else:
+                from bench_sparse_analysis.phase4_loopk_debug import _phase4_bench
+
+                _phase4_bench(force=args.force)
         elif phase == "5-scaling":
             from bench_sparse_analysis.phase5_scaling import _phase5_bench
 
@@ -112,15 +122,20 @@ def main():
         elif phase == "3-l2-inflection":
             parser.error("Phase 3 has no --plot. Use --ncu 3-l2-inflection")
         elif phase == "4-loopk-debug":
-            from bench_sparse_analysis.phase4_loopk_debug import (
-                _phase4_opt_plot,
-                _phase4_plot,
-                _phase4_summary_plot,
-            )
+            if args.iss:
+                from bench_sparse_analysis.phase4_loopk_debug import _phase4_iss_plot
 
-            _phase4_plot()
-            _phase4_opt_plot()
-            _phase4_summary_plot()
+                _phase4_iss_plot()
+            else:
+                from bench_sparse_analysis.phase4_loopk_debug import (
+                    _phase4_opt_plot,
+                    _phase4_plot,
+                    _phase4_summary_plot,
+                )
+
+                _phase4_plot()
+                _phase4_opt_plot()
+                _phase4_summary_plot()
         elif phase == "5-scaling":
             from bench_sparse_analysis.phase5_scaling import _phase5_plot
 

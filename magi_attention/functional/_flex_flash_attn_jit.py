@@ -542,7 +542,8 @@ def get_ffa_jit_spec(
             extra_template_args["bwd_union_dkvacc"] = (
                 "true" if _union_env != "0" else "false"
             )
-            uri += f"_ud{_union_env}"
+            if _union_env != "0":
+                uri += f"_ud{_union_env}"
         _perf_union = os.environ.get("MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2")
         if _perf_union is not None and _perf_union != "0":
             extra_template_args.setdefault("bwd_union_dkvacc", "true")
@@ -559,7 +560,8 @@ def get_ffa_jit_spec(
         )
         if _inner_store_stages is not None:
             extra_template_args["inner_store_stages"] = _inner_store_stages
-            uri += f"_iss{_inner_store_stages}"
+            if _inner_store_stages != "1":
+                uri += f"_iss{_inner_store_stages}"
 
         # Per-switch debug overrides (LoopK perf isolation, correctness NOT guaranteed).
         for _env_name, _tpl_key, _uri_key in [

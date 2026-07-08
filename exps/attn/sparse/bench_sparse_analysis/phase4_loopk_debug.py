@@ -22,6 +22,7 @@ import time
 
 from bench_sparse_analysis._common import (
     HD,
+    KBS,
     NHK,
     NHQ,
     S_FULL,
@@ -64,6 +65,7 @@ _DEBUG_ENV_KEYS = [
     "MAGI_ATTENTION_FFA_BWD_STAGES_DS",
     "MAGI_ATTENTION_FFA_BWD_STAGES_V",
     "MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2",
+    "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES",
 ]
 
 # Symmetric configs: same skip flags on BOTH LoopK and LoopQ.
@@ -1180,3 +1182,312 @@ print("[DONE]")
                     )
                 ):
                     print(f"    {line}")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Phase 4 ISS: InnerStoreStages sparse LoopK benchmark (multi-scale)
+# ═══════════════════════════════════════════════════════════════
+
+_ISS_CONFIGS = [
+    # (label, env_overrides, short_name)
+    (
+        "iss_m128n64_iss1_ud0",
+        {"MAGI_ATTENTION_FFA_BWD_STAGES_V": "1"},
+        "M128N64 ISS=1 UD=0 (baseline)",
+    ),
+    (
+        "iss_m64n64_iss1_ud0",
+        {
+            "MAGI_ATTENTION_FFA_BWD_TILE_M": "64",
+            "MAGI_ATTENTION_FFA_BWD_TILE_N": "64",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_DS": "1",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
+        },
+        "M64N64 ISS=1 UD=0",
+    ),
+    (
+        "iss_m64n64_iss2_ud0",
+        {
+            "MAGI_ATTENTION_FFA_BWD_TILE_M": "64",
+            "MAGI_ATTENTION_FFA_BWD_TILE_N": "64",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_DS": "1",
+            "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
+            "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "0",
+            "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES": "2",
+        },
+        "M64N64 ISS=2 UD=0 (double-buffer)",
+    ),
+]
+
+_ISS_KVSEQLENS = [32768, 65536, 131072, 262144]
+_ISS_QSEQLEN = 8192
+
+
+def _phase4_iss_bench(force=False):
+    """Benchmark ISS=1 vs ISS=2 for sparse LoopK at multiple kvseqlens."""
+    import torch
+
+    from magi_attention.functional import flex_flash_attn_func
+    from magi_attention.utils.sparse_utils import generate_ranges_from_topk_indices
+
+    phase = "4-loopk-debug"
+    results = _load_results(phase)
+    gpu = _set_gpu()
+    device = f"cuda:{gpu}"
+    print(f"[{_ts()}] Phase 4 ISS: sparse LoopK double-buffer evaluation (gpu{gpu})")
+    print(
+        f"  qseqlen={_ISS_QSEQLEN}, nhq={NHQ}, nhk={NHK}, hd={HD}, kbs={KBS}, "
+        f"block_sparse, pack_gqa, bf16"
+    )
+    print(f"  kvseqlens: {[s // 1024 for s in _ISS_KVSEQLENS]}K\n", flush=True)
+
+    for label, env_overrides, desc in _ISS_CONFIGS:
+        print(f"  ── {desc} ──", flush=True)
+
+        for env_key in _DEBUG_ENV_KEYS:
+            os.environ.pop(env_key, None)
+        for ek, ev in env_overrides.items():
+            os.environ[ek] = ev
+
+        for kvseqlen in _ISS_KVSEQLENS:
+            topk = kvseqlen // 4
+            key = f"bwd_iss/{label}"
+
+            if not force and _has_entry(results, key, kvseqlen):
+                d = results[key]
+                idx = d["topk"].index(kvseqlen)
+                print(
+                    f"    kvseqlen={kvseqlen // 1024}K: "
+                    f"{d['tflops'][idx]:>7.1f} T (cached)",
+                    flush=True,
+                )
+                continue
+
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            try:
+                n_kv_blocks = kvseqlen // KBS
+                n_topk_blocks = topk // KBS
+
+                torch.manual_seed(42)
+                q = torch.randn(
+                    _ISS_QSEQLEN, NHQ, HD,
+                    dtype=torch.bfloat16, device=device, requires_grad=True,
+                )
+                k = torch.randn(
+                    kvseqlen, NHK, HD,
+                    dtype=torch.bfloat16, device=device, requires_grad=True,
+                )
+                v = torch.randn(
+                    kvseqlen, NHK, HD,
+                    dtype=torch.bfloat16, device=device, requires_grad=True,
+                )
+
+                gen = torch.Generator().manual_seed(42)
+                rand_vals = torch.rand(_ISS_QSEQLEN, n_kv_blocks, generator=gen)
+                perms = (
+                    rand_vals.argsort(dim=1)[:, :n_topk_blocks].sort(dim=1).values
+                )
+                indices = (
+                    perms.unsqueeze(1)
+                    .expand(-1, NHK, -1)
+                    .to(torch.int32)
+                    .to(device)
+                    .contiguous()
+                )
+                ia_3d = indices.permute(1, 0, 2).contiguous()
+                q_ranges, k_ranges = generate_ranges_from_topk_indices(
+                    ia_3d, block_m=1, block_n=KBS, num_k_blocks=n_kv_blocks
+                )
+                atm = torch.zeros(
+                    q_ranges.size(0), dtype=torch.int32, device=device
+                )
+
+                kw = dict(
+                    q_ranges=q_ranges,
+                    k_ranges=k_ranges,
+                    attn_type_map=atm,
+                    pack_gqa=True,
+                    block_sparse=True,
+                    sparse_k_block_size=KBS,
+                    swap_bwd_qk_loop=True,
+                )
+
+                t0 = time.time()
+                o, *_ = flex_flash_attn_func(q, k, v, **kw)
+                do = torch.randn_like(o)
+                flops = _calc_flops(_ISS_QSEQLEN, topk, True)
+
+                def run_fn():
+                    o.backward(do, retain_graph=True)
+
+                tf, ms = _bench_kernel(run_fn, flops, device)
+                elapsed = time.time() - t0
+                _set_entry(results, key, kvseqlen, round(tf, 1), round(ms, 3))
+                print(
+                    f"    kvseqlen={kvseqlen // 1024}K: "
+                    f"{tf:>7.1f} T ({ms:.3f}ms, {elapsed:.0f}s)",
+                    flush=True,
+                )
+            except Exception as e:
+                _set_entry(results, key, kvseqlen, None, None)
+                print(f"    kvseqlen={kvseqlen // 1024}K: FAIL - {e}", flush=True)
+            finally:
+                q = k = v = None
+                gc.collect()
+                torch.cuda.empty_cache()
+
+            _save_results(phase, results)
+
+    for env_key in _DEBUG_ENV_KEYS:
+        os.environ.pop(env_key, None)
+
+    # Summary table
+    print(f"\n[{_ts()}] Phase 4 ISS Summary")
+    print(
+        "  ╔═══════════════════════════════════╦"
+        + "═════════╦" * len(_ISS_KVSEQLENS)
+        + "╗"
+    )
+    header = "  ║ Config                            ║"
+    for s in _ISS_KVSEQLENS:
+        header += f" {s // 1024:>5}K ║"
+    print(header)
+    print(
+        "  ╠═══════════════════════════════════╬"
+        + "═════════╬" * len(_ISS_KVSEQLENS)
+        + "╣"
+    )
+
+    baseline_tfs = {}
+    for label, _, desc in _ISS_CONFIGS:
+        key = f"bwd_iss/{label}"
+        d = results.get(key, {})
+        row = f"  ║ {desc[:33]:<33s} ║"
+        for kvseqlen in _ISS_KVSEQLENS:
+            if kvseqlen in d.get("topk", []):
+                idx = d["topk"].index(kvseqlen)
+                tf = d["tflops"][idx]
+                if tf is not None:
+                    if label == "iss_m128n64_iss1_ud0":
+                        baseline_tfs[kvseqlen] = tf
+                    row += f" {tf:>5.0f} T ║"
+                else:
+                    row += "  FAIL  ║"
+            else:
+                row += "   N/A  ║"
+        print(row)
+
+    print(
+        "  ╚═══════════════════════════════════╩"
+        + "═════════╩" * len(_ISS_KVSEQLENS)
+        + "╝"
+    )
+
+    if baseline_tfs:
+        print("\n  ── Delta vs M128N64 baseline ──")
+        for label, _, desc in _ISS_CONFIGS:
+            if label == "iss_m128n64_iss1_ud0":
+                continue
+            key = f"bwd_iss/{label}"
+            d = results.get(key, {})
+            row = f"    {desc[:35]:<35s}"
+            for kvseqlen in _ISS_KVSEQLENS:
+                base = baseline_tfs.get(kvseqlen)
+                if (
+                    base
+                    and kvseqlen in d.get("topk", [])
+                    and d["tflops"][d["topk"].index(kvseqlen)] is not None
+                ):
+                    idx = d["topk"].index(kvseqlen)
+                    tf = d["tflops"][idx]
+                    delta = (tf - base) / base * 100
+                    row += f"  {delta:>+5.1f}%"
+                else:
+                    row += "    N/A"
+            print(row)
+
+    print(f"\n[{_ts()}] Phase 4 ISS DONE -> {_results_path(phase)}", flush=True)
+
+
+def _phase4_iss_plot():
+    """Grouped bar chart: ISS configs at multiple kvseqlens."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    phase = "4-loopk-debug"
+    results = _load_results(phase)
+    if not results:
+        print(f"ERROR: {_results_path(phase)} not found. Run --exp first.")
+        return
+
+    out = _out_dir(phase)
+    os.makedirs(out, exist_ok=True)
+
+    configs_with_data = []
+    for label, _, desc in _ISS_CONFIGS:
+        key = f"bwd_iss/{label}"
+        d = results.get(key, {})
+        if d and "topk" in d:
+            tfs = []
+            for kvseqlen in _ISS_KVSEQLENS:
+                if kvseqlen in d["topk"]:
+                    idx = d["topk"].index(kvseqlen)
+                    tfs.append(d["tflops"][idx])
+                else:
+                    tfs.append(None)
+            configs_with_data.append((label, desc, tfs))
+
+    if not configs_with_data:
+        print("No ISS data found. Run --exp 4-loopk-debug --iss first.")
+        return
+
+    colors = ["#1565C0", "#7B1FA2", "#C62828", "#2E7D32", "#FF8F00"]
+    n_groups = len(_ISS_KVSEQLENS)
+    n_bars = len(configs_with_data)
+    bar_w = 0.75 / n_bars
+    x = np.arange(n_groups)
+
+    fig, ax = plt.subplots(figsize=(14, 7), dpi=150)
+
+    for i, (label, desc, tfs) in enumerate(configs_with_data):
+        vals = [tf if tf is not None else 0 for tf in tfs]
+        offset = (i - (n_bars - 1) / 2) * bar_w
+        bars = ax.bar(
+            x + offset, vals, width=bar_w * 0.9, label=desc,
+            color=colors[i % len(colors)], edgecolor="white",
+            linewidth=0.5, alpha=0.88,
+        )
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, v + 3, f"{v:.0f}",
+                    ha="center", va="bottom", fontsize=8, fontweight="bold",
+                )
+
+    ax.set_title(
+        "InnerStoreStages Double-Buffer: Sparse LoopK BWD\n"
+        f"qseqlen={_ISS_QSEQLEN}, topk=kvseqlen/4, nhq={NHQ}, kbs={KBS}, "
+        f"pack_gqa, bf16, H100",
+        fontsize=13, fontweight="bold",
+    )
+    ax.set_ylabel("TFLOPS (BWD)", fontsize=12)
+    ax.set_xlabel("kvseqlen", fontsize=12)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{s // 1024}K" for s in _ISS_KVSEQLENS], fontsize=11)
+    ax.legend(fontsize=10, loc="upper right")
+    ax.grid(axis="y", alpha=0.3)
+    valid_max = max(
+        (tf for _, _, tfs in configs_with_data for tf in tfs if tf), default=100
+    )
+    ax.set_ylim(0, valid_max * 1.15)
+
+    plt.tight_layout()
+    path = os.path.join(out, "iss_double_buffer_comparison.png")
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close()
+    print(f"[{_ts()}] ISS plot -> {path}")
