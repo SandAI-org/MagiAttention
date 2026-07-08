@@ -356,19 +356,22 @@ def get_ffa_jit_spec(
         else:
             kblock_m, kblock_n = None, None
 
-    # PackGQA packs qhead_per_kvhead Q heads into the M (seqlen) dimension,
-    # reshaping Q to ((pack_gqa_factor, seqlen), headdim, nheads_kv).
-    # TMA requires kBlockM to divide cleanly within this (pack_gqa_factor,
-    # seqlen) hierarchy — otherwise it crosses the boundary between the two
-    # modes which have different strides. The divisibility constraint is:
+    # PackGQA packs Q heads into ((pack_gqa_factor, seqlen), headdim, nheads_kv).
+    # TMA requires kBlockM to divide cleanly within this hierarchy:
     #   kBlockM % pack_gqa_factor == 0  OR  pack_gqa_factor % kBlockM == 0
+    # When neither holds (e.g. kBlockM=192, pgf=128: 192 straddles the (128,
+    # seqlen) mode boundary), reduce kBlockM to pack_gqa_factor so each tile
+    # contains an integer number of packed GQA groups.
     if pack_gqa and kblock_m is not None and pack_gqa_factor > 1:
         if kblock_m % pack_gqa_factor != 0 and pack_gqa_factor % kblock_m != 0:
-            raise ValueError(
-                f"pack_gqa with pack_gqa_factor={pack_gqa_factor} is incompatible "
-                f"with kBlockM={kblock_m} (head_dim={head_dim}): "
-                f"TMA requires kBlockM % pack_gqa_factor == 0 or "
-                f"pack_gqa_factor % kBlockM == 0"
+            old_kblock_m = kblock_m
+            kblock_m = pack_gqa_factor
+            logger.info(
+                "pack_gqa: kBlockM %d -> %d for pack_gqa_factor=%d (head_dim=%d)",
+                old_kblock_m,
+                kblock_m,
+                pack_gqa_factor,
+                head_dim,
             )
 
     uri = get_ffa_uri(
