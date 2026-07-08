@@ -89,7 +89,11 @@ def main():
         elif phase == "6-video-production":
             from bench_sparse_analysis.phase6_video_production import _phase6_bench
 
-            _phase6_bench(force=args.force, max_kvseqlen=max_kvseqlen)
+            _phase6_bench(
+                force=args.force,
+                max_kvseqlen=max_kvseqlen,
+                rerun_filter=rerun_filter,
+            )
     elif args.plot:
         phase = args.plot
         print(f"[{_ts()}] === --plot {phase} ===", flush=True)

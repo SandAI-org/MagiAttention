@@ -69,7 +69,7 @@ PASSES = ["fwd", "bwd_loopk", "bwd_loopq"]
 METHODS = ["d1b", "d1b_nopg", "dense_nb", "dense_nb_rm", "block_sparse", "index_sparse"]
 
 
-def _phase6_bench(force=False, max_kvseqlen=None):
+def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
@@ -167,7 +167,10 @@ def _phase6_bench(force=False, max_kvseqlen=None):
                     continue
 
                 key = f"{pass_type}/{method}"
-                if not force and _has_entry(results, key, kvseqlen):
+                if rerun_filter is not None:
+                    if (pass_type, method, kvseqlen) not in rerun_filter:
+                        continue
+                elif not force and _has_entry(results, key, kvseqlen):
                     d = results[key]
                     idx = d["topk"].index(kvseqlen)
                     tf = d["tflops"][idx]
@@ -453,12 +456,12 @@ def _phase6_plot():
         ("bwd_loopk", "BWD InnerLoopK"),
     ]
     PLOT_METHODS = [
-        ("d1b", "Dense-1B", (0.58, 0.58, 0.58)),
-        ("d1b_nopg", "Dense-1B-noPG", (0.78, 0.78, 0.78)),
-        ("dense_nb", "Dense-NB", (0.22, 0.37, 0.71)),
-        ("dense_nb_rm", "Dense-NB-RM", (0.45, 0.55, 0.85)),
-        ("block_sparse", "BS-kbs128", (0.29, 0.57, 0.60)),
-        ("index_sparse", "IS-kbs1", (0.77, 0.34, 0.49)),
+        ("d1b", "Dense-1B-kbs128", (0.58, 0.58, 0.58)),
+        ("d1b_nopg", "Dense-1B-noPG-kbs128", (0.78, 0.78, 0.78)),
+        ("dense_nb", "Dense-NB-kbs128", (0.22, 0.37, 0.71)),
+        ("dense_nb_rm", "Dense-NB-RM-kbs128", (0.45, 0.55, 0.85)),
+        ("block_sparse", "BlockSparse-kbs128", (0.29, 0.57, 0.60)),
+        ("index_sparse", "IndexSparse-kbs1", (0.77, 0.34, 0.49)),
     ]
 
     kvseqlens = [s[0] for s in SCENARIOS]
