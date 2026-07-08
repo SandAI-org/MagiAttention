@@ -1456,8 +1456,17 @@ struct CollectiveMainloopBwdSm90 {
     Element const* const ptr_gdO_base = params.ptr_dO + bidh * PackGQAFactor * stride_do_head + ldst_group_inner_idx * 8;
     // LSE/dPsum strides: 4 floats per token, head_stride position depends on GQA mode.
     auto extract_lse_strides = [&](auto const& stride) -> cute::tuple<int64_t, int64_t> {
-      int64_t kv_hs = CatGQA ? get<2, 1>(stride) : get<2>(stride);
-      int64_t in_group_hs = PackGQA ? get<1, 0>(stride) : (CatGQA ? get<2, 0>(stride) : int64_t(0));
+      int64_t kv_hs, in_group_hs;
+      if constexpr (CatGQA) {
+        kv_hs = get<2, 1>(stride);
+        in_group_hs = get<2, 0>(stride);
+      } else if constexpr (PackGQA) {
+        kv_hs = get<2>(stride);
+        in_group_hs = get<1, 0>(stride);
+      } else {
+        kv_hs = get<2>(stride);
+        in_group_hs = int64_t(0);
+      }
       return {kv_hs, in_group_hs};
     };
     auto [lse_kv_hs, lse_in_group_hs] = extract_lse_strides(params.stride_LSE);
@@ -1468,21 +1477,55 @@ struct CollectiveMainloopBwdSm90 {
     auto lse_row_offset = [&](int p) -> int64_t { return decompose_packed(p, 4, lse_in_group_hs); };
     auto dpsum_row_offset = [&](int p) -> int64_t { return decompose_packed(p, 4, dpsum_in_group_hs); };
 
-    // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
-    // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy (dense)
-    // or multi-thread scatter cp.async (BlockSparse).
+    // ─── CpAsync scatter load helper (load-side counterpart of sparse_inner_store) ───
+    // Scatter-loads kBlockM tokens of a main tensor (Q/dO, kHeadDim wide) and its associated
+    // scalar tensor (LSE/dPsum, 4 floats wide) from GMEM into SMEM using cp.async.
+    auto cpasync_scatter_load = [&](auto& smem_main,
+                                    Element const* ptr_main_base,
+                                    int64_t stride_token,
+                                    int64_t stride_head,
+                                    auto& smem_scalar,
+                                    float const* ptr_scalar_base,
+                                    auto scalar_offset_fn,
+                                    int const* idx_slot,
+                                    int stage) {
+      CUTE_UNROLL
+      for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
+        int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
+        int64_t token_offset = decompose_packed(idx_slot[smem_row], stride_token, stride_head);
+        CUTE_UNROLL
+        for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
+          if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
+            Element* dst_ptr = &smem_main(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, stage);
+            auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_main_base + token_offset + tile_idx * 64)), Layout<_1>{});
+            auto s_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+            cute::copy(cp_async_cg, g_src, s_dst);
+          }
+        }
+      }
+      for (int i = ldst_group_inner_idx; i < NumTokensPerLdstGroup; i += NumThreadsPerLdstGroup) {
+        int smem_idx = ldst_group_idx * NumTokensPerLdstGroup + i;
+        float* s_dst = &smem_scalar(_0{}, smem_idx, stage);
+        auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_scalar_base + scalar_offset_fn(idx_slot[smem_idx]))), Layout<_1>{});
+        auto s_dst_t = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(s_dst)), Layout<_1>{});
+        cute::copy(cp_async_cg, g_src, s_dst_t);
+      }
+    };
+
+    // ─── Load lambdas: two branches — TMA 2D (dense + contiguous sparse) and CpAsync (sparse fallback) ───
     // Q and dO share the same pipe slot when Q_dO_same_stages=true, so pipe advance
     // happens in load_dO_dPsum (the second of each pair) to keep the slot index in sync.
     auto load_Q_LSE = [&]() {
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        // All elected threads (lane_predicate) participate in pipe state advance,
-        // but only thread 0 has the correct block_meta cursor and issues TMA.
-        // (Each thread's block_meta.cur_range_inner_idx is group-offset-shifted
-        // during construction; only thread 0's ldst_group_idx=0 → correct first row.)
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
+        // TMA 2D: dense uses domain_offset tensors, sparse uses absolute-coordinate tensors.
+        // Sparse: only thread 0 has valid cursor from block_meta; also writes packed_first_row
+        // to smem_sparse_inner_indices for consumer's store addressing.
         if (!lane_predicate)
           return;
         pipeline_q.producer_acquire(smem_pipe_write_q);
-        if (thread_idx == 0) {
+        if constexpr (IsSparse) {
+          if (thread_idx != 0)
+            return;
           int const stage = smem_pipe_write_q.index();
           int const packed_first_row = block_meta.get_packed_first_row();
           shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockM] = packed_first_row;
@@ -1490,134 +1533,77 @@ struct CollectiveMainloopBwdSm90 {
           auto tma_Q_desc = params.tma_load_Q_packed.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
           copy(tma_Q_desc, tQgQ_abs(_, m_block_abs), tQsQ(_, stage));
           copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE_abs(_, _, m_block_abs), sLSE(_, _, stage));
+        } else {
+          auto tma_Q_desc = [&]() {
+            if constexpr (PackGQA || CatGQA) {
+              return params.tma_load_Q_packed.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+            } else {
+              return params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+            }
+          }();
+          if constexpr (CatGQA) {
+            copy(tma_Q_desc, tQgQ(_, m_block, bidh_kv_cat), tQsQ(_, smem_pipe_write_q.index()));
+            copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block, bidh_kv_cat), sLSE(_, _, smem_pipe_write_q.index()));
+          } else {
+            copy(tma_Q_desc, tQgQ(_, m_block), tQsQ(_, smem_pipe_write_q.index()));
+            copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write_q.index()));
+          }
         }
-      } else if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
-        // Legacy cp.async per-row scatter for Q + LSE (A/B benchmarking).
+      } else {
+        // CpAsync scatter: all producer threads participate, per-token cp.async
         pipeline_q.producer_acquire(smem_pipe_write_q);
         int const stage = smem_pipe_write_q.index();
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockM];
         block_meta.fill_token_indices(idx_slot, ldst_group_inner_idx, ldst_group_idx);
         __syncwarp();
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-          int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
-          int64_t token_offset = decompose_packed(idx_slot[smem_row], stride_q_token, stride_q_head);
-          CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
-            if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-              Element* dst_ptr = &sQ(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, stage);
-              auto gQ_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gQ_base + token_offset + tile_idx * 64)), Layout<_1>{});
-              auto sQ_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-              cute::copy(cp_async_cg, gQ_src, sQ_dst);
-            }
-          }
-        }
-        for (int i = ldst_group_inner_idx; i < NumTokensPerLdstGroup; i += NumThreadsPerLdstGroup) {
-          float* lse_dst = &sLSE(_0{}, ldst_group_idx * NumTokensPerLdstGroup + i, stage);
-          auto gLSE_src = make_tensor(
-              make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gLSE_base + lse_row_offset(idx_slot[ldst_group_idx * NumTokensPerLdstGroup + i]))),
-              Layout<_1>{});
-          auto sLSE_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(lse_dst)), Layout<_1>{});
-          cute::copy(cp_async_cg, gLSE_src, sLSE_dst);
-        }
+        cpasync_scatter_load(sQ, ptr_gQ_base, stride_q_token, stride_q_head, sLSE, ptr_gLSE_base, lse_row_offset, idx_slot, stage);
         pipeline_q.producer_commit(smem_pipe_write_q, cutlass::arch::cpasync_barrier_arrive);
-      } else {
-        if (!lane_predicate)
-          return;
-        pipeline_q.producer_acquire(smem_pipe_write_q);
-        auto tma_Q_desc = [&]() {
-          if constexpr (PackGQA || CatGQA) {
-            return params.tma_load_Q_packed.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
-          } else {
-            return params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
-          }
-        }();
-        if constexpr (CatGQA) {
-          copy(tma_Q_desc, tQgQ(_, m_block, bidh_kv_cat), tQsQ(_, smem_pipe_write_q.index()));
-          copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block, bidh_kv_cat), sLSE(_, _, smem_pipe_write_q.index()));
-        } else {
-          copy(tma_Q_desc, tQgQ(_, m_block), tQsQ(_, smem_pipe_write_q.index()));
-          copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write_q.index()));
-        }
       }
     };
 
     auto load_dO_dPsum = [&]() {
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
+      PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
         if (!lane_predicate)
           return;
-        PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
-        if (thread_idx == 0) {
+        if constexpr (IsSparse) {
+          if (thread_idx != 0)
+            return;
           int const packed_first_row = shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_q.index() * kBlockM];
           int const m_block_abs = packed_first_row / kBlockM;
           auto tma_dO_desc = params.tma_load_dO_packed.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
           copy(tma_dO_desc, tdOgdO_abs(_, m_block_abs), tdOsdO(_, smem_pipe_write_do_cur.index()));
           copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum_abs(_, _, m_block_abs), sdPsum(_, _, smem_pipe_write_do_cur.index()));
+        } else {
+          auto tma_dO_desc = [&]() {
+            if constexpr (PackGQA || CatGQA) {
+              return params.tma_load_dO_packed.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+            } else {
+              return params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
+            }
+          }();
+          if constexpr (CatGQA) {
+            copy(tma_dO_desc, tdOgdO(_, m_block, bidh_kv_cat), tdOsdO(_, smem_pipe_write_do_cur.index()));
+            copy(
+                bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)),
+                gdPsum(_, _, m_block, bidh_kv_cat),
+                sdPsum(_, _, smem_pipe_write_do_cur.index()));
+          } else {
+            copy(tma_dO_desc, tdOgdO(_, m_block), tdOsdO(_, smem_pipe_write_do_cur.index()));
+            copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_do_cur.index()));
+          }
         }
-        if constexpr (!Q_dO_same_stages) {
-          ++smem_pipe_write_do;
-        }
-        ++smem_pipe_write_q;
-      } else if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
-        // Legacy cp.async per-row scatter for dO + dPsum (A/B benchmarking).
-        PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
+      } else {
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_q.index() * kBlockM];
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-          int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
-          int64_t token_offset = decompose_packed(idx_slot[smem_row], stride_do_token, stride_do_head);
-          CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
-            if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-              Element* dst_ptr = &sdO(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_do_cur.index());
-              auto gdO_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdO_base + token_offset + tile_idx * 64)), Layout<_1>{});
-              auto sdO_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-              cute::copy(cp_async_cg, gdO_src, sdO_dst);
-            }
-          }
-        }
-        for (int i = ldst_group_inner_idx; i < NumTokensPerLdstGroup; i += NumThreadsPerLdstGroup) {
-          float* dpsum_dst = &sdPsum(_0{}, ldst_group_idx * NumTokensPerLdstGroup + i, smem_pipe_write_do_cur.index());
-          auto gdPsum_src = make_tensor(
-              make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gdPsum_base + dpsum_row_offset(idx_slot[ldst_group_idx * NumTokensPerLdstGroup + i]))),
-              Layout<_1>{});
-          auto sdPsum_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dpsum_dst)), Layout<_1>{});
-          cute::copy(cp_async_cg, gdPsum_src, sdPsum_dst);
-        }
+        cpasync_scatter_load(sdO, ptr_gdO_base, stride_do_token, stride_do_head, sdPsum, ptr_gdPsum_base, dpsum_row_offset, idx_slot, smem_pipe_write_do_cur.index());
         pipeline_do.producer_commit(smem_pipe_write_do_cur, cutlass::arch::cpasync_barrier_arrive);
-        if constexpr (!Q_dO_same_stages) {
-          ++smem_pipe_write_do;
-        }
-        ++smem_pipe_write_q;
-      } else {
-        if (!lane_predicate)
-          return;
-        PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
-        pipeline_do.producer_acquire(smem_pipe_write_do_cur);
-        auto tma_dO_desc = [&]() {
-          if constexpr (PackGQA || CatGQA) {
-            return params.tma_load_dO_packed.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
-          } else {
-            return params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
-          }
-        }();
-        if constexpr (CatGQA) {
-          copy(tma_dO_desc, tdOgdO(_, m_block, bidh_kv_cat), tdOsdO(_, smem_pipe_write_do_cur.index()));
-          copy(
-              bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)),
-              gdPsum(_, _, m_block, bidh_kv_cat),
-              sdPsum(_, _, smem_pipe_write_do_cur.index()));
-        } else {
-          copy(tma_dO_desc, tdOgdO(_, m_block), tdOsdO(_, smem_pipe_write_do_cur.index()));
-          copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_do_cur.index()));
-        }
-        if constexpr (!Q_dO_same_stages) {
-          ++smem_pipe_write_do;
-        }
-        ++smem_pipe_write_q;
       }
+      if constexpr (!Q_dO_same_stages) {
+        ++smem_pipe_write_do;
+      }
+      ++smem_pipe_write_q;
     };
 
     auto load_KV = [&]() {

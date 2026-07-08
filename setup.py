@@ -25,6 +25,7 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import torch
 from packaging.version import Version, parse
@@ -742,7 +743,7 @@ def prebuild_ffa_kernels() -> None:
     # the standard precompile_kernel_specs() interface. This replaces the old
     # hand-maintained lists (precompile_sparse_tests.py + ci_dense_features)
     # and stays in sync with test @parameterize sweeps automatically.
-    ci_test_specs: dict[str, object] = {}
+    ci_test_specs: dict[str, Any] = {}
     if prebuild_level == "ci":
         try:
             from magi_attention.testing.precompile import collect_test_kernel_specs
