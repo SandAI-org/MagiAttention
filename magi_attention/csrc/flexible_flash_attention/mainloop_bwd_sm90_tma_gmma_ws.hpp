@@ -3718,17 +3718,18 @@ struct CollectiveMainloopBwdSm90 {
 
             BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warp_group_idx);
           } // !PerfDebugDeferDvR2S
-        } else {
-          // Consumer store path: dispatch on the store mechanism
-          if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-            static_assert(kInnerStoreMode != InnerStoreMode::BypassSmem, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
+        } else if constexpr (IsSparse) {
+          // Path 3: Consumer self-store (sparse): R2S → smem, sync, GMEM write, sync
+          static_assert(kInnerStoreMode != InnerStoreMode::BypassSmem, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
-            Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
-            cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
-            cutlass::arch::fence_view_async_shared();
+          Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
+          cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+          cutlass::arch::fence_view_async_shared();
 
-            BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
+          BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
 
+          if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
+            // Contiguous sparse: TMA 2D reduce (thread 0 only)
             if (thread_idx == 0) {
               Tensor sdV_tma = make_tensor(make_smem_ptr(smem_inner_dv_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVSwizzled{});
               auto block_tma_dV_c = params.tma_add_dV.get_slice(_0{});
@@ -3743,17 +3744,8 @@ struct CollectiveMainloopBwdSm90 {
               tma_store_arrive();
               tma_store_wait<0>();
             }
-
-            BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
-          } else if constexpr (IsSparse) {
-            static_assert(kInnerStoreMode != InnerStoreMode::BypassSmem, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
-
-            Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
-            cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
-            cutlass::arch::fence_view_async_shared();
-
-            BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
-
+          } else {
+            // Non-contiguous sparse: scatter store (all consumer threads)
             int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
             int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
             int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
@@ -3766,16 +3758,17 @@ struct CollectiveMainloopBwdSm90 {
                 ptr_gdV_base,
                 stride_dV_token,
                 flat_thread_idx);
+          }
 
-            BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
-          } else {
-            Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
-            Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
-            static_assert(CUTE_STATIC_V(size(tdVrdV_atomic)) == CUTE_STATIC_V(size(tdVgdVaccum_atomic)));
+          BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
+        } else {
+          // Path 4: Dense consumer float4 atomicAdd (register→GMEM directly, no smem)
+          Tensor tdVrdV_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdVrdV));
+          Tensor tdVgdVaccum_atomic = recast<float4>(tdVgdVaccum(_, _, _, _, _, n_block));
+          static_assert(CUTE_STATIC_V(size(tdVrdV_atomic)) == CUTE_STATIC_V(size(tdVgdVaccum_atomic)));
 #pragma unroll
-            for (int i = 0; i < size(tdVrdV_atomic); ++i) {
-              atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
-            }
+          for (int i = 0; i < size(tdVrdV_atomic); ++i) {
+            atomicAdd(&tdVgdVaccum_atomic(i), tdVrdV_atomic(i));
           }
         }
 
@@ -3888,20 +3881,21 @@ struct CollectiveMainloopBwdSm90 {
           if constexpr (kInnerStoreStages >= 2) {
             consumer_store_stage = (consumer_store_stage + 1) % kInnerStoreStages;
           }
-        } else {
-          // Consumer store path: dispatch on the store mechanism
-          if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-            static_assert(kInnerStoreMode != InnerStoreMode::BypassSmem, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
+        } else if constexpr (IsSparse) {
+          // Path 3: Consumer self-store (sparse): scale + R2S → smem, sync, GMEM write, sync
+          static_assert(kInnerStoreMode != InnerStoreMode::BypassSmem, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
 
-            Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
-            for (int dki = 0; dki < size(taccdKrdK); ++dki) {
-              taccdKrdK(dki) *= params.softmax_scale;
-            }
-            cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
-            cutlass::arch::fence_view_async_shared();
+          Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
+          for (int dki = 0; dki < size(taccdKrdK); ++dki) {
+            taccdKrdK(dki) *= params.softmax_scale;
+          }
+          cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
+          cutlass::arch::fence_view_async_shared();
 
-            BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
+          BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
 
+          if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
+            // Contiguous sparse: TMA 2D reduce (thread 0 only)
             if (thread_idx == 0) {
               Tensor sdK_tma = make_tensor(make_smem_ptr(smem_inner_dk_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVSwizzled{});
               auto block_tma_dK_c = params.tma_add_dK.get_slice(_0{});
@@ -3916,20 +3910,8 @@ struct CollectiveMainloopBwdSm90 {
               tma_store_arrive();
               tma_store_wait<0>();
             }
-
-            BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
-          } else if constexpr (IsSparse) {
-            static_assert(kInnerStoreMode != InnerStoreMode::BypassSmem, "Consumer scatter dKV requires smem accumulator buffer (kHeadDim < 256)");
-
-            Tensor taccdKrdK = r2s_thr_copy_dKVaccum.retile_S(tdKrdK);
-            for (int dki = 0; dki < size(taccdKrdK); ++dki) {
-              taccdKrdK(dki) *= params.softmax_scale;
-            }
-            cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
-            cutlass::arch::fence_view_async_shared();
-
-            BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
-
+          } else {
+            // Non-contiguous sparse: scatter store (all consumer threads)
             int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
             int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
             int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
@@ -3942,16 +3924,17 @@ struct CollectiveMainloopBwdSm90 {
                 ptr_gdK_base,
                 stride_dK_token,
                 flat_thread_idx);
+          }
 
-            BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
-          } else {
-            Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
-            Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
-            static_assert(CUTE_STATIC_V(size(tdKrdK_atomic)) == CUTE_STATIC_V(size(tdKgdKaccum_atomic)));
+          BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
+        } else {
+          // Path 4: Dense consumer float4 atomicAdd (register→GMEM directly, no smem)
+          Tensor tdKrdK_atomic = recast<float4>(r2s_thr_copy_dKVaccum.retile_S(tdKrdK));
+          Tensor tdKgdKaccum_atomic = recast<float4>(tdKgdKaccum(_, _, _, _, _, n_block));
+          static_assert(CUTE_STATIC_V(size(tdKrdK_atomic)) == CUTE_STATIC_V(size(tdKgdKaccum_atomic)));
 #pragma unroll
-            for (int i = 0; i < size(tdKrdK_atomic); ++i) {
-              atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
-            }
+          for (int i = 0; i < size(tdKrdK_atomic); ++i) {
+            atomicAdd(&tdKgdKaccum_atomic(i), tdKrdK_atomic(i));
           }
         }
       } else { // Slice_dQKV_Mma, and guaranteed not Mma_dKV_is_RS
