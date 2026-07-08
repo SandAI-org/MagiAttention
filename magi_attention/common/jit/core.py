@@ -210,6 +210,13 @@ class JitSpec:
                 "Loading cached JIT artifact for '%s' from %s", mod_name, lib_dir
             )
         else:
+            if os.environ.get("MAGI_ATTENTION_JIT_COMPILE_DISABLED") == "1":
+                raise RuntimeError(
+                    f"JIT compilation is disabled (MAGI_ATTENTION_JIT_COMPILE_DISABLED=1) "
+                    f"but no precompiled artifact found for '{mod_name}'. "
+                    f"Searched AOT: {self.aot_path}, JIT cache: {self.workspace_path}. "
+                    f"This kernel must be added to the precompile configuration."
+                )
             logger.info("No AOT artifact for '%s', triggering JIT build", mod_name)
             self.build()
             lib_dir = self.workspace_path

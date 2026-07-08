@@ -452,6 +452,17 @@ Toggle this env variable to `1` to force building FFA in JIT mode, even the pre-
 
 Sets the number of threads for `nvcc`'s `--split-compile` option, which can speed up the JIT compilation of CUDA kernels.
 
+**MAGI_ATTENTION_JIT_COMPILE_DISABLED**
+
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.common.jit.core.JitSpec.build_and_load`
+
+Toggle this env variable to `1` to forbid JIT compilation at runtime.
+If a kernel is not found in the AOT or JIT cache, a `RuntimeError` is raised
+immediately instead of compiling on the fly. Useful for CI to verify that all
+required kernels have been precompiled — any missing kernel surfaces as a clear
+error with the kernel name and searched paths.
+
 **MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED**
 
 - **Defaults to:** `0`
