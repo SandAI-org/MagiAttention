@@ -136,13 +136,6 @@ Override the MMA tile dimensions (M×N) for the backward kernel. Common values: 
 
 Override the number of pipeline stages for K (main pipeline), dS (double buffer), and V.
 
-**MAGI_ATTENTION_FFA_BWD_LSE_UNION**
-
-- **Defaults to:** `0` (separate smem_lse/smem_dpsum)
-- **Used by:** `kBwdLseUnion` → `LseDpsumUnionDKVacc`
-
-Set to `1` to union the LSE/dpsum SMEM with the dKVacc buffer (saves SMEM, requires careful sizing).
-
 **MAGI_ATTENTION_FFA_BWD_UNION_DKVACC**
 
 - **Defaults to:** `0` (smem_dkacc and smem_dvacc are unioned into one buffer)

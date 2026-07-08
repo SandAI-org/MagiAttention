@@ -526,24 +526,12 @@ def get_ffa_jit_spec(
             ("MAGI_ATTENTION_FFA_BWD_STAGES", "bwd_stages", "stg"),
             ("MAGI_ATTENTION_FFA_BWD_STAGES_DS", "bwd_stages_ds", "stds"),
             ("MAGI_ATTENTION_FFA_BWD_STAGES_V", "bwd_stages_v", "stv"),
-            ("MAGI_ATTENTION_FFA_BWD_LSE_UNION", "bwd_lse_union", "lu"),
         ]:
             _val = os.environ.get(_env_name)
             if _val is not None:
                 extra_template_args[_tpl_key] = str(int(_val))
                 _uri_val = _val.replace("-", "n")
                 uri += f"_{_uri_key}{_uri_val}"
-
-        # Default LseDpsumUnion=1 for InnerLoopQ (saves ~5 producer spills, zero perf cost).
-        # Env MAGI_ATTENTION_FFA_BWD_LSE_UNION overrides (handled above); only set default if not overridden.
-        # CatGQA has different SMEM layout that is incompatible with LseDpsumUnion.
-        if (
-            "bwd_lse_union" not in extra_template_args
-            and not bwd_inner_loop_k
-            and not cat_gqa
-        ):
-            extra_template_args["bwd_lse_union"] = "1"
-            uri += "_lu1"
 
         # Default for LoopK: separate dK/dV SMEM buffers (UnionDkvacc=false) + stgV=1.
         # Separate mode (+38T, +11%): SMEM 198KB → 214KB (stgV=1 frees 16KB for +32KB).
@@ -785,7 +773,6 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_STAGES",
     "MAGI_ATTENTION_FFA_BWD_STAGES_DS",
     "MAGI_ATTENTION_FFA_BWD_STAGES_V",
-    "MAGI_ATTENTION_FFA_BWD_LSE_UNION",
     "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
     "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC",
     "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES",

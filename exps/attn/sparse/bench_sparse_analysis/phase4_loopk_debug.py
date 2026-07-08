@@ -62,7 +62,6 @@ _DEBUG_ENV_KEYS = [
     "MAGI_ATTENTION_FFA_BWD_TILE_N",
     "MAGI_ATTENTION_FFA_BWD_STAGES",
     "MAGI_ATTENTION_FFA_BWD_STAGES_DS",
-    "MAGI_ATTENTION_FFA_BWD_LSE_UNION",
     "MAGI_ATTENTION_FFA_BWD_STAGES_V",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK",
@@ -117,7 +116,7 @@ for factor_key, env_ov, short in _SKIP_FACTORS:
 # skip_v_load frees ~32KB (smem_v stages), skip_dv may free dvacc buffer.
 _STRUCTURAL_CONFIGS = [
     # ── Baseline structural params ──
-    ("loopk_lseu1", {"MAGI_ATTENTION_FFA_BWD_LSE_UNION": "1"}, False, "LoopK: lseU=1"),
+    ("loopk_baseline", {}, False, "LoopK: baseline"),
     (
         "loopk_m64n64",
         {"MAGI_ATTENTION_FFA_BWD_TILE_M": "64", "MAGI_ATTENTION_FFA_BWD_TILE_N": "64"},
@@ -126,16 +125,15 @@ _STRUCTURAL_CONFIGS = [
     ),
     # ── skip_all + structural (freed SMEM enables new configs) ──
     (
-        "loopk_skipall_lseu1",
+        "loopk_skipall",
         {
             "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE": "1",
             "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA": "1",
-            "MAGI_ATTENTION_FFA_BWD_LSE_UNION": "1",
         },
         False,
-        "LoopK: skip all + lseU1",
+        "LoopK: skip all",
     ),
     # skip_all + M64N128 + stgV=1 + dS=1: force single-stage dS to fit SMEM
     # (M64N128 heuristic defaults dS=2 → 228KB, barely exceeds with pipeline barriers)
@@ -180,11 +178,10 @@ _STRUCTURAL_CONFIGS = [
             "MAGI_ATTENTION_FFA_BWD_TILE_M": "64",
             "MAGI_ATTENTION_FFA_BWD_TILE_N": "128",
             "MAGI_ATTENTION_FFA_BWD_STAGES_DS": "1",
-            "MAGI_ATTENTION_FFA_BWD_LSE_UNION": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
         },
         False,
-        "LoopK: skip all + M64N128 lseU1",
+        "LoopK: skip all + M64N128",
     ),
     # ── Fine-grained decomposition ──
     # skip_dv_mma + skip_dv_store together (vs individually) to see interaction

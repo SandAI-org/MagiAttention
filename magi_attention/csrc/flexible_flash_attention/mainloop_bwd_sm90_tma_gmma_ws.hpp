@@ -79,7 +79,6 @@ template <
     bool Mma_dP_is_RS,
     int Stages_V_,
     int Tma1dSmemRowPad_,
-    bool LseDpsumUnionDKVacc_,
     int SparseKBlockSize_,
     int InnerLoadMode_,
     bool UnionDkvacc_,
@@ -110,8 +109,6 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(Stages_dS == 1 || Stages_dS == kStages);
   static_assert(kStages_V >= 1 && kStages_V <= kStages);
   static_assert(!Mma_dP_is_RS || SdP_swapAB_); // If Mma_dP_is_RS, we need SdP_SwapAB
-
-  static constexpr bool LseDpsumUnionDKVacc = LseDpsumUnionDKVacc_;
 
   static constexpr bool PerfDebugSkipVLoad = PerfDebugSkipVLoad_;
   static constexpr bool PerfDebugSkipDvStore = PerfDebugSkipDvStore_;
@@ -690,9 +687,7 @@ struct CollectiveMainloopBwdSm90 {
     SmemSparseStoreStagingIndices smem_sparse_store_staging_indices;
   };
 
-  // Empty placeholders for zero-sized SMEM fields (used with [[no_unique_address]])
-  struct SmemLSE_Empty_ {};
-  struct SmemDPsum_Empty_ {};
+  // Empty placeholder for zero-sized SMEM fields (used with [[no_unique_address]])
   struct SmemP_Empty_ {
     CUTLASS_HOST_DEVICE Element* data() {
       return nullptr;
@@ -702,10 +697,8 @@ struct CollectiveMainloopBwdSm90 {
     }
   };
 
-  static constexpr bool LseDpsumUnionEffective = LseDpsumUnionDKVacc && !(kInnerStoreMode == InnerStoreMode::BypassSmem);
-  using SmemLSE_t = std::conditional_t<LseDpsumUnionEffective, SmemLSE_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentLSE>>;
-  using SmemDPsum_t =
-      std::conditional_t<LseDpsumUnionEffective, SmemDPsum_Empty_, cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum>>;
+  using SmemLSE_t = cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentLSE>;
+  using SmemDPsum_t = cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, SmemAlignmentdPsum>;
   // InnerLoopK keeps P with kStages_dS stages (same as dS), unlike InnerLoopQ which uses 1-stage P.
   using SmemP_LoopK_t = std::conditional_t<Mma_dKV_is_RS, SmemP_Empty_, cute::array_aligned<Element, cute::cosize_v<SmemLayoutPdS>, SmemAlignmentP>>;
 
@@ -719,8 +712,6 @@ struct CollectiveMainloopBwdSm90 {
     // allowing dV/dK r2s to overlap (independent barrier paths, +11% perf).
     // UnionDkvacc = true: union saves 32 KB but forces serialized stores via the swapped
     // dVEmpty/dKEmpty barrier protocol in store_dkv().
-    // When LseDpsumUnionDKVacc: the first bytes of smem_dkacc are also aliased as
-    // smem_lse (512B) + smem_dpsum (512B) during outer-loop LSE/dPsum TMA loads.
     //
     // kInnerStoreStages=2 (double-buffer): multiple buffer stages alternated per iteration.
     // Union DB: 2 union stages, each dK/dV share → 2×32KB = 64KB (vs current 64KB ununion)
@@ -760,8 +751,8 @@ struct CollectiveMainloopBwdSm90 {
     // (struct alignment from PdS swizzle is 1024B; core data sums to exactly N*1024).
     // [[no_unique_address]] on truly-empty types lets the compiler overlap them with
     // tail padding, avoiding a 1KB bump to the next alignment boundary.
-    [[no_unique_address]] SmemLSE_t smem_lse;
-    [[no_unique_address]] SmemDPsum_t smem_dpsum;
+    SmemLSE_t smem_lse;
+    SmemDPsum_t smem_dpsum;
     [[no_unique_address]] SmemP_LoopK_t smem_p;
   };
 
@@ -1355,20 +1346,9 @@ struct CollectiveMainloopBwdSm90 {
       gdPsum = local_tile(cute::domain_offset(lse_off, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
     };
 
-    // Sparse TMA inner-load: absolute-coordinate tensors (no domain_offset) so that
-    // runtime-computed m_block_abs from get_tile_first_compound_idx() can index arbitrary tiles.
-    // Dense path uses offset-relative tQgQ/tdOgdO/gLSE/gdPsum instead; these are DCE'd.
-    auto make_abs_or_empty = [](auto fn) {
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        return fn();
-      } else {
-        return cute::make_tuple();
-      }
-    };
-    auto tQgQ_abs = make_abs_or_empty([&]() { return group_modes<0, 3>(block_tma_Q.partition_S(local_tile(mQ, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord))); });
-    auto tdOgdO_abs = make_abs_or_empty([&]() { return group_modes<0, 3>(block_tma_dO.partition_S(local_tile(mdO, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord))); });
-    auto gLSE_abs = make_abs_or_empty([&]() { return local_tile(mLSE, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); });
-    auto gdPsum_abs = make_abs_or_empty([&]() { return local_tile(mdPsum, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); });
+    // Sparse TMA Q/dO/LSE/dPsum: use domain_offset per-call at the runtime-computed origin,
+    // then index tile 0 (since origin already points to the exact tile start).
+    // Dense path uses the pre-built tQgQ/tdOgdO/gLSE/gdPsum with m_block indexing.
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
@@ -1518,22 +1498,24 @@ struct CollectiveMainloopBwdSm90 {
     // happens in load_dO_dPsum (the second of each pair) to keep the slot index in sync.
     auto load_Q_LSE = [&]() {
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
-        // TMA 2D: dense uses domain_offset tensors, sparse uses absolute-coordinate tensors.
-        // Sparse: only thread 0 has valid cursor from block_meta; also writes tile_first_compound_idx
-        // to smem_sparse_inner_indices for consumer's store addressing.
         if (!lane_predicate)
           return;
         pipeline_q.producer_acquire(smem_pipe_write_q);
+        int const stage = smem_pipe_write_q.index();
         if constexpr (IsSparse) {
           if (thread_idx != 0)
             return;
-          int const stage = smem_pipe_write_q.index();
           int const tile_first_compound_idx = block_meta.get_tile_first_compound_idx();
           shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockM] = tile_first_compound_idx;
-          int const m_block_abs = tile_first_compound_idx / kBlockM;
+          // domain_offset at the exact tile start; index tile 0
+          auto const qdo_off = make_coord(tile_first_compound_idx, _0{});
+          Tensor gQ_ = local_tile(domain_offset(qdo_off, mQ), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+          Tensor tQgQ_ = group_modes<0, 3>(block_tma_Q.partition_S(gQ_));
           auto tma_Q_desc = params.tma_load_Q_packed.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
-          copy(tma_Q_desc, tQgQ_abs(_, m_block_abs), tQsQ(_, stage));
-          copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE_abs(_, _, m_block_abs), sLSE(_, _, stage));
+          copy(tma_Q_desc, tQgQ_(_, 0), tQsQ(_, stage));
+          auto const lse_off = make_coord(_0{}, tile_first_compound_idx);
+          Tensor gLSE_ = local_tile(domain_offset(lse_off, mLSE), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, _0{}));
+          copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE_, sLSE(_, _, stage));
         } else {
           auto tma_Q_desc = [&]() {
             if constexpr (PackGQA || CatGQA) {
@@ -1543,11 +1525,11 @@ struct CollectiveMainloopBwdSm90 {
             }
           }();
           if constexpr (CatGQA) {
-            copy(tma_Q_desc, tQgQ(_, m_block, bidh_kv_cat), tQsQ(_, smem_pipe_write_q.index()));
-            copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block, bidh_kv_cat), sLSE(_, _, smem_pipe_write_q.index()));
+            copy(tma_Q_desc, tQgQ(_, m_block, bidh_kv_cat), tQsQ(_, stage));
+            copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block, bidh_kv_cat), sLSE(_, _, stage));
           } else {
-            copy(tma_Q_desc, tQgQ(_, m_block), tQsQ(_, smem_pipe_write_q.index()));
-            copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write_q.index()));
+            copy(tma_Q_desc, tQgQ(_, m_block), tQsQ(_, stage));
+            copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write_q)), gLSE(_, _, m_block), sLSE(_, _, stage));
           }
         }
       } else {
@@ -1572,10 +1554,14 @@ struct CollectiveMainloopBwdSm90 {
           if (thread_idx != 0)
             return;
           int const tile_first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_q.index() * kBlockM];
-          int const m_block_abs = tile_first_compound_idx / kBlockM;
+          auto const qdo_off = make_coord(tile_first_compound_idx, _0{});
+          Tensor gdO_ = local_tile(domain_offset(qdo_off, mdO), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+          Tensor tdOgdO_ = group_modes<0, 3>(block_tma_dO.partition_S(gdO_));
           auto tma_dO_desc = params.tma_load_dO_packed.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST);
-          copy(tma_dO_desc, tdOgdO_abs(_, m_block_abs), tdOsdO(_, smem_pipe_write_do_cur.index()));
-          copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum_abs(_, _, m_block_abs), sdPsum(_, _, smem_pipe_write_do_cur.index()));
+          copy(tma_dO_desc, tdOgdO_(_, 0), tdOsdO(_, smem_pipe_write_do_cur.index()));
+          auto const dpsum_off = make_coord(_0{}, tile_first_compound_idx);
+          Tensor gdPsum_ = local_tile(domain_offset(dpsum_off, mdPsum), make_shape(_4{}, Int<kBlockM>{}), make_coord(_0{}, _0{}));
+          copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum_, sdPsum(_, _, smem_pipe_write_do_cur.index()));
         } else {
           auto tma_dO_desc = [&]() {
             if constexpr (PackGQA || CatGQA) {
@@ -1700,17 +1686,8 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
     Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
     Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutV{});
-    ElementAccum* lse_smem_ptr;
-    ElementAccum* dpsum_smem_ptr;
-    if constexpr (LseDpsumUnionEffective) {
-      lse_smem_ptr = reinterpret_cast<ElementAccum*>(smem_dkacc_ptr(shared_storage.tensors.mainloop));
-      dpsum_smem_ptr = lse_smem_ptr + cute::cosize_v<SmemLayoutLSE>;
-    } else {
-      lse_smem_ptr = shared_storage.tensors.mainloop.smem_lse.data();
-      dpsum_smem_ptr = shared_storage.tensors.mainloop.smem_dpsum.data();
-    }
-    Tensor sLSE = make_tensor(make_smem_ptr(lse_smem_ptr), SmemLayoutLSE{});
-    Tensor sdPsum = make_tensor(make_smem_ptr(dpsum_smem_ptr), SmemLayoutLSE{});
+    Tensor sLSE = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSE{});
+    Tensor sdPsum = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSE{});
 
     // prepare for TMA multicast meta
     auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
@@ -1815,24 +1792,23 @@ struct CollectiveMainloopBwdSm90 {
     auto block_tma_V = params.tma_load_V.get_slice(cluster_block_id_kv);
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
-    // Sparse TMA: absolute-coordinate K/V tensors for issuing TMA at
-    // runtime-computed positions from block_meta.
-    auto tKgK_abs = [&]() {
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        auto gK_abs = local_tile(mK, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-        return group_modes<0, 3>(block_tma_K.partition_S(gK_abs));
-      } else {
-        return cute::make_tuple();
-      }
-    }();
-    auto tVgV_abs = [&]() {
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        auto gV_abs = local_tile(mV, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-        return group_modes<0, 3>(block_tma_V.partition_S(gV_abs));
-      } else {
-        return cute::make_tuple();
-      }
-    }();
+    // ─── TMA K/V load helper: domain_offset + partition, used by both dense and sparse paths ───
+    auto tma_load_K_tile = [&](int origin, int block_idx, int stage) {
+      Tensor gK_ = local_tile(domain_offset(make_coord(origin, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+      Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
+      copy(
+          params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+          tKgK_(_, block_idx),
+          tKsK(_, stage));
+    };
+    auto tma_load_V_tile = [&](int origin, int block_idx, int stage) {
+      Tensor gV_ = local_tile(domain_offset(make_coord(origin, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+      Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
+      copy(
+          params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+          tVgV_(_, block_idx),
+          tVsV(_, stage));
+    };
 
     // ─── CpAsync scatter load helper for K/V (no scalar, no GQA decomposition) ───
     auto cpasync_scatter_load_kv = [&](auto& smem, Element const* ptr_base, int stride_row, int const* idx_slot, int stage) {
@@ -1862,33 +1838,20 @@ struct CollectiveMainloopBwdSm90 {
         if (!lane_predicate)
           return;
         pipeline_k.producer_acquire(smem_pipe_write_k);
+        int const stage = smem_pipe_write_k.index();
         if constexpr (IsSparse) {
-          // Sparse TMA: only thread 0 has valid block_meta cursor.
-          // Fill contiguous token indices (needed by consumer's dKV scatter store).
           if (thread_idx == 0) {
-            int const stage = smem_pipe_write_k.index();
             int const tile_first_compound_idx = block_meta.get_tile_first_compound_idx();
             int* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockN];
             CUTE_UNROLL
             for (int r = 0; r < kBlockN; ++r) {
               idx_slot[r] = tile_first_compound_idx + r;
             }
-            int const n_block_abs = tile_first_compound_idx / kBlockN;
-            copy(
-                params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-                tKgK_abs(_, n_block_abs),
-                tKsK(_, stage));
+            tma_load_K_tile(tile_first_compound_idx, 0, stage);
           }
-          last_k_write_stage = smem_pipe_write_k.index();
+          last_k_write_stage = stage;
         } else {
-          // Dense TMA: domain_offset tensors must be created per-call because
-          // offset_k changes across merged-batch boundaries.
-          Tensor gK_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-          Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
-          copy(
-              params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tKgK_(_, block_meta.inner_block_idx),
-              tKsK(_, smem_pipe_write_k.index()));
+          tma_load_K_tile(block_meta.seqlen_info.offset_k, block_meta.inner_block_idx, stage);
         }
         ++smem_pipe_write_k;
       } else {
@@ -1915,18 +1878,10 @@ struct CollectiveMainloopBwdSm90 {
           pipeline_v.producer_acquire(smem_pipe_write_v);
           if constexpr (IsSparse) {
             if (thread_idx == 0) {
-              copy(
-                  params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-                  tVgV_abs(_, 0),
-                  tVsV(_, smem_pipe_write_v.index()));
+              tma_load_V_tile(0, 0, smem_pipe_write_v.index());
             }
           } else {
-            Tensor gV_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-            Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
-            copy(
-                params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-                tVgV_(_, 0),
-                tVsV(_, smem_pipe_write_v.index()));
+            tma_load_V_tile(block_meta.seqlen_info.offset_k, 0, smem_pipe_write_v.index());
           }
           ++smem_pipe_write_v;
         } else {
@@ -1955,21 +1910,11 @@ struct CollectiveMainloopBwdSm90 {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         if constexpr (IsSparse) {
           if (thread_idx == 0) {
-            // V reads token indices from K's stage slot (may differ when kStages_V < kStages)
             int const tile_first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_inner_indices[last_k_write_stage * kBlockN];
-            int const n_block_abs = tile_first_compound_idx / kBlockN;
-            copy(
-                params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-                tVgV_abs(_, n_block_abs),
-                tVsV(_, smem_pipe_write_v.index()));
+            tma_load_V_tile(tile_first_compound_idx, 0, smem_pipe_write_v.index());
           }
         } else {
-          Tensor gV_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-          Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
-          copy(
-              params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tVgV_(_, block_meta.inner_block_idx),
-              tVsV(_, smem_pipe_write_v.index()));
+          tma_load_V_tile(block_meta.seqlen_info.offset_k, block_meta.inner_block_idx, smem_pipe_write_v.index());
         }
         ++smem_pipe_write_v;
       } else {
@@ -3307,17 +3252,8 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdV = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(smem_dvacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVStore{}));
     Tensor sdVt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(smem_dvacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVtStore{}));
 
-    ElementAccum* lse_smem_ptr_c;
-    ElementAccum* dpsum_smem_ptr_c;
-    if constexpr (LseDpsumUnionEffective) {
-      lse_smem_ptr_c = reinterpret_cast<ElementAccum*>(smem_dkacc_ptr(shared_storage.tensors.mainloop));
-      dpsum_smem_ptr_c = lse_smem_ptr_c + cute::cosize_v<SmemLayoutLSE>;
-    } else {
-      lse_smem_ptr_c = shared_storage.tensors.mainloop.smem_lse.data();
-      dpsum_smem_ptr_c = shared_storage.tensors.mainloop.smem_dpsum.data();
-    }
-    Tensor sdPsumMma_full = make_tensor(make_smem_ptr(dpsum_smem_ptr_c), SmemLayoutLSEMma{});
-    Tensor sLSEMma_full = make_tensor(make_smem_ptr(lse_smem_ptr_c), SmemLayoutLSEMma{});
+    Tensor sdPsumMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
+    Tensor sLSEMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
     Tensor sLSEMma = sLSEMma_full(_0{}, _, _); // slice dummy dim 0 with size of 4
     Tensor sdPsumMma = sdPsumMma_full(_0{}, _, _); // slice dummy dim 0 with size of 4
 
@@ -4157,22 +4093,6 @@ struct CollectiveMainloopBwdSm90 {
       }
     } else {
       mma_body();
-    }
-
-    // When LSE/dPsum are unioned with dKVacc, the loader will TMA-load new
-    // LSE/dPsum into smem_dkacc for the next work tile. We must ensure the
-    // store warp has finished TMA-storing the last dK (which also lives in
-    // smem_dkacc) before the loader overwrites it. dVEmpty is signaled by
-    // the store warp after each dK TMA completes, so an extra sync here
-    // drains the last pending arrive. We then re-arrive on behalf of the
-    // store warp so the next tile's first dVEmpty sync is pre-satisfied
-    // (mirroring mma_init).
-    if constexpr (LseDpsumUnionEffective && dKVacc_use_smem && InnerStoreInProducer) {
-      int const warp_idx_in_wg = canonical_warp_idx_in_warpgroup_sync();
-      BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
-      if (warp_idx_in_wg == 0 || (IsSparse && warp_idx_in_wg == 1)) {
-        BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVEmptyWG1, /*warp_group_idx=*/warp_group_idx);
-      }
     }
 
     return true;

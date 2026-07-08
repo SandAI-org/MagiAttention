@@ -135,7 +135,6 @@ template <
     bool OuterStoreNeedReduction,
     int Stages_V,
     int Tma1dSmemRowPad,
-    bool LseDpsumUnionDKVacc,
     int SparseKBlockSize,
     int InnerLoadMode,
     bool UnionDkvacc,
@@ -208,7 +207,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       V_in_regs,
       Stages_V,
       Tma1dSmemRowPad,
-      LseDpsumUnionDKVacc,
       SparseKBlockSize,
       InnerLoadMode,
       UnionDkvacc,
@@ -334,7 +332,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       int sz_pipe = sizeof(typename AttnKernel::SharedStorage) - sz_tensor;
       printf("[BWD] total=%d(%.1fKB) tensor=%d pipe=%d\n", smem_size, smem_size / 1024.0f, sz_tensor, sz_pipe);
       printf(
-          "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d lseU=%d storeMode=%d union=%d SwapQK=%d\n",
+          "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d storeMode=%d union=%d SwapQK=%d\n",
           kBlockM,
           kBlockN,
           kHeadDim,
@@ -342,7 +340,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
           Stages_V,
           Stages_dS,
           Tma1dSmemRowPad,
-          (int)LseDpsumUnionDKVacc,
           InnerStoreMode,
           (int)UnionDkvacc,
           (int)BwdInnerLoopK);
@@ -409,7 +406,6 @@ template <
     int BwdStagesDs,
     int BwdStagesV,
     int BwdTma1dSmemRowPad,
-    int BwdLseUnion,
     int SparseKBlockSize,
     int InnerLoadMode,
     bool BwdUnionDkvacc,
@@ -436,7 +432,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int Stages_dS = BwdStagesDs > 0 ? BwdStagesDs : (kHeadDim <= 128 ? (kBlockM <= 64 ? 2 : 1) : 1);
   static constexpr int Stages_V = BwdStagesV > 0 ? BwdStagesV : Stages;
   static constexpr int Tma1dSmemRowPad = BwdTma1dSmemRowPad;
-  static constexpr bool LseDpsumUnionDKVacc = BwdLseUnion != 0;
   static constexpr bool UnionDkvacc = BwdUnionDkvacc;
 
   static constexpr bool SdP_swapAB = kHeadDim <= 128 ? true : false;
@@ -500,7 +495,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*OuterStoreNeedReduction=*/OuterStoreNeedReduction,
       /*Stages_V=*/Stages_V,
       /*Tma1dSmemRowPad=*/Tma1dSmemRowPad,
-      /*LseDpsumUnionDKVacc=*/LseDpsumUnionDKVacc,
       /*SparseKBlockSize=*/SparseKBlockSize,
       /*InnerLoadMode=*/InnerLoadMode,
       /*UnionDkvacc=*/UnionDkvacc,
