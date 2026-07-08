@@ -1196,26 +1196,21 @@ _ISS_CONFIGS = [
         "M128N64 ISS=1 UD=0 (baseline)",
     ),
     (
-        "iss_m64n64_iss1_ud0",
+        "iss_m128n64_iss1_ud1",
         {
-            "MAGI_ATTENTION_FFA_BWD_TILE_M": "64",
-            "MAGI_ATTENTION_FFA_BWD_TILE_N": "64",
-            "MAGI_ATTENTION_FFA_BWD_STAGES_DS": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
+            "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "1",
         },
-        "M64N64 ISS=1 UD=0",
+        "M128N64 ISS=1 UD=1 (union)",
     ),
     (
-        "iss_m64n64_iss2_ud0",
+        "iss_m128n64_iss2_ud1",
         {
-            "MAGI_ATTENTION_FFA_BWD_TILE_M": "64",
-            "MAGI_ATTENTION_FFA_BWD_TILE_N": "64",
-            "MAGI_ATTENTION_FFA_BWD_STAGES_DS": "1",
             "MAGI_ATTENTION_FFA_BWD_STAGES_V": "1",
-            "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "0",
+            "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC": "1",
             "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES": "2",
         },
-        "M64N64 ISS=2 UD=0 (double-buffer)",
+        "M128N64 ISS=2 UD=1 (union+DB)",
     ),
 ]
 
