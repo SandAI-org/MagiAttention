@@ -446,41 +446,23 @@ def generate_ranges_from_block_mask_triton(
             - k_range_tensor (torch.Tensor): Tensor of shape [num_true_blocks, 2] listing the key ranges.
     """
     assert block_mask.dim() == 4, "block_mask must be 4D [B, H, Q, K]"
-    b, h, num_q, num_k = block_mask.shape
+    _b, _h, num_q, num_k = block_mask.shape
 
-    # 1. Find all True indices in the block mask
-    # FIXME: torch.nonzero causes cpu-gpu sync
-    indices = torch.nonzero(block_mask)  # Shape: [N, 4] -> (batch, h, q, k)
-
-    n_elements = indices.shape[0]
-    if n_elements == 0:
+    indices = torch.nonzero(block_mask)  # [N, 4] → (batch, h, q, k)
+    if indices.shape[0] == 0:
         return (
             torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
             torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
         )
 
-    q_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
-    k_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
+    h_idx, q_idx, k_idx = indices[:, 1], indices[:, 2], indices[:, 3]
+    q_global = q_idx + h_idx * num_q
+    k_global = k_idx + h_idx * num_k
 
-    def grid(meta):
-        return (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-
-    block_mask_to_qk_ranges_kernel[grid](
-        indices_ptr=indices,
-        q_ranges_ptr=q_ranges,
-        k_ranges_ptr=k_ranges,
-        stride_idx_0=indices.stride(0),
-        stride_idx_1=indices.stride(1),
-        stride_out_0=q_ranges.stride(0),
-        stride_out_1=q_ranges.stride(1),
-        num_q_blocks=num_q,
-        num_k_blocks=num_k,
-        block_m=block_m,
-        block_n=block_n,
-        n_elements=n_elements,
-        BLOCK_SIZE=1024,
-    )
-
+    q_starts = (q_global * block_m).int()
+    k_starts = (k_global * block_n).int()
+    q_ranges = torch.stack([q_starts, q_starts + block_m], dim=1)
+    k_ranges = torch.stack([k_starts, k_starts + block_n], dim=1)
     return q_ranges, k_ranges
 
 

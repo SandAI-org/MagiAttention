@@ -48,7 +48,10 @@ constexpr std::tuple<int, int, bool> tile_size_fwd_sm90(int headdim, int element
     // Good for long seqlen (>= 4k) but suffers from tile quantization at short seqlen
     // return {192, is_causal || is_local ? 192 : 176, true};
   } else if (headdim <= 128) {
-    return {64, 64, true};
+    // Synced with Python tile_size_fwd_sm90 in _flex_flash_attn_jit.py.
+    // NOTE: this C++ fallback is not used in practice — Python always resolves
+    // tile sizes before Jinja rendering — but must stay in sync to avoid confusion.
+    return {128, 128, true};
     // {128, 192, false} and {192, 128, false} are quite good too
     // 128 x 192 hits the limit of smem if MmaPV_is_RS, 128 x 144 hits the limit if !MmaPV_is_RS
   } else if (headdim <= 192) {

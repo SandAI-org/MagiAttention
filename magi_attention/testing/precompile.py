@@ -122,8 +122,13 @@ def add_ffa_spec(
         dkv_dtype = None
     else:
         out_dtype = None
-        dq_dtype = compute_dtype if bwd_dq_bf16 else torch.float32
-        dkv_dtype = compute_dtype if bwd_dkv_bf16 else torch.float32
+        # Outer direct-store path uses native dtype (matches flex_flash_attn.py backward):
+        #   dQ outer (InnerLoopK + disable_dq_atomic) → compute_dtype
+        #   dKV outer (InnerLoopQ + disable_atomic) → compute_dtype
+        _dq_native = bwd_dq_bf16 or (disable_dq_atomic and bwd_inner_loop_k)
+        _dkv_native = bwd_dkv_bf16 or (disable_atomic and not bwd_inner_loop_k)
+        dq_dtype = compute_dtype if _dq_native else torch.float32
+        dkv_dtype = compute_dtype if _dkv_native else torch.float32
 
     saved_env: dict[str, str | None] = {}
     if env:
