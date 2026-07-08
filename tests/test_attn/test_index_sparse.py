@@ -450,6 +450,59 @@ class TestIndexSparseSimple(unittest.TestCase):
     - DisableAtomic auto-flag configuration
     """
 
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Standard precompile interface — see magi_attention/testing/precompile.py.
+
+        View-trick tests: FWD-only with PackGQA at various pack factors.
+        DisableAtomic tests: MQA128, FWD+BWD InnerLoopK and FWD-only.
+        """
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+
+        # view-trick tests: all FWD only, index_sparse kbs=1
+        # After view-trick rearrange, kernel sees NHK=1 → pack_gqa_factor=gqa
+        for nhq, nhk in [(2, 1), (4, 4), (32, 32)]:
+            pack_f = nhq // nhk if nhk == 1 else 1
+            pgqa = nhk == 1
+            add_ffa_spec(
+                specs,
+                direction="fwd",
+                disable_atomic=True,
+                pack_gqa=pgqa,
+                pack_gqa_factor=pack_f,
+                index_sparse=True,
+                sparse_k_block_size=1,
+            )
+
+        # disable_atomic tests: MQA128
+        # BWD InnerLoopK
+        add_ffa_spec(
+            specs,
+            direction="fwd",
+            disable_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            index_sparse=True,
+            sparse_k_block_size=1,
+        )
+        add_ffa_spec(
+            specs,
+            direction="bwd",
+            disable_dq_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            index_sparse=True,
+            bwd_inner_loop_k=True,
+            sparse_k_block_size=1,
+            bwd_dq_bf16=True,
+        )
+        # FWD-only (swap_bwd_qk_loop=None → no BWD kernel)
+        # FWD kernel is the same as above, already in specs
+
+        return specs
+
     @property
     def device(self):
         return torch.cuda.current_device()
@@ -590,6 +643,44 @@ class TestIndexSparseSweep(DistTestBase):
     Fixed compile params: MQA128, D=128, PackGQA=True, kbs=1.
     """
 
+    Q_SEQLENS = [512, 1000, 16384]
+    KV_SEQLENS = [512, 1000, 16384]
+    TOPKS = [128, 256]
+
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Standard precompile interface — see magi_attention/testing/precompile.py.
+
+        All classic combos share the same compile params: MQA128 kbs=1.
+        FWD + BWD InnerLoopK (swap_bwd_qk_loop defaults to True for IndexSparse).
+        """
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+        # FWD: disable_fwd_atomic, ref_block_size=(128,128)
+        add_ffa_spec(
+            specs,
+            direction="fwd",
+            disable_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            index_sparse=True,
+            sparse_k_block_size=1,
+        )
+        # BWD InnerLoopK: disable_dq_atomic
+        add_ffa_spec(
+            specs,
+            direction="bwd",
+            disable_dq_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            index_sparse=True,
+            bwd_inner_loop_k=True,
+            sparse_k_block_size=1,
+            bwd_dq_bf16=True,
+        )
+        return specs
+
     @property
     def seed(self):
         return SEED
@@ -607,9 +698,9 @@ class TestIndexSparseSweep(DistTestBase):
         return 600
 
     @with_run_in_mp
-    @parameterize("q_seqlen", [512, 1000, 16384])
-    @parameterize("kv_seqlen", [512, 1000, 16384])
-    @parameterize("topk", [128, 256])
+    @parameterize("q_seqlen", Q_SEQLENS)
+    @parameterize("kv_seqlen", KV_SEQLENS)
+    @parameterize("topk", TOPKS)
     def test_index_sparse_classic(self, q_seqlen, kv_seqlen, topk):
         if topk > kv_seqlen:
             return
@@ -638,6 +729,99 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     Skips invalid combos (kbs>1 requires NHK=1+PackGQA+D=128).
     """
 
+    NHQ_NHK_HD_PACKGQA = [
+        (128, 1, 128, True),  # MQA128
+        (64, 1, 128, True),  # MQA64
+        (32, 1, 128, True),  # MQA32
+        (16, 1, 128, True),  # MQA16
+        (4, 1, 128, True),  # MQA4
+        (128, 2, 128, True),  # GQA 128x2
+        (32, 4, 128, True),  # GQA 32x4
+        (4, 2, 128, True),  # GQA 4x2
+        (8, 8, 128, True),  # MHA8
+        (64, 1, 64, False),  # MQA64 D=64 no packgqa
+        (4, 4, 64, False),  # MHA4 D=64
+        (8, 2, 64, False),  # GQA 8x2 D=64
+    ]
+    KBS_VALUES = [1, 8, 32, 128, 256]
+    INNER_ENVS = [
+        {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true"},
+        {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "false"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD": "tma1d"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD": "cpasync"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE": "cpasync"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE": "tma1d"},
+    ]
+
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Standard precompile interface — see magi_attention/testing/precompile.py.
+
+        Mirrors the skip logic in the test: kbs>1 requires NHK=1+PackGQA+D=128.
+        After view-trick rearrange in _run_index_sparse_config, kernel sees
+        NHK=1 → effective pack_gqa_factor = nhq/nhk.
+        """
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+        for nhq, nhk, hd, pack_gqa in cls.NHQ_NHK_HD_PACKGQA:
+            # view-trick: kernel sees NHK=1, effective pack_f = nhq/nhk
+            pack_f = nhq // nhk if pack_gqa else 1
+            pgqa = (
+                pack_gqa or nhq == nhk
+            )  # MHA → pack_f=1 still uses pack_gqa=True after rearrange
+            if nhk > 1:
+                # after rearrange: NHQ_eff = nhq/nhk, NHK_eff=1
+                pgqa = True
+                pack_f = nhq // nhk
+
+            for kbs in cls.KBS_VALUES:
+                if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
+                    continue
+                test_bwd = kbs < 256
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    head_dim=hd,
+                    disable_atomic=True,
+                    pack_gqa=pgqa,
+                    pack_gqa_factor=pack_f,
+                    index_sparse=True,
+                    sparse_k_block_size=kbs,
+                )
+                if test_bwd:
+                    add_ffa_spec(
+                        specs,
+                        direction="bwd",
+                        head_dim=hd,
+                        disable_dq_atomic=True,
+                        pack_gqa=pgqa,
+                        pack_gqa_factor=pack_f,
+                        index_sparse=True,
+                        bwd_inner_loop_k=True,
+                        sparse_k_block_size=kbs,
+                        bwd_dq_bf16=True,
+                    )
+
+        # inner-mode variants: MQA128, kbs=1
+        for env_dict in cls.INNER_ENVS:
+            for d in ("fwd", "bwd"):
+                add_ffa_spec(
+                    specs,
+                    direction=d,
+                    disable_atomic=True if d == "fwd" else False,
+                    disable_dq_atomic=True if d == "bwd" else False,
+                    pack_gqa=True,
+                    pack_gqa_factor=128,
+                    index_sparse=True,
+                    bwd_inner_loop_k=(d == "bwd"),
+                    sparse_k_block_size=1,
+                    bwd_dq_bf16=(d == "bwd"),
+                    env=env_dict,
+                )
+
+        return specs
+
     @property
     def seed(self):
         return SEED
@@ -655,24 +839,8 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         return 1200
 
     @with_run_in_mp
-    @parameterize(
-        "nhq_nhk_hd_packgqa",
-        [
-            (128, 1, 128, True),  # MQA128
-            (64, 1, 128, True),  # MQA64
-            (32, 1, 128, True),  # MQA32
-            (16, 1, 128, True),  # MQA16
-            (4, 1, 128, True),  # MQA4
-            (128, 2, 128, True),  # GQA 128x2
-            (32, 4, 128, True),  # GQA 32x4
-            (4, 2, 128, True),  # GQA 4x2
-            (8, 8, 128, True),  # MHA8
-            (64, 1, 64, False),  # MQA64 D=64 no packgqa
-            (4, 4, 64, False),  # MHA4 D=64
-            (8, 2, 64, False),  # GQA 8x2 D=64
-        ],
-    )
-    @parameterize("kbs", [1, 8, 32, 128, 256])
+    @parameterize("nhq_nhk_hd_packgqa", NHQ_NHK_HD_PACKGQA)
+    @parameterize("kbs", KBS_VALUES)
     def test_index_sparse_comprehensive(self, nhq_nhk_hd_packgqa, kbs):
         nhq, nhk, hd, pack_gqa = nhq_nhk_hd_packgqa
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
@@ -700,17 +868,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
 
     @with_run_in_mp
-    @parameterize(
-        "inner_env",
-        [
-            {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true"},
-            {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "false"},
-            {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD": "tma1d"},
-            {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD": "cpasync"},
-            {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE": "cpasync"},
-            {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE": "tma1d"},
-        ],
-    )
+    @parameterize("inner_env", INNER_ENVS)
     def test_index_sparse_inner_mode(self, inner_env):
         config: dict[str, Any] = {
             "B": 1,

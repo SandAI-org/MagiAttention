@@ -82,6 +82,64 @@ BACKENDS = "backends"
 
 # TODO: rewrite the specific function for unitest profiling mode
 class TestPipelineBaseWithWorldSize1(DistTestBase):
+    # Dense feature combos needed by the pipeline test flag-comb sweep.
+    # (disable_atomic, deterministic, auto_range_merge, cat_gqa,
+    #  bwd_inner_loop_k, pack_gqa_factor, return_max_logits)
+    CI_DENSE_FEATURES = [
+        (False, True, False, False, False, 1, False),  # deterministic
+        (False, False, True, False, False, 1, False),  # auto_range_merge
+        (False, False, True, False, False, 128, False),  # ARM + packgqa128
+        (False, False, False, False, True, 1, False),  # bwd_inner_loop_k
+        (False, False, False, False, True, 8, False),  # swap + packgqa8
+        (False, False, True, False, True, 8, False),  # ARM + swap + packgqa8
+        (False, False, True, False, True, 128, False),  # ARM + swap + packgqa128
+        (False, False, False, False, False, 1, True),  # return_max_logits
+        (False, False, False, False, False, 8, True),  # RML + packgqa8
+        (False, False, True, False, False, 1, True),  # ARM + RML
+        (False, False, True, False, False, 8, True),  # ARM + RML + packgqa8
+        (False, True, False, False, False, 1, True),  # det + RML
+        (False, True, False, False, False, 8, True),  # det + RML + packgqa8
+        (False, True, True, False, False, 1, True),  # det + ARM + RML
+        (False, False, False, True, False, 8, False),  # catgqa8
+        (False, False, True, True, False, 8, False),  # ARM + catgqa8
+        (False, True, False, True, False, 8, False),  # det + catgqa8
+        (False, True, True, True, False, 8, False),  # det + ARM + catgqa8
+    ]
+
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Standard precompile interface — see magi_attention/testing/precompile.py.
+
+        Dense extras: feature flag combos × hd × compute_dtype × direction.
+        These kernels are NOT sparse — they cover deterministic, ARM,
+        cat_gqa, return_max_logits, bwd_inner_loop_k flag combos used by
+        test_pipeline and test_flex_flash_attn.
+        """
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+        for hd in [64, 128]:
+            for compute_dt in [torch.float16, torch.bfloat16]:
+                for dis_at, det, arm, cat, swap, pgf, rml in cls.CI_DENSE_FEATURES:
+                    directions = ["fwd"] if rml else ["fwd", "bwd"]
+                    pack_gqa = pgf > 1
+                    for direction in directions:
+                        add_ffa_spec(
+                            specs,
+                            direction=direction,
+                            head_dim=hd,
+                            compute_dtype=compute_dt,
+                            output_dtype=torch.float32 if direction == "fwd" else None,
+                            deterministic=det,
+                            auto_range_merge=arm,
+                            pack_gqa=pack_gqa,
+                            cat_gqa=cat,
+                            pack_gqa_factor=pgf,
+                            bwd_inner_loop_k=swap and direction == "bwd",
+                            return_max_logits=rml,
+                        )
+        return specs
+
     def init_pg(self) -> None:
         super().init_pg()
 

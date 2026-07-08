@@ -906,6 +906,151 @@ class TestBlockSparseSimple(unittest.TestCase):
     def device(self):
         return torch.cuda.current_device()
 
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Standard precompile interface — FFA kernels this class needs.
+
+        See magi_attention/testing/precompile.py. Derived from the same
+        config constants used by the tests below.
+        """
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+
+        # ── test_very_simple_block_sparse: GQA nhq=16/nhk=4, seqlen 2048 ──
+        # k_size ∈ {64, 1} → runtime sparse_k_block_size auto-derived from
+        # k_ranges: uniform k_size blocks
+        for cfg in cls.VERY_SIMPLE_BLOCK_SPARSE_CONFIGS:
+            kbs = cfg["k_size"]
+            pack_gqa = cfg.get("pack_gqa", True)
+            # FWD: sparse auto-flags → disable_fwd_atomic, ref forced (128,128)
+            add_ffa_spec(
+                specs,
+                direction="fwd",
+                ref_block_size=(128, 128),
+                disable_atomic=True,
+                pack_gqa=pack_gqa,
+                pack_gqa_factor=4,
+                block_sparse=True,
+                auto_range_merge=True,
+                sparse_k_block_size=kbs,
+            )
+            if cfg["swap_bwd_qk_loop"]:
+                # BWD InnerLoopK: disable_dq_atomic → dq native dtype
+                add_ffa_spec(
+                    specs,
+                    direction="bwd",
+                    disable_dq_atomic=True,
+                    pack_gqa=True,
+                    pack_gqa_factor=4,
+                    block_sparse=True,
+                    auto_range_merge=True,
+                    bwd_inner_loop_k=True,
+                    sparse_k_block_size=kbs,
+                    bwd_dq_bf16=True,
+                )
+            else:
+                # BWD InnerLoopQ without pack_gqa: no dkv-atomic disable
+                add_ffa_spec(
+                    specs,
+                    direction="bwd",
+                    block_sparse=True,
+                    auto_range_merge=True,
+                    sparse_k_block_size=kbs,
+                )
+
+        # ── test_block_sparse_loopq_packgqa: MQA128, dense ref + sparse ──
+        for cfg in cls.LOOPQ_PACKGQA_CONFIGS:
+            kbs = cfg["k_block"]
+            # dense reference (block_sparse=False, ARM, PackGQA128, swap=True)
+            add_ffa_spec(
+                specs,
+                direction="fwd",
+                pack_gqa=True,
+                pack_gqa_factor=128,
+                auto_range_merge=True,
+            )
+            add_ffa_spec(
+                specs,
+                direction="bwd",
+                pack_gqa=True,
+                pack_gqa_factor=128,
+                auto_range_merge=True,
+                bwd_inner_loop_k=True,
+            )
+            # sparse FWD
+            add_ffa_spec(
+                specs,
+                direction="fwd",
+                ref_block_size=(128, 128),
+                disable_atomic=True,
+                pack_gqa=True,
+                pack_gqa_factor=128,
+                block_sparse=True,
+                auto_range_merge=True,
+                sparse_k_block_size=kbs,
+            )
+            # sparse BWD LoopQ: PackGQA → disable_dkv_atomic → dkv native
+            add_ffa_spec(
+                specs,
+                direction="bwd",
+                disable_atomic=True,
+                pack_gqa=True,
+                pack_gqa_factor=128,
+                block_sparse=True,
+                auto_range_merge=True,
+                sparse_k_block_size=kbs,
+                bwd_dkv_bf16=True,
+            )
+            if kbs == 128:
+                # sparse BWD LoopK case
+                add_ffa_spec(
+                    specs,
+                    direction="bwd",
+                    disable_dq_atomic=True,
+                    pack_gqa=True,
+                    pack_gqa_factor=128,
+                    block_sparse=True,
+                    auto_range_merge=True,
+                    bwd_inner_loop_k=True,
+                    sparse_k_block_size=kbs,
+                    bwd_dq_bf16=True,
+                )
+
+        # ── test_disable_atomic_block_sparse_*: kbs=128, S=2048 ──
+        for inner_loop_k, pack_f, pack_gqa in [
+            (False, 128, True),  # innerloopq (MQA128)
+            (True, 128, True),  # innerloopk (MQA128)
+            (False, 1, False),  # mha (NHQ=NHK=1)
+        ]:
+            add_ffa_spec(
+                specs,
+                direction="fwd",
+                ref_block_size=(128, 128),
+                disable_atomic=True,
+                pack_gqa=pack_gqa,
+                pack_gqa_factor=pack_f,
+                block_sparse=True,
+                auto_range_merge=True,
+                sparse_k_block_size=128,
+            )
+            add_ffa_spec(
+                specs,
+                direction="bwd",
+                disable_atomic=not inner_loop_k,  # LoopQ+gqa_safe → dkv disable
+                disable_dq_atomic=inner_loop_k,
+                pack_gqa=pack_gqa,
+                pack_gqa_factor=pack_f,
+                block_sparse=True,
+                auto_range_merge=True,
+                bwd_inner_loop_k=inner_loop_k,
+                sparse_k_block_size=128,
+                bwd_dq_bf16=inner_loop_k,
+                bwd_dkv_bf16=not inner_loop_k,
+            )
+
+        return specs
+
     def _get_block_sparse_helper(self):
         helper = _BlockSparseTestHelper.__new__(_BlockSparseTestHelper)
         return helper
@@ -1257,11 +1402,73 @@ class TestBlockSparseSweep(DistTestBase):
     def timeout(self) -> int:
         return 600
 
+    # parameter space shared by @parameterize and precompile_kernel_specs
+    Q_SEQLENS = [512, 1000, 16384]
+    KV_SEQLENS = [512, 1000, 16384]
+    SPARSITIES = [0.2]
+    SWAP_BWD_QK_LOOPS = [False, True]
+
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Standard precompile interface — see magi_attention/testing/precompile.py.
+
+        All classic-sweep combos share the same compile-time params
+        (MQA128 + kbs=128); only the BWD loop direction changes kernels.
+        The dense reference adds the non-sparse ARM+PackGQA128 kernels.
+        """
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+        # dense reference: block_sparse=False, ARM, PackGQA128, swap=True
+        add_ffa_spec(
+            specs,
+            direction="fwd",
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            auto_range_merge=True,
+        )
+        add_ffa_spec(
+            specs,
+            direction="bwd",
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            auto_range_merge=True,
+            bwd_inner_loop_k=True,
+        )
+        # sparse FWD (auto-flags: disable_fwd_atomic, ref forced (128,128))
+        add_ffa_spec(
+            specs,
+            direction="fwd",
+            ref_block_size=(128, 128),
+            disable_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            block_sparse=True,
+            auto_range_merge=True,
+            sparse_k_block_size=128,
+        )
+        for swap in cls.SWAP_BWD_QK_LOOPS:
+            add_ffa_spec(
+                specs,
+                direction="bwd",
+                disable_atomic=not swap,  # LoopQ + PackGQA → dkv-atomic disabled
+                disable_dq_atomic=swap,  # LoopK → dq-atomic disabled
+                pack_gqa=True,
+                pack_gqa_factor=128,
+                block_sparse=True,
+                auto_range_merge=True,
+                bwd_inner_loop_k=swap,
+                sparse_k_block_size=128,
+                bwd_dq_bf16=swap,
+                bwd_dkv_bf16=not swap,
+            )
+        return specs
+
     @with_run_in_mp
-    @parameterize("q_seqlen", [512, 1000, 16384])
-    @parameterize("kv_seqlen", [512, 1000, 16384])
-    @parameterize("sparsity", [0.2])
-    @parameterize("swap_bwd_qk_loop", [False, True])
+    @parameterize("q_seqlen", Q_SEQLENS)
+    @parameterize("kv_seqlen", KV_SEQLENS)
+    @parameterize("sparsity", SPARSITIES)
+    @parameterize("swap_bwd_qk_loop", SWAP_BWD_QK_LOOPS)
     def test_block_sparse_mqa_sweep(
         self, q_seqlen, kv_seqlen, sparsity, swap_bwd_qk_loop
     ):
@@ -1355,13 +1562,56 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
     def timeout(self) -> int:
         return 1200
 
+    # parameter space shared by @parameterize and precompile_kernel_specs
+    NHQ_NHK_HD = [(8, 8, 128), (16, 4, 128), (128, 1, 128), (1, 1, 64), (4, 2, 64)]
+    Q_SIZE_K_SIZE = [(64, 64), (128, 1), (16, 128), (64, 8)]
+    SPARSITY_RATIOS = [0.5]
+
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Standard precompile interface — see magi_attention/testing/precompile.py.
+
+        Kernel axes: pack_gqa_factor (= nhq/nhk), head_dim, and
+        sparse_k_block_size (= k_size, auto-derived from k_ranges at runtime).
+        Test always runs FWD + BWD InnerLoopK (swap_bwd_qk_loop=True).
+        """
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+        for nhq, nhk, hd in cls.NHQ_NHK_HD:
+            pack_f = nhq // nhk
+            for _q_size, k_size in cls.Q_SIZE_K_SIZE:
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    head_dim=hd,
+                    ref_block_size=(128, 128),
+                    disable_atomic=True,
+                    pack_gqa=True,
+                    pack_gqa_factor=pack_f,
+                    block_sparse=True,
+                    auto_range_merge=True,
+                    sparse_k_block_size=k_size,
+                )
+                add_ffa_spec(
+                    specs,
+                    direction="bwd",
+                    head_dim=hd,
+                    disable_dq_atomic=True,
+                    pack_gqa=True,
+                    pack_gqa_factor=pack_f,
+                    block_sparse=True,
+                    auto_range_merge=True,
+                    bwd_inner_loop_k=True,
+                    sparse_k_block_size=k_size,
+                    bwd_dq_bf16=True,
+                )
+        return specs
+
     @with_run_in_mp
-    @parameterize(
-        "nhq_nhk_hd",
-        [(8, 8, 128), (16, 4, 128), (128, 1, 128), (1, 1, 64), (4, 2, 64)],
-    )
-    @parameterize("q_size_k_size", [(64, 64), (128, 1), (16, 128), (64, 8)])
-    @parameterize("sparsity_ratio", [0.5])
+    @parameterize("nhq_nhk_hd", NHQ_NHK_HD)
+    @parameterize("q_size_k_size", Q_SIZE_K_SIZE)
+    @parameterize("sparsity_ratio", SPARSITY_RATIOS)
     def test_block_sparse_comprehensive_sweep(
         self, nhq_nhk_hd, q_size_k_size, sparsity_ratio
     ):
