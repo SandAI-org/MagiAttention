@@ -346,11 +346,12 @@ struct BlockSparseBlockMeta {
     }
   }
 
-  // Return the absolute packed row index for the first row of the current tile.
-  // Used by InnerLoadMode::kTma (scatter) to compute TMA tile coordinates.
+  // Return token_head_compound_idx for the first row of the current tile:
+  // token_idx * PackGQAFactor + g_within_group (or plain token_idx when !PackGQA).
+  // Used by sparse TMA to compute absolute tile coordinates.
   CUTLASS_DEVICE
-  int get_packed_first_row() const {
-    static_assert(IsProducer, "get_packed_first_row() is producer-only");
+  int get_tile_first_compound_idx() const {
+    static_assert(IsProducer, "get_tile_first_compound_idx() is producer-only");
     return packed_range(cur_range_idx).x + cur_range_inner_idx;
   }
 
@@ -554,12 +555,12 @@ struct IndexSparseBlockMeta {
     }
   }
 
-  // First token row of the current tile — unified kStride formula for both directions.
+  // token_head_compound_idx for the first row of the current tile — unified kStride formula.
   // LoopK (kbs >= kBlockN): TMA caller divides by InnerBlockSize to get tile coordinate.
-  // LoopQ: result is the packed Q row directly.
+  // LoopQ: result is token_idx * PackGQAFactor + g (or plain token_idx).
   CUTLASS_DEVICE
-  int get_packed_first_row() const {
-    static_assert(IsProducer, "get_packed_first_row() is producer-only");
+  int get_tile_first_compound_idx() const {
+    static_assert(IsProducer, "get_tile_first_compound_idx() is producer-only");
     constexpr int kStride = InnerLoopQ ? (PackGQA ? PackGQAFactor : 1) : SparseKBlockSize;
     int const tile_pos = inner_block_idx * InnerBlockSize;
     int const indices_idx = tile_pos / kStride;

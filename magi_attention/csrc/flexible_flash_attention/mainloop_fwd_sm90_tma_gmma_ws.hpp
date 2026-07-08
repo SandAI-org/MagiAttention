@@ -724,7 +724,7 @@ struct CollectiveMainloopFwdSm90 {
       } else if constexpr ((BlockSparse || IndexSparse) && kInnerLoadMode == InnerLoadMode::Tma) {
         // BlockSparse / IndexSparse TMA: tiles are contiguous → use absolute coords.
         if (is_tma_issue_thread()) {
-          int const n_block_abs = block_meta.get_packed_first_row() / kBlockN;
+          int const n_block_abs = block_meta.get_tile_first_compound_idx() / kBlockN;
           shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_k.index()] = n_block_abs;
 
           Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
@@ -895,7 +895,7 @@ struct CollectiveMainloopFwdSm90 {
 
     // OPT-5: Prefetch all K block indices from GMEM to SMEM once per outer tile.
     // The TMA issue thread reads sparse_indices_ptr[indices_idx] every inner iteration
-    // via get_packed_first_row(); redirecting that pointer to SMEM eliminates per-tile
+    // via get_tile_first_compound_idx(); redirecting that pointer to SMEM eliminates per-tile
     // GMEM latency on the producer critical path.
     if constexpr (IndexSparse && kInnerLoadMode == InnerLoadMode::Tma) {
       int const num_kblocks = block_meta.seqlen_info.seqlen_k / SparseKBlockSize;
