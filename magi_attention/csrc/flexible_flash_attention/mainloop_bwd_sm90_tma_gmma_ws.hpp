@@ -1807,17 +1807,15 @@ struct CollectiveMainloopBwdSm90 {
       copy(bulk_copy.with(barrier_QdO), gdPsum, sdPsum);
     };
 
-    // ─── TMA setup for K/V (dense and scatter-TMA paths) ───
+    // ─── TMA setup for K/V ───
     auto block_tma_K = params.tma_load_K.get_slice(cluster_block_id_kv);
-    Tensor tKgK = group_modes<0, 3>(block_tma_K.partition_S(gK)); // (TMA, k)
     Tensor tKsK = group_modes<0, 3>(block_tma_K.partition_D(sK)); // (TMA, PIPE)
 
     auto block_tma_V = params.tma_load_V.get_slice(cluster_block_id_kv);
-    Tensor tVgV = group_modes<0, 3>(block_tma_V.partition_S(gV)); // (TMA, k)
     Tensor tVsV = group_modes<0, 3>(block_tma_V.partition_D(sV)); // (TMA, PIPE)
 
-    // kInnerLoadMode == InnerLoadMode::Tma && IsSparse (InnerLoopK scatter TMA): absolute-coordinate
-    // K/V tensors for issuing TMA at runtime-computed positions from block_meta.
+    // Sparse TMA: absolute-coordinate K/V tensors for issuing TMA at
+    // runtime-computed positions from block_meta.
     auto tKgK_abs = [&]() {
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         auto gK_abs = local_tile(mK, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
@@ -1835,87 +1833,112 @@ struct CollectiveMainloopBwdSm90 {
       }
     }();
 
-    // ─── Unified load_K / load_V: scatter vs TMA ───
+    // ─── CpAsync scatter load helper for K/V (no scalar, no GQA decomposition) ───
+    auto cpasync_scatter_load_kv = [&](auto& smem, Element const* ptr_base, int stride_row, int const* idx_slot, int stage) {
+      CUTE_UNROLL
+      for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
+        int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
+        int token_idx = idx_slot[smem_row] * stride_row;
+        CUTE_UNROLL
+        for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
+          if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
+            Element* dst_ptr = &smem(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, stage);
+            auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_base + token_idx + tile_idx * 64)), Layout<_1>{});
+            auto s_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
+            cute::copy(cp_async_cg, g_src, s_dst);
+          }
+        }
+      }
+    };
+
+    // ─── load_K / load_V: two branches — TMA (dense + sparse) and CpAsync (sparse fallback) ───
     // When kStages_V != kStages, V pipeline's stage index differs from K's.
     // V needs K's stage to read smem_sparse_inner_indices (populated by load_K).
     int last_k_write_stage = 0;
 
     auto load_K = [&]() {
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        // Scatter TMA: BlockSparse K tiles are contiguous within each k_range.
-        // All elected threads participate in pipe state; only thread 0 issues TMA.
+      if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
         if (!lane_predicate)
           return;
         pipeline_k.producer_acquire(smem_pipe_write_k);
-        if (thread_idx == 0) {
-          int const stage = smem_pipe_write_k.index();
-          int const packed_first_row = block_meta.get_packed_first_row();
-          // Fill contiguous token indices (needed by consumer's dKV scatter store)
-          int* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockN];
-          CUTE_UNROLL
-          for (int r = 0; r < kBlockN; ++r) {
-            idx_slot[r] = packed_first_row + r;
+        if constexpr (IsSparse) {
+          // Sparse TMA: only thread 0 has valid block_meta cursor.
+          // Fill contiguous token indices (needed by consumer's dKV scatter store).
+          if (thread_idx == 0) {
+            int const stage = smem_pipe_write_k.index();
+            int const packed_first_row = block_meta.get_packed_first_row();
+            int* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockN];
+            CUTE_UNROLL
+            for (int r = 0; r < kBlockN; ++r) {
+              idx_slot[r] = packed_first_row + r;
+            }
+            int const n_block_abs = packed_first_row / kBlockN;
+            copy(
+                params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+                tKgK_abs(_, n_block_abs),
+                tKsK(_, stage));
           }
-          int const n_block_abs = packed_first_row / kBlockN;
+          last_k_write_stage = smem_pipe_write_k.index();
+        } else {
+          // Dense TMA: domain_offset tensors must be created per-call because
+          // offset_k changes across merged-batch boundaries.
+          Tensor gK_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+          Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
           copy(
               params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tKgK_abs(_, n_block_abs),
-              tKsK(_, stage));
+              tKgK_(_, block_meta.inner_block_idx),
+              tKsK(_, smem_pipe_write_k.index()));
         }
-        last_k_write_stage = smem_pipe_write_k.index();
         ++smem_pipe_write_k;
-      } else if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
-        // Legacy cp.async per-row scatter (for A/B benchmarking against TMA 1D).
+      } else {
+        // CpAsync scatter: all producer threads participate, per-token cp.async.
         pipeline_k.producer_acquire(smem_pipe_write_k);
         int* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_k.index() * kBlockN];
         block_meta.fill_token_indices(idx_slot, ldst_group_inner_idx, ldst_group_idx);
         __syncwarp();
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-          int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
-          int token_idx = idx_slot[smem_row] * stride_kv_row;
-          CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
-            if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-              Element* dst_ptr = &sK(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_k.index());
-              auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_idx + tile_idx * 64)), Layout<_1>{});
-              auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-              cute::copy(cp_async_cg, gK_src, sK_dst);
-            }
-          }
-        }
+        cpasync_scatter_load_kv(sK, ptr_gK_base, stride_kv_row, idx_slot, smem_pipe_write_k.index());
         last_k_write_stage = smem_pipe_write_k.index();
         pipeline_k.producer_commit(smem_pipe_write_k, cutlass::arch::cpasync_barrier_arrive);
-        ++smem_pipe_write_k;
-      } else {
-        if (!lane_predicate)
-          return;
-        Tensor gK_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-        Tensor tKgK_ = group_modes<0, 3>(block_tma_K.partition_S(gK_));
-        pipeline_k.producer_acquire(smem_pipe_write_k);
-        copy(
-            params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tKgK_(_, block_meta.inner_block_idx),
-            tKsK(_, smem_pipe_write_k.index()));
         ++smem_pipe_write_k;
       }
     };
 
     auto load_V = [&]() {
       if constexpr (PerfDebugSkipVLoad) {
-        // Debug: lightweight V load placeholder. Performs a real TMA/cp.async
-        // copy from a FIXED block (block 0) so the pipeline stays intact and
-        // PV MMA runs on real (but wrong) data. After the first iteration the
-        // load hits L2 cache, minimizing actual GMEM bandwidth.
-        if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
+        // Debug: lightweight V load placeholder. Loads a FIXED block (block 0)
+        // so the pipeline stays intact and PV MMA runs on real (but wrong) data.
+        // After the first iteration the load hits L2 cache, minimizing GMEM bandwidth.
+        if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
+          if (!lane_predicate)
+            return;
+          pipeline_v.producer_acquire(smem_pipe_write_v);
+          if constexpr (IsSparse) {
+            if (thread_idx == 0) {
+              copy(
+                  params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+                  tVgV_abs(_, 0),
+                  tVsV(_, smem_pipe_write_v.index()));
+            }
+          } else {
+            Tensor gV_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
+            Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
+            copy(
+                params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+                tVgV_(_, 0),
+                tVsV(_, smem_pipe_write_v.index()));
+          }
+          ++smem_pipe_write_v;
+        } else {
+          // CpAsync debug: sequential rows from block 0 (no idx_slot).
           pipeline_v.producer_acquire(smem_pipe_write_v);
           CUTE_UNROLL
           for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-            int token_idx = (ldst_group_idx * NumTokensPerLdstGroup + local_row) * stride_kv_row_v;
+            int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
+            int token_idx = smem_row * stride_kv_row_v;
             CUTE_UNROLL
             for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
               if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-                Element* dst_ptr = &sV(ldst_group_idx * NumTokensPerLdstGroup + local_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_v.index());
+                Element* dst_ptr = &sV(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_v.index());
                 auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_idx + tile_idx * 64)), Layout<_1>{});
                 auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
                 cute::copy(cp_async_cg, gV_src, sV_dst);
@@ -1924,75 +1947,36 @@ struct CollectiveMainloopBwdSm90 {
           }
           pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
           ++smem_pipe_write_v;
-        } else if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-          // Scatter-TMA: mirror the real scatter path — only thread 0 issues TMA.
-          if (!lane_predicate)
-            return;
-          pipeline_v.producer_acquire(smem_pipe_write_v);
+        }
+      } else if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
+        if (!lane_predicate)
+          return;
+        pipeline_v.producer_acquire(smem_pipe_write_v);
+        if constexpr (IsSparse) {
           if (thread_idx == 0) {
+            // V reads token indices from K's stage slot (may differ when kStages_V < kStages)
+            int const packed_first_row = shared_storage.tensors.mainloop.smem_sparse_inner_indices[last_k_write_stage * kBlockN];
+            int const n_block_abs = packed_first_row / kBlockN;
             copy(
                 params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-                tVgV_abs(_, 0),
+                tVgV_abs(_, n_block_abs),
                 tVsV(_, smem_pipe_write_v.index()));
           }
-          ++smem_pipe_write_v;
         } else {
-          // Non-scatter TMA: load V block 0 every iteration (L2 cached after first).
-          if (!lane_predicate)
-            return;
           Tensor gV_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
           Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
-          pipeline_v.producer_acquire(smem_pipe_write_v);
           copy(
               params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tVgV_(_, 0),
+              tVgV_(_, block_meta.inner_block_idx),
               tVsV(_, smem_pipe_write_v.index()));
-          ++smem_pipe_write_v;
         }
-      } else if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        if (!lane_predicate)
-          return;
-        pipeline_v.producer_acquire(smem_pipe_write_v);
-        if (thread_idx == 0) {
-          int const v_stage = smem_pipe_write_v.index();
-          // V reads token indices from K's stage slot (they may differ when kStages_V < kStages)
-          int const packed_first_row = shared_storage.tensors.mainloop.smem_sparse_inner_indices[last_k_write_stage * kBlockN];
-          int const n_block_abs = packed_first_row / kBlockN;
-          copy(
-              params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-              tVgV_abs(_, n_block_abs),
-              tVsV(_, v_stage));
-        }
-        ++smem_pipe_write_v;
-      } else if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
-        // Legacy cp.async per-row scatter for V (A/B benchmarking).
-        pipeline_v.producer_acquire(smem_pipe_write_v);
-        int const* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[last_k_write_stage * kBlockN];
-        CUTE_UNROLL
-        for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-          int token_idx = idx_slot[ldst_group_idx * NumTokensPerLdstGroup + local_row] * stride_kv_row_v;
-          CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
-            if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-              Element* dst_ptr = &sV(ldst_group_idx * NumTokensPerLdstGroup + local_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_v.index());
-              auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_idx + tile_idx * 64)), Layout<_1>{});
-              auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
-              cute::copy(cp_async_cg, gV_src, sV_dst);
-            }
-          }
-        }
-        pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       } else {
-        if (!lane_predicate)
-          return;
-        Tensor gV_ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
-        Tensor tVgV_ = group_modes<0, 3>(block_tma_V.partition_S(gV_));
+        // CpAsync scatter: reuse K's token indices from last_k_write_stage.
         pipeline_v.producer_acquire(smem_pipe_write_v);
-        copy(
-            params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write_v), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-            tVgV_(_, block_meta.inner_block_idx),
-            tVsV(_, smem_pipe_write_v.index()));
+        int const* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[last_k_write_stage * kBlockN];
+        cpasync_scatter_load_kv(sV, ptr_gV_base, stride_kv_row_v, idx_slot, smem_pipe_write_v.index());
+        pipeline_v.producer_commit(smem_pipe_write_v, cutlass::arch::cpasync_barrier_arrive);
         ++smem_pipe_write_v;
       }
     };
