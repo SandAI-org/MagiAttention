@@ -108,6 +108,109 @@ attention computation, and the output is cast back to the original input dtype.
 
 ## For Performance
 
+### FFA BWD Kernel Tuning (Advanced)
+
+The following environment variables control low-level kernel configuration for the backward pass.
+They override compile-time defaults and produce distinct JIT-cached kernels per configuration.
+**For expert use only** — incorrect combinations may cause correctness issues or crashes.
+
+**MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS**
+
+- **Defaults to:** auto (40 for sparse, 64 for dense)
+- **Used by:** `_flex_flash_attn_jit.py` → `kBwdProducerRegs` / `kBwdConsumerRegs`
+
+Override the `setmaxnreg` register quota for the producer warp group. Consumer regs are derived
+to satisfy the per-SM register budget constraint: `1×ProducerRegs + 2×ConsumerRegs ≤ 504`.
+
+**MAGI_ATTENTION_FFA_BWD_TILE_M** / **MAGI_ATTENTION_FFA_BWD_TILE_N**
+
+- **Defaults to:** `0` (auto from `tile_size_bwd_sm90()`)
+- **Used by:** `kBwdTileM` / `kBwdTileN` in the kernel
+
+Override the MMA tile dimensions (M×N) for the backward kernel. Common values: 64, 128.
+
+**MAGI_ATTENTION_FFA_BWD_STAGES** / **MAGI_ATTENTION_FFA_BWD_STAGES_DS** / **MAGI_ATTENTION_FFA_BWD_STAGES_V**
+
+- **Defaults to:** `0` (auto: stages=2, stages_ds=1 or 2, stages_v=stages)
+- **Used by:** `kBwdStages` / `kBwdStagesDs` / `kBwdStagesV`
+
+Override the number of pipeline stages for K (main pipeline), dS (double buffer), and V.
+
+**MAGI_ATTENTION_FFA_BWD_LSE_UNION**
+
+- **Defaults to:** `0` (separate smem_lse/smem_dpsum)
+- **Used by:** `kBwdLseUnion` → `LseDpsumUnionDKVacc`
+
+Set to `1` to union the LSE/dpsum SMEM with the dKVacc buffer (saves SMEM, requires careful sizing).
+
+**MAGI_ATTENTION_FFA_BWD_UNION_DKVACC**
+
+- **Defaults to:** `0` (smem_dkacc and smem_dvacc are unioned into one buffer)
+- **Used by:** `UnionDkvacc` template parameter
+
+Set to `1` to un-union dKacc/dVacc (separate SMEM for each). Requires `stages_v=1` to fit.
+
+**MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS**
+
+- **Defaults to:** `0`
+- **Used by:** `kInnerStoreMode` (forces `InnerStoreMode::BypassSmem`)
+
+Set to `1` to bypass the SMEM accumulator for dKV — consumer WGs atomicAdd directly to GMEM
+from registers. Experimental; may improve performance for bandwidth-bound configs.
+
+**MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD**
+
+- **Defaults to:** auto (`tma` when tiles are contiguous, else `cpasync`)
+- **Used by:** `kInnerLoadMode` enum (`Tma`=0, `Tma1d`=1, `CpAsync`=2)
+
+Override the inner-loop load method for sparse paths. Options: `tma`, `tma1d`, `cpasync`.
+
+**MAGI_ATTENTION_FFA_SPARSE_INNER_STORE**
+
+- **Defaults to:** `tma1d`
+- **Used by:** `kInnerStoreMode` enum (`Tma1d`=1, `AtomicAdd`=2, `BypassSmem`=3)
+
+Override the inner-loop store method for sparse paths. Options: `tma1d`, `atomicadd`, `bypass`.
+
+**MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER**
+
+- **Defaults to:** `true`
+- **Used by:** `InnerStoreInProducer` template parameter
+
+Set to `false` to have consumer WGs handle dX store directly (frees producer warps for loading
+but increases consumer register pressure).
+
+**MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN**
+
+- **Defaults to:** `true`
+- **Used by:** `InnerDirMaxToMin` template parameter
+
+Set to `false` to iterate the inner loop from min to max instead of max to min.
+
+**MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS**
+
+- **Defaults to:** `false`
+- **Used by:** `PerfDebugForceMmaDkvSS`
+
+Force Mma_dKV to SS (SMEM-SMEM) mode instead of RS. For benchmarking register pressure.
+
+### FFA BWD PerfDebug Switches (Isolation Testing)
+
+These switches disable specific operations in the backward kernel for performance isolation.
+**Correctness is NOT guaranteed when any of these are enabled.**
+
+| Env Variable | Kernel Flag | Effect |
+|---|---|---|
+| `MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD` | `PerfDebugSkipVLoad` | Skip V tile load |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE` | `PerfDebugSkipDvStore` | Skip dV GMEM store |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE` | `PerfDebugSkipDkStore` | Skip dK GMEM store |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA` | `PerfDebugSkipDvMma` | Skip dV MMA |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK` | `PerfDebugSkipDvWriteback` | Skip dV r2s writeback |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK` | `PerfDebugSkipDkWriteback` | Skip dK r2s writeback |
+| `MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S` | `PerfDebugDeferDvR2S` | Defer dV register-to-SMEM |
+
+---
+
 **MAGI_ATTENTION_FA4_BACKEND**
 
 - **Defaults to:** `0`

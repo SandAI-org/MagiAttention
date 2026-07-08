@@ -66,7 +66,7 @@ SCENARIOS = [
 ]
 
 PASSES = ["fwd", "bwd_loopk", "bwd_loopq"]
-METHODS = ["d1b", "d1b_nopg", "dense_nb", "dense_nb_rm", "block_sparse", "index_sparse"]
+METHODS = ["d1b", "d1b_nopg", "dense_nb_rm", "block_sparse", "index_sparse"]
 
 
 def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
@@ -96,17 +96,6 @@ def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
         f"{f', max_kvseqlen={max_kvseqlen // 1024}k' if max_kvseqlen else ''}\n",
         flush=True,
     )
-
-    def _make_nb_ranges(seqlen):
-        """Per-Qblock ranges: each Q block's k_range covers full [0, seqlen)."""
-        n_qblocks = seqlen // 128
-        q_starts = torch.arange(0, seqlen, 128, dtype=torch.int32, device=device)
-        q_ends = q_starts + 128
-        q_r = torch.stack([q_starts, q_ends], dim=-1)
-        k_r = torch.zeros(n_qblocks, 2, dtype=torch.int32, device=device)
-        k_r[:, 1] = seqlen
-        atm = torch.zeros(n_qblocks, dtype=torch.int32, device=device)
-        return q_r, k_r, atm
 
     def _build_block_indices(qseqlen_l, kvseqlen_l, topk_l):
         """Build per-Q-position block indices selecting topk_l/KBS blocks from kvseqlen_l/KBS."""
@@ -157,6 +146,11 @@ def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
             f"qseqlen={qseqlen}, topk={topk // 1024}k ──",
             flush=True,
         )
+
+        # Pre-build block indices and ranges for this scenario.
+        # Shared by dense_nb, dense_nb_rm, block_sparse (same effective attention pattern).
+        bs_indices = _build_block_indices(qseqlen, kvseqlen, topk)
+        bs_q_ranges, bs_k_ranges, bs_atm = _to_ranges(bs_indices, kvseqlen)
 
         for pass_type in PASSES:
             is_bwd = pass_type != "fwd"
@@ -253,54 +247,29 @@ def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
                         )
                         flops_S = topk
 
-                    elif method == "dense_nb":
-                        # Dense-MultiBatch: per-Qblock ranges, PackGQA
-                        q = torch.randn(
-                            topk, NHQ, HD, dtype=torch.bfloat16, device=device
-                        )
-                        k = torch.randn(
-                            topk, NHK, HD, dtype=torch.bfloat16, device=device
-                        )
-                        v = torch.randn(
-                            topk, NHK, HD, dtype=torch.bfloat16, device=device
-                        )
-                        if is_bwd:
-                            q.requires_grad_(True)
-                            k.requires_grad_(True)
-                            v.requires_grad_(True)
-                        q_ranges, k_ranges, atm = _make_nb_ranges(topk)
-                        kw = dict(
-                            q_ranges=q_ranges,
-                            k_ranges=k_ranges,
-                            attn_type_map=atm,
-                            pack_gqa=True,
-                        )
-                        flops_S = topk
-
                     elif method == "dense_nb_rm":
-                        # Dense-MultiBatch-RangeMerge: per-Qblock ranges + auto_range_merge
+                        # Same Q/K/V and ranges as BS, auto_range_merge, no block_sparse
                         q = torch.randn(
-                            topk, NHQ, HD, dtype=torch.bfloat16, device=device
+                            qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device
                         )
                         k = torch.randn(
-                            topk, NHK, HD, dtype=torch.bfloat16, device=device
+                            kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
                         )
                         v = torch.randn(
-                            topk, NHK, HD, dtype=torch.bfloat16, device=device
+                            kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
                         )
                         if is_bwd:
                             q.requires_grad_(True)
                             k.requires_grad_(True)
                             v.requires_grad_(True)
-                        q_ranges, k_ranges, atm = _make_nb_ranges(topk)
                         kw = dict(
-                            q_ranges=q_ranges,
-                            k_ranges=k_ranges,
-                            attn_type_map=atm,
+                            q_ranges=bs_q_ranges,
+                            k_ranges=bs_k_ranges,
+                            attn_type_map=bs_atm,
                             pack_gqa=True,
                             auto_range_merge=True,
                         )
-                        flops_S = topk
+                        flops_S = qseqlen
 
                     elif method == "block_sparse":
                         # BlockSparse: Q=qseqlen, K=kvseqlen, kbs=128
@@ -317,12 +286,10 @@ def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
                             q.requires_grad_(True)
                             k.requires_grad_(True)
                             v.requires_grad_(True)
-                        indices = _build_block_indices(qseqlen, kvseqlen, topk)
-                        q_ranges, k_ranges, atm = _to_ranges(indices, kvseqlen)
                         kw = dict(
-                            q_ranges=q_ranges,
-                            k_ranges=k_ranges,
-                            attn_type_map=atm,
+                            q_ranges=bs_q_ranges,
+                            k_ranges=bs_k_ranges,
+                            attn_type_map=bs_atm,
                             pack_gqa=True,
                             block_sparse=True,
                             sparse_k_block_size=KBS,
@@ -456,10 +423,9 @@ def _phase6_plot():
         ("bwd_loopk", "BWD InnerLoopK"),
     ]
     PLOT_METHODS = [
-        ("d1b", "Dense-1B-kbs128", (0.58, 0.58, 0.58)),
-        ("d1b_nopg", "Dense-1B-noPG-kbs128", (0.78, 0.78, 0.78)),
-        ("dense_nb", "Dense-NB-kbs128", (0.22, 0.37, 0.71)),
-        ("dense_nb_rm", "Dense-NB-RM-kbs128", (0.45, 0.55, 0.85)),
+        ("d1b", "Dense-1B (K=topk)", (0.58, 0.58, 0.58)),
+        ("d1b_nopg", "Dense-1B-noPG (K=topk)", (0.78, 0.78, 0.78)),
+        ("dense_nb_rm", "RangeMerge (=BS data)", (0.45, 0.55, 0.85)),
         ("block_sparse", "BlockSparse-kbs128", (0.29, 0.57, 0.60)),
         ("index_sparse", "IndexSparse-kbs1", (0.77, 0.34, 0.49)),
     ]

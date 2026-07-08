@@ -2256,7 +2256,7 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
     def test_scalar_dx_store(self):
         """Tier-1: scalar atomicAdd dX store fallback
         (MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE=false, i.e.
-        SparseInnerDxReduceUseTma=false) for both LoopK and LoopQ."""
+        kInnerStoreMode==InnerStoreMode::AtomicAdd) for both LoopK and LoopQ."""
         import os
 
         from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod

@@ -373,7 +373,7 @@ struct CollectiveMainloopFwdSm90 {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutVt>, SmemAlignmentVtNoTranspose> smem_v;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
-    KVTokenIndices_t smem_inner_token_indices;
+    KVTokenIndices_t smem_sparse_inner_indices;
     KBlockIdxPrefetch_t smem_kblock_idx_cache;
   };
 
@@ -382,7 +382,7 @@ struct CollectiveMainloopFwdSm90 {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
     SmemP_t smem_p;
-    KVTokenIndices_t smem_inner_token_indices;
+    KVTokenIndices_t smem_sparse_inner_indices;
     KBlockIdxPrefetch_t smem_kblock_idx_cache;
   };
 
@@ -454,29 +454,22 @@ struct CollectiveMainloopFwdSm90 {
   template <bool IsProducer>
   using BlockMeta = flash::DenseBlockMeta<IsProducer, /*InnerLoopQ=*/false, RangeMerge, /*FlattenGQA=*/PackGQA, PackGQAFactor, SeqlenInfo_t, BlockMN_t>;
 
-  // BlockSparse producer (used by load)
-  using BlockSparseProducerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/true,
-                                                                   RangeMerge,
-                                                                   PackGQA,
-                                                                   PackGQAFactor,
-                                                                   NumTokensPerLdstGroup,
-                                                                   NumThreadsPerLdstGroup,
-                                                                   NumProducerThreads,
-                                                                   kBlockN,
-                                                                   InnerDirMaxToMin,
-                                                                   /*InnerLoopQ=*/false>;
+  // BlockSparse BlockMeta: only IsProducer varies (FWD always InnerLoopK-like, InnerLoopQ=false).
+  template <bool IsProducer>
+  using BlockSparseBlockMetaT = flash::BlockSparseBlockMeta<
+      IsProducer,
+      RangeMerge,
+      PackGQA,
+      PackGQAFactor,
+      NumTokensPerLdstGroup,
+      NumThreadsPerLdstGroup,
+      NumProducerThreads,
+      kBlockN,
+      InnerDirMaxToMin,
+      /*InnerLoopQ=*/false>;
 
-  // BlockSparse consumer (used by mma)
-  using BlockSparseConsumerBlockMeta = flash::BlockSparseBlockMeta</*IsProducer=*/false,
-                                                                   RangeMerge,
-                                                                   PackGQA,
-                                                                   PackGQAFactor,
-                                                                   NumTokensPerLdstGroup,
-                                                                   NumThreadsPerLdstGroup,
-                                                                   NumProducerThreads,
-                                                                   kBlockN,
-                                                                   InnerDirMaxToMin,
-                                                                   /*InnerLoopQ=*/false>;
+  using BlockSparseProducerBlockMeta = BlockSparseBlockMetaT<true>;
+  using BlockSparseConsumerBlockMeta = BlockSparseBlockMetaT<false>;
 
   template <bool IsProducer>
   using IndexSparseBlockMeta = flash::IndexSparseBlockMeta<
@@ -709,7 +702,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
         pipeline_k.producer_acquire(smem_pipe_write_k);
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
-        int* const idx_slot = &shared_storage.tensors.mainloop.smem_inner_token_indices[smem_pipe_write_k.index() * kBlockN];
+        int* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_k.index() * kBlockN];
         block_meta.fill_token_indices(idx_slot, ldst_group_inner_idx, ldst_group_idx);
         __syncwarp();
         CUTE_UNROLL
@@ -732,7 +725,7 @@ struct CollectiveMainloopFwdSm90 {
         // BlockSparse / IndexSparse TMA: tiles are contiguous → use absolute coords.
         if (is_tma_issue_thread()) {
           int const n_block_abs = block_meta.get_packed_first_row() / kBlockN;
-          shared_storage.tensors.mainloop.smem_inner_token_indices[smem_pipe_write_k.index()] = n_block_abs;
+          shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_k.index()] = n_block_abs;
 
           Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
           Tensor gK = local_tile(mK, select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));
@@ -781,7 +774,7 @@ struct CollectiveMainloopFwdSm90 {
       if constexpr (kInnerLoadMode == InnerLoadMode::CpAsync) {
         pipeline_v.producer_acquire(smem_pipe_write_v);
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
-        int const* const idx_slot = &shared_storage.tensors.mainloop.smem_inner_token_indices[smem_pipe_write_v.index() * kBlockN];
+        int const* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_v.index() * kBlockN];
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
           int const token_offset = idx_slot[ldst_group_idx * NumTokensPerLdstGroup + local_row] * stride_kv_v;
@@ -800,7 +793,7 @@ struct CollectiveMainloopFwdSm90 {
       } else if constexpr ((BlockSparse || IndexSparse) && kInnerLoadMode == InnerLoadMode::Tma) {
         // BlockSparse / IndexSparse TMA: read n_block_abs written by the matching load_K.
         if (is_tma_issue_thread()) {
-          int const n_block_abs = shared_storage.tensors.mainloop.smem_inner_token_indices[smem_pipe_write_v.index()];
+          int const n_block_abs = shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_v.index()];
           auto shape_Vt = make_shape(params.headdim, get<0>(params.shape_K), get<2>(params.shape_K));
 
           Tensor mVt = params.tma_load_V.get_tma_tensor(shape_Vt)(_, _, block_meta.bidh_kv);
