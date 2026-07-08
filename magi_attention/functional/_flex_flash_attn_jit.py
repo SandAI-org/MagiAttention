@@ -542,6 +542,14 @@ def get_ffa_jit_spec(
                 extra_template_args["bwd_stages_v"] = "1"
                 uri += "_stv1"
 
+        # Inner store pipeline stages: 1 = single-buffer (default), 2 = double-buffer dKVacc.
+        _inner_store_stages = os.environ.get(
+            "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES"
+        )
+        if _inner_store_stages is not None:
+            extra_template_args["inner_store_stages"] = _inner_store_stages
+            uri += f"_iss{_inner_store_stages}"
+
         # Force Mma_dKV to SS mode (SMEM-SMEM) for benchmarking register pressure
         _force_ss = os.environ.get("MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS")
         if _force_ss is not None and _force_ss == "1":
@@ -757,6 +765,7 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_LSE_UNION",
     "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
     "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC",
+    "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES",
     "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",

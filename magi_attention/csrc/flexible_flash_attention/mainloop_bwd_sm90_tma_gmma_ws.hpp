@@ -83,6 +83,7 @@ template <
     int SparseKBlockSize_,
     int InnerLoadMode_,
     bool UnionDkvacc_,
+    int InnerStoreStages_,
     bool PerfDebugForceMmaDkvSS_,
     bool PerfDebugSkipVLoad_,
     bool PerfDebugSkipDvStore_,
@@ -119,6 +120,8 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool PerfDebugSkipDvWriteback = PerfDebugSkipDvWriteback_;
   static constexpr bool PerfDebugSkipDkWriteback = PerfDebugSkipDkWriteback_;
   static constexpr bool UnionDkvacc = UnionDkvacc_;
+  static constexpr int kInnerStoreStages = InnerStoreStages_;
+  static_assert(kInnerStoreStages == 1 || kInnerStoreStages == 2, "kInnerStoreStages must be 1 or 2");
   static constexpr bool PerfDebugDeferDvR2S = PerfDebugDeferDvR2S_;
 
   static constexpr bool Has_softcap = Has_softcap_;
@@ -718,6 +721,10 @@ struct CollectiveMainloopBwdSm90 {
     // dVEmpty/dKEmpty barrier protocol in store_dkv().
     // When LseDpsumUnionDKVacc: the first bytes of smem_dkacc are also aliased as
     // smem_lse (512B) + smem_dpsum (512B) during outer-loop LSE/dPsum TMA loads.
+    //
+    // kInnerStoreStages=2 (double-buffer): multiple buffer stages alternated per iteration.
+    // Union DB: 2 union stages, each dK/dV share → 2×32KB = 64KB (vs current 64KB ununion)
+    // Non-union DB: 2 separate stages, 4 buffers → 4×32KB = 128KB (needs smaller tiles)
     struct SeparatedDkvacc {
       SmemdKVacc_t smem_dkacc;
       SmemdKVacc_t smem_dvacc;
@@ -728,8 +735,25 @@ struct CollectiveMainloopBwdSm90 {
         SmemdKVacc_t smem_dvacc;
       };
     };
-    using DkvaccStorage = std::conditional_t<UnionDkvacc, UnionedDkvacc, SeparatedDkvacc>;
+    struct UnionedDkvaccDB {
+      struct Stage {
+        union {
+          SmemdKVacc_t smem_dkacc;
+          SmemdKVacc_t smem_dvacc;
+        };
+      };
+      Stage stages[kInnerStoreStages];
+    };
+    struct SeparatedDkvaccDB {
+      SmemdKVacc_t smem_dkacc_bufs[kInnerStoreStages];
+      SmemdKVacc_t smem_dvacc_bufs[kInnerStoreStages];
+    };
+    using DkvaccStorage = std::conditional_t<
+        kInnerStoreStages >= 2,
+        std::conditional_t<UnionDkvacc, UnionedDkvaccDB, SeparatedDkvaccDB>,
+        std::conditional_t<UnionDkvacc, UnionedDkvacc, SeparatedDkvacc>>;
     DkvaccStorage dkvacc_storage;
+
     SmemSparseInnerIndices smem_sparse_inner_indices;
     SmemSparseStoreStagingIndices smem_sparse_store_staging_indices;
     // Zero-sized fields placed AFTER all data buffers so they fall in struct tail padding
@@ -742,6 +766,30 @@ struct CollectiveMainloopBwdSm90 {
   };
 
   using TensorStorage = std::conditional_t<BwdInnerLoopK, TensorStorageLoopK, TensorStorageLoopQ>;
+
+  // ─── dKVacc buffer accessors (uniform API across single/double-buffer + union/separate) ───
+  // Takes the mainloop's TensorStorage (= TensorStorageLoopK / TensorStorageLoopQ).
+  // Callers from the kernel level should pass shared_storage.tensors.mainloop.
+  CUTLASS_DEVICE static auto* smem_dkacc_ptr(TensorStorage& ts, int stage = 0) {
+    auto& st = ts.dkvacc_storage;
+    if constexpr (kInnerStoreStages >= 2 && UnionDkvacc) {
+      return st.stages[stage].smem_dkacc.data();
+    } else if constexpr (kInnerStoreStages >= 2 && !UnionDkvacc) {
+      return st.smem_dkacc_bufs[stage].data();
+    } else {
+      return st.smem_dkacc.data();
+    }
+  }
+  CUTLASS_DEVICE static auto* smem_dvacc_ptr(TensorStorage& ts, int stage = 0) {
+    auto& st = ts.dkvacc_storage;
+    if constexpr (kInnerStoreStages >= 2 && UnionDkvacc) {
+      return st.stages[stage].smem_dvacc.data();
+    } else if constexpr (kInnerStoreStages >= 2 && !UnionDkvacc) {
+      return st.smem_dvacc_bufs[stage].data();
+    } else {
+      return st.smem_dvacc.data();
+    }
+  }
 
   // Host side kernel arguments
   struct Arguments {
@@ -1134,8 +1182,10 @@ struct CollectiveMainloopBwdSm90 {
   // addressed by sparse_indices[i]. Two modes via kInnerStoreMode:
   //   Tma1d:     per-entry cp.reduce.async.bulk (kHeadDim*4B, contiguous SMEM layout)
   //   AtomicAdd: per-element atomicAdd (NumThreadsPerLdstGroup threads × kStoreVecWidth)
-  // kPackScale > 1 (PackGQA): packed_idx = token*G + g → gmem decomposes via stride_head.
-  template <int kTileSize, int kNumThreads, int kPackScale, typename SmemStoreT>
+  // kInnerStoreHeadPackFactor: GQA head-packing factor applied to sparse_indices by fill_token_indices.
+  //   dQ calls pass PackGQAFactor (indices encode token*G+g, need stride_head decomposition);
+  //   dK/dV calls pass 1 (indices are plain token indices, no head packing).
+  template <int kTileSize, int kNumThreads, int kInnerStoreHeadPackFactor, typename SmemStoreT>
   CUTLASS_DEVICE static void sparse_inner_store(
       SmemStoreT const& s_store,
       int const* sparse_indices,
@@ -1144,11 +1194,12 @@ struct CollectiveMainloopBwdSm90 {
       int const thread_idx,
       int const tile_offset = 0,
       int const stride_head = 0) {
-    auto gmem_ptr = [&](int idx) -> ElementAccum* {
-      if constexpr (kPackScale != 1) {
-        return gmem_base + static_cast<int64_t>(idx / kPackScale) * stride_token + static_cast<int64_t>(idx % kPackScale) * stride_head;
+    auto gmem_ptr = [&](int packed_idx) -> ElementAccum* {
+      if constexpr (kInnerStoreHeadPackFactor != 1) {
+        return gmem_base + static_cast<int64_t>(packed_idx / kInnerStoreHeadPackFactor) * stride_token +
+            static_cast<int64_t>(packed_idx % kInnerStoreHeadPackFactor) * stride_head;
       } else {
-        return gmem_base + static_cast<int64_t>(idx) * stride_token;
+        return gmem_base + static_cast<int64_t>(packed_idx) * stride_token;
       }
     };
     if constexpr ((kInnerStoreMode == InnerStoreMode::Tma1d)) {
@@ -1164,15 +1215,17 @@ struct CollectiveMainloopBwdSm90 {
         cute::tma_store_wait<0>();
       }
     } else {
+      // Same NumThreadsPerLdstGroup-based decomposition as load-side NumTokensPerLdstGroup,
+      // but parameterized by kNumThreads (varies per call site: 32 / NumProducer… / NumConsumer…).
       static_assert(kNumThreads % NumThreadsPerLdstGroup == 0);
-      static constexpr int kNumGroups_ = kNumThreads / NumThreadsPerLdstGroup;
-      static_assert(kTileSize % kNumGroups_ == 0, "AtomicAdd store requires kTileSize divisible by thread groups");
-      static constexpr int kEntriesPerGroup_ = kTileSize / kNumGroups_;
+      static constexpr int kNumStoreGroups = kNumThreads / NumThreadsPerLdstGroup;
+      static_assert(kTileSize % kNumStoreGroups == 0, "AtomicAdd store requires kTileSize divisible by store groups");
+      static constexpr int kTokensPerGroup = kTileSize / kNumStoreGroups;
       int const group_idx = thread_idx / NumThreadsPerLdstGroup;
       int const lane_in_group = thread_idx % NumThreadsPerLdstGroup;
       CUTE_UNROLL
-      for (int local_i = 0; local_i < kEntriesPerGroup_; ++local_i) {
-        int const i = group_idx * kEntriesPerGroup_ + local_i;
+      for (int local_i = 0; local_i < kTokensPerGroup; ++local_i) {
+        int const i = group_idx * kTokensPerGroup + local_i;
         ElementAccum* const dst = gmem_ptr(sparse_indices[i]);
         CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < kNumStoreTiles; ++tile_idx) {
@@ -1302,38 +1355,20 @@ struct CollectiveMainloopBwdSm90 {
       gdPsum = local_tile(cute::domain_offset(lse_off, mdPsum), make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
     };
 
-    // kInnerLoadMode == InnerLoadMode::Tma && IsSparse: absolute-coordinate TMA tensors (no domain_offset by offset_q)
-    // for issuing TMA loads at runtime-computed token positions.
-    auto tQgQ_abs = [&]() {
+    // Sparse TMA inner-load: absolute-coordinate tensors (no domain_offset) so that
+    // runtime-computed m_block_abs from get_packed_first_row() can index arbitrary tiles.
+    // Dense path uses offset-relative tQgQ/tdOgdO/gLSE/gdPsum instead; these are DCE'd.
+    auto make_abs_or_empty = [](auto fn) {
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        auto gQ_abs = local_tile(mQ, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
-        return group_modes<0, 3>(block_tma_Q.partition_S(gQ_abs));
-      } else {
-        return cute::make_tuple(); // DCE placeholder
-      }
-    }();
-    auto tdOgdO_abs = [&]() {
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        auto gdO_abs = local_tile(mdO, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord);
-        return group_modes<0, 3>(block_tma_dO.partition_S(gdO_abs));
+        return fn();
       } else {
         return cute::make_tuple();
       }
-    }();
-    auto gLSE_abs = [&]() {
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        return local_tile(mLSE, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
-      } else {
-        return cute::make_tuple();
-      }
-    }();
-    auto gdPsum_abs = [&]() {
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-        return local_tile(mdPsum, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord);
-      } else {
-        return cute::make_tuple();
-      }
-    }();
+    };
+    auto tQgQ_abs = make_abs_or_empty([&]() { return group_modes<0, 3>(block_tma_Q.partition_S(local_tile(mQ, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord))); });
+    auto tdOgdO_abs = make_abs_or_empty([&]() { return group_modes<0, 3>(block_tma_dO.partition_S(local_tile(mdO, select<0, 2>(TileShape_MNK{}), gQdOdQ_coord))); });
+    auto gLSE_abs = make_abs_or_empty([&]() { return local_tile(mLSE, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); });
+    auto gdPsum_abs = make_abs_or_empty([&]() { return local_tile(mdPsum, make_shape(_4{}, Int<kBlockM>{}), gLSEdPsum_coord); });
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
@@ -1402,63 +1437,36 @@ struct CollectiveMainloopBwdSm90 {
     int const thread_idx = threadIdx.x % NumProducerLoaderThreads;
     int const ldst_group_inner_idx = thread_idx % NumThreadsPerLdstGroup;
     int const ldst_group_idx = thread_idx / NumThreadsPerLdstGroup;
-    // PackGQA: the token-index slots hold PACKED rows p = token * G + g (g = q-head
-    // within the kv group, G = PackGQAFactor); bidh is then the kv head index, so head
-    // bases are scaled by G. Q/dO/dQ rows decompose as token*row_stride + g*head_stride
-    // (heads within a token are head_stride apart, NOT row-contiguous when nheads_kv > 1).
-    // PackGQAFactor: packing scale (= actual Q/KV ratio when PackGQA, else 1)
-    int64_t const stride_q_row = get<0>(params.stride_Q);
-    int64_t const stride_do_row = get<0>(params.stride_dO);
+    // Packed index decomposition: p = token * G + g (G = PackGQAFactor).
+    // All scatter offset calculations decompose p into token*token_stride + g*head_stride.
+    // Strides are precomputed as plain int64_t so the offset function is trivial.
+    auto decompose_packed = [](int p, int64_t token_stride, int64_t head_stride) -> int64_t {
+      if constexpr (PackGQA || CatGQA) {
+        return (p / PackGQAFactor) * token_stride + (p % PackGQAFactor) * head_stride;
+      } else {
+        return p * token_stride;
+      }
+    };
+    // Q/dO strides
+    int64_t const stride_q_token = get<0>(params.stride_Q);
+    int64_t const stride_do_token = get<0>(params.stride_dO);
     int64_t const stride_q_head = get<2>(params.stride_Q);
     int64_t const stride_do_head = get<2>(params.stride_dO);
     Element const* const ptr_gQ_base = params.ptr_Q + bidh * PackGQAFactor * stride_q_head + ldst_group_inner_idx * 8;
     Element const* const ptr_gdO_base = params.ptr_dO + bidh * PackGQAFactor * stride_do_head + ldst_group_inner_idx * 8;
-    // Decompose a packed row into a gmem element offset (plain token * row_stride when !PackGQA)
-    auto packed_row_offset = [&](int p, int64_t stride_token, int64_t stride_head) -> int64_t {
-      if constexpr (PackGQA) {
-        return (p / PackGQAFactor) * stride_token + (p % PackGQAFactor) * stride_head;
-      } else {
-        return p * stride_token;
-      }
+    // LSE/dPsum strides: 4 floats per token, head_stride position depends on GQA mode.
+    auto extract_lse_strides = [&](auto const& stride) -> cute::tuple<int64_t, int64_t> {
+      int64_t kv_hs = CatGQA ? get<2, 1>(stride) : get<2>(stride);
+      int64_t in_group_hs = PackGQA ? get<1, 0>(stride) : (CatGQA ? get<2, 0>(stride) : int64_t(0));
+      return {kv_hs, in_group_hs};
     };
-    // LSE/dPsum per-token row is always 4 floats.
-    // PackGQA: stride is (1, (head_stride, 4), G*head_stride), get<2> is scalar.
-    // CatGQA:  stride is (1, 4, (head_stride, G*head_stride)), get<2> is nested —
-    //          bidh is KV-head index, so base offset = bidh * G * head_stride = get<2,1>.
-    auto const lse_kv_head_stride = [&]() -> int64_t {
-      if constexpr (CatGQA) {
-        return get<2, 1>(params.stride_LSE);
-      } else {
-        return get<2>(params.stride_LSE);
-      }
-    }();
-    auto const dpsum_kv_head_stride = [&]() -> int64_t {
-      if constexpr (CatGQA) {
-        return get<2, 1>(params.stride_dPsum);
-      } else {
-        return get<2>(params.stride_dPsum);
-      }
-    }();
-    float const* const ptr_gLSE_base = params.ptr_LSE_log2 + bidh * lse_kv_head_stride;
-    float const* const ptr_gdPsum_base = params.ptr_dPsum + bidh * dpsum_kv_head_stride;
-    auto lse_row_offset = [&](int p) -> int64_t {
-      if constexpr (PackGQA) {
-        return (p % PackGQAFactor) * get<1, 0>(params.stride_LSE) + (p / PackGQAFactor) * 4;
-      } else if constexpr (CatGQA) {
-        return (p % PackGQAFactor) * get<2, 0>(params.stride_LSE) + (p / PackGQAFactor) * 4;
-      } else {
-        return p * 4;
-      }
-    };
-    auto dpsum_row_offset = [&](int p) -> int64_t {
-      if constexpr (PackGQA) {
-        return (p % PackGQAFactor) * get<1, 0>(params.stride_dPsum) + (p / PackGQAFactor) * 4;
-      } else if constexpr (CatGQA) {
-        return (p % PackGQAFactor) * get<2, 0>(params.stride_dPsum) + (p / PackGQAFactor) * 4;
-      } else {
-        return p * 4;
-      }
-    };
+    auto [lse_kv_hs, lse_in_group_hs] = extract_lse_strides(params.stride_LSE);
+    auto [dpsum_kv_hs, dpsum_in_group_hs] = extract_lse_strides(params.stride_dPsum);
+    float const* const ptr_gLSE_base = params.ptr_LSE_log2 + bidh * lse_kv_hs;
+    float const* const ptr_gdPsum_base = params.ptr_dPsum + bidh * dpsum_kv_hs;
+    // LSE/dPsum offset: token_stride=4 (fixed), head_stride=in_group_hs (precomputed above)
+    auto lse_row_offset = [&](int p) -> int64_t { return decompose_packed(p, 4, lse_in_group_hs); };
+    auto dpsum_row_offset = [&](int p) -> int64_t { return decompose_packed(p, 4, dpsum_in_group_hs); };
 
     // Define lambda funcs to load Q,dO,K,V,LSE,dPsum
     // Each lambda is self-contained: lane_predicate guard + acquire + TMA copy (dense)
@@ -1493,7 +1501,7 @@ struct CollectiveMainloopBwdSm90 {
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
           int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
-          int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_q_row, stride_q_head);
+          int64_t token_offset = decompose_packed(idx_slot[smem_row], stride_q_token, stride_q_head);
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
             if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
@@ -1559,7 +1567,7 @@ struct CollectiveMainloopBwdSm90 {
         CUTE_UNROLL
         for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
           int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
-          int64_t token_offset = packed_row_offset(idx_slot[smem_row], stride_do_row, stride_do_head);
+          int64_t token_offset = decompose_packed(idx_slot[smem_row], stride_do_token, stride_do_head);
           CUTE_UNROLL
           for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
             if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
@@ -1708,7 +1716,7 @@ struct CollectiveMainloopBwdSm90 {
     ElementAccum* lse_smem_ptr;
     ElementAccum* dpsum_smem_ptr;
     if constexpr (LseDpsumUnionEffective) {
-      lse_smem_ptr = reinterpret_cast<ElementAccum*>(shared_storage.tensors.mainloop.dkvacc_storage.smem_dkacc.data());
+      lse_smem_ptr = reinterpret_cast<ElementAccum*>(smem_dkacc_ptr(shared_storage.tensors.mainloop));
       dpsum_smem_ptr = lse_smem_ptr + cute::cosize_v<SmemLayoutLSE>;
     } else {
       lse_smem_ptr = shared_storage.tensors.mainloop.smem_lse.data();
@@ -2165,11 +2173,11 @@ struct CollectiveMainloopBwdSm90 {
     // Scatter store addressing for producer store warp (32 threads).
     // PackGQA: smem_sparse_inner_indices hold packed rows p = token*G + g; bidh is the kv head,
     // so the head base and the per-token decompose are scaled by G (see sparse_inner_store).
-    static constexpr int kdQPackScale = PackGQA ? PackGQAFactor : 1;
+    static constexpr int kdQHeadPackFactor = PackGQA ? PackGQAFactor : 1;
     [[maybe_unused]] int const store_thread_idx = threadIdx.x % cutlass::NumThreadsPerWarp;
     [[maybe_unused]] int const stride_dq_token = get<0>(params.stride_dQ);
     [[maybe_unused]] int const stride_dq_head = get<2>(params.stride_dQ);
-    [[maybe_unused]] ElementAccum* const ptr_dQ_base = params.ptr_dQ + bidh * kdQPackScale * static_cast<int64_t>(get<2>(params.stride_dQ));
+    [[maybe_unused]] ElementAccum* const ptr_dQ_base = params.ptr_dQ + bidh * kdQHeadPackFactor * static_cast<int64_t>(get<2>(params.stride_dQ));
 
     auto store_dQ_this_m_block = [&](int const m_block, int const bidh_kv_cat, int const off_q) {
 #pragma unroll
@@ -2192,7 +2200,7 @@ struct CollectiveMainloopBwdSm90 {
         }
       } else if constexpr (IsSparse) {
         // Per-row 1D bulk reduce fallback for non-MQA scatter
-        sparse_inner_store<kBlockM, cutlass::NumThreadsPerWarp, kdQPackScale>(
+        sparse_inner_store<kBlockM, cutlass::NumThreadsPerWarp, kdQHeadPackFactor>(
             sdQ_store,
             shared_storage.tensors.mainloop.smem_sparse_store_staging_indices.data(),
             ptr_dQ_base,
@@ -2357,11 +2365,18 @@ struct CollectiveMainloopBwdSm90 {
     bool const lane_predicate = cute::elect_one_sync();
     int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-    // smem dK/dV accumulators: scatter store reads the Store layout view, dense TMA the swizzled one
-    Tensor sdK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dkacc.data()), SmemLayoutdKVStore{});
-    Tensor sdV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dvacc.data()), SmemLayoutdKVStore{});
-    Tensor sdK_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dkacc.data()), SmemLayoutdKVSwizzled{});
-    Tensor sdV_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dvacc.data()), SmemLayoutdKVSwizzled{});
+    // smem dK/dV accumulators: scatter store reads the Store layout view, dense TMA the swizzled one.
+    // For double-buffer (kInnerStoreStages >= 2), these are reconstructed per-iteration with the
+    // current store_stage. Here we initialize to stage 0 for the initial setup.
+    int store_stage = 0;
+    auto make_sdK = [&](int stg) { return make_tensor(make_smem_ptr(smem_dkacc_ptr(shared_storage.tensors.mainloop, stg)), SmemLayoutdKVStore{}); };
+    auto make_sdV = [&](int stg) { return make_tensor(make_smem_ptr(smem_dvacc_ptr(shared_storage.tensors.mainloop, stg)), SmemLayoutdKVStore{}); };
+    auto make_sdK_tma = [&](int stg) { return make_tensor(make_smem_ptr(smem_dkacc_ptr(shared_storage.tensors.mainloop, stg)), SmemLayoutdKVSwizzled{}); };
+    auto make_sdV_tma = [&](int stg) { return make_tensor(make_smem_ptr(smem_dvacc_ptr(shared_storage.tensors.mainloop, stg)), SmemLayoutdKVSwizzled{}); };
+    Tensor sdK = make_sdK(0);
+    Tensor sdV = make_sdV(0);
+    Tensor sdK_tma = make_sdK_tma(0);
+    Tensor sdV_tma = make_sdV_tma(0);
 
     // Dense TMA reduce-add setup (uses shape_dKdV which includes pool dimension)
     Tensor mdKaccum = params.tma_add_dK.get_tma_tensor(params.shape_dKdV)(_, _, bidh_kv);
@@ -2413,7 +2428,8 @@ struct CollectiveMainloopBwdSm90 {
             tma_store_wait<0>();
           }
         } else if constexpr (IsSparse) {
-          sparse_inner_store<kBlockN, NumProducerLoaderThreads, /*kPackScale=*/1>(sdV, &idx_staging[0 * kBlockN], ptr_gdV_base, stride_dV_token, thread_idx);
+          sparse_inner_store<kBlockN, NumProducerLoaderThreads, /*kInnerStoreHeadPackFactor=*/1>(
+              sdV, &idx_staging[0 * kBlockN], ptr_gdV_base, stride_dV_token, thread_idx);
         } else {
           if (lane_predicate) {
             Tensor gdVaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdVaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
@@ -2456,7 +2472,8 @@ struct CollectiveMainloopBwdSm90 {
             tma_store_wait<0>();
           }
         } else if constexpr (IsSparse) {
-          sparse_inner_store<kBlockN, NumProducerLoaderThreads, /*kPackScale=*/1>(sdK, &idx_staging[1 * kBlockN], ptr_gdK_base, stride_dK_token, thread_idx);
+          sparse_inner_store<kBlockN, NumProducerLoaderThreads, /*kInnerStoreHeadPackFactor=*/1>(
+              sdK, &idx_staging[1 * kBlockN], ptr_gdK_base, stride_dK_token, thread_idx);
         } else {
           if (lane_predicate) {
             Tensor gdKaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_k, _0{}), mdKaccum), TileShape_dKVaccum{}, make_coord(_, _0{}));
@@ -2478,7 +2495,24 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
+    auto update_store_bufs = [&]() {
+      if constexpr (kInnerStoreStages >= 2) {
+        sdK = make_sdK(store_stage);
+        sdV = make_sdV(store_stage);
+        sdK_tma = make_sdK_tma(store_stage);
+        sdV_tma = make_sdV_tma(store_stage);
+        tdKsdK = block_tma_dK.partition_S(sdK_tma);
+        tdVsdV = block_tma_dV.partition_S(sdV_tma);
+      }
+    };
+    auto advance_store_stage = [&]() {
+      if constexpr (kInnerStoreStages >= 2) {
+        store_stage = (store_stage + 1) % kInnerStoreStages;
+      }
+    };
+
     auto store_body = [&]() {
+      update_store_bufs();
       if constexpr (IsSparse) {
         // NOTE(058 P2a-2): an overlapped dV/dK variant (defer the dV bulk wait until after the
         // dK issue via staged tma_store_wait<1>/<0>) was implemented and benched: zero gain on
@@ -2493,6 +2527,7 @@ struct CollectiveMainloopBwdSm90 {
           store_dK();
         });
       }
+      advance_store_stage();
     };
 
     // ─── Unified control flow ───
@@ -3029,13 +3064,13 @@ struct CollectiveMainloopBwdSm90 {
             } else if constexpr (IsSparse) {
               // BlockSparse scatter reduce: per-row 1D bulk reduce
               Tensor sdQ_acc = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQStore{});
-              static constexpr int kdQPackScale = PackGQA ? PackGQAFactor : 1;
+              static constexpr int kdQHeadPackFactor = PackGQA ? PackGQAFactor : 1;
               int const stride_dq_token = get<0>(params.stride_dQ);
               int const stride_dq_head = get<2>(params.stride_dQ);
-              ElementAccum* const ptr_dQ_base = params.ptr_dQ + block_meta.bidh * kdQPackScale * static_cast<int64_t>(get<2>(params.stride_dQ));
+              ElementAccum* const ptr_dQ_base = params.ptr_dQ + block_meta.bidh * kdQHeadPackFactor * static_cast<int64_t>(get<2>(params.stride_dQ));
               int const wg_thread_idx = thread_idx % cutlass::NumThreadsPerWarpGroup;
               int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
-              sparse_inner_store<kBlockM, NumConsumerThreads, kdQPackScale>(
+              sparse_inner_store<kBlockM, NumConsumerThreads, kdQHeadPackFactor>(
                   sdQ_acc,
                   &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_read_q.index() * kBlockM],
                   ptr_dQ_base,
@@ -3294,20 +3329,17 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdSt_pi = cute::as_position_independent_swizzle_tensor(sdSt);
 
     // r2s write targets use the Store layout (aliases the swizzled TMA layout unless the
-    // bulk-reduce scatter path swaps in the row-contiguous layout)
-    Tensor sdK = cute::as_position_independent_swizzle_tensor(
-        make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dkacc.data()), SmemLayoutdKVStore{}));
-    Tensor sdKt = cute::as_position_independent_swizzle_tensor(
-        make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dkacc.data()), SmemLayoutdKVtStore{}));
-    Tensor sdV = cute::as_position_independent_swizzle_tensor(
-        make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dvacc.data()), SmemLayoutdKVStore{}));
-    Tensor sdVt = cute::as_position_independent_swizzle_tensor(
-        make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dvacc.data()), SmemLayoutdKVtStore{}));
+    // bulk-reduce scatter path swaps in the row-contiguous layout).
+    // Stage 0 tensors used as defaults; for DB, stage-specific tensors are constructed at R2S time.
+    Tensor sdK = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(smem_dkacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVStore{}));
+    Tensor sdKt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(smem_dkacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVtStore{}));
+    Tensor sdV = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(smem_dvacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVStore{}));
+    Tensor sdVt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(smem_dvacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVtStore{}));
 
     ElementAccum* lse_smem_ptr_c;
     ElementAccum* dpsum_smem_ptr_c;
     if constexpr (LseDpsumUnionEffective) {
-      lse_smem_ptr_c = reinterpret_cast<ElementAccum*>(shared_storage.tensors.mainloop.dkvacc_storage.smem_dkacc.data());
+      lse_smem_ptr_c = reinterpret_cast<ElementAccum*>(smem_dkacc_ptr(shared_storage.tensors.mainloop));
       dpsum_smem_ptr_c = lse_smem_ptr_c + cute::cosize_v<SmemLayoutLSE>;
     } else {
       lse_smem_ptr_c = shared_storage.tensors.mainloop.smem_lse.data();
@@ -3344,6 +3376,22 @@ struct CollectiveMainloopBwdSm90 {
     auto r2s_thr_copy_dKVaccum = r2s_tiled_copy_dKVaccum.get_thread_slice(thread_idx);
     Tensor tdKsdKaccum = r2s_thr_copy_dKVaccum.partition_D(cute::conditional_return<!dKV_swapAB>(sdK, sdKt));
     Tensor tdVsdVaccum = r2s_thr_copy_dKVaccum.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt));
+
+    // Double-buffer store stage counter for InnerStoreInProducer R2S path.
+    // Selects which dKVacc buffer to write (consumer) and read (producer).
+    int consumer_store_stage = 0;
+    auto make_r2s_dv_target = [&](int stg) {
+      auto* p = smem_dvacc_ptr(shared_storage.tensors.mainloop, stg);
+      Tensor s1 = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(p), SmemLayoutdKVStore{}));
+      Tensor s2 = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(p), SmemLayoutdKVtStore{}));
+      return r2s_thr_copy_dKVaccum.partition_D(cute::conditional_return<!dKV_swapAB>(s1, s2));
+    };
+    auto make_r2s_dk_target = [&](int stg) {
+      auto* p = smem_dkacc_ptr(shared_storage.tensors.mainloop, stg);
+      Tensor s1 = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(p), SmemLayoutdKVStore{}));
+      Tensor s2 = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(p), SmemLayoutdKVtStore{}));
+      return r2s_thr_copy_dKVaccum.partition_D(cute::conditional_return<!dKV_swapAB>(s1, s2));
+    };
 
     /* DEBUG */
     // Tensor cdKVsdKV = make_identity_tensor(SmemLayoutdKVSwizzled{}.shape());
@@ -3417,8 +3465,8 @@ struct CollectiveMainloopBwdSm90 {
 
     // TMA partitions go through the swizzled TMA-layout views (dense path only; the r2s
     // targets sdK/sdV above may carry the row-contiguous Store layout instead)
-    Tensor sdK_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dkacc.data()), SmemLayoutdKVSwizzled{});
-    Tensor sdV_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dvacc.data()), SmemLayoutdKVSwizzled{});
+    Tensor sdK_tma = make_tensor(make_smem_ptr(smem_dkacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVSwizzled{});
+    Tensor sdV_tma = make_tensor(make_smem_ptr(smem_dvacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVSwizzled{});
     auto block_tma_dK = params.tma_add_dK.get_slice(_0{});
     Tensor tdKgdK = block_tma_dK.partition_D(gdKaccum); // (TMA, TMA_N, TMA_K)
     Tensor tdKsdK = block_tma_dK.partition_S(sdK_tma); // (TMA, TMA_N, TMA_K)
@@ -3733,7 +3781,12 @@ struct CollectiveMainloopBwdSm90 {
               }
 
               Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
-              cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+              if constexpr (kInnerStoreStages >= 2) {
+                auto tdVsdVaccum_s = make_r2s_dv_target(consumer_store_stage);
+                cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum_s);
+              } else {
+                cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+              }
 
               cutlass::arch::fence_view_async_shared();
             } // !PerfDebugSkipDvWriteback
@@ -3752,7 +3805,7 @@ struct CollectiveMainloopBwdSm90 {
             BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
 
             if (thread_idx == 0) {
-              Tensor sdV_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dvacc.data()), SmemLayoutdKVSwizzled{});
+              Tensor sdV_tma = make_tensor(make_smem_ptr(smem_dvacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVSwizzled{});
               auto block_tma_dV_c = params.tma_add_dV.get_slice(_0{});
               Tensor tdVsdV_c = block_tma_dV_c.partition_S(sdV_tma);
 
@@ -3781,8 +3834,8 @@ struct CollectiveMainloopBwdSm90 {
             int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
             int const stride_dV_token = get<0>(params.stride_dV);
             ElementAccum* const ptr_gdV_base = params.ptr_dV + bidh_kv * get<2>(params.stride_dV);
-            Tensor sdV_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dvacc.data()), SmemLayoutdKVStore{});
-            sparse_inner_store<kBlockN, NumConsumerThreads, /*kPackScale=*/1>(
+            Tensor sdV_store = make_tensor(make_smem_ptr(smem_dvacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVStore{});
+            sparse_inner_store<kBlockN, NumConsumerThreads, /*kInnerStoreHeadPackFactor=*/1>(
                 sdV_store,
                 &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_read_k.index() * kBlockN],
                 ptr_gdV_base,
@@ -3829,7 +3882,12 @@ struct CollectiveMainloopBwdSm90 {
           }
 
           Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
-          cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+          if constexpr (kInnerStoreStages >= 2) {
+            auto tdVsdVaccum_s = make_r2s_dv_target(consumer_store_stage);
+            cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum_s);
+          } else {
+            cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
+          }
 
           cutlass::arch::fence_view_async_shared();
 
@@ -3889,12 +3947,22 @@ struct CollectiveMainloopBwdSm90 {
             for (int dki = 0; dki < size(taccdKrdK); ++dki) {
               taccdKrdK(dki) *= params.softmax_scale;
             }
-            cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
+            if constexpr (kInnerStoreStages >= 2) {
+              auto tdKsdKaccum_s = make_r2s_dk_target(consumer_store_stage);
+              cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum_s);
+            } else {
+              cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
+            }
 
             cutlass::arch::fence_view_async_shared();
           } // !PerfDebugSkipDkWriteback
 
           BarrierManager::arrive<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warp_group_idx);
+
+          // Advance consumer store stage for double-buffer
+          if constexpr (kInnerStoreStages >= 2) {
+            consumer_store_stage = (consumer_store_stage + 1) % kInnerStoreStages;
+          }
         } else {
           // Consumer store path: dispatch on the store mechanism
           if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
@@ -3910,7 +3978,7 @@ struct CollectiveMainloopBwdSm90 {
             BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
 
             if (thread_idx == 0) {
-              Tensor sdK_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dkacc.data()), SmemLayoutdKVSwizzled{});
+              Tensor sdK_tma = make_tensor(make_smem_ptr(smem_dkacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVSwizzled{});
               auto block_tma_dK_c = params.tma_add_dK.get_slice(_0{});
               Tensor tdKsdK_c = block_tma_dK_c.partition_S(sdK_tma);
 
@@ -3942,8 +4010,8 @@ struct CollectiveMainloopBwdSm90 {
             int const flat_thread_idx = warp_group_idx * cutlass::NumThreadsPerWarpGroup + wg_thread_idx;
             int const stride_dK_token = get<0>(params.stride_dK);
             ElementAccum* const ptr_gdK_base = params.ptr_dK + bidh_kv * get<2>(params.stride_dK);
-            Tensor sdK_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.dkvacc_storage.smem_dkacc.data()), SmemLayoutdKVStore{});
-            sparse_inner_store<kBlockN, NumConsumerThreads, /*kPackScale=*/1>(
+            Tensor sdK_store = make_tensor(make_smem_ptr(smem_dkacc_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVStore{});
+            sparse_inner_store<kBlockN, NumConsumerThreads, /*kInnerStoreHeadPackFactor=*/1>(
                 sdK_store,
                 &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_read_k.index() * kBlockN],
                 ptr_gdK_base,
