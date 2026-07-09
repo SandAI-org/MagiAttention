@@ -33,6 +33,7 @@
 #include "block.h"
 #include "block_meta.h"
 #include "inner_mode.hpp"
+#include "inner_scatter_ldst.hpp"
 #include "mask.h"
 #include "named_barrier.hpp"
 #include "seqlen.h"
@@ -131,10 +132,10 @@ struct CollectiveMainloopFwdSm90 {
   // is a contiguous memory region → TMA 2D. Both IndexSparse and BlockSparse
   // must set SparseKBlockSize appropriately (BlockSparse: kBlockN, IndexSparse: user).
   static constexpr bool Use_TMA_Q = true;
-  static constexpr bool _is_contiguous = (!IndexSparse && !BlockSparse) || (SparseKBlockSize >= kBlockN);
+  static constexpr bool kInnerTilesContiguous = (!IndexSparse && !BlockSparse) || (SparseKBlockSize >= kBlockN);
   // Tma1d (=1) falls through to CpAsync: cp.async.bulk 1D is incompatible with WGMMA
   // atom-tiled SMEM layouts (see inner_mode.hpp for details).
-  static constexpr InnerLoadMode kInnerLoadMode = _is_contiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
+  static constexpr InnerLoadMode kInnerLoadMode = kInnerTilesContiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
   static_assert(kInnerLoadMode == InnerLoadMode::Tma || kInnerLoadMode == InnerLoadMode::CpAsync);
   static_assert(kInnerLoadMode == InnerLoadMode::Tma || CUTE_STATIC_V(size(ClusterShape{})) == 1, "Scatter load requires ClusterShape == 1");
 
@@ -160,17 +161,8 @@ struct CollectiveMainloopFwdSm90 {
   // TMA 2D paths issue from a single thread, so a single warp (32 threads) suffices.
   static constexpr int NumProducerThreads = kInnerLoadMode != InnerLoadMode::Tma ? cutlass::NumThreadsPerWarpGroup : cutlass::NumThreadsPerWarp;
 
-  // Const parameters for scatter load (CpAsync path)
-  // SMEM bank row width: 32 banks * 4 bytes = 128 bytes
-  static constexpr int kCpAsyncTransactionBytes = 128;
-  // A load-store group of 8 threads form one memory transaction (8 * 16B = 128B)
-  static constexpr int NumThreadsPerLdstGroup = kCpAsyncTransactionBytes / 16; // 16B per cp.async instruction
-  static constexpr int NumLdstGroups = NumProducerThreads / NumThreadsPerLdstGroup;
-  // Number of tokens to load per ldst group
-  static constexpr int NumTokensPerLdstGroup = kBlockN / NumLdstGroups;
-  // Number of cp.async tiles per row: each tile covers kCpAsyncTransactionBytes of the row
-  static constexpr int NumCpAsyncTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-  static_assert(kInnerLoadMode == InnerLoadMode::Tma || kBlockN % NumLdstGroups == 0, "Scatter KV load requires kBlockN divisible by NumLdstGroups");
+  using ScatterLdst = InnerScatterLdstGroup<NumProducerThreads, kBlockN, kHeadDim, sizeof(Element), sizeof(ElementAccum)>;
+  static_assert(kInnerLoadMode == InnerLoadMode::Tma || kBlockN % ScatterLdst::kNumGroups == 0, "Scatter KV load requires kBlockN divisible by NumLdstGroups");
 
   using AtomLayoutQK = Layout<Shape<Int<kBlockM / 64>, _1, _1>>;
 
@@ -461,8 +453,8 @@ struct CollectiveMainloopFwdSm90 {
       RangeMerge,
       PackGQA,
       PackGQAFactor,
-      NumTokensPerLdstGroup,
-      NumThreadsPerLdstGroup,
+      ScatterLdst::kTokensPerGroup,
+      ScatterLdst::kThreadsPerGroup,
       NumProducerThreads,
       kBlockN,
       InnerDirMaxToMin,
@@ -476,9 +468,9 @@ struct CollectiveMainloopFwdSm90 {
       IsProducer,
       PackGQA,
       PackGQAFactor,
-      NumTokensPerLdstGroup,
+      ScatterLdst::kTokensPerGroup,
       NumProducerThreads,
-      NumThreadsPerLdstGroup,
+      ScatterLdst::kThreadsPerGroup,
       kBlockN,
       InnerDirMaxToMin,
       SparseKBlockSize,
@@ -683,12 +675,12 @@ struct CollectiveMainloopFwdSm90 {
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
     int const idx_in_warpgroup = threadIdx.x % NumProducerThreads;
-    int const ldst_group_inner_idx = idx_in_warpgroup % NumThreadsPerLdstGroup;
-    int const ldst_group_idx = idx_in_warpgroup / NumThreadsPerLdstGroup;
+    int const ldst_group_inner_idx = idx_in_warpgroup % ScatterLdst::kThreadsPerGroup;
+    int const ldst_group_idx = idx_in_warpgroup / ScatterLdst::kThreadsPerGroup;
     int const stride_kv = get<0>(params.stride_K);
     int const stride_kv_v = get<0>(params.stride_V);
-    Element* const ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + ldst_group_inner_idx * 8;
-    Element* const ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + ldst_group_inner_idx * 8;
+    Element* const ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K) + ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread;
+    Element* const ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V) + ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread;
 
     // Lazy barrier_O: waited on the first V load (smem_v = smem_o).
     // Allows K (and Q) loads to proceed before epilogue finishes reading smem_o.
@@ -706,14 +698,16 @@ struct CollectiveMainloopFwdSm90 {
         block_meta.fill_token_indices(idx_slot, ldst_group_inner_idx, ldst_group_idx);
         __syncwarp();
         CUTE_UNROLL
-        for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-          int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
+        for (int local_row = 0; local_row < ScatterLdst::kTokensPerGroup; ++local_row) {
+          int smem_row = ldst_group_idx * ScatterLdst::kTokensPerGroup + local_row;
           int token_offset = idx_slot[smem_row] * stride_kv;
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-              Element* dst_ptr = &sK(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_k.index());
-              auto gK_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_offset + tile_idx * 64)), Layout<_1>{});
+          for (int tile_idx = 0; tile_idx < ScatterLdst::kOuterTilesPerRow; ++tile_idx) {
+            if (ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread + tile_idx * ScatterLdst::kOuterElemsPerBankRow < kHeadDim) {
+              Element* dst_ptr =
+                  &sK(smem_row, ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread + tile_idx * ScatterLdst::kOuterElemsPerBankRow, smem_pipe_write_k.index());
+              auto gK_src = make_tensor(
+                  make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gK_base + token_offset + tile_idx * ScatterLdst::kOuterElemsPerBankRow)), Layout<_1>{});
               auto sK_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
               cute::copy(cp_async_cg, gK_src, sK_dst);
             }
@@ -776,13 +770,17 @@ struct CollectiveMainloopFwdSm90 {
         Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
         int const* const idx_slot = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_v.index() * kBlockN];
         CUTE_UNROLL
-        for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-          int const token_offset = idx_slot[ldst_group_idx * NumTokensPerLdstGroup + local_row] * stride_kv_v;
+        for (int local_row = 0; local_row < ScatterLdst::kTokensPerGroup; ++local_row) {
+          int const token_offset = idx_slot[ldst_group_idx * ScatterLdst::kTokensPerGroup + local_row] * stride_kv_v;
           CUTE_UNROLL
-          for (int tile_idx = 0; tile_idx < NumCpAsyncTilesPerRow; ++tile_idx) {
-            if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-              Element* dst_ptr = &sVt(ldst_group_inner_idx * 8 + tile_idx * 64, ldst_group_idx * NumTokensPerLdstGroup + local_row, smem_pipe_write_v.index());
-              auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_offset + tile_idx * 64)), Layout<_1>{});
+          for (int tile_idx = 0; tile_idx < ScatterLdst::kOuterTilesPerRow; ++tile_idx) {
+            if (ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread + tile_idx * ScatterLdst::kOuterElemsPerBankRow < kHeadDim) {
+              Element* dst_ptr = &sVt(
+                  ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread + tile_idx * ScatterLdst::kOuterElemsPerBankRow,
+                  ldst_group_idx * ScatterLdst::kTokensPerGroup + local_row,
+                  smem_pipe_write_v.index());
+              auto gV_src = make_tensor(
+                  make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_offset + tile_idx * ScatterLdst::kOuterElemsPerBankRow)), Layout<_1>{});
               auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
               cute::copy(cp_async_cg, gV_src, sV_dst);
             }

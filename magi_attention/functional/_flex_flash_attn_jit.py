@@ -95,7 +95,7 @@ def _ffa_register_quota(
     fwd (producer, consumer) by mode:
       - scatter load ((index_sparse or block_sparse) with kbs<kBlockN): (64, 216)
         cp.async producer warpgroup needs more registers than the TMA producer warp.
-      - TMA KV (kbs>=kBlockN, i.e. _is_contiguous=true): use Dense quota
+      - TMA KV (kbs>=kBlockN, i.e. kInnerTilesContiguous=true): use Dense quota
         since only thread 0 issues TMA.
       - dense, by MMA warpgroup count (1/2/3 from kBlockM/64, or 1 when SwapAB): (56, 256),
         (40, 232), (32, 160).
@@ -118,8 +118,8 @@ def _ffa_register_quota(
     kblock_n_fwd = 128  # Default FWD tile N
     if direction == "fwd":
         assert kblock_m is not None
-        # CpAsync scatter path is used when _is_contiguous is false:
-        #   _is_contiguous = (!IndexSparse && !BlockSparse) || (KBlockSize >= kBlockN)
+        # CpAsync scatter path is used when kInnerTilesContiguous is false:
+        #   kInnerTilesContiguous = (!IndexSparse && !BlockSparse) || (KBlockSize >= kBlockN)
         # So scatter is needed when (IndexSparse || BlockSparse) && KBlockSize < kBlockN.
         uses_scatter = (
             index_sparse or block_sparse

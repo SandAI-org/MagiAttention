@@ -36,6 +36,7 @@
 #include "copy_sm90_bulk_reduce.hpp"
 #include "deterministic.h"
 #include "inner_mode.hpp"
+#include "inner_scatter_ldst.hpp"
 #include "mask.h"
 #include "named_barrier.hpp"
 #include "seqlen.h"
@@ -247,20 +248,10 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(InnerStoreInProducer || ProducerWarpRoles::kNumInnerStorerWarps == 0);
   static_assert(ProducerWarpRoles::kNumTotalWarps * cutlass::NumThreadsPerWarp == NumProducerThreads);
 
-  // Const parameters for scatter load/store
-  static constexpr int kCpAsyncTransactionBytes = 128;
-  static constexpr int NumThreadsPerLdstGroup = kCpAsyncTransactionBytes / 16;
-  static constexpr int NumLdstGroups = NumProducerLoaderThreads / NumThreadsPerLdstGroup;
   // Inner tile size in tokens: kBlockN (KV) for InnerLoopK, kBlockM (Q/dO) for InnerLoopQ.
-  // Matches BlockMeta::InnerBlockSize — used for scatter load/store group sizing and
-  // the smem index array (SmemSparseInnerIndices below).
   static constexpr int kInnerTileSize = BwdInnerLoopK ? kBlockN : kBlockM;
-  static constexpr int NumTokensPerLdstGroup = kInnerTileSize / NumLdstGroups;
-  static constexpr int kNumLoadTilesPerRow = kHeadDim * sizeof(Element) / kCpAsyncTransactionBytes;
-  static constexpr int kStoreVecWidth = kCpAsyncTransactionBytes / (NumThreadsPerLdstGroup * sizeof(ElementAccum));
-  static constexpr int kNumStoreTiles = kHeadDim / (NumThreadsPerLdstGroup * kStoreVecWidth);
-
-  static_assert(!IsSparse || kInnerTileSize % NumLdstGroups == 0, "Scatter requires kInnerTileSize divisible by NumLdstGroups");
+  using ScatterLdst = InnerScatterLdstGroup<NumProducerLoaderThreads, kInnerTileSize, kHeadDim, sizeof(Element), sizeof(ElementAccum)>;
+  static_assert(!IsSparse || kInnerTileSize % ScatterLdst::kNumGroups == 0, "Scatter requires kInnerTileSize divisible by NumLdstGroups");
 
   static constexpr bool Mma_dKV_is_RS = AtomLayoutMSdP == 1 && AtomLayoutMdKV == 1 && SdP_swapAB && !dKV_swapAB;
   static constexpr bool Mma_dQ_is_RS = AtomLayoutNSdP == 1 && AtomLayoutNdQ == 1 && !SdP_swapAB && !dQ_swapAB; // If dQ_swapAB, we can't use RS
@@ -884,8 +875,8 @@ struct CollectiveMainloopBwdSm90 {
       RangeMerge,
       PackGQA,
       PackGQAFactor,
-      NumTokensPerLdstGroup,
-      NumThreadsPerLdstGroup,
+      ScatterLdst::kTokensPerGroup,
+      ScatterLdst::kThreadsPerGroup,
       NumProducerThreads,
       InnerLoopQ ? kBlockM : kBlockN,
       InnerDirMaxToMin,
@@ -1129,9 +1120,9 @@ struct CollectiveMainloopBwdSm90 {
       IsProducer,
       PackGQA,
       PackGQAFactor,
-      NumTokensPerLdstGroup,
+      ScatterLdst::kTokensPerGroup,
       NumProducerThreads,
-      NumThreadsPerLdstGroup,
+      ScatterLdst::kThreadsPerGroup,
       InnerLoopQ ? kBlockM : kBlockN,
       InnerDirMaxToMin,
       SparseKBlockSize,
@@ -1164,7 +1155,7 @@ struct CollectiveMainloopBwdSm90 {
   // Reduce-add kTileSize entries of SMEM store buffer into non-contiguous GMEM positions
   // addressed by sparse_indices[i]. Two modes via kInnerStoreMode:
   //   Tma1d:     per-entry cp.reduce.async.bulk (kHeadDim*4B, contiguous SMEM layout)
-  //   AtomicAdd: per-element atomicAdd (NumThreadsPerLdstGroup threads × kStoreVecWidth)
+  //   AtomicAdd: per-element atomicAdd (Ldst::kThreadsPerGroup threads × Ldst::kInnerElemsPerThread)
   // kInnerStoreHeadPackFactor: GQA head-packing factor for compound indices (token_idx*G+g).
   //   dQ calls pass PackGQAFactor (compound_idx needs token/head decomposition);
   //   dK/dV calls pass 1 (plain token indices, no head packing).
@@ -1198,23 +1189,18 @@ struct CollectiveMainloopBwdSm90 {
         cute::tma_store_wait<0>();
       }
     } else {
-      // Same NumThreadsPerLdstGroup-based decomposition as load-side NumTokensPerLdstGroup,
-      // but parameterized by kNumThreads (varies per call site: 32 / NumProducer… / NumConsumer…).
-      static_assert(kNumThreads % NumThreadsPerLdstGroup == 0);
-      static constexpr int kNumStoreGroups = kNumThreads / NumThreadsPerLdstGroup;
-      static_assert(kTileSize % kNumStoreGroups == 0, "AtomicAdd store requires kTileSize divisible by store groups");
-      static constexpr int kTokensPerGroup = kTileSize / kNumStoreGroups;
-      int const group_idx = thread_idx / NumThreadsPerLdstGroup;
-      int const lane_in_group = thread_idx % NumThreadsPerLdstGroup;
+      using Ldst = InnerScatterLdstGroup<kNumThreads, kTileSize, kHeadDim, sizeof(Element), sizeof(ElementAccum)>;
+      int const group_idx = thread_idx / Ldst::kThreadsPerGroup;
+      int const lane_in_group = thread_idx % Ldst::kThreadsPerGroup;
       CUTE_UNROLL
-      for (int local_i = 0; local_i < kTokensPerGroup; ++local_i) {
-        int const i = group_idx * kTokensPerGroup + local_i;
+      for (int local_i = 0; local_i < Ldst::kTokensPerGroup; ++local_i) {
+        int const i = group_idx * Ldst::kTokensPerGroup + local_i;
         ElementAccum* const dst = gmem_ptr(sparse_indices[i]);
         CUTE_UNROLL
-        for (int tile_idx = 0; tile_idx < kNumStoreTiles; ++tile_idx) {
-          int const col_base = lane_in_group * kStoreVecWidth + tile_idx * NumThreadsPerLdstGroup * kStoreVecWidth;
+        for (int tile_idx = 0; tile_idx < Ldst::kInnerTilesPerRow; ++tile_idx) {
+          int const col_base = lane_in_group * Ldst::kInnerElemsPerThread + tile_idx * Ldst::kInnerElemsPerBankRow;
           CUTE_UNROLL
-          for (int v = 0; v < kStoreVecWidth; ++v) {
+          for (int v = 0; v < Ldst::kInnerElemsPerThread; ++v) {
             atomicAdd(dst + col_base + v, s_store(tile_offset + i, col_base + v));
           }
         }
@@ -1226,7 +1212,7 @@ struct CollectiveMainloopBwdSm90 {
   // Scatter-loads kInnerTileSize tokens from non-contiguous GMEM positions into pipelined SMEM.
   // kHeadPackFactor: GQA compound index factor (>1 → compound_idx = token_idx*G+g decomposition).
   // Main tensor: Element-typed, kHeadDim wide. Thread decomposition mirrors sparse_inner_store.
-  // ptr_main_base: pre-offset to current head + group_lane * 8 (128 bits per thread per tile).
+  // ptr_main_base: pre-offset to current head + group_lane * kOuterElemsPerThread.
   template <int kHeadPackFactor = 1, typename SmemMainT>
   CUTLASS_DEVICE static void sparse_inner_load(
       SmemMainT& smem_main,
@@ -1238,12 +1224,12 @@ struct CollectiveMainloopBwdSm90 {
       int thread_idx) {
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
-    int const group_lane = thread_idx % NumThreadsPerLdstGroup;
-    int const group_idx = thread_idx / NumThreadsPerLdstGroup;
+    int const group_lane = thread_idx % ScatterLdst::kThreadsPerGroup;
+    int const group_idx = thread_idx / ScatterLdst::kThreadsPerGroup;
 
     CUTE_UNROLL
-    for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-      int smem_row = group_idx * NumTokensPerLdstGroup + local_row;
+    for (int local_row = 0; local_row < ScatterLdst::kTokensPerGroup; ++local_row) {
+      int smem_row = group_idx * ScatterLdst::kTokensPerGroup + local_row;
       int64_t token_offset;
       if constexpr (kHeadPackFactor > 1) {
         int const ci = compound_indices[smem_row];
@@ -1252,10 +1238,11 @@ struct CollectiveMainloopBwdSm90 {
         token_offset = static_cast<int64_t>(compound_indices[smem_row]) * stride_token;
       }
       CUTE_UNROLL
-      for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
-        if (group_lane * 8 + tile_idx * 64 < kHeadDim) {
-          Element* dst_ptr = &smem_main(smem_row, group_lane * 8 + tile_idx * 64, stage);
-          auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_main_base + token_offset + tile_idx * 64)), Layout<_1>{});
+      for (int tile_idx = 0; tile_idx < ScatterLdst::kOuterTilesPerRow; ++tile_idx) {
+        if (group_lane * ScatterLdst::kOuterElemsPerThread + tile_idx * ScatterLdst::kOuterElemsPerBankRow < kHeadDim) {
+          Element* dst_ptr = &smem_main(smem_row, group_lane * ScatterLdst::kOuterElemsPerThread + tile_idx * ScatterLdst::kOuterElemsPerBankRow, stage);
+          auto g_src = make_tensor(
+              make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_main_base + token_offset + tile_idx * ScatterLdst::kOuterElemsPerBankRow)), Layout<_1>{});
           auto s_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
           cute::copy(cp_async_cg, g_src, s_dst);
         }
@@ -1281,11 +1268,11 @@ struct CollectiveMainloopBwdSm90 {
 
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
-    int const group_lane = thread_idx % NumThreadsPerLdstGroup;
-    int const group_idx = thread_idx / NumThreadsPerLdstGroup;
+    int const group_lane = thread_idx % ScatterLdst::kThreadsPerGroup;
+    int const group_idx = thread_idx / ScatterLdst::kThreadsPerGroup;
 
-    for (int i = group_lane; i < NumTokensPerLdstGroup; i += NumThreadsPerLdstGroup) {
-      int smem_idx = group_idx * NumTokensPerLdstGroup + i;
+    for (int i = group_lane; i < ScatterLdst::kTokensPerGroup; i += ScatterLdst::kThreadsPerGroup) {
+      int smem_idx = group_idx * ScatterLdst::kTokensPerGroup + i;
       float* s_dst = &smem_scalar(_0{}, smem_idx, stage);
       auto g_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_scalar_base + scalar_offset_fn(compound_indices[smem_idx]))), Layout<_1>{});
       auto s_dst_t = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(s_dst)), Layout<_1>{});
@@ -1476,8 +1463,8 @@ struct CollectiveMainloopBwdSm90 {
 
     // ─── BlockSparse InnerLoopQ scatter infra (DCE'd on dense path) ───
     int const thread_idx = threadIdx.x % NumProducerLoaderThreads;
-    int const ldst_group_inner_idx = thread_idx % NumThreadsPerLdstGroup;
-    int const ldst_group_idx = thread_idx / NumThreadsPerLdstGroup;
+    int const ldst_group_inner_idx = thread_idx % ScatterLdst::kThreadsPerGroup;
+    int const ldst_group_idx = thread_idx / ScatterLdst::kThreadsPerGroup;
     // Compound index decomposition: compound_idx = token_idx * G + g (G = PackGQAFactor).
     // Splits compound_idx into token_idx * token_stride + g * head_stride.
     auto compound_idx_to_offset = [](int compound_idx, int64_t token_stride, int64_t head_stride) -> int64_t {
@@ -1492,8 +1479,8 @@ struct CollectiveMainloopBwdSm90 {
     int64_t const stride_do_token = get<0>(params.stride_dO);
     int64_t const stride_q_head = get<2>(params.stride_Q);
     int64_t const stride_do_head = get<2>(params.stride_dO);
-    Element const* const ptr_gQ_base = params.ptr_Q + bidh * PackGQAFactor * stride_q_head + ldst_group_inner_idx * 8;
-    Element const* const ptr_gdO_base = params.ptr_dO + bidh * PackGQAFactor * stride_do_head + ldst_group_inner_idx * 8;
+    Element const* const ptr_gQ_base = params.ptr_Q + bidh * PackGQAFactor * stride_q_head + ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread;
+    Element const* const ptr_gdO_base = params.ptr_dO + bidh * PackGQAFactor * stride_do_head + ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread;
     // LSE/dPsum strides: 4 floats per token.
     // kv_head_stride: stride between KV heads (bidh axis).
     // q_head_in_group_stride: stride between Q heads within one GQA group (0 when !PackGQA && !CatGQA).
@@ -1786,12 +1773,12 @@ struct CollectiveMainloopBwdSm90 {
     using CpAsyncCg = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL_ZFILL<cute::uint128_t>, cute::uint128_t>;
     CpAsyncCg const cp_async_cg{};
     int const thread_idx = threadIdx.x % NumProducerLoaderThreads;
-    int const ldst_group_inner_idx = thread_idx % NumThreadsPerLdstGroup;
-    int const ldst_group_idx = thread_idx / NumThreadsPerLdstGroup;
+    int const ldst_group_inner_idx = thread_idx % ScatterLdst::kThreadsPerGroup;
+    int const ldst_group_idx = thread_idx / ScatterLdst::kThreadsPerGroup;
     int const stride_kv_row = get<0>(params.stride_K);
     int const stride_kv_row_v = get<0>(params.stride_V);
-    Element const* const ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + ldst_group_inner_idx * 8;
-    Element const* const ptr_gV_base = params.ptr_V + bidh_kv * get<2>(params.stride_V) + ldst_group_inner_idx * 8;
+    Element const* const ptr_gK_base = params.ptr_K + bidh_kv * get<2>(params.stride_K) + ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread;
+    Element const* const ptr_gV_base = params.ptr_V + bidh_kv * get<2>(params.stride_V) + ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread;
 
     // ─── Shared Q/dO/LSE/dPsum loading ───
 
@@ -1897,14 +1884,16 @@ struct CollectiveMainloopBwdSm90 {
           // CpAsync debug: sequential rows from block 0 (no stage_indices).
           pipeline_v.producer_acquire(smem_pipe_write_v);
           CUTE_UNROLL
-          for (int local_row = 0; local_row < NumTokensPerLdstGroup; ++local_row) {
-            int smem_row = ldst_group_idx * NumTokensPerLdstGroup + local_row;
+          for (int local_row = 0; local_row < ScatterLdst::kTokensPerGroup; ++local_row) {
+            int smem_row = ldst_group_idx * ScatterLdst::kTokensPerGroup + local_row;
             int token_idx = smem_row * stride_kv_row_v;
             CUTE_UNROLL
-            for (int tile_idx = 0; tile_idx < kNumLoadTilesPerRow; ++tile_idx) {
-              if (ldst_group_inner_idx * 8 + tile_idx * 64 < kHeadDim) {
-                Element* dst_ptr = &sV(smem_row, ldst_group_inner_idx * 8 + tile_idx * 64, smem_pipe_write_v.index());
-                auto gV_src = make_tensor(make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_idx + tile_idx * 64)), Layout<_1>{});
+            for (int tile_idx = 0; tile_idx < ScatterLdst::kOuterTilesPerRow; ++tile_idx) {
+              if (ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread + tile_idx * ScatterLdst::kOuterElemsPerBankRow < kHeadDim) {
+                Element* dst_ptr =
+                    &sV(smem_row, ldst_group_inner_idx * ScatterLdst::kOuterElemsPerThread + tile_idx * ScatterLdst::kOuterElemsPerBankRow, smem_pipe_write_v.index());
+                auto gV_src = make_tensor(
+                    make_gmem_ptr(reinterpret_cast<cute::uint128_t const*>(ptr_gV_base + token_idx + tile_idx * ScatterLdst::kOuterElemsPerBankRow)), Layout<_1>{});
                 auto sV_dst = make_tensor(make_smem_ptr(reinterpret_cast<cute::uint128_t*>(dst_ptr)), Layout<_1>{});
                 cute::copy(cp_async_cg, gV_src, sV_dst);
               }
