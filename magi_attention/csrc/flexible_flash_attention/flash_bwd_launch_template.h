@@ -133,11 +133,12 @@ template <
     int BwdConsumerRegs,
     int InnerStoreMode,
     bool OuterStoreNeedReduction,
+    int OuterStoreMode,
     int Stages_V,
     int Tma1dSmemRowPad,
     int SparseKBlockSize,
     int InnerLoadMode,
-    bool UnionDkvacc,
+    bool UnionDkvSmem,
     int InnerStoreStages,
     bool ProfileMode,
     bool PerfDebugSkipVLoad_ = false,
@@ -205,7 +206,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       Tma1dSmemRowPad,
       SparseKBlockSize,
       InnerLoadMode,
-      UnionDkvacc,
+      UnionDkvSmem,
       InnerStoreStages,
       PerfDebugSkipVLoad_,
       PerfDebugSkipDvStore_,
@@ -235,6 +236,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutMdQ,
       AtomLayoutNdKV,
       OuterStoreNeedReduction,
+      OuterStoreMode,
       Deterministic,
       BwdInnerLoopK,
       /*PackGQA=*/PackGQA,
@@ -333,7 +335,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
           Stages_dS,
           Tma1dSmemRowPad,
           InnerStoreMode,
-          (int)UnionDkvacc,
+          (int)UnionDkvSmem,
           (int)BwdInnerLoopK);
       cudaFuncAttributes func_attrs;
       cudaFuncGetAttributes(&func_attrs, (void*)cutlass::device_kernel<AttnKernel>);
@@ -400,8 +402,9 @@ template <
     int BwdTma1dSmemRowPad,
     int SparseKBlockSize,
     int InnerLoadMode,
-    bool BwdUnionDkvacc,
+    bool BwdUnionDkvSmem,
     int InnerStoreStages,
+    int OuterStoreMode,
     bool ProfileMode,
     bool PerfDebugSkipVLoad = false,
     bool PerfDebugSkipDvStore = false,
@@ -420,7 +423,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int Stages_dS = BwdStagesDs > 0 ? BwdStagesDs : (kHeadDim <= 128 ? (kBlockM <= 64 ? 2 : 1) : 1);
   static constexpr int Stages_V = BwdStagesV > 0 ? BwdStagesV : Stages;
   static constexpr int Tma1dSmemRowPad = BwdTma1dSmemRowPad;
-  static constexpr bool UnionDkvacc = BwdUnionDkvacc;
+  static constexpr bool UnionDkvSmem = BwdUnionDkvSmem;
 
   static constexpr bool SdP_swapAB = kHeadDim <= 128 ? true : false;
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
@@ -481,11 +484,12 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*BwdConsumerRegs=*/BwdConsumerRegs,
       /*InnerStoreMode=*/InnerStoreMode,
       /*OuterStoreNeedReduction=*/OuterStoreNeedReduction,
+      /*OuterStoreMode=*/OuterStoreMode,
       /*Stages_V=*/Stages_V,
       /*Tma1dSmemRowPad=*/Tma1dSmemRowPad,
       /*SparseKBlockSize=*/SparseKBlockSize,
       /*InnerLoadMode=*/InnerLoadMode,
-      /*UnionDkvacc=*/UnionDkvacc,
+      /*UnionDkvSmem=*/UnionDkvSmem,
       /*InnerStoreStages=*/InnerStoreStages,
       /*PerfDebugSkipVLoad=*/PerfDebugSkipVLoad,
       /*PerfDebugSkipDvStore=*/PerfDebugSkipDvStore,

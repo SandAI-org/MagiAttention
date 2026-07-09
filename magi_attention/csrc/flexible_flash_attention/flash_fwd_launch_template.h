@@ -63,6 +63,7 @@ template <
     int ConsumerRegs,
     int SparseKBlockSize,
     int InnerLoadMode,
+    int OuterStoreMode,
     bool ProfileMode>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(!(BlockSparse && IndexSparse), "BlockSparse and IndexSparse cannot be enabled at the same time");
@@ -102,7 +103,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
 
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
-      CollectiveMainloop::NumMmaThreads,
+      CollectiveMainloop::NumConsumerThreads,
       CollectiveMainloop::NumProducerThreads,
       /*WarpSpecialized=*/Arch >= 90,
       PackGQA,
@@ -115,13 +116,14 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       ElementOut,
       ArchTag,
       typename Scheduler::BlockCoordType,
-      CollectiveMainloop::NumMmaThreads,
+      CollectiveMainloop::NumConsumerThreads,
       DisableFwdAtomicReduction,
       PackGQA,
       PackGQAFactor,
       Deterministic,
       SwapAB,
-      ReturnMaxLogits>;
+      ReturnMaxLogits,
+      OuterStoreMode>;
 
   using AttnKernel =
       flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, ProducerRegs, ConsumerRegs>>;
@@ -231,6 +233,7 @@ template <
     int kConsumerRegs,
     int kSparseKBlockSize,
     int kInnerLoadMode,
+    int kOuterStoreMode,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only fp16/bf16 dtype are supported");
@@ -267,6 +270,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*ConsumerRegs=*/kConsumerRegs,
         /*SparseKBlockSize=*/kSparseKBlockSize,
         /*InnerLoadMode=*/kInnerLoadMode,
+        /*OuterStoreMode=*/kOuterStoreMode,
         /*ProfileMode=*/kProfileMode>(params, stream);
   });
 }

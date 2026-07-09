@@ -18,12 +18,10 @@ static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
-static constexpr bool kRangeMerge = {{ auto_range_merge }};
+static constexpr bool kRangeMerge = {{ range_merge }};
 static constexpr bool kBwdInnerLoopK = {{ bwd_inner_loop_k }};
-// OuterStoreNoReduction: the outer-direction output (dQ for InnerLoopK, dKV for InnerLoopQ)
-// uses direct per-element store without atomic reduction.
-static constexpr bool kOuterStoreNoReduction = kBwdInnerLoopK ? {{ disable_dq_atomic }} : {{ disable_atomic }};
-static constexpr bool kOuterStoreNeedReduction = !kOuterStoreNoReduction;
+// Outer-direction store uses atomic reduction when multiple CTAs may alias the same output row.
+static constexpr bool kOuterStoreNeedReduction = kBwdInnerLoopK ? !{{ disable_dq_atomic }} : !{{ disable_atomic }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr bool kCatGQA = {{ cat_gqa }};
 static constexpr int kPackGQAFactor = {{ pack_gqa_factor }};
@@ -50,13 +48,15 @@ static constexpr int kBwdStagesDs = {{bwd_stages_ds | default(0)}};
 static constexpr int kBwdStagesV = {{bwd_stages_v | default(0)}};
 // tma1d_smem_row_pad: row padding (floats) for the Tma1d bulk-reduce linear layout to avoid bank conflicts.
 //   -1 = auto (default 4), >=0 = override.
-static constexpr int kBwdTma1dSmemRowPad = {{bwd_tma1d_acc_row_pad | default(-1)}};
-// Union dKV accumulators: false(0) = separate smem_dkacc/smem_dvacc (optimized, requires stgV=1)
+static constexpr int kBwdTma1dSmemRowPad = {{bwd_tma1d_smem_row_pad | default(-1)}};
+// Union dKV SMEM buffers: false(0) = separate smem_inner_dk/smem_inner_dv (optimized, requires stgV=1)
 //                         true(1) = union into single buffer (legacy, needed for LoopQ with stgV=2)
-static constexpr bool kBwdUnionDkvacc = {{ bwd_union_dkvacc | default('false') }};
-// Inner store pipeline stages: 1 = single-buffer (default), 2 = double-buffer dKVacc.
+static constexpr bool kBwdUnionDkvSmem = {{ bwd_union_dkv_smem | default('false') }};
+// Inner store pipeline stages: 1 = single-buffer (default), 2 = double-buffer dKV SMEM.
 // Union mode recommended when 2 to fit SMEM budget (M=128 N=64).
 static constexpr int kInnerStoreStages = {{inner_store_stages | default(1)}};
+// Outer-loop store mode: 0=Tma(full-tile TMA store/reduce), 1=Stg(per-thread vectorized STG.128)
+static constexpr int kOuterStoreMode = {{ outer_store_mode | default(0) }};
 // Sparse K block size: 1 = token-level indices, >1 = block-level (each index covers SparseKBlockSize tokens)
 static constexpr int kSparseKBlockSize = {{sparse_k_block_size | default(1)}};
 // Per-switch perf isolation overrides (InnerLoopK only, correctness NOT guaranteed).
@@ -127,7 +127,7 @@ std::vector<at::Tensor> mha_bwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kOuterStoreNoReduction, kBwdInnerLoopK, kPackGQA, kCatGQA, kIndexSparse>(
+  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd<kDeterministic, kOuterStoreNeedReduction, kBwdInnerLoopK, kPackGQA, kCatGQA, kIndexSparse>(
       dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, 
       q_ranges_, k_ranges_, attn_type_map_, 
       merge_k_ranges_, bwd_kq_map_, bwd_unique_count_, 
@@ -140,7 +140,7 @@ std::vector<at::Tensor> mha_bwd(
     MagiEvents::stop("bwd_prepare");
 
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdTma1dSmemRowPad, kSparseKBlockSize, kInnerLoadMode, kBwdUnionDkvacc, kInnerStoreStages, kProfileMode, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDq, TDkv, kHeadDim, kHasSoftcap, kOuterStoreNeedReduction, kDeterministic, kRangeMerge, kBwdInnerLoopK, kPackGQA, kCatGQA, kPackGQAFactor, kBlockSparse, kIndexSparse, kInnerDirMaxToMin, kMaskMode, kInnerStoreInProducer, kBwdProducerRegs, kBwdConsumerRegs, kInnerStoreMode, kBwdTileM, kBwdTileN, kBwdStages, kBwdStagesDs, kBwdStagesV, kBwdTma1dSmemRowPad, kSparseKBlockSize, kInnerLoadMode, kBwdUnionDkvSmem, kInnerStoreStages, kOuterStoreMode, kProfileMode, kPerfDebugSkipVLoad, kPerfDebugSkipDvStore, kPerfDebugSkipDkStore, kPerfDebugSkipDvMma>(params, stream);
 
   return {dq, dk, dv, dsink};
 }

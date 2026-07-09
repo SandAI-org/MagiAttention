@@ -172,7 +172,7 @@ def get_ffa_uri(
     deterministic: bool,
     kblock_m: int | None,
     kblock_n: int | None,
-    auto_range_merge: bool,
+    range_merge: bool,
     swap_ab: bool,
     pack_gqa: bool,
     cat_gqa: bool,
@@ -200,7 +200,7 @@ def get_ffa_uri(
         f"{'' if disable_atomic_reduction else '_atomic'}"
         f"{'' if not disable_dq_atomic_reduction else '_nodqatomic'}"
         f"{'_deterministic' if deterministic else ''}"
-        f"{'_autorangemerge' if auto_range_merge else ''}"
+        f"{'_rangemerge' if range_merge else ''}"
         f"{'_swapab' if swap_ab else ''}"
         f"{f'_packgqa{pack_gqa_factor}' if pack_gqa else ''}"
         f"{f'_catgqa{pack_gqa_factor}' if cat_gqa else ''}"
@@ -312,7 +312,7 @@ def get_ffa_jit_spec(
     disable_dq_atomic_reduction: bool,
     deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
-    auto_range_merge: bool = False,
+    range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
@@ -391,7 +391,7 @@ def get_ffa_jit_spec(
         deterministic=deterministic,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
-        auto_range_merge=auto_range_merge,
+        range_merge=range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
@@ -478,26 +478,31 @@ def get_ffa_jit_spec(
         ), f"MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER must be true/false, got {_dxp}"
         extra_template_args["inner_store_in_producer"] = _dxp_lower
         uri += f"_dxp{_dxp_lower}"
-    # ─── InnerLoadMode: tma=0 (2D auto), tma1d=1 (bulk per-row, no-swizzle K), cpasync=2 ───
+    # ─── InnerLoadMode: tma=0 (2D auto), cpasync=2 ───
     if _inner_use_scatter:
-        _load_env = os.environ.get("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD")
+        _load_env = os.environ.get(
+            "MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE",
+            os.environ.get("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD"),
+        )
         if _load_env is not None:
             _load_lower = _load_env.lower()
-            _load_mode_map = {"tma": "0", "tma1d": "1", "cpasync": "2"}
+            _load_mode_map = {"tma": "0", "cpasync": "2"}
             assert (
                 _load_lower in _load_mode_map
-            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD must be tma/tma1d/cpasync, got {_load_env}"
+            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE must be tma/cpasync, got {_load_env}"
             extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
             uri += f"_sload{_load_mode_map[_load_lower]}"
-    # ─── InnerStoreMode (BWD only): 1=tma1d, 2=cpasync, 3=bypass_smem ───
-    # Applies to both scatter and dense paths. Tma1d requires scatter (sparse) path.
+    # ─── InnerStoreMode (BWD only): 1=tma1d, 2=atomicadd, 3=bypass_smem ───
     if direction == "bwd":
         _store_env = os.environ.get(
-            "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE",
-            os.environ.get("MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"),
+            "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE",
+            os.environ.get(
+                "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE",
+                os.environ.get("MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"),
+            ),
         )
-        _bypass_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS")
-        if _bypass_env is not None and _bypass_env != "0":
+        _use_smem_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM")
+        if _use_smem_env is not None and _use_smem_env == "0":
             extra_template_args["inner_store_mode"] = "3"
             uri += "_sstore3"
         elif _store_env is not None:
@@ -512,7 +517,7 @@ def get_ffa_jit_spec(
             }
             assert (
                 _store_lower in _store_mode_map
-            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE must be tma1d/atomicadd/bypass, got {_store_env}"
+            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE must be tma1d/atomicadd/bypass, got {_store_env}"
             extra_template_args["inner_store_mode"] = _store_mode_map[_store_lower]
             uri += f"_sstore{_store_mode_map[_store_lower]}"
         elif _inner_use_scatter:
@@ -533,20 +538,20 @@ def get_ffa_jit_spec(
                 _uri_val = _val.replace("-", "n")
                 uri += f"_{_uri_key}{_uri_val}"
 
-        # Default for LoopK: separate dK/dV SMEM buffers (UnionDkvacc=false) + stgV=1.
+        # Default for LoopK: separate dK/dV SMEM buffers (UnionDkvSmem=false) + stgV=1.
         # Separate mode (+38T, +11%): SMEM 198KB → 214KB (stgV=1 frees 16KB for +32KB).
         # Convenience override: MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2=1 restores legacy union.
-        # Fine-grained: BWD_UNION_DKVACC / BWD_STAGES_V still work individually.
-        _union_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_UNION_DKVACC")
+        # Fine-grained: BWD_UNION_DKV_SMEM / BWD_STAGES_V still work individually.
+        _union_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_UNION_DKV_SMEM")
         if _union_env is not None:
-            extra_template_args["bwd_union_dkvacc"] = (
+            extra_template_args["bwd_union_dkv_smem"] = (
                 "true" if _union_env != "0" else "false"
             )
             if _union_env != "0":
                 uri += f"_ud{_union_env}"
         _perf_union = os.environ.get("MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2")
         if _perf_union is not None and _perf_union != "0":
-            extra_template_args.setdefault("bwd_union_dkvacc", "true")
+            extra_template_args.setdefault("bwd_union_dkv_smem", "true")
             extra_template_args.setdefault("bwd_stages_v", "2")
             uri += "_pus1"
         elif bwd_inner_loop_k:
@@ -554,7 +559,7 @@ def get_ffa_jit_spec(
                 extra_template_args["bwd_stages_v"] = "1"
                 uri += "_stv1"
 
-        # Inner store pipeline stages: 1 = single-buffer (default), 2 = double-buffer dKVacc.
+        # Inner store pipeline stages: 1 = single-buffer (default), 2 = double-buffer dKV SMEM.
         _inner_store_stages = os.environ.get(
             "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES"
         )
@@ -601,6 +606,35 @@ def get_ffa_jit_spec(
     extra_template_args[f"{direction}_producer_regs"] = str(_producer_regs)
     extra_template_args[f"{direction}_consumer_regs"] = str(_consumer_regs)
     uri += f"_pr{_producer_regs}_cr{_consumer_regs}"
+
+    # ─── OuterStoreMode: 0=Tma, 1=Stg ───
+    # FWD: Tma only when SwapAB=true and PackGQA shape divides kBlockM cleanly.
+    # BWD: Tma when OuterStoreNeedReduction=true and not IndexSparse partial tile.
+    _outer_store_env = os.environ.get("MAGI_ATTENTION_FFA_OUTER_STORE_MODE")
+    if _outer_store_env is not None:
+        _osm_map = {"tma": "0", "stg": "1", "0": "0", "1": "1"}
+        _osm_lower = _outer_store_env.lower()
+        assert _osm_lower in _osm_map, (
+            f"MAGI_ATTENTION_FFA_OUTER_STORE_MODE must be tma/stg, got {_outer_store_env}"
+        )
+        extra_template_args["outer_store_mode"] = _osm_map[_osm_lower]
+        uri += f"_osm{_osm_map[_osm_lower]}"
+    elif direction == "fwd":
+        _can_tma = swap_ab and (
+            not pack_gqa
+            or (kblock_m is not None and kblock_m % pack_gqa_factor == 0)
+        )
+        extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"
+    elif direction == "bwd":
+        # BWD: Tma when reduction is needed and tile is not partial (IndexSparse LoopQ)
+        _outer_needs_reduction = (
+            (bwd_inner_loop_k and not disable_dq_atomic_reduction)
+            or (not bwd_inner_loop_k and not disable_atomic_reduction)
+        )
+        _is_partial_tile = index_sparse and not bwd_inner_loop_k
+        _can_tma = _outer_needs_reduction and not _is_partial_tile
+        extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"
+
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
     logger.info("Generated source directory: %s", gen_directory)
@@ -628,7 +662,7 @@ def get_ffa_jit_spec(
     disable_dq_atomic = bool(disable_dq_atomic_reduction)
     deterministic = bool(deterministic)
     profile_mode = bool(profile_mode)
-    auto_range_merge = bool(auto_range_merge)
+    range_merge = bool(range_merge)
     swap_ab = bool(swap_ab)
     pack_gqa = bool(pack_gqa)
     cat_gqa = bool(cat_gqa)
@@ -649,7 +683,7 @@ def get_ffa_jit_spec(
         profile_mode=str(profile_mode).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
-        auto_range_merge=str(auto_range_merge).lower(),
+        range_merge=str(range_merge).lower(),
         swap_ab=str(swap_ab).lower(),
         pack_gqa=str(pack_gqa).lower(),
         cat_gqa=str(cat_gqa).lower(),
@@ -757,8 +791,8 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_STAGES",
     "MAGI_ATTENTION_FFA_BWD_STAGES_DS",
     "MAGI_ATTENTION_FFA_BWD_STAGES_V",
-    "MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS",
-    "MAGI_ATTENTION_FFA_BWD_UNION_DKVACC",
+    "MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM",
+    "MAGI_ATTENTION_FFA_BWD_UNION_DKV_SMEM",
     "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES",
     "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
@@ -790,7 +824,7 @@ def get_ffa_jit_mod(
     disable_dq_atomic_reduction: bool,
     deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
-    auto_range_merge: bool = False,
+    range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
@@ -832,7 +866,7 @@ def get_ffa_jit_mod(
         disable_dq_atomic_reduction=disable_dq_atomic_reduction,
         deterministic=deterministic,
         ref_block_size=ref_block_size,
-        auto_range_merge=auto_range_merge,
+        range_merge=range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,

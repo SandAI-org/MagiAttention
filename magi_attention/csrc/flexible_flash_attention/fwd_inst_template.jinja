@@ -16,7 +16,7 @@ static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
-static constexpr bool kRangeMerge = {{ auto_range_merge }};
+static constexpr bool kRangeMerge = {{ range_merge }};
 static constexpr bool kSwapAB = {{ swap_ab }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr bool kCatGQA = {{ cat_gqa }};
@@ -37,6 +37,8 @@ static constexpr int kFwdConsumerRegs = {{ fwd_consumer_regs }};
 static constexpr int kSparseKBlockSize = {{ sparse_k_block_size | default(1) }};
 // Inner-loop scatter load mode: 0=Tma(2D,auto), 1=Tma1d(bulk per-row, no-swizzle K), 2=CpAsync(per-row)
 static constexpr int kInnerLoadMode = {{ inner_load_mode | default(2) }};
+// Outer-loop store mode: 0=Tma(full-tile TMA store), 1=Stg(per-thread vectorized STG.128)
+static constexpr int kOuterStoreMode = {{ outer_store_mode | default(0) }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
@@ -120,7 +122,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kPackGQAFactor, kDeterministic, kRangeMerge, kSwapAB, kBlockSparse, kIndexSparse, kIntraWGOverlap, kInnerDirMaxToMin, kMaskMode, kReturnMaxLogits, kFwdProducerRegs, kFwdConsumerRegs, kSparseKBlockSize, kInnerLoadMode, kProfileMode>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kPackGQAFactor, kDeterministic, kRangeMerge, kSwapAB, kBlockSparse, kIndexSparse, kIntraWGOverlap, kInnerDirMaxToMin, kMaskMode, kReturnMaxLogits, kFwdProducerRegs, kFwdConsumerRegs, kSparseKBlockSize, kInnerLoadMode, kOuterStoreMode, kProfileMode>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");

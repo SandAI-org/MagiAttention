@@ -28,6 +28,7 @@
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 
 #include "deterministic.h"
+#include "inner_mode.hpp"
 #include "named_barrier.hpp"
 #include "seqlen.h"
 #include "softmax.h"
@@ -51,7 +52,8 @@ template <
     int PackGQAFactor_,
     bool Deterministic_,
     bool SwapAB_,
-    bool ReturnMaxLogits_>
+    bool ReturnMaxLogits_,
+    int OuterStoreMode_>
 struct CollectiveEpilogueFwd {
   using TileShape_MNK_PV = TileShape_MNK_PV_;
   using ClusterShape = ClusterShape_;
@@ -71,6 +73,8 @@ struct CollectiveEpilogueFwd {
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapAB = SwapAB_;
   static constexpr bool ReturnMaxLogits = ReturnMaxLogits_;
+  static constexpr OuterStoreMode kOuterStoreMode = static_cast<OuterStoreMode>(OuterStoreMode_);
+  static constexpr bool Use_TMA_O = (kOuterStoreMode == OuterStoreMode::Tma);
 
   static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
   static constexpr int kHeadDim = get<1>(TileShape_MNK_PV{});
@@ -136,7 +140,7 @@ struct CollectiveEpilogueFwd {
   // TMA O store only when SwapAB=true (SmemLayoutOTMA has no bank conflict with
   // transposed WGMMA output). When SwapAB=false, per-thread STG.128 via SmemLayoutOSTS
   // is faster because SmemLayoutOTMA causes SMEM bank conflicts during R2S copy.
-  static constexpr bool Use_TMA_O = SwapAB && (ArchTag::kMinComputeCapability >= 90) && (!PackGQA || kBlockM % PackGQAFactor == 0);
+  // The actual mode is now decided externally via kOuterStoreMode template parameter.
   using SmemLayoutO = std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>;
 
   // Define ShapeO and StrideO based on PackGQA
