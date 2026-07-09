@@ -614,23 +614,21 @@ def get_ffa_jit_spec(
     if _outer_store_env is not None:
         _osm_map = {"tma": "0", "stg": "1", "0": "0", "1": "1"}
         _osm_lower = _outer_store_env.lower()
-        assert _osm_lower in _osm_map, (
-            f"MAGI_ATTENTION_FFA_OUTER_STORE_MODE must be tma/stg, got {_outer_store_env}"
-        )
+        assert (
+            _osm_lower in _osm_map
+        ), f"MAGI_ATTENTION_FFA_OUTER_STORE_MODE must be tma/stg, got {_outer_store_env}"
         extra_template_args["outer_store_mode"] = _osm_map[_osm_lower]
         uri += f"_osm{_osm_map[_osm_lower]}"
     elif direction == "fwd":
         _can_tma = swap_ab and (
-            not pack_gqa
-            or (kblock_m is not None and kblock_m % pack_gqa_factor == 0)
+            not pack_gqa or (kblock_m is not None and kblock_m % pack_gqa_factor == 0)
         )
         extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"
     elif direction == "bwd":
         # BWD: Tma when reduction is needed and tile is not partial (IndexSparse LoopQ)
         _outer_needs_reduction = (
-            (bwd_inner_loop_k and not disable_dq_atomic_reduction)
-            or (not bwd_inner_loop_k and not disable_atomic_reduction)
-        )
+            bwd_inner_loop_k and not disable_dq_atomic_reduction
+        ) or (not bwd_inner_loop_k and not disable_atomic_reduction)
         _is_partial_tile = index_sparse and not bwd_inner_loop_k
         _can_tma = _outer_needs_reduction and not _is_partial_tile
         extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"

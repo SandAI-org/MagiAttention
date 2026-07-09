@@ -257,7 +257,7 @@ def _flex_flash_attn_forward_compilable(
         ref_block_size=(kblock_m, kblock_n)
         if kblock_m is not None and kblock_n is not None
         else None,
-        auto_range_merge=auto_range_merge,
+        range_merge=auto_range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         cat_gqa=False,
@@ -518,7 +518,7 @@ def _flex_flash_attn_backward_compilable(
         cat_gqa=cat_gqa,
         pack_gqa_factor=q.size(1) // k.size(1),
         deterministic=deterministic,
-        auto_range_merge=auto_range_merge,
+        range_merge=auto_range_merge,
         bwd_inner_loop_k=bwd_inner_loop_k,
         block_sparse=block_sparse,
         index_sparse=index_sparse,

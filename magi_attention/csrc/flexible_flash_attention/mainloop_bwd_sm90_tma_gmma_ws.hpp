@@ -3372,9 +3372,9 @@ struct CollectiveMainloopBwdSm90 {
 
     /* DEBUG */
     // if (blockIdx.x == 0 && threadIdx.x == 128) {
-    // print(mdK_reduce); printf("\n"); print(gdK_reduce_); printf("\n"); print(gdK_reduce); printf("\n"); print(tdKgdK_reduce); printf("\n"); print(tdKsdK); printf("\n");
-    // print(mdV_reduce); printf("\n"); print(gdV_reduce_); printf("\n"); print(gdV_reduce); printf("\n"); print(tdVgdV_reduce); printf("\n"); print(tdVsdV); printf("\n");
-    // printf("\n"); }
+    // print(mdK_reduce); printf("\n"); print(gdK_reduce_); printf("\n"); print(gdK_reduce); printf("\n"); print(tdKgdK_reduce); printf("\n"); print(tdKsdK);
+    // printf("\n"); print(mdV_reduce); printf("\n"); print(gdV_reduce_); printf("\n"); print(gdV_reduce); printf("\n"); print(tdVgdV_reduce); printf("\n");
+    // print(tdVsdV); printf("\n"); printf("\n"); }
 
     flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
 

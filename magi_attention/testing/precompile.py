@@ -147,7 +147,7 @@ def add_ffa_spec(
             disable_dq_atomic_reduction=disable_dq_atomic,
             deterministic=deterministic,
             ref_block_size=ref_block_size,
-            auto_range_merge=auto_range_merge,
+            range_merge=auto_range_merge,
             swap_ab=swap_ab,
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
