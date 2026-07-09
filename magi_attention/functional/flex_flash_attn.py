@@ -1718,7 +1718,26 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction = True
 
         _is_mha = q.size(1) == k.size(1)
+
+        # Sparse kernels cannot correctly handle GQA head broadcast without
+        # packing: the tile scheduler assumes each CTA owns exclusive output,
+        # but without pack_gqa multiple Q-heads share the same KV data leading
+        # to incorrect tile assignments.  Auto-upgrade to pack_gqa.
+        # NOTE: pack_gqa requires k.size(1)==1 (data must be "view-tricked"
+        # so that each KV-head is treated as a separate batch dimension).
+        if not _is_mha and not pack_gqa and not cat_gqa and k.size(1) == 1:
+            pack_gqa = True
+
         _gqa_safe = _is_mha or pack_gqa or cat_gqa
+
+        # IndexSparse + LoopK: each Q-tile (M=128) must cover exactly one
+        # original seq position's packed heads.  When pack_gqa_factor < 128,
+        # one Q-tile spans multiple seq positions with different index patterns
+        # → BWD dQ is incorrect.  Fall back to LoopQ.
+        if index_sparse and bwd_inner_loop_k is True and pack_gqa:
+            _pack_f = q.size(1) // k.size(1)
+            if _pack_f < 128:
+                bwd_inner_loop_k = None
 
         # BWD InnerLoopQ (bwd_inner_loop_k != True): dKV is outer accumulation.
         # Safe only when GQA heads are packed (no cross-CTA dKV overlap).

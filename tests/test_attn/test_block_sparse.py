@@ -921,22 +921,24 @@ class TestBlockSparseSimple(unittest.TestCase):
         # ── test_very_simple_block_sparse: GQA nhq=16/nhk=4, seqlen 2048 ──
         # k_size ∈ {64, 1} → runtime sparse_k_block_size auto-derived from
         # k_ranges: uniform k_size blocks
+        # NOTE: auto-flag forces pack_gqa=True for sparse + GQA at runtime.
         for cfg in cls.VERY_SIMPLE_BLOCK_SPARSE_CONFIGS:
             kbs = cfg["k_size"]
-            pack_gqa = cfg.get("pack_gqa", True)
-            # FWD: sparse auto-flags → disable_fwd_atomic, ref forced (128,128)
+            swap_bwd = cfg.get("swap_bwd_qk_loop", True)
+            rbs = cfg.get("ref_block_size", (128, 128))
+            # FWD: sparse auto-flags → disable_fwd_atomic, pack_gqa forced True
             add_ffa_spec(
                 specs,
                 direction="fwd",
-                ref_block_size=(128, 128),
+                ref_block_size=rbs,
                 disable_atomic=True,
-                pack_gqa=pack_gqa,
+                pack_gqa=True,
                 pack_gqa_factor=4,
                 block_sparse=True,
                 range_merge=True,
                 sparse_k_block_size=kbs,
             )
-            if cfg["swap_bwd_qk_loop"]:
+            if swap_bwd:
                 # BWD InnerLoopK: disable_dq_atomic → dq native dtype
                 add_ffa_spec(
                     specs,
@@ -951,13 +953,18 @@ class TestBlockSparseSimple(unittest.TestCase):
                     bwd_dq_bf16=True,
                 )
             else:
-                # BWD InnerLoopQ without pack_gqa: no dkv-atomic disable
+                # BWD LoopQ: _gqa_safe=True → disable_dkv_atomic → dkv bf16
                 add_ffa_spec(
                     specs,
                     direction="bwd",
+                    ref_block_size=rbs,
+                    disable_atomic=True,
+                    pack_gqa=True,
+                    pack_gqa_factor=4,
                     block_sparse=True,
                     range_merge=True,
                     sparse_k_block_size=kbs,
+                    bwd_dkv_bf16=True,
                 )
 
         # ── test_block_sparse_loopq_packgqa: MQA128, dense ref + sparse ──

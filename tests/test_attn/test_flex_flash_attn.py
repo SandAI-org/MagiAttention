@@ -1933,9 +1933,11 @@ class TestFlexFlashAttn(DistTestBase):
             if deterministic:
                 return
 
-        if pack_gqa:
-            # BWD BlockSparse does not support PackGQA (TMA shape conflict)
-            if block_sparse:
+        if block_sparse:
+            # Sparse kernel requires NHQ==NHK or view-trick (pack_gqa with
+            # single KV head per batch slice).  test_ffa_random passes raw
+            # multi-KV-head data without view-trick, so skip GQA combos.
+            if num_heads_q != num_heads_kv:
                 return
 
         if cat_gqa:

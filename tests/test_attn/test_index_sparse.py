@@ -862,10 +862,14 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             # _gqa_safe mirrors runtime: after view-trick NHQ_eff=nhq/nhk, NHK_eff=1
             # _is_mha = (NHQ_eff == NHK_eff) = (nhq/nhk == 1) = (nhq == nhk)
             _is_mha = nhq == nhk
-            _gqa_safe = _is_mha or pack_gqa
+            # Simulate runtime auto-force: sparse + GQA → pack_gqa=True
+            effective_pack_gqa = pack_gqa
+            if not _is_mha and not pack_gqa:
+                effective_pack_gqa = True
+            _gqa_safe = _is_mha or effective_pack_gqa
 
             for kbs in cls.KBS_VALUES:
-                if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
+                if kbs > 1 and (nhk > 1 or not effective_pack_gqa or hd != 128):
                     continue
                 test_bwd = kbs < 256
                 add_ffa_spec(
@@ -873,7 +877,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                     direction="fwd",
                     head_dim=hd,
                     disable_atomic=True,
-                    pack_gqa=pack_gqa,
+                    pack_gqa=effective_pack_gqa,
                     pack_gqa_factor=pack_f,
                     index_sparse=True,
                     sparse_k_block_size=kbs,
@@ -888,7 +892,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                             direction="bwd",
                             head_dim=hd,
                             disable_atomic=True,
-                            pack_gqa=pack_gqa,
+                            pack_gqa=effective_pack_gqa,
                             pack_gqa_factor=pack_f,
                             index_sparse=True,
                             sparse_k_block_size=kbs,
@@ -898,25 +902,28 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                             specs,
                             direction="bwd",
                             head_dim=hd,
-                            pack_gqa=pack_gqa,
+                            pack_gqa=effective_pack_gqa,
                             pack_gqa_factor=pack_f,
                             index_sparse=True,
                             sparse_k_block_size=kbs,
                         )
 
                     # LoopK BWD (test_index_sparse_comprehensive_loopk):
-                    add_ffa_spec(
-                        specs,
-                        direction="bwd",
-                        head_dim=hd,
-                        disable_dq_atomic=True,
-                        pack_gqa=pack_gqa,
-                        pack_gqa_factor=pack_f,
-                        index_sparse=True,
-                        bwd_inner_loop_k=True,
-                        sparse_k_block_size=kbs,
-                        bwd_dq_bf16=True,
-                    )
+                    # Only compiled for pack_f >= 128 (auto-fallback to LoopQ
+                    # at runtime when pack_f < 128).
+                    if pack_f >= 128:
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            head_dim=hd,
+                            disable_dq_atomic=True,
+                            pack_gqa=pack_gqa,
+                            pack_gqa_factor=pack_f,
+                            index_sparse=True,
+                            bwd_inner_loop_k=True,
+                            sparse_k_block_size=kbs,
+                            bwd_dq_bf16=True,
+                        )
 
                 # env variants (inner-mode): same config with env overrides
                 for env_dict in cls.INNER_ENVS:
@@ -925,7 +932,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                         direction="fwd",
                         head_dim=hd,
                         disable_atomic=True,
-                        pack_gqa=pack_gqa,
+                        pack_gqa=effective_pack_gqa,
                         pack_gqa_factor=pack_f,
                         index_sparse=True,
                         sparse_k_block_size=kbs,
@@ -938,7 +945,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                                 direction="bwd",
                                 head_dim=hd,
                                 disable_atomic=True,
-                                pack_gqa=pack_gqa,
+                                pack_gqa=effective_pack_gqa,
                                 pack_gqa_factor=pack_f,
                                 index_sparse=True,
                                 sparse_k_block_size=kbs,
@@ -949,25 +956,26 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                                 specs,
                                 direction="bwd",
                                 head_dim=hd,
-                                pack_gqa=pack_gqa,
+                                pack_gqa=effective_pack_gqa,
                                 pack_gqa_factor=pack_f,
                                 index_sparse=True,
                                 sparse_k_block_size=kbs,
                                 env=env_dict,
                             )
-                        add_ffa_spec(
-                            specs,
-                            direction="bwd",
-                            head_dim=hd,
-                            disable_dq_atomic=True,
-                            pack_gqa=pack_gqa,
-                            pack_gqa_factor=pack_f,
-                            index_sparse=True,
-                            bwd_inner_loop_k=True,
-                            sparse_k_block_size=kbs,
-                            bwd_dq_bf16=True,
-                            env=env_dict,
-                        )
+                        if pack_f >= 128:
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                head_dim=hd,
+                                disable_dq_atomic=True,
+                                pack_gqa=pack_gqa,
+                                pack_gqa_factor=pack_f,
+                                index_sparse=True,
+                                bwd_inner_loop_k=True,
+                                sparse_k_block_size=kbs,
+                                bwd_dq_bf16=True,
+                                env=env_dict,
+                            )
 
         return specs
 
@@ -1030,7 +1038,12 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     @parameterize("kbs", KBS_VALUES)
     @parameterize("inner_env", INNER_ENVS)
     def test_index_sparse_comprehensive_loopk(self, nhq_nhk_hd_packgqa, kbs, inner_env):
-        """LoopK direction — tests dQ non-atomic path."""
+        """LoopK direction — tests dQ non-atomic path.
+
+        LoopK + IndexSparse: when pack_gqa_factor < 128, the Python auto-flag
+        falls back to LoopQ (one Q-tile would span multiple seq positions with
+        different index patterns).  This test verifies correctness regardless.
+        """
         nhq, nhk, hd, pack_gqa = nhq_nhk_hd_packgqa
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return

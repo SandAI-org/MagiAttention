@@ -444,8 +444,19 @@ def get_ffa_jit_spec(
         uri += f"_iwg{_iwg}"
     _idm = os.environ.get("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
     if _idm is not None:
-        extra_template_args["inner_dir_max_to_min"] = _idm.lower()
-        uri += f"_idm{_idm}"
+        # Known precision bug: INNER_DIR_MAX_TO_MIN + BWD when the Q-block
+        # tile (ref_block_size[0]) is < 128.  The reversed inner-loop bounds
+        # are incorrect for 64-wide Q tiles (both LoopQ and LoopK).
+        _eff_q_tile = ref_block_size[0] if ref_block_size is not None else 128
+        if direction == "bwd" and _eff_q_tile < 128:
+            logger.warning(
+                "INNER_DIR_MAX_TO_MIN ignored for BWD q_tile=%d "
+                "(unsupported: precision bug with q_tile < 128)",
+                _eff_q_tile,
+            )
+        else:
+            extra_template_args["inner_dir_max_to_min"] = _idm.lower()
+            uri += f"_idm{_idm}"
     # mask_mode: "regular"=0 (direct apply), "dispatch"=1 (3-lambda), "unified"=2
     # BWD default: unified (avoids 3-lambda code bloat that causes register spill).
     # FWD default: dispatch (template default '1' in jinja).
