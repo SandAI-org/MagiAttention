@@ -2460,9 +2460,7 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (IsSparse) {
         store_tile();
       } else {
-        flash::iterate_range<kInnerDir, 2>(block_meta.inner_block_idx, block_meta.inner_block_min, block_meta.inner_block_cnt, [&] {
-          store_tile();
-        });
+        flash::iterate_range<kInnerDir, 2>(block_meta.inner_block_idx, block_meta.inner_block_min, block_meta.inner_block_cnt, [&] { store_tile(); });
       }
     };
 
