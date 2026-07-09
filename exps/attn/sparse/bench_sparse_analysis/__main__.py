@@ -92,6 +92,14 @@ def main():
                 from bench_sparse_analysis.phase4_loopk_debug import _phase4_bench
 
                 _phase4_bench(force=args.force)
+        elif phase == "4_1-skip-ablation":
+            from bench_sparse_analysis.phase4_1_skip_ablation import _phase4_1_bench
+
+            _phase4_1_bench(force=args.force)
+        elif phase == "4_2-iss-double-buffer":
+            from bench_sparse_analysis.phase4_2_iss_double_buffer import _phase4_2_bench
+
+            _phase4_2_bench(force=args.force)
         elif phase == "5-scaling":
             from bench_sparse_analysis.phase5_scaling import _phase5_bench
 
@@ -128,14 +136,18 @@ def main():
                 _phase4_iss_plot()
             else:
                 from bench_sparse_analysis.phase4_loopk_debug import (
-                    _phase4_opt_plot,
-                    _phase4_plot,
                     _phase4_summary_plot,
                 )
 
-                _phase4_plot()
-                _phase4_opt_plot()
                 _phase4_summary_plot()
+        elif phase == "4_1-skip-ablation":
+            from bench_sparse_analysis.phase4_1_skip_ablation import _phase4_1_plot
+
+            _phase4_1_plot()
+        elif phase == "4_2-iss-double-buffer":
+            from bench_sparse_analysis.phase4_2_iss_double_buffer import _phase4_2_plot
+
+            _phase4_2_plot()
         elif phase == "5-scaling":
             from bench_sparse_analysis.phase5_scaling import _phase5_plot
 
@@ -165,6 +177,12 @@ def main():
             from bench_sparse_analysis.phase4_loopk_debug import _phase4_ncu
 
             _phase4_ncu()
+        elif phase == "4_1-skip-ablation":
+            from bench_sparse_analysis.phase4_1_skip_ablation import _phase4_1_ncu
+
+            _phase4_1_ncu()
+        elif phase == "4_2-iss-double-buffer":
+            parser.error("Phase 4_2 has no --ncu")
         elif phase == "5-scaling":
             from bench_sparse_analysis.phase5_scaling import _phase5_ncu
 
