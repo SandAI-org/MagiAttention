@@ -127,15 +127,12 @@ struct CollectiveMainloopFwdSm90 {
 
   // ─── Inner-Loop KV Load Strategy (InnerLoadMode enum) ───
   // Tma:     physically contiguous tiles → TMA 2D descriptor (auto-detected)
-  // Tma1d:   cp.async.bulk per-row (1 instr/row); K uses INTER (no-swizzle) SMEM layout
-  // CpAsync: cp.async per-row scatter (8×16B per row)
+  // CpAsync: cp.async per-row scatter (8×16B per row, non-contiguous tokens)
   // SparseKBlockSize controls contiguity: when SparseKBlockSize >= kBlockN, each inner tile
   // is a contiguous memory region → TMA 2D. Both IndexSparse and BlockSparse
   // must set SparseKBlockSize appropriately (BlockSparse: kBlockN, IndexSparse: user).
   static constexpr bool Use_TMA_Q = true;
-  static constexpr bool kInnerTilesContiguous = (!IndexSparse && !BlockSparse) || (SparseKBlockSize >= kBlockN);
-  // Tma1d (=1) falls through to CpAsync: cp.async.bulk 1D is incompatible with WGMMA
-  // atom-tiled SMEM layouts (see inner_mode.hpp for details).
+  static constexpr bool kInnerTilesContiguous = !IsSparse || (SparseKBlockSize >= kBlockN);
   static constexpr InnerLoadMode kInnerLoadMode = kInnerTilesContiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
   static_assert(kInnerLoadMode == InnerLoadMode::Tma || kInnerLoadMode == InnerLoadMode::CpAsync);
   static_assert(kInnerLoadMode == InnerLoadMode::Tma || CUTE_STATIC_V(size(ClusterShape{})) == 1, "Scatter load requires ClusterShape == 1");
@@ -1094,18 +1091,6 @@ struct CollectiveMainloopFwdSm90 {
       pipeline.consumer_wait(smem_pipe_read, barrier_token);
     };
 
-    // Consumer-side rearrange: linear → swizzled for TMA 1D scatter loads.
-    // Each participating thread handles one row (row < kBlockN):
-    // read from linear positions into registers, barrier, write to swizzled positions.
-    // Two barriers prevent RAW hazards (swizzled addr of row A may alias linear addr of row B).
-    //
-    // ALL MMA threads (NumMmaThreads) participate: WG0 threads (row < kBlockN) do actual
-    // read/write work; WG1 threads (row >= kBlockN) participate in barriers only.
-    // This ensures correctness in fwd_step where UseSchedulerBarrier is active: both WGs
-    // Rearrange is a no-op for both CpAsync and TMA2D paths.
-    auto rearrange_K = [&](auto& smem_pipe_read) { (void)smem_pipe_read; };
-    auto rearrange_V = [&](auto& smem_pipe_read) { (void)smem_pipe_read; };
-
     auto consumer_release = [](auto& pipeline, auto& smem_pipe_read) {
       pipeline.consumer_release(smem_pipe_read);
       ++smem_pipe_read;
@@ -1257,7 +1242,6 @@ struct CollectiveMainloopFwdSm90 {
     auto mma_head = [&]() {
       barrier_Q.wait(work_idx % 2);
       consumer_wait(pipeline_k, smem_pipe_read_k);
-      rearrange_K(smem_pipe_read_k);
       gemm_QK();
       warpgroup_wait<0>();
       consumer_release(pipeline_k, smem_pipe_read_k);
@@ -1276,7 +1260,6 @@ struct CollectiveMainloopFwdSm90 {
 
       if constexpr (!IntraWGOverlap) {
         consumer_wait(pipeline_v, smem_pipe_read_v);
-        rearrange_V(smem_pipe_read_v);
         gemm_PV();
         warpgroup_wait<0>();
         consumer_release(pipeline_v, smem_pipe_read_v);
@@ -1302,7 +1285,6 @@ struct CollectiveMainloopFwdSm90 {
         consumer_wait(pipeline_k, smem_pipe_read_k);
       }
       warp_scheduler_barrier_sync();
-      rearrange_K(smem_pipe_read_k);
       gemm_QK();
 
       // IntraWGOverlap: launch P@V_{i-1} overlapping with Q@K_i in-flight
@@ -1313,7 +1295,6 @@ struct CollectiveMainloopFwdSm90 {
         if (!UseSchedulerBarrier || warp_group_idx == 0) {
           consumer_wait(pipeline_v, smem_pipe_read_v);
         }
-        rearrange_V(smem_pipe_read_v);
         gemm_PV();
       }
 
@@ -1337,7 +1318,6 @@ struct CollectiveMainloopFwdSm90 {
         // rescale old O, then P_i@V_i (same iteration, no cross-iteration lag)
         softmax.rescale_o(tOrO, scores_scale);
         consumer_wait(pipeline_v, smem_pipe_read_v);
-        rearrange_V(smem_pipe_read_v);
         gemm_PV();
         warpgroup_wait<0>();
         consumer_release(pipeline_v, smem_pipe_read_v);
@@ -1355,7 +1335,6 @@ struct CollectiveMainloopFwdSm90 {
           softmax.rescale_o(tOrO, scores_scale);
         }
         consumer_wait(pipeline_v, smem_pipe_read_v);
-        rearrange_V(smem_pipe_read_v);
         gemm_PV();
       }
 
