@@ -77,7 +77,13 @@ class BlockInfo:
     def get_m_block_min_max(
         self, seqlen_info: SeqlenInfoQK, n_block: Int32
     ) -> Tuple[Int32, Int32]:
-        m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
+        qpk = self.qhead_per_kvhead_packgqa
+        if const_expr(qpk > 1):
+            m_block_max = cute.ceil_div(
+                seqlen_info.seqlen_q * qpk, self.tile_m
+            )
+        else:
+            m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
         m_block_min = 0
         if const_expr(
             self.is_causal or (self.is_local and self.window_size_right is not None)
@@ -87,12 +93,20 @@ class BlockInfo:
             m_idx_right = (
                 m_idx if const_expr(self.is_causal) else m_idx - self.window_size_right
             )
-            m_block_min = max(m_block_min, m_idx_right // self.tile_m)
+            if const_expr(qpk > 1):
+                m_block_min = max(m_block_min, (m_idx_right * qpk) // self.tile_m)
+            else:
+                m_block_min = max(m_block_min, m_idx_right // self.tile_m)
         if const_expr(self.is_local and self.window_size_left is not None):
             n_idx_max = (n_block + 1) * self.tile_n
             m_idx = n_idx_max + seqlen_info.seqlen_q - seqlen_info.seqlen_k
             m_idx_left = m_idx + self.window_size_left
-            m_block_max = min(m_block_max, cute.ceil_div(m_idx_left, self.tile_m))
+            if const_expr(qpk > 1):
+                m_block_max = min(
+                    m_block_max, cute.ceil_div(m_idx_left * qpk, self.tile_m)
+                )
+            else:
+                m_block_max = min(m_block_max, cute.ceil_div(m_idx_left, self.tile_m))
         return m_block_min, m_block_max
 
     @cute.jit
@@ -109,15 +123,27 @@ class BlockInfo:
         Blocks in [m_block_min, result) need causal mask;
         blocks in [result, m_block_max) are fully valid and can skip mask.
         """
+        qpk = self.qhead_per_kvhead_packgqa
         if const_expr(not self.is_causal):
             result = m_block_min
         else:
             n_idx_max = (n_block + 1) * self.tile_n
             cv = n_idx_max + seqlen_info.seqlen_q - seqlen_info.seqlen_k
-            result = cutlass.min(
-                m_block_max,
-                cutlass.max(m_block_min, cute.ceil_div(cutlass.max(cv, 1), self.tile_m)),
-            )
+            if const_expr(qpk > 1):
+                result = cutlass.min(
+                    m_block_max,
+                    cutlass.max(
+                        m_block_min,
+                        cute.ceil_div(cutlass.max(cv * qpk, 1), self.tile_m),
+                    ),
+                )
+            else:
+                result = cutlass.min(
+                    m_block_max,
+                    cutlass.max(
+                        m_block_min, cute.ceil_div(cutlass.max(cv, 1), self.tile_m)
+                    ),
+                )
         return result
 
     @cute.jit
@@ -132,13 +158,22 @@ class BlockInfo:
         For BWD LoopK with local masking: blocks in [result, m_block_max) need
         local mask re-applied.  When not using local, returns m_block_max.
         """
+        qpk = self.qhead_per_kvhead_packgqa
         if const_expr(not self.is_local or self.window_size_left is None):
             result = m_block_max
         else:
             n_idx_min = n_block * self.tile_n
             m_idx = n_idx_min + seqlen_info.seqlen_q - seqlen_info.seqlen_k
             m_idx_left = m_idx + self.window_size_left
-            result = cutlass.min(m_block_max, cutlass.max(0, m_idx_left // self.tile_m))
+            if const_expr(qpk > 1):
+                result = cutlass.min(
+                    m_block_max,
+                    cutlass.max(0, (m_idx_left * qpk) // self.tile_m),
+                )
+            else:
+                result = cutlass.min(
+                    m_block_max, cutlass.max(0, m_idx_left // self.tile_m)
+                )
         return result
 
     @cute.jit

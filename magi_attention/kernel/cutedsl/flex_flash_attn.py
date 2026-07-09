@@ -50,6 +50,7 @@ from .ffa_utils import (
     create_softcap_scoremod,
     create_softcap_scoremod_bwd,
     get_device_arch,
+    get_ffa_inner_dir_max_to_min,
     get_ffa_swap_bwd_qk_loop,
     hash_callable,
     is_ffa_2cta_disabled,
@@ -1149,8 +1150,8 @@ def _flex_flash_attn_bwd(
     qhead_per_kvhead = num_head // num_head_kv
     if pack_gqa is None:
         pack_gqa = qhead_per_kvhead > 1
-    # pack_gqa backward not yet supported in bwd
-    pack_gqa = False
+    if pack_gqa and m_block_size % qhead_per_kvhead != 0:
+        pack_gqa = False
 
     if softcap != 0.0:
         assert (
@@ -1384,6 +1385,7 @@ def _flex_flash_attn_bwd(
             V_in_regs,
             dQ_single_wg,
             deterministic,
+            get_ffa_inner_dir_max_to_min(),
             q_ranges is None,
             k_ranges is None,
             score_mod_hash,
@@ -1447,6 +1449,13 @@ def _flex_flash_attn_bwd(
             to_cute_tensor(t) for t in (q, k, v, dout, dq, dk, dv)
         ]
         lse_log2_tensor, dpsum_tensor = [to_cute_tensor(t) for t in (lse_log2, dpsum)]
+        if dq_accum is not None and pack_gqa and qhead_per_kvhead > 1:
+            dq_accum_shape = dq_accum.shape
+            dq_accum = dq_accum.view(
+                *dq_accum_shape[:-2],
+                num_head_kv,
+                dq_accum_shape[-1] * qhead_per_kvhead,
+            )
         dq_accum_tensor = to_cute_tensor(dq_accum) if dq_accum is not None else None
         if dKV_postprocess:
             dk_accum_tensor, dv_accum_tensor = [
@@ -1560,6 +1569,8 @@ def _flex_flash_attn_bwd(
                     if use_index_sparse_sm90_bwd
                     else 0,
                     swap_bwd_qk_loop=swap_bwd_qk_loop,
+                    inner_dir_max_to_min=get_ffa_inner_dir_max_to_min(),
+                    pack_gqa=pack_gqa,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case _:
@@ -1693,6 +1704,44 @@ def _flex_flash_attn_bwd(
             ]
         )
     _flex_flash_attn_bwd.compile_cache[compile_key](*bwd_call_args)
+
+    # De-interleave dq_accum from PackGQA blocked layout to per-Q-head sequential layout
+    if pack_gqa and qhead_per_kvhead > 1 and dq_accum is not None:
+        positions_per_head_per_block = m_block_size // qhead_per_kvhead
+        if q_ranges is None:
+            num_m_blocks = seqlen_q_rounded // m_block_size * qhead_per_kvhead
+            dq_accum = (
+                dq_accum.view(
+                    batch_size,
+                    num_head_kv,
+                    num_m_blocks,
+                    qhead_per_kvhead,
+                    positions_per_head_per_block,
+                    head_dim_rounded,
+                )
+                .permute(0, 1, 3, 2, 4, 5)
+                .contiguous()
+                .view(batch_size, num_head, seqlen_q_rounded * head_dim_rounded)
+            )
+        else:
+            total_q_rounded_padded = (
+                (total_q + (batch_size + 1) * m_block_size - 1)
+                // m_block_size
+                * m_block_size
+            )
+            num_m_blocks = total_q_rounded_padded // m_block_size * qhead_per_kvhead
+            dq_accum = (
+                dq_accum.view(
+                    num_head_kv,
+                    num_m_blocks,
+                    qhead_per_kvhead,
+                    positions_per_head_per_block,
+                    head_dim_rounded,
+                )
+                .permute(0, 2, 1, 3, 4)
+                .contiguous()
+                .view(num_head, total_q_rounded_padded * head_dim_rounded)
+            )
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
     match major_arch:
