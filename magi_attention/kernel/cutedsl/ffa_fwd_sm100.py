@@ -639,9 +639,7 @@ class FFAFwdSm100:
 
         # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
         # or (sq, nhq, hd) -> (sq, hd, nhq) if there's q_ranges
-        Q_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mRangesQ is None) else [0, 2, 1]
-        )
+        Q_layout_transpose = [1, 3, 2, 0] if const_expr(mRangesQ is None) else [0, 2, 1]
         mQ = cute.make_tensor(
             mQ.iterator, cute.select(mQ.layout, mode=Q_layout_transpose)
         )
@@ -662,9 +660,7 @@ class FFAFwdSm100:
 
         # (sk, hd, nhk, b) -> (hd, sk, nhk, b)
         # or (sk, nhk, hd) -> (hd, sk, nhk) if there's k_ranges
-        V_layout_transpose = (
-            [1, 0, 2, 3] if const_expr(mRangesK is None) else [1, 0, 2]
-        )
+        V_layout_transpose = [1, 0, 2, 3] if const_expr(mRangesK is None) else [1, 0, 2]
         mV = cute.make_tensor(  # actually => actually V.T
             mV.iterator, cute.select(mV.layout, mode=V_layout_transpose)
         )
@@ -688,9 +684,7 @@ class FFAFwdSm100:
 
             # (b, nhq, sq) -> (sq, nhq, b)
             # or (nhq, sq) -> (sq, nhq) if there's q_ranges
-            LSE_layout_transpose = (
-                [2, 1, 0] if const_expr(mRangesQ is None) else [1, 0]
-            )
+            LSE_layout_transpose = [2, 1, 0] if const_expr(mRangesQ is None) else [1, 0]
             num_splits = Int32(1)
 
         mO = cute.make_tensor(

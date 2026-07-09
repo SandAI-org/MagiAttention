@@ -726,9 +726,7 @@ class FFABwdSm80:
             # Uses seqlen k, etc. since main bwd kernel's blocks are over n
             num_block=cute.ceil_div(mK.shape[1], self.n_block_size),
             num_head=(
-                mQ.shape[1]
-                if cutlass.const_expr(mRangesQ is not None)
-                else mQ.shape[2]
+                mQ.shape[1] if cutlass.const_expr(mRangesQ is not None) else mQ.shape[2]
             ),
             num_batch=(
                 mRangesK.shape[0] - 1

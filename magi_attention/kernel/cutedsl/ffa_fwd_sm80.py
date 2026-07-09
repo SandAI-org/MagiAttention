@@ -618,9 +618,7 @@ class FFAFwdSm80:
         # 3D non-varlen: (b, nh, s) -> (s, nh, b)
         # 2D varlen: (nh, t) -> (t, nh)
         if const_expr(mLSE is not None):
-            LSE_layout_transpose = (
-                [2, 1, 0] if const_expr(mRangesQ is None) else [1, 0]
-            )
+            LSE_layout_transpose = [2, 1, 0] if const_expr(mRangesQ is None) else [1, 0]
             mLSE = cute.make_tensor(
                 mLSE.iterator, cute.select(mLSE.layout, mode=LSE_layout_transpose)
             )

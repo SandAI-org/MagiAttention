@@ -683,9 +683,7 @@ def _compile_bwd_postprocess(
     )
     batch = mQ.shape[0] if not has_ranges_q else cute.sym_int()
     mRangesQ = (
-        fake_tensor(cutlass.Int32, (batch, 2), divisibility=1)
-        if has_ranges_q
-        else None
+        fake_tensor(cutlass.Int32, (batch, 2), divisibility=1) if has_ranges_q else None
     )
     mSeqUsedQ = (
         fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None

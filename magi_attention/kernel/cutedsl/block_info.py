@@ -79,9 +79,7 @@ class BlockInfo:
     ) -> Tuple[Int32, Int32]:
         qpk = self.qhead_per_kvhead_packgqa
         if const_expr(qpk > 1):
-            m_block_max = cute.ceil_div(
-                seqlen_info.seqlen_q * qpk, self.tile_m
-            )
+            m_block_max = cute.ceil_div(seqlen_info.seqlen_q * qpk, self.tile_m)
         else:
             m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
         m_block_min = 0

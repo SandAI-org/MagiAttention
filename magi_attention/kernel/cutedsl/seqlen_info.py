@@ -58,9 +58,7 @@ class SeqlenInfo:
             seqlen = ranges[batch_idx, 1] - offset
         else:
             seqlen = seqlen_static
-        return SeqlenInfo(
-            offset, offset_padded, seqlen, has_ranges=ranges is not None
-        )
+        return SeqlenInfo(offset, offset_padded, seqlen, has_ranges=ranges is not None)
 
     def offset_batch(
         self,
@@ -310,9 +308,7 @@ class SeqlenInfoQKNewK:
         if const_expr(mSeqUsedK is not None):
             seqlen_k_og = mSeqUsedK[batch_idx] - leftpad_k
         elif const_expr(mRangesK is not None):
-            seqlen_k_og = (
-                mRangesK[batch_idx, 1] - mRangesK[batch_idx, 0] - leftpad_k
-            )
+            seqlen_k_og = mRangesK[batch_idx, 1] - mRangesK[batch_idx, 0] - leftpad_k
         else:
             seqlen_k_og = (
                 seqlen_k_static - leftpad_k
@@ -325,9 +321,7 @@ class SeqlenInfoQKNewK:
         else:
             seqlen_k_new = mRangesKNew[batch_idx, 1] - mRangesKNew[batch_idx, 0]
         seqlen_k = (
-            seqlen_k_og
-            if const_expr(mRangesQ is None)
-            else seqlen_k_og + seqlen_k_new
+            seqlen_k_og if const_expr(mRangesQ is None) else seqlen_k_og + seqlen_k_new
         )
 
         # seqlen_rotary: defaults to seqlen_k_og + leftpad_k unless explicitly provided

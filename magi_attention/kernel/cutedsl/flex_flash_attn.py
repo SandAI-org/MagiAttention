@@ -282,13 +282,9 @@ def _flex_flash_attn_fwd(
 
     out_torch_dtype = q.dtype
     device = q.device
-    q_batch_seqlen_shape = (
-        (batch_size, seqlen_q) if q_ranges is None else (total_q,)
-    )
+    q_batch_seqlen_shape = (batch_size, seqlen_q) if q_ranges is None else (total_q,)
     lse_shape = (  # (b, nh, sq) or (nh, tq)
-        (batch_size, num_head, seqlen_q)
-        if q_ranges is None
-        else (num_head, total_q)
+        (batch_size, num_head, seqlen_q) if q_ranges is None else (num_head, total_q)
     )
 
     if out is None:
@@ -759,8 +755,12 @@ def _flex_flash_attn_fwd(
                 print(f"[sparse_debug] q_ranges={q_ranges.cpu().tolist()}")
                 print(f"[sparse_debug] k_ranges={k_ranges.cpu().tolist()}")
                 print(f"[sparse_debug] cu_batches={sparse_cu_batches.cpu().tolist()}")
-                print(f"[sparse_debug] q_ranges_kernel={q_ranges_kernel.cpu().tolist()}")
-                print(f"[sparse_debug] k_ranges_kernel={k_ranges_kernel.cpu().tolist()}")
+                print(
+                    f"[sparse_debug] q_ranges_kernel={q_ranges_kernel.cpu().tolist()}"
+                )
+                print(
+                    f"[sparse_debug] k_ranges_kernel={k_ranges_kernel.cpu().tolist()}"
+                )
                 print(
                     f"[sparse_debug] max_seqlen_q={max_seqlen_q} max_seqlen_k={max_seqlen_k}"
                 )
@@ -1164,8 +1164,8 @@ def _flex_flash_attn_bwd(
             score_mod_bwd is not None
         ), "score_mod_bwd is required when score_mod is provided"
         assert (
-        q_ranges is None and k_ranges is None
-    ), "varlen + score_mod not supported in bwd yet"
+            q_ranges is None and k_ranges is None
+        ), "varlen + score_mod not supported in bwd yet"
         if major_arch == 8:
             raise NotImplementedError(
                 "Custom user-provided score_mod is not supported on SM8x architectures."
@@ -1228,7 +1228,9 @@ def _flex_flash_attn_bwd(
     # GQA (qhead_per_kvhead > 1) needs dK/dV accum+postprocess since multiple Q heads
     # accumulate into the same dK/dV. SM90 varlen_k with qhead_per_kvhead==1 now uses
     # ragged TMA tensors for direct store, so no longer needs accum+postprocess.
-    dKV_postprocess = qhead_per_kvhead > 1
+    # PackGQA folds Q heads into the M dimension so the kernel sees qhead_per_kvhead=1
+    # and can store dK/dV directly.
+    dKV_postprocess = qhead_per_kvhead > 1 and not pack_gqa
     if dKV_postprocess:
         head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
         if k_ranges is None:
@@ -1449,13 +1451,6 @@ def _flex_flash_attn_bwd(
             to_cute_tensor(t) for t in (q, k, v, dout, dq, dk, dv)
         ]
         lse_log2_tensor, dpsum_tensor = [to_cute_tensor(t) for t in (lse_log2, dpsum)]
-        if dq_accum is not None and pack_gqa and qhead_per_kvhead > 1:
-            dq_accum_shape = dq_accum.shape
-            dq_accum = dq_accum.view(
-                *dq_accum_shape[:-2],
-                num_head_kv,
-                dq_accum_shape[-1] * qhead_per_kvhead,
-            )
         dq_accum_tensor = to_cute_tensor(dq_accum) if dq_accum is not None else None
         if dKV_postprocess:
             dk_accum_tensor, dv_accum_tensor = [

@@ -676,9 +676,7 @@ class FFABwdSm100:
 
         self.is_varlen_k = mRangesK is not None or mSeqUsedK is not None
         self.is_varlen_q = mRangesQ is not None or mSeqUsedQ is not None
-        self.use_tma_store = not (
-            self.qhead_per_kvhead == 1 and mRangesK is not None
-        )
+        self.use_tma_store = not (self.qhead_per_kvhead == 1 and mRangesK is not None)
         self.dKV_postprocess = self.qhead_per_kvhead > 1
 
         if const_expr(self.dKV_postprocess):
@@ -741,9 +739,7 @@ class FFABwdSm100:
         if const_expr(not self.dKV_postprocess):
             layout_dKV_transpose = KV_layout_transpose
         else:
-            layout_dKV_transpose = (
-                [2, 1, 0] if const_expr(mRangesK is None) else [1, 0]
-            )
+            layout_dKV_transpose = [2, 1, 0] if const_expr(mRangesK is None) else [1, 0]
         mdK, mdV = [
             layout_utils.select(t, mode=layout_dKV_transpose) for t in (mdK, mdV)
         ]
