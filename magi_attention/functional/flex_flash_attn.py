@@ -693,8 +693,13 @@ def _flex_flash_attn_backward(
     if clear_dkv:
         # skip clear dk and dv if no reduction
         if disable_bwd_dkv_atomic_reduction:
-            dk = torch.empty_like(k, dtype=dk_type or k.dtype)
-            dv = torch.empty_like(v, dtype=dv_type or v.dtype)
+            if index_sparse:
+                # IndexSparse: zero-init replaces postprocess (no k_ranges available)
+                dk = torch.zeros_like(k, dtype=dk_type or k.dtype)
+                dv = torch.zeros_like(v, dtype=dv_type or v.dtype)
+            else:
+                dk = torch.empty_like(k, dtype=dk_type or k.dtype)
+                dv = torch.empty_like(v, dtype=dv_type or v.dtype)
         else:
             dk = torch.zeros_like(k, dtype=dk_type or torch.float32)
             dv = torch.zeros_like(v, dtype=dv_type or torch.float32)
@@ -1703,9 +1708,7 @@ def flex_flash_attn_func(
 
         # BWD InnerLoopQ (bwd_inner_loop_k != True): dKV is outer accumulation.
         # Safe only when GQA heads are packed (no cross-CTA dKV overlap).
-        # IndexSparse excluded: the dKV postprocess kernel requires k_ranges
-        # which IndexSparse does not provide.
-        if block_sparse and bwd_inner_loop_k is not True and _gqa_safe:
+        if _is_sparse and bwd_inner_loop_k is not True and _gqa_safe:
             disable_bwd_dkv_atomic_reduction = True
 
         # BWD InnerLoopK (bwd_inner_loop_k == True): dQ is outer accumulation.

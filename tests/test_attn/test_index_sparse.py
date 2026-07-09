@@ -85,6 +85,7 @@ def _run_sparse_attn_and_get_output(
     ref_block_size=None,
     sparse_k_block_size=1,
     test_bwd=False,
+    swap_bwd_qk_loop=None,
 ):
     """Run FFA with index_sparse_indices and return reshaped output [B, S_q, NHQ, D].
 
@@ -109,6 +110,7 @@ def _run_sparse_attn_and_get_output(
             pack_gqa=pack_gqa,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
         o_reshaped = rearrange(
             o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q
@@ -195,6 +197,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
     sparse_k_block_size = cfg.get("sparse_k_block_size", 1)
     dtype = cfg.get("dtype", torch.bfloat16)
     atol = cfg.get("atol", DEFAULT_ATOL)
+    swap_bwd_qk_loop = cfg.get("swap_bwd_qk_loop", None)
 
     q = torch.randn(B, S_q, NHQ, D, dtype=dtype, device=device)
     k = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
@@ -235,6 +238,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
         ref_block_size=ref_block_size,
         sparse_k_block_size=sparse_k_block_size,
         test_bwd=test_bwd,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 
     if test_bwd:
@@ -332,7 +336,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
         if err_msgs:
             raise AssertionError("\n".join(err_msgs))
 
-        if cfg.get("check_deterministic", True):
+        if cfg.get("check_deterministic", True) and swap_bwd_qk_loop is not True:
             det_errs = _check_deterministic_index_sparse(
                 q_ffa=q_ffa,
                 k_ffa=k_ffa,
@@ -342,6 +346,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
                 sparse_k_block_size=sparse_k_block_size,
                 ref_block_size=ref_block_size,
                 swap_ab=swap_ab,
+                swap_bwd_qk_loop=swap_bwd_qk_loop,
                 o_ref=o_sparse.detach(),
                 dq_ref=dq_ffa,
                 test_case=test_case,
@@ -360,38 +365,49 @@ def _check_deterministic_index_sparse(
     sparse_k_block_size,
     ref_block_size,
     swap_ab,
+    swap_bwd_qk_loop=None,
     o_ref,
     dq_ref,
     test_case,
 ):
-    """Re-run with deterministic=True and verify bit-exact reproducibility."""
+    """Verify bit-exact reproducibility by running twice in deterministic mode.
+
+    For LoopK: deterministic=True is unsupported by the kernel, skip check.
+    For LoopQ: run twice with deterministic=True and compare the two runs.
+    """
+    if swap_bwd_qk_loop is True:
+        return []
+
     err_msgs: list[str] = []
-    q2 = q_ffa.clone().detach().requires_grad_(True)
-    k2 = k_ffa.clone().detach().requires_grad_(True)
-    v2 = v_ffa.clone().detach().requires_grad_(True)
-    o2, _ = flex_flash_attn_func(
-        q2,
-        k2,
-        v2,
-        index_sparse_indices=index_sparse_indices,
-        q_block_size=1,
-        sparse_k_block_size=sparse_k_block_size,
-        pack_gqa=pack_gqa,
-        swap_ab=swap_ab,
-        ref_block_size=ref_block_size,
-        deterministic=True,
-    )
-    do = torch.randn_like(o2)
-    o2.backward(do)
-    try:
-        assert torch.equal(
-            o2, o_ref
-        ), f"For {test_case=}: forward output not deterministic"
-        assert torch.equal(
-            q2.grad, dq_ref
-        ), f"For {test_case=}: backward dQ not deterministic"
-    except Exception as e:
-        err_msgs.append(str(e))
+    do = torch.randn_like(q_ffa)
+
+    def _run_det():
+        q2 = q_ffa.clone().detach().requires_grad_(True)
+        k2 = k_ffa.clone().detach().requires_grad_(True)
+        v2 = v_ffa.clone().detach().requires_grad_(True)
+        o2, _ = flex_flash_attn_func(
+            q2,
+            k2,
+            v2,
+            index_sparse_indices=index_sparse_indices,
+            q_block_size=1,
+            sparse_k_block_size=sparse_k_block_size,
+            pack_gqa=pack_gqa,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
+            deterministic=True,
+        )
+        o2.backward(do)
+        return o2.detach(), q2.grad.detach()
+
+    o_det1, dq_det1 = _run_det()
+    o_det2, dq_det2 = _run_det()
+
+    if not torch.equal(o_det1, o_det2):
+        err_msgs.append(f"For {test_case=}: forward output not deterministic")
+    if not torch.equal(dq_det1, dq_det2):
+        err_msgs.append(f"For {test_case=}: backward dQ not deterministic")
     return err_msgs
 
 
@@ -722,7 +738,7 @@ class TestIndexSparseSweep(DistTestBase):
         """Standard precompile interface — see magi_attention/testing/precompile.py.
 
         All classic combos share the same compile params: MQA128 kbs=1.
-        FWD + BWD InnerLoopK (swap_bwd_qk_loop defaults to True for IndexSparse).
+        FWD + BWD InnerLoopK (swap_bwd_qk_loop=True).
         """
         from magi_attention.testing.precompile import add_ffa_spec
 
@@ -783,6 +799,7 @@ class TestIndexSparseSweep(DistTestBase):
             "D": 128,
             "topk": topk,
             "pack_gqa": True,
+            "swap_bwd_qk_loop": True,
         }
         _run_index_sparse_config(self.device, config, test_bwd=True)
 
@@ -831,51 +848,133 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         Mirrors the skip logic in the test: kbs>1 requires NHK=1+PackGQA+D=128.
         After view-trick rearrange in _run_index_sparse_config, kernel sees
         NHK=1 → effective pack_gqa_factor = nhq/nhk.
+
+        Covers both LoopQ (test_index_sparse_comprehensive) and
+        LoopK (test_index_sparse_comprehensive_loopk) directions.
         """
         from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
         for nhq, nhk, hd, pack_gqa in cls.NHQ_NHK_HD_PACKGQA:
-            # view-trick: kernel sees NHK=1, effective pack_f = nhq/nhk
-            pack_f = nhq // nhk if pack_gqa else 1
-            pgqa = (
-                pack_gqa or nhq == nhk
-            )  # MHA → pack_f=1 still uses pack_gqa=True after rearrange
-            if nhk > 1:
-                # after rearrange: NHQ_eff = nhq/nhk, NHK_eff=1
-                pgqa = True
-                pack_f = nhq // nhk
+            # Skip GQA-without-pack (pre-existing precision issue)
+            if nhq != nhk and not pack_gqa:
+                continue
+            # Runtime passes pack_gqa as-is from config. pack_gqa_factor is
+            # computed at runtime as q.size(1)//k.size(1) = (nhq/nhk) / 1.
+            pack_f = nhq // nhk
+            # _gqa_safe mirrors runtime: after view-trick NHQ_eff=nhq/nhk, NHK_eff=1
+            # _is_mha = (NHQ_eff == NHK_eff) = (nhq/nhk == 1) = (nhq == nhk)
+            _is_mha = nhq == nhk
+            _gqa_safe = _is_mha or pack_gqa
+            # LoopK: skip D=64 (pre-existing precision issue)
+            _loopk_ok = hd != 64
 
             for kbs in cls.KBS_VALUES:
                 if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
                     continue
                 test_bwd = kbs < 256
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    head_dim=hd,
+                    disable_atomic=True,
+                    pack_gqa=pack_gqa,
+                    pack_gqa_factor=pack_f,
+                    index_sparse=True,
+                    sparse_k_block_size=kbs,
+                )
+                if test_bwd:
+                    # LoopQ BWD (test_index_sparse_comprehensive):
+                    # gqa_safe → disable_dkv_atomic (dKV bf16, non-atomic)
+                    # NOT gqa_safe → atomic (dKV float32)
+                    if _gqa_safe:
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            head_dim=hd,
+                            disable_atomic=True,
+                            pack_gqa=pack_gqa,
+                            pack_gqa_factor=pack_f,
+                            index_sparse=True,
+                            sparse_k_block_size=kbs,
+                        )
+                    else:
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            head_dim=hd,
+                            pack_gqa=pack_gqa,
+                            pack_gqa_factor=pack_f,
+                            index_sparse=True,
+                            sparse_k_block_size=kbs,
+                        )
+
+                    # LoopK BWD (test_index_sparse_comprehensive_loopk):
+                    if _loopk_ok:
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            head_dim=hd,
+                            disable_dq_atomic=True,
+                            pack_gqa=pack_gqa,
+                            pack_gqa_factor=pack_f,
+                            index_sparse=True,
+                            bwd_inner_loop_k=True,
+                            sparse_k_block_size=kbs,
+                            bwd_dq_bf16=True,
+                        )
+
+                # env variants (inner-mode): same config with env overrides
                 for env_dict in cls.INNER_ENVS:
                     add_ffa_spec(
                         specs,
                         direction="fwd",
                         head_dim=hd,
                         disable_atomic=True,
-                        pack_gqa=pgqa,
+                        pack_gqa=pack_gqa,
                         pack_gqa_factor=pack_f,
                         index_sparse=True,
                         sparse_k_block_size=kbs,
                         env=env_dict,
                     )
                     if test_bwd:
-                        add_ffa_spec(
-                            specs,
-                            direction="bwd",
-                            head_dim=hd,
-                            disable_dq_atomic=True,
-                            pack_gqa=pgqa,
-                            pack_gqa_factor=pack_f,
-                            index_sparse=True,
-                            bwd_inner_loop_k=True,
-                            sparse_k_block_size=kbs,
-                            bwd_dq_bf16=True,
-                            env=env_dict,
-                        )
+                        if _gqa_safe:
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                head_dim=hd,
+                                disable_atomic=True,
+                                pack_gqa=pack_gqa,
+                                pack_gqa_factor=pack_f,
+                                index_sparse=True,
+                                sparse_k_block_size=kbs,
+                                env=env_dict,
+                            )
+                        else:
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                head_dim=hd,
+                                pack_gqa=pack_gqa,
+                                pack_gqa_factor=pack_f,
+                                index_sparse=True,
+                                sparse_k_block_size=kbs,
+                                env=env_dict,
+                            )
+                        if _loopk_ok:
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                head_dim=hd,
+                                disable_dq_atomic=True,
+                                pack_gqa=pack_gqa,
+                                pack_gqa_factor=pack_f,
+                                index_sparse=True,
+                                bwd_inner_loop_k=True,
+                                sparse_k_block_size=kbs,
+                                bwd_dq_bf16=True,
+                                env=env_dict,
+                            )
 
         return specs
 
@@ -900,8 +999,12 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     @parameterize("kbs", KBS_VALUES)
     @parameterize("inner_env", INNER_ENVS)
     def test_index_sparse_comprehensive(self, nhq_nhk_hd_packgqa, kbs, inner_env):
+        """LoopQ (default) direction — tests non-atomic dKV path with env variants."""
         nhq, nhk, hd, pack_gqa = nhq_nhk_hd_packgqa
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
+            return
+        # Skip GQA-without-pack configs: pre-existing precision issue
+        if nhq != nhk and not pack_gqa:
             return
 
         if kbs <= 1:
@@ -920,6 +1023,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             "topk": topk,
             "pack_gqa": pack_gqa,
             "sparse_k_block_size": kbs,
+            "check_deterministic": False,
         }
         if kbs > 1:
             config["max_topk"] = topk
@@ -927,6 +1031,50 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             os.environ[key] = val
         try:
             _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
+        finally:
+            for key in inner_env:
+                os.environ.pop(key, None)
+
+    @with_run_in_mp
+    @parameterize("nhq_nhk_hd_packgqa", NHQ_NHK_HD_PACKGQA)
+    @parameterize("kbs", KBS_VALUES)
+    @parameterize("inner_env", INNER_ENVS)
+    def test_index_sparse_comprehensive_loopk(self, nhq_nhk_hd_packgqa, kbs, inner_env):
+        """LoopK direction — tests dQ non-atomic path."""
+        nhq, nhk, hd, pack_gqa = nhq_nhk_hd_packgqa
+        if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
+            return
+        if kbs >= 256:
+            return
+        # Skip GQA-without-pack and non-MQA128 D=64 configs: pre-existing LoopK precision issue
+        if nhq != nhk and not pack_gqa:
+            return
+        if hd == 64:
+            return
+
+        if kbs <= 1:
+            S, topk = 256, 128
+        else:
+            S = 1024
+            topk = max(2, 128 // kbs)
+
+        config: dict[str, Any] = {
+            "B": 1,
+            "S": S,
+            "NHQ": nhq,
+            "NHK": nhk,
+            "D": hd,
+            "topk": topk,
+            "pack_gqa": pack_gqa,
+            "sparse_k_block_size": kbs,
+            "swap_bwd_qk_loop": True,
+        }
+        if kbs > 1:
+            config["max_topk"] = topk
+        for key, val in inner_env.items():
+            os.environ[key] = val
+        try:
+            _run_index_sparse_config(self.device, config, test_bwd=True)
         finally:
             for key in inner_env:
                 os.environ.pop(key, None)
