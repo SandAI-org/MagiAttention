@@ -95,7 +95,7 @@ def bench_fwd(S):
                 k_ranges=k_ranges,
                 attn_type_map=attn_type_map,
                 block_sparse=True,
-                auto_range_merge=True,
+                range_merge=True,
                 pack_gqa=True,
             )
 
@@ -134,7 +134,7 @@ def bench_bwd(S, swap_bwd_qk_loop=True):
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
             block_sparse=True,
-            auto_range_merge=True,
+            range_merge=True,
             pack_gqa=True,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
         )

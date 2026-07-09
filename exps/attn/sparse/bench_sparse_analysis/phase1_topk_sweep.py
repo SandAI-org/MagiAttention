@@ -146,7 +146,7 @@ def _phase1_bench(force=False, rerun_filter=None):
             k_ranges=k_ranges,
             attn_type_map=atm,
             block_sparse=True,
-            auto_range_merge=True,
+            range_merge=True,
             pack_gqa=True,
             sparse_k_block_size=KBS,
         )

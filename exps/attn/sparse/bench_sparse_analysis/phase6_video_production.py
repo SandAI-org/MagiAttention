@@ -248,7 +248,7 @@ def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
                         flops_S = topk
 
                     elif method == "dense_nb_rm":
-                        # Same Q/K/V and ranges as BS, auto_range_merge, no block_sparse
+                        # Same Q/K/V and ranges as BS, range_merge, no block_sparse
                         q = torch.randn(
                             qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device
                         )
@@ -267,7 +267,7 @@ def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
                             k_ranges=bs_k_ranges,
                             attn_type_map=bs_atm,
                             pack_gqa=True,
-                            auto_range_merge=True,
+                            range_merge=True,
                         )
                         flops_S = qseqlen
 

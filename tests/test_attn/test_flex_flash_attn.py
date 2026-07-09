@@ -138,7 +138,7 @@ class TestFlexFlashAttn(DistTestBase):
             flags=[
                 "test_accumulation_inplace",
                 "deterministic",
-                "auto_range_merge",
+                "range_merge",
                 "random_attn_type_map",
                 "swap_bwd_qk_loop",
                 "ref_block_config_idx",  # Use index instead of dict
@@ -152,7 +152,7 @@ class TestFlexFlashAttn(DistTestBase):
             defaults={
                 "ref_block_config_idx": 0,
             },
-            groups=[("auto_range_merge", "swap_bwd_qk_loop")],
+            groups=[("range_merge", "swap_bwd_qk_loop")],
             strategy="heuristic",
         )
         self.flag_iterator = iter(self.flag_generator)
@@ -299,7 +299,7 @@ class TestFlexFlashAttn(DistTestBase):
         q_ranges_tensor: torch.Tensor,
         k_ranges_tensor: torch.Tensor,
         attn_type_map_tensor: torch.Tensor,
-        auto_range_merge: bool,
+        range_merge: bool,
         block_sparse: bool,
         o_ref: torch.Tensor,
         lse_ref: torch.Tensor,
@@ -335,7 +335,7 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map=attn_type_map_tensor,
             sink=sink,
             sink_layout=sink_layout,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             deterministic=True,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
@@ -385,7 +385,7 @@ class TestFlexFlashAttn(DistTestBase):
         q_ranges_tensor: torch.Tensor,
         k_ranges_tensor: torch.Tensor,
         attn_type_map_tensor: torch.Tensor,
-        auto_range_merge: bool,
+        range_merge: bool,
         deterministic: bool,
         pack_gqa: bool,
         cat_gqa: bool,
@@ -400,7 +400,7 @@ class TestFlexFlashAttn(DistTestBase):
 
         softmax_scale = 1.0 / (d**0.5)
 
-        if auto_range_merge:
+        if range_merge:
             (
                 merge_q_ranges,
                 fwd_q_ranges,
@@ -465,7 +465,7 @@ class TestFlexFlashAttn(DistTestBase):
             # optional args below mainly for sparse attn
             ref_block_size=None,
             max_seqlen_q=max_seqlen_q,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             merge_q_ranges=merge_q_ranges,
             fwd_qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
@@ -510,7 +510,7 @@ class TestFlexFlashAttn(DistTestBase):
             # optional args below mainly for sparse attn
             ref_block_size=None,
             max_seqlen_q=max_seqlen_q,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             merge_q_ranges=merge_q_ranges,
             fwd_qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
@@ -580,7 +580,7 @@ class TestFlexFlashAttn(DistTestBase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
@@ -618,7 +618,7 @@ class TestFlexFlashAttn(DistTestBase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
@@ -1138,7 +1138,7 @@ class TestFlexFlashAttn(DistTestBase):
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
         attn_type_map: list[int],
-        auto_range_merge: bool,
+        range_merge: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
         block_sparse: bool,
@@ -1153,10 +1153,8 @@ class TestFlexFlashAttn(DistTestBase):
         return_max_logits: bool = False,
         cat_gqa: bool = False,
     ) -> None:
-        if (
-            block_sparse
-        ):  # sparse load supports only auto_range_merge and full attn_type
-            if not auto_range_merge or test_accumulation_inplace:
+        if block_sparse:  # sparse load supports only range_merge and full attn_type
+            if not range_merge or test_accumulation_inplace:
                 return
             for attn_type in attn_type_map:
                 if attn_type != 0:
@@ -1234,7 +1232,7 @@ class TestFlexFlashAttn(DistTestBase):
                 q_ranges_tensor=q_ranges_tensor,
                 k_ranges_tensor=k_ranges_tensor,
                 attn_type_map_tensor=attn_type_map_tensor,
-                auto_range_merge=auto_range_merge,
+                range_merge=range_merge,
                 deterministic=deterministic,
                 pack_gqa=pack_gqa,
                 cat_gqa=cat_gqa,
@@ -1261,7 +1259,7 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map=attn_type_map_tensor,
             sink=sink,
             sink_layout=sink_layout,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             deterministic=deterministic,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
@@ -1291,7 +1289,7 @@ class TestFlexFlashAttn(DistTestBase):
                 q_ranges_tensor=q_ranges_tensor,
                 k_ranges_tensor=k_ranges_tensor,
                 attn_type_map_tensor=attn_type_map_tensor,
-                auto_range_merge=auto_range_merge,
+                range_merge=range_merge,
                 block_sparse=block_sparse,
                 o_ref=o,
                 lse_ref=lse,
@@ -1697,7 +1695,7 @@ class TestFlexFlashAttn(DistTestBase):
             flag_comb.get("test_accumulation_inplace", False)
         )
         deterministic = bool(flag_comb.get("deterministic", False))
-        auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
+        range_merge = bool(flag_comb.get("range_merge", False))
         random_attn_type_map = bool(flag_comb.get("random_attn_type_map", False))
         swap_bwd_qk_loop = bool(flag_comb.get("swap_bwd_qk_loop", False))
         enable_max_seqlen_q = bool(flag_comb.get("max_seqlen_q", False))
@@ -1766,7 +1764,7 @@ class TestFlexFlashAttn(DistTestBase):
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             block_sparse=block_sparse,
@@ -1910,7 +1908,7 @@ class TestFlexFlashAttn(DistTestBase):
             flag_comb.get("test_accumulation_inplace", False)
         )
         deterministic = bool(flag_comb.get("deterministic", False))
-        auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
+        range_merge = bool(flag_comb.get("range_merge", False))
         swap_bwd_qk_loop = bool(flag_comb.get("swap_bwd_qk_loop", False))
         enable_max_seqlen_q = bool(flag_comb.get("max_seqlen_q", False))
         # NOTE: we use ref_block_config_idx to extract ref_block_config since it is a non-hashable dict
@@ -1982,7 +1980,7 @@ class TestFlexFlashAttn(DistTestBase):
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             block_sparse=block_sparse,
@@ -2047,9 +2045,9 @@ class TestFlexFlashAttn(DistTestBase):
             ),
             sink=sink,
             sink_layout=sink_layout,
-            # FIXME: compiling does not support auto_range_merge
+            # FIXME: compiling does not support range_merge
             # due to custom unique_consecutive_pairs kernel with dynamic output shape
-            auto_range_merge=False,
+            range_merge=False,
             block_sparse=False,
         )
         lse = meta.lse
@@ -2144,7 +2142,7 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
                 k_ranges=k_ranges,
                 attn_type_map=attn_type_map,
                 block_sparse=block_sparse,
-                auto_range_merge=True,
+                range_merge=True,
                 pack_gqa=True,
                 swap_bwd_qk_loop=swap_bwd_qk_loop,
             )

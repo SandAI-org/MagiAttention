@@ -60,7 +60,7 @@ class FlashAttnBwdSm90 {
   static constexpr bool IsSparse = CollectiveMainloop::IsSparse;
   static constexpr bool InnerStoreInProducer = CollectiveMainloop::InnerStoreInProducer;
   static constexpr bool kInnerTilesContiguous = CollectiveMainloop::kInnerTilesContiguous;
-  static constexpr int NumProducerLoaderThreads = CollectiveMainloop::ProducerWarpRoles::kNumLoaderThreads;
+  static constexpr int NumProducerLoaderThreads = CollectiveMainloop::ProducerConsts::kLoaderThreads;
 
   template <typename Pipeline, typename Storage, typename PipelineParamsT>
   CUTLASS_DEVICE static Pipeline make_inner_pipeline(Storage& storage, PipelineParamsT const& pipeline_params) {
@@ -287,9 +287,9 @@ class FlashAttnBwdSm90 {
             typename CollectiveMainloop::BlockSparseLoopQProducerBlockMeta>,
         BlockMetaT>;
 
-    using Roles = typename CollectiveMainloop::ProducerWarpRoles;
-    static constexpr int NumLoaderWarps = Roles::kNumLoaderWarps;
-    static constexpr int NumProducerLoaderThreads = Roles::kNumLoaderThreads;
+    using Roles = typename CollectiveMainloop::ProducerConsts;
+    static constexpr int NumLoaderWarps = Roles::kInnerLoaderWarps;
+    static constexpr int NumProducerLoaderThreads = Roles::kLoaderThreads;
 
     if (warp_group_idx == 0) { // Producer
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
@@ -406,7 +406,7 @@ class FlashAttnBwdSm90 {
         auto block_coord = work_tile_info.get_block_coord();
         auto det_msg = work_tile_info.get_det_msg();
 
-        // Init the zero-initialized register accumulator for dK and dV
+        // Init the zero-initialized register SMEM buffer for dK and dV
         Tensor tdKrdK = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
         Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB ? 2 : 1>(TileShape_MNK{}));
         clear(tdKrdK);
@@ -545,9 +545,9 @@ class FlashAttnBwdSm90 {
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-      using Roles = typename CollectiveMainloop::ProducerWarpRoles;
-      static constexpr int NumLoaderWarps = Roles::kNumLoaderWarps;
-      static constexpr int NumProducerLoaderThreads = Roles::kNumLoaderThreads;
+      using Roles = typename CollectiveMainloop::ProducerConsts;
+      static constexpr int NumLoaderWarps = Roles::kInnerLoaderWarps;
+      static constexpr int NumProducerLoaderThreads = Roles::kLoaderThreads;
 
       using ProducerBlockMetaT = std::conditional_t<
           BlockSparse,
@@ -633,7 +633,7 @@ class FlashAttnBwdSm90 {
       mainloop.mma_init();
       scheduler.init_consumer();
 
-      static constexpr int NumProducerLoaderThreads = CollectiveMainloop::ProducerWarpRoles::kNumLoaderThreads;
+      static constexpr int NumProducerLoaderThreads = CollectiveMainloop::ProducerConsts::kLoaderThreads;
 
       // For each work tile job:
       //  1. run mma consumer to compute partial dQ,dK,dV as the consumer prologue/mainloop
@@ -646,7 +646,7 @@ class FlashAttnBwdSm90 {
            work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
         auto block_coord = work_tile_info.get_block_coord();
 
-        // Init the zero-initialized register accumulator for dQ
+        // Init the zero-initialized register SMEM buffer for dQ
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         clear(tdQrdQ);
 

@@ -20,68 +20,6 @@ import triton.language as tl
 
 
 @triton.jit
-def block_mask_to_qk_ranges_kernel(
-    # Pointers
-    indices_ptr,  # input: [N, 4] int64 (b, h, q, k)
-    q_ranges_ptr,  # output: [N, 2] int32
-    k_ranges_ptr,  # output: [N, 2] int32
-    # Strides
-    stride_idx_0,
-    stride_idx_1,  # indices strides
-    stride_out_0,
-    stride_out_1,  # output strides
-    # Shapes & Block sizes
-    num_q_blocks,  # Integer
-    num_k_blocks,  # Integer
-    block_m,  # Integer
-    block_n,  # Integer
-    n_elements,  # Total number of true blocks (N)
-    # Meta
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-
-    # indices shape is [N, 4], layout is usually row-major.
-    # We need columns 1 (h), 2 (q), 3 (k). Column 0 is batch (assumed 0).
-    row_ptr = indices_ptr + offsets * stride_idx_0
-
-    h_ptr = row_ptr + 1 * stride_idx_1
-    q_ptr = row_ptr + 2 * stride_idx_1
-    k_ptr = row_ptr + 3 * stride_idx_1
-
-    # Load indices
-    h = tl.load(h_ptr, mask=mask)
-    q = tl.load(q_ptr, mask=mask)
-    k = tl.load(k_ptr, mask=mask)
-
-    # Core Logic (Flattening + Range Calculation)
-    # Corresponding to: q_indices_flat = q_indices + h_indices * num_q
-    #            q_starts = q_indices_flat * block_m
-
-    q_global_idx = q + h * num_q_blocks
-    q_start = q_global_idx * block_m
-    q_end = q_start + block_m
-
-    k_global_idx = k + h * num_k_blocks
-    k_start = k_global_idx * block_n
-    k_end = k_start + block_n
-
-    # Store results
-    # Output shape [N, 2]. Col 0 = start, Col 1 = end.
-
-    q_out_row_ptr = q_ranges_ptr + offsets * stride_out_0
-    tl.store(q_out_row_ptr + 0 * stride_out_1, q_start.to(tl.int32), mask=mask)
-    tl.store(q_out_row_ptr + 1 * stride_out_1, q_end.to(tl.int32), mask=mask)
-
-    k_out_row_ptr = k_ranges_ptr + offsets * stride_out_0
-    tl.store(k_out_row_ptr + 0 * stride_out_1, k_start.to(tl.int32), mask=mask)
-    tl.store(k_out_row_ptr + 1 * stride_out_1, k_end.to(tl.int32), mask=mask)
-
-
-@triton.jit
 def topk_indices_to_qk_ranges_kernel(
     topk_indices_ptr,  # input: [kv_heads, total_num_q_blocks, topk_k_blocks] int32
     q_ranges_ptr,  # output: [N, 2] int32
@@ -1206,7 +1144,7 @@ def choose_ref_block(
         # the input is a single uniform block size, and callers generate ranges
         # from a uniform block mask with this same sparse_k_block_size.
         # Variable-block-size masks must NOT enable block_sparse (they take the
-        # dense TMA path with auto_range_merge, which has no such requirement).
+        # dense TMA path with range_merge, which has no such requirement).
         block_sparse = True
         ref_sparse_k_block_size = 128
     else:

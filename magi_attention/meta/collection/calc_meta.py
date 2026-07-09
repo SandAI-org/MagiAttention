@@ -125,7 +125,7 @@ class AttnArg:
                 assert k_ranges_tensor_fwd.shape == torch.Size([batch_size_fwd, 2])
                 assert mask_type_tensor_fwd.shape == torch.Size([batch_size_fwd])
 
-        if env.general.is_auto_range_merge_enable():
+        if env.general.is_range_merge_enable():
             # lazy import to avoid circular import
             from magi_attention.functional.flex_flash_attn import merge_ranges
 
@@ -191,7 +191,7 @@ class AttnArg:
                 assert k_ranges_tensor_bwd.shape == torch.Size([batch_size_bwd, 2])
                 assert attn_type_map.shape == torch.Size([batch_size_bwd])
 
-        if env.general.is_auto_range_merge_enable():
+        if env.general.is_range_merge_enable():
             # lazy import to avoid circular import
             from magi_attention.functional.flex_flash_attn import merge_ranges
 
@@ -233,7 +233,7 @@ class AttnArg:
             and env.general.is_cat_gqa_enable()
             # TODO: support auto range merge:
             #  when enabled, we should use the merged k_ranges above
-        ) and not env.general.is_auto_range_merge_enable()
+        ) and not env.general.is_range_merge_enable()
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         return self.ffa_bwd_args_dict if is_bwd else self.ffa_fwd_args_dict

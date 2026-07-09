@@ -136,32 +136,34 @@ Override the MMA tile dimensions (M×N) for the backward kernel. Common values: 
 
 Override the number of pipeline stages for K (main pipeline), dS (double buffer), and V.
 
-**MAGI_ATTENTION_FFA_BWD_UNION_DKVACC**
+**MAGI_ATTENTION_FFA_BWD_UNION_DKV_SMEM**
 
-- **Defaults to:** `0` (smem_dkacc and smem_dvacc are unioned into one buffer)
-- **Used by:** `UnionDkvacc` template parameter
+- **Defaults to:** `0` (smem_inner_dk and smem_inner_dv are unioned into one buffer)
+- **Used by:** `UnionDkvSmem` template parameter
 
-Set to `1` to un-union dKacc/dVacc (separate SMEM for each). Requires `stages_v=1` to fit.
+Set to `1` to un-union dK/dV SMEM (separate buffers for each). Requires `stages_v=1` to fit.
 
-**MAGI_ATTENTION_FFA_BWD_DKVACC_BYPASS**
+**MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM**
 
-- **Defaults to:** `0`
-- **Used by:** `kInnerStoreMode` (forces `InnerStoreMode::BypassSmem`)
+- **Defaults to:** `1` (use SMEM for inner dKV store)
+- **Used by:** `kInnerStoreMode` (`0` forces `InnerStoreMode::BypassSmem`)
 
-Set to `1` to bypass the SMEM accumulator for dKV — consumer WGs atomicAdd directly to GMEM
-from registers. Experimental; may improve performance for bandwidth-bound configs.
+Set to `0` to bypass SMEM for dKV — consumer WGs atomicAdd directly to GMEM from registers.
+Experimental; may improve performance for bandwidth-bound configs.
 
-**MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD**
+**MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE**
 
 - **Defaults to:** auto (`tma` when tiles are contiguous, else `cpasync`)
-- **Used by:** `kInnerLoadMode` enum (`Tma`=0, `Tma1d`=1, `CpAsync`=2)
+- **Used by:** `kInnerLoadMode` enum (`Tma`=0, `CpAsync`=2)
+- **Aliases:** `MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD` (deprecated)
 
-Override the inner-loop load method for sparse paths. Options: `tma`, `tma1d`, `cpasync`.
+Override the inner-loop load method for sparse paths. Options: `tma`, `cpasync`.
 
-**MAGI_ATTENTION_FFA_SPARSE_INNER_STORE**
+**MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE**
 
 - **Defaults to:** `tma1d`
 - **Used by:** `kInnerStoreMode` enum (`Tma1d`=1, `AtomicAdd`=2, `BypassSmem`=3)
+- **Aliases:** `MAGI_ATTENTION_FFA_SPARSE_INNER_STORE` (deprecated)
 
 Override the inner-loop store method for sparse paths. Options: `tma1d`, `atomicadd`, `bypass`.
 
@@ -242,10 +244,10 @@ This feature is experimental and under active development for now, and not compa
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
-**MAGI_ATTENTION_AUTO_RANGE_MERGE**
+**MAGI_ATTENTION_RANGE_MERGE**
 
 - **Defaults to:** `0`
-- **Used by:** `magi_attention.env.general.is_auto_range_merge_enable`
+- **Used by:** `magi_attention.env.general.is_range_merge_enable`
 
 Toggle this env variable to `1` to enable automatic range merging for flex-flash-attention,
 to improve performance by reducing the number of attention ranges.

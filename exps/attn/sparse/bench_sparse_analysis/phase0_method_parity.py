@@ -129,7 +129,7 @@ def _phase0_bench(force=False, rerun_filter=None):
             k_ranges=k_ranges,
             attn_type_map=atm,
             block_sparse=True,
-            auto_range_merge=True,
+            range_merge=True,
             pack_gqa=True,
             sparse_k_block_size=KBS,
         )
@@ -352,7 +352,7 @@ def _phase0_ncu():
                 f"atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device='cuda')\n"
                 f"out, _ = flex_flash_attn_func(q, k, v,\n"
                 f"    q_ranges=q_ranges, k_ranges=k_ranges, attn_type_map=atm,\n"
-                f"    block_sparse=True, auto_range_merge=True, pack_gqa=True,\n"
+                f"    block_sparse=True, range_merge=True, pack_gqa=True,\n"
                 f"    sparse_k_block_size={KBS},\n"
                 f"    {'swap_bwd_qk_loop=' + swap_loopk + ',' if is_bwd else ''})"
             )

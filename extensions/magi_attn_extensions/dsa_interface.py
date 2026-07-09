@@ -77,7 +77,7 @@ def ffa_block_sparse_fwd(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         softmax_scale=softmax_scale,
-        auto_range_merge=True,
+        range_merge=True,
         block_sparse=True,
         pack_gqa=True if group_size > 1 else False,
         ref_block_size=ref_block_size,

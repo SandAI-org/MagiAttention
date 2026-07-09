@@ -228,7 +228,7 @@ def _flex_flash_attn_forward_compilable(
     kblock_m: int | None,
     kblock_n: int | None,
     max_seqlen_q: int | None,
-    auto_range_merge: bool,
+    range_merge: bool,
     merge_q_ranges: torch.Tensor | None,
     fwd_qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
@@ -257,7 +257,7 @@ def _flex_flash_attn_forward_compilable(
         ref_block_size=(kblock_m, kblock_n)
         if kblock_m is not None and kblock_n is not None
         else None,
-        range_merge=auto_range_merge,
+        range_merge=range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         cat_gqa=False,
@@ -320,7 +320,7 @@ def _flex_flash_attn_forward_compilable_fake(
     kblock_m: int | None,
     kblock_n: int | None,
     max_seqlen_q: int | None,
-    auto_range_merge: bool,
+    range_merge: bool,
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
@@ -356,7 +356,7 @@ def _flex_flash_attn_forward(
     sm_margin: int,
     ref_block_size: tuple[int, int] | None = None,
     max_seqlen_q: int | None = None,
-    auto_range_merge: bool = False,
+    range_merge: bool = False,
     merge_q_ranges: torch.Tensor | None = None,
     fwd_qk_map: torch.Tensor | None = None,
     fwd_unique_count: torch.Tensor | None = None,
@@ -443,7 +443,7 @@ def _flex_flash_attn_forward(
         kblock_m=kblock_m,
         kblock_n=kblock_n,
         max_seqlen_q=max_seqlen_q,
-        auto_range_merge=auto_range_merge,
+        range_merge=range_merge,
         merge_q_ranges=merge_q_ranges,
         fwd_qk_map=fwd_qk_map,
         fwd_unique_count=fwd_unique_count,
@@ -493,7 +493,7 @@ def _flex_flash_attn_backward_compilable(
     disable_bwd_dq_atomic_reduction: bool,
     deterministic: bool,
     sm_margin: int,
-    auto_range_merge: bool,
+    range_merge: bool,
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
@@ -518,7 +518,7 @@ def _flex_flash_attn_backward_compilable(
         cat_gqa=cat_gqa,
         pack_gqa_factor=q.size(1) // k.size(1),
         deterministic=deterministic,
-        range_merge=auto_range_merge,
+        range_merge=range_merge,
         bwd_inner_loop_k=bwd_inner_loop_k,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
@@ -599,7 +599,7 @@ def _flex_flash_attn_backward_compilable_fake(
     disable_bwd_dq_atomic_reduction: bool,
     deterministic: bool,
     sm_margin: int,
-    auto_range_merge: bool,
+    range_merge: bool,
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
@@ -640,7 +640,7 @@ def _flex_flash_attn_backward(
     disable_bwd_dq_atomic_reduction: bool,
     deterministic: bool,
     sm_margin: int = 0,
-    auto_range_merge: bool = False,
+    range_merge: bool = False,
     merge_k_ranges: torch.Tensor | None = None,
     bwd_kq_map: torch.Tensor | None = None,
     bwd_unique_count: torch.Tensor | None = None,
@@ -738,7 +738,7 @@ def _flex_flash_attn_backward(
         disable_bwd_dq_atomic_reduction=disable_bwd_dq_atomic_reduction,
         deterministic=deterministic,
         sm_margin=sm_margin,
-        auto_range_merge=auto_range_merge,
+        range_merge=range_merge,
         merge_k_ranges=merge_k_ranges,
         bwd_kq_map=bwd_kq_map,
         bwd_unique_count=bwd_unique_count,
@@ -778,7 +778,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_bwd_dq_atomic_reduction: bool = False,
         ref_block_size: tuple[int, int] | None = None,
         max_seqlen_q: int | None = None,
-        auto_range_merge: bool = False,
+        range_merge: bool = False,
         swap_ab: bool = False,
         pack_gqa: bool = False,
         cat_gqa: bool = False,
@@ -811,7 +811,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 )
 
         if block_sparse:
-            auto_range_merge = True
+            range_merge = True
 
         if disable_bwd_dkv_atomic_reduction and bwd_inner_loop_k is True:
             raise RuntimeError(
@@ -859,7 +859,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         # ---- FFA (native) backend ---- #
         ctx.use_fa4_backend = False
 
-        if auto_range_merge:
+        if range_merge:
             with maybe_profile_ffa_ctx("fwd_range_merge"):
                 (
                     merge_q_ranges,
@@ -908,7 +908,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             # optional args below mainly for sparse attn
             ref_block_size=ref_block_size,
             max_seqlen_q=max_seqlen_q,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             merge_q_ranges=merge_q_ranges,
             fwd_qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
@@ -929,7 +929,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         with maybe_profile_ffa_ctx("fwd_cast"):
             out = out.to(q.dtype)
 
-        save_merge_info = (bwd_inner_loop_k is True) and auto_range_merge
+        save_merge_info = (bwd_inner_loop_k is True) and range_merge
 
         tensors_to_save = [
             # 1. Base Tensors
@@ -958,7 +958,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
         ctx.ref_block_size = ref_block_size
-        ctx.auto_range_merge = auto_range_merge
+        ctx.range_merge = range_merge
         ctx.swap_ab = swap_ab
         ctx.block_sparse = block_sparse
         ctx.index_sparse = index_sparse
@@ -1010,7 +1010,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # disable_bwd_dq_atomic_reduction
                 None,  # ref_block_size
                 None,  # max_seqlen_q
-                None,  # auto_range_merge
+                None,  # range_merge
                 None,  # swap_ab
                 None,  # pack_gqa
                 None,  # cat_gqa
@@ -1064,7 +1064,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_k_ranges = None
             bwd_kq_map = None
             bwd_unique_count = None
-            bwd_auto_range_merge = False
+            bwd_range_merge = False
 
             if not bwd_inner_loop_k:
                 # IndexSparse BWD InnerLoopQ: outer=K block, inner=Q from inner_indices
@@ -1102,8 +1102,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     ctx.inner_indices_cnt = _inner_topk
 
             # else: IndexSparse BWD InnerLoopK — use forward's topk_indices directly
-        elif ctx.auto_range_merge:
-            bwd_auto_range_merge = True
+        elif ctx.range_merge:
+            bwd_range_merge = True
             with maybe_profile_ffa_ctx("bwd_range_merge"):
                 if bwd_inner_loop_k:
                     if merge_q_ranges is not None:
@@ -1146,7 +1146,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         bwd_unique_count,
                     ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
         else:
-            bwd_auto_range_merge = False
+            bwd_range_merge = False
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,
                 k_ranges,
@@ -1183,7 +1183,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_bwd_dq_atomic_reduction=ctx.disable_bwd_dq_atomic_reduction,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
-            auto_range_merge=bwd_auto_range_merge,
+            range_merge=bwd_range_merge,
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
@@ -1224,7 +1224,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # disable_bwd_dq_atomic_reduction
             None,  # ref_block_size
             None,  # max_seqlen_q
-            None,  # auto_range_merge
+            None,  # range_merge
             None,  # swap_ab
             None,  # pack_gqa
             None,  # cat_gqa
@@ -1263,7 +1263,7 @@ def flex_flash_attn_func(
     disable_bwd_dq_atomic_reduction: bool = False,
     ref_block_size: tuple[int, int] | None = None,
     max_seqlen_q: int | None = None,
-    auto_range_merge: bool = False,
+    range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
@@ -1311,7 +1311,7 @@ def flex_flash_attn_func(
 
         max_seqlen_q (int | None, optional): Maximum sequence length for query. Defaults to ``None``.
             If provided, enables optimization for tile_scheduler. Most recommended to set this when using
-            auto_range_merge(for block sparse attention).
+            range_merge(for block sparse attention).
         attn_type_map (torch.Tensor, optional): Attention type map tensor with dtype=torch.int32,
             Defaults to ``None`` to apply full attention for all ranges.
             The values specify the attention type for each token:
@@ -1381,7 +1381,7 @@ def flex_flash_attn_func(
             If provided, enables optimization for forward tile_scheduler,
             especially for block sparse attention scenarios.
 
-        auto_range_merge (bool, optional):
+        range_merge (bool, optional):
             Whether to automatically merge k_ranges for the same q_range. Defaults to ``False``.
             **Note:** This flag is useful for sparse attention scenarios but still under development.
 
@@ -1403,7 +1403,7 @@ def flex_flash_attn_func(
 
         block_sparse (bool, optional):
             Whether to enable sparse load mode for optimizing performance when k_range size is small (< 64).
-            Automatically enables ``auto_range_merge``. Defaults to ``False``.
+            Automatically enables ``range_merge``. Defaults to ``False``.
             Mutually exclusive with ``index_sparse_indices``.
             When enabled, ``sparse_k_block_size`` is auto-set to ``tile_N`` (128)
             so that inner KV loads use TMA 2D — without this, the kernel falls back to CpAsync
@@ -1597,7 +1597,7 @@ def flex_flash_attn_func(
                 warnings.warn(
                     f"block_sparse: non-uniform k_ranges detected "
                     f"(sizes in [{k_sizes.min().item()}, {k_sizes.max().item()}]). "
-                    f"auto_range_merge will normalize them to ref_block_size.",
+                    f"range_merge will normalize them to ref_block_size.",
                     stacklevel=2,
                 )
 
@@ -1643,7 +1643,7 @@ def flex_flash_attn_func(
             "q_ranges/k_ranges must not be provided simultaneously."
         )
 
-        auto_range_merge = False
+        range_merge = False
         if max_seqlen_q is None:
             max_seqlen_q = q_block_size
         # IndexSparse: fixed (128, tile_size) tile — q_block_size=1 means PackGQA fills M dim.
@@ -1667,7 +1667,7 @@ def flex_flash_attn_func(
             "disable_bwd_dkv_atomic_reduction": disable_bwd_dkv_atomic_reduction,
             "ref_block_size": ref_block_size is not None,
             "max_seqlen_q": max_seqlen_q is not None,
-            "auto_range_merge": auto_range_merge,
+            "range_merge": range_merge,
             "swap_ab": swap_ab,
             "pack_gqa": pack_gqa,
             "cat_gqa": cat_gqa,
@@ -1692,7 +1692,7 @@ def flex_flash_attn_func(
 
     # ── Auto-set sparse flags ──
     if block_sparse:
-        auto_range_merge = True
+        range_merge = True
 
     _is_sparse = block_sparse or index_sparse
     if _is_sparse:
@@ -1731,7 +1731,7 @@ def flex_flash_attn_func(
         disable_bwd_dq_atomic_reduction,
         ref_block_size,
         max_seqlen_q,
-        auto_range_merge,
+        range_merge,
         swap_ab,
         pack_gqa,
         cat_gqa,

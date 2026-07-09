@@ -492,7 +492,7 @@ def get_ffa_jit_spec(
             ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE must be tma/cpasync, got {_load_env}"
             extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
             uri += f"_sload{_load_mode_map[_load_lower]}"
-    # ─── InnerStoreMode (BWD only): 1=tma1d, 2=atomicadd, 3=bypass_smem ───
+    # ─── InnerStoreMode (BWD only): 0=tma(2D), 1=tma1d, 2=atomicadd, 3=bypass_smem ───
     if direction == "bwd":
         _store_env = os.environ.get(
             "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE",
@@ -508,6 +508,8 @@ def get_ffa_jit_spec(
         elif _store_env is not None:
             _store_lower = _store_env.lower()
             _store_mode_map = {
+                "tma": "0",
+                "tma2d": "0",
                 "tma1d": "1",
                 "atomicadd": "2",
                 "cpasync": "2",
@@ -517,7 +519,7 @@ def get_ffa_jit_spec(
             }
             assert (
                 _store_lower in _store_mode_map
-            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE must be tma1d/atomicadd/bypass, got {_store_env}"
+            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE must be tma/tma2d/tma1d/atomicadd/bypass, got {_store_env}"
             extra_template_args["inner_store_mode"] = _store_mode_map[_store_lower]
             uri += f"_sstore{_store_mode_map[_store_lower]}"
         elif _inner_use_scatter:
@@ -600,7 +602,7 @@ def get_ffa_jit_spec(
         bwd_inner_loop_k=bwd_inner_loop_k,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
-        sparse_dx_tma_reduce=extra_template_args.get("inner_store_mode", "2") == "1",
+        sparse_dx_tma_reduce=extra_template_args.get("inner_store_mode", "0") == "1",
         sparse_k_block_size=sparse_k_block_size,
     )
     extra_template_args[f"{direction}_producer_regs"] = str(_producer_regs)

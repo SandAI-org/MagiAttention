@@ -290,7 +290,7 @@ _RM_BWD_LOOPK_CASES = [
 
 
 class TestRangeMergeBwdLoopK(DistTestBase):
-    """End-to-end correctness test for BWD LoopK path with auto_range_merge=True."""
+    """End-to-end correctness test for BWD LoopK path with range_merge=True."""
 
     @property
     def world_size(self) -> int:
@@ -322,7 +322,7 @@ class TestRangeMergeBwdLoopK(DistTestBase):
             q_ranges=qr,
             k_ranges=kr,
             attn_type_map=am,
-            auto_range_merge=True,
+            range_merge=True,
             swap_bwd_qk_loop=True,
         )
         torch.cuda.synchronize()

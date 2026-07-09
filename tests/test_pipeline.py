@@ -14,6 +14,7 @@
 
 import os
 import random
+from itertools import product
 from typing import Any
 
 import torch
@@ -82,29 +83,52 @@ BACKENDS = "backends"
 
 # TODO: rewrite the specific function for unitest profiling mode
 class TestPipelineBaseWithWorldSize1(DistTestBase):
-    # Dense feature combos needed by the pipeline test flag-comb sweep.
-    # (disable_atomic, deterministic, auto_range_merge, cat_gqa,
-    #  bwd_inner_loop_k, pack_gqa_factor, return_max_logits)
-    CI_DENSE_FEATURES = [
-        (False, True, False, False, False, 1, False),  # deterministic
-        (False, False, True, False, False, 1, False),  # auto_range_merge
-        (False, False, True, False, False, 128, False),  # ARM + packgqa128
-        (False, False, False, False, True, 1, False),  # bwd_inner_loop_k
-        (False, False, False, False, True, 8, False),  # swap + packgqa8
-        (False, False, True, False, True, 8, False),  # ARM + swap + packgqa8
-        (False, False, True, False, True, 128, False),  # ARM + swap + packgqa128
-        (False, False, False, False, False, 1, True),  # return_max_logits
-        (False, False, False, False, False, 8, True),  # RML + packgqa8
-        (False, False, True, False, False, 1, True),  # ARM + RML
-        (False, False, True, False, False, 8, True),  # ARM + RML + packgqa8
-        (False, True, False, False, False, 1, True),  # det + RML
-        (False, True, False, False, False, 8, True),  # det + RML + packgqa8
-        (False, True, True, False, False, 1, True),  # det + ARM + RML
-        (False, False, False, True, False, 8, False),  # catgqa8
-        (False, False, True, True, False, 8, False),  # ARM + catgqa8
-        (False, True, False, True, False, 8, False),  # det + catgqa8
-        (False, True, True, True, False, 8, False),  # det + ARM + catgqa8
-    ]
+    # Dense feature combos for pipeline / flex_flash_attn precompile.
+    # Generated via itertools.product + filter; superset of legacy hand-picked list.
+    _DENSE_FEATURE_AXES = dict(
+        disable_atomic=[False],
+        deterministic=[False, True],
+        range_merge=[False, True],
+        cat_gqa=[False, True],
+        bwd_inner_loop_k=[False, True],
+        pack_gqa_factor=[1, 8, 128],
+        return_max_logits=[False, True],
+    )
+
+    @classmethod
+    def _is_valid_dense_feature(
+        cls,
+        disable_atomic: bool,
+        deterministic: bool,
+        range_merge: bool,
+        cat_gqa: bool,
+        bwd_inner_loop_k: bool,
+        pack_gqa_factor: int,
+        return_max_logits: bool,
+    ) -> bool:
+        if disable_atomic:
+            return False
+        if cat_gqa and pack_gqa_factor <= 1:
+            return False
+        if cat_gqa and bwd_inner_loop_k:
+            return False
+        if cat_gqa and return_max_logits:
+            return False
+        if return_max_logits and bwd_inner_loop_k:
+            return False
+        if return_max_logits and pack_gqa_factor == 128:
+            return False
+        if deterministic and bwd_inner_loop_k:
+            return False
+        return True
+
+    @classmethod
+    def _iter_dense_features(cls):
+        keys = list(cls._DENSE_FEATURE_AXES.keys())
+        for values in product(*(cls._DENSE_FEATURE_AXES[k] for k in keys)):
+            combo = dict(zip(keys, values))
+            if cls._is_valid_dense_feature(**combo):
+                yield combo
 
     @classmethod
     def precompile_kernel_specs(cls):
@@ -120,7 +144,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         specs: dict = {}
         for hd in [64, 128]:
             for compute_dt in [torch.float16, torch.bfloat16]:
-                for dis_at, det, arm, cat, swap, pgf, rml in cls.CI_DENSE_FEATURES:
+                for feat in cls._iter_dense_features():
+                    det = feat["deterministic"]
+                    arm = feat["range_merge"]
+                    cat = feat["cat_gqa"]
+                    swap = feat["bwd_inner_loop_k"]
+                    pgf = feat["pack_gqa_factor"]
+                    rml = feat["return_max_logits"]
                     directions = ["fwd"] if rml else ["fwd", "bwd"]
                     for direction in directions:
                         use_cat = cat and direction == "bwd"
@@ -132,7 +162,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                             compute_dtype=compute_dt,
                             output_dtype=torch.float32 if direction == "fwd" else None,
                             deterministic=det,
-                            auto_range_merge=arm,
+                            range_merge=arm,
                             pack_gqa=pack_gqa,
                             cat_gqa=use_cat,
                             pack_gqa_factor=pgf if not use_cat else 1,

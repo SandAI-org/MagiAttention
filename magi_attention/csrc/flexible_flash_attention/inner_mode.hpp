@@ -24,11 +24,12 @@ namespace flash {
 enum class InnerLoadMode : int { Tma = 0, CpAsync = 2 };
 
 // Inner-loop store strategy (BWD dX accumulation to global memory).
-// Tma1d:       cp.reduce.async.bulk per-row from SMEM (requires scatter path)
+// Tma:         2D TMA reduce-add full-tile from swizzled SMEM (default for dense paths)
+// Tma1d:       cp.reduce.async.bulk per-row from linear SMEM (requires scatter path)
 // AtomicAdd:   scalar atomicAdd from SMEM (scatter or dense fallback)
-// BypassSmem:  skip SMEM SMEM buffer entirely — consumer does register atomicAdd to gmem
+// BypassSmem:  skip SMEM buffer entirely — consumer does register atomicAdd to gmem
 //              (eliminates inner dKV SMEM buffer, barriers, and store warps; works for both dense/scatter)
-enum class InnerStoreMode : int { Tma1d = 1, AtomicAdd = 2, BypassSmem = 3 };
+enum class InnerStoreMode : int { Tma = 0, Tma1d = 1, AtomicAdd = 2, BypassSmem = 3 };
 
 // Outer-loop store strategy (epilogue O/dQ/dKV write to global memory).
 // Tma: full-tile TMA store (SM90_TMA_STORE or SM90_TMA_REDUCE_ADD)

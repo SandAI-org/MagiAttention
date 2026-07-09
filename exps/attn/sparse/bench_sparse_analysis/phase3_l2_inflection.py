@@ -92,7 +92,7 @@ ia_3d = idx.permute(1, 0, 2).contiguous()
 q_ranges, k_ranges = generate_ranges_from_topk_indices(ia_3d, block_m=1, block_n={KBS}, num_k_blocks=n_total)
 atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device="cuda")
 out, _ = flex_flash_attn_func(q, k, v, q_ranges=q_ranges, k_ranges=k_ranges,
-    attn_type_map=atm, block_sparse=True, auto_range_merge=True, pack_gqa=True,
+    attn_type_map=atm, block_sparse=True, range_merge=True, pack_gqa=True,
     sparse_k_block_size={KBS}, swap_bwd_qk_loop=False)
 do = torch.randn_like(out)
 out.backward(do)

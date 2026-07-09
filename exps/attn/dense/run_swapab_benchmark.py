@@ -241,7 +241,7 @@ def sparse_attn_benchmark(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
-                    auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
+                    range_merge=True,  # we should enable range_merge for block sparse mask.
                     **ref_block_params,
                 )
 
@@ -284,7 +284,7 @@ def sparse_attn_benchmark(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
-                    auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
+                    range_merge=True,  # we should enable range_merge for block sparse mask.
                     **ref_block_params,
                 )
 

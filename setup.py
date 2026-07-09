@@ -713,7 +713,7 @@ def prebuild_ffa_kernels() -> None:
     ]
     disable_dkv_atomic_reductions = [False, True]
     deterministics = [False]
-    auto_range_merges = [False]
+    range_merges = [False]
     cat_gqas = [False]
 
     combos = itertools.product(
@@ -722,7 +722,7 @@ def prebuild_ffa_kernels() -> None:
         compute_output_dtype_tuples,
         disable_dkv_atomic_reductions,
         deterministics,
-        auto_range_merges,
+        range_merges,
         cat_gqas,
     )
     # Each combo is a tuple of scalars; extend with sparse/gqa fields below.
@@ -774,7 +774,7 @@ def prebuild_ffa_kernels() -> None:
             compute_output_dtype_tuple,
             disable_dkv_atomic_reduction,
             deterministic,
-            auto_range_merge,
+            range_merge,
             cat_gqa,
             block_sparse,
             index_sparse,
@@ -821,7 +821,7 @@ def prebuild_ffa_kernels() -> None:
             disable_dq_atomic_reduction=disable_dq_atomic_reduction,
             deterministic=deterministic,
             ref_block_size=ref_block_size,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             swap_ab=False,
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,

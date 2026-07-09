@@ -64,7 +64,7 @@ class ENVVAR_CONFIG:
                 "TORCH_NCCL_HIGH_PRIORITY": [1],  # for better overlap with a2av backend
                 # --- MagiAttention optim --- #
                 "MAGI_ATTENTION_CATGQA": [0],
-                "MAGI_ATTENTION_AUTO_RANGE_MERGE": [0],
+                "MAGI_ATTENTION_RANGE_MERGE": [0],
                 "MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE": [0],
                 # --- MagiAttention comm --- #
                 # turn it to `1` to enable a2av-based hierarchical comm

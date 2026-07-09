@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import time
 import unittest
 from typing import Optional, Tuple
@@ -59,7 +60,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
         q_ranges_tensor,
         k_ranges_tensor,
         attn_type_map_tensor,
-        auto_range_merge,
+        range_merge,
         ref_block_size,
         test_case,
         o_ref: torch.Tensor,
@@ -81,7 +82,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
             k_ranges=k_ranges_tensor,
             max_seqlen_q=None,
             attn_type_map=attn_type_map_tensor,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             deterministic=True,
             ref_block_size=ref_block_size,
         )
@@ -113,7 +114,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
         q_ranges_tensor,
         k_ranges_tensor,
         attn_type_map_tensor,
-        auto_range_merge,
+        range_merge,
         deterministic,
         test_case,
     ):
@@ -123,7 +124,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
         lse_acc = torch.randn([t, h], device=q.device, dtype=torch.float32)
         softmax_scale = 1.0 / (d**0.5)
 
-        if auto_range_merge:
+        if range_merge:
             (
                 merge_q_ranges,
                 fwd_q_ranges,
@@ -168,7 +169,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
             # optional args below mainly for sparse attn
             ref_block_size=None,
             max_seqlen_q=None,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             merge_q_ranges=merge_q_ranges,
             fwd_qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
@@ -203,7 +204,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
             # optional args below mainly for sparse attn
             ref_block_size=None,
             max_seqlen_q=None,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             merge_q_ranges=merge_q_ranges,
             fwd_qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
@@ -260,7 +261,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
@@ -293,7 +294,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
-            auto_range_merge=auto_range_merge,
+            range_merge=range_merge,
             merge_k_ranges=merge_k_ranges,
             bwd_kq_map=bwd_kq_map,
             bwd_unique_count=bwd_unique_count,
@@ -395,7 +396,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
                 q_ranges_tensor=q_ranges_tensor,
                 k_ranges_tensor=k_ranges_tensor,
                 attn_type_map_tensor=attn_type_map,
-                auto_range_merge=True,
+                range_merge=True,
                 deterministic=deterministic,
                 test_case=test_case,
             )
@@ -412,7 +413,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
             k_ranges=k_ranges_tensor,
             max_seqlen_q=max_seqlen_q,
             attn_type_map=attn_type_map_tensor,
-            auto_range_merge=True,
+            range_merge=True,
             pack_gqa=pack_gqa,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
@@ -437,7 +438,7 @@ class _BlockSparseTestHelper(unittest.TestCase):
                     q_ranges_tensor=q_ranges_tensor,
                     k_ranges_tensor=k_ranges_tensor,
                     attn_type_map_tensor=attn_type_map_tensor,
-                    auto_range_merge=True,
+                    range_merge=True,
                     ref_block_size=ref_block_size,
                     test_case=test_case,
                     o_ref=o,
@@ -932,7 +933,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                 pack_gqa=pack_gqa,
                 pack_gqa_factor=4,
                 block_sparse=True,
-                auto_range_merge=True,
+                range_merge=True,
                 sparse_k_block_size=kbs,
             )
             if cfg["swap_bwd_qk_loop"]:
@@ -944,7 +945,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                     pack_gqa=True,
                     pack_gqa_factor=4,
                     block_sparse=True,
-                    auto_range_merge=True,
+                    range_merge=True,
                     bwd_inner_loop_k=True,
                     sparse_k_block_size=kbs,
                     bwd_dq_bf16=True,
@@ -955,7 +956,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                     specs,
                     direction="bwd",
                     block_sparse=True,
-                    auto_range_merge=True,
+                    range_merge=True,
                     sparse_k_block_size=kbs,
                 )
 
@@ -968,14 +969,14 @@ class TestBlockSparseSimple(unittest.TestCase):
                 direction="fwd",
                 pack_gqa=True,
                 pack_gqa_factor=128,
-                auto_range_merge=True,
+                range_merge=True,
             )
             add_ffa_spec(
                 specs,
                 direction="bwd",
                 pack_gqa=True,
                 pack_gqa_factor=128,
-                auto_range_merge=True,
+                range_merge=True,
                 bwd_inner_loop_k=True,
             )
             # sparse FWD
@@ -987,7 +988,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                 pack_gqa=True,
                 pack_gqa_factor=128,
                 block_sparse=True,
-                auto_range_merge=True,
+                range_merge=True,
                 sparse_k_block_size=kbs,
             )
             # sparse BWD LoopQ: PackGQA → disable_dkv_atomic
@@ -998,7 +999,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                 pack_gqa=True,
                 pack_gqa_factor=128,
                 block_sparse=True,
-                auto_range_merge=True,
+                range_merge=True,
                 sparse_k_block_size=kbs,
             )
             if kbs == 128:
@@ -1010,7 +1011,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                     pack_gqa=True,
                     pack_gqa_factor=128,
                     block_sparse=True,
-                    auto_range_merge=True,
+                    range_merge=True,
                     bwd_inner_loop_k=True,
                     sparse_k_block_size=kbs,
                     bwd_dq_bf16=True,
@@ -1030,7 +1031,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                 pack_gqa=pack_gqa,
                 pack_gqa_factor=pack_f,
                 block_sparse=True,
-                auto_range_merge=True,
+                range_merge=True,
                 sparse_k_block_size=128,
             )
             add_ffa_spec(
@@ -1041,7 +1042,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                 pack_gqa=pack_gqa,
                 pack_gqa_factor=pack_f,
                 block_sparse=True,
-                auto_range_merge=True,
+                range_merge=True,
                 bwd_inner_loop_k=inner_loop_k,
                 sparse_k_block_size=128,
                 bwd_dq_bf16=inner_loop_k,
@@ -1253,7 +1254,7 @@ class TestBlockSparseSimple(unittest.TestCase):
                 k_ranges=k_ranges,
                 attn_type_map=attn_type_map,
                 block_sparse=block_sparse,
-                auto_range_merge=True,
+                range_merge=True,
                 pack_gqa=True,
                 swap_bwd_qk_loop=swap_bwd_qk_loop,
             )
@@ -1344,7 +1345,7 @@ class TestBlockSparseSimple(unittest.TestCase):
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             block_sparse=True,
-            auto_range_merge=True,
+            range_merge=True,
             pack_gqa=pack_gqa,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
             sparse_k_block_size=kbs,
@@ -1423,14 +1424,14 @@ class TestBlockSparseSweep(DistTestBase):
             direction="fwd",
             pack_gqa=True,
             pack_gqa_factor=128,
-            auto_range_merge=True,
+            range_merge=True,
         )
         add_ffa_spec(
             specs,
             direction="bwd",
             pack_gqa=True,
             pack_gqa_factor=128,
-            auto_range_merge=True,
+            range_merge=True,
             bwd_inner_loop_k=True,
         )
         # sparse FWD (auto-flags: disable_fwd_atomic, ref forced (128,128))
@@ -1442,7 +1443,7 @@ class TestBlockSparseSweep(DistTestBase):
             pack_gqa=True,
             pack_gqa_factor=128,
             block_sparse=True,
-            auto_range_merge=True,
+            range_merge=True,
             sparse_k_block_size=128,
         )
         for swap in cls.SWAP_BWD_QK_LOOPS:
@@ -1454,7 +1455,7 @@ class TestBlockSparseSweep(DistTestBase):
                 pack_gqa=True,
                 pack_gqa_factor=128,
                 block_sparse=True,
-                auto_range_merge=True,
+                range_merge=True,
                 bwd_inner_loop_k=swap,
                 sparse_k_block_size=128,
                 bwd_dq_bf16=swap,
@@ -1512,7 +1513,7 @@ class TestBlockSparseSweep(DistTestBase):
                 k_ranges=k_ranges,
                 attn_type_map=attn_type_map,
                 block_sparse=block_sparse,
-                auto_range_merge=True,
+                range_merge=True,
                 pack_gqa=True,
                 swap_bwd_qk_loop=swap,
             )
@@ -1543,9 +1544,18 @@ class TestBlockSparseSweep(DistTestBase):
 class TestBlockSparseComprehensiveSweep(DistTestBase):
     """BlockSparse Comprehensive sweep — CI.
 
-    Cross-product of GQA config × block size. Covers
-    MHA/GQA/MQA × D=64/128 × (q_size, k_size) combos.
+    Cross-product of GQA config × block size × inner env variants.
     """
+
+    INNER_ENVS = [
+        {},
+        {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true"},
+        {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "false"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "tma"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "cpasync"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "atomicadd"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "tma1d"},
+    ]
 
     @property
     def device(self):
@@ -1578,39 +1588,43 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         for nhq, nhk, hd in cls.NHQ_NHK_HD:
             pack_f = nhq // nhk
             for _q_size, k_size in cls.Q_SIZE_K_SIZE:
-                add_ffa_spec(
-                    specs,
-                    direction="fwd",
-                    head_dim=hd,
-                    ref_block_size=(128, 128),
-                    disable_atomic=True,
-                    pack_gqa=True,
-                    pack_gqa_factor=pack_f,
-                    block_sparse=True,
-                    auto_range_merge=True,
-                    sparse_k_block_size=k_size,
-                )
-                add_ffa_spec(
-                    specs,
-                    direction="bwd",
-                    head_dim=hd,
-                    disable_dq_atomic=True,
-                    pack_gqa=True,
-                    pack_gqa_factor=pack_f,
-                    block_sparse=True,
-                    auto_range_merge=True,
-                    bwd_inner_loop_k=True,
-                    sparse_k_block_size=k_size,
-                    bwd_dq_bf16=True,
-                )
+                for env_dict in cls.INNER_ENVS:
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        ref_block_size=(128, 128),
+                        disable_atomic=True,
+                        pack_gqa=True,
+                        pack_gqa_factor=pack_f,
+                        block_sparse=True,
+                        range_merge=True,
+                        sparse_k_block_size=k_size,
+                        env=env_dict,
+                    )
+                    add_ffa_spec(
+                        specs,
+                        direction="bwd",
+                        head_dim=hd,
+                        disable_dq_atomic=True,
+                        pack_gqa=True,
+                        pack_gqa_factor=pack_f,
+                        block_sparse=True,
+                        range_merge=True,
+                        bwd_inner_loop_k=True,
+                        sparse_k_block_size=k_size,
+                        bwd_dq_bf16=True,
+                        env=env_dict,
+                    )
         return specs
 
     @with_run_in_mp
     @parameterize("nhq_nhk_hd", NHQ_NHK_HD)
     @parameterize("q_size_k_size", Q_SIZE_K_SIZE)
     @parameterize("sparsity_ratio", SPARSITY_RATIOS)
+    @parameterize("inner_env", INNER_ENVS)
     def test_block_sparse_comprehensive_sweep(
-        self, nhq_nhk_hd, q_size_k_size, sparsity_ratio
+        self, nhq_nhk_hd, q_size_k_size, sparsity_ratio, inner_env
     ):
         nhq, nhk, hd = nhq_nhk_hd
         q_size, k_size = q_size_k_size
@@ -1644,32 +1658,38 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         )
         do = torch.randn_like(q)
 
-        test_case = f"[comprehensive][nhq={nhq},nhk={nhk},hd={hd},q={q_size},k={k_size}][sp={sparsity_ratio}]"
-        helper.assert_close_to_torch_ref(
-            dtype=dtype,
-            q=q,
-            k=k,
-            v=v,
-            grad_output=do,
-            seqlen=seqlen,
-            block_size=block_sizes,
-            block_mask=block_mask,
-            head_wise="per_kv_head",
-            sparse_format="block_mask",
-            nhq=nhq,
-            nhk=nhk,
-            pack_gqa=True,
-            deterministic=False,
-            test_accumulation_inplace=False,
-            swap_ab=False,
-            ref_block_size=(64, 128),
-            block_sparse=True,
-            swap_bwd_qk_loop=True,
-            test_case=test_case,
-            sparsity_ratio=sparsity_ratio,
-            uniform=True,
-            max_seqlen_q=q_size,
-        )
+        test_case = f"[comprehensive][nhq={nhq},nhk={nhk},hd={hd},q={q_size},k={k_size}][sp={sparsity_ratio}][env={inner_env}]"
+        for key, val in inner_env.items():
+            os.environ[key] = val
+        try:
+            helper.assert_close_to_torch_ref(
+                dtype=dtype,
+                q=q,
+                k=k,
+                v=v,
+                grad_output=do,
+                seqlen=seqlen,
+                block_size=block_sizes,
+                block_mask=block_mask,
+                head_wise="per_kv_head",
+                sparse_format="block_mask",
+                nhq=nhq,
+                nhk=nhk,
+                pack_gqa=True,
+                deterministic=False,
+                test_accumulation_inplace=False,
+                swap_ab=False,
+                ref_block_size=(64, 128),
+                block_sparse=True,
+                swap_bwd_qk_loop=True,
+                test_case=test_case,
+                sparsity_ratio=sparsity_ratio,
+                uniform=True,
+                max_seqlen_q=q_size,
+            )
+        finally:
+            for key in inner_env:
+                os.environ.pop(key, None)
 
 
 if __name__ == "__main__":

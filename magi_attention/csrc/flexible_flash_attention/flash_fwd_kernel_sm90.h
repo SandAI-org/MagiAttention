@@ -67,7 +67,7 @@ class FlashAttnFwdSm90 {
     }
   }
   static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
-  static constexpr int NumMmaThreadsQK = CollectiveMainloop::NumMmaThreadsQK;
+  static constexpr int NumConsumerThreads = CollectiveMainloop::NumConsumerThreads;
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
   static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
   static constexpr bool SwapAB = CollectiveMainloop::SwapAB;
@@ -101,10 +101,10 @@ class FlashAttnFwdSm90 {
 
   static constexpr auto kInnerDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr uint32_t NumLoadWarpGroups = 1;
-  static constexpr uint32_t NumMmaWarpGroups = CUTE_STATIC_V(size(TiledMmaPV{})) / cutlass::NumThreadsPerWarpGroup;
+  static constexpr uint32_t NumConsumerWarpGroups = CUTE_STATIC_V(size(TiledMmaPV{})) / cutlass::NumThreadsPerWarpGroup;
   static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaPV{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
   static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
-  static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
+  static_assert(NumConsumerWarpGroups == 1 || NumConsumerWarpGroups == 2 || NumConsumerWarpGroups == 3);
 
   // Register quotas for the Load/Mma WGs are selected in Python (_ffa_register_quota in
   // functional/_flex_flash_attn_jit.py, where the tuning notes live) and passed down the
@@ -200,8 +200,6 @@ class FlashAttnFwdSm90 {
 
   CUTLASS_DEVICE
   void operator()(Params const& params, char* smem_buf) {
-    static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
-    // The offset of the first thread of the first mma warp group
     static constexpr int MmaThreadOffset = NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
     static constexpr int kBlockN = get<2>(TileShape_MNK_PV{});
@@ -232,7 +230,7 @@ class FlashAttnFwdSm90 {
     if (warp_idx == 0 && lane_predicate) {
       shared_storage.pipelines.barrier_Q.init(/*numThreads=*/Use_TMA_Q ? 1 : NumProducerThreads);
       // TODO: Fix if TMA store O is used
-      shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumMmaThreads);
+      shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumConsumerThreads);
     }
 
     if constexpr (ReturnMaxLogits) {
@@ -248,9 +246,9 @@ class FlashAttnFwdSm90 {
     if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
-      pipeline_params_k.num_consumers = NumMmaThreads;
+      pipeline_params_k.num_consumers = NumConsumerThreads;
     } else {
-      pipeline_params_k.consumer_arv_count = NumMmaThreads;
+      pipeline_params_k.consumer_arv_count = NumConsumerThreads;
       pipeline_params_k.producer_arv_count = NumProducerThreads;
     }
 
@@ -385,16 +383,16 @@ class FlashAttnFwdSm90 {
         // Init softmax object
         float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
         flash::Softmax<
-            !SwapAB ? 2 * (2 * kBlockM / NumMmaThreads) : 32 * kBlockM / NumMmaThreads,
+            !SwapAB ? 2 * (2 * kBlockM / NumConsumerThreads) : 32 * kBlockM / NumConsumerThreads,
             /*Max_offset=*/0,
             /*SwapAB=*/SwapAB>
             softmax(softmax_scale_log2);
         typename flash::Softmax<
-            !SwapAB ? 2 * (2 * kBlockM / NumMmaThreads) : 32 * kBlockM / NumMmaThreads,
+            !SwapAB ? 2 * (2 * kBlockM / NumConsumerThreads) : 32 * kBlockM / NumConsumerThreads,
             /*Max_offset=*/0,
             /*SwapAB=*/SwapAB>::TensorT scores_scale;
 
-        // Init the zero-initialized register accumulator for O
+        // Init the zero-initialized register SMEM buffer for O
         Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV_Active{}));
         clear(tOrO);
 

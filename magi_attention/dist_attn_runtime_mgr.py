@@ -83,7 +83,7 @@ class DistAttnRuntimeKey:
     is_flatten_head_groups_enable: bool
     kernel_backend: MagiAttentionKernelBackend
     precision: MagiAttentionPrecision | None
-    is_auto_range_merge_enable: bool
+    is_range_merge_enable: bool
 
     def __hash__(self) -> int:
         try:
@@ -112,7 +112,7 @@ class DistAttnRuntimeKey:
                     self.is_flatten_head_groups_enable,
                     self.kernel_backend,
                     self.precision,
-                    self.is_auto_range_merge_enable,
+                    self.is_range_merge_enable,
                 )
             )
             object.__setattr__(self, "_cached_hash", h)
@@ -524,7 +524,7 @@ def init_dist_attn_runtime_key(
         is_flatten_head_groups_enable=env.general.is_flatten_head_groups_enable(),
         kernel_backend=env.general.kernel_backend(),
         precision=env.general.precision(),
-        is_auto_range_merge_enable=env.general.is_auto_range_merge_enable(),
+        is_range_merge_enable=env.general.is_range_merge_enable(),
     )
 
 
@@ -687,7 +687,7 @@ def init_dist_attn_runtime_mgr(
         "  flatten_head_groups   : %s\n"
         "  sdpa_backend          : %s\n"
         "  fa4_backend           : %s\n"
-        "  auto_range_merge      : %s",
+        "  range_merge      : %s",
         q_ranges,
         k_ranges,
         attn_mask_type,
@@ -716,7 +716,7 @@ def init_dist_attn_runtime_mgr(
         env.general.is_flatten_head_groups_enable(),
         env.general.kernel_backend(),
         env.general.precision(),
-        env.general.is_auto_range_merge_enable(),
+        env.general.is_range_merge_enable(),
     )
 
     # Make dispatch meta

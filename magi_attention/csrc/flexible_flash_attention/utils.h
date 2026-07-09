@@ -672,7 +672,7 @@ CUTLASS_DEVICE void copy2(
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Byte permute and shuffle to match register layout of
-// (FP8 downcasted) accumulator of GEMM-I to FP8 operand A of GEMM-II.
+// (FP8 downcasted) SMEM buffer of GEMM-I to FP8 operand A of GEMM-II.
 template <typename Fragment>
 CUTLASS_DEVICE void permute_Aregs_fp8(Fragment& frag) {
   // frag has shape ((4, 2, 2), MMA_M, MMA_N), each element is 8 bits

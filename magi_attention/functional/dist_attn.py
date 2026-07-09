@@ -1312,7 +1312,7 @@ class DistAttnRuntime:
                     # optional args below mainly for sparse attn
                     ref_block_size=None,
                     max_seqlen_q=None,
-                    auto_range_merge=env.general.is_auto_range_merge_enable(),
+                    range_merge=env.general.is_range_merge_enable(),
                     swap_ab=False,
                     pack_gqa=False,
                     block_sparse=False,
@@ -1444,7 +1444,7 @@ class DistAttnRuntime:
                     deterministic=self.deterministic,
                     sm_margin=self.bwd_sm_margin,
                     # optional args below mainly for sparse attn
-                    auto_range_merge=env.general.is_auto_range_merge_enable(),
+                    range_merge=env.general.is_range_merge_enable(),
                     bwd_inner_loop_k=False,
                     cat_gqa=env.general.is_cat_gqa_enable(),
                 )

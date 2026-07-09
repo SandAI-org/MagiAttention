@@ -53,10 +53,10 @@ struct TileSchedulerArguments {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <int kBlock, int NumMmaThreads, int NumProducerThreads, bool WarpSpecialized, bool PackGQA, bool Deterministic, bool IndexSparse>
+template <int kBlock, int NumConsumerThreads, int NumProducerThreads, bool WarpSpecialized, bool PackGQA, bool Deterministic, bool IndexSparse>
 class DynamicPersistentTileSchedulerFwd {
-  static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
-  static constexpr int NumThreads = WarpSpecialized ? NumMmaThreads + NumProducerThreads : NumMmaThreads;
+  static_assert(WarpSpecialized || NumProducerThreads == NumConsumerThreads);
+  static constexpr int NumThreads = WarpSpecialized ? NumConsumerThreads + NumProducerThreads : NumConsumerThreads;
 
  public:
   using WorkInfoStorage = std::conditional_t<Deterministic, thrust::pair<int4, int3>, int4>;

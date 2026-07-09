@@ -28,8 +28,8 @@ Classic sweep (CI gate):
   - Parameterizes: q_seqlen(512/1000/16384) × kv_seqlen(512/1000/16384) × topk(128/256)
 
 Comprehensive sweep (CI):
-  - GQA config × kbs cross-product (12 GQA modes × 5 kbs values, invalid combos skipped)
-  - Inner mode variants (inner_dir, inner_load, inner_store) for MQA128
+  - GQA config × kbs × inner env cross-product (invalid combos skipped)
+  - Inner env: default + inner_dir + inner_load_mode + inner_store_mode
   - kbs>1 only for NHK=1, PackGQA=True, D=128
 
 Known limitations:
@@ -331,6 +331,68 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
                 )
         if err_msgs:
             raise AssertionError("\n".join(err_msgs))
+
+        if cfg.get("check_deterministic", True):
+            det_errs = _check_deterministic_index_sparse(
+                q_ffa=q_ffa,
+                k_ffa=k_ffa,
+                v_ffa=v_ffa,
+                index_sparse_indices=index_sparse_indices,
+                pack_gqa=pack_gqa,
+                sparse_k_block_size=sparse_k_block_size,
+                ref_block_size=ref_block_size,
+                swap_ab=swap_ab,
+                o_ref=o_sparse.detach(),
+                dq_ref=dq_ffa,
+                test_case=test_case,
+            )
+            if det_errs:
+                raise AssertionError("\n".join(det_errs))
+
+
+def _check_deterministic_index_sparse(
+    q_ffa,
+    k_ffa,
+    v_ffa,
+    index_sparse_indices,
+    *,
+    pack_gqa,
+    sparse_k_block_size,
+    ref_block_size,
+    swap_ab,
+    o_ref,
+    dq_ref,
+    test_case,
+):
+    """Re-run with deterministic=True and verify bit-exact reproducibility."""
+    err_msgs: list[str] = []
+    q2 = q_ffa.clone().detach().requires_grad_(True)
+    k2 = k_ffa.clone().detach().requires_grad_(True)
+    v2 = v_ffa.clone().detach().requires_grad_(True)
+    o2, _ = flex_flash_attn_func(
+        q2,
+        k2,
+        v2,
+        index_sparse_indices=index_sparse_indices,
+        q_block_size=1,
+        sparse_k_block_size=sparse_k_block_size,
+        pack_gqa=pack_gqa,
+        swap_ab=swap_ab,
+        ref_block_size=ref_block_size,
+        deterministic=True,
+    )
+    do = torch.randn_like(o2)
+    o2.backward(do)
+    try:
+        assert torch.equal(
+            o2, o_ref
+        ), f"For {test_case=}: forward output not deterministic"
+        assert torch.equal(
+            q2.grad, dq_ref
+        ), f"For {test_case=}: backward dQ not deterministic"
+    except Exception as e:
+        err_msgs.append(str(e))
+    return err_msgs
 
 
 # ═══════════════════════════════════════════════════════════
@@ -733,7 +795,7 @@ class TestIndexSparseSweep(DistTestBase):
 class TestIndexSparseComprehensiveSweep(DistTestBase):
     """IndexSparse Comprehensive sweep — CI.
 
-    Cross-product of GQA config × kbs. Plus inner-mode variants for MQA128.
+    Cross-product of GQA config × kbs × inner env variants.
     Skips invalid combos (kbs>1 requires NHK=1+PackGQA+D=128).
     """
 
@@ -753,12 +815,13 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     ]
     KBS_VALUES = [1, 8, 32, 128, 256]
     INNER_ENVS = [
+        {},
         {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true"},
         {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "false"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD": "tma1d"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD": "cpasync"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE": "cpasync"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE": "tma1d"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "tma"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "cpasync"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "atomicadd"},
+        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "tma1d"},
     ]
 
     @classmethod
@@ -787,46 +850,32 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                 if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
                     continue
                 test_bwd = kbs < 256
-                add_ffa_spec(
-                    specs,
-                    direction="fwd",
-                    head_dim=hd,
-                    disable_atomic=True,
-                    pack_gqa=pgqa,
-                    pack_gqa_factor=pack_f,
-                    index_sparse=True,
-                    sparse_k_block_size=kbs,
-                )
-                if test_bwd:
+                for env_dict in cls.INNER_ENVS:
                     add_ffa_spec(
                         specs,
-                        direction="bwd",
+                        direction="fwd",
                         head_dim=hd,
-                        disable_dq_atomic=True,
+                        disable_atomic=True,
                         pack_gqa=pgqa,
                         pack_gqa_factor=pack_f,
                         index_sparse=True,
-                        bwd_inner_loop_k=True,
                         sparse_k_block_size=kbs,
-                        bwd_dq_bf16=True,
+                        env=env_dict,
                     )
-
-        # inner-mode variants: MQA128, kbs=1
-        for env_dict in cls.INNER_ENVS:
-            for d in ("fwd", "bwd"):
-                add_ffa_spec(
-                    specs,
-                    direction=d,
-                    disable_atomic=True if d == "fwd" else False,
-                    disable_dq_atomic=True if d == "bwd" else False,
-                    pack_gqa=True,
-                    pack_gqa_factor=128,
-                    index_sparse=True,
-                    bwd_inner_loop_k=(d == "bwd"),
-                    sparse_k_block_size=1,
-                    bwd_dq_bf16=(d == "bwd"),
-                    env=env_dict,
-                )
+                    if test_bwd:
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            head_dim=hd,
+                            disable_dq_atomic=True,
+                            pack_gqa=pgqa,
+                            pack_gqa_factor=pack_f,
+                            index_sparse=True,
+                            bwd_inner_loop_k=True,
+                            sparse_k_block_size=kbs,
+                            bwd_dq_bf16=True,
+                            env=env_dict,
+                        )
 
         return specs
 
@@ -849,7 +898,8 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     @with_run_in_mp
     @parameterize("nhq_nhk_hd_packgqa", NHQ_NHK_HD_PACKGQA)
     @parameterize("kbs", KBS_VALUES)
-    def test_index_sparse_comprehensive(self, nhq_nhk_hd_packgqa, kbs):
+    @parameterize("inner_env", INNER_ENVS)
+    def test_index_sparse_comprehensive(self, nhq_nhk_hd_packgqa, kbs, inner_env):
         nhq, nhk, hd, pack_gqa = nhq_nhk_hd_packgqa
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
@@ -873,24 +923,10 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         }
         if kbs > 1:
             config["max_topk"] = topk
-        _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
-
-    @with_run_in_mp
-    @parameterize("inner_env", INNER_ENVS)
-    def test_index_sparse_inner_mode(self, inner_env):
-        config: dict[str, Any] = {
-            "B": 1,
-            "S": 256,
-            "NHQ": 128,
-            "NHK": 1,
-            "D": 128,
-            "topk": 128,
-            "pack_gqa": True,
-        }
         for key, val in inner_env.items():
             os.environ[key] = val
         try:
-            _run_index_sparse_config(self.device, config, test_bwd=True)
+            _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
         finally:
             for key in inner_env:
                 os.environ.pop(key, None)

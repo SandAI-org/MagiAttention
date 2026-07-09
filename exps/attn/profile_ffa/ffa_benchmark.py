@@ -226,7 +226,7 @@ def prepare_block_sparse_ffa_args(
         "q_ranges": q_ranges,
         "k_ranges": k_ranges,
         "attn_type_map": attn_type_map,
-        "auto_range_merge": True,
+        "range_merge": True,
         "block_sparse": block_sparse,
     }
     return args, None

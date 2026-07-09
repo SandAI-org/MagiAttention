@@ -370,12 +370,12 @@ msgid ""
 msgstr "将此环境变量设为 ``1`` 以展平 GQA/MQA attention 中的 head groups 来优化 dynamic solver 性能。"
 
 #: ../../source/user_guide/env_variables.md:159
-msgid "**MAGI_ATTENTION_AUTO_RANGE_MERGE**"
-msgstr "**MAGI_ATTENTION_AUTO_RANGE_MERGE**"
+msgid "**MAGI_ATTENTION_RANGE_MERGE**"
+msgstr "**MAGI_ATTENTION_RANGE_MERGE**"
 
 #: ../../source/user_guide/env_variables.md:162
-msgid "**Used by:** `magi_attention.env.general.is_auto_range_merge_enable`"
-msgstr "**使用方：** `magi_attention.env.general.is_auto_range_merge_enable`"
+msgid "**Used by:** `magi_attention.env.general.is_range_merge_enable`"
+msgstr "**使用方：** `magi_attention.env.general.is_range_merge_enable`"
 
 #: ../../source/user_guide/env_variables.md:164
 msgid ""
