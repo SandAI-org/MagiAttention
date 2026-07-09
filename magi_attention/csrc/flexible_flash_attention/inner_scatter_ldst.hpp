@@ -18,53 +18,32 @@
 
 namespace flash {
 
-// Thread decomposition for scatter load (cp.async) and scatter store (atomicAdd).
+// Scatter load/store thread topology (dtype-independent).
 //
-// Anchor: each thread processes kBytesPerLane = 16B per tile_idx iteration.
-//   Load:  16B = one cp.async instruction (hardware width).
-//   Store: 16B = kInnerElemsPerThread × sizeof(Inner) (work-division of 128B row among 8 lanes).
+// Hardware anchors:
+//   kBankRowBytes = 128  (SMEM bank row = one memory transaction)
+//   kLaneBytes    = 16   (per-thread access: cp.async width for load,
+//                          coalesced portion for store)
+//   kThreadsPerGroup = 128/16 = 8 (threads jointly covering one bank row)
 //
 // Token-row partitioning:
-//   kThreadsPerGroup = 128B / 16B = 8 threads jointly cover one SMEM bank row.
-//   kNumGroups = kNumThreads / 8 → each group handles kTokensPerGroup rows.
-//   Store inherits the same 8-thread grouping so that the same threads handle the same tokens.
+//   kNumGroups = kNumThreads / 8   (e.g. 128→16, 32→4)
+//   kTokensPerGroup = kTileSize / kNumGroups
 //
-// Head-dim tiling per row:
-//   Outer (load):  kOuterTilesPerRow = kHeadDim / (128B / sizeof(Outer))
-//   Inner (store): kInnerTilesPerRow = kHeadDim / (128B / sizeof(Inner))
-//   Ratio = sizeof(Inner) / sizeof(Outer), e.g. float/bf16 = 2.
-//
-// Outer = GMEM activation (Q/K/V, bf16/fp16). Inner = accumulator (dQ/dK/dV, float).
-template <int kNumThreads_, int kTileSize_, int kHeadDim_, int kOuterElemSize_, int kInnerElemSize_>
-struct InnerScatterLdstGroup {
-  static constexpr int kSmemBankRowBytes = 128;
-  static constexpr int kBytesPerLane = 16;
+// Head-dim tiling is dtype-dependent — compute at call site:
+//   tiles_per_row  = kHeadDim * sizeof(T) / kBankRowBytes
+//   elems_per_lane = kLaneBytes / sizeof(T)
+//   elems_per_row  = kBankRowBytes / sizeof(T)
+template <int kNumThreads_, int kTileSize_>
+struct ScatterLdstGroup {
+  static constexpr int kBankRowBytes = 128;
+  static constexpr int kLaneBytes = 16;
+  static constexpr int kThreadsPerGroup = kBankRowBytes / kLaneBytes;
+  static constexpr int kNumGroups = kNumThreads_ / kThreadsPerGroup;
+  static constexpr int kTokensPerGroup = kTileSize_ / kNumGroups;
 
-  static constexpr int kNumThreads = kNumThreads_;
-  static constexpr int kTileSize = kTileSize_;
-  static constexpr int kHeadDim = kHeadDim_;
-
-  // ── Token-row decomposition (shared by load and store) ──
-  static constexpr int kThreadsPerGroup = kSmemBankRowBytes / kBytesPerLane;
-  static constexpr int kNumGroups = kNumThreads / kThreadsPerGroup;
-  static constexpr int kTokensPerGroup = kTileSize / kNumGroups;
-
-  // ── Outer (cp.async load) ──
-  static constexpr int kOuterElemsPerThread = kBytesPerLane / kOuterElemSize_;
-  static constexpr int kOuterElemsPerBankRow = kSmemBankRowBytes / kOuterElemSize_;
-  static constexpr int kOuterTilesPerRow = kHeadDim / kOuterElemsPerBankRow;
-
-  // ── Inner (atomicAdd store) ──
-  static constexpr int kInnerElemsPerThread = kBytesPerLane / kInnerElemSize_;
-  static constexpr int kInnerElemsPerBankRow = kSmemBankRowBytes / kInnerElemSize_;
-  static constexpr int kInnerTilesPerRow = kHeadDim / kInnerElemsPerBankRow;
-
-  static_assert(kBytesPerLane % kOuterElemSize_ == 0);
-  static_assert(kBytesPerLane % kInnerElemSize_ == 0);
-  static_assert(kHeadDim % kOuterElemsPerBankRow == 0, "HeadDim must be a multiple of outer bank row elements");
-  static_assert(kHeadDim % kInnerElemsPerBankRow == 0, "HeadDim must be a multiple of inner bank row elements");
-  static_assert(kNumThreads % kThreadsPerGroup == 0);
-  static_assert(kTileSize % kNumGroups == 0);
+  static_assert(kNumThreads_ % kThreadsPerGroup == 0, "kNumThreads must be a multiple of 8");
+  static_assert(kTileSize_ % kNumGroups == 0, "kTileSize must be divisible by kNumGroups");
 };
 
 } // namespace flash
