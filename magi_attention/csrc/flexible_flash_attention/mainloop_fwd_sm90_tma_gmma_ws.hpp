@@ -357,17 +357,11 @@ struct CollectiveMainloopFwdSm90 {
       cute::array<int, kBlockN * kStages>,
       std::conditional_t<IsSparse && kInnerLoadMode == InnerLoadMode::Tma, cute::array<int, kStages>, cute::array<int, 0>>>;
 
-  // OPT-5: SMEM cache for K block indices. IndexSparse with TMA prefetches
-  // sparse_indices_ptr here once per outer tile so inner loop reads from SMEM (L1).
-  static constexpr int kMaxKBlockIdxPrefetch = (IndexSparse && kInnerLoadMode == InnerLoadMode::Tma) ? 1024 : 0;
-  using SmemKBlockIdxCache = cute::array<int, kMaxKBlockIdxPrefetch>;
-
   struct TensorStorageWithoutP : cute::aligned_struct<maxSmemAlignmentWithoutP, _0> {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutVt>, SmemAlignmentVtNoTranspose> smem_v;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
     SmemSparseInnerIndices smem_sparse_inner_indices;
-    SmemKBlockIdxCache smem_kblock_idx_cache;
   };
 
   struct TensorStorageWithP : cute::aligned_struct<maxSmemAlignmentWithP, _0> {
@@ -376,7 +370,6 @@ struct CollectiveMainloopFwdSm90 {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
     SmemP_t smem_p;
     SmemSparseInnerIndices smem_sparse_inner_indices;
-    SmemKBlockIdxCache smem_kblock_idx_cache;
   };
 
   using TensorStorage = std::conditional_t<MmaPV_is_RS, TensorStorageWithoutP, TensorStorageWithP>;
@@ -886,23 +879,6 @@ struct CollectiveMainloopFwdSm90 {
       return false;
 
     block_meta.template update_block_cur<kInnerDir>();
-
-    // OPT-5: Prefetch all K block indices from GMEM to SMEM once per outer tile.
-    // The TMA issue thread reads sparse_indices_ptr[indices_idx] every inner iteration
-    // via get_tile_first_compound_idx(); redirecting that pointer to SMEM eliminates per-tile
-    // GMEM latency on the producer critical path.
-    if constexpr (IndexSparse && kInnerLoadMode == InnerLoadMode::Tma) {
-      int const num_kblocks = block_meta.seqlen_info.seqlen_k / SparseKBlockSize;
-      if (num_kblocks <= kMaxKBlockIdxPrefetch) {
-        int* const cache = shared_storage.tensors.mainloop.smem_kblock_idx_cache.data();
-        if (idx_in_warpgroup == 0) {
-          for (int i = 0; i < num_kblocks; ++i) {
-            cache[i] = block_meta.sparse_indices_ptr[i];
-          }
-        }
-        block_meta.sparse_indices_ptr = cache;
-      }
-    }
 
     load_head();
     load_Q();
