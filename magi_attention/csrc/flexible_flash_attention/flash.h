@@ -185,6 +185,10 @@ struct Flash_bwd_params : public Flash_fwd_params {
   // IndexSparse params (3D: batch × nhk × inner_indices_cnt)
   int* __restrict__ index_sparse_indices;
   int inner_indices_cnt; // per-head topk width (dim-2 of 3D tensor)
+
+  // Coverage mask for IndexSparse postprocess (Phase 2):
+  // Boolean mask of shape (total_k,) indicating which KV rows are covered.
+  bool* __restrict__ kv_covered_mask;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

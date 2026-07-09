@@ -58,6 +58,7 @@ class FlashAttnBwdDkvPostprocess {
     int2* k_ranges;
     int num_k_ranges;
     int* num_k_ranges_ptr;
+    bool* kv_covered_mask;
   };
 
   CUTLASS_DEVICE
@@ -78,7 +79,9 @@ class FlashAttnBwdDkvPostprocess {
       int32_t const n_idx = offset_n + i;
       int valid = 0;
       if (n_idx < total_k) {
-        if (params.k_ranges == nullptr) {
+        if (params.kv_covered_mask != nullptr) {
+          valid = params.kv_covered_mask[n_idx] ? 1 : 0;
+        } else if (params.k_ranges == nullptr) {
           valid = 1;
         } else {
           // Binary search to check if n_idx is in any k_range

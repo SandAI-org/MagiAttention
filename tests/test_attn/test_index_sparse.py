@@ -856,9 +856,6 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
 
         specs: dict = {}
         for nhq, nhk, hd, pack_gqa in cls.NHQ_NHK_HD_PACKGQA:
-            # Skip GQA-without-pack (pre-existing precision issue)
-            if nhq != nhk and not pack_gqa:
-                continue
             # Runtime passes pack_gqa as-is from config. pack_gqa_factor is
             # computed at runtime as q.size(1)//k.size(1) = (nhq/nhk) / 1.
             pack_f = nhq // nhk
@@ -866,8 +863,6 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             # _is_mha = (NHQ_eff == NHK_eff) = (nhq/nhk == 1) = (nhq == nhk)
             _is_mha = nhq == nhk
             _gqa_safe = _is_mha or pack_gqa
-            # LoopK: skip D=64 (pre-existing precision issue)
-            _loopk_ok = hd != 64
 
             for kbs in cls.KBS_VALUES:
                 if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
@@ -910,19 +905,18 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                         )
 
                     # LoopK BWD (test_index_sparse_comprehensive_loopk):
-                    if _loopk_ok:
-                        add_ffa_spec(
-                            specs,
-                            direction="bwd",
-                            head_dim=hd,
-                            disable_dq_atomic=True,
-                            pack_gqa=pack_gqa,
-                            pack_gqa_factor=pack_f,
-                            index_sparse=True,
-                            bwd_inner_loop_k=True,
-                            sparse_k_block_size=kbs,
-                            bwd_dq_bf16=True,
-                        )
+                    add_ffa_spec(
+                        specs,
+                        direction="bwd",
+                        head_dim=hd,
+                        disable_dq_atomic=True,
+                        pack_gqa=pack_gqa,
+                        pack_gqa_factor=pack_f,
+                        index_sparse=True,
+                        bwd_inner_loop_k=True,
+                        sparse_k_block_size=kbs,
+                        bwd_dq_bf16=True,
+                    )
 
                 # env variants (inner-mode): same config with env overrides
                 for env_dict in cls.INNER_ENVS:
@@ -961,20 +955,19 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                                 sparse_k_block_size=kbs,
                                 env=env_dict,
                             )
-                        if _loopk_ok:
-                            add_ffa_spec(
-                                specs,
-                                direction="bwd",
-                                head_dim=hd,
-                                disable_dq_atomic=True,
-                                pack_gqa=pack_gqa,
-                                pack_gqa_factor=pack_f,
-                                index_sparse=True,
-                                bwd_inner_loop_k=True,
-                                sparse_k_block_size=kbs,
-                                bwd_dq_bf16=True,
-                                env=env_dict,
-                            )
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            head_dim=hd,
+                            disable_dq_atomic=True,
+                            pack_gqa=pack_gqa,
+                            pack_gqa_factor=pack_f,
+                            index_sparse=True,
+                            bwd_inner_loop_k=True,
+                            sparse_k_block_size=kbs,
+                            bwd_dq_bf16=True,
+                            env=env_dict,
+                        )
 
         return specs
 
@@ -1002,9 +995,6 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         """LoopQ (default) direction — tests non-atomic dKV path with env variants."""
         nhq, nhk, hd, pack_gqa = nhq_nhk_hd_packgqa
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
-            return
-        # Skip GQA-without-pack configs: pre-existing precision issue
-        if nhq != nhk and not pack_gqa:
             return
 
         if kbs <= 1:
@@ -1045,11 +1035,6 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
         if kbs >= 256:
-            return
-        # Skip GQA-without-pack and non-MQA128 D=64 configs: pre-existing LoopK precision issue
-        if nhq != nhk and not pack_gqa:
-            return
-        if hd == 64:
             return
 
         if kbs <= 1:

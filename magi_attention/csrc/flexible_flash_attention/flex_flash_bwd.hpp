@@ -108,7 +108,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<at::ScalarType> dk_type_,
     std::optional<at::ScalarType> dv_type_,
     const std::string& sink_layout_,
-    int const sm_margin) {
+    int const sm_margin,
+    std::optional<const at::Tensor>& kv_covered_mask_) {
 #ifdef FLASHATTENTION_DISABLE_BACKWARD
   TORCH_CHECK(false, "This flash attention build does not support backward.");
 #endif
@@ -472,6 +473,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
 
   params.index_sparse_indices = has_index_sparse ? static_cast<int*>(index_sparse_indices.data_ptr()) : nullptr;
   params.inner_indices_cnt = inner_indices_cnt;
+  params.kv_covered_mask = kv_covered_mask_.has_value() ? static_cast<bool*>(kv_covered_mask_.value().data_ptr()) : nullptr;
 
   return {params, dq, dk, dv, dsink};
 }

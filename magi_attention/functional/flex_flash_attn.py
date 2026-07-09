@@ -504,6 +504,7 @@ def _flex_flash_attn_backward_compilable(
     index_sparse: bool,
     index_sparse_indices: torch.Tensor | None,
     inner_indices_cnt: int,
+    kv_covered_mask: torch.Tensor | None,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
@@ -570,6 +571,8 @@ def _flex_flash_attn_backward_compilable(
         dv_type,
         sink_layout,
         sm_margin,
+        # coverage mask for IndexSparse postprocess
+        kv_covered_mask,
     )
 
 
@@ -610,6 +613,7 @@ def _flex_flash_attn_backward_compilable_fake(
     index_sparse: bool,
     index_sparse_indices: torch.Tensor | None,
     inner_indices_cnt: int,
+    kv_covered_mask: torch.Tensor | None,
 ) -> None:
     pass
 
@@ -690,13 +694,22 @@ def _flex_flash_attn_backward(
     )
 
     clear_dkv = dk is None and dv is None
+    kv_covered_mask = None
     if clear_dkv:
         # skip clear dk and dv if no reduction
         if disable_bwd_dkv_atomic_reduction:
-            if index_sparse:
-                # IndexSparse: zero-init replaces postprocess (no k_ranges available)
-                dk = torch.zeros_like(k, dtype=dk_type or k.dtype)
-                dv = torch.zeros_like(v, dtype=dv_type or v.dtype)
+            if index_sparse and index_sparse_indices is not None:
+                # IndexSparse: use empty_like + postprocess with coverage mask
+                dk = torch.empty_like(k, dtype=dk_type or k.dtype)
+                dv = torch.empty_like(v, dtype=dv_type or v.dtype)
+                # Compute coverage mask: which KV rows are referenced by any Q
+                total_k = k.size(0)
+                flat_idx = index_sparse_indices.reshape(-1).long()
+                valid = flat_idx >= 0
+                kv_covered_mask = torch.zeros(
+                    total_k, dtype=torch.bool, device=k.device
+                )
+                kv_covered_mask.scatter_(0, flat_idx[valid], True)
             else:
                 dk = torch.empty_like(k, dtype=dk_type or k.dtype)
                 dv = torch.empty_like(v, dtype=dv_type or v.dtype)
@@ -754,6 +767,7 @@ def _flex_flash_attn_backward(
         index_sparse=index_sparse,
         index_sparse_indices=index_sparse_indices,
         inner_indices_cnt=inner_indices_cnt,
+        kv_covered_mask=kv_covered_mask,
     )
 
     return dq, dk, dv, dsink
