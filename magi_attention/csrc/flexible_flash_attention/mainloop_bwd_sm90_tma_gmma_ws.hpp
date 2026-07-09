@@ -1523,6 +1523,16 @@ struct CollectiveMainloopBwdSm90 {
     // happens in load_dO_dPsum (the second of each pair) to keep the slot index in sync.
     auto load_Q_LSE = [&]() {
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
+        // Sparse configs run multiple loader warps (sized for the CpAsync
+        // scatter path), but only the leader loader warp may drive the Q/dO
+        // TMA pipeline: an extra warp would producer_acquire and then early
+        // return on `thread_idx != 0` BEFORE ++smem_pipe_write_q, leaving its
+        // pipeline state at a stale phase that deadlocks producer_tail
+        // whenever the total tile count has the wrong phase parity.
+        if constexpr (IsSparse) {
+          if (thread_idx >= cutlass::NumThreadsPerWarp)
+            return;
+        }
         if (!lane_predicate)
           return;
         pipeline_q.producer_acquire(smem_pipe_write_q);
@@ -1572,6 +1582,11 @@ struct CollectiveMainloopBwdSm90 {
     auto load_dO_dPsum = [&]() {
       PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write_q, smem_pipe_write_do);
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
+        // See load_Q_LSE: only the leader loader warp may touch the TMA pipeline.
+        if constexpr (IsSparse) {
+          if (thread_idx >= cutlass::NumThreadsPerWarp)
+            return;
+        }
         if (!lane_predicate)
           return;
         pipeline_do.producer_acquire(smem_pipe_write_do_cur);
@@ -1990,7 +2005,13 @@ struct CollectiveMainloopBwdSm90 {
 
     // PipelineAsync (kCpAsync): all threads must arrive.
     // PipelineTmaAsync (kTmaDense/kTma2D): single-thread arrive suffices.
-    if (kInnerLoadMode != InnerLoadMode::Tma || cute::elect_one_sync()) {
+    // In TMA mode only the leader loader warp drives the pipeline (see
+    // load_Q_LSE); extra sparse loader warps hold virgin pipeline states
+    // whose phase parity would deadlock producer_tail, so they must not
+    // participate here. elect_one_sync() alone is insufficient: it elects
+    // one lane PER WARP.
+    bool const is_leader_loader_warp = (threadIdx.x % NumProducerLoaderThreads) < cutlass::NumThreadsPerWarp;
+    if (kInnerLoadMode != InnerLoadMode::Tma || (is_leader_loader_warp && cute::elect_one_sync())) {
       pipeline_q.producer_tail(smem_pipe_write_q);
       pipeline_do.producer_tail(smem_pipe_write_do);
     }
