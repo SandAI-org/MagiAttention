@@ -3317,6 +3317,16 @@ struct CollectiveMainloopBwdSm90 {
       Tensor s2 = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(p), SmemLayoutdKVtStore{}));
       return r2s_thr_copy_dKVaccum.partition_D(cute::conditional_return<!dKV_swapAB>(s1, s2));
     };
+    // Pre-built per-stage targets with compile-time-foldable base offsets. Building the
+    // target inside the hot loop from the runtime `consumer_store_stage` defeats ptxas
+    // alignment analysis and devectorizes the R2S copy (STS.128 → STS.32, ~3x shared_st
+    // instructions, measured -24% at 32K). A two-way branch on the stage keeps each
+    // branch's address statically aligned.
+    static_assert(kInnerStoreStages <= 2, "R2S stage dispatch below assumes at most 2 store stages");
+    auto tdVsdVaccum_s0 = make_r2s_dv_target(0);
+    auto tdVsdVaccum_s1 = make_r2s_dv_target(kInnerStoreStages - 1);
+    auto tdKsdKaccum_s0 = make_r2s_dk_target(0);
+    auto tdKsdKaccum_s1 = make_r2s_dk_target(kInnerStoreStages - 1);
 
     /* DEBUG */
     // Tensor cdKVsdKV = make_identity_tensor(SmemLayoutdKVSwizzled{}.shape());
@@ -3704,8 +3714,11 @@ struct CollectiveMainloopBwdSm90 {
 
             Tensor taccdVrdV = r2s_thr_copy_dKVaccum.retile_S(tdVrdV);
             if constexpr (kInnerStoreStages >= 2) {
-              auto tdVsdVaccum_s = make_r2s_dv_target(consumer_store_stage);
-              cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum_s);
+              if (consumer_store_stage == 0) {
+                cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum_s0);
+              } else {
+                cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum_s1);
+              }
             } else {
               cute::copy(r2s_tiled_copy_dKVaccum, taccdVrdV, tdVsdVaccum);
             }
@@ -3832,8 +3845,11 @@ struct CollectiveMainloopBwdSm90 {
               taccdKrdK(dki) *= params.softmax_scale;
             }
             if constexpr (kInnerStoreStages >= 2) {
-              auto tdKsdKaccum_s = make_r2s_dk_target(consumer_store_stage);
-              cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum_s);
+              if (consumer_store_stage == 0) {
+                cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum_s0);
+              } else {
+                cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum_s1);
+              }
             } else {
               cute::copy(r2s_tiled_copy_dKVaccum, taccdKrdK, tdKsdKaccum);
             }
