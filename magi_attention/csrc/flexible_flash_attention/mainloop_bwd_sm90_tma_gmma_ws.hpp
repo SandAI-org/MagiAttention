@@ -222,10 +222,16 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kInnerStorerThreads = kNumInnerStorerWarps * cutlass::NumThreadsPerWarp;
     static constexpr int kTotalThreads = kNumTotalWarps * cutlass::NumThreadsPerWarp;
 
-    // Inner store barrier width = consumer WG + all storer threads.
-    // All storer warps participate in each barrier direction (dQ or dK/dV).
-    // InnerLoopQ: 1 warp (32 threads), InnerLoopK: 2 warps (64 threads).
-    static constexpr int kInnerStoreBarrierThreads = cutlass::NumThreadsPerWarpGroup + kInnerStorerThreads;
+    // Inner store barrier width = consumer WG + storer threads participating per direction.
+    // InnerLoopQ: the single dQ storer warp (32 threads).
+    // InnerLoopK sparse: both storer warps scatter each direction together (64 threads).
+    // InnerLoopK dense: each direction is owned by exactly one warp (dV: warp 1, dK: warp 2)
+    // via the early-return guards in store_dV/store_dK, so only 1 warp (32 threads) ever
+    // reaches each bar.sync — counting both warps here would deadlock (the non-owning warp
+    // never arrives). This also makes the dV and dK barrier chains independent, letting the
+    // two TMA store warps run concurrently.
+    static constexpr int kNumInnerStoreBarrierWarps = (BwdInnerLoopK && !IsSparse && InnerStoreInProducer) ? 1 : kNumInnerStorerWarps;
+    static constexpr int kInnerStoreBarrierThreads = cutlass::NumThreadsPerWarpGroup + kNumInnerStoreBarrierWarps * cutlass::NumThreadsPerWarp;
 
     // Role predicates (warp_idx is 0-based within the producer warp group)
     static CUTLASS_DEVICE bool is_loader(int warp_idx) {
@@ -2434,23 +2440,30 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    auto store_body = [&]() {
+    // One inner tile's store: rebind buffers to the current stage, drain dV+dK, advance.
+    // The stage must advance per inner tile (not per store_body) to stay in lockstep with
+    // the consumer's consumer_store_stage, which advances after each tile's dK R2S. The
+    // dense path iterates multiple inner tiles per store_body via iterate_range.
+    auto store_tile = [&]() {
       update_store_bufs();
+      // NOTE(058 P2a-2): an overlapped dV/dK variant (defer the dV bulk wait until after the
+      // dK issue via staged tma_store_wait<1>/<0>) was implemented and benched: zero gain on
+      // sparseload-loopk / indexattn-loopk (159/161 TF unchanged) — the store warps' wait is
+      // not on the critical path once bulk reduce is enabled. Reverted to keep the simple
+      // sequential form; see .tmp/058-fwd-tokenidx/NOTES.md.
+      store_dV();
+      store_dK();
+      advance_store_stage();
+    };
+
+    auto store_body = [&]() {
       if constexpr (IsSparse) {
-        // NOTE(058 P2a-2): an overlapped dV/dK variant (defer the dV bulk wait until after the
-        // dK issue via staged tma_store_wait<1>/<0>) was implemented and benched: zero gain on
-        // sparseload-loopk / indexattn-loopk (159/161 TF unchanged) — the store warps' wait is
-        // not on the critical path once bulk reduce is enabled. Reverted to keep the simple
-        // sequential form; see .tmp/058-fwd-tokenidx/NOTES.md.
-        store_dV();
-        store_dK();
+        store_tile();
       } else {
         flash::iterate_range<kInnerDir, 2>(block_meta.inner_block_idx, block_meta.inner_block_min, block_meta.inner_block_cnt, [&] {
-          store_dV();
-          store_dK();
+          store_tile();
         });
       }
-      advance_store_stage();
     };
 
     // ─── Unified control flow ───
