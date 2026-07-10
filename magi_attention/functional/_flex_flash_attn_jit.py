@@ -776,37 +776,19 @@ def get_ffa_jit_spec(
     return spec, uri
 
 
-_ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
-    "MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP",
-    "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN",
-    "MAGI_ATTENTION_FFA_MASK_MODE",
-    "MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER",
-    "MAGI_ATTENTION_FFA_INNER_LOAD_MODE",
-    "MAGI_ATTENTION_FFA_INNER_STORE_MODE",
-    "MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS",
-    "MAGI_ATTENTION_FFA_BWD_TILE_M",
-    "MAGI_ATTENTION_FFA_BWD_TILE_N",
-    "MAGI_ATTENTION_FFA_BWD_STAGES",
-    "MAGI_ATTENTION_FFA_BWD_STAGES_DS",
-    "MAGI_ATTENTION_FFA_BWD_STAGES_V",
-    "MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM",
-    "MAGI_ATTENTION_FFA_BWD_UNION_DKV_SMEM",
-    "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES",
-    "MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD",
-    "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
-    "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",
-    "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA",
-    "MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2",
-)
+_ENV_PREFIX = "MAGI_ATTENTION_FFA_"
 
 
-def _snapshot_env() -> tuple[tuple[str, str | None], ...]:
-    """Capture all env vars that affect kernel compilation into a hashable tuple.
+def _snapshot_env() -> tuple[tuple[str, str], ...]:
+    """Capture all MAGI_ATTENTION_FFA_* env vars into a hashable tuple.
 
     Passed as ``_env_snapshot`` to ``get_ffa_jit_mod`` so that ``lru_cache``
     sees different keys when env vars change between calls.
+    Any new env var with the prefix automatically invalidates the cache.
     """
-    return tuple((k, os.environ.get(k)) for k in _ENV_KEYS_AFFECTING_COMPILATION)
+    return tuple(
+        sorted((k, v) for k, v in os.environ.items() if k.startswith(_ENV_PREFIX))
+    )
 
 
 def get_ffa_jit_mod(
