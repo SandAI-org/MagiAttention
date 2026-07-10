@@ -19,18 +19,22 @@ Validates flex_flash_attn_func with index_sparse_indices against PyTorch SDPA
 reference.
 
 Structure:
-  TestIndexSparseSimple — standalone tests (view-trick + DisableAtomic)
-  TestIndexSparseSweep  — Classic CI sweep: q_seqlen × kv_seqlen × topk
-  TestIndexSparseComprehensiveSweep — CI: GQA config × kbs + inner mode sweep
+  TestIndexSparseViewTrick — view-trick correctness (MQA view, MHA wrong, MHA permute)
+  TestIndexSparseSweep     — Classic CI sweep: q_seqlen × kv_seqlen × topk
+  TestIndexSparseComprehensiveSweep — CI: orthogonal parameterization:
+      head_config × head_dim × kbs × inner_dir × inner_load_mode × inner_store_mode
 
 Classic sweep (CI gate):
   - Fixed: MQA128, D=128, PackGQA=True, kbs=1
   - Parameterizes: q_seqlen(512/1000/16384) × kv_seqlen(512/1000/16384) × topk(128/256)
 
 Comprehensive sweep (CI):
-  - GQA config × kbs × inner env cross-product (invalid combos skipped)
-  - Inner env: default + inner_dir + inner_load_mode + inner_store_mode
-  - kbs>1 only for NHK=1, PackGQA=True, D=128
+  - head_config: 3 MQA + 3 GQA + 3 MHA = 9
+  - head_dim: 64, 128
+  - kbs: 1, 8, 32, 128, 256 (kbs>1 only valid for NHK=1, PackGQA=True, D=128)
+  - inner_dir: None (default), "true", "false"
+  - inner_load_mode: None (default), "tma", "cpasync"
+  - inner_store_mode: None (default), "atomicadd", "tma1d"
 
 Known limitations:
   - swap_ab is prohibited for IndexSparse (asserted in flex_flash_attn_func)
@@ -524,25 +528,22 @@ def _run_view_trick(
 
 
 # ═══════════════════════════════════════════════════════════
-# TestIndexSparseSimple — standalone tests (view-trick + DisableAtomic)
+# TestIndexSparseViewTrick — view-trick correctness tests
 # ═══════════════════════════════════════════════════════════
 
 
-class TestIndexSparseSimple(unittest.TestCase):
-    """Standalone IndexSparse tests: view-trick + DisableAtomic.
+class TestIndexSparseViewTrick(unittest.TestCase):
+    """Standalone IndexSparse view-trick tests.
 
-    These test specific behaviors that don't fit in the parametric sweep:
-    - View-trick correctness (MQA view, MHA wrong, MHA permute)
-    - DisableAtomic auto-flag configuration
+    Tests specific behaviors:
+    - MQA: simple .view() works (zero-copy)
+    - MHA: simple .view() fails (wrong head mapping)
+    - MHA: permute+contiguous fixes head mapping
     """
 
     @classmethod
     def precompile_kernel_specs(cls):
-        """Standard precompile interface — see magi_attention/testing/precompile.py.
-
-        View-trick tests: FWD-only with PackGQA at various pack factors.
-        DisableAtomic tests: MQA128, FWD+BWD InnerLoopK and FWD-only.
-        """
+        """Standard precompile interface — see magi_attention/testing/precompile.py."""
         from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
@@ -562,38 +563,11 @@ class TestIndexSparseSimple(unittest.TestCase):
                 sparse_k_block_size=1,
             )
 
-        # disable_atomic tests: MQA128
-        # BWD InnerLoopK
-        add_ffa_spec(
-            specs,
-            direction="fwd",
-            disable_atomic=True,
-            pack_gqa=True,
-            pack_gqa_factor=128,
-            index_sparse=True,
-            sparse_k_block_size=1,
-        )
-        add_ffa_spec(
-            specs,
-            direction="bwd",
-            disable_dq_atomic=True,
-            pack_gqa=True,
-            pack_gqa_factor=128,
-            index_sparse=True,
-            bwd_inner_loop_k=True,
-            sparse_k_block_size=1,
-            bwd_dq_bf16=True,
-        )
-        # FWD-only (swap_bwd_qk_loop=None → no BWD kernel)
-        # FWD kernel is the same as above, already in specs
-
         return specs
 
     @property
     def device(self):
         return torch.cuda.current_device()
-
-    # ─── View-trick tests ─────────────────────────────────────
 
     def test_mqa_simple_view(self):
         """MQA (NHK=1): simple .view() works — zero-copy, no permute needed."""
@@ -654,67 +628,6 @@ class TestIndexSparseSimple(unittest.TestCase):
 
         diff = (o_view.float() - o_ref.float()).abs().max().item()
         assert diff < 0.02, f"MHA 32h permute: max_diff={diff:.6f} >= 0.02"
-
-    # ─── DisableAtomic tests ──────────────────────────────────
-
-    def _run_index_sparse_atomic_config(
-        self,
-        S: int = 512,
-        NHQ: int = 128,
-        NHK: int = 1,
-        D: int = 128,
-        topk: int = 128,
-        swap_bwd_qk_loop: bool | None = True,
-        pack_gqa: bool = True,
-    ):
-        """Run IndexSparse FWD+BWD and verify correctness with auto-set atomic flags."""
-        torch.manual_seed(42)
-        q = torch.randn(
-            S, NHQ, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
-        )
-        k = torch.randn(
-            S, NHK, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
-        )
-        v = torch.randn(
-            S, NHK, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
-        )
-
-        tile_size = 128
-        padded_topk = ((topk + tile_size - 1) // tile_size) * tile_size
-        indices = torch.randint(
-            0, S, (S, NHK, padded_topk), device=self.device, dtype=torch.int32
-        )
-        indices[:, :, topk:] = -1
-
-        out, meta = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            index_sparse_indices=indices,
-            pack_gqa=pack_gqa,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
-        )
-
-        self.assertEqual(out.shape, (S, NHQ, D))
-        self.assertFalse(out.isnan().any())
-
-        do = torch.randn_like(out)
-        out.backward(do)
-
-        self.assertIsNotNone(q.grad)
-        self.assertIsNotNone(k.grad)
-        self.assertIsNotNone(v.grad)
-        self.assertFalse(q.grad.isnan().any(), "dQ contains NaN")
-        self.assertFalse(k.grad.isnan().any(), "dK contains NaN")
-        self.assertFalse(v.grad.isnan().any(), "dV contains NaN")
-
-    def test_disable_atomic_index_sparse_bwd_innerloopk(self):
-        """InnerLoopK path: auto-sets disable_bwd_dq_atomic_reduction=True."""
-        self._run_index_sparse_atomic_config(swap_bwd_qk_loop=True)
-
-    def test_disable_atomic_index_sparse_fwd_only(self):
-        """FWD path: auto-sets disable_fwd_atomic_reduction=True."""
-        self._run_index_sparse_atomic_config(swap_bwd_qk_loop=None)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -812,170 +725,138 @@ class TestIndexSparseSweep(DistTestBase):
 class TestIndexSparseComprehensiveSweep(DistTestBase):
     """IndexSparse Comprehensive sweep — CI.
 
-    Cross-product of GQA config × kbs × inner env variants.
-    Skips invalid combos (kbs>1 requires NHK=1+PackGQA+D=128).
+    Orthogonal parameterization:
+      head_config × head_dim × kbs × inner_dir × inner_load_mode × inner_store_mode
+    Skips invalid combos (kbs>1 requires NHK=1+PackGQA+D=128; kbs>=256 no BWD).
     """
 
-    NHQ_NHK_HD_PACKGQA = [
-        (128, 1, 128, True),  # MQA128
-        (64, 1, 128, True),  # MQA64
-        (32, 1, 128, True),  # MQA32
-        (16, 1, 128, True),  # MQA16
-        (4, 1, 128, True),  # MQA4
-        (128, 2, 128, True),  # GQA 128x2
-        (32, 4, 128, True),  # GQA 32x4
-        (4, 2, 128, True),  # GQA 4x2
-        (8, 8, 128, True),  # MHA8
-        (64, 1, 64, False),  # MQA64 D=64 no packgqa
-        (4, 4, 64, False),  # MHA4 D=64
-        (8, 2, 64, False),  # GQA 8x2 D=64
+    # ─── Axis 1: Head configuration (NHQ, NHK, pack_gqa) ───
+    # 3 MQA + 3 GQA + 3 MHA = 9 configs
+    HEAD_CONFIGS = [
+        (128, 1, True),  # MQA128
+        (64, 1, True),  # MQA64
+        (4, 1, True),  # MQA4
+        (128, 2, True),  # GQA 128:2
+        (32, 4, True),  # GQA 32:4
+        (4, 2, True),  # GQA 4:2
+        (8, 8, True),  # MHA8
+        (4, 4, True),  # MHA4
+        (32, 32, True),  # MHA32
     ]
+
+    # ─── Axis 2: Head dimension ───
+    HEAD_DIMS = [64, 128]
+
+    # ─── Axis 3: Sparse K block size ───
     KBS_VALUES = [1, 8, 32, 128, 256]
-    INNER_ENVS = [
-        {},
-        {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true"},
-        {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "false"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "tma"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "cpasync"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "atomicadd"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "tma1d"},
-    ]
+
+    # ─── Axis 4: Inner loop direction ───
+    INNER_DIRS = [None, "true", "false"]
+
+    # ─── Axis 5: Inner load mode ───
+    INNER_LOAD_MODES = [None, "tma", "cpasync"]
+
+    # ─── Axis 6: Inner store mode ───
+    INNER_STORE_MODES = [None, "atomicadd", "tma1d"]
 
     @classmethod
-    def precompile_kernel_specs(cls):
-        """Standard precompile interface — see magi_attention/testing/precompile.py.
-
-        Mirrors the skip logic in the test: kbs>1 requires NHK=1+PackGQA+D=128.
-        After view-trick rearrange in _run_index_sparse_config, kernel sees
-        NHK=1 → effective pack_gqa_factor = nhq/nhk.
-
-        Covers both LoopQ (test_index_sparse_comprehensive) and
-        LoopK (test_index_sparse_comprehensive_loopk) directions.
-        """
-        from magi_attention.testing.precompile import add_ffa_spec
-
-        specs: dict = {}
-        for nhq, nhk, hd, pack_gqa in cls.NHQ_NHK_HD_PACKGQA:
-            # Runtime passes pack_gqa as-is from config. pack_gqa_factor is
-            # computed at runtime as q.size(1)//k.size(1) = (nhq/nhk) / 1.
+    def _iter_valid_configs(cls):
+        """Iterate all valid (non-skipped) parameter combinations for precompile."""
+        for nhq, nhk, pack_gqa in cls.HEAD_CONFIGS:
             pack_f = nhq // nhk
-            # _gqa_safe mirrors runtime: after view-trick NHQ_eff=nhq/nhk, NHK_eff=1
-            # _is_mha = (NHQ_eff == NHK_eff) = (nhq/nhk == 1) = (nhq == nhk)
             _is_mha = nhq == nhk
-            # Simulate runtime auto-force: sparse + GQA → pack_gqa=True
             effective_pack_gqa = pack_gqa
             if not _is_mha and not pack_gqa:
                 effective_pack_gqa = True
             _gqa_safe = _is_mha or effective_pack_gqa
 
-            for kbs in cls.KBS_VALUES:
-                if kbs > 1 and (nhk > 1 or not effective_pack_gqa or hd != 128):
-                    continue
-                test_bwd = kbs < 256
-                add_ffa_spec(
-                    specs,
-                    direction="fwd",
-                    head_dim=hd,
-                    disable_atomic=True,
-                    pack_gqa=effective_pack_gqa,
-                    pack_gqa_factor=pack_f,
-                    index_sparse=True,
-                    sparse_k_block_size=kbs,
-                )
-                if test_bwd:
-                    # LoopQ BWD (test_index_sparse_comprehensive):
-                    # gqa_safe → disable_dkv_atomic (dKV bf16, non-atomic)
-                    # NOT gqa_safe → atomic (dKV float32)
-                    if _gqa_safe:
-                        add_ffa_spec(
-                            specs,
-                            direction="bwd",
-                            head_dim=hd,
-                            disable_atomic=True,
-                            pack_gqa=effective_pack_gqa,
-                            pack_gqa_factor=pack_f,
-                            index_sparse=True,
-                            sparse_k_block_size=kbs,
-                        )
-                    else:
-                        add_ffa_spec(
-                            specs,
-                            direction="bwd",
-                            head_dim=hd,
-                            pack_gqa=effective_pack_gqa,
-                            pack_gqa_factor=pack_f,
-                            index_sparse=True,
-                            sparse_k_block_size=kbs,
-                        )
+            for hd in cls.HEAD_DIMS:
+                for kbs in cls.KBS_VALUES:
+                    if kbs > 1 and (nhk > 1 or not effective_pack_gqa or hd != 128):
+                        continue
+                    yield nhq, nhk, pack_gqa, hd, kbs, pack_f, _is_mha, effective_pack_gqa, _gqa_safe
 
-                    # LoopK BWD (test_index_sparse_comprehensive_loopk):
-                    # Only compiled for pack_f >= 128 (auto-fallback to LoopQ
-                    # at runtime when pack_f < 128).
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Standard precompile interface — see magi_attention/testing/precompile.py.
+
+        Covers both LoopQ and LoopK directions, and all inner mode env variants.
+        """
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+
+        # Build env combos (cross-product of dir × load × store, deduplicated)
+        env_combos: list[dict[str, str]] = [{}]
+        for d in cls.INNER_DIRS:
+            for lm in cls.INNER_LOAD_MODES:
+                for sm in cls.INNER_STORE_MODES:
+                    env: dict[str, str] = {}
+                    if d is not None:
+                        env["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = d
+                    if lm is not None:
+                        env["MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE"] = lm
+                    if sm is not None:
+                        env["MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE"] = sm
+                    if env and env not in env_combos:
+                        env_combos.append(env)
+
+        def _add(
+            direction,
+            env,
+            *,
+            disable_atomic=False,
+            disable_dq_atomic=False,
+            bwd_inner_loop_k=False,
+            bwd_dq_bf16=False,
+            **kw,
+        ):
+            add_ffa_spec(
+                specs,
+                direction=direction,
+                env=env,
+                disable_atomic=disable_atomic,
+                disable_dq_atomic=disable_dq_atomic,
+                bwd_inner_loop_k=bwd_inner_loop_k,
+                bwd_dq_bf16=bwd_dq_bf16,
+                index_sparse=True,
+                **kw,
+            )
+
+        for (
+            nhq,
+            nhk,
+            pack_gqa,
+            hd,
+            kbs,
+            pack_f,
+            _is_mha,
+            effective_pack_gqa,
+            _gqa_safe,
+        ) in cls._iter_valid_configs():
+            common = dict(
+                head_dim=hd,
+                pack_gqa=effective_pack_gqa,
+                pack_gqa_factor=pack_f,
+                sparse_k_block_size=kbs,
+            )
+            test_bwd = kbs < 256
+            for env in env_combos:
+                _add("fwd", env, disable_atomic=True, **common)
+                if test_bwd:
+                    _add("bwd", env, disable_atomic=_gqa_safe, **common)
                     if pack_f >= 128:
-                        add_ffa_spec(
-                            specs,
-                            direction="bwd",
-                            head_dim=hd,
+                        _add(
+                            "bwd",
+                            env,
                             disable_dq_atomic=True,
+                            bwd_inner_loop_k=True,
+                            bwd_dq_bf16=True,
+                            head_dim=hd,
                             pack_gqa=pack_gqa,
                             pack_gqa_factor=pack_f,
-                            index_sparse=True,
-                            bwd_inner_loop_k=True,
                             sparse_k_block_size=kbs,
-                            bwd_dq_bf16=True,
                         )
-
-                # env variants (inner-mode): same config with env overrides
-                for env_dict in cls.INNER_ENVS:
-                    add_ffa_spec(
-                        specs,
-                        direction="fwd",
-                        head_dim=hd,
-                        disable_atomic=True,
-                        pack_gqa=effective_pack_gqa,
-                        pack_gqa_factor=pack_f,
-                        index_sparse=True,
-                        sparse_k_block_size=kbs,
-                        env=env_dict,
-                    )
-                    if test_bwd:
-                        if _gqa_safe:
-                            add_ffa_spec(
-                                specs,
-                                direction="bwd",
-                                head_dim=hd,
-                                disable_atomic=True,
-                                pack_gqa=effective_pack_gqa,
-                                pack_gqa_factor=pack_f,
-                                index_sparse=True,
-                                sparse_k_block_size=kbs,
-                                env=env_dict,
-                            )
-                        else:
-                            add_ffa_spec(
-                                specs,
-                                direction="bwd",
-                                head_dim=hd,
-                                pack_gqa=effective_pack_gqa,
-                                pack_gqa_factor=pack_f,
-                                index_sparse=True,
-                                sparse_k_block_size=kbs,
-                                env=env_dict,
-                            )
-                        if pack_f >= 128:
-                            add_ffa_spec(
-                                specs,
-                                direction="bwd",
-                                head_dim=hd,
-                                disable_dq_atomic=True,
-                                pack_gqa=pack_gqa,
-                                pack_gqa_factor=pack_f,
-                                index_sparse=True,
-                                bwd_inner_loop_k=True,
-                                sparse_k_block_size=kbs,
-                                bwd_dq_bf16=True,
-                                env=env_dict,
-                            )
 
         return specs
 
@@ -996,12 +877,17 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         return 1200
 
     @with_run_in_mp
-    @parameterize("nhq_nhk_hd_packgqa", NHQ_NHK_HD_PACKGQA)
+    @parameterize("head_config", HEAD_CONFIGS)
+    @parameterize("hd", HEAD_DIMS)
     @parameterize("kbs", KBS_VALUES)
-    @parameterize("inner_env", INNER_ENVS)
-    def test_index_sparse_comprehensive(self, nhq_nhk_hd_packgqa, kbs, inner_env):
-        """LoopQ (default) direction — tests non-atomic dKV path with env variants."""
-        nhq, nhk, hd, pack_gqa = nhq_nhk_hd_packgqa
+    @parameterize("inner_dir", INNER_DIRS)
+    @parameterize("inner_load_mode", INNER_LOAD_MODES)
+    @parameterize("inner_store_mode", INNER_STORE_MODES)
+    def test_index_sparse_comprehensive(
+        self, head_config, hd, kbs, inner_dir, inner_load_mode, inner_store_mode
+    ):
+        """LoopQ (default) direction — full orthogonal sweep."""
+        nhq, nhk, pack_gqa = head_config
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
 
@@ -1025,26 +911,38 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         }
         if kbs > 1:
             config["max_topk"] = topk
-        for key, val in inner_env.items():
-            os.environ[key] = val
+
+        env_keys: list[str] = []
+        if inner_dir is not None:
+            os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = inner_dir
+            env_keys.append("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
+        if inner_load_mode is not None:
+            os.environ["MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE"] = inner_load_mode
+            env_keys.append("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE")
+        if inner_store_mode is not None:
+            os.environ["MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE"] = inner_store_mode
+            env_keys.append("MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE")
         try:
             _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
         finally:
-            for key in inner_env:
+            for key in env_keys:
                 os.environ.pop(key, None)
 
     @with_run_in_mp
-    @parameterize("nhq_nhk_hd_packgqa", NHQ_NHK_HD_PACKGQA)
+    @parameterize("head_config", HEAD_CONFIGS)
+    @parameterize("hd", HEAD_DIMS)
     @parameterize("kbs", KBS_VALUES)
-    @parameterize("inner_env", INNER_ENVS)
-    def test_index_sparse_comprehensive_loopk(self, nhq_nhk_hd_packgqa, kbs, inner_env):
+    @parameterize("inner_dir", INNER_DIRS)
+    @parameterize("inner_load_mode", INNER_LOAD_MODES)
+    @parameterize("inner_store_mode", INNER_STORE_MODES)
+    def test_index_sparse_comprehensive_loopk(
+        self, head_config, hd, kbs, inner_dir, inner_load_mode, inner_store_mode
+    ):
         """LoopK direction — tests dQ non-atomic path.
 
-        LoopK + IndexSparse: when pack_gqa_factor < 128, the Python auto-flag
-        falls back to LoopQ (one Q-tile would span multiple seq positions with
-        different index patterns).  This test verifies correctness regardless.
+        When pack_gqa_factor < 128, runtime auto-falls back to LoopQ.
         """
-        nhq, nhk, hd, pack_gqa = nhq_nhk_hd_packgqa
+        nhq, nhk, pack_gqa = head_config
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
         if kbs >= 256:
@@ -1069,12 +967,21 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         }
         if kbs > 1:
             config["max_topk"] = topk
-        for key, val in inner_env.items():
-            os.environ[key] = val
+
+        env_keys: list[str] = []
+        if inner_dir is not None:
+            os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = inner_dir
+            env_keys.append("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
+        if inner_load_mode is not None:
+            os.environ["MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE"] = inner_load_mode
+            env_keys.append("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE")
+        if inner_store_mode is not None:
+            os.environ["MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE"] = inner_store_mode
+            env_keys.append("MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE")
         try:
             _run_index_sparse_config(self.device, config, test_bwd=True)
         finally:
-            for key in inner_env:
+            for key in env_keys:
                 os.environ.pop(key, None)
 
 

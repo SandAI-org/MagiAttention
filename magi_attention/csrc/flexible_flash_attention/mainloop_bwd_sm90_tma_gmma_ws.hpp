@@ -1788,7 +1788,9 @@ struct CollectiveMainloopBwdSm90 {
         int const stage = smem_pipe_write_k.index();
         if constexpr (IsSparse) {
           if (thread_idx == 0) {
-            int const tile_first_compound_idx = block_meta.get_tile_first_compound_idx();
+            // Round to kBlockN boundary: MaxToMin anchor is offset within the tile
+            // by (kTokensPerGroup-1); division truncates this to the tile start.
+            int const tile_first_compound_idx = (block_meta.get_tile_first_compound_idx() / kBlockN) * kBlockN;
             int* const stage_indices = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockN];
             CUTE_UNROLL
             for (int r = 0; r < kBlockN; ++r) {

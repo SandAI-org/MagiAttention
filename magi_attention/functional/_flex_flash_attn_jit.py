@@ -450,7 +450,7 @@ def get_ffa_jit_spec(
         # block_sparse LoopQ with D=128).  Since BWD never receives
         # ref_block_size at runtime, we cannot reliably determine the tile —
         # safest to unconditionally skip IDM for BWD.
-        if direction == "bwd":
+        if direction == "bwd" and not os.environ.get("_MAGI_IDM_BWD_BYPASS"):
             logger.warning(
                 "INNER_DIR_MAX_TO_MIN ignored for BWD "
                 "(unsupported: precision bug with reversed inner loop)",

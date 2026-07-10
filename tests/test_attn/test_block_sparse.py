@@ -911,148 +911,95 @@ class TestBlockSparseSimple(unittest.TestCase):
     def precompile_kernel_specs(cls):
         """Standard precompile interface — FFA kernels this class needs.
 
-        See magi_attention/testing/precompile.py. Derived from the same
-        config constants used by the tests below.
+        See magi_attention/testing/precompile.py.
         """
         from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
+        sparse_common = dict(block_sparse=True, range_merge=True)
 
-        # ── test_very_simple_block_sparse: GQA nhq=16/nhk=4, seqlen 2048 ──
-        # k_size ∈ {64, 1} → runtime sparse_k_block_size auto-derived from
-        # k_ranges: uniform k_size blocks
-        # NOTE: auto-flag forces pack_gqa=True for sparse + GQA at runtime.
+        def _add(direction, **kw):
+            add_ffa_spec(specs, direction=direction, **kw)
+
+        # ── test_very_simple_block_sparse: GQA nhq=16/nhk=4 ──
         for cfg in cls.VERY_SIMPLE_BLOCK_SPARSE_CONFIGS:
             kbs = cfg["k_size"]
             swap_bwd = cfg.get("swap_bwd_qk_loop", True)
             rbs = cfg.get("ref_block_size", (128, 128))
-            # FWD: sparse auto-flags → disable_fwd_atomic, pack_gqa forced True
-            add_ffa_spec(
-                specs,
-                direction="fwd",
-                ref_block_size=rbs,
-                disable_atomic=True,
+            common = dict(
                 pack_gqa=True,
                 pack_gqa_factor=4,
-                block_sparse=True,
-                range_merge=True,
                 sparse_k_block_size=kbs,
+                **sparse_common,
             )
+            _add("fwd", ref_block_size=rbs, disable_atomic=True, **common)
             if swap_bwd:
-                # BWD InnerLoopK: disable_dq_atomic → dq native dtype
-                add_ffa_spec(
-                    specs,
-                    direction="bwd",
+                _add(
+                    "bwd",
                     disable_dq_atomic=True,
-                    pack_gqa=True,
-                    pack_gqa_factor=4,
-                    block_sparse=True,
-                    range_merge=True,
                     bwd_inner_loop_k=True,
-                    sparse_k_block_size=kbs,
                     bwd_dq_bf16=True,
+                    **common,
                 )
             else:
-                # BWD LoopQ: _gqa_safe=True → disable_dkv_atomic → dkv bf16
-                add_ffa_spec(
-                    specs,
-                    direction="bwd",
+                _add(
+                    "bwd",
                     ref_block_size=rbs,
                     disable_atomic=True,
-                    pack_gqa=True,
-                    pack_gqa_factor=4,
-                    block_sparse=True,
-                    range_merge=True,
-                    sparse_k_block_size=kbs,
                     bwd_dkv_bf16=True,
+                    **common,
                 )
 
         # ── test_block_sparse_loopq_packgqa: MQA128, dense ref + sparse ──
         for cfg in cls.LOOPQ_PACKGQA_CONFIGS:
             kbs = cfg["k_block"]
-            # dense reference (block_sparse=False, ARM, PackGQA128, swap=True)
-            add_ffa_spec(
-                specs,
-                direction="fwd",
-                pack_gqa=True,
-                pack_gqa_factor=128,
-                range_merge=True,
-            )
-            add_ffa_spec(
-                specs,
-                direction="bwd",
+            # dense reference
+            _add("fwd", pack_gqa=True, pack_gqa_factor=128, range_merge=True)
+            _add(
+                "bwd",
                 pack_gqa=True,
                 pack_gqa_factor=128,
                 range_merge=True,
                 bwd_inner_loop_k=True,
             )
-            # sparse FWD
-            add_ffa_spec(
-                specs,
-                direction="fwd",
-                ref_block_size=(128, 128),
-                disable_atomic=True,
+            # sparse
+            common = dict(
                 pack_gqa=True,
                 pack_gqa_factor=128,
-                block_sparse=True,
-                range_merge=True,
                 sparse_k_block_size=kbs,
+                **sparse_common,
             )
-            # sparse BWD LoopQ: PackGQA → disable_dkv_atomic
-            add_ffa_spec(
-                specs,
-                direction="bwd",
-                disable_atomic=True,
-                pack_gqa=True,
-                pack_gqa_factor=128,
-                block_sparse=True,
-                range_merge=True,
-                sparse_k_block_size=kbs,
-            )
+            _add("fwd", ref_block_size=(128, 128), disable_atomic=True, **common)
+            _add("bwd", disable_atomic=True, **common)
             if kbs == 128:
-                # sparse BWD LoopK case
-                add_ffa_spec(
-                    specs,
-                    direction="bwd",
+                _add(
+                    "bwd",
                     disable_dq_atomic=True,
-                    pack_gqa=True,
-                    pack_gqa_factor=128,
-                    block_sparse=True,
-                    range_merge=True,
                     bwd_inner_loop_k=True,
-                    sparse_k_block_size=kbs,
                     bwd_dq_bf16=True,
+                    **common,
                 )
 
-        # ── test_disable_atomic_block_sparse_*: kbs=128, S=2048 ──
+        # ── test_disable_atomic_block_sparse_*: kbs=128 ──
         for inner_loop_k, pack_f, pack_gqa in [
-            (False, 128, True),  # innerloopq (MQA128)
-            (True, 128, True),  # innerloopk (MQA128)
-            (False, 1, False),  # mha (NHQ=NHK=1)
+            (False, 128, True),
+            (True, 128, True),
+            (False, 1, False),
         ]:
-            add_ffa_spec(
-                specs,
-                direction="fwd",
-                ref_block_size=(128, 128),
-                disable_atomic=True,
+            common = dict(
                 pack_gqa=pack_gqa,
                 pack_gqa_factor=pack_f,
-                block_sparse=True,
-                range_merge=True,
                 sparse_k_block_size=128,
+                **sparse_common,
             )
-            add_ffa_spec(
-                specs,
-                direction="bwd",
-                disable_atomic=not inner_loop_k,  # LoopQ+gqa_safe → dkv disable
+            _add("fwd", ref_block_size=(128, 128), disable_atomic=True, **common)
+            _add(
+                "bwd",
+                disable_atomic=not inner_loop_k,
                 disable_dq_atomic=inner_loop_k,
-                pack_gqa=pack_gqa,
-                pack_gqa_factor=pack_f,
-                block_sparse=True,
-                range_merge=True,
                 bwd_inner_loop_k=inner_loop_k,
-                sparse_k_block_size=128,
                 bwd_dq_bf16=inner_loop_k,
+                **common,
             )
 
         return specs
@@ -1585,9 +1532,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
     def precompile_kernel_specs(cls):
         """Standard precompile interface — see magi_attention/testing/precompile.py.
 
-        Kernel axes: pack_gqa_factor (= nhq/nhk), head_dim, and
-        sparse_k_block_size (= k_size, auto-derived from k_ranges at runtime).
-        Test always runs FWD + BWD InnerLoopK (swap_bwd_qk_loop=True).
+        FWD + BWD InnerLoopK for each (nhq/nhk × hd × k_size × env) combo.
         """
         from magi_attention.testing.precompile import add_ffa_spec
 
@@ -1595,33 +1540,31 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         for nhq, nhk, hd in cls.NHQ_NHK_HD:
             pack_f = nhq // nhk
             for _q_size, k_size in cls.Q_SIZE_K_SIZE:
-                for env_dict in cls.INNER_ENVS:
+                common = dict(
+                    head_dim=hd,
+                    pack_gqa=True,
+                    pack_gqa_factor=pack_f,
+                    block_sparse=True,
+                    range_merge=True,
+                    sparse_k_block_size=k_size,
+                )
+                for env in cls.INNER_ENVS:
                     add_ffa_spec(
                         specs,
                         direction="fwd",
-                        head_dim=hd,
-                        ref_block_size=(128, 128),
+                        env=env,
                         disable_atomic=True,
-                        pack_gqa=True,
-                        pack_gqa_factor=pack_f,
-                        block_sparse=True,
-                        range_merge=True,
-                        sparse_k_block_size=k_size,
-                        env=env_dict,
+                        ref_block_size=(128, 128),
+                        **common,
                     )
                     add_ffa_spec(
                         specs,
                         direction="bwd",
-                        head_dim=hd,
+                        env=env,
                         disable_dq_atomic=True,
-                        pack_gqa=True,
-                        pack_gqa_factor=pack_f,
-                        block_sparse=True,
-                        range_merge=True,
                         bwd_inner_loop_k=True,
-                        sparse_k_block_size=k_size,
                         bwd_dq_bf16=True,
-                        env=env_dict,
+                        **common,
                     )
         return specs
 
