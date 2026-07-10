@@ -465,18 +465,17 @@ Set this env variable to specify the directory for the CuteDSL FFA kernel cache.
 
 **MAGI_ATTENTION_PREBUILD_LEVEL**
 
-- **Defaults to:** `lite`
+- **Defaults to:** `lite` (auto-promoted to `ci` when `GITHUB_ACTIONS=true` or `CI=true`)
 - **Used by:** `setup.py`
 
 Controls the breadth of FFA kernel configurations pre-built during `pip install`.
 
-- `lite` (default): Pre-builds only the basic Dense kernels (fwd/bwd × head_dim 64/128 × fp16/bf16 × atomic/non-atomic). Sufficient for most inference and training workloads.
-- `ci`: Additionally pre-builds BlockSparse, IndexSparse, deterministic, PackGQA, and `swap_bwd_qk_loop` kernel variants exercised by CI tests (`test_block_sparse.py`, `test_index_sparse.py`, `test_deterministic.py`). Eliminates JIT compilation during test runs.
+- `lite` (default for local builds): Pre-builds only the basic Dense kernels (fwd/bwd × head_dim 64/128 × fp16/bf16 × atomic/non-atomic). Sufficient for most inference and training workloads.
+- `ci` (auto-detected in CI): Additionally pre-builds all kernel variants declared by test classes via `precompile_kernel_specs()`. Eliminates JIT compilation during test runs.
 
 ```{note}
-Setting `MAGI_ATTENTION_PREBUILD_LEVEL=ci` in your CI pipeline's `pip install` step
-ensures that subsequent tests do not trigger JIT compilation, giving faster and more
-predictable test execution times.
+In GitHub Actions or other CI environments (where `GITHUB_ACTIONS=true` or `CI=true`),
+the level is automatically set to `ci` — no explicit env var needed.
 ```
 
 **MAGI_ATTENTION_PREBUILD_FFA_JOBS**

@@ -128,7 +128,7 @@ jobs:
           rm -rf /github/home/.cache/magi_attention/
       - name: install MagiAttention
         run: |
-          MAGI_ATTENTION_PREBUILD_LEVEL=ci pip install -e . --no-build-isolation -vvv
+          pip install -e . --no-build-isolation -vvv
       - name: verify MagiAttention import
         run: |
           cd /github/home
@@ -138,7 +138,7 @@ jobs:
       - name: build MagiAttention wheel
         run: |
           rm -rf dist/
-          MAGI_ATTENTION_PREBUILD_LEVEL=ci python -m build --wheel --no-isolation -v
+          python -m build --wheel --no-isolation -v
       - name: install MagiAttention wheel
         run: |
           pip uninstall -y magi_attention

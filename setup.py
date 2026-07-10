@@ -687,21 +687,18 @@ def prebuild_ffa_kernels() -> None:
             "Ensure source tree is available. Error: "
         ) from e
 
-    # determine the combinations of prebuild options
-    # NOTE: the CI workflow is triggered by `pull_request_target`, so GitHub runs
-    # the workflow yaml from the BASE branch — env vars set in the PR branch's yaml
-    # (e.g. MAGI_ATTENTION_PREBUILD_LEVEL=ci) do NOT take effect. Hence we
-    # auto-detect GitHub Actions here and default to "ci" level in that case.
-    _level_env = os.environ.get("MAGI_ATTENTION_PREBUILD_LEVEL")
-    if _level_env is not None:
-        prebuild_level = _level_env.lower()
-        _level_source = "env MAGI_ATTENTION_PREBUILD_LEVEL"
-    elif os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("CI") == "true":
+    # Determine prebuild level: CI environments auto-detect to "ci" level,
+    # local builds default to "lite".
+    if os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("CI") == "true":
         prebuild_level = "ci"
         _level_source = "auto-detected CI environment (GITHUB_ACTIONS/CI)"
     else:
-        prebuild_level = "lite"
-        _level_source = "default"
+        prebuild_level = os.environ.get("MAGI_ATTENTION_PREBUILD_LEVEL", "lite").lower()
+        _level_source = (
+            "env MAGI_ATTENTION_PREBUILD_LEVEL"
+            if "MAGI_ATTENTION_PREBUILD_LEVEL" in os.environ
+            else "default"
+        )
     print(f"[prebuild] level={prebuild_level!r} (source: {_level_source})", flush=True)
     directions = ["fwd", "bwd"]
     head_dims = [64, 128]
@@ -759,8 +756,6 @@ def prebuild_ffa_kernels() -> None:
                 f"[prebuild WARNING] failed to collect test kernel specs: {e}",
                 flush=True,
             )
-
-    ci_extra: list = []
 
     # URIs already covered by the test specs — skip duplicates to avoid
     # two concurrent ninja builds racing in the same kernel directory.
@@ -837,6 +832,10 @@ def prebuild_ffa_kernels() -> None:
         )
         if uri in _ci_test_uri_set:
             return f"{uri} (deduped with test spec)"
+        return _build_and_install(uri, spec)
+
+    def _build_and_install(uri, spec):
+        """Build a kernel spec and copy artifacts from JIT to AOT directory."""
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
@@ -844,15 +843,7 @@ def prebuild_ffa_kernels() -> None:
             shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
         return uri
 
-    def _build_test_spec(uri, spec):
-        spec.build()
-        src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
-        dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
-        if src_dir.exists():
-            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
-        return uri
-
-    all_combos = base_combos + ci_extra
+    all_combos = base_combos
     n_total = len(all_combos) + len(ci_test_specs)
     n_done = 0
     n_failed = 0
@@ -864,10 +855,10 @@ def prebuild_ffa_kernels() -> None:
         flush=True,
     )
     with ThreadPoolExecutor(max_workers=PREBUILD_FFA_JOBS) as ex:
-        futs = {ex.submit(_build_one, c): c for c in all_combos}
+        futs: dict = {ex.submit(_build_one, c): c for c in all_combos}
         futs.update(
             {
-                ex.submit(_build_test_spec, uri, spec): uri
+                ex.submit(_build_and_install, uri, spec): uri
                 for uri, spec in ci_test_specs.items()
             }
         )
