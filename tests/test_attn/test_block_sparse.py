@@ -15,19 +15,12 @@
 import os
 import time
 import unittest
-from typing import Optional, Tuple
 
 import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.functional import flex_flash_attn_func
-from magi_attention.functional.flex_flash_attn import (
-    _flex_flash_attn_backward,
-    _flex_flash_attn_forward,
-    merge_ranges,
-)
-from magi_attention.functional.utils import correct_attn_out_lse
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import (
@@ -105,230 +98,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
             err_msg_list.append(str(e))
         return err_msg_list
 
-    def check_flex_flash_attn_accumulation(
-        self,
-        q,
-        k,
-        v,
-        do,
-        q_ranges_tensor,
-        k_ranges_tensor,
-        attn_type_map_tensor,
-        range_merge,
-        deterministic,
-        test_case,
-    ):
-        # (Implementation is identical to the original)
-        t, h, d = q.shape
-        o_acc = torch.randn_like(q, dtype=torch.float32)
-        lse_acc = torch.randn([t, h], device=q.device, dtype=torch.float32)
-        softmax_scale = 1.0 / (d**0.5)
-
-        if range_merge:
-            (
-                merge_q_ranges,
-                fwd_q_ranges,
-                fwd_k_ranges,
-                fwd_attn_type_map,
-                fwd_qk_map,
-                fwd_unique_count,
-            ) = merge_ranges(q_ranges_tensor, k_ranges_tensor, attn_type_map_tensor)
-            (
-                merge_k_ranges,
-                bwd_k_ranges,
-                bwd_q_ranges,
-                bwd_attn_type_map,
-                bwd_kq_map,
-                bwd_unique_count,
-            ) = merge_ranges(k_ranges_tensor, q_ranges_tensor, attn_type_map_tensor)
-        else:
-            fwd_q_ranges = bwd_q_ranges = q_ranges_tensor
-            fwd_k_ranges = bwd_k_ranges = k_ranges_tensor
-            fwd_attn_type_map = bwd_attn_type_map = attn_type_map_tensor
-            merge_q_ranges = merge_k_ranges = None
-            fwd_qk_map = bwd_kq_map = None
-            fwd_unique_count = bwd_unique_count = None
-
-        o, meta = _flex_flash_attn_forward(
-            q=q,
-            k=k,
-            v=v,
-            sink=None,
-            sink_layout="sh",
-            out=None,
-            lse=None,
-            q_ranges=fwd_q_ranges,
-            k_ranges=fwd_k_ranges,
-            attn_type_map=fwd_attn_type_map,
-            softmax_scale=softmax_scale,
-            softcap=0.0,
-            out_type=torch.float32,
-            disable_fwd_atomic_reduction=False,
-            deterministic=deterministic,
-            sm_margin=0,
-            # optional args below mainly for sparse attn
-            ref_block_size=None,
-            max_seqlen_q=None,
-            range_merge=range_merge,
-            merge_q_ranges=merge_q_ranges,
-            fwd_qk_map=fwd_qk_map,
-            fwd_unique_count=fwd_unique_count,
-            swap_ab=False,
-            pack_gqa=False,
-            block_sparse=False,
-        )
-        lse = meta.lse
-        o_ref, lse_ref = correct_attn_out_lse(
-            out1=o,
-            lse1=lse,
-            out2=o_acc,
-            lse2=lse_acc,
-        )
-        o_auto_acc, meta_auto_acc = _flex_flash_attn_forward(
-            q=q,
-            k=k,
-            v=v,
-            sink=None,
-            sink_layout="sh",
-            out=o_acc,
-            lse=lse_acc,
-            q_ranges=fwd_q_ranges,
-            k_ranges=fwd_k_ranges,
-            attn_type_map=fwd_attn_type_map,
-            softmax_scale=softmax_scale,
-            softcap=0.0,
-            out_type=None,
-            disable_fwd_atomic_reduction=False,
-            deterministic=deterministic,
-            sm_margin=0,
-            # optional args below mainly for sparse attn
-            ref_block_size=None,
-            max_seqlen_q=None,
-            range_merge=range_merge,
-            merge_q_ranges=merge_q_ranges,
-            fwd_qk_map=fwd_qk_map,
-            fwd_unique_count=fwd_unique_count,
-            swap_ab=False,
-            pack_gqa=False,
-            block_sparse=False,
-        )
-        lse_auto_acc = meta_auto_acc.lse
-
-        assert_close(
-            o_auto_acc,
-            o_ref,
-            atol=1e-5,
-            rtol=1e-4,
-            mismatch_threshold=0.005,
-            test_case=f"{test_case} => o",
-            print_rank=-1,
-        )
-        assert_close(
-            lse_auto_acc,
-            lse_ref,
-            atol=1e-5,
-            rtol=1e-4,
-            mismatch_threshold=0.005,
-            test_case=f"{test_case} => lse",
-            print_rank=-1,
-        )
-
-        dq_acc = torch.randn_like(q, dtype=torch.float32)
-        dk_acc = torch.randn_like(k, dtype=torch.float32)
-        dv_acc = torch.randn_like(v, dtype=torch.float32)
-
-        dq_ref, dk_ref, dv_ref, _ = _flex_flash_attn_backward(
-            do,
-            q,
-            k,
-            v,
-            None,  # sink
-            "sh",  # sink_layout
-            o_ref.to(q.dtype),
-            lse_ref,
-            None,  # dq
-            None,  # dk
-            None,  # dv
-            None,  # dsink
-            bwd_q_ranges,
-            bwd_k_ranges,
-            bwd_attn_type_map,
-            softmax_scale=softmax_scale,
-            softcap=0.0,
-            disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
-            dq_type=torch.float32,
-            dk_type=torch.float32,
-            dv_type=torch.float32,
-            deterministic=deterministic,
-            sm_margin=0,
-            range_merge=range_merge,
-            merge_k_ranges=merge_k_ranges,
-            bwd_kq_map=bwd_kq_map,
-            bwd_unique_count=bwd_unique_count,
-            bwd_inner_loop_k=False,  # TODO: test when it's `True`
-        )
-        dq_ref += dq_acc
-        dk_ref += dk_acc
-        dv_ref += dv_acc
-        dq_acc, dk_acc, dv_acc, _ = _flex_flash_attn_backward(
-            do,
-            q,
-            k,
-            v,
-            None,  # sink
-            "sh",  # sink_layout
-            o_ref.to(q.dtype),
-            lse_ref,
-            dq_acc,
-            dk_acc,
-            dv_acc,
-            None,  # dsink
-            bwd_q_ranges,
-            bwd_k_ranges,
-            bwd_attn_type_map,
-            softmax_scale=softmax_scale,
-            softcap=0.0,
-            disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
-            dq_type=torch.float32,
-            dk_type=torch.float32,
-            dv_type=torch.float32,
-            deterministic=deterministic,
-            sm_margin=0,
-            range_merge=range_merge,
-            merge_k_ranges=merge_k_ranges,
-            bwd_kq_map=bwd_kq_map,
-            bwd_unique_count=bwd_unique_count,
-            bwd_inner_loop_k=False,  # TODO: test when it's `True`
-        )
-
-        assert_close(
-            dq_acc,
-            dq_ref,
-            atol=1e-5,
-            rtol=1e-4,
-            mismatch_threshold=0.005,
-            test_case=f"{test_case} => dq",
-            print_rank=-1,
-        )
-        assert_close(
-            dk_acc,
-            dk_ref,
-            atol=1e-5,
-            rtol=1e-4,
-            mismatch_threshold=0.005,
-            test_case=f"{test_case} => dk",
-            print_rank=-1,
-        )
-        assert_close(
-            dv_acc,
-            dv_ref,
-            atol=1e-5,
-            rtol=1e-4,
-            mismatch_threshold=0.005,
-            test_case=f"{test_case} => dv",
-            print_rank=-1,
-        )
-
     def get_ffa_result(
         self,
         q,
@@ -342,7 +111,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
         nhk,
         pack_gqa,
         deterministic,
-        test_accumulation_inplace,
         swap_ab,
         ref_block_size,
         block_sparse,
@@ -359,12 +127,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
         h1 = k.size(2)
         q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
         assert nhq % nhk == 0
-        """
-        repeats = nhq // nhk
-        if head_wise == "q":
-            k = torch.repeat_interleave(k, repeats=repeats, dim=2)
-            v = torch.repeat_interleave(v, repeats=repeats, dim=2)
-        """
         # flatten kv head.
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
@@ -372,7 +134,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
         k.retain_grad()
         v.retain_grad()
         q.grad, k.grad, v.grad = None, None, None
-        # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
         q_block_size, sparse_k_block_size = block_size
         (
             q_ranges_tensor,
@@ -384,27 +145,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
             len(q_ranges_tensor), dtype=torch.int32, device="cuda"
         )
 
-        # FIXME: dout shape error when enable test_accumulation_inplace
-        """
-        if test_accumulation_inplace:
-            # If test_accumulation_inplace is True, we will test the accumulation and return
-            self.check_flex_flash_attn_accumulation(
-                q=q,
-                k=k,
-                v=v,
-                do=grad_output,
-                q_ranges_tensor=q_ranges_tensor,
-                k_ranges_tensor=k_ranges_tensor,
-                attn_type_map_tensor=attn_type_map,
-                range_merge=True,
-                deterministic=deterministic,
-                test_case=test_case,
-            )
-
-        q.grad = None
-        k.grad = None
-        v.grad = None
-        """
         o, meta = flex_flash_attn_func(
             q,
             k,
@@ -513,7 +253,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
         nhk,
         pack_gqa,
         deterministic,
-        test_accumulation_inplace,
         swap_ab: bool,
         ref_block_size: tuple[int, int],
         block_sparse,
@@ -582,7 +321,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
             nhk,
             pack_gqa,
             deterministic,
-            test_accumulation_inplace,
             swap_ab,
             ref_block_size,
             block_sparse,
@@ -851,51 +589,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
         if err_msg_list:
             raise AssertionError("\n\n".join(err_msg_list))
 
-    def _generate_sparse_pattern(
-        self,
-        test_type: str,
-        num_heads_q: int,
-        num_heads_kv: int,
-        seqlen: int,
-        sparsity_ratio: float,
-        sparsity_granularity: str,
-        sparse_format: str,
-        block_size: Optional[Tuple[int, int]] = None,
-    ) -> Tuple[
-        torch.Tensor, Tuple[int, int], Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
-        """
-        Helper function to generate uniform block sparse patterns.
-
-        Returns:
-            A tuple containing:
-            - block_mask (torch.Tensor): The generated sparse mask.
-            - block_sizes (Tuple[int, int]): Q block size and K/V block size.
-            - block_row_sz (None): Reserved for compatibility.
-            - block_col_sz (None): Reserved for compatibility.
-        """
-        if test_type == "uniform":
-            assert (
-                block_size is not None
-            ), "`block_size` is required for 'uniform' test type."
-
-            q_block_size, sparse_k_block_size = block_size
-            num_q_blocks = seqlen // q_block_size
-            num_kv_blocks = seqlen // sparse_k_block_size
-            block_mask, _ = generate_block_sparse_pattern(
-                num_q_heads=num_heads_q,
-                num_kv_heads=num_heads_kv,
-                num_q_blocks=num_q_blocks,
-                num_kv_blocks=num_kv_blocks,
-                sparsity=sparsity_ratio,
-                mode=sparsity_granularity,
-                sparse_format=sparse_format,
-                device="cuda",
-            )
-            return block_mask, block_size, None, None
-        else:
-            raise ValueError(f"Unknown test_type: {test_type}")
-
 
 class TestBlockSparseSimple(unittest.TestCase):
     """Standalone BlockSparse tests: basic FWD, LoopQ vs LoopK comparison, DisableAtomic.
@@ -1077,20 +770,18 @@ class TestBlockSparseSimple(unittest.TestCase):
 
         helper = self._get_block_sparse_helper()
 
-        (
-            block_mask,
-            block_sizes,
-            block_row_sz,
-            block_col_sz,
-        ) = helper._generate_sparse_pattern(
-            test_type="uniform",
-            num_heads_q=num_heads_q,
-            num_heads_kv=num_heads_kv,
-            seqlen=seqlen,
-            sparsity_ratio=0.5,
-            sparsity_granularity="per_kv_head",
+        q_block_size, sparse_k_block_size = block_size
+        num_q_blocks = seqlen // q_block_size
+        num_kv_blocks = seqlen // sparse_k_block_size
+        block_mask, _ = generate_block_sparse_pattern(
+            num_q_heads=num_heads_q,
+            num_kv_heads=num_heads_kv,
+            num_q_blocks=num_q_blocks,
+            num_kv_blocks=num_kv_blocks,
+            sparsity=0.5,
+            mode="per_kv_head",
             sparse_format="block_mask",
-            block_size=block_size,
+            device="cuda",
         )
 
         q = torch.randn(
@@ -1133,7 +824,7 @@ class TestBlockSparseSimple(unittest.TestCase):
             v=v,
             grad_output=do,
             seqlen=seqlen,
-            block_size=block_sizes,
+            block_size=block_size,
             block_mask=block_mask,
             head_wise="per_kv_head",
             sparse_format="block_mask",
@@ -1141,7 +832,6 @@ class TestBlockSparseSimple(unittest.TestCase):
             nhk=num_heads_kv,
             pack_gqa=pack_gqa,
             deterministic=False,
-            test_accumulation_inplace=False,
             swap_ab=swap_ab,
             ref_block_size=ref_block_size,
             block_sparse=block_sparse,
@@ -1149,8 +839,6 @@ class TestBlockSparseSimple(unittest.TestCase):
             test_case=test_case,
             sparsity_ratio=0.5,
             uniform=True,
-            block_row_sz=block_row_sz,
-            block_col_sz=block_col_sz,
             max_seqlen_q=max_seqlen_q,
             err_ratio_dict=err_ratio_dict,
         )
@@ -1356,10 +1044,12 @@ class TestBlockSparseSweep(DistTestBase):
         return 600
 
     # parameter space shared by @parameterize and precompile_kernel_specs
-    Q_SEQLENS = [512, 1000, 16384]
-    KV_SEQLENS = [512, 1000, 16384]
-    SPARSITIES = [0.2]
-    SWAP_BWD_QK_LOOPS = [False, True]
+    _PARAM_SPACE: dict[str, list] = dict(
+        q_seqlen=[512, 1000, 16384],
+        kv_seqlen=[512, 1000, 16384],
+        sparsity=[0.2],
+        swap_bwd_qk_loop=[False, True],
+    )
 
     @classmethod
     def precompile_kernel_specs(cls):
@@ -1400,7 +1090,7 @@ class TestBlockSparseSweep(DistTestBase):
             range_merge=True,
             sparse_k_block_size=128,
         )
-        for swap in cls.SWAP_BWD_QK_LOOPS:
+        for swap in cls._PARAM_SPACE["swap_bwd_qk_loop"]:
             add_ffa_spec(
                 specs,
                 direction="bwd",
@@ -1417,10 +1107,10 @@ class TestBlockSparseSweep(DistTestBase):
         return specs
 
     @with_run_in_mp
-    @parameterize("q_seqlen", Q_SEQLENS)
-    @parameterize("kv_seqlen", KV_SEQLENS)
-    @parameterize("sparsity", SPARSITIES)
-    @parameterize("swap_bwd_qk_loop", SWAP_BWD_QK_LOOPS)
+    @parameterize("q_seqlen", _PARAM_SPACE["q_seqlen"])
+    @parameterize("kv_seqlen", _PARAM_SPACE["kv_seqlen"])
+    @parameterize("sparsity", _PARAM_SPACE["sparsity"])
+    @parameterize("swap_bwd_qk_loop", _PARAM_SPACE["swap_bwd_qk_loop"])
     def test_block_sparse_mqa_sweep(
         self, q_seqlen, kv_seqlen, sparsity, swap_bwd_qk_loop
     ):
@@ -1501,15 +1191,21 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
     Cross-product of GQA config × block size × inner env variants.
     """
 
-    INNER_ENVS = [
-        {},
-        {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true"},
-        {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "false"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "tma"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "cpasync"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "atomicadd"},
-        {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "tma1d"},
-    ]
+    # parameter space shared by @parameterize and precompile_kernel_specs
+    _PARAM_SPACE: dict[str, list] = dict(
+        nhq_nhk_hd=[(8, 8, 128), (16, 4, 128), (128, 1, 128), (1, 1, 64), (4, 2, 64)],
+        q_size_k_size=[(64, 64), (128, 1), (16, 128), (64, 8)],
+        sparsity_ratio=[0.5],
+        inner_env=[
+            {},
+            {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true"},
+            {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "false"},
+            {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "tma"},
+            {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "cpasync"},
+            {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "atomicadd"},
+            {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "tma1d"},
+        ],
+    )
 
     @property
     def device(self):
@@ -1523,11 +1219,6 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
     def timeout(self) -> int:
         return 1200
 
-    # parameter space shared by @parameterize and precompile_kernel_specs
-    NHQ_NHK_HD = [(8, 8, 128), (16, 4, 128), (128, 1, 128), (1, 1, 64), (4, 2, 64)]
-    Q_SIZE_K_SIZE = [(64, 64), (128, 1), (16, 128), (64, 8)]
-    SPARSITY_RATIOS = [0.5]
-
     @classmethod
     def precompile_kernel_specs(cls):
         """Standard precompile interface — see magi_attention/testing/precompile.py.
@@ -1537,9 +1228,9 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
-        for nhq, nhk, hd in cls.NHQ_NHK_HD:
+        for nhq, nhk, hd in cls._PARAM_SPACE["nhq_nhk_hd"]:
             pack_f = nhq // nhk
-            for _q_size, k_size in cls.Q_SIZE_K_SIZE:
+            for _q_size, k_size in cls._PARAM_SPACE["q_size_k_size"]:
                 common = dict(
                     head_dim=hd,
                     pack_gqa=True,
@@ -1548,7 +1239,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                     range_merge=True,
                     sparse_k_block_size=k_size,
                 )
-                for env in cls.INNER_ENVS:
+                for env in cls._PARAM_SPACE["inner_env"]:
                     add_ffa_spec(
                         specs,
                         direction="fwd",
@@ -1569,10 +1260,10 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         return specs
 
     @with_run_in_mp
-    @parameterize("nhq_nhk_hd", NHQ_NHK_HD)
-    @parameterize("q_size_k_size", Q_SIZE_K_SIZE)
-    @parameterize("sparsity_ratio", SPARSITY_RATIOS)
-    @parameterize("inner_env", INNER_ENVS)
+    @parameterize("nhq_nhk_hd", _PARAM_SPACE["nhq_nhk_hd"])
+    @parameterize("q_size_k_size", _PARAM_SPACE["q_size_k_size"])
+    @parameterize("sparsity_ratio", _PARAM_SPACE["sparsity_ratio"])
+    @parameterize("inner_env", _PARAM_SPACE["inner_env"])
     def test_block_sparse_comprehensive_sweep(
         self, nhq_nhk_hd, q_size_k_size, sparsity_ratio, inner_env
     ):
@@ -1586,15 +1277,17 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         helper = _BlockSparseTestHelper.__new__(_BlockSparseTestHelper)
 
         block_size = (q_size, k_size)
-        block_mask, block_sizes, _, _ = helper._generate_sparse_pattern(
-            test_type="uniform",
-            num_heads_q=nhq,
-            num_heads_kv=nhk,
-            seqlen=seqlen,
-            sparsity_ratio=sparsity_ratio,
-            sparsity_granularity="per_kv_head",
+        num_q_blocks = seqlen // q_size
+        num_kv_blocks = seqlen // k_size
+        block_mask, _ = generate_block_sparse_pattern(
+            num_q_heads=nhq,
+            num_kv_heads=nhk,
+            num_q_blocks=num_q_blocks,
+            num_kv_blocks=num_kv_blocks,
+            sparsity=sparsity_ratio,
+            mode="per_kv_head",
             sparse_format="block_mask",
-            block_size=block_size,
+            device="cuda",
         )
 
         q = torch.randn(
@@ -1619,7 +1312,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                 v=v,
                 grad_output=do,
                 seqlen=seqlen,
-                block_size=block_sizes,
+                block_size=block_size,
                 block_mask=block_mask,
                 head_wise="per_kv_head",
                 sparse_format="block_mask",
@@ -1627,7 +1320,6 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                 nhk=nhk,
                 pack_gqa=True,
                 deterministic=False,
-                test_accumulation_inplace=False,
                 swap_ab=False,
                 ref_block_size=(64, 128),
                 block_sparse=True,
