@@ -1713,13 +1713,11 @@ def flex_flash_attn_func(
 
         _is_mha = q.size(1) == k.size(1)
 
-        # Sparse kernels cannot correctly handle GQA head broadcast without
-        # packing: the tile scheduler assumes each CTA owns exclusive output,
-        # but without pack_gqa multiple Q-heads share the same KV data leading
-        # to incorrect tile assignments.  Auto-upgrade to pack_gqa.
-        # NOTE: pack_gqa requires k.size(1)==1 (data must be "view-tricked"
-        # so that each KV-head is treated as a separate batch dimension).
-        if not _is_mha and not pack_gqa and not cat_gqa and k.size(1) == 1:
+        # Sparse tile scheduler (both block_sparse and index_sparse) requires
+        # pack_gqa=True for correct work-item enumeration via range_merge.
+        # Without it, the scheduler hangs because its tile count logic assumes
+        # the pack_gqa layout. This applies to ALL head configurations (MHA/GQA).
+        if not pack_gqa and not cat_gqa and k.size(1) == 1:
             pack_gqa = True
 
         _gqa_safe = _is_mha or pack_gqa or cat_gqa
