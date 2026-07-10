@@ -444,15 +444,16 @@ def get_ffa_jit_spec(
         uri += f"_iwg{_iwg}"
     _idm = os.environ.get("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
     if _idm is not None:
-        # Known precision bug: INNER_DIR_MAX_TO_MIN + BWD when the Q-block
-        # tile (ref_block_size[0]) is < 128.  The reversed inner-loop bounds
-        # are incorrect for 64-wide Q tiles (both LoopQ and LoopK).
-        _eff_q_tile = ref_block_size[0] if ref_block_size is not None else 128
-        if direction == "bwd" and _eff_q_tile < 128:
+        # IDM is an experimental FWD-only ablation env var.  BWD has a known
+        # precision bug with reversed inner-loop bounds (tile boundary
+        # miscalculation for Q-tiles < 128, which is the default for BWD
+        # block_sparse LoopQ with D=128).  Since BWD never receives
+        # ref_block_size at runtime, we cannot reliably determine the tile —
+        # safest to unconditionally skip IDM for BWD.
+        if direction == "bwd":
             logger.warning(
-                "INNER_DIR_MAX_TO_MIN ignored for BWD q_tile=%d "
-                "(unsupported: precision bug with q_tile < 128)",
-                _eff_q_tile,
+                "INNER_DIR_MAX_TO_MIN ignored for BWD "
+                "(unsupported: precision bug with reversed inner loop)",
             )
         else:
             extra_template_args["inner_dir_max_to_min"] = _idm.lower()
