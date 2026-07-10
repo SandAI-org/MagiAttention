@@ -133,6 +133,72 @@ class TestFlexFlashAttn(DistTestBase):
         # Use indices instead of dicts to make them hashable
         ref_block_config_indices = list(range(len(self.valid_ref_block_configs)))
 
+    # -- Kernel precompile for CI --
+    _REF_BLOCK_CONFIGS = [
+        {"swap_ab": False, "ref_block_size": None, "pack_gqa": False, "block_sparse": False},
+        {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": True, "block_sparse": False},
+        {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": False, "block_sparse": True},
+        {"swap_ab": False, "ref_block_size": (64, 128), "pack_gqa": False, "block_sparse": True},
+        {"swap_ab": False, "ref_block_size": (64, 128), "pack_gqa": True, "block_sparse": True},
+        {"swap_ab": True, "ref_block_size": (16, 64), "pack_gqa": False, "block_sparse": True},
+        {"swap_ab": True, "ref_block_size": (8, 64), "pack_gqa": False, "block_sparse": False},
+        {"swap_ab": True, "ref_block_size": (16, 64), "pack_gqa": False, "block_sparse": False},
+        {"swap_ab": True, "ref_block_size": (32, 64), "pack_gqa": False, "block_sparse": False},
+        {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": True, "block_sparse": False},
+        {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": True, "block_sparse": True},
+    ]
+    _HEAD_DIMS = [64, 128]
+    _PACK_GQA_FACTORS = [1, 2, 8]
+
+    @classmethod
+    def precompile_kernel_specs(cls) -> dict:
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+        for hd in cls._HEAD_DIMS:
+            for cfg in cls._REF_BLOCK_CONFIGS:
+                swap_ab = cfg["swap_ab"]
+                ref_block_size = cfg["ref_block_size"]
+                pack_gqa = cfg["pack_gqa"]
+                block_sparse = cfg["block_sparse"]
+
+                pgf_list = cls._PACK_GQA_FACTORS if pack_gqa else [1]
+                for pgf in pgf_list:
+                    # FWD
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        ref_block_size=ref_block_size,
+                        swap_ab=swap_ab,
+                        pack_gqa=pack_gqa,
+                        pack_gqa_factor=pgf,
+                        block_sparse=block_sparse,
+                    )
+                    # BWD (swap_ab is FWD-only; block_sparse BWD uses default tile)
+                    if not swap_ab:
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            head_dim=hd,
+                            disable_atomic=block_sparse,
+                            pack_gqa=pack_gqa,
+                            pack_gqa_factor=pgf,
+                            block_sparse=block_sparse,
+                        )
+                        # BWD LoopK variant
+                        if not block_sparse:
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                head_dim=hd,
+                                bwd_inner_loop_k=True,
+                                disable_dq_atomic=True,
+                                pack_gqa=pack_gqa,
+                                pack_gqa_factor=pgf,
+                            )
+        return specs
+
         # init flag generator and its iterator
         self.flag_generator = FlagCombGenerator(
             flags=[

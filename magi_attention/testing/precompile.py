@@ -69,6 +69,7 @@ PRECOMPILE_CLASSMETHOD_NAME = "precompile_kernel_specs"
 # Test modules scanned by the collector. A module is listed here iff at
 # least one of its test classes defines `precompile_kernel_specs`.
 TEST_MODULES_WITH_KERNEL_SPECS = [
+    "tests.test_attn.test_flex_flash_attn",
     "tests.test_attn.test_block_sparse",
     "tests.test_attn.test_index_sparse",
     "tests.test_pipeline",

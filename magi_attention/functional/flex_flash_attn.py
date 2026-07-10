@@ -1095,30 +1095,24 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     invert_index_sparse_indices,
                 )
 
-                if _loopq_kbs > 1:
-                    assert nhk == 1, (
-                        f"IndexSparse BWD InnerLoopQ with sparse_k_block_size>1 currently only supports nhk=1, "
+                if _loopq_kbs > 1 and nhk != 1:
+                    raise NotImplementedError(
+                        f"IndexSparse BWD InnerLoopQ with sparse_k_block_size>1 requires nhk=1, "
                         f"got nhk={nhk}. NHK>1 + kbs>1 has a flat-layout mismatch (P8-BUG-NHK)."
                     )
 
-                    _inner_indices, _inner_topk = invert_index_sparse_indices(
-                        index_sparse_indices,
-                        seqlen_k=seqlen_k,
-                        sparse_k_block_size=_loopq_kbs,
-                        pad_multiple=64,
-                    )
-                    # _inner_indices: (num_k_blocks, nhk, inner_topk) — already 3D
-                    index_sparse_indices = _inner_indices.contiguous()
-                    ctx.inner_indices_cnt = _inner_topk
-                else:
-                    _inner_indices, _inner_topk = invert_index_sparse_indices(
-                        index_sparse_indices,
-                        seqlen_k=seqlen_k,
-                        pad_multiple=64,
-                    )
-                    # _inner_indices: (seqlen_k, nhk, inner_topk) — already 3D
-                    index_sparse_indices = _inner_indices.contiguous()
-                    ctx.inner_indices_cnt = _inner_topk
+                # NOTE: invert_index_sparse_indices contains a GPU→CPU sync
+                # (counts.max().item()) to determine the padded inner_topk.
+                # This is acceptable for now as the inversion is O(nnz) and the
+                # sync cost is amortized by the BWD kernel runtime.
+                _inner_indices, _inner_topk = invert_index_sparse_indices(
+                    index_sparse_indices,
+                    seqlen_k=seqlen_k,
+                    sparse_k_block_size=_loopq_kbs,
+                    pad_multiple=64,
+                )
+                index_sparse_indices = _inner_indices.contiguous()
+                ctx.inner_indices_cnt = _inner_topk
 
             # else: IndexSparse BWD InnerLoopK — use forward's topk_indices directly
         elif ctx.range_merge:
