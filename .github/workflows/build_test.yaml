@@ -128,7 +128,7 @@ jobs:
           rm -rf /github/home/.cache/magi_attention/
       - name: install MagiAttention
         run: |
-          pip install -e . --no-build-isolation -vvv
+          MAGI_ATTENTION_PREBUILD_LEVEL=ci pip install -e . --no-build-isolation -vvv
       - name: verify MagiAttention import
         run: |
           cd /github/home
@@ -154,6 +154,7 @@ jobs:
           coverage xml -i
         env:
           COVERAGE_RUN: True
+          MAGI_ATTENTION_JIT_COMPILE_DISABLED: "1"
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
