@@ -151,23 +151,21 @@ Set to `1` to un-union dK/dV SMEM (separate buffers for each). Requires `stages_
 Set to `0` to bypass SMEM for dKV — consumer WGs atomicAdd directly to GMEM from registers.
 Experimental; may improve performance for bandwidth-bound configs.
 
-**MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE**
+**MAGI_ATTENTION_FFA_INNER_LOAD_MODE**
 
 - **Defaults to:** auto (`tma` when tiles are contiguous, else `cpasync`)
 - **Used by:** `kInnerLoadMode` enum (`Tma`=0, `CpAsync`=2)
-- **Aliases:** `MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD` (deprecated)
 
-Override the inner-loop load method for sparse paths. Options: `tma`, `cpasync`.
+Override the inner-loop load method. Options: `tma`, `cpasync`.
 
-**MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE**
+**MAGI_ATTENTION_FFA_INNER_STORE_MODE**
 
-- **Defaults to:** `tma1d`
-- **Used by:** `kInnerStoreMode` enum (`Tma1d`=1, `AtomicAdd`=2, `BypassSmem`=3)
-- **Aliases:** `MAGI_ATTENTION_FFA_SPARSE_INNER_STORE` (deprecated)
+- **Defaults to:** `tma` (2D reduce-add for sparse, or auto for dense)
+- **Used by:** `kInnerStoreMode` enum (`Tma`=0, `Tma1d`=1, `AtomicAdd`=2, `BypassSmem`=3)
 
-Override the inner-loop store method for sparse paths. Options: `tma1d`, `atomicadd`, `bypass`.
+Override the inner-loop store method. Options: `tma`, `tma2d`, `tma1d`, `atomicadd`, `bypass`.
 
-**MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER**
+**MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER**
 
 - **Defaults to:** `true`
 - **Used by:** `InnerStoreInProducer` template parameter
