@@ -79,7 +79,6 @@ from magi_attention.utils.dtype import max_fp_dtype
 # (omitted or empty means all backends)
 BACKENDS = "backends"
 
-
 # TODO: rewrite the specific function for unitest profiling mode
 class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
@@ -885,8 +884,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ],
     )
     @parameterize(
-        "head_dim",
-        [64, 128],
+        "head_dims",
+        [
+            (64, 64),
+            (128, 128),
+            (192, 128),
+            (256, 256),
+        ],
     )
     @parameterize(
         "dtype",
@@ -908,11 +912,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         self,
         attn_config: dict[str, Any],
         num_heads: tuple[int, int],  # (nhq, nhkv)
-        head_dim: int,
+        head_dims: tuple[int, int],  # (Q/K dim, V dim)
         dtype: torch.dtype,
         backend: MagiAttentionKernelBackend,
         run_bwd: bool = True,
     ):
+        head_dim, head_dim_v = head_dims
+
         # -----    skip if this attn_config is not for the current backend   ---- #
 
         allowed_backends = attn_config.get(BACKENDS, None)
@@ -981,6 +987,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "backend": backend,
                 "num_heads": num_heads,
                 "head_dim": head_dim,
+                "head_dim_v": head_dim_v,
             }
             flag_comb = self.flag_generator.get_next_valid_comb(
                 test_config=test_config,
@@ -1025,7 +1032,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"world_size=[{self.world_size}] x "
             f"backend=[{backend.value}] x "
             f"attn_config=[{attn_config[NAME]}] x "
-            f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
+            f"dtype=[{dtype}] x (nh,hd,hdv)=[({num_heads},{head_dim},{head_dim_v})] x "
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
             + flag_comb_test_case
         )
@@ -1145,6 +1152,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 cp_group=self.nccl_group,
                 cp_mesh=self.device_mesh,
                 dist_attn_config=dist_attn_config,
+                head_dim_v=head_dim_v if head_dim_v != head_dim else None,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
@@ -1170,7 +1178,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             total_v = torch.randn(
                 total_seqlen_k,
                 num_heads_kv,
-                head_dim,
+                head_dim_v,
                 device=self.device,
                 dtype=dtype,
                 requires_grad=run_bwd,

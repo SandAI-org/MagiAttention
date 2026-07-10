@@ -527,8 +527,12 @@ def correct_attn_out_lse(
     N_BLOCK = N  # N block size, where one head dim is always a single n block
     # Shard seqlen_q with M_BLOCK=128 on Hopper+ (CC major >= 9); use 64 on older
     # GPUs where the kernel's shared-memory usage at M_BLOCK=128 exceeds the limit.
+    # Also drop to 64 when the head_dim tile is large (>=256): the kernel keeps
+    # both the input and output tiles in shared memory as fp32, and
+    # 128 * 256 * 4 (out) + 128 * 256 * 4 (inp) ~= 256 KiB which overflows even
+    # Blackwell's per-SM SMEM.
     sm_major, _ = torch.cuda.get_device_capability(out1.device)
-    M_BLOCK = 64 if sm_major < 9 else 128
+    M_BLOCK = 64 if (sm_major < 9 or N_BLOCK >= 256) else 128
     NUM_M_BLOCKS = triton.cdiv(M, M_BLOCK)  # number of M blocks along seqlen_q
 
     grid = (NUM_M_BLOCKS, H)

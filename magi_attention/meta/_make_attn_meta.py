@@ -49,6 +49,7 @@ def make_attn_meta_from_dispatch_meta(
     overlap_config: OverlapConfig,
     cp_group: dist.ProcessGroup,
     cp_mesh: DeviceMesh | None = None,
+    head_dim_v: int | None = None,
 ) -> tuple[CommMeta, CalcMeta, BaseDistAttnSolver]:
     """Make the communication and calculation meta from the dispatch meta
 
@@ -87,6 +88,7 @@ def make_attn_meta_from_dispatch_meta(
             dispatch_meta_q=dispatch_meta_q,
             dispatch_meta_k=dispatch_meta_k,
             cp_mesh=cp_mesh,
+            head_dim_v=head_dim_v,
         )
         attn_solver.solve(
             q_ranges=q_ranges,
@@ -107,6 +109,7 @@ def make_attn_meta_from_dispatch_meta(
             overlap_config=overlap_config,
             cp_group=cp_group,
             cp_mesh=cp_mesh,
+            head_dim_v=head_dim_v,
         )
         attn_solver.solve(
             q_ranges=q_ranges,

@@ -583,6 +583,12 @@ class CommMeta:
     num_heads_q: int
     num_heads_kv: int
     head_dim: int
+    # NOTE: MLA-style asymmetric K/V (d_qk != d_v). When None, treated as
+    # symmetric (head_dim_v = head_dim). Affects the packed_times baked into
+    # kv_group_collective_args_list (2 for symmetric, 1 for asymmetric — the
+    # asymmetric path fuses K and V along the head_dim axis at comm time so
+    # only one tensor's worth of tokens flows through group_cast/reduce).
+    head_dim_v: int | None = None
 
     @property
     def overlap_degree(self) -> int:
@@ -591,6 +597,11 @@ class CommMeta:
     @property
     def num_heads_per_group(self) -> int:
         return self._num_heads_per_group
+
+    @property
+    def is_asymmetric_kv(self) -> bool:
+        """True when d_qk != d_v (MLA-style)."""
+        return self.head_dim_v is not None and self.head_dim_v != self.head_dim
 
     def __post_init__(self):
         assert (
@@ -632,14 +643,24 @@ class CommMeta:
 
         And the original args will also be inplace modified
 
-        - num_remote_kv_tokens_per_stage will time by 2
+        - num_remote_kv_tokens_per_stage:
+            * symmetric K/V: times by 2 (K and V packed along seqlen)
+            * asymmetric K/V (MLA, d_qk != d_v): stays the same (K and V
+              packed along head_dim at comm time; only seqlen worth of
+              tokens are sent per stage)
         - kv_group_collective_args_list will become `list[A2AVBasedGroupCollectiveArg]`
-        with packed_times=2 and reduce_op="sum"
+            * symmetric K/V: packed_times=2 with reduce_op="sum"
+            * asymmetric K/V: packed_times=1 with reduce_op="sum"
 
         - num_remote_qo_tokens_per_stage will stay the same
         - qo_group_collective_args_list will become `list[A2AVBasedGroupCollectiveArg]`
         with packed_times=1 and reduce_op="sum"
         """
+
+        # KV is packed along seqlen (packed_times=2) when symmetric, but along
+        # the head_dim axis (packed_times=1) when asymmetric — see comments on
+        # `is_asymmetric_kv` and `_fetch_remote_kv` in functional/dist_attn.py.
+        kv_packed_times = 1 if self.is_asymmetric_kv else 2
 
         # -----     init a2a-v based group collective args     ----- #
 
@@ -651,15 +672,21 @@ class CommMeta:
             num_remote_kv_tokens = self.num_remote_kv_tokens_per_stage[stage]
             kv_group_collective_kwargs = vars(self.kv_group_collective_args_list[stage])
 
-            # DEVIATION: num_remote_kv_tokens_per_stage[stage] multiplied by 2 in-place,
-            #   kv_group_collective_args_list[stage] replaced with A2AVBasedGroupCollectiveArg
-            # Reason: KV and dKV are packed along the seqlen dim for fused fetch/reduce,
-            #   so the token count must double and the collective arg must carry packed_times=2.
-            # Recovery: original token count is num_remote_kv_tokens_per_stage[stage] // 2.
-            self.num_remote_kv_tokens_per_stage[stage] = num_remote_kv_tokens * 2
+            # DEVIATION: num_remote_kv_tokens_per_stage[stage] multiplied by `kv_packed_times`
+            # in-place; kv_group_collective_args_list[stage] replaced with
+            # A2AVBasedGroupCollectiveArg(packed_times=kv_packed_times).
+            # Reason: symmetric K/V (kv_packed_times=2) packs K then V along
+            # the seqlen dim for fused fetch/reduce; asymmetric K/V
+            # (kv_packed_times=1) packs them along head_dim instead, so the
+            # token count stays at seqlen.
+            # Recovery: original token count is num_remote_kv_tokens_per_stage[stage]
+            # // kv_packed_times.
+            self.num_remote_kv_tokens_per_stage[stage] = (
+                num_remote_kv_tokens * kv_packed_times
+            )
             self.kv_group_collective_args_list[stage] = A2AVBasedGroupCollectiveArg(
                 **kv_group_collective_kwargs,
-                packed_times=2,  # pack kv/dkv along seqlen dim
+                packed_times=kv_packed_times,
                 reduce_op="sum",  # sum-reduce dkv
                 init_group_reduce=True,
             )

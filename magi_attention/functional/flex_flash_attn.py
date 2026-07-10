@@ -809,6 +809,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 seqlen_q=q.shape[0],
                 seqlen_k=k.shape[0],
                 headdim=q.shape[-1],
+                headdim_v=v.shape[-1],
             )
 
             out, lse = fa4_fwd(

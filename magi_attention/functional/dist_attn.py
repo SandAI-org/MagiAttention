@@ -177,8 +177,19 @@ class DistAttnRuntime:
         # cp1 shortcut: skip all communication
         self.skip_comm = cp_group_gc.size() == 1
 
-        # NOTE: concat kv together for comm only when not using native grpcoll and world_size > 1
-        self.concat_kv = (not self.skip_comm) and (not self.use_native_grpcoll)
+        # MLA-style asymmetric K/V (d_qk != d_v) baked into CommMeta. When True,
+        # KV is packed along the head_dim axis (not seqlen), and the symmetric
+        # "fused along seqlen" path (concat_kv=True) is disabled.
+        self.is_asymmetric_kv = comm_meta.is_asymmetric_kv
+
+        # NOTE: concat kv together for comm only when not using native grpcoll
+        # and world_size > 1; force False for asymmetric K/V (the asymmetric
+        # path inside `_fetch_remote_kv` does its own cat-on-head_dim fusion).
+        self.concat_kv = (
+            (not self.skip_comm)
+            and (not self.use_native_grpcoll)
+            and (not self.is_asymmetric_kv)
+        )
 
         # NOTE: only the FFA backend supports accumulative buffer for out/lse
         # to avoid storing partial results and an explicit `correct_attn_out_lse`
@@ -206,8 +217,13 @@ class DistAttnRuntime:
 
         # ----------    other control flags for bwd   --------- #
 
-        # NOTE: concat dkv together for comm only when not using native grpcoll and world_size > 1
-        self.concat_dkv = (not self.skip_comm) and (not self.use_native_grpcoll)
+        # NOTE: concat dkv together for comm only when not using native grpcoll
+        # and world_size > 1; same asymmetric K/V gate as concat_kv above.
+        self.concat_dkv = (
+            (not self.skip_comm)
+            and (not self.use_native_grpcoll)
+            and (not self.is_asymmetric_kv)
+        )
 
         # NOTE: concat q,o,do together for comm only when enabling qo comm and not using native grpcoll and world_size > 1
         self.concat_qo_do = (
@@ -1485,8 +1501,27 @@ class DistAttnRuntime:
                 for i = 0, 1, ..., overlap_degree - 1
         """
 
+        # MLA-style asymmetric K/V (d_qk != d_v): concat K and V along the
+        # head_dim (last) axis to form a single fused tensor of shape
+        # [seqlen, h, d_k + d_v]. The comm primitive still partitions dim 0
+        # (tokens) just like the symmetric fused path, so the rest of the
+        # function flows through the existing fused-buffer logic — only the
+        # entry (cat), the comm args (packed_times=1 — pre-baked in CommMeta),
+        # and the returned work (split-on-receive) differ.
+        asymmetric_kv = self.is_asymmetric_kv
+        if asymmetric_kv:
+            assert isinstance(local_kv, tuple) and len(local_kv) == 2, (
+                "asymmetric K/V path expects a (K, V) tuple input"
+            )
+            asym_d_k = local_kv[0].shape[-1]
+            local_kv = torch.cat(local_kv, dim=-1)  # cat-on-last-dim is contiguous
+
+        # The fused-buffer path covers both the symmetric concat_kv=True case
+        # and the asymmetric cat-on-feature case.
+        is_fused = self.concat_kv or asymmetric_kv
+
         # Prepare the meta info
-        if self.concat_kv:
+        if is_fused:
             _, num_heads, head_dim = local_kv.shape
             dtype = local_kv.dtype
             device = local_kv.device
@@ -1495,12 +1530,21 @@ class DistAttnRuntime:
             dtype = local_kv[0].dtype
             device = local_kv[0].device
 
-        # Get the group-cast args for kv
+        # Get the group-cast args for kv. CommMeta has already baked the right
+        # packed_times into kv_group_collective_args_list and the corresponding
+        # num_remote_kv_tokens_per_stage entry:
+        #   - symmetric K/V: packed_times=2 (K + V along seqlen)
+        #   - asymmetric K/V (MLA, d_qk != d_v): packed_times=1 (K, V fused
+        #     along head_dim inside this function — see the cat above)
         group_cast_arg = self.comm_meta.kv_group_collective_args_list[overlap_stage]
         group_cast_kwargs = group_cast_arg.to_group_cast_args()
-        remote_kv_seqlen = self.comm_meta.num_remote_kv_tokens_per_stage[overlap_stage]
-        if not self.concat_kv:
-            remote_kv_seqlen *= 2  # still x2 to allocate once
+        remote_kv_seqlen = self.comm_meta.num_remote_kv_tokens_per_stage[
+            overlap_stage
+        ]
+        if not self.concat_kv and not asymmetric_kv:
+            # Symmetric tuple path (e.g. native grpcoll): allocate once with
+            # the doubled seqlen, then chunk into K/V views below.
+            remote_kv_seqlen *= 2
 
         # Init remote kv buffer
         remote_kv_buffer = torch.empty(
@@ -1512,22 +1556,22 @@ class DistAttnRuntime:
         )
 
         # Compute communication bytes for nvtx logging
-        if not self.concat_kv:  # chunk to k,v individual buffers
+        if is_fused:
+            input_kv_shape = local_kv.shape
+            input_kv_dtype = local_kv.dtype
+            output_kv_shape = remote_kv_buffer.shape
+            output_kv_dtype = remote_kv_buffer.dtype
+            num_tensors = 1
+        else:  # tuple branch, symmetric K/V chunked into individual buffers
             remote_kv_buffer = self._maybe_chunk(remote_kv_buffer, num_chunks=2)
             input_kv_shape = local_kv[0].shape
             input_kv_dtype = local_kv[0].dtype
             output_kv_shape = remote_kv_buffer[0].shape
             output_kv_dtype = remote_kv_buffer[0].dtype
             num_tensors = 2
-        else:
-            input_kv_shape = local_kv.shape
-            input_kv_dtype = local_kv.dtype
-            output_kv_shape = remote_kv_buffer.shape
-            output_kv_dtype = remote_kv_buffer.dtype
-            num_tensors = 1
         group_cast_kv_bytes = self._compute_grpcoll_bytes(
             comm_tokens=group_cast_arg.group_cast_comm_tokens * num_tensors,
-            input=local_kv if self.concat_kv else local_kv[0],
+            input=local_kv if is_fused else local_kv[0],
         )
 
         # Compute RDMA communication bytes for nvtx logging
@@ -1536,7 +1580,7 @@ class DistAttnRuntime:
         )
         group_cast_kv_rdma_bytes = self._compute_grpcoll_bytes(
             comm_tokens=internode_output_seqlen * num_tensors,
-            input=local_kv if self.concat_kv else local_kv[0],
+            input=local_kv if is_fused else local_kv[0],
         )
 
         # Launch group cast kernel
@@ -1549,7 +1593,8 @@ class DistAttnRuntime:
                 f"{input_kv_dtype=} | "
                 f"{output_kv_shape=} | "
                 f"{output_kv_dtype=} | "
-                f"{num_tensors=}"
+                f"{num_tensors=} | "
+                f"{asymmetric_kv=}"
             )
         ):
             remote_kv_work = group_cast(
@@ -1561,6 +1606,19 @@ class DistAttnRuntime:
                 buffer_name=buffer_name,
                 kernel_barrier=kernel_barrier,
             )
+
+        # For asymmetric: wrap the work so wait_post_process splits the fused
+        # buffer back into a (remote_k, remote_v) tuple along the head_dim.
+        # We hijack the post_process_fn chain on the same underlying work; no
+        # extra class needed.
+        if asymmetric_kv:
+            inner_pp = remote_kv_work.post_process_fn
+
+            def _split_post_process(buf, _inner=inner_pp, _dk=asym_d_k):
+                ready = _inner(buf)
+                return ready[..., :_dk].contiguous(), ready[..., _dk:].contiguous()
+
+            remote_kv_work.post_process_fn = _split_post_process
 
         return remote_kv_work, remote_kv_buffer
 
@@ -2088,8 +2146,34 @@ class DistAttnRuntime:
             partial_dkv_reduce_work (WorkWithPostProcessFn): partial dkv group-reduce work
         """
 
+        # MLA-style asymmetric K/V (d_qk != d_v): concat dK and dV along the
+        # head_dim (last) axis into a single fused tensor, then go through the
+        # standard fused-buffer reduce path. Bandwidth = seqlen * h * (d_k+d_v).
+        asymmetric_kv = self.is_asymmetric_kv
+        if asymmetric_kv:
+            assert isinstance(ref_remote_dkv, tuple) and len(ref_remote_dkv) == 2
+            asym_d_k = ref_remote_dkv[0].shape[-1]
+            # partial_local_dkv is always a tuple here (concat_dkv=False).
+            assert isinstance(partial_local_dkv, tuple)
+            # Cache the fused local-dkv buffer for the lifetime of one bwd call
+            # so ALL overlap stages accumulate into the SAME tensor (mirror of
+            # the symmetric concat_dkv=True path which reuses one
+            # partial_local_dkv across stages). Reset in `_reset_work_list`.
+            if self._asym_fused_local_dkv is None:
+                self._asym_fused_local_dkv = torch.cat(
+                    partial_local_dkv, dim=-1
+                )  # cat-on-last-dim is contiguous
+            partial_local_dkv = self._asym_fused_local_dkv
+            if isinstance(partial_remote_dkv, tuple):
+                partial_remote_dkv = torch.cat(partial_remote_dkv, dim=-1)
+            ref_remote_dkv = torch.cat(ref_remote_dkv, dim=-1)
+
+        # The fused-buffer path covers both symmetric concat_dkv=True and the
+        # asymmetric cat-on-feature case.
+        is_fused = self.concat_kv or asymmetric_kv
+
         # Prepare the meta info
-        if self.concat_kv:  # ref_remote_dkv is a fused tensor
+        if is_fused:  # ref_remote_dkv is a fused tensor
             dtype = ref_remote_dkv.dtype
             device = ref_remote_dkv.device
             remote_dkv_shape = ref_remote_dkv.shape
@@ -2101,7 +2185,8 @@ class DistAttnRuntime:
                 *ref_remote_dkv[0].shape[1:],
             )
 
-        # Get the group-reduce args for dkv
+        # Get the group-reduce args for dkv. CommMeta has already baked
+        # packed_times (1 for asymmetric, 2 for symmetric) into the arg list.
         group_reduce_arg = self.comm_meta.kv_group_collective_args_list[overlap_stage]
         group_reduce_kwargs = group_reduce_arg.to_group_reduce_args()
 
@@ -2121,10 +2206,12 @@ class DistAttnRuntime:
                 ),
                 device=device,
             )
-            if not self.concat_dkv:
+            if not is_fused:
                 partial_remote_dkv = self._maybe_chunk(partial_remote_dkv, num_chunks=2)
         elif not self.use_native_grpcoll and not self.bwd_hp_reduce:
-            assert self.concat_dkv
+            # Asymmetric path already fused above into single tensors; symmetric
+            # tuple path is rejected here (matches the original assertion).
+            assert is_fused
             # Downcast to the same dtype as dkv
             # if using non-native grpcoll and not reduce in high-precision
             partial_remote_dkv = partial_remote_dkv.to(dtype)
@@ -2140,7 +2227,7 @@ class DistAttnRuntime:
             )
 
         # Compute communication bytes for nvtx logging
-        if self.concat_dkv:
+        if is_fused:
             input_dkv_shape = partial_remote_dkv.shape
             input_dkv_dtype = partial_remote_dkv.dtype
             output_dkv_shape = partial_local_dkv.shape
@@ -2154,7 +2241,7 @@ class DistAttnRuntime:
             num_tensors_of_dkv = 2
         group_reduce_dkv_bytes = self._compute_grpcoll_bytes(
             comm_tokens=group_reduce_arg.group_reduce_comm_tokens * num_tensors_of_dkv,
-            input=partial_remote_dkv if self.concat_dkv else partial_remote_dkv[0],  # type: ignore
+            input=partial_remote_dkv if is_fused else partial_remote_dkv[0],  # type: ignore
         )
 
         # Compute RDMA communication bytes for nvtx logging
@@ -2163,7 +2250,7 @@ class DistAttnRuntime:
         )
         group_reduce_dkv_rdma_bytes = self._compute_grpcoll_bytes(
             comm_tokens=internode_output_seqlen * num_tensors_of_dkv,
-            input=partial_remote_dkv if self.concat_dkv else partial_remote_dkv[0],  # type: ignore
+            input=partial_remote_dkv if is_fused else partial_remote_dkv[0],  # type: ignore
         )
 
         # Launch group-reduce kernel
@@ -2176,7 +2263,8 @@ class DistAttnRuntime:
                 f"{input_dkv_dtype=} | "
                 f"{output_dkv_shape=} | "
                 f"{output_dkv_dtype=} | "
-                f"{num_tensors_of_dkv=}"
+                f"{num_tensors_of_dkv=} | "
+                f"{asymmetric_kv=}"
             )
         ):
             partial_dkv_reduce_work = group_reduce(
@@ -2189,6 +2277,23 @@ class DistAttnRuntime:
                 buffer_name=buffer_name,
                 kernel_barrier=kernel_barrier,
             )
+
+        # For asymmetric: hijack the post_process_fn to split the fused local
+        # dkv buffer back into a (dk, dv) tuple along the head_dim. The caller
+        # passes its own local_dkv tuple to wait_post_process, but we know
+        # the underlying reduce wrote into our cached fused buffer.
+        if asymmetric_kv:
+            inner_pp = partial_dkv_reduce_work.post_process_fn
+            fused_local_capture = partial_local_dkv
+
+            def _split_post_process(
+                _local_dkv_tuple, _inner=inner_pp, _fused=fused_local_capture,
+                _dk=asym_d_k,
+            ):
+                ready = _inner(_fused)
+                return ready[..., :_dk].contiguous(), ready[..., _dk:].contiguous()
+
+            partial_dkv_reduce_work.post_process_fn = _split_post_process
 
         return partial_dkv_reduce_work
 
@@ -2976,6 +3081,10 @@ class DistAttnRuntime:
             None
         ] * self.overlap_degree  # bwd
         self.partial_dsink_reduce_work: WorkWithPostProcessFn = None  # bwd
+        # MLA-style asymmetric K/V: fused local-dkv buffer cache (one per bwd
+        # call, shared across all overlap stages so reductions accumulate
+        # into the same tensor).
+        self._asym_fused_local_dkv: torch.Tensor | None = None
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, DistAttnRuntime):
@@ -3047,6 +3156,7 @@ class DistAttnFunc(torch.autograd.Function):
                 softcap=softcap,
                 return_max_logits=return_max_logits,
             )
+
 
         # init kernel barrier for native grpcoll to ensure comm kernel is always preceded by compute kernel
         kernel_barrier_fetch = KernelBarrier(
