@@ -770,7 +770,6 @@ class TestBlockSparseSimple(unittest.TestCase):
             nhk=num_heads_kv,
             pack_gqa=False,
             deterministic=False,
-            test_accumulation_inplace=False,
             swap_ab=False,
             ref_block_size=cfg["ref_block_size"],
             block_sparse=True,
