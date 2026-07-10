@@ -1023,6 +1023,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                             )
                             for inner_store in cls._PARAM_SPACE["inner_store_mode"]:
                                 env_bwd = {
+                                    "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
                                     "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
                                     "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store,
                                 }
