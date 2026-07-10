@@ -180,8 +180,11 @@ struct Mask {
     }
   };
 
-  // Mask invalid columns (N-side padding, for BlockSparse LoopK / IndexSparse)
-  template <typename Engine, typename Layout>
+  // Mask invalid columns (N-side padding, for BlockSparse LoopK / IndexSparse).
+  // MaskLow=false (default): masks columns >= kBlockN - num_invalid (high end, for MinToMax).
+  // MaskLow=true: masks columns < num_invalid (low end, for MaxToMin where padding
+  //   occupies the beginning of the tile due to the reversed scatter fill order).
+  template <bool MaskLow = false, typename Engine, typename Layout>
   CUTLASS_DEVICE void apply_padding_mask(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");
     auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
@@ -197,21 +200,36 @@ struct Mask {
     Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
 
     int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
-    int const seqlenk_col_limit = kBlockN - num_invalid_token - thread_col_offset;
 
+    if constexpr (MaskLow) {
+      int const low_col_limit = num_invalid_token - thread_col_offset;
 #pragma unroll
-    for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
-      if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
+      for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+        if (int(get<Col>(t0ScS_rowcol(_0{}, n))) < low_col_limit) {
 #pragma unroll
-        for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-          tSrS_rowcol(m, n) = -INFINITY;
+          for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+            tSrS_rowcol(m, n) = -INFINITY;
+          }
+        }
+      }
+    } else {
+      int const seqlenk_col_limit = kBlockN - num_invalid_token - thread_col_offset;
+#pragma unroll
+      for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+        if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
+#pragma unroll
+          for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+            tSrS_rowcol(m, n) = -INFINITY;
+          }
         }
       }
     }
   }
 
-  // Mask invalid rows (M-side padding, for BlockSparse LoopQ)
-  template <typename Engine, typename Layout>
+  // Mask invalid rows (M-side padding, for BlockSparse LoopQ).
+  // MaskLow=false (default): masks rows >= kBlockM - num_invalid (high end, MinToMax).
+  // MaskLow=true: masks rows < num_invalid (low end, MaxToMin).
+  template <bool MaskLow = false, typename Engine, typename Layout>
   CUTLASS_DEVICE void apply_padding_mask_row(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");
     auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
@@ -227,14 +245,27 @@ struct Mask {
     Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
 
     int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-    int const seqlenq_row_limit = kBlockM - num_invalid_token - thread_row_offset;
 
+    if constexpr (MaskLow) {
+      int const low_row_limit = num_invalid_token - thread_row_offset;
 #pragma unroll
-    for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-      if (int(get<Row>(t0ScS_rowcol(m, _0{}))) >= seqlenq_row_limit) {
+      for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+        if (int(get<Row>(t0ScS_rowcol(m, _0{}))) < low_row_limit) {
 #pragma unroll
-        for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
-          tSrS_rowcol(m, n) = -INFINITY;
+          for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+            tSrS_rowcol(m, n) = -INFINITY;
+          }
+        }
+      }
+    } else {
+      int const seqlenq_row_limit = kBlockM - num_invalid_token - thread_row_offset;
+#pragma unroll
+      for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+        if (int(get<Row>(t0ScS_rowcol(m, _0{}))) >= seqlenq_row_limit) {
+#pragma unroll
+          for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+            tSrS_rowcol(m, n) = -INFINITY;
+          }
         }
       }
     }

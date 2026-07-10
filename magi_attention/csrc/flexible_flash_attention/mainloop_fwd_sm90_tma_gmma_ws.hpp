@@ -1049,7 +1049,7 @@ struct CollectiveMainloopFwdSm90 {
     };
     auto padding_mask_fn = [&](int /*n_block*/) {
       if constexpr (IsSparse) {
-        mask.apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
+        mask.template apply_padding_mask<BlockMetaT::kPaddingAtLowEnd>(tSrS, block_meta.num_invalid_token, thread_idx);
       }
     };
 
@@ -1128,12 +1128,11 @@ struct CollectiveMainloopFwdSm90 {
       gemm_QK();
       warpgroup_wait<0>();
       consumer_release(pipeline_k, smem_pipe_read_k);
-      // Head mask: dense → boundary; sparse MaxToMin → padding (head is always max-end);
-      // sparse MinToMax → runtime check (head is min-end, but single-block case is also padding block).
+      // Head mask: dense → boundary; sparse → check if head is the padding block.
+      // padding_block() is direction-aware: MinToMax=last tile, BlockSparse MaxToMin=first tile (=0),
+      // IndexSparse MaxToMin=last tile (=inner_block_cnt-1, which IS the head for MaxToMin).
       if constexpr (!(IsSparse)) {
         apply_mask_softmax(block_meta.inner_block_idx, boundary_mask_fn, cute::true_type{}, /*is_first=*/true);
-      } else if constexpr (InnerDirMaxToMin) {
-        apply_mask_softmax(block_meta.inner_block_idx, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
       } else if (block_meta.num_invalid_token > 0 && block_meta.inner_block_idx == block_meta.padding_block()) {
         apply_mask_softmax(block_meta.inner_block_idx, padding_mask_fn, cute::true_type{}, /*is_first=*/true);
       } else {
@@ -1232,15 +1231,13 @@ struct CollectiveMainloopFwdSm90 {
       ++work_idx;
     };
 
-    // MMA body: sparse uses compile-time direction for mask selection;
+    // MMA body: sparse uses padding_block() for mask selection (works for both directions);
     // Dense uses mask_dispatch (3-lambda, compile-time zone splitting) for zero-overhead inner loop.
     auto mma_body = [&]() {
       if constexpr (IsSparse) {
         if (block_meta.is_finish())
           return;
-        if constexpr (InnerDirMaxToMin) {
-          fwd_step(block_meta.inner_block_idx, no_mask_fn, cute::false_type{});
-        } else if (block_meta.inner_block_idx == block_meta.padding_block() && block_meta.num_invalid_token > 0) {
+        if (block_meta.num_invalid_token > 0 && block_meta.inner_block_idx == block_meta.padding_block()) {
           fwd_step(block_meta.inner_block_idx, padding_mask_fn, cute::false_type{});
         } else {
           fwd_step(block_meta.inner_block_idx, no_mask_fn, cute::false_type{});

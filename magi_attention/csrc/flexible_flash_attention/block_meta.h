@@ -169,6 +169,9 @@ struct BlockSparseBlockMeta {
   static constexpr bool NeedsBatchLoop = true;
   static constexpr bool InnerLoopQ = InnerLoopQ_;
   static constexpr int InnerBlockSize = kBlockN_;
+  // MaxToMin anchor-based fill reverses SMEM order, placing overflow (clamped) tokens
+  // at the LOW end of the last-processed tile (inner_block_idx=0).
+  static constexpr bool kPaddingAtLowEnd = InnerDirMaxToMin_;
 
   int const outer_tile_idx; // m_block for InnerLoopK, n_block for InnerLoopQ
   int const bidh;
@@ -381,7 +384,11 @@ struct BlockSparseBlockMeta {
 
   CUTLASS_DEVICE
   int padding_block() const {
-    return inner_block_cnt - 1;
+    if constexpr (kDir == flash::DispatchDirection::MaxToMin) {
+      return 0;
+    } else {
+      return inner_block_cnt - 1;
+    }
   }
 
   template <flash::DispatchDirection>
@@ -461,6 +468,9 @@ struct IndexSparseBlockMeta {
   static constexpr int SparseKBlockSize = SparseKBlockSize_;
   static constexpr bool InnerLoopQ = InnerLoopQ_;
   static constexpr bool NeedsBatchLoop = true;
+  // IndexSparse uses linear base (inner_block_idx * InnerBlockSize); padding is always at
+  // the HIGH end of padding_block (= inner_block_cnt-1), regardless of iteration direction.
+  static constexpr bool kPaddingAtLowEnd = false;
 
   // ─── Scheduler-assigned coordinates (const, computed in init-list) ───
   int const outer_tile_idx;

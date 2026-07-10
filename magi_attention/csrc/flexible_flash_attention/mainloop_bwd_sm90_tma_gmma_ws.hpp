@@ -3039,7 +3039,7 @@ struct CollectiveMainloopBwdSm90 {
             mask.template apply_padding_mask(tSrS, num_invalid_k_token, thread_idx);
           }
           if (need_row_mask) {
-            mask.template apply_padding_mask_row(tSrS, block_meta.num_invalid_token, thread_idx);
+            mask.template apply_padding_mask_row<BlockMetaT::kPaddingAtLowEnd>(tSrS, block_meta.num_invalid_token, thread_idx);
           }
         };
         auto sparse_no_mask_fn = [&](int /*m_blk*/) {};
@@ -3890,7 +3890,7 @@ struct CollectiveMainloopBwdSm90 {
     // --- Mask lambdas ---
     auto padding_mask_fn = [&](int /*n_blk*/) {
       if constexpr (IsSparse) {
-        mask.template apply_padding_mask(tSrS, block_meta.num_invalid_token, thread_idx);
+        mask.template apply_padding_mask<BlockMetaT::kPaddingAtLowEnd>(tSrS, block_meta.num_invalid_token, thread_idx);
       }
     };
     auto sparse_no_mask_fn = [&](int /*n_blk*/) {};
