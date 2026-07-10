@@ -579,6 +579,7 @@ def _flex_flash_attn_bwd(
     pack_gqa: bool = False,
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    swap_bwd_qk_loop: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
@@ -899,9 +900,9 @@ def _flex_flash_attn_bwd(
         )
 
     # GQA (qhead_per_kvhead > 1) needs dK/dV accum+postprocess since multiple Q heads
-    # accumulate into the same dK/dV. SM90 varlen_k with qhead_per_kvhead==1 now uses
-    # ragged TMA tensors for direct store, so no longer needs accum+postprocess.
-    dKV_postprocess = qhead_per_kvhead > 1
+    # accumulate into the same dK/dV. LoopK also needs it since multiple Q tiles
+    # contribute to the same dK/dV via atomic reduce.
+    dKV_postprocess = qhead_per_kvhead > 1 or swap_bwd_qk_loop
     if dKV_postprocess:
         head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
         if cu_seqlens_k is None:
@@ -1100,6 +1101,7 @@ def _flex_flash_attn_bwd(
             (seqlen_q_rounded // m_block_size == 1),
             (seqlen_k_rounded // n_block_size == 1),
             magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+            swap_bwd_qk_loop,
         )
 
     if compile_key not in _flex_flash_attn_bwd.compile_cache:
@@ -1203,6 +1205,7 @@ def _flex_flash_attn_bwd(
                     mask_mod=mask_mod,
                     has_aux_tensors=aux_tensors is not None,
                     subtile_factor=subtile_factor,
+                    swap_bwd_qk_loop=swap_bwd_qk_loop,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
