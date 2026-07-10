@@ -154,6 +154,7 @@ jobs:
           coverage xml -i
         env:
           COVERAGE_RUN: True
+          MAGI_ATTENTION_JIT_COMPILE_DISABLED: "1"
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:

@@ -130,22 +130,74 @@ class TestFlexFlashAttn(DistTestBase):
             },
         ]
 
-        # Use indices instead of dicts to make them hashable
-        ref_block_config_indices = list(range(len(self.valid_ref_block_configs)))
-
     # -- Kernel precompile for CI --
-    _REF_BLOCK_CONFIGS = [
-        {"swap_ab": False, "ref_block_size": None, "pack_gqa": False, "block_sparse": False},
-        {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": True, "block_sparse": False},
-        {"swap_ab": False, "ref_block_size": (128, 128), "pack_gqa": False, "block_sparse": True},
-        {"swap_ab": False, "ref_block_size": (64, 128), "pack_gqa": False, "block_sparse": True},
-        {"swap_ab": False, "ref_block_size": (64, 128), "pack_gqa": True, "block_sparse": True},
-        {"swap_ab": True, "ref_block_size": (16, 64), "pack_gqa": False, "block_sparse": True},
-        {"swap_ab": True, "ref_block_size": (8, 64), "pack_gqa": False, "block_sparse": False},
-        {"swap_ab": True, "ref_block_size": (16, 64), "pack_gqa": False, "block_sparse": False},
-        {"swap_ab": True, "ref_block_size": (32, 64), "pack_gqa": False, "block_sparse": False},
-        {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": True, "block_sparse": False},
-        {"swap_ab": True, "ref_block_size": (64, 64), "pack_gqa": True, "block_sparse": True},
+    _REF_BLOCK_CONFIGS: list[dict] = [
+        {
+            "swap_ab": False,
+            "ref_block_size": None,
+            "pack_gqa": False,
+            "block_sparse": False,
+        },
+        {
+            "swap_ab": False,
+            "ref_block_size": (128, 128),
+            "pack_gqa": True,
+            "block_sparse": False,
+        },
+        {
+            "swap_ab": False,
+            "ref_block_size": (128, 128),
+            "pack_gqa": False,
+            "block_sparse": True,
+        },
+        {
+            "swap_ab": False,
+            "ref_block_size": (64, 128),
+            "pack_gqa": False,
+            "block_sparse": True,
+        },
+        {
+            "swap_ab": False,
+            "ref_block_size": (64, 128),
+            "pack_gqa": True,
+            "block_sparse": True,
+        },
+        {
+            "swap_ab": True,
+            "ref_block_size": (16, 64),
+            "pack_gqa": False,
+            "block_sparse": True,
+        },
+        {
+            "swap_ab": True,
+            "ref_block_size": (8, 64),
+            "pack_gqa": False,
+            "block_sparse": False,
+        },
+        {
+            "swap_ab": True,
+            "ref_block_size": (16, 64),
+            "pack_gqa": False,
+            "block_sparse": False,
+        },
+        {
+            "swap_ab": True,
+            "ref_block_size": (32, 64),
+            "pack_gqa": False,
+            "block_sparse": False,
+        },
+        {
+            "swap_ab": True,
+            "ref_block_size": (64, 64),
+            "pack_gqa": True,
+            "block_sparse": False,
+        },
+        {
+            "swap_ab": True,
+            "ref_block_size": (64, 64),
+            "pack_gqa": True,
+            "block_sparse": True,
+        },
     ]
     _HEAD_DIMS = [64, 128]
     _PACK_GQA_FACTORS = [1, 2, 8]
@@ -155,73 +207,389 @@ class TestFlexFlashAttn(DistTestBase):
         from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
-        for hd in cls._HEAD_DIMS:
-            for cfg in cls._REF_BLOCK_CONFIGS:
-                swap_ab = cfg["swap_ab"]
-                ref_block_size = cfg["ref_block_size"]
-                pack_gqa = cfg["pack_gqa"]
-                block_sparse = cfg["block_sparse"]
+        _DTYPES = [torch.bfloat16, torch.float16]
 
-                pgf_list = cls._PACK_GQA_FACTORS if pack_gqa else [1]
-                for pgf in pgf_list:
-                    # FWD
-                    add_ffa_spec(
-                        specs,
-                        direction="fwd",
-                        head_dim=hd,
-                        ref_block_size=ref_block_size,
-                        swap_ab=swap_ab,
-                        pack_gqa=pack_gqa,
-                        pack_gqa_factor=pgf,
-                        block_sparse=block_sparse,
-                    )
-                    # BWD (swap_ab is FWD-only; block_sparse BWD uses default tile)
-                    if not swap_ab:
+        for hd in cls._HEAD_DIMS:
+            for dt in _DTYPES:
+                for cfg in cls._REF_BLOCK_CONFIGS:
+                    swap_ab = cfg["swap_ab"]
+                    ref_block_size = cfg["ref_block_size"]
+                    pack_gqa = cfg["pack_gqa"]
+                    block_sparse = cfg["block_sparse"]
+
+                    pgf_list = cls._PACK_GQA_FACTORS if pack_gqa else [1]
+                    for pgf in pgf_list:
+                        # FWD (output_dtype=float32 is the runtime default)
                         add_ffa_spec(
                             specs,
-                            direction="bwd",
+                            direction="fwd",
                             head_dim=hd,
-                            disable_atomic=block_sparse,
+                            compute_dtype=dt,
+                            output_dtype=torch.float32,
+                            ref_block_size=ref_block_size,
+                            swap_ab=swap_ab,
                             pack_gqa=pack_gqa,
                             pack_gqa_factor=pgf,
                             block_sparse=block_sparse,
                         )
-                        # BWD LoopK variant
-                        if not block_sparse:
+                        # BWD (swap_ab is FWD-only; block_sparse BWD uses default tile)
+                        if not swap_ab:
                             add_ffa_spec(
                                 specs,
                                 direction="bwd",
                                 head_dim=hd,
-                                bwd_inner_loop_k=True,
-                                disable_dq_atomic=True,
+                                compute_dtype=dt,
+                                disable_atomic=block_sparse,
                                 pack_gqa=pack_gqa,
                                 pack_gqa_factor=pgf,
+                                block_sparse=block_sparse,
                             )
-        return specs
+                            # BWD LoopK variant
+                            if not block_sparse:
+                                add_ffa_spec(
+                                    specs,
+                                    direction="bwd",
+                                    head_dim=hd,
+                                    compute_dtype=dt,
+                                    bwd_inner_loop_k=True,
+                                    disable_dq_atomic=True,
+                                    pack_gqa=pack_gqa,
+                                    pack_gqa_factor=pgf,
+                                )
 
-        # init flag generator and its iterator
-        self.flag_generator = FlagCombGenerator(
-            flags=[
-                "test_accumulation_inplace",
-                "deterministic",
-                "range_merge",
-                "random_attn_type_map",
-                "swap_bwd_qk_loop",
-                "ref_block_config_idx",  # Use index instead of dict
-                "max_seqlen_q",
-                "return_max_logits",
-                "cat_gqa",
-            ],
-            options={
-                "ref_block_config_idx": ref_block_config_indices,
-            },
-            defaults={
-                "ref_block_config_idx": 0,
-            },
-            groups=[("range_merge", "swap_bwd_qk_loop")],
-            strategy="heuristic",
+        # Feature flags exercised by FlagCombGenerator at runtime: deterministic,
+        # range_merge, return_max_logits, cat_gqa.  Only enumerate combos that
+        # produce distinct kernel URIs on the non-swap_ab, non-block_sparse base.
+        _FEATURE_COMBOS: list[dict] = [
+            {"deterministic": True},
+            {"return_max_logits": True},
+            {"deterministic": True, "return_max_logits": True},
+            {"range_merge": True},
+            {"deterministic": True, "range_merge": True},
+        ]
+        for hd in cls._HEAD_DIMS:
+            pgf = 2 if hd == 64 else 8
+            for dt in _DTYPES:
+                for feat in _FEATURE_COMBOS:
+                    det = feat.get("deterministic", False)
+                    rm = feat.get("range_merge", False)
+                    rml = feat.get("return_max_logits", False)
+                    # FWD dense
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        deterministic=det,
+                        range_merge=rm,
+                        return_max_logits=rml,
+                    )
+                    # FWD dense disable_atomic (output=float32 via explicit override)
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        disable_atomic=True,
+                        deterministic=det,
+                        range_merge=rm,
+                        return_max_logits=rml,
+                    )
+                    # FWD dense with pack_gqa
+                    for p in [1, pgf]:
+                        add_ffa_spec(
+                            specs,
+                            direction="fwd",
+                            head_dim=hd,
+                            compute_dtype=dt,
+                            output_dtype=torch.float32,
+                            pack_gqa=p > 1,
+                            pack_gqa_factor=p,
+                            deterministic=det,
+                            range_merge=rm,
+                            return_max_logits=rml,
+                        )
+                    # BWD dense
+                    add_ffa_spec(
+                        specs,
+                        direction="bwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        deterministic=det,
+                        range_merge=rm,
+                    )
+                    # BWD dense pack_gqa
+                    for p in [1, pgf]:
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            head_dim=hd,
+                            compute_dtype=dt,
+                            pack_gqa=p > 1,
+                            pack_gqa_factor=p,
+                            deterministic=det,
+                            range_merge=rm,
+                        )
+                        # Also with pack_gqa=True even at pgf=1 (test can enable flag)
+                        if p == 1 and (det or rm):
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                head_dim=hd,
+                                compute_dtype=dt,
+                                pack_gqa=True,
+                                pack_gqa_factor=1,
+                                deterministic=det,
+                                range_merge=rm,
+                            )
+                    # BWD with cat_gqa (mutually exclusive with pack_gqa at kernel level)
+                    add_ffa_spec(
+                        specs,
+                        direction="bwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        cat_gqa=True,
+                        pack_gqa_factor=pgf,
+                        deterministic=det,
+                        range_merge=rm,
+                    )
+                    # BWD LoopK with range_merge
+                    if rm:
+                        for p in [1, pgf]:
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                head_dim=hd,
+                                compute_dtype=dt,
+                                bwd_inner_loop_k=True,
+                                disable_dq_atomic=True,
+                                pack_gqa=p > 1,
+                                pack_gqa_factor=p,
+                                range_merge=True,
+                            )
+                            # pack_gqa=True at pgf=1
+                            if p == 1:
+                                add_ffa_spec(
+                                    specs,
+                                    direction="bwd",
+                                    head_dim=hd,
+                                    compute_dtype=dt,
+                                    bwd_inner_loop_k=True,
+                                    disable_dq_atomic=True,
+                                    pack_gqa=True,
+                                    pack_gqa_factor=1,
+                                    range_merge=True,
+                                )
+                                # LoopK + rangemerge without disable_dq_atomic
+                                add_ffa_spec(
+                                    specs,
+                                    direction="bwd",
+                                    head_dim=hd,
+                                    compute_dtype=dt,
+                                    bwd_inner_loop_k=True,
+                                    pack_gqa=True,
+                                    pack_gqa_factor=1,
+                                    range_merge=True,
+                                )
+
+        # FWD swap_ab with feature flags (deterministic, range_merge, return_max_logits)
+        _SWAP_TILES = [(8, 64), (16, 64), (32, 64)]
+        _SWAP_FEATURES: list[dict] = [
+            {"deterministic": True},
+            {"range_merge": True},
+            {"deterministic": True, "range_merge": True},
+            {"return_max_logits": True},
+            {"deterministic": True, "return_max_logits": True},
+        ]
+        for hd in cls._HEAD_DIMS:
+            pgf = 2 if hd == 64 else 8
+            for dt in _DTYPES:
+                for tile in _SWAP_TILES:
+                    for feat in _SWAP_FEATURES:
+                        add_ffa_spec(
+                            specs,
+                            direction="fwd",
+                            head_dim=hd,
+                            compute_dtype=dt,
+                            output_dtype=torch.float32,
+                            swap_ab=True,
+                            ref_block_size=tile,
+                            deterministic=feat.get("deterministic", False),
+                            range_merge=feat.get("range_merge", False),
+                            return_max_logits=feat.get("return_max_logits", False),
+                        )
+                    # swap_ab + pack_gqa
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        swap_ab=True,
+                        ref_block_size=(64, 64),
+                        pack_gqa=True,
+                        pack_gqa_factor=pgf,
+                        deterministic=True,
+                    )
+
+        # Block sparse BWD with range_merge (from FlagCombGenerator)
+        _BS_PACK_CONFIGS: list[tuple[tuple[int, int], bool, int]] = [
+            ((128, 128), False, 1),
+            ((64, 128), True, 4),
+        ]
+        for hd in [128]:
+            for dt in _DTYPES:
+                for rbs, bs_pack, bs_pgf in _BS_PACK_CONFIGS:
+                    add_ffa_spec(
+                        specs,
+                        direction="bwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        disable_atomic=True,
+                        block_sparse=True,
+                        range_merge=True,
+                        pack_gqa=bs_pack,
+                        pack_gqa_factor=bs_pgf,
+                        sparse_k_block_size=rbs[1] // 2,
+                    )
+                    # Also without explicit kbs (uses default=1)
+                    if bs_pack:
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            head_dim=hd,
+                            compute_dtype=dt,
+                            disable_atomic=True,
+                            block_sparse=True,
+                            range_merge=True,
+                            pack_gqa=True,
+                            pack_gqa_factor=bs_pgf,
+                        )
+
+        # Index sparse BWD LoopK (hd=64, non-packgqa, from TestFlexFlashAttn)
+        add_ffa_spec(
+            specs,
+            direction="bwd",
+            head_dim=64,
+            compute_dtype=torch.bfloat16,
+            index_sparse=True,
+            bwd_inner_loop_k=True,
+            disable_dq_atomic=True,
+            bwd_dq_bf16=True,
         )
-        self.flag_iterator = iter(self.flag_generator)
+
+        # FWD swap_ab with range_merge+return_max_logits and packgqa+return_max_logits
+        for hd in cls._HEAD_DIMS:
+            pgf = 2 if hd == 64 else 8
+            for dt in _DTYPES:
+                for tile in [(8, 64), (16, 64), (32, 64)]:
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        swap_ab=True,
+                        ref_block_size=tile,
+                        range_merge=True,
+                        return_max_logits=True,
+                    )
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        swap_ab=True,
+                        ref_block_size=tile,
+                        deterministic=True,
+                        range_merge=True,
+                        return_max_logits=True,
+                    )
+                # swap_ab + packgqa + deterministic + return_max_logits
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    head_dim=hd,
+                    compute_dtype=dt,
+                    output_dtype=torch.float32,
+                    swap_ab=True,
+                    ref_block_size=(64, 64),
+                    pack_gqa=True,
+                    pack_gqa_factor=pgf,
+                    deterministic=True,
+                    return_max_logits=True,
+                )
+                # swap_ab + packgqa + deterministic + range_merge
+                for p in [1, pgf]:
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        swap_ab=True,
+                        ref_block_size=(64, 64),
+                        pack_gqa=True,
+                        pack_gqa_factor=p,
+                        deterministic=True,
+                        range_merge=True,
+                    )
+                # FWD dense packgqa + range_merge + return_max_logits
+                for p in [1, pgf if hd == 64 else 1]:
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        pack_gqa=True,
+                        pack_gqa_factor=p,
+                        deterministic=True,
+                        range_merge=True,
+                        return_max_logits=True,
+                    )
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        pack_gqa=True,
+                        pack_gqa_factor=p,
+                        range_merge=True,
+                        return_max_logits=True,
+                    )
+                # pgf=1 pack_gqa=True for rangemerge+return_max_logits (non-swap)
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    head_dim=hd,
+                    compute_dtype=dt,
+                    output_dtype=torch.float32,
+                    pack_gqa=True,
+                    pack_gqa_factor=1,
+                    range_merge=True,
+                    return_max_logits=True,
+                )
+                # With ref_block_size=(128,128) for 64hd → m128n128 tile
+                if hd == 64:
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        ref_block_size=(128, 128),
+                        pack_gqa=True,
+                        pack_gqa_factor=1,
+                        range_merge=True,
+                        return_max_logits=True,
+                    )
+
+        return specs
 
     @property
     def seed(self):
