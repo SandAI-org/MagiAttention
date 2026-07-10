@@ -2660,7 +2660,7 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
     @pytest.mark.slow
     def test_consumer_dkv_store(self):
         """Tier-1: consumer-side scatter dX store
-        (MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER=false) for both
+        (MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER=false) for both
         LoopK (dKV from consumer WGs) and LoopQ (dQ from consumer WGs)."""
         import os
 
@@ -2669,7 +2669,7 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
         test_case = "[consumer_dkv_store]"
         print(f"\n>>> {test_case} START", flush=True)
         t0 = time.time()
-        os.environ["MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER"] = "false"
+        os.environ["MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER"] = "false"
         if hasattr(get_ffa_jit_mod, "cache_clear"):
             get_ffa_jit_mod.cache_clear()
         try:
@@ -2681,7 +2681,7 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
                 test_case=test_case,
             )
         finally:
-            del os.environ["MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER"]
+            del os.environ["MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER"]
             if hasattr(get_ffa_jit_mod, "cache_clear"):
                 get_ffa_jit_mod.cache_clear()
         print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
@@ -2689,7 +2689,7 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
     @pytest.mark.slow
     def test_scalar_dx_store(self):
         """Tier-1: scalar atomicAdd dX store fallback
-        (MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE=false, i.e.
+        (MAGI_ATTENTION_FFA_INNER_STORE_MODE=atomicadd, i.e.
         kInnerStoreMode==InnerStoreMode::AtomicAdd) for both LoopK and LoopQ."""
         import os
 
@@ -2698,7 +2698,7 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
         test_case = "[scalar_dx_store]"
         print(f"\n>>> {test_case} START", flush=True)
         t0 = time.time()
-        os.environ["MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"] = "false"
+        os.environ["MAGI_ATTENTION_FFA_INNER_STORE_MODE"] = "atomicadd"
         if hasattr(get_ffa_jit_mod, "cache_clear"):
             get_ffa_jit_mod.cache_clear()
         try:
@@ -2710,7 +2710,7 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
                 test_case=test_case,
             )
         finally:
-            del os.environ["MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"]
+            del os.environ["MAGI_ATTENTION_FFA_INNER_STORE_MODE"]
             if hasattr(get_ffa_jit_mod, "cache_clear"):
                 get_ffa_jit_mod.cache_clear()
         print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)

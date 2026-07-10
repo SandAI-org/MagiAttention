@@ -795,9 +795,9 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                     if d is not None:
                         env["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = d
                     if lm is not None:
-                        env["MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE"] = lm
+                        env["MAGI_ATTENTION_FFA_INNER_LOAD_MODE"] = lm
                     if sm is not None:
-                        env["MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE"] = sm
+                        env["MAGI_ATTENTION_FFA_INNER_STORE_MODE"] = sm
                     if env and env not in env_combos:
                         env_combos.append(env)
 
@@ -917,11 +917,11 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = inner_dir
             env_keys.append("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
         if inner_load_mode is not None:
-            os.environ["MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE"] = inner_load_mode
-            env_keys.append("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE")
+            os.environ["MAGI_ATTENTION_FFA_INNER_LOAD_MODE"] = inner_load_mode
+            env_keys.append("MAGI_ATTENTION_FFA_INNER_LOAD_MODE")
         if inner_store_mode is not None:
-            os.environ["MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE"] = inner_store_mode
-            env_keys.append("MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE")
+            os.environ["MAGI_ATTENTION_FFA_INNER_STORE_MODE"] = inner_store_mode
+            env_keys.append("MAGI_ATTENTION_FFA_INNER_STORE_MODE")
         try:
             _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
         finally:
@@ -973,11 +973,11 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = inner_dir
             env_keys.append("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
         if inner_load_mode is not None:
-            os.environ["MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE"] = inner_load_mode
-            env_keys.append("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE")
+            os.environ["MAGI_ATTENTION_FFA_INNER_LOAD_MODE"] = inner_load_mode
+            env_keys.append("MAGI_ATTENTION_FFA_INNER_LOAD_MODE")
         if inner_store_mode is not None:
-            os.environ["MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE"] = inner_store_mode
-            env_keys.append("MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE")
+            os.environ["MAGI_ATTENTION_FFA_INNER_STORE_MODE"] = inner_store_mode
+            env_keys.append("MAGI_ATTENTION_FFA_INNER_STORE_MODE")
         try:
             _run_index_sparse_config(self.device, config, test_bwd=True)
         finally:

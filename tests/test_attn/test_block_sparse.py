@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-import time
 import unittest
 
 import torch
@@ -590,435 +589,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
             raise AssertionError("\n\n".join(err_msg_list))
 
 
-class TestBlockSparseSimple(unittest.TestCase):
-    """Standalone BlockSparse tests: basic FWD, LoopQ vs LoopK comparison, DisableAtomic.
-
-    These test specific behaviors that don't fit in the parametric sweep.
-    """
-
-    @property
-    def device(self):
-        return torch.cuda.current_device()
-
-    @classmethod
-    def precompile_kernel_specs(cls):
-        """Standard precompile interface — FFA kernels this class needs.
-
-        See magi_attention/testing/precompile.py.
-        """
-        from magi_attention.testing.precompile import add_ffa_spec
-
-        specs: dict = {}
-        sparse_common = dict(block_sparse=True, range_merge=True)
-
-        def _add(direction, **kw):
-            add_ffa_spec(specs, direction=direction, **kw)
-
-        # ── test_very_simple_block_sparse: GQA nhq=16/nhk=4 ──
-        for cfg in cls.VERY_SIMPLE_BLOCK_SPARSE_CONFIGS:
-            kbs = cfg["k_size"]
-            swap_bwd = cfg.get("swap_bwd_qk_loop", True)
-            rbs = cfg.get("ref_block_size", (128, 128))
-            common = dict(
-                pack_gqa=True,
-                pack_gqa_factor=4,
-                sparse_k_block_size=kbs,
-                **sparse_common,
-            )
-            _add("fwd", ref_block_size=rbs, disable_atomic=True, **common)
-            if swap_bwd:
-                _add(
-                    "bwd",
-                    disable_dq_atomic=True,
-                    bwd_inner_loop_k=True,
-                    bwd_dq_bf16=True,
-                    **common,
-                )
-            else:
-                _add(
-                    "bwd",
-                    ref_block_size=rbs,
-                    disable_atomic=True,
-                    bwd_dkv_bf16=True,
-                    **common,
-                )
-
-        # ── test_block_sparse_loopq_packgqa: MQA128, dense ref + sparse ──
-        for cfg in cls.LOOPQ_PACKGQA_CONFIGS:
-            kbs = cfg["k_block"]
-            # dense reference
-            _add("fwd", pack_gqa=True, pack_gqa_factor=128, range_merge=True)
-            _add(
-                "bwd",
-                pack_gqa=True,
-                pack_gqa_factor=128,
-                range_merge=True,
-                bwd_inner_loop_k=True,
-            )
-            # sparse
-            common = dict(
-                pack_gqa=True,
-                pack_gqa_factor=128,
-                sparse_k_block_size=kbs,
-                **sparse_common,
-            )
-            _add("fwd", ref_block_size=(128, 128), disable_atomic=True, **common)
-            _add("bwd", disable_atomic=True, **common)
-            if kbs == 128:
-                _add(
-                    "bwd",
-                    disable_dq_atomic=True,
-                    bwd_inner_loop_k=True,
-                    bwd_dq_bf16=True,
-                    **common,
-                )
-
-        # ── test_disable_atomic_block_sparse_*: kbs=128 ──
-        for inner_loop_k, pack_f, pack_gqa in [
-            (False, 128, True),
-            (True, 128, True),
-            (False, 1, False),
-        ]:
-            common = dict(
-                pack_gqa=pack_gqa,
-                pack_gqa_factor=pack_f,
-                sparse_k_block_size=128,
-                **sparse_common,
-            )
-            _add("fwd", ref_block_size=(128, 128), disable_atomic=True, **common)
-            _add(
-                "bwd",
-                disable_atomic=not inner_loop_k,
-                disable_dq_atomic=inner_loop_k,
-                bwd_inner_loop_k=inner_loop_k,
-                bwd_dq_bf16=inner_loop_k,
-                **common,
-            )
-
-        return specs
-
-    def _get_block_sparse_helper(self):
-        helper = _BlockSparseTestHelper.__new__(_BlockSparseTestHelper)
-        return helper
-
-    # ─── Block-Sparse FWD (very simple) ───
-
-    VERY_SIMPLE_BLOCK_SPARSE_CONFIGS = [
-        {
-            "name": "block_sparse_loopk_q64k64",
-            "q_size": 64,
-            "k_size": 64,
-            "swap_ab": False,
-            "block_sparse": True,
-            "swap_bwd_qk_loop": True,
-            "ref_block_size": (64, 128),
-        },
-        {
-            "name": "block_sparse_loopk_q128k1",
-            "q_size": 128,
-            "k_size": 1,
-            "swap_ab": False,
-            "block_sparse": True,
-            "swap_bwd_qk_loop": True,
-            "ref_block_size": (128, 128),
-        },
-        {
-            "name": "block_sparse_loopq_q64k64",
-            "q_size": 64,
-            "k_size": 64,
-            "swap_ab": False,
-            "block_sparse": True,
-            "swap_bwd_qk_loop": False,
-            "pack_gqa": False,
-            "ref_block_size": (64, 128),
-            "err_ratio_dict": {"dq_min_norm_rtol": 0.05},
-        },
-        {
-            "name": "block_sparse_loopq_q128k1",
-            "q_size": 128,
-            "k_size": 1,
-            "swap_ab": False,
-            "block_sparse": True,
-            "swap_bwd_qk_loop": False,
-            "pack_gqa": False,
-            "ref_block_size": (128, 128),
-            "err_ratio_dict": {"dq_min_norm_rtol": 0.05},
-        },
-    ]
-
-    @parameterize("cfg", VERY_SIMPLE_BLOCK_SPARSE_CONFIGS)
-    def test_very_simple_block_sparse(self, cfg):
-        """Lightweight block-sparse FWD test (GQA NHQ=16, NHK=4)."""
-        torch.manual_seed(42)
-        device = self.device
-
-        seqlen = 2048
-        dtype = torch.bfloat16
-        num_heads_q = 16
-        num_heads_kv = 4
-        head_dim = 128
-
-        q_block_size = cfg["q_size"]
-        sparse_k_block_size = cfg["k_size"]
-        swap_ab = cfg["swap_ab"]
-        block_sparse = cfg["block_sparse"]
-        swap_bwd_qk_loop = cfg.get("swap_bwd_qk_loop", block_sparse)
-        pack_gqa = cfg.get("pack_gqa", True)
-        ref_block_size = cfg["ref_block_size"]
-        block_size = (q_block_size, sparse_k_block_size)
-        max_seqlen_q = q_block_size
-
-        helper = self._get_block_sparse_helper()
-
-        q_block_size, sparse_k_block_size = block_size
-        num_q_blocks = seqlen // q_block_size
-        num_kv_blocks = seqlen // sparse_k_block_size
-        block_mask, _ = generate_block_sparse_pattern(
-            num_q_heads=num_heads_q,
-            num_kv_heads=num_heads_kv,
-            num_q_blocks=num_q_blocks,
-            num_kv_blocks=num_kv_blocks,
-            sparsity=0.5,
-            mode="per_kv_head",
-            sparse_format="block_mask",
-            device="cuda",
-        )
-
-        q = torch.randn(
-            1,
-            seqlen,
-            num_heads_q,
-            head_dim,
-            dtype=dtype,
-            device=device,
-            requires_grad=True,
-        )
-        k = torch.randn(
-            1,
-            seqlen,
-            num_heads_kv,
-            head_dim,
-            dtype=dtype,
-            device=device,
-            requires_grad=True,
-        )
-        v = torch.randn(
-            1,
-            seqlen,
-            num_heads_kv,
-            head_dim,
-            dtype=dtype,
-            device=device,
-            requires_grad=True,
-        )
-        do = torch.randn_like(q)
-
-        err_ratio_dict = cfg.get("err_ratio_dict", {})
-        test_case = f"[very_simple_block_sparse][{cfg['name']}]"
-        print(f"\n>>> {test_case} START", flush=True)
-        t0 = time.time()
-        helper.assert_close_to_torch_ref(
-            dtype=dtype,
-            q=q,
-            k=k,
-            v=v,
-            grad_output=do,
-            seqlen=seqlen,
-            block_size=block_size,
-            block_mask=block_mask,
-            head_wise="per_kv_head",
-            sparse_format="block_mask",
-            nhq=num_heads_q,
-            nhk=num_heads_kv,
-            pack_gqa=pack_gqa,
-            deterministic=False,
-            swap_ab=swap_ab,
-            ref_block_size=ref_block_size,
-            block_sparse=block_sparse,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
-            test_case=test_case,
-            sparsity_ratio=0.5,
-            uniform=True,
-            max_seqlen_q=max_seqlen_q,
-            err_ratio_dict=err_ratio_dict,
-        )
-        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
-
-    # ─── BlockSparse BWD LoopQ vs LoopK comparison ───
-
-    def _check_block_sparse_vs_dense_ref(
-        self,
-        *,
-        S: int,
-        n_attend: int,
-        k_block: int,
-        swap_bwd_qk_loop_cases: tuple[bool, ...],
-        test_case: str,
-        tol: float = 2e-2,
-    ):
-        """Comparison helper: block_sparse variants vs the dense-TMA ffa reference."""
-        from magi_attention.utils.sparse_utils import (
-            generate_ranges_from_block_mask_triton,
-        )
-
-        device = self.device
-        nhq, nhk, head_dim = 128, 1, 128
-        dtype = torch.bfloat16
-        torch.manual_seed(42)
-
-        n_q_blocks, n_k_blocks = S, S // k_block
-        sel = torch.rand(n_q_blocks, n_k_blocks, device=device).argsort(dim=1)[
-            :, : min(n_attend, n_k_blocks)
-        ]
-        block_mask = torch.zeros(
-            1, nhk, n_q_blocks, n_k_blocks, dtype=torch.bool, device=device
-        )
-        block_mask[0, 0].scatter_(1, sel, True)
-        q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
-            block_mask, 1, k_block
-        )
-        attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device=device)
-
-        q0 = torch.randn(S, nhq, head_dim, device=device, dtype=dtype)
-        k0 = torch.randn(S, nhk, head_dim, device=device, dtype=dtype)
-        v0 = torch.randn(S, nhk, head_dim, device=device, dtype=dtype)
-        do = torch.randn(S, nhq, head_dim, device=device, dtype=dtype)
-
-        def run(block_sparse: bool, swap_bwd_qk_loop: bool):
-            q = q0.clone().requires_grad_(True)
-            k = k0.clone().requires_grad_(True)
-            v = v0.clone().requires_grad_(True)
-            out, _ = flex_flash_attn_func(
-                q,
-                k,
-                v,
-                q_ranges=q_ranges,
-                k_ranges=k_ranges,
-                attn_type_map=attn_type_map,
-                block_sparse=block_sparse,
-                range_merge=True,
-                pack_gqa=True,
-                swap_bwd_qk_loop=swap_bwd_qk_loop,
-            )
-            out.backward(do)
-            return out.detach(), q.grad, k.grad, v.grad
-
-        ref = run(block_sparse=False, swap_bwd_qk_loop=True)
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        for swap in swap_bwd_qk_loop_cases:
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            got = run(block_sparse=True, swap_bwd_qk_loop=swap)
-            loop_name = "loopk" if swap else "loopq"
-            for name, a, b in zip(("out", "dq", "dk", "dv"), got, ref):
-                err = (
-                    (a.float() - b.float()).abs().max()
-                    / b.float().abs().max().clamp_min(1e-6)
-                ).item()
-                assert (
-                    err < tol
-                ), f"{test_case}[{loop_name}] {name} max_rel_err={err:.3e} >= {tol}"
-
-    LOOPQ_PACKGQA_CONFIGS = [
-        {"name": "kblk128", "S": 2048, "n_attend": 8, "k_block": 128},
-        {"name": "kblk96_residual_cols", "S": 2304, "n_attend": 8, "k_block": 96},
-    ]
-
-    @parameterize("cfg", LOOPQ_PACKGQA_CONFIGS)
-    def test_block_sparse_loopq_packgqa(self, cfg):
-        """BlockSparse BWD LoopQ + PackGQA (canonical MQA, q_block=1) against dense-TMA reference."""
-        test_case = f"[block_sparse_loopq_packgqa][{cfg['name']}]"
-        print(f"\n>>> {test_case} START", flush=True)
-        t0 = time.time()
-        self._check_block_sparse_vs_dense_ref(
-            S=cfg["S"],
-            n_attend=cfg["n_attend"],
-            k_block=cfg["k_block"],
-            swap_bwd_qk_loop_cases=(False, True) if cfg["k_block"] == 128 else (False,),
-            test_case=test_case,
-        )
-        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
-
-    # ─── Disable-Atomic BlockSparse validation ───
-
-    def _run_block_sparse_disable_atomic(
-        self,
-        S: int = 2048,
-        NHQ: int = 128,
-        NHK: int = 1,
-        D: int = 128,
-        kbs: int = 128,
-        sparsity: float = 0.9,
-        swap_bwd_qk_loop: bool | None = None,
-        pack_gqa: bool = True,
-    ):
-        """Run BlockSparse FWD+BWD with auto-set atomic flags and verify no NaN."""
-        torch.manual_seed(42)
-        q = torch.randn(
-            S, NHQ, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
-        )
-        k = torch.randn(
-            S, NHK, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
-        )
-        v = torch.randn(
-            S, NHK, D, device=self.device, dtype=torch.bfloat16, requires_grad=True
-        )
-
-        num_q_blocks = S // kbs
-        num_kv_blocks = S // kbs
-        block_mask, topk_indices = generate_block_sparse_pattern(
-            num_q_heads=NHQ,
-            num_kv_heads=NHK,
-            num_q_blocks=num_q_blocks,
-            num_kv_blocks=num_kv_blocks,
-            sparsity=sparsity,
-        )
-        from magi_attention.utils.sparse_utils import generate_ranges_from_block_mask
-
-        q_ranges, k_ranges = generate_ranges_from_block_mask(block_mask[0], kbs, kbs)
-        q_ranges = q_ranges.to(self.device)
-        k_ranges = k_ranges.to(self.device)
-
-        out, meta = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            block_sparse=True,
-            range_merge=True,
-            pack_gqa=pack_gqa,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
-            sparse_k_block_size=kbs,
-        )
-
-        self.assertEqual(out.shape, (S, NHQ, D))
-        self.assertFalse(out.isnan().any(), "FWD output contains NaN")
-
-        do = torch.randn_like(out)
-        out.backward(do)
-
-        self.assertIsNotNone(q.grad)
-        self.assertIsNotNone(k.grad)
-        self.assertIsNotNone(v.grad)
-        self.assertFalse(q.grad.isnan().any(), "dQ contains NaN")
-        self.assertFalse(k.grad.isnan().any(), "dK contains NaN")
-        self.assertFalse(v.grad.isnan().any(), "dV contains NaN")
-
-    def test_disable_atomic_block_sparse_bwd_innerloopq(self):
-        """InnerLoopQ (default): auto-sets disable_fwd + disable_bwd_dkv_atomic."""
-        self._run_block_sparse_disable_atomic(swap_bwd_qk_loop=None)
-
-    def test_disable_atomic_block_sparse_bwd_innerloopk(self):
-        """InnerLoopK: auto-sets disable_fwd + disable_bwd_dq_atomic."""
-        self._run_block_sparse_disable_atomic(swap_bwd_qk_loop=True)
-
-    def test_disable_atomic_block_sparse_mha(self):
-        """MHA (NHQ == NHK): auto-sets all three disable flags for InnerLoopQ."""
-        self._run_block_sparse_disable_atomic(NHQ=1, NHK=1, pack_gqa=False)
-
-
 # ═══════════════════════════════════════════════════════════
 # TestBlockSparseSweep — Classic CI sweep
 # ═══════════════════════════════════════════════════════════
@@ -1193,18 +763,14 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
 
     # parameter space shared by @parameterize and precompile_kernel_specs
     _PARAM_SPACE: dict[str, list] = dict(
-        nhq_nhk_hd=[(8, 8, 128), (16, 4, 128), (128, 1, 128), (1, 1, 64), (4, 2, 64)],
-        q_size_k_size=[(64, 64), (128, 1), (16, 128), (64, 8)],
+        nhq_nhk=[(8, 8), (16, 4), (128, 1), (1, 1), (4, 2)],
+        head_dim=[64, 128],
+        q_size=[1, 16, 64, 128],
+        k_size=[1, 8, 64, 128],
         sparsity_ratio=[0.5],
-        inner_env=[
-            {},
-            {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true"},
-            {"MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "false"},
-            {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "tma"},
-            {"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE": "cpasync"},
-            {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "atomicadd"},
-            {"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE": "tma1d"},
-        ],
+        inner_dir=["true", "false"],
+        inner_load_mode=["tma", "cpasync"],
+        inner_store_mode=["tma", "tma1d", "atomicadd"],
     )
 
     @property
@@ -1223,52 +789,80 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
     def precompile_kernel_specs(cls):
         """Standard precompile interface — see magi_attention/testing/precompile.py.
 
-        FWD + BWD InnerLoopK for each (nhq/nhk × hd × k_size × env) combo.
+        FWD + BWD InnerLoopK for each (pack_f × hd × k_size × inner modes) combo.
+        q_size and sparsity_ratio are runtime-only (don't affect compilation).
         """
         from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
-        for nhq, nhk, hd in cls._PARAM_SPACE["nhq_nhk_hd"]:
+        seen_pack_f: set = set()
+        for nhq, nhk in cls._PARAM_SPACE["nhq_nhk"]:
             pack_f = nhq // nhk
-            for _q_size, k_size in cls._PARAM_SPACE["q_size_k_size"]:
-                common = dict(
-                    head_dim=hd,
-                    pack_gqa=True,
-                    pack_gqa_factor=pack_f,
-                    block_sparse=True,
-                    range_merge=True,
-                    sparse_k_block_size=k_size,
-                )
-                for env in cls._PARAM_SPACE["inner_env"]:
-                    add_ffa_spec(
-                        specs,
-                        direction="fwd",
-                        env=env,
-                        disable_atomic=True,
-                        ref_block_size=(128, 128),
-                        **common,
+            if pack_f in seen_pack_f:
+                continue
+            seen_pack_f.add(pack_f)
+            for hd in cls._PARAM_SPACE["head_dim"]:
+                for k_size in cls._PARAM_SPACE["k_size"]:
+                    common = dict(
+                        head_dim=hd,
+                        pack_gqa=True,
+                        pack_gqa_factor=pack_f,
+                        block_sparse=True,
+                        range_merge=True,
+                        sparse_k_block_size=k_size,
                     )
-                    add_ffa_spec(
-                        specs,
-                        direction="bwd",
-                        env=env,
-                        disable_dq_atomic=True,
-                        bwd_inner_loop_k=True,
-                        bwd_dq_bf16=True,
-                        **common,
-                    )
+                    for inner_dir in cls._PARAM_SPACE["inner_dir"]:
+                        for inner_load in cls._PARAM_SPACE["inner_load_mode"]:
+                            env_fwd = {
+                                "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
+                                "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
+                            }
+                            add_ffa_spec(
+                                specs,
+                                direction="fwd",
+                                env=env_fwd,
+                                disable_atomic=True,
+                                ref_block_size=(128, 128),
+                                **common,
+                            )
+                            for inner_store in cls._PARAM_SPACE["inner_store_mode"]:
+                                env_bwd = {
+                                    "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
+                                    "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store,
+                                }
+                                add_ffa_spec(
+                                    specs,
+                                    direction="bwd",
+                                    env=env_bwd,
+                                    disable_dq_atomic=True,
+                                    bwd_inner_loop_k=True,
+                                    bwd_dq_bf16=True,
+                                    **common,
+                                )
         return specs
 
     @with_run_in_mp
-    @parameterize("nhq_nhk_hd", _PARAM_SPACE["nhq_nhk_hd"])
-    @parameterize("q_size_k_size", _PARAM_SPACE["q_size_k_size"])
+    @parameterize("nhq_nhk", _PARAM_SPACE["nhq_nhk"])
+    @parameterize("head_dim", _PARAM_SPACE["head_dim"])
+    @parameterize("q_size", _PARAM_SPACE["q_size"])
+    @parameterize("k_size", _PARAM_SPACE["k_size"])
     @parameterize("sparsity_ratio", _PARAM_SPACE["sparsity_ratio"])
-    @parameterize("inner_env", _PARAM_SPACE["inner_env"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
     def test_block_sparse_comprehensive_sweep(
-        self, nhq_nhk_hd, q_size_k_size, sparsity_ratio, inner_env
+        self,
+        nhq_nhk,
+        head_dim,
+        q_size,
+        k_size,
+        sparsity_ratio,
+        inner_dir,
+        inner_load_mode,
+        inner_store_mode,
     ):
-        nhq, nhk, hd = nhq_nhk_hd
-        q_size, k_size = q_size_k_size
+        nhq, nhk = nhq_nhk
+        hd = head_dim
 
         torch.manual_seed(42)
         seqlen = 2048
@@ -1301,7 +895,15 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         )
         do = torch.randn_like(q)
 
-        test_case = f"[comprehensive][nhq={nhq},nhk={nhk},hd={hd},q={q_size},k={k_size}][sp={sparsity_ratio}][env={inner_env}]"
+        test_case = (
+            f"[comprehensive][nhq={nhq},nhk={nhk},hd={hd},q={q_size},k={k_size}]"
+            f"[sp={sparsity_ratio}][dir={inner_dir},load={inner_load_mode},store={inner_store_mode}]"
+        )
+        inner_env = {
+            "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
+            "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load_mode,
+            "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
+        }
         for key, val in inner_env.items():
             os.environ[key] = val
         try:

@@ -477,7 +477,7 @@ def get_ffa_jit_spec(
     # InnerLoopK scatters K/V when block_sparse or index_sparse, InnerLoopQ scatters Q/dO when block_sparse
     # or index_sparse (inner_indices).
     _inner_use_scatter = block_sparse or index_sparse
-    _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER")
+    _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER")
     # Applies to ALL bwd configs (Dense, IndexSparse, BlockSparse).
     # Default is true (producer store warp handles dX reduce-add to GMEM).
     # false → consumer WGs handle dX store directly; frees one producer warp but
@@ -487,32 +487,23 @@ def get_ffa_jit_spec(
         assert _dxp_lower in (
             "true",
             "false",
-        ), f"MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER must be true/false, got {_dxp}"
+        ), f"MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER must be true/false, got {_dxp}"
         extra_template_args["inner_store_in_producer"] = _dxp_lower
         uri += f"_dxp{_dxp_lower}"
     # ─── InnerLoadMode: tma=0 (2D auto), cpasync=2 ───
     if _inner_use_scatter:
-        _load_env = os.environ.get(
-            "MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE",
-            os.environ.get("MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD"),
-        )
+        _load_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_LOAD_MODE")
         if _load_env is not None:
             _load_lower = _load_env.lower()
             _load_mode_map = {"tma": "0", "cpasync": "2"}
             assert (
                 _load_lower in _load_mode_map
-            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD_MODE must be tma/cpasync, got {_load_env}"
+            ), f"MAGI_ATTENTION_FFA_INNER_LOAD_MODE must be tma/cpasync, got {_load_env}"
             extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
             uri += f"_sload{_load_mode_map[_load_lower]}"
     # ─── InnerStoreMode (BWD only): 0=tma(2D), 1=tma1d, 2=atomicadd, 3=bypass_smem ───
     if direction == "bwd":
-        _store_env = os.environ.get(
-            "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE",
-            os.environ.get(
-                "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE",
-                os.environ.get("MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE"),
-            ),
-        )
+        _store_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_STORE_MODE")
         _use_smem_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM")
         if _use_smem_env is not None and _use_smem_env == "0":
             extra_template_args["inner_store_mode"] = "3"
@@ -526,12 +517,10 @@ def get_ffa_jit_spec(
                 "atomicadd": "2",
                 "cpasync": "2",
                 "bypass": "3",
-                "true": "1",
-                "false": "2",
             }
             assert (
                 _store_lower in _store_mode_map
-            ), f"MAGI_ATTENTION_FFA_SPARSE_INNER_STORE_MODE must be tma/tma2d/tma1d/atomicadd/bypass, got {_store_env}"
+            ), f"MAGI_ATTENTION_FFA_INNER_STORE_MODE must be tma/tma2d/tma1d/atomicadd/bypass, got {_store_env}"
             extra_template_args["inner_store_mode"] = _store_mode_map[_store_lower]
             uri += f"_sstore{_store_mode_map[_store_lower]}"
         elif _inner_use_scatter:
@@ -789,15 +778,12 @@ def get_ffa_jit_spec(
 
 _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP",
-    "MAGI_ATTENTION_FFA_USE_MASK_DISPATCH",
     "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN",
     "MAGI_ATTENTION_FFA_MASK_MODE",
-    "MAGI_ATTENTION_FFA_INNER_DX_STORE_IN_PRODUCER",
-    "MAGI_ATTENTION_FFA_SPARSE_INNER_LOAD",
-    "MAGI_ATTENTION_FFA_SPARSE_INNER_STORE",
-    "MAGI_ATTENTION_FFA_SPARSE_DX_TMA_REDUCE",
+    "MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER",
+    "MAGI_ATTENTION_FFA_INNER_LOAD_MODE",
+    "MAGI_ATTENTION_FFA_INNER_STORE_MODE",
     "MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS",
-    "MAGI_ATTENTION_FFA_BWD_FORCE_MMA_DKV_SS",
     "MAGI_ATTENTION_FFA_BWD_TILE_M",
     "MAGI_ATTENTION_FFA_BWD_TILE_N",
     "MAGI_ATTENTION_FFA_BWD_STAGES",
@@ -810,9 +796,6 @@ _ENV_KEYS_AFFECTING_COMPILATION: tuple[str, ...] = (
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA",
-    "MAGI_ATTENTION_FFA_BWD_SKIP_DV_WRITEBACK",
-    "MAGI_ATTENTION_FFA_BWD_SKIP_DK_WRITEBACK",
-    "MAGI_ATTENTION_FFA_BWD_DEFER_DV_R2S",
     "MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2",
 )
 
