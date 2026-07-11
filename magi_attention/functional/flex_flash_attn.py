@@ -1713,11 +1713,11 @@ def flex_flash_attn_func(
 
         _is_mha = q.size(1) == k.size(1)
 
-        # Sparse tile scheduler (both block_sparse and index_sparse) requires
-        # pack_gqa=True for correct work-item enumeration via range_merge.
-        # Without it, the scheduler hangs because its tile count logic assumes
-        # the pack_gqa layout. This applies to ALL head configurations (MHA/GQA).
-        if not pack_gqa and not cat_gqa and k.size(1) == 1:
+        # BlockSparse: fwd_qk_map from merge_ranges assumes PackGQA layout.
+        # Without pack_gqa=True, the tile→range lookup produces wrong K ranges
+        # → incorrect attention output.  IndexSparse doesn't use qk_map (uses
+        # explicit per-token indices) so pack_gqa=False is safe there.
+        if block_sparse and not pack_gqa and not cat_gqa and k.size(1) == 1:
             pack_gqa = True
 
         _gqa_safe = _is_mha or pack_gqa or cat_gqa
