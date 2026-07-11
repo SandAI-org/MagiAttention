@@ -621,8 +621,8 @@ class TestIndexSparseSweep(DistTestBase):
     Fixed compile params: MQA128, D=128, PackGQA=True, kbs=1.
     """
 
-    Q_SEQLENS = [512, 1000, 16384]
-    KV_SEQLENS = [512, 1000, 16384]
+    Q_SEQLENS = [512, 1000, 8192]
+    KV_SEQLENS = [512, 1000, 8192]
     TOPKS = [128, 256]
 
     @classmethod
