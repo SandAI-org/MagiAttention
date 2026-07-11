@@ -25,6 +25,7 @@ from tqdm import tqdm
 from tvm_ffi.utils import kwargs_wrapper
 
 from magi_attention.common import AttnRanges
+from magi_attention.env import ffa as ffa_env
 from magi_attention.meta.collection.calc_meta import FA4AttnArg
 
 is_fa4_installed = False
@@ -35,8 +36,6 @@ try:
 except ImportError:
     pass
 
-
-from magi_attention.env import ffa as ffa_env
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
