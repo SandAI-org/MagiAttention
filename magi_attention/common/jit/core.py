@@ -42,6 +42,7 @@ from magi_attention.env.build import (
     is_build_debug,
     is_build_verbose,
     is_force_jit_build,
+    is_jit_compile_disabled,
     nvcc_threads,
 )
 
@@ -210,7 +211,7 @@ class JitSpec:
                 "Loading cached JIT artifact for '%s' from %s", mod_name, lib_dir
             )
         else:
-            if os.environ.get("MAGI_ATTENTION_JIT_COMPILE_DISABLED") == "1":
+            if is_jit_compile_disabled():
                 raise RuntimeError(
                     f"JIT compilation is disabled (MAGI_ATTENTION_JIT_COMPILE_DISABLED=1) "
                     f"but no precompiled artifact found for '{mod_name}'. "

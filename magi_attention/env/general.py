@@ -285,3 +285,10 @@ def is_cpp_backend_enable() -> bool:
     Default value is ``0``
     """
     return os.environ.get("MAGI_ATTENTION_CPP_BACKEND", "0") == "1"
+
+
+# ------------------------------------------------------------------ #
+#  Debug
+# ------------------------------------------------------------------ #
+
+ENABLE_REMOTE_DEBUG = "MAGI_ATTENTION_ENABLE_REMOTE_DEBUG"

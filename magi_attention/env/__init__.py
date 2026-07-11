@@ -19,13 +19,14 @@ Usage::
     from magi_attention.env.general import is_sanity_check_enable
     from magi_attention.env.comm import is_qo_comm_enable
     from magi_attention.env.build import is_force_jit_build
+    from magi_attention.env import ffa as ffa_env  # FFA kernel tuning constants
 
 Environment variables owned by the *testing* helpers
-(``MAGI_ATTENTION_TEST_*``, ``MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP``)
-and by the third-party ``flash-attention`` sub-package are intentionally
+(``MAGI_ATTENTION_TEST_*``, ``MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP``),
+the CuteDSL subsystem, and ``setup.py`` build-time vars are intentionally
 **not** included — they live closer to the code that consumes them.
 """
 
-from . import build, comm, general
+from . import build, comm, ffa, general
 
-__all__ = ["general", "comm", "build"]
+__all__ = ["general", "comm", "build", "ffa"]

@@ -16,7 +16,7 @@
 
 Production config: 1080p, qhead=32, kvhead=8, hd=128.
 32-GPU training: 8 KV-heads distributed → per-rank nhk=1, nhq=128/8*32=128 (4 Q-ranks share 1 KV-head).
-Per-rank: qseqlen = kvseqlen/64, topk = kvseqlen/4.
+Per-rank: qseqlen = kvseqlen/64, topk = kvseqlen/8.
 Post-distribution: NHQ=128, NHK=1, PackGQA, q_block_size=1.
 Methods: Dense(d1b/d1b_nopg/dense_nb/dense_nb_rm), BlockSparse(kbs=128), IndexSparse(kbs=1).
 
@@ -55,14 +55,14 @@ from bench_sparse_analysis._common import (
 
 # kvseqlen → (qseqlen, topk)
 # qseqlen = kvseqlen / 64 (Q_BLOCK_SIZE=16 × 4 Q-ranks)
-# topk = kvseqlen / 4
+# topk = kvseqlen / 8
 SCENARIOS = [
     # (kvseqlen, qseqlen, topk)
-    (32768, 512, 8192),
-    (65536, 1024, 16384),
-    (131072, 2048, 32768),
-    (262144, 4096, 65536),
-    (524288, 8192, 131072),
+    (32768, 512, 4096),
+    (65536, 1024, 8192),
+    (131072, 2048, 16384),
+    (262144, 4096, 32768),
+    (524288, 8192, 65536),
 ]
 
 PASSES = ["fwd", "bwd_loopk", "bwd_loopq"]
@@ -479,11 +479,11 @@ def _phase6_plot():
                     )
 
         ax.set_title(pname, fontsize=14, fontweight="bold")
-        ax.set_xlabel("kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/4)", fontsize=10)
+        ax.set_xlabel("kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)", fontsize=10)
         ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
         ax.set_xticklabels(
-            [f"{kv // 1024}K\n(q={kv // 64}, top={kv // 4096}K)" for kv in kvseqlens],
+            [f"{kv // 1024}K\n(q={kv // 64}, top={kv // 8192}K)" for kv in kvseqlens],
             fontsize=9,
         )
         ax.tick_params(axis="y", labelsize=11)
@@ -532,7 +532,7 @@ def _phase6_ncu():
 
     gpu = _find_free_gpu()
     # Use kvseqlen=128k scenario
-    kvseqlen, qseqlen, topk = 131072, 2048, 32768
+    kvseqlen, qseqlen, topk = 131072, 2048, 16384
 
     ncu_configs = [
         ("bs_loopk_128k", True),

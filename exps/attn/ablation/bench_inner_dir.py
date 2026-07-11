@@ -42,6 +42,7 @@ import os
 
 import torch
 
+from magi_attention.env import ffa as ffa_env
 from magi_attention.functional import flex_flash_attn_func
 
 
@@ -61,7 +62,7 @@ def bench_one(
     dtype = torch.bfloat16
 
     env_val = "true" if inner_dir_max_to_min else "false"
-    os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = env_val
+    os.environ[ffa_env.INNER_DIR_MAX_TO_MIN] = env_val
 
     from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
@@ -273,7 +274,7 @@ def main():
         cfg["label"] = label
 
     if "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN" in os.environ:
-        del os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"]
+        del os.environ[ffa_env.INNER_DIR_MAX_TO_MIN]
 
 
 if __name__ == "__main__":

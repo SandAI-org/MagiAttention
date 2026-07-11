@@ -23,6 +23,8 @@ __all__ = [
     "is_force_jit_build",
     "is_build_verbose",
     "is_build_debug",
+    "JIT_COMPILE_DISABLED",
+    "is_jit_compile_disabled",
     "nvcc_threads",
 ]
 
@@ -72,6 +74,26 @@ def is_build_debug() -> bool:
     Default value is ``0``
     """
     return os.environ.get("MAGI_ATTENTION_BUILD_DEBUG", "0") == "1"
+
+
+# ------------------------------------------------------------------ #
+#  JIT compile guard
+# ------------------------------------------------------------------ #
+
+JIT_COMPILE_DISABLED = "MAGI_ATTENTION_JIT_COMPILE_DISABLED"
+
+
+def is_jit_compile_disabled() -> bool:
+    """
+    Toggle this env variable to ``1`` to disable JIT compilation entirely.
+
+    When set, any attempt to JIT-compile a kernel that is not already
+    cached will raise ``RuntimeError``.  Useful in CI / production to
+    ensure all kernels are pre-built.
+
+    Default value is ``0`` (JIT compilation enabled).
+    """
+    return os.environ.get(JIT_COMPILE_DISABLED) == "1"
 
 
 def nvcc_threads() -> str:

@@ -16,6 +16,8 @@
 
 import os
 
+from magi_attention.env import ffa as ffa_env
+
 __all__ = [
     "is_hierarchical_comm_enable",
     "ffa_fwd_sm_margin_save_for_comm",
@@ -48,7 +50,7 @@ def ffa_fwd_sm_margin_save_for_comm() -> int:
 
     Default value is ``4`` if "CUDA_DEVICE_MAX_CONNECTIONS" > ``1``, otherwise ``0``
     """
-    sm_margin = os.environ.get("MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN", None)
+    sm_margin = os.environ.get(ffa_env.FORWARD_SM_MARGIN, None)
     if sm_margin is None:
         max_connections = int(os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8"))
         sm_margin = "4" if max_connections > 1 else "0"
@@ -62,7 +64,7 @@ def ffa_bwd_sm_margin_save_for_comm() -> int:
 
     Default value is ``4`` if "CUDA_DEVICE_MAX_CONNECTIONS" > ``1``, otherwise ``0``
     """
-    sm_margin = os.environ.get("MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN", None)
+    sm_margin = os.environ.get(ffa_env.BACKWARD_SM_MARGIN, None)
     if sm_margin is None:
         max_connections = int(os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8"))
         sm_margin = "4" if max_connections > 1 else "0"

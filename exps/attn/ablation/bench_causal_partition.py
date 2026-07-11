@@ -40,6 +40,7 @@ import os
 
 import torch
 
+from magi_attention.env import ffa as ffa_env
 from magi_attention.functional import flex_flash_attn_func
 
 
@@ -61,7 +62,7 @@ def bench_one(
     dtype = torch.bfloat16
 
     env_val = "true" if use_mask_dispatch else "false"
-    os.environ["MAGI_ATTENTION_FFA_USE_MASK_DISPATCH"] = env_val
+    os.environ[ffa_env.USE_MASK_DISPATCH] = env_val
 
     from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
@@ -409,7 +410,7 @@ def main():
             print(f"{label:<35} ERROR: {e}")
 
     if "MAGI_ATTENTION_FFA_USE_MASK_DISPATCH" in os.environ:
-        del os.environ["MAGI_ATTENTION_FFA_USE_MASK_DISPATCH"]
+        del os.environ[ffa_env.USE_MASK_DISPATCH]
 
 
 if __name__ == "__main__":
