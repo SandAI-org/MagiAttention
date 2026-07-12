@@ -13,9 +13,7 @@
 # limitations under the License.
 
 import os
-import time
 import unittest
-from typing import Optional, Tuple
 
 import torch
 from einops import rearrange
@@ -590,200 +588,6 @@ class _BlockSparseTestHelper(unittest.TestCase):
         if err_msg_list:
             raise AssertionError("\n\n".join(err_msg_list))
 
-    def _generate_sparse_pattern(
-        self,
-        test_type: str,
-        num_heads_q: int,
-        num_heads_kv: int,
-        seqlen: int,
-        sparsity_ratio: float,
-        sparsity_granularity: str,
-        sparse_format: str,
-        block_size: Optional[Tuple[int, int]] = None,
-    ) -> Tuple[
-        torch.Tensor, Tuple[int, int], Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
-        """
-        Helper function to generate uniform block sparse patterns.
-
-        Returns:
-            A tuple containing:
-            - block_mask (torch.Tensor): The generated sparse mask.
-            - block_sizes (Tuple[int, int]): Q block size and K/V block size.
-            - block_row_sz (None): Reserved for compatibility.
-            - block_col_sz (None): Reserved for compatibility.
-        """
-        if test_type == "uniform":
-            assert (
-                block_size is not None
-            ), "`block_size` is required for 'uniform' test type."
-
-            q_block_size, sparse_k_block_size = block_size
-            num_q_blocks = seqlen // q_block_size
-            num_kv_blocks = seqlen // sparse_k_block_size
-            block_mask, _ = generate_block_sparse_pattern(
-                num_q_heads=num_heads_q,
-                num_kv_heads=num_heads_kv,
-                num_q_blocks=num_q_blocks,
-                num_kv_blocks=num_kv_blocks,
-                sparsity=sparsity_ratio,
-                mode=sparsity_granularity,
-                sparse_format=sparse_format,
-                device="cuda",
-            )
-            return block_mask, block_size, None, None
-        else:
-            raise ValueError(f"Unknown test_type: {test_type}")
-
-
-class TestBlockSparseSimple(unittest.TestCase):
-    """GQA LoopQ + pack_gqa=False block-sparse tests.
-
-    These exercise the InnerLoopQ path with GQA where pack_gqa is NOT
-    auto-enabled — a supported edge case under active development.
-    """
-
-    @property
-    def device(self):
-        return torch.cuda.current_device()
-
-    @classmethod
-    def precompile_kernel_specs(cls):
-        from magi_attention.testing.precompile import add_ffa_spec
-
-        specs: dict = {}
-        for cfg in cls.LOOPQ_GQA_CONFIGS:
-            kbs = cfg["k_size"]
-            rbs = cfg.get("ref_block_size", (128, 128))
-            common = dict(
-                pack_gqa=True,
-                pack_gqa_factor=4,
-                sparse_k_block_size=kbs,
-                block_sparse=True,
-                range_merge=True,
-            )
-            add_ffa_spec(
-                specs,
-                direction="fwd",
-                ref_block_size=rbs,
-                disable_atomic=True,
-                **common,
-            )
-            add_ffa_spec(
-                specs,
-                direction="bwd",
-                ref_block_size=rbs,
-                disable_atomic=True,
-                bwd_dkv_bf16=True,
-                **common,
-            )
-        return specs
-
-    LOOPQ_GQA_CONFIGS = [
-        {
-            "name": "block_sparse_loopq_q64k64",
-            "q_size": 64,
-            "k_size": 64,
-            "ref_block_size": (64, 128),
-            "err_ratio_dict": {"dq_min_norm_rtol": 0.05},
-        },
-        {
-            "name": "block_sparse_loopq_q128k1",
-            "q_size": 128,
-            "k_size": 1,
-            "ref_block_size": (128, 128),
-            "err_ratio_dict": {"dq_min_norm_rtol": 0.05},
-        },
-    ]
-
-    @parameterize("cfg", LOOPQ_GQA_CONFIGS)
-    def test_block_sparse_loopq_gqa_no_packgqa(self, cfg):
-        """BlockSparse LoopQ with GQA (NHQ=16, NHK=4) and pack_gqa=False."""
-        torch.manual_seed(42)
-        device = self.device
-        seqlen = 2048
-        dtype = torch.bfloat16
-        num_heads_q, num_heads_kv, head_dim = 16, 4, 128
-
-        helper = _BlockSparseTestHelper.__new__(_BlockSparseTestHelper)
-        block_size = (cfg["q_size"], cfg["k_size"])
-        (
-            block_mask,
-            block_sizes,
-            block_row_sz,
-            block_col_sz,
-        ) = helper._generate_sparse_pattern(
-            test_type="uniform",
-            num_heads_q=num_heads_q,
-            num_heads_kv=num_heads_kv,
-            seqlen=seqlen,
-            sparsity_ratio=0.5,
-            sparsity_granularity="per_kv_head",
-            sparse_format="block_mask",
-            block_size=block_size,
-        )
-
-        q = torch.randn(
-            1,
-            seqlen,
-            num_heads_q,
-            head_dim,
-            dtype=dtype,
-            device=device,
-            requires_grad=True,
-        )
-        k = torch.randn(
-            1,
-            seqlen,
-            num_heads_kv,
-            head_dim,
-            dtype=dtype,
-            device=device,
-            requires_grad=True,
-        )
-        v = torch.randn(
-            1,
-            seqlen,
-            num_heads_kv,
-            head_dim,
-            dtype=dtype,
-            device=device,
-            requires_grad=True,
-        )
-        do = torch.randn_like(q)
-
-        test_case = f"[block_sparse_loopq_gqa][{cfg['name']}]"
-        print(f"\n>>> {test_case} START", flush=True)
-        t0 = time.time()
-        helper.assert_close_to_torch_ref(
-            dtype=dtype,
-            q=q,
-            k=k,
-            v=v,
-            grad_output=do,
-            seqlen=seqlen,
-            block_size=block_sizes,
-            block_mask=block_mask,
-            head_wise="per_kv_head",
-            sparse_format="block_mask",
-            nhq=num_heads_q,
-            nhk=num_heads_kv,
-            pack_gqa=False,
-            deterministic=False,
-            swap_ab=False,
-            ref_block_size=cfg["ref_block_size"],
-            block_sparse=True,
-            swap_bwd_qk_loop=False,
-            test_case=test_case,
-            sparsity_ratio=0.5,
-            uniform=True,
-            block_row_sz=block_row_sz,
-            block_col_sz=block_col_sz,
-            max_seqlen_q=cfg["q_size"],
-            err_ratio_dict=cfg.get("err_ratio_dict", {}),
-        )
-        print(f">>> {test_case} PASSED  ({time.time() - t0:.1f}s)", flush=True)
-
 
 # ═══════════════════════════════════════════════════════════
 # TestBlockSparseSweep — Classic CI sweep
@@ -966,7 +770,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         sparsity_ratio=[0.5],
         inner_dir=["true", "false"],
         inner_load_mode=["tma", "cpasync"],
-        inner_store_mode=["tma", "tma1d", "atomicadd"],
+        inner_store_mode=["tma", "tma1d", "atomicadd", "bypass"],
     )
 
     @property

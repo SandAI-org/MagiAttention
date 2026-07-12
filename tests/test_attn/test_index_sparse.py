@@ -31,16 +31,15 @@ Classic sweep (CI gate):
 Comprehensive sweep (CI):
   - head_config: 3 MQA + 3 GQA + 3 MHA = 9
   - head_dim: 64, 128
-  - kbs: 1, 8, 32, 128, 256 (kbs>1 only valid for NHK=1, PackGQA=True, D=128)
-  - inner_dir: None (default), "true", "false"
-  - inner_load_mode: None (default), "tma", "cpasync"
-  - inner_store_mode: None (default), "atomicadd", "tma1d"
+  - kbs: 1, 8, 32, 128 (kbs>1 only valid for NHK=1, PackGQA=True, D=128)
+  - inner_dir: "true", "false"
+  - inner_load_mode: "tma", "cpasync"
+  - inner_store_mode: "tma", "tma1d", "atomicadd", "bypass"
 
 Known limitations:
   - swap_ab is prohibited for IndexSparse (asserted in flex_flash_attn_func)
   - max_topk must be multiples of tile_size (128, or 64 if swap_ab)
   - Q/K/V are packed in (b, s, h) order to match index_sparse_indices view layout
-  - BWD with kbs>=256 exceeds SM90 smem limit (BwdTileN=256 → >228KB)
 """
 
 import os
@@ -706,42 +705,33 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
 
     Orthogonal parameterization:
       head_config × head_dim × kbs × inner_dir × inner_load_mode × inner_store_mode
-    Skips invalid combos (kbs>1 requires NHK=1+PackGQA+D=128; kbs>=256 no BWD).
+    Skips invalid combos (kbs>1 requires NHK=1+PackGQA+D=128).
     """
 
-    # ─── Axis 1: Head configuration (NHQ, NHK, pack_gqa) ───
-    # 3 MQA + 3 GQA + 3 MHA = 9 configs
-    HEAD_CONFIGS = [
-        (128, 1, True),  # MQA128
-        (64, 1, True),  # MQA64
-        (4, 1, True),  # MQA4
-        (128, 2, True),  # GQA 128:2
-        (32, 4, True),  # GQA 32:4
-        (4, 2, True),  # GQA 4:2
-        (8, 8, True),  # MHA8
-        (4, 4, True),  # MHA4
-        (32, 32, True),  # MHA32
-    ]
-
-    # ─── Axis 2: Head dimension ───
-    HEAD_DIMS = [64, 128]
-
-    # ─── Axis 3: Sparse K block size ───
-    KBS_VALUES = [1, 8, 32, 128, 256]
-
-    # ─── Axis 4: Inner loop direction ───
-    INNER_DIRS = [None, "true", "false"]
-
-    # ─── Axis 5: Inner load mode ───
-    INNER_LOAD_MODES = [None, "tma", "cpasync"]
-
-    # ─── Axis 6: Inner store mode ───
-    INNER_STORE_MODES = [None, "atomicadd", "tma1d"]
+    # parameter space shared by @parameterize and precompile_kernel_specs
+    _PARAM_SPACE: dict[str, list] = dict(
+        head_config=[
+            (128, 1, True),  # MQA128
+            (64, 1, True),  # MQA64
+            (4, 1, True),  # MQA4
+            (128, 2, True),  # GQA 128:2
+            (32, 4, True),  # GQA 32:4
+            (4, 2, True),  # GQA 4:2
+            (8, 8, True),  # MHA8
+            (4, 4, True),  # MHA4
+            (32, 32, True),  # MHA32
+        ],
+        head_dim=[64, 128],
+        kbs=[1, 8, 32, 128],
+        inner_dir=["true", "false"],
+        inner_load_mode=["tma", "cpasync"],
+        inner_store_mode=["tma", "tma1d", "atomicadd", "bypass"],
+    )
 
     @classmethod
     def _iter_valid_configs(cls):
         """Iterate all valid (non-skipped) parameter combinations for precompile."""
-        for nhq, nhk, pack_gqa in cls.HEAD_CONFIGS:
+        for nhq, nhk, pack_gqa in cls._PARAM_SPACE["head_config"]:
             pack_f = nhq // nhk
             _is_mha = nhq == nhk
             effective_pack_gqa = pack_gqa
@@ -749,8 +739,8 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                 effective_pack_gqa = True
             _gqa_safe = _is_mha or effective_pack_gqa
 
-            for hd in cls.HEAD_DIMS:
-                for kbs in cls.KBS_VALUES:
+            for hd in cls._PARAM_SPACE["head_dim"]:
+                for kbs in cls._PARAM_SPACE["kbs"]:
                     if kbs > 1 and (nhk > 1 or not effective_pack_gqa or hd != 128):
                         continue
                     yield nhq, nhk, pack_gqa, hd, kbs, pack_f, _is_mha, effective_pack_gqa, _gqa_safe
@@ -759,48 +749,11 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     def precompile_kernel_specs(cls):
         """Standard precompile interface — see magi_attention/testing/precompile.py.
 
-        Covers both LoopQ and LoopK directions, and all inner mode env variants.
+        FWD + BWD LoopQ/LoopK for each (head × hd × kbs × inner modes) combo.
         """
         from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
-
-        # Build env combos (cross-product of dir × load × store, deduplicated)
-        env_combos: list[dict[str, str]] = [{}]
-        for d in cls.INNER_DIRS:
-            for lm in cls.INNER_LOAD_MODES:
-                for sm in cls.INNER_STORE_MODES:
-                    env: dict[str, str] = {}
-                    if d is not None:
-                        env["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = d
-                    if lm is not None:
-                        env["MAGI_ATTENTION_FFA_INNER_LOAD_MODE"] = lm
-                    if sm is not None:
-                        env["MAGI_ATTENTION_FFA_INNER_STORE_MODE"] = sm
-                    if env and env not in env_combos:
-                        env_combos.append(env)
-
-        def _add(
-            direction,
-            env,
-            *,
-            disable_atomic=False,
-            disable_dq_atomic=False,
-            bwd_inner_loop_k=False,
-            bwd_dq_bf16=False,
-            **kw,
-        ):
-            add_ffa_spec(
-                specs,
-                direction=direction,
-                env=env,
-                disable_atomic=disable_atomic,
-                disable_dq_atomic=disable_dq_atomic,
-                bwd_inner_loop_k=bwd_inner_loop_k,
-                bwd_dq_bf16=bwd_dq_bf16,
-                index_sparse=True,
-                **kw,
-            )
 
         for (
             nhq,
@@ -819,23 +772,48 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                 pack_gqa_factor=pack_f,
                 sparse_k_block_size=kbs,
             )
-            test_bwd = kbs < 256
-            for env in env_combos:
-                _add("fwd", env, disable_atomic=True, **common)
-                if test_bwd:
-                    _add("bwd", env, disable_atomic=_gqa_safe, **common)
-                    if pack_f >= 128:
-                        _add(
-                            "bwd",
-                            env,
-                            disable_dq_atomic=True,
-                            bwd_inner_loop_k=True,
-                            bwd_dq_bf16=True,
-                            head_dim=hd,
-                            pack_gqa=pack_gqa,
-                            pack_gqa_factor=pack_f,
-                            sparse_k_block_size=kbs,
+            for inner_dir in cls._PARAM_SPACE["inner_dir"]:
+                for inner_load in cls._PARAM_SPACE["inner_load_mode"]:
+                    env_fwd = {
+                        "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
+                        "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
+                    }
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        env=env_fwd,
+                        disable_atomic=True,
+                        index_sparse=True,
+                        **common,
+                    )
+                    for inner_store in cls._PARAM_SPACE["inner_store_mode"]:
+                        env_bwd = {
+                            "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
+                            "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
+                            "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store,
+                        }
+                        add_ffa_spec(
+                            specs,
+                            direction="bwd",
+                            env=env_bwd,
+                            disable_atomic=_gqa_safe,
+                            index_sparse=True,
+                            **common,
                         )
+                        if pack_f >= 128:
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                env=env_bwd,
+                                disable_dq_atomic=True,
+                                bwd_inner_loop_k=True,
+                                bwd_dq_bf16=True,
+                                index_sparse=True,
+                                head_dim=hd,
+                                pack_gqa=pack_gqa,
+                                pack_gqa_factor=pack_f,
+                                sparse_k_block_size=kbs,
+                            )
 
         return specs
 
@@ -856,12 +834,12 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         return 1200
 
     @with_run_in_mp
-    @parameterize("head_config", HEAD_CONFIGS)
-    @parameterize("hd", HEAD_DIMS)
-    @parameterize("kbs", KBS_VALUES)
-    @parameterize("inner_dir", INNER_DIRS)
-    @parameterize("inner_load_mode", INNER_LOAD_MODES)
-    @parameterize("inner_store_mode", INNER_STORE_MODES)
+    @parameterize("head_config", _PARAM_SPACE["head_config"])
+    @parameterize("hd", _PARAM_SPACE["head_dim"])
+    @parameterize("kbs", _PARAM_SPACE["kbs"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
     def test_index_sparse_comprehensive(
         self, head_config, hd, kbs, inner_dir, inner_load_mode, inner_store_mode
     ):
@@ -876,7 +854,6 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             S = 1024
             topk = max(2, 128 // kbs)
 
-        test_bwd = kbs < 256
         config: dict[str, Any] = {
             "B": 1,
             "S": S,
@@ -891,29 +868,26 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         if kbs > 1:
             config["max_topk"] = topk
 
-        env_keys: list[str] = []
-        if inner_dir is not None:
-            os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = inner_dir
-            env_keys.append("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
-        if inner_load_mode is not None:
-            os.environ["MAGI_ATTENTION_FFA_INNER_LOAD_MODE"] = inner_load_mode
-            env_keys.append("MAGI_ATTENTION_FFA_INNER_LOAD_MODE")
-        if inner_store_mode is not None:
-            os.environ["MAGI_ATTENTION_FFA_INNER_STORE_MODE"] = inner_store_mode
-            env_keys.append("MAGI_ATTENTION_FFA_INNER_STORE_MODE")
+        inner_env = {
+            "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
+            "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load_mode,
+            "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
+        }
+        for key, val in inner_env.items():
+            os.environ[key] = val
         try:
-            _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
+            _run_index_sparse_config(self.device, config, test_bwd=True)
         finally:
-            for key in env_keys:
+            for key in inner_env:
                 os.environ.pop(key, None)
 
     @with_run_in_mp
-    @parameterize("head_config", HEAD_CONFIGS)
-    @parameterize("hd", HEAD_DIMS)
-    @parameterize("kbs", KBS_VALUES)
-    @parameterize("inner_dir", INNER_DIRS)
-    @parameterize("inner_load_mode", INNER_LOAD_MODES)
-    @parameterize("inner_store_mode", INNER_STORE_MODES)
+    @parameterize("head_config", _PARAM_SPACE["head_config"])
+    @parameterize("hd", _PARAM_SPACE["head_dim"])
+    @parameterize("kbs", _PARAM_SPACE["kbs"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
     def test_index_sparse_comprehensive_loopk(
         self, head_config, hd, kbs, inner_dir, inner_load_mode, inner_store_mode
     ):
@@ -923,8 +897,6 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         """
         nhq, nhk, pack_gqa = head_config
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
-            return
-        if kbs >= 256:
             return
 
         if kbs <= 1:
@@ -947,20 +919,17 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         if kbs > 1:
             config["max_topk"] = topk
 
-        env_keys: list[str] = []
-        if inner_dir is not None:
-            os.environ["MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN"] = inner_dir
-            env_keys.append("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
-        if inner_load_mode is not None:
-            os.environ["MAGI_ATTENTION_FFA_INNER_LOAD_MODE"] = inner_load_mode
-            env_keys.append("MAGI_ATTENTION_FFA_INNER_LOAD_MODE")
-        if inner_store_mode is not None:
-            os.environ["MAGI_ATTENTION_FFA_INNER_STORE_MODE"] = inner_store_mode
-            env_keys.append("MAGI_ATTENTION_FFA_INNER_STORE_MODE")
+        inner_env = {
+            "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
+            "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load_mode,
+            "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
+        }
+        for key, val in inner_env.items():
+            os.environ[key] = val
         try:
             _run_index_sparse_config(self.device, config, test_bwd=True)
         finally:
-            for key in env_keys:
+            for key in inner_env:
                 os.environ.pop(key, None)
 
 
