@@ -130,6 +130,31 @@ class TestFlexFlashAttn(DistTestBase):
             },
         ]
 
+        ref_block_config_indices = list(range(len(self.valid_ref_block_configs)))
+
+        self.flag_generator = FlagCombGenerator(
+            flags=[
+                "test_accumulation_inplace",
+                "deterministic",
+                "auto_range_merge",
+                "random_attn_type_map",
+                "swap_bwd_qk_loop",
+                "ref_block_config_idx",
+                "max_seqlen_q",
+                "return_max_logits",
+                "cat_gqa",
+            ],
+            options={
+                "ref_block_config_idx": ref_block_config_indices,
+            },
+            defaults={
+                "ref_block_config_idx": 0,
+            },
+            groups=[("auto_range_merge", "swap_bwd_qk_loop")],
+            strategy="heuristic",
+        )
+        self.flag_iterator = iter(self.flag_generator)
+
     # -- Kernel precompile for CI --
     _REF_BLOCK_CONFIGS: list[dict] = [
         {
