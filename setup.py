@@ -687,19 +687,10 @@ def prebuild_ffa_kernels() -> None:
             "Ensure source tree is available. Error: "
         ) from e
 
-    # Determine prebuild level: CI environments auto-detect to "ci" level,
-    # local builds default to "lite".
-    if os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("CI") == "true":
-        prebuild_level = "ci"
-        _level_source = "auto-detected CI environment (GITHUB_ACTIONS/CI)"
-    else:
-        prebuild_level = os.environ.get("MAGI_ATTENTION_PREBUILD_LEVEL", "lite").lower()
-        _level_source = (
-            "env MAGI_ATTENTION_PREBUILD_LEVEL"
-            if "MAGI_ATTENTION_PREBUILD_LEVEL" in os.environ
-            else "default"
-        )
-    print(f"[prebuild] level={prebuild_level!r} (source: {_level_source})", flush=True)
+    # Prebuild level: set MAGI_ATTENTION_PREBUILD_LEVEL=ci in CI yaml,
+    # defaults to "lite" for local builds.
+    prebuild_level = os.environ.get("MAGI_ATTENTION_PREBUILD_LEVEL", "lite").lower()
+    print(f"[prebuild] level={prebuild_level!r}", flush=True)
     directions = ["fwd", "bwd"]
     head_dims = [64, 128]
     compute_output_dtype_tuples = [
