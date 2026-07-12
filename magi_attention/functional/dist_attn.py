@@ -1311,7 +1311,7 @@ class DistAttnRuntime:
                     sm_margin=self.fwd_sm_margin,
                     # optional args below mainly for sparse attn
                     ref_block_size=None,
-                    max_seqlen_q=None,
+                    max_outer_range_width=None,
                     range_merge=env.general.is_range_merge_enable(),
                     swap_ab=False,
                     pack_gqa=False,

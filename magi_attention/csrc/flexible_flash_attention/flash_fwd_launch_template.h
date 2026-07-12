@@ -176,10 +176,9 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
                                                         /*range_map=*/params.qk_map,
                                                         /*determin_conflict_state=*/params.determin_conflict_state,
                                                         /*unique_count=*/params.unique_count,
-                                                        /*max_seqlen_q=*/params.max_seqlen_q,
-                                                        /*has_max_seqlen_q=*/params.has_max_seqlen_q,
-                                                        /*blocks_per_batch=*/params.blocks_per_batch,
-                                                        /*tiles_per_batch_per_intergroup=*/params.tiles_per_batch_per_intergroup,
+                                                        /*max_outer_range_width=*/params.max_outer_range_width,
+                                                        /*has_max_outer_range_width=*/params.has_max_outer_range_width,
+                                                        /*batch_stride=*/params.batch_stride,
                                                         /*max_tile_idx=*/params.max_tile_idx};
 
   int device;

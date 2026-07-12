@@ -227,7 +227,7 @@ def _flex_flash_attn_forward_compilable(
     sm_margin: int,
     kblock_m: int | None,
     kblock_n: int | None,
-    max_seqlen_q: int | None,
+    max_outer_range_width: int | None,
     range_merge: bool,
     merge_q_ranges: torch.Tensor | None,
     fwd_qk_map: torch.Tensor | None,
@@ -281,7 +281,7 @@ def _flex_flash_attn_forward_compilable(
         q_ranges,
         k_ranges,
         attn_type_map,
-        max_seqlen_q,
+        max_outer_range_width,
         # for range merge
         merge_q_ranges,
         fwd_qk_map,
@@ -319,7 +319,7 @@ def _flex_flash_attn_forward_compilable_fake(
     sm_margin: int,
     kblock_m: int | None,
     kblock_n: int | None,
-    max_seqlen_q: int | None,
+    max_outer_range_width: int | None,
     range_merge: bool,
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
@@ -355,7 +355,7 @@ def _flex_flash_attn_forward(
     deterministic: bool,
     sm_margin: int,
     ref_block_size: tuple[int, int] | None = None,
-    max_seqlen_q: int | None = None,
+    max_outer_range_width: int | None = None,
     range_merge: bool = False,
     merge_q_ranges: torch.Tensor | None = None,
     fwd_qk_map: torch.Tensor | None = None,
@@ -442,7 +442,7 @@ def _flex_flash_attn_forward(
         sm_margin=sm_margin,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
-        max_seqlen_q=max_seqlen_q,
+        max_outer_range_width=max_outer_range_width,
         range_merge=range_merge,
         merge_q_ranges=merge_q_ranges,
         fwd_qk_map=fwd_qk_map,
@@ -796,7 +796,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_bwd_dkv_atomic_reduction: bool = False,
         disable_bwd_dq_atomic_reduction: bool = False,
         ref_block_size: tuple[int, int] | None = None,
-        max_seqlen_q: int | None = None,
+        max_outer_range_width: int | None = None,
         range_merge: bool = False,
         swap_ab: bool = False,
         pack_gqa: bool = False,
@@ -926,7 +926,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sm_margin=sm_margin,
             # optional args below mainly for sparse attn
             ref_block_size=ref_block_size,
-            max_seqlen_q=max_seqlen_q,
+            max_outer_range_width=max_outer_range_width,
             range_merge=range_merge,
             merge_q_ranges=merge_q_ranges,
             fwd_qk_map=fwd_qk_map,
@@ -1028,7 +1028,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 None,  # disable_bwd_dkv_atomic_reduction
                 None,  # disable_bwd_dq_atomic_reduction
                 None,  # ref_block_size
-                None,  # max_seqlen_q
+                None,  # max_outer_range_width
                 None,  # range_merge
                 None,  # swap_ab
                 None,  # pack_gqa
@@ -1236,7 +1236,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # disable_bwd_dkv_atomic_reduction
             None,  # disable_bwd_dq_atomic_reduction
             None,  # ref_block_size
-            None,  # max_seqlen_q
+            None,  # max_outer_range_width
             None,  # range_merge
             None,  # swap_ab
             None,  # pack_gqa
@@ -1560,6 +1560,7 @@ def flex_flash_attn_func(
     """
 
     bwd_inner_loop_k = swap_bwd_qk_loop
+    max_outer_range_width = max_seqlen_q
 
     # ── Sparse mask input validation ──
     # Auto-infer index_sparse from tensor presence.
@@ -1614,6 +1615,9 @@ def flex_flash_attn_func(
                     stacklevel=2,
                 )
 
+        if max_outer_range_width is None:
+            max_outer_range_width = q_block_size
+
     # ── index_sparse_indices direct path: kernel reads indices directly ──
     if index_sparse:
         assert index_sparse_indices is not None
@@ -1657,8 +1661,8 @@ def flex_flash_attn_func(
         )
 
         range_merge = False
-        if max_seqlen_q is None:
-            max_seqlen_q = q_block_size
+        if max_outer_range_width is None:
+            max_outer_range_width = q_block_size
         # IndexSparse: fixed (128, tile_size) tile — q_block_size=1 means PackGQA fills M dim.
         # TODO: tune kBlockM for non-PackGQA or small-head scenarios
         ref_block_size = (128, tile_size)
@@ -1679,7 +1683,7 @@ def flex_flash_attn_func(
             "disable_fwd_atomic_reduction": disable_fwd_atomic_reduction,
             "disable_bwd_dkv_atomic_reduction": disable_bwd_dkv_atomic_reduction,
             "ref_block_size": ref_block_size is not None,
-            "max_seqlen_q": max_seqlen_q is not None,
+            "max_seqlen_q": max_outer_range_width is not None,
             "range_merge": range_merge,
             "swap_ab": swap_ab,
             "pack_gqa": pack_gqa,
@@ -1758,7 +1762,7 @@ def flex_flash_attn_func(
         disable_bwd_dkv_atomic_reduction,
         disable_bwd_dq_atomic_reduction,
         ref_block_size,
-        max_seqlen_q,
+        max_outer_range_width,
         range_merge,
         swap_ab,
         pack_gqa,

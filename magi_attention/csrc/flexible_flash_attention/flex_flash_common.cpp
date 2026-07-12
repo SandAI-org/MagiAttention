@@ -50,10 +50,9 @@ void set_params_fprop(
     flash::SinkLayout const sink_layout,
     int const sm_margin,
     bool const disable_fwd_atomic_reduction,
-    int const max_seqlen_q,
-    bool const has_max_seqlen_q,
-    int const blocks_per_batch,
-    int const tiles_per_batch_per_intergroup,
+    int const max_outer_range_width,
+    bool const has_max_outer_range_width,
+    int const batch_stride,
     int const max_tile_idx,
     void* index_sparse_indices_d,
     int const inner_indices_cnt) {
@@ -135,10 +134,9 @@ void set_params_fprop(
   params.num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
 
   // Set optimization params for tile scheduling
-  params.max_seqlen_q = max_seqlen_q;
-  params.has_max_seqlen_q = has_max_seqlen_q;
-  params.blocks_per_batch = blocks_per_batch;
-  params.tiles_per_batch_per_intergroup = tiles_per_batch_per_intergroup;
+  params.max_outer_range_width = max_outer_range_width;
+  params.has_max_outer_range_width = has_max_outer_range_width;
+  params.batch_stride = batch_stride;
   params.max_tile_idx = max_tile_idx;
 
   // Set IndexSparse indices direct path params

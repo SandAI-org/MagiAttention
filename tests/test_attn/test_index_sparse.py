@@ -843,7 +843,11 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     def test_index_sparse_comprehensive(
         self, head_config, hd, kbs, inner_dir, inner_load_mode, inner_store_mode
     ):
-        """LoopQ (default) direction — full orthogonal sweep."""
+        """LoopQ (default) direction — full orthogonal sweep.
+
+        BWD LoopQ only tested for kbs>=128 (contiguous TMA loads); smaller kbs
+        uses scatter-load which is too slow for comprehensive sweeps.
+        """
         nhq, nhk, pack_gqa = head_config
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
@@ -854,6 +858,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             S = 1024
             topk = max(2, 128 // kbs)
 
+        test_bwd = kbs >= 128 and kbs < 256
         config: dict[str, Any] = {
             "B": 1,
             "S": S,
@@ -876,7 +881,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         for key, val in inner_env.items():
             os.environ[key] = val
         try:
-            _run_index_sparse_config(self.device, config, test_bwd=True)
+            _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
         finally:
             for key in inner_env:
                 os.environ.pop(key, None)

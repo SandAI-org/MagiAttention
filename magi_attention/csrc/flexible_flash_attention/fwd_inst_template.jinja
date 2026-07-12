@@ -36,7 +36,7 @@ static constexpr int kFwdConsumerRegs = {{ fwd_consumer_regs }};
 // Sparse K block size: 1 = token-level indices, >1 = block-level (each index covers SparseKBlockSize tokens)
 static constexpr int kSparseKBlockSize = {{ sparse_k_block_size | default(1) }};
 // Inner-loop scatter load mode: 0=Tma(2D,auto), 1=Tma1d(bulk per-row, no-swizzle K), 2=CpAsync(per-row)
-static constexpr int kInnerLoadMode = {{ inner_load_mode | default(2) }};
+static constexpr int kInnerLoadMode = {{ inner_load_mode }};
 // Outer-loop store mode: 0=Tma(full-tile TMA store), 1=Stg(per-thread vectorized STG.128)
 static constexpr int kOuterStoreMode = {{ outer_store_mode | default(0) }};
 
@@ -89,7 +89,7 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& q_ranges_,
     std::optional<const at::Tensor>& k_ranges_,
     std::optional<const at::Tensor>& attn_type_map_,
-    std::optional<int> const max_seqlen_q,
+    std::optional<int> const max_outer_range_width,
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
@@ -105,7 +105,7 @@ std::vector<at::Tensor> mha_fwd(
 
   // Parameter preparation
   auto [params, out, softmax_lse, max_logit] = prepare_mha_fwd<kBlockM, kDeterministic, kDisableAtomic, kPackGQA, kReturnMaxLogits>(
-      q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, max_logit_,
+      q, k, v, max_outer_range_width, sink_, out_, softmax_lse_, max_logit_,
       q_ranges_, k_ranges_, attn_type_map_, 
       merge_q_ranges_, qk_map_, unique_count_, 
       index_sparse_indices_, inner_indices_cnt,

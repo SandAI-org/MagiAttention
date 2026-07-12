@@ -27,7 +27,7 @@
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 
 #include "deterministic.h"
-#include "inner_mode.hpp"
+#include "inner_ldst_mode.hpp"
 #include "named_barrier.hpp"
 #include "seqlen.h"
 #include "utils.h"

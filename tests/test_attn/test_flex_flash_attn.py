@@ -900,7 +900,7 @@ class TestFlexFlashAttn(DistTestBase):
             sm_margin=0,
             # optional args below mainly for sparse attn
             ref_block_size=None,
-            max_seqlen_q=max_seqlen_q,
+            max_outer_range_width=max_seqlen_q,
             range_merge=range_merge,
             merge_q_ranges=merge_q_ranges,
             fwd_qk_map=fwd_qk_map,
@@ -945,7 +945,7 @@ class TestFlexFlashAttn(DistTestBase):
             sm_margin=0,
             # optional args below mainly for sparse attn
             ref_block_size=None,
-            max_seqlen_q=max_seqlen_q,
+            max_outer_range_width=max_seqlen_q,
             range_merge=range_merge,
             merge_q_ranges=merge_q_ranges,
             fwd_qk_map=fwd_qk_map,

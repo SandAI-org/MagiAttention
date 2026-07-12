@@ -122,7 +122,6 @@ template <
     int AtomLayoutMSdP,
     int AtomLayoutNdKV,
     int AtomLayoutMdQ,
-    bool V_in_regs,
     bool RangeMerge,
     bool BlockSparse,
     bool IndexSparse,
@@ -141,10 +140,10 @@ template <
     bool UnionDkvSmem,
     int InnerStoreStages,
     bool ProfileMode,
-    bool PerfDebugSkipVLoad_ = false,
-    bool PerfDebugSkipDvStore_ = false,
-    bool PerfDebugSkipDkStore_ = false,
-    bool PerfDebugSkipDvMma_ = false>
+    bool PerfDebugSkipVLoad_,
+    bool PerfDebugSkipDvStore_,
+    bool PerfDebugSkipDkStore_,
+    bool PerfDebugSkipDvMma_>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -201,7 +200,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutMSdP,
       AtomLayoutNdKV,
       AtomLayoutMdQ,
-      V_in_regs,
       Stages_V,
       Tma1dSmemRowPad,
       SparseKBlockSize,
@@ -406,10 +404,10 @@ template <
     int InnerStoreStages,
     int OuterStoreMode,
     bool ProfileMode,
-    bool PerfDebugSkipVLoad = false,
-    bool PerfDebugSkipDvStore = false,
-    bool PerfDebugSkipDkStore = false,
-    bool PerfDebugSkipDvMma = false>
+    bool PerfDebugSkipVLoad,
+    bool PerfDebugSkipDvStore,
+    bool PerfDebugSkipDkStore,
+    bool PerfDebugSkipDvMma>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // BwdTileM/N, BwdStages/Ds: 0 = use default, >0 = override (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS).
@@ -443,8 +441,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int AtomLayoutNdKV = kHeadDim <= 128 ? (kBlockN <= 64 ? 1 : 2) : 1;
   static constexpr int AtomLayoutMdQ = kHeadDim <= 64 ? (kBlockM <= 64 ? 1 : 2) : 1;
 
-  static constexpr bool V_in_regs = false;
-
   if constexpr (RangeMerge) {
     assert(params.merge_k_ranges != nullptr && params.bwd_kq_map != nullptr && params.bwd_unique_count != nullptr);
   }
@@ -473,7 +469,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*AtomLayoutMSdP=*/AtomLayoutMSdP,
       /*AtomLayoutNdKV=*/AtomLayoutNdKV,
       /*AtomLayoutMdQ=*/AtomLayoutMdQ,
-      /*V_in_regs=*/V_in_regs,
       /*RangeMerge=*/RangeMerge,
       /*BlockSparse=*/BlockSparse,
       /*IndexSparse=*/IndexSparse,

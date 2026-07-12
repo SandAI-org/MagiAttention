@@ -478,17 +478,27 @@ def get_ffa_jit_spec(
         ), f"MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER must be true/false, got {_dxp}"
         extra_template_args["inner_store_in_producer"] = _dxp_lower
         uri += f"_dxp{_dxp_lower}"
-    # ─── InnerLoadMode: tma=0 (2D auto), cpasync=2 ───
+    # ─── InnerLoadMode: tma=0, cpasync=2 ───
+    # C++ uses template param directly (no default). Always set explicitly.
     if _inner_use_scatter:
+        _load_mode_map = {"tma": "0", "cpasync": "2"}
         _load_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_LOAD_MODE")
         if _load_env is not None:
             _load_lower = _load_env.lower()
-            _load_mode_map = {"tma": "0", "cpasync": "2"}
             assert (
                 _load_lower in _load_mode_map
             ), f"MAGI_ATTENTION_FFA_INNER_LOAD_MODE must be tma/cpasync, got {_load_env}"
             extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
             uri += f"_sload{_load_mode_map[_load_lower]}"
+        else:
+            _kblock_n = 128
+            _contiguous = sparse_k_block_size >= _kblock_n
+            if direction == "bwd" and not bwd_inner_loop_k:
+                _contiguous = pack_gqa and (not index_sparse or pack_gqa_factor >= 128)
+            _auto_mode = "0" if _contiguous else "2"
+            extra_template_args["inner_load_mode"] = _auto_mode
+    else:
+        extra_template_args["inner_load_mode"] = "0"
     # ─── InnerStoreMode (BWD only): 0=tma(2D), 1=tma1d, 2=atomicadd, 3=bypass_smem ───
     if direction == "bwd":
         _store_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_STORE_MODE")

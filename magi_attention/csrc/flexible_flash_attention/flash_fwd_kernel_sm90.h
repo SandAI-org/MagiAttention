@@ -35,7 +35,7 @@
 #include <cutlass/arch/grid_dependency_control.h>
 
 #include "fwd_tile_scheduler.hpp"
-#include "inner_mode.hpp"
+#include "inner_ldst_mode.hpp"
 #include "mask.h"
 #include "softmax.h"
 #include "utils.h"
@@ -106,14 +106,8 @@ class FlashAttnFwdSm90 {
   static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
   static_assert(NumConsumerWarpGroups == 1 || NumConsumerWarpGroups == 2 || NumConsumerWarpGroups == 3);
 
-  // Register quotas for the Load/Mma WGs are selected in Python (_ffa_register_quota in
-  // functional/_flex_flash_attn_jit.py, where the tuning notes live) and passed down the
-  // dispatch chain; the kernel only enforces the setmaxnreg constraints:
-  // multiples of 8, within [24, 256], weighted sum within the per-thread budget.
-  static constexpr uint32_t LoadRegisterRequirement = ProducerRegs_;
-  static constexpr uint32_t MmaRegisterRequirement = ConsumerRegs_;
-  static_assert(LoadRegisterRequirement % 8 == 0 && LoadRegisterRequirement >= 24 && LoadRegisterRequirement <= 256);
-  static_assert(MmaRegisterRequirement % 8 == 0 && MmaRegisterRequirement >= 24 && MmaRegisterRequirement <= 256);
+  static_assert(ProducerRegs_ % 8 == 0 && ProducerRegs_ >= 24 && ProducerRegs_ <= 256);
+  static_assert(ConsumerRegs_ % 8 == 0 && ConsumerRegs_ >= 24 && ConsumerRegs_ <= 256);
 
   // Kernel level shared memory storage
   // We overlap the shared memory for the mainloop and epilogue.
@@ -278,7 +272,7 @@ class FlashAttnFwdSm90 {
 
       // Deallocate the registers for the producer WG,
       // which allows the consumer WGs to have more registers
-      cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+      cutlass::arch::warpgroup_reg_dealloc<ProducerRegs_>();
 
       // Initialize producer write pipeline states of K,V
       PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
@@ -318,16 +312,16 @@ class FlashAttnFwdSm90 {
       // For each work tile job:
       // 1. load this m block of Q from global memory into shared memory
       // 2. pipeline the loads of K,V for each n block from global memory into shared memory
-      for (auto work_tile_info = is_scheduler_warp() ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
-                                                     : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
-           work_tile_info.is_valid(params.scheduler);
-           work_tile_info = is_scheduler_warp() ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
-                                                : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-        auto block_coord = work_tile_info.get_block_coord();
+      for (auto work_block_info = is_scheduler_warp() ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
+                                                      : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+           work_block_info.is_valid(params.scheduler);
+           work_block_info = is_scheduler_warp() ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_block_info)
+                                                 : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_block_info)) {
+        auto block_coord = work_block_info.get_block_coord();
 
         BlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
 
-        auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
+        auto scheduler_prefetch = [&scheduler, &params, &work_block_info]() { scheduler.prefetch_next_work(params.scheduler, work_block_info); };
 
         bool has_tile_valid = mainloop.template load<kInnerDir>(
             params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
@@ -348,7 +342,7 @@ class FlashAttnFwdSm90 {
               typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>>>;
 
       // Allocate the registers for the consumer WGs
-      cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
+      cutlass::arch::warpgroup_reg_alloc<ConsumerRegs_>();
 
       // Initialize tiled mma object for O=PV
       TiledMmaPV tiled_mma_pv;
@@ -370,11 +364,11 @@ class FlashAttnFwdSm90 {
       //  3. store the reduced O into the global memory as the consumer epilogue
       int work_idx = 0;
       CUTLASS_PRAGMA_NO_UNROLL
-      for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
+      for (auto work_block_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_block_info.is_valid(params.scheduler);
            // get_next_work will be called before the epilogue
       ) {
-        auto block_coord = work_tile_info.get_block_coord();
-        auto det_msg = work_tile_info.get_det_msg();
+        auto block_coord = work_block_info.get_block_coord();
+        auto det_msg = work_block_info.get_det_msg();
 
         BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
@@ -412,7 +406,7 @@ class FlashAttnFwdSm90 {
             shared_storage);
 
         // NOTE: get next work before epilogue so that the next tile is ready to go.
-        work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
+        work_block_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_block_info);
 
         if (has_tile_valid) {
           if constexpr (!ReturnMaxLogits) {

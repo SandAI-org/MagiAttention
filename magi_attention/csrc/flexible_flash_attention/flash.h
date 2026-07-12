@@ -116,13 +116,12 @@ struct Flash_fwd_params : public Qkv_params {
   int inner_indices_cnt; // per-head topk width (dim-2 of 3D tensor)
 
   // Optimization params for tile scheduling
-  // for each batch, we assume the seqlen is the same(max_seqlen_q).
+  // for each batch, we assume the seqlen is the same(max_outer_range_width).
   // and precompute some params to avoid computation each time in fwd_tile_scheduler.
-  int max_seqlen_q;
-  bool has_max_seqlen_q; // Whether max_seqlen_q is provided
-  int blocks_per_batch; // number of blocks per batch ((max_seqlen_q * seqlen_scale_factor + kBlockM - 1) / kBlockM)
-  int tiles_per_batch_per_intergroup; // number of tiles per batch each intergroup (blocks_per_batch * qheads_per_kv_group)
-  int max_tile_idx; // maximum tile index when has_max_seqlen_q is true, if tile_id >= max_tile_idx, the tile must be invalid.
+  int max_outer_range_width;
+  bool has_max_outer_range_width; // Whether max_outer_range_width is provided
+  int batch_stride; // number of tiles per batch each intergroup (blocks_per_batch * qheads_per_kv_group)
+  int max_tile_idx; // maximum tile index when has_max_outer_range_width is true, if tile_id >= max_tile_idx, the tile must be invalid.
 
   bool has_sink() const {
     return total_sink > 0;

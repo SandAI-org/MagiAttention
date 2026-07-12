@@ -35,7 +35,7 @@
 #include "block_meta.h"
 #include "copy_sm90_bulk_reduce.hpp"
 #include "deterministic.h"
-#include "inner_mode.hpp"
+#include "inner_ldst_mode.hpp"
 #include "inner_scatter_ldst.hpp"
 #include "mask.h"
 #include "named_barrier.hpp"
@@ -77,7 +77,6 @@ template <
     int AtomLayoutMSdP,
     int AtomLayoutNdKV,
     int AtomLayoutMdQ,
-    bool Mma_dP_is_RS,
     int Stages_V_,
     int Tma1dSmemRowPad_,
     int SparseKBlockSize_,
@@ -105,7 +104,6 @@ struct CollectiveMainloopBwdSm90 {
   static_assert(kStages >= kStages_dO);
   static_assert(Stages_dS == 1 || Stages_dS == kStages);
   static_assert(kStages_V >= 1 && kStages_V <= kStages);
-  static_assert(!Mma_dP_is_RS || SdP_swapAB_); // If Mma_dP_is_RS, we need SdP_SwapAB
 
   static constexpr bool PerfDebugSkipVLoad = PerfDebugSkipVLoad_;
   static constexpr bool PerfDebugSkipDvStore = PerfDebugSkipDvStore_;
@@ -179,7 +177,8 @@ struct CollectiveMainloopBwdSm90 {
   //     IndexSparse: contiguous when kbs >= kBlockN AND PackGQAFactor >= kBlockM.
   static constexpr bool kInnerTilesContiguous = !IsSparse || (!BwdInnerLoopK && PackGQA && (!IndexSparse || PackGQAFactor >= kBlockM)) ||
       (BwdInnerLoopK && ((BlockSparse && SparseKBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && SparseKBlockSize >= kBlockN)));
-  static constexpr InnerLoadMode kInnerLoadMode = kInnerTilesContiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
+  static constexpr InnerLoadMode kInnerLoadMode = static_cast<InnerLoadMode>(InnerLoadMode_);
+  static_assert(kInnerLoadMode != InnerLoadMode::Tma || kInnerTilesContiguous, "TMA inner load requires contiguous tiles");
 
   using MainloopPipeline =
       std::conditional_t<kInnerLoadMode == InnerLoadMode::Tma, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
@@ -272,8 +271,7 @@ struct CollectiveMainloopBwdSm90 {
   using AtomLayoutSdP =
       std::conditional_t<!SdP_swapAB, Layout<Shape<Int<AtomLayoutMSdP>, Int<AtomLayoutNSdP>, _1>>, Layout<Shape<Int<AtomLayoutNSdP>, Int<AtomLayoutMSdP>, _1>>>;
   using TiledMmaSdP = decltype(cute::make_tiled_mma(GMMA::ss_op_selector<Element, Element, ElementAccum, TileShapeAtomSdP>(), AtomLayoutSdP{}));
-  using TiledMmadPRS = decltype(cute::make_tiled_mma(GMMA::rs_op_selector<Element, Element, ElementAccum, TileShapeAtomSdP>(), AtomLayoutSdP{}));
-  using TiledMmadP = std::conditional_t<!Mma_dP_is_RS, TiledMmaSdP, TiledMmadPRS>;
+  using TiledMmadP = TiledMmaSdP;
   static_assert(
       stride<0>(typename TiledMmaSdP::ALayout{}) == 0 and stride<0>(typename TiledMmaSdP::BLayout{}) == 0,
       "Stride of the first mode of TiledMmaSdP must be 0");
@@ -617,7 +615,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr size_t SmemAlignmentdS = cutlass::detail::alignment_for_swizzle(SmemLayoutPdS{});
   // Without this SmemAlignment, with hdim 256 we get "misaligned address" error in TMA
   static constexpr size_t SmemAlignmentQKVdO = kHeadDim % 256 == 0 ? 256 : 128;
-  static constexpr size_t SmemAlignmentV = !Mma_dP_is_RS ? SmemAlignmentQKVdO : cutlass::detail::alignment_for_swizzle(SmemLayoutV{});
+  static constexpr size_t SmemAlignmentV = SmemAlignmentQKVdO;
   static constexpr size_t SmemAlignmentLSE = 128, SmemAlignmentdPsum = 128;
   static constexpr size_t maxSmemAlignment = cute::max(SmemAlignmentP, SmemAlignmentdS, SmemAlignmentQKVdO, SmemAlignmentV, SmemAlignmentLSE, SmemAlignmentdPsum);
   static_assert(SmemAlignmentP >= 128 && SmemAlignmentdS >= 128, "Require at least 128B alignment");
@@ -867,10 +865,14 @@ struct CollectiveMainloopBwdSm90 {
       InnerDirMaxToMin,
       InnerLoopQ>;
 
-  using BlockSparseLoopKProducerBlockMeta = BlockSparseBlockMetaT<true, false>;
-  using BlockSparseLoopKConsumerBlockMeta = BlockSparseBlockMetaT<false, false>;
-  using BlockSparseLoopQProducerBlockMeta = BlockSparseBlockMetaT<true, true>;
-  using BlockSparseLoopQConsumerBlockMeta = BlockSparseBlockMetaT<false, true>;
+  template <bool IsProducer>
+  using BlockSparseLoopKBlockMeta = BlockSparseBlockMetaT<IsProducer, false>;
+  template <bool IsProducer>
+  using BlockSparseLoopQBlockMeta = BlockSparseBlockMetaT<IsProducer, true>;
+
+  // Unified sparse LoopQ alias — dispatches to IndexSparse or BlockSparse based on template config.
+  template <bool IsProducer>
+  using SparseLoopQBlockMeta = std::conditional_t<IndexSparse, IndexSparseBlockMetaT<IsProducer, true>, BlockSparseBlockMetaT<IsProducer, true>>;
 
   static Params to_underlying_arguments(Arguments const& args) {
     if constexpr (Deterministic) {
@@ -1107,6 +1109,10 @@ struct CollectiveMainloopBwdSm90 {
   using IndexSparseLoopKBlockMeta = IndexSparseBlockMetaT<IsProducer, false>;
   template <bool IsProducer>
   using IndexSparseLoopQBlockMeta = IndexSparseBlockMetaT<IsProducer, true>;
+
+  // Unified sparse LoopK alias (mirrors SparseLoopQBlockMeta above).
+  template <bool IsProducer>
+  using SparseLoopKBlockMeta = std::conditional_t<IndexSparse, IndexSparseBlockMetaT<IsProducer, false>, BlockSparseBlockMetaT<IsProducer, false>>;
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
@@ -2609,15 +2615,6 @@ struct CollectiveMainloopBwdSm90 {
       shared_storage.pipelines.barrier_KV.wait(work_idx % 2);
     }
 
-    if constexpr (Mma_dP_is_RS) { // guanrateed SdP_SwapAB, then only V needs to copy to registers
-      using SmemCopyAtomV = Copy_Atom<cute::SM75_U32x4_LDSM_N, Element>;
-      auto smem_tiled_copy_V = make_tiled_copy_A(SmemCopyAtomV{}, tiled_mma_dP);
-      auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(thread_idx);
-      Tensor tdPrV_copy_view = smem_thr_copy_V.retile_D(tdPrV);
-      Tensor tdPsV_copy_view = smem_thr_copy_V.partition_S(cute::as_position_independent_swizzle_tensor(sV));
-      cute::copy(smem_tiled_copy_V, tdPsV_copy_view, tdPrV_copy_view);
-    }
-
     Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
 
     // Define backward step lambda func
@@ -3365,13 +3362,6 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    if constexpr (Mma_dP_is_RS) {
-      // NOTE: if Mma_dP_is_RS, then SdP_SwapAB must be true,
-      // then we have to copy current n block of V to registers every iteration,
-      // which seems unacceptable for loop-k settings
-      static_assert(!Mma_dP_is_RS, "Mma_dP_is_RS is not supported yet when BwdInnerLoopK is true.");
-    }
-
     Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
 
     // Define backward step lambda func
@@ -3974,7 +3964,7 @@ struct CollectiveMainloopBwdSm90 {
   CUTLASS_DEVICE void debug_print_mma(int block_idx = 0, int thread_idx = 128) {
     if (blockIdx.x == block_idx && threadIdx.x == thread_idx) {
       printf(
-          "kBlockM=%d, kBlockN=%d, kHeadDim=%d | dQ_swapAB=%d, dKV_swapAB=%d, SdP_swapAB=%d | Mma_dQ_is_RS=%d, Mma_dKV_is_RS=%d, Mma_dP_is_RS=%d\n",
+          "kBlockM=%d, kBlockN=%d, kHeadDim=%d | dQ_swapAB=%d, dKV_swapAB=%d, SdP_swapAB=%d | Mma_dQ_is_RS=%d, Mma_dKV_is_RS=%d\n",
           kBlockM,
           kBlockN,
           kHeadDim,
@@ -3982,8 +3972,7 @@ struct CollectiveMainloopBwdSm90 {
           dKV_swapAB,
           SdP_swapAB,
           Mma_dQ_is_RS,
-          Mma_dKV_is_RS,
-          Mma_dP_is_RS);
+          Mma_dKV_is_RS);
 
       TileShapeAtomdQ tile_shape_at_dQ;
       TiledMmadQ tiled_mma_dQ;

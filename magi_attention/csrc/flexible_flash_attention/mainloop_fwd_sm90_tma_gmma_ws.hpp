@@ -32,7 +32,7 @@
 
 #include "block.h"
 #include "block_meta.h"
-#include "inner_mode.hpp"
+#include "inner_ldst_mode.hpp"
 #include "inner_scatter_ldst.hpp"
 #include "mask.h"
 #include "named_barrier.hpp"
@@ -64,7 +64,7 @@ template <
     bool InnerDirMaxToMin_,
     int MaskMode_,
     int SparseKBlockSize_,
-    int InnerLoadMode_ = 2>
+    int InnerLoadMode_>
 struct CollectiveMainloopFwdSm90 {
   using ClusterShape = ClusterShape_;
   using TileShape_MNK = TileShape_MNK_;
@@ -126,15 +126,15 @@ struct CollectiveMainloopFwdSm90 {
   using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB, TileShape_MNK_PV>;
 
   // ─── Inner-Loop KV Load Strategy (InnerLoadMode enum) ───
-  // Tma:     physically contiguous tiles → TMA 2D descriptor (auto-detected)
+  // Tma:     physically contiguous tiles → TMA 2D descriptor
   // CpAsync: cp.async per-row scatter (8×16B per row, non-contiguous tokens)
-  // SparseKBlockSize controls contiguity: when SparseKBlockSize >= kBlockN, each inner tile
-  // is a contiguous memory region → TMA 2D. Both IndexSparse and BlockSparse
-  // must set SparseKBlockSize appropriately (BlockSparse: kBlockN, IndexSparse: user).
+  // The load mode is set by the Python JIT layer (auto-detected from SparseKBlockSize
+  // vs kBlockN, or overridden via MAGI_ATTENTION_FFA_INNER_LOAD_MODE env var).
   static constexpr bool Use_TMA_Q = true;
   static constexpr bool kInnerTilesContiguous = !IsSparse || (SparseKBlockSize >= kBlockN);
-  static constexpr InnerLoadMode kInnerLoadMode = kInnerTilesContiguous ? InnerLoadMode::Tma : InnerLoadMode::CpAsync;
+  static constexpr InnerLoadMode kInnerLoadMode = static_cast<InnerLoadMode>(InnerLoadMode_);
   static_assert(kInnerLoadMode == InnerLoadMode::Tma || kInnerLoadMode == InnerLoadMode::CpAsync);
+  static_assert(kInnerLoadMode != InnerLoadMode::Tma || kInnerTilesContiguous, "TMA inner load requires contiguous tiles (SparseKBlockSize >= kBlockN)");
   static_assert(kInnerLoadMode == InnerLoadMode::Tma || CUTE_STATIC_V(size(ClusterShape{})) == 1, "Scatter load requires ClusterShape == 1");
 
   // By default, V is always row-major

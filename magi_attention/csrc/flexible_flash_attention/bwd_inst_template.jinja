@@ -36,7 +36,7 @@ static constexpr bool kInnerStoreInProducer = {{inner_store_in_producer | defaul
 static constexpr int kBwdProducerRegs = {{bwd_producer_regs}};
 static constexpr int kBwdConsumerRegs = {{bwd_consumer_regs}};
 // Inner-loop scatter load mode: 0=Tma(2D,auto), 2=CpAsync(per-row). Auto-determined in mainloop from tile contiguity.
-static constexpr int kInnerLoadMode = {{inner_load_mode | default(0)}};
+static constexpr int kInnerLoadMode = {{inner_load_mode}};
 // Inner-loop store mode: 0=Tma(2D reduce-add, default), 1=Tma1d(bulk per-row), 2=AtomicAdd(scalar), 3=BypassSmem(register atomicAdd)
 static constexpr int kInnerStoreMode = {{inner_store_mode | default(0)}};
 // Tile/stage overrides for A/B benchmarking (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS/V).

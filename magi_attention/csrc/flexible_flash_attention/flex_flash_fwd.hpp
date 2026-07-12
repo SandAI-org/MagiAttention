@@ -47,7 +47,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
-    const std::optional<int> max_seqlen_q_,
+    const std::optional<int> max_outer_range_width_,
     const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
@@ -293,8 +293,8 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
   int total_seqlen_q = !PackGQA ? total_q : total_q * qhead_per_khead;
   // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads columns
   at::Tensor range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));
-  // Create tile_count_semaphore tensor, used to count the number of tiles
-  at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
+  // Create block_count_semaphore tensor, used to count the number of tiles
+  at::Tensor block_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   // If atomic reduction is enabled, we need to zero out the out_accum tensor
   if (!DisableAtomic)
     range_locks.zero_();
@@ -316,20 +316,20 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
     determin_conflict_state.zero_();
   }
 
-  // Compute optimization parameters if max_seqlen_q is provided
+  // Compute optimization parameters if max_outer_range_width is provided
   int blocks_per_batch = 0;
-  int tiles_per_batch_per_intergroup = 0;
+  int batch_stride = 0;
   int max_tile_idx = 0;
-  bool has_max_seqlen_q = max_seqlen_q_.has_value();
-  if (has_max_seqlen_q) {
+  bool has_max_outer_range_width = max_outer_range_width_.has_value();
+  if (has_max_outer_range_width) {
     int seqlen_scale_factor = !PackGQA ? 1 : qhead_per_khead;
-    blocks_per_batch = (max_seqlen_q_.value() * seqlen_scale_factor + kBlockM - 1) / kBlockM;
+    blocks_per_batch = (max_outer_range_width_.value() * seqlen_scale_factor + kBlockM - 1) / kBlockM;
     int qheads_per_kv_group = !PackGQA ? qhead_per_khead : 1;
-    tiles_per_batch_per_intergroup = blocks_per_batch * qheads_per_kv_group;
-    // max_tile_idx = num_heads_kv * total_tiles_per_intergroup
-    // where total_tiles_per_intergroup = tiles_per_batch_per_intergroup * merge_batch_size
-    int total_tiles_per_intergroup = tiles_per_batch_per_intergroup * merge_batch_size;
-    max_tile_idx = num_heads_kv * total_tiles_per_intergroup;
+    batch_stride = blocks_per_batch * qheads_per_kv_group;
+    // max_tile_idx = num_heads_kv * intergroup_stride
+    // where intergroup_stride = batch_stride * merge_batch_size
+    int intergroup_stride = batch_stride * merge_batch_size;
+    max_tile_idx = num_heads_kv * intergroup_stride;
   }
 
   Flash_fwd_params params;
@@ -362,15 +362,14 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor, std::optional<at::Tensor>> 
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*max_logits=*/ReturnMaxLogits ? max_logits->data_ptr() : nullptr,
       /*softmax_scale=*/softmax_scale,
-      /*tile_count_semaphore=*/tile_count_semaphore.data_ptr(),
+      /*block_count_semaphore=*/block_count_semaphore.data_ptr(),
       /*softcap=*/softcap,
       /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
       /*disable_fwd_atomic_reduction=*/DisableAtomic,
-      /*max_seqlen_q=*/has_max_seqlen_q ? max_seqlen_q_.value() : 0,
-      /*has_max_seqlen_q=*/has_max_seqlen_q,
-      /*blocks_per_batch=*/blocks_per_batch,
-      /*tiles_per_batch_per_intergroup=*/tiles_per_batch_per_intergroup,
+      /*max_outer_range_width=*/has_max_outer_range_width ? max_outer_range_width_.value() : 0,
+      /*has_max_outer_range_width=*/has_max_outer_range_width,
+      /*batch_stride=*/batch_stride,
       /*max_tile_idx=*/max_tile_idx,
       /*index_sparse_indices=*/has_index_sparse ? index_sparse_indices.data_ptr() : nullptr,
       /*inner_indices_cnt=*/inner_indices_cnt);

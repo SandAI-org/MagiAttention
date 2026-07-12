@@ -73,10 +73,9 @@ void set_params_fprop(
     flash::SinkLayout const sink_layout = flash::SinkLayout::SH,
     int const sm_margin = 0,
     bool const disable_fwd_atomic_reduction = false,
-    int const max_seqlen_q = 0,
-    bool const has_max_seqlen_q = false,
-    int const blocks_per_batch = 0,
-    int const tiles_per_batch_per_intergroup = 0,
+    int const max_outer_range_width = 0,
+    bool const has_max_outer_range_width = false,
+    int const batch_stride = 0,
     int const max_tile_idx = 0,
     void* index_sparse_indices_d = nullptr,
     int const inner_indices_cnt = 0);
