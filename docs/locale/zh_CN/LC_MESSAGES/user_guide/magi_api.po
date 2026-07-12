@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: MagiAttention\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"POT-Creation-Date: 2026-07-03 04:26+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -34,6 +34,505 @@ msgid ""
 "following interface."
 msgstr "为了支持不规则形状掩码的计算，我们实现了 `flexible_flash_attention` 内核，可通过以下接口调用。"
 
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:1 of
+msgid ""
+"An interface similar to flash attention that doesn't require distributed "
+"environment, dispatch or undispatch. Directly call magi_attn_kernel to get "
+"attention output and lse. This is faster when you don't need context "
+"parallel."
+msgstr ""
+"类似 flash attention 的接口，无需分布式环境、dispatch 或 undispatch。直接调用 magi_attn_kernel "
+"获取注意力输出和 lse。当您不需要上下文并行时，此接口更快。"
+
+#: ../../source/user_guide/magi_api.md
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch
+#: of
+msgid "Parameters"
+msgstr "参数"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:4 of
+msgid "Query tensor."
+msgstr "Query 张量。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:6 of
+msgid "Key tensor."
+msgstr "Key 张量。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:8 of
+msgid "Value tensor."
+msgstr "Value 张量。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:10 of
+msgid ""
+"Query ranges tensor to represent the attn mask. Mutually exclusive with "
+"``index_attn_indices``."
+msgstr "表示注意力掩码的 query ranges 张量。与 ``index_attn_indices`` 互斥。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:13 of
+msgid ""
+"Key ranges tensor to represent the attn mask. Must be provided together with"
+" ``q_ranges``."
+msgstr "表示注意力掩码的 key ranges 张量。必须与 ``q_ranges`` 一起提供。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:16 of
+msgid ""
+"IndexAttn token indices. Shape: ``(total_q, num_kv_heads, max_topk)``, "
+"dtype=int32. Values are **logical** KV token positions: ``batch_idx * S_kv +"
+" token_idx``. The kernel internally converts to physical row via ``pos * NHK"
+" + kv_head``. Use ``-1`` for padding (must be contiguous at the tail of each"
+" row). Mutually exclusive with ``q_ranges``. The kernel scans trailing "
+"``-1`` entries to determine loop count and invalid count internally — no "
+"Python-side preprocessing is needed. ``max_topk`` (last dim) must be a "
+"multiple of tile_size (128, or 64 if swap_ab). The mask representation "
+"theoretically supports block-level KV (``k_block_size > 1``) but currently "
+"only ``k_block_size=1`` (token-level) is implemented."
+msgstr ""
+"IndexAttn token 索引。形状：``(total_q, num_kv_heads, max_topk)``，dtype=int32。值为 "
+"**逻辑** KV token 位置：``batch_idx * S_kv + token_idx``。内核内部通过 ``pos * NHK + "
+"kv_head`` 转换为物理行。使用 ``-1`` 作为填充（必须连续位于每行末尾）。与 ``q_ranges`` 互斥。内核内部扫描末尾的 "
+"``-1`` 条目来确定循环次数和无效数量——无需 Python 端预处理。``max_topk``（最后一维）必须是 tile_size "
+"的倍数（128，若 swap_ab 则为 64）。该掩码表示理论上支持块级 KV（``k_block_size > 1``），但目前仅实现了 "
+"``k_block_size=1``（token 级）。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:28 of
+msgid ""
+"Q block size. Defaults to ``1``. Currently only ``1`` (per-token Q "
+"granularity) is supported."
+msgstr "Q 块大小。默认为 ``1``。目前仅支持 ``1``（逐 token 的 Q 粒度）。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:31 of
+msgid ""
+"K block size. Defaults to ``1``. Currently only ``1`` (token-level KV) is "
+"implemented; future may support 32/64."
+msgstr "K 块大小。默认为 ``1``。目前仅实现了 ``1``（token 级 KV）；未来可能支持 32/64。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:34 of
+msgid ""
+"Maximum sequence length for query. Defaults to ``None``. If provided, "
+"enables optimization for tile_scheduler. Most recommended to set this when "
+"using auto_range_merge(for block sparse attention)."
+msgstr ""
+"query 的最大序列长度。默认为 ``None``。若提供，则为 tile_scheduler 启用优化。使用 "
+"auto_range_merge（用于块稀疏注意力）时最推荐设置此项。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:38 of
+msgid ""
+"Attention type map tensor with dtype=torch.int32, Defaults to ``None`` to "
+"apply full attention for all ranges. The values specify the attention type "
+"for each token:      - 0: full attention     - 1: causal attention     - 2: "
+"inverse causal attention     - 3: bidirectional causal attention  More "
+"information about the attention type map can be found in the ``Note`` below."
+msgstr ""
+"注意力类型映射张量，dtype=torch.int32，默认为 ``None``，即对所有 range 应用全注意力。取值指定每个 token "
+"的注意力类型：      - 0：full attention     - 1：causal attention     - 2：inverse "
+"causal attention     - 3：bidirectional causal attention  关于注意力类型映射的更多信息见下方 "
+"``Note``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:38 of
+msgid ""
+"Attention type map tensor with dtype=torch.int32, Defaults to ``None`` to "
+"apply full attention for all ranges. The values specify the attention type "
+"for each token:"
+msgstr ""
+"注意力类型映射张量，dtype=torch.int32，默认为 ``None``，即对所有 range 应用全注意力。取值指定每个 token "
+"的注意力类型："
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:42 of
+msgid "0: full attention"
+msgstr "0：full attention（全注意力）"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:43 of
+msgid "1: causal attention"
+msgstr "1：causal attention（因果注意力）"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:44 of
+msgid "2: inverse causal attention"
+msgstr "2：inverse causal attention（逆因果注意力）"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:45 of
+msgid "3: bidirectional causal attention"
+msgstr "3：bidirectional causal attention（双向因果注意力）"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:47 of
+msgid ""
+"More information about the attention type map can be found in the ``Note`` "
+"below."
+msgstr "关于注意力类型映射的更多信息见下方 ``Note``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:49 of
+msgid ""
+"Learnable sink token tensor. Defaults to ``None`` to not apply attention "
+"sink."
+msgstr "可学习的 sink token 张量。默认为 ``None``，即不应用 attention sink。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:52 of
+msgid ""
+"the layout of the sink tokens. Defaults to \"sh\". Available Options: "
+"\"sh\", \"ssh\"."
+msgstr "sink token 的布局。默认为 \"sh\"。可选值：\"sh\"、\"ssh\"。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:55 of
+msgid "Softmax scale. Defaults to ``None`` to use: ``1/sqrt(head_dim)``."
+msgstr "Softmax 缩放因子。默认为 ``None``，即使用 ``1/sqrt(head_dim)``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:58 of
+msgid "Softcap. Defaults to ``0.0``."
+msgstr "Softcap。默认为 ``0.0``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:60 of
+msgid "Whether to use deterministic attention. Defaults to ``False``."
+msgstr "是否使用确定性注意力。默认为 ``False``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:62 of
+msgid ""
+"The amount of SMs reserved out, useful when considering overlapping with "
+"other kernels such as communication kernels. Defaults to ``0`` to use all "
+"available SMs."
+msgstr "预留的 SM 数量，在考虑与其他内核（如通信内核）重叠时很有用。默认为 ``0``，即使用所有可用的 SM。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:66 of
+msgid ""
+"Whether to disable forward atomic reduction. Defaults to ``False``.      If "
+"you can ensure ``q_ranges`` is non-overlapped,     you can set this to "
+"``True`` for better performance.     The \"overlap\" term among ``q_ranges``"
+" is defined as:     if any two ``q_range`` in ``q_ranges`` have non-empty "
+"intersection, then it is overlapped.     For example, ``q_ranges`` = ``[[0, "
+"15], [10, 20], [20, 30]]`` is overlapped     since ``q_range1`` = ``[0, "
+"15]`` and ``q_range2`` = ``[10, 20]`` intersect,     while `` q_ranges`` = "
+"``[[0, 15], [15, 20], [20, 30]]`` then is non-overlapped."
+msgstr ""
+"是否禁用前向 atomic reduction。默认为 ``False``。      如果您能确保 ``q_ranges`` 不重叠，     "
+"可以将其设为 ``True`` 以获得更好的性能。     ``q_ranges`` 中的“重叠”定义为：     如果 ``q_ranges`` "
+"中任意两个 ``q_range`` 有非空交集，则为重叠。     例如，``q_ranges`` = ``[[0, 15], [10, 20], "
+"[20, 30]]`` 是重叠的，     因为 ``q_range1`` = ``[0, 15]`` 与 ``q_range2`` = ``[10, "
+"20]`` 相交，     而 `` q_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` 则不重叠。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:67 of
+msgid "Whether to disable forward atomic reduction. Defaults to ``False``."
+msgstr "是否禁用前向 atomic reduction。默认为 ``False``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:69 of
+msgid ""
+"If you can ensure ``q_ranges`` is non-overlapped, you can set this to "
+"``True`` for better performance. The \"overlap\" term among ``q_ranges`` is "
+"defined as: if any two ``q_range`` in ``q_ranges`` have non-empty "
+"intersection, then it is overlapped. For example, ``q_ranges`` = ``[[0, 15],"
+" [10, 20], [20, 30]]`` is overlapped since ``q_range1`` = ``[0, 15]`` and "
+"``q_range2`` = ``[10, 20]`` intersect, while `` q_ranges`` = ``[[0, 15], "
+"[15, 20], [20, 30]]`` then is non-overlapped."
+msgstr ""
+"如果您能确保 ``q_ranges`` 不重叠，可以将其设为 ``True`` 以获得更好的性能。``q_ranges`` 中的“重叠”定义为：如果 "
+"``q_ranges`` 中任意两个 ``q_range`` 有非空交集，则为重叠。例如，``q_ranges`` = ``[[0, 15], [10,"
+" 20], [20, 30]]`` 是重叠的，因为 ``q_range1`` = ``[0, 15]`` 与 ``q_range2`` = ``[10,"
+" 20]`` 相交，而 `` q_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` 则不重叠。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:77 of
+msgid ""
+"Whether to disable backward dK/dV atomic reduction. Defaults to ``False``."
+"      If you can ensure ``k_ranges`` (used in backward) is non-overlapped "
+"and sorted,     you can set this to ``True`` for better performance.     The"
+" \"overlap\" term among ``k_ranges`` is defined as:     if any two "
+"``k_range`` in ``k_ranges`` have non-empty intersection, then it is "
+"overlapped.     For example, ``k_ranges`` = ``[[0, 15], [10, 20], [20, "
+"30]]`` is overlapped     since ``k_range1`` = ``[0, 15]`` and ``k_range2`` ="
+" ``[10, 20]`` intersect,     while ``k_ranges`` = ``[[0, 15], [15, 20], [20,"
+" 30]]`` then is non-overlapped.     **Note:** This flag can only be enabled "
+"with MHA or catGQA."
+msgstr ""
+"是否禁用反向 dK/dV atomic reduction。默认为 ``False``。      如果您能确保（反向中使用的）``k_ranges``"
+" 不重叠且已排序，     可以将其设为 ``True`` 以获得更好的性能。     ``k_ranges`` 中的“重叠”定义为：     如果 "
+"``k_ranges`` 中任意两个 ``k_range`` 有非空交集，则为重叠。     例如，``k_ranges`` = ``[[0, 15],"
+" [10, 20], [20, 30]]`` 是重叠的，     因为 ``k_range1`` = ``[0, 15]`` 与 "
+"``k_range2`` = ``[10, 20]`` 相交，     而 ``k_ranges`` = ``[[0, 15], [15, 20], "
+"[20, 30]]`` 则不重叠。     **注意：** 此标志只能在 MHA 或 catGQA 下启用。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:78 of
+msgid ""
+"Whether to disable backward dK/dV atomic reduction. Defaults to ``False``."
+msgstr "是否禁用反向 dK/dV atomic reduction。默认为 ``False``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:80 of
+msgid ""
+"If you can ensure ``k_ranges`` (used in backward) is non-overlapped and "
+"sorted, you can set this to ``True`` for better performance. The \"overlap\""
+" term among ``k_ranges`` is defined as: if any two ``k_range`` in "
+"``k_ranges`` have non-empty intersection, then it is overlapped. For "
+"example, ``k_ranges`` = ``[[0, 15], [10, 20], [20, 30]]`` is overlapped "
+"since ``k_range1`` = ``[0, 15]`` and ``k_range2`` = ``[10, 20]`` intersect, "
+"while ``k_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` then is non-"
+"overlapped. **Note:** This flag can only be enabled with MHA or catGQA."
+msgstr ""
+"如果您能确保（反向中使用的）``k_ranges`` 不重叠且已排序，可以将其设为 ``True`` 以获得更好的性能。``k_ranges`` "
+"中的“重叠”定义为：如果 ``k_ranges`` 中任意两个 ``k_range`` 有非空交集，则为重叠。例如，``k_ranges`` = "
+"``[[0, 15], [10, 20], [20, 30]]`` 是重叠的，因为 ``k_range1`` = ``[0, 15]`` 与 "
+"``k_range2`` = ``[10, 20]`` 相交，而 ``k_ranges`` = ``[[0, 15], [15, 20], [20, "
+"30]]`` 则不重叠。**注意：** 此标志只能在 MHA 或 catGQA 下启用。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:89 of
+msgid ""
+"Reference block size (M, N) for kernel selection. Defaults to ``None`` to "
+"use the internal heuristic. **Note:** This flag is useful for sparse "
+"attention scenarios but still under development."
+msgstr ""
+"用于内核选择的参考块大小 (M, N)。默认为 ``None``，即使用内部启发式规则。**注意：** 此标志对稀疏注意力场景有用，但仍在开发中。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:93 of
+msgid ""
+"Maximum sequence length for query. Defaults to ``None``. If provided, "
+"enables optimization for forward tile_scheduler, especially for block sparse"
+" attention scenarios."
+msgstr ""
+"query 的最大序列长度。默认为 ``None``。若提供，则为前向 tile_scheduler 启用优化，尤其适用于块稀疏注意力场景。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:97 of
+msgid ""
+"Whether to automatically merge k_ranges for the same q_range. Defaults to "
+"``False``. **Note:** This flag is useful for sparse attention scenarios but "
+"still under development."
+msgstr ""
+"是否为相同的 q_range 自动合并 k_ranges。默认为 ``False``。**注意：** 此标志对稀疏注意力场景有用，但仍在开发中。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:100 of
+msgid ""
+"Whether to swap the order of A and B operands for the matmul operation (i.e."
+" transpose `C=A x B^T` to `C^T= B x A^T`) in attention forward passes. "
+"Defaults to ``False``. **Note:** This flag is useful for sparse attention "
+"scenarios but still under development."
+msgstr ""
+"是否在注意力前向中交换 matmul 运算的 A、B 操作数顺序（即将 `C=A x B^T` 转置为 `C^T= B x A^T`）。默认为 "
+"``False``。**注意：** 此标志对稀疏注意力场景有用，但仍在开发中。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:104 of
+msgid ""
+"Whether to group query heads sharing the same KV head into a single "
+"computation block tile for small seqlen_q scenarios. This method "
+"significantly improves the computational efficiency of block sparse "
+"attention when seqlen_q is small. Defaults to ``False``. **Note:** kblockm "
+"must be divisible by qhead_per_khead(num_qhead // num_khead). For backward "
+"pass, this flag is only enabled when swap_bwd_qk_loop is True."
+msgstr ""
+"对于 seqlen_q 较小的场景，是否将共享相同 KV head 的 query head 分组到单个计算块 tile 中。当 seqlen_q "
+"较小时，此方法可显著提升块稀疏注意力的计算效率。默认为 ``False``。**注意：** kblockm 必须能被 "
+"qhead_per_khead（num_qhead // num_khead）整除。对于反向传播，此标志仅在 swap_bwd_qk_loop 为 "
+"True 时启用。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:110 of
+msgid ""
+"Whether to concatenate multiple Q heads sharing the same KV head, to "
+"optimize the backward performance under GQA settings. Defaults to ``False``."
+msgstr "是否拼接共享相同 KV head 的多个 Q head，以优化 GQA 设置下的反向性能。默认为 ``False``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:113 of
+msgid ""
+"Whether to enable sparse load mode for optimizing performance when k_range "
+"size is small (< 64). Must be used together with ``auto_range_merge=True`` "
+"for enhanced performance. Defaults to ``False``. Mutually exclusive with "
+"``index_attn_indices``."
+msgstr ""
+"是否启用稀疏加载模式，以在 k_range 大小较小（< 64）时优化性能。必须与 ``auto_range_merge=True`` "
+"一起使用以增强性能。默认为 ``False``。与 ``index_attn_indices`` 互斥。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:117 of
+msgid ""
+"Only used when ``sparse_load=True``. Indicates whether all k_ranges have "
+"equal size, which lets the kernel take an O(1) divide-based cursor seek "
+"instead of an O(num_steps) fallback. Defaults to ``True`` (the common case, "
+"e.g. uniform block-sparse). **Warning:** must be set to ``False`` when "
+"k_range sizes differ, otherwise the seek computes wrong token indices "
+"(incorrect results)."
+msgstr ""
+"仅在 ``sparse_load=True`` 时使用。指示是否所有 k_ranges 大小相同，这让内核可以采用 O(1) 的基于除法的游标查找，而非"
+" O(num_steps) 的回退方案。默认为 ``True``（常见情况，如均匀块稀疏）。**警告：** 当 k_range 大小不同时必须设为 "
+"``False``，否则查找会计算出错误的 token 索引（导致结果错误）。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:123 of
+msgid ""
+"Whether to enable the IndexAttn kernel path, where the kernel directly reads"
+" ``index_attn_indices`` instead of using q/k ranges. Automatically set to "
+"``True`` when ``index_attn_indices`` is provided. Defaults to ``False``."
+msgstr ""
+"是否启用 IndexAttn 内核路径，此时内核直接读取 ``index_attn_indices`` 而非使用 q/k ranges。当提供 "
+"``index_attn_indices`` 时自动设为 ``True``。默认为 ``False``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:127 of
+msgid ""
+"Whether to swap the order of Q and K double-loops (i.e. from the default `K "
+"for outer-loop and Q for inner-loop` to `Q for outer-loop and K for inner-"
+"loop`) in the attention backward pass. Defaults to ``False``. **Note:** This"
+" flag is useful for sparse attention scenarios but still under development."
+msgstr ""
+"是否在注意力反向中交换 Q 和 K 双重循环的顺序（即从默认的 `K 为外层循环、Q 为内层循环` 改为 `Q 为外层循环、K 为内层循环`）。默认为 "
+"``False``。**注意：** 此标志对稀疏注意力场景有用，但仍在开发中。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:132 of
+msgid ""
+"Whether to return the maximum attention logits, according to the Muon QK-"
+"Clip technique introduced in Kimi K2: https://arxiv.org/pdf/2507.20534.pdf. "
+"Defaults to ``False``."
+msgstr ""
+"是否返回最大注意力 logits，依据 Kimi K2 提出的 Muon QK-Clip "
+"技术：https://arxiv.org/pdf/2507.20534.pdf。默认为 ``False``。"
+
+#: ../../source/user_guide/magi_api.md
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch
+#: of
+msgid "Returns"
+msgstr "返回"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:137 of
+msgid ""
+"- out (torch.Tensor): Attention output tensor - meta (AttnForwardMeta): Meta"
+" information of the attention forward pass,     for now, including lse "
+"(torch.Tensor) with dtype=torch.float32,     and max_logits (torch.Tensor) "
+"with dtype=torch.float32,     if ``return_max_logits`` is ``True``, "
+"otherwise ``None``."
+msgstr ""
+"- out (torch.Tensor)：注意力输出张量 - meta (AttnForwardMeta)：注意力前向传播的元信息，     目前包括 "
+"dtype=torch.float32 的 lse (torch.Tensor)，     以及 dtype=torch.float32 的 "
+"max_logits (torch.Tensor)，     若 ``return_max_logits`` 为 ``True``，否则为 "
+"``None``。"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:137 of
+msgid "out (torch.Tensor): Attention output tensor"
+msgstr "out (torch.Tensor)：注意力输出张量"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:29
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:138 of
+msgid ""
+"meta (AttnForwardMeta): Meta information of the attention forward pass,"
+msgstr "meta (AttnForwardMeta)：注意力前向传播的元信息，"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:139 of
+msgid ""
+"for now, including lse (torch.Tensor) with dtype=torch.float32, and "
+"max_logits (torch.Tensor) with dtype=torch.float32, if ``return_max_logits``"
+" is ``True``, otherwise ``None``."
+msgstr ""
+"目前包括 dtype=torch.float32 的 lse (torch.Tensor)，以及 dtype=torch.float32 的 "
+"max_logits (torch.Tensor)，若 ``return_max_logits`` 为 ``True``，否则为 ``None``。"
+
+#: ../../source/user_guide/magi_api.md
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch
+#: of
+msgid "Return type"
+msgstr "返回类型"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:144 of
+msgid "Shape:"
+msgstr "形状："
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:145 of
+msgid "q: (num_tokens_q, num_heads_q, head_dim)"
+msgstr "q: (num_tokens_q, num_heads_q, head_dim)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:146 of
+msgid "k: (num_tokens_kv, num_heads_kv, head_dim)"
+msgstr "k: (num_tokens_kv, num_heads_kv, head_dim)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:147 of
+msgid "v: (num_tokens_kv, num_heads_kv, head_dim)"
+msgstr "v: (num_tokens_kv, num_heads_kv, head_dim)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:148 of
+msgid "sink:"
+msgstr "sink:"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:149 of
+msgid "if sink_layout == \"sh\": (num_tokens_sink, num_heads_q)"
+msgstr "if sink_layout == \"sh\": (num_tokens_sink, num_heads_q)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:150 of
+msgid "if sink_layout == \"ssh\": (num_tokens_q, num_tokens_sink, num_heads_q)"
+msgstr "if sink_layout == \"ssh\": (num_tokens_q, num_tokens_sink, num_heads_q)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:151 of
+msgid "q_ranges: (num_ranges, 2)"
+msgstr "q_ranges: (num_ranges, 2)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:152 of
+msgid "k_ranges: (num_ranges, 2)"
+msgstr "k_ranges: (num_ranges, 2)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:153 of
+msgid "attn_type_map: (num_ranges,)"
+msgstr "attn_type_map: (num_ranges,)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:154 of
+msgid "out: (num_tokens_q, num_heads_q, head_dim)"
+msgstr "out: (num_tokens_q, num_heads_q, head_dim)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:155 of
+msgid "lse: (num_tokens_q, num_heads_q)"
+msgstr "lse: (num_tokens_q, num_heads_q)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:156 of
+msgid "max_logits: (num_heads_q,)"
+msgstr "max_logits: (num_heads_q,)"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:160 of
+msgid ""
+"The ``attn_type_map`` explains the semantics of different attention mask "
+"types. In addition to the descriptions below, see our blog for a visual "
+"explanation: https://sandai-org.github.io/MagiAttention/blog/#flex-flash-"
+"attn"
+msgstr ""
+"``attn_type_map`` 解释了不同注意力掩码类型的语义。除下方说明外，可参见我们的博客获取可视化说明：https://sandai-"
+"org.github.io/MagiAttention/blog/#flex-flash-attn"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:164 of
+msgid "Full attention:"
+msgstr "Full attention（全注意力）："
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:165
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:187
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:209
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:233 of
+msgid "If seqlen_q = 5 and seqlen_k = 2::"
+msgstr "当 seqlen_q = 5 且 seqlen_k = 2 时::"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:173
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:195
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:217
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:241 of
+msgid "If seqlen_q = 2 and seqlen_k = 5::"
+msgstr "当 seqlen_q = 2 且 seqlen_k = 5 时::"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:178
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:200
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:222
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:246 of
+msgid "If seqlen_q = 5 and seqlen_k = 5::"
+msgstr "当 seqlen_q = 5 且 seqlen_k = 5 时::"
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:186 of
+msgid "Causal attention (bottom-right aligned):"
+msgstr "Causal attention（因果注意力，右下对齐）："
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:208 of
+msgid "Inverse causal attention (top-left aligned):"
+msgstr "Inverse causal attention（逆因果注意力，左上对齐）："
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:230 of
+msgid ""
+"Bidirectional causal attention (intersection of causal and inverse causal):"
+msgstr "Bidirectional causal attention（双向因果注意力，因果与逆因果的交集）："
+
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:231 of
+msgid "This is the element-wise AND of causal and inverse causal masks."
+msgstr "这是 causal 与 inverse causal 掩码的逐元素 AND。"
+
 #: ../../source/user_guide/magi_api.md:24
 msgid "Dispatch"
 msgstr "分发（Dispatch）"
@@ -51,6 +550,118 @@ msgid ""
 msgstr ""
 "如果您使用的是由 `cu_seqlens` 定义的掩码（如 varlen full 或 varlen causal 掩码），我们参照 "
 "FlashAttention 的 API 设计了类似的接口 `magi_attn_varlen_key`，方便您快速上手。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:1 of
+msgid ""
+"This is a flash-attn-varlen like interface, to generate ``q_ranges``, "
+"``k_ranges`` and ``attn_mask_type`` from ``cu_seqlens_q``, ``cu_seqlens_k``,"
+" ``causal`` and ``window_size``, calculate ``dist_attn_runtime_key`` and "
+"generate the corr. inner ``dist_attn_runtime_mgr``."
+msgstr ""
+"这是一个类似 flash-attn-varlen 的接口，用于从 "
+"``cu_seqlens_q``、``cu_seqlens_k``、``causal`` 和 ``window_size`` 生成 "
+"``q_ranges``、``k_ranges`` 和 ``attn_mask_type``，计算 ``dist_attn_runtime_key`` "
+"并生成对应的内部 ``dist_attn_runtime_mgr``。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:6
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:13
+#: of
+msgid "the cumulative sequence lengths for queries."
+msgstr "query 的累积序列长度。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:8
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:15
+#: of
+msgid "the cumulative sequence lengths for keys."
+msgstr "key 的累积序列长度。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:17
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:10 of
+msgid "the number of heads for query."
+msgstr "query 的 head 数量。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:19
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:12 of
+msgid "the number of heads for key/value."
+msgstr "key/value 的 head 数量。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:21
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:14 of
+msgid "the dimension of each attention head."
+msgstr "每个注意力 head 的维度。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:23
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:16 of
+msgid ""
+"**Deprecated**. This parameter is deprecated and will be removed in future "
+"versions. It is now computed internally based on the adjusted "
+"``chunk_size``. Passing a non-zero value will trigger a "
+":class:`DeprecationWarning`."
+msgstr ""
+"**已弃用**。此参数已弃用，将在未来版本中移除。现在它基于调整后的 ``chunk_size`` 在内部计算。传入非零值将触发 "
+":class:`DeprecationWarning`。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:27
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:20 of
+msgid ""
+"process group or device mesh. **NOTE**: for process group, we only support "
+"nccl backend for now, and for device mesh, we only support 1D or 2D mesh for"
+" now."
+msgstr ""
+"进程组或设备网格（device mesh）。**注意**：对于进程组，我们目前仅支持 nccl 后端；对于设备网格，我们目前仅支持 1D 或 2D "
+"网格。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:24 of
+msgid ""
+"if ``True``, all mask types are set to ``CAUSAL``, otherwise, determine the "
+"mask types by ``window_size``. Defaults to ``False``."
+msgstr ""
+"若为 ``True``，则所有掩码类型都设为 ``CAUSAL``；否则根据 ``window_size`` 确定掩码类型。默认为 ``False``。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:27
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:22
+#: of
+msgid ""
+"window_size of sliding window mask which represents ``[window_size_left, "
+"window_size_right]``. The parameter is effective only when ``causal`` is "
+"``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``. "
+"Defaults to be ``(-1, -1)``."
+msgstr ""
+"滑动窗口掩码的 window_size，表示 ``[window_size_left, window_size_right]``。此参数仅在 "
+"``causal`` 为 ``False`` 时生效；当 ``causal`` 为 ``True`` 时，要求为 ``(-1, -1)``。默认为 "
+"``(-1, -1)``。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:31
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:32 of
+msgid ""
+"dist attn config. Use ``DispatchConfig(chunk_size=..., uneven_shard=...)`` "
+"inside ``dist_attn_config`` to configure dispatching parameters."
+msgstr ""
+"dist attn 配置。在 ``dist_attn_config`` 中使用 ``DispatchConfig(chunk_size=..., "
+"uneven_shard=...)`` 来配置分发参数。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:44
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:36 of
+msgid ""
+"**Deprecated**. This parameter is deprecated and will be removed in future "
+"versions. Please pass ``chunk_size`` via ``DispatchConfig(chunk_size=...)`` "
+"in ``dist_attn_config`` instead."
+msgstr ""
+"**已弃用**。此参数已弃用，将在未来版本中移除。请改为在 ``dist_attn_config`` 中通过 "
+"``DispatchConfig(chunk_size=...)`` 传入 ``chunk_size``。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:41 of
+msgid "the key points to the inner DistAttnRuntimeMgr."
+msgstr "指向内部 DistAttnRuntimeMgr 的 key。"
+
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window:17
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:70
+#: magi_attention.api.magi_attn_interface.magi_attn_varlen_key:45
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:35
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:39
+#: of
+msgid "Example"
+msgstr "示例"
 
 #: ../../source/user_guide/magi_api.md:38
 msgid ""
@@ -70,6 +681,78 @@ msgid ""
 "communication."
 msgstr "新掩码将复用与 dispatch 掩码相同的分发方案，但使用不同的元参数进行计算和通信。"
 
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:1
+#: of
+msgid ""
+"Make a new dist attn runtime key for a new mask after dispatch with the "
+"given arguments for the new mask in flash-attn-varlen style and the key used"
+" for dispatch"
+msgstr ""
+"根据以 flash-attn-varlen 风格给出的新掩码参数和用于 dispatch 的 key，在 dispatch 之后为新掩码创建一个新的 "
+"dist attn 运行时 key。"
+
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:4
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:4
+#: of
+msgid ""
+"NOTE: this API is useful when you want to apply more than one masks within "
+"the same training pass, if your model adopts hybrid-attn structure, in which"
+" case, we can only choose one of the masks to dispatch, while the others're "
+"supposed to reuse the same dispatch solution with different meta arguments "
+"for computation and communication"
+msgstr ""
+"注意：当您想在同一训练步中应用多个掩码时（如果您的模型采用混合注意力结构），此 API 很有用；在这种情况下，我们只能选择其中一个掩码进行 "
+"dispatch，其余掩码应复用相同的 dispatch 方案，但使用不同的元参数进行计算和通信。"
+
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:10
+#: of
+msgid ""
+"WARNING: in such case, we can not guarantee all the masks are load-balanced "
+"in computation and optimized in communication."
+msgstr "警告：在这种情况下，我们无法保证所有掩码在计算上都负载均衡、在通信上都得到优化。"
+
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:21
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:17
+#: of
+msgid "the key used for dispatch."
+msgstr "用于 dispatch 的 key。"
+
+#: magi_attention.api.functools.infer_attn_mask_from_cu_seqlens:8
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:19
+#: of
+msgid "whether the varlen attention mask is causal. Defaults to ``False``."
+msgstr "varlen 注意力掩码是否为因果的。默认为 ``False``。"
+
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:23
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:27
+#: of
+msgid ""
+"the optional new dist attn config. NOTE: if not provided, we will use the "
+"same config as the ``key_for_dispatch``, and if provided, the dispatch "
+"config of the new dist attn config won't be applied to the new mask"
+msgstr ""
+"可选的新 dist attn 配置。注意：如果不提供，我们将使用与 ``key_for_dispatch`` 相同的配置；如果提供，新 dist "
+"attn 配置中的 dispatch 配置不会应用于新掩码。"
+
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:32
+#: of
+msgid ""
+"the new dist attn runtime key     for new mask with the same dispatch "
+"solution as the ``key_for_dispatch``."
+msgstr "新掩码的新 dist attn 运行时 key，     其 dispatch 方案与 ``key_for_dispatch`` 相同。"
+
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:30
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:34
+#: of
+msgid "the new dist attn runtime key"
+msgstr "新的 dist attn 运行时 key"
+
+#: magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch:35
+#: of
+msgid ""
+"for new mask with the same dispatch solution as the ``key_for_dispatch``."
+msgstr "用于与 ``key_for_dispatch`` 采用相同 dispatch 方案的新掩码。"
+
 #: ../../source/user_guide/magi_api.md:47
 msgid "Flexible Dispatch"
 msgstr "灵活分发（Flexible Dispatch）"
@@ -83,6 +766,105 @@ msgstr ""
 "如果您使用的掩码不限于 varlen full 或 varlen causal，还包括滑动窗口掩码或其他更多样的类型，我们建议使用 "
 "`magi_attn_flex_key`，如下所示。"
 
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:1 of
+msgid ""
+"This is the most flexible interface, directly passing in ``q_ranges``, "
+"``k_ranges`` and ``attn_mask_type`` to generate ``dist_attn_runtime_key`` "
+"which stores and indicates the inner meta data as a required argument for "
+"following APIs including ``dispatch``, ``undispatch``, ``calc_attn``, etc."
+msgstr ""
+"这是最灵活的接口，直接传入 ``q_ranges``、``k_ranges`` 和 ``attn_mask_type`` 来生成 "
+"``dist_attn_runtime_key``，它存储并指示内部元数据，作为后续 API（包括 "
+"``dispatch``、``undispatch``、``calc_attn`` 等）的必需参数。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:6
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:14
+#: of
+msgid "the global query ranges."
+msgstr "全局 query ranges。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:8
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:16
+#: of
+msgid "the global key ranges."
+msgstr "全局 key ranges。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:10
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:18
+#: of
+msgid ""
+"the global attn mask type (list), represented by str or enum "
+"``AttnMaskType`` or their mixed combination."
+msgstr "全局注意力掩码类型（列表），由 str 或枚举 ``AttnMaskType`` 或二者的混合组合表示。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:13 of
+msgid "the total seqlen of query."
+msgstr "query 的总序列长度。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:15 of
+msgid "the total seqlen of key."
+msgstr "key 的总序列长度。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:35 of
+msgid ""
+"is query tensor and key tensor share the same source. Default to ``True``."
+msgstr "query 张量和 key 张量是否共享同一来源。默认为 ``True``。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:38 of
+msgid "is query tensor permutable. Default to ``True``."
+msgstr "query 张量是否可排列变换。默认为 ``True``。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:41 of
+msgid "is key tensor permutable. Default to ``True``."
+msgstr "key 张量是否可排列变换。默认为 ``True``。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:49 of
+msgid "the key stores and indicates the inner meta data."
+msgstr "存储并指示内部元数据的 key。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:54 of
+msgid ""
+"For decoder-only transformers (e.g., GPT), it applies 'self-attn' as "
+"follows:"
+msgstr "对于仅解码器（decoder-only）的 transformer（如 GPT），它按如下方式应用 'self-attn'："
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:56 of
+msgid "``is_same_source`` is True."
+msgstr "``is_same_source`` 为 True。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:57 of
+msgid ""
+"Both ``q`` and ``k`` are permutable, as long as they are permuted in the "
+"same way."
+msgstr "``q`` 和 ``k`` 都可排列变换，只要它们以相同方式排列。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:59 of
+msgid ""
+"For encoder-decoder transformers (e.g., T5), it applies 'cross-attn' as "
+"follows:"
+msgstr "对于编码器-解码器（encoder-decoder）的 transformer（如 T5），它按如下方式应用 'cross-attn'："
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:61
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:66 of
+msgid "``is_same_source`` is False."
+msgstr "``is_same_source`` 为 False。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:62 of
+msgid "``q`` is permutable but ``k`` is not."
+msgstr "``q`` 可排列变换，但 ``k`` 不可。"
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:64 of
+msgid ""
+"For multi-modal transformers with external encoders, it applies 'cross-attn'"
+" as follows:"
+msgstr "对于带有外部编码器的多模态 transformer，它按如下方式应用 'cross-attn'："
+
+#: magi_attention.api.magi_attn_interface.magi_attn_flex_key:67 of
+msgid ""
+"``q`` is unpermutable due to self-attn, but ``k`` is permutable even in a "
+"different way."
+msgstr "由于 self-attn，``q`` 不可排列变换，但 ``k`` 可排列变换，甚至可以以不同方式排列。"
+
 #: ../../source/user_guide/magi_api.md:59
 msgid ""
 "If you want to apply more than one varlen masks within the same training "
@@ -92,6 +874,38 @@ msgid ""
 msgstr ""
 "如果您想在同一训练步中应用多个 varlen 掩码，可以使用 `make_flex_key_for_new_mask_after_dispatch` "
 "为新掩码创建密钥，只需提供掩码参数和已有的 dispatch 密钥。"
+
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:1
+#: of
+msgid ""
+"Make a new dist attn runtime key for a new mask after dispatch with the "
+"given arguments for the new mask and the key used for dispatch"
+msgstr ""
+"根据给出的新掩码参数和用于 dispatch 的 key，在 dispatch 之后为新掩码创建一个新的 dist attn 运行时 key。"
+
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:10
+#: of
+msgid ""
+"WARNING: in such case, we can not guarantee all the masks are load-balanced "
+"in computation and optimized in communication for now. However, we are "
+"working on it with the dynamic dist-attn solver to optimize the computation "
+"and communication for each distinct mask with the same dispatch solution"
+msgstr ""
+"警告：在这种情况下，我们目前无法保证所有掩码在计算上都负载均衡、在通信上都得到优化。不过，我们正在借助动态 dist-attn "
+"求解器进行改进，以便为采用相同 dispatch 方案的每个不同掩码优化计算和通信。"
+
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:28
+#: of
+msgid ""
+"the new dist attn runtime key     for new mask with the same dispatch "
+"solution as the ``key_for_dispatch``"
+msgstr "新掩码的新 dist attn 运行时 key，     其 dispatch 方案与 ``key_for_dispatch`` 相同"
+
+#: magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch:31
+#: of
+msgid ""
+"for new mask with the same dispatch solution as the ``key_for_dispatch``"
+msgstr "用于与 ``key_for_dispatch`` 采用相同 dispatch 方案的新掩码"
 
 #: ../../source/user_guide/magi_api.md:67
 msgid "Dispatch Function"
@@ -104,6 +918,47 @@ msgid ""
 "the seqlen dim."
 msgstr ""
 "获取 dist attn 运行时密钥后，您可以调用 `dispatch` 函数将全局输入张量沿 seqlen 维度分发，得到填充后的本地张量。"
+
+#: magi_attention.api.magi_attn_interface.dispatch:1 of
+msgid ""
+"Pad and dispatch the global input tensor to local input tensor for each cp "
+"rank along the seqlen dim."
+msgstr "沿 seqlen 维度将全局输入张量填充并分发为每个 cp rank 的本地输入张量。"
+
+#: magi_attention.api.magi_attn_interface.dispatch:4 of
+msgid "the global input tensor."
+msgstr "全局输入张量。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:9
+#: magi_attention.api.magi_attn_interface.dispatch:6
+#: magi_attention.api.magi_attn_interface.get_position_ids:4
+#: magi_attention.api.magi_attn_interface.roll:20
+#: magi_attention.api.magi_attn_interface.undispatch:6 of
+msgid ""
+"the key that holds some inner meta data, as a required argument for many "
+"APIs of ``magi_attention``, which users don't have to bother with."
+msgstr "存放某些内部元数据的 key，是 ``magi_attention`` 许多 API 的必需参数，用户无需关心。"
+
+#: magi_attention.api.magi_attn_interface.dispatch:10 of
+msgid "the specific value to pad to input tensor. Defaults to ``0``."
+msgstr "填充到输入张量的具体值。默认为 ``0``。"
+
+#: magi_attention.api.magi_attn_interface.dispatch:14 of
+msgid "the padded local input tensor."
+msgstr "填充后的本地输入张量。"
+
+#: ../../source/user_guide/magi_api.md
+msgid "Raises"
+msgstr "抛出"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:44
+#: magi_attention.api.magi_attn_interface.dispatch:17
+#: magi_attention.api.magi_attn_interface.get_position_ids:12
+#: magi_attention.api.magi_attn_interface.roll:32
+#: magi_attention.api.magi_attn_interface.undispatch:18 of
+msgid ""
+"If the provided ``key`` does not exist in cached ``dist_attn_runtime_dict``."
+msgstr "如果提供的 ``key`` 在缓存的 ``dist_attn_runtime_dict`` 中不存在。"
 
 #: ../../source/user_guide/magi_api.md:79
 msgid "Calculate Attention"
@@ -118,6 +973,106 @@ msgid ""
 msgstr ""
 "在 dispatch 和 QKV 投影之后，您将获得本地的 query、key 和 value。然后可以使用 dist attn 运行时密钥调用 "
 "`calc_attn` 来计算分布式注意力，获取本地注意力输出张量。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:1 of
+msgid "Calculate distributed attention with local q, k, v tensors."
+msgstr "使用本地 q、k、v 张量计算分布式注意力。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:3 of
+msgid "the local query tensor."
+msgstr "本地 query 张量。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:5 of
+msgid "the local key tensor."
+msgstr "本地 key 张量。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:7 of
+msgid "the local value tensor."
+msgstr "本地 value 张量。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:13 of
+msgid ""
+"the global sink tensor (replicated among cp ranks). Defaults to ``None`` to "
+"not apply attention sink."
+msgstr "全局 sink 张量（在 cp rank 间复制）。默认为 ``None``，即不应用 attention sink。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:16 of
+msgid ""
+"softmax scale. Defaults to ``None`` to use the value: ``1/sqrt(head_dim)``."
+msgstr "softmax 缩放因子。默认为 ``None``，即使用 ``1/sqrt(head_dim)``。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:19 of
+msgid "softcap. Defaults to ``0.0``."
+msgstr "softcap。默认为 ``0.0``。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:22 of
+msgid ""
+"whether to return the global maximum attention logits (replicated among cp "
+"ranks), according to the Muon QK-Clip technique introduced in Kimi K2: "
+"https://arxiv.org/pdf/2507.20534.pdf. Defaults to ``False``."
+msgstr ""
+"是否返回全局最大注意力 logits（在 cp rank 间复制），依据 Kimi K2 提出的 Muon QK-Clip "
+"技术：https://arxiv.org/pdf/2507.20534.pdf。默认为 ``False``。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:28 of
+msgid ""
+"- out (torch.Tensor): local output tensor. - meta (AttnForwardMeta): Meta "
+"information of the attention forward pass,     for now, including local "
+"``lse`` (torch.Tensor) with dtype=torch.float32,     and global "
+"``max_logits`` (torch.Tensor) with dtype=torch.float32,     if "
+"``return_max_logits`` is ``True``, otherwise ``None``."
+msgstr ""
+"- out (torch.Tensor)：本地输出张量。 - meta (AttnForwardMeta)：注意力前向传播的元信息，     目前包括 "
+"dtype=torch.float32 的本地 ``lse`` (torch.Tensor)，     以及 dtype=torch.float32 "
+"的全局 ``max_logits`` (torch.Tensor)，     若 ``return_max_logits`` 为 "
+"``True``，否则为 ``None``。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:28 of
+msgid "out (torch.Tensor): local output tensor."
+msgstr "out (torch.Tensor)：本地输出张量。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:30 of
+msgid ""
+"for now, including local ``lse`` (torch.Tensor) with dtype=torch.float32, "
+"and global ``max_logits`` (torch.Tensor) with dtype=torch.float32, if "
+"``return_max_logits`` is ``True``, otherwise ``None``."
+msgstr ""
+"目前包括 dtype=torch.float32 的本地 ``lse`` (torch.Tensor)，以及 dtype=torch.float32 "
+"的全局 ``max_logits`` (torch.Tensor)，若 ``return_max_logits`` 为 ``True``，否则为 "
+"``None``。"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:35
+#: magi_attention.api.magi_attn_interface.roll:28 of
+msgid "Shapes:"
+msgstr "形状："
+
+#: magi_attention.api.magi_attn_interface.calc_attn:36 of
+msgid "q: [num_tokens_q_local, num_heads_q, head_dim]"
+msgstr "q: [num_tokens_q_local, num_heads_q, head_dim]"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:37 of
+msgid "k: [num_tokens_kv_local, num_heads_kv, head_dim]"
+msgstr "k: [num_tokens_kv_local, num_heads_kv, head_dim]"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:38 of
+msgid "v: [num_tokens_kv_local, num_heads_kv, head_dim]"
+msgstr "v: [num_tokens_kv_local, num_heads_kv, head_dim]"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:39 of
+msgid "sink: [num_tokens_sink_global, num_heads_q]"
+msgstr "sink: [num_tokens_sink_global, num_heads_q]"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:40 of
+msgid "out: [num_tokens_q_local, num_heads_q, head_dim]"
+msgstr "out: [num_tokens_q_local, num_heads_q, head_dim]"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:41 of
+msgid "lse: [num_tokens_q_local, num_heads_q]"
+msgstr "lse: [num_tokens_q_local, num_heads_q]"
+
+#: magi_attention.api.magi_attn_interface.calc_attn:42 of
+msgid "max_logits: [num_heads_q,]"
+msgstr "max_logits: [num_heads_q,]"
 
 #: ../../source/user_guide/magi_api.md:91
 msgid "Roll"
@@ -149,6 +1104,57 @@ msgstr ""
 "语义上，`roll` 等价于 `undispatch` -> `torch.roll` -> "
 "`dispatch`，但避免了实体化完整的全局张量，将峰值内存从 O(N) 降低到 O(N/P)，并将通信量减少约 P 倍。"
 
+#: magi_attention.api.magi_attn_interface.roll:1 of
+msgid ""
+"Cyclically roll a dispatched local tensor along a given dimension using "
+"point-to-point communication."
+msgstr "使用点对点通信沿给定维度循环移位已 dispatch 的本地张量。"
+
+#: magi_attention.api.magi_attn_interface.roll:4 of
+msgid ""
+"This is primarily designed for **Multi-Token Prediction (MTP)**, where the "
+"labels need to be shifted by one or more positions relative to the input "
+"tokens. It can also serve other use cases such as relative positional "
+"offsets or shifted-window patterns."
+msgstr ""
+"此功能主要为 **Multi-Token Prediction (MTP)** 设计，其中标签需要相对于输入 token "
+"移位一个或多个位置。它也可用于其他场景，如相对位置偏移或 shifted-window 模式。"
+
+#: magi_attention.api.magi_attn_interface.roll:9 of
+msgid ""
+"Semantically equivalent to ``undispatch`` -> ``torch.roll`` -> ``dispatch``,"
+" but avoids materialising the full global tensor, cutting peak memory from "
+"O(N) to O(N/P) and reducing communication volume by ~P times."
+msgstr ""
+"语义上等价于 ``undispatch`` -> ``torch.roll`` -> "
+"``dispatch``，但避免了实体化完整的全局张量，将峰值内存从 O(N) 降低到 O(N/P)，并将通信量减少约 P 倍。"
+
+#: magi_attention.api.magi_attn_interface.roll:13 of
+msgid "the dispatched local tensor on this rank."
+msgstr "本 rank 上已 dispatch 的本地张量。"
+
+#: magi_attention.api.magi_attn_interface.roll:15 of
+msgid ""
+"number of positions to roll (positive = shift right, negative = shift left, "
+"wraps cyclically)."
+msgstr "移位的位置数（正数 = 右移，负数 = 左移，循环回绕）。"
+
+#: magi_attention.api.magi_attn_interface.roll:18 of
+msgid "the dimension to roll along (typically the sequence dimension)."
+msgstr "移位所沿的维度（通常为序列维度）。"
+
+#: magi_attention.api.magi_attn_interface.roll:25 of
+msgid "the rolled local tensor, same shape as *x*."
+msgstr "移位后的本地张量，与 *x* 形状相同。"
+
+#: magi_attention.api.magi_attn_interface.roll:29 of
+msgid "x: ``[num_tokens_local, ...]``"
+msgstr "x: ``[num_tokens_local, ...]``"
+
+#: magi_attention.api.magi_attn_interface.roll:30 of
+msgid "output: ``[num_tokens_local, ...]``"
+msgstr "output: ``[num_tokens_local, ...]``"
+
 #: ../../source/user_guide/magi_api.md:107
 msgid "Undispatch"
 msgstr "反分发（Undispatch）"
@@ -166,6 +1172,26 @@ msgid ""
 msgstr ""
 "当您需要从本地张量恢复全局输出张量（用于计算损失或其他原因）时，可以调用 `undispatch` 函数将填充后的本地输出张量沿 seqlen "
 "维度反分发回未填充的全局张量。"
+
+#: magi_attention.api.magi_attn_interface.undispatch:1 of
+msgid ""
+"Undispatch and unpad the local output tensor to global output tensor for "
+"each cp rank along the seqlen dim."
+msgstr "沿 seqlen 维度将每个 cp rank 的本地输出张量反分发并去填充为全局输出张量。"
+
+#: magi_attention.api.magi_attn_interface.undispatch:4 of
+msgid "the local output tensor."
+msgstr "本地输出张量。"
+
+#: magi_attention.api.magi_attn_interface.undispatch:10 of
+msgid ""
+"when True, backward uses reduce_scatter to aggregate partial gradients "
+"across ranks instead of simply selecting local chunks. Defaults to False."
+msgstr "为 True 时，反向使用 reduce_scatter 在各 rank 间聚合部分梯度，而非简单地选取本地块。默认为 False。"
+
+#: magi_attention.api.magi_attn_interface.undispatch:15 of
+msgid "the unpadded global output tensor."
+msgstr "去填充后的全局输出张量。"
 
 #: ../../source/user_guide/magi_api.md:123
 msgid "Utility Functions"
@@ -191,11 +1217,87 @@ msgid ""
 "and use this value as a parameter in subsequent functions."
 msgstr "您可以调用 `compute_pad_size` 计算所需的填充长度，并将此值作为后续函数的参数使用。"
 
+#: magi_attention.api.functools.compute_pad_size:1 of
+msgid ""
+"Compute the size to pad to the input tensor along the seqlen dim at last."
+msgstr "计算最后沿 seqlen 维度需要填充到输入张量的大小。"
+
+#: magi_attention.api.functools.compute_pad_size:3 of
+msgid "seqlen of q."
+msgstr "q 的 seqlen。"
+
+#: magi_attention.api.functools.compute_pad_size:5 of
+msgid "The size of cp group."
+msgstr "cp group 的大小。"
+
+#: magi_attention.api.functools.compute_pad_size:7 of
+msgid ""
+"chunk size to chunk the input tensor x along the seqlen dim for dispatch to "
+"control the granularity of computation load-balance."
+msgstr "用于沿 seqlen 维度对输入张量 x 分块以进行 dispatch 的 chunk 大小，用于控制计算负载均衡的粒度。"
+
+#: magi_attention.api.functools.compute_pad_size:11 of
+msgid "the number of tokens to pad."
+msgstr "需要填充的 token 数量。"
+
 #: ../../source/user_guide/magi_api.md:139
 msgid ""
 "After obtaining `pad_size`, you can use `pad_at_dim` and `unpad_at_dim` "
 "function to pad and unpad the tensor."
 msgstr "获取 `pad_size` 后，您可以使用 `pad_at_dim` 和 `unpad_at_dim` 函数对张量进行填充和去填充操作。"
+
+#: magi_attention.api.functools.pad_at_dim:1 of
+msgid ""
+"Pads a tensor along a specified dimension with a given value, either on the "
+"left or right side."
+msgstr "沿指定维度在左侧或右侧用给定值填充张量。"
+
+#: magi_attention.api.functools.pad_at_dim:3 of
+msgid "Input tensor to be padded."
+msgstr "要填充的输入张量。"
+
+#: magi_attention.api.functools.pad_at_dim:5 of
+msgid "The dimension along which to apply padding."
+msgstr "应用填充所沿的维度。"
+
+#: magi_attention.api.functools.pad_at_dim:7 of
+msgid "The number of values to pad."
+msgstr "要填充的值的数量。"
+
+#: magi_attention.api.functools.pad_at_dim:9 of
+msgid "The padding value. Defaults to ``0.0``."
+msgstr "填充值。默认为 ``0.0``。"
+
+#: magi_attention.api.functools.pad_at_dim:11 of
+msgid ""
+"Side on which to apply the padding, either ``left`` or ``right``. Defaults "
+"to ``right``."
+msgstr "应用填充的一侧，``left`` 或 ``right``。默认为 ``right``。"
+
+#: magi_attention.api.functools.pad_at_dim:15 of
+msgid "The padded tensor with the same number of dimensions as the input."
+msgstr "填充后的张量，与输入维度数量相同。"
+
+#: magi_attention.api.functools.unpad_at_dim:1 of
+msgid "Removes padding from a tensor along a specified dimension."
+msgstr "沿指定维度移除张量的填充。"
+
+#: magi_attention.api.functools.unpad_at_dim:3 of
+msgid "Input tensor from which padding will be removed."
+msgstr "要移除填充的输入张量。"
+
+#: magi_attention.api.functools.unpad_at_dim:5 of
+msgid "The dimension along which to remove padding."
+msgstr "移除填充所沿的维度。"
+
+#: magi_attention.api.functools.unpad_at_dim:7 of
+msgid ""
+"The number of elements to remove from the end of the specified dimension."
+msgstr "要从指定维度末尾移除的元素数量。"
+
+#: magi_attention.api.functools.unpad_at_dim:10 of
+msgid "The tensor with padding removed along the specified dimension."
+msgstr "沿指定维度移除填充后的张量。"
 
 #: ../../source/user_guide/magi_api.md:153
 msgid ""
@@ -209,6 +1311,65 @@ msgstr ""
 #: ../../source/user_guide/magi_api.md:155
 msgid "This function fills the padding region with invalid slices."
 msgstr "此函数使用无效切片填充填充区域。"
+
+#: magi_attention.api.functools.apply_padding:1 of
+msgid ""
+"Appends padding to the attention ranges and updates the corresponding mask "
+"type."
+msgstr "将填充追加到注意力 range，并更新相应的掩码类型。"
+
+#: magi_attention.api.functools.apply_padding:3 of
+msgid ""
+"This function adds a padding query range at the end of `q_ranges`, a dummy "
+"key range to `k_ranges`, and appends a `FULL` attention mask type to "
+"maintain alignment. It is typically used when padding is required for "
+"alignment or block-wise processing."
+msgstr ""
+"此函数在 `q_ranges` 末尾添加一个填充 query range，向 `k_ranges` 添加一个虚拟 key range，并追加一个 "
+"`FULL` 注意力掩码类型以保持对齐。通常在需要为对齐或分块处理进行填充时使用。"
+
+#: magi_attention.api.functools.apply_padding:7 of
+msgid "Query token ranges before padding."
+msgstr "填充前的 query token ranges。"
+
+#: magi_attention.api.functools.apply_padding:9 of
+msgid "Key token ranges before padding."
+msgstr "填充前的 key token ranges。"
+
+#: magi_attention.api.functools.apply_padding:11 of
+msgid "List of attention mask types corresponding to the ranges."
+msgstr "与各 range 对应的注意力掩码类型列表。"
+
+#: magi_attention.api.functools.apply_padding:13 of
+msgid ""
+"The total original sequence length (used to place the padding at the end)."
+msgstr "原始总序列长度（用于将填充放置在末尾）。"
+
+#: magi_attention.api.functools.apply_padding:15 of
+msgid "The size of the padding to append."
+msgstr "要追加的填充大小。"
+
+#: magi_attention.api.functools.apply_padding:18 of
+msgid ""
+"- Updated query ranges with padding added. - Updated key ranges with a dummy"
+" range for padding. - Updated attention mask type list with a FULL mask for "
+"the padding block."
+msgstr ""
+"- 添加填充后的更新 query ranges。 - 添加了用于填充的虚拟 range 的更新 key ranges。 - 为填充块添加了 FULL "
+"掩码的更新注意力掩码类型列表。"
+
+#: magi_attention.api.functools.apply_padding:18 of
+msgid "Updated query ranges with padding added."
+msgstr "添加填充后的更新 query ranges。"
+
+#: magi_attention.api.functools.apply_padding:19 of
+msgid "Updated key ranges with a dummy range for padding."
+msgstr "添加了用于填充的虚拟 range 的更新 key ranges。"
+
+#: magi_attention.api.functools.apply_padding:20 of
+msgid ""
+"Updated attention mask type list with a FULL mask for the padding block."
+msgstr "为填充块添加了 FULL 掩码的更新注意力掩码类型列表。"
 
 #: ../../source/user_guide/magi_api.md:162
 msgid "Get Position Ids"
@@ -226,6 +1387,16 @@ msgid ""
 "Therefore, we provide a function `get_position_ids` to get the position ids "
 "of the input tensor similar to Llama."
 msgstr "因此，我们提供了 `get_position_ids` 函数来获取输入张量的位置 ID，类似于 Llama。"
+
+#: magi_attention.api.magi_attn_interface.get_position_ids:1 of
+msgid ""
+"Get the global positional ids of the local tensor, as it is sliced from the "
+"global tensor after dispatching."
+msgstr "获取本地张量的全局位置 ID，因为它是在 dispatch 后从全局张量切片得到的。"
+
+#: magi_attention.api.magi_attn_interface.get_position_ids:9 of
+msgid "the global positional ids."
+msgstr "全局位置 ID。"
 
 #: ../../source/user_guide/magi_api.md:178
 msgid "Get Most Recent Key"
@@ -246,6 +1417,24 @@ msgid ""
 "arguments, in case of unexpected inconsistency."
 msgstr "但是，我们强烈建议您通过参数传递的方式访问密钥，以避免意外的不一致性。"
 
+#: magi_attention.api.magi_attn_interface.get_most_recent_key:1 of
+msgid "Get the most recent inserted key."
+msgstr "获取最近插入的 key。"
+
+#: magi_attention.api.magi_attn_interface.get_most_recent_key:3 of
+msgid ""
+"NOTE: this is useful when you can not access the key through the arguments, "
+"and meanwhile you only need the most recent inserted key. However, we "
+"strongly recommend you to access the key passed through the arguments, in "
+"case of unexpected inconsistency."
+msgstr ""
+"注意：当您无法通过参数访问 key，同时只需要最近插入的 key 时，此功能很有用。但是，我们强烈建议您通过参数传递的方式访问 "
+"key，以避免意外的不一致性。"
+
+#: magi_attention.api.magi_attn_interface.get_most_recent_key:8 of
+msgid "the most recent inserted dist_attn_runtime_key."
+msgstr "最近插入的 dist_attn_runtime_key。"
+
 #: ../../source/user_guide/magi_api.md:193
 msgid "Infer Varlen Masks"
 msgstr "推断变长掩码"
@@ -258,6 +1447,33 @@ msgid ""
 msgstr ""
 "如果您想使用每个分段长度相同的 varlen 掩码，我们提供了 `infer_varlen_mask_from_batch` 函数为您生成相应的 "
 "cu_seqlens 张量。"
+
+#: magi_attention.api.functools.infer_varlen_mask_from_batch:1 of
+msgid ""
+"Converts fixed-length full attention into varlen fulll attention format by "
+"generating cumulative sequence lengths for queries and keys."
+msgstr "通过生成 query 和 key 的累积序列长度，将固定长度的全注意力转换为 varlen 全注意力格式。"
+
+#: magi_attention.api.functools.infer_varlen_mask_from_batch:4 of
+msgid "The number of sequences in the batch."
+msgstr "batch 中的序列数量。"
+
+#: magi_attention.api.functools.infer_varlen_mask_from_batch:6 of
+msgid "The fixed sequence length for each sequence in the batch."
+msgstr "batch 中每个序列的固定序列长度。"
+
+#: magi_attention.api.functools.infer_varlen_mask_from_batch:8 of
+msgid "The device to allocate the tensors on. Defaults to ``\"cuda\"``."
+msgstr "分配张量所在的设备。默认为 ``\"cuda\"``。"
+
+#: magi_attention.api.functools.infer_varlen_mask_from_batch:11 of
+msgid ""
+"A pair of 1D tensors (cu_seqlens_q, cu_seqlens_k), each of shape "
+"``[batch_size + 1,]``, representing the cumulative sequence lengths for the "
+"queries and keys respectively."
+msgstr ""
+"一对 1D 张量 (cu_seqlens_q, cu_seqlens_k)，各自形状为 ``[batch_size + 1,]``，分别表示 query"
+" 和 key 的累积序列长度。"
 
 #: ../../source/user_guide/magi_api.md:205
 msgid ""
@@ -272,6 +1488,21 @@ msgid ""
 "To facilitate the use of the above APIs, we provide the `squash_batch_dim` "
 "function to merge the tensor dimensions."
 msgstr "为便于使用上述 API，我们提供了 `squash_batch_dim` 函数来合并张量维度。"
+
+#: magi_attention.api.functools.squash_batch_dim:1 of
+msgid ""
+"Reshapes a tensor from shape ``[b, s, ...]`` to ``[b x s, ...]``, "
+"effectively flattening the batch and sequence dimensions into a single "
+"leading dimension."
+msgstr "将张量从形状 ``[b, s, ...]`` 重塑为 ``[b x s, ...]``，即把 batch 维和序列维展平为单一的前导维度。"
+
+#: magi_attention.api.functools.squash_batch_dim:4 of
+msgid "Input tensor of shape ``[batch_size, seq_len, ...]`` to be merged."
+msgstr "要合并的、形状为 ``[batch_size, seq_len, ...]`` 的输入张量。"
+
+#: magi_attention.api.functools.squash_batch_dim:7 of
+msgid "Reshaped tensor of shape ``[batch_size x seq_len, ...]``."
+msgstr "形状为 ``[batch_size x seq_len, ...]`` 的重塑后张量。"
 
 #: ../../source/user_guide/magi_api.md:217
 msgid ""
@@ -306,6 +1537,56 @@ msgstr ""
 "token）全局可见的架构非常有用。为防止信息泄露，相对位置 ``i`` 处的 query 只能看到位置 ``[0, "
 "min(global_window_size, i + window_size_right + 1))`` 的全局 token。"
 
+#: magi_attention.api.functools.infer_attn_mask_from_cu_seqlens:1 of
+msgid ""
+"Infer query ranges, key ranges and other arguments for flexible attn mask "
+"representation from cu_seqlens, widely used for varlen masks."
+msgstr ""
+"从 cu_seqlens 推断灵活注意力掩码表示的 query ranges、key ranges 及其他参数，广泛用于 varlen 掩码。"
+
+#: magi_attention.api.functools.infer_attn_mask_from_cu_seqlens:4 of
+msgid "cumulative sequence lengths for queries"
+msgstr "query 的累积序列长度"
+
+#: magi_attention.api.functools.infer_attn_mask_from_cu_seqlens:6 of
+msgid "cumulative sequence lengths for keys"
+msgstr "key 的累积序列长度"
+
+#: magi_attention.api.functools.infer_attn_mask_from_cu_seqlens:10 of
+msgid ""
+"window_size of sliding window mask which represents ``[window_size_left, "
+"window_size_right]``. The parameter is effective only when ``causal`` is "
+"``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``. "
+"Defaults to ``(-1, -1)``."
+msgstr ""
+"滑动窗口掩码的 window_size，表示 ``[window_size_left, window_size_right]``。此参数仅在 "
+"``causal`` 为 ``False`` 时生效；当 ``causal`` 为 ``True`` 时，要求为 ``(-1, -1)``。默认为 "
+"``(-1, -1)``。"
+
+#: magi_attention.api.functools.infer_attn_mask_from_cu_seqlens:15 of
+msgid ""
+"the number of leading key tokens in each sample that every query always "
+"attends to, in addition to the sliding window. For example, "
+"``global_window_size=4`` means every query token in a sample attends to the "
+"first 4 key tokens of that sample regardless of the sliding window. To "
+"prevent information leakage, a query at relative position ``i`` can only see"
+" global tokens at positions ``[0, min(global_window_size, i + "
+"window_size_right + 1))``, so queries near the beginning of the sample see "
+"fewer global tokens. Only effective when ``window_size`` is not ``(-1, "
+"-1)``. Defaults to ``0``."
+msgstr ""
+"每个样本中每个 query 除滑动窗口外总会关注的前导 key token 数量。例如，``global_window_size=4`` 表示样本中每个"
+" query token 无论滑动窗口如何，都会关注该样本的前 4 个 key token。为防止信息泄露，相对位置 ``i`` 处的 query "
+"只能看到位置 ``[0, min(global_window_size, i + window_size_right + 1))`` 的全局 "
+"token，因此样本开头附近的 query 看到的全局 token 较少。仅在 ``window_size`` 不为 ``(-1, -1)`` "
+"时生效。默认为 ``0``。"
+
+#: magi_attention.api.functools.infer_attn_mask_from_cu_seqlens:25 of
+msgid ""
+"query ranges, key ranges, attn mask type list, total seqlen of q, total "
+"seqlen of k"
+msgstr "query ranges、key ranges、注意力掩码类型列表、q 的总 seqlen、k 的总 seqlen"
+
 #: ../../source/user_guide/magi_api.md:229
 msgid "Infer Sliding Window Masks"
 msgstr "推断滑动窗口掩码"
@@ -335,3 +1616,39 @@ msgid ""
 "`infer_attn_mask_from_sliding_window` function to handle this process for "
 "you."
 msgstr "如果您不确定如何进行分解，我们提供了 `infer_attn_mask_from_sliding_window` 函数来为您处理。"
+
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window:1 of
+msgid ""
+"Convert only one sliding window masks into representations using q_range, "
+"k_range, and mask type. The mask type is specified using window_size."
+msgstr "仅将一个滑动窗口掩码转换为使用 q_range、k_range 和掩码类型的表示。掩码类型通过 window_size 指定。"
+
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window:4 of
+msgid "q_range of this sliding window mask"
+msgstr "此滑动窗口掩码的 q_range"
+
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window:6 of
+msgid "k_range of this sliding window mask"
+msgstr "此滑动窗口掩码的 k_range"
+
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window:8 of
+msgid ""
+"window_size of sliding window mask which represents ``[window_size_left, "
+"window_size_right]``"
+msgstr "滑动窗口掩码的 window_size，表示 ``[window_size_left, window_size_right]``"
+
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window:12 of
+msgid ""
+"processed ``(q_ranges, k_ranges, masktypes)`` triple, sliding window mask "
+"have been cutted into triple representation."
+msgstr "处理后的 ``(q_ranges, k_ranges, masktypes)`` 三元组，滑动窗口掩码已被切分为三元组表示。"
+
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window:18 of
+msgid "Here's an example of ``infer_attn_mask_from_sliding_window``::"
+msgstr "以下是 ``infer_attn_mask_from_sliding_window`` 的示例::"
+
+#: magi_attention.api.functools.infer_attn_mask_from_sliding_window:26 of
+msgid ""
+"The code above represents the sliding window mask within the ``[5, 15] x [5,"
+" 15]`` region with a window size of ``(2, 3)``."
+msgstr "上面的代码表示 ``[5, 15] x [5, 15]`` 区域内、窗口大小为 ``(2, 3)`` 的滑动窗口掩码。"
