@@ -1,8 +1,45 @@
-# EXAMPLE::
-# coverage run -m pytest tests/
-# coverage combine
-# coverage report
-# coverage html
+# ─────────────────────────────────────────────────────────────────────────────
+# USAGE EXAMPLES
+#
+# Basic (whole suite):
+#   coverage erase                 # drop stale .coverage.* shards from last run
+#   coverage run -m pytest tests/
+#   coverage combine               # REQUIRED when parallel=True: it merges the
+#                                  # per-process shards (.coverage.<host>.<pid>.<rand>)
+#   coverage report
+#   coverage html
+#
+# Partial run (a single file / a subset via -k) -- works exactly the same,
+# you just get partial coverage of whatever executed:
+#   coverage erase
+#   coverage run -m pytest <path/to/test_file.py> -k <test_name>
+#   coverage combine && coverage report
+#
+# Aggregate several separate pytest invocations into ONE report
+# (with parallel=True each run appends a new shard, so just combine at the end):
+#   coverage erase
+#   coverage run -m pytest <path/to/test_a.py>
+#   coverage run -m pytest <path/to/test_b.py>
+#   coverage combine && coverage report
+#
+# Focus the report on only the code you care about (glob patterns):
+#   # at REPORT time (re-filter without re-running):
+#   coverage report --include="*/<pkg>/<subdir>/*"
+#   coverage html   --include="*/<pkg>/<module>.py" -d htmlcov_focus
+#   # or exclude noise:
+#   coverage report --omit="*/<pkg>/<subdir>/*"
+#
+# Focus at COLLECTION time (smaller data files):
+#   coverage run --include="*/<pkg>/<subdir>/*" -m pytest tests/
+#   # --source counts fully-unexecuted files too (honest denominator, exposes
+#   #  files with zero coverage); --include only counts files actually imported:
+#   coverage run --source=<pkg>.<module> -m pytest tests/
+#
+# NOTE (multiprocess / distributed tests): if your tests spawn subprocesses,
+# their coverage is captured via `concurrency = multiprocessing` below. If some
+# subprocess coverage ever goes missing (combined line count looks too low),
+# export COVERAGE_PROCESS_START=$PWD/.coveragerc so each child starts coverage.
+# ─────────────────────────────────────────────────────────────────────────────
 
 [run]
 # Specify the package/directory for collecting coverage data
@@ -21,8 +58,15 @@ omit =
     */__init__.py
 
 [report]
-# Specify code lines to exclude from coverage statistics
+# Specify code lines to exclude from coverage statistics.
+# NOTE: when a regex matches a line that starts a clause (a def, or a
+# decorator), coverage excludes the WHOLE clause. So matching `@triton.jit`
+# drops entire Triton kernels -- their Python body is never executed
+# line-by-line (Triton compiles them), so it would otherwise show as missing.
 exclude_lines =
     pragma: no cover
     def __repr__
     raise NotImplementedError
+    @triton\.jit
+    @triton\.autotune
+    @triton\.heuristics
