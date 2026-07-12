@@ -1043,6 +1043,12 @@
 <li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.testing</span></code> (<code class="docutils literal notranslate"><span class="pre">with_run_in_mp</span></code>)</p></li>
 </ul>
 <p>是否在多进程上下文中运行参数化的分布式测试用例。此变量由 <code class="docutils literal notranslate"><span class="pre">&#64;with_run_in_mp</span></code> 装饰器内部设置，而非由用户直接配置。</p>
+<p><strong>MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">1</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.testing</span></code> (<code class="docutils literal notranslate"><span class="pre">assert_close</span></code>)</p></li>
+</ul>
+<p>当两个张量在 <code class="docutils literal notranslate"><span class="pre">assert_close</span></code> 中匹配时，是否打印 “has no mismatch” 消息。设为 <code class="docutils literal notranslate"><span class="pre">0</span></code> 可禁用它，主要用于减少 CI 中的日志噪声。</p>
 <p><strong>MAGI_ATTENTION_COPYRIGHT_TEST_YEAR</strong></p>
 <ul class="simple">
 <li><p><strong>默认值：</strong> 当前日历年份</p></li>

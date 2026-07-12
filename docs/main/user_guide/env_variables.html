@@ -1059,6 +1059,12 @@ This is only supposed to be used for testing or debugging, since the performance
 <li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.testing</span></code> (<code class="docutils literal notranslate"><span class="pre">with_run_in_mp</span></code>)</p></li>
 </ul>
 <p>Whether to run parameterized distributed test cases in a multiprocessing context. This is set internally by the <code class="docutils literal notranslate"><span class="pre">&#64;with_run_in_mp</span></code> decorator rather than being configured by users directly.</p>
+<p><strong>MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">1</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.testing</span></code> (<code class="docutils literal notranslate"><span class="pre">assert_close</span></code>)</p></li>
+</ul>
+<p>Whether to print the “has no mismatch” message when two tensors match in <code class="docutils literal notranslate"><span class="pre">assert_close</span></code>. Set to <code class="docutils literal notranslate"><span class="pre">0</span></code> to disable it, mainly used to reduce logging noise in CI.</p>
 <p><strong>MAGI_ATTENTION_COPYRIGHT_TEST_YEAR</strong></p>
 <ul class="simple">
 <li><p><strong>Defaults to:</strong> current calendar year</p></li>
