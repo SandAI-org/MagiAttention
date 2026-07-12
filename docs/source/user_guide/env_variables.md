@@ -462,6 +462,13 @@ If not found anywhere, all relative features used in native group collective com
 
 Whether to run parameterized distributed test cases in a multiprocessing context. This is set internally by the `@with_run_in_mp` decorator rather than being configured by users directly.
 
+**MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH**
+
+- **Defaults to:** `1`
+- **Used by:** `magi_attention.testing` (`assert_close`)
+
+Whether to print the "has no mismatch" message when two tensors match in `assert_close`. Set to `0` to disable it, mainly used to reduce logging noise in CI.
+
 **MAGI_ATTENTION_COPYRIGHT_TEST_YEAR**
 
 - **Defaults to:** current calendar year
