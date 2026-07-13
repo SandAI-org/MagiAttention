@@ -75,8 +75,6 @@ struct CollectiveEpilogueBwd {
   static constexpr bool IsSameTypeDkv = cute::is_same_v<ElementDkv, ElementAccum>;
   static constexpr bool OuterStoreNeedReduction = OuterStoreNeedReduction_;
   static constexpr OuterStoreMode kOuterStoreMode = static_cast<OuterStoreMode>(OuterStoreMode_);
-  static constexpr bool Use_TMA_Outer = (kOuterStoreMode == OuterStoreMode::Tma);
-
   static constexpr bool dQ_swapAB = dQ_swapAB_;
   static constexpr bool dKV_swapAB = dKV_swapAB_;
   static constexpr bool Use_TMA = true; // SM90 only
@@ -98,10 +96,11 @@ struct CollectiveEpilogueBwd {
   static constexpr int kBlockN = get<1>(TileShape_MNK{});
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
-  // TMA type for dQ: only used when OuterStoreNeedReduction=true (atomic reduce-add path).
-  // When OuterStoreNeedReduction=false, store_dq() uses per-element flash::copy instead.
-  using GmemTiledCopydQTMA = cute::SM90_TMA_REDUCE_ADD;
-  using GmemTiledCopydKVTMA = std::conditional_t<!BwdInnerLoopK && !OuterStoreNeedReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
+  // Outer TMA instruction variant: SM90_TMA_REDUCE_ADD when multiple CTAs contribute
+  // to the same position (OuterStoreNeedReduction), SM90_TMA_STORE otherwise.
+  // Only instantiated when kOuterStoreMode == OuterStoreMode::Tma.
+  using GmemTiledCopydQTMA = std::conditional_t<OuterStoreNeedReduction, cute::SM90_TMA_REDUCE_ADD, cute::SM90_TMA_STORE>;
+  using GmemTiledCopydKVTMA = std::conditional_t<OuterStoreNeedReduction, cute::SM90_TMA_REDUCE_ADD, cute::SM90_TMA_STORE>;
   using BwdNamedBarriers = std::conditional_t<BwdInnerLoopK, BwdNamedBarriersLoopK, BwdNamedBarriersLoopQ>;
   static_assert(BarrierManager::check<BwdNamedBarriers, NumConsumerWarpGroups>());
 
@@ -178,37 +177,19 @@ struct CollectiveEpilogueBwd {
   using ShapedQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)
   using StridedQKV = cute::Stride<int64_t, _1, int64_t>;
 
-  // Packed shape/stride for dQ when PackGQA is enabled
-  // ((PackGQAFactor, seqlen_q), head_dim, nheads_kv)
-  using ShapedQPacked = std::conditional_t<!PackGQA, ShapedQKV, cute::Shape<cute::Shape<cute::Int<PackGQAFactor>, int32_t>, int32_t, int32_t>>;
-  using StridedQPacked = std::conditional_t<!PackGQA, StridedQKV, cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>>;
-
-  // Compile-time-selected dQ store layout/TMA (PackGQA picks packed variants).
-  using ShapeDqStore = ShapedQPacked;
-  using StrideDqStore = StridedQPacked;
+  // dQ store shape/stride: PackGQA folds (PackGQAFactor, seqlen_q) into dim-0.
+  using ShapeDqStore = std::conditional_t<!PackGQA, ShapedQKV, cute::Shape<cute::Shape<cute::Int<PackGQAFactor>, int32_t>, int32_t, int32_t>>;
+  using StrideDqStore = std::conditional_t<!PackGQA, StridedQKV, cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>>;
 
   using TMA_dQ = std::conditional_t<
       Use_TMA,
       decltype(make_tma_copy(
           GmemTiledCopydQTMA{},
-          make_tensor(make_gmem_ptr(static_cast<ElementDq*>(nullptr)), ShapedQKV{}, StridedQKV{}),
+          make_tensor(make_gmem_ptr(static_cast<ElementDq*>(nullptr)), ShapeDqStore{}, StrideDqStore{}),
           SmemLayoutdQTMA{},
           select<0, 2>(TileShape_MNK{}),
-          _1{})), // no mcast for dQ
+          _1{})),
       std::nullptr_t>;
-
-  // Packed TMA for dQ when PackGQA is enabled
-  using TMA_dQ_Packed = std::conditional_t<
-      Use_TMA && PackGQA,
-      decltype(make_tma_copy(
-          GmemTiledCopydQTMA{},
-          make_tensor(make_gmem_ptr(static_cast<ElementDq*>(nullptr)), ShapedQPacked{}, StridedQPacked{}),
-          SmemLayoutdQTMA{},
-          select<0, 2>(TileShape_MNK{}),
-          _1{})), // no mcast for packed dQ
-      std::nullptr_t>;
-
-  using TMA_dQ_Store = std::conditional_t<PackGQA, TMA_dQ_Packed, TMA_dQ>;
 
   using TMA_dKV = std::conditional_t<
       Use_TMA,
@@ -249,7 +230,7 @@ struct CollectiveEpilogueBwd {
     ElementDkv* ptr_dV; // k for outer-loop and q for inner-loop
     ShapedQKV const shape_dV;
     StridedQKV const stride_dV;
-    TMA_dQ_Store tma_store_dQ; // q for outer-loop and k for inner-loop
+    TMA_dQ tma_store_dQ; // q for outer-loop and k for inner-loop
     TMA_dKV tma_store_dK; // k for outer-loop and q for inner-loop
     TMA_dKV tma_store_dV; // k for outer-loop and q for inner-loop
     int2 const* q_ranges;
@@ -270,7 +251,7 @@ struct CollectiveEpilogueBwd {
     Tensor mdK = make_tensor(make_gmem_ptr(args.ptr_dK), args.shape_dK, args.stride_dK);
     Tensor mdV = make_tensor(make_gmem_ptr(args.ptr_dV), args.shape_dV, args.stride_dV);
 
-    TMA_dQ_Store tma_store_dQ = [&] {
+    TMA_dQ tma_store_dQ = [&] {
       if constexpr (Use_TMA) {
         return make_tma_copy(GmemTiledCopydQTMA{}, mdQ, SmemLayoutdQTMA{}, select<0, 2>(TileShape_MNK{}), _1{});
       } else {
@@ -317,11 +298,11 @@ struct CollectiveEpilogueBwd {
   static void prefetch_tma_descriptors(Params const& params) {
     if constexpr (Use_TMA) {
       if constexpr (BwdInnerLoopK) {
-        if constexpr (Use_TMA_Outer) {
+        if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
           cute::prefetch_tma_descriptor(params.tma_store_dQ.get_tma_descriptor());
         }
       } else {
-        if constexpr (Use_TMA_Outer) {
+        if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
           cute::prefetch_tma_descriptor(params.tma_store_dK.get_tma_descriptor());
           cute::prefetch_tma_descriptor(params.tma_store_dV.get_tma_descriptor());
         }
@@ -401,7 +382,7 @@ struct CollectiveEpilogueBwd {
     // IndexSparse LoopQ with SparseKBlockSize < kBlockN: only partial rows valid in the tile,
     // TMA full-tile store would corrupt neighbors. Use per-element path with residual guard.
     // When SparseKBlockSize >= kBlockN the full tile is valid and can use TMA store.
-    if constexpr (Use_TMA_Outer && !(IndexSparse && !BwdInnerLoopK)) {
+    if constexpr (kOuterStoreMode == OuterStoreMode::Tma && !(IndexSparse && !BwdInnerLoopK)) {
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
       cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
 
@@ -559,7 +540,7 @@ struct CollectiveEpilogueBwd {
     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     cute::copy(smem_tiled_copy_dQ, taccdQrdQ, taccdQsdQ);
 
-    if constexpr (!Use_TMA_Outer) {
+    if constexpr (kOuterStoreMode != OuterStoreMode::Tma) {
       // Per-element direct store: outer Q range is unique per CTA (rangemerge / sparse),
       // so no atomic reduction needed.  Mirrors store_dkv()'s per-element path.
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);

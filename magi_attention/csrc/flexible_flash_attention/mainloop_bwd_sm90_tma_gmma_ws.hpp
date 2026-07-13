@@ -1312,7 +1312,9 @@ struct CollectiveMainloopBwdSm90 {
     int bidh_kv_cat;
 
     // Prepare for TMA multicast meta
-    auto [mcast_mask_qdo, cluster_block_id_qdo] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyQdO, /*RowwiseMask=*/false>();
+    auto const mcast_meta_qdo = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyQdO, /*RowwiseMask=*/false>();
+    uint16_t const mcast_mask_qdo = get<0>(mcast_meta_qdo);
+    uint32_t const cluster_block_id_qdo = get<1>(mcast_meta_qdo);
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -1478,8 +1480,12 @@ struct CollectiveMainloopBwdSm90 {
       }
       return {kv_head_stride, q_head_in_group_stride};
     };
-    auto [lse_kv_head_stride, lse_q_head_in_group_stride] = extract_lse_strides(params.stride_LSE);
-    auto [dpsum_kv_head_stride, dpsum_q_head_in_group_stride] = extract_lse_strides(params.stride_dPsum);
+    auto const lse_strides = extract_lse_strides(params.stride_LSE);
+    int64_t const lse_kv_head_stride = get<0>(lse_strides);
+    int64_t const lse_q_head_in_group_stride = get<1>(lse_strides);
+    auto const dpsum_strides = extract_lse_strides(params.stride_dPsum);
+    int64_t const dpsum_kv_head_stride = get<0>(dpsum_strides);
+    int64_t const dpsum_q_head_in_group_stride = get<1>(dpsum_strides);
     float const* const ptr_gLSE_base = params.ptr_LSE_log2 + bidh * lse_kv_head_stride;
     float const* const ptr_gdPsum_base = params.ptr_dPsum + bidh * dpsum_kv_head_stride;
     // LSE/dPsum per-token offset: token_stride=4 (fixed), head_stride from GQA decomposition.
@@ -1687,7 +1693,9 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdPsum = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSE{});
 
     // prepare for TMA multicast meta
-    auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
+    auto const mcast_meta_kv = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
+    uint16_t const mcast_mask_kv = get<0>(mcast_meta_kv);
+    uint32_t const cluster_block_id_kv = get<1>(mcast_meta_kv);
 
     // Prepare the TMA loads
     auto mQ = params.tma_load_Q.get_tma_tensor(params.shape_QdOdQ)(_, _, bidh);

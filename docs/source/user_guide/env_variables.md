@@ -465,17 +465,17 @@ Set this env variable to specify the directory for the CuteDSL FFA kernel cache.
 
 **MAGI_ATTENTION_PREBUILD_LEVEL**
 
-- **Defaults to:** `lite` (auto-promoted to `ci` when `GITHUB_ACTIONS=true` or `CI=true`)
+- **Defaults to:** `lite`
 - **Used by:** `setup.py`
 
 Controls the breadth of FFA kernel configurations pre-built during `pip install`.
 
-- `lite` (default for local builds): Pre-builds only the basic Dense kernels (fwd/bwd × head_dim 64/128 × fp16/bf16 × atomic/non-atomic). Sufficient for most inference and training workloads.
-- `ci` (auto-detected in CI): Additionally pre-builds all kernel variants declared by test classes via `precompile_kernel_specs()`. Eliminates JIT compilation during test runs.
+- `lite` (default): Pre-builds only the basic Dense kernels (fwd/bwd × head_dim 64/128 × fp16/bf16 × atomic/non-atomic). Sufficient for most inference and training workloads.
+- `ci`: Additionally pre-builds all kernel variants declared by test classes via `precompile_kernel_specs()`. Eliminates JIT compilation during test runs.
 
 ```{note}
-In GitHub Actions or other CI environments (where `GITHUB_ACTIONS=true` or `CI=true`),
-the level is automatically set to `ci` — no explicit env var needed.
+The CI workflow (`build_test.yaml`) explicitly sets `MAGI_ATTENTION_PREBUILD_LEVEL=ci`
+in the build step. For local builds, the default `lite` level is used unless overridden.
 ```
 
 **MAGI_ATTENTION_PREBUILD_FFA_JOBS**
