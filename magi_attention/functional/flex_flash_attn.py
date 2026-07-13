@@ -699,17 +699,17 @@ def _flex_flash_attn_backward(
         # skip clear dk and dv if no reduction
         if disable_bwd_dkv_atomic_reduction:
             if index_sparse and index_sparse_indices is not None:
-                # IndexSparse: use empty_like + postprocess with coverage mask
                 dk = torch.empty_like(k, dtype=dk_type or k.dtype)
                 dv = torch.empty_like(v, dtype=dv_type or v.dtype)
-                # Compute coverage mask: which KV rows are referenced by any Q
+                # Coverage mask based on K-block structure: a block is covered
+                # when it has >= 1 valid Q entry (inverted index value >= 0).
                 total_k = k.size(0)
-                flat_idx = index_sparse_indices.reshape(-1).long()
-                valid = flat_idx >= 0
-                kv_covered_mask = torch.zeros(
-                    total_k, dtype=torch.bool, device=k.device
-                )
-                kv_covered_mask.scatter_(0, flat_idx[valid], True)
+                num_k_blocks = index_sparse_indices.size(0)
+                kbs_eff = total_k // num_k_blocks
+                per_block_covered = (
+                    index_sparse_indices.reshape(num_k_blocks, -1) >= 0
+                ).any(dim=1)
+                kv_covered_mask = per_block_covered.repeat_interleave(kbs_eff)
             else:
                 dk = torch.empty_like(k, dtype=dk_type or k.dtype)
                 dv = torch.empty_like(v, dtype=dv_type or v.dtype)

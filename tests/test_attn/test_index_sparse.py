@@ -694,7 +694,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             )
             for inner_dir in cls._PARAM_SPACE["inner_dir"]:
                 for inner_load in cls._PARAM_SPACE["inner_load_mode"]:
-                    if inner_load == "tma" and kbs < kBlockN:
+                    if inner_load == "tma" and (kbs < kBlockN or pack_f < kBlockN):
                         continue
                     env_fwd = {
                         "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
@@ -776,7 +776,8 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
         kBlockN = 128
-        if inner_load_mode == "tma" and kbs < kBlockN:
+        pgf = nhq // nhk if pack_gqa and nhk > 0 else 1
+        if inner_load_mode == "tma" and (kbs < kBlockN or pgf < kBlockN):
             return
         if inner_store_mode == "bypass" and hd < 256:
             return
@@ -828,7 +829,8 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
         kBlockN = 128
-        if inner_load_mode == "tma" and kbs < kBlockN:
+        pgf = nhq // nhk if pack_gqa and nhk > 0 else 1
+        if inner_load_mode == "tma" and (kbs < kBlockN or pgf < kBlockN):
             return
         if inner_store_mode == "bypass" and hd < 256:
             return

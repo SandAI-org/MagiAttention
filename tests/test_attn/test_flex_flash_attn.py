@@ -331,7 +331,7 @@ class TestFlexFlashAttn(DistTestBase):
                     head_dim=hd,
                     compute_dtype=dt,
                     output_dtype=torch.float32,
-                    pack_gqa=p > 1,
+                    pack_gqa=True,
                     pack_gqa_factor=p,
                     deterministic=det,
                     range_merge=rm,
