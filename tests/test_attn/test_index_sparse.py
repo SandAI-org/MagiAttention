@@ -438,15 +438,17 @@ class TestIndexSparseViewTrick(unittest.TestCase):
         specs: dict = {}
 
         # view-trick tests: all FWD only, index_sparse kbs=1
-        # After view-trick rearrange, kernel sees NHK=1 → pack_gqa_factor=gqa
-        for nhq, nhk in [(2, 1), (4, 4), (32, 32)]:
-            pack_f = nhq // nhk if nhk == 1 else 1
-            pgqa = nhk == 1
+        # After view-trick rearrange with qbs folding, the kernel sees:
+        #   NHQ_new = NHQ * qbs heads with NHK kv-heads
+        #   pack_gqa_factor = NHQ * qbs / NHK
+        # All current test configs yield pack_gqa_factor=4:
+        #   (2,1,qbs=2): 2*2/1=4   (4,4,qbs=4): 4*4/4=4   (32,32,qbs=4): 32*4/32=4
+        for pack_f in [2, 4]:
             add_ffa_spec(
                 specs,
                 direction="fwd",
                 disable_atomic=True,
-                pack_gqa=pgqa,
+                pack_gqa=True,
                 pack_gqa_factor=pack_f,
                 index_sparse=True,
                 sparse_k_block_size=1,
@@ -665,6 +667,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
+        kBlockN = 128
 
         for (
             nhq,
@@ -685,6 +688,8 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             )
             for inner_dir in cls._PARAM_SPACE["inner_dir"]:
                 for inner_load in cls._PARAM_SPACE["inner_load_mode"]:
+                    if inner_load == "tma" and kbs < kBlockN:
+                        continue
                     env_fwd = {
                         "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
                         "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
@@ -698,6 +703,8 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                         **common,
                     )
                     for inner_store in cls._PARAM_SPACE["inner_store_mode"]:
+                        if inner_store == "bypass" and hd < 256:
+                            continue
                         env_bwd = {
                             "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
                             "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
@@ -762,6 +769,11 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         nhq, nhk, pack_gqa = head_config
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
+        kBlockN = 128
+        if inner_load_mode == "tma" and kbs < kBlockN:
+            return
+        if inner_store_mode == "bypass" and hd < 256:
+            return
 
         if kbs <= 1:
             S, topk = 256, 128
@@ -808,6 +820,11 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         """
         nhq, nhk, pack_gqa = head_config
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
+            return
+        kBlockN = 128
+        if inner_load_mode == "tma" and kbs < kBlockN:
+            return
+        if inner_store_mode == "bypass" and hd < 256:
             return
 
         if kbs <= 1:

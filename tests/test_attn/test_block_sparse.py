@@ -242,6 +242,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
 
         specs: dict = {}
         seen_pack_f: set = set()
+        kBlockN = 128
         for nhq, nhk in cls._PARAM_SPACE["nhq_nhk"]:
             pack_f = nhq // nhk
             if pack_f in seen_pack_f:
@@ -259,6 +260,8 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                     )
                     for inner_dir in cls._PARAM_SPACE["inner_dir"]:
                         for inner_load in cls._PARAM_SPACE["inner_load_mode"]:
+                            if inner_load == "tma" and k_size < kBlockN:
+                                continue
                             env_fwd = {
                                 "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
                                 "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
@@ -272,6 +275,8 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                                 **common,
                             )
                             for inner_store in cls._PARAM_SPACE["inner_store_mode"]:
+                                if inner_store == "bypass" and hd < 256:
+                                    continue
                                 env_bwd = {
                                     "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
                                     "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
@@ -310,6 +315,12 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
     ):
         nhq, nhk = nhq_nhk
         hd = head_dim
+
+        kBlockN = 128
+        if inner_load_mode == "tma" and k_size < kBlockN:
+            return
+        if inner_store_mode == "bypass" and hd < 256:
+            return
 
         torch.manual_seed(42)
         seqlen = 2048

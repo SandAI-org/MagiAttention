@@ -446,32 +446,33 @@ class TestFlexFlashAttn(DistTestBase):
                     return_max_logits=feat.get("return_max_logits", False),
                 )
             # swap_ab + pack_gqa (tile (64,64))
-            add_ffa_spec(
-                specs,
-                direction="fwd",
-                head_dim=hd,
-                compute_dtype=dt,
-                output_dtype=torch.float32,
-                swap_ab=True,
-                ref_block_size=(64, 64),
-                pack_gqa=True,
-                pack_gqa_factor=pgf,
-                deterministic=True,
-            )
-            # swap_ab + packgqa + deterministic + return_max_logits
-            add_ffa_spec(
-                specs,
-                direction="fwd",
-                head_dim=hd,
-                compute_dtype=dt,
-                output_dtype=torch.float32,
-                swap_ab=True,
-                ref_block_size=(64, 64),
-                pack_gqa=True,
-                pack_gqa_factor=pgf,
-                deterministic=True,
-                return_max_logits=True,
-            )
+            for p in [1, pgf]:
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    head_dim=hd,
+                    compute_dtype=dt,
+                    output_dtype=torch.float32,
+                    swap_ab=True,
+                    ref_block_size=(64, 64),
+                    pack_gqa=True,
+                    pack_gqa_factor=p,
+                    deterministic=True,
+                )
+                # swap_ab + packgqa + deterministic + return_max_logits
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    head_dim=hd,
+                    compute_dtype=dt,
+                    output_dtype=torch.float32,
+                    swap_ab=True,
+                    ref_block_size=(64, 64),
+                    pack_gqa=True,
+                    pack_gqa_factor=p,
+                    deterministic=True,
+                    return_max_logits=True,
+                )
             # swap_ab + packgqa + deterministic + range_merge
             for p in [1, pgf]:
                 add_ffa_spec(
