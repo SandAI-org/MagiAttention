@@ -357,11 +357,10 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         )
         attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-        q_ffa = pack_q_for_ffa(q, nhk, SparsePackLayout.HEAD_MAJOR)
-        q_ffa.retain_grad()
-        k_ffa, v_ffa = pack_kv_for_ffa(k, v, SparsePackLayout.HEAD_MAJOR)
-        k_ffa.retain_grad()
-        v_ffa.retain_grad()
+        q_ffa = pack_q_for_ffa(q, nhk, SparsePackLayout.HEAD_MAJOR, requires_grad=True)
+        k_ffa, v_ffa = pack_kv_for_ffa(
+            k, v, SparsePackLayout.HEAD_MAJOR, requires_grad=True
+        )
 
         inner_env = {
             "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
