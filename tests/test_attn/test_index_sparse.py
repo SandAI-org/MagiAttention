@@ -620,9 +620,11 @@ class TestIndexSparseSweep(DistTestBase):
     Fixed compile params: MQA128, D=128, PackGQA=True, kbs=1.
     """
 
-    Q_SEQLENS = [512, 1000, 8192]
-    KV_SEQLENS = [512, 1000, 8192]
-    TOPKS = [128, 256]
+    _PARAM_SPACE: dict[str, list] = dict(
+        q_seqlen=[512, 1000, 8192],
+        kv_seqlen=[512, 1000, 8192],
+        topk=[128, 256],
+    )
 
     @classmethod
     def precompile_kernel_specs(cls):
@@ -675,9 +677,9 @@ class TestIndexSparseSweep(DistTestBase):
         return 600
 
     @with_run_in_mp
-    @parameterize("q_seqlen", Q_SEQLENS)
-    @parameterize("kv_seqlen", KV_SEQLENS)
-    @parameterize("topk", TOPKS)
+    @parameterize("q_seqlen", _PARAM_SPACE["q_seqlen"])
+    @parameterize("kv_seqlen", _PARAM_SPACE["kv_seqlen"])
+    @parameterize("topk", _PARAM_SPACE["topk"])
     def test_index_sparse_classic(self, q_seqlen, kv_seqlen, topk):
         if topk > kv_seqlen:
             return
