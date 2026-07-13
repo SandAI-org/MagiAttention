@@ -606,7 +606,7 @@ struct CollectiveMainloopFwdSm90 {
 
     // ─── TMA K/V load helper: domain_offset + partition, used by both dense and sparse paths ───
     // Dense: tma_load_K_tile(offset_k, inner_block_idx, stage) — origin at batch start, relative tile
-    // Sparse: tma_load_K_tile(compound_idx, 0, stage) — origin at target tile, tile 0
+    // Sparse: tma_load_K_tile(n_block_abs * kBlockN, 0, stage) — origin at tile-aligned start
     // Both compute the same address: origin + block_idx * kBlockN = target tile element start.
     Tensor mK_tma = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, block_meta.bidh_kv);
     Tensor sK_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
@@ -646,9 +646,10 @@ struct CollectiveMainloopFwdSm90 {
             block_idx = block_meta.inner_block_idx;
           } else {
             int const compound_idx = block_meta.get_tile_first_compound_idx();
-            origin = compound_idx;
+            int const n_block_abs = compound_idx / kBlockN;
+            origin = n_block_abs * kBlockN;
             block_idx = 0;
-            shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_k.index()] = compound_idx / kBlockN;
+            shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_write_k.index()] = n_block_abs;
           }
           pipeline_k.producer_acquire(smem_pipe_write_k);
           tma_load_K_tile(origin, block_idx, smem_pipe_write_k.index());

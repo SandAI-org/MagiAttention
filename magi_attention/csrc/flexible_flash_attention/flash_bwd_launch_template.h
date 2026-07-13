@@ -316,31 +316,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   dim3 block_dims = AttnKernel::get_block_shape();
   int smem_size = AttnKernel::SharedStorageSize;
 
-  {
-    static bool printed = false;
-    if (!printed) {
-      printed = true;
-      int sz_tensor = sizeof(typename CollectiveMainloop::TensorStorage);
-      int sz_pipe = sizeof(typename AttnKernel::SharedStorage) - sz_tensor;
-      printf("[BWD] total=%d(%.1fKB) tensor=%d pipe=%d\n", smem_size, smem_size / 1024.0f, sz_tensor, sz_pipe);
-      printf(
-          "[BWD] M=%d N=%d hd=%d stg=%d stgV=%d stg_dS=%d pad=%d storeMode=%d union=%d SwapQK=%d\n",
-          kBlockM,
-          kBlockN,
-          kHeadDim,
-          Stages,
-          Stages_V,
-          Stages_dS,
-          Tma1dSmemRowPad,
-          InnerStoreMode,
-          (int)UnionDkvSmem,
-          (int)BwdInnerLoopK);
-      cudaFuncAttributes func_attrs;
-      cudaFuncGetAttributes(&func_attrs, (void*)cutlass::device_kernel<AttnKernel>);
-      printf("[BWD] static_smem=%zu regs=%d\n", func_attrs.sharedSizeBytes, func_attrs.numRegs);
-    }
-  }
-
   if constexpr (size(ClusterShape{}) > 1) {
     void const* kernel = (void const*)cutlass::device_kernel<AttnKernel>;
     if (smem_size >= 48 * 1024) { // exceed static shared memory size limit (48KB on Hopper)
