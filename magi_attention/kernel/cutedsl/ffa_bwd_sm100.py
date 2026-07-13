@@ -323,21 +323,18 @@ class FFABwdSm100:
         return self.mask_type == MT_MAP.causal
 
     def _setup_attributes(self):
+        self.dO_stage = 1
+        self.single_stage = 1
+        self.sdKVaccum_stage = 2
         if self.swap_bwd_qk_loop:
             # LoopK: K/V streaming, Q/dO fixed (single-stage).
             # K_stage=1 for D>=128 to stay within SM100 228KB smem limit;
             # with D>=128 + K_stage=2, sK+sV alone would be 128KB, exceeding budget.
             self.K_stage = 1 if self.tile_hdim >= 128 else 2
             self.Q_stage = 1
-            self.dO_stage = 1
-            self.single_stage = 1
-            self.sdKVaccum_stage = 2
         else:
             self.K_stage = 1
             self.Q_stage = 1 if self.use_2cta_instrs else 2
-            self.dO_stage = 1
-            self.single_stage = 1
-            self.sdKVaccum_stage = 2
 
         # Determine number of tma reduce adds per dQacc mma
         # TODO: try 32/1 or 48/2 for 2cta d=192 dv=128
