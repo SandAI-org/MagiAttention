@@ -64,11 +64,12 @@ from tests.test_attn.sparse_test_utils import (
     SEED,
     SparsePackLayout,
     check_ffa_deterministic_twice,
-    compare_sdpa_bwd_dq,
+    compare_sdpa_bwd_all,
     compare_sdpa_fwd,
     inner_loop_env,
     pack_kv_for_ffa,
     pack_q_for_ffa,
+    sdpa_ref_bwd_grads,
     unpack_ffa_output,
 )
 
@@ -245,19 +246,34 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
         o_sparse.backward(do)
 
         bwd_atol = cfg.get("bwd_atol", DEFAULT_BWD_DQ_ATOL)
-        compare_sdpa_bwd_dq(
-            q_ffa.grad,
+        do_unpacked = unpack_ffa_output(
             do,
+            B=B,
+            S=S_q,
+            NHK=NHK,
+            layout=SparsePackLayout.SEQ_MAJOR,
+        )
+        sdpa_dq, _, _ = sdpa_ref_bwd_grads(
+            do_unpacked,
             q,
             k,
             v,
             sdpa_mask,
-            B=B,
-            S_q=S_q,
             NHQ=NHQ,
             NHK=NHK,
-            atol=bwd_atol,
+        )
+        dq_ffa = rearrange(
+            q_ffa.grad,
+            "(b s h1) h2 d -> b (h1 h2) s d",
+            b=B,
+            h1=NHK,
+            s=S_q,
+        )
+        compare_sdpa_bwd_all(
+            ffa_dq=dq_ffa,
+            sdpa_dq=sdpa_dq,
             test_case=test_case,
+            dq_atol=bwd_atol,
         )
 
         if cfg.get("check_deterministic", True) and swap_bwd_qk_loop is not True:

@@ -143,34 +143,6 @@ def sdpa_ref_output(
     return torch.stack(o_ref_all, dim=0)
 
 
-def sdpa_ref_bwd_dq(
-    do_packed: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    sdpa_mask: torch.Tensor,
-    *,
-    B: int,
-    S_q: int,
-    NHQ: int,
-    NHK: int,
-) -> torch.Tensor:
-    """Compute SDPA backward dQ reference, returned in (B*S_q, NHQ, D) layout."""
-    gqa = NHQ // NHK
-    total_q = B * S_q
-
-    q_sdpa = q.transpose(1, 2).detach().clone().requires_grad_(True)
-    k_expanded = k.repeat_interleave(gqa, dim=2).transpose(1, 2).detach()
-    v_expanded = v.repeat_interleave(gqa, dim=2).transpose(1, 2).detach()
-    mask_expanded = sdpa_mask.repeat_interleave(gqa, dim=1)
-    o_sdpa = F.scaled_dot_product_attention(
-        q_sdpa, k_expanded, v_expanded, attn_mask=mask_expanded
-    )
-    do_sdpa = rearrange(do_packed, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q)
-    o_sdpa.backward(do_sdpa)
-    return rearrange(q_sdpa.grad, "b h s d -> (b s) h d")[:total_q]
-
-
 def compare_sdpa_fwd(
     o_ffa: torch.Tensor,
     q: torch.Tensor,
@@ -195,42 +167,6 @@ def compare_sdpa_fwd(
         rtol=rtol,
         mismatch_threshold=mismatch_threshold,
         test_case=f"{test_case} => fwd_out",
-    )
-
-
-def compare_sdpa_bwd_dq(
-    dq_ffa_packed: torch.Tensor,
-    do_packed: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    sdpa_mask: torch.Tensor,
-    *,
-    B: int,
-    S_q: int,
-    NHQ: int,
-    NHK: int,
-    test_case: str,
-    atol: float = DEFAULT_BWD_DQ_ATOL,
-    rtol: float = DEFAULT_BWD_DQ_RTOL,
-    mismatch_threshold: float = DEFAULT_MISMATCH_THRES,
-) -> None:
-    """Compare packed FFA dQ against SDPA backward reference using assert_close."""
-    dq_ref = sdpa_ref_bwd_dq(
-        do_packed, q, k, v, sdpa_mask, B=B, S_q=S_q, NHQ=NHQ, NHK=NHK
-    )
-    dq_ffa_reshaped = rearrange(
-        dq_ffa_packed, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q
-    )
-    dq_ref_reshaped = rearrange(dq_ref, "(b s) h d -> b h s d", b=B, s=S_q)
-
-    assert_close(
-        dq_ffa_reshaped,
-        dq_ref_reshaped,
-        atol=atol,
-        rtol=rtol,
-        mismatch_threshold=mismatch_threshold,
-        test_case=f"{test_case} => dq",
     )
 
 
@@ -267,12 +203,12 @@ def sdpa_ref_bwd_grads(
 
 
 def compare_sdpa_bwd_all(
-    ffa_dq: torch.Tensor,
-    ffa_dk: torch.Tensor,
-    ffa_dv: torch.Tensor,
-    sdpa_dq: torch.Tensor,
-    sdpa_dk: torch.Tensor,
-    sdpa_dv: torch.Tensor,
+    ffa_dq: torch.Tensor | None = None,
+    ffa_dk: torch.Tensor | None = None,
+    ffa_dv: torch.Tensor | None = None,
+    sdpa_dq: torch.Tensor | None = None,
+    sdpa_dk: torch.Tensor | None = None,
+    sdpa_dv: torch.Tensor | None = None,
     *,
     test_case: str,
     mismatch_threshold: float = DEFAULT_MISMATCH_THRES,
@@ -283,31 +219,24 @@ def compare_sdpa_bwd_all(
     dv_atol: float = DEFAULT_BWD_DKV_ATOL,
     dv_rtol: float = DEFAULT_BWD_DV_RTOL,
 ) -> None:
-    """Compare FFA dQ/dK/dV against SDPA reference using assert_close."""
-    assert_close(
-        ffa_dq,
-        sdpa_dq,
-        atol=dq_atol,
-        rtol=dq_rtol,
-        mismatch_threshold=mismatch_threshold,
-        test_case=f"{test_case} => dq",
-    )
-    assert_close(
-        ffa_dk,
-        sdpa_dk,
-        atol=dk_atol,
-        rtol=dk_rtol,
-        mismatch_threshold=mismatch_threshold,
-        test_case=f"{test_case} => dk",
-    )
-    assert_close(
-        ffa_dv,
-        sdpa_dv,
-        atol=dv_atol,
-        rtol=dv_rtol,
-        mismatch_threshold=mismatch_threshold,
-        test_case=f"{test_case} => dv",
-    )
+    """Compare FFA dQ/dK/dV against SDPA reference using assert_close.
+
+    Any pair of (ffa_dx, sdpa_dx) that is None is silently skipped.
+    """
+    for ffa, ref, atol, rtol, label in [
+        (ffa_dq, sdpa_dq, dq_atol, dq_rtol, "dq"),
+        (ffa_dk, sdpa_dk, dk_atol, dk_rtol, "dk"),
+        (ffa_dv, sdpa_dv, dv_atol, dv_rtol, "dv"),
+    ]:
+        if ffa is not None and ref is not None:
+            assert_close(
+                ffa,
+                ref,
+                atol=atol,
+                rtol=rtol,
+                mismatch_threshold=mismatch_threshold,
+                test_case=f"{test_case} => {label}",
+            )
 
 
 def check_ffa_deterministic_twice(
