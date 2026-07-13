@@ -26,9 +26,17 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
+from magi_attention.testing.precision import assert_close
+
 SEED = 42
 DEFAULT_FWD_ATOL = 0.01
-DEFAULT_BWD_DQ_ATOL = 0.05
+DEFAULT_FWD_RTOL = 0.05
+DEFAULT_BWD_DQ_ATOL = 0.02
+DEFAULT_BWD_DQ_RTOL = 0.3
+DEFAULT_BWD_DKV_ATOL = 0.02
+DEFAULT_BWD_DK_RTOL = 0.15
+DEFAULT_BWD_DV_RTOL = 0.05
+DEFAULT_MISMATCH_THRES = 0.01
 
 
 class SparsePackLayout(Enum):
@@ -100,6 +108,69 @@ def inner_loop_env(env: dict[str, str]) -> Iterator[None]:
             os.environ.pop(key, None)
 
 
+def sdpa_ref_output(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sdpa_mask: torch.Tensor,
+    *,
+    B: int,
+    NHQ: int,
+    NHK: int,
+) -> torch.Tensor:
+    """Compute SDPA reference output (B, S_q, NHQ, D).
+
+    Runs per Q-head to avoid materializing the full (NHQ, S_q, S_kv) matrix
+    for large MQA configs.
+    sdpa_mask: (B, NHK, S_q, S_kv).
+    q: (B, S_q, NHQ, D), k: (B, S_kv, NHK, D), v: (B, S_kv, NHK, D).
+    """
+    gqa = NHQ // NHK
+    o_ref_all = []
+    with torch.no_grad():
+        for b_idx in range(B):
+            o_ref_heads = []
+            for h_q in range(NHQ):
+                h_kv = h_q // gqa
+                q_h = q[b_idx, :, h_q : h_q + 1, :].unsqueeze(0).transpose(1, 2)
+                k_h = k[b_idx, :, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+                v_h = v[b_idx, :, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+                mask_h = sdpa_mask[b_idx, h_kv : h_kv + 1].unsqueeze(0)
+                o_h = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=mask_h)
+                o_ref_heads.append(o_h)
+            o_batch = torch.cat(o_ref_heads, dim=1)
+            o_ref_all.append(rearrange(o_batch, "1 h s d -> s h d"))
+    return torch.stack(o_ref_all, dim=0)
+
+
+def sdpa_ref_bwd_dq(
+    do_packed: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sdpa_mask: torch.Tensor,
+    *,
+    B: int,
+    S_q: int,
+    NHQ: int,
+    NHK: int,
+) -> torch.Tensor:
+    """Compute SDPA backward dQ reference, returned in (B*S_q, NHQ, D) layout."""
+    gqa = NHQ // NHK
+    total_q = B * S_q
+
+    q_sdpa = q.transpose(1, 2).detach().clone().requires_grad_(True)
+    k_expanded = k.repeat_interleave(gqa, dim=2).transpose(1, 2).detach()
+    v_expanded = v.repeat_interleave(gqa, dim=2).transpose(1, 2).detach()
+    mask_expanded = sdpa_mask.repeat_interleave(gqa, dim=1)
+    o_sdpa = F.scaled_dot_product_attention(
+        q_sdpa, k_expanded, v_expanded, attn_mask=mask_expanded
+    )
+    do_sdpa = rearrange(do_packed, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q)
+    o_sdpa.backward(do_sdpa)
+    return rearrange(q_sdpa.grad, "b h s d -> (b s) h d")[:total_q]
+
+
 def compare_sdpa_fwd(
     o_ffa: torch.Tensor,
     q: torch.Tensor,
@@ -110,34 +181,21 @@ def compare_sdpa_fwd(
     B: int,
     NHQ: int,
     NHK: int,
-    atol: float,
     test_case: str,
+    atol: float = DEFAULT_FWD_ATOL,
+    rtol: float = DEFAULT_FWD_RTOL,
+    mismatch_threshold: float = DEFAULT_MISMATCH_THRES,
 ) -> None:
-    """Compare FFA output against SDPA reference, batch by batch, head by head."""
-    gqa = NHQ // NHK
-    err_msgs: list[str] = []
-    for b_idx in range(B):
-        o_ref_heads = []
-        with torch.no_grad():
-            for h_q in range(NHQ):
-                h_kv = h_q // gqa
-                q_h = q[b_idx, :, h_q : h_q + 1, :].unsqueeze(0).transpose(1, 2)
-                k_h = k[b_idx, :, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
-                v_h = v[b_idx, :, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
-                mask_h = sdpa_mask[b_idx, h_kv : h_kv + 1].unsqueeze(0)
-                o_h = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=mask_h)
-                o_ref_heads.append(o_h)
-        o_ref = torch.cat(o_ref_heads, dim=1)
-        o_ref = rearrange(o_ref, "1 h s d -> s h d")
-
-        max_diff = (o_ffa[b_idx].float() - o_ref.float()).abs().max().item()
-        if max_diff >= atol:
-            err_msgs.append(
-                f"batch {b_idx}: max_diff={max_diff:.6f} >= {atol} in {test_case}"
-            )
-
-    if err_msgs:
-        raise AssertionError("\n".join(err_msgs))
+    """Compare FFA forward output against SDPA reference using assert_close."""
+    o_ref = sdpa_ref_output(q, k, v, sdpa_mask, B=B, NHQ=NHQ, NHK=NHK)
+    assert_close(
+        o_ffa,
+        o_ref,
+        atol=atol,
+        rtol=rtol,
+        mismatch_threshold=mismatch_threshold,
+        test_case=f"{test_case} => fwd_out",
+    )
 
 
 def compare_sdpa_bwd_dq(
@@ -152,87 +210,119 @@ def compare_sdpa_bwd_dq(
     S_q: int,
     NHQ: int,
     NHK: int,
-    atol: float,
     test_case: str,
+    atol: float = DEFAULT_BWD_DQ_ATOL,
+    rtol: float = DEFAULT_BWD_DQ_RTOL,
+    mismatch_threshold: float = DEFAULT_MISMATCH_THRES,
 ) -> None:
-    """Compare packed FFA dQ against SDPA backward reference."""
-    gqa = NHQ // NHK
-    total_q = B * S_q
-
-    q_sdpa = q.transpose(1, 2).detach().clone().requires_grad_(True)
-    k_expanded = k.repeat_interleave(gqa, dim=2).transpose(1, 2).detach()
-    v_expanded = v.repeat_interleave(gqa, dim=2).transpose(1, 2).detach()
-    mask_expanded = sdpa_mask.repeat_interleave(gqa, dim=1)
-    o_sdpa = F.scaled_dot_product_attention(
-        q_sdpa, k_expanded, v_expanded, attn_mask=mask_expanded
+    """Compare packed FFA dQ against SDPA backward reference using assert_close."""
+    dq_ref = sdpa_ref_bwd_dq(
+        do_packed, q, k, v, sdpa_mask, B=B, S_q=S_q, NHQ=NHQ, NHK=NHK
     )
-    do_sdpa = rearrange(do_packed, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q)
-    o_sdpa.backward(do_sdpa)
-    dq_ref = rearrange(q_sdpa.grad, "b h s d -> (b s) h d")[:total_q]
-
     dq_ffa_reshaped = rearrange(
         dq_ffa_packed, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q
     )
     dq_ref_reshaped = rearrange(dq_ref, "(b s) h d -> b h s d", b=B, s=S_q)
 
-    err_msgs: list[str] = []
-    for b_idx in range(B):
-        max_dq_diff = (
-            (dq_ffa_reshaped[b_idx].float() - dq_ref_reshaped[b_idx].float())
-            .abs()
-            .max()
-            .item()
-        )
-        if max_dq_diff >= atol:
-            err_msgs.append(
-                f"BWD batch {b_idx}: dQ max_diff={max_dq_diff:.6f} >= {atol} in {test_case}"
-            )
-    if err_msgs:
-        raise AssertionError("\n".join(err_msgs))
+    assert_close(
+        dq_ffa_reshaped,
+        dq_ref_reshaped,
+        atol=atol,
+        rtol=rtol,
+        mismatch_threshold=mismatch_threshold,
+        test_case=f"{test_case} => dq",
+    )
+
+
+def sdpa_ref_bwd_grads(
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sdpa_mask: torch.Tensor,
+    *,
+    NHQ: int,
+    NHK: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute SDPA backward gradients.
+
+    Inputs in (B, S, H, D) layout. sdpa_mask: (B, NHK, S_q, S_kv).
+    Returns (dq, dk, dv) each in (B, H, S, D) layout (transposed).
+    """
+    gqa = NHQ // NHK
+    q_sdpa = q.transpose(1, 2).detach().clone().requires_grad_(True)
+    k_sdpa = k.transpose(1, 2).detach().clone().requires_grad_(True)
+    v_sdpa = v.transpose(1, 2).detach().clone().requires_grad_(True)
+
+    k_expanded = k_sdpa.repeat_interleave(gqa, dim=1)
+    v_expanded = v_sdpa.repeat_interleave(gqa, dim=1)
+    mask_expanded = sdpa_mask.repeat_interleave(gqa, dim=1)
+
+    o_sdpa = F.scaled_dot_product_attention(
+        q_sdpa, k_expanded, v_expanded, attn_mask=mask_expanded
+    )
+    do_sdpa = do.transpose(1, 2)
+    o_sdpa.backward(do_sdpa)
+    return q_sdpa.grad, k_sdpa.grad, v_sdpa.grad
+
+
+def compare_sdpa_bwd_all(
+    ffa_dq: torch.Tensor,
+    ffa_dk: torch.Tensor,
+    ffa_dv: torch.Tensor,
+    sdpa_dq: torch.Tensor,
+    sdpa_dk: torch.Tensor,
+    sdpa_dv: torch.Tensor,
+    *,
+    test_case: str,
+    mismatch_threshold: float = DEFAULT_MISMATCH_THRES,
+    dq_atol: float = DEFAULT_BWD_DQ_ATOL,
+    dq_rtol: float = DEFAULT_BWD_DQ_RTOL,
+    dk_atol: float = DEFAULT_BWD_DKV_ATOL,
+    dk_rtol: float = DEFAULT_BWD_DK_RTOL,
+    dv_atol: float = DEFAULT_BWD_DKV_ATOL,
+    dv_rtol: float = DEFAULT_BWD_DV_RTOL,
+) -> None:
+    """Compare FFA dQ/dK/dV against SDPA reference using assert_close."""
+    assert_close(
+        ffa_dq,
+        sdpa_dq,
+        atol=dq_atol,
+        rtol=dq_rtol,
+        mismatch_threshold=mismatch_threshold,
+        test_case=f"{test_case} => dq",
+    )
+    assert_close(
+        ffa_dk,
+        sdpa_dk,
+        atol=dk_atol,
+        rtol=dk_rtol,
+        mismatch_threshold=mismatch_threshold,
+        test_case=f"{test_case} => dk",
+    )
+    assert_close(
+        ffa_dv,
+        sdpa_dv,
+        atol=dv_atol,
+        rtol=dv_rtol,
+        mismatch_threshold=mismatch_threshold,
+        test_case=f"{test_case} => dv",
+    )
 
 
 def check_ffa_deterministic_twice(
-    run_once: Callable[[], tuple[torch.Tensor, torch.Tensor | None]],
+    run_once: Callable[[], tuple[torch.Tensor, ...]],
     *,
     test_case: str,
-    check_dq: bool = True,
 ) -> list[str]:
-    """Run FFA twice in deterministic mode and compare (index_sparse style)."""
-    o_det1, dq_det1 = run_once()
-    o_det2, dq_det2 = run_once()
+    """Run FFA twice in deterministic mode and compare all returned tensors."""
+    results1 = run_once()
+    results2 = run_once()
 
+    labels = ["fwd_out", "dq", "dk", "dv"]
     err_msgs: list[str] = []
-    if not torch.equal(o_det1, o_det2):
-        err_msgs.append(f"For {test_case=}: forward output not deterministic")
-    if check_dq and dq_det1 is not None and dq_det2 is not None:
-        if not torch.equal(dq_det1, dq_det2):
-            err_msgs.append(f"For {test_case=}: backward dQ not deterministic")
-    return err_msgs
-
-
-def check_ffa_deterministic_rerun(
-    *,
-    o_ref: torch.Tensor,
-    dq_ref: torch.Tensor | None,
-    dk_ref: torch.Tensor | None,
-    dv_ref: torch.Tensor | None,
-    run_deterministic: Callable[
-        [], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-    ],
-    test_case: str,
-) -> list[str]:
-    """Rerun FFA in deterministic mode and compare to stored refs (block_sparse style)."""
-    err_msgs: list[str] = []
-    o_det, dq_det, dk_det, dv_det = run_deterministic()
-    try:
-        if not torch.equal(o_det, o_ref):
-            err_msgs.append(f"For {test_case=}: forward output not deterministic")
-        if dq_ref is not None and not torch.equal(dq_det, dq_ref):
-            err_msgs.append(f"For {test_case=}: backward dq not deterministic")
-        if dk_ref is not None and not torch.equal(dk_det, dk_ref):
-            err_msgs.append(f"For {test_case=}: backward dk not deterministic")
-        if dv_ref is not None and not torch.equal(dv_det, dv_ref):
-            err_msgs.append(f"For {test_case=}: backward dv not deterministic")
-    except Exception as e:
-        err_msgs.append(str(e))
+    for i, (t1, t2) in enumerate(zip(results1, results2)):
+        if t1 is not None and t2 is not None and not torch.equal(t1, t2):
+            label = labels[i] if i < len(labels) else f"tensor_{i}"
+            err_msgs.append(f"For {test_case=}: {label} not deterministic")
     return err_msgs

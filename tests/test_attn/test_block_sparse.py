@@ -12,24 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import unittest
-
 import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.functional import flex_flash_attn_func
-from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
-from magi_attention.testing.precision import (
-    EPSILON,
-    MAX_MISMATCH_THRES,
-    MISMATCH_THRES_RATIO,
-    NORM_RTOL_RATIO,
-    assert_close,
-    calc_inf_norm,
-    extract_mismatch_threshold,
-)
 from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask_triton,
@@ -37,555 +26,14 @@ from magi_attention.utils.sparse_utils import (
 )
 from tests.test_attn.sparse_test_utils import (
     SparsePackLayout,
-    check_ffa_deterministic_rerun,
+    compare_sdpa_bwd_all,
+    compare_sdpa_fwd,
     inner_loop_env,
     pack_kv_for_ffa,
     pack_q_for_ffa,
+    sdpa_ref_bwd_grads,
     unpack_ffa_output,
 )
-
-
-class _BlockSparseTestHelper(unittest.TestCase):
-    @property
-    def device(self):
-        return torch.cuda.current_device()
-
-    def check_deterministic(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        do: torch.Tensor,
-        q_ranges_tensor,
-        k_ranges_tensor,
-        attn_type_map_tensor,
-        range_merge,
-        ref_block_size,
-        test_case,
-        o_ref: torch.Tensor,
-        dq_ref: torch.Tensor,
-        dk_ref: torch.Tensor,
-        dv_ref: torch.Tensor,
-    ):
-        # (Implementation is identical to the original)
-
-        def _run_deterministic():
-            q_det = q.clone().detach().requires_grad_(True)
-            k_det = k.clone().detach().requires_grad_(True)
-            v_det = v.clone().detach().requires_grad_(True)
-            o_det, _ = flex_flash_attn_func(
-                q_det,
-                k_det,
-                v_det,
-                q_ranges=q_ranges_tensor,
-                k_ranges=k_ranges_tensor,
-                max_seqlen_q=None,
-                attn_type_map=attn_type_map_tensor,
-                range_merge=range_merge,
-                deterministic=True,
-                ref_block_size=ref_block_size,
-            )
-            o_det.backward(do)
-            return o_det, q_det.grad, k_det.grad, v_det.grad
-
-        return check_ffa_deterministic_rerun(
-            o_ref=o_ref,
-            dq_ref=dq_ref,
-            dk_ref=dk_ref,
-            dv_ref=dv_ref,
-            run_deterministic=_run_deterministic,
-            test_case=test_case,
-        )
-
-    def get_ffa_result(
-        self,
-        q,
-        k,
-        v,
-        grad_output,
-        block_mask,
-        head_wise,
-        block_size,
-        nhq,
-        nhk,
-        pack_gqa,
-        deterministic,
-        swap_ab,
-        ref_block_size,
-        block_sparse,
-        swap_bwd_qk_loop,
-        test_case,
-        err_msg_list,
-        sparse_format="block_mask",
-        uniform=True,
-        block_row_sz=None,
-        block_col_sz=None,
-        max_seqlen_q=None,
-    ):
-        s = q.size(1)
-        h1 = k.size(2)
-        assert nhq % nhk == 0
-        q = pack_q_for_ffa(q, h1, SparsePackLayout.HEAD_MAJOR)
-        k, v = pack_kv_for_ffa(k, v, SparsePackLayout.HEAD_MAJOR)
-        q.retain_grad()
-        k.retain_grad()
-        v.retain_grad()
-        q.grad, k.grad, v.grad = None, None, None
-        q_block_size, sparse_k_block_size = block_size
-        (
-            q_ranges_tensor,
-            k_ranges_tensor,
-        ) = generate_ranges_from_block_mask_triton(
-            block_mask, q_block_size, sparse_k_block_size
-        )
-        attn_type_map_tensor = torch.zeros(
-            len(q_ranges_tensor), dtype=torch.int32, device="cuda"
-        )
-
-        o, meta = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            q_ranges=q_ranges_tensor,
-            k_ranges=k_ranges_tensor,
-            max_seqlen_q=max_seqlen_q,
-            attn_type_map=attn_type_map_tensor,
-            range_merge=True,
-            pack_gqa=pack_gqa,
-            swap_ab=swap_ab,
-            ref_block_size=ref_block_size,
-            block_sparse=block_sparse,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
-        )
-        torch.cuda.synchronize()
-
-        lse = meta.lse
-        o = unpack_ffa_output(o, B=1, S=s, NHK=h1, layout=SparsePackLayout.HEAD_MAJOR)
-        lse = rearrange(lse, "(h1 s) h2 -> s (h1 h2)", s=s, h1=h1)
-        o.backward(grad_output)
-        torch.cuda.synchronize()
-
-        if deterministic:
-            err_msg_list.extend(
-                self.check_deterministic(
-                    q=q,
-                    k=k,
-                    v=v,
-                    do=grad_output,
-                    q_ranges_tensor=q_ranges_tensor,
-                    k_ranges_tensor=k_ranges_tensor,
-                    attn_type_map_tensor=attn_type_map_tensor,
-                    range_merge=True,
-                    ref_block_size=ref_block_size,
-                    test_case=test_case,
-                    o_ref=o,
-                    dq_ref=q.grad,
-                    dk_ref=k.grad,
-                    dv_ref=v.grad,
-                )
-            )
-
-        return o, lse
-
-    def get_sdpa_attn_ref(
-        self,
-        q,
-        k,
-        v,
-        grad_output,
-        seqlen,
-        block_size,
-        block_mask,
-        sparse_format="block_mask",
-        uniform=True,
-        block_row_sz=None,
-        block_col_sz=None,
-        high_precision=False,
-    ):
-        q = rearrange(q, "1 s h d -> s h d")  # shd
-        k = rearrange(k, "1 s h d -> s h d")
-        v = rearrange(v, "1 s h d -> s h d")
-        q_block_size, sparse_k_block_size = block_size
-        sdpa_mask_4d = get_sdpa_mask_from_block_sparse_mask(
-            block_mask, seqlen, seqlen, q_block_size, sparse_k_block_size, q.size(1)
-        )
-        sdpa_mask = rearrange(
-            sdpa_mask_4d, "1 h seqlen_q seqlen_k -> h seqlen_q seqlen_k"
-        )
-        o, meta = ref_attn_func(
-            q=q,
-            k=k,
-            v=v,
-            sink=None,
-            mask=sdpa_mask,
-            layout="thd",
-            high_precision=high_precision,
-            backend="sdpa",
-            return_lse=True,
-            sink_layout=None,
-        )
-        lse = meta.lse
-        torch.cuda.synchronize()
-
-        o = rearrange(o, "s h d -> 1 s h d")
-        lse = rearrange(lse, "1 seqlen h -> seqlen h")
-        o.backward(grad_output)
-        torch.cuda.synchronize()
-
-        return o, lse
-
-    def assert_close_to_torch_ref(
-        self,
-        dtype,
-        q,
-        k,
-        v,
-        grad_output,
-        seqlen,
-        block_size,
-        block_mask,
-        head_wise,
-        sparse_format,
-        nhq,
-        nhk,
-        pack_gqa,
-        deterministic,
-        swap_ab: bool,
-        ref_block_size: tuple[int, int],
-        block_sparse,
-        swap_bwd_qk_loop,
-        test_case,
-        sparsity_ratio,
-        uniform=True,
-        block_row_sz=None,
-        block_col_sz=None,
-        err_ratio_dict: dict[str, float] = {},
-        max_seqlen_q=None,
-    ):
-        high_precision_torch_out_ref, high_precision_lse_ref = self.get_sdpa_attn_ref(
-            q,
-            k,
-            v,
-            grad_output,
-            seqlen,
-            block_size,
-            block_mask,
-            sparse_format=sparse_format,
-            uniform=uniform,
-            block_row_sz=block_row_sz,
-            block_col_sz=block_col_sz,
-            high_precision=True,
-        )
-        high_precision_dq_ref, high_precision_dk_ref, high_precision_dv_ref = (
-            q.grad,
-            k.grad,
-            v.grad,
-        )
-
-        q.grad, k.grad, v.grad = None, None, None
-        low_precision_torch_out_ref, low_precision_lse_ref = self.get_sdpa_attn_ref(
-            q,
-            k,
-            v,
-            grad_output,
-            seqlen,
-            block_size,
-            block_mask,
-            sparse_format=sparse_format,
-            uniform=uniform,
-            block_row_sz=block_row_sz,
-            block_col_sz=block_col_sz,
-            high_precision=False,
-        )
-        low_precision_dq_ref, low_precision_dk_ref, low_precision_dv_ref = (
-            q.grad,
-            k.grad,
-            v.grad,
-        )
-
-        q.grad, k.grad, v.grad = None, None, None
-        err_msg_list: list[str] = []
-
-        ffa_out, ffa_lse = self.get_ffa_result(
-            q,
-            k,
-            v,
-            grad_output,
-            block_mask,
-            head_wise,
-            block_size,
-            nhq,
-            nhk,
-            pack_gqa,
-            deterministic,
-            swap_ab,
-            ref_block_size,
-            block_sparse,
-            swap_bwd_qk_loop,
-            test_case,
-            err_msg_list,
-            sparse_format=sparse_format,
-            uniform=uniform,
-            block_row_sz=block_row_sz,
-            block_col_sz=block_col_sz,
-            max_seqlen_q=max_seqlen_q,
-        )
-        ffa_dq, ffa_dk, ffa_dv = q.grad, k.grad, v.grad
-
-        #  -------  test with torch ref ------- #
-        o_atol = EPSILON
-        o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
-        o_norm_rtol_ratio = err_ratio_dict.get("o_norm_rtol_ratio", NORM_RTOL_RATIO)
-        o_min_norm_rtol = err_ratio_dict.get("o_min_norm_rtol", 0.0)
-        o_mismatch_thres_ratio = err_ratio_dict.get(
-            "o_mismatch_thres_ratio", MISMATCH_THRES_RATIO
-        )
-        o_min_mismatch_thres = err_ratio_dict.get("o_min_mismatch_thres", 0.0)
-        o_max_mismatch_thres = err_ratio_dict.get(
-            "o_max_mismatch_thres", MAX_MISMATCH_THRES
-        )
-
-        lse_atol = EPSILON
-        lse_rtol = 0.001
-        lse_norm_rtol_ratio = err_ratio_dict.get("lse_norm_rtol_ratio", NORM_RTOL_RATIO)
-        lse_min_norm_rtol = err_ratio_dict.get("lse_min_norm_rtol", 0.0)
-        lse_mismatch_thres_ratio = err_ratio_dict.get(
-            "lse_mismatch_thres_ratio", MISMATCH_THRES_RATIO
-        )
-        lse_min_mismatch_thres = err_ratio_dict.get("lse_min_mismatch_thres", 0.0)
-        lse_max_mismatch_thres = err_ratio_dict.get(
-            "lse_max_mismatch_thres", MAX_MISMATCH_THRES
-        )
-
-        dq_atol = EPSILON
-        dq_rtol = {torch.bfloat16: 0.3, torch.float16: 0.2}.get(dtype, 0.2)
-        dq_norm_rtol_ratio = err_ratio_dict.get("dq_norm_rtol_ratio", NORM_RTOL_RATIO)
-        dq_min_norm_rtol = err_ratio_dict.get("dq_min_norm_rtol", 0.0)
-        dq_mismatch_thres_ratio = err_ratio_dict.get(
-            "dq_mismatch_thres_ratio", MISMATCH_THRES_RATIO
-        )
-        dq_min_mismatch_thres = err_ratio_dict.get("dq_min_mismatch_thres", 0.0)
-        dq_max_mismatch_thres = err_ratio_dict.get(
-            "dq_max_mismatch_thres", MAX_MISMATCH_THRES
-        )
-
-        dk_atol = EPSILON
-        dk_rtol = {torch.bfloat16: 0.15, torch.float16: 0.08}.get(dtype, 0.08)
-        dk_norm_rtol_ratio = err_ratio_dict.get("dk_norm_rtol_ratio", NORM_RTOL_RATIO)
-        dk_min_norm_rtol = err_ratio_dict.get("dk_min_norm_rtol", 0.0)
-        dk_mismatch_thres_ratio = err_ratio_dict.get(
-            "dk_mismatch_thres_ratio", MISMATCH_THRES_RATIO
-        )
-        dk_min_mismatch_thres = err_ratio_dict.get("dk_min_mismatch_thres", 0.0)
-        dk_max_mismatch_thres = err_ratio_dict.get(
-            "dk_max_mismatch_thres", MAX_MISMATCH_THRES
-        )
-
-        dv_atol = EPSILON
-        dv_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
-        dv_norm_rtol_ratio = err_ratio_dict.get("dv_norm_rtol_ratio", NORM_RTOL_RATIO)
-        dv_min_norm_rtol = err_ratio_dict.get("dv_min_norm_rtol", 0.0)
-        dv_mismatch_thres_ratio = err_ratio_dict.get(
-            "dv_mismatch_thres_ratio", MISMATCH_THRES_RATIO
-        )
-        dv_min_mismatch_thres = err_ratio_dict.get("dv_min_mismatch_thres", 0.0)
-        dv_max_mismatch_thres = err_ratio_dict.get(
-            "dv_max_mismatch_thres", MAX_MISMATCH_THRES
-        )
-
-        # -----   assert close for fwd out   ---- #
-        # norm_rtol_ratio = 2.0
-        out_norm = calc_inf_norm(ffa_out, high_precision_torch_out_ref)
-        out_ref_norm = calc_inf_norm(
-            low_precision_torch_out_ref, high_precision_torch_out_ref
-        )
-
-        try:
-            self.assertLessEqual(
-                out_norm,
-                max(o_min_norm_rtol, o_norm_rtol_ratio * out_ref_norm),
-                msg=(
-                    f"For {test_case=}: {out_norm=} should be no greater than "
-                    f"max({o_min_norm_rtol}, {o_norm_rtol_ratio} x {out_ref_norm=})",
-                ),
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        # torch style with atol + rtol + mismatch threshold
-        o_thres = extract_mismatch_threshold(
-            actual=low_precision_torch_out_ref,
-            expected=high_precision_torch_out_ref,
-            atol=o_atol,
-            rtol=o_rtol,
-            mismatch_thres_ratio=o_mismatch_thres_ratio,
-            min_mismatch_thres=o_min_mismatch_thres,
-            max_mismatch_thres=o_max_mismatch_thres,
-        )
-        try:
-            assert_close(
-                ffa_out,
-                high_precision_torch_out_ref,
-                atol=o_atol,
-                rtol=o_rtol,
-                mismatch_threshold=o_thres,
-                test_case=f"{test_case} => o",
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        # -----   assert close for fwd lse   ---- #
-
-        lse_norm = calc_inf_norm(ffa_lse, high_precision_lse_ref)
-        lse_ref_norm = calc_inf_norm(low_precision_lse_ref, high_precision_lse_ref)
-        try:
-            self.assertLessEqual(
-                lse_norm,
-                max(lse_min_norm_rtol, lse_norm_rtol_ratio * lse_ref_norm),
-                msg=(
-                    f"For {test_case=}: {lse_norm=} should be no greater than "
-                    f"max({lse_min_norm_rtol}, {lse_norm_rtol_ratio} x {lse_ref_norm=})"
-                ),
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        # torch style with atol + rtol + mismatch threshold
-        lse_thres = extract_mismatch_threshold(
-            actual=low_precision_lse_ref,
-            expected=high_precision_lse_ref,
-            atol=lse_atol,
-            rtol=lse_rtol,
-            mismatch_thres_ratio=lse_mismatch_thres_ratio,
-            min_mismatch_thres=lse_min_mismatch_thres,
-            max_mismatch_thres=lse_max_mismatch_thres,
-        )
-        try:
-            assert_close(
-                ffa_lse,
-                high_precision_lse_ref,
-                atol=lse_atol,
-                rtol=lse_rtol,
-                mismatch_threshold=lse_thres,
-                test_case=f"{test_case} => lse",
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        dq_norm = calc_inf_norm(ffa_dq, high_precision_dq_ref)
-        dq_ref_norm = calc_inf_norm(low_precision_dq_ref, high_precision_dq_ref)
-
-        try:
-            self.assertLessEqual(
-                dq_norm,
-                max(dq_min_norm_rtol, dq_norm_rtol_ratio * dq_ref_norm),
-                msg=(
-                    f"For {test_case=}: {dq_norm=} should be no greater than "
-                    f"max({dq_min_norm_rtol}, {dq_norm_rtol_ratio} x {dq_ref_norm=})"
-                ),
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        # torch style with atol + rtol + mismatch threshold
-        dq_thres = extract_mismatch_threshold(
-            actual=low_precision_dq_ref,
-            expected=high_precision_dq_ref,
-            atol=dq_atol,
-            rtol=dq_rtol,
-            mismatch_thres_ratio=dq_mismatch_thres_ratio,
-            min_mismatch_thres=dq_min_mismatch_thres,
-            max_mismatch_thres=dq_max_mismatch_thres,
-        )
-        try:
-            assert_close(
-                ffa_dq,
-                high_precision_dq_ref,
-                atol=dq_atol,
-                rtol=dq_rtol,
-                mismatch_threshold=dq_thres,
-                test_case=f"{test_case} => dq",
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        dk_norm = calc_inf_norm(ffa_dk, high_precision_dk_ref)
-        dk_ref_norm = calc_inf_norm(low_precision_dk_ref, high_precision_dk_ref)
-
-        try:
-            self.assertLessEqual(
-                dk_norm,
-                max(dk_min_norm_rtol, dk_norm_rtol_ratio * dk_ref_norm),
-                msg=(
-                    f"For {test_case=}: {dk_norm=} should be no greater than "
-                    f"max({dk_min_norm_rtol}, {dk_norm_rtol_ratio} x {dk_ref_norm=})"
-                ),
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        # torch style with atol + rtol + mismatch threshold
-        dk_thres = extract_mismatch_threshold(
-            actual=low_precision_dk_ref,
-            expected=high_precision_dk_ref,
-            atol=dk_atol,
-            rtol=dk_rtol,
-            mismatch_thres_ratio=dk_mismatch_thres_ratio,
-            min_mismatch_thres=dk_min_mismatch_thres,
-            max_mismatch_thres=dk_max_mismatch_thres,
-        )
-        try:
-            assert_close(
-                ffa_dk,
-                high_precision_dk_ref,
-                atol=dk_atol,
-                rtol=dk_rtol,
-                mismatch_threshold=dk_thres,
-                test_case=f"{test_case} => dk",
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        dv_norm = calc_inf_norm(ffa_dv, high_precision_dv_ref)
-        dv_ref_norm = calc_inf_norm(low_precision_dv_ref, high_precision_dv_ref)
-
-        try:
-            self.assertLessEqual(
-                dv_norm,
-                max(dv_min_norm_rtol, dv_norm_rtol_ratio * dv_ref_norm),
-                msg=(
-                    f"For {test_case=}: {dv_norm=} should be no greater than "
-                    f"max({dv_min_norm_rtol}, {dv_norm_rtol_ratio} x {dv_ref_norm=})"
-                ),
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        # torch style with atol + rtol + mismatch threshold
-        dv_thres = extract_mismatch_threshold(
-            actual=low_precision_dv_ref,
-            expected=high_precision_dv_ref,
-            atol=dv_atol,
-            rtol=dv_rtol,
-            mismatch_thres_ratio=dv_mismatch_thres_ratio,
-            min_mismatch_thres=dv_min_mismatch_thres,
-            max_mismatch_thres=dv_max_mismatch_thres,
-        )
-        try:
-            assert_close(
-                ffa_dv,
-                low_precision_dv_ref,
-                atol=dv_atol,
-                rtol=dv_rtol,
-                mismatch_threshold=dv_thres,
-                test_case=f"{test_case} => dv",
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
-
-        if err_msg_list:
-            raise AssertionError("\n\n".join(err_msg_list))
-
 
 # ═══════════════════════════════════════════════════════════
 # TestBlockSparseSweep — Classic CI sweep
@@ -867,9 +315,6 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         seqlen = 2048
         dtype = torch.bfloat16
 
-        helper = _BlockSparseTestHelper.__new__(_BlockSparseTestHelper)
-
-        block_size = (q_size, k_size)
         num_q_blocks = seqlen // q_size
         num_kv_blocks = seqlen // k_size
         block_mask, _ = generate_block_sparse_pattern(
@@ -883,51 +328,111 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
             device="cuda",
         )
 
-        q = torch.randn(
-            1, seqlen, nhq, hd, dtype=dtype, device=self.device, requires_grad=True
-        )
-        k = torch.randn(
-            1, seqlen, nhk, hd, dtype=dtype, device=self.device, requires_grad=True
-        )
-        v = torch.randn(
-            1, seqlen, nhk, hd, dtype=dtype, device=self.device, requires_grad=True
-        )
+        q = torch.randn(1, seqlen, nhq, hd, dtype=dtype, device=self.device)
+        k = torch.randn(1, seqlen, nhk, hd, dtype=dtype, device=self.device)
+        v = torch.randn(1, seqlen, nhk, hd, dtype=dtype, device=self.device)
         do = torch.randn_like(q)
 
         test_case = (
-            f"[comprehensive][nhq={nhq},nhk={nhk},hd={hd},q={q_size},k={k_size}]"
-            f"[sp={sparsity_ratio}][dir={inner_dir},load={inner_load_mode},store={inner_store_mode}]"
+            f"[comprehensive][nhq={nhq},nhk={nhk},hd={hd},"
+            f"q={q_size},k={k_size}]"
+            f"[sp={sparsity_ratio}]"
+            f"[dir={inner_dir},load={inner_load_mode},"
+            f"store={inner_store_mode}]"
         )
+
+        q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
+            block_mask, q_size, k_size
+        )
+        attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
+
+        q_ffa = pack_q_for_ffa(q, nhk, SparsePackLayout.HEAD_MAJOR)
+        q_ffa.retain_grad()
+        k_ffa, v_ffa = pack_kv_for_ffa(k, v, SparsePackLayout.HEAD_MAJOR)
+        k_ffa.retain_grad()
+        v_ffa.retain_grad()
+
         inner_env = {
             "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
             "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load_mode,
             "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
         }
+        do_packed = rearrange(
+            do,
+            "b s (h1 h2) d -> (b h1 s) h2 d",
+            h1=nhk,
+        )
         with inner_loop_env(inner_env):
-            helper.assert_close_to_torch_ref(
-                dtype=dtype,
-                q=q,
-                k=k,
-                v=v,
-                grad_output=do,
-                seqlen=seqlen,
-                block_size=block_size,
-                block_mask=block_mask,
-                head_wise="per_kv_head",
-                sparse_format="block_mask",
-                nhq=nhq,
-                nhk=nhk,
+            o_ffa, _ = flex_flash_attn_func(
+                q_ffa,
+                k_ffa,
+                v_ffa,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                max_seqlen_q=q_size,
+                attn_type_map=attn_type_map,
+                range_merge=True,
                 pack_gqa=True,
-                deterministic=False,
-                swap_ab=False,
-                ref_block_size=(64, 128),
                 block_sparse=True,
                 swap_bwd_qk_loop=True,
-                test_case=test_case,
-                sparsity_ratio=sparsity_ratio,
-                uniform=True,
-                max_seqlen_q=q_size,
+                ref_block_size=(64, 128),
             )
+            o_ffa.backward(do_packed)
+        torch.cuda.synchronize()
+
+        o_unpacked = unpack_ffa_output(
+            o_ffa,
+            B=1,
+            S=seqlen,
+            NHK=nhk,
+            layout=SparsePackLayout.HEAD_MAJOR,
+        )
+
+        sdpa_mask = get_sdpa_mask_from_block_sparse_mask(
+            block_mask,
+            seqlen,
+            seqlen,
+            q_size,
+            k_size,
+            nhk,
+        )
+        compare_sdpa_fwd(
+            o_unpacked,
+            q,
+            k,
+            v,
+            sdpa_mask,
+            B=1,
+            NHQ=nhq,
+            NHK=nhk,
+            test_case=test_case,
+        )
+
+        sdpa_dq, sdpa_dk, sdpa_dv = sdpa_ref_bwd_grads(
+            do,
+            q,
+            k,
+            v,
+            sdpa_mask,
+            NHQ=nhq,
+            NHK=nhk,
+        )
+        dq_ref_packed = rearrange(
+            sdpa_dq,
+            "b (h1 h2) s d -> (b h1 s) h2 d",
+            h1=nhk,
+        )
+        dk_ref_packed = rearrange(sdpa_dk, "b h s d -> (b h s) 1 d")
+        dv_ref_packed = rearrange(sdpa_dv, "b h s d -> (b h s) 1 d")
+        compare_sdpa_bwd_all(
+            q_ffa.grad,
+            k_ffa.grad,
+            v_ffa.grad,
+            dq_ref_packed,
+            dk_ref_packed,
+            dv_ref_packed,
+            test_case=test_case,
+        )
 
 
 if __name__ == "__main__":
