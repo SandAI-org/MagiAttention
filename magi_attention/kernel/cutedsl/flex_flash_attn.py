@@ -65,7 +65,9 @@ from .ffa_utils import (
 from .sparse_utils import (
     block_sparse_call_tuple,
     get_sparse_q_block_size,
+    index_attn_indices_to_block_sparse,
     prepare_block_sparse_bwd,
+    prepare_block_sparse_bwd_loopk,
     prepare_block_sparse_fwd,
     to_cute_block_sparse_tensors,
 )
@@ -580,6 +582,7 @@ def _flex_flash_attn_bwd(
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
     swap_bwd_qk_loop: bool = False,
+    index_attn_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
@@ -606,7 +609,23 @@ def _flex_flash_attn_bwd(
     score_mod_bwd = flex_attn_args.score_mod_bwd
     mask_mod = flex_attn_args.mask_mod
     aux_tensors = flex_attn_args.aux_tensors
-    block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
+    # LoopK uses forward-direction block_sparse_tensors (per-Q-tile K-block list);
+    # LoopQ uses backward-direction tensors (per-K-tile Q-block list).
+    if swap_bwd_qk_loop and flex_attn_args.block_sparse_tensors is not None:
+        block_sparse_tensors = flex_attn_args.block_sparse_tensors
+    else:
+        block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
+
+    # IndexAttn: convert token-level indices to block-level BlockSparseTensors.
+    # Only supported for LoopK (swap_bwd_qk_loop=True), non-varlen.
+    _index_attn_block_sparse = None
+    if index_attn_indices is not None:
+        assert (
+            swap_bwd_qk_loop
+        ), "IndexAttn BWD on CuTe-DSL requires swap_bwd_qk_loop=True (LoopK)"
+        assert (
+            q_ranges is None and k_ranges is None
+        ), "IndexAttn does not use q/k ranges"
 
     local = False
     # NOTE: only a single mask type shared by all q/k ranges is supported for now,
@@ -732,6 +751,7 @@ def _flex_flash_attn_bwd(
                 or score_mod_bwd is not None
                 or mask_mod is not None
                 or block_sparse_tensors is not None
+                or swap_bwd_qk_loop
             )
             cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
             use_2cta_instrs = cluster_size == 2
@@ -766,6 +786,18 @@ def _flex_flash_attn_bwd(
         seqlen_k = max_seqlen_k if max_seqlen_k is not None else total_k
 
     num_head_kv = k.shape[-2]
+
+    # IndexAttn: convert token-level indices to block-level sparse after block sizes are known
+    if index_attn_indices is not None and block_sparse_tensors is None:
+        block_sparse_tensors = index_attn_indices_to_block_sparse(
+            index_attn_indices,
+            batch_size=batch_size,
+            seqlen_q=seqlen_q,
+            seqlen_k=seqlen_k,
+            num_kv_heads=num_head_kv,
+            m_block_size=m_block_size,
+            n_block_size=n_block_size,
+        )
 
     use_block_sparsity = block_sparse_tensors is not None
     subtile_factor = sparse_q // m_block_size if sparse_q is not None else 2
@@ -1010,23 +1042,41 @@ def _flex_flash_attn_bwd(
             to_cute_tensor(buf, assumed_align=None, fully_dynamic=True)
             for buf in aux_tensors
         ]
-    (
-        normalized_block_sparse_tensors,
-        block_sparse_broadcast_pattern,
-        spt,
-    ) = prepare_block_sparse_bwd(
-        block_sparse_tensors,
-        deterministic=deterministic,
-        causal=causal,
-        local=local,
-        batch_size=batch_size,
-        num_head=num_head,
-        seqlen_q=seqlen_q,
-        seqlen_k=seqlen_k,
-        m_block_size=m_block_size,
-        n_block_size=n_block_size,
-        subtile_factor=subtile_factor,
-    )
+    if swap_bwd_qk_loop:
+        (
+            normalized_block_sparse_tensors,
+            block_sparse_broadcast_pattern,
+            spt,
+        ) = prepare_block_sparse_bwd_loopk(
+            block_sparse_tensors,
+            causal=causal,
+            local=local,
+            deterministic=deterministic,
+            batch_size=batch_size,
+            num_head=num_head,
+            seqlen_q=seqlen_q,
+            seqlen_k=seqlen_k,
+            m_block_size=m_block_size,
+            n_block_size=n_block_size,
+        )
+    else:
+        (
+            normalized_block_sparse_tensors,
+            block_sparse_broadcast_pattern,
+            spt,
+        ) = prepare_block_sparse_bwd(
+            block_sparse_tensors,
+            deterministic=deterministic,
+            causal=causal,
+            local=local,
+            batch_size=batch_size,
+            num_head=num_head,
+            seqlen_q=seqlen_q,
+            seqlen_k=seqlen_k,
+            m_block_size=m_block_size,
+            n_block_size=n_block_size,
+            subtile_factor=subtile_factor,
+        )
 
     # Backward kernel: compute dk, dv, dq_accum.
     if major_arch in [8, 9, 12]:

@@ -708,6 +708,132 @@ def prepare_block_sparse_bwd(
     return normalized_tensors, broadcast_pattern, spt
 
 
+def prepare_block_sparse_bwd_loopk(
+    block_sparse_tensors: BlockSparseTensorsTorch | None,
+    *,
+    causal: bool,
+    local: bool,
+    deterministic: bool,
+    batch_size: int,
+    num_head: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    m_block_size: int,
+    n_block_size: int,
+) -> tuple[BlockSparseTensorsTorch | None, object, bool]:
+    """Host-side block-sparse preparation for LoopK backward.
+
+    LoopK iterates over K-blocks per Q-tile, so it uses **forward-direction**
+    block-sparse tensors (indexed by M-blocks → N-block list), unlike LoopQ
+    which uses the transposed Q-direction tensors.
+
+    Returns ``(normalized_tensors, broadcast_pattern, spt)``.
+    """
+    normalized_tensors = None
+    broadcast_pattern = None
+    if block_sparse_tensors is not None:
+        expected_m_blocks = ceildiv(seqlen_q, m_block_size)
+        expected_n_blocks = ceildiv(seqlen_k, n_block_size)
+        expected_count_shape = (batch_size, num_head, expected_m_blocks)
+        expected_index_shape = (
+            batch_size,
+            num_head,
+            expected_m_blocks,
+            expected_n_blocks,
+        )
+        normalized_tensors = normalize_block_sparse_tensors(
+            block_sparse_tensors,
+            expected_count_shape=expected_count_shape,
+            expected_index_shape=expected_index_shape,
+            context="_flash_attn_bwd_loopk",
+            hint=lambda: (
+                f"LoopK backward expects forward-direction block-sparse tensors "
+                f"(mask_block_cnt/mask_block_idx indexed by M-blocks). "
+                f"Expected count shape {expected_count_shape}, index shape {expected_index_shape}."
+            ),
+        )
+        broadcast_pattern = get_block_sparse_broadcast_pattern(normalized_tensors)
+
+    spt = (causal or local) and deterministic
+    return normalized_tensors, broadcast_pattern, spt
+
+
+def index_attn_indices_to_block_sparse(
+    index_attn_indices: torch.Tensor,
+    batch_size: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    num_kv_heads: int,
+    m_block_size: int,
+    n_block_size: int,
+) -> BlockSparseTensorsTorch:
+    """Convert token-level IndexAttn indices to block-level BlockSparseTensors.
+
+    Produces **forward-direction** tensors (per M-block -> N-block list) suitable
+    for BWD LoopK.
+
+    Args:
+        index_attn_indices: (total_q, NHK, max_topk) int32 tensor.
+            Values are logical KV token positions ``batch * S_kv + token_idx``.
+            ``-1`` indicates padding.
+    """
+    device = index_attn_indices.device
+    total_q, NHK, max_topk = index_attn_indices.shape
+    assert NHK == num_kv_heads
+    assert total_q == batch_size * seqlen_q
+
+    M_blocks = ceildiv(seqlen_q, m_block_size)
+    N_blocks = ceildiv(seqlen_k, n_block_size)
+
+    valid = index_attn_indices >= 0
+    k_local = index_attn_indices % seqlen_k
+    k_block = (k_local // n_block_size).clamp(0, N_blocks - 1)
+
+    q_idx = torch.arange(total_q, device=device)
+    local_q = q_idx % seqlen_q
+    m_block_per_q = local_q // m_block_size
+    batch_per_q = q_idx // seqlen_q
+
+    b_expand = batch_per_q[:, None, None].expand_as(k_block)
+    m_expand = m_block_per_q[:, None, None].expand_as(k_block)
+    h_expand = torch.arange(NHK, device=device)[None, :, None].expand_as(k_block)
+
+    b_flat = b_expand[valid].long()
+    h_flat = h_expand[valid].long()
+    m_flat = m_expand[valid].long()
+    k_flat = k_block[valid].long()
+
+    presence = torch.zeros(
+        batch_size, NHK, M_blocks, N_blocks, dtype=torch.bool, device=device
+    )
+    linear_idx = (
+        b_flat * (NHK * M_blocks * N_blocks)
+        + h_flat * (M_blocks * N_blocks)
+        + m_flat * N_blocks
+        + k_flat
+    )
+    presence.view(-1).scatter_(0, linear_idx, True)
+
+    mask_block_cnt = presence.sum(dim=-1).int()
+    max_cnt = int(mask_block_cnt.max().item())
+    if max_cnt == 0:
+        max_cnt = 1
+
+    sorted_indices = presence.int().argsort(dim=-1, descending=True)
+    mask_block_idx = sorted_indices[..., :max_cnt].contiguous().to(torch.int32)
+
+    counts_expanded = mask_block_cnt.unsqueeze(-1)
+    positions = torch.arange(max_cnt, device=device)
+    mask_block_idx = mask_block_idx.where(
+        positions < counts_expanded, torch.zeros_like(mask_block_idx)
+    )
+
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=mask_block_cnt,
+        mask_block_idx=mask_block_idx,
+    )
+
+
 def block_sparse_call_tuple(
     normalized_tensors: BlockSparseTensorsTorch | None,
 ) -> tuple | None:

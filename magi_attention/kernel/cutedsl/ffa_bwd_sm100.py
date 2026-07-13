@@ -48,6 +48,7 @@ from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_utils import (
     BlockSparseTensors,
     get_block_sparse_iteration_info_bwd,
+    get_curr_blocksparse_tensors,
     get_m_block_from_iter_bwd,
     get_total_q_block_count_bwd,
     produce_block_sparse_q_loads_bwd_sm100,
@@ -323,8 +324,10 @@ class FFABwdSm100:
 
     def _setup_attributes(self):
         if self.swap_bwd_qk_loop:
-            # LoopK: K/V streaming (multi-stage), Q/dO fixed (single-stage)
-            self.K_stage = 2
+            # LoopK: K/V streaming, Q/dO fixed (single-stage).
+            # K_stage=1 for D>=128 to stay within SM100 228KB smem limit;
+            # with D>=128 + K_stage=2, sK+sV alone would be 128KB, exceeding budget.
+            self.K_stage = 1 if self.tile_hdim >= 128 else 2
             self.Q_stage = 1
             self.dO_stage = 1
             self.single_stage = 1
@@ -1024,7 +1027,7 @@ class FFABwdSm100:
             assert self.spt_override is not None
             self.spt = self.spt_override and self.deterministic
 
-        if self.swap_bwd_qk_loop:
+        if const_expr(self.swap_bwd_qk_loop):
             # LoopK: outer loop over Q blocks (m_blocks)
             tile_sched_args = TileSchedulerArguments(
                 num_block=cute.ceil_div(cute.size(mQ.shape[0]), self.tile_m),
@@ -1223,6 +1226,7 @@ class FFABwdSm100:
 
                 Q_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
                 dO_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.dO_stage]
+                K_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.K_stage]
                 LSE_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
                 dPsum_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.dO_stage]
                 S_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.single_stage]
@@ -1612,6 +1616,8 @@ class FFABwdSm100:
         dPsum_mbar_ptr = storage.dPsum_mbar_ptr.data_ptr()
         Q_mbar_ptr = storage.Q_mbar_ptr.data_ptr()
         dO_mbar_ptr = storage.dO_mbar_ptr.data_ptr()
+        if const_expr(not self.use_2cta_instrs):
+            K_mbar_ptr = storage.K_mbar_ptr.data_ptr()
         if const_expr(self.use_2cta_instrs):
             Qt_mbar_ptr = storage.Qt_mbar_ptr.data_ptr()
             Kt_mbar_ptr = storage.Kt_mbar_ptr.data_ptr()
@@ -1700,11 +1706,15 @@ class FFABwdSm100:
             defer_sync=True,
         )
 
-        # dKV pipeline (MMA -> compute)
+        # dKV pipeline: LoopQ → MMA -> compute; LoopK → MMA -> reduce
         pipeline_dKV = pipeline.PipelineUmmaAsync.create(
             num_stages=2,
             producer_group=mma_warp,
-            consumer_group=compute_warps_cluster,
+            consumer_group=(
+                reduce_warps_cluster
+                if const_expr(self.swap_bwd_qk_loop)
+                else compute_warps_cluster
+            ),
             barrier_storage=dKV_mbar_ptr,
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
@@ -1786,6 +1796,20 @@ class FFABwdSm100:
             )
         else:
             pipeline_Qt = pipeline_Kt = pipeline_Q
+
+        # Load K pipeline for LoopK (separate from Q to avoid mbarrier conflict)
+        if const_expr(self.swap_bwd_qk_loop):
+            pipeline_K_load = ffa_pipeline.PipelineTmaUmma.create(
+                barrier_storage=K_mbar_ptr,
+                num_stages=self.K_stage,
+                producer_group=load_warp,
+                consumer_group=mma_warp_mcast,
+                tx_count=self.tma_copy_bytes["K"],
+                cta_layout_vmnk=cta_layout_vmnk,
+                defer_sync=True,
+            )
+        else:
+            pipeline_K_load = pipeline_Q
 
         # Load dO pipeline (load -> MMA)
         pipeline_dO = ffa_pipeline.PipelineTmaUmma.create(
@@ -2103,8 +2127,8 @@ class FFABwdSm100:
                     tma_atom_K,
                     tma_atom_V,
                     tma_atom_dO,
+                    pipeline_K_load,
                     pipeline_Q,
-                    pipeline_Q,  # reuse as pipeline_K for now
                     pipeline_dO,
                     pipeline_LSE,
                     pipeline_dPsum,
@@ -2112,6 +2136,7 @@ class FFABwdSm100:
                     block_info,
                     SeqlenInfoCls,
                     tile_scheduler,
+                    blocksparse_tensors=blocksparse_tensors,
                 )
             else:
                 self.load(
@@ -2202,7 +2227,7 @@ class FFABwdSm100:
                     tdVtdV,
                     tdKtdK,
                     tdQtdQ,
-                    pipeline_Q,  # reuse as pipeline_K
+                    pipeline_K_load,
                     pipeline_Q,
                     pipeline_dO,
                     pipeline_S_P,
@@ -2214,6 +2239,7 @@ class FFABwdSm100:
                     SeqlenInfoCls,
                     tile_scheduler,
                     is_leader_cta,
+                    blocksparse_tensors=blocksparse_tensors,
                 )
             else:
                 self.mma(
@@ -2362,6 +2388,7 @@ class FFABwdSm100:
                     block_info,
                     SeqlenInfoCls,
                     tile_scheduler,
+                    blocksparse_tensors=blocksparse_tensors,
                     is_print_block=is_print_block,
                 )
             else:
@@ -3290,9 +3317,9 @@ class FFABwdSm100:
         block_info: BlockInfo,
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
+        blocksparse_tensors: Optional[BlockSparseTensors] = None,
     ):
         """LoopK producer: Q/dO/LSE/dPsum loaded once, K/V stream per inner iter."""
-        tidx = cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE
         copy_atom_stats = cute.make_copy_atom(cpasync.CopyBulkG2SOp(), Float32)
         copy_stats_fn = partial(cute.copy, copy_atom_stats)
         a_cta_layout = cute.make_layout(
@@ -3306,9 +3333,6 @@ class FFABwdSm100:
             pipeline.PipelineUserType.Producer, self.K_stage
         )
         producer_state_Q = pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Producer, 1
-        )
-        producer_state_dO = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Producer, 1
         )
         producer_state_LSE = pipeline.make_pipeline_state(
@@ -3360,9 +3384,9 @@ class FFABwdSm100:
                 (0, m_block),
             )
 
-            mLSE_cur = seqlen_info.offset_batch_Q(
-                mLSE, batch_idx, dim=2, padded=True
-            )[None, head_idx]
+            mLSE_cur = seqlen_info.offset_batch_Q(mLSE, batch_idx, dim=2, padded=True)[
+                None, head_idx
+            ]
             mdPsum_cur = seqlen_info.offset_batch_Q(
                 mdPsum, batch_idx, dim=2, padded=True
             )[None, head_idx]
@@ -3410,32 +3434,54 @@ class FFABwdSm100:
                 single_stage=True,
             )
 
-            process_tile = n_block_min < n_block_max
+            if const_expr(self.use_block_sparsity):
+                assert blocksparse_tensors is not None
+                (
+                    curr_mask_cnt,
+                    curr_mask_idx,
+                    curr_full_cnt,
+                    curr_full_idx,
+                ) = get_curr_blocksparse_tensors(
+                    batch_idx,
+                    head_idx,
+                    m_block,
+                    blocksparse_tensors,
+                    seqlen_info,
+                )
+                loop_count = curr_mask_cnt + curr_full_cnt
+                process_tile = loop_count > 0
+            else:
+                loop_count = n_block_max - n_block_min
+                process_tile = n_block_min < n_block_max
 
             if process_tile:
-                first_n_block = n_block_min
+                if const_expr(self.use_block_sparsity):
+                    first_n_block, _ = get_m_block_from_iter_bwd(
+                        Int32(0),
+                        curr_mask_cnt,
+                        curr_mask_idx,
+                        curr_full_cnt,
+                        curr_full_idx,
+                    )
+                else:
+                    first_n_block = n_block_min
 
                 # Prologue: load Q, dO, LSE, dPsum once + K(0), V(0)
                 pipeline_Q.producer_acquire(
                     producer_state_Q,
                     extra_tx_count=self.tma_copy_bytes["dO"],
                 )
-                load_Q(
-                    tma_bar_ptr=pipeline_Q.producer_get_barrier(producer_state_Q)
-                )
-                load_dO(
-                    tma_bar_ptr=pipeline_Q.producer_get_barrier(producer_state_Q)
-                )
+                load_Q(tma_bar_ptr=pipeline_Q.producer_get_barrier(producer_state_Q))
+                load_dO(tma_bar_ptr=pipeline_Q.producer_get_barrier(producer_state_Q))
                 pipeline_Q.producer_commit(producer_state_Q)
+                producer_state_Q.advance()
 
                 pipeline_LSE.producer_acquire(producer_state_LSE)
                 with cute.arch.elect_one():
                     copy_stats_fn(
                         gLSE[None, m_block],
                         sLSE[None, producer_state_LSE.index],
-                        mbar_ptr=pipeline_LSE.producer_get_barrier(
-                            producer_state_LSE
-                        ),
+                        mbar_ptr=pipeline_LSE.producer_get_barrier(producer_state_LSE),
                     )
                 producer_state_LSE.advance()
 
@@ -3461,9 +3507,17 @@ class FFABwdSm100:
                 producer_state_K.advance()
 
                 # Mainloop: load K(j), V(j)
-                for n_block in cutlass.range(
-                    n_block_min + 1, n_block_max, unroll=1
-                ):
+                for iter_idx in cutlass.range(1, loop_count, unroll=1):
+                    if const_expr(self.use_block_sparsity):
+                        n_block, _ = get_m_block_from_iter_bwd(
+                            iter_idx,
+                            curr_mask_cnt,
+                            curr_mask_idx,
+                            curr_full_cnt,
+                            curr_full_idx,
+                        )
+                    else:
+                        n_block = n_block_min + iter_idx
                     pipeline_K.producer_acquire(
                         producer_state_K,
                         extra_tx_count=self.tma_copy_bytes["V"],
@@ -4441,6 +4495,7 @@ class FFABwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
         is_leader_cta: cutlass.Boolean,
+        blocksparse_tensors: Optional[BlockSparseTensors] = None,
     ):
         """LoopK MMA consumer: inner loop over K blocks.
 
@@ -4523,9 +4578,6 @@ class FFABwdSm100:
         consumer_state_Q = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, 1
         )
-        consumer_state_dO = pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Consumer, 1
-        )
         producer_phase_acc = Int32(1)
         consumer_state_dS = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, 1
@@ -4540,30 +4592,48 @@ class FFABwdSm100:
             n_block_min, n_block_max = block_info.get_n_block_min_max(
                 seqlen_info, m_block
             )
-            block_iter_count = n_block_max - n_block_min
-            process_tile = n_block_min < n_block_max
+
+            if const_expr(self.use_block_sparsity):
+                assert blocksparse_tensors is not None
+                (
+                    _mask_cnt,
+                    _mask_idx,
+                    _full_cnt,
+                    _full_idx,
+                ) = get_curr_blocksparse_tensors(
+                    batch_idx,
+                    head_idx,
+                    m_block,
+                    blocksparse_tensors,
+                    seqlen_info,
+                )
+                block_iter_count = _mask_cnt + _full_cnt
+                process_tile = block_iter_count > 0
+            else:
+                block_iter_count = n_block_max - n_block_min
+                process_tile = n_block_min < n_block_max
 
             if is_leader_cta and process_tile:
                 accumulate_dQ = False
 
-                # Wait for Q/dO to be loaded once
+                # Wait for Q+dO to be loaded once (both arrive on pipeline_Q's barrier)
                 pipeline_Q.consumer_wait(consumer_state_Q)
-                pipeline_dO.consumer_wait(consumer_state_dO)
 
                 # Prologue: S(0), dP(0), dV(0)
 
                 # S(0).T = K(0) @ Q.T
                 handle_K = pipeline_K_consumer.wait_and_advance()
                 pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
-                mma_s_qk_fn(A_idx=handle_K.index)
+                mma_s_qk_fn(A_idx=handle_K.index, B_idx=Int32(0))
                 pipeline_S_P.sync_object_full.arrive(
                     0, pipeline_S_P.producer_mask, cta_group
                 )
 
                 # dP(0).T = V(0) @ dO.T
                 pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
-                pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
-                mma_dp_vdo_fn(A_idx=handle_K.index)
+                # NOTE: skip pipeline_dQ.sync_object_empty.wait — LoopK has
+                # separate TMEM regions for dP and dQ (no overlap).
+                mma_dp_vdo_fn(A_idx=handle_K.index, B_idx=Int32(0))
                 pipeline_dP.sync_object_full.arrive(
                     0, pipeline_dP.producer_mask, cta_group
                 )
@@ -4571,21 +4641,20 @@ class FFABwdSm100:
 
                 # dV(0) = P(0).T @ dO
                 pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
-                mma_dv_pdo_fn(zero_init=True)
+                mma_dv_pdo_fn(zero_init=True, B_idx=Int32(0))
 
-                # Mainloop: S(j), dK(j-1), dQ += dS(j-1)@K(j-1), dP(j), dV(j)
+                # Mainloop: dK(j-1), dQ += dS(j-1)@K(j-1), release K(j-1),
+                #           acquire K(j), S(j), dP(j), dV(j)
+                # NOTE: With K_stage=1, we MUST release K(j-1) before acquiring K(j).
+                # The original ordering (acquire K(j) first) deadlocks because the
+                # producer can't reuse the single-stage buffer until the consumer releases it.
                 handle_K_next = handle_K
                 for j in cutlass.range(1, block_iter_count, unroll=1):
-                    # S(j).T = K(j) @ Q.T
-                    handle_K_next = pipeline_K_consumer.wait_and_advance()
-                    mma_s_qk_fn(A_idx=handle_K_next.index)
-                    pipeline_S_P.sync_object_full.arrive(
-                        0, pipeline_S_P.producer_mask, cta_group
-                    )
+                    # --- Phase A: finish with K(j-1) ---
 
                     # dK(j-1) = dS(j-1).T @ Q
                     pipeline_dS.consumer_wait(consumer_state_dS)
-                    mma_dk_dsq_fn(zero_init=True)
+                    mma_dk_dsq_fn(zero_init=True, B_idx=Int32(0))
 
                     # dQ += dS(j-1) @ K(j-1)
                     mma_dq_dsk_fn(
@@ -4594,27 +4663,35 @@ class FFABwdSm100:
                     )
                     accumulate_dQ = True
 
-                    # Commit dK(j-1) to reduce warps
+                    # Commit dK(j-1), dV(j-1) to reduce warps
                     pipeline_dKV.sync_object_empty.wait(0, producer_phase_dKV)
                     pipeline_dKV.sync_object_full.arrive(
                         0, pipeline_dKV.producer_mask, cta_group
                     )
-
-                    # dV(j-1) → also commit
                     pipeline_dKV.sync_object_empty.wait(1, producer_phase_dKV)
                     pipeline_dKV.sync_object_full.arrive(
                         1, pipeline_dKV.producer_mask, cta_group
                     )
                     producer_phase_dKV ^= 1
 
+                    # Release K(j-1) buffer so load warp can fill K(j)
                     handle_K.release()
 
                     pipeline_dS.consumer_release(consumer_state_dS)
                     consumer_state_dS.advance()
 
+                    # --- Phase B: acquire K(j) and compute S/dP/dV ---
+
+                    # S(j).T = K(j) @ Q.T
+                    handle_K_next = pipeline_K_consumer.wait_and_advance()
+                    mma_s_qk_fn(A_idx=handle_K_next.index, B_idx=Int32(0))
+                    pipeline_S_P.sync_object_full.arrive(
+                        0, pipeline_S_P.producer_mask, cta_group
+                    )
+
                     # dP(j).T = V(j) @ dO.T
-                    pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
-                    mma_dp_vdo_fn(A_idx=handle_K_next.index)
+                    # NOTE: LoopK: skip pipeline_dQ.sync_object_empty.wait here.
+                    mma_dp_vdo_fn(A_idx=handle_K_next.index, B_idx=Int32(0))
                     pipeline_dP.sync_object_full.arrive(
                         0, pipeline_dP.producer_mask, cta_group
                     )
@@ -4622,7 +4699,7 @@ class FFABwdSm100:
 
                     # dV(j) = P(j).T @ dO
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
-                    mma_dv_pdo_fn(zero_init=True)
+                    mma_dv_pdo_fn(zero_init=True, B_idx=Int32(0))
 
                     handle_K = handle_K_next
 
@@ -4630,7 +4707,7 @@ class FFABwdSm100:
 
                 # dK(-1) = dS(-1).T @ Q
                 pipeline_dS.consumer_wait(consumer_state_dS)
-                mma_dk_dsq_fn(zero_init=True)
+                mma_dk_dsq_fn(zero_init=True, B_idx=Int32(0))
 
                 # dQ += dS(-1) @ K(-1)
                 mma_dq_dsk_fn(
@@ -4660,11 +4737,9 @@ class FFABwdSm100:
                     0, pipeline_dQ.producer_mask, cta_group
                 )
 
-                # Release Q/dO (they persist for the entire outer tile)
+                # Release Q+dO (they persist for the entire outer tile, both on pipeline_Q)
                 pipeline_Q.consumer_release(consumer_state_Q)
                 consumer_state_Q.advance()
-                pipeline_dO.consumer_release(consumer_state_dO)
-                consumer_state_dO.advance()
 
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
@@ -4933,10 +5008,27 @@ class FFABwdSm100:
                     seqlen_info, m_block
                 )
                 n_block = n_block_min
-                loop_count = n_block_max - n_block_min
-                process_tile = n_block_min < n_block_max
                 m_block_min = Int32(0)
                 m_block_max = Int32(0)
+                if const_expr(self.use_block_sparsity):
+                    assert blocksparse_tensors is not None
+                    (
+                        curr_loopk_mask_cnt,
+                        curr_loopk_mask_idx,
+                        curr_loopk_full_cnt,
+                        curr_loopk_full_idx,
+                    ) = get_curr_blocksparse_tensors(
+                        batch_idx,
+                        head_idx,
+                        m_block,
+                        blocksparse_tensors,
+                        seqlen_info,
+                    )
+                    loop_count = curr_loopk_mask_cnt + curr_loopk_full_cnt
+                    process_tile = loop_count > 0
+                else:
+                    loop_count = n_block_max - n_block_min
+                    process_tile = n_block_min < n_block_max
             else:
                 n_block, head_idx, batch_idx, _ = work_tile.tile_idx
                 seqlen_info = SeqlenInfoCls(batch_idx)
@@ -4978,8 +5070,8 @@ class FFABwdSm100:
                     or m_block_min < m_block_max
                 )
 
-            # TODO: review the logics
-            if const_expr(self.use_block_sparsity):
+            # LoopQ block sparsity: get Q block list per KV tile (indexed by n_block)
+            if const_expr(self.use_block_sparsity and not self.swap_bwd_qk_loop):
                 assert blocksparse_tensors is not None
                 (
                     curr_q_cnt,
@@ -5132,18 +5224,29 @@ class FFABwdSm100:
                     pipeline_LSE.consumer_wait(consumer_state_LSE)
                     pipeline_dPsum.consumer_wait(consumer_state_dPsum)
 
-            # NOTE: For block sparsity: iterate over sparse m_block count
-            # and derive actual m_block from Q_IDX/FULL_Q_IDX tensors.
-            # For dense: iterate m_block_min..m_block_max directly.
+            # NOTE: For block sparsity: iterate over sparse block count
+            # and derive actual block index from IDX/FULL_IDX tensors.
+            # LoopQ: derive m_block from Q_IDX per KV tile.
+            # LoopK: derive n_block from K_IDX per Q tile.
+            # For dense: iterate sequentially.
             for iter_idx in cutlass.range(loop_count, unroll=1):
+                is_full_block = False
                 if const_expr(self.swap_bwd_qk_loop):
-                    n_block = n_block_min + iter_idx
+                    if const_expr(self.use_block_sparsity):
+                        n_block, is_full_block = get_m_block_from_iter_bwd(
+                            iter_idx,
+                            curr_loopk_mask_cnt,
+                            curr_loopk_mask_idx,
+                            curr_loopk_full_cnt,
+                            curr_loopk_full_idx,
+                        )
+                    else:
+                        n_block = n_block_min + iter_idx
                 else:
                     m_block = m_block_min + iter_idx
-                is_full_block = False
 
-                # TODO: review the logics
-                if const_expr(self.use_block_sparsity):
+                # LoopQ block sparsity: derive m_block from Q block indices
+                if const_expr(self.use_block_sparsity and not self.swap_bwd_qk_loop):
                     m_block, is_full_block = get_m_block_from_iter_bwd(
                         iter_idx,
                         curr_q_cnt,
@@ -5235,7 +5338,7 @@ class FFABwdSm100:
                         head_idx=head_idx,
                         aux_tensors=aux_tensors,
                         fastdiv_mods=fastdiv_mods,
-                        is_full_block=False,
+                        is_full_block=is_full_block,
                         check_m_boundary=check_m_boundary,
                     )
                 else:
@@ -5487,7 +5590,6 @@ class FFABwdSm100:
                         # Commit tdS to be full for this iter if not using 2-CTA
                         pipeline_dS.producer_commit(producer_state_dS)
                     producer_state_dS.advance()
-
                 # DS2S copy from sdS_xchg to peer's sdS buffer in 2-CTA mode
                 if const_expr(self.use_2cta_instrs):
                     stage_copy_bytes = const_expr(self.tma_copy_bytes["dS"] // 2)
@@ -5591,7 +5693,9 @@ class FFABwdSm100:
                             thr_copy_r2s_dKV,
                             pipeline_dKV,
                             consumer_state_dKV,
-                            softmax_scale if const_expr(not self.dKV_postprocess) else None,
+                            softmax_scale
+                            if const_expr(not self.dKV_postprocess)
+                            else None,
                             int(NamedBarrierBwdSm100.EpilogueWG1),  # barrier_id
                             mdK_semaphore,
                             "K",
@@ -6176,6 +6280,7 @@ class FFABwdSm100:
         block_info: BlockInfo,
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
+        blocksparse_tensors: Optional[BlockSparseTensors] = None,
         is_print_block: bool = False,
     ):
         """LoopK reduce warps: per-K-iter dKV atomic reduce + end-of-tile dQ reduce."""
@@ -6190,22 +6295,18 @@ class FFABwdSm100:
 
         # --- T2R copy atoms ---
         tmem_load_atom_dK = cute.make_copy_atom(
-            tcgen05.copy.Ld32x32bOp(
-                tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)
-            ),
+            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)),
             Float32,
         )
         tmem_load_atom_dQ = cute.make_copy_atom(
-            tcgen05.copy.Ld32x32bOp(
-                tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)
-            ),
+            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)),
             Float32,
         )
 
         # --- T2R tiled copies for dK, dV, dQ ---
-        thr_copy_t2r_dK = tcgen05.make_tmem_copy(
-            tmem_load_atom_dK, tdKtdK
-        ).get_slice(tidx)
+        thr_copy_t2r_dK = tcgen05.make_tmem_copy(tmem_load_atom_dK, tdKtdK).get_slice(
+            tidx
+        )
         tdKtdK_t2r = thr_copy_t2r_dK.partition_S(tdKtdK)
         tdKcdK = thr_mma_dK.partition_C(
             cute.make_identity_tensor(self.mma_tiler_dsq[:2])
@@ -6214,9 +6315,9 @@ class FFABwdSm100:
         dK_reduce_ncol = self.dK_reduce_ncol
         dK_reduce_stage = self.tile_hdim // dK_reduce_ncol
 
-        thr_copy_t2r_dV = tcgen05.make_tmem_copy(
-            tmem_load_atom_dK, tdVtdV
-        ).get_slice(tidx)
+        thr_copy_t2r_dV = tcgen05.make_tmem_copy(tmem_load_atom_dK, tdVtdV).get_slice(
+            tidx
+        )
         tdVtdV_t2r = thr_copy_t2r_dV.partition_S(tdVtdV)
         tdVcdV = thr_mma_dV.partition_C(
             cute.make_identity_tensor(self.mma_tiler_pdo[:2])
@@ -6225,9 +6326,9 @@ class FFABwdSm100:
         dV_reduce_ncol = self.dK_reduce_ncol
         dV_reduce_stage = self.tile_hdimv // dV_reduce_ncol
 
-        thr_copy_t2r_dQ = tcgen05.make_tmem_copy(
-            tmem_load_atom_dQ, tdQtdQ
-        ).get_slice(tidx)
+        thr_copy_t2r_dQ = tcgen05.make_tmem_copy(tmem_load_atom_dQ, tdQtdQ).get_slice(
+            tidx
+        )
         tdQtdQ_t2r = thr_copy_t2r_dQ.partition_S(tdQtdQ)
         tdQcdQ = thr_mma_dQ.partition_C(
             cute.make_identity_tensor(self.mma_tiler_dsk[:2])
@@ -6264,8 +6365,26 @@ class FFABwdSm100:
             n_block_min, n_block_max = block_info.get_n_block_min_max(
                 seqlen_info, m_block
             )
-            loop_count = n_block_max - n_block_min
-            process_tile = n_block_min < n_block_max
+
+            if const_expr(self.use_block_sparsity):
+                assert blocksparse_tensors is not None
+                (
+                    _rd_mask_cnt,
+                    _rd_mask_idx,
+                    _rd_full_cnt,
+                    _rd_full_idx,
+                ) = get_curr_blocksparse_tensors(
+                    batch_idx,
+                    head_idx,
+                    m_block,
+                    blocksparse_tensors,
+                    seqlen_info,
+                )
+                loop_count = _rd_mask_cnt + _rd_full_cnt
+                process_tile = loop_count > 0
+            else:
+                loop_count = n_block_max - n_block_min
+                process_tile = n_block_min < n_block_max
 
             # GMEM destinations (flattened fp32 for dKV_postprocess)
             head_idx_kv = head_idx // self.qhead_per_kvhead
@@ -6291,7 +6410,16 @@ class FFABwdSm100:
 
             # --- Per-K-iter dKV reduce ---
             for iter_idx in cutlass.range(loop_count, unroll=1):
-                n_block = n_block_min + iter_idx
+                if const_expr(self.use_block_sparsity):
+                    n_block, _ = get_m_block_from_iter_bwd(
+                        iter_idx,
+                        _rd_mask_cnt,
+                        _rd_mask_idx,
+                        _rd_full_cnt,
+                        _rd_full_idx,
+                    )
+                else:
+                    n_block = n_block_min + iter_idx
 
                 # ======== Reduce dK ========
                 pipeline_dKV.consumer_wait(dKV_consumer_state)
@@ -6306,9 +6434,7 @@ class FFABwdSm100:
                 gdK = cute.local_tile(
                     mdK_cur, (self.tile_n * self.tile_hdim,), (n_block,)
                 )
-                gdK_staged = cute.flat_divide(
-                    gdK, (self.tile_n * dK_reduce_ncol,)
-                )
+                gdK_staged = cute.flat_divide(gdK, (self.tile_n * dK_reduce_ncol,))
                 tdKrdK = cute.make_tensor(
                     tdKrdK_t2r.iterator,
                     (dK_reduce_ncol, dK_reduce_stage),
@@ -6350,9 +6476,7 @@ class FFABwdSm100:
                 gdV = cute.local_tile(
                     mdV_cur, (self.tile_n * self.tile_hdimv,), (n_block,)
                 )
-                gdV_staged = cute.flat_divide(
-                    gdV, (self.tile_n * dV_reduce_ncol,)
-                )
+                gdV_staged = cute.flat_divide(gdV, (self.tile_n * dV_reduce_ncol,))
                 tdVrdV = cute.make_tensor(
                     tdVrdV_t2r.iterator,
                     (dV_reduce_ncol, dV_reduce_stage),
@@ -6401,8 +6525,7 @@ class FFABwdSm100:
                 )
                 tdQrdQ = cute.make_tensor(
                     tdQrdQ_t2r.iterator,
-                    (self.dQ_reduce_ncol,
-                     self.tile_hdim // self.dQ_reduce_ncol),
+                    (self.dQ_reduce_ncol, self.tile_hdim // self.dQ_reduce_ncol),
                 )
 
                 for stg in cutlass.range_constexpr(dQ_reduce_stage):
