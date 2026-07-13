@@ -221,3 +221,4 @@ __marimo__/
 # Temporary debug/scratch files
 .tmp/
 .clangd
+build_ext/

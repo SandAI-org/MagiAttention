@@ -461,6 +461,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*InnerLoadMode=*/InnerLoadMode,
       /*UnionDkvSmem=*/UnionDkvSmem,
       /*InnerStoreStages=*/InnerStoreStages,
+      /*ProfileMode=*/ProfileMode,
       /*PerfDebugSkipVLoad=*/PerfDebugSkipVLoad,
       /*PerfDebugSkipDvStore=*/PerfDebugSkipDvStore,
       /*PerfDebugSkipDkStore=*/PerfDebugSkipDkStore,

@@ -504,8 +504,9 @@ class FlashAttnBwdSm90 {
 
       using ProducerBlockMetaT = std::conditional_t<IsSparse, typename CollectiveMainloop::template SparseLoopKBlockMeta<true>, BlockMetaT>;
 
-      bool const is_loader = ProducerConsts::is_loader(warp_idx_in_warpgroup);
-      bool const is_inner_storer = ProducerConsts::is_inner_storer(warp_idx_in_warpgroup);
+      using ProducerConsts_LoopK = typename CollectiveMainloop::ProducerConsts;
+      bool const is_loader = ProducerConsts_LoopK::is_loader(warp_idx_in_warpgroup);
+      bool const is_inner_storer = ProducerConsts_LoopK::is_inner_storer(warp_idx_in_warpgroup);
 
       if (is_loader) { // Load Q,dO and pipeline K,V
         // Initialize producer write pipeline states of K,V

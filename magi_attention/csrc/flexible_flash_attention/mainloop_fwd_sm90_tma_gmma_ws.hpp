@@ -532,9 +532,7 @@ struct CollectiveMainloopFwdSm90 {
     // int const thread_idx = threadIdx.x % NumProducerThreads;
 
     // prepare for TMA multicast meta
-    auto const mcast_meta_kv = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
-    uint16_t const mcast_mask_kv = get<0>(mcast_meta_kv);
-    uint32_t const cluster_block_id_kv = get<1>(mcast_meta_kv);
+    auto [mcast_mask_kv, cluster_block_id_kv] = get_tma_multi_cast_meta<ClusterShape, GmemTiledCopyKV, /*RowwiseMask=*/true>();
 
     int prev_offset_k = 0, prev_v_tail_idx = 0;
 
