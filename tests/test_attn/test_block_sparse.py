@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import unittest
 
 import torch
@@ -35,6 +34,14 @@ from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask_triton,
     get_sdpa_mask_from_block_sparse_mask,
+)
+from tests.test_attn.sparse_test_utils import (
+    SparsePackLayout,
+    check_ffa_deterministic_rerun,
+    inner_loop_env,
+    pack_kv_for_ffa,
+    pack_q_for_ffa,
+    unpack_ffa_output,
 )
 
 
@@ -61,41 +68,34 @@ class _BlockSparseTestHelper(unittest.TestCase):
         dv_ref: torch.Tensor,
     ):
         # (Implementation is identical to the original)
-        err_msg_list: list[str] = []
-        q = q.clone().detach().requires_grad_(True)
-        k = k.clone().detach().requires_grad_(True)
-        v = v.clone().detach().requires_grad_(True)
-        do = do.clone()
-        o, _ = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            q_ranges=q_ranges_tensor,
-            k_ranges=k_ranges_tensor,
-            max_seqlen_q=None,
-            attn_type_map=attn_type_map_tensor,
-            range_merge=range_merge,
-            deterministic=True,
-            ref_block_size=ref_block_size,
-        )
-        o.backward(do)
 
-        try:
-            assert torch.equal(
-                o, o_ref
-            ), f"For {test_case=}: forward output not deterministic"
-            assert torch.equal(
-                q.grad, dq_ref
-            ), f"For {test_case=}: backward dq not deterministic"
-            assert torch.equal(
-                k.grad, dk_ref
-            ), f"For {test_case=}: backward dk not deterministic"
-            assert torch.equal(
-                v.grad, dv_ref
-            ), f"For {test_case=}: backward dv not deterministic"
-        except Exception as e:
-            err_msg_list.append(str(e))
-        return err_msg_list
+        def _run_deterministic():
+            q_det = q.clone().detach().requires_grad_(True)
+            k_det = k.clone().detach().requires_grad_(True)
+            v_det = v.clone().detach().requires_grad_(True)
+            o_det, _ = flex_flash_attn_func(
+                q_det,
+                k_det,
+                v_det,
+                q_ranges=q_ranges_tensor,
+                k_ranges=k_ranges_tensor,
+                max_seqlen_q=None,
+                attn_type_map=attn_type_map_tensor,
+                range_merge=range_merge,
+                deterministic=True,
+                ref_block_size=ref_block_size,
+            )
+            o_det.backward(do)
+            return o_det, q_det.grad, k_det.grad, v_det.grad
+
+        return check_ffa_deterministic_rerun(
+            o_ref=o_ref,
+            dq_ref=dq_ref,
+            dk_ref=dk_ref,
+            dv_ref=dv_ref,
+            run_deterministic=_run_deterministic,
+            test_case=test_case,
+        )
 
     def get_ffa_result(
         self,
@@ -124,11 +124,9 @@ class _BlockSparseTestHelper(unittest.TestCase):
     ):
         s = q.size(1)
         h1 = k.size(2)
-        q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
         assert nhq % nhk == 0
-        # flatten kv head.
-        k = rearrange(k, "b s h d -> (b h s) 1 d")
-        v = rearrange(v, "b s h d -> (b h s) 1 d")
+        q = pack_q_for_ffa(q, h1, SparsePackLayout.HEAD_MAJOR)
+        k, v = pack_kv_for_ffa(k, v, SparsePackLayout.HEAD_MAJOR)
         q.retain_grad()
         k.retain_grad()
         v.retain_grad()
@@ -162,13 +160,13 @@ class _BlockSparseTestHelper(unittest.TestCase):
         torch.cuda.synchronize()
 
         lse = meta.lse
-        o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
+        o = unpack_ffa_output(o, B=1, S=s, NHK=h1, layout=SparsePackLayout.HEAD_MAJOR)
         lse = rearrange(lse, "(h1 s) h2 -> s (h1 h2)", s=s, h1=h1)
         o.backward(grad_output)
         torch.cuda.synchronize()
 
         if deterministic:
-            err_msg_list.append(
+            err_msg_list.extend(
                 self.check_deterministic(
                     q=q,
                     k=k,
@@ -905,9 +903,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
             "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load_mode,
             "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
         }
-        for key, val in inner_env.items():
-            os.environ[key] = val
-        try:
+        with inner_loop_env(inner_env):
             helper.assert_close_to_torch_ref(
                 dtype=dtype,
                 q=q,
@@ -932,9 +928,6 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                 uniform=True,
                 max_seqlen_q=q_size,
             )
-        finally:
-            for key in inner_env:
-                os.environ.pop(key, None)
 
 
 if __name__ == "__main__":

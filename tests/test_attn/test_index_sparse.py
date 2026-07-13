@@ -42,7 +42,6 @@ Known limitations:
   - Q/K/V are packed in (b, s, h) order to match index_sparse_indices view layout
 """
 
-import os
 import unittest
 from typing import Any
 
@@ -59,10 +58,19 @@ from magi_attention.utils.sparse_utils import (
     build_index_sparse_indices,
     get_sdpa_mask_from_index_sparse_indices,
 )
-
-SEED = 42
-DEFAULT_ATOL = 0.01
-
+from tests.test_attn.sparse_test_utils import (
+    DEFAULT_BWD_DQ_ATOL,
+    DEFAULT_FWD_ATOL,
+    SEED,
+    SparsePackLayout,
+    check_ffa_deterministic_twice,
+    compare_sdpa_bwd_dq,
+    compare_sdpa_fwd,
+    inner_loop_env,
+    pack_kv_for_ffa,
+    pack_q_for_ffa,
+    unpack_ffa_output,
+)
 
 # ═══════════════════════════════════════════════════════════
 # Helpers
@@ -94,15 +102,12 @@ def _run_sparse_attn_and_get_output(
 
     When test_bwd=True, returns (output, q_ffa, k_ffa, v_ffa) with gradients enabled.
     """
-    q_ffa = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=NHK)
-    k_ffa = rearrange(k, "b s h d -> (b s h) 1 d")
-    v_ffa = rearrange(v, "b s h d -> (b s h) 1 d")
+    q_ffa = pack_q_for_ffa(q, NHK, SparsePackLayout.SEQ_MAJOR, requires_grad=test_bwd)
+    k_ffa, v_ffa = pack_kv_for_ffa(
+        k, v, SparsePackLayout.SEQ_MAJOR, requires_grad=test_bwd
+    )
 
     if test_bwd:
-        q_ffa = q_ffa.detach().clone().requires_grad_(True)
-        k_ffa = k_ffa.detach().clone().requires_grad_(True)
-        v_ffa = v_ffa.detach().clone().requires_grad_(True)
-
         o_sparse, _ = flex_flash_attn_func(
             q_ffa,
             k_ffa,
@@ -115,16 +120,20 @@ def _run_sparse_attn_and_get_output(
             ref_block_size=ref_block_size,
             swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
-        o_reshaped = rearrange(
-            o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q
+        o_reshaped = unpack_ffa_output(
+            o_sparse,
+            B=B,
+            S=S_q,
+            NHK=NHK,
+            layout=SparsePackLayout.SEQ_MAJOR,
         )
         return o_reshaped, o_sparse, q_ffa, k_ffa, v_ffa
     else:
         with torch.no_grad():
             o_sparse, _ = flex_flash_attn_func(
-                q_ffa.clone(),
-                k_ffa.clone(),
-                v_ffa.clone(),
+                q_ffa,
+                k_ffa,
+                v_ffa,
                 index_sparse_indices=index_sparse_indices,
                 q_block_size=1,
                 sparse_k_block_size=sparse_k_block_size,
@@ -132,53 +141,13 @@ def _run_sparse_attn_and_get_output(
                 swap_ab=swap_ab,
                 ref_block_size=ref_block_size,
             )
-        return rearrange(o_sparse, "(b s h1) h2 d -> b s (h1 h2) d", b=B, h1=NHK, s=S_q)
-
-
-def _compare_against_sdpa(
-    o_ffa,
-    q,
-    k,
-    v,
-    sdpa_mask,
-    B,
-    NHQ,
-    NHK,
-    atol,
-    test_case,
-):
-    """Compare FFA output against SDPA reference, batch by batch, head by head.
-
-    Loops per Q-head to avoid materializing the full (NHQ, S_q, S_kv)
-    attention matrix which is catastrophic for large MQA configs.
-    sdpa_mask: compact (B, NHK, S_q, S_kv) — broadcasts across GQA heads.
-    """
-    gqa = NHQ // NHK
-    err_msgs = []
-    for b_idx in range(B):
-        o_ref_heads = []
-        with torch.no_grad():
-            for h_q in range(NHQ):
-                h_kv = h_q // gqa
-                q_h = q[b_idx, :, h_q : h_q + 1, :].unsqueeze(0).transpose(1, 2)
-                k_h = k[b_idx, :, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
-                v_h = v[b_idx, :, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
-                mask_h = sdpa_mask[b_idx, h_kv : h_kv + 1].unsqueeze(0)
-                o_h = torch.nn.functional.scaled_dot_product_attention(
-                    q_h, k_h, v_h, attn_mask=mask_h
-                )
-                o_ref_heads.append(o_h)
-        o_ref = torch.cat(o_ref_heads, dim=1)
-        o_ref = rearrange(o_ref, "1 h s d -> s h d")
-
-        max_diff = (o_ffa[b_idx].float() - o_ref.float()).abs().max().item()
-        if max_diff >= atol:
-            err_msgs.append(
-                f"batch {b_idx}: max_diff={max_diff:.6f} >= {atol} in {test_case}"
-            )
-
-    if err_msgs:
-        raise AssertionError("\n".join(err_msgs))
+        return unpack_ffa_output(
+            o_sparse,
+            B=B,
+            S=S_q,
+            NHK=NHK,
+            layout=SparsePackLayout.SEQ_MAJOR,
+        )
 
 
 def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True):
@@ -199,7 +168,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
     ref_block_size = cfg.get("ref_block_size", None)
     sparse_k_block_size = cfg.get("sparse_k_block_size", 1)
     dtype = cfg.get("dtype", torch.bfloat16)
-    atol = cfg.get("atol", DEFAULT_ATOL)
+    atol = cfg.get("atol", DEFAULT_FWD_ATOL)
     swap_bwd_qk_loop = cfg.get("swap_bwd_qk_loop", None)
 
     q = torch.randn(B, S_q, NHQ, D, dtype=dtype, device=device)
@@ -267,130 +236,56 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
         f"flat:NHQ_eff={NHQ},S_q_eff={S_q},S_kv_eff={S_kv}]"
     )
 
-    _compare_against_sdpa(o_ffa, q, k, v, sdpa_mask, B, NHQ, NHK, atol, test_case)
+    compare_sdpa_fwd(
+        o_ffa, q, k, v, sdpa_mask, B=B, NHQ=NHQ, NHK=NHK, atol=atol, test_case=test_case
+    )
 
     if test_bwd:
         do = torch.randn_like(o_sparse)
         o_sparse.backward(do)
-        dq_ffa = q_ffa.grad.clone()
 
-        gqa = NHQ // NHK
-        total_q = B * S_q
-
-        # dQ reference: expand K/V to match Q heads, run SDPA backward in one shot.
-        # dQ is independent per Q-head (no cross-head contamination), so no need
-        # for per-head isolation — only dK/dV accumulate across shared KV heads.
-        q_sdpa = (
-            q.transpose(1, 2).detach().clone().requires_grad_(True)
-        )  # (B, NHQ, S_q, D)
-        k_expanded = (
-            k.repeat_interleave(gqa, dim=2).transpose(1, 2).detach()
-        )  # (B, NHQ, S_kv, D)
-        v_expanded = (
-            v.repeat_interleave(gqa, dim=2).transpose(1, 2).detach()
-        )  # (B, NHQ, S_kv, D)
-        mask_expanded = sdpa_mask.repeat_interleave(gqa, dim=1)  # (B, NHQ, S_q, S_kv)
-        o_sdpa = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa, k_expanded, v_expanded, attn_mask=mask_expanded
+        bwd_atol = cfg.get("bwd_atol", DEFAULT_BWD_DQ_ATOL)
+        compare_sdpa_bwd_dq(
+            q_ffa.grad,
+            do,
+            q,
+            k,
+            v,
+            sdpa_mask,
+            B=B,
+            S_q=S_q,
+            NHQ=NHQ,
+            NHK=NHK,
+            atol=bwd_atol,
+            test_case=test_case,
         )
-        do_sdpa = rearrange(do, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q)
-        o_sdpa.backward(do_sdpa)
-        dq_ref = rearrange(q_sdpa.grad, "b h s d -> (b s) h d")[:total_q]
-
-        dq_ffa_reshaped = rearrange(
-            dq_ffa, "(b s h1) h2 d -> b (h1 h2) s d", b=B, h1=NHK, s=S_q
-        )
-        dq_ref_reshaped = rearrange(dq_ref, "(b s) h d -> b h s d", b=B, s=S_q)
-
-        bwd_atol = cfg.get("bwd_atol", 0.05)
-        err_msgs = []
-        for b_idx in range(B):
-            max_dq_diff = (
-                (dq_ffa_reshaped[b_idx].float() - dq_ref_reshaped[b_idx].float())
-                .abs()
-                .max()
-                .item()
-            )
-            if max_dq_diff >= bwd_atol:
-                err_msgs.append(
-                    f"BWD batch {b_idx}: dQ max_diff={max_dq_diff:.6f} >= {bwd_atol} in {test_case}"
-                )
-        if err_msgs:
-            raise AssertionError("\n".join(err_msgs))
 
         if cfg.get("check_deterministic", True) and swap_bwd_qk_loop is not True:
-            det_errs = _check_deterministic_index_sparse(
-                q_ffa=q_ffa,
-                k_ffa=k_ffa,
-                v_ffa=v_ffa,
-                index_sparse_indices=index_sparse_indices,
-                pack_gqa=pack_gqa,
-                sparse_k_block_size=sparse_k_block_size,
-                ref_block_size=ref_block_size,
-                swap_ab=swap_ab,
-                swap_bwd_qk_loop=swap_bwd_qk_loop,
-                o_ref=o_sparse.detach(),
-                dq_ref=dq_ffa,
-                test_case=test_case,
-            )
+            do_det = torch.randn_like(q_ffa)
+
+            def _run_det():
+                q2 = q_ffa.clone().detach().requires_grad_(True)
+                k2 = k_ffa.clone().detach().requires_grad_(True)
+                v2 = v_ffa.clone().detach().requires_grad_(True)
+                o2, _ = flex_flash_attn_func(
+                    q2,
+                    k2,
+                    v2,
+                    index_sparse_indices=index_sparse_indices,
+                    q_block_size=1,
+                    sparse_k_block_size=sparse_k_block_size,
+                    pack_gqa=pack_gqa,
+                    swap_ab=swap_ab,
+                    ref_block_size=ref_block_size,
+                    swap_bwd_qk_loop=swap_bwd_qk_loop,
+                    deterministic=True,
+                )
+                o2.backward(do_det)
+                return o2.detach(), q2.grad.detach()
+
+            det_errs = check_ffa_deterministic_twice(_run_det, test_case=test_case)
             if det_errs:
                 raise AssertionError("\n".join(det_errs))
-
-
-def _check_deterministic_index_sparse(
-    q_ffa,
-    k_ffa,
-    v_ffa,
-    index_sparse_indices,
-    *,
-    pack_gqa,
-    sparse_k_block_size,
-    ref_block_size,
-    swap_ab,
-    swap_bwd_qk_loop=None,
-    o_ref,
-    dq_ref,
-    test_case,
-):
-    """Verify bit-exact reproducibility by running twice in deterministic mode.
-
-    For LoopK: deterministic=True is unsupported by the kernel, skip check.
-    For LoopQ: run twice with deterministic=True and compare the two runs.
-    """
-    if swap_bwd_qk_loop is True:
-        return []
-
-    err_msgs: list[str] = []
-    do = torch.randn_like(q_ffa)
-
-    def _run_det():
-        q2 = q_ffa.clone().detach().requires_grad_(True)
-        k2 = k_ffa.clone().detach().requires_grad_(True)
-        v2 = v_ffa.clone().detach().requires_grad_(True)
-        o2, _ = flex_flash_attn_func(
-            q2,
-            k2,
-            v2,
-            index_sparse_indices=index_sparse_indices,
-            q_block_size=1,
-            sparse_k_block_size=sparse_k_block_size,
-            pack_gqa=pack_gqa,
-            swap_ab=swap_ab,
-            ref_block_size=ref_block_size,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
-            deterministic=True,
-        )
-        o2.backward(do)
-        return o2.detach(), q2.grad.detach()
-
-    o_det1, dq_det1 = _run_det()
-    o_det2, dq_det2 = _run_det()
-
-    if not torch.equal(o_det1, o_det2):
-        err_msgs.append(f"For {test_case=}: forward output not deterministic")
-    if not torch.equal(dq_det1, dq_det2):
-        err_msgs.append(f"For {test_case=}: backward dQ not deterministic")
-    return err_msgs
 
 
 # ═══════════════════════════════════════════════════════════
@@ -878,13 +773,8 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load_mode,
             "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
         }
-        for key, val in inner_env.items():
-            os.environ[key] = val
-        try:
+        with inner_loop_env(inner_env):
             _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
-        finally:
-            for key in inner_env:
-                os.environ.pop(key, None)
 
     @with_run_in_mp
     @parameterize("head_config", _PARAM_SPACE["head_config"])
@@ -929,13 +819,8 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load_mode,
             "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
         }
-        for key, val in inner_env.items():
-            os.environ[key] = val
-        try:
+        with inner_loop_env(inner_env):
             _run_index_sparse_config(self.device, config, test_bwd=True)
-        finally:
-            for key in inner_env:
-                os.environ.pop(key, None)
 
 
 if __name__ == "__main__":
