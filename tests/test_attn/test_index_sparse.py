@@ -253,7 +253,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
             NHK=NHK,
             layout=SparsePackLayout.SEQ_MAJOR,
         )
-        sdpa_dq, _, _ = sdpa_ref_bwd_grads(
+        sdpa_dq, sdpa_dk, sdpa_dv = sdpa_ref_bwd_grads(
             do_unpacked,
             q,
             k,
@@ -269,9 +269,15 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
             h1=NHK,
             s=S_q,
         )
+        dk_ffa = rearrange(k_ffa.grad, "(b s h) 1 d -> b h s d", b=B, s=S_kv, h=NHK)
+        dv_ffa = rearrange(v_ffa.grad, "(b s h) 1 d -> b h s d", b=B, s=S_kv, h=NHK)
         compare_sdpa_bwd_all(
             ffa_dq=dq_ffa,
+            ffa_dk=dk_ffa,
+            ffa_dv=dv_ffa,
             sdpa_dq=sdpa_dq,
+            sdpa_dk=sdpa_dk,
+            sdpa_dv=sdpa_dv,
             test_case=test_case,
             dq_atol=bwd_atol,
         )
