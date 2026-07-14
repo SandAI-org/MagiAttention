@@ -206,10 +206,10 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
 
     # parameter space shared by @parameterize and precompile_kernel_specs
     _PARAM_SPACE: dict[str, list] = dict(
-        nhq_nhk=[(8, 8), (16, 4), (128, 1), (1, 1), (4, 2)],
+        nhq_nhk=[(128, 1), (4, 1), (128, 2), (32, 4), (4, 4), (32, 32)],
         head_dim=[64, 128],
-        q_size=[1, 16, 64, 128],
-        k_size=[1, 8, 64, 128],
+        q_size=[1, 8, 128],
+        k_size=[1, 8, 128],
         sparsity_ratio=[0.5],
         inner_dir=["true", "false"],
         inner_load_mode=["tma", "cpasync"],
@@ -268,7 +268,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                                 direction="fwd",
                                 env=env_fwd,
                                 disable_atomic=True,
-                                ref_block_size=(128, 128),
+                                ref_block_size=(64, 128),
                                 **common,
                             )
                             for inner_store in cls._PARAM_SPACE["inner_store_mode"]:

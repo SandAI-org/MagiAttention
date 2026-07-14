@@ -222,3 +222,9 @@ __marimo__/
 .tmp/
 .clangd
 build_ext/
+
+# CMake build artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+detect_cuda_version.cc

@@ -263,6 +263,19 @@ class TestFlexFlashAttn(DistTestBase):
                     pack_gqa_factor=pgf,
                     block_sparse=block_sparse,
                 )
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    head_dim=hd,
+                    compute_dtype=dt,
+                    output_dtype=torch.float32,
+                    ref_block_size=tile,
+                    swap_ab=swap_ab,
+                    pack_gqa=pack_gqa,
+                    pack_gqa_factor=pgf,
+                    block_sparse=block_sparse,
+                    return_max_logits=True,
+                )
                 if not swap_ab:
                     add_ffa_spec(
                         specs,

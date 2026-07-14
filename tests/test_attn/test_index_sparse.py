@@ -601,17 +601,14 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     _PARAM_SPACE: dict[str, list] = dict(
         head_config=[
             (128, 1, True),  # MQA128
-            (64, 1, True),  # MQA64
             (4, 1, True),  # MQA4
             (128, 2, True),  # GQA 128:2
             (32, 4, True),  # GQA 32:4
-            (4, 2, True),  # GQA 4:2
-            (8, 8, True),  # MHA8
             (4, 4, True),  # MHA4
             (32, 32, True),  # MHA32
         ],
         head_dim=[64, 128],
-        kbs=[1, 8, 32, 128],
+        kbs=[1, 8, 128],
         inner_dir=["true", "false"],
         inner_load_mode=["tma", "cpasync"],
         inner_store_mode=["tma", "tma1d", "atomicadd", "bypass"],

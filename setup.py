@@ -75,11 +75,7 @@ DISABLE_AGGRESSIVE_PTX_INSTRS = os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1") 
 # and leave others built in jit mode
 PREBUILD_FFA = os.getenv("MAGI_ATTENTION_PREBUILD_FFA", "1") == "1"
 
-# Each JIT kernel uses --split-compile N (NVCC_THREADS, default 4), so total
-# CPU threads ≈ PREBUILD_FFA_JOBS × split_compile.  Default to 2× cpu_count //
-# split_compile (moderate oversubscription to keep the compile pipeline full).
-_nvcc_split_compile = int(os.getenv("NVCC_THREADS", "4"))
-default_jobs = max(1, os.cpu_count() // _nvcc_split_compile * 2)  # type: ignore[operator]
+default_jobs = max(1, os.cpu_count() or 1)  # type: ignore[operator]
 PREBUILD_FFA_JOBS = int(
     os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", str(default_jobs))
 )
