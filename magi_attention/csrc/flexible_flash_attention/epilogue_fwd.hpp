@@ -74,7 +74,6 @@ struct CollectiveEpilogueFwd {
   static constexpr bool SwapAB = SwapAB_;
   static constexpr bool ReturnMaxLogits = ReturnMaxLogits_;
   static constexpr OuterStoreMode kOuterStoreMode = static_cast<OuterStoreMode>(OuterStoreMode_);
-  static constexpr bool Use_TMA_O = (kOuterStoreMode == OuterStoreMode::Tma);
 
   static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
   static constexpr int kHeadDim = get<1>(TileShape_MNK_PV{});
@@ -137,12 +136,7 @@ struct CollectiveEpilogueFwd {
   using SmemLayoutAtomO = decltype(composition(Swizzle<kSwizzle, kSwizzleBase, kSwizzleShift>{}, Layout<Shape<_8, Int<kBlockKGmem>>, Stride<Int<kBlockKGmem>, _1>>{}));
   using SmemLayoutOSTS = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 1>(TileShape_MNK_PV{})));
 
-  // SmemLayoutO must match the store path:
-  //   Use_TMA_O=true  → SmemLayoutOTMA (TMA descriptor is built with this layout)
-  //   Use_TMA_O=false → SwapAB decides: TMA layout for SwapAB (no bank conflict with
-  //                      transposed WGMMA output), STS layout otherwise (bank-conflict-free
-  //                      R2S for non-transposed WGMMA output, then STG.128 store).
-  using SmemLayoutO = std::conditional_t<Use_TMA_O, SmemLayoutOTMA, std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>>;
+  using SmemLayoutO = std::conditional_t<kOuterStoreMode == OuterStoreMode::Tma, SmemLayoutOTMA, std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>>;
 
   // Define ShapeO and StrideO based on PackGQA
   using ShapeO = std::conditional_t<
@@ -185,11 +179,10 @@ struct CollectiveEpilogueFwd {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutO>> smem_o;
   };
 
-  // When Use_TMA_O is false (e.g. PackGQA with PackGQAFactor not dividing kBlockM),
-  // the PackGQA-reshaped ShapeO is TMA-incompatible. Use a non-PackGQA shape for the
-  // type alias so make_tma_copy compiles; the TMA descriptor is never created at runtime.
-  using TMA_O_ShapeForType = std::conditional_t<Use_TMA_O, ShapeO, cute::Shape<int32_t, int32_t, int32_t>>;
-  using TMA_O_StrideForType = std::conditional_t<Use_TMA_O, StrideO, cute::Stride<int64_t, _1, int64_t>>;
+  // When Stg mode, the PackGQA-reshaped ShapeO may be TMA-incompatible. Use a non-PackGQA
+  // shape for the type alias so make_tma_copy compiles; the TMA descriptor is never created at runtime.
+  using TMA_O_ShapeForType = std::conditional_t<kOuterStoreMode == OuterStoreMode::Tma, ShapeO, cute::Shape<int32_t, int32_t, int32_t>>;
+  using TMA_O_StrideForType = std::conditional_t<kOuterStoreMode == OuterStoreMode::Tma, StrideO, cute::Stride<int64_t, _1, int64_t>>;
   using TMA_O = decltype(make_tma_copy(
       GmemTiledCopyOTMA{},
       make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), TMA_O_ShapeForType{}, TMA_O_StrideForType{}),
@@ -251,7 +244,7 @@ struct CollectiveEpilogueFwd {
     auto const stride_LSE = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), PackGQAFactor));
 
     TMA_O tma_store_O = [&]() {
-      if constexpr (Use_TMA_O) {
+      if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
         Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), shape_O, stride_O);
         return make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutOTMA{}, select<0, 1>(TileShape_MNK_PV{}), _1{});
       } else {
@@ -281,7 +274,7 @@ struct CollectiveEpilogueFwd {
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
-    if constexpr (Use_TMA_O) {
+    if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
       cute::prefetch_tma_descriptor(params.tma_store_O.get_tma_descriptor());
     }
   }
@@ -599,7 +592,7 @@ struct CollectiveEpilogueFwd {
     [[maybe_unused]] auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
     [[maybe_unused]] Tensor tOcO = gmem_thr_copy_O.partition_D(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})));
     [[maybe_unused]] Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOcO)));
-    if constexpr (!Use_TMA_O) {
+    if constexpr (kOuterStoreMode != OuterStoreMode::Tma) {
 #pragma unroll
       for (int k = 0; k < size(tOpO); ++k) {
         tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O);
@@ -630,7 +623,7 @@ struct CollectiveEpilogueFwd {
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     }
 
-    if constexpr (Use_TMA_O) {
+    if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
       cutlass::arch::fence_view_async_shared();
       if (cute::elect_one_sync()) {
         Tensor mdO_tma = params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh);

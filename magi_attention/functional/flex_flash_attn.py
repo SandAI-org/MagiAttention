@@ -1433,9 +1433,10 @@ def flex_flash_attn_func(
 
         swap_bwd_qk_loop (bool | None, optional): Controls backward double-loop order.
             ``False`` = LoopQ (outer K, inner Q), ``True`` = LoopK (outer Q, inner K).
-            ``None`` (default) = auto-infer: IndexSparse with ``sparse_k_block_size >= 8`` uses LoopQ,
-            IndexSparse with ``sparse_k_block_size < 8`` uses LoopK, Dense/BlockSparse uses LoopQ.
-            **Note:** This flag is useful for sparse attention scenarios but still under development.
+            ``None`` (default) = auto-infer: IndexSparse with ``sparse_k_block_size < 128``
+            uses LoopK (bounded inner K loop from forward indices),
+            otherwise LoopQ.  LoopK requires ``pack_gqa_factor >= 128``; when
+            not met, falls back to LoopQ automatically.
 
         return_max_logits (bool, optional): Whether to return the maximum attention logits,
             according to the Muon QK-Clip technique introduced in Kimi K2: https://arxiv.org/pdf/2507.20534.pdf.
@@ -1725,6 +1726,13 @@ def flex_flash_attn_func(
             pack_gqa = True
 
         _gqa_safe = _is_mha or pack_gqa or cat_gqa
+
+        # IndexSparse auto-infer BWD loop mode: when kbs < kBlockN (128),
+        # inner K loads use CpAsync scatter → LoopQ's inverted-index inner
+        # loop degenerates (each K block touched by ~all Q tokens).
+        # LoopK keeps the inner loop bounded (topk / kBlockN iterations).
+        if index_sparse and bwd_inner_loop_k is None and sparse_k_block_size < 128:
+            bwd_inner_loop_k = True
 
         # IndexSparse + LoopK: each Q-tile (M=128) must cover exactly one
         # original seq position's packed heads.  When pack_gqa_factor < 128,

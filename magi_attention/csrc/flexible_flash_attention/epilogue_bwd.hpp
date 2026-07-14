@@ -75,7 +75,6 @@ struct CollectiveEpilogueBwd {
   static constexpr bool IsSameTypeDkv = cute::is_same_v<ElementDkv, ElementAccum>;
   static constexpr bool OuterStoreNeedReduction = OuterStoreNeedReduction_;
   static constexpr OuterStoreMode kOuterStoreMode = static_cast<OuterStoreMode>(OuterStoreMode_);
-  static constexpr bool Use_TMA_Outer = (kOuterStoreMode == OuterStoreMode::Tma);
 
   static constexpr bool dQ_swapAB = dQ_swapAB_;
   static constexpr bool dKV_swapAB = dKV_swapAB_;
@@ -317,11 +316,11 @@ struct CollectiveEpilogueBwd {
   static void prefetch_tma_descriptors(Params const& params) {
     if constexpr (Use_TMA) {
       if constexpr (BwdInnerLoopK) {
-        if constexpr (Use_TMA_Outer) {
+        if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
           cute::prefetch_tma_descriptor(params.tma_store_dQ.get_tma_descriptor());
         }
       } else {
-        if constexpr (Use_TMA_Outer) {
+        if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
           cute::prefetch_tma_descriptor(params.tma_store_dK.get_tma_descriptor());
           cute::prefetch_tma_descriptor(params.tma_store_dV.get_tma_descriptor());
         }
@@ -401,7 +400,7 @@ struct CollectiveEpilogueBwd {
     // IndexSparse LoopQ with SparseKBlockSize < kBlockN: only partial rows valid in the tile,
     // TMA full-tile store would corrupt neighbors. Use per-element path with residual guard.
     // When SparseKBlockSize >= kBlockN the full tile is valid and can use TMA store.
-    if constexpr (Use_TMA_Outer && !(IndexSparse && !BwdInnerLoopK)) {
+    if constexpr (kOuterStoreMode == OuterStoreMode::Tma && !(IndexSparse && !BwdInnerLoopK)) {
       cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
       cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
 
@@ -559,9 +558,9 @@ struct CollectiveEpilogueBwd {
     BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     cute::copy(smem_tiled_copy_dQ, taccdQrdQ, taccdQsdQ);
 
-    if constexpr (!Use_TMA_Outer) {
+    if constexpr (kOuterStoreMode != OuterStoreMode::Tma) {
       // Per-element direct store: outer Q range is unique per CTA (rangemerge / sparse),
-      // so no atomic reduction needed.  Mirrors store_dkv()'s per-element path.
+      // so no atomic reduction needed.
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
       GmemTiledCopydQ gmem_tiled_copy_dQ;
