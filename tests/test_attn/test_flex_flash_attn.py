@@ -251,31 +251,20 @@ class TestFlexFlashAttn(DistTestBase):
             pgf_list = _PGF if pack_gqa else [1]
 
             for pgf in pgf_list:
-                add_ffa_spec(
-                    specs,
-                    direction="fwd",
-                    head_dim=hd,
-                    compute_dtype=dt,
-                    output_dtype=torch.float32,
-                    ref_block_size=tile,
-                    swap_ab=swap_ab,
-                    pack_gqa=pack_gqa,
-                    pack_gqa_factor=pgf,
-                    block_sparse=block_sparse,
-                )
-                add_ffa_spec(
-                    specs,
-                    direction="fwd",
-                    head_dim=hd,
-                    compute_dtype=dt,
-                    output_dtype=torch.float32,
-                    ref_block_size=tile,
-                    swap_ab=swap_ab,
-                    pack_gqa=pack_gqa,
-                    pack_gqa_factor=pgf,
-                    block_sparse=block_sparse,
-                    return_max_logits=True,
-                )
+                for rml in [False, True]:
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        ref_block_size=tile,
+                        swap_ab=swap_ab,
+                        pack_gqa=pack_gqa,
+                        pack_gqa_factor=pgf,
+                        block_sparse=block_sparse,
+                        return_max_logits=rml,
+                    )
                 if not swap_ab:
                     add_ffa_spec(
                         specs,
@@ -316,27 +305,18 @@ class TestFlexFlashAttn(DistTestBase):
             rml = feat.get("return_max_logits", False)
 
             # FWD dense (base + disable_atomic + pack_gqa)
-            add_ffa_spec(
-                specs,
-                direction="fwd",
-                head_dim=hd,
-                compute_dtype=dt,
-                output_dtype=torch.float32,
-                deterministic=det,
-                range_merge=rm,
-                return_max_logits=rml,
-            )
-            add_ffa_spec(
-                specs,
-                direction="fwd",
-                head_dim=hd,
-                compute_dtype=dt,
-                output_dtype=torch.float32,
-                disable_atomic=True,
-                deterministic=det,
-                range_merge=rm,
-                return_max_logits=rml,
-            )
+            for da in [False, True]:
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    head_dim=hd,
+                    compute_dtype=dt,
+                    output_dtype=torch.float32,
+                    disable_atomic=da,
+                    deterministic=det,
+                    range_merge=rm,
+                    return_max_logits=rml,
+                )
             for p in [1, pgf]:
                 add_ffa_spec(
                     specs,
@@ -408,27 +388,18 @@ class TestFlexFlashAttn(DistTestBase):
                         range_merge=True,
                     )
                     if p == 1:
-                        add_ffa_spec(
-                            specs,
-                            direction="bwd",
-                            head_dim=hd,
-                            compute_dtype=dt,
-                            bwd_inner_loop_k=True,
-                            disable_dq_atomic=True,
-                            pack_gqa=True,
-                            pack_gqa_factor=1,
-                            range_merge=True,
-                        )
-                        add_ffa_spec(
-                            specs,
-                            direction="bwd",
-                            head_dim=hd,
-                            compute_dtype=dt,
-                            bwd_inner_loop_k=True,
-                            pack_gqa=True,
-                            pack_gqa_factor=1,
-                            range_merge=True,
-                        )
+                        for dda in [True, False]:
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                head_dim=hd,
+                                compute_dtype=dt,
+                                bwd_inner_loop_k=True,
+                                disable_dq_atomic=dda,
+                                pack_gqa=True,
+                                pack_gqa_factor=1,
+                                range_merge=True,
+                            )
 
         # ═══════════════════════════════════════════════════════════════════
         # Section 3: FWD swap_ab + feature flags
@@ -460,32 +431,20 @@ class TestFlexFlashAttn(DistTestBase):
                 )
             # swap_ab + pack_gqa (tile (64,64))
             for p in [1, pgf]:
-                add_ffa_spec(
-                    specs,
-                    direction="fwd",
-                    head_dim=hd,
-                    compute_dtype=dt,
-                    output_dtype=torch.float32,
-                    swap_ab=True,
-                    ref_block_size=(64, 64),
-                    pack_gqa=True,
-                    pack_gqa_factor=p,
-                    deterministic=True,
-                )
-                # swap_ab + packgqa + deterministic + return_max_logits
-                add_ffa_spec(
-                    specs,
-                    direction="fwd",
-                    head_dim=hd,
-                    compute_dtype=dt,
-                    output_dtype=torch.float32,
-                    swap_ab=True,
-                    ref_block_size=(64, 64),
-                    pack_gqa=True,
-                    pack_gqa_factor=p,
-                    deterministic=True,
-                    return_max_logits=True,
-                )
+                for rml in [False, True]:
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        swap_ab=True,
+                        ref_block_size=(64, 64),
+                        pack_gqa=True,
+                        pack_gqa_factor=p,
+                        deterministic=True,
+                        return_max_logits=rml,
+                    )
             # swap_ab + packgqa + deterministic + range_merge
             for p in [1, pgf]:
                 add_ffa_spec(
@@ -542,29 +501,19 @@ class TestFlexFlashAttn(DistTestBase):
         for hd, dt in product(cls._HEAD_DIMS, _DTYPES):
             pgf = _pgf(hd)
             for p in [1, pgf if hd == 64 else 1]:
-                add_ffa_spec(
-                    specs,
-                    direction="fwd",
-                    head_dim=hd,
-                    compute_dtype=dt,
-                    output_dtype=torch.float32,
-                    pack_gqa=True,
-                    pack_gqa_factor=p,
-                    deterministic=True,
-                    range_merge=True,
-                    return_max_logits=True,
-                )
-                add_ffa_spec(
-                    specs,
-                    direction="fwd",
-                    head_dim=hd,
-                    compute_dtype=dt,
-                    output_dtype=torch.float32,
-                    pack_gqa=True,
-                    pack_gqa_factor=p,
-                    range_merge=True,
-                    return_max_logits=True,
-                )
+                for det in [True, False]:
+                    add_ffa_spec(
+                        specs,
+                        direction="fwd",
+                        head_dim=hd,
+                        compute_dtype=dt,
+                        output_dtype=torch.float32,
+                        pack_gqa=True,
+                        pack_gqa_factor=p,
+                        deterministic=det,
+                        range_merge=True,
+                        return_max_logits=True,
+                    )
             add_ffa_spec(
                 specs,
                 direction="fwd",

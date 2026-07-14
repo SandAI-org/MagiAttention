@@ -75,7 +75,7 @@ DISABLE_AGGRESSIVE_PTX_INSTRS = os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1") 
 # and leave others built in jit mode
 PREBUILD_FFA = os.getenv("MAGI_ATTENTION_PREBUILD_FFA", "1") == "1"
 
-default_jobs = max(1, os.cpu_count() or 1)  # type: ignore[operator]
+default_jobs = os.cpu_count()
 PREBUILD_FFA_JOBS = int(
     os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", str(default_jobs))
 )
