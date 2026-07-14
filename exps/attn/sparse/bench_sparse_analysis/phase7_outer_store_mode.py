@@ -33,7 +33,6 @@ from bench_sparse_analysis._common import (
     NHQ,
     _bench_kernel,
     _load_results,
-    _out_dir,
     _results_path,
     _save_results,
     _set_entry,
@@ -123,12 +122,8 @@ def _phase7_bench(force=False):
                         k.requires_grad_(True)
                         v.requires_grad_(True)
 
-                    q_ranges = torch.tensor(
-                        [[0, S]], dtype=torch.int32, device=device
-                    )
-                    k_ranges = torch.tensor(
-                        [[0, S]], dtype=torch.int32, device=device
-                    )
+                    q_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
+                    k_ranges = torch.tensor([[0, S]], dtype=torch.int32, device=device)
                     atm = torch.zeros(1, dtype=torch.int32, device=device)
 
                     kw = dict(
@@ -150,6 +145,7 @@ def _phase7_bench(force=False):
 
                         def run_fn():
                             o.backward(do, retain_graph=True)
+
                     else:
 
                         def run_fn():
@@ -188,7 +184,7 @@ def _print_summary(results):
     """Print comparison table per pass_type."""
     for pass_type, configs in CONFIGS.items():
         labels = [c[0] for c in configs]
-        hdr = " | ".join(f"{l:>15s}" for l in labels)
+        hdr = " | ".join(f"{lb:>15s}" for lb in labels)
         print(f"\n  {pass_type}:")
         print(f"  {'SeqLen':>8s} | {hdr}")
         print(f"  {'-' * (10 + 18 * len(labels))}")
