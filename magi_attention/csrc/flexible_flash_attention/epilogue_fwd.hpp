@@ -137,11 +137,12 @@ struct CollectiveEpilogueFwd {
   using SmemLayoutAtomO = decltype(composition(Swizzle<kSwizzle, kSwizzleBase, kSwizzleShift>{}, Layout<Shape<_8, Int<kBlockKGmem>>, Stride<Int<kBlockKGmem>, _1>>{}));
   using SmemLayoutOSTS = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 1>(TileShape_MNK_PV{})));
 
-  // TMA O store only when SwapAB=true (SmemLayoutOTMA has no bank conflict with
-  // transposed WGMMA output). When SwapAB=false, per-thread STG.128 via SmemLayoutOSTS
-  // is faster because SmemLayoutOTMA causes SMEM bank conflicts during R2S copy.
-  // The actual mode is now decided externally via kOuterStoreMode template parameter.
-  using SmemLayoutO = std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>;
+  // SmemLayoutO must match the store path:
+  //   Use_TMA_O=true  → SmemLayoutOTMA (TMA descriptor is built with this layout)
+  //   Use_TMA_O=false → SwapAB decides: TMA layout for SwapAB (no bank conflict with
+  //                      transposed WGMMA output), STS layout otherwise (bank-conflict-free
+  //                      R2S for non-transposed WGMMA output, then STG.128 store).
+  using SmemLayoutO = std::conditional_t<Use_TMA_O, SmemLayoutOTMA, std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>>;
 
   // Define ShapeO and StrideO based on PackGQA
   using ShapeO = std::conditional_t<

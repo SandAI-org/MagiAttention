@@ -609,7 +609,11 @@ def get_ffa_jit_spec(
     uri += f"_pr{_producer_regs}_cr{_consumer_regs}"
 
     # ─── OuterStoreMode: 0=Tma, 1=Stg ───
-    # FWD: Tma only when SwapAB=true and PackGQA shape divides kBlockM cleanly.
+    # FWD default: Tma when SwapAB=true and PackGQA shape divides kBlockM.
+    #   SwapAB=false defaults to Stg (bank-conflict-free R2S with SmemLayoutOSTS).
+    #   Env var MAGI_ATTENTION_FFA_OUTER_STORE_MODE can force Tma for SwapAB=false
+    #   (C++ SmemLayoutO follows Use_TMA_O, so TMA store is correct regardless of
+    #   SwapAB; R2S into SmemLayoutOTMA has bank conflicts but TMA store may still win).
     # BWD: Tma when OuterStoreNeedReduction=true and not IndexSparse partial tile.
     _outer_store_env = os.environ.get("MAGI_ATTENTION_FFA_OUTER_STORE_MODE")
     if _outer_store_env is not None:

@@ -112,6 +112,10 @@ def main():
                 max_kvseqlen=max_kvseqlen,
                 rerun_filter=rerun_filter,
             )
+        elif phase == "7-outer-store-mode":
+            from bench_sparse_analysis.phase7_outer_store_mode import _phase7_bench
+
+            _phase7_bench(force=args.force)
     elif args.plot:
         phase = args.plot
         print(f"[{_ts()}] === --plot {phase} ===", flush=True)

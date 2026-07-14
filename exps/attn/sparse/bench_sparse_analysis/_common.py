@@ -38,6 +38,7 @@ PHASES = [
     "4_2-iss-double-buffer",
     "5-scaling",
     "6-video-production",
+    "7-outer-store-mode",
 ]
 
 
@@ -309,6 +310,8 @@ def _bench_ffa(S, topk, pass_type, kw, device):
     from magi_attention.functional import flex_flash_attn_func
 
     is_bwd = pass_type != "fwd"
+    if not is_bwd:
+        kw.setdefault("disable_fwd_atomic_reduction", True)
     if "q_ranges" in kw or "index_sparse_indices" in kw:
         q, k, v = _make_tensors(S, device, torch.bfloat16, grad=is_bwd)
     else:

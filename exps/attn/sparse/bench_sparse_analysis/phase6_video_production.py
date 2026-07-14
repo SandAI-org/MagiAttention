@@ -214,6 +214,7 @@ def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
                             k_ranges=k_ranges,
                             attn_type_map=atm,
                             pack_gqa=True,
+                            disable_fwd_atomic_reduction=True,
                         )
                         flops_S = topk
 
@@ -244,6 +245,7 @@ def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
                             k_ranges=k_ranges,
                             attn_type_map=atm,
                             pack_gqa=False,
+                            disable_fwd_atomic_reduction=True,
                         )
                         flops_S = topk
 
@@ -268,6 +270,7 @@ def _phase6_bench(force=False, max_kvseqlen=None, rerun_filter=None):
                             attn_type_map=bs_atm,
                             pack_gqa=True,
                             range_merge=True,
+                            disable_fwd_atomic_reduction=True,
                         )
                         flops_S = qseqlen
 
