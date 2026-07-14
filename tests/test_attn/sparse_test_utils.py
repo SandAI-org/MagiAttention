@@ -145,21 +145,14 @@ def sdpa_ref_output(
 
 def compare_sdpa_fwd(
     o_ffa: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    sdpa_mask: torch.Tensor,
+    o_ref: torch.Tensor,
     *,
-    B: int,
-    NHQ: int,
-    NHK: int,
     test_case: str,
     atol: float = DEFAULT_FWD_ATOL,
     rtol: float = DEFAULT_FWD_RTOL,
     mismatch_threshold: float = DEFAULT_MISMATCH_THRES,
 ) -> None:
-    """Compare FFA forward output against SDPA reference using assert_close."""
-    o_ref = sdpa_ref_output(q, k, v, sdpa_mask, B=B, NHQ=NHQ, NHK=NHK)
+    """Compare FFA forward output against pre-computed SDPA reference."""
     assert_close(
         o_ffa,
         o_ref,

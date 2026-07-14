@@ -70,6 +70,7 @@ from tests.test_attn.sparse_test_utils import (
     pack_kv_for_ffa,
     pack_q_for_ffa,
     sdpa_ref_bwd_grads,
+    sdpa_ref_output,
     unpack_ffa_output,
 )
 
@@ -96,62 +97,38 @@ def _run_sparse_attn_and_get_output(
     swap_ab=False,
     ref_block_size=None,
     sparse_k_block_size=1,
-    test_bwd=False,
     swap_bwd_qk_loop=None,
 ):
-    """Run FFA with index_sparse_indices and return reshaped output [B, S_q, NHQ, D].
+    """Run FFA with index_sparse_indices.
 
-    When test_bwd=True, returns (output, q_ffa, k_ffa, v_ffa) with gradients enabled.
+    Returns (o_unpacked, o_sparse, q_ffa, k_ffa, v_ffa) with gradients enabled.
     """
-    q_ffa = pack_q_for_ffa(q, NHK, SparsePackLayout.SEQ_MAJOR, requires_grad=test_bwd)
-    k_ffa, v_ffa = pack_kv_for_ffa(
-        k, v, SparsePackLayout.SEQ_MAJOR, requires_grad=test_bwd
+    q_ffa = pack_q_for_ffa(q, NHK, SparsePackLayout.SEQ_MAJOR, requires_grad=True)
+    k_ffa, v_ffa = pack_kv_for_ffa(k, v, SparsePackLayout.SEQ_MAJOR, requires_grad=True)
+
+    o_sparse, _ = flex_flash_attn_func(
+        q_ffa,
+        k_ffa,
+        v_ffa,
+        index_sparse_indices=index_sparse_indices,
+        q_block_size=1,
+        sparse_k_block_size=sparse_k_block_size,
+        pack_gqa=pack_gqa,
+        swap_ab=swap_ab,
+        ref_block_size=ref_block_size,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
-
-    if test_bwd:
-        o_sparse, _ = flex_flash_attn_func(
-            q_ffa,
-            k_ffa,
-            v_ffa,
-            index_sparse_indices=index_sparse_indices,
-            q_block_size=1,
-            sparse_k_block_size=sparse_k_block_size,
-            pack_gqa=pack_gqa,
-            swap_ab=swap_ab,
-            ref_block_size=ref_block_size,
-            swap_bwd_qk_loop=swap_bwd_qk_loop,
-        )
-        o_reshaped = unpack_ffa_output(
-            o_sparse,
-            B=B,
-            S=S_q,
-            NHK=NHK,
-            layout=SparsePackLayout.SEQ_MAJOR,
-        )
-        return o_reshaped, o_sparse, q_ffa, k_ffa, v_ffa
-    else:
-        with torch.no_grad():
-            o_sparse, _ = flex_flash_attn_func(
-                q_ffa,
-                k_ffa,
-                v_ffa,
-                index_sparse_indices=index_sparse_indices,
-                q_block_size=1,
-                sparse_k_block_size=sparse_k_block_size,
-                pack_gqa=pack_gqa,
-                swap_ab=swap_ab,
-                ref_block_size=ref_block_size,
-            )
-        return unpack_ffa_output(
-            o_sparse,
-            B=B,
-            S=S_q,
-            NHK=NHK,
-            layout=SparsePackLayout.SEQ_MAJOR,
-        )
+    o_unpacked = unpack_ffa_output(
+        o_sparse,
+        B=B,
+        S=S_q,
+        NHK=NHK,
+        layout=SparsePackLayout.SEQ_MAJOR,
+    )
+    return o_unpacked, o_sparse, q_ffa, k_ffa, v_ffa
 
 
-def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True):
+def _run_index_sparse_config(device, cfg: dict[str, Any]):
     """Run one index_sparse_indices test config and assert against SDPA."""
     set_random_seed(SEED)
     B = cfg["B"]
@@ -196,7 +173,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
         sparse_k_block_size=sparse_k_block_size,
     )
 
-    result = _run_sparse_attn_and_get_output(
+    o_ffa, o_sparse, q_ffa, k_ffa, v_ffa = _run_sparse_attn_and_get_output(
         q,
         k,
         v,
@@ -210,14 +187,8 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
         swap_ab=swap_ab,
         ref_block_size=ref_block_size,
         sparse_k_block_size=sparse_k_block_size,
-        test_bwd=test_bwd,
         swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
-
-    if test_bwd:
-        o_ffa, o_sparse, q_ffa, k_ffa, v_ffa = result
-    else:
-        o_ffa = result
 
     sdpa_mask = _build_sdpa_mask(
         index_sparse_indices,
@@ -231,83 +202,82 @@ def _run_index_sparse_config(device, cfg: dict[str, Any], test_bwd: bool = True)
     )
 
     test_case = (
-        f"[NHQ={cfg['NHQ']},NHK={cfg['NHK']},S_q={cfg.get('S_q', cfg.get('S'))},S_kv={cfg.get('S_kv', cfg.get('S'))},"
+        f"[NHQ={cfg['NHQ']},NHK={cfg['NHK']},S_q={cfg.get('S_q', cfg.get('S'))},"
+        f"S_kv={cfg.get('S_kv', cfg.get('S'))},"
         f"B={B},D={D},topk={topk},max_topk={max_topk},pack_gqa={pack_gqa},"
         f"swap_ab={swap_ab},sparse_k_block_size={sparse_k_block_size},dtype={dtype},"
         f"flat:NHQ_eff={NHQ},S_q_eff={S_q},S_kv_eff={S_kv}]"
     )
 
-    compare_sdpa_fwd(
-        o_ffa, q, k, v, sdpa_mask, B=B, NHQ=NHQ, NHK=NHK, atol=atol, test_case=test_case
+    o_ref = sdpa_ref_output(q, k, v, sdpa_mask, B=B, NHQ=NHQ, NHK=NHK)
+    compare_sdpa_fwd(o_ffa, o_ref, atol=atol, test_case=test_case)
+
+    do = torch.randn_like(o_sparse)
+    o_sparse.backward(do)
+
+    bwd_atol = cfg.get("bwd_atol", DEFAULT_BWD_DQ_ATOL)
+    do_unpacked = unpack_ffa_output(
+        do,
+        B=B,
+        S=S_q,
+        NHK=NHK,
+        layout=SparsePackLayout.SEQ_MAJOR,
+    )
+    sdpa_dq, sdpa_dk, sdpa_dv = sdpa_ref_bwd_grads(
+        do_unpacked,
+        q,
+        k,
+        v,
+        sdpa_mask,
+        NHQ=NHQ,
+        NHK=NHK,
+    )
+    dq_ffa = rearrange(
+        q_ffa.grad,
+        "(b s h1) h2 d -> b (h1 h2) s d",
+        b=B,
+        h1=NHK,
+        s=S_q,
+    )
+    dk_ffa = rearrange(k_ffa.grad, "(b s h) 1 d -> b h s d", b=B, s=S_kv, h=NHK)
+    dv_ffa = rearrange(v_ffa.grad, "(b s h) 1 d -> b h s d", b=B, s=S_kv, h=NHK)
+    compare_sdpa_bwd_all(
+        ffa_dq=dq_ffa,
+        ffa_dk=dk_ffa,
+        ffa_dv=dv_ffa,
+        sdpa_dq=sdpa_dq,
+        sdpa_dk=sdpa_dk,
+        sdpa_dv=sdpa_dv,
+        test_case=test_case,
+        dq_atol=bwd_atol,
     )
 
-    if test_bwd:
-        do = torch.randn_like(o_sparse)
-        o_sparse.backward(do)
+    if cfg.get("check_deterministic", True) and swap_bwd_qk_loop is not True:
+        do_det = torch.randn_like(q_ffa)
 
-        bwd_atol = cfg.get("bwd_atol", DEFAULT_BWD_DQ_ATOL)
-        do_unpacked = unpack_ffa_output(
-            do,
-            B=B,
-            S=S_q,
-            NHK=NHK,
-            layout=SparsePackLayout.SEQ_MAJOR,
-        )
-        sdpa_dq, sdpa_dk, sdpa_dv = sdpa_ref_bwd_grads(
-            do_unpacked,
-            q,
-            k,
-            v,
-            sdpa_mask,
-            NHQ=NHQ,
-            NHK=NHK,
-        )
-        dq_ffa = rearrange(
-            q_ffa.grad,
-            "(b s h1) h2 d -> b (h1 h2) s d",
-            b=B,
-            h1=NHK,
-            s=S_q,
-        )
-        dk_ffa = rearrange(k_ffa.grad, "(b s h) 1 d -> b h s d", b=B, s=S_kv, h=NHK)
-        dv_ffa = rearrange(v_ffa.grad, "(b s h) 1 d -> b h s d", b=B, s=S_kv, h=NHK)
-        compare_sdpa_bwd_all(
-            ffa_dq=dq_ffa,
-            ffa_dk=dk_ffa,
-            ffa_dv=dv_ffa,
-            sdpa_dq=sdpa_dq,
-            sdpa_dk=sdpa_dk,
-            sdpa_dv=sdpa_dv,
-            test_case=test_case,
-            dq_atol=bwd_atol,
-        )
+        def _run_det():
+            q2 = q_ffa.clone().detach().requires_grad_(True)
+            k2 = k_ffa.clone().detach().requires_grad_(True)
+            v2 = v_ffa.clone().detach().requires_grad_(True)
+            o2, _ = flex_flash_attn_func(
+                q2,
+                k2,
+                v2,
+                index_sparse_indices=index_sparse_indices,
+                q_block_size=1,
+                sparse_k_block_size=sparse_k_block_size,
+                pack_gqa=pack_gqa,
+                swap_ab=swap_ab,
+                ref_block_size=ref_block_size,
+                swap_bwd_qk_loop=swap_bwd_qk_loop,
+                deterministic=True,
+            )
+            o2.backward(do_det)
+            return o2.detach(), q2.grad.detach()
 
-        if cfg.get("check_deterministic", True) and swap_bwd_qk_loop is not True:
-            do_det = torch.randn_like(q_ffa)
-
-            def _run_det():
-                q2 = q_ffa.clone().detach().requires_grad_(True)
-                k2 = k_ffa.clone().detach().requires_grad_(True)
-                v2 = v_ffa.clone().detach().requires_grad_(True)
-                o2, _ = flex_flash_attn_func(
-                    q2,
-                    k2,
-                    v2,
-                    index_sparse_indices=index_sparse_indices,
-                    q_block_size=1,
-                    sparse_k_block_size=sparse_k_block_size,
-                    pack_gqa=pack_gqa,
-                    swap_ab=swap_ab,
-                    ref_block_size=ref_block_size,
-                    swap_bwd_qk_loop=swap_bwd_qk_loop,
-                    deterministic=True,
-                )
-                o2.backward(do_det)
-                return o2.detach(), q2.grad.detach()
-
-            det_errs = check_ffa_deterministic_twice(_run_det, test_case=test_case)
-            if det_errs:
-                raise AssertionError("\n".join(det_errs))
+        det_errs = check_ffa_deterministic_twice(_run_det, test_case=test_case)
+        if det_errs:
+            raise AssertionError("\n".join(det_errs))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -611,7 +581,7 @@ class TestIndexSparseSweep(DistTestBase):
             "pack_gqa": True,
             "swap_bwd_qk_loop": True,
         }
-        _run_index_sparse_config(self.device, config, test_bwd=True)
+        _run_index_sparse_config(self.device, config)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -788,7 +758,6 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             S = 1024
             topk = max(2, 128 // kbs)
 
-        test_bwd = kbs >= 128 and kbs < 256
         config: dict[str, Any] = {
             "B": 1,
             "S": S,
@@ -809,7 +778,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
         }
         with inner_loop_env(inner_env):
-            _run_index_sparse_config(self.device, config, test_bwd=test_bwd)
+            _run_index_sparse_config(self.device, config)
 
     @with_run_in_mp
     @parameterize("head_config", _PARAM_SPACE["head_config"])
@@ -861,7 +830,7 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
         }
         with inner_loop_env(inner_env):
-            _run_index_sparse_config(self.device, config, test_bwd=True)
+            _run_index_sparse_config(self.device, config)
 
 
 if __name__ == "__main__":

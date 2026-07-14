@@ -32,6 +32,7 @@ from tests.test_attn.sparse_test_utils import (
     pack_kv_for_ffa,
     pack_q_for_ffa,
     sdpa_ref_bwd_grads,
+    sdpa_ref_output,
     unpack_ffa_output,
 )
 
@@ -130,10 +131,6 @@ class TestBlockSparseSweep(DistTestBase):
     def test_block_sparse_mqa_sweep(
         self, q_seqlen, kv_seqlen, sparsity, swap_bwd_qk_loop
     ):
-        from magi_attention.utils.sparse_utils import (
-            generate_ranges_from_block_mask_triton,
-        )
-
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.manual_seed(42)
@@ -406,17 +403,8 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
             k_size,
             nhk,
         )
-        compare_sdpa_fwd(
-            o_unpacked,
-            q,
-            k,
-            v,
-            sdpa_mask,
-            B=1,
-            NHQ=nhq,
-            NHK=nhk,
-            test_case=test_case,
-        )
+        o_ref = sdpa_ref_output(q, k, v, sdpa_mask, B=1, NHQ=nhq, NHK=nhk)
+        compare_sdpa_fwd(o_unpacked, o_ref, test_case=test_case)
 
         sdpa_dq, sdpa_dk, sdpa_dv = sdpa_ref_bwd_grads(
             do,
