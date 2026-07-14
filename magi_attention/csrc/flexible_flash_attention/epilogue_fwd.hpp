@@ -135,8 +135,12 @@ struct CollectiveEpilogueFwd {
   // when sizeof(Element) == 4, we use Swizzle<2,3,2>, otherwize we use swizzle as fa3 to avoid bank conflict
   using SmemLayoutAtomO = decltype(composition(Swizzle<kSwizzle, kSwizzleBase, kSwizzleShift>{}, Layout<Shape<_8, Int<kBlockKGmem>>, Stride<Int<kBlockKGmem>, _1>>{}));
   using SmemLayoutOSTS = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 1>(TileShape_MNK_PV{})));
+  using SmemLayoutOLinear = Layout<Shape<Int<kBlockM>, Int<kHeadDim>>, Stride<Int<kHeadDim>, _1>>;
 
-  using SmemLayoutO = std::conditional_t<kOuterStoreMode == OuterStoreMode::Tma, SmemLayoutOTMA, std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>>;
+  using SmemLayoutO = std::conditional_t<
+      kOuterStoreMode == OuterStoreMode::Tma,
+      SmemLayoutOTMA,
+      std::conditional_t<kOuterStoreMode == OuterStoreMode::Tma1d, SmemLayoutOLinear, std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>>>;
 
   // Define ShapeO and StrideO based on PackGQA
   using ShapeO = std::conditional_t<
@@ -635,8 +639,23 @@ struct CollectiveEpilogueFwd {
         tma_store_arrive();
       }
       tma_store_wait<0>();
+    } else if constexpr (kOuterStoreMode == OuterStoreMode::Tma1d) {
+      // TMA1d path: per-row cp.async.bulk from linear (unswizzled) SMEM to GMEM.
+      // SmemLayoutOLinear guarantees each row is kHeadDim contiguous elements in SMEM.
+      // Per-row bulk copy handles non-contiguous GMEM strides (PackGQA hierarchical stride).
+      cutlass::arch::fence_view_async_shared();
+      int const rows_to_store = min(kBlockM, seqlen_o - m_block * kBlockM);
+      if (cute::elect_one_sync()) {
+        constexpr int kRowBytes = kHeadDim * int(sizeof(Element));
+        Element const* smem_base = sO.data().get();
+        for (int row = 0; row < rows_to_store; ++row) {
+          SM90_BULK_COPY_S2G::copy(smem_base + row * kHeadDim, &gO(row, _0{}), kRowBytes);
+        }
+        tma_store_arrive();
+      }
+      tma_store_wait<0>();
     } else {
-      // Non-TMA path: smem → registers → gmem with per-thread vectorized stores
+      // Stg path: smem → registers → gmem with per-thread vectorized stores
       Tensor tOsO = gmem_thr_copy_O.partition_S(sO);
       Tensor tOrFinalO = make_fragment_like(tOsO);
       cute::copy(gmem_tiled_copy_O, tOsO, tOrFinalO);

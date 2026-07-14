@@ -33,12 +33,13 @@ enum class InnerLoadMode : int { Tma = 0, CpAsync = 2 };
 enum class InnerStoreMode : int { Tma = 0, Tma1d = 1, AtomicAdd = 2, BypassSmem = 3 };
 
 // Outer-loop store strategy (epilogue O/dQ/dKV write to global memory).
-// Tma: full-tile 2D TMA store (SM90_TMA_STORE or SM90_TMA_REDUCE_ADD).
-//      SMEM layout must be GMMA K-major swizzled (TMA descriptor encodes the layout).
-// Stg: per-thread R2S to SMEM then STG.128 to GMEM with residual guard (flash::copy).
-//      FWD uses bank-conflict-free SmemLayoutOSTS (FA3-style swizzle) when SwapAB=false.
-// No Tma1d here: 1D bulk copy targets scatter (non-contiguous GMEM destinations);
-// outer store always writes contiguous tiles, so 2D TMA or per-thread STG suffice.
-enum class OuterStoreMode : int { Tma = 0, Stg = 1 };
+// Tma:   full-tile 2D TMA store (SM90_TMA_STORE or SM90_TMA_REDUCE_ADD).
+//        SMEM layout must be GMMA K-major swizzled (TMA descriptor encodes the layout).
+// Stg:   per-thread R2S to SMEM then STG.128 to GMEM with residual guard (flash::copy).
+//        FWD uses bank-conflict-free SmemLayoutOSTS (FA3-style swizzle) when SwapAB=false.
+// Tma1d: R2S to linear (unswizzled) SMEM, then per-row cp.async.bulk S2G.
+//        Linear layout enables bulk DMA but may have R2S bank conflicts.
+//        Experimental: benchmarks needed to compare vs Stg (STS swizzle + STG.128).
+enum class OuterStoreMode : int { Tma = 0, Stg = 1, Tma1d = 2 };
 
 } // namespace flash

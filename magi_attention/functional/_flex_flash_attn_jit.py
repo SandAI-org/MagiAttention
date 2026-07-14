@@ -617,11 +617,11 @@ def get_ffa_jit_spec(
     # BWD: Tma when OuterStoreNeedReduction=true and not IndexSparse partial tile.
     _outer_store_env = os.environ.get("MAGI_ATTENTION_FFA_OUTER_STORE_MODE")
     if _outer_store_env is not None:
-        _osm_map = {"tma": "0", "stg": "1", "0": "0", "1": "1"}
+        _osm_map = {"tma": "0", "stg": "1", "tma1d": "2", "0": "0", "1": "1", "2": "2"}
         _osm_lower = _outer_store_env.lower()
         assert (
             _osm_lower in _osm_map
-        ), f"MAGI_ATTENTION_FFA_OUTER_STORE_MODE must be tma/stg, got {_outer_store_env}"
+        ), f"MAGI_ATTENTION_FFA_OUTER_STORE_MODE must be tma/stg/tma1d, got {_outer_store_env}"
         extra_template_args["outer_store_mode"] = _osm_map[_osm_lower]
         uri += f"_osm{_osm_map[_osm_lower]}"
     elif direction == "fwd":
