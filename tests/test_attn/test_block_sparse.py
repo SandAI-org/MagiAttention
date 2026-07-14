@@ -202,6 +202,9 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
     """BlockSparse Comprehensive sweep — CI.
 
     Cross-product of GQA config × block size × inner env variants.
+    Split by head_dim into two @with_run_in_mp methods so each subprocess
+    loads at most ~120 unique kernel .so files, staying well under the
+    PTHREAD_KEYS_MAX=1024 TSS key limit.
     """
 
     # parameter space shared by @parameterize and precompile_kernel_specs
@@ -287,16 +290,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                                 )
         return specs
 
-    @with_run_in_mp
-    @parameterize("nhq_nhk", _PARAM_SPACE["nhq_nhk"])
-    @parameterize("head_dim", _PARAM_SPACE["head_dim"])
-    @parameterize("q_size", _PARAM_SPACE["q_size"])
-    @parameterize("k_size", _PARAM_SPACE["k_size"])
-    @parameterize("sparsity_ratio", _PARAM_SPACE["sparsity_ratio"])
-    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
-    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
-    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
-    def test_block_sparse_comprehensive_sweep(
+    def _run_comprehensive_case(
         self,
         nhq_nhk,
         head_dim,
@@ -425,6 +419,64 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
             dk_ref_packed,
             dv_ref_packed,
             test_case=test_case,
+        )
+
+    @with_run_in_mp
+    @parameterize("nhq_nhk", _PARAM_SPACE["nhq_nhk"])
+    @parameterize("q_size", _PARAM_SPACE["q_size"])
+    @parameterize("k_size", _PARAM_SPACE["k_size"])
+    @parameterize("sparsity_ratio", _PARAM_SPACE["sparsity_ratio"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
+    def test_block_sparse_comprehensive_sweep_hd64(
+        self,
+        nhq_nhk,
+        q_size,
+        k_size,
+        sparsity_ratio,
+        inner_dir,
+        inner_load_mode,
+        inner_store_mode,
+    ):
+        self._run_comprehensive_case(
+            nhq_nhk,
+            64,
+            q_size,
+            k_size,
+            sparsity_ratio,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+        )
+
+    @with_run_in_mp
+    @parameterize("nhq_nhk", _PARAM_SPACE["nhq_nhk"])
+    @parameterize("q_size", _PARAM_SPACE["q_size"])
+    @parameterize("k_size", _PARAM_SPACE["k_size"])
+    @parameterize("sparsity_ratio", _PARAM_SPACE["sparsity_ratio"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
+    def test_block_sparse_comprehensive_sweep_hd128(
+        self,
+        nhq_nhk,
+        q_size,
+        k_size,
+        sparsity_ratio,
+        inner_dir,
+        inner_load_mode,
+        inner_store_mode,
+    ):
+        self._run_comprehensive_case(
+            nhq_nhk,
+            128,
+            q_size,
+            k_size,
+            sparsity_ratio,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
         )
 
 
