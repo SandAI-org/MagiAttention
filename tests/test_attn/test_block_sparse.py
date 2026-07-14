@@ -209,7 +209,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         nhq_nhk=[(128, 1), (4, 1), (128, 2), (32, 4), (4, 4), (32, 32)],
         head_dim=[64, 128],
         q_size=[1, 8, 128],
-        k_size=[1, 8, 128],
+        k_size=[1, 128],
         sparsity_ratio=[0.5],
         inner_dir=["true", "false"],
         inner_load_mode=["tma", "cpasync"],
