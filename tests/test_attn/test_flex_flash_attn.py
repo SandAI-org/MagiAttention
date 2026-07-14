@@ -277,16 +277,17 @@ class TestFlexFlashAttn(DistTestBase):
                         block_sparse=block_sparse,
                     )
                     if not block_sparse:
-                        add_ffa_spec(
-                            specs,
-                            direction="bwd",
-                            head_dim=hd,
-                            compute_dtype=dt,
-                            bwd_inner_loop_k=True,
-                            disable_dq_atomic=True,
-                            pack_gqa=pack_gqa,
-                            pack_gqa_factor=pgf,
-                        )
+                        for dda in [True, False]:
+                            add_ffa_spec(
+                                specs,
+                                direction="bwd",
+                                head_dim=hd,
+                                compute_dtype=dt,
+                                bwd_inner_loop_k=True,
+                                disable_dq_atomic=dda,
+                                pack_gqa=pack_gqa,
+                                pack_gqa_factor=pgf,
+                            )
 
         # ═══════════════════════════════════════════════════════════════════
         # Section 2: Feature combos (det, rm, rml) on dense kernels

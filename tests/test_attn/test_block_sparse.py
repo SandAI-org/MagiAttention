@@ -268,7 +268,6 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                                 direction="fwd",
                                 env=env_fwd,
                                 disable_atomic=True,
-                                ref_block_size=(64, 128),
                                 **common,
                             )
                             for inner_store in cls._PARAM_SPACE["inner_store_mode"]:
