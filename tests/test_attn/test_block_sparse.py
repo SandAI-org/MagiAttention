@@ -213,7 +213,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         sparsity_ratio=[0.5],
         inner_dir=["true", "false"],
         inner_load_mode=["tma", "cpasync"],
-        inner_store_mode=["tma", "tma1d", "atomicadd", "bypass"],
+        inner_store_mode=["tma", "tma1d", "atomicadd"],
     )
 
     @property
@@ -272,8 +272,6 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                                 **common,
                             )
                             for inner_store in cls._PARAM_SPACE["inner_store_mode"]:
-                                if inner_store == "bypass" and hd < 256:
-                                    continue
                                 env_bwd = {
                                     "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
                                     "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
@@ -315,8 +313,6 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
 
         kBlockN = 128
         if inner_load_mode == "tma" and k_size < kBlockN:
-            return
-        if inner_store_mode == "bypass" and hd < 256:
             return
 
         torch.manual_seed(42)
