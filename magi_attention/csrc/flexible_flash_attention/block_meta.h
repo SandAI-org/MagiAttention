@@ -349,13 +349,18 @@ struct BlockSparseBlockMeta {
     }
   }
 
-  // Return token_head_compound_idx for the first row of the current tile:
-  // token_idx * PackGQAFactor + g_within_group (or plain token_idx when !PackGQA).
+  // Return token_head_compound_idx for the first (lowest) row of the current tile.
   // Used by sparse TMA to compute absolute tile coordinates.
+  // MaxToMin: group 0's cursor sits at offset (NumTokensPerLdstGroup_ - 1) above
+  // the tile's actual start; subtract that offset to get the true first row.
   CUTLASS_DEVICE
   int get_tile_first_compound_idx() const {
     static_assert(IsProducer, "get_tile_first_compound_idx() is producer-only");
-    return packed_range(cur_range_idx).x + cur_range_inner_idx;
+    int compound = packed_range(cur_range_idx).x + cur_range_inner_idx;
+    if constexpr (InnerDirMaxToMin_) {
+      compound -= (NumTokensPerLdstGroup_ - 1);
+    }
+    return compound;
   }
 
   CUTLASS_DEVICE
