@@ -595,6 +595,10 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     Orthogonal parameterization:
       head_config × head_dim × kbs × inner_dir × inner_load_mode × inner_store_mode
     Skips invalid combos (kbs>1 requires NHK=1+PackGQA+D=128).
+
+    Split by head_dim into separate @with_run_in_mp methods so each subprocess
+    loads at most ~80 unique kernel .so files, staying well under the
+    PTHREAD_KEYS_MAX=1024 TSS key limit.
     """
 
     # parameter space shared by @parameterize and precompile_kernel_specs
@@ -722,21 +726,16 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
     def timeout(self) -> int:
         return 1200
 
-    @with_run_in_mp
-    @parameterize("head_config", _PARAM_SPACE["head_config"])
-    @parameterize("hd", _PARAM_SPACE["head_dim"])
-    @parameterize("kbs", _PARAM_SPACE["kbs"])
-    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
-    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
-    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
-    def test_index_sparse_comprehensive(
-        self, head_config, hd, kbs, inner_dir, inner_load_mode, inner_store_mode
+    def _run_comprehensive_case(
+        self,
+        head_config,
+        hd,
+        kbs,
+        inner_dir,
+        inner_load_mode,
+        inner_store_mode,
+        swap_bwd_qk_loop=False,
     ):
-        """LoopQ (default) direction — full orthogonal sweep.
-
-        BWD LoopQ only tested for kbs>=128 (contiguous TMA loads); smaller kbs
-        uses scatter-load which is too slow for comprehensive sweeps.
-        """
         nhq, nhk, pack_gqa = head_config
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
@@ -760,8 +759,11 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             "topk": topk,
             "pack_gqa": pack_gqa,
             "sparse_k_block_size": kbs,
-            "check_deterministic": False,
         }
+        if swap_bwd_qk_loop:
+            config["swap_bwd_qk_loop"] = True
+        else:
+            config["check_deterministic"] = False
         if kbs > 1:
             config["max_topk"] = topk
 
@@ -775,53 +777,77 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
 
     @with_run_in_mp
     @parameterize("head_config", _PARAM_SPACE["head_config"])
-    @parameterize("hd", _PARAM_SPACE["head_dim"])
     @parameterize("kbs", _PARAM_SPACE["kbs"])
     @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
     @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
     @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
-    def test_index_sparse_comprehensive_loopk(
-        self, head_config, hd, kbs, inner_dir, inner_load_mode, inner_store_mode
+    def test_index_sparse_comprehensive_hd64(
+        self, head_config, kbs, inner_dir, inner_load_mode, inner_store_mode
     ):
-        """LoopK direction — tests dQ non-atomic path.
+        self._run_comprehensive_case(
+            head_config,
+            64,
+            kbs,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+        )
 
-        When pack_gqa_factor < 128, runtime auto-falls back to LoopQ.
-        """
-        nhq, nhk, pack_gqa = head_config
-        if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
-            return
-        kBlockN = 128
-        pgf = nhq // nhk if pack_gqa and nhk > 0 else 1
-        if inner_load_mode == "tma" and (kbs < kBlockN or pgf < kBlockN):
-            return
+    @with_run_in_mp
+    @parameterize("head_config", _PARAM_SPACE["head_config"])
+    @parameterize("kbs", _PARAM_SPACE["kbs"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
+    def test_index_sparse_comprehensive_hd128(
+        self, head_config, kbs, inner_dir, inner_load_mode, inner_store_mode
+    ):
+        self._run_comprehensive_case(
+            head_config,
+            128,
+            kbs,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+        )
 
-        if kbs <= 1:
-            S, topk = 256, 128
-        else:
-            S = 1024
-            topk = max(2, 128 // kbs)
+    @with_run_in_mp
+    @parameterize("head_config", _PARAM_SPACE["head_config"])
+    @parameterize("kbs", _PARAM_SPACE["kbs"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
+    def test_index_sparse_comprehensive_loopk_hd64(
+        self, head_config, kbs, inner_dir, inner_load_mode, inner_store_mode
+    ):
+        self._run_comprehensive_case(
+            head_config,
+            64,
+            kbs,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+            swap_bwd_qk_loop=True,
+        )
 
-        config: dict[str, Any] = {
-            "B": 1,
-            "S": S,
-            "NHQ": nhq,
-            "NHK": nhk,
-            "D": hd,
-            "topk": topk,
-            "pack_gqa": pack_gqa,
-            "sparse_k_block_size": kbs,
-            "swap_bwd_qk_loop": True,
-        }
-        if kbs > 1:
-            config["max_topk"] = topk
-
-        inner_env = {
-            "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
-            "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load_mode,
-            "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
-        }
-        with inner_loop_env(inner_env):
-            _run_index_sparse_config(self.device, config)
+    @with_run_in_mp
+    @parameterize("head_config", _PARAM_SPACE["head_config"])
+    @parameterize("kbs", _PARAM_SPACE["kbs"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
+    def test_index_sparse_comprehensive_loopk_hd128(
+        self, head_config, kbs, inner_dir, inner_load_mode, inner_store_mode
+    ):
+        self._run_comprehensive_case(
+            head_config,
+            128,
+            kbs,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+            swap_bwd_qk_loop=True,
+        )
 
 
 if __name__ == "__main__":
