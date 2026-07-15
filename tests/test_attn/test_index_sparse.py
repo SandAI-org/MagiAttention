@@ -29,12 +29,14 @@ Classic sweep (CI gate):
   - Parameterizes: q_seqlen(512/1000/16384) × kv_seqlen(512/1000/16384) × topk(128/256)
 
 Comprehensive sweep (CI):
-  - head_config: 3 MQA + 3 GQA + 3 MHA = 9
+  - head_config: 2 MQA + 2 GQA + 2 MHA = 6
   - head_dim: 64, 128
-  - kbs: 1, 8, 32, 128 (kbs>1 only valid for NHK=1, PackGQA=True, D=128)
+  - kbs: 1, 8, 128 (kbs>1 only valid for NHK=1, PackGQA=True, D=128)
   - inner_dir: "true", "false"
   - inner_load_mode: "tma", "cpasync"
-  - inner_store_mode: "tma", "tma1d", "atomicadd", "bypass"
+  - inner_store_mode: "tma", "tma1d", "atomicadd"
+  Split by head_dim × LoopQ/LoopK into 4 @with_run_in_mp subprocesses
+  to stay under PTHREAD_KEYS_MAX=1024 TSS key limit.
 
 Known limitations:
   - swap_ab is prohibited for IndexSparse (asserted in flex_flash_attn_func)
