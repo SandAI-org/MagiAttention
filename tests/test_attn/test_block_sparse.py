@@ -201,23 +201,19 @@ class TestBlockSparseSweep(DistTestBase):
 class TestBlockSparseComprehensiveSweep(DistTestBase):
     """BlockSparse Comprehensive sweep — CI.
 
-    Cross-product of GQA config × block size × inner env variants (LoopK only).
-    Split by head_dim into two @with_run_in_mp methods so each subprocess
-    loads at most ~120 unique kernel .so files, staying well under the
-    PTHREAD_KEYS_MAX=1024 TSS key limit.
-
-    Note: LoopQ is NOT tested here because LoopQ + block_sparse + TMA 2D
-    inner store has a known dQ correctness bug.  LoopQ for block_sparse
-    is still covered by TestBlockSparseSweep (default inner modes).
+    Cross-product of GQA config × block size × inner env variants × loop order.
+    Split by (head_dim, loop_order) into four @with_run_in_mp methods so each
+    subprocess loads at most ~120 unique kernel .so files, staying well under
+    the PTHREAD_KEYS_MAX=1024 TSS key limit.
     """
 
-    # parameter space shared by @parameterize and precompile_kernel_specs
     _PARAM_SPACE: dict[str, list] = dict(
         nhq_nhk=[(128, 1), (4, 1), (128, 2), (32, 4), (4, 4), (32, 32)],
         head_dim=[64, 128],
         q_size=[1, 8, 128],
         k_size=[1, 128],
         sparsity_ratio=[0.5],
+        swap_bwd_qk_loop=[True, False],
         inner_dir=["true", "false"],
         inner_load_mode=["tma", "cpasync"],
         inner_store_mode=["tma", "tma1d", "atomicadd"],
@@ -239,7 +235,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
     def precompile_kernel_specs(cls):
         """Standard precompile interface — see magi_attention/testing/precompile.py.
 
-        FWD + BWD InnerLoopK for each (pack_f × hd × k_size × inner modes) combo.
+        FWD + BWD (LoopK + LoopQ) for each (pack_f × hd × k_size × inner modes) combo.
         q_size and sparsity_ratio are runtime-only (don't affect compilation).
         """
         from magi_attention.testing.precompile import add_ffa_spec
@@ -283,15 +279,17 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                                     "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
                                     "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store,
                                 }
-                                add_ffa_spec(
-                                    specs,
-                                    direction="bwd",
-                                    env=env_bwd,
-                                    disable_dq_atomic=True,
-                                    bwd_inner_loop_k=True,
-                                    bwd_dq_bf16=True,
-                                    **common,
-                                )
+                                for swap in cls._PARAM_SPACE["swap_bwd_qk_loop"]:
+                                    add_ffa_spec(
+                                        specs,
+                                        direction="bwd",
+                                        env=env_bwd,
+                                        disable_atomic=not swap,
+                                        disable_dq_atomic=swap,
+                                        bwd_inner_loop_k=swap,
+                                        bwd_dq_bf16=swap,
+                                        **common,
+                                    )
         return specs
 
     def _run_comprehensive_case(
@@ -301,6 +299,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         q_size,
         k_size,
         sparsity_ratio,
+        swap_bwd_qk_loop,
         inner_dir,
         inner_load_mode,
         inner_store_mode,
@@ -312,6 +311,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         if inner_load_mode == "tma" and k_size < kBlockN:
             return
 
+        loop_tag = "loopk" if swap_bwd_qk_loop else "loopq"
         torch.manual_seed(42)
         seqlen = 2048
         dtype = torch.bfloat16
@@ -339,7 +339,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
             f"q={q_size},k={k_size}]"
             f"[sp={sparsity_ratio}]"
             f"[dir={inner_dir},load={inner_load_mode},"
-            f"store={inner_store_mode}]"
+            f"store={inner_store_mode},{loop_tag}]"
         )
 
         q_ranges, k_ranges = generate_ranges_from_block_mask_triton(
@@ -374,7 +374,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                 range_merge=True,
                 pack_gqa=True,
                 block_sparse=True,
-                swap_bwd_qk_loop=True,
+                swap_bwd_qk_loop=swap_bwd_qk_loop,
                 ref_block_size=(64, 128),
             )
             o_ffa.backward(do_packed)
@@ -449,6 +449,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
             q_size,
             k_size,
             sparsity_ratio,
+            True,
             inner_dir,
             inner_load_mode,
             inner_store_mode,
@@ -478,6 +479,67 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
             q_size,
             k_size,
             sparsity_ratio,
+            True,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+        )
+
+    @with_run_in_mp
+    @parameterize("nhq_nhk", _PARAM_SPACE["nhq_nhk"])
+    @parameterize("q_size", _PARAM_SPACE["q_size"])
+    @parameterize("k_size", _PARAM_SPACE["k_size"])
+    @parameterize("sparsity_ratio", _PARAM_SPACE["sparsity_ratio"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
+    def test_block_sparse_comprehensive_sweep_loopq_hd64(
+        self,
+        nhq_nhk,
+        q_size,
+        k_size,
+        sparsity_ratio,
+        inner_dir,
+        inner_load_mode,
+        inner_store_mode,
+    ):
+        self._run_comprehensive_case(
+            nhq_nhk,
+            64,
+            q_size,
+            k_size,
+            sparsity_ratio,
+            False,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+        )
+
+    @with_run_in_mp
+    @parameterize("nhq_nhk", _PARAM_SPACE["nhq_nhk"])
+    @parameterize("q_size", _PARAM_SPACE["q_size"])
+    @parameterize("k_size", _PARAM_SPACE["k_size"])
+    @parameterize("sparsity_ratio", _PARAM_SPACE["sparsity_ratio"])
+    @parameterize("inner_dir", _PARAM_SPACE["inner_dir"])
+    @parameterize("inner_load_mode", _PARAM_SPACE["inner_load_mode"])
+    @parameterize("inner_store_mode", _PARAM_SPACE["inner_store_mode"])
+    def test_block_sparse_comprehensive_sweep_loopq_hd128(
+        self,
+        nhq_nhk,
+        q_size,
+        k_size,
+        sparsity_ratio,
+        inner_dir,
+        inner_load_mode,
+        inner_store_mode,
+    ):
+        self._run_comprehensive_case(
+            nhq_nhk,
+            128,
+            q_size,
+            k_size,
+            sparsity_ratio,
+            False,
             inner_dir,
             inner_load_mode,
             inner_store_mode,

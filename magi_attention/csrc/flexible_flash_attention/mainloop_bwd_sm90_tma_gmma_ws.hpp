@@ -2061,10 +2061,11 @@ struct CollectiveMainloopBwdSm90 {
 
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         // 2D TMA reduce: entire tile written in one TMA reduce-add instruction.
-        // InnerLoopQ: all kBlockM compound indices map to one physical token (PackGQAFactor >= kBlockM).
+        // Use domain_offset to shift to the exact sparse origin (mirrors load at L1512-1513).
         if (lane_predicate) {
           int const tile_first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_store_staging_indices[0];
-          tma_inner_store(params.tma_add_dQ, sdQ, mdQ_reduce, TileShape_InnerDq{}, gQdOdQ_coord, tile_first_compound_idx / kBlockM);
+          auto const dq_sparse_off = make_coord(tile_first_compound_idx, _0{});
+          tma_inner_store(params.tma_add_dQ, sdQ, domain_offset(dq_sparse_off, mdQ_reduce), TileShape_InnerDq{}, gQdOdQ_coord, 0);
         }
       } else if constexpr (IsSparse) {
         // Per-row 1D bulk reduce fallback for non-MQA scatter
@@ -2895,11 +2896,12 @@ struct CollectiveMainloopBwdSm90 {
             BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
 
             if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
-              // IndexSparse TMA reduce: single thread issues one 2D TMA reduce-add instruction
+              // Sparse TMA reduce: use domain_offset at exact sparse origin (mirrors load at L1512).
               if (thread_idx == 0) {
                 Tensor sdQ_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_inner_dq.data()), SmemLayoutdQSwizzled{});
                 int const compound_idx = shared_storage.tensors.mainloop.smem_sparse_inner_indices[smem_pipe_read_q.index() * kBlockM];
-                tma_inner_store(params.tma_add_dQ, sdQ_tma, mdQ_reduce, TileShape_InnerDq{}, gQdOdQ_coord, compound_idx / kBlockM);
+                auto const dq_sparse_off = make_coord(compound_idx, _0{});
+                tma_inner_store(params.tma_add_dQ, sdQ_tma, domain_offset(dq_sparse_off, mdQ_reduce), TileShape_InnerDq{}, gQdOdQ_coord, 0);
               }
             } else if constexpr (IsSparse) {
               // BlockSparse scatter reduce: per-row 1D bulk reduce
