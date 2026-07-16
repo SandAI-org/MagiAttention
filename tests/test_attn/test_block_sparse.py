@@ -243,6 +243,7 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         specs: dict = {}
         seen_pack_f: set = set()
         kBlockN = 128
+        kBlockM = 128
         for nhq, nhk in cls._PARAM_SPACE["nhq_nhk"]:
             pack_f = nhq // nhk
             if pack_f in seen_pack_f:
@@ -280,6 +281,12 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                                     "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store,
                                 }
                                 for swap in cls._PARAM_SPACE["swap_bwd_qk_loop"]:
+                                    if (
+                                        not swap
+                                        and inner_load == "tma"
+                                        and pack_f < kBlockM
+                                    ):
+                                        continue
                                     add_ffa_spec(
                                         specs,
                                         direction="bwd",
@@ -308,7 +315,15 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         hd = head_dim
 
         kBlockN = 128
+        kBlockM = 128
         if inner_load_mode == "tma" and k_size < kBlockN:
+            return
+        pack_gqa_factor = nhq // nhk
+        if (
+            not swap_bwd_qk_loop
+            and inner_load_mode == "tma"
+            and pack_gqa_factor < kBlockM
+        ):
             return
 
         loop_tag = "loopk" if swap_bwd_qk_loop else "loopq"

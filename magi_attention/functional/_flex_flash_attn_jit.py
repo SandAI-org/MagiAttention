@@ -494,7 +494,7 @@ def get_ffa_jit_spec(
             _kblock_n = 128
             _contiguous = sparse_k_block_size >= _kblock_n
             if direction == "bwd" and not bwd_inner_loop_k:
-                _contiguous = pack_gqa and (not index_sparse or pack_gqa_factor >= 128)
+                _contiguous = pack_gqa and pack_gqa_factor >= 128
             _auto_mode = "0" if _contiguous else "2"
             extra_template_args["inner_load_mode"] = _auto_mode
     else:

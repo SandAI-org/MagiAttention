@@ -171,11 +171,12 @@ struct CollectiveMainloopBwdSm90 {
   //   Dense: always contiguous.
   //   InnerLoopQ (inner=Q/dO): PackGQA packs heads into consecutive rows:
   //     BlockSparse: always contiguous (packed rows = token × heads, sequential).
-  //     IndexSparse: contiguous only if one Q token fills a tile (PackGQAFactor >= kBlockM).
+  //     Both: contiguous only when one packed-Q token fills a tile (PackGQAFactor >= kBlockM).
+  //     BlockSparse tiles span multiple ranges that may have gaps when PackGQAFactor < kBlockM.
   //   InnerLoopK (inner=K/V): each tile maps to one K block:
   //     BlockSparse: contiguous when kbs >= kBlockN (one block = one tile).
   //     IndexSparse: contiguous when kbs >= kBlockN AND PackGQAFactor >= kBlockM.
-  static constexpr bool kInnerTilesContiguous = !IsSparse || (!BwdInnerLoopK && PackGQA && (!IndexSparse || PackGQAFactor >= kBlockM)) ||
+  static constexpr bool kInnerTilesContiguous = !IsSparse || (!BwdInnerLoopK && PackGQA && PackGQAFactor >= kBlockM) ||
       (BwdInnerLoopK && ((BlockSparse && SparseKBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && SparseKBlockSize >= kBlockN)));
   static constexpr InnerLoadMode kInnerLoadMode = static_cast<InnerLoadMode>(InnerLoadMode_);
   static_assert(kInnerLoadMode != InnerLoadMode::Tma || kInnerTilesContiguous, "TMA inner load requires contiguous tiles");
@@ -2699,7 +2700,11 @@ struct CollectiveMainloopBwdSm90 {
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
         int const seqlenq_row_limit = [&]() {
           if constexpr (BlockSparse) {
-            return kBlockM - block_meta.num_invalid_token - thread_row_offset;
+            if constexpr (BlockMetaT::kPaddingAtLowEnd) {
+              return block_meta.num_invalid_token - thread_row_offset;
+            } else {
+              return kBlockM - block_meta.num_invalid_token - thread_row_offset;
+            }
           } else {
             int const seqlen_q_packed_local = !PackGQA ? block_meta.seqlen_info.seqlen_q : block_meta.seqlen_info.seqlen_q * PackGQAFactor;
             return seqlen_q_packed_local - m_block * kBlockM - thread_row_offset;
@@ -2708,7 +2713,17 @@ struct CollectiveMainloopBwdSm90 {
 
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
-          bool const is_oob = int(get<Row>(t0ScS_rowcol(mi, _0{}))) >= seqlenq_row_limit;
+          int const row_pos = int(get<Row>(t0ScS_rowcol(mi, _0{})));
+          bool is_oob;
+          if constexpr (BlockSparse) {
+            if constexpr (BlockMetaT::kPaddingAtLowEnd) {
+              is_oob = row_pos < seqlenq_row_limit;
+            } else {
+              is_oob = row_pos >= seqlenq_row_limit;
+            }
+          } else {
+            is_oob = row_pos >= seqlenq_row_limit;
+          }
           float lse_scaled = get_lse_scaled(mi);
           lse_scaled = is_oob ? cutlass::platform::numeric_limits<float>::infinity() : lse_scaled;
 #pragma unroll
