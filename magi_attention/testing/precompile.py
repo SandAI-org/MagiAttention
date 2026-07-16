@@ -112,6 +112,11 @@ def add_ffa_spec(
     """
     from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_spec
 
+    # Mirror runtime auto-set in flex_flash_attn_func:
+    # BlockSparse always requires RangeMerge (C++ static_assert).
+    if block_sparse:
+        range_merge = True
+
     # flex_flash_attn_func forces ref_block_size=(128,128) for sparse FWD paths;
     # BWD never passes ref_block_size (tile is inferred from head_dim alone).
     if direction == "fwd" and (index_sparse or block_sparse) and ref_block_size is None:
