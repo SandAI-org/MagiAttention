@@ -108,6 +108,92 @@ attention computation, and the output is cast back to the original input dtype.
 
 ## For Performance
 
+### FFA BWD Kernel Tuning (Advanced)
+
+The following environment variables control low-level kernel configuration for the backward pass.
+They override compile-time defaults and produce distinct JIT-cached kernels per configuration.
+**For expert use only** — incorrect combinations may cause correctness issues or crashes.
+
+**MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS**
+
+- **Defaults to:** auto (40 for sparse, 64 for dense)
+- **Used by:** `_flex_flash_attn_jit.py` → `kBwdProducerRegs` / `kBwdConsumerRegs`
+
+Override the `setmaxnreg` register quota for the producer warp group. Consumer regs are derived
+to satisfy the per-SM register budget constraint: `1×ProducerRegs + 2×ConsumerRegs ≤ 504`.
+
+**MAGI_ATTENTION_FFA_BWD_TILE_M** / **MAGI_ATTENTION_FFA_BWD_TILE_N**
+
+- **Defaults to:** `0` (auto from `tile_size_bwd_sm90()`)
+- **Used by:** `kBwdTileM` / `kBwdTileN` in the kernel
+
+Override the MMA tile dimensions (M×N) for the backward kernel. Common values: 64, 128.
+
+**MAGI_ATTENTION_FFA_BWD_STAGES** / **MAGI_ATTENTION_FFA_BWD_STAGES_DS** / **MAGI_ATTENTION_FFA_BWD_STAGES_V**
+
+- **Defaults to:** `0` (auto: stages=2, stages_ds=1 or 2, stages_v=stages)
+- **Used by:** `kBwdStages` / `kBwdStagesDs` / `kBwdStagesV`
+
+Override the number of pipeline stages for K (main pipeline), dS (double buffer), and V.
+
+**MAGI_ATTENTION_FFA_BWD_UNION_DKV_SMEM**
+
+- **Defaults to:** `0` (smem_inner_dk and smem_inner_dv are unioned into one buffer)
+- **Used by:** `UnionDkvSmem` template parameter
+
+Set to `1` to un-union dK/dV SMEM (separate buffers for each). Requires `stages_v=1` to fit.
+
+**MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM**
+
+- **Defaults to:** `1` (use SMEM for inner dKV store)
+- **Used by:** `kInnerStoreMode` (`0` forces `InnerStoreMode::BypassSmem`)
+
+Set to `0` to bypass SMEM for dKV — consumer WGs atomicAdd directly to GMEM from registers.
+Experimental; may improve performance for bandwidth-bound configs.
+
+**MAGI_ATTENTION_FFA_INNER_LOAD_MODE**
+
+- **Defaults to:** auto (`tma` when tiles are contiguous, else `cpasync`)
+- **Used by:** `kInnerLoadMode` enum (`Tma`=0, `CpAsync`=2)
+
+Override the inner-loop load method. Options: `tma`, `cpasync`.
+
+**MAGI_ATTENTION_FFA_INNER_STORE_MODE**
+
+- **Defaults to:** `tma` (2D reduce-add for sparse, or auto for dense)
+- **Used by:** `kInnerStoreMode` enum (`Tma`=0, `Tma1d`=1, `AtomicAdd`=2, `BypassSmem`=3)
+
+Override the inner-loop store method. Options: `tma`, `tma2d`, `tma1d`, `atomicadd`, `bypass`.
+
+**MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER**
+
+- **Defaults to:** `true`
+- **Used by:** `InnerStoreInProducer` template parameter
+
+Set to `false` to have consumer WGs handle dX store directly (frees producer warps for loading
+but increases consumer register pressure).
+
+**MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN**
+
+- **Defaults to:** `true`
+- **Used by:** `InnerDirMaxToMin` template parameter
+
+Set to `false` to iterate the inner loop from min to max instead of max to min.
+
+### FFA BWD PerfDebug Switches (Isolation Testing)
+
+These switches disable specific operations in the backward kernel for performance isolation.
+**Correctness is NOT guaranteed when any of these are enabled.**
+
+| Env Variable | Kernel Flag | Effect |
+|---|---|---|
+| `MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD` | `PerfDebugSkipVLoad` | Skip V tile load |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE` | `PerfDebugSkipDvStore` | Skip dV GMEM store (all paths) |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE` | `PerfDebugSkipDkStore` | Skip dK GMEM store (all paths) |
+| `MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA` | `PerfDebugSkipDvMma` | Skip dV MMA |
+
+---
+
 **MAGI_ATTENTION_FA4_BACKEND**
 
 - **Defaults to:** `0`
@@ -156,10 +242,10 @@ This feature is experimental and under active development for now, and not compa
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
-**MAGI_ATTENTION_AUTO_RANGE_MERGE**
+**MAGI_ATTENTION_RANGE_MERGE**
 
 - **Defaults to:** `0`
-- **Used by:** `magi_attention.env.general.is_auto_range_merge_enable`
+- **Used by:** `magi_attention.env.general.is_range_merge_enable`
 
 Toggle this env variable to `1` to enable automatic range merging for flex-flash-attention,
 to improve performance by reducing the number of attention ranges.
@@ -349,6 +435,17 @@ Toggle this env variable to `1` to force building FFA in JIT mode, even the pre-
 
 Sets the number of threads for `nvcc`'s `--split-compile` option, which can speed up the JIT compilation of CUDA kernels.
 
+**MAGI_ATTENTION_JIT_COMPILE_DISABLED**
+
+- **Defaults to:** `0`
+- **Used by:** `magi_attention.common.jit.core.JitSpec.build_and_load`
+
+Toggle this env variable to `1` to forbid JIT compilation at runtime.
+If a kernel is not found in the AOT or JIT cache, a `RuntimeError` is raised
+immediately instead of compiling on the fly. Useful for CI to verify that all
+required kernels have been precompiled — any missing kernel surfaces as a clear
+error with the kernel name and searched paths.
+
 **MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED**
 
 - **Defaults to:** `0`
@@ -365,6 +462,21 @@ Set this env variable to specify the directory for the CuteDSL FFA kernel cache.
 
 
 ### AOT
+
+**MAGI_ATTENTION_PREBUILD_LEVEL**
+
+- **Defaults to:** `lite`
+- **Used by:** `setup.py`
+
+Controls the breadth of FFA kernel configurations pre-built during `pip install`.
+
+- `lite` (default): Pre-builds only the basic Dense kernels (fwd/bwd × head_dim 64/128 × fp16/bf16 × atomic/non-atomic). Sufficient for most inference and training workloads.
+- `ci`: Additionally pre-builds all kernel variants declared by test classes via `precompile_kernel_specs()`. Eliminates JIT compilation during test runs.
+
+```{note}
+The CI workflow (`build_test.yaml`) explicitly sets `MAGI_ATTENTION_PREBUILD_LEVEL=ci`
+in the build step. For local builds, the default `lite` level is used unless overridden.
+```
 
 **MAGI_ATTENTION_PREBUILD_FFA_JOBS**
 

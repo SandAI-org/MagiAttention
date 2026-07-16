@@ -650,15 +650,20 @@
 <ul class="simple">
 <li><p><a class="reference internal" href="#for-correctness" id="id2">正确性相关</a></p></li>
 <li><p><a class="reference internal" href="#for-runtime" id="id3">运行时相关</a></p></li>
-<li><p><a class="reference internal" href="#for-performance" id="id4">性能相关</a></p></li>
-<li><p><a class="reference internal" href="#for-debug" id="id5">调试相关</a></p></li>
-<li><p><a class="reference internal" href="#for-build" id="id6">构建相关</a></p>
+<li><p><a class="reference internal" href="#for-performance" id="id4">性能相关</a></p>
 <ul>
-<li><p><a class="reference internal" href="#jit" id="id7">JIT</a></p></li>
-<li><p><a class="reference internal" href="#aot" id="id8">AOT</a></p></li>
+<li><p><a class="reference internal" href="#ffa-bwd-kernel-tuning-advanced" id="id5">FFA BWD Kernel Tuning (Advanced)</a></p></li>
+<li><p><a class="reference internal" href="#ffa-bwd-perfdebug-switches-isolation-testing" id="id6">FFA BWD PerfDebug Switches (Isolation Testing)</a></p></li>
 </ul>
 </li>
-<li><p><a class="reference internal" href="#for-testing" id="id9">测试相关</a></p></li>
+<li><p><a class="reference internal" href="#for-debug" id="id7">调试相关</a></p></li>
+<li><p><a class="reference internal" href="#for-build" id="id8">构建相关</a></p>
+<ul>
+<li><p><a class="reference internal" href="#jit" id="id9">JIT</a></p></li>
+<li><p><a class="reference internal" href="#aot" id="id10">AOT</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#for-testing" id="id11">测试相关</a></p></li>
 </ul>
 </nav>
 <section id="for-correctness">
@@ -739,6 +744,101 @@
 </section>
 <section id="for-performance">
 <h2><a class="toc-backref" href="#id4" role="doc-backlink">性能相关</a><a class="headerlink" href="#for-performance" title="链接到此标题。">#</a></h2>
+<section id="ffa-bwd-kernel-tuning-advanced">
+<h3><a class="toc-backref" href="#id5" role="doc-backlink">FFA BWD Kernel Tuning (Advanced)</a><a class="headerlink" href="#ffa-bwd-kernel-tuning-advanced" title="链接到此标题。">#</a></h3>
+<p>The following environment variables control low-level kernel configuration for the backward pass.
+They override compile-time defaults and produce distinct JIT-cached kernels per configuration.
+<strong>For expert use only</strong> — incorrect combinations may cause correctness issues or crashes.</p>
+<p><strong>MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> auto (40 for sparse, 64 for dense)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">_flex_flash_attn_jit.py</span></code> → <code class="docutils literal notranslate"><span class="pre">kBwdProducerRegs</span></code> / <code class="docutils literal notranslate"><span class="pre">kBwdConsumerRegs</span></code></p></li>
+</ul>
+<p>Override the <code class="docutils literal notranslate"><span class="pre">setmaxnreg</span></code> register quota for the producer warp group. Consumer regs are derived
+to satisfy the per-SM register budget constraint: <code class="docutils literal notranslate"><span class="pre">1×ProducerRegs</span> <span class="pre">+</span> <span class="pre">2×ConsumerRegs</span> <span class="pre">≤</span> <span class="pre">504</span></code>.</p>
+<p><strong>MAGI_ATTENTION_FFA_BWD_TILE_M</strong> / <strong>MAGI_ATTENTION_FFA_BWD_TILE_N</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code> (auto from <code class="docutils literal notranslate"><span class="pre">tile_size_bwd_sm90()</span></code>)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">kBwdTileM</span></code> / <code class="docutils literal notranslate"><span class="pre">kBwdTileN</span></code> in the kernel</p></li>
+</ul>
+<p>Override the MMA tile dimensions (M×N) for the backward kernel. Common values: 64, 128.</p>
+<p><strong>MAGI_ATTENTION_FFA_BWD_STAGES</strong> / <strong>MAGI_ATTENTION_FFA_BWD_STAGES_DS</strong> / <strong>MAGI_ATTENTION_FFA_BWD_STAGES_V</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code> (auto: stages=2, stages_ds=1 or 2, stages_v=stages)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">kBwdStages</span></code> / <code class="docutils literal notranslate"><span class="pre">kBwdStagesDs</span></code> / <code class="docutils literal notranslate"><span class="pre">kBwdStagesV</span></code></p></li>
+</ul>
+<p>Override the number of pipeline stages for K (main pipeline), dS (double buffer), and V.</p>
+<p><strong>MAGI_ATTENTION_FFA_BWD_UNION_DKV_SMEM</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code> (smem_inner_dk and smem_inner_dv are unioned into one buffer)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">UnionDkvSmem</span></code> template parameter</p></li>
+</ul>
+<p>Set to <code class="docutils literal notranslate"><span class="pre">1</span></code> to un-union dK/dV SMEM (separate buffers for each). Requires <code class="docutils literal notranslate"><span class="pre">stages_v=1</span></code> to fit.</p>
+<p><strong>MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">1</span></code> (use SMEM for inner dKV store)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">kInnerStoreMode</span></code> (<code class="docutils literal notranslate"><span class="pre">0</span></code> forces <code class="docutils literal notranslate"><span class="pre">InnerStoreMode::BypassSmem</span></code>)</p></li>
+</ul>
+<p>Set to <code class="docutils literal notranslate"><span class="pre">0</span></code> to bypass SMEM for dKV — consumer WGs atomicAdd directly to GMEM from registers.
+Experimental; may improve performance for bandwidth-bound configs.</p>
+<p><strong>MAGI_ATTENTION_FFA_INNER_LOAD_MODE</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> auto (<code class="docutils literal notranslate"><span class="pre">tma</span></code> when tiles are contiguous, else <code class="docutils literal notranslate"><span class="pre">cpasync</span></code>)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">kInnerLoadMode</span></code> enum (<code class="docutils literal notranslate"><span class="pre">Tma</span></code>=0, <code class="docutils literal notranslate"><span class="pre">CpAsync</span></code>=2)</p></li>
+</ul>
+<p>Override the inner-loop load method. Options: <code class="docutils literal notranslate"><span class="pre">tma</span></code>, <code class="docutils literal notranslate"><span class="pre">cpasync</span></code>.</p>
+<p><strong>MAGI_ATTENTION_FFA_INNER_STORE_MODE</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">tma</span></code> (2D reduce-add for sparse, or auto for dense)</p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">kInnerStoreMode</span></code> enum (<code class="docutils literal notranslate"><span class="pre">Tma</span></code>=0, <code class="docutils literal notranslate"><span class="pre">Tma1d</span></code>=1, <code class="docutils literal notranslate"><span class="pre">AtomicAdd</span></code>=2, <code class="docutils literal notranslate"><span class="pre">BypassSmem</span></code>=3)</p></li>
+</ul>
+<p>Override the inner-loop store method. Options: <code class="docutils literal notranslate"><span class="pre">tma</span></code>, <code class="docutils literal notranslate"><span class="pre">tma2d</span></code>, <code class="docutils literal notranslate"><span class="pre">tma1d</span></code>, <code class="docutils literal notranslate"><span class="pre">atomicadd</span></code>, <code class="docutils literal notranslate"><span class="pre">bypass</span></code>.</p>
+<p><strong>MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">true</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">InnerStoreInProducer</span></code> template parameter</p></li>
+</ul>
+<p>Set to <code class="docutils literal notranslate"><span class="pre">false</span></code> to have consumer WGs handle dX store directly (frees producer warps for loading
+but increases consumer register pressure).</p>
+<p><strong>MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">true</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">InnerDirMaxToMin</span></code> template parameter</p></li>
+</ul>
+<p>Set to <code class="docutils literal notranslate"><span class="pre">false</span></code> to iterate the inner loop from min to max instead of max to min.</p>
+</section>
+<section id="ffa-bwd-perfdebug-switches-isolation-testing">
+<h3><a class="toc-backref" href="#id6" role="doc-backlink">FFA BWD PerfDebug Switches (Isolation Testing)</a><a class="headerlink" href="#ffa-bwd-perfdebug-switches-isolation-testing" title="链接到此标题。">#</a></h3>
+<p>These switches disable specific operations in the backward kernel for performance isolation.
+<strong>Correctness is NOT guaranteed when any of these are enabled.</strong></p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Env Variable</p></th>
+<th class="head"><p>Kernel Flag</p></th>
+<th class="head"><p>Effect</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">PerfDebugSkipVLoad</span></code></p></td>
+<td><p>Skip V tile load</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">PerfDebugSkipDvStore</span></code></p></td>
+<td><p>Skip dV GMEM store (all paths)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">PerfDebugSkipDkStore</span></code></p></td>
+<td><p>Skip dK GMEM store (all paths)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">PerfDebugSkipDvMma</span></code></p></td>
+<td><p>Skip dV MMA</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<hr class="docutils" />
 <p><strong>MAGI_ATTENTION_FA4_BACKEND</strong></p>
 <ul class="simple">
 <li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
@@ -779,10 +879,10 @@
 <p class="admonition-title">备注</p>
 <p>此功能目前处于实验阶段并在积极开发中，与许多其他功能不兼容，因此请不要启用，除非您清楚了解其影响。</p>
 </div>
-<p><strong>MAGI_ATTENTION_AUTO_RANGE_MERGE</strong></p>
+<p><strong>MAGI_ATTENTION_RANGE_MERGE</strong></p>
 <ul class="simple">
 <li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
-<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_auto_range_merge_enable</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.is_range_merge_enable</span></code></p></li>
 </ul>
 <p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以启用 flex-flash-attention 的自动范围合并，通过减少注意力范围的数量来提升性能。</p>
 <div class="admonition note">
@@ -860,8 +960,9 @@
 </ul>
 <p>此环境变量定义了 CUDA stream 可以使用的硬件队列数量。增大此值可以改善通信与计算的重叠，但也可能增加 PCIe 流量。</p>
 </section>
+</section>
 <section id="for-debug">
-<h2><a class="toc-backref" href="#id5" role="doc-backlink">调试相关</a><a class="headerlink" href="#for-debug" title="链接到此标题。">#</a></h2>
+<h2><a class="toc-backref" href="#id7" role="doc-backlink">调试相关</a><a class="headerlink" href="#for-debug" title="链接到此标题。">#</a></h2>
 <p><strong>MAGI_ATTENTION_SANITY_CHECK</strong></p>
 <ul class="simple">
 <li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
@@ -906,9 +1007,9 @@
 <p>将此环境变量设为 <code class="docutils literal notranslate"><span class="pre">1</span></code> 以为 CuteDSL FFA 内核启用调试期检查和诊断。</p>
 </section>
 <section id="for-build">
-<h2><a class="toc-backref" href="#id6" role="doc-backlink">构建相关</a><a class="headerlink" href="#for-build" title="链接到此标题。">#</a></h2>
+<h2><a class="toc-backref" href="#id8" role="doc-backlink">构建相关</a><a class="headerlink" href="#for-build" title="链接到此标题。">#</a></h2>
 <section id="jit">
-<h3><a class="toc-backref" href="#id7" role="doc-backlink">JIT</a><a class="headerlink" href="#jit" title="链接到此标题。">#</a></h3>
+<h3><a class="toc-backref" href="#id9" role="doc-backlink">JIT</a><a class="headerlink" href="#jit" title="链接到此标题。">#</a></h3>
 <p><strong>MAGI_ATTENTION_WORKSPACE_BASE</strong></p>
 <ul class="simple">
 <li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">$HOME</span></code></p></li>
@@ -945,6 +1046,16 @@
 <li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.build.nvcc_threads</span></code></p></li>
 </ul>
 <p>设置 <code class="docutils literal notranslate"><span class="pre">nvcc</span></code> 的 <code class="docutils literal notranslate"><span class="pre">--split-compile</span></code> 选项的线程数，可加速 CUDA 内核的 JIT 编译。</p>
+<p><strong>MAGI_ATTENTION_JIT_COMPILE_DISABLED</strong></p>
+<ul class="simple">
+<li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.common.jit.core.JitSpec.build_and_load</span></code></p></li>
+</ul>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to forbid JIT compilation at runtime.
+If a kernel is not found in the AOT or JIT cache, a <code class="docutils literal notranslate"><span class="pre">RuntimeError</span></code> is raised
+immediately instead of compiling on the fly. Useful for CI to verify that all
+required kernels have been precompiled — any missing kernel surfaces as a clear
+error with the kernel name and searched paths.</p>
 <p><strong>MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED</strong></p>
 <ul class="simple">
 <li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
@@ -959,7 +1070,22 @@
 <p>设置此环境变量以指定 CuteDSL FFA 内核缓存的目录。</p>
 </section>
 <section id="aot">
-<h3><a class="toc-backref" href="#id8" role="doc-backlink">AOT</a><a class="headerlink" href="#aot" title="链接到此标题。">#</a></h3>
+<h3><a class="toc-backref" href="#id10" role="doc-backlink">AOT</a><a class="headerlink" href="#aot" title="链接到此标题。">#</a></h3>
+<p><strong>MAGI_ATTENTION_PREBUILD_LEVEL</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">lite</span></code></p></li>
+<li><p><strong>使用方：</strong> <code class="docutils literal notranslate"><span class="pre">setup.py</span></code></p></li>
+</ul>
+<p>Controls the breadth of FFA kernel configurations pre-built during <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span></code>.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">lite</span></code> (default): Pre-builds only the basic Dense kernels (fwd/bwd × head_dim 64/128 × fp16/bf16 × atomic/non-atomic). Sufficient for most inference and training workloads.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ci</span></code>: Additionally pre-builds all kernel variants declared by test classes via <code class="docutils literal notranslate"><span class="pre">precompile_kernel_specs()</span></code>. Eliminates JIT compilation during test runs.</p></li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">备注</p>
+<p>The CI workflow (<code class="docutils literal notranslate"><span class="pre">build_test.yaml</span></code>) explicitly sets <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_PREBUILD_LEVEL=ci</span></code>
+in the build step. For local builds, the default <code class="docutils literal notranslate"><span class="pre">lite</span></code> level is used unless overridden.</p>
+</div>
 <p><strong>MAGI_ATTENTION_PREBUILD_FFA_JOBS</strong></p>
 <ul class="simple">
 <li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">ceil(num_cpu_cores</span> <span class="pre">*</span> <span class="pre">0.9)</span></code></p></li>
@@ -1036,7 +1162,7 @@
 </section>
 </section>
 <section id="for-testing">
-<h2><a class="toc-backref" href="#id9" role="doc-backlink">测试相关</a><a class="headerlink" href="#for-testing" title="链接到此标题。">#</a></h2>
+<h2><a class="toc-backref" href="#id11" role="doc-backlink">测试相关</a><a class="headerlink" href="#for-testing" title="链接到此标题。">#</a></h2>
 <p><strong>MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP</strong></p>
 <ul class="simple">
 <li><p><strong>默认值：</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
@@ -1086,7 +1212,11 @@
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-correctness">正确性相关</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-runtime">运行时相关</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">性能相关</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">性能相关</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-bwd-kernel-tuning-advanced">FFA BWD Kernel Tuning (Advanced)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#ffa-bwd-perfdebug-switches-isolation-testing">FFA BWD PerfDebug Switches (Isolation Testing)</a></li>
+</ul>
+</li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-debug">调试相关</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">构建相关</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#jit">JIT</a></li>

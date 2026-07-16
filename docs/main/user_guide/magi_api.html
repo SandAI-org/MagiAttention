@@ -687,10 +687,10 @@ Directly call magi_attn_kernel to get attention output and lse. This is faster w
 <li><p><strong>k</strong> (<em>torch.Tensor</em>) – Key tensor.</p></li>
 <li><p><strong>v</strong> (<em>torch.Tensor</em>) – Value tensor.</p></li>
 <li><p><strong>q_ranges</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – Query ranges tensor to represent the attn mask.
-Mutually exclusive with <code class="docutils literal notranslate"><span class="pre">index_attn_indices</span></code>.</p></li>
+Mutually exclusive with <code class="docutils literal notranslate"><span class="pre">index_sparse_indices</span></code>.</p></li>
 <li><p><strong>k_ranges</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – Key ranges tensor to represent the attn mask.
 Must be provided together with <code class="docutils literal notranslate"><span class="pre">q_ranges</span></code>.</p></li>
-<li><p><strong>index_attn_indices</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – IndexAttn token indices.
+<li><p><strong>index_sparse_indices</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – IndexSparse token indices.
 Shape: <code class="docutils literal notranslate"><span class="pre">(total_q,</span> <span class="pre">num_kv_heads,</span> <span class="pre">max_topk)</span></code>, dtype=int32.
 Values are <strong>logical</strong> KV token positions: <code class="docutils literal notranslate"><span class="pre">batch_idx</span> <span class="pre">*</span> <span class="pre">S_kv</span> <span class="pre">+</span> <span class="pre">token_idx</span></code>.
 The kernel internally converts to physical row via <code class="docutils literal notranslate"><span class="pre">pos</span> <span class="pre">*</span> <span class="pre">NHK</span> <span class="pre">+</span> <span class="pre">kv_head</span></code>.
@@ -699,15 +699,22 @@ Mutually exclusive with <code class="docutils literal notranslate"><span class="
 The kernel scans trailing <code class="docutils literal notranslate"><span class="pre">-1</span></code> entries to determine loop count and
 invalid count internally — no Python-side preprocessing is needed.
 <code class="docutils literal notranslate"><span class="pre">max_topk</span></code> (last dim) must be a multiple of tile_size (128, or 64 if swap_ab).
-The mask representation theoretically supports block-level KV (<code class="docutils literal notranslate"><span class="pre">k_block_size</span> <span class="pre">&gt;</span> <span class="pre">1</span></code>)
-but currently only <code class="docutils literal notranslate"><span class="pre">k_block_size=1</span></code> (token-level) is implemented.</p></li>
+The mask representation theoretically supports block-level KV (<code class="docutils literal notranslate"><span class="pre">sparse_k_block_size</span> <span class="pre">&gt;</span> <span class="pre">1</span></code>)
+but currently only <code class="docutils literal notranslate"><span class="pre">sparse_k_block_size=1</span></code> (token-level) is implemented.</p></li>
 <li><p><strong>q_block_size</strong> (<em>int</em><em>, </em><em>optional</em>) – Q block size. Defaults to <code class="docutils literal notranslate"><span class="pre">1</span></code>.
 Currently only <code class="docutils literal notranslate"><span class="pre">1</span></code> (per-token Q granularity) is supported.</p></li>
-<li><p><strong>k_block_size</strong> (<em>int</em><em>, </em><em>optional</em>) – K block size. Defaults to <code class="docutils literal notranslate"><span class="pre">1</span></code>.
-Currently only <code class="docutils literal notranslate"><span class="pre">1</span></code> (token-level KV) is implemented; future may support 32/64.</p></li>
+<li><p><strong>sparse_k_block_size</strong> (<em>int</em><em>, </em><em>optional</em>) – K block size for inner-loop contiguity. Defaults to <code class="docutils literal notranslate"><span class="pre">1</span></code>.
+Must be a positive power of 2 (1, 2, 4, 8, 16, 32, 64, 128, 256, …).
+For <code class="docutils literal notranslate"><span class="pre">index_sparse</span></code>: specifies the granularity of K indices (each index covers
+<code class="docutils literal notranslate"><span class="pre">sparse_k_block_size</span></code> tokens). When <code class="docutils literal notranslate"><span class="pre">sparse_k_block_size</span> <span class="pre">&gt;=</span> <span class="pre">128</span></code>, inner KV loads use TMA 2D;
+when <code class="docutils literal notranslate"><span class="pre">sparse_k_block_size</span> <span class="pre">&lt;</span> <span class="pre">128</span></code>, inner KV loads use CpAsync scatter with per-token
+gather. Both paths are correct; TMA 2D is faster for large contiguous blocks.
+For <code class="docutils literal notranslate"><span class="pre">block_sparse</span></code>: auto-derived from the uniform k_range size if left at
+default. When k_range_size &gt;= 128, inner loads use TMA 2D for best perf.
+Not compatible with <code class="docutils literal notranslate"><span class="pre">swap_ab</span></code>.</p></li>
 <li><p><strong>max_seqlen_q</strong> (<em>int</em><em> | </em><em>None</em><em>, </em><em>optional</em>) – Maximum sequence length for query. Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code>.
 If provided, enables optimization for tile_scheduler. Most recommended to set this when using
-auto_range_merge(for block sparse attention).</p></li>
+range_merge(for block sparse attention).</p></li>
 <li><p><strong>attn_type_map</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – <p>Attention type map tensor with dtype=torch.int32,
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to apply full attention for all ranges.
 The values specify the attention type for each token:</p>
@@ -755,39 +762,54 @@ while <code class="docutils literal notranslate"><span class="pre">k_ranges</spa
 <strong>Note:</strong> This flag can only be enabled with MHA or catGQA.</p>
 </div></blockquote>
 </p></li>
+<li><p><strong>disable_bwd_dq_atomic_reduction</strong> (<em>bool</em><em>, </em><em>optional</em>) – <p>Whether to disable backward dQ atomic reduction for BWD InnerLoopK
+(<code class="docutils literal notranslate"><span class="pre">swap_bwd_qk_loop=True</span></code>). Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p>
+<blockquote>
+<div><p>When enabled, dQ uses the input dtype (bf16/fp16) instead of float32,
+skips zero-initialization (<code class="docutils literal notranslate"><span class="pre">empty_like</span></code>), and the epilogue uses per-element
+direct store instead of TMA atomic reduce-add. Safe when outer Q ranges
+are non-overlapping (guaranteed by BlockSparse/IndexSparse with RangeMerge).
+Auto-set to <code class="docutils literal notranslate"><span class="pre">True</span></code> for sparse scenarios with <code class="docutils literal notranslate"><span class="pre">swap_bwd_qk_loop=True</span></code>.</p>
+</div></blockquote>
+</p></li>
 <li><p><strong>ref_block_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – Reference block size (M, N) for kernel selection.
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use the internal heuristic.
 <strong>Note:</strong> This flag is useful for sparse attention scenarios but still under development.</p></li>
 <li><p><strong>max_seqlen_q</strong> – Maximum sequence length for query. Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code>.
 If provided, enables optimization for forward tile_scheduler,
 especially for block sparse attention scenarios.</p></li>
-<li><p><strong>auto_range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to automatically merge k_ranges for the same q_range. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
+<li><p><strong>range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to automatically merge k_ranges for the same q_range. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
 <strong>Note:</strong> This flag is useful for sparse attention scenarios but still under development.</p></li>
 <li><p><strong>swap_ab</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to swap the order of A and B operands for the matmul operation
 (i.e. transpose <cite>C=A x B^T</cite> to <cite>C^T= B x A^T</cite>) in attention forward passes. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
-<strong>Note:</strong> This flag is useful for sparse attention scenarios but still under development.</p></li>
+<strong>Not compatible with sparse attention</strong> (<code class="docutils literal notranslate"><span class="pre">block_sparse</span></code> or <code class="docutils literal notranslate"><span class="pre">index_sparse</span></code>).
+Only applicable to dense attention with very small Q sequences.</p></li>
 <li><p><strong>pack_gqa</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to group query heads sharing the same KV head into a single computation block tile for small
 seqlen_q scenarios. This method significantly improves the computational efficiency
 of block sparse attention when seqlen_q is small. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
-<strong>Note:</strong> kblockm must be divisible by qhead_per_khead(num_qhead // num_khead).
+<strong>Note:</strong> kblockm must be divisible by pack_gqa_factor (num_qhead // num_khead).
 For backward pass, this flag is only enabled when swap_bwd_qk_loop is True.</p></li>
 <li><p><strong>cat_gqa</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to concatenate multiple Q heads sharing the same KV head,
 to optimize the backward performance under GQA settings. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
-<li><p><strong>sparse_load</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to enable sparse load mode for optimizing performance when k_range size is small (&lt; 64).
-Must be used together with <code class="docutils literal notranslate"><span class="pre">auto_range_merge=True</span></code> for enhanced performance. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
-Mutually exclusive with <code class="docutils literal notranslate"><span class="pre">index_attn_indices</span></code>.</p></li>
-<li><p><strong>equal_k_range_size</strong> (<em>bool</em><em>, </em><em>optional</em>) – Only used when <code class="docutils literal notranslate"><span class="pre">sparse_load=True</span></code>. Indicates whether all k_ranges have equal size,
-which lets the kernel take an O(1) divide-based cursor seek instead of an O(num_steps)
-fallback. Defaults to <code class="docutils literal notranslate"><span class="pre">True</span></code> (the common case, e.g. uniform block-sparse).
-<strong>Warning:</strong> must be set to <code class="docutils literal notranslate"><span class="pre">False</span></code> when k_range sizes differ, otherwise the seek
-computes wrong token indices (incorrect results).</p></li>
-<li><p><strong>index_attn</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to enable the IndexAttn kernel path, where the kernel directly reads
-<code class="docutils literal notranslate"><span class="pre">index_attn_indices</span></code> instead of using q/k ranges. Automatically set to <code class="docutils literal notranslate"><span class="pre">True</span></code>
-when <code class="docutils literal notranslate"><span class="pre">index_attn_indices</span></code> is provided. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
-<li><p><strong>swap_bwd_qk_loop</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to swap the order of Q and K double-loops
-(i.e. from the default <cite>K for outer-loop and Q for inner-loop</cite> to <cite>Q for outer-loop and K for inner-loop</cite>)
-in the attention backward pass. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
-<strong>Note:</strong> This flag is useful for sparse attention scenarios but still under development.</p></li>
+<li><p><strong>block_sparse</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to enable sparse load mode for optimizing performance when k_range size is small (&lt; 64).
+Automatically enables <code class="docutils literal notranslate"><span class="pre">range_merge</span></code>. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
+Mutually exclusive with <code class="docutils literal notranslate"><span class="pre">index_sparse_indices</span></code>.
+When enabled, <code class="docutils literal notranslate"><span class="pre">sparse_k_block_size</span></code> is auto-set to <code class="docutils literal notranslate"><span class="pre">tile_N</span></code> (128)
+so that inner KV loads use TMA 2D — without this, the kernel falls back to CpAsync
+scatter load with ~40% performance loss.
+<strong>Contract:</strong> all k_ranges (and, for <code class="docutils literal notranslate"><span class="pre">swap_bwd_qk_loop=False</span></code> backward, all q_ranges)
+must have one uniform size — the kernel relies on it for O(1) cursor seeks.
+Block-mask generated ranges satisfy this by construction; it is verified when
+<code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_SANITY_CHECK=1</span></code>.</p></li>
+<li><p><strong>index_sparse</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to enable the IndexSparse kernel path, where the kernel directly reads
+<code class="docutils literal notranslate"><span class="pre">index_sparse_indices</span></code> instead of using q/k ranges. Automatically set to <code class="docutils literal notranslate"><span class="pre">True</span></code>
+when <code class="docutils literal notranslate"><span class="pre">index_sparse_indices</span></code> is provided. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
+<li><p><strong>swap_bwd_qk_loop</strong> (<em>bool</em><em> | </em><em>None</em><em>, </em><em>optional</em>) – Controls backward double-loop order.
+<code class="docutils literal notranslate"><span class="pre">False</span></code> = LoopQ (outer K, inner Q), <code class="docutils literal notranslate"><span class="pre">True</span></code> = LoopK (outer Q, inner K).
+<code class="docutils literal notranslate"><span class="pre">None</span></code> (default) = auto-infer: IndexSparse with <code class="docutils literal notranslate"><span class="pre">sparse_k_block_size</span> <span class="pre">&lt;</span> <span class="pre">128</span></code>
+uses LoopK (bounded inner K loop from forward indices),
+otherwise LoopQ.  LoopK requires <code class="docutils literal notranslate"><span class="pre">pack_gqa_factor</span> <span class="pre">&gt;=</span> <span class="pre">128</span></code>; when
+not met, falls back to LoopQ automatically.</p></li>
 <li><p><strong>return_max_logits</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to return the maximum attention logits,
 according to the Muon QK-Clip technique introduced in Kimi K2: <a class="reference external" href="https://arxiv.org/pdf/2507.20534.pdf">https://arxiv.org/pdf/2507.20534.pdf</a>.
 Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
