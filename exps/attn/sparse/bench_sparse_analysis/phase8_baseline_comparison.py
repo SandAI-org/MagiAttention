@@ -660,7 +660,16 @@ def _phase8_bench(force=False, rerun_filter=None):
 
 
 def _phase8_plot():
+    """Generate Phase-6 style grouped bar charts: 2 figures (kbs=1, kbs=128).
+
+    Each figure has subplots for each pass (FWD, BWD, etc.), with grouped bars
+    per seqlen, one bar per method. TFLOPS on y-axis, seqlen on x-axis.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import numpy as np
 
     results = _load_results(PHASE)
     if not results:
@@ -670,75 +679,156 @@ def _phase8_plot():
     out = _out_dir(PHASE)
     os.makedirs(out, exist_ok=True)
 
-    COLORS = {
-        "ffa_is": "red",
-        "ffa_bs": "red",
-        "ffa_is128": "orange",
-        "flexattn": "green",
-        "triton": "blue",
-    }
-    MARKERS = {
-        "ffa_is": "o",
-        "ffa_bs": "s",
-        "ffa_is128": "D",
-        "flexattn": "^",
-        "triton": "v",
-    }
+    x = np.arange(len(SEQLEN_VALS))
+    x_labels = [f"{s // 1024}K" for s in SEQLEN_VALS]
 
-    def _plot_group(prefix, methods, labels, pass_type, title_extra, fname):
-        fig, ax = plt.subplots(figsize=(10, 6))
-        has_data = False
-        for m in methods:
-            key = f"{prefix}/{pass_type}/{m}"
-            d = results.get(key)
-            if not d:
-                continue
-            valid = [(s, t) for s, t in zip(d["seqlen"], d["tflops"]) if t is not None]
-            if not valid:
-                continue
-            xs, ys = zip(*valid)
-            ax.plot(
-                [x // 1024 for x in xs],
-                ys,
-                marker=MARKERS.get(m, "o"),
-                color=COLORS.get(m, "gray"),
-                label=labels[m],
-                linewidth=2,
-                markersize=7,
+    # ── 8a) kbs=1 ──
+    KBS1_PLOT = [
+        ("ffa_is", "FFA IndexSparse", (0.85, 0.25, 0.25)),
+        ("flexattn", "FlexAttention", (0.30, 0.70, 0.35)),
+        ("triton", "Triton Token-Sparse", (0.25, 0.45, 0.80)),
+    ]
+    KBS1_PASS_LABELS = [("fwd", "FWD"), ("bwd", "BWD (LoopK)")]
+
+    n_cols = len(KBS1_PASS_LABELS)
+    fig, axes = plt.subplots(1, n_cols, figsize=(7 * n_cols, 7), dpi=150)
+    if n_cols == 1:
+        axes = [axes]
+
+    for col_idx, (pid, pname) in enumerate(KBS1_PASS_LABELS):
+        ax = axes[col_idx]
+        n_m = len(KBS1_PLOT)
+        bw = 0.8 / n_m
+        for i, (mid, lbl, col) in enumerate(KBS1_PLOT):
+            key = f"kbs1/{pid}/{mid}"
+            d = results.get(key, {})
+            vals = []
+            for S in SEQLEN_VALS:
+                if S in d.get("seqlen", []):
+                    idx = d["seqlen"].index(S)
+                    v = d["tflops"][idx] if d["tflops"][idx] else 0
+                else:
+                    v = 0
+                vals.append(v)
+            off = (i - n_m / 2 + 0.5) * bw
+            bars = ax.bar(
+                x + off,
+                vals,
+                width=bw,
+                label=lbl,
+                color=col,
+                edgecolor="white",
+                linewidth=0.5,
+                alpha=0.85,
             )
-            has_data = True
-        if not has_data:
-            plt.close(fig)
-            return
-        ax.set_title(
-            f"Sparse Attention {pass_type.upper()} — {title_extra}\n"
-            f"nhq={NHQ}, nhk={NHK}, hd={HD}, topk={TOPK}"
-        )
-        ax.set_xlabel("Sequence Length (K)")
-        ax.set_ylabel("Effective Sparse TFLOPS/s")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_xscale("log", base=2)
-        ax.set_xticks([s // 1024 for s in SEQLEN_VALS])
-        ax.get_xaxis().set_major_formatter(plt.FuncFormatter(lambda x, _: f"{int(x)}K"))
-        fig.savefig(os.path.join(out, fname), dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  Saved: {fname}", flush=True)
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 5,
+                        f"{v:.0f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        fontweight="bold",
+                    )
 
-    # 8a plots
-    for pt in KBS1_PASSES:
-        _plot_group("kbs1", KBS1_METHODS, KBS1_LABELS, pt, "kbs=1", f"kbs1_{pt}.png")
+        ax.set_title(pname, fontsize=13, fontweight="bold")
+        ax.set_xlabel("Sequence Length", fontsize=10)
+        ax.set_ylabel("TFLOPS", fontsize=12)
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, fontsize=10)
+        ax.tick_params(axis="y", labelsize=11)
+        ax.legend(loc="upper right", fontsize=9)
+        ax.grid(axis="y", alpha=0.3)
 
-    # 8b plots
-    for pt in KBS128_PASSES:
-        _plot_group(
-            "kbs128",
-            KBS128_METHODS,
-            KBS128_LABELS,
-            pt,
-            f"kbs={KBS_BLOCK}",
-            f"kbs128_{pt}.png",
-        )
+    fig.suptitle(
+        f"Phase 8a: Token-Sparse Baseline (kbs=1)\n"
+        f"nhq={NHQ}, nhk={NHK}, hd={HD}, topk={TOPK}, bf16, H100",
+        fontsize=13,
+        fontweight="bold",
+        y=1.02,
+    )
+    plt.tight_layout()
+    path = os.path.join(out, "phase8a_kbs1.png")
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}", flush=True)
+
+    # ── 8b) kbs=128 ──
+    KBS128_PLOT = [
+        ("ffa_bs", "FFA BlockSparse", (0.29, 0.57, 0.60)),
+        ("ffa_is128", "FFA IndexSparse (kbs=128)", (0.85, 0.45, 0.20)),
+        ("flexattn", "FlexAttention", (0.30, 0.70, 0.35)),
+    ]
+    KBS128_PASS_LABELS = [
+        ("fwd", "FWD"),
+        ("bwd_loopk", "BWD LoopK"),
+        ("bwd_loopq", "BWD LoopQ"),
+    ]
+
+    n_cols = len(KBS128_PASS_LABELS)
+    fig, axes = plt.subplots(1, n_cols, figsize=(7 * n_cols, 7), dpi=150)
+
+    for col_idx, (pid, pname) in enumerate(KBS128_PASS_LABELS):
+        ax = axes[col_idx]
+        n_m = len(KBS128_PLOT)
+        bw = 0.8 / n_m
+        for i, (mid, lbl, col) in enumerate(KBS128_PLOT):
+            key = f"kbs128/{pid}/{mid}"
+            d = results.get(key, {})
+            vals = []
+            for S in SEQLEN_VALS:
+                if S in d.get("seqlen", []):
+                    idx = d["seqlen"].index(S)
+                    v = d["tflops"][idx] if d["tflops"][idx] else 0
+                else:
+                    v = 0
+                vals.append(v)
+            off = (i - n_m / 2 + 0.5) * bw
+            bars = ax.bar(
+                x + off,
+                vals,
+                width=bw,
+                label=lbl,
+                color=col,
+                edgecolor="white",
+                linewidth=0.5,
+                alpha=0.85,
+            )
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 5,
+                        f"{v:.0f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        fontweight="bold",
+                    )
+
+        ax.set_title(pname, fontsize=13, fontweight="bold")
+        ax.set_xlabel("Sequence Length", fontsize=10)
+        ax.set_ylabel("TFLOPS", fontsize=12)
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, fontsize=10)
+        ax.tick_params(axis="y", labelsize=11)
+        ax.legend(loc="upper right", fontsize=9)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle(
+        f"Phase 8b: Block-Sparse Baseline (kbs={KBS_BLOCK})\n"
+        f"nhq={NHQ}, nhk={NHK}, hd={HD}, topk={TOPK}, bf16, H100",
+        fontsize=13,
+        fontweight="bold",
+        y=1.02,
+    )
+    plt.tight_layout()
+    path = os.path.join(out, "phase8b_kbs128.png")
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}", flush=True)
 
     # Summary tables
     print("\n  " + "─" * 60)
