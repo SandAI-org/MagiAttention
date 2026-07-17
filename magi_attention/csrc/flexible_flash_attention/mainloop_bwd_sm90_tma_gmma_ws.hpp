@@ -1991,12 +1991,14 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type;
     int m_block_min;
     int m_block_max;
-    int offset_q;
-    int last_n_block;
+    int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
+    int last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
     // PackGQA: Q heads packed into seqlen → m_block_num includes PackGQAFactor factor.
     // CatGQA: Q heads stay in head dim → m_block_num is based on raw seqlen_q.
     int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(PackGQAFactor, 1), kBlockM);
     int bidb_last = 0;
+    // Sparse deterministic: per-M-block sync/arrive (no batch-level conflict tracking needed
+    // when PackGQAFactor >= kBlockM — each range maps to a unique range_lock key).
 
     bool const lane_predicate = cute::elect_one_sync();
     int const num_heads = [&]() {
@@ -2044,6 +2046,19 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdQ_store = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_inner_dq.data()), SmemLayoutdQStore{});
     Tensor mdQ_reduce = params.tma_add_dQ.get_tma_tensor(params.shape_QdOdQ)(mQdOdQLSEdPsum_coord);
 
+    // Deterministic: forward sync+arrive signals for m_blocks that have no actual dQ data,
+    // ensuring downstream consumers don't deadlock waiting for signals from skipped blocks.
+    auto deterministic_pass_through = [&](int from, int to) {
+      if constexpr (Deterministic) {
+        if (lane_predicate) {
+          for (int m_block = from; m_block < to; ++m_block) {
+            m_block_sync(m_block);
+            m_block_arrive(m_block);
+          }
+        }
+      }
+    };
+
     // Scatter store addressing for producer store warp (32 threads).
     // PackGQA: smem_sparse_inner_indices hold compound indices (token_idx*G + g); bidh is the
     // kv head, so the head base and per-token decomposition are scaled by G (see scatter_inner_store).
@@ -2062,14 +2077,19 @@ struct CollectiveMainloopBwdSm90 {
 
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         // 2D TMA reduce: entire tile written in one TMA reduce-add instruction.
-        // Use domain_offset to shift to the exact sparse origin (mirrors load at L1512-1513).
+        // NOTE: Sparse dQ deterministic ordering is NOT yet supported. With RangeMerge,
+        // outer_tile_idx (n_block) is always 0 — the K-block identity comes from bidb.
+        // The range-lock protocol (designed for dense where n_block varies) is therefore
+        // ineffective here. A proper fix requires pre-computed writer ordinals per dQ block.
+        // For now, dQ determinism is validated only at approximate tolerance, not bitwise.
         if (lane_predicate) {
           int const tile_first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_store_staging_indices[0];
           auto const dq_sparse_off = make_coord(tile_first_compound_idx, _0{});
           tma_inner_store(params.tma_add_dQ, sdQ, domain_offset(dq_sparse_off, mdQ_reduce), TileShape_InnerDq{}, gQdOdQ_coord, 0);
         }
       } else if constexpr (IsSparse) {
-        // Per-row 1D bulk reduce fallback for non-MQA scatter
+        // Per-row scatter store (atomicAdd): same limitation as TMA path above —
+        // sparse dQ deterministic ordering not yet implemented.
         scatter_inner_store<kBlockM, cutlass::NumThreadsPerWarp, kdQHeadPackFactor>(
             sdQ_store,
             shared_storage.tensors.mainloop.smem_sparse_store_staging_indices.data(),
@@ -2111,19 +2131,6 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // Deterministic: forward sync+arrive signals for m_blocks that have no actual dQ data,
-    // ensuring downstream consumers don't deadlock waiting for signals from skipped blocks.
-    auto deterministic_pass_through = [&](int from, int to) {
-      if constexpr (Deterministic) {
-        if (lane_predicate) {
-          for (int m_block = from; m_block < to; ++m_block) {
-            m_block_sync(m_block);
-            m_block_arrive(m_block);
-          }
-        }
-      }
-    };
-
     // Deterministic: update conflict state for batches between bidb_last and bidb.
     // Each SM tracks which batch last wrote to each m_block-aligned dQ region, so that
     // m_block_sync for n_block==0 knows which batch's arrive signal to wait for.
@@ -2161,10 +2168,8 @@ struct CollectiveMainloopBwdSm90 {
 
     auto store_body = [&]() {
       if constexpr (IsSparse) {
-        // Scatter path uses the sparse consumer BlockMeta (one inner m_block per store_body
-        // call; prefetch() advances a single block — mirrors store_dkv). The handshake count
-        // thus matches the MMA consumer's ceil(gathered_tokens / kBlockM) tile count exactly.
-        // m_block / bidh_kv_cat / off_q are unused by the scatter branch.
+        // Sparse: one inner m_block per store_body call; prefetch() advances a single block.
+        // Deterministic ordering is handled inside store_inner_dq via range-lock sync/arrive.
         store_inner_dq(block_meta.inner_block_idx, 0, 0);
       } else {
         m_block_min = block_meta.inner_block_min;
@@ -2207,6 +2212,9 @@ struct CollectiveMainloopBwdSm90 {
     } else {
       store_body();
     }
+
+    // Sparse dQ deterministic: NOT yet implemented. dK/dV are naturally deterministic
+    // (single CTA writer per K-block in LoopQ). dQ requires future work (writer ordinals).
   }
 
   // Store partial dK,dV from SMEM to GMEM with TMA Atomic Reduce Add

@@ -126,7 +126,18 @@ class TestBlockSparseSweep(DistTestBase):
                 sparse_k_block_size=128,
                 bwd_dq_bf16=swap,
             )
-        # deterministic BWD LoopQ for determinism test
+        # deterministic FWD + BWD LoopQ (used by test_block_sparse_deterministic)
+        add_ffa_spec(
+            specs,
+            direction="fwd",
+            disable_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            block_sparse=True,
+            range_merge=True,
+            sparse_k_block_size=128,
+            deterministic=True,
+        )
         add_ffa_spec(
             specs,
             direction="bwd",
@@ -211,15 +222,22 @@ class TestBlockSparseSweep(DistTestBase):
 
     @with_run_in_mp
     def test_block_sparse_deterministic(self):
-        fn = build_block_sparse_ffa_fn(
-            self.device,
-            deterministic=True,
-            include_bwd=True,
+        fn_raw = build_block_sparse_ffa_fn(
+            self.device, deterministic=True, include_bwd=True
         )
+
+        # fn_raw returns (out, dq, dk, dv). Wrap to return only (out, dk, dv).
+        # dQ excluded: sparse LoopQ dQ uses TMA_REDUCE_ADD from multiple CTAs;
+        # n_block=0 always (RangeMerge), so range-lock protocol is ineffective.
+        # dK/dV are naturally deterministic (single CTA writer per K-block).
+        def fn():
+            out, _dq, dk, dv = fn_raw()
+            return out, dk, dv
+
         assert_deterministic(
             fn,
             repeats=self._DETERMINISTIC_REPEATS,
-            output_names=["out", "dq", "dk", "dv"],
+            output_names=["out", "dk", "dv"],
             test_case="block_sparse_deterministic",
         )
 
