@@ -21,10 +21,11 @@ Two sub-benchmarks organized by K block size:
       Passes: FWD, BWD (LoopK only — IS kbs=1 has no LoopQ)
 
   8b) kbs=128 (block-sparse):
-      FFA BlockSparse vs FFA IndexSparse(kbs=128) vs FlexAttention
+      FFA BlockSparse vs FFA IndexSparse(kbs=128) vs FlexAttention vs Triton Token-Sparse
       Passes: FWD, BWD_LoopK, BWD_LoopQ
 
-Config: nhq=128, nhk=1, hd=128, topk=2048 (fixed), sweep S=[32K..512K].
+Config: nhq=128, nhk=1, hd=128, video-production scenario
+        (qseqlen=kvseqlen/64, topk=kvseqlen/8), sweep kvseqlen=[32K..512K].
 """
 
 import gc
@@ -32,9 +33,17 @@ import os
 import sys
 
 from bench_sparse_analysis._common import (
+    COLOR_BLOCK_SPARSE,
+    COLOR_FLEXATTN,
+    COLOR_INDEX_SPARSE,
+    COLOR_TRITON,
     HD,
     NHK,
     NHQ,
+    PLOT_BAR_ALPHA,
+    PLOT_BAR_WIDTH_RATIO,
+    PLOT_VALUE_FONTSIZE,
+    VIDEO_SCENARIOS,
     _bench_kernel,
     _load_results,
     _out_dir,
@@ -50,15 +59,8 @@ from bench_sparse_analysis._common import (
 PHASE = "8-baseline-comparison"
 KBS_BLOCK = 128
 
-# Same scenario as Phase 6: qseqlen = kvseqlen/64, topk = kvseqlen/8
-SCENARIOS = [
-    # (kvseqlen, qseqlen, topk)
-    (32768, 512, 4096),
-    (65536, 1024, 8192),
-    (131072, 2048, 16384),
-    (262144, 4096, 32768),
-    (524288, 8192, 65536),
-]
+# Use shared video-production scenarios from _common
+SCENARIOS = VIDEO_SCENARIOS
 
 # 8a: kbs=1 (token-sparse)
 KBS1_METHODS = ["ffa_is", "flexattn", "triton"]
@@ -70,12 +72,13 @@ KBS1_LABELS = {
 }
 
 # 8b: kbs=128 (block-sparse)
-KBS128_METHODS = ["ffa_bs", "ffa_is128", "flexattn"]
+KBS128_METHODS = ["ffa_bs", "ffa_is128", "flexattn", "triton"]
 KBS128_PASSES = ["fwd", "bwd_loopk", "bwd_loopq"]
 KBS128_LABELS = {
     "ffa_bs": "FFA BlockSparse",
     "ffa_is128": "FFA IndexSparse (kbs=128)",
     "flexattn": "FlexAttention",
+    "triton": "Triton Token-Sparse",
 }
 
 
@@ -374,6 +377,50 @@ def _run_kbs128_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
     return _run_kbs1_flexattn(kvseqlen, qseqlen, topk, pass_type, device)
 
 
+def _run_kbs128_triton(kvseqlen, qseqlen, topk, pass_type, device):
+    """Triton Token-Sparse in kbs=128 scenario (expand block indices to tokens)."""
+    import torch
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
+    from token_sparse_attn_triton import token_sparse_attn, token_sparse_fwd
+
+    q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(kvseqlen, 1, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(kvseqlen, 1, HD, dtype=torch.bfloat16, device=device)
+
+    n_kv_blocks = kvseqlen // KBS_BLOCK
+    n_topk_blocks = topk // KBS_BLOCK
+    block_idx = (
+        torch.rand(qseqlen, n_kv_blocks, device=device)
+        .argsort(dim=1)[:, :n_topk_blocks]
+        .sort(dim=1)
+        .values
+    )
+    tri_indices = (
+        (block_idx.unsqueeze(-1) * KBS_BLOCK + torch.arange(KBS_BLOCK, device=device))
+        .reshape(qseqlen, topk)
+        .to(torch.int32)
+    )
+    is_bwd = pass_type != "fwd"
+
+    if is_bwd:
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        o = token_sparse_attn(q, k, v, tri_indices)
+        do = torch.randn_like(o)
+
+        def run_fn():
+            o.backward(do, retain_graph=True)
+
+    else:
+
+        def run_fn():
+            token_sparse_fwd(q, k, v, tri_indices)
+
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Dispatch
 # ═══════════════════════════════════════════════════════════════
@@ -388,6 +435,7 @@ _KBS128_RUNNERS = {
     "ffa_bs": _run_kbs128_ffa_bs,
     "ffa_is128": _run_kbs128_ffa_is,
     "flexattn": _run_kbs128_flexattn,
+    "triton": _run_kbs128_triton,
 }
 
 
@@ -553,116 +601,77 @@ def _phase8_bench(force=False, rerun_filter=None):
         flush=True,
     )
 
-    # Correctness verification first
     if not _sanity_check(device):
         return
 
-    # --- 8a: kbs=1 ---
-    print("\n  " + "─" * 55, flush=True)
-    print("  8a) kbs=1: IndexSparse vs Baselines (FWD + BWD LoopK)", flush=True)
-    print("  " + "─" * 55, flush=True)
-    for kvseqlen, qseqlen, topk in SCENARIOS:
-        print(
-            f"  ── kvseqlen={kvseqlen // 1024}k, "
-            f"qseqlen={qseqlen}, topk={topk // 1024}k ──",
-            flush=True,
-        )
-        for pass_type in KBS1_PASSES:
-            for method in KBS1_METHODS:
-                key = f"kbs1/{pass_type}/{method}"
-                if not force and _has_entry(results, key, kvseqlen):
-                    d = results[key]
-                    idx = d["kvseqlen"].index(kvseqlen)
-                    tf = d["tflops"][idx]
-                    print(
-                        f"    {pass_type:10s} {method:10s}: " f"{tf:>7.1f} T (cached)",
-                        flush=True,
-                    )
-                    continue
+    def _run_group(prefix, methods, passes, runners, label):
+        print("\n  " + "─" * 55, flush=True)
+        print(f"  {label}", flush=True)
+        print("  " + "─" * 55, flush=True)
+        for kvseqlen, qseqlen, topk in SCENARIOS:
+            print(
+                f"  ── kvseqlen={kvseqlen // 1024}k, "
+                f"qseqlen={qseqlen}, topk={topk // 1024}k ──",
+                flush=True,
+            )
+            for pass_type in passes:
+                for method in methods:
+                    key = f"{prefix}/{pass_type}/{method}"
+                    if not force and _has_entry(results, key, kvseqlen):
+                        d = results[key]
+                        idx = d["kvseqlen"].index(kvseqlen)
+                        tf = d["tflops"][idx]
+                        print(
+                            f"    {pass_type:10s} {method:10s}: "
+                            f"{tf:>7.1f} T (cached)",
+                            flush=True,
+                        )
+                        continue
 
-                gc.collect()
-                torch.cuda.empty_cache()
-                try:
-                    runner = _KBS1_RUNNERS[method]
-                    tf, ms = runner(kvseqlen, qseqlen, topk, pass_type, device)
-                    _set_entry(results, key, kvseqlen, round(tf, 1), round(ms, 3))
-                    _save_results(PHASE, results)
-                    print(
-                        f"    {pass_type:10s} {method:10s}: "
-                        f"{tf:>7.1f} T  ({ms:.3f} ms)",
-                        flush=True,
-                    )
-                except torch.cuda.OutOfMemoryError:
-                    print(
-                        f"    {pass_type:10s} {method:10s}: OOM",
-                        flush=True,
-                    )
-                    _set_entry(results, key, kvseqlen, None, None)
-                    _save_results(PHASE, results)
+                    gc.collect()
                     torch.cuda.empty_cache()
-                except Exception as e:
-                    print(
-                        f"    {pass_type:10s} {method:10s}: ERR — {e}",
-                        flush=True,
-                    )
-                    _set_entry(results, key, kvseqlen, None, None)
-                    _save_results(PHASE, results)
-                    torch.cuda.empty_cache()
+                    try:
+                        tf, ms = runners[method](
+                            kvseqlen, qseqlen, topk, pass_type, device
+                        )
+                        _set_entry(results, key, kvseqlen, round(tf, 1), round(ms, 3))
+                        _save_results(PHASE, results)
+                        print(
+                            f"    {pass_type:10s} {method:10s}: "
+                            f"{tf:>7.1f} T  ({ms:.3f} ms)",
+                            flush=True,
+                        )
+                    except torch.cuda.OutOfMemoryError:
+                        print(
+                            f"    {pass_type:10s} {method:10s}: OOM",
+                            flush=True,
+                        )
+                        _set_entry(results, key, kvseqlen, None, None)
+                        _save_results(PHASE, results)
+                        torch.cuda.empty_cache()
+                    except Exception as e:
+                        print(
+                            f"    {pass_type:10s} {method:10s}: ERR — {e}",
+                            flush=True,
+                        )
+                        _set_entry(results, key, kvseqlen, None, None)
+                        _save_results(PHASE, results)
+                        torch.cuda.empty_cache()
 
-    # --- 8b: kbs=128 ---
-    print("\n  " + "─" * 55, flush=True)
-    print(
-        f"  8b) kbs={KBS_BLOCK}: BS/IS vs Baselines " f"(FWD + BWD LoopK + BWD LoopQ)",
-        flush=True,
+    _run_group(
+        "kbs1",
+        KBS1_METHODS,
+        KBS1_PASSES,
+        _KBS1_RUNNERS,
+        "8a) kbs=1: IndexSparse vs Baselines (FWD + BWD LoopK)",
     )
-    print("  " + "─" * 55, flush=True)
-    for kvseqlen, qseqlen, topk in SCENARIOS:
-        print(
-            f"  ── kvseqlen={kvseqlen // 1024}k, "
-            f"qseqlen={qseqlen}, topk={topk // 1024}k ──",
-            flush=True,
-        )
-        for pass_type in KBS128_PASSES:
-            for method in KBS128_METHODS:
-                key = f"kbs128/{pass_type}/{method}"
-                if not force and _has_entry(results, key, kvseqlen):
-                    d = results[key]
-                    idx = d["kvseqlen"].index(kvseqlen)
-                    tf = d["tflops"][idx]
-                    print(
-                        f"    {pass_type:10s} {method:10s}: " f"{tf:>7.1f} T (cached)",
-                        flush=True,
-                    )
-                    continue
-
-                gc.collect()
-                torch.cuda.empty_cache()
-                try:
-                    runner = _KBS128_RUNNERS[method]
-                    tf, ms = runner(kvseqlen, qseqlen, topk, pass_type, device)
-                    _set_entry(results, key, kvseqlen, round(tf, 1), round(ms, 3))
-                    _save_results(PHASE, results)
-                    print(
-                        f"    {pass_type:10s} {method:10s}: "
-                        f"{tf:>7.1f} T  ({ms:.3f} ms)",
-                        flush=True,
-                    )
-                except torch.cuda.OutOfMemoryError:
-                    print(
-                        f"    {pass_type:10s} {method:10s}: OOM",
-                        flush=True,
-                    )
-                    _set_entry(results, key, kvseqlen, None, None)
-                    _save_results(PHASE, results)
-                    torch.cuda.empty_cache()
-                except Exception as e:
-                    print(
-                        f"    {pass_type:10s} {method:10s}: ERR — {e}",
-                        flush=True,
-                    )
-                    _set_entry(results, key, kvseqlen, None, None)
-                    _save_results(PHASE, results)
-                    torch.cuda.empty_cache()
+    _run_group(
+        "kbs128",
+        KBS128_METHODS,
+        KBS128_PASSES,
+        _KBS128_RUNNERS,
+        f"8b) kbs={KBS_BLOCK}: BS/IS vs Baselines (FWD + BWD LoopK + BWD LoopQ)",
+    )
 
     print(f"\n[{_ts()}] Phase 8 done.", flush=True)
 
@@ -673,10 +682,10 @@ def _phase8_bench(force=False, rerun_filter=None):
 
 
 def _phase8_plot():
-    """Generate Phase-6 style grouped bar charts: 2 figures (kbs=1, kbs=128).
+    """Generate Phase-6 style grouped bar charts using _common plot constants.
 
-    Each figure has subplots for each pass (FWD, BWD, etc.), with grouped bars
-    per kvseqlen, one bar per method. TFLOPS on y-axis, kvseqlen on x-axis.
+    Two figures: phase8a_kbs1.png and phase8b_kbs128.png.
+    Colors: our kernels use warm/saturated from _common; baselines use grey/dark.
     """
     import matplotlib
 
@@ -696,153 +705,95 @@ def _phase8_plot():
     x = np.arange(len(kvseqlens))
     x_labels = [f"{kv // 1024}K\n(q={kv // 64}, top={kv // 8192}K)" for kv in kvseqlens]
 
+    def _plot_figure(fig_id, prefix, plot_defs, pass_defs, title):
+        """Shared plotting logic for both 8a and 8b."""
+        n_cols = len(pass_defs)
+        fig, axes = plt.subplots(1, n_cols, figsize=(7 * n_cols, 7), dpi=150)
+        if n_cols == 1:
+            axes = [axes]
+
+        for col_idx, (pid, pname) in enumerate(pass_defs):
+            ax = axes[col_idx]
+            n_m = len(plot_defs)
+            bw = PLOT_BAR_WIDTH_RATIO / n_m
+            for i, (mid, lbl, col) in enumerate(plot_defs):
+                key = f"{prefix}/{pid}/{mid}"
+                d = results.get(key, {})
+                vals = []
+                for kv in kvseqlens:
+                    if kv in d.get("kvseqlen", []):
+                        idx = d["kvseqlen"].index(kv)
+                        v = d["tflops"][idx] if d["tflops"][idx] else 0
+                    else:
+                        v = 0
+                    vals.append(v)
+                off = (i - n_m / 2 + 0.5) * bw
+                bars = ax.bar(
+                    x + off,
+                    vals,
+                    width=bw,
+                    label=lbl,
+                    color=col,
+                    edgecolor="white",
+                    linewidth=0.5,
+                    alpha=PLOT_BAR_ALPHA,
+                )
+                for bar, v in zip(bars, vals):
+                    if v > 0:
+                        ax.text(
+                            bar.get_x() + bar.get_width() / 2,
+                            bar.get_height() + 5,
+                            f"{v:.0f}",
+                            ha="center",
+                            va="bottom",
+                            fontsize=PLOT_VALUE_FONTSIZE,
+                            fontweight="bold",
+                        )
+
+            ax.set_title(pname, fontsize=13, fontweight="bold")
+            ax.set_xlabel("kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)", fontsize=9)
+            ax.set_ylabel("TFLOPS", fontsize=12)
+            ax.set_xticks(x)
+            ax.set_xticklabels(x_labels, fontsize=9)
+            ax.tick_params(axis="y", labelsize=11)
+            ax.legend(loc="upper right", fontsize=9)
+            ax.grid(axis="y", alpha=0.3)
+
+        fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
+        plt.tight_layout()
+        path = os.path.join(out, f"{fig_id}.png")
+        fig.savefig(path, dpi=180, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {path}", flush=True)
+
     # ── 8a) kbs=1 ──
-    KBS1_PLOT = [
-        ("ffa_is", "FFA IndexSparse", (0.85, 0.25, 0.25)),
-        ("flexattn", "FlexAttention", (0.30, 0.70, 0.35)),
-        ("triton", "Triton Token-Sparse", (0.25, 0.45, 0.80)),
-    ]
-    KBS1_PASS_LABELS = [("fwd", "FWD"), ("bwd", "BWD (LoopK)")]
-
-    n_cols = len(KBS1_PASS_LABELS)
-    fig, axes = plt.subplots(1, n_cols, figsize=(7 * n_cols, 7), dpi=150)
-    if n_cols == 1:
-        axes = [axes]
-
-    for col_idx, (pid, pname) in enumerate(KBS1_PASS_LABELS):
-        ax = axes[col_idx]
-        n_m = len(KBS1_PLOT)
-        bw = 0.8 / n_m
-        for i, (mid, lbl, col) in enumerate(KBS1_PLOT):
-            key = f"kbs1/{pid}/{mid}"
-            d = results.get(key, {})
-            vals = []
-            for kv in kvseqlens:
-                if kv in d.get("kvseqlen", []):
-                    idx = d["kvseqlen"].index(kv)
-                    v = d["tflops"][idx] if d["tflops"][idx] else 0
-                else:
-                    v = 0
-                vals.append(v)
-            off = (i - n_m / 2 + 0.5) * bw
-            bars = ax.bar(
-                x + off,
-                vals,
-                width=bw,
-                label=lbl,
-                color=col,
-                edgecolor="white",
-                linewidth=0.5,
-                alpha=0.85,
-            )
-            for bar, v in zip(bars, vals):
-                if v > 0:
-                    ax.text(
-                        bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + 5,
-                        f"{v:.0f}",
-                        ha="center",
-                        va="bottom",
-                        fontsize=7,
-                        fontweight="bold",
-                    )
-
-        ax.set_title(pname, fontsize=13, fontweight="bold")
-        ax.set_xlabel("kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)", fontsize=9)
-        ax.set_ylabel("TFLOPS", fontsize=12)
-        ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, fontsize=9)
-        ax.tick_params(axis="y", labelsize=11)
-        ax.legend(loc="upper right", fontsize=9)
-        ax.grid(axis="y", alpha=0.3)
-
-    fig.suptitle(
+    _plot_figure(
+        "phase8a_kbs1",
+        "kbs1",
+        [
+            ("ffa_is", "FFA IndexSparse", COLOR_INDEX_SPARSE),
+            ("flexattn", "FlexAttention", COLOR_FLEXATTN),
+            ("triton", "Triton Token-Sparse", COLOR_TRITON),
+        ],
+        [("fwd", "FWD"), ("bwd", "BWD (LoopK)")],
         "Phase 8a: Token-Sparse Baseline (kbs=1)\n"
         f"nhq={NHQ}, nhk={NHK}, hd={HD}, PackGQA, bf16, H100",
-        fontsize=13,
-        fontweight="bold",
-        y=1.02,
     )
-    plt.tight_layout()
-    path = os.path.join(out, "phase8a_kbs1.png")
-    fig.savefig(path, dpi=180, bbox_inches="tight")
-    plt.close()
-    print(f"  Saved: {path}", flush=True)
 
     # ── 8b) kbs=128 ──
-    KBS128_PLOT = [
-        ("ffa_bs", "FFA BlockSparse", (0.29, 0.57, 0.60)),
-        ("ffa_is128", "FFA IndexSparse (kbs=128)", (0.85, 0.45, 0.20)),
-        ("flexattn", "FlexAttention", (0.30, 0.70, 0.35)),
-    ]
-    KBS128_PASS_LABELS = [
-        ("fwd", "FWD"),
-        ("bwd_loopk", "BWD LoopK"),
-        ("bwd_loopq", "BWD LoopQ"),
-    ]
-
-    n_cols = len(KBS128_PASS_LABELS)
-    fig, axes = plt.subplots(1, n_cols, figsize=(7 * n_cols, 7), dpi=150)
-
-    for col_idx, (pid, pname) in enumerate(KBS128_PASS_LABELS):
-        ax = axes[col_idx]
-        n_m = len(KBS128_PLOT)
-        bw = 0.8 / n_m
-        for i, (mid, lbl, col) in enumerate(KBS128_PLOT):
-            key = f"kbs128/{pid}/{mid}"
-            d = results.get(key, {})
-            vals = []
-            for kv in kvseqlens:
-                if kv in d.get("kvseqlen", []):
-                    idx = d["kvseqlen"].index(kv)
-                    v = d["tflops"][idx] if d["tflops"][idx] else 0
-                else:
-                    v = 0
-                vals.append(v)
-            off = (i - n_m / 2 + 0.5) * bw
-            bars = ax.bar(
-                x + off,
-                vals,
-                width=bw,
-                label=lbl,
-                color=col,
-                edgecolor="white",
-                linewidth=0.5,
-                alpha=0.85,
-            )
-            for bar, v in zip(bars, vals):
-                if v > 0:
-                    ax.text(
-                        bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + 5,
-                        f"{v:.0f}",
-                        ha="center",
-                        va="bottom",
-                        fontsize=7,
-                        fontweight="bold",
-                    )
-
-        ax.set_title(pname, fontsize=13, fontweight="bold")
-        ax.set_xlabel("kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)", fontsize=9)
-        ax.set_ylabel("TFLOPS", fontsize=12)
-        ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, fontsize=9)
-        ax.tick_params(axis="y", labelsize=11)
-        ax.legend(loc="upper right", fontsize=9)
-        ax.grid(axis="y", alpha=0.3)
-
-    fig.suptitle(
+    _plot_figure(
+        "phase8b_kbs128",
+        "kbs128",
+        [
+            ("ffa_bs", "FFA BlockSparse", COLOR_BLOCK_SPARSE),
+            ("ffa_is128", "FFA IndexSparse (kbs=128)", COLOR_INDEX_SPARSE),
+            ("flexattn", "FlexAttention", COLOR_FLEXATTN),
+            ("triton", "Triton Token-Sparse", COLOR_TRITON),
+        ],
+        [("fwd", "FWD"), ("bwd_loopk", "BWD LoopK"), ("bwd_loopq", "BWD LoopQ")],
         f"Phase 8b: Block-Sparse Baseline (kbs={KBS_BLOCK})\n"
         f"nhq={NHQ}, nhk={NHK}, hd={HD}, PackGQA, bf16, H100",
-        fontsize=13,
-        fontweight="bold",
-        y=1.02,
     )
-    plt.tight_layout()
-    path = os.path.join(out, "phase8b_kbs128.png")
-    fig.savefig(path, dpi=180, bbox_inches="tight")
-    plt.close()
-    print(f"  Saved: {path}", flush=True)
 
     # Summary tables
     print("\n  " + "─" * 60)

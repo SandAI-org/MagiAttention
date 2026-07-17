@@ -25,6 +25,29 @@ S_FULL = 32768
 TOPK_VALS = [32768, 16384, 8192, 4096, 2048]
 WARMUP, ITERS = 8, 20
 
+# ── Video-production scenarios (shared by Phase 6 & 8) ────────
+# qseqlen = kvseqlen/64, topk = kvseqlen/8
+VIDEO_SCENARIOS = [
+    # (kvseqlen, qseqlen, topk)
+    (32768, 512, 4096),
+    (65536, 1024, 8192),
+    (131072, 2048, 16384),
+    (262144, 4096, 32768),
+    (524288, 8192, 65536),
+]
+
+# ── Plot style (consistent across all phases) ─────────────────
+# Our kernels: warm/saturated colors
+COLOR_INDEX_SPARSE = (0.77, 0.34, 0.49)
+COLOR_BLOCK_SPARSE = (0.29, 0.57, 0.60)
+# External baselines: gray/dark
+COLOR_FLEXATTN = (0.45, 0.45, 0.45)
+COLOR_TRITON = (0.65, 0.65, 0.65)
+
+PLOT_BAR_WIDTH_RATIO = 0.8
+PLOT_BAR_ALPHA = 0.85
+PLOT_VALUE_FONTSIZE = 7
+
 _SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BASE_OUT = os.path.join(_SCRIPT_DIR, "outs", "sparse_analysis")
 
