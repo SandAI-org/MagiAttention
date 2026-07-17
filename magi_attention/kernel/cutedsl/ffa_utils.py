@@ -542,6 +542,16 @@ def is_ffa_2cta_disabled(is_fwd: bool = False) -> bool:
         return _ffa_disable_2cta_enabled
 
 
+def is_ffa_inner_dir_max_to_min() -> bool:
+    return os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_INNER_DIR_MAX_TO_MIN", "0") == "1"
+
+
+def get_ffa_mask_mode() -> int:
+    _mm = os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_MASK_MODE", "regular")
+    _map = {"regular": 0, "dispatch": 1}
+    return _map.get(_mm.lower(), 0)
+
+
 def _compute_base_hash(func: Callable) -> str:
     """Compute hash from source code or bytecode and closure values."""
     try:

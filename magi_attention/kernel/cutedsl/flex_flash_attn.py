@@ -50,9 +50,11 @@ from .ffa_utils import (
     create_softcap_scoremod,
     create_softcap_scoremod_bwd,
     get_device_arch,
+    get_ffa_mask_mode,
     hash_callable,
     is_ffa_2cta_disabled,
     is_ffa_clc_enabled,
+    is_ffa_inner_dir_max_to_min,
     maybe_contiguous,
     normalize_mask_types,
     ranges_to_cu_seqlens,
@@ -617,12 +619,8 @@ def _flex_flash_attn_bwd(
         block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
 
     # IndexAttn: convert token-level indices to block-level BlockSparseTensors.
-    # Only supported for LoopK (swap_bwd_qk_loop=True), non-varlen.
     _index_attn_block_sparse = None
     if index_attn_indices is not None:
-        assert (
-            swap_bwd_qk_loop
-        ), "IndexAttn BWD on CuTe-DSL requires swap_bwd_qk_loop=True (LoopK)"
         assert (
             q_ranges is None and k_ranges is None
         ), "IndexAttn does not use q/k ranges"
@@ -752,6 +750,7 @@ def _flex_flash_attn_bwd(
                 or mask_mod is not None
                 or block_sparse_tensors is not None
                 or swap_bwd_qk_loop
+                or pack_gqa
             )
             cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
             use_2cta_instrs = cluster_size == 2
@@ -857,8 +856,9 @@ def _flex_flash_attn_bwd(
     qhead_per_kvhead = num_head // num_head_kv
     if pack_gqa is None:
         pack_gqa = qhead_per_kvhead > 1  # type: ignore[unreachable]
-    # pack_gqa backward not yet supported in bwd
-    pack_gqa = False
+    # SM80/SM90 BWD kernels do not support PackGQA yet; SM100+ does.
+    if major_arch in (8, 9, 12):
+        pack_gqa = False
 
     if softcap != 0.0:
         assert (
@@ -1026,6 +1026,38 @@ def _flex_flash_attn_bwd(
         use_padded_offsets=False,
     )
 
+    # PackGQA: reorder lse_log2/dpsum/dq_accum from (B, NHQ, *) head-major
+    # to (B, NHK, *×qhpk) column-major so packed M iterates h_offset fastest.
+    # CuTe packed layout: linear_idx = h_offset + q_pos * qhpk (column-major).
+    if pack_gqa and qhead_per_kvhead > 1 and cu_seqlens_q is None:
+        lse_log2 = (
+            lse_log2.view(batch_size, num_head_kv, qhead_per_kvhead, seqlen_q_rounded)
+            .permute(0, 1, 3, 2)
+            .contiguous()
+            .view(batch_size, num_head_kv, seqlen_q_rounded * qhead_per_kvhead)
+        )
+        dpsum = (
+            dpsum.view(batch_size, num_head_kv, qhead_per_kvhead, seqlen_q_rounded)
+            .permute(0, 1, 3, 2)
+            .contiguous()
+            .view(batch_size, num_head_kv, seqlen_q_rounded * qhead_per_kvhead)
+        )
+        dq_accum = (
+            dq_accum.view(
+                batch_size,
+                num_head_kv,
+                qhead_per_kvhead,
+                seqlen_q_rounded * head_dim_rounded,
+            )
+            .permute(0, 1, 3, 2)
+            .contiguous()
+            .view(
+                batch_size,
+                num_head_kv,
+                seqlen_q_rounded * head_dim_rounded * qhead_per_kvhead,
+            )
+        )
+
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
     # BwdConfig.num_wg, SM100/SM110 uses default from function signature (384).
     if major_arch not in [8, 9, 12]:
@@ -1152,6 +1184,8 @@ def _flex_flash_attn_bwd(
             (seqlen_k_rounded // n_block_size == 1),
             magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             swap_bwd_qk_loop,
+            is_ffa_inner_dir_max_to_min(),
+            get_ffa_mask_mode(),
         )
 
     if compile_key not in _flex_flash_attn_bwd.compile_cache:
@@ -1256,6 +1290,9 @@ def _flex_flash_attn_bwd(
                     has_aux_tensors=aux_tensors is not None,
                     subtile_factor=subtile_factor,
                     swap_bwd_qk_loop=swap_bwd_qk_loop,
+                    pack_gqa=pack_gqa,
+                    inner_dir_max_to_min=is_ffa_inner_dir_max_to_min(),
+                    mask_mode=get_ffa_mask_mode(),
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
@@ -1334,6 +1371,23 @@ def _flex_flash_attn_bwd(
         case _:
             num_threads_post_dQ = 128
             num_threads_post_dKV = 128
+
+    # Unpack dq_accum from column-major (B, NHK, Sq*D*qhpk) back to (B, NHQ, Sq*D).
+    # Kernel output: packed_idx = h_offset + q_pos * qhpk, each with D elements.
+    # Structure: (B, NHK, Sq, qhpk, D) in memory → permute → (B, NHK, qhpk, Sq, D) → (B, NHQ, Sq*D)
+    if pack_gqa and qhead_per_kvhead > 1 and cu_seqlens_q is None:
+        dq_accum = (
+            dq_accum.view(
+                batch_size,
+                num_head_kv,
+                seqlen_q_rounded,
+                qhead_per_kvhead,
+                head_dim_rounded,
+            )
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+            .view(batch_size, num_head, seqlen_q_rounded * head_dim_rounded)
+        )
 
     bwd_postprocess(
         dq_accum,

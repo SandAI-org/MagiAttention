@@ -43,6 +43,7 @@ from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwdSm100
+from .pack_gqa import pack_gqa_layout
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_utils import (
@@ -85,6 +86,9 @@ class FFABwdSm100:
         has_aux_tensors: cutlass.Constexpr = False,
         subtile_factor: cutlass.Constexpr[int] = 1,
         swap_bwd_qk_loop: bool = False,
+        pack_gqa: bool = False,
+        inner_dir_max_to_min: bool = False,
+        mask_mode: int = 0,
         debug_print: bool = False,
     ):
         # padding head_dim to a multiple of 16 as k_block_size
@@ -142,7 +146,7 @@ class FFABwdSm100:
         self.mask_type = mask_type
         self.is_local = is_local
         self.qhead_per_kvhead = qhead_per_kvhead
-        self.pack_gqa = False
+        self.pack_gqa = pack_gqa
         self.deterministic = deterministic
         self.spt_override = spt
 
@@ -150,6 +154,9 @@ class FFABwdSm100:
         if swap_bwd_qk_loop:
             assert not use_2cta_instrs, "LoopK does not support 2-CTA mode"
             assert self.tile_hdim <= 128, "LoopK requires hdim <= 128"
+
+        self.inner_dir_max_to_min = inner_dir_max_to_min
+        self.mask_mode = mask_mode
 
         # Score mod and mask mod support
         self.score_mod = score_mod
@@ -738,8 +745,17 @@ class FFABwdSm100:
         )
         mQ, mdO = [layout_utils.select(t, mode=QO_layout_transpose) for t in (mQ, mdO)]
 
+        # --- Apply PackGQA layout (before dO transpose) ---
+        # Pack qhead_per_kvhead Q heads into M dimension for GQA:
+        #   Q/dO: (sq, hd, nhq, b) -> ((qhpk, sq), hd, nhk, b)
+        if const_expr(self.pack_gqa):
+            nheads_kv = mK.shape[2]  # mK still in original (b, sk, nhk, hd) form
+            mQ = pack_gqa_layout(mQ, self.qhead_per_kvhead, nheads_kv, head_idx=2)
+            mdO = pack_gqa_layout(mdO, self.qhead_per_kvhead, nheads_kv, head_idx=2)
+
         # (sq, hd, nhq, b) --> (hd, sq, nhq, b)
         # or (sq, hd, nhq) -> (hd, sq, nhq) if there's cu_seqlens_q
+        # With pack_gqa: ((qhpk,sq), hd, nhk, b) --> (hd, (qhpk,sq), nhk, b)
         dO_transpose = [1, 0, 2, 3] if const_expr(mCuSeqlensQ is None) else [1, 0, 2]
         mdO = layout_utils.select(mdO, mode=dO_transpose)  # => actually dO.T
 
@@ -763,6 +779,10 @@ class FFABwdSm100:
             layout_utils.select(t, mode=LSE_dPsum_dQacc_transpose)
             for t in (mLSE, mdPsum)
         ]
+
+        # For PackGQA: LSE/dPsum/dQacc are reshaped on the host from (B, NHQ, *)
+        # to (B, NHK, *qhpk) so they're flat-contiguous in packed order.
+        # No pack_gqa_layout needed here — just transpose normally.
 
         # --- Make mdQacc ---
 
@@ -1068,7 +1088,9 @@ class FFABwdSm100:
                 cluster_shape_mn=self.cluster_shape_mnk[:2],
                 mCuSeqlensQ=mCuSeqlensK,
                 mSeqUsedQ=mSeqUsedK,
-                qhead_per_kvhead_packgqa=1,  # pack_gqa disabled for bwd
+                qhead_per_kvhead_packgqa=self.qhead_per_kvhead
+                if const_expr(self.pack_gqa)
+                else 1,
                 element_size=self.k_dtype.width // 8,
                 is_persistent=self.is_persistent,  # persistent mode not tested
                 lpt=self.spt,
@@ -1986,11 +2008,15 @@ class FFABwdSm100:
             False,  # is_split_kv
             window_size_left,
             window_size_right,
-            qhead_per_kvhead_packgqa=1,
+            qhead_per_kvhead_packgqa=self.qhead_per_kvhead
+            if const_expr(self.pack_gqa)
+            else 1,
         )
         SeqlenInfoCls = partial(
             SeqlenInfoQK.create,
-            seqlen_q_static=mQ.shape[0],
+            seqlen_q_static=mQ.shape[0]
+            if const_expr(not self.pack_gqa)
+            else mQ.shape[0][1],
             seqlen_k_static=mK.shape[0],
             mCuSeqlensQ=mCuSeqlensQ,
             mCuSeqlensK=mCuSeqlensK,
@@ -2006,6 +2032,9 @@ class FFABwdSm100:
             swap_AB=True,
             window_size_left=window_size_left,
             window_size_right=window_size_right,
+            qhead_per_kvhead_packgqa=self.qhead_per_kvhead
+            if const_expr(self.pack_gqa)
+            else 1,
         )
 
         # --- Cluster wait before tensor memory alloc ---
@@ -2600,7 +2629,11 @@ class FFABwdSm100:
             m_block_min, m_block_max = block_info.get_m_block_min_max(
                 seqlen_info, n_block // self.cluster_shape_mnk[0]
             )
-            head_idx_kv = head_idx // self.qhead_per_kvhead
+            head_idx_kv = (
+                head_idx
+                if const_expr(self.pack_gqa)
+                else head_idx // self.qhead_per_kvhead
+            )
             n_block_cta_group = n_block // self.cta_group_size
 
             # //////////////////////////////////////////////
@@ -2974,7 +3007,10 @@ class FFABwdSm100:
                         m_block_max=m_block_max,
                     )
                 else:
-                    first_m_block = m_block_min
+                    if const_expr(self.inner_dir_max_to_min):
+                        first_m_block = m_block_max - 1
+                    else:
+                        first_m_block = m_block_min
 
                     # TODO: review the logics
                     if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
@@ -3182,18 +3218,25 @@ class FFABwdSm100:
                             pipeline_Kt.producer_commit(producer_state_Kt)
                             producer_state_Kt.advance()
 
-                        # --- Mainloop: load Q(i),Qt(i-1)/dO(i),dOt(i)/LSE(i),dPsum(i) ---
+                        # --- Mainloop: load Q(i),Qt(prev)/dO(i),dOt(i)/LSE(i),dPsum(i) ---
 
-                        for m_block in cutlass.range(
-                            m_block_min + 1, m_block_max, unroll=1
+                        for _iter in cutlass.range(
+                            m_block_max - m_block_min - 1, unroll=1
                         ):
-                            # Load Qt(i-1), Q(i), LSE(i)
+                            if const_expr(self.inner_dir_max_to_min):
+                                m_block = m_block_max - 2 - _iter
+                                prev_m_block = m_block + 1
+                            else:
+                                m_block = m_block_min + 1 + _iter
+                                prev_m_block = m_block - 1
+
+                            # Load Qt(prev), Q(i), LSE(i)
                             if const_expr(should_load_Q):
-                                # Load Qt(i-1)
+                                # Load Qt(prev)
                                 if const_expr(tma_atom_Qt is not None):
                                     pipeline_Qt.producer_acquire(producer_state_Qt)
                                     load_Qt(
-                                        m_block - 1, producer_state=producer_state_Qt
+                                        prev_m_block, producer_state=producer_state_Qt
                                     )
                                     pipeline_Qt.producer_commit(producer_state_Qt)
                                     producer_state_Qt.advance()
@@ -3244,15 +3287,17 @@ class FFABwdSm100:
                                     )
                                 producer_state_dO_dPsum.advance()
 
-                        # --- Epilogue: load Qt(-1) ---
+                        # --- Epilogue: load Qt(last) ---
 
-                        # Load Qt(-1)
                         if const_expr(should_load_Q):
                             if const_expr(tma_atom_Qt is not None):
-                                pipeline_Qt.producer_acquire(producer_state_Qt)
-                                load_Qt(
-                                    m_block_max - 1, producer_state=producer_state_Qt
+                                last_m_block = (
+                                    m_block_min
+                                    if const_expr(self.inner_dir_max_to_min)
+                                    else m_block_max - 1
                                 )
+                                pipeline_Qt.producer_acquire(producer_state_Qt)
+                                load_Qt(last_m_block, producer_state=producer_state_Qt)
                                 pipeline_Qt.producer_commit(producer_state_Qt)
                                 producer_state_Qt.advance()
 
@@ -3346,7 +3391,11 @@ class FFABwdSm100:
             n_block_min, n_block_max = block_info.get_n_block_min_max(
                 seqlen_info, m_block
             )
-            head_idx_kv = head_idx // self.qhead_per_kvhead
+            head_idx_kv = (
+                head_idx
+                if const_expr(self.pack_gqa)
+                else head_idx // self.qhead_per_kvhead
+            )
 
             # Make gQ/gK/gV/gdO/gLSE/gdPsum
             mQ_cur = seqlen_info.offset_batch_Q(mQ, batch_idx, dim=3)[
@@ -3461,7 +3510,10 @@ class FFABwdSm100:
                         curr_full_idx,
                     )
                 else:
-                    first_n_block = n_block_min
+                    if const_expr(self.inner_dir_max_to_min):
+                        first_n_block = n_block_max - 1
+                    else:
+                        first_n_block = n_block_min
 
                 # Prologue: load Q, dO, LSE, dPsum once + K(0), V(0)
                 pipeline_Q.producer_acquire(
@@ -3514,7 +3566,10 @@ class FFABwdSm100:
                             curr_full_idx,
                         )
                     else:
-                        n_block = n_block_min + iter_idx
+                        if const_expr(self.inner_dir_max_to_min):
+                            n_block = n_block_max - 1 - iter_idx
+                        else:
+                            n_block = n_block_min + iter_idx
                     pipeline_K.producer_acquire(
                         producer_state_K,
                         extra_tx_count=self.tma_copy_bytes["V"],
@@ -5004,7 +5059,10 @@ class FFABwdSm100:
                 n_block_min, n_block_max = block_info.get_n_block_min_max(
                     seqlen_info, m_block
                 )
-                n_block = n_block_min
+                if const_expr(self.inner_dir_max_to_min):
+                    n_block = n_block_max - 1
+                else:
+                    n_block = n_block_min
                 m_block_min = Int32(0)
                 m_block_max = Int32(0)
                 if const_expr(self.use_block_sparsity):
@@ -5032,7 +5090,10 @@ class FFABwdSm100:
                 m_block_min, m_block_max = block_info.get_m_block_min_max(
                     seqlen_info, n_block // self.cluster_shape_mnk[0]
                 )
-                m_block = m_block_min
+                if const_expr(self.inner_dir_max_to_min):
+                    m_block = m_block_max - 1
+                else:
+                    m_block = m_block_min
 
             # --- Define attn mask apply fn ---
 
@@ -5238,9 +5299,15 @@ class FFABwdSm100:
                             curr_loopk_full_idx,
                         )
                     else:
-                        n_block = n_block_min + iter_idx
+                        if const_expr(self.inner_dir_max_to_min):
+                            n_block = n_block_max - 1 - iter_idx
+                        else:
+                            n_block = n_block_min + iter_idx
                 else:
-                    m_block = m_block_min + iter_idx
+                    if const_expr(self.inner_dir_max_to_min):
+                        m_block = m_block_max - 1 - iter_idx
+                    else:
+                        m_block = m_block_min + iter_idx
 
                 # LoopQ block sparsity: derive m_block from Q block indices
                 if const_expr(self.use_block_sparsity and not self.swap_bwd_qk_loop):
@@ -5319,7 +5386,28 @@ class FFABwdSm100:
                 #  Apply mask on rS
                 # //////////////////////////////////////////////
 
-                check_m_boundary = (m_block + 1) * self.tile_m > seqlen_info.seqlen_q
+                seqlen_q_eff = (
+                    seqlen_info.seqlen_q * self.qhead_per_kvhead
+                    if const_expr(self.pack_gqa)
+                    else seqlen_info.seqlen_q
+                )
+                check_m_boundary = (m_block + 1) * self.tile_m > seqlen_q_eff
+
+                # mask_mode=1 (dispatch): skip mask for fully-valid causal tiles
+                if const_expr(
+                    self.mask_mode == 1
+                    and self.is_causal
+                    and not self.use_block_sparsity
+                ):
+                    if const_expr(not self.swap_bwd_qk_loop):
+                        n_block_for_check = n_block // self.cta_group_size
+                    else:
+                        n_block_for_check = n_block
+                    qhpk = self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1
+                    is_full_block = (m_block + 1) * self.tile_m <= (
+                        n_block_for_check + 1
+                    ) * self.tile_n * qhpk
+
                 if const_expr(self.swap_bwd_qk_loop):
                     mask.apply_mask_sm100_transposed(
                         tSrS_t2r,
@@ -6093,10 +6181,12 @@ class FFABwdSm100:
             # and derive actual m_block from Q_IDX/FULL_Q_IDX tensors.
             # For dense: iterate m_block_min..m_block_max directly.
             for iter_idx in cutlass.range(loop_count, unroll=1):
-                m_block = m_block_min + iter_idx
+                if const_expr(self.inner_dir_max_to_min):
+                    m_block = m_block_max - 1 - iter_idx
+                else:
+                    m_block = m_block_min + iter_idx
                 m_block_oob_upper = False
 
-                # TODO: review the logics
                 if const_expr(self.use_block_sparsity):
                     m_block, _ = get_m_block_from_iter_bwd(
                         iter_idx,
@@ -6384,7 +6474,11 @@ class FFABwdSm100:
                 process_tile = n_block_min < n_block_max
 
             # GMEM destinations (flattened fp32 for dKV_postprocess)
-            head_idx_kv = head_idx // self.qhead_per_kvhead
+            head_idx_kv = (
+                head_idx
+                if const_expr(self.pack_gqa)
+                else head_idx // self.qhead_per_kvhead
+            )
             if const_expr(not seqlen_info.has_cu_seqlens_k):
                 mdK_cur = mdK[None, head_idx_kv, batch_idx]
                 mdV_cur = mdV[None, head_idx_kv, batch_idx]
@@ -6416,7 +6510,10 @@ class FFABwdSm100:
                         _rd_full_idx,
                     )
                 else:
-                    n_block = n_block_min + iter_idx
+                    if const_expr(self.inner_dir_max_to_min):
+                        n_block = n_block_max - 1 - iter_idx
+                    else:
+                        n_block = n_block_min + iter_idx
 
                 # ======== Reduce dK ========
                 pipeline_dKV.consumer_wait(dKV_consumer_state)
@@ -6846,7 +6943,9 @@ class FFABwdSm100:
 
         # --- Make gdK/gdV ---
 
-        head_idx_kv = head_idx // self.qhead_per_kvhead
+        head_idx_kv = (
+            head_idx if const_expr(self.pack_gqa) else head_idx // self.qhead_per_kvhead
+        )
         if const_expr(not self.dKV_postprocess):
             assert not seqlen_info.has_cu_seqlens_k, "varlen uses non tma store path"
             mdKV_cur = mdKV[None, None, head_idx_kv, batch_idx]  # (seqlen, hdim)
@@ -6927,7 +7026,7 @@ class FFABwdSm100:
                 mdKV_semaphore_cur.iterator,
                 tidx,
                 wg_idx,
-                head_idx % self.qhead_per_kvhead,
+                0 if const_expr(self.pack_gqa) else head_idx % self.qhead_per_kvhead,
             )
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
 
