@@ -116,6 +116,10 @@ def main():
             from bench_sparse_analysis.phase7_outer_store_mode import _phase7_bench
 
             _phase7_bench(force=args.force)
+        elif phase == "8-baseline-comparison":
+            from bench_sparse_analysis.phase8_baseline_comparison import _phase8_bench
+
+            _phase8_bench(force=args.force, rerun_filter=rerun_filter)
     elif args.plot:
         phase = args.plot
         print(f"[{_ts()}] === --plot {phase} ===", flush=True)
@@ -160,6 +164,12 @@ def main():
             from bench_sparse_analysis.phase6_video_production import _phase6_plot
 
             _phase6_plot()
+        elif phase == "7-outer-store-mode":
+            pass  # Phase 7 has no dedicated plot
+        elif phase == "8-baseline-comparison":
+            from bench_sparse_analysis.phase8_baseline_comparison import _phase8_plot
+
+            _phase8_plot()
     elif args.ncu:
         phase = args.ncu
         print(f"[{_ts()}] === --ncu {phase} ===", flush=True)

@@ -39,6 +39,7 @@ PHASES = [
     "5-scaling",
     "6-video-production",
     "7-outer-store-mode",
+    "8-baseline-comparison",
 ]
 
 
