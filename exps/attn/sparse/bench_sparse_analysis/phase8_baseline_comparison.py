@@ -290,6 +290,8 @@ def _run_ffa_block_sparse(S, topk, is_bwd, device):
         k_ranges=k_ranges,
         attn_type_map=atm,
         pack_gqa=True,
+        block_sparse=True,
+        range_merge=True,
         disable_fwd_atomic_reduction=True,
     )
 
@@ -325,6 +327,152 @@ _RUNNERS = {
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Correctness Verification
+# ═══════════════════════════════════════════════════════════════
+
+
+def _ref_token_sparse_attn(q, k, v, indices, sm_scale=None):
+    """Naive reference: per-query gather topk KV → softmax → output."""
+    import torch
+
+    S, Hq, D = q.shape
+    if sm_scale is None:
+        sm_scale = 1.0 / (D**0.5)
+    q_f = q.float()
+    k_f = k.squeeze(1).float()
+    v_f = v.squeeze(1).float()
+    o = torch.zeros_like(q_f)
+    for i in range(min(S, 64)):
+        idx = indices[i].long()
+        ki = k_f[idx]
+        vi = v_f[idx]
+        qi = q_f[i]
+        scores = (qi @ ki.T) * sm_scale
+        weights = torch.softmax(scores, dim=-1)
+        o[i] = weights @ vi
+    return o[:64].to(q.dtype)
+
+
+def _sanity_check(device):
+    """Verify correctness of all methods at small scale before benchmarking."""
+    import torch
+
+    from magi_attention.functional import flex_flash_attn_func
+    from magi_attention.utils.sparse_utils import generate_ranges_from_topk_indices
+
+    S_ck, topk_ck = 512, 128
+    torch.manual_seed(42)
+    q = torch.randn(S_ck, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(S_ck, NHK, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(S_ck, NHK, HD, dtype=torch.bfloat16, device=device)
+
+    # Shared indices for fair comparison
+    indices_2d = (
+        torch.randint(0, S_ck, (S_ck, topk_ck), device=device, dtype=torch.int32)
+        .sort(dim=1)
+        .values
+    )
+    # Reference (first 64 rows only for speed)
+    ref = _ref_token_sparse_attn(q, k, v, indices_2d)
+
+    results = {}
+
+    # 1. FFA IndexSparse
+    is_indices = indices_2d.unsqueeze(1).expand(-1, NHK, -1).contiguous()
+    ffa_out, *_ = flex_flash_attn_func(
+        q,
+        k,
+        v,
+        index_sparse_indices=is_indices,
+        q_block_size=1,
+        sparse_k_block_size=1,
+        pack_gqa=True,
+        disable_fwd_atomic_reduction=True,
+    )
+    err = (ffa_out[:64].float() - ref.float()).abs().max().item()
+    results["ffa_index_sparse"] = err
+
+    # 2. FFA BlockSparse (kbs=128)
+    n_kv_blocks = S_ck // KBS_BLOCK
+    n_topk_blocks = topk_ck // KBS_BLOCK
+    bs_idx = (
+        torch.rand(S_ck, n_kv_blocks, device=device)
+        .argsort(dim=1)[:, :n_topk_blocks]
+        .sort(dim=1)
+        .values.unsqueeze(1)
+        .expand(-1, NHK, -1)
+        .to(torch.int32)
+        .contiguous()
+    )
+    ia_3d = bs_idx.permute(1, 0, 2).contiguous()
+    q_ranges, k_ranges = generate_ranges_from_topk_indices(
+        ia_3d, block_m=1, block_n=KBS_BLOCK, num_k_blocks=n_kv_blocks
+    )
+    atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device=device)
+    bs_out, *_ = flex_flash_attn_func(
+        q,
+        k,
+        v,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_type_map=atm,
+        pack_gqa=True,
+        block_sparse=True,
+        range_merge=True,
+        disable_fwd_atomic_reduction=True,
+    )
+    # BS attends to DIFFERENT K positions (blocks of 128) so can't compare to ref directly.
+    # Just check it doesn't produce NaN/Inf and output shape is correct.
+    bs_ok = (
+        not torch.isnan(bs_out).any().item()
+        and not torch.isinf(bs_out).any().item()
+        and bs_out.shape == (S_ck, NHQ, HD)
+    )
+    results["ffa_block_sparse"] = 0.0 if bs_ok else float("inf")
+
+    # 3. FlexAttention
+    from torch.nn.attention.flex_attention import flex_attention
+
+    q_bhsd = q.unsqueeze(0).permute(0, 2, 1, 3)  # (1, NHQ, S, HD)
+    k_bhsd = k.unsqueeze(0).permute(0, 2, 1, 3)
+    v_bhsd = v.unsqueeze(0).permute(0, 2, 1, 3)
+    block_mask = _build_flex_block_mask(S_ck, topk_ck, device)
+    flex_fn = torch.compile(flex_attention)
+    flex_out = flex_fn(q_bhsd, k_bhsd, v_bhsd, block_mask=block_mask, enable_gqa=True)
+    flex_ok = (
+        not torch.isnan(flex_out).any().item()
+        and not torch.isinf(flex_out).any().item()
+        and flex_out.shape == (1, NHQ, S_ck, HD)
+    )
+    results["flexattention"] = 0.0 if flex_ok else float("inf")
+
+    # 4. Triton Token-Sparse
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
+    from token_sparse_attn_triton import token_sparse_fwd
+
+    tri_out = token_sparse_fwd(q, k, v, indices_2d)
+    err_tri = (tri_out[:64].float() - ref.float()).abs().max().item()
+    results["triton_token_sparse"] = err_tri
+
+    # Print results
+    print("  Correctness verification (S=512, topk=128):", flush=True)
+    all_pass = True
+    for method, val in results.items():
+        if val < 0.05:
+            status = "PASS"
+        elif val == 0.0:
+            status = "PASS (shape/nan check)"
+        else:
+            status = f"FAIL (max_err={val:.4f})"
+            all_pass = False
+        print(f"    {method:22s}: {status}", flush=True)
+
+    if not all_pass:
+        print("  [ERROR] Correctness check failed! Aborting.", flush=True)
+    return all_pass
+
+
+# ═══════════════════════════════════════════════════════════════
 #  --exp
 # ═══════════════════════════════════════════════════════════════
 
@@ -343,6 +491,10 @@ def _phase8_bench(force=False, rerun_filter=None):
         flush=True,
     )
     print(f"  Passes: {PASSES}\n", flush=True)
+
+    # Correctness verification first
+    if not _sanity_check(device):
+        return
 
     # --- 8a: IndexSparse ---
     print("  " + "─" * 50, flush=True)
