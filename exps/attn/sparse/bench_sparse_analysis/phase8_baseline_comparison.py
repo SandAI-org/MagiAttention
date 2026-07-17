@@ -14,16 +14,17 @@
 
 """Phase 8: Baseline Comparison — FFA IndexSparse/BlockSparse vs external kernels.
 
-Compare MagiAttention sparse kernels against publicly available baselines:
-  - FlexAttention: PyTorch flex_attention + block_mask (Triton compiled)
-  - Triton Token-Sparse: Hand-written Triton MQA-optimized (tl.dot)
+Two sub-benchmarks organized by K block size:
 
-Two sub-benchmarks:
-  8a) IndexSparse (kbs=1): token-level sparsity
-  8b) BlockSparse (kbs=128): block-level sparsity (FlexAttention only)
+  8a) kbs=1 (token-sparse):
+      FFA IndexSparse vs FlexAttention vs Triton Token-Sparse
+      Passes: FWD, BWD (LoopK only — IS kbs=1 has no LoopQ)
+
+  8b) kbs=128 (block-sparse):
+      FFA BlockSparse vs FFA IndexSparse(kbs=128) vs FlexAttention
+      Passes: FWD, BWD_LoopK, BWD_LoopQ
 
 Config: nhq=128, nhk=1, hd=128, topk=2048 (fixed), sweep S=[32K..512K].
-Passes: FWD, BWD.
 """
 
 import gc
@@ -50,21 +51,23 @@ PHASE = "8-baseline-comparison"
 TOPK = 2048
 KBS_BLOCK = 128
 SEQLEN_VALS = [32768, 65536, 131072, 262144, 524288]
-PASSES = ["fwd", "bwd"]
 
-# Index Sparse methods (kbs=1)
-IS_METHODS = ["ffa_index_sparse", "flexattention", "triton_token_sparse"]
-IS_METHOD_LABELS = {
-    "ffa_index_sparse": "FFA IndexSparse",
-    "flexattention": "FlexAttention",
-    "triton_token_sparse": "Triton Token-Sparse",
+# 8a: kbs=1 (token-sparse)
+KBS1_METHODS = ["ffa_is", "flexattn", "triton"]
+KBS1_PASSES = ["fwd", "bwd"]
+KBS1_LABELS = {
+    "ffa_is": "FFA IndexSparse (kbs=1)",
+    "flexattn": "FlexAttention",
+    "triton": "Triton Token-Sparse",
 }
 
-# Block Sparse methods (kbs=128)
-BS_METHODS = ["ffa_block_sparse", "flexattention"]
-BS_METHOD_LABELS = {
-    "ffa_block_sparse": "FFA BlockSparse",
-    "flexattention": "FlexAttention",
+# 8b: kbs=128 (block-sparse)
+KBS128_METHODS = ["ffa_bs", "ffa_is128", "flexattn"]
+KBS128_PASSES = ["fwd", "bwd_loopk", "bwd_loopq"]
+KBS128_LABELS = {
+    "ffa_bs": "FFA BlockSparse",
+    "ffa_is128": "FFA IndexSparse (kbs=128)",
+    "flexattn": "FlexAttention",
 }
 
 
@@ -76,15 +79,6 @@ BS_METHOD_LABELS = {
 def _calc_sparse_flops(S, topk, is_bwd):
     fwd = 4 * S * topk * NHQ * HD
     return fwd * 2.5 if is_bwd else fwd
-
-
-def _build_index_sparse_indices(S, topk, device):
-    """(S, NHK, topk) int32 — random per-Q-position token indices."""
-    import torch
-
-    idx = torch.randint(0, S, (S, topk), device=device, dtype=torch.int32)
-    idx = idx.sort(dim=1).values
-    return idx.unsqueeze(1).expand(-1, NHK, -1).contiguous()
 
 
 def _build_flex_block_mask(S, topk, device):
@@ -115,24 +109,6 @@ def _build_flex_block_mask(S, topk, device):
     )
 
 
-def _build_block_sparse_indices(S, topk, device):
-    """(S, NHK, n_topk_blocks) int32 — block-level indices for FFA BlockSparse."""
-    import torch
-
-    n_kv_blocks = S // KBS_BLOCK
-    n_topk_blocks = topk // KBS_BLOCK
-    if n_topk_blocks >= n_kv_blocks:
-        idx = torch.arange(n_kv_blocks, dtype=torch.int32, device=device)
-        return idx.unsqueeze(0).unsqueeze(0).expand(S, NHK, -1).contiguous()
-    idx = (
-        torch.rand(S, n_kv_blocks, device=device)
-        .argsort(dim=1)[:, :n_topk_blocks]
-        .sort(dim=1)
-        .values
-    )
-    return idx.unsqueeze(1).expand(-1, NHK, -1).to(torch.int32).contiguous()
-
-
 def _has_entry(results, key, S):
     d = results.get(key, {})
     if not d or "seqlen" not in d:
@@ -159,11 +135,12 @@ def _set_entry(results, key, S, tflops, ms):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Index Sparse Runners
+#  8a: kbs=1 Runners
 # ═══════════════════════════════════════════════════════════════
 
 
-def _run_ffa_index_sparse(S, topk, is_bwd, device):
+def _run_kbs1_ffa_is(S, topk, pass_type, device):
+    """FFA IndexSparse kbs=1. BWD always uses LoopK (no LoopQ for kbs=1)."""
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
@@ -171,8 +148,14 @@ def _run_ffa_index_sparse(S, topk, is_bwd, device):
     q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
     k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
     v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
-    indices = _build_index_sparse_indices(S, topk, device)
-
+    indices = (
+        torch.randint(0, S, (S, topk), device=device, dtype=torch.int32)
+        .sort(dim=1)
+        .values.unsqueeze(1)
+        .expand(-1, NHK, -1)
+        .contiguous()
+    )
+    is_bwd = pass_type != "fwd"
     kw = dict(
         index_sparse_indices=indices,
         q_block_size=1,
@@ -180,7 +163,6 @@ def _run_ffa_index_sparse(S, topk, is_bwd, device):
         pack_gqa=True,
         disable_fwd_atomic_reduction=True,
     )
-
     if is_bwd:
         q.requires_grad_(True)
         k.requires_grad_(True)
@@ -196,11 +178,11 @@ def _run_ffa_index_sparse(S, topk, is_bwd, device):
         def run_fn():
             flex_flash_attn_func(q, k, v, **kw)
 
-    flops = _calc_sparse_flops(S, topk, is_bwd)
-    return _bench_kernel(run_fn, flops, device)
+    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
 
 
-def _run_flexattention(S, topk, is_bwd, device):
+def _run_kbs1_flexattn(S, topk, pass_type, device):
+    """FlexAttention with sparse block mask."""
     import torch
     from torch.nn.attention.flex_attention import flex_attention
 
@@ -209,6 +191,7 @@ def _run_flexattention(S, topk, is_bwd, device):
     v = torch.randn(1, NHK, S, HD, dtype=torch.bfloat16, device=device)
     block_mask = _build_flex_block_mask(S, topk, device)
     _flex_fn = torch.compile(flex_attention)
+    is_bwd = pass_type != "fwd"
 
     if is_bwd:
         q.requires_grad_(True)
@@ -225,11 +208,11 @@ def _run_flexattention(S, topk, is_bwd, device):
         def run_fn():
             _flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
 
-    flops = _calc_sparse_flops(S, topk, is_bwd)
-    return _bench_kernel(run_fn, flops, device)
+    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
 
 
-def _run_triton_token_sparse(S, topk, is_bwd, device):
+def _run_kbs1_triton(S, topk, pass_type, device):
+    """Triton hand-written token-sparse kernel."""
     import torch
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
@@ -243,6 +226,7 @@ def _run_triton_token_sparse(S, topk, is_bwd, device):
         .sort(dim=1)
         .values
     )
+    is_bwd = pass_type != "fwd"
 
     if is_bwd:
         q.requires_grad_(True)
@@ -259,16 +243,16 @@ def _run_triton_token_sparse(S, topk, is_bwd, device):
         def run_fn():
             token_sparse_fwd(q, k, v, tri_indices)
 
-    flops = _calc_sparse_flops(S, topk, is_bwd)
-    return _bench_kernel(run_fn, flops, device)
+    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Block Sparse Runners
+#  8b: kbs=128 Runners
 # ═══════════════════════════════════════════════════════════════
 
 
-def _run_ffa_block_sparse(S, topk, is_bwd, device):
+def _run_kbs128_ffa_bs(S, topk, pass_type, device):
+    """FFA BlockSparse (q_ranges/k_ranges + block_sparse + range_merge)."""
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
@@ -277,14 +261,26 @@ def _run_ffa_block_sparse(S, topk, is_bwd, device):
     q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
     k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
     v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
-    indices = _build_block_sparse_indices(S, topk, device)
 
+    n_kv_blocks = S // KBS_BLOCK
+    n_topk_blocks = topk // KBS_BLOCK
+    indices = (
+        torch.rand(S, n_kv_blocks, device=device)
+        .argsort(dim=1)[:, :n_topk_blocks]
+        .sort(dim=1)
+        .values.unsqueeze(1)
+        .expand(-1, NHK, -1)
+        .to(torch.int32)
+        .contiguous()
+    )
     ia_3d = indices.permute(1, 0, 2).contiguous()
     q_ranges, k_ranges = generate_ranges_from_topk_indices(
-        ia_3d, block_m=1, block_n=KBS_BLOCK, num_k_blocks=S // KBS_BLOCK
+        ia_3d, block_m=1, block_n=KBS_BLOCK, num_k_blocks=n_kv_blocks
     )
     atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device=device)
 
+    is_bwd = pass_type != "fwd"
+    swap_qk = pass_type == "bwd_loopk"
     kw = dict(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -294,8 +290,8 @@ def _run_ffa_block_sparse(S, topk, is_bwd, device):
         range_merge=True,
         disable_fwd_atomic_reduction=True,
     )
-
     if is_bwd:
+        kw["swap_bwd_qk_loop"] = swap_qk
         q.requires_grad_(True)
         k.requires_grad_(True)
         v.requires_grad_(True)
@@ -310,19 +306,78 @@ def _run_ffa_block_sparse(S, topk, is_bwd, device):
         def run_fn():
             flex_flash_attn_func(q, k, v, **kw)
 
-    flops = _calc_sparse_flops(S, topk, is_bwd)
-    return _bench_kernel(run_fn, flops, device)
+    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
+
+
+def _run_kbs128_ffa_is(S, topk, pass_type, device):
+    """FFA IndexSparse with kbs=128 (index_sparse_indices with block indices)."""
+    import torch
+
+    from magi_attention.functional import flex_flash_attn_func
+
+    q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+
+    n_kv_blocks = S // KBS_BLOCK
+    n_topk_blocks = topk // KBS_BLOCK
+    indices = (
+        torch.rand(S, n_kv_blocks, device=device)
+        .argsort(dim=1)[:, :n_topk_blocks]
+        .sort(dim=1)
+        .values.unsqueeze(1)
+        .expand(-1, NHK, -1)
+        .to(torch.int32)
+        .contiguous()
+    )
+
+    is_bwd = pass_type != "fwd"
+    swap_qk = pass_type == "bwd_loopk"
+    kw = dict(
+        index_sparse_indices=indices,
+        q_block_size=1,
+        sparse_k_block_size=KBS_BLOCK,
+        pack_gqa=True,
+        disable_fwd_atomic_reduction=True,
+    )
+    if is_bwd:
+        kw["swap_bwd_qk_loop"] = swap_qk
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        o, *_ = flex_flash_attn_func(q, k, v, **kw)
+        do = torch.randn_like(o)
+
+        def run_fn():
+            o.backward(do, retain_graph=True)
+
+    else:
+
+        def run_fn():
+            flex_flash_attn_func(q, k, v, **kw)
+
+    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
+
+
+def _run_kbs128_flexattn(S, topk, pass_type, device):
+    """FlexAttention (same for kbs=128 group — block mask matches 128-block granularity)."""
+    return _run_kbs1_flexattn(S, topk, pass_type, device)
 
 
 # ═══════════════════════════════════════════════════════════════
 #  Dispatch
 # ═══════════════════════════════════════════════════════════════
 
-_RUNNERS = {
-    "ffa_index_sparse": _run_ffa_index_sparse,
-    "ffa_block_sparse": _run_ffa_block_sparse,
-    "flexattention": _run_flexattention,
-    "triton_token_sparse": _run_triton_token_sparse,
+_KBS1_RUNNERS = {
+    "ffa_is": _run_kbs1_ffa_is,
+    "flexattn": _run_kbs1_flexattn,
+    "triton": _run_kbs1_triton,
+}
+
+_KBS128_RUNNERS = {
+    "ffa_bs": _run_kbs128_ffa_bs,
+    "ffa_is128": _run_kbs128_ffa_is,
+    "flexattn": _run_kbs128_flexattn,
 }
 
 
@@ -332,16 +387,16 @@ _RUNNERS = {
 
 
 def _ref_token_sparse_attn(q, k, v, indices, sm_scale=None):
-    """Naive reference: per-query gather topk KV → softmax → output."""
+    """Naive reference: per-query gather topk KV → softmax → output (first 64 rows)."""
     import torch
 
-    S, Hq, D = q.shape
+    S, _Hq, D = q.shape
     if sm_scale is None:
         sm_scale = 1.0 / (D**0.5)
     q_f = q.float()
     k_f = k.squeeze(1).float()
     v_f = v.squeeze(1).float()
-    o = torch.zeros_like(q_f)
+    o = torch.zeros(min(S, 64), _Hq, D, dtype=torch.float32, device=q.device)
     for i in range(min(S, 64)):
         idx = indices[i].long()
         ki = k_f[idx]
@@ -350,7 +405,7 @@ def _ref_token_sparse_attn(q, k, v, indices, sm_scale=None):
         scores = (qi @ ki.T) * sm_scale
         weights = torch.softmax(scores, dim=-1)
         o[i] = weights @ vi
-    return o[:64].to(q.dtype)
+    return o.to(q.dtype)
 
 
 def _sanity_check(device):
@@ -366,18 +421,15 @@ def _sanity_check(device):
     k = torch.randn(S_ck, NHK, HD, dtype=torch.bfloat16, device=device)
     v = torch.randn(S_ck, NHK, HD, dtype=torch.bfloat16, device=device)
 
-    # Shared indices for fair comparison
     indices_2d = (
         torch.randint(0, S_ck, (S_ck, topk_ck), device=device, dtype=torch.int32)
         .sort(dim=1)
         .values
     )
-    # Reference (first 64 rows only for speed)
     ref = _ref_token_sparse_attn(q, k, v, indices_2d)
-
     results = {}
 
-    # 1. FFA IndexSparse
+    # 1. FFA IndexSparse kbs=1
     is_indices = indices_2d.unsqueeze(1).expand(-1, NHK, -1).contiguous()
     ffa_out, *_ = flex_flash_attn_func(
         q,
@@ -389,10 +441,9 @@ def _sanity_check(device):
         pack_gqa=True,
         disable_fwd_atomic_reduction=True,
     )
-    err = (ffa_out[:64].float() - ref.float()).abs().max().item()
-    results["ffa_index_sparse"] = err
+    results["ffa_is_kbs1"] = (ffa_out[:64].float() - ref.float()).abs().max().item()
 
-    # 2. FFA BlockSparse (kbs=128)
+    # 2. FFA BlockSparse kbs=128
     n_kv_blocks = S_ck // KBS_BLOCK
     n_topk_blocks = topk_ck // KBS_BLOCK
     bs_idx = (
@@ -421,54 +472,52 @@ def _sanity_check(device):
         range_merge=True,
         disable_fwd_atomic_reduction=True,
     )
-    # BS attends to DIFFERENT K positions (blocks of 128) so can't compare to ref directly.
-    # Just check it doesn't produce NaN/Inf and output shape is correct.
-    bs_ok = (
-        not torch.isnan(bs_out).any().item()
-        and not torch.isinf(bs_out).any().item()
-        and bs_out.shape == (S_ck, NHQ, HD)
-    )
-    results["ffa_block_sparse"] = 0.0 if bs_ok else float("inf")
+    bs_ok = not torch.isnan(bs_out).any() and not torch.isinf(bs_out).any()
+    results["ffa_bs_kbs128"] = 0.0 if bs_ok else float("inf")
 
-    # 3. FlexAttention
+    # 3. FFA IndexSparse kbs=128
+    is128_out, *_ = flex_flash_attn_func(
+        q,
+        k,
+        v,
+        index_sparse_indices=bs_idx,
+        q_block_size=1,
+        sparse_k_block_size=KBS_BLOCK,
+        pack_gqa=True,
+        disable_fwd_atomic_reduction=True,
+    )
+    is128_ok = not torch.isnan(is128_out).any() and not torch.isinf(is128_out).any()
+    results["ffa_is_kbs128"] = 0.0 if is128_ok else float("inf")
+
+    # 4. FlexAttention
     from torch.nn.attention.flex_attention import flex_attention
 
-    q_bhsd = q.unsqueeze(0).permute(0, 2, 1, 3)  # (1, NHQ, S, HD)
+    q_bhsd = q.unsqueeze(0).permute(0, 2, 1, 3)
     k_bhsd = k.unsqueeze(0).permute(0, 2, 1, 3)
     v_bhsd = v.unsqueeze(0).permute(0, 2, 1, 3)
     block_mask = _build_flex_block_mask(S_ck, topk_ck, device)
     flex_fn = torch.compile(flex_attention)
     flex_out = flex_fn(q_bhsd, k_bhsd, v_bhsd, block_mask=block_mask, enable_gqa=True)
-    flex_ok = (
-        not torch.isnan(flex_out).any().item()
-        and not torch.isinf(flex_out).any().item()
-        and flex_out.shape == (1, NHQ, S_ck, HD)
-    )
-    results["flexattention"] = 0.0 if flex_ok else float("inf")
+    flex_ok = not torch.isnan(flex_out).any() and not torch.isinf(flex_out).any()
+    results["flexattn"] = 0.0 if flex_ok else float("inf")
 
-    # 4. Triton Token-Sparse
+    # 5. Triton Token-Sparse
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
     from token_sparse_attn_triton import token_sparse_fwd
 
     tri_out = token_sparse_fwd(q, k, v, indices_2d)
-    err_tri = (tri_out[:64].float() - ref.float()).abs().max().item()
-    results["triton_token_sparse"] = err_tri
+    results["triton"] = (tri_out[:64].float() - ref.float()).abs().max().item()
 
-    # Print results
-    print("  Correctness verification (S=512, topk=128):", flush=True)
+    # Print
+    print("  Correctness check (S=512, topk=128):", flush=True)
     all_pass = True
     for method, val in results.items():
-        if val < 0.05:
-            status = "PASS"
-        elif val == 0.0:
-            status = "PASS (shape/nan check)"
-        else:
-            status = f"FAIL (max_err={val:.4f})"
+        status = "PASS" if val < 0.05 else f"FAIL (err={val:.4f})"
+        if val >= 0.05:
             all_pass = False
-        print(f"    {method:22s}: {status}", flush=True)
-
+        print(f"    {method:18s}: {status}", flush=True)
     if not all_pass:
-        print("  [ERROR] Correctness check failed! Aborting.", flush=True)
+        print("  [ERROR] Correctness failed! Aborting.", flush=True)
     return all_pass
 
 
@@ -490,21 +539,19 @@ def _phase8_bench(force=False, rerun_filter=None):
         f"S=[{','.join(f'{s // 1024}k' for s in SEQLEN_VALS)}]",
         flush=True,
     )
-    print(f"  Passes: {PASSES}\n", flush=True)
 
     # Correctness verification first
     if not _sanity_check(device):
         return
 
-    # --- 8a: IndexSparse ---
-    print("  " + "─" * 50, flush=True)
-    print("  8a) IndexSparse (kbs=1) vs Baselines", flush=True)
-    print("  " + "─" * 50, flush=True)
-    for pass_type in PASSES:
-        is_bwd = pass_type == "bwd"
-        for method in IS_METHODS:
+    # --- 8a: kbs=1 ---
+    print("\n  " + "─" * 55, flush=True)
+    print("  8a) kbs=1: IndexSparse vs Baselines (FWD + BWD LoopK)", flush=True)
+    print("  " + "─" * 55, flush=True)
+    for pass_type in KBS1_PASSES:
+        for method in KBS1_METHODS:
             for S in SEQLEN_VALS:
-                key = f"is/{pass_type}/{method}"
+                key = f"kbs1/{pass_type}/{method}"
                 if rerun_filter and (pass_type, method, S) not in rerun_filter:
                     continue
                 if not force and _has_entry(results, key, S):
@@ -512,7 +559,7 @@ def _phase8_bench(force=False, rerun_filter=None):
                     idx = d["seqlen"].index(S)
                     tf = d["tflops"][idx]
                     print(
-                        f"    {pass_type:4s} {method:22s} S={S // 1024:>4d}k: "
+                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
                         f"{tf:>7.1f} T (cached)",
                         flush=True,
                     )
@@ -521,18 +568,18 @@ def _phase8_bench(force=False, rerun_filter=None):
                 gc.collect()
                 torch.cuda.empty_cache()
                 try:
-                    runner = _RUNNERS[method]
-                    tf, ms = runner(S, TOPK, is_bwd, device)
+                    runner = _KBS1_RUNNERS[method]
+                    tf, ms = runner(S, TOPK, pass_type, device)
                     _set_entry(results, key, S, round(tf, 1), round(ms, 3))
                     _save_results(PHASE, results)
                     print(
-                        f"    {pass_type:4s} {method:22s} S={S // 1024:>4d}k: "
+                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
                         f"{tf:>7.1f} T  ({ms:.3f} ms)",
                         flush=True,
                     )
                 except torch.cuda.OutOfMemoryError:
                     print(
-                        f"    {pass_type:4s} {method:22s} S={S // 1024:>4d}k: OOM",
+                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: OOM",
                         flush=True,
                     )
                     _set_entry(results, key, S, None, None)
@@ -540,23 +587,25 @@ def _phase8_bench(force=False, rerun_filter=None):
                     torch.cuda.empty_cache()
                 except Exception as e:
                     print(
-                        f"    {pass_type:4s} {method:22s} S={S // 1024:>4d}k: "
-                        f"ERROR — {e}",
+                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
+                        f"ERR — {e}",
                         flush=True,
                     )
                     _set_entry(results, key, S, None, None)
                     _save_results(PHASE, results)
                     torch.cuda.empty_cache()
 
-    # --- 8b: BlockSparse ---
-    print("\n  " + "─" * 50, flush=True)
-    print(f"  8b) BlockSparse (kbs={KBS_BLOCK}) vs Baselines", flush=True)
-    print(f"  {'─' * 50}", flush=True)
-    for pass_type in PASSES:
-        is_bwd = pass_type == "bwd"
-        for method in BS_METHODS:
+    # --- 8b: kbs=128 ---
+    print("\n  " + "─" * 55, flush=True)
+    print(
+        f"  8b) kbs={KBS_BLOCK}: BS/IS vs Baselines " f"(FWD + BWD LoopK + BWD LoopQ)",
+        flush=True,
+    )
+    print("  " + "─" * 55, flush=True)
+    for pass_type in KBS128_PASSES:
+        for method in KBS128_METHODS:
             for S in SEQLEN_VALS:
-                key = f"bs/{pass_type}/{method}"
+                key = f"kbs128/{pass_type}/{method}"
                 if rerun_filter and (pass_type, method, S) not in rerun_filter:
                     continue
                 if not force and _has_entry(results, key, S):
@@ -564,7 +613,7 @@ def _phase8_bench(force=False, rerun_filter=None):
                     idx = d["seqlen"].index(S)
                     tf = d["tflops"][idx]
                     print(
-                        f"    {pass_type:4s} {method:22s} S={S // 1024:>4d}k: "
+                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
                         f"{tf:>7.1f} T (cached)",
                         flush=True,
                     )
@@ -573,18 +622,18 @@ def _phase8_bench(force=False, rerun_filter=None):
                 gc.collect()
                 torch.cuda.empty_cache()
                 try:
-                    runner = _RUNNERS[method]
-                    tf, ms = runner(S, TOPK, is_bwd, device)
+                    runner = _KBS128_RUNNERS[method]
+                    tf, ms = runner(S, TOPK, pass_type, device)
                     _set_entry(results, key, S, round(tf, 1), round(ms, 3))
                     _save_results(PHASE, results)
                     print(
-                        f"    {pass_type:4s} {method:22s} S={S // 1024:>4d}k: "
+                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
                         f"{tf:>7.1f} T  ({ms:.3f} ms)",
                         flush=True,
                     )
                 except torch.cuda.OutOfMemoryError:
                     print(
-                        f"    {pass_type:4s} {method:22s} S={S // 1024:>4d}k: OOM",
+                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: OOM",
                         flush=True,
                     )
                     _set_entry(results, key, S, None, None)
@@ -592,8 +641,8 @@ def _phase8_bench(force=False, rerun_filter=None):
                     torch.cuda.empty_cache()
                 except Exception as e:
                     print(
-                        f"    {pass_type:4s} {method:22s} S={S // 1024:>4d}k: "
-                        f"ERROR — {e}",
+                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
+                        f"ERR — {e}",
                         flush=True,
                     )
                     _set_entry(results, key, S, None, None)
@@ -619,82 +668,100 @@ def _phase8_plot():
     out = _out_dir(PHASE)
     os.makedirs(out, exist_ok=True)
 
-    for sub, methods, labels in [
-        ("is", IS_METHODS, IS_METHOD_LABELS),
-        ("bs", BS_METHODS, BS_METHOD_LABELS),
-    ]:
-        for pass_type in PASSES:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            has_data = False
-            for method in methods:
-                key = f"{sub}/{pass_type}/{method}"
-                d = results.get(key)
-                if not d:
-                    continue
-                seqlens = d["seqlen"]
-                tflops = d["tflops"]
-                valid = [(s, t) for s, t in zip(seqlens, tflops) if t is not None]
-                if not valid:
-                    continue
-                xs, ys = zip(*valid)
-                ax.plot(
-                    [x // 1024 for x in xs],
-                    ys,
-                    marker="o",
-                    label=labels[method],
-                    linewidth=2,
-                )
-                has_data = True
+    COLORS = {
+        "ffa_is": "red",
+        "ffa_bs": "red",
+        "ffa_is128": "orange",
+        "flexattn": "green",
+        "triton": "blue",
+    }
+    MARKERS = {
+        "ffa_is": "o",
+        "ffa_bs": "s",
+        "ffa_is128": "D",
+        "flexattn": "^",
+        "triton": "v",
+    }
 
-            if not has_data:
-                plt.close(fig)
+    def _plot_group(prefix, methods, labels, pass_type, title_extra, fname):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        has_data = False
+        for m in methods:
+            key = f"{prefix}/{pass_type}/{m}"
+            d = results.get(key)
+            if not d:
                 continue
-
-            kbs_label = "kbs=1" if sub == "is" else f"kbs={KBS_BLOCK}"
-            title = (
-                f"Sparse Attention {pass_type.upper()} — {kbs_label}\n"
-                f"nhq={NHQ}, nhk={NHK}, hd={HD}, topk={TOPK}"
+            valid = [(s, t) for s, t in zip(d["seqlen"], d["tflops"]) if t is not None]
+            if not valid:
+                continue
+            xs, ys = zip(*valid)
+            ax.plot(
+                [x // 1024 for x in xs],
+                ys,
+                marker=MARKERS.get(m, "o"),
+                color=COLORS.get(m, "gray"),
+                label=labels[m],
+                linewidth=2,
+                markersize=7,
             )
-            ax.set_title(title)
-            ax.set_xlabel("Sequence Length (K)")
-            ax.set_ylabel("Effective Sparse TFLOPS/s")
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            ax.set_xscale("log", base=2)
-            ax.set_xticks([s // 1024 for s in SEQLEN_VALS])
-            ax.get_xaxis().set_major_formatter(
-                plt.FuncFormatter(lambda x, _: f"{int(x)}K")
-            )
-
-            fname = f"{sub}_{pass_type}.png"
-            fig.savefig(os.path.join(out, fname), dpi=150, bbox_inches="tight")
+            has_data = True
+        if not has_data:
             plt.close(fig)
-            print(f"  Saved: {os.path.join(out, fname)}", flush=True)
+            return
+        ax.set_title(
+            f"Sparse Attention {pass_type.upper()} — {title_extra}\n"
+            f"nhq={NHQ}, nhk={NHK}, hd={HD}, topk={TOPK}"
+        )
+        ax.set_xlabel("Sequence Length (K)")
+        ax.set_ylabel("Effective Sparse TFLOPS/s")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_xscale("log", base=2)
+        ax.set_xticks([s // 1024 for s in SEQLEN_VALS])
+        ax.get_xaxis().set_major_formatter(plt.FuncFormatter(lambda x, _: f"{int(x)}K"))
+        fig.savefig(os.path.join(out, fname), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {fname}", flush=True)
 
-    # Summary table
+    # 8a plots
+    for pt in KBS1_PASSES:
+        _plot_group("kbs1", KBS1_METHODS, KBS1_LABELS, pt, "kbs=1", f"kbs1_{pt}.png")
+
+    # 8b plots
+    for pt in KBS128_PASSES:
+        _plot_group(
+            "kbs128",
+            KBS128_METHODS,
+            KBS128_LABELS,
+            pt,
+            f"kbs={KBS_BLOCK}",
+            f"kbs128_{pt}.png",
+        )
+
+    # Summary tables
     print("\n  " + "─" * 60)
-    print("  Summary Table (TFLOPS)")
+    print("  Summary Tables (TFLOPS)")
     print("  " + "─" * 60)
-    for sub, methods, labels in [
-        ("is", IS_METHODS, IS_METHOD_LABELS),
-        ("bs", BS_METHODS, BS_METHOD_LABELS),
+
+    for prefix, methods, labels, passes in [
+        ("kbs1", KBS1_METHODS, KBS1_LABELS, KBS1_PASSES),
+        ("kbs128", KBS128_METHODS, KBS128_LABELS, KBS128_PASSES),
     ]:
-        kbs_label = "kbs=1" if sub == "is" else f"kbs={KBS_BLOCK}"
-        for pass_type in PASSES:
-            print(f"\n  {pass_type.upper()} ({kbs_label}):")
+        for pt in passes:
+            print(f"\n  {pt.upper()} ({prefix}):")
             header = f"  {'S':>6s}"
             for m in methods:
-                header += f"  {labels[m]:>20s}"
+                header += f"  {labels[m]:>24s}"
             print(header)
             for S in SEQLEN_VALS:
                 row = f"  {S // 1024:>5d}k"
                 for m in methods:
-                    key = f"{sub}/{pass_type}/{m}"
+                    key = f"{prefix}/{pt}/{m}"
                     d = results.get(key, {})
                     if d and S in d.get("seqlen", []):
                         idx = d["seqlen"].index(S)
                         tf = d["tflops"][idx]
-                        row += f"  {tf:>20.1f}" if tf else f"  {'—':>20s}"
+                        row += f"  {tf:>24.1f}" if tf else f"  {'—':>24s}"
                     else:
-                        row += f"  {'—':>20s}"
+                        row += f"  {'—':>24s}"
                 print(row)
