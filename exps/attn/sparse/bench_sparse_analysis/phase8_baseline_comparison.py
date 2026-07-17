@@ -40,9 +40,9 @@ from bench_sparse_analysis._common import (
     HD,
     NHK,
     NHQ,
-    PLOT_BAR_ALPHA,
-    PLOT_BAR_WIDTH_RATIO,
-    PLOT_VALUE_FONTSIZE,
+    PLOT_DPI_SAVE,
+    PLOT_SUBPLOT_HEIGHT,
+    PLOT_SUBPLOT_WIDTH,
     VIDEO_SCENARIOS,
     _bench_kernel,
     _load_results,
@@ -50,6 +50,7 @@ from bench_sparse_analysis._common import (
     _save_results,
     _set_gpu,
     _ts,
+    plot_grouped_bars,
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -682,10 +683,9 @@ def _phase8_bench(force=False, rerun_filter=None):
 
 
 def _phase8_plot():
-    """Generate Phase-6 style grouped bar charts using _common plot constants.
+    """Generate Phase-6 style grouped bar charts via plot_grouped_bars().
 
-    Two figures: phase8a_kbs1.png and phase8b_kbs128.png.
-    Colors: our kernels use warm/saturated from _common; baselines use grey/dark.
+    Baselines (grey) on LEFT, our kernels (colored) on RIGHT — matching Phase 6.
     """
     import matplotlib
 
@@ -704,101 +704,100 @@ def _phase8_plot():
     kvseqlens = [s[0] for s in SCENARIOS]
     x = np.arange(len(kvseqlens))
     x_labels = [f"{kv // 1024}K\n(q={kv // 64}, top={kv // 8192}K)" for kv in kvseqlens]
+    xlabel = "kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)"
 
-    def _plot_figure(fig_id, prefix, plot_defs, pass_defs, title):
-        """Shared plotting logic for both 8a and 8b."""
-        n_cols = len(pass_defs)
-        fig, axes = plt.subplots(1, n_cols, figsize=(7 * n_cols, 7), dpi=150)
-        if n_cols == 1:
-            axes = [axes]
+    def _vals(prefix, pid, mid):
+        key = f"{prefix}/{pid}/{mid}"
+        d = results.get(key, {})
+        out_vals = []
+        for kv in kvseqlens:
+            if kv in d.get("kvseqlen", []):
+                idx = d["kvseqlen"].index(kv)
+                v = d["tflops"][idx] if d["tflops"][idx] else 0
+            else:
+                v = 0
+            out_vals.append(v)
+        return out_vals
 
-        for col_idx, (pid, pname) in enumerate(pass_defs):
-            ax = axes[col_idx]
-            n_m = len(plot_defs)
-            bw = PLOT_BAR_WIDTH_RATIO / n_m
-            for i, (mid, lbl, col) in enumerate(plot_defs):
-                key = f"{prefix}/{pid}/{mid}"
-                d = results.get(key, {})
-                vals = []
-                for kv in kvseqlens:
-                    if kv in d.get("kvseqlen", []):
-                        idx = d["kvseqlen"].index(kv)
-                        v = d["tflops"][idx] if d["tflops"][idx] else 0
-                    else:
-                        v = 0
-                    vals.append(v)
-                off = (i - n_m / 2 + 0.5) * bw
-                bars = ax.bar(
-                    x + off,
-                    vals,
-                    width=bw,
-                    label=lbl,
-                    color=col,
-                    edgecolor="white",
-                    linewidth=0.5,
-                    alpha=PLOT_BAR_ALPHA,
-                )
-                for bar, v in zip(bars, vals):
-                    if v > 0:
-                        ax.text(
-                            bar.get_x() + bar.get_width() / 2,
-                            bar.get_height() + 5,
-                            f"{v:.0f}",
-                            ha="center",
-                            va="bottom",
-                            fontsize=PLOT_VALUE_FONTSIZE,
-                            fontweight="bold",
-                        )
-
-            ax.set_title(pname, fontsize=13, fontweight="bold")
-            ax.set_xlabel("kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)", fontsize=9)
-            ax.set_ylabel("TFLOPS", fontsize=12)
-            ax.set_xticks(x)
-            ax.set_xticklabels(x_labels, fontsize=9)
-            ax.tick_params(axis="y", labelsize=11)
-            ax.legend(loc="upper right", fontsize=9)
-            ax.grid(axis="y", alpha=0.3)
-
-        fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
-        plt.tight_layout()
-        path = os.path.join(out, f"{fig_id}.png")
-        fig.savefig(path, dpi=180, bbox_inches="tight")
-        plt.close()
-        print(f"  Saved: {path}", flush=True)
-
-    # ── 8a) kbs=1 ──
-    _plot_figure(
-        "phase8a_kbs1",
-        "kbs1",
-        [
-            ("ffa_is", "FFA IndexSparse", COLOR_INDEX_SPARSE),
-            ("flexattn", "FlexAttention", COLOR_FLEXATTN),
-            ("triton", "Triton Token-Sparse", COLOR_TRITON),
-        ],
-        [("fwd", "FWD"), ("bwd", "BWD (LoopK)")],
+    # ── 8a) kbs=1: baselines LEFT, our kernel RIGHT ──
+    kbs1_pass_defs = [("fwd", "FWD"), ("bwd", "BWD (LoopK)")]
+    kbs1_methods = [
+        ("flexattn", "FlexAttention", COLOR_FLEXATTN),
+        ("triton", "Triton Token-Sparse", COLOR_TRITON),
+        ("ffa_is", "FFA IndexSparse", COLOR_INDEX_SPARSE),
+    ]
+    n_cols = len(kbs1_pass_defs)
+    fig, axes = plt.subplots(
+        1, n_cols, figsize=(PLOT_SUBPLOT_WIDTH * n_cols, PLOT_SUBPLOT_HEIGHT), dpi=150
+    )
+    if n_cols == 1:
+        axes = [axes]
+    for col_idx, (pid, pname) in enumerate(kbs1_pass_defs):
+        plot_grouped_bars(
+            axes[col_idx],
+            x,
+            kbs1_methods,
+            lambda mid, _pid=pid: _vals("kbs1", _pid, mid),
+            title=pname,
+            xlabel=xlabel,
+            x_labels=x_labels,
+        )
+    fig.suptitle(
         "Phase 8a: Token-Sparse Baseline (kbs=1)\n"
         f"nhq={NHQ}, nhk={NHK}, hd={HD}, PackGQA, bf16, H100",
+        fontsize=14,
+        fontweight="bold",
+        y=1.02,
     )
+    plt.tight_layout()
+    p = os.path.join(out, "phase8a_kbs1.png")
+    fig.savefig(p, dpi=PLOT_DPI_SAVE, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {p}", flush=True)
 
-    # ── 8b) kbs=128 ──
-    _plot_figure(
-        "phase8b_kbs128",
-        "kbs128",
-        [
-            ("ffa_bs", "FFA BlockSparse", COLOR_BLOCK_SPARSE),
-            ("ffa_is128", "FFA IndexSparse (kbs=128)", COLOR_INDEX_SPARSE),
-            ("flexattn", "FlexAttention", COLOR_FLEXATTN),
-            ("triton", "Triton Token-Sparse", COLOR_TRITON),
-        ],
-        [("fwd", "FWD"), ("bwd_loopk", "BWD LoopK"), ("bwd_loopq", "BWD LoopQ")],
+    # ── 8b) kbs=128: baselines LEFT, our kernels RIGHT ──
+    kbs128_pass_defs = [
+        ("fwd", "FWD"),
+        ("bwd_loopk", "BWD LoopK"),
+        ("bwd_loopq", "BWD LoopQ"),
+    ]
+    kbs128_methods = [
+        ("flexattn", "FlexAttention", COLOR_FLEXATTN),
+        ("triton", "Triton Token-Sparse", COLOR_TRITON),
+        ("ffa_bs", "FFA BlockSparse", COLOR_BLOCK_SPARSE),
+        ("ffa_is128", "FFA IndexSparse (kbs=128)", COLOR_INDEX_SPARSE),
+    ]
+    n_cols = len(kbs128_pass_defs)
+    fig, axes = plt.subplots(
+        1, n_cols, figsize=(PLOT_SUBPLOT_WIDTH * n_cols, PLOT_SUBPLOT_HEIGHT), dpi=150
+    )
+    for col_idx, (pid, pname) in enumerate(kbs128_pass_defs):
+        plot_grouped_bars(
+            axes[col_idx],
+            x,
+            kbs128_methods,
+            lambda mid, _pid=pid: _vals("kbs128", _pid, mid),
+            title=pname,
+            xlabel=xlabel,
+            x_labels=x_labels,
+        )
+    fig.suptitle(
         f"Phase 8b: Block-Sparse Baseline (kbs={KBS_BLOCK})\n"
         f"nhq={NHQ}, nhk={NHK}, hd={HD}, PackGQA, bf16, H100",
+        fontsize=14,
+        fontweight="bold",
+        y=1.02,
     )
+    plt.tight_layout()
+    p = os.path.join(out, "phase8b_kbs128.png")
+    fig.savefig(p, dpi=PLOT_DPI_SAVE, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {p}", flush=True)
 
     # Summary tables
-    print("\n  " + "─" * 60)
+    print("\n  " + "\u2500" * 60)
     print("  Summary Tables (TFLOPS)")
-    print("  " + "─" * 60)
+    print("  " + "\u2500" * 60)
 
     for prefix, methods, labels, passes in [
         ("kbs1", KBS1_METHODS, KBS1_LABELS, KBS1_PASSES),
@@ -806,7 +805,7 @@ def _phase8_plot():
     ]:
         for pt in passes:
             print(f"\n  {pt.upper()} ({prefix}):")
-            header = f"  {'kvseqlen':>8s}"
+            header = "  " + f"{'kvseqlen':>8s}"
             for m in methods:
                 header += f"  {labels[m]:>24s}"
             print(header)
@@ -818,7 +817,7 @@ def _phase8_plot():
                     if d and kv in d.get("kvseqlen", []):
                         idx = d["kvseqlen"].index(kv)
                         tf = d["tflops"][idx]
-                        row += f"  {tf:>24.1f}" if tf else f"  {'—':>24s}"
+                        row += f"  {tf:>24.1f}" if tf else ("  " + "\u2014".rjust(24))
                     else:
-                        row += f"  {'—':>24s}"
+                        row += "  " + "\u2014".rjust(24)
                 print(row)
