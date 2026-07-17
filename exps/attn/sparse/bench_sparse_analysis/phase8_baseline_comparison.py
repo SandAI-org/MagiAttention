@@ -184,8 +184,10 @@ def _run_kbs1_ffa_is(S, topk, pass_type, device):
 def _run_kbs1_flexattn(S, topk, pass_type, device):
     """FlexAttention with sparse block mask."""
     import torch
+    import torch._functorch.config
     from torch.nn.attention.flex_attention import flex_attention
 
+    torch._functorch.config.donated_buffer = False
     q = torch.randn(1, NHQ, S, HD, dtype=torch.bfloat16, device=device)
     k = torch.randn(1, NHK, S, HD, dtype=torch.bfloat16, device=device)
     v = torch.randn(1, NHK, S, HD, dtype=torch.bfloat16, device=device)
