@@ -73,6 +73,9 @@ from .sparse_utils import (
     prepare_block_sparse_fwd,
     to_cute_block_sparse_tensors,
 )
+from .sparse_utils import (
+    transpose_block_sparse_tensors as _transpose_block_sparse_tensors,
+)
 
 
 def _flex_flash_attn_fwd(
@@ -749,6 +752,7 @@ def _flex_flash_attn_bwd(
                 or score_mod_bwd is not None
                 or mask_mod is not None
                 or block_sparse_tensors is not None
+                or index_attn_indices is not None
                 or swap_bwd_qk_loop
                 or pack_gqa
             )
@@ -786,7 +790,13 @@ def _flex_flash_attn_bwd(
 
     num_head_kv = k.shape[-2]
 
-    # IndexAttn: convert token-level indices to block-level sparse after block sizes are known
+    use_block_sparsity = block_sparse_tensors is not None
+    subtile_factor = sparse_q // m_block_size if sparse_q is not None else 2
+
+    # IndexAttn: convert token-level indices to block-level sparse after block sizes are known.
+    # index_attn_indices_to_block_sparse produces forward-direction tensors (M→N).
+    # LoopK uses forward-direction directly; LoopQ needs backward-direction (N→M),
+    # so we transpose the presence matrix when swap_bwd_qk_loop is False.
     if index_attn_indices is not None and block_sparse_tensors is None:
         block_sparse_tensors = index_attn_indices_to_block_sparse(
             index_attn_indices,
@@ -797,9 +807,18 @@ def _flex_flash_attn_bwd(
             m_block_size=m_block_size,
             n_block_size=n_block_size,
         )
-
-    use_block_sparsity = block_sparse_tensors is not None
-    subtile_factor = sparse_q // m_block_size if sparse_q is not None else 2
+        if not swap_bwd_qk_loop:
+            block_sparse_tensors = _transpose_block_sparse_tensors(
+                block_sparse_tensors,
+                batch_size=batch_size,
+                num_kv_heads=num_head_kv,
+                seqlen_q=seqlen_q,
+                seqlen_k=seqlen_k,
+                m_block_size=m_block_size,
+                n_block_size=n_block_size,
+                subtile_factor=subtile_factor,
+            )
+        use_block_sparsity = True
     seqlen_q_rounded = (seqlen_q + m_block_size - 1) // m_block_size * m_block_size
     seqlen_k_rounded = (seqlen_k + n_block_size - 1) // n_block_size * n_block_size
     num_n_blocks = seqlen_k_rounded // n_block_size

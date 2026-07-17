@@ -834,6 +834,78 @@ def index_attn_indices_to_block_sparse(
     )
 
 
+def transpose_block_sparse_tensors(
+    fwd_tensors: BlockSparseTensorsTorch,
+    batch_size: int,
+    num_kv_heads: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    m_block_size: int,
+    n_block_size: int,
+    subtile_factor: int = 2,
+) -> BlockSparseTensorsTorch:
+    """Transpose forward-direction (M→N) block-sparse tensors to backward-direction (N→M).
+
+    Forward: mask_block_cnt (B, NHK, M_blocks), mask_block_idx (B, NHK, M_blocks, max_n)
+    Backward: mask_block_cnt (B, NHK, N_blocks), mask_block_idx (B, NHK, N_blocks, max_m_coarse)
+
+    The backward path uses coarser Q blocks: sparse_q = subtile_factor * m_block_size.
+    If any fine M-block in a coarse group has a presence entry for a given N-block,
+    the coarse M-block is marked present.
+    """
+    import torch
+
+    device = fwd_tensors.mask_block_cnt.device
+    M_blocks_fine = ceildiv(seqlen_q, m_block_size)
+    N_blocks = ceildiv(seqlen_k, n_block_size)
+    sparse_q = subtile_factor * m_block_size
+    M_blocks_coarse = ceildiv(seqlen_q, sparse_q)
+
+    cnt = fwd_tensors.mask_block_cnt
+    idx = fwd_tensors.mask_block_idx
+
+    presence = torch.zeros(
+        batch_size,
+        num_kv_heads,
+        M_blocks_fine,
+        N_blocks,
+        dtype=torch.bool,
+        device=device,
+    )
+    max_n = idx.shape[-1]
+    n_positions = torch.arange(max_n, device=device)
+    valid = n_positions[None, None, None, :] < cnt.unsqueeze(-1)
+    valid_idx = idx.clamp(0, N_blocks - 1)
+    presence.scatter_(3, valid_idx.long() * valid.long(), valid)
+
+    if subtile_factor > 1 and M_blocks_fine > M_blocks_coarse:
+        pad = M_blocks_coarse * subtile_factor - M_blocks_fine
+        if pad > 0:
+            presence = torch.nn.functional.pad(presence, (0, 0, 0, pad))
+        presence = presence.view(
+            batch_size, num_kv_heads, M_blocks_coarse, subtile_factor, N_blocks
+        ).any(dim=3)
+    elif M_blocks_fine == M_blocks_coarse:
+        pass
+
+    presence_t = presence.permute(0, 1, 3, 2).contiguous()
+
+    bwd_cnt = presence_t.sum(dim=-1).int()
+    max_m = max(int(bwd_cnt.max().item()), 1)
+    sorted_m = presence_t.int().argsort(dim=-1, descending=True)
+    bwd_idx = sorted_m[..., :max_m].contiguous().to(torch.int32)
+
+    counts_expanded = bwd_cnt.unsqueeze(-1)
+    positions = torch.arange(max_m, device=device)
+    bwd_idx = bwd_idx.where(positions < counts_expanded, torch.zeros_like(bwd_idx))
+
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=bwd_cnt,
+        mask_block_idx=bwd_idx,
+        block_size=(sparse_q, n_block_size),
+    )
+
+
 def block_sparse_call_tuple(
     normalized_tensors: BlockSparseTensorsTorch | None,
 ) -> tuple | None:
