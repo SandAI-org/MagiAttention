@@ -55,6 +55,7 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.testing.template import assert_deterministic, assert_overlap_safe
 from magi_attention.utils import set_random_seed
 from magi_attention.utils.sparse_utils import (
     build_index_sparse_indices,
@@ -65,6 +66,7 @@ from tests.test_attn.sparse_test_utils import (
     DEFAULT_FWD_ATOL,
     SEED,
     SparsePackLayout,
+    build_index_sparse_ffa_fn,
     check_ffa_deterministic_twice,
     compare_sdpa_bwd_all,
     compare_sdpa_fwd,
@@ -514,6 +516,8 @@ class TestIndexSparseSweep(DistTestBase):
     Q_SEQLENS = [512, 1000, 8192]
     KV_SEQLENS = [512, 1000, 8192]
     TOPKS = [128, 256]
+    _DETERMINISTIC_REPEATS = 10
+    _OVERLAP_ITERS = 10
 
     @classmethod
     def precompile_kernel_specs(cls):
@@ -546,6 +550,17 @@ class TestIndexSparseSweep(DistTestBase):
             bwd_inner_loop_k=True,
             sparse_k_block_size=1,
             bwd_dq_bf16=True,
+        )
+        # deterministic BWD LoopQ for determinism test
+        add_ffa_spec(
+            specs,
+            direction="bwd",
+            disable_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            index_sparse=True,
+            sparse_k_block_size=1,
+            deterministic=True,
         )
         return specs
 
@@ -584,6 +599,34 @@ class TestIndexSparseSweep(DistTestBase):
             "swap_bwd_qk_loop": True,
         }
         _run_index_sparse_config(self.device, config)
+
+    @with_run_in_mp
+    def test_index_sparse_deterministic(self):
+        fn = build_index_sparse_ffa_fn(
+            self.device,
+            deterministic=True,
+            include_bwd=True,
+        )
+        assert_deterministic(
+            fn,
+            repeats=self._DETERMINISTIC_REPEATS,
+            output_names=["out", "dq", "dk", "dv"],
+            test_case="index_sparse_deterministic",
+        )
+
+    @with_run_in_mp
+    def test_index_sparse_overlap_safe(self):
+        fn = build_index_sparse_ffa_fn(self.device)
+        assert_overlap_safe(
+            fn,
+            device=torch.device("cuda", torch.cuda.current_device()),
+            overlap_iters=self._OVERLAP_ITERS,
+            atol=1e-2,
+            rtol=1e-2,
+            mismatch_threshold=2e-2,
+            output_names=["out"],
+            test_case="index_sparse_overlap",
+        )
 
 
 # ═══════════════════════════════════════════════════════════

@@ -19,6 +19,7 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.testing.template import assert_deterministic, assert_overlap_safe
 from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask_triton,
@@ -26,6 +27,7 @@ from magi_attention.utils.sparse_utils import (
 )
 from tests.test_attn.sparse_test_utils import (
     SparsePackLayout,
+    build_block_sparse_ffa_fn,
     compare_sdpa_bwd_all,
     compare_sdpa_fwd,
     inner_loop_env,
@@ -67,6 +69,9 @@ class TestBlockSparseSweep(DistTestBase):
         sparsity=[0.2],
         swap_bwd_qk_loop=[False, True],
     )
+
+    _DETERMINISTIC_REPEATS = 10
+    _OVERLAP_ITERS = 10
 
     @classmethod
     def precompile_kernel_specs(cls):
@@ -121,6 +126,18 @@ class TestBlockSparseSweep(DistTestBase):
                 sparse_k_block_size=128,
                 bwd_dq_bf16=swap,
             )
+        # deterministic BWD LoopQ for determinism test
+        add_ffa_spec(
+            specs,
+            direction="bwd",
+            disable_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            block_sparse=True,
+            range_merge=True,
+            sparse_k_block_size=128,
+            deterministic=True,
+        )
         return specs
 
     @with_run_in_mp
@@ -191,6 +208,34 @@ class TestBlockSparseSweep(DistTestBase):
             assert (
                 err < tol
             ), f"sweep[Sq={q_seqlen},Skv={kv_seqlen},sp={sparsity},{loop_name}] {name} max_rel_err={err:.3e} >= {tol}"
+
+    @with_run_in_mp
+    def test_block_sparse_deterministic(self):
+        fn = build_block_sparse_ffa_fn(
+            self.device,
+            deterministic=True,
+            include_bwd=True,
+        )
+        assert_deterministic(
+            fn,
+            repeats=self._DETERMINISTIC_REPEATS,
+            output_names=["out", "dq", "dk", "dv"],
+            test_case="block_sparse_deterministic",
+        )
+
+    @with_run_in_mp
+    def test_block_sparse_overlap_safe(self):
+        fn = build_block_sparse_ffa_fn(self.device)
+        assert_overlap_safe(
+            fn,
+            device=torch.device("cuda", torch.cuda.current_device()),
+            overlap_iters=self._OVERLAP_ITERS,
+            atol=1e-2,
+            rtol=1e-2,
+            mismatch_threshold=2e-2,
+            output_names=["out"],
+            test_case="block_sparse_overlap",
+        )
 
 
 # ═══════════════════════════════════════════════════════════
