@@ -48,9 +48,17 @@ from bench_sparse_analysis._common import (
 # ═══════════════════════════════════════════════════════════════
 
 PHASE = "8-baseline-comparison"
-TOPK = 2048
 KBS_BLOCK = 128
-SEQLEN_VALS = [32768, 65536, 131072, 262144, 524288]
+
+# Same scenario as Phase 6: qseqlen = kvseqlen/64, topk = kvseqlen/8
+SCENARIOS = [
+    # (kvseqlen, qseqlen, topk)
+    (32768, 512, 4096),
+    (65536, 1024, 8192),
+    (131072, 2048, 16384),
+    (262144, 4096, 32768),
+    (524288, 8192, 65536),
+]
 
 # 8a: kbs=1 (token-sparse)
 KBS1_METHODS = ["ffa_is", "flexattn", "triton"]
@@ -76,19 +84,19 @@ KBS128_LABELS = {
 # ═══════════════════════════════════════════════════════════════
 
 
-def _calc_sparse_flops(S, topk, is_bwd):
-    fwd = 4 * S * topk * NHQ * HD
+def _calc_sparse_flops(qseqlen, topk, is_bwd):
+    fwd = 4 * qseqlen * topk * NHQ * HD
     return fwd * 2.5 if is_bwd else fwd
 
 
-def _build_flex_block_mask(S, topk, device):
-    """FlexAttention block_mask for sparse pattern (128x128 blocks)."""
+def _build_flex_block_mask(qseqlen, kvseqlen, topk, device):
+    """FlexAttention block_mask for sparse pattern (128x128 blocks), Q≠KV."""
     import torch
     from torch.nn.attention.flex_attention import create_block_mask
 
     FLEX_BLOCK = 128
-    num_q_blocks = S // FLEX_BLOCK
-    num_kv_blocks = S // FLEX_BLOCK
+    num_q_blocks = (qseqlen + FLEX_BLOCK - 1) // FLEX_BLOCK
+    num_kv_blocks = kvseqlen // FLEX_BLOCK
     kv_blocks_needed = min((topk + FLEX_BLOCK - 1) // FLEX_BLOCK, num_kv_blocks)
 
     selected = torch.rand(num_q_blocks, num_kv_blocks, device=device).argsort(dim=1)[
@@ -105,31 +113,31 @@ def _build_flex_block_mask(S, topk, device):
         return mask_dense[q_block, kv_block]
 
     return create_block_mask(
-        sparse_mask_mod, B=None, H=None, Q_LEN=S, KV_LEN=S, device=device
+        sparse_mask_mod, B=None, H=None, Q_LEN=qseqlen, KV_LEN=kvseqlen, device=device
     )
 
 
-def _has_entry(results, key, S):
+def _has_entry(results, key, kvseqlen):
     d = results.get(key, {})
-    if not d or "seqlen" not in d:
+    if not d or "kvseqlen" not in d:
         return False
     try:
-        idx = d["seqlen"].index(S)
+        idx = d["kvseqlen"].index(kvseqlen)
         return d["tflops"][idx] is not None
     except (ValueError, IndexError):
         return False
 
 
-def _set_entry(results, key, S, tflops, ms):
+def _set_entry(results, key, kvseqlen, tflops, ms):
     if key not in results:
-        results[key] = {"seqlen": [], "tflops": [], "ms": []}
+        results[key] = {"kvseqlen": [], "tflops": [], "ms": []}
     d = results[key]
-    if S in d["seqlen"]:
-        idx = d["seqlen"].index(S)
+    if kvseqlen in d["kvseqlen"]:
+        idx = d["kvseqlen"].index(kvseqlen)
         d["tflops"][idx] = tflops
         d["ms"][idx] = ms
     else:
-        d["seqlen"].append(S)
+        d["kvseqlen"].append(kvseqlen)
         d["tflops"].append(tflops)
         d["ms"].append(ms)
 
@@ -139,17 +147,17 @@ def _set_entry(results, key, S, tflops, ms):
 # ═══════════════════════════════════════════════════════════════
 
 
-def _run_kbs1_ffa_is(S, topk, pass_type, device):
+def _run_kbs1_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
     """FFA IndexSparse kbs=1. BWD always uses LoopK (no LoopQ for kbs=1)."""
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
 
-    q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+    q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
     indices = (
-        torch.randint(0, S, (S, topk), device=device, dtype=torch.int32)
+        torch.randint(0, kvseqlen, (qseqlen, topk), device=device, dtype=torch.int32)
         .sort(dim=1)
         .values.unsqueeze(1)
         .expand(-1, NHK, -1)
@@ -178,20 +186,20 @@ def _run_kbs1_ffa_is(S, topk, pass_type, device):
         def run_fn():
             flex_flash_attn_func(q, k, v, **kw)
 
-    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
 
-def _run_kbs1_flexattn(S, topk, pass_type, device):
+def _run_kbs1_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
     """FlexAttention with sparse block mask."""
     import torch
     import torch._functorch.config
     from torch.nn.attention.flex_attention import flex_attention
 
     torch._functorch.config.donated_buffer = False
-    q = torch.randn(1, NHQ, S, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(1, NHK, S, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(1, NHK, S, HD, dtype=torch.bfloat16, device=device)
-    block_mask = _build_flex_block_mask(S, topk, device)
+    q = torch.randn(1, NHQ, qseqlen, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
+    block_mask = _build_flex_block_mask(qseqlen, kvseqlen, topk, device)
     _flex_fn = torch.compile(flex_attention)
     is_bwd = pass_type != "fwd"
 
@@ -210,21 +218,21 @@ def _run_kbs1_flexattn(S, topk, pass_type, device):
         def run_fn():
             _flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
 
-    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
 
-def _run_kbs1_triton(S, topk, pass_type, device):
+def _run_kbs1_triton(kvseqlen, qseqlen, topk, pass_type, device):
     """Triton hand-written token-sparse kernel."""
     import torch
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
     from token_sparse_attn_triton import token_sparse_attn, token_sparse_fwd
 
-    q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(S, 1, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(S, 1, HD, dtype=torch.bfloat16, device=device)
+    q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(kvseqlen, 1, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(kvseqlen, 1, HD, dtype=torch.bfloat16, device=device)
     tri_indices = (
-        torch.randint(0, S, (S, topk), device=device, dtype=torch.int32)
+        torch.randint(0, kvseqlen, (qseqlen, topk), device=device, dtype=torch.int32)
         .sort(dim=1)
         .values
     )
@@ -245,7 +253,7 @@ def _run_kbs1_triton(S, topk, pass_type, device):
         def run_fn():
             token_sparse_fwd(q, k, v, tri_indices)
 
-    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -253,21 +261,21 @@ def _run_kbs1_triton(S, topk, pass_type, device):
 # ═══════════════════════════════════════════════════════════════
 
 
-def _run_kbs128_ffa_bs(S, topk, pass_type, device):
+def _run_kbs128_ffa_bs(kvseqlen, qseqlen, topk, pass_type, device):
     """FFA BlockSparse (q_ranges/k_ranges + block_sparse + range_merge)."""
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
     from magi_attention.utils.sparse_utils import generate_ranges_from_topk_indices
 
-    q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+    q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
 
-    n_kv_blocks = S // KBS_BLOCK
+    n_kv_blocks = kvseqlen // KBS_BLOCK
     n_topk_blocks = topk // KBS_BLOCK
     indices = (
-        torch.rand(S, n_kv_blocks, device=device)
+        torch.rand(qseqlen, n_kv_blocks, device=device)
         .argsort(dim=1)[:, :n_topk_blocks]
         .sort(dim=1)
         .values.unsqueeze(1)
@@ -308,23 +316,23 @@ def _run_kbs128_ffa_bs(S, topk, pass_type, device):
         def run_fn():
             flex_flash_attn_func(q, k, v, **kw)
 
-    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
 
-def _run_kbs128_ffa_is(S, topk, pass_type, device):
+def _run_kbs128_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
     """FFA IndexSparse with kbs=128 (index_sparse_indices with block indices)."""
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
 
-    q = torch.randn(S, NHQ, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(S, NHK, HD, dtype=torch.bfloat16, device=device)
+    q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
 
-    n_kv_blocks = S // KBS_BLOCK
+    n_kv_blocks = kvseqlen // KBS_BLOCK
     n_topk_blocks = topk // KBS_BLOCK
     indices = (
-        torch.rand(S, n_kv_blocks, device=device)
+        torch.rand(qseqlen, n_kv_blocks, device=device)
         .argsort(dim=1)[:, :n_topk_blocks]
         .sort(dim=1)
         .values.unsqueeze(1)
@@ -358,12 +366,12 @@ def _run_kbs128_ffa_is(S, topk, pass_type, device):
         def run_fn():
             flex_flash_attn_func(q, k, v, **kw)
 
-    return _bench_kernel(run_fn, _calc_sparse_flops(S, topk, is_bwd), device)
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
 
-def _run_kbs128_flexattn(S, topk, pass_type, device):
-    """FlexAttention (same for kbs=128 group — block mask matches 128-block granularity)."""
-    return _run_kbs1_flexattn(S, topk, pass_type, device)
+def _run_kbs128_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
+    """FlexAttention for kbs=128 group (same as kbs1 but different scenario)."""
+    return _run_kbs1_flexattn(kvseqlen, qseqlen, topk, pass_type, device)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -417,14 +425,16 @@ def _sanity_check(device):
     from magi_attention.functional import flex_flash_attn_func
     from magi_attention.utils.sparse_utils import generate_ranges_from_topk_indices
 
-    S_ck, topk_ck = 512, 128
+    kvseqlen_ck, qseqlen_ck, topk_ck = 512, 64, 128
     torch.manual_seed(42)
-    q = torch.randn(S_ck, NHQ, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(S_ck, NHK, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(S_ck, NHK, HD, dtype=torch.bfloat16, device=device)
+    q = torch.randn(qseqlen_ck, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(kvseqlen_ck, NHK, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(kvseqlen_ck, NHK, HD, dtype=torch.bfloat16, device=device)
 
     indices_2d = (
-        torch.randint(0, S_ck, (S_ck, topk_ck), device=device, dtype=torch.int32)
+        torch.randint(
+            0, kvseqlen_ck, (qseqlen_ck, topk_ck), device=device, dtype=torch.int32
+        )
         .sort(dim=1)
         .values
     )
@@ -446,10 +456,10 @@ def _sanity_check(device):
     results["ffa_is_kbs1"] = (ffa_out[:64].float() - ref.float()).abs().max().item()
 
     # 2. FFA BlockSparse kbs=128
-    n_kv_blocks = S_ck // KBS_BLOCK
+    n_kv_blocks = kvseqlen_ck // KBS_BLOCK
     n_topk_blocks = topk_ck // KBS_BLOCK
     bs_idx = (
-        torch.rand(S_ck, n_kv_blocks, device=device)
+        torch.rand(qseqlen_ck, n_kv_blocks, device=device)
         .argsort(dim=1)[:, :n_topk_blocks]
         .sort(dim=1)
         .values.unsqueeze(1)
@@ -497,7 +507,7 @@ def _sanity_check(device):
     q_bhsd = q.unsqueeze(0).permute(0, 2, 1, 3)
     k_bhsd = k.unsqueeze(0).permute(0, 2, 1, 3)
     v_bhsd = v.unsqueeze(0).permute(0, 2, 1, 3)
-    block_mask = _build_flex_block_mask(S_ck, topk_ck, device)
+    block_mask = _build_flex_block_mask(qseqlen_ck, kvseqlen_ck, topk_ck, device)
     flex_fn = torch.compile(flex_attention)
     flex_out = flex_fn(q_bhsd, k_bhsd, v_bhsd, block_mask=block_mask, enable_gqa=True)
     flex_ok = not torch.isnan(flex_out).any() and not torch.isinf(flex_out).any()
@@ -511,7 +521,7 @@ def _sanity_check(device):
     results["triton"] = (tri_out[:64].float() - ref.float()).abs().max().item()
 
     # Print
-    print("  Correctness check (S=512, topk=128):", flush=True)
+    print("  Correctness check (kvseqlen=512, qseqlen=64, topk=128):", flush=True)
     all_pass = True
     for method, val in results.items():
         status = "PASS" if val < 0.05 else f"FAIL (err={val:.4f})"
@@ -537,8 +547,9 @@ def _phase8_bench(force=False, rerun_filter=None):
 
     print(f"[{_ts()}] Phase 8: Baseline Comparison (gpu{gpu})", flush=True)
     print(
-        f"  nhq={NHQ}, nhk={NHK}, hd={HD}, topk={TOPK}, "
-        f"S=[{','.join(f'{s // 1024}k' for s in SEQLEN_VALS)}]",
+        f"  nhq={NHQ}, nhk={NHK}, hd={HD}, "
+        f"scenarios: kvseqlen=[{','.join(f'{s[0] // 1024}k' for s in SCENARIOS)}], "
+        f"qseqlen=kvseqlen/64, topk=kvseqlen/8",
         flush=True,
     )
 
@@ -550,19 +561,21 @@ def _phase8_bench(force=False, rerun_filter=None):
     print("\n  " + "─" * 55, flush=True)
     print("  8a) kbs=1: IndexSparse vs Baselines (FWD + BWD LoopK)", flush=True)
     print("  " + "─" * 55, flush=True)
-    for pass_type in KBS1_PASSES:
-        for method in KBS1_METHODS:
-            for S in SEQLEN_VALS:
+    for kvseqlen, qseqlen, topk in SCENARIOS:
+        print(
+            f"  ── kvseqlen={kvseqlen // 1024}k, "
+            f"qseqlen={qseqlen}, topk={topk // 1024}k ──",
+            flush=True,
+        )
+        for pass_type in KBS1_PASSES:
+            for method in KBS1_METHODS:
                 key = f"kbs1/{pass_type}/{method}"
-                if rerun_filter and (pass_type, method, S) not in rerun_filter:
-                    continue
-                if not force and _has_entry(results, key, S):
+                if not force and _has_entry(results, key, kvseqlen):
                     d = results[key]
-                    idx = d["seqlen"].index(S)
+                    idx = d["kvseqlen"].index(kvseqlen)
                     tf = d["tflops"][idx]
                     print(
-                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
-                        f"{tf:>7.1f} T (cached)",
+                        f"    {pass_type:10s} {method:10s}: " f"{tf:>7.1f} T (cached)",
                         flush=True,
                     )
                     continue
@@ -571,29 +584,28 @@ def _phase8_bench(force=False, rerun_filter=None):
                 torch.cuda.empty_cache()
                 try:
                     runner = _KBS1_RUNNERS[method]
-                    tf, ms = runner(S, TOPK, pass_type, device)
-                    _set_entry(results, key, S, round(tf, 1), round(ms, 3))
+                    tf, ms = runner(kvseqlen, qseqlen, topk, pass_type, device)
+                    _set_entry(results, key, kvseqlen, round(tf, 1), round(ms, 3))
                     _save_results(PHASE, results)
                     print(
-                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
+                        f"    {pass_type:10s} {method:10s}: "
                         f"{tf:>7.1f} T  ({ms:.3f} ms)",
                         flush=True,
                     )
                 except torch.cuda.OutOfMemoryError:
                     print(
-                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: OOM",
+                        f"    {pass_type:10s} {method:10s}: OOM",
                         flush=True,
                     )
-                    _set_entry(results, key, S, None, None)
+                    _set_entry(results, key, kvseqlen, None, None)
                     _save_results(PHASE, results)
                     torch.cuda.empty_cache()
                 except Exception as e:
                     print(
-                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
-                        f"ERR — {e}",
+                        f"    {pass_type:10s} {method:10s}: ERR — {e}",
                         flush=True,
                     )
-                    _set_entry(results, key, S, None, None)
+                    _set_entry(results, key, kvseqlen, None, None)
                     _save_results(PHASE, results)
                     torch.cuda.empty_cache()
 
@@ -604,19 +616,21 @@ def _phase8_bench(force=False, rerun_filter=None):
         flush=True,
     )
     print("  " + "─" * 55, flush=True)
-    for pass_type in KBS128_PASSES:
-        for method in KBS128_METHODS:
-            for S in SEQLEN_VALS:
+    for kvseqlen, qseqlen, topk in SCENARIOS:
+        print(
+            f"  ── kvseqlen={kvseqlen // 1024}k, "
+            f"qseqlen={qseqlen}, topk={topk // 1024}k ──",
+            flush=True,
+        )
+        for pass_type in KBS128_PASSES:
+            for method in KBS128_METHODS:
                 key = f"kbs128/{pass_type}/{method}"
-                if rerun_filter and (pass_type, method, S) not in rerun_filter:
-                    continue
-                if not force and _has_entry(results, key, S):
+                if not force and _has_entry(results, key, kvseqlen):
                     d = results[key]
-                    idx = d["seqlen"].index(S)
+                    idx = d["kvseqlen"].index(kvseqlen)
                     tf = d["tflops"][idx]
                     print(
-                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
-                        f"{tf:>7.1f} T (cached)",
+                        f"    {pass_type:10s} {method:10s}: " f"{tf:>7.1f} T (cached)",
                         flush=True,
                     )
                     continue
@@ -625,29 +639,28 @@ def _phase8_bench(force=False, rerun_filter=None):
                 torch.cuda.empty_cache()
                 try:
                     runner = _KBS128_RUNNERS[method]
-                    tf, ms = runner(S, TOPK, pass_type, device)
-                    _set_entry(results, key, S, round(tf, 1), round(ms, 3))
+                    tf, ms = runner(kvseqlen, qseqlen, topk, pass_type, device)
+                    _set_entry(results, key, kvseqlen, round(tf, 1), round(ms, 3))
                     _save_results(PHASE, results)
                     print(
-                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
+                        f"    {pass_type:10s} {method:10s}: "
                         f"{tf:>7.1f} T  ({ms:.3f} ms)",
                         flush=True,
                     )
                 except torch.cuda.OutOfMemoryError:
                     print(
-                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: OOM",
+                        f"    {pass_type:10s} {method:10s}: OOM",
                         flush=True,
                     )
-                    _set_entry(results, key, S, None, None)
+                    _set_entry(results, key, kvseqlen, None, None)
                     _save_results(PHASE, results)
                     torch.cuda.empty_cache()
                 except Exception as e:
                     print(
-                        f"    {pass_type:10s} {method:10s} S={S // 1024:>4d}k: "
-                        f"ERR — {e}",
+                        f"    {pass_type:10s} {method:10s}: ERR — {e}",
                         flush=True,
                     )
-                    _set_entry(results, key, S, None, None)
+                    _set_entry(results, key, kvseqlen, None, None)
                     _save_results(PHASE, results)
                     torch.cuda.empty_cache()
 
@@ -663,7 +676,7 @@ def _phase8_plot():
     """Generate Phase-6 style grouped bar charts: 2 figures (kbs=1, kbs=128).
 
     Each figure has subplots for each pass (FWD, BWD, etc.), with grouped bars
-    per seqlen, one bar per method. TFLOPS on y-axis, seqlen on x-axis.
+    per kvseqlen, one bar per method. TFLOPS on y-axis, kvseqlen on x-axis.
     """
     import matplotlib
 
@@ -679,8 +692,9 @@ def _phase8_plot():
     out = _out_dir(PHASE)
     os.makedirs(out, exist_ok=True)
 
-    x = np.arange(len(SEQLEN_VALS))
-    x_labels = [f"{s // 1024}K" for s in SEQLEN_VALS]
+    kvseqlens = [s[0] for s in SCENARIOS]
+    x = np.arange(len(kvseqlens))
+    x_labels = [f"{kv // 1024}K\n(q={kv // 64}, top={kv // 8192}K)" for kv in kvseqlens]
 
     # ── 8a) kbs=1 ──
     KBS1_PLOT = [
@@ -703,9 +717,9 @@ def _phase8_plot():
             key = f"kbs1/{pid}/{mid}"
             d = results.get(key, {})
             vals = []
-            for S in SEQLEN_VALS:
-                if S in d.get("seqlen", []):
-                    idx = d["seqlen"].index(S)
+            for kv in kvseqlens:
+                if kv in d.get("kvseqlen", []):
+                    idx = d["kvseqlen"].index(kv)
                     v = d["tflops"][idx] if d["tflops"][idx] else 0
                 else:
                     v = 0
@@ -734,17 +748,17 @@ def _phase8_plot():
                     )
 
         ax.set_title(pname, fontsize=13, fontweight="bold")
-        ax.set_xlabel("Sequence Length", fontsize=10)
+        ax.set_xlabel("kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)", fontsize=9)
         ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, fontsize=10)
+        ax.set_xticklabels(x_labels, fontsize=9)
         ax.tick_params(axis="y", labelsize=11)
         ax.legend(loc="upper right", fontsize=9)
         ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle(
-        f"Phase 8a: Token-Sparse Baseline (kbs=1)\n"
-        f"nhq={NHQ}, nhk={NHK}, hd={HD}, topk={TOPK}, bf16, H100",
+        "Phase 8a: Token-Sparse Baseline (kbs=1)\n"
+        f"nhq={NHQ}, nhk={NHK}, hd={HD}, PackGQA, bf16, H100",
         fontsize=13,
         fontweight="bold",
         y=1.02,
@@ -778,9 +792,9 @@ def _phase8_plot():
             key = f"kbs128/{pid}/{mid}"
             d = results.get(key, {})
             vals = []
-            for S in SEQLEN_VALS:
-                if S in d.get("seqlen", []):
-                    idx = d["seqlen"].index(S)
+            for kv in kvseqlens:
+                if kv in d.get("kvseqlen", []):
+                    idx = d["kvseqlen"].index(kv)
                     v = d["tflops"][idx] if d["tflops"][idx] else 0
                 else:
                     v = 0
@@ -809,17 +823,17 @@ def _phase8_plot():
                     )
 
         ax.set_title(pname, fontsize=13, fontweight="bold")
-        ax.set_xlabel("Sequence Length", fontsize=10)
+        ax.set_xlabel("kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)", fontsize=9)
         ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, fontsize=10)
+        ax.set_xticklabels(x_labels, fontsize=9)
         ax.tick_params(axis="y", labelsize=11)
         ax.legend(loc="upper right", fontsize=9)
         ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle(
         f"Phase 8b: Block-Sparse Baseline (kbs={KBS_BLOCK})\n"
-        f"nhq={NHQ}, nhk={NHK}, hd={HD}, topk={TOPK}, bf16, H100",
+        f"nhq={NHQ}, nhk={NHK}, hd={HD}, PackGQA, bf16, H100",
         fontsize=13,
         fontweight="bold",
         y=1.02,
@@ -841,17 +855,17 @@ def _phase8_plot():
     ]:
         for pt in passes:
             print(f"\n  {pt.upper()} ({prefix}):")
-            header = f"  {'S':>6s}"
+            header = f"  {'kvseqlen':>8s}"
             for m in methods:
                 header += f"  {labels[m]:>24s}"
             print(header)
-            for S in SEQLEN_VALS:
-                row = f"  {S // 1024:>5d}k"
+            for kv in kvseqlens:
+                row = f"  {kv // 1024:>7d}k"
                 for m in methods:
                     key = f"{prefix}/{pt}/{m}"
                     d = results.get(key, {})
-                    if d and S in d.get("seqlen", []):
-                        idx = d["seqlen"].index(S)
+                    if d and kv in d.get("kvseqlen", []):
+                        idx = d["kvseqlen"].index(kv)
                         tf = d["tflops"][idx]
                         row += f"  {tf:>24.1f}" if tf else f"  {'—':>24s}"
                     else:
