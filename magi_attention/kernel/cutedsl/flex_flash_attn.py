@@ -65,6 +65,7 @@ from .ffa_utils import (
     validate_tensor,
 )
 from .sparse_utils import (
+    BlockSparseTensorsTorch,
     block_sparse_call_tuple,
     get_sparse_q_block_size,
     index_attn_indices_to_block_sparse,
@@ -1082,6 +1083,36 @@ def _flex_flash_attn_bwd(
     if major_arch not in [8, 9, 12]:
         num_threads = 384
 
+    # GQA: expand block sparse tensors from NHK → NHQ when needed.
+    # The kernel indexes block sparse tensors by head_idx.
+    # - pack_gqa=True: head_idx is in KV head space, use num_head_kv
+    # - pack_gqa=False: head_idx is in Q head space, expand to NHQ
+    bst_num_head = num_head
+    if block_sparse_tensors is not None and num_head != num_head_kv:
+        bst_h = block_sparse_tensors.mask_block_cnt.shape[1]
+        if bst_h == num_head_kv and not pack_gqa:
+            block_sparse_tensors = BlockSparseTensorsTorch(
+                mask_block_cnt=block_sparse_tensors.mask_block_cnt.repeat_interleave(
+                    qhead_per_kvhead, dim=1
+                ),
+                mask_block_idx=block_sparse_tensors.mask_block_idx.repeat_interleave(
+                    qhead_per_kvhead, dim=1
+                ),
+                full_block_cnt=block_sparse_tensors.full_block_cnt.repeat_interleave(
+                    qhead_per_kvhead, dim=1
+                )
+                if block_sparse_tensors.full_block_cnt is not None
+                else None,
+                full_block_idx=block_sparse_tensors.full_block_idx.repeat_interleave(
+                    qhead_per_kvhead, dim=1
+                )
+                if block_sparse_tensors.full_block_idx is not None
+                else None,
+                block_size=block_sparse_tensors.block_size,
+            )
+        elif pack_gqa:
+            bst_num_head = num_head_kv
+
     # Prepare block sparse for backward.
     score_mod_hash = hash_callable(score_mod) if score_mod else False
     score_mod_bwd_hash = hash_callable(score_mod_bwd) if score_mod_bwd else False
@@ -1104,7 +1135,7 @@ def _flex_flash_attn_bwd(
             local=local,
             deterministic=deterministic,
             batch_size=batch_size,
-            num_head=num_head,
+            num_head=bst_num_head,
             seqlen_q=seqlen_q,
             seqlen_k=seqlen_k,
             m_block_size=m_block_size,
@@ -1121,7 +1152,7 @@ def _flex_flash_attn_bwd(
             causal=causal,
             local=local,
             batch_size=batch_size,
-            num_head=num_head,
+            num_head=bst_num_head,
             seqlen_q=seqlen_q,
             seqlen_k=seqlen_k,
             m_block_size=m_block_size,
