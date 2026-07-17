@@ -425,7 +425,7 @@ def _sanity_check(device):
     from magi_attention.functional import flex_flash_attn_func
     from magi_attention.utils.sparse_utils import generate_ranges_from_topk_indices
 
-    kvseqlen_ck, qseqlen_ck, topk_ck = 512, 64, 128
+    kvseqlen_ck, qseqlen_ck, topk_ck = 2048, 256, 256
     torch.manual_seed(42)
     q = torch.randn(qseqlen_ck, NHQ, HD, dtype=torch.bfloat16, device=device)
     k = torch.randn(kvseqlen_ck, NHK, HD, dtype=torch.bfloat16, device=device)
@@ -521,7 +521,7 @@ def _sanity_check(device):
     results["triton"] = (tri_out[:64].float() - ref.float()).abs().max().item()
 
     # Print
-    print("  Correctness check (kvseqlen=512, qseqlen=64, topk=128):", flush=True)
+    print("  Correctness check (kvseqlen=2048, qseqlen=256, topk=256):", flush=True)
     all_pass = True
     for method, val in results.items():
         status = "PASS" if val < 0.05 else f"FAIL (err={val:.4f})"
