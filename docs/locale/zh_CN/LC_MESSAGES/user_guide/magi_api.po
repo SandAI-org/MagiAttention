@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  MagiAttention\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-12 18:49+0800\n"
+"POT-Creation-Date: 2026-07-18 07:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -404,13 +404,13 @@ msgstr ""
 msgid ""
 "Controls backward double-loop order. ``False`` = LoopQ (outer K, inner "
 "Q), ``True`` = LoopK (outer Q, inner K). ``None`` (default) = auto-infer:"
-" IndexSparse with ``sparse_k_block_size >= 8`` uses LoopQ, IndexSparse "
-"with ``sparse_k_block_size < 8`` uses LoopK, Dense/BlockSparse uses "
-"LoopQ. **Note:** This flag is useful for sparse attention scenarios but "
-"still under development."
+" IndexSparse with ``sparse_k_block_size < 128`` uses LoopK (bounded inner"
+" K loop from forward indices), otherwise LoopQ.  LoopK requires "
+"``pack_gqa_factor >= 128``; when not met, falls back to LoopQ "
+"automatically."
 msgstr ""
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:151 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:152 of
 msgid ""
 "Whether to return the maximum attention logits, according to the Muon QK-"
 "Clip technique introduced in Kimi K2: "
@@ -429,7 +429,7 @@ msgstr ""
 msgid "Returns"
 msgstr "返回"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:156 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:157 of
 msgid ""
 "- out (torch.Tensor): Attention output tensor - meta (AttnForwardMeta): "
 "Meta information of the attention forward pass,     for now, including "
@@ -442,16 +442,16 @@ msgstr ""
 " 的 max_logits (torch.Tensor)，     若 ``return_max_logits`` 为 ``True``，否则为 "
 "``None``。"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:156 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:157 of
 msgid "out (torch.Tensor): Attention output tensor"
 msgstr "out (torch.Tensor)：注意力输出张量"
 
 #: magi_attention.api.magi_attn_interface.calc_attn:29
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:157 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:158 of
 msgid "meta (AttnForwardMeta): Meta information of the attention forward pass,"
 msgstr "meta (AttnForwardMeta)：注意力前向传播的元信息，"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:158 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:159 of
 msgid ""
 "for now, including lse (torch.Tensor) with dtype=torch.float32, and "
 "max_logits (torch.Tensor) with dtype=torch.float32, if "
@@ -471,59 +471,59 @@ msgstr ""
 msgid "Return type"
 msgstr "返回类型"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:163 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:164 of
 msgid "Shape:"
 msgstr "形状："
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:164 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:165 of
 msgid "q: (num_tokens_q, num_heads_q, head_dim)"
 msgstr "q: (num_tokens_q, num_heads_q, head_dim)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:165 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:166 of
 msgid "k: (num_tokens_kv, num_heads_kv, head_dim)"
 msgstr "k: (num_tokens_kv, num_heads_kv, head_dim)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:166 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:167 of
 msgid "v: (num_tokens_kv, num_heads_kv, head_dim)"
 msgstr "v: (num_tokens_kv, num_heads_kv, head_dim)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:167 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:168 of
 msgid "sink:"
 msgstr "sink:"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:168 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:169 of
 msgid "if sink_layout == \"sh\": (num_tokens_sink, num_heads_q)"
 msgstr "if sink_layout == \"sh\": (num_tokens_sink, num_heads_q)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:169 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:170 of
 msgid "if sink_layout == \"ssh\": (num_tokens_q, num_tokens_sink, num_heads_q)"
 msgstr "if sink_layout == \"ssh\": (num_tokens_q, num_tokens_sink, num_heads_q)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:170 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:171 of
 msgid "q_ranges: (num_ranges, 2)"
 msgstr "q_ranges: (num_ranges, 2)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:171 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:172 of
 msgid "k_ranges: (num_ranges, 2)"
 msgstr "k_ranges: (num_ranges, 2)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:172 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:173 of
 msgid "attn_type_map: (num_ranges,)"
 msgstr "attn_type_map: (num_ranges,)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:173 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:174 of
 msgid "out: (num_tokens_q, num_heads_q, head_dim)"
 msgstr "out: (num_tokens_q, num_heads_q, head_dim)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:174 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:175 of
 msgid "lse: (num_tokens_q, num_heads_q)"
 msgstr "lse: (num_tokens_q, num_heads_q)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:175 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:176 of
 msgid "max_logits: (num_heads_q,)"
 msgstr "max_logits: (num_heads_q,)"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:179 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:180 of
 msgid ""
 "The ``attn_type_map`` explains the semantics of different attention mask "
 "types. In addition to the descriptions below, see our blog for a visual "
@@ -533,46 +533,46 @@ msgstr ""
 "``attn_type_map`` 解释了不同注意力掩码类型的语义。除下方说明外，可参见我们的博客获取可视化说明：https://sandai-"
 "org.github.io/MagiAttention/blog/#flex-flash-attn"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:183 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:184 of
 msgid "Full attention:"
 msgstr "Full attention（全注意力）："
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:184
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:206
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:228
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:252 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:185
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:207
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:229
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:253 of
 msgid "If seqlen_q = 5 and seqlen_k = 2::"
 msgstr "当 seqlen_q = 5 且 seqlen_k = 2 时::"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:192
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:214
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:236
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:260 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:193
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:215
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:237
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:261 of
 msgid "If seqlen_q = 2 and seqlen_k = 5::"
 msgstr "当 seqlen_q = 2 且 seqlen_k = 5 时::"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:197
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:219
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:241
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:265 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:198
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:220
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:242
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:266 of
 msgid "If seqlen_q = 5 and seqlen_k = 5::"
 msgstr "当 seqlen_q = 5 且 seqlen_k = 5 时::"
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:205 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:206 of
 msgid "Causal attention (bottom-right aligned):"
 msgstr "Causal attention（因果注意力，右下对齐）："
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:227 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:228 of
 msgid "Inverse causal attention (top-left aligned):"
 msgstr "Inverse causal attention（逆因果注意力，左上对齐）："
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:249 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:250 of
 msgid ""
 "Bidirectional causal attention (intersection of causal and inverse "
 "causal):"
 msgstr "Bidirectional causal attention（双向因果注意力，因果与逆因果的交集）："
 
-#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:250 of
+#: magi_attention.functional.flex_flash_attn.flex_flash_attn_func:251 of
 msgid "This is the element-wise AND of causal and inverse causal masks."
 msgstr "这是 causal 与 inverse causal 掩码的逐元素 AND。"
 
@@ -1751,3 +1751,16 @@ msgstr "上面的代码表示 ``[5, 15] x [5, 15]`` 区域内、窗口大小为 
 #~ "是否在注意力反向中交换 Q 和 K 双重循环的顺序（即从默认的 `K "
 #~ "为外层循环、Q 为内层循环` 改为 `Q 为外层循环、K 为内层循环`）。默认为"
 #~ " ``False``。**注意：** 此标志对稀疏注意力场景有用，但仍在开发中。"
+
+#~ msgid ""
+#~ "Controls backward double-loop order. "
+#~ "``False`` = LoopQ (outer K, inner "
+#~ "Q), ``True`` = LoopK (outer Q, "
+#~ "inner K). ``None`` (default) = auto-"
+#~ "infer: IndexSparse with ``sparse_k_block_size "
+#~ ">= 8`` uses LoopQ, IndexSparse with "
+#~ "``sparse_k_block_size < 8`` uses LoopK, "
+#~ "Dense/BlockSparse uses LoopQ. **Note:** This"
+#~ " flag is useful for sparse attention"
+#~ " scenarios but still under development."
+#~ msgstr ""
