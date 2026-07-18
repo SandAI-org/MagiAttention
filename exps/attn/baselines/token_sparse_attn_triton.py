@@ -23,19 +23,15 @@ FWD: Grid (total_q_positions,) — 1 thread block processes all nhq heads.
      Q[BLOCK_M, D] @ gathered_K[BLOCK_N, D]^T → S[BLOCK_M, BLOCK_N]  (tl.dot)
      P[BLOCK_M, BLOCK_N] @ gathered_V[BLOCK_N, D] → O[BLOCK_M, D]    (tl.dot)
 
-BWD: Two-pass architecture with selectable dKV strategy:
-     dQ kernel (LoopK): per query-position, inner-loop over topk KV positions.
-         Grid=(total_q,). dQ accumulated locally, no atomics. Uses tl.dot.
-     dKV kernel — two variants:
-       (a) "atomic" (default): LoopK + atomic scatter.
-           Grid=(total_q,). Uses tl.dot. Best for RANDOM indices.
-           ~36 TFLOPS. Bottleneck: atomic contention.
-       (b) "loopq": LoopQ with BLOCK_N KV tiling + PackGQA + block-level inner_indices.
-           Grid=(num_kv_blocks, num_splits). ALL ops use tl.dot (Tensor Core).
-           - Structured/local indices: ~150 TFLOPS (4x faster than atomic!)
-           - Random indices: ~15 TFLOPS (sparse mask wastes N dimension)
-           Tile: M=128 (PackGQA nhq heads), N=BLOCK_N (consecutive KV positions).
-           Preprocess: block inverse index + per-(block,Q) bitmask.
+BWD: Four dKV strategies:
+     (a) "split" (default): separate dQ kernel (fp32 accum, no atomics) +
+         head-chunked dKV kernel (BLOCK_MH=32, BLOCK_N=64, bf16 atomics).
+         Head chunking reduces register pressure from 576+ to ~240, eliminating
+         spilling. Larger BLOCK_N=64 halves atomic write batches. ~98-105 TFLOPS.
+     (b) "fused": single kernel computes dQ + dKV together.
+         Computes S/P once, loads K/V once, BLOCK_N=32. ~75 TFLOPS.
+     (c) "atomic": separate dQ + dKV kernels, fp32 atomic scatter. ~43 TFLOPS.
+     (d) "loopq": LoopQ with block-level inverse index + bitmask.
 
 Input:
     q: (total_q, nhq, D)
@@ -288,6 +284,177 @@ def _token_sparse_bwd_dq_kernel(
     # Store dQ
     dq_ptrs = dQ + pid_q * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :]
     tl.store(dq_ptrs, dq_acc.to(dQ.dtype.element_ty), mask=m_mask[:, None])
+
+
+@triton.jit
+def _fused_dq_dkv_kernel(
+    Q,
+    K,
+    V,
+    Indices,
+    dO,
+    dQ,
+    dK,
+    dV,
+    Lse,
+    Delta,
+    sm_scale,
+    stride_qt,
+    stride_qh,
+    stride_kt,
+    stride_it,
+    stride_ot,
+    stride_oh,
+    stride_dkt,
+    NHQ: tl.constexpr,
+    TOPK: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """Fused dQ + dKV kernel: computes S/P once (saves 2 redundant tl.dot vs separate
+    dQ + dKV kernels), and loads K/V only once.
+    dQ: accumulated locally (no atomics). dK/dV: bf16 atomic scatter.
+    BLOCK_N=32 is optimal — smaller S/P tiles reduce register spilling, which
+    dominates over loop-count overhead."""
+    pid_q = tl.program_id(0).to(tl.int64)
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, D)
+    offs_n = tl.arange(0, BLOCK_N)
+    m_mask = offs_m < NHQ
+
+    q_ptrs = Q + pid_q * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :]
+    q_tile = tl.load(q_ptrs, mask=m_mask[:, None], other=0.0)
+    do_ptrs = dO + pid_q * stride_ot + offs_m[:, None] * stride_oh + offs_d[None, :]
+    do_tile = tl.load(do_ptrs, mask=m_mask[:, None], other=0.0)
+
+    lse = tl.load(Lse + pid_q * NHQ + offs_m, mask=m_mask, other=0.0)
+    delta = tl.load(Delta + pid_q * NHQ + offs_m, mask=m_mask, other=0.0)
+
+    dq_acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
+    idx_base = Indices + pid_q * stride_it
+
+    num_chunks = tl.cdiv(TOPK, BLOCK_N)
+    for chunk_id in range(num_chunks):
+        start = chunk_id * BLOCK_N
+        chunk_offs = start + offs_n
+        n_mask = chunk_offs < TOPK
+        kv_idx = tl.load(idx_base + chunk_offs, mask=n_mask, other=0)
+
+        k_ptrs = K + kv_idx[:, None] * stride_kt + offs_d[None, :]
+        k_tile = tl.load(k_ptrs, mask=n_mask[:, None], other=0.0)
+        v_ptrs = V + kv_idx[:, None] * stride_kt + offs_d[None, :]
+        v_tile = tl.load(v_ptrs, mask=n_mask[:, None], other=0.0)
+
+        s = tl.dot(q_tile, tl.trans(k_tile)) * sm_scale
+        s = tl.where(m_mask[:, None] & n_mask[None, :], s, -float("inf"))
+        p = tl.exp(s - lse[:, None])
+
+        dp = tl.dot(do_tile, tl.trans(v_tile))
+        ds = (p * (dp - delta[:, None]) * sm_scale).to(q_tile.dtype)
+
+        dq_acc += tl.dot(ds, k_tile).to(tl.float32)
+
+        dk_chunk = tl.dot(tl.trans(ds), q_tile)
+        dv_chunk = tl.dot(tl.trans(p.to(do_tile.dtype)), do_tile)
+        dk_ptrs = dK + kv_idx[:, None] * stride_dkt + offs_d[None, :]
+        dv_ptrs = dV + kv_idx[:, None] * stride_dkt + offs_d[None, :]
+        tl.atomic_add(dk_ptrs, dk_chunk.to(tl.bfloat16), mask=n_mask[:, None])
+        tl.atomic_add(dv_ptrs, dv_chunk.to(tl.bfloat16), mask=n_mask[:, None])
+
+    dq_ptrs = dQ + pid_q * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :]
+    tl.store(dq_ptrs, dq_acc.to(dQ.dtype.element_ty), mask=m_mask[:, None])
+
+
+@triton.jit
+def _dkv_headchunked_kernel(
+    Q,
+    K,
+    V,
+    Indices,
+    dO,
+    dK,
+    dV,
+    Lse,
+    Delta,
+    sm_scale,
+    stride_qt,
+    stride_qh,
+    stride_kt,
+    stride_it,
+    stride_ot,
+    stride_oh,
+    stride_dkt,
+    NHQ: tl.constexpr,
+    TOPK: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_MH: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """dKV with head chunking: processes heads in groups of BLOCK_MH to reduce
+    register pressure from 576+ (full BLOCK_M=128) to ~240.
+    dK/dV accumulated across head groups in fp32, then bf16 atomic scatter.
+    Optimal: BLOCK_MH=32, BLOCK_N=64 — balances register budget vs loop count."""
+    pid_q = tl.program_id(0).to(tl.int64)
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, D)
+    num_chunks: tl.constexpr = (TOPK + BLOCK_N - 1) // BLOCK_N
+    num_hgroups: tl.constexpr = (NHQ + BLOCK_MH - 1) // BLOCK_MH
+
+    idx_base = Indices + pid_q * stride_it
+
+    for chunk_id in range(num_chunks):
+        start = chunk_id * BLOCK_N
+        chunk_offs = start + offs_n
+        n_mask = chunk_offs < TOPK
+        kv_idx = tl.load(idx_base + chunk_offs, mask=n_mask, other=0)
+
+        k_tile = tl.load(
+            K + kv_idx[:, None] * stride_kt + offs_d[None, :],
+            mask=n_mask[:, None],
+            other=0.0,
+        )
+        v_tile = tl.load(
+            V + kv_idx[:, None] * stride_kt + offs_d[None, :],
+            mask=n_mask[:, None],
+            other=0.0,
+        )
+
+        dk_acc = tl.zeros([BLOCK_N, D], dtype=tl.float32)
+        dv_acc = tl.zeros([BLOCK_N, D], dtype=tl.float32)
+
+        for hg in range(num_hgroups):
+            h_start = hg * BLOCK_MH
+            offs_m = h_start + tl.arange(0, BLOCK_MH)
+            m_mask = offs_m < NHQ
+
+            q_hg = tl.load(
+                Q + pid_q * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :],
+                mask=m_mask[:, None],
+                other=0.0,
+            )
+            do_hg = tl.load(
+                dO + pid_q * stride_ot + offs_m[:, None] * stride_oh + offs_d[None, :],
+                mask=m_mask[:, None],
+                other=0.0,
+            )
+            lse_hg = tl.load(Lse + pid_q * NHQ + offs_m, mask=m_mask, other=0.0)
+            delta_hg = tl.load(Delta + pid_q * NHQ + offs_m, mask=m_mask, other=0.0)
+
+            s = tl.dot(q_hg, tl.trans(k_tile)) * sm_scale
+            s = tl.where(m_mask[:, None] & n_mask[None, :], s, -float("inf"))
+            p = tl.exp(s - lse_hg[:, None])
+
+            dp = tl.dot(do_hg, tl.trans(v_tile))
+            ds = (p * (dp - delta_hg[:, None]) * sm_scale).to(q_hg.dtype)
+
+            dk_acc += tl.dot(tl.trans(ds), q_hg)
+            dv_acc += tl.dot(tl.trans(p.to(do_hg.dtype)), do_hg)
+
+        dk_ptrs = dK + kv_idx[:, None] * stride_dkt + offs_d[None, :]
+        dv_ptrs = dV + kv_idx[:, None] * stride_dkt + offs_d[None, :]
+        tl.atomic_add(dk_ptrs, dk_acc.to(tl.bfloat16), mask=n_mask[:, None])
+        tl.atomic_add(dv_ptrs, dv_acc.to(tl.bfloat16), mask=n_mask[:, None])
 
 
 @triton.jit
@@ -593,15 +760,8 @@ def _build_block_inverse_indices(indices, total_kv, BLOCK_N):
     return block_inv_q, block_inv_mask, block_offsets
 
 
-def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
+def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="split"):
     """Token-sparse attention backward (MQA-optimized).
-
-    dQ: LoopK direction (per Q, iterate topk K) — uses tl.dot, no atomics.
-    dKV: selectable strategy via `dkv_mode`:
-        - "atomic" (default): LoopK + atomic scatter. Uses tl.dot. Best for random indices.
-        - "loopq": LoopQ with BLOCK_N KV tiling + PackGQA + bitmask.
-          ALL operations use tl.dot. Best for structured/local indices (4x faster).
-          With random indices: ~2.4x slower due to sparse mask inefficiency.
 
     Args:
         q: (total_q, nhq, D)
@@ -611,7 +771,7 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
         o: (total_q, nhq, D) — FWD output
         do: (total_q, nhq, D) — gradient of output
         lse: (total_q, nhq) — log-sum-exp from FWD
-        dkv_mode: "atomic" | "loopq"
+        dkv_mode: "split" (default) | "fused" | "atomic" | "loopq"
 
     Returns:
         dq: (total_q, nhq, D)
@@ -624,7 +784,6 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
     sm_scale = 1.0 / math.sqrt(D)
 
     BLOCK_M = triton.next_power_of_2(nhq)
-    BLOCK_N = 64
 
     # Preprocess: Delta = rowsum(O * dO)
     delta = torch.empty(total_q, nhq, device=q.device, dtype=torch.float32)
@@ -639,10 +798,113 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
         BLOCK_M=BLOCK_M,
     )
 
-    # dQ kernel (LoopK direction: per Q position, iterate over topk K)
-    dq = torch.empty_like(q)
     k_flat = k.squeeze(1)
     v_flat = v.squeeze(1)
+
+    if dkv_mode == "split":
+        # Split: separate dQ (fp32, no atomics) + head-chunked dKV (bf16 atomics).
+        # Head chunking (BLOCK_MH=32) reduces register pressure from 576+ to ~240,
+        # eliminating spilling. BLOCK_N=64 halves atomic write batches vs BN=32.
+        BLOCK_N_DQ = 64
+        BLOCK_MH = 32
+        BLOCK_N_DKV = 64
+
+        dq = torch.empty_like(q)
+        _token_sparse_bwd_dq_kernel[(total_q,)](
+            q,
+            k_flat,
+            v_flat,
+            indices,
+            do,
+            dq,
+            lse,
+            delta,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            indices.stride(0),
+            do.stride(0),
+            do.stride(1),
+            NHQ=nhq,
+            TOPK=topk,
+            D=D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N_DQ,
+        )
+
+        dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
+        dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
+        _dkv_headchunked_kernel[(total_q,)](
+            q,
+            k_flat,
+            v_flat,
+            indices,
+            do,
+            dk,
+            dv,
+            lse,
+            delta,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            indices.stride(0),
+            do.stride(0),
+            do.stride(1),
+            dk.stride(0),
+            NHQ=nhq,
+            TOPK=topk,
+            D=D,
+            BLOCK_MH=BLOCK_MH,
+            BLOCK_N=BLOCK_N_DKV,
+        )
+        dk = dk.unsqueeze(1).to(q.dtype)
+        dv = dv.unsqueeze(1).to(q.dtype)
+        return dq, dk, dv
+
+    if dkv_mode == "fused":
+        # Fused dQ+dKV: single kernel computes S/P once (saves 2 redundant
+        # tl.dot vs separate kernels) and loads K/V once. dK/dV use bf16
+        # hardware atomics. BLOCK_N=32 minimizes register spilling.
+        BLOCK_N = 32
+        dq = torch.empty_like(q)
+        dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
+        dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
+
+        _fused_dq_dkv_kernel[(total_q,)](
+            q,
+            k_flat,
+            v_flat,
+            indices,
+            do,
+            dq,
+            dk,
+            dv,
+            lse,
+            delta,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            indices.stride(0),
+            do.stride(0),
+            do.stride(1),
+            dk.stride(0),
+            NHQ=nhq,
+            TOPK=topk,
+            D=D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+        )
+        dk = dk.unsqueeze(1).to(q.dtype)
+        dv = dv.unsqueeze(1).to(q.dtype)
+        return dq, dk, dv
+
+    BLOCK_N = 64
+
+    # dQ kernel (LoopK direction: per Q position, iterate over topk K)
+    dq = torch.empty_like(q)
 
     _token_sparse_bwd_dq_kernel[(total_q,)](
         q,
@@ -671,9 +933,7 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
     dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
 
     if dkv_mode == "loopq":
-        # LoopQ with BLOCK_N KV tiling: per KV-BLOCK, iterate Q refs with tl.dot.
-        # Uses block-level inverse index + bitmask for sparse pattern.
-        LOOPQ_BLOCK_N = min(BLOCK_N, 64)  # must fit in int64 bitmask
+        LOOPQ_BLOCK_N = min(BLOCK_N, 64)
         block_inv_q, block_inv_mask, block_offsets = _build_block_inverse_indices(
             indices, total_kv, LOOPQ_BLOCK_N
         )
@@ -708,8 +968,6 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
             SPLIT_SIZE=SPLIT_SIZE,
         )
     else:
-        # LoopK + atomic: per Q position, tiles BLOCK_N KVs for tl.dot.
-        # Faster for MQA (inner-loop loads light K/V, heavy Q stays in regs).
         _token_sparse_bwd_dkv_atomic_kernel[(total_q,)](
             q,
             k_flat,
