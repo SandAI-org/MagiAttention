@@ -17,8 +17,8 @@
 Two sub-benchmarks organized by K block size:
 
   8a) kbs=1 (token-sparse):
-      FFA IndexSparse vs FlexAttention vs Triton Token-Sparse
-      Passes: FWD, BWD (LoopK only — IS kbs=1 has no LoopQ)
+      FFA IndexSparse vs FlexAttention vs Triton LoopK vs Triton LoopQ
+      Passes: FWD, BWD (LoopK + LoopQ comparison for Triton)
 
   8b) kbs=128 (block-sparse):
       FFA BlockSparse vs FFA IndexSparse(kbs=128) vs FlexAttention vs Triton Token-Sparse
@@ -37,6 +37,7 @@ from bench_sparse_analysis._common import (
     COLOR_FLEXATTN,
     COLOR_INDEX_SPARSE,
     COLOR_TRITON,
+    COLOR_TRITON_LOOPQ,
     HD,
     NHK,
     NHQ,
@@ -64,12 +65,13 @@ KBS_BLOCK = 128
 SCENARIOS = VIDEO_SCENARIOS
 
 # 8a: kbs=1 (token-sparse)
-KBS1_METHODS = ["ffa_is", "flexattn", "triton"]
+KBS1_METHODS = ["ffa_is", "flexattn", "triton", "triton_loopq"]
 KBS1_PASSES = ["fwd", "bwd"]
 KBS1_LABELS = {
     "ffa_is": "FFA IndexSparse (kbs=1)",
     "flexattn": "FlexAttention",
-    "triton": "Triton Token-Sparse",
+    "triton": "Triton LoopK",
+    "triton_loopq": "Triton LoopQ",
 }
 
 # 8b: kbs=128 (block-sparse)
@@ -260,6 +262,42 @@ def _run_kbs1_triton(kvseqlen, qseqlen, topk, pass_type, device):
     return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
 
+def _run_kbs1_triton_loopq(kvseqlen, qseqlen, topk, pass_type, device):
+    """Triton token-sparse BWD using LoopQ direction (inverse index, no dKV atomics).
+
+    FWD is identical to standard Triton — returns same result.
+    BWD uses dkv_mode="loopq": outer KV blocks, inner Q positions via inverse index.
+    """
+    import torch
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
+    from token_sparse_attn_triton import token_sparse_bwd, token_sparse_fwd
+
+    q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(kvseqlen, 1, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(kvseqlen, 1, HD, dtype=torch.bfloat16, device=device)
+    tri_indices = (
+        torch.randint(0, kvseqlen, (qseqlen, topk), device=device, dtype=torch.int32)
+        .sort(dim=1)
+        .values
+    )
+    is_bwd = pass_type != "fwd"
+
+    if is_bwd:
+        o, lse = token_sparse_fwd(q, k, v, tri_indices, return_lse=True)
+        do = torch.randn_like(o)
+
+        def run_fn():
+            token_sparse_bwd(q, k, v, tri_indices, o, do, lse, dkv_mode="loopq")
+
+    else:
+
+        def run_fn():
+            token_sparse_fwd(q, k, v, tri_indices)
+
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
+
+
 # ═══════════════════════════════════════════════════════════════
 #  8b: kbs=128 Runners
 # ═══════════════════════════════════════════════════════════════
@@ -430,6 +468,7 @@ _KBS1_RUNNERS = {
     "ffa_is": _run_kbs1_ffa_is,
     "flexattn": _run_kbs1_flexattn,
     "triton": _run_kbs1_triton,
+    "triton_loopq": _run_kbs1_triton_loopq,
 }
 
 _KBS128_RUNNERS = {
@@ -723,7 +762,8 @@ def _phase8_plot():
     kbs1_pass_defs = [("fwd", "FWD"), ("bwd", "BWD (LoopK)")]
     kbs1_methods = [
         ("flexattn", "FlexAttention", COLOR_FLEXATTN),
-        ("triton", "Triton Token-Sparse", COLOR_TRITON),
+        ("triton", "Triton LoopK", COLOR_TRITON),
+        ("triton_loopq", "Triton LoopQ", COLOR_TRITON_LOOPQ),
         ("ffa_is", "FFA IndexSparse", COLOR_INDEX_SPARSE),
     ]
     n_cols = len(kbs1_pass_defs)

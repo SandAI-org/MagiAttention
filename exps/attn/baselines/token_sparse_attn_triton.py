@@ -744,13 +744,19 @@ def _build_block_inverse_indices(indices, total_kv, BLOCK_N):
     block_inv_q = (unique_keys % total_q).int()
     block_inv_block = (unique_keys // total_q).int()
 
-    # Build bitmask: for each unique (block, q), OR the local_id bits
+    # Build bitmask: for each unique (block, q), OR the local_id bits.
+    # Dedup (block, q, local) triples — scatter_add_ does ADD not OR,
+    # so duplicate local_ids within the same (block, q) pair corrupt the mask.
+    triple_key = pair_key * BLOCK_N + sorted_local
+    first_occ = torch.ones(len(triple_key), device=device, dtype=torch.bool)
+    first_occ[1:] = triple_key[1:] != triple_key[:-1]
+
     block_inv_mask = torch.zeros(num_entries, device=device, dtype=torch.int64)
     bit_values = (
         torch.ones(sorted_local.shape[0], device=device, dtype=torch.int64)
         << sorted_local
     )
-    block_inv_mask.scatter_add_(0, inverse, bit_values)
+    block_inv_mask.scatter_add_(0, inverse[first_occ], bit_values[first_occ])
 
     # CSR offsets per block
     block_counts = torch.bincount(block_inv_block, minlength=num_blocks)
