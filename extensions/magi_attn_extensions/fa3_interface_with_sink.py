@@ -24,6 +24,10 @@ from magi_attention.functional.utils import (
     sink_bwd_compiled,
 )
 
+# ---------------------------------------------------------------------------
+# Autograd functions
+# ---------------------------------------------------------------------------
+
 
 class FA3QKVPackedFuncWithSink(torch.autograd.Function):
     @staticmethod
@@ -673,6 +677,11 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
                     assert sink_layout == "shd"
             case _:
                 raise ValueError(f"Invalid sink shape {sink.shape}")
+
+
+# ---------------------------------------------------------------------------
+# Public wrappers
+# ---------------------------------------------------------------------------
 
 
 def fa3_qkvpacked_func_with_sink(
