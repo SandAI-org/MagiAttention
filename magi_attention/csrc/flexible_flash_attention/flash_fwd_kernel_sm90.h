@@ -77,7 +77,7 @@ class FlashAttnFwdSm90 {
   static constexpr int NumMaxLogits = CollectiveEpilogue::NumMaxLogits;
 
   // Mainloop derived types
-  // using BlockMeta = typename CollectiveMainloop::BlockMeta;
+  // using InnerBlockMeta = typename CollectiveMainloop::InnerBlockMeta;
   using TileShape_MNK_PV = typename CollectiveMainloop::TileShape_MNK_PV;
   using TileShape_MNK_PV_Active = typename CollectiveMainloop::TileShape_MNK_PV_Active;
   using TiledMmaPV = typename CollectiveMainloop::TiledMmaPV_Active;
@@ -262,13 +262,13 @@ class FlashAttnFwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
-      using BlockMetaT = std::conditional_t<
+      using InnerBlockMetaT = std::conditional_t<
           BlockSparse,
-          typename CollectiveMainloop::BlockSparseProducerBlockMeta,
+          typename CollectiveMainloop::BlockSparseProducerInnerBlockMeta,
           std::conditional_t<
               IndexSparse,
-              typename CollectiveMainloop::template IndexSparseBlockMeta</*IsProducer=*/true>,
-              typename CollectiveMainloop::BlockMeta</*IsProducer=*/true>>>;
+              typename CollectiveMainloop::template IndexSparseInnerBlockMeta</*IsProducer=*/true>,
+              typename CollectiveMainloop::InnerBlockMeta</*IsProducer=*/true>>>;
 
       // Deallocate the registers for the producer WG,
       // which allows the consumer WGs to have more registers
@@ -319,12 +319,12 @@ class FlashAttnFwdSm90 {
                                                  : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_block_info)) {
         auto block_coord = work_block_info.get_block_coord();
 
-        BlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
+        InnerBlockMetaT inner_block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
 
         auto scheduler_prefetch = [&scheduler, &params, &work_block_info]() { scheduler.prefetch_next_work(params.scheduler, work_block_info); };
 
         bool has_tile_valid = mainloop.template load<kInnerDir>(
-            params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_meta, work_idx, thread_idx);
+            params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, inner_block_meta, work_idx, thread_idx);
 
         scheduler_prefetch();
         if (has_tile_valid) {
@@ -333,13 +333,13 @@ class FlashAttnFwdSm90 {
       }
       mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
     } else { // Consumer
-      using BlockMetaT = std::conditional_t<
+      using InnerBlockMetaT = std::conditional_t<
           BlockSparse,
-          typename CollectiveMainloop::BlockSparseConsumerBlockMeta,
+          typename CollectiveMainloop::BlockSparseConsumerInnerBlockMeta,
           std::conditional_t<
               IndexSparse,
-              typename CollectiveMainloop::template IndexSparseBlockMeta</*IsProducer=*/false>,
-              typename CollectiveMainloop::BlockMeta</*IsProducer=*/false>>>;
+              typename CollectiveMainloop::template IndexSparseInnerBlockMeta</*IsProducer=*/false>,
+              typename CollectiveMainloop::InnerBlockMeta</*IsProducer=*/false>>>;
 
       // Allocate the registers for the consumer WGs
       cutlass::arch::warpgroup_reg_alloc<ConsumerRegs_>();
@@ -370,9 +370,9 @@ class FlashAttnFwdSm90 {
         auto block_coord = work_block_info.get_block_coord();
         auto det_msg = work_block_info.get_det_msg();
 
-        BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
+        InnerBlockMetaT inner_block_meta = InnerBlockMetaT{params.mainloop, block_coord, shared_storage};
 
-        auto epilogue_block_coord = block_meta.get_epilogue_coord();
+        auto epilogue_block_coord = inner_block_meta.get_epilogue_coord();
 
         // Init softmax object
         float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
@@ -402,7 +402,7 @@ class FlashAttnFwdSm90 {
             scores_scale,
             threadIdx.x - MmaThreadOffset,
             work_idx,
-            block_meta,
+            inner_block_meta,
             shared_storage);
 
         // NOTE: get next work before epilogue so that the next tile is ready to go.
@@ -418,7 +418,7 @@ class FlashAttnFwdSm90 {
                 tiled_mma_pv,
                 threadIdx.x - MmaThreadOffset,
                 epilogue_block_coord,
-                block_meta.seqlen_info,
+                inner_block_meta.seqlen_info,
                 det_msg);
           } else {
             epilogue.store(
@@ -429,12 +429,12 @@ class FlashAttnFwdSm90 {
                 tiled_mma_pv,
                 threadIdx.x - MmaThreadOffset,
                 epilogue_block_coord,
-                block_meta.seqlen_info,
+                inner_block_meta.seqlen_info,
                 det_msg,
                 softmax.row_max);
           }
         } else {
-          epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, epilogue_block_coord, block_meta.seqlen_info, det_msg);
+          epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, epilogue_block_coord, inner_block_meta.seqlen_info, det_msg);
         }
       }
       // barrier_O guards smem_o/smem_v union: producer waits before V load,

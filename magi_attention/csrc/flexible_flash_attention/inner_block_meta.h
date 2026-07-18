@@ -31,14 +31,14 @@ namespace flash {
 using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// DenseBlockMeta: Unified FWD + BWD Dense path BlockMeta.
+// DenseInnerBlockMeta: Unified FWD + BWD Dense path InnerBlockMeta.
 //
 // InnerLoopQ=false  =>  FWD / BWD-InnerLoopK (inner loop over n_block/K).
 // InnerLoopQ=true   =>  BWD-InnerLoopQ  (inner loop over m_block/Q).
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <bool IsProducer, bool InnerLoopQ, bool RangeMerge, bool FlattenGQA, int PackGQAFactor, typename SeqlenInfo_t, typename BlockMN_t>
-struct DenseBlockMeta {
+struct DenseInnerBlockMeta {
   // All fields are by-value (no reference data members) to avoid register spilling to stack.
   // When !RangeMerge, the batch loop runs exactly once; mark it so callers can elide the while(true).
   static constexpr bool NeedsBatchLoop = RangeMerge;
@@ -60,7 +60,7 @@ struct DenseBlockMeta {
   int const* const attn_type_map;
 
   template <typename ParamsT, typename BlockCoordT, typename SharedStorage>
-  CUTLASS_DEVICE DenseBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
+  CUTLASS_DEVICE DenseInnerBlockMeta(ParamsT const& params, BlockCoordT const& block_coord, SharedStorage& shared_storage, int thread_idx = 0)
       : outer_tile_idx(get<0>(block_coord)),
         bidh(get<1>(block_coord)),
         // When FlattenGQA (PackGQA or CatGQA), the scheduler assigns bidh as
@@ -146,7 +146,7 @@ struct DenseBlockMeta {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// BlockSparseBlockMeta: Unified producer/consumer via IsProducer template parameter.
+// BlockSparseInnerBlockMeta: Unified producer/consumer via IsProducer template parameter.
 // Used by both producer (IsProducer=true) and consumer (IsProducer=false) aliases.
 //
 // InnerLoopQ_=false (InnerLoopK): outer=Q (TMA), inner=KV (scatter), token_indices = KV positions
@@ -164,7 +164,7 @@ template <
     int kBlockN_,
     bool InnerDirMaxToMin_,
     bool InnerLoopQ_>
-struct BlockSparseBlockMeta {
+struct BlockSparseInnerBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr bool NeedsBatchLoop = true;
   static constexpr bool InnerLoopQ = InnerLoopQ_;
@@ -218,7 +218,7 @@ struct BlockSparseBlockMeta {
   }
 
   template <typename ParamsT, typename SharedStorage>
-  CUTLASS_DEVICE BlockSparseBlockMeta(
+  CUTLASS_DEVICE BlockSparseInnerBlockMeta(
       ParamsT const& params,
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,
@@ -437,8 +437,8 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 } // namespace detail
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// IndexSparseBlockMeta: Unified sparse block metadata for index-based attention.
-// Handles both InnerLoopK and InnerLoopQ via the InnerLoopQ_ template parameter (like BlockSparseBlockMeta).
+// IndexSparseInnerBlockMeta: Unified sparse block metadata for index-based attention.
+// Handles both InnerLoopK and InnerLoopQ via the InnerLoopQ_ template parameter (like BlockSparseInnerBlockMeta).
 //
 // Template params:
 //   InnerBlockSize_    — inner scatter tile size (kBlockN for InnerLoopK, kBlockM for InnerLoopQ)
@@ -457,7 +457,7 @@ struct nhk_of<P, std::void_t<decltype(std::declval<P>().shape_K)>> {
 //   bidh        — head index from scheduler (= KV-head when PackGQA; = Q-head when !PackGQA)
 //   bidb        — batch/token index (Q token for InnerLoopK, K block for InnerLoopQ)
 //   nhk         — total KV-head count
-//   bidh_kv     — resolved KV-head for this CTA (consistent with DenseBlockMeta/BlockSparseBlockMeta)
+//   bidh_kv     — resolved KV-head for this CTA (consistent with DenseInnerBlockMeta/BlockSparseInnerBlockMeta)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -471,7 +471,7 @@ template <
     bool InnerDirMaxToMin_,
     int SparseKBlockSize_,
     bool InnerLoopQ_>
-struct IndexSparseBlockMeta {
+struct IndexSparseInnerBlockMeta {
   static constexpr auto kDir = InnerDirMaxToMin_ ? flash::DispatchDirection::MaxToMin : flash::DispatchDirection::MinToMax;
   static constexpr int InnerBlockSize = InnerBlockSize_;
   static constexpr int SparseKBlockSize = SparseKBlockSize_;
@@ -486,7 +486,7 @@ struct IndexSparseBlockMeta {
   int const bidh; // Head index from scheduler (KV-head when PackGQA, Q-head otherwise)
   int const bidb;
   int const nhk; // Total KV-head count
-  int const bidh_kv; // Resolved KV-head for this CTA (matches DenseBlockMeta/BlockSparseBlockMeta)
+  int const bidh_kv; // Resolved KV-head for this CTA (matches DenseInnerBlockMeta/BlockSparseInnerBlockMeta)
 
   // ─── Mutable state (set in constructor body) ───
   flash::SeqlenInfo seqlen_info;
@@ -502,7 +502,7 @@ struct IndexSparseBlockMeta {
   int const* sparse_indices_ptr = nullptr;
 
   template <typename ParamsT, typename SharedStorage>
-  CUTLASS_DEVICE IndexSparseBlockMeta(
+  CUTLASS_DEVICE IndexSparseInnerBlockMeta(
       ParamsT const& params,
       cute::tuple<int32_t, int32_t, int32_t> const& block_coord,
       SharedStorage& shared_storage,

@@ -268,10 +268,10 @@ class FlashAttnBwdSm90 {
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
-    using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
-    using BlockMetaConsumerT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>;
+    using InnerBlockMetaT = typename CollectiveMainloop::template InnerBlockMeta</*IsProducer=*/true>;
+    using InnerBlockMetaConsumerT = typename CollectiveMainloop::template InnerBlockMeta</*IsProducer=*/false>;
 
-    using ProducerBlockMetaT = std::conditional_t<IsSparse, typename CollectiveMainloop::template SparseLoopQBlockMeta<true>, BlockMetaT>;
+    using ProducerInnerBlockMetaT = std::conditional_t<IsSparse, typename CollectiveMainloop::template SparseLoopQInnerBlockMeta<true>, InnerBlockMetaT>;
 
     using ProducerConsts = typename CollectiveMainloop::ProducerConsts;
 
@@ -311,9 +311,9 @@ class FlashAttnBwdSm90 {
 
           // Run the producer load pipeline
           int thread_idx = threadIdx.x % NumProducerLoaderThreads;
-          ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
+          ProducerInnerBlockMetaT inner_block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
           bool tile_valid = mainloop.template load_with_loop_q<kInnerDir>(
-              params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, block_meta);
+              params.mainloop, pipeline_q, pipeline_do, smem_pipe_write_q, smem_pipe_write_do, shared_storage, inner_block_meta);
 
           // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
           if (tile_valid) {
@@ -338,11 +338,11 @@ class FlashAttnBwdSm90 {
           auto block_coord = work_block_info.get_block_coord();
 
           if constexpr (IsSparse) {
-            typename CollectiveMainloop::template SparseLoopQBlockMeta<false> block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
+            typename CollectiveMainloop::template SparseLoopQInnerBlockMeta<false> inner_block_meta{params.mainloop, block_coord, shared_storage};
+            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, inner_block_meta);
           } else {
-            BlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
-            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, block_meta);
+            InnerBlockMetaT inner_block_meta{params.mainloop, block_coord, shared_storage};
+            mainloop.template store_dq<kInnerDir>(params.mainloop, shared_storage, inner_block_meta);
           }
         }
       }
@@ -380,10 +380,10 @@ class FlashAttnBwdSm90 {
         clear(tdVrdV);
 
         // Run the mma to compute partial dQ,dK,dV
-        using ConsumerBlockMetaT = std::conditional_t<IsSparse, typename CollectiveMainloop::template SparseLoopQBlockMeta<false>, BlockMetaConsumerT>;
-        ConsumerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage};
+        using ConsumerInnerBlockMetaT = std::conditional_t<IsSparse, typename CollectiveMainloop::template SparseLoopQInnerBlockMeta<false>, InnerBlockMetaConsumerT>;
+        ConsumerInnerBlockMetaT inner_block_meta{params.mainloop, block_coord, shared_storage};
 
-        auto epilogue_block_coord = block_meta.get_epilogue_coord();
+        auto epilogue_block_coord = inner_block_meta.get_epilogue_coord();
 
         bool tile_valid = mainloop.template mma_with_loop_q<kInnerDir>(
             params.mainloop,
@@ -395,7 +395,7 @@ class FlashAttnBwdSm90 {
             tdVrdV,
             threadIdx.x - NumCopyThreads,
             work_idx,
-            block_meta,
+            inner_block_meta,
             shared_storage);
 
         // Run the epilogue to store reduced dK (scaled),dV
@@ -489,11 +489,11 @@ class FlashAttnBwdSm90 {
 
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
-    using BlockMetaT = typename CollectiveMainloop::template BlockMeta</*IsProducer=*/true>;
-    using BlockMetaConsumerT = std::conditional_t<
+    using InnerBlockMetaT = typename CollectiveMainloop::template InnerBlockMeta</*IsProducer=*/true>;
+    using InnerBlockMetaConsumerT = std::conditional_t<
         IsSparse,
-        typename CollectiveMainloop::template SparseLoopKBlockMeta<false>,
-        typename CollectiveMainloop::template BlockMeta</*IsProducer=*/false>>;
+        typename CollectiveMainloop::template SparseLoopKInnerBlockMeta<false>,
+        typename CollectiveMainloop::template InnerBlockMeta</*IsProducer=*/false>>;
 
     if (warp_group_idx == 0) { // Producer
       // Deallocate the registers for the producer WG,
@@ -502,7 +502,7 @@ class FlashAttnBwdSm90 {
 
       int warp_idx_in_warpgroup = canonical_warp_idx_in_warpgroup_sync();
 
-      using ProducerBlockMetaT = std::conditional_t<IsSparse, typename CollectiveMainloop::template SparseLoopKBlockMeta<true>, BlockMetaT>;
+      using ProducerInnerBlockMetaT = std::conditional_t<IsSparse, typename CollectiveMainloop::template SparseLoopKInnerBlockMeta<true>, InnerBlockMetaT>;
 
       using ProducerConsts_LoopK = typename CollectiveMainloop::ProducerConsts;
       bool const is_loader = ProducerConsts_LoopK::is_loader(warp_idx_in_warpgroup);
@@ -531,9 +531,9 @@ class FlashAttnBwdSm90 {
 
           // Run the producer load pipeline
           int thread_idx = threadIdx.x % NumProducerLoaderThreads;
-          ProducerBlockMetaT block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
+          ProducerInnerBlockMetaT inner_block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
           bool has_tile_valid =
-              mainloop.template load_with_loop_k<kInnerDir>(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, block_meta);
+              mainloop.template load_with_loop_k<kInnerDir>(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, inner_block_meta);
 
           // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
           if (has_tile_valid) {
@@ -551,8 +551,8 @@ class FlashAttnBwdSm90 {
              work_block_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_block_info)) {
           auto block_coord = work_block_info.get_block_coord();
 
-          BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
-          mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, block_meta);
+          InnerBlockMetaConsumerT inner_block_meta{params.mainloop, block_coord, shared_storage};
+          mainloop.template store_dkv<kInnerDir>(params.mainloop, shared_storage, inner_block_meta);
         }
       }
     } else { // Consumer
@@ -586,11 +586,11 @@ class FlashAttnBwdSm90 {
         clear(tdQrdQ);
 
         // Run the mma to compute partial dQ,dK,dV
-        BlockMetaConsumerT block_meta{params.mainloop, block_coord, shared_storage};
-        auto epilogue_block_coord = block_meta.get_epilogue_coord();
+        InnerBlockMetaConsumerT inner_block_meta{params.mainloop, block_coord, shared_storage};
+        auto epilogue_block_coord = inner_block_meta.get_epilogue_coord();
 
         bool tile_valid = mainloop.template mma_with_loop_k<kInnerDir>(
-            params.mainloop, pipeline_k, pipeline_v, smem_pipe_read_k, smem_pipe_read_v, tdQrdQ, threadIdx.x - NumCopyThreads, work_idx, block_meta, shared_storage);
+            params.mainloop, pipeline_k, pipeline_v, smem_pipe_read_k, smem_pipe_read_v, tdQrdQ, threadIdx.x - NumCopyThreads, work_idx, inner_block_meta, shared_storage);
 
         // Run the epilogue to store reduced dQ (scaled)
         if (tile_valid) {
