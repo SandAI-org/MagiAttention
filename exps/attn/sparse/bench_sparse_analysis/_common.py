@@ -25,6 +25,33 @@ S_FULL = 32768
 TOPK_VALS = [32768, 16384, 8192, 4096, 2048]
 WARMUP, ITERS = 8, 20
 
+# ── Video-production scenarios (shared by Phase 6 & 8) ────────
+# qseqlen = kvseqlen/64, topk = kvseqlen/8
+VIDEO_SCENARIOS = [
+    # (kvseqlen, qseqlen, topk)
+    (32768, 512, 4096),
+    (65536, 1024, 8192),
+    (131072, 2048, 16384),
+    (262144, 4096, 32768),
+    (524288, 8192, 65536),
+]
+
+# ── Plot style (consistent across all phases) ─────────────────
+# Our kernels: warm/saturated colors
+COLOR_INDEX_SPARSE = (0.77, 0.34, 0.49)
+COLOR_BLOCK_SPARSE = (0.29, 0.57, 0.60)
+# External baselines: gray/dark
+COLOR_FLEXATTN = (0.45, 0.45, 0.45)
+COLOR_TRITON = (0.65, 0.65, 0.65)
+
+PLOT_BAR_WIDTH_RATIO = 0.8
+PLOT_BAR_ALPHA = 0.85
+PLOT_VALUE_FONTSIZE = 6
+PLOT_YLIM = (0, 750)
+PLOT_DPI_SAVE = 180
+PLOT_SUBPLOT_WIDTH = 8
+PLOT_SUBPLOT_HEIGHT = 7
+
 _SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BASE_OUT = os.path.join(_SCRIPT_DIR, "outs", "sparse_analysis")
 
@@ -39,6 +66,7 @@ PHASES = [
     "5-scaling",
     "6-video-production",
     "7-outer-store-mode",
+    "8-baseline-comparison",
 ]
 
 
@@ -335,3 +363,69 @@ def _bench_ffa(S, topk, pass_type, kw, device):
     gc.collect()
     torch.cuda.empty_cache()
     return tf, ms
+
+
+# ── Shared plot helper ────────────────────────────────────────
+def plot_grouped_bars(
+    ax,
+    x,
+    methods,
+    data_fn,
+    *,
+    title="",
+    xlabel="",
+    ylabel="TFLOPS",
+    x_labels=None,
+    ylim=None,
+):
+    """Draw grouped bars on *ax* with unified style.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    x : np.ndarray of x-tick positions
+    methods : list of (method_id, label, color)
+        Ordered left-to-right. Put baselines first (grey), our kernels last.
+    data_fn : callable(method_id) -> list[float]
+        Returns TFLOPS values for each x position (0 means missing).
+    """
+
+    n_m = len(methods)
+    bw = PLOT_BAR_WIDTH_RATIO / n_m
+    for i, (mid, lbl, col) in enumerate(methods):
+        vals = data_fn(mid)
+        off = (i - n_m / 2 + 0.5) * bw
+        bars = ax.bar(
+            x + off,
+            vals,
+            width=bw,
+            label=lbl,
+            color=col,
+            edgecolor="white",
+            linewidth=0.5,
+            alpha=PLOT_BAR_ALPHA,
+        )
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 5,
+                    f"{v:.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=PLOT_VALUE_FONTSIZE,
+                    fontweight="bold",
+                )
+
+    ax.set_title(title, fontsize=14, fontweight="bold")
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_xticks(x)
+    if x_labels is not None:
+        ax.set_xticklabels(x_labels, fontsize=9)
+    ax.tick_params(axis="y", labelsize=11)
+    effective_ylim = ylim if ylim is not None else PLOT_YLIM
+    ax.set_ylim(*effective_ylim)
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
