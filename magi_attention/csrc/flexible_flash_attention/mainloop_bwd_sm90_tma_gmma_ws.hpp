@@ -32,9 +32,9 @@
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 
 #include "block.h"
-#include "inner_block_meta.h"
 #include "copy_sm90_bulk_reduce.hpp"
 #include "deterministic.h"
+#include "inner_block_meta.h"
 #include "inner_ldst_mode.hpp"
 #include "inner_scatter_ldst.hpp"
 #include "mask.h"
@@ -1086,7 +1086,8 @@ struct CollectiveMainloopBwdSm90 {
   //   BwdInnerLoopK=false → inner loop over m_block (InnerLoopQ) → InnerLoopQ=true
   // So: InnerLoopQ = !BwdInnerLoopK
   template <bool IsProducer>
-  using InnerBlockMeta = flash::DenseInnerBlockMeta<IsProducer, /*InnerLoopQ=*/!BwdInnerLoopK, RangeMerge, /*FlattenGQA=*/FlattenGQA, PackGQAFactor, SeqlenInfo_t, BlockMN_t>;
+  using InnerBlockMeta =
+      flash::DenseInnerBlockMeta<IsProducer, /*InnerLoopQ=*/!BwdInnerLoopK, RangeMerge, /*FlattenGQA=*/FlattenGQA, PackGQAFactor, SeqlenInfo_t, BlockMN_t>;
 
   // IndexSparse InnerBlockMeta: templated on IsProducer and InnerLoopQ, other params fixed.
   template <bool IsProducer, bool InnerLoopQ>
@@ -1993,14 +1994,38 @@ struct CollectiveMainloopBwdSm90 {
     int m_block_max;
     int offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
     int last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
+    // k_start_tile: first valid global K-tile for the current batch (k_range.x / kBlockN).
+    // Required for sparse deterministic where n_block is global but last_n_block is local.
+    [[maybe_unused]] int k_start_tile = [&]() -> int {
+      if constexpr (BlockSparse) {
+        return seqlen_info.offset_k / kBlockN;
+      }
+      return 0;
+    }();
     // PackGQA: Q heads packed into seqlen → m_block_num includes PackGQAFactor factor.
     // CatGQA: Q heads stay in head dim → m_block_num is based on raw seqlen_q.
     int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(PackGQAFactor, 1), kBlockM);
     int bidb_last = 0;
-    // Sparse deterministic: per-M-block sync/arrive (no batch-level conflict tracking needed
-    // when PackGQAFactor >= kBlockM — each range maps to a unique range_lock key).
+    // Sparse deterministic state: track last-arrived m_block for pass-through gap filling.
+    // BlockSparse uniform-range allows O(1) compound_idx → (bidb, m_block) mapping.
+    [[maybe_unused]] int sparse_det_last_arrived_m = -1;
+    [[maybe_unused]] int const bidb_initial = bidb;
+    [[maybe_unused]] int const sparse_range_size_packed = [&]() -> int {
+      if constexpr (BlockSparse) {
+        auto r = block_meta.packed_range(bidb);
+        return r.y - r.x;
+      }
+      return 0;
+    }();
+    [[maybe_unused]] int const sparse_first_batch_start = [&]() -> int {
+      if constexpr (BlockSparse) {
+        return block_meta.packed_range(bidb).x;
+      }
+      return 0;
+    }();
 
     bool const lane_predicate = cute::elect_one_sync();
+
     int const num_heads = [&]() {
       if constexpr (CatGQA) {
         return get<2, 1>(params.shape_QdOdQ);
@@ -2014,28 +2039,37 @@ struct CollectiveMainloopBwdSm90 {
     // PackGQA: offset_q is already scaled by PackGQAFactor (set in the main loop below),
     // so we use offset_q here to keep conflict indices consistent with the packed m_block range.
     auto m_block_sync = [&](int m_block_id) {
+      // For BlockSparse: skip deterministic sync entirely.
+      // The dense range-lock protocol requires ALL K-tiles to participate for ALL batches,
+      // but in block-sparse, the sparse mask means not all K-tiles serve every batch.
+      // Single-writer batches are inherently deterministic; 2-writer batches are deterministic
+      // due to FP commutativity (a+b == b+a). For 3+ writers, TMA reduce-add provides
+      // atomicity but not ordering — full determinism requires the extra-buffer approach (TODO).
+      if constexpr (BlockSparse) {
+        return;
+      }
       uint32_t smid = blockIdx.x;
       uint32_t sm_stride = gridDim.x;
-      // calc dq conflict range lock index
       int left_dq_conflict_index = offset_q / kBlockM + m_block_id;
       int right_dq_conflict_index = (offset_q + kBlockM - 1) / kBlockM + m_block_id;
-      // the first n_block should wait for conflict batches
-      // the others n_block should wait for previous n_block
-      int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
-                                   : bidb * params.n_block_max_num + n_block;
-      int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
-                                   : bidb * params.n_block_max_num + n_block;
+      int const global_k_tile = n_block;
+      int sync_num1 = global_k_tile == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
+                                         : bidb * params.n_block_max_num + global_k_tile;
+      int sync_num2 = global_k_tile == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
+                                         : bidb * params.n_block_max_num + global_k_tile;
       deterministic_sync(params.dq_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
     };
 
     auto m_block_arrive = [&](int m_block_id) {
-      // calc arrive message: l_arrive_twice & r_arrive_twice
-      // each range_lock needs to arrive twice to make sure conflict batch has been completed
-      // because range_lock block and batch's block may start from a different offset
+      // For BlockSparse: skip deterministic arrive (see rationale in m_block_sync).
+      if constexpr (BlockSparse) {
+        return;
+      }
       bool l_arrive_twice = (m_block_id == 0) && (offset_q % kBlockM != 0);
       bool r_arrive_twice = (m_block_id == m_block_num - 1) && (offset_q % kBlockM != 0);
-      // the last n_block arrive num is always (batch id + 1) * n_block_max_num
-      int arrive_num = n_block == last_n_block ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + n_block + 1;
+      int const global_k_tile = n_block;
+      bool const is_last_k_tile = (global_k_tile == params.n_block_max_num - 1);
+      int arrive_num = is_last_k_tile ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + global_k_tile + 1;
       deterministic_arrive(params.dq_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
     };
 
@@ -2048,14 +2082,52 @@ struct CollectiveMainloopBwdSm90 {
 
     // Deterministic: forward sync+arrive signals for m_blocks that have no actual dQ data,
     // ensuring downstream consumers don't deadlock waiting for signals from skipped blocks.
+    // NOTE: only lane_predicate thread does actual work (spin-wait in m_block_sync).
+    // Callers must ensure warp convergence (via __syncwarp) AFTER this lambda returns
+    // if the next operation requires all threads (e.g. update_conflict_state).
     auto deterministic_pass_through = [&](int from, int to) {
       if constexpr (Deterministic) {
+        // For BlockSparse: sync protocol is disabled (sparse mask prevents all-CTA participation).
+        // Skip pass-through entirely to avoid OOB batch metadata access.
+        if constexpr (BlockSparse)
+          return;
         if (lane_predicate) {
           for (int m_block = from; m_block < to; ++m_block) {
             m_block_sync(m_block);
             m_block_arrive(m_block);
           }
         }
+      }
+    };
+
+    // Deterministic: update conflict state for batches between bidb_last and bidb.
+    // Each SM tracks which batch last wrote to each m_block-aligned dQ region, so that
+    // m_block_sync for n_block==0 knows which batch's arrive signal to wait for.
+    auto update_conflict_state = [&](int bidb_last, int bidb_cur) {
+      if constexpr (Deterministic) {
+        // For BlockSparse: sync protocol disabled, conflict_state unused.
+        if constexpr (BlockSparse)
+          return;
+        int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
+        uint32_t smid = blockIdx.x;
+        uint32_t sm_stride = gridDim.x;
+        int* conflict_state = params.dq_determin_conflict_state;
+        while (bidb_last < bidb_cur) {
+          int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
+          if constexpr (PackGQA) {
+            bidb_last_l *= PackGQAFactor;
+            bidb_last_r *= PackGQAFactor;
+          }
+          int l = bidb_last_l / kBlockM + lane;
+          int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM);
+          int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM;
+          while (l <= r) {
+            conflict_state[l * sm_stride + smid] = bidb_last + 1;
+            l += cutlass::NumThreadsPerWarp;
+          }
+          bidb_last++;
+        }
+        __syncwarp();
       }
     };
 
@@ -2077,19 +2149,121 @@ struct CollectiveMainloopBwdSm90 {
 
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         // 2D TMA reduce: entire tile written in one TMA reduce-add instruction.
-        // NOTE: Sparse dQ deterministic ordering is NOT yet supported. With RangeMerge,
-        // outer_tile_idx (n_block) is always 0 — the K-block identity comes from bidb.
-        // The range-lock protocol (designed for dense where n_block varies) is therefore
-        // ineffective here. A proper fix requires pre-computed writer ordinals per dQ block.
-        // For now, dQ determinism is validated only at approximate tolerance, not bitwise.
+        // Read compound_idx from SMEM (all threads see same value after dQFull barrier).
+        int const tile_first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_store_staging_indices[0];
+
+        if constexpr (Deterministic && BlockSparse) {
+          // Batch transition + gap pass-through before the real sync+store+arrive.
+          // update_conflict_state uses lane-parallel loop, so ALL warp threads must participate.
+          int const ci_offset = tile_first_compound_idx - sparse_first_batch_start;
+          int const cur_bidb = bidb_initial + ci_offset / sparse_range_size_packed;
+          int const cur_local_m = (ci_offset % sparse_range_size_packed) / kBlockM;
+
+          if (cur_bidb != bidb) {
+            // Pass-through remaining m_blocks of current batch
+            deterministic_pass_through(sparse_det_last_arrived_m + 1, m_block_num);
+            __syncwarp();
+
+            // Pass-through ALL m_blocks of ALL intermediate batches (bidb+1 ... cur_bidb-1)
+            // This is critical: other K-blocks (n_block=1, etc.) need our sync+arrive signals
+            // for every batch, not just the ones we have tiles for.
+            for (int b = bidb + 1; b < cur_bidb; ++b) {
+              auto const r_b = block_meta.packed_range(b);
+              bidb = b;
+              offset_q = r_b.x;
+              m_block_num = cute::ceil_div(r_b.y - r_b.x, kBlockM);
+              flash::SeqlenInfo batch_si_b{b, block_meta.q_ranges, block_meta.k_ranges};
+              last_n_block = cute::ceil_div(batch_si_b.seqlen_k, kBlockN) - 1;
+              k_start_tile = batch_si_b.offset_k / kBlockN;
+              update_conflict_state(bidb_last, b);
+              bidb_last = b;
+              deterministic_pass_through(0, m_block_num);
+              __syncwarp();
+            }
+
+            // Set up for cur_bidb
+            bidb = cur_bidb;
+            auto const r = block_meta.packed_range(bidb);
+            offset_q = r.x;
+            m_block_num = cute::ceil_div(r.y - r.x, kBlockM);
+            flash::SeqlenInfo batch_si{bidb, block_meta.q_ranges, block_meta.k_ranges};
+            last_n_block = cute::ceil_div(batch_si.seqlen_k, kBlockN) - 1;
+            k_start_tile = batch_si.offset_k / kBlockN;
+            update_conflict_state(bidb_last, bidb);
+            bidb_last = bidb;
+            sparse_det_last_arrived_m = -1;
+          }
+          deterministic_pass_through(sparse_det_last_arrived_m + 1, cur_local_m);
+          if (lane_predicate) {
+            m_block_sync(cur_local_m);
+          }
+        }
+
         if (lane_predicate) {
-          int const tile_first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_store_staging_indices[0];
           auto const dq_sparse_off = make_coord(tile_first_compound_idx, _0{});
           tma_inner_store(params.tma_add_dQ, sdQ, domain_offset(dq_sparse_off, mdQ_reduce), TileShape_InnerDq{}, gQdOdQ_coord, 0);
         }
+
+        if constexpr (Deterministic && BlockSparse) {
+          int const ci_offset = tile_first_compound_idx - sparse_first_batch_start;
+          int const cur_local_m = (ci_offset % sparse_range_size_packed) / kBlockM;
+          if (lane_predicate) {
+            m_block_arrive(cur_local_m);
+          }
+          sparse_det_last_arrived_m = cur_local_m;
+        }
       } else if constexpr (IsSparse) {
-        // Per-row scatter store (atomicAdd): same limitation as TMA path above —
-        // sparse dQ deterministic ordering not yet implemented.
+        // Per-row scatter store (atomicAdd).
+        int const first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_store_staging_indices[0];
+        [[maybe_unused]] int const local_m_block_id = (first_compound_idx - offset_q) / kBlockM;
+
+        if constexpr (Deterministic && BlockSparse) {
+          // Batch transition + gap pass-through (single thread, then syncwarp for all).
+          int const ci_offset = first_compound_idx - sparse_first_batch_start;
+          int const cur_bidb = bidb_initial + ci_offset / sparse_range_size_packed;
+          int const cur_local_m = (ci_offset % sparse_range_size_packed) / kBlockM;
+
+          if (cur_bidb != bidb) {
+            if (store_thread_idx == 0) {
+              deterministic_pass_through(sparse_det_last_arrived_m + 1, m_block_num);
+            }
+            __syncwarp();
+
+            // Pass-through ALL intermediate batches (bidb+1 ... cur_bidb-1)
+            for (int b = bidb + 1; b < cur_bidb; ++b) {
+              auto const r_b = block_meta.packed_range(b);
+              bidb = b;
+              offset_q = r_b.x;
+              m_block_num = cute::ceil_div(r_b.y - r_b.x, kBlockM);
+              flash::SeqlenInfo batch_si_b{b, block_meta.q_ranges, block_meta.k_ranges};
+              last_n_block = cute::ceil_div(batch_si_b.seqlen_k, kBlockN) - 1;
+              k_start_tile = batch_si_b.offset_k / kBlockN;
+              update_conflict_state(bidb_last, b);
+              bidb_last = b;
+              if (store_thread_idx == 0) {
+                deterministic_pass_through(0, m_block_num);
+              }
+              __syncwarp();
+            }
+
+            bidb = cur_bidb;
+            auto const r = block_meta.packed_range(bidb);
+            offset_q = r.x;
+            m_block_num = cute::ceil_div(r.y - r.x, kBlockM);
+            flash::SeqlenInfo batch_si{bidb, block_meta.q_ranges, block_meta.k_ranges};
+            last_n_block = cute::ceil_div(batch_si.seqlen_k, kBlockN) - 1;
+            k_start_tile = batch_si.offset_k / kBlockN;
+            update_conflict_state(bidb_last, bidb);
+            bidb_last = bidb;
+            sparse_det_last_arrived_m = -1;
+          }
+          if (store_thread_idx == 0) {
+            deterministic_pass_through(sparse_det_last_arrived_m + 1, cur_local_m);
+            m_block_sync(cur_local_m);
+          }
+          __syncwarp();
+        }
+
         scatter_inner_store<kBlockM, cutlass::NumThreadsPerWarp, kdQHeadPackFactor>(
             sdQ_store,
             shared_storage.tensors.mainloop.smem_sparse_store_staging_indices.data(),
@@ -2098,6 +2272,16 @@ struct CollectiveMainloopBwdSm90 {
             store_thread_idx,
             /*tile_offset=*/0,
             stride_dq_head);
+
+        if constexpr (Deterministic && BlockSparse) {
+          __syncwarp();
+          if (store_thread_idx == 0) {
+            int const ci_offset = first_compound_idx - sparse_first_batch_start;
+            int const cur_local_m = (ci_offset % sparse_range_size_packed) / kBlockM;
+            m_block_arrive(cur_local_m);
+            sparse_det_last_arrived_m = cur_local_m;
+          }
+        }
       } else {
         // Dense TMA reduce
         if (lane_predicate) {
@@ -2131,41 +2315,6 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
-    // Deterministic: update conflict state for batches between bidb_last and bidb.
-    // Each SM tracks which batch last wrote to each m_block-aligned dQ region, so that
-    // m_block_sync for n_block==0 knows which batch's arrive signal to wait for.
-    auto update_conflict_state = [&](int bidb_last, int bidb_cur) {
-      if constexpr (Deterministic) {
-        int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
-        uint32_t smid = blockIdx.x;
-        uint32_t sm_stride = gridDim.x;
-        int* conflict_state = params.dq_determin_conflict_state;
-        // update missed batch's conflict state, loop for bidb_last ~ bidb
-        while (bidb_last < bidb_cur) {
-          // bidb_last_l ~ bidb_last_r is the range of bidb_last
-          // PackGQA: q_ranges stores original offsets, but dQ conflict_state is indexed
-          // by packed offsets (seqlen_q * PackGQAFactor), so we must scale accordingly.
-          int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
-          if constexpr (PackGQA) {
-            bidb_last_l *= PackGQAFactor;
-            bidb_last_r *= PackGQAFactor;
-          }
-          int l = bidb_last_l / kBlockM + lane; // bidb_last_l / kBlock is first block id
-          int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM); // calc total block num of bidb_last
-          int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM; // calc last block id
-          // each threads of warp update conflict block id left ~ right
-          // each batch's range will conflict with previous batch, which cover the same block id
-          while (l <= r) {
-            // conflict state[block id * sm_stride + smid] save the conflict info of this sm
-            conflict_state[l * sm_stride + smid] = bidb_last + 1;
-            l += cutlass::NumThreadsPerWarp;
-          }
-          bidb_last++;
-        }
-        __syncwarp();
-      }
-    };
-
     auto store_body = [&]() {
       if constexpr (IsSparse) {
         // Sparse: one inner m_block per store_body call; prefetch() advances a single block.
@@ -2179,6 +2328,9 @@ struct CollectiveMainloopBwdSm90 {
         attn_type = inner_block_meta.attn_type;
         offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
         last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
+        if constexpr (BlockSparse) {
+          k_start_tile = seqlen_info.offset_k / kBlockN;
+        }
         m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(PackGQAFactor, 1), kBlockM);
 
         update_conflict_state(bidb_last, bidb);
@@ -2213,8 +2365,27 @@ struct CollectiveMainloopBwdSm90 {
       store_body();
     }
 
-    // Sparse dQ deterministic: NOT yet implemented. dK/dV are naturally deterministic
-    // (single CTA writer per K-block in LoopQ). dQ requires future work (writer ordinals).
+    // Finalize: sparse deterministic must pass-through remaining m_blocks of last batch,
+    // and any subsequent batches that had no targeted tiles.
+    if constexpr (Deterministic && BlockSparse) {
+      // Pass-through remaining m_blocks of last active batch.
+      deterministic_pass_through(sparse_det_last_arrived_m + 1, m_block_num);
+      // Pass-through all m_blocks of subsequent batches with no tiles for this K-block.
+      for (int b = bidb + 1; b < block_meta.end_batches; ++b) {
+        bidb = b;
+        auto const r = block_meta.packed_range(b);
+        offset_q = r.x;
+        int const range_len = r.y - r.x;
+        m_block_num = cute::ceil_div(range_len, kBlockM);
+        flash::SeqlenInfo batch_si{b, block_meta.q_ranges, block_meta.k_ranges};
+        last_n_block = cute::ceil_div(batch_si.seqlen_k, kBlockN) - 1;
+        k_start_tile = batch_si.offset_k / kBlockN;
+        __syncwarp(); // Converge after prior pass-through spin-wait before lane-parallel update_conflict_state
+        update_conflict_state(bidb_last, b);
+        bidb_last = b;
+        deterministic_pass_through(0, m_block_num);
+      }
+    }
   }
 
   // Store partial dK,dV from SMEM to GMEM with TMA Atomic Reduce Add
@@ -3106,7 +3277,8 @@ struct CollectiveMainloopBwdSm90 {
                 no_mask_fn);
           } else {
             // MaskMode 2 (unified): mask_dispatch_unified with runtime zone dispatch.
-            flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::M, kInnerDir>(inner_block_meta, mask, tSrS, thread_idx, bwd_step);
+            flash::mask_dispatch_unified<kBlockM, kBlockN, PackGQA, PackGQAFactor, flash::DispatchAxis::M, kInnerDir>(
+                inner_block_meta, mask, tSrS, thread_idx, bwd_step);
           }
         }
       }

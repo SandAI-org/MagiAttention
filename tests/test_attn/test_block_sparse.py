@@ -222,23 +222,28 @@ class TestBlockSparseSweep(DistTestBase):
 
     @with_run_in_mp
     def test_block_sparse_deterministic(self):
-        fn_raw = build_block_sparse_ffa_fn(
+        fn = build_block_sparse_ffa_fn(
             self.device, deterministic=True, include_bwd=True
         )
-
-        # fn_raw returns (out, dq, dk, dv). Wrap to return only (out, dk, dv).
-        # dQ excluded: sparse LoopQ dQ uses TMA_REDUCE_ADD from multiple CTAs;
-        # n_block=0 always (RangeMerge), so range-lock protocol is ineffective.
-        # dK/dV are naturally deterministic (single CTA writer per K-block).
-        def fn():
-            out, _dq, dk, dv = fn_raw()
-            return out, dk, dv
-
         assert_deterministic(
             fn,
             repeats=self._DETERMINISTIC_REPEATS,
-            output_names=["out", "dk", "dv"],
+            output_names=["out", "dq", "dk", "dv"],
             test_case="block_sparse_deterministic",
+            atol={"dq": 2e-3},
+        )
+
+    @with_run_in_mp
+    def test_block_sparse_deterministic_loopk(self):
+        fn = build_block_sparse_ffa_fn(
+            self.device, deterministic=True, include_bwd=True, swap_bwd_qk_loop=True
+        )
+        assert_deterministic(
+            fn,
+            repeats=self._DETERMINISTIC_REPEATS,
+            output_names=["out", "dq", "dk", "dv"],
+            test_case="block_sparse_deterministic_loopk",
+            atol={"dq": 2e-3},
         )
 
     @with_run_in_mp

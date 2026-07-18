@@ -2113,10 +2113,6 @@ class TestFlexFlashAttn(DistTestBase):
 
         # TODO: Avoid skipping many flag combinations; instead, regenerate combinations with
         #       constraints to exclude invalid cases while covering more valid ones.
-        if swap_bwd_qk_loop:
-            # TODO: support deterministic mode with swap_bwd_qk_loop
-            if deterministic:
-                return
 
         if cat_gqa:
             # NOTE: pack_gqa and cat_gqa cannot be both True
@@ -2327,11 +2323,6 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
         # -----    skip invalid flag combinations   ---- #
-
-        if swap_bwd_qk_loop:
-            # TODO: support deterministic mode with swap_bwd_qk_loop
-            if deterministic:
-                return
 
         if block_sparse:
             # Sparse kernel requires NHQ==NHK or view-trick (pack_gqa with

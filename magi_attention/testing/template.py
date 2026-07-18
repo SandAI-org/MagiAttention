@@ -247,12 +247,20 @@ def assert_deterministic(
     test_case: str = "",
     print_rank: int = -1,
     log_interval: int = 50,
+    atol: float | dict[str, float] | None = None,
 ) -> None:
-    """Assert that *fn* produces bitwise-identical tensor outputs on every call.
+    """Assert that *fn* produces bitwise-identical (or near-identical) outputs.
 
     Executes ``fn()`` once to capture a reference, then calls it ``repeats``
     more times and checks that every output tensor is identical to the reference
     via :func:`torch.equal`.
+
+    When *atol* is provided (as a float applied to all outputs, or as a dict
+    mapping output names to per-output tolerances), the check relaxes to
+    ``torch.allclose(out, ref, atol=atol, rtol=0)`` for named outputs with a
+    tolerance, allowing tiny floating-point differences from non-associative
+    atomic reductions.  Outputs without an explicit tolerance still use
+    bitwise equality.
 
     Args:
         fn (Callable[[], Any]): Zero-argument callable whose outputs are
@@ -309,9 +317,20 @@ def assert_deterministic(
     for run_idx in range(1, repeats + 1):
         outputs = _normalize_fn_outputs(fn())
         for name, out, ref in zip(names, outputs, reference):
-            assert torch.equal(
-                out, ref
-            ), f"{test_case}: run={run_idx} non-deterministic {name}"
+            tol = (
+                (atol.get(name) if isinstance(atol, dict) else atol)
+                if atol is not None
+                else None
+            )
+            if tol is not None:
+                assert torch.allclose(out, ref, atol=tol, rtol=0), (
+                    f"{test_case}: run={run_idx} non-deterministic {name} "
+                    f"(max_diff={(out - ref).abs().max().item():.2e}, atol={tol})"
+                )
+            else:
+                assert torch.equal(
+                    out, ref
+                ), f"{test_case}: run={run_idx} non-deterministic {name}"
         if is_print_rank and run_idx % log_interval == 0:
             print(f"{test_case}: determinism {run_idx}/{repeats}", flush=True)
 

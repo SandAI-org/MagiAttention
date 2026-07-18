@@ -1067,6 +1067,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ctx.bwd_inner_loop_k if ctx.bwd_inner_loop_k is not None else False
         )
 
+        # Deterministic mode requires LoopQ (outer K, inner Q) for BWD:
+        # dKV is naturally deterministic (single CTA writer per K-tile in LoopQ),
+        # dQ uses range-lock protocol for serialized TMA reduce-add.
+        # LoopK would need a symmetric dKV range-lock (not yet implemented).
+        if ctx.deterministic and bwd_inner_loop_k:
+            bwd_inner_loop_k = False
+
         if ctx.disable_bwd_dkv_atomic_reduction and bwd_inner_loop_k:
             raise RuntimeError(
                 "disable_bwd_dkv_atomic_reduction is incompatible with bwd_inner_loop_k=True (InnerLoopK)."
@@ -1668,10 +1675,6 @@ def flex_flash_attn_func(
         # TODO: tune kBlockM for non-PackGQA or small-head scenarios
         ref_block_size = (128, tile_size)
 
-    assert not (
-        bwd_inner_loop_k is True and deterministic
-    ), "Deterministic mode is not supported when bwd_inner_loop_k is True."
-
     if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert is_fa4_installed, (
             "FA4 backend is enabled (MAGI_ATTENTION_FA4_BACKEND=1), "
@@ -1742,6 +1745,12 @@ def flex_flash_attn_func(
             _pack_f = q.size(1) // k.size(1)
             if _pack_f < 128:
                 bwd_inner_loop_k = None
+
+        # Deterministic mode requires LoopQ: dKV is naturally deterministic (single CTA
+        # writer per K-tile), dQ uses range-lock serialization.  LoopK would need a
+        # symmetric dKV range-lock which is not yet implemented.
+        if deterministic and bwd_inner_loop_k is True:
+            bwd_inner_loop_k = False
 
         # BWD InnerLoopQ (bwd_inner_loop_k != True): dKV is outer accumulation.
         # Safe only when GQA heads are packed (no cross-CTA dKV overlap).

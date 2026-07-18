@@ -242,16 +242,31 @@ def check_ffa_deterministic_twice(
     run_once: Callable[[], tuple[torch.Tensor, ...]],
     *,
     test_case: str,
+    dq_atol: float | None = 2e-3,
 ) -> list[str]:
-    """Run FFA twice in deterministic mode and compare all returned tensors."""
+    """Run FFA twice in deterministic mode and compare all returned tensors.
+
+    *dq_atol*: tolerance for dQ comparison (sparse dQ may have tiny FP
+    differences from non-associative TMA reduce-add across CTAs).
+    """
     results1 = run_once()
     results2 = run_once()
 
     labels = ["fwd_out", "dq", "dk", "dv"]
     err_msgs: list[str] = []
     for i, (t1, t2) in enumerate(zip(results1, results2)):
-        if t1 is not None and t2 is not None and not torch.equal(t1, t2):
-            label = labels[i] if i < len(labels) else f"tensor_{i}"
+        if t1 is None or t2 is None:
+            continue
+        label = labels[i] if i < len(labels) else f"tensor_{i}"
+        tol = dq_atol if label == "dq" and dq_atol is not None else None
+        if tol is not None:
+            if not torch.allclose(t1, t2, atol=tol, rtol=0):
+                max_diff = (t1 - t2).abs().max().item()
+                err_msgs.append(
+                    f"For {test_case=}: {label} not deterministic "
+                    f"(max_diff={max_diff:.2e} > atol={tol})"
+                )
+        elif not torch.equal(t1, t2):
             err_msgs.append(f"For {test_case=}: {label} not deterministic")
     return err_msgs
 
@@ -273,6 +288,7 @@ def build_block_sparse_ffa_fn(
     dtype: torch.dtype = torch.bfloat16,
     deterministic: bool = False,
     include_bwd: bool = False,
+    swap_bwd_qk_loop: bool | None = None,
 ) -> Callable[[], tuple[torch.Tensor, ...]]:
     """Build a zero-arg callable that runs block_sparse FFA once.
 
@@ -328,6 +344,7 @@ def build_block_sparse_ffa_fn(
             pack_gqa=True,
             block_sparse=True,
             deterministic=deterministic,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
         if include_bwd:
             o.backward(do_packed)
@@ -349,6 +366,7 @@ def build_index_sparse_ffa_fn(
     dtype: torch.dtype = torch.bfloat16,
     deterministic: bool = False,
     include_bwd: bool = False,
+    swap_bwd_qk_loop: bool | None = None,
 ) -> Callable[[], tuple[torch.Tensor, ...]]:
     """Build a zero-arg callable that runs index_sparse FFA once.
 
@@ -390,6 +408,7 @@ def build_index_sparse_ffa_fn(
             sparse_k_block_size=kbs,
             pack_gqa=True,
             deterministic=deterministic,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
         if include_bwd:
             o.backward(do_packed)

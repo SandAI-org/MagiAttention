@@ -256,7 +256,7 @@ def _run_index_sparse_config(device, cfg: dict[str, Any]):
         dq_atol=bwd_atol,
     )
 
-    if cfg.get("check_deterministic", True) and swap_bwd_qk_loop is not True:
+    if cfg.get("check_deterministic", True):
         do_det = torch.randn_like(q_ffa)
 
         def _run_det():
@@ -551,10 +551,20 @@ class TestIndexSparseSweep(DistTestBase):
             sparse_k_block_size=1,
             bwd_dq_bf16=True,
         )
-        # deterministic FWD (used by test_index_sparse_deterministic)
+        # deterministic FWD + BWD (used by test_index_sparse_deterministic)
         add_ffa_spec(
             specs,
             direction="fwd",
+            disable_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            index_sparse=True,
+            sparse_k_block_size=1,
+            deterministic=True,
+        )
+        add_ffa_spec(
+            specs,
+            direction="bwd",
             disable_atomic=True,
             pack_gqa=True,
             pack_gqa_factor=128,
@@ -602,13 +612,28 @@ class TestIndexSparseSweep(DistTestBase):
 
     @with_run_in_mp
     def test_index_sparse_deterministic(self):
-        # FWD-only: index_sparse BWD defaults to LoopK which does not yet support deterministic.
-        fn = build_index_sparse_ffa_fn(self.device, deterministic=True)
+        fn = build_index_sparse_ffa_fn(
+            self.device, deterministic=True, include_bwd=True
+        )
         assert_deterministic(
             fn,
             repeats=self._DETERMINISTIC_REPEATS,
-            output_names=["out"],
+            output_names=["out", "dq", "dk", "dv"],
             test_case="index_sparse_deterministic",
+            atol={"dq": 2e-3},
+        )
+
+    @with_run_in_mp
+    def test_index_sparse_deterministic_loopk(self):
+        fn = build_index_sparse_ffa_fn(
+            self.device, deterministic=True, include_bwd=True, swap_bwd_qk_loop=True
+        )
+        assert_deterministic(
+            fn,
+            repeats=self._DETERMINISTIC_REPEATS,
+            output_names=["out", "dq", "dk", "dv"],
+            test_case="index_sparse_deterministic_loopk",
+            atol={"dq": 2e-3},
         )
 
     @with_run_in_mp
