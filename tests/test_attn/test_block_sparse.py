@@ -230,7 +230,6 @@ class TestBlockSparseSweep(DistTestBase):
             repeats=self._DETERMINISTIC_REPEATS,
             output_names=["out", "dq", "dk", "dv"],
             test_case="block_sparse_deterministic",
-            atol={"dq": 2e-3},
         )
 
     @with_run_in_mp
@@ -243,7 +242,6 @@ class TestBlockSparseSweep(DistTestBase):
             repeats=self._DETERMINISTIC_REPEATS,
             output_names=["out", "dq", "dk", "dv"],
             test_case="block_sparse_deterministic_loopk",
-            atol={"dq": 2e-3},
         )
 
     @with_run_in_mp

@@ -630,12 +630,15 @@ def get_ffa_jit_spec(
         )
         extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"
     elif direction == "bwd":
-        # BWD: Tma when reduction is needed and tile is not partial (IndexSparse LoopQ)
-        _outer_needs_reduction = (
-            bwd_inner_loop_k and not disable_dq_atomic_reduction
-        ) or (not bwd_inner_loop_k and not disable_atomic_reduction)
+        # BWD: Tma when OuterStoreNeedReduction and tile is not partial (IndexSparse LoopQ).
+        # Mirrors C++ jinja: kOuterStoreNeedReduction = LoopK ? !dq_atomic : !dkv_atomic.
+        outer_store_need_reduction = not (
+            disable_dq_atomic_reduction
+            if bwd_inner_loop_k
+            else disable_atomic_reduction
+        )
         _is_partial_tile = index_sparse and not bwd_inner_loop_k
-        _can_tma = _outer_needs_reduction and not _is_partial_tile
+        _can_tma = outer_store_need_reduction and not _is_partial_tile
         extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri

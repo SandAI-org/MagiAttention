@@ -2006,23 +2006,6 @@ struct CollectiveMainloopBwdSm90 {
     // CatGQA: Q heads stay in head dim → m_block_num is based on raw seqlen_q.
     int m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(PackGQAFactor, 1), kBlockM);
     int bidb_last = 0;
-    // Sparse deterministic state: track last-arrived m_block for pass-through gap filling.
-    // BlockSparse uniform-range allows O(1) compound_idx → (bidb, m_block) mapping.
-    [[maybe_unused]] int sparse_det_last_arrived_m = -1;
-    [[maybe_unused]] int const bidb_initial = bidb;
-    [[maybe_unused]] int const sparse_range_size_packed = [&]() -> int {
-      if constexpr (BlockSparse) {
-        auto r = block_meta.packed_range(bidb);
-        return r.y - r.x;
-      }
-      return 0;
-    }();
-    [[maybe_unused]] int const sparse_first_batch_start = [&]() -> int {
-      if constexpr (BlockSparse) {
-        return block_meta.packed_range(bidb).x;
-      }
-      return 0;
-    }();
 
     bool const lane_predicate = cute::elect_one_sync();
 
@@ -2147,123 +2130,19 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dQFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
 
+      // BlockSparse + Deterministic: no in-kernel range-lock yet (early-return in
+      // m_block_sync/arrive). Sparse bitwise det uses Python dual-pass instead.
       if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
         // 2D TMA reduce: entire tile written in one TMA reduce-add instruction.
         // Read compound_idx from SMEM (all threads see same value after dQFull barrier).
         int const tile_first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_store_staging_indices[0];
 
-        if constexpr (Deterministic && BlockSparse) {
-          // Batch transition + gap pass-through before the real sync+store+arrive.
-          // update_conflict_state uses lane-parallel loop, so ALL warp threads must participate.
-          int const ci_offset = tile_first_compound_idx - sparse_first_batch_start;
-          int const cur_bidb = bidb_initial + ci_offset / sparse_range_size_packed;
-          int const cur_local_m = (ci_offset % sparse_range_size_packed) / kBlockM;
-
-          if (cur_bidb != bidb) {
-            // Pass-through remaining m_blocks of current batch
-            deterministic_pass_through(sparse_det_last_arrived_m + 1, m_block_num);
-            __syncwarp();
-
-            // Pass-through ALL m_blocks of ALL intermediate batches (bidb+1 ... cur_bidb-1)
-            // This is critical: other K-blocks (n_block=1, etc.) need our sync+arrive signals
-            // for every batch, not just the ones we have tiles for.
-            for (int b = bidb + 1; b < cur_bidb; ++b) {
-              auto const r_b = block_meta.packed_range(b);
-              bidb = b;
-              offset_q = r_b.x;
-              m_block_num = cute::ceil_div(r_b.y - r_b.x, kBlockM);
-              flash::SeqlenInfo batch_si_b{b, block_meta.q_ranges, block_meta.k_ranges};
-              last_n_block = cute::ceil_div(batch_si_b.seqlen_k, kBlockN) - 1;
-              k_start_tile = batch_si_b.offset_k / kBlockN;
-              update_conflict_state(bidb_last, b);
-              bidb_last = b;
-              deterministic_pass_through(0, m_block_num);
-              __syncwarp();
-            }
-
-            // Set up for cur_bidb
-            bidb = cur_bidb;
-            auto const r = block_meta.packed_range(bidb);
-            offset_q = r.x;
-            m_block_num = cute::ceil_div(r.y - r.x, kBlockM);
-            flash::SeqlenInfo batch_si{bidb, block_meta.q_ranges, block_meta.k_ranges};
-            last_n_block = cute::ceil_div(batch_si.seqlen_k, kBlockN) - 1;
-            k_start_tile = batch_si.offset_k / kBlockN;
-            update_conflict_state(bidb_last, bidb);
-            bidb_last = bidb;
-            sparse_det_last_arrived_m = -1;
-          }
-          deterministic_pass_through(sparse_det_last_arrived_m + 1, cur_local_m);
-          if (lane_predicate) {
-            m_block_sync(cur_local_m);
-          }
-        }
-
         if (lane_predicate) {
           auto const dq_sparse_off = make_coord(tile_first_compound_idx, _0{});
           tma_inner_store(params.tma_add_dQ, sdQ, domain_offset(dq_sparse_off, mdQ_reduce), TileShape_InnerDq{}, gQdOdQ_coord, 0);
         }
-
-        if constexpr (Deterministic && BlockSparse) {
-          int const ci_offset = tile_first_compound_idx - sparse_first_batch_start;
-          int const cur_local_m = (ci_offset % sparse_range_size_packed) / kBlockM;
-          if (lane_predicate) {
-            m_block_arrive(cur_local_m);
-          }
-          sparse_det_last_arrived_m = cur_local_m;
-        }
       } else if constexpr (IsSparse) {
         // Per-row scatter store (atomicAdd).
-        int const first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_store_staging_indices[0];
-        [[maybe_unused]] int const local_m_block_id = (first_compound_idx - offset_q) / kBlockM;
-
-        if constexpr (Deterministic && BlockSparse) {
-          // Batch transition + gap pass-through (single thread, then syncwarp for all).
-          int const ci_offset = first_compound_idx - sparse_first_batch_start;
-          int const cur_bidb = bidb_initial + ci_offset / sparse_range_size_packed;
-          int const cur_local_m = (ci_offset % sparse_range_size_packed) / kBlockM;
-
-          if (cur_bidb != bidb) {
-            if (store_thread_idx == 0) {
-              deterministic_pass_through(sparse_det_last_arrived_m + 1, m_block_num);
-            }
-            __syncwarp();
-
-            // Pass-through ALL intermediate batches (bidb+1 ... cur_bidb-1)
-            for (int b = bidb + 1; b < cur_bidb; ++b) {
-              auto const r_b = block_meta.packed_range(b);
-              bidb = b;
-              offset_q = r_b.x;
-              m_block_num = cute::ceil_div(r_b.y - r_b.x, kBlockM);
-              flash::SeqlenInfo batch_si_b{b, block_meta.q_ranges, block_meta.k_ranges};
-              last_n_block = cute::ceil_div(batch_si_b.seqlen_k, kBlockN) - 1;
-              k_start_tile = batch_si_b.offset_k / kBlockN;
-              update_conflict_state(bidb_last, b);
-              bidb_last = b;
-              if (store_thread_idx == 0) {
-                deterministic_pass_through(0, m_block_num);
-              }
-              __syncwarp();
-            }
-
-            bidb = cur_bidb;
-            auto const r = block_meta.packed_range(bidb);
-            offset_q = r.x;
-            m_block_num = cute::ceil_div(r.y - r.x, kBlockM);
-            flash::SeqlenInfo batch_si{bidb, block_meta.q_ranges, block_meta.k_ranges};
-            last_n_block = cute::ceil_div(batch_si.seqlen_k, kBlockN) - 1;
-            k_start_tile = batch_si.offset_k / kBlockN;
-            update_conflict_state(bidb_last, bidb);
-            bidb_last = bidb;
-            sparse_det_last_arrived_m = -1;
-          }
-          if (store_thread_idx == 0) {
-            deterministic_pass_through(sparse_det_last_arrived_m + 1, cur_local_m);
-            m_block_sync(cur_local_m);
-          }
-          __syncwarp();
-        }
-
         scatter_inner_store<kBlockM, cutlass::NumThreadsPerWarp, kdQHeadPackFactor>(
             sdQ_store,
             shared_storage.tensors.mainloop.smem_sparse_store_staging_indices.data(),
@@ -2272,16 +2151,6 @@ struct CollectiveMainloopBwdSm90 {
             store_thread_idx,
             /*tile_offset=*/0,
             stride_dq_head);
-
-        if constexpr (Deterministic && BlockSparse) {
-          __syncwarp();
-          if (store_thread_idx == 0) {
-            int const ci_offset = first_compound_idx - sparse_first_batch_start;
-            int const cur_local_m = (ci_offset % sparse_range_size_packed) / kBlockM;
-            m_block_arrive(cur_local_m);
-            sparse_det_last_arrived_m = cur_local_m;
-          }
-        }
       } else {
         // Dense TMA reduce
         if (lane_predicate) {
@@ -2363,28 +2232,6 @@ struct CollectiveMainloopBwdSm90 {
       }
     } else {
       store_body();
-    }
-
-    // Finalize: sparse deterministic must pass-through remaining m_blocks of last batch,
-    // and any subsequent batches that had no targeted tiles.
-    if constexpr (Deterministic && BlockSparse) {
-      // Pass-through remaining m_blocks of last active batch.
-      deterministic_pass_through(sparse_det_last_arrived_m + 1, m_block_num);
-      // Pass-through all m_blocks of subsequent batches with no tiles for this K-block.
-      for (int b = bidb + 1; b < block_meta.end_batches; ++b) {
-        bidb = b;
-        auto const r = block_meta.packed_range(b);
-        offset_q = r.x;
-        int const range_len = r.y - r.x;
-        m_block_num = cute::ceil_div(range_len, kBlockM);
-        flash::SeqlenInfo batch_si{b, block_meta.q_ranges, block_meta.k_ranges};
-        last_n_block = cute::ceil_div(batch_si.seqlen_k, kBlockN) - 1;
-        k_start_tile = batch_si.offset_k / kBlockN;
-        __syncwarp(); // Converge after prior pass-through spin-wait before lane-parallel update_conflict_state
-        update_conflict_state(bidb_last, b);
-        bidb_last = b;
-        deterministic_pass_through(0, m_block_num);
-      }
     }
   }
 

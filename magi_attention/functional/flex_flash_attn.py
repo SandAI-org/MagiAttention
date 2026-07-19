@@ -680,13 +680,21 @@ def _flex_flash_attn_backward(
             )
         ]
 
-    # InnerLoopK + disable_bwd_dq_atomic_reduction: dQ is outer, epilogue uses per-element
-    # direct store (one CTA per Q block) → empty_like is safe, no zero-init needed.
-    # Otherwise dQ is inner → mainloop uses TMA_REDUCE_ADD → must be zeros.
+    # API keeps dx-specific disable_* flags; convert immediately to the unified
+    # OuterStoreNeedReduction used by C++/jinja (LoopK → dQ flag, LoopQ → dKV flag).
+    # Opposite-direction flag is ignored so LoopK/LoopQ cannot inherit a stale value.
+    outer_store_need_reduction = not (
+        disable_bwd_dq_atomic_reduction
+        if bwd_inner_loop_k
+        else disable_bwd_dkv_atomic_reduction
+    )
+
+    # Outer + no reduction → empty_like (one CTA owns each tile).
+    # Otherwise → zeros (atomic reduce-add).
     dq = (
         (
             torch.empty_like(q, dtype=dq_type or q.dtype)
-            if disable_bwd_dq_atomic_reduction and bwd_inner_loop_k
+            if bwd_inner_loop_k and not outer_store_need_reduction
             else torch.zeros_like(q, dtype=dq_type or torch.float32)
         )
         if dq is None
@@ -696,8 +704,7 @@ def _flex_flash_attn_backward(
     clear_dkv = dk is None and dv is None
     kv_covered_mask = None
     if clear_dkv:
-        # skip clear dk and dv if no reduction
-        if disable_bwd_dkv_atomic_reduction:
+        if (not bwd_inner_loop_k) and not outer_store_need_reduction:
             if index_sparse and index_sparse_indices is not None:
                 dk = torch.empty_like(k, dtype=dk_type or k.dtype)
                 dv = torch.empty_like(v, dtype=dv_type or v.dtype)
@@ -752,8 +759,11 @@ def _flex_flash_attn_backward(
         dq_type=dq_type,
         dk_type=dk_type,
         dv_type=dv_type,
-        disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
-        disable_bwd_dq_atomic_reduction=disable_bwd_dq_atomic_reduction,
+        # Map back for JIT/jinja: only the outer-direction disable flag is True.
+        disable_bwd_dkv_atomic_reduction=(not bwd_inner_loop_k)
+        and not outer_store_need_reduction,
+        disable_bwd_dq_atomic_reduction=bwd_inner_loop_k
+        and not outer_store_need_reduction,
         deterministic=deterministic,
         sm_margin=sm_margin,
         range_merge=range_merge,
@@ -1067,11 +1077,24 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ctx.bwd_inner_loop_k if ctx.bwd_inner_loop_k is not None else False
         )
 
-        # Deterministic mode requires LoopQ (outer K, inner Q) for BWD:
-        # dKV is naturally deterministic (single CTA writer per K-tile in LoopQ),
-        # dQ uses range-lock protocol for serialized TMA reduce-add.
-        # LoopK would need a symmetric dKV range-lock (not yet implemented).
-        if ctx.deterministic and bwd_inner_loop_k:
+        # Deterministic mode for sparse BWD: use dual-pass approach.
+        # - LoopQ (outer K, inner Q): dKV is outer accumulation → bitwise deterministic
+        # - LoopK (outer Q, inner K): dQ is outer accumulation → bitwise deterministic
+        # Combined: all gradients are bitwise deterministic with exactly 2x compute cost.
+        _sparse_deterministic_dual_pass = ctx.deterministic and (
+            ctx.block_sparse or ctx.index_sparse
+        )
+
+        # Dense deterministic still forces LoopQ (uses range-lock protocol for dQ).
+        if (
+            ctx.deterministic
+            and bwd_inner_loop_k
+            and not _sparse_deterministic_dual_pass
+        ):
+            bwd_inner_loop_k = False
+
+        # Dual-pass: first pass is always LoopQ, so merge_ranges below uses K-merge.
+        if _sparse_deterministic_dual_pass:
             bwd_inner_loop_k = False
 
         if ctx.disable_bwd_dkv_atomic_reduction and bwd_inner_loop_k:
@@ -1083,6 +1106,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             assert (
                 q_ranges is None and k_ranges is None
             ), "IndexSparse BWD does not use q_ranges/k_ranges; they should be None"
+
+            _orig_inner_indices_cnt = ctx.inner_indices_cnt
 
             bwd_q_ranges = None
             bwd_k_ranges = None
@@ -1178,44 +1203,156 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             global _ffa_sparse_k_block_size
             _ffa_sparse_k_block_size = ctx.sparse_k_block_size
 
-        dq, dk, dv, dsink = _flex_flash_attn_backward(
-            dout=dout,
-            q=q,
-            k=k,
-            v=v,
-            sink=sink,
-            sink_layout=ctx.sink_layout,
-            out=out,
-            lse=lse,
-            dq=None,
-            dk=None,
-            dv=None,
-            dsink=None,
-            q_ranges=bwd_q_ranges,
-            k_ranges=bwd_k_ranges,
-            attn_type_map=bwd_attn_type_map,
-            softmax_scale=ctx.softmax_scale,
-            softcap=ctx.softcap,
-            dq_type=q.dtype if ctx.disable_bwd_dq_atomic_reduction else torch.float32,
-            dk_type=k.dtype if ctx.disable_bwd_dkv_atomic_reduction else torch.float32,
-            dv_type=v.dtype if ctx.disable_bwd_dkv_atomic_reduction else torch.float32,
-            disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
-            disable_bwd_dq_atomic_reduction=ctx.disable_bwd_dq_atomic_reduction,
-            deterministic=ctx.deterministic,
-            sm_margin=ctx.sm_margin,
-            range_merge=bwd_range_merge,
-            merge_k_ranges=merge_k_ranges,
-            bwd_kq_map=bwd_kq_map,
-            bwd_unique_count=bwd_unique_count,
-            bwd_inner_loop_k=bwd_inner_loop_k,
-            pack_gqa=ctx.pack_gqa,
-            cat_gqa=ctx.cat_gqa,
-            block_sparse=ctx.block_sparse,
-            index_sparse=ctx.index_sparse,
-            index_sparse_indices=index_sparse_indices,
-            inner_indices_cnt=ctx.inner_indices_cnt,
-            sparse_k_block_size=ctx.sparse_k_block_size,
-        )
+        if _sparse_deterministic_dual_pass:
+            # Pass 1 LoopQ → deterministic dKV; Pass 2 LoopK → deterministic dQ.
+            _, dk, dv, dsink = _flex_flash_attn_backward(
+                dout=dout,
+                q=q,
+                k=k,
+                v=v,
+                sink=sink,
+                sink_layout=ctx.sink_layout,
+                out=out,
+                lse=lse,
+                dq=None,
+                dk=None,
+                dv=None,
+                dsink=None,
+                q_ranges=bwd_q_ranges,
+                k_ranges=bwd_k_ranges,
+                attn_type_map=bwd_attn_type_map,
+                softmax_scale=ctx.softmax_scale,
+                softcap=ctx.softcap,
+                dq_type=None,
+                dk_type=None,
+                dv_type=None,
+                disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
+                disable_bwd_dq_atomic_reduction=False,
+                deterministic=ctx.deterministic,
+                sm_margin=ctx.sm_margin,
+                range_merge=bwd_range_merge,
+                merge_k_ranges=merge_k_ranges,
+                bwd_kq_map=bwd_kq_map,
+                bwd_unique_count=bwd_unique_count,
+                bwd_inner_loop_k=False,
+                pack_gqa=ctx.pack_gqa,
+                cat_gqa=ctx.cat_gqa,
+                block_sparse=ctx.block_sparse,
+                index_sparse=ctx.index_sparse,
+                index_sparse_indices=index_sparse_indices,
+                inner_indices_cnt=ctx.inner_indices_cnt,
+                sparse_k_block_size=ctx.sparse_k_block_size,
+            )
+
+            if ctx.index_sparse:
+                loopk_merge_k_ranges = None
+                loopk_bwd_kq_map = None
+                loopk_bwd_unique_count = None
+                loopk_bwd_range_merge = False
+                loopk_q_ranges = None
+                loopk_k_ranges = None
+                loopk_attn_type_map = None
+                loopk_index_sparse_indices = ctx.saved_tensors[-1]
+                loopk_inner_indices_cnt = _orig_inner_indices_cnt
+            else:
+                # LoopK outer=Q: reuse FWD Q-merge when available.
+                if merge_q_ranges is not None:
+                    loopk_q_ranges = q_ranges
+                    loopk_k_ranges = k_ranges
+                    loopk_attn_type_map = attn_type_map
+                    loopk_merge_k_ranges = merge_q_ranges
+                    loopk_bwd_kq_map = fwd_qk_map
+                    loopk_bwd_unique_count = fwd_unique_count
+                else:
+                    (
+                        loopk_merge_k_ranges,
+                        loopk_q_ranges,
+                        loopk_k_ranges,
+                        loopk_attn_type_map,
+                        loopk_bwd_kq_map,
+                        loopk_bwd_unique_count,
+                    ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
+                loopk_bwd_range_merge = True
+                loopk_index_sparse_indices = index_sparse_indices
+                loopk_inner_indices_cnt = ctx.inner_indices_cnt
+
+            dq, _, _, _ = _flex_flash_attn_backward(
+                dout=dout,
+                q=q,
+                k=k,
+                v=v,
+                sink=sink,
+                sink_layout=ctx.sink_layout,
+                out=out,
+                lse=lse,
+                dq=None,
+                dk=None,
+                dv=None,
+                dsink=None,
+                q_ranges=loopk_q_ranges,
+                k_ranges=loopk_k_ranges,
+                attn_type_map=loopk_attn_type_map,
+                softmax_scale=ctx.softmax_scale,
+                softcap=ctx.softcap,
+                dq_type=None,
+                dk_type=None,
+                dv_type=None,
+                disable_bwd_dkv_atomic_reduction=False,
+                disable_bwd_dq_atomic_reduction=True,
+                deterministic=False,
+                sm_margin=ctx.sm_margin,
+                range_merge=loopk_bwd_range_merge,
+                merge_k_ranges=loopk_merge_k_ranges,
+                bwd_kq_map=loopk_bwd_kq_map,
+                bwd_unique_count=loopk_bwd_unique_count,
+                bwd_inner_loop_k=True,
+                pack_gqa=ctx.pack_gqa,
+                cat_gqa=ctx.cat_gqa,
+                block_sparse=ctx.block_sparse,
+                index_sparse=ctx.index_sparse,
+                index_sparse_indices=loopk_index_sparse_indices,
+                inner_indices_cnt=loopk_inner_indices_cnt,
+                sparse_k_block_size=ctx.sparse_k_block_size,
+            )
+        else:
+            dq, dk, dv, dsink = _flex_flash_attn_backward(
+                dout=dout,
+                q=q,
+                k=k,
+                v=v,
+                sink=sink,
+                sink_layout=ctx.sink_layout,
+                out=out,
+                lse=lse,
+                dq=None,
+                dk=None,
+                dv=None,
+                dsink=None,
+                q_ranges=bwd_q_ranges,
+                k_ranges=bwd_k_ranges,
+                attn_type_map=bwd_attn_type_map,
+                softmax_scale=ctx.softmax_scale,
+                softcap=ctx.softcap,
+                dq_type=None,
+                dk_type=None,
+                dv_type=None,
+                disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
+                disable_bwd_dq_atomic_reduction=ctx.disable_bwd_dq_atomic_reduction,
+                deterministic=ctx.deterministic,
+                sm_margin=ctx.sm_margin,
+                range_merge=bwd_range_merge,
+                merge_k_ranges=merge_k_ranges,
+                bwd_kq_map=bwd_kq_map,
+                bwd_unique_count=bwd_unique_count,
+                bwd_inner_loop_k=bwd_inner_loop_k,
+                pack_gqa=ctx.pack_gqa,
+                cat_gqa=ctx.cat_gqa,
+                block_sparse=ctx.block_sparse,
+                index_sparse=ctx.index_sparse,
+                index_sparse_indices=index_sparse_indices,
+                inner_indices_cnt=ctx.inner_indices_cnt,
+                sparse_k_block_size=ctx.sparse_k_block_size,
+            )
 
         # Cast gradients to the same dtype as inputs
         with maybe_profile_ffa_ctx("bwd_cast"):
