@@ -75,13 +75,14 @@ KBS1_LABELS = {
 }
 
 # 8b: kbs=128 (block-sparse)
-KBS128_METHODS = ["ffa_bs", "ffa_is128", "flexattn", "triton"]
+KBS128_METHODS = ["ffa_bs", "ffa_is128", "flexattn", "triton", "triton_loopq"]
 KBS128_PASSES = ["fwd", "bwd_loopk", "bwd_loopq"]
 KBS128_LABELS = {
     "ffa_bs": "FFA BlockSparse",
     "ffa_is128": "FFA IndexSparse (kbs=128)",
     "flexattn": "FlexAttention",
-    "triton": "Triton Token-Sparse",
+    "triton": "Triton LoopK",
+    "triton_loopq": "Triton LoopQ Dense",
 }
 
 
@@ -460,6 +461,51 @@ def _run_kbs128_triton(kvseqlen, qseqlen, topk, pass_type, device):
     return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
 
+def _run_kbs128_triton_loopq(kvseqlen, qseqlen, topk, pass_type, device):
+    """Triton kbs=128 BWD using dense LoopQ (inverse index, no dKV atomics).
+
+    dKV uses _loopq_dense_dkv_kernel: S[NHQ, 128] fully dense, tl.dot,
+    fp32 accumulation, no atomics. FWD is identical to standard Triton.
+    """
+    import torch
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
+    from token_sparse_attn_triton import token_sparse_bwd, token_sparse_fwd
+
+    q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(kvseqlen, 1, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(kvseqlen, 1, HD, dtype=torch.bfloat16, device=device)
+
+    n_kv_blocks = kvseqlen // KBS_BLOCK
+    n_topk_blocks = topk // KBS_BLOCK
+    block_idx = (
+        torch.rand(qseqlen, n_kv_blocks, device=device)
+        .argsort(dim=1)[:, :n_topk_blocks]
+        .sort(dim=1)
+        .values
+    )
+    tri_indices = (
+        (block_idx.unsqueeze(-1) * KBS_BLOCK + torch.arange(KBS_BLOCK, device=device))
+        .reshape(qseqlen, topk)
+        .to(torch.int32)
+    )
+    is_bwd = pass_type != "fwd"
+
+    if is_bwd:
+        o, lse = token_sparse_fwd(q, k, v, tri_indices, return_lse=True)
+        do = torch.randn_like(o)
+
+        def run_fn():
+            token_sparse_bwd(q, k, v, tri_indices, o, do, lse, dkv_mode="loopq_dense")
+
+    else:
+
+        def run_fn():
+            token_sparse_fwd(q, k, v, tri_indices)
+
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Dispatch
 # ═══════════════════════════════════════════════════════════════
@@ -476,6 +522,7 @@ _KBS128_RUNNERS = {
     "ffa_is128": _run_kbs128_ffa_is,
     "flexattn": _run_kbs128_flexattn,
     "triton": _run_kbs128_triton,
+    "triton_loopq": _run_kbs128_triton_loopq,
 }
 
 
@@ -803,7 +850,8 @@ def _phase8_plot():
     ]
     kbs128_methods = [
         ("flexattn", "FlexAttention", COLOR_FLEXATTN),
-        ("triton", "Triton Token-Sparse", COLOR_TRITON),
+        ("triton", "Triton LoopK", COLOR_TRITON),
+        ("triton_loopq", "Triton LoopQ Dense", COLOR_TRITON_LOOPQ),
         ("ffa_bs", "FFA BlockSparse", COLOR_BLOCK_SPARSE),
         ("ffa_is128", "FFA IndexSparse (kbs=128)", COLOR_INDEX_SPARSE),
     ]

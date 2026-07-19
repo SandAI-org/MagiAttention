@@ -23,7 +23,7 @@ FWD: Grid (total_q_positions,) — 1 thread block processes all nhq heads.
      Q[BLOCK_M, D] @ gathered_K[BLOCK_N, D]^T → S[BLOCK_M, BLOCK_N]  (tl.dot)
      P[BLOCK_M, BLOCK_N] @ gathered_V[BLOCK_N, D] → O[BLOCK_M, D]    (tl.dot)
 
-BWD: Four dKV strategies:
+BWD: Five dKV strategies:
      (a) "split" (default): separate dQ kernel (fp32 accum, no atomics) +
          head-chunked dKV kernel (BLOCK_MH=32, BLOCK_N=64, bf16 atomics).
          Head chunking reduces register pressure from 576+ to ~240, eliminating
@@ -31,7 +31,9 @@ BWD: Four dKV strategies:
      (b) "fused": single kernel computes dQ + dKV together.
          Computes S/P once, loads K/V once, BLOCK_N=32. ~75 TFLOPS.
      (c) "atomic": separate dQ + dKV kernels, fp32 atomic scatter. ~43 TFLOPS.
-     (d) "loopq": LoopQ with block-level inverse index + bitmask.
+     (d) "loopq": LoopQ with block-level inverse index + bitmask (kbs=64).
+     (e) "loopq_dense": LoopQ with kbs=128 dense S[NHQ,128], no atomics, no mask.
+         dKV accumulated in fp32 registers via tl.dot. Requires kbs-aligned indices.
 
 Input:
     q: (total_q, nhq, D)
@@ -695,6 +697,159 @@ def _token_sparse_bwd_dkv_atomic_kernel(
         tl.atomic_add(dv_scatter_ptrs, dv_chunk, mask=n_mask[:, None])
 
 
+def _build_dense_block_inverse(indices, total_kv, kbs):
+    """Build dense block-level inverse index for LoopQ with kbs >= BLOCK_N.
+
+    Converts token-level Q→KV indices into block-level KV_block→Q mapping.
+    Each Q that references ANY token in KV block b is included in b's list.
+    Unlike the bitmask approach, S[NHQ, kbs] is FULLY DENSE (all kbs KV
+    positions are valid for every Q ref), so no mask waste.
+
+    Args:
+        indices: (total_q, topk) int32 — forward Q→KV token indices
+        total_kv: int
+        kbs: int — K block size (e.g. 128)
+
+    Returns:
+        inv_q: (num_kv_blocks, inner_topk) int32 — Q positions per KV block.
+            Padded with -1.
+        inner_topk: int — max Q refs across all blocks (padded to 64).
+    """
+    total_q, topk = indices.shape
+    device = indices.device
+    num_blocks = total_kv // kbs
+
+    block_ids = (indices // kbs).long()
+    flat_q = (
+        torch.arange(total_q, device=device, dtype=torch.int32)
+        .unsqueeze(1)
+        .expand(total_q, topk)
+        .reshape(-1)
+    )
+    flat_block = block_ids.reshape(-1)
+
+    # Deduplicate (block, q) pairs
+    combo = flat_block * total_q + flat_q.long()
+    combo_unique = combo.unique()
+    unique_block = (combo_unique // total_q).int()
+    unique_q = (combo_unique % total_q).int()
+
+    counts = torch.zeros(num_blocks, device=device, dtype=torch.int32)
+    counts.scatter_add_(
+        0,
+        unique_block.long(),
+        torch.ones(len(unique_block), device=device, dtype=torch.int32),
+    )
+    max_refs = int(counts.max().item())
+    inner_topk = ((max_refs + 63) // 64) * 64  # pad to 64
+
+    sorted_order = unique_block.long().argsort(stable=True)
+    sorted_q = unique_q[sorted_order]
+    sorted_block = unique_block[sorted_order].long()
+
+    group_starts = torch.zeros(num_blocks + 1, device=device, dtype=torch.int64)
+    group_starts[1:] = counts.long().cumsum(0)
+
+    offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
+    offsets = offsets - group_starts[sorted_block]
+
+    inv_q = torch.full((num_blocks, inner_topk), -1, device=device, dtype=torch.int32)
+    inv_q[sorted_block, offsets.long()] = sorted_q
+    return inv_q, inner_topk
+
+
+@triton.jit
+def _loopq_dense_dkv_kernel(
+    Q,
+    K,
+    V,
+    dO,
+    dK,
+    dV,
+    Lse,
+    Delta,
+    InvQ,
+    sm_scale,
+    stride_qt,
+    stride_qh,
+    stride_kt,
+    stride_ot,
+    stride_oh,
+    stride_dkt,
+    stride_inv,
+    NHQ: tl.constexpr,
+    D: tl.constexpr,
+    KBS: tl.constexpr,
+    INNER_TOPK: tl.constexpr,
+):
+    """LoopQ dKV kernel with DENSE S[NHQ, KBS] — no mask waste.
+
+    Grid: (num_kv_blocks,).
+    Each TB owns one KV block of KBS consecutive positions.
+    Iterates over Q refs from the block-level inverse index (gathered by index).
+    S[NHQ, KBS] is fully dense because every Q ref references the entire block.
+
+    All operations use tl.dot (Tensor Core):
+      S  = Q @ K^T:   [NHQ, D] @ [D, KBS]  → [NHQ, KBS]
+      dP = dO @ V^T:  [NHQ, D] @ [D, KBS]  → [NHQ, KBS]
+      dK = dS^T @ Q:  [KBS, NHQ] @ [NHQ, D] → [KBS, D]
+      dV = P^T @ dO:  [KBS, NHQ] @ [NHQ, D] → [KBS, D]
+    """
+    pid_block = tl.program_id(0).to(tl.int64)
+    block_start = pid_block * KBS
+
+    offs_m = tl.arange(0, NHQ)
+    offs_n = tl.arange(0, KBS)
+    offs_d = tl.arange(0, D)
+
+    # Load K_tile, V_tile: [KBS, D] — stays in registers for all Q iterations
+    kv_base = (block_start + offs_n[:, None].to(tl.int64)) * stride_kt + offs_d[None, :]
+    k_tile = tl.load(K + kv_base)
+    v_tile = tl.load(V + kv_base)
+
+    dk_acc = tl.zeros([KBS, D], dtype=tl.float32)
+    dv_acc = tl.zeros([KBS, D], dtype=tl.float32)
+
+    inv_base = InvQ + pid_block * stride_inv
+
+    for qi in tl.range(0, INNER_TOPK):
+        qp = tl.load(inv_base + qi)
+        if qp >= 0:
+            qp_i64 = qp.to(tl.int64)
+
+            q_ptrs = (
+                Q + qp_i64 * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :]
+            )
+            q_tile = tl.load(q_ptrs)
+
+            do_ptrs = (
+                dO + qp_i64 * stride_ot + offs_m[:, None] * stride_oh + offs_d[None, :]
+            )
+            do_tile = tl.load(do_ptrs)
+
+            lse = tl.load(Lse + qp_i64 * NHQ + offs_m)
+            delta = tl.load(Delta + qp_i64 * NHQ + offs_m)
+
+            s = tl.dot(q_tile, tl.trans(k_tile)) * sm_scale
+            p = tl.exp(s - lse[:, None])
+
+            dp = tl.dot(do_tile, tl.trans(v_tile))
+            ds = (p * (dp - delta[:, None]) * sm_scale).to(q_tile.dtype)
+
+            dk_acc += tl.dot(tl.trans(ds), q_tile).to(tl.float32)
+            dv_acc += tl.dot(tl.trans(p.to(do_tile.dtype)), do_tile).to(tl.float32)
+
+    # Direct store (no atomics — each TB owns its KV block exclusively)
+    dk_out = (
+        dK + (block_start + offs_n[:, None].to(tl.int64)) * stride_dkt + offs_d[None, :]
+    )
+    dv_out = (
+        dV + (block_start + offs_n[:, None].to(tl.int64)) * stride_dkt + offs_d[None, :]
+    )
+    tl.store(dk_out, dk_acc.to(dK.dtype.element_ty))
+    tl.store(dv_out, dv_acc.to(dV.dtype.element_ty))
+
+
 def _build_block_inverse_indices(indices, total_kv, BLOCK_N):
     """Build block-level inverse indices for LoopQ dKV with BLOCK_N KV tiling.
 
@@ -777,7 +932,7 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="split"):
         o: (total_q, nhq, D) — FWD output
         do: (total_q, nhq, D) — gradient of output
         lse: (total_q, nhq) — log-sum-exp from FWD
-        dkv_mode: "split" (default) | "fused" | "atomic" | "loopq"
+        dkv_mode: "split" | "fused" | "atomic" | "loopq" | "loopq_dense"
 
     Returns:
         dq: (total_q, nhq, D)
@@ -806,6 +961,76 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="split"):
 
     k_flat = k.squeeze(1)
     v_flat = v.squeeze(1)
+
+    if dkv_mode == "loopq_dense":
+        # LoopQ with dense S[NHQ, kbs]: outer KV blocks, inner Q refs via inverse index.
+        # Requires kbs >= 16 so tl.dot can form S[NHQ, kbs] efficiently.
+        # dKV accumulated in fp32 registers — NO atomics.
+        # dQ uses LoopK (separate kernel, fp32, no atomics).
+        kbs = 128  # block size for KV grouping
+        assert (
+            total_kv % kbs == 0
+        ), f"total_kv ({total_kv}) must be divisible by kbs ({kbs})"
+
+        inv_q, inner_topk = _build_dense_block_inverse(indices, total_kv, kbs)
+        num_kv_blocks = total_kv // kbs
+
+        # dQ via LoopK (same as split mode)
+        BLOCK_N_DQ = 64
+        dq = torch.empty_like(q)
+        _token_sparse_bwd_dq_kernel[(total_q,)](
+            q,
+            k_flat,
+            v_flat,
+            indices,
+            do,
+            dq,
+            lse,
+            delta,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            indices.stride(0),
+            do.stride(0),
+            do.stride(1),
+            NHQ=nhq,
+            TOPK=topk,
+            D=D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N_DQ,
+        )
+
+        # dKV via LoopQ — dense, no atomics
+        dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
+        dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
+        _loopq_dense_dkv_kernel[(num_kv_blocks,)](
+            q,
+            k_flat,
+            v_flat,
+            do,
+            dk,
+            dv,
+            lse,
+            delta,
+            inv_q,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            do.stride(0),
+            do.stride(1),
+            dk.stride(0),
+            inv_q.stride(0),
+            NHQ=nhq,
+            D=D,
+            KBS=kbs,
+            INNER_TOPK=inner_topk,
+        )
+
+        dk = dk.unsqueeze(1).to(q.dtype)
+        dv = dv.unsqueeze(1).to(q.dtype)
+        return dq, dk, dv
 
     if dkv_mode == "split":
         # Split: separate dQ (fp32, no atomics) + head-chunked dKV (bf16 atomics).
