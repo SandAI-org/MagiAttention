@@ -532,8 +532,8 @@ class FlashAttnBwdSm90 {
           // Run the producer load pipeline
           int thread_idx = threadIdx.x % NumProducerLoaderThreads;
           ProducerInnerBlockMetaT inner_block_meta{params.mainloop, block_coord, shared_storage, thread_idx};
-          bool has_tile_valid =
-              mainloop.template load_with_loop_k<kInnerDir>(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, inner_block_meta);
+          bool has_tile_valid = mainloop.template load_with_loop_k<kInnerDir>(
+              params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, inner_block_meta);
 
           // Wait for the MMA warpgroups to say that smem_q and smem_do are ready
           if (has_tile_valid) {
@@ -590,7 +590,16 @@ class FlashAttnBwdSm90 {
         auto epilogue_block_coord = inner_block_meta.get_epilogue_coord();
 
         bool tile_valid = mainloop.template mma_with_loop_k<kInnerDir>(
-            params.mainloop, pipeline_k, pipeline_v, smem_pipe_read_k, smem_pipe_read_v, tdQrdQ, threadIdx.x - NumCopyThreads, work_idx, inner_block_meta, shared_storage);
+            params.mainloop,
+            pipeline_k,
+            pipeline_v,
+            smem_pipe_read_k,
+            smem_pipe_read_v,
+            tdQrdQ,
+            threadIdx.x - NumCopyThreads,
+            work_idx,
+            inner_block_meta,
+            shared_storage);
 
         // Run the epilogue to store reduced dQ (scaled)
         if (tile_valid) {
