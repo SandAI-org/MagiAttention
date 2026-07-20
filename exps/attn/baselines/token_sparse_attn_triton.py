@@ -1066,32 +1066,18 @@ def token_sparse_bwd(
     v_flat = v.squeeze(1)
 
     if dkv_mode == "loopq_token":
-        # Unified LoopQ with token-level inverted index.
-        # Uses invert_index_sparse_indices for both kbs=1 and kbs>1.
+        # Unified LoopQ with block-grouped inverted index + bitmask.
+        # Always groups by BLOCK_KV positions for efficient tl.dot tiles.
+        # For kbs >= BLOCK_KV: S[NHQ, kbs] fully dense (no mask needed).
+        # For kbs < BLOCK_KV: bitmask indicates valid KV positions per Q ref,
+        #   so S[NHQ, BLOCK_KV] uses the full tile width (no padding waste).
         # dKV accumulated in fp32 registers — NO atomics.
         from magi_attention.utils.sparse_utils import invert_index_sparse_indices
 
         kbs = sparse_k_block_size
-        # invert expects (seqlen_q, nhk, topk) — unsqueeze nhk=1 dim
-        indices_3d = indices.unsqueeze(1)  # (total_q, 1, topk)
+        BLOCK_KV = 64  # tile size for KV dim (matches tl.dot efficiency)
 
-        if kbs > 1:
-            # Convert token indices to block indices for the inversion
-            block_indices = indices_3d // kbs
-            inner_indices, inner_topk = invert_index_sparse_indices(
-                block_indices,
-                seqlen_k=total_kv,
-                sparse_k_block_size=kbs,
-                pad_multiple=64,
-            )
-            num_kv_slots = total_kv // kbs
-        else:
-            inner_indices, inner_topk = invert_index_sparse_indices(
-                indices_3d, seqlen_k=total_kv, sparse_k_block_size=1, pad_multiple=64
-            )
-            num_kv_slots = total_kv
-
-        # dQ via LoopK (same as split mode)
+        # dQ via LoopK (same as split mode, always)
         BLOCK_N_DQ = 64
         dq = torch.empty_like(q)
         _token_sparse_bwd_dq_kernel[(total_q,)](
@@ -1117,38 +1103,85 @@ def token_sparse_bwd(
             BLOCK_N=BLOCK_N_DQ,
         )
 
-        # dKV via unified inverted LoopQ
-        BLOCK_KV = max(triton.next_power_of_2(kbs), 16)
-        dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
-        dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
+        if kbs >= BLOCK_KV:
+            # Block-aligned: S[NHQ, kbs] fully dense, use _loopq_inverted_dkv_kernel.
+            indices_3d = indices.unsqueeze(1)  # (total_q, 1, topk)
+            block_indices = indices_3d // kbs
+            inner_indices, inner_topk = invert_index_sparse_indices(
+                block_indices,
+                seqlen_k=total_kv,
+                sparse_k_block_size=kbs,
+                pad_multiple=64,
+            )
+            num_kv_slots = total_kv // kbs
 
-        inner_indices_contig = inner_indices.contiguous()
-        _loopq_inverted_dkv_kernel[(num_kv_slots,)](
-            q,
-            k_flat,
-            v_flat,
-            do,
-            dk,
-            dv,
-            lse,
-            delta,
-            inner_indices_contig,
-            sm_scale,
-            q.stride(0),
-            q.stride(1),
-            k_flat.stride(0),
-            do.stride(0),
-            do.stride(1),
-            dk.stride(0),
-            inner_indices_contig.stride(0),
-            inner_indices_contig.stride(2),
-            NHQ=nhq,
-            D=D,
-            KBS=kbs,
-            BLOCK_KV=BLOCK_KV,
-            INNER_TOPK=inner_topk,
-            BLOCK_M=BLOCK_M,
-        )
+            dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
+            dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
+            inner_indices_contig = inner_indices.contiguous()
+            _loopq_inverted_dkv_kernel[(num_kv_slots,)](
+                q,
+                k_flat,
+                v_flat,
+                do,
+                dk,
+                dv,
+                lse,
+                delta,
+                inner_indices_contig,
+                sm_scale,
+                q.stride(0),
+                q.stride(1),
+                k_flat.stride(0),
+                do.stride(0),
+                do.stride(1),
+                dk.stride(0),
+                inner_indices_contig.stride(0),
+                inner_indices_contig.stride(2),
+                NHQ=nhq,
+                D=D,
+                KBS=kbs,
+                BLOCK_KV=triton.next_power_of_2(kbs),
+                INNER_TOPK=inner_topk,
+                BLOCK_M=BLOCK_M,
+            )
+        else:
+            # Token-level sparse (kbs < BLOCK_KV): group by BLOCK_KV positions,
+            # use bitmask to mark valid KV positions per Q ref.
+            # S[NHQ, BLOCK_KV] fully utilizes tl.dot; invalid positions get -inf.
+            block_inv_q, block_inv_mask, block_offsets = _build_block_inverse_indices(
+                indices, total_kv, BLOCK_KV
+            )
+            num_kv_blocks = (total_kv + BLOCK_KV - 1) // BLOCK_KV
+            max_refs = int((block_offsets[1:] - block_offsets[:-1]).max().item())
+            SPLIT_SIZE = ((max_refs + 63) // 64) * 64
+
+            dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
+            dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
+            _token_sparse_bwd_dkv_loopq_kernel[(num_kv_blocks, 1)](
+                q,
+                k_flat,
+                v_flat,
+                do,
+                dk,
+                dv,
+                lse,
+                delta,
+                block_inv_q,
+                block_inv_mask,
+                block_offsets,
+                sm_scale,
+                q.stride(0),
+                q.stride(1),
+                k_flat.stride(0),
+                do.stride(0),
+                do.stride(1),
+                dk.stride(0),
+                NHQ=nhq,
+                D=D,
+                BLOCK_M=BLOCK_M,
+                BLOCK_N=BLOCK_KV,
+                SPLIT_SIZE=SPLIT_SIZE,
+            )
 
         dk = dk.unsqueeze(1).to(q.dtype)
         dv = dv.unsqueeze(1).to(q.dtype)
