@@ -697,6 +697,106 @@ def _token_sparse_bwd_dkv_atomic_kernel(
         tl.atomic_add(dv_scatter_ptrs, dv_chunk, mask=n_mask[:, None])
 
 
+@triton.jit
+def _loopq_inverted_dkv_kernel(
+    Q,
+    K,
+    V,
+    dO,
+    dK,
+    dV,
+    Lse,
+    Delta,
+    InnerIndices,
+    sm_scale,
+    stride_qt,
+    stride_qh,
+    stride_kt,
+    stride_ot,
+    stride_oh,
+    stride_dkt,
+    stride_inv_slot,
+    stride_inv_topk,
+    NHQ: tl.constexpr,
+    D: tl.constexpr,
+    KBS: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+    INNER_TOPK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    """Unified LoopQ dKV kernel — token-level (kbs=1) and block-level (kbs=N).
+
+    Grid: (num_kv_slots,)
+    Each TB owns KBS consecutive KV positions, iterates over Q refs from
+    the inverted index (gathered by token index). S[BLOCK_M, BLOCK_KV] is
+    fully dense for valid positions — no mask waste.
+
+    BLOCK_KV = max(KBS, 16) to satisfy tl.dot min dimension.
+    """
+    pid_slot = tl.program_id(0).to(tl.int64)
+    kv_start = pid_slot * KBS
+
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_kv = tl.arange(0, BLOCK_KV)
+    offs_d = tl.arange(0, D)
+
+    m_mask = offs_m < NHQ
+    kv_mask = offs_kv < KBS
+
+    # Load K_tile, V_tile: [BLOCK_KV, D]
+    kv_ptrs = (kv_start + offs_kv[:, None].to(tl.int64)) * stride_kt + offs_d[None, :]
+    k_tile = tl.load(K + kv_ptrs, mask=kv_mask[:, None], other=0.0)
+    v_tile = tl.load(V + kv_ptrs, mask=kv_mask[:, None], other=0.0)
+
+    dk_acc = tl.zeros([BLOCK_KV, D], dtype=tl.float32)
+    dv_acc = tl.zeros([BLOCK_KV, D], dtype=tl.float32)
+
+    # InnerIndices: (num_kv_slots, nhk=1, inner_topk) — squeeze nhk dim via strides
+    inv_base = InnerIndices + pid_slot * stride_inv_slot
+
+    for qi in tl.range(0, INNER_TOPK):
+        qp = tl.load(inv_base + qi * stride_inv_topk)
+        if qp >= 0:
+            qp_i64 = qp.to(tl.int64)
+
+            q_ptrs = (
+                Q + qp_i64 * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :]
+            )
+            q_tile = tl.load(q_ptrs, mask=m_mask[:, None], other=0.0)
+
+            do_ptrs = (
+                dO + qp_i64 * stride_ot + offs_m[:, None] * stride_oh + offs_d[None, :]
+            )
+            do_tile = tl.load(do_ptrs, mask=m_mask[:, None], other=0.0)
+
+            lse = tl.load(Lse + qp_i64 * NHQ + offs_m, mask=m_mask, other=0.0)
+            delta = tl.load(Delta + qp_i64 * NHQ + offs_m, mask=m_mask, other=0.0)
+
+            # S = Q @ K^T: [BLOCK_M, BLOCK_KV]
+            s = tl.dot(q_tile, tl.trans(k_tile)) * sm_scale
+            s = tl.where(m_mask[:, None] & kv_mask[None, :], s, -float("inf"))
+
+            p = tl.exp(s - lse[:, None])
+
+            # dP = dO @ V^T
+            dp = tl.dot(do_tile, tl.trans(v_tile))
+            ds = (p * (dp - delta[:, None]) * sm_scale).to(q_tile.dtype)
+
+            # dK += dS^T @ Q, dV += P^T @ dO
+            dk_acc += tl.dot(tl.trans(ds), q_tile).to(tl.float32)
+            dv_acc += tl.dot(tl.trans(p.to(do_tile.dtype)), do_tile).to(tl.float32)
+
+    # Store — no atomics
+    dk_out = (
+        dK + (kv_start + offs_kv[:, None].to(tl.int64)) * stride_dkt + offs_d[None, :]
+    )
+    dv_out = (
+        dV + (kv_start + offs_kv[:, None].to(tl.int64)) * stride_dkt + offs_d[None, :]
+    )
+    tl.store(dk_out, dk_acc.to(dK.dtype.element_ty), mask=kv_mask[:, None])
+    tl.store(dv_out, dv_acc.to(dV.dtype.element_ty), mask=kv_mask[:, None])
+
+
 def _build_dense_block_inverse(indices, total_kv, kbs):
     """Build dense block-level inverse index for LoopQ with kbs >= BLOCK_N.
 
@@ -921,7 +1021,9 @@ def _build_block_inverse_indices(indices, total_kv, BLOCK_N):
     return block_inv_q, block_inv_mask, block_offsets
 
 
-def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="split"):
+def token_sparse_bwd(
+    q, k, v, indices, o, do, lse, dkv_mode="split", sparse_k_block_size=1
+):
     """Token-sparse attention backward (MQA-optimized).
 
     Args:
@@ -932,7 +1034,8 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="split"):
         o: (total_q, nhq, D) — FWD output
         do: (total_q, nhq, D) — gradient of output
         lse: (total_q, nhq) — log-sum-exp from FWD
-        dkv_mode: "split" | "fused" | "atomic" | "loopq" | "loopq_dense"
+        dkv_mode: "split" | "fused" | "atomic" | "loopq" | "loopq_dense" | "loopq_token"
+        sparse_k_block_size: int (default 1). For loopq_token: 1=token-level, >1=block-level.
 
     Returns:
         dq: (total_q, nhq, D)
@@ -961,6 +1064,95 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="split"):
 
     k_flat = k.squeeze(1)
     v_flat = v.squeeze(1)
+
+    if dkv_mode == "loopq_token":
+        # Unified LoopQ with token-level inverted index.
+        # Uses invert_index_sparse_indices for both kbs=1 and kbs>1.
+        # dKV accumulated in fp32 registers — NO atomics.
+        from magi_attention.utils.sparse_utils import invert_index_sparse_indices
+
+        kbs = sparse_k_block_size
+        # invert expects (seqlen_q, nhk, topk) — unsqueeze nhk=1 dim
+        indices_3d = indices.unsqueeze(1)  # (total_q, 1, topk)
+
+        if kbs > 1:
+            # Convert token indices to block indices for the inversion
+            block_indices = indices_3d // kbs
+            inner_indices, inner_topk = invert_index_sparse_indices(
+                block_indices,
+                seqlen_k=total_kv,
+                sparse_k_block_size=kbs,
+                pad_multiple=64,
+            )
+            num_kv_slots = total_kv // kbs
+        else:
+            inner_indices, inner_topk = invert_index_sparse_indices(
+                indices_3d, seqlen_k=total_kv, sparse_k_block_size=1, pad_multiple=64
+            )
+            num_kv_slots = total_kv
+
+        # dQ via LoopK (same as split mode)
+        BLOCK_N_DQ = 64
+        dq = torch.empty_like(q)
+        _token_sparse_bwd_dq_kernel[(total_q,)](
+            q,
+            k_flat,
+            v_flat,
+            indices,
+            do,
+            dq,
+            lse,
+            delta,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            indices.stride(0),
+            do.stride(0),
+            do.stride(1),
+            NHQ=nhq,
+            TOPK=topk,
+            D=D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N_DQ,
+        )
+
+        # dKV via unified inverted LoopQ
+        BLOCK_KV = max(triton.next_power_of_2(kbs), 16)
+        dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
+        dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
+
+        inner_indices_contig = inner_indices.contiguous()
+        _loopq_inverted_dkv_kernel[(num_kv_slots,)](
+            q,
+            k_flat,
+            v_flat,
+            do,
+            dk,
+            dv,
+            lse,
+            delta,
+            inner_indices_contig,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            do.stride(0),
+            do.stride(1),
+            dk.stride(0),
+            inner_indices_contig.stride(0),
+            inner_indices_contig.stride(2),
+            NHQ=nhq,
+            D=D,
+            KBS=kbs,
+            BLOCK_KV=BLOCK_KV,
+            INNER_TOPK=inner_topk,
+            BLOCK_M=BLOCK_M,
+        )
+
+        dk = dk.unsqueeze(1).to(q.dtype)
+        dv = dv.unsqueeze(1).to(q.dtype)
+        return dq, dk, dv
 
     if dkv_mode == "loopq_dense":
         # LoopQ with dense S[NHQ, kbs]: outer KV blocks, inner Q refs via inverse index.
