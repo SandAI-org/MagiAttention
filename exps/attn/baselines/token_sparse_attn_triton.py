@@ -797,6 +797,121 @@ def _loopq_inverted_dkv_kernel(
     tl.store(dv_out, dv_acc.to(dV.dtype.element_ty), mask=kv_mask[:, None])
 
 
+@triton.jit
+def _loopq_persistent_dkv_kernel(
+    Q,
+    K,
+    V,
+    dO,
+    dK,
+    dV,
+    Lse,
+    Delta,
+    InnerIndices,
+    InnerCounts,
+    sm_scale,
+    stride_qt,
+    stride_qh,
+    stride_kt,
+    stride_ot,
+    stride_oh,
+    stride_dkt,
+    stride_inv_slot,
+    stride_inv_topk,
+    NUM_KV_SLOTS,
+    NHQ: tl.constexpr,
+    D: tl.constexpr,
+    KBS: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+    MAX_TILES_PER_SM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    """Persistent LoopQ dKV kernel — grid-stride outer, variable-length inner.
+
+    Architecture (FFA InnerLoopQ):
+      Outer loop: persistent grid-stride over KV blocks (N = contiguous KV)
+      Inner loop: iterate Q refs from inner_indices (M = 128 heads + discrete Q gather)
+
+    Grid: (NUM_SMS,) — fixed TB count, each TB processes multiple KV blocks.
+    No atomics. Variable-length inner loop avoids padding waste.
+    """
+    pid = tl.program_id(0)
+    num_sms = tl.num_programs(0)
+
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_kv = tl.arange(0, BLOCK_KV)
+    offs_d = tl.arange(0, D)
+    m_mask = offs_m < NHQ
+    kv_mask = offs_kv < KBS
+
+    # ═══ Persistent outer loop: grid-stride over KV slots ═══
+    for _t in tl.range(0, MAX_TILES_PER_SM):
+        tile_id = (pid + _t * num_sms).to(tl.int64)
+        if tile_id < NUM_KV_SLOTS:
+            kv_start = tile_id * KBS
+
+            # Load K, V for this block: [BLOCK_KV, D]
+            kv_ptrs = (kv_start + offs_kv[:, None].to(tl.int64)) * stride_kt + offs_d[
+                None, :
+            ]
+            k_tile = tl.load(K + kv_ptrs, mask=kv_mask[:, None], other=0.0)
+            v_tile = tl.load(V + kv_ptrs, mask=kv_mask[:, None], other=0.0)
+
+            dk_acc = tl.zeros([BLOCK_KV, D], dtype=tl.float32)
+            dv_acc = tl.zeros([BLOCK_KV, D], dtype=tl.float32)
+
+            # Variable-length inner loop bound
+            num_q_refs = tl.load(InnerCounts + tile_id).to(tl.int32)
+            inv_base = InnerIndices + tile_id * stride_inv_slot
+
+            # ═══ Inner loop: iterate Q refs (discrete Q indices) ═══
+            for qi in tl.range(0, num_q_refs):
+                qp = tl.load(inv_base + qi * stride_inv_topk).to(tl.int64)
+
+                # Load Q[qp]: M=128 heads (PackGQA), discrete Q index gather
+                q_ptrs = (
+                    Q + qp * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :]
+                )
+                q_tile = tl.load(q_ptrs, mask=m_mask[:, None], other=0.0)
+
+                do_ptrs = (
+                    dO + qp * stride_ot + offs_m[:, None] * stride_oh + offs_d[None, :]
+                )
+                do_tile = tl.load(do_ptrs, mask=m_mask[:, None], other=0.0)
+
+                lse = tl.load(Lse + qp * NHQ + offs_m, mask=m_mask, other=0.0)
+                delta = tl.load(Delta + qp * NHQ + offs_m, mask=m_mask, other=0.0)
+
+                # S = Q @ K^T: [BLOCK_M, BLOCK_KV] — tl.dot (Tensor Core)
+                s = tl.dot(q_tile, tl.trans(k_tile)) * sm_scale
+                s = tl.where(m_mask[:, None] & kv_mask[None, :], s, -float("inf"))
+
+                p = tl.exp(s - lse[:, None])
+
+                # dP = dO @ V^T: [BLOCK_M, BLOCK_KV]
+                dp = tl.dot(do_tile, tl.trans(v_tile))
+                ds = (p * (dp - delta[:, None]) * sm_scale).to(q_tile.dtype)
+
+                # dK += dS^T @ Q: [BLOCK_KV, D] — tl.dot
+                dk_acc += tl.dot(tl.trans(ds), q_tile).to(tl.float32)
+                # dV += P^T @ dO: [BLOCK_KV, D] — tl.dot
+                dv_acc += tl.dot(tl.trans(p.to(do_tile.dtype)), do_tile).to(tl.float32)
+
+            # Store dK/dV — NO atomics (unique KV block ownership)
+            dk_out = (
+                dK
+                + (kv_start + offs_kv[:, None].to(tl.int64)) * stride_dkt
+                + offs_d[None, :]
+            )
+            dv_out = (
+                dV
+                + (kv_start + offs_kv[:, None].to(tl.int64)) * stride_dkt
+                + offs_d[None, :]
+            )
+            tl.store(dk_out, dk_acc.to(dK.dtype.element_ty), mask=kv_mask[:, None])
+            tl.store(dv_out, dv_acc.to(dV.dtype.element_ty), mask=kv_mask[:, None])
+
+
 def _build_dense_block_inverse(indices, total_kv, kbs):
     """Build dense block-level inverse index for LoopQ with kbs >= BLOCK_N.
 
@@ -1064,6 +1179,103 @@ def token_sparse_bwd(
 
     k_flat = k.squeeze(1)
     v_flat = v.squeeze(1)
+
+    if dkv_mode == "loopq_persistent":
+        # Persistent LoopQ: grid-stride outer (KV blocks) + variable-length inner (Q refs).
+        # Architecture: FFA InnerLoopQ — M=128heads+discrete Q, N=contiguous KV.
+        # For kbs>=128: S[128, kbs] fully dense, zero mask waste.
+        from magi_attention.utils.sparse_utils import invert_index_sparse_indices
+
+        kbs = sparse_k_block_size
+        assert kbs >= 128, "loopq_persistent requires kbs>=128 for fully dense S tiles"
+
+        # dQ via standard LoopK (same as split mode)
+        BLOCK_N_DQ = 64
+        dq = torch.empty_like(q)
+        _token_sparse_bwd_dq_kernel[(total_q,)](
+            q,
+            k_flat,
+            v_flat,
+            indices,
+            do,
+            dq,
+            lse,
+            delta,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            indices.stride(0),
+            do.stride(0),
+            do.stride(1),
+            NHQ=nhq,
+            TOPK=topk,
+            D=D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N_DQ,
+        )
+
+        # Build block-level inverse index
+        indices_3d = indices.unsqueeze(1)  # (total_q, 1, topk)
+        block_indices = indices_3d // kbs
+        inner_indices, inner_topk = invert_index_sparse_indices(
+            block_indices,
+            seqlen_k=total_kv,
+            sparse_k_block_size=kbs,
+            pad_multiple=64,
+        )
+        num_kv_slots = total_kv // kbs
+        inner_indices_contig = inner_indices.contiguous()
+
+        # Compute per-slot actual Q-ref counts (for variable-length inner loop)
+        inner_counts = (
+            (inner_indices_contig[:, 0, :] >= 0)
+            .sum(dim=-1)
+            .to(torch.int32)
+            .contiguous()
+        )
+
+        # Persistent launch: Grid = NUM_SMS
+        NUM_SMS = 132  # H100
+        max_tiles_per_sm = (num_kv_slots + NUM_SMS - 1) // NUM_SMS
+        BLOCK_KV = triton.next_power_of_2(kbs)
+
+        dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
+        dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
+
+        _loopq_persistent_dkv_kernel[(NUM_SMS,)](
+            q,
+            k_flat,
+            v_flat,
+            do,
+            dk,
+            dv,
+            lse,
+            delta,
+            inner_indices_contig,
+            inner_counts,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            do.stride(0),
+            do.stride(1),
+            dk.stride(0),
+            inner_indices_contig.stride(0),
+            inner_indices_contig.stride(2),
+            NUM_KV_SLOTS=num_kv_slots,
+            NHQ=nhq,
+            D=D,
+            KBS=kbs,
+            BLOCK_KV=BLOCK_KV,
+            MAX_TILES_PER_SM=max_tiles_per_sm,
+            BLOCK_M=BLOCK_M,
+            num_warps=8,
+        )
+
+        dk = dk.unsqueeze(1).to(q.dtype)
+        dv = dv.unsqueeze(1).to(q.dtype)
+        return dq, dk, dv
 
     if dkv_mode == "loopq_token":
         # Unified LoopQ with block-grouped inverted index + bitmask.
