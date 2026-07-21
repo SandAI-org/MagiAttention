@@ -1447,11 +1447,16 @@ def flex_flash_attn_func(
             Shape: ``(total_q, num_kv_heads, max_topk)``, dtype=int32.
             Values are **logical** KV token positions: ``batch_idx * S_kv + token_idx``.
             The kernel internally converts to physical row via ``pos * NHK + kv_head``.
-            Use ``-1`` for padding (must be contiguous at the tail of each row).
+            Use ``-1`` for padding (must be contiguous at the tail of each row;
+            scattered -1 between valid indices is NOT supported and causes silent
+            corruption). If ``max_topk`` is not a multiple of tile_size, auto-padding
+            with trailing -1 is applied (a UserWarning is issued).
             Mutually exclusive with ``q_ranges``.
             The kernel scans trailing ``-1`` entries to determine loop count and
             invalid count internally — no Python-side preprocessing is needed.
-            ``max_topk`` (last dim) must be a multiple of tile_size (128, or 64 if swap_ab).
+            ``max_topk`` (last dim) is auto-padded to tile_size (128, or 64 if swap_ab).
+            Indices need NOT be sorted, but sorted (ascending) indices yield better
+            L2 cache utilization and are recommended for production workloads.
             The mask representation theoretically supports block-level KV (``sparse_k_block_size > 1``)
             but currently only ``sparse_k_block_size=1`` (token-level) is implemented.
         q_block_size (int, optional): Q block size. Defaults to ``1``.
@@ -1821,6 +1826,22 @@ def flex_flash_attn_func(
         # Keep 3D: kernel uses nhk (from shape_K) and bidh_kv to index
         # directly into dim-1 — no flatten/unflatten needed.
         index_sparse_indices = index_sparse_indices.contiguous()
+
+        if is_sanity_check_enable():
+            # Kernel counts valid indices by scanning from the END backwards until
+            # it hits a non-negative value.  Scattered -1 in the middle would be
+            # silently treated as valid positions (loading token 0 without mask).
+            neg_mask = index_sparse_indices < 0
+            if neg_mask.any():
+                # For each (q, head) row, check that all -1 are trailing:
+                # after the last valid (>=0) index, everything must be -1.
+                cummax_valid = (~neg_mask).flip(-1).cummax(dim=-1).values.flip(-1)
+                has_scattered_neg = (neg_mask & cummax_valid).any()
+                assert not has_scattered_neg, (
+                    "index_sparse_indices contains -1 (invalid) entries before valid "
+                    "indices. The kernel only supports trailing -1 (padding at the end "
+                    "of the topk dimension). Please sort valid indices to the front."
+                )
 
         # IndexSparse uses indices, not ranges — assert ranges are not provided
         assert q_ranges is None and k_ranges is None, (
