@@ -67,12 +67,13 @@ SPARSITY_SEED = 42
 
 # Pass-specific matrices avoid invalid and duplicate method/pass products.
 KBS1_PASS_METHODS = {
-    "fwd": ["ffa_is", "triton"],
-    "bwd_loopk": ["ffa_is", "triton"],
-    "bwd_loopq": ["triton"],
+    "fwd": ["ffa_is", "flexattn", "triton"],
+    "bwd_loopk": ["ffa_is", "flexattn", "triton"],
+    "bwd_loopq": ["flexattn", "triton"],
 }
 KBS1_LABELS = {
     "ffa_is": "FFA IndexSparse (kbs=1)",
+    "flexattn": "FlexAttention",
     "triton": "Triton",
 }
 KBS128_PASS_METHODS = {
@@ -249,6 +250,38 @@ def _run_kbs1_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
 
         def run_fn():
             flex_flash_attn_func(q, k, v, **kw)
+
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
+
+
+def _run_kbs1_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
+    """FlexAttention with Q-BLOCK-level block-sparse mask for the same sparsity ratio."""
+    import torch
+    import torch._functorch.config
+    from torch.nn.attention.flex_attention import flex_attention
+
+    torch._functorch.config.donated_buffer = False
+    q = torch.randn(1, NHQ, qseqlen, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
+    block_mask = _build_flex_block_mask(qseqlen, kvseqlen, topk, device)
+    flex_fn = torch.compile(flex_attention)
+    is_bwd = pass_type != "fwd"
+
+    if is_bwd:
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        o = flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
+        do = torch.randn_like(o)
+
+        def run_fn():
+            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
+
+    else:
+
+        def run_fn():
+            flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
 
     return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
@@ -452,6 +485,7 @@ def _run_kbs128_triton(kvseqlen, qseqlen, topk, pass_type, device):
 
 _KBS1_RUNNERS = {
     "ffa_is": _run_kbs1_ffa_is,
+    "flexattn": _run_kbs1_flexattn,
     "triton": _run_kbs1_triton,
 }
 _KBS128_RUNNERS = {
