@@ -100,6 +100,7 @@ class AttnArg:
         # init `skip_attn_fwd` flag
         batch_size_fwd = len(self.q_ranges)
         self.skip_attn_fwd = batch_size_fwd == 0
+        self.disable_fwd_atomic_reduction = False
 
         # guard clause
         if self.skip_attn_fwd:
@@ -169,6 +170,7 @@ class AttnArg:
         self.q_ranges_bwd = self.q_ranges
         self.k_ranges_bwd = self.k_ranges
         self.attn_type_map_bwd = self.attn_type_map
+        self.disable_bwd_dkv_atomic_reduction = False
 
         # guard clause
         if self.skip_attn_bwd:
