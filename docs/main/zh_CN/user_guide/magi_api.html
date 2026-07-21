@@ -937,6 +937,7 @@ not met, falls back to LoopQ automatically.</p></li>
 <li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) -- 滑动窗口掩码的 window_size，表示 <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>。此参数仅在 <code class="docutils literal notranslate"><span class="pre">causal</span></code> 为 <code class="docutils literal notranslate"><span class="pre">False</span></code> 时生效；当 <code class="docutils literal notranslate"><span class="pre">causal</span></code> 为 <code class="docutils literal notranslate"><span class="pre">True</span></code> 时，要求为 <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>。默认为 <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>。</p></li>
 <li><p><strong>dist_attn_config</strong> (<em>DistAttnConfig</em>) -- dist attn 配置。在 <code class="docutils literal notranslate"><span class="pre">dist_attn_config</span></code> 中使用 <code class="docutils literal notranslate"><span class="pre">DispatchConfig(chunk_size=...,</span> <span class="pre">uneven_shard=...)</span></code> 来配置分发参数。</p></li>
 <li><p><strong>chunk_size</strong> (<em>int</em><em> | </em><em>None</em>) -- <strong>已弃用</strong>。此参数已弃用，将在未来版本中移除。请改为在 <code class="docutils literal notranslate"><span class="pre">dist_attn_config</span></code> 中通过 <code class="docutils literal notranslate"><span class="pre">DispatchConfig(chunk_size=...)</span></code> 传入 <code class="docutils literal notranslate"><span class="pre">chunk_size</span></code>。</p></li>
+<li><p><strong>head_dim_v</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">返回<span class="colon">:</span></dt>
@@ -1141,6 +1142,7 @@ not met, falls back to LoopQ automatically.</p></li>
 <li><p><strong>is_q_permutable</strong> (<em>bool</em>) -- query 张量是否可排列变换。默认为 <code class="docutils literal notranslate"><span class="pre">True</span></code>。</p></li>
 <li><p><strong>is_k_permutable</strong> (<em>bool</em>) -- key 张量是否可排列变换。默认为 <code class="docutils literal notranslate"><span class="pre">True</span></code>。</p></li>
 <li><p><strong>chunk_size</strong> (<em>int</em><em> | </em><em>None</em>) -- <strong>已弃用</strong>。此参数已弃用，将在未来版本中移除。请改为在 <code class="docutils literal notranslate"><span class="pre">dist_attn_config</span></code> 中通过 <code class="docutils literal notranslate"><span class="pre">DispatchConfig(chunk_size=...)</span></code> 传入 <code class="docutils literal notranslate"><span class="pre">chunk_size</span></code>。</p></li>
+<li><p><strong>head_dim_v</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-even">返回<span class="colon">:</span></dt>
