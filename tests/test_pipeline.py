@@ -919,6 +919,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     ):
         head_dim, head_dim_v = head_dims
 
+        # Extended head dimensions are covered by FFA_FA4 only.
+        if head_dim > 128 and backend != MagiAttentionKernelBackend.FA4:
+            return
+
         # -----    skip if this attn_config is not for the current backend   ---- #
 
         allowed_backends = attn_config.get(BACKENDS, None)
