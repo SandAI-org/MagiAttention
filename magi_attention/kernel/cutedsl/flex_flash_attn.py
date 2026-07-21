@@ -242,6 +242,7 @@ def _flex_flash_attn_fwd(
     is_index_sparse = index_sparse_tiles is not None
     if is_index_sparse:
         block_sparse_tensors = index_sparse_tiles.scheduling_bst
+        pack_gqa = False
     use_block_sparsity = block_sparse_tensors is not None
 
     local = False
@@ -286,7 +287,7 @@ def _flex_flash_attn_fwd(
         max_seqlen_q = seqlen_q if cu_seqlens_q is None else total_q
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
-    seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
+    seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead if pack_gqa else max_seqlen_q
     if major_arch == 10:
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
@@ -898,6 +899,8 @@ def _flex_flash_attn_bwd(
         pack_gqa = qhead_per_kvhead > 1  # type: ignore[unreachable]
     # SM80/SM90 BWD kernels do not support PackGQA yet; SM100+ does.
     if major_arch in (8, 9, 12):
+        pack_gqa = False
+    if is_index_sparse:
         pack_gqa = False
 
     if softcap != 0.0:
