@@ -1843,6 +1843,24 @@ def flex_flash_attn_func(
                     "of the topk dimension). Please sort valid indices to the front."
                 )
 
+            # Unsorted indices are correct but cause significant BWD perf degradation
+            # (up to 56% slower at 131k kvseqlen) due to L2 cache thrashing.
+            valid_mask = index_sparse_indices >= 0
+            if valid_mask.any():
+                sorted_check = index_sparse_indices.clone()
+                sorted_check[~valid_mask] = torch.iinfo(torch.int32).max
+                is_sorted = (sorted_check[:, :, 1:] >= sorted_check[:, :, :-1]).all()
+                if not is_sorted:
+                    import warnings
+
+                    warnings.warn(
+                        "index_sparse_indices are not sorted in ascending order. "
+                        "This is correct but causes significant BWD performance "
+                        "degradation (up to 56%% at large kvseqlen) due to L2 cache "
+                        "thrashing. Consider sorting indices for production workloads.",
+                        stacklevel=3,
+                    )
+
         # IndexSparse uses indices, not ranges — assert ranges are not provided
         assert q_ranges is None and k_ranges is None, (
             "IndexSparse path requires index_sparse_indices only; "
