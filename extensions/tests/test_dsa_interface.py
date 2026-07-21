@@ -80,14 +80,16 @@ class TestDSASparseInterface(TestCase):
         k = torch.randn((skv, nhkv, hd), dtype=dtype, device=self.device)
         v = torch.randn((skv, nhkv, hd), dtype=dtype, device=self.device)
 
-        # construct random index_map: (nhkv, sq, topk)
-        # each Q token corresponds to topk K tokens for each KV head
-        index_map = torch.stack(
+        # construct random index_sparse_indices: (sq, nhkv, topk)
+        index_sparse_indices = torch.stack(
             [
                 torch.stack(
-                    [torch.randperm(skv, device=self.device)[:topk] for _ in range(sq)]
+                    [
+                        torch.randperm(skv, device=self.device)[:topk]
+                        for _ in range(nhkv)
+                    ]
                 )
-                for _ in range(nhkv)
+                for _ in range(sq)
             ]
         ).to(torch.int32)
 
@@ -95,32 +97,29 @@ class TestDSASparseInterface(TestCase):
 
         test_case = f"Sparse Attention [{dtype=}, {backend=} {attn_config=}]"
 
-        # run Torch reference implementation (as baseline)
         o_ref, lse_ref = dsa_ref_attn_func(
             q=q,
             k=k,
             v=v,
-            index_map=index_map,
+            index_sparse_indices=index_sparse_indices,
             softmax_scale=softmax_scale,
             high_precision=False,
         )
 
-        # run Torch reference implementation (high precision)
         o_ref_hp, lse_ref_hp = dsa_ref_attn_func(
             q=q,
             k=k,
             v=v,
-            index_map=index_map,
+            index_sparse_indices=index_sparse_indices,
             softmax_scale=softmax_scale,
             high_precision=True,
         )
 
-        # run Flex Attention backend
         o_flex, lse_flex = dsa_attn_func(
             q=q,
             k=k,
             v=v,
-            index_map=index_map,
+            index_sparse_indices=index_sparse_indices,
             softmax_scale=softmax_scale,
             backend=backend,
         )

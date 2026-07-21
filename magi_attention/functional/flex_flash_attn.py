@@ -1786,15 +1786,38 @@ def flex_flash_attn_func(
         total_q_idx, nhk_idx, max_topk_per_head = index_sparse_indices.shape
         if sparse_k_block_size > 1:
             effective_topk = max_topk_per_head * sparse_k_block_size
-            assert effective_topk % tile_size == 0, (
-                f"effective topk (max_topk_per_head={max_topk_per_head} * sparse_k_block_size={sparse_k_block_size} "
-                f"= {effective_topk}) must be a multiple of tile_size={tile_size}."
-            )
+            if effective_topk % tile_size != 0:
+                import warnings
+
+                pad_topk = (
+                    tile_size - (effective_topk % tile_size)
+                ) // sparse_k_block_size
+                warnings.warn(
+                    f"index_sparse_indices last dim ({max_topk_per_head}) with "
+                    f"sparse_k_block_size={sparse_k_block_size} gives effective_topk="
+                    f"{effective_topk} not aligned to tile_size={tile_size}. "
+                    f"Auto-padding with {pad_topk} extra slots (value=-1).",
+                    stacklevel=3,
+                )
+                index_sparse_indices = torch.nn.functional.pad(
+                    index_sparse_indices, (0, pad_topk), value=-1
+                )
+                max_topk_per_head = index_sparse_indices.shape[-1]
         else:
-            assert max_topk_per_head % tile_size == 0, (
-                f"index_sparse_indices last dim (max_topk_per_head={max_topk_per_head}) must be a multiple "
-                f"of tile_size={tile_size}. Pad with -1 if needed."
-            )
+            if max_topk_per_head % tile_size != 0:
+                import warnings
+
+                pad_size = tile_size - (max_topk_per_head % tile_size)
+                warnings.warn(
+                    f"index_sparse_indices last dim ({max_topk_per_head}) is not a "
+                    f"multiple of tile_size={tile_size}. Auto-padding with {pad_size} "
+                    f"extra slots (value=-1).",
+                    stacklevel=3,
+                )
+                index_sparse_indices = torch.nn.functional.pad(
+                    index_sparse_indices, (0, pad_size), value=-1
+                )
+                max_topk_per_head = index_sparse_indices.shape[-1]
         # Keep 3D: kernel uses nhk (from shape_K) and bidh_kv to index
         # directly into dim-1 — no flatten/unflatten needed.
         index_sparse_indices = index_sparse_indices.contiguous()
