@@ -15,9 +15,13 @@
 """Phase 9: sorted vs shuffled — Impact of index ordering on index-sparse performance.
 
 Measures FWD and BWD TFLOPS with ascending-sorted indices versus randomly-shuffled
-indices across a range of kvseqlen values (video-production config).
+indices under the video-production scenario (shared with Phase 6 & 8).
 
-Key finding: BWD is up to 56% slower with unsorted indices at large kvseqlen due to
+Production config: 1080p, qhead=32, kvhead=8, hd=128.
+32-GPU training: per-rank NHQ=128, NHK=1, PackGQA.
+Per-rank: qseqlen = kvseqlen/64, topk = kvseqlen/8.
+
+Key finding: BWD is up to 53% slower with unsorted indices at large kvseqlen due to
 L2 cache thrashing in the LoopK inner loop's scatter KV loads.
 """
 
@@ -30,6 +34,7 @@ from bench_sparse_analysis._common import (
     NHK,
     NHQ,
     PLOT_DPI_SAVE,
+    VIDEO_SCENARIOS,
     _bench_kernel,
     _calc_flops,
     _load_results,
@@ -39,25 +44,17 @@ from bench_sparse_analysis._common import (
     _ts,
 )
 
-# Extended scenarios for finer granularity
-SCENARIOS = [
-    # (kvseqlen, qseqlen, topk)
-    (16384, 256, 2048),
-    (32768, 512, 4096),
-    (49152, 768, 6144),
-    (65536, 1024, 8192),
-    (98304, 1536, 12288),
-    (131072, 2048, 16384),
-    (196608, 3072, 24576),
-    (262144, 4096, 32768),
-]
-
 PASSES = ["fwd", "bwd"]
 ORDERS = ["sorted", "shuffled"]
 
 
 def _build_indices(qseqlen, kvseqlen, topk, device, sorted_order: bool):
-    """Build index_sparse_indices (qseqlen, NHK, topk) int32."""
+    """Build index_sparse_indices (qseqlen, NHK, topk) int32.
+
+    Uses argsort to select topk random KV positions per Q-token.
+    When sorted_order=True, the selected indices are sorted ascending (better L2 locality).
+    When sorted_order=False, the argsort order is kept (effectively random permutation).
+    """
     import torch
 
     gen = torch.Generator(device="cpu").manual_seed(42)
@@ -74,8 +71,6 @@ def _build_indices(qseqlen, kvseqlen, topk, device, sorted_order: bool):
 
 
 def _make_run_fn_fwd(q, k, v, indices, flex_flash_attn_func):
-    """Create FWD benchmark closure with explicit captures."""
-
     def run_fn():
         flex_flash_attn_func(
             q,
@@ -92,8 +87,6 @@ def _make_run_fn_fwd(q, k, v, indices, flex_flash_attn_func):
 
 
 def _make_run_fn_bwd(q_g, k_g, v_g, indices, flex_flash_attn_func):
-    """Create BWD benchmark closure with explicit captures."""
-
     def run_fn():
         out, _ = flex_flash_attn_func(
             q_g,
@@ -123,13 +116,18 @@ def _phase9_bench(force=False, max_kvseqlen=None):
     gpu = _set_gpu()
     device = f"cuda:{gpu}"
 
-    scenarios = SCENARIOS
+    scenarios = VIDEO_SCENARIOS
     if max_kvseqlen is not None:
-        scenarios = [(kv, q, t) for kv, q, t in SCENARIOS if kv <= max_kvseqlen]
+        scenarios = [(kv, q, t) for kv, q, t in VIDEO_SCENARIOS if kv <= max_kvseqlen]
 
     print(f"[{_ts()}] Phase 9: Sorted vs Shuffled (gpu{gpu})", flush=True)
     print(
-        f"  nhq={NHQ}, nhk={NHK}, hd={HD}, kbs=1, PackGQA, bf16\n",
+        f"  nhq={NHQ}, nhk={NHK}, hd={HD}, kbs=1, PackGQA, bf16",
+        flush=True,
+    )
+    print(
+        f"  qseqlen=kvseqlen/64, topk=kvseqlen/8 (video-production)"
+        f"{f', max_kvseqlen={max_kvseqlen // 1024}k' if max_kvseqlen else ''}\n",
         flush=True,
     )
 
@@ -219,25 +217,32 @@ def _phase9_plot(results=None):
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     fig.suptitle(
         "Index Sparse: Sorted vs Shuffled Indices\n"
-        f"NHQ={NHQ}, NHK={NHK}, HD={HD}, bf16, PackGQA, kbs=1",
-        fontsize=13,
+        f"NHQ={NHQ}, NHK={NHK}, HD={HD}, bf16, PackGQA, kbs=1\n"
+        "qseqlen=kvseqlen/64, topk=kvseqlen/8 (video-production)",
+        fontsize=12,
     )
 
     for ax_idx, direction in enumerate(["fwd", "bwd"]):
         ax = axes[ax_idx]
         sorted_tflops = []
         shuffled_tflops = []
+        sorted_ms_vals = []
+        shuffled_ms_vals = []
         speedups = []
         valid_kv = []
 
         for kv in kv_seqlens:
             key_s = f"sorted/{direction}/kv{kv // 1024}k"
             key_u = f"shuffled/{direction}/kv{kv // 1024}k"
-            s_val = results.get(key_s, {}).get("tflops")
-            u_val = results.get(key_u, {}).get("tflops")
+            s_data = results.get(key_s, {})
+            u_data = results.get(key_u, {})
+            s_val = s_data.get("tflops")
+            u_val = u_data.get("tflops")
             if s_val and u_val:
                 sorted_tflops.append(s_val)
                 shuffled_tflops.append(u_val)
+                sorted_ms_vals.append(s_data.get("ms", 0))
+                shuffled_ms_vals.append(u_data.get("ms", 0))
                 speedups.append(s_val / u_val)
                 valid_kv.append(kv)
 
