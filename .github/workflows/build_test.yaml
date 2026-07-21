@@ -105,6 +105,7 @@ jobs:
           curl www.google.com
       - uses: actions/checkout@v4
         with:
+          allow-unsafe-pr-checkout: true
           submodules: 'recursive'
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
