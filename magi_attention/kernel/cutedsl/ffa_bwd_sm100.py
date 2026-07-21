@@ -4847,6 +4847,14 @@ class FFABwdSm100:
                     )
                     producer_phase_dKV ^= 1
 
+                    if const_expr(self.index_sparse):
+                        # IS scatter reduce is slower than TMA bulk reduce,
+                        # so wait for the reduce warp to copy dV from TMEM
+                        # before proceeding to overwrite it with dV(j+1).
+                        pipeline_dKV.sync_object_empty.wait(
+                            1, producer_phase_dKV
+                        )
+
                     # Release K(j-1) buffer so load warp can fill K(j)
                     handle_K.release()
 
