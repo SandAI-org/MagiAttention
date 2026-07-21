@@ -1856,7 +1856,7 @@ def flex_flash_attn_func(
                     warnings.warn(
                         "index_sparse_indices are not sorted in ascending order. "
                         "This is correct but causes significant BWD performance "
-                        "degradation (up to 56%% at large kvseqlen) due to L2 cache "
+                        "degradation (up to 56% at large kvseqlen) due to L2 cache "
                         "thrashing. Consider sorting indices for production workloads.",
                         stacklevel=3,
                     )
