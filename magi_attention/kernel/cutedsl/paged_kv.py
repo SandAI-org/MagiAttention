@@ -285,3 +285,204 @@ class PagedKVManager(ParamsBase):
                 mX_paged_cur, (self.async_copy_elems,)
             )
             self._copy_row_async(tXsX, tXcX, mX_paged_cur_copy, m, should_load)
+
+
+# ===========================================================================
+# IndexSparseKVLoader — scatter K/V loader for IndexSparse token-level attention
+# ===========================================================================
+
+
+@dataclass
+class IndexSparseKVLoader(ParamsBase):
+    """Scatter K/V loader for IndexSparse token-level attention.
+
+    Follows the same copy pattern as PagedKVManager: uses CopyG2SOp + cute.copy()
+    for async global-to-shared copies, with per-row pointer computation based
+    on token indices instead of page tables.
+    """
+
+    mK: cute.Tensor
+    mV: cute.Tensor
+    mTileTokenIndices: cute.Tensor
+    batch_idx: Int32
+    head_idx_kv: Int32
+    m_block_sparse: Int32
+    thread_idx: Int32
+    n_block_size: cutlass.Constexpr[Int32]
+    head_dim: cutlass.Constexpr[Int32]
+    head_dim_v: cutlass.Constexpr[Int32]
+    num_threads: cutlass.Constexpr[Int32]
+    transpose_V_smem: cutlass.Constexpr[bool]
+    threads_per_group: cutlass.Constexpr[Int32]
+    rows_per_thread: cutlass.Constexpr[Int32]
+    async_copy_elems: cutlass.Constexpr[Int32]
+    gmem_tiled_copy_KV: cute.TiledCopy
+    gmem_thr_copy_KV: cute.ThrCopy
+    tPrTokenIdx: cute.Tensor
+
+    @staticmethod
+    def create(
+        mK: cute.Tensor,
+        mV: cute.Tensor,
+        mTileTokenIndices: cute.Tensor,
+        batch_idx: Int32,
+        head_idx_kv: Int32,
+        m_block: Int32,
+        thread_idx: Int32,
+        n_block_size: cutlass.Constexpr[Int32],
+        head_dim: cutlass.Constexpr[Int32],
+        head_dim_v: cutlass.Constexpr[Int32],
+        num_threads: cutlass.Constexpr[Int32],
+        dtype: type,
+        qhead_per_kvhead: cutlass.Constexpr[int] = 1,
+        transpose_V_smem: cutlass.Constexpr[bool] = False,
+    ):
+        m_block_sparse = (
+            m_block // qhead_per_kvhead
+            if const_expr(qhead_per_kvhead > 1)
+            else m_block
+        )
+
+        # Keep these hardware anchors identical to
+        # csrc/flexible_flash_attention/inner_scatter_ldst.hpp:
+        # one 8-lane group covers one 128B SMEM bank row, 16B per lane.
+        bank_row_bytes = 128
+        lane_bytes = 16
+        lane_copy_bits = lane_bytes * 8
+        dtype_bytes = dtype.width // 8
+        elems_per_lane = lane_bytes // dtype_bytes
+        elems_per_bank_row = bank_row_bytes // dtype_bytes
+        threads_per_group = bank_row_bytes // lane_bytes
+
+        assert num_threads % threads_per_group == 0
+        assert head_dim % elems_per_bank_row == 0
+        assert head_dim_v % elems_per_bank_row == 0
+        async_copy_elems = elems_per_lane
+
+        atom_async_copy = cute.make_copy_atom(
+            cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.ALWAYS),
+            dtype,
+            num_bits_per_copy=lane_copy_bits,
+        )
+        thr_layout = cute.make_ordered_layout(
+            (num_threads // threads_per_group, threads_per_group),
+            order=(1, 0),
+        )
+        val_layout = cute.make_layout((1, async_copy_elems))
+        gmem_tiled_copy_KV = cute.make_tiled_copy_tv(
+            atom_async_copy, thr_layout, val_layout
+        )
+        gmem_thr_copy_KV = gmem_tiled_copy_KV.get_slice(thread_idx)
+
+        rows_per_thread = n_block_size // num_threads
+        tPrTokenIdx = cute.make_rmem_tensor((rows_per_thread,), Int32)
+
+        return IndexSparseKVLoader(
+            mK, mV, mTileTokenIndices,
+            batch_idx, head_idx_kv, m_block_sparse,
+            thread_idx,
+            n_block_size, head_dim, head_dim_v, num_threads,
+            transpose_V_smem,
+            threads_per_group,
+            rows_per_thread,
+            async_copy_elems,
+            gmem_tiled_copy_KV,
+            gmem_thr_copy_KV,
+            tPrTokenIdx,
+        )
+
+    @cute.jit
+    def preload_token_indices(self, n_block: Int32):
+        """Preload this thread's token-index entries for the K-block.
+
+        Uses the same group-interleaved row partition as PagedKVManager
+        (threads_per_group == reference kThreadsPerGroup = 128B/16B = 8),
+        so that load_KV's shuffle_sync reconstructs the correct
+        token<->smem-row mapping.
+        """
+        for i in cutlass.range(self.rows_per_thread, unroll=1):
+            row = (
+                i * self.num_threads
+                + (self.thread_idx % self.threads_per_group)
+                * (self.num_threads // self.threads_per_group)
+                + (self.thread_idx // self.threads_per_group)
+            )
+            global_row = n_block * self.n_block_size + row
+            token_idx = self.mTileTokenIndices[
+                self.batch_idx, self.head_idx_kv, self.m_block_sparse, global_row
+            ]
+            self.tPrTokenIdx[i] = token_idx
+
+    @cute.jit
+    def load_KV(self, n_block: Int32, sX: cute.Tensor, K_or_V: str):
+        """Scatter load K or V into SMEM using cp.async (via cute.copy)."""
+        assert K_or_V in ("K", "V")
+
+        head_dim = (
+            self.head_dim_v if const_expr(K_or_V == "V") else self.head_dim
+        )
+        mX = self.mK if const_expr(K_or_V == "K") else self.mV
+
+        sX_pi = self._flatten_smem_sm100(sX, K_or_V)
+
+        cX = cute.make_identity_tensor((self.n_block_size, head_dim))
+        tXsX = self.gmem_thr_copy_KV.partition_D(sX_pi)
+        tXcX = self.gmem_thr_copy_KV.partition_S(cX)
+
+        for m in cutlass.range_constexpr(cute.size(tXsX, mode=[1])):
+            token_idx = cutedsl_utils.shuffle_sync(
+                self.tPrTokenIdx[m // self.threads_per_group],
+                m % self.threads_per_group,
+                width=self.threads_per_group,
+            )
+            should_load = cute.make_fragment_like(tXsX[(0, None), m, 0], cute.Boolean)
+            should_load.fill(True)
+
+            # Raw K is (token, dim, head, batch), while raw V is
+            # (dim, token, head, batch) so its dim values remain contiguous.
+            gmem_ptr = (
+                cutedsl_utils.elem_pointer(
+                    mX, (0, token_idx, self.head_idx_kv, self.batch_idx)
+                )
+                if const_expr(K_or_V == "V")
+                else cutedsl_utils.elem_pointer(
+                    mX, (token_idx, 0, self.head_idx_kv, self.batch_idx)
+                )
+            )
+            x_ptr_i64 = gmem_ptr.toint()
+            x_gmem_ptr = cute.make_ptr(
+                mX.element_type,
+                x_ptr_i64,
+                cute.AddressSpace.gmem,
+                assumed_align=16,
+            )
+            mX_row = cute.make_tensor(x_gmem_ptr, cute.make_layout((head_dim,)))
+            mX_row_tiled = cute.tiled_divide(mX_row, (self.async_copy_elems,))
+
+            for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
+                ki = tXcX[0, 0, k][1] // self.async_copy_elems
+                mX_row_ki = mX_row_tiled[None, ki]
+                tXsX_k = tXsX[None, m, k]
+                mX_row_ki = cute.make_tensor(mX_row_ki.iterator, tXsX_k.layout)
+                cute.copy(
+                    self.gmem_tiled_copy_KV,
+                    mX_row_ki,
+                    tXsX_k,
+                    pred=should_load,
+                )
+
+    @cute.jit
+    def _flatten_smem_sm100(self, sX: cute.Tensor, K_or_V: str):
+        """Flatten SM100 smem ((a,b), cta_split, k) to (rows, cols)."""
+        sX_pi = cute.make_tensor(
+            sX.iterator,
+            cute.make_layout(
+                (sX.shape[0][0], (sX.shape[0][1], sX.shape[2])),
+                stride=(sX.stride[0][0], (sX.stride[0][1], sX.stride[2])),
+            ),
+        )
+        if const_expr(K_or_V == "V" and self.transpose_V_smem):
+            sX_pi = cute.make_tensor(
+                sX_pi.iterator, cute.select(sX_pi.layout, mode=[1, 0])
+            )
+        return sX_pi

@@ -236,6 +236,12 @@ def _flex_flash_attn_fwd(
         return out, lse
 
     dtype = to_cute_dtype(q.dtype)
+
+    # IndexSparse token-level tiles
+    index_sparse_tiles = flex_attn_args.index_sparse_tiles if flex_attn_args else None
+    is_index_sparse = index_sparse_tiles is not None
+    if is_index_sparse:
+        block_sparse_tensors = index_sparse_tiles.scheduling_bst
     use_block_sparsity = block_sparse_tensors is not None
 
     local = False
@@ -472,6 +478,7 @@ def _flex_flash_attn_fwd(
                     use_2cta_instrs=use_2cta_instrs,
                     use_clc_scheduler=use_clc_scheduler,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                    index_sparse=is_index_sparse,
                 )
             case 12:
                 # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
@@ -518,9 +525,15 @@ def _flex_flash_attn_fwd(
         if major_arch in [10, 11]:
             # FP8 descale tensors removed; SM100 kernel descale slot is always None.
             compile_args.append(None)
+        tile_token_indices_tensor = (
+            to_cute_tensor(index_sparse_tiles.tile_token_indices, assumed_align=4, leading_dim=-1)
+            if is_index_sparse
+            else None
+        )
         compile_args.extend(
             [
                 sparse_tensors,
+                tile_token_indices_tensor,
                 cute_aux_tensors,
             ]
         )
@@ -553,6 +566,7 @@ def _flex_flash_attn_fwd(
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
+            index_sparse_tiles.tile_token_indices if is_index_sparse else None,
             aux_tensors,
         ]
     )
@@ -615,9 +629,15 @@ def _flex_flash_attn_bwd(
     score_mod_bwd = flex_attn_args.score_mod_bwd
     mask_mod = flex_attn_args.mask_mod
     aux_tensors = flex_attn_args.aux_tensors
+    # IndexSparse token-level tiles for BWD
+    index_sparse_tiles = flex_attn_args.index_sparse_tiles if flex_attn_args else None
+    is_index_sparse = index_sparse_tiles is not None
+
     # LoopK uses forward-direction block_sparse_tensors (per-Q-tile K-block list);
     # LoopQ uses backward-direction tensors (per-K-tile Q-block list).
-    if swap_bwd_qk_loop and flex_attn_args.block_sparse_tensors is not None:
+    if is_index_sparse and swap_bwd_qk_loop:
+        block_sparse_tensors = index_sparse_tiles.scheduling_bst
+    elif swap_bwd_qk_loop and flex_attn_args.block_sparse_tensors is not None:
         block_sparse_tensors = flex_attn_args.block_sparse_tensors
     else:
         block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
@@ -1091,6 +1111,7 @@ def _flex_flash_attn_bwd(
     if block_sparse_tensors is not None and num_head != num_head_kv:
         bst_h = block_sparse_tensors.mask_block_cnt.shape[1]
         if bst_h == num_head_kv and not pack_gqa:
+            _is_vt = block_sparse_tensors.is_valid_total
             block_sparse_tensors = BlockSparseTensorsTorch(
                 mask_block_cnt=block_sparse_tensors.mask_block_cnt.repeat_interleave(
                     qhead_per_kvhead, dim=1
@@ -1109,6 +1130,9 @@ def _flex_flash_attn_bwd(
                 if block_sparse_tensors.full_block_idx is not None
                 else None,
                 block_size=block_sparse_tensors.block_size,
+                is_valid_total=_is_vt.repeat_interleave(qhead_per_kvhead, dim=1)
+                if _is_vt is not None
+                else None,
             )
         elif pack_gqa:
             bst_num_head = num_head_kv
@@ -1234,6 +1258,7 @@ def _flex_flash_attn_bwd(
             (seqlen_k_rounded // n_block_size == 1),
             magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             swap_bwd_qk_loop,
+            is_index_sparse,
             is_ffa_inner_dir_max_to_min(),
             get_ffa_mask_mode(),
         )
@@ -1344,7 +1369,15 @@ def _flex_flash_attn_bwd(
                     inner_dir_max_to_min=is_ffa_inner_dir_max_to_min(),
                     mask_mode=get_ffa_mask_mode(),
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                    index_sparse=is_index_sparse,
                 )
+
+        # IS tile_token_indices for BWD
+        tile_token_indices_bwd_tensor = (
+            to_cute_tensor(index_sparse_tiles.tile_token_indices, assumed_align=4, leading_dim=-1)
+            if is_index_sparse
+            else None
+        )
 
         # Block sparse tensors for backward use Q-direction indexing (transposed from forward).
         sparse_tensors_compile = (
@@ -1376,6 +1409,7 @@ def _flex_flash_attn_bwd(
             dV_semaphore_tensor,
             cute_aux_tensors,
             sparse_tensors_compile,
+            tile_token_indices_bwd_tensor,
             current_stream,
             options="--enable-tvm-ffi",
         )
@@ -1401,6 +1435,7 @@ def _flex_flash_attn_bwd(
         dV_semaphore,
         aux_tensors,
         block_sparse_call_tuple(normalized_block_sparse_tensors),
+        index_sparse_tiles.tile_token_indices if is_index_sparse else None,
     )
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16

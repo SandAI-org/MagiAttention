@@ -90,6 +90,7 @@ class FFABwdSm100:
         inner_dir_max_to_min: bool = False,
         mask_mode: int = 0,
         debug_print: bool = False,
+        index_sparse: bool = False,
     ):
         # padding head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
@@ -157,6 +158,9 @@ class FFABwdSm100:
 
         self.inner_dir_max_to_min = inner_dir_max_to_min
         self.mask_mode = mask_mode
+        self.index_sparse = index_sparse
+        if index_sparse:
+            assert swap_bwd_qk_loop, "IndexSparse BWD requires LoopK"
 
         # Score mod and mask mod support
         self.score_mod = score_mod
@@ -698,6 +702,7 @@ class FFABwdSm100:
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mTileTokenIndices: Optional[cute.Tensor] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -761,12 +766,56 @@ class FFABwdSm100:
 
         # --- Make mK/mV ---
 
+        # Save raw K/V for IndexSparse scatter loads.
+        # IS loader indexes as (token_idx, col, head_kv, batch), so we need
+        # K in (SK, HD, NHK, B) layout and V in (HD, SK, NHK, B) layout.
+        # Use explicit shape/stride to avoid ComposedLayout.
+        if const_expr(self.index_sparse):
+            if const_expr(mCuSeqlensK is None):
+                # mK is (B, SK, NHK, HD) → reorder to (SK, HD, NHK, B)
+                mK_raw = cute.make_tensor(
+                    mK.iterator,
+                    cute.make_layout(
+                        (mK.shape[1], mK.shape[3], mK.shape[2], mK.shape[0]),
+                        stride=(mK.stride[1], mK.stride[3], mK.stride[2], mK.stride[0]),
+                    ),
+                )
+                # mV is (B, SK, NHK, HD) → reorder to (HD, SK, NHK, B) for transpose_V_smem
+                mV_raw = cute.make_tensor(
+                    mV.iterator,
+                    cute.make_layout(
+                        (mV.shape[3], mV.shape[1], mV.shape[2], mV.shape[0]),
+                        stride=(mV.stride[3], mV.stride[1], mV.stride[2], mV.stride[0]),
+                    ),
+                )
+            else:
+                # varlen: mK is (SK, NHK, HD) → reorder to (SK, HD, NHK)
+                mK_raw = cute.make_tensor(
+                    mK.iterator,
+                    cute.make_layout(
+                        (mK.shape[0], mK.shape[2], mK.shape[1]),
+                        stride=(mK.stride[0], mK.stride[2], mK.stride[1]),
+                    ),
+                )
+                mV_raw = cute.make_tensor(
+                    mV.iterator,
+                    cute.make_layout(
+                        (mV.shape[2], mV.shape[0], mV.shape[1]),
+                        stride=(mV.stride[2], mV.stride[0], mV.stride[1]),
+                    ),
+                )
+        else:
+            mK_raw = None
+            mV_raw = None
+
         # (b, sk, nhk, hd) -> (sk, hd, nhk, b)
         # or (sk, nhk, hd) -> (sk, hd, nhk) if there's cu_seqlens_k
         KV_layout_transpose = (
             [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
         )
         mK, mV = [layout_utils.select(t, mode=KV_layout_transpose) for t in (mK, mV)]
+
+
 
         # --- Make mLSE/mdPsum ---
 
@@ -1485,6 +1534,9 @@ class FFABwdSm100:
             aux_tensors,
             fastdiv_mods,
             blocksparse_tensors,
+            mK_raw,
+            mV_raw,
+            mTileTokenIndices,
         ).launch(
             grid=grid_dim,
             block=[self.threads_per_cta, 1, 1],
@@ -1560,6 +1612,9 @@ class FFABwdSm100:
         aux_tensors: Optional[list] = None,
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mK_raw: Optional[cute.Tensor] = None,
+        mV_raw: Optional[cute.Tensor] = None,
+        mTileTokenIndices: Optional[cute.Tensor] = None,
     ):
         # /////////////////////////////////////////////////////////////////////////////
         #  Set up before warp specialization
@@ -2163,6 +2218,9 @@ class FFABwdSm100:
                     SeqlenInfoCls,
                     tile_scheduler,
                     blocksparse_tensors=blocksparse_tensors,
+                    mK_raw=mK_raw,
+                    mV_raw=mV_raw,
+                    mTileTokenIndices=mTileTokenIndices,
                 )
             else:
                 self.load(
@@ -2266,6 +2324,7 @@ class FFABwdSm100:
                     tile_scheduler,
                     is_leader_cta,
                     blocksparse_tensors=blocksparse_tensors,
+                    mTileTokenIndices=mTileTokenIndices,
                 )
             else:
                 self.mma(
@@ -2375,6 +2434,7 @@ class FFABwdSm100:
                 aux_tensors,
                 fastdiv_mods,
                 blocksparse_tensors,
+                mTileTokenIndices=mTileTokenIndices,
                 is_print_block=is_print_block,
             )
 
@@ -2415,6 +2475,9 @@ class FFABwdSm100:
                     SeqlenInfoCls,
                     tile_scheduler,
                     blocksparse_tensors=blocksparse_tensors,
+                    mK_raw=mK_raw,
+                    mV_raw=mV_raw,
+                    mTileTokenIndices=mTileTokenIndices,
                     is_print_block=is_print_block,
                 )
             else:
@@ -3360,6 +3423,9 @@ class FFABwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mK_raw: Optional[cute.Tensor] = None,
+        mV_raw: Optional[cute.Tensor] = None,
+        mTileTokenIndices: Optional[cute.Tensor] = None,
     ):
         """LoopK producer: Q/dO/LSE/dPsum loaded once, K/V stream per inner iter."""
         copy_atom_stats = cute.make_copy_atom(cpasync.CopyBulkG2SOp(), Float32)
@@ -3396,6 +3462,21 @@ class FFABwdSm100:
                 if const_expr(self.pack_gqa)
                 else head_idx // self.qhead_per_kvhead
             )
+
+            # IndexSparse KV loader
+            is_loader = None
+            if const_expr(self.index_sparse):
+                from .paged_kv import IndexSparseKVLoader
+                is_loader = IndexSparseKVLoader.create(
+                    mK_raw, mV_raw, mTileTokenIndices,
+                    batch_idx, head_idx_kv, m_block,
+                    cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE,
+                    self.tile_n, self.tile_hdim, self.tile_hdimv,
+                    cute.arch.WARP_SIZE,
+                    mK_raw.element_type,
+                    qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                    transpose_V_smem=False,
+                )
 
             # Make gQ/gK/gV/gdO/gLSE/gdPsum
             mQ_cur = seqlen_info.offset_batch_Q(mQ, batch_idx, dim=3)[
@@ -3546,14 +3627,19 @@ class FFABwdSm100:
                 producer_state_dPsum.advance()
 
                 # Load K(0) + V(0)
-                pipeline_K.producer_acquire(
-                    producer_state_K,
-                    extra_tx_count=self.tma_copy_bytes["V"],
-                )
-                load_K(first_n_block, producer_state=producer_state_K)
-                load_V(first_n_block, producer_state=producer_state_K)
-                pipeline_K.producer_commit(producer_state_K)
-                producer_state_K.advance()
+                if const_expr(self.index_sparse):
+                    is_loader.preload_token_indices(first_n_block)
+                    self._bwd_is_load_kv_pair(is_loader, sK, sV, pipeline_K, producer_state_K, first_n_block)
+                    producer_state_K.advance()
+                else:
+                    pipeline_K.producer_acquire(
+                        producer_state_K,
+                        extra_tx_count=self.tma_copy_bytes["V"],
+                    )
+                    load_K(first_n_block, producer_state=producer_state_K)
+                    load_V(first_n_block, producer_state=producer_state_K)
+                    pipeline_K.producer_commit(producer_state_K)
+                    producer_state_K.advance()
 
                 # Mainloop: load K(j), V(j)
                 for iter_idx in cutlass.range(1, loop_count, unroll=1):
@@ -3570,14 +3656,19 @@ class FFABwdSm100:
                             n_block = n_block_max - 1 - iter_idx
                         else:
                             n_block = n_block_min + iter_idx
-                    pipeline_K.producer_acquire(
-                        producer_state_K,
-                        extra_tx_count=self.tma_copy_bytes["V"],
-                    )
-                    load_K(n_block, producer_state=producer_state_K)
-                    load_V(n_block, producer_state=producer_state_K)
-                    pipeline_K.producer_commit(producer_state_K)
-                    producer_state_K.advance()
+                    if const_expr(self.index_sparse):
+                        is_loader.preload_token_indices(n_block)
+                        self._bwd_is_load_kv_pair(is_loader, sK, sV, pipeline_K, producer_state_K, n_block)
+                        producer_state_K.advance()
+                    else:
+                        pipeline_K.producer_acquire(
+                            producer_state_K,
+                            extra_tx_count=self.tma_copy_bytes["V"],
+                        )
+                        load_K(n_block, producer_state=producer_state_K)
+                        load_V(n_block, producer_state=producer_state_K)
+                        pipeline_K.producer_commit(producer_state_K)
+                        producer_state_K.advance()
 
                 # Producer tail
                 pipeline_K.producer_tail(producer_state_K)
@@ -3588,6 +3679,35 @@ class FFABwdSm100:
             tile_scheduler.prefetch_next_work()
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
+
+    @cute.jit
+    def _bwd_is_load_kv_pair(
+        self,
+        is_loader,
+        sK: cute.Tensor,
+        sV: cute.Tensor,
+        pipeline_kv: ffa_pipeline.PipelineTmaUmma,
+        producer_state: pipeline.PipelineState,
+        n_block: Int32,
+    ):
+        """IndexSparse K+V scatter load within a single pipeline stage for BWD LoopK.
+
+        Loads both K and V via cp.async into the current pipeline stage, waits
+        for all async copies, then signals the barrier exactly once.
+        """
+        stage, phase = producer_state.index, producer_state.phase
+        pipeline_kv.sync_object_empty.wait(stage, phase)
+        sK_cur = sK[None, None, None, stage]
+        is_loader.load_KV(n_block, sK_cur, "K")
+        sV_cur = sV[None, None, None, stage]
+        is_loader.load_KV(n_block, sV_cur, "V")
+        cute.arch.cp_async_commit_group()
+        cute.arch.cp_async_wait_group(0)
+        cute.arch.fence_view_async_shared()
+        cute.arch.sync_warp()
+        with cute.arch.elect_one():
+            bar_ptr = pipeline_kv.sync_object_full.get_barrier(stage)
+            cute.arch.mbarrier_arrive_and_expect_tx(bar_ptr, 0)
 
     @cute.jit
     def mma(
@@ -4548,6 +4668,7 @@ class FFABwdSm100:
         tile_scheduler: TileSchedulerProtocol,
         is_leader_cta: cutlass.Boolean,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mTileTokenIndices: Optional[cute.Tensor] = None,
     ):
         """LoopK MMA consumer: inner loop over K blocks.
 
@@ -4839,6 +4960,7 @@ class FFABwdSm100:
         aux_tensors: Optional[list] = None,
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mTileTokenIndices: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         # --- Set up thread info ---
@@ -5056,6 +5178,37 @@ class FFABwdSm100:
             if const_expr(self.swap_bwd_qk_loop):
                 m_block, head_idx, batch_idx, _ = work_tile.tile_idx
                 seqlen_info = SeqlenInfoCls(batch_idx)
+
+                if const_expr(self.index_sparse):
+                    head_idx_kv_compute = (
+                        head_idx
+                        if const_expr(self.pack_gqa)
+                        else head_idx // self.qhead_per_kvhead
+                    )
+                    m_block_sparse = (
+                        m_block // self.qhead_per_kvhead
+                        if const_expr(self.pack_gqa)
+                        else m_block
+                    )
+                    is_valid_total = blocksparse_tensors.is_valid_total[
+                        batch_idx, head_idx_kv_compute, m_block_sparse
+                    ]
+                    seqlen_info = SeqlenInfoQK(
+                        offset_q=seqlen_info.offset_q,
+                        offset_k=seqlen_info.offset_k,
+                        padded_offset_q=seqlen_info.padded_offset_q,
+                        padded_offset_k=seqlen_info.padded_offset_k,
+                        seqlen_q=seqlen_info.seqlen_q,
+                        seqlen_k=is_valid_total,
+                        m_block_offset=seqlen_info.m_block_offset,
+                        block_idx_offset=seqlen_info.block_idx_offset,
+                        num_n_blocks=seqlen_info.num_n_blocks,
+                        has_cu_seqlens_q=seqlen_info.has_cu_seqlens_q,
+                        has_cu_seqlens_k=seqlen_info.has_cu_seqlens_k,
+                        has_seqused_q=seqlen_info.has_seqused_q,
+                        has_seqused_k=seqlen_info.has_seqused_k,
+                    )
+
                 n_block_min, n_block_max = block_info.get_n_block_min_max(
                     seqlen_info, m_block
                 )
@@ -6368,6 +6521,9 @@ class FFABwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mK_raw: Optional[cute.Tensor] = None,
+        mV_raw: Optional[cute.Tensor] = None,
+        mTileTokenIndices: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         """LoopK reduce warps: per-K-iter dKV atomic reduce + end-of-tile dQ reduce."""
@@ -6479,6 +6635,16 @@ class FFABwdSm100:
                 if const_expr(self.pack_gqa)
                 else head_idx // self.qhead_per_kvhead
             )
+            is_valid_total_reduce = Int32(0)
+            if const_expr(self.index_sparse):
+                m_block_sparse_r = (
+                    m_block // self.qhead_per_kvhead
+                    if const_expr(self.pack_gqa)
+                    else m_block
+                )
+                is_valid_total_reduce = blocksparse_tensors.is_valid_total[
+                    batch_idx, head_idx_kv, m_block_sparse_r
+                ]
             if const_expr(not seqlen_info.has_cu_seqlens_k):
                 mdK_cur = mdK[None, head_idx_kv, batch_idx]
                 mdV_cur = mdV[None, head_idx_kv, batch_idx]
@@ -6544,16 +6710,27 @@ class FFABwdSm100:
                     cute.arch.fence_view_async_shared()
                     self.reduce_sync_barrier.arrive_and_wait()
                     if is_tma_warp:
-                        with cute.arch.elect_one():
-                            copy_utils.cpasync_reduce_bulk_add_f32(
-                                sdQacc[None, smem_idx].iterator,
-                                gdK_staged[None, stg].iterator,
-                                self.tma_copy_bytes["dKacc"],
+                        if const_expr(self.index_sparse):
+                            self._is_scatter_reduce_dKV(
+                                sdQacc, smem_idx,
+                                mdK_cur, mTileTokenIndices,
+                                batch_idx, head_idx_kv, m_block, n_block,
+                                stg, dK_reduce_ncol, self.tile_n, self.tile_hdim,
+                                is_valid_total=is_valid_total_reduce,
                             )
-                        cute.arch.cp_async_bulk_commit_group()
-                        cute.arch.cp_async_bulk_wait_group(
-                            self.sdQacc_stage - 1, read=True
-                        )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(0, read=True)
+                        else:
+                            with cute.arch.elect_one():
+                                copy_utils.cpasync_reduce_bulk_add_f32(
+                                    sdQacc[None, smem_idx].iterator,
+                                    gdK_staged[None, stg].iterator,
+                                    self.tma_copy_bytes["dKacc"],
+                                )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(
+                                self.sdQacc_stage - 1, read=True
+                            )
                     self.reduce_sync_barrier.arrive_and_wait()
                     tma_store_state.advance()
 
@@ -6586,16 +6763,27 @@ class FFABwdSm100:
                     cute.arch.fence_view_async_shared()
                     self.reduce_sync_barrier.arrive_and_wait()
                     if is_tma_warp:
-                        with cute.arch.elect_one():
-                            copy_utils.cpasync_reduce_bulk_add_f32(
-                                sdQacc[None, smem_idx].iterator,
-                                gdV_staged[None, stg].iterator,
-                                self.tma_copy_bytes["dKacc"],
+                        if const_expr(self.index_sparse):
+                            self._is_scatter_reduce_dKV(
+                                sdQacc, smem_idx,
+                                mdV_cur, mTileTokenIndices,
+                                batch_idx, head_idx_kv, m_block, n_block,
+                                stg, dV_reduce_ncol, self.tile_n, self.tile_hdimv,
+                                is_valid_total=is_valid_total_reduce,
                             )
-                        cute.arch.cp_async_bulk_commit_group()
-                        cute.arch.cp_async_bulk_wait_group(
-                            self.sdQacc_stage - 1, read=True
-                        )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(0, read=True)
+                        else:
+                            with cute.arch.elect_one():
+                                copy_utils.cpasync_reduce_bulk_add_f32(
+                                    sdQacc[None, smem_idx].iterator,
+                                    gdV_staged[None, stg].iterator,
+                                    self.tma_copy_bytes["dKacc"],
+                                )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(
+                                self.sdQacc_stage - 1, read=True
+                            )
                     self.reduce_sync_barrier.arrive_and_wait()
                     tma_store_state.advance()
 
@@ -6654,6 +6842,85 @@ class FFABwdSm100:
             work_tile = tile_scheduler.get_current_work()
 
         cute.arch.cp_async_bulk_wait_group(0, read=True)
+
+    @cute.jit
+    def _is_scatter_reduce_dKV(
+        self,
+        sdQacc: cute.Tensor,
+        smem_idx: Int32,
+        mdXV_cur: cute.Tensor,
+        mTileTokenIndices: cute.Tensor,
+        batch_idx: Int32,
+        head_idx_kv: Int32,
+        m_block: Int32,
+        n_block: Int32,
+        stg: Int32,
+        reduce_ncol: Int32,
+        tile_n: Int32,
+        tile_hdim: Int32,
+        is_valid_total: Int32 = 0,
+    ):
+        """Scatter serialized SM100 accumulator chunks to token destinations.
+
+        FfaBwdPostProcess interprets each 128x128 fp32 accumulator tile with:
+          physical_row = (logical_col // 4) * 4 + logical_row // 32
+          physical_col = (logical_row % 32) * 4 + logical_col % 4
+        Preserve that serialization while replacing compact logical_row with
+        the selected token's row inside its destination tile.
+        """
+        m_block_sparse = (
+            m_block // self.qhead_per_kvhead
+            if const_expr(self.pack_gqa)
+            else m_block
+        )
+        smem_stage = sdQacc[None, smem_idx]
+
+        elems_per_vec = 4  # 16B fp32 cp.reduce
+        stage_elems = tile_n * reduce_ncol
+        vectors_per_stage = stage_elems // elems_per_vec
+        vectors_per_thread = vectors_per_stage // cute.arch.WARP_SIZE
+        physical_rows_per_stage = stage_elems // tile_hdim
+        lane = cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE
+
+        for vec_iter in cutlass.range(vectors_per_thread, unroll=1):
+            vec_linear = vec_iter * cute.arch.WARP_SIZE + lane
+            local_physical_row = vec_linear // (tile_hdim // elems_per_vec)
+            physical_col_vec = vec_linear % (tile_hdim // elems_per_vec)
+            physical_col = physical_col_vec * elems_per_vec
+            physical_row = stg * physical_rows_per_stage + local_physical_row
+
+            # Invert the postprocess permutation for this serialized chunk.
+            logical_row = (physical_row % 4) * 32 + physical_col_vec
+            logical_col = (physical_row // 4) * elems_per_vec
+            abs_row = n_block * tile_n + logical_row
+
+            if abs_row < is_valid_total:
+                token_idx = mTileTokenIndices[
+                    batch_idx, head_idx_kv, m_block_sparse, abs_row
+                ]
+                dst_tile = token_idx // tile_n
+                dst_row = token_idx % tile_n
+                dst_physical_row = (
+                    (logical_col // elems_per_vec) * 4 + dst_row // 32
+                )
+                dst_physical_col = (dst_row % 32) * elems_per_vec
+                dst_offset = (
+                    dst_tile * tile_n * tile_hdim
+                    + dst_physical_row * tile_hdim
+                    + dst_physical_col
+                )
+                src_offset = (
+                    local_physical_row * tile_hdim + physical_col
+                )
+                gmem_ptr = cutedsl_utils.elem_pointer(
+                    mdXV_cur, (dst_offset,)
+                )
+                smem_ptr = cutedsl_utils.elem_pointer(
+                    smem_stage, (src_offset,)
+                )
+                copy_utils.cpasync_reduce_bulk_add_f32(
+                    smem_ptr, gmem_ptr, 16
+                )
 
     @cute.jit
     def epilogue_dKV(

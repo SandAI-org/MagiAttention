@@ -148,6 +148,7 @@ class TorchFlexAttnArgs:
     aux_tensors: list[torch.Tensor] | None = None
     block_sparse_tensors: "BlockSparseTensorsTorch | None" = None
     block_sparse_tensors_bwd: "BlockSparseTensorsTorch | None" = None
+    index_sparse_tiles: "object | None" = None
 
     def drop_aux_tensors(self) -> "TorchFlexAttnArgs":
         """Return a copy with ``aux_tensors`` cleared.

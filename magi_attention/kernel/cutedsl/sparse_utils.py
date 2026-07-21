@@ -53,6 +53,7 @@ class BlockSparseTensors(NamedTuple):
     cu_block_idx_offsets: cute.Tensor | None = None
     dq_write_order: cute.Tensor | None = None
     dq_write_order_full: cute.Tensor | None = None
+    is_valid_total: cute.Tensor | None = None
 
     def __new_from_mlir_values__(self, values):
         new_fields = []
@@ -76,6 +77,7 @@ class BlockSparseTensorsTorch(NamedTuple):
     block_size: tuple[int, int] | None = None
     dq_write_order: torch.Tensor | None = None
     dq_write_order_full: torch.Tensor | None = None
+    is_valid_total: torch.Tensor | None = None
     spt: bool | None = None
 
 
@@ -388,6 +390,7 @@ def normalize_block_sparse_tensors(
         block_size=tensors.block_size,
         dq_write_order=dq_write_order,
         dq_write_order_full=dq_write_order_full,
+        is_valid_total=tensors.is_valid_total,
         spt=spt,
     )
 
@@ -583,6 +586,14 @@ def to_cute_block_sparse_tensors(
         for t in (tensors.dq_write_order, tensors.dq_write_order_full)
     ]
 
+    is_valid_total_tensor = (
+        to_cute_tensor(
+            tensors.is_valid_total, assumed_align=4, leading_dim=-1, enable_tvm_ffi=enable_tvm_ffi
+        )
+        if tensors.is_valid_total is not None
+        else None
+    )
+
     return BlockSparseTensors(
         mask_block_cnt_tensor,
         mask_block_idx_tensor,
@@ -592,6 +603,7 @@ def to_cute_block_sparse_tensors(
         cu_block_idx_offsets_tensor,
         dq_write_order_tensor,
         dq_write_order_full_tensor,
+        is_valid_total_tensor,
     )
 
 
@@ -925,6 +937,7 @@ def block_sparse_call_tuple(
         normalized_tensors.cu_block_idx_offsets,
         normalized_tensors.dq_write_order,
         normalized_tensors.dq_write_order_full,
+        normalized_tensors.is_valid_total,
     )
 
 
@@ -2502,3 +2515,130 @@ def dQacc_store_block_sparse_bwd_sm90(
                     num_threads_per_warp_group,
                     tma_copy_bytes_dQ,
                 )
+
+
+# ===========================================================================
+# IndexSparse token-level tile preparation
+# ===========================================================================
+
+
+class IndexSparseTilesTorch(NamedTuple):
+    """Token-level tile data for IndexSparse attention.
+
+    tile_token_indices: (B, NHK, M_blocks, max_tokens_per_tile) int32
+        Maps each (batch, kv_head, q_tile, local_row) to a global K token index.
+    scheduling_bst: BlockSparseTensorsTorch
+        Block-sparse scheduling tensors derived from the token indices.
+    is_valid_total: torch.Tensor
+        (B, NHK, M_blocks) int32 — number of unique valid tokens per Q-tile.
+    """
+
+    tile_token_indices: torch.Tensor
+    scheduling_bst: "BlockSparseTensorsTorch"
+    is_valid_total: torch.Tensor
+
+
+def prepare_index_sparse_tiles(
+    index_attn_indices: torch.Tensor,
+    *,
+    batch_size: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    num_kv_heads: int,
+    num_q_heads: int,
+    m_block_size: int = 128,
+    n_block_size: int = 128,
+    pack_gqa: bool = False,
+) -> IndexSparseTilesTorch:
+    """Convert raw index_attn_indices to tile-based IndexSparse tensors.
+
+    Args:
+        index_attn_indices: (B, NHQ, SQ, TOPK) int32 — per-query token indices into K.
+        Other args define the tiling geometry.
+
+    Returns:
+        IndexSparseTilesTorch with scheduling BST and tile_token_indices.
+    """
+    device = index_attn_indices.device
+    B = batch_size
+    NHQ = num_q_heads
+    NHK = num_kv_heads
+    qhead_per_kvhead = NHQ // NHK
+    TOPK = index_attn_indices.shape[-1]
+
+    # Determine M_blocks (Q tiles)
+    if pack_gqa:
+        M_blocks = ceildiv(seqlen_q * qhead_per_kvhead, m_block_size)
+    else:
+        M_blocks = ceildiv(seqlen_q, m_block_size)
+
+    # For each Q-tile, collect the union of all token indices across queries in that tile
+    # and pad to a multiple of n_block_size.
+    max_tokens_per_tile = ceildiv(TOPK, n_block_size) * n_block_size
+
+    tile_token_indices = torch.zeros(
+        (B, NHK, M_blocks, max_tokens_per_tile), dtype=torch.int32, device=device
+    )
+    is_valid_total = torch.zeros(
+        (B, NHK, M_blocks), dtype=torch.int32, device=device
+    )
+
+    # Build tile_token_indices: for each Q-tile, take TOPK indices from the first query
+    # in that tile (all queries in same tile share same K set for token-level IS).
+    for b in range(B):
+        for h_kv in range(NHK):
+            for m_blk in range(M_blocks):
+                if pack_gqa:
+                    # PackGQA: m_block covers qhead_per_kvhead * m_block_size queries
+                    q_start = m_blk * m_block_size // qhead_per_kvhead
+                    h_q = m_blk * m_block_size % qhead_per_kvhead + h_kv * qhead_per_kvhead
+                    if q_start >= seqlen_q:
+                        continue
+                    h_q = min(h_q, NHQ - 1)
+                else:
+                    q_start = m_blk * m_block_size
+                    h_q = h_kv * qhead_per_kvhead  # Use first Q head in group
+                    if q_start >= seqlen_q:
+                        continue
+
+                # Take indices from the representative query
+                indices = index_attn_indices[b, h_q, q_start, :TOPK]
+                valid_count = min(TOPK, seqlen_k)
+                tile_token_indices[b, h_kv, m_blk, :valid_count] = indices[:valid_count]
+                is_valid_total[b, h_kv, m_blk] = valid_count
+
+    # Build scheduling BST: K-iteration count per Q-tile
+    k_iter_count = ceildiv(TOPK, n_block_size)
+    mask_block_cnt = torch.full(
+        (B, NHK, M_blocks), k_iter_count, dtype=torch.int32, device=device
+    )
+    # Sequential block indices: 0, 1, 2, ...
+    mask_block_idx = (
+        torch.arange(k_iter_count, dtype=torch.int32, device=device)
+        .unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        .expand(B, NHK, M_blocks, k_iter_count)
+        .contiguous()
+    )
+
+    # The generic sparse consumers compile both mask/full branches even when
+    # full counts are zero, so provide a dummy full-index tensor instead of None.
+    full_block_cnt = torch.zeros(
+        (B, NHK, M_blocks), dtype=torch.int32, device=device
+    )
+    full_block_idx = torch.zeros(
+        (B, NHK, M_blocks, 1), dtype=torch.int32, device=device
+    )
+    scheduling_bst = BlockSparseTensorsTorch(
+        mask_block_cnt=mask_block_cnt,
+        mask_block_idx=mask_block_idx,
+        full_block_cnt=full_block_cnt,
+        full_block_idx=full_block_idx,
+        block_size=(m_block_size, n_block_size),
+        is_valid_total=is_valid_total,
+    )
+
+    return IndexSparseTilesTorch(
+        tile_token_indices=tile_token_indices,
+        scheduling_bst=scheduling_bst,
+        is_valid_total=is_valid_total,
+    )
