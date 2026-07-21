@@ -79,6 +79,7 @@ from magi_attention.utils.dtype import max_fp_dtype
 # (omitted or empty means all backends)
 BACKENDS = "backends"
 
+
 # TODO: rewrite the specific function for unitest profiling mode
 class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:

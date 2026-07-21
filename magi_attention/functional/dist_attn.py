@@ -157,6 +157,7 @@ class DistAttnRuntime:
     partial_dq_reduce_work_per_stage: list[WorkWithPostProcessFn]
     partial_dkv_reduce_work_per_stage: list[WorkWithPostProcessFn]
     partial_dsink_reduce_work: WorkWithPostProcessFn
+    _asym_fused_local_dkv: torch.Tensor | None
 
     def __init__(
         self,
@@ -691,10 +692,6 @@ class DistAttnRuntime:
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
-        if self.concat_kv:  # kv is a fused tensor
-            dkv_shape = kv.shape
-        else:  # kv are tupled tensors
-            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
 
         # attention backward pass
         (
@@ -714,7 +711,6 @@ class DistAttnRuntime:
             softmax_scale=_softmax_scale,
             softcap=softcap,
             is_host_stage=is_host_stage,
-            dkv_shape=dkv_shape,
         )
 
         # maybe downcast dq,dkv to q,kv dtype for the host stage
@@ -1353,7 +1349,6 @@ class DistAttnRuntime:
         softmax_scale: float,
         softcap: float,
         is_host_stage: bool,
-        dkv_shape: tuple[int, ...],
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
         _backend = self.kernel_backend
         with nvtx.add_nvtx_event(
@@ -1417,6 +1412,11 @@ class DistAttnRuntime:
                     partial_dk, partial_dv, need_concat=self.concat_dkv
                 )
             else:
+                assert k.shape == v.shape, (
+                    "The fused dKV buffer requires symmetric K/V shapes, "
+                    f"but got {k.shape=} and {v.shape=}."
+                )
+                dkv_shape = (k.shape[0] * 2, *k.shape[1:])
                 # init partial_dkv buffer
                 # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
                 # and we need to zero-initialize partial_dkv since it needs to be reduced
@@ -1510,9 +1510,9 @@ class DistAttnRuntime:
         # and the returned work (split-on-receive) differ.
         asymmetric_kv = self.is_asymmetric_kv
         if asymmetric_kv:
-            assert isinstance(local_kv, tuple) and len(local_kv) == 2, (
-                "asymmetric K/V path expects a (K, V) tuple input"
-            )
+            assert (
+                isinstance(local_kv, tuple) and len(local_kv) == 2
+            ), "asymmetric K/V path expects a (K, V) tuple input"
             asym_d_k = local_kv[0].shape[-1]
             local_kv = torch.cat(local_kv, dim=-1)  # cat-on-last-dim is contiguous
 
@@ -1538,9 +1538,7 @@ class DistAttnRuntime:
         #     along head_dim inside this function — see the cat above)
         group_cast_arg = self.comm_meta.kv_group_collective_args_list[overlap_stage]
         group_cast_kwargs = group_cast_arg.to_group_cast_args()
-        remote_kv_seqlen = self.comm_meta.num_remote_kv_tokens_per_stage[
-            overlap_stage
-        ]
+        remote_kv_seqlen = self.comm_meta.num_remote_kv_tokens_per_stage[overlap_stage]
         if not self.concat_kv and not asymmetric_kv:
             # Symmetric tuple path (e.g. native grpcoll): allocate once with
             # the doubled seqlen, then chunk into K/V views below.
@@ -2170,7 +2168,7 @@ class DistAttnRuntime:
 
         # The fused-buffer path covers both symmetric concat_dkv=True and the
         # asymmetric cat-on-feature case.
-        is_fused = self.concat_kv or asymmetric_kv
+        is_fused = self.concat_dkv or asymmetric_kv
 
         # Prepare the meta info
         if is_fused:  # ref_remote_dkv is a fused tensor
@@ -2287,7 +2285,9 @@ class DistAttnRuntime:
             fused_local_capture = partial_local_dkv
 
             def _split_post_process(
-                _local_dkv_tuple, _inner=inner_pp, _fused=fused_local_capture,
+                _local_dkv_tuple,
+                _inner=inner_pp,
+                _fused=fused_local_capture,
                 _dk=asym_d_k,
             ):
                 ready = _inner(_fused)
@@ -3084,7 +3084,7 @@ class DistAttnRuntime:
         # MLA-style asymmetric K/V: fused local-dkv buffer cache (one per bwd
         # call, shared across all overlap stages so reductions accumulate
         # into the same tensor).
-        self._asym_fused_local_dkv: torch.Tensor | None = None
+        self._asym_fused_local_dkv = None
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, DistAttnRuntime):
@@ -3156,7 +3156,6 @@ class DistAttnFunc(torch.autograd.Function):
                 softcap=softcap,
                 return_max_logits=return_max_logits,
             )
-
 
         # init kernel barrier for native grpcoll to ensure comm kernel is always preceded by compute kernel
         kernel_barrier_fetch = KernelBarrier(
@@ -3458,7 +3457,6 @@ class DistAttnFunc(torch.autograd.Function):
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
-        dkv_shape = (full_k.shape[0] * 2, *full_k.shape[1:])
 
         # -- Step 6: single backward call with merged arg --
         (
@@ -3478,7 +3476,6 @@ class DistAttnFunc(torch.autograd.Function):
             softmax_scale=_softmax_scale,
             softcap=softcap,
             is_host_stage=True,
-            dkv_shape=dkv_shape,
         )
 
         # -- Step 7: split dkv into local and remote parts --
