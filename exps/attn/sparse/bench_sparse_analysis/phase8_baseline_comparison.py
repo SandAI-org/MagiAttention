@@ -67,24 +67,23 @@ SPARSITY_SEED = 42
 
 # Pass-specific matrices avoid invalid and duplicate method/pass products.
 KBS1_PASS_METHODS = {
-    "fwd": ["ffa_is", "flexattn", "triton"],
-    "bwd_loopk": ["ffa_is", "flexattn", "triton"],
+    "fwd": ["ffa_is", "triton"],
+    "bwd_loopk": ["ffa_is", "triton"],
     "bwd_loopq": ["triton"],
 }
 KBS1_LABELS = {
     "ffa_is": "FFA IndexSparse (kbs=1)",
-    "flexattn": "FlexAttention (block-sparse approx.)",
     "triton": "Triton",
 }
 KBS128_PASS_METHODS = {
     "fwd": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
     "bwd_loopk": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
-    "bwd_loopq": ["ffa_bs", "ffa_is128", "triton"],
+    "bwd_loopq": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
 }
 KBS128_LABELS = {
     "ffa_bs": "FFA BlockSparse",
     "ffa_is128": "FFA IndexSparse (kbs=128)",
-    "flexattn": "FlexAttention (block-sparse approx.)",
+    "flexattn": "FlexAttention",
     "triton": "Triton",
 }
 
@@ -148,18 +147,21 @@ def _build_sparse_indices(
 
 
 def _build_flex_block_mask(qseqlen, kvseqlen, topk, device):
-    """Deterministic 128x128 block-sparse approximation for FlexAttention."""
+    """Build Q-BLOCK-level sparse mask for FlexAttention (kbs=128).
+
+    FlexAttention operates at (BLOCK_M=128, BLOCK_N=128) granularity.
+    Each Q-block of 128 rows shares the same set of selected KV-blocks,
+    matching the reference implementation in run_index_sparse_comparison_benchmark.py.
+    """
     import torch
     from torch.nn.attention.flex_attention import create_block_mask
 
-    flex_block = 128
-    num_q_blocks = (qseqlen + flex_block - 1) // flex_block
-    num_kv_blocks = kvseqlen // flex_block
+    num_q_blocks = (qseqlen + KBS_BLOCK - 1) // KBS_BLOCK
+    num_kv_blocks = kvseqlen // KBS_BLOCK
+    kv_blocks_needed = min(topk // KBS_BLOCK, num_kv_blocks)
+
     selected = _build_unique_indices(
-        num_q_blocks,
-        num_kv_blocks,
-        min((topk + flex_block - 1) // flex_block, num_kv_blocks),
-        device,
+        num_q_blocks, num_kv_blocks, kv_blocks_needed, device
     ).long()
     mask_dense = torch.zeros(
         num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device
@@ -167,10 +169,15 @@ def _build_flex_block_mask(qseqlen, kvseqlen, topk, device):
     mask_dense.scatter_(1, selected, True)
 
     def sparse_mask_mod(b_idx, h_idx, q_idx, kv_idx):
-        return mask_dense[q_idx // flex_block, kv_idx // flex_block]
+        return mask_dense[q_idx // KBS_BLOCK, kv_idx // KBS_BLOCK]
 
     return create_block_mask(
-        sparse_mask_mod, B=None, H=None, Q_LEN=qseqlen, KV_LEN=kvseqlen, device=device
+        sparse_mask_mod,
+        B=None,
+        H=None,
+        Q_LEN=qseqlen,
+        KV_LEN=kvseqlen,
+        device=device,
     )
 
 
@@ -205,7 +212,7 @@ def _set_entry(results, key, kvseqlen, tflops, ms):
 
 
 def _run_kbs1_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
-    """FFA IndexSparse kbs=1. BWD always uses LoopK (no LoopQ for kbs=1)."""
+    """FFA IndexSparse kbs=1 with pass-selected BWD traversal."""
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
@@ -228,6 +235,7 @@ def _run_kbs1_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
         disable_fwd_atomic_reduction=True,
     )
     if is_bwd:
+        kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
         q.requires_grad_(True)
         k.requires_grad_(True)
         v.requires_grad_(True)
@@ -241,38 +249,6 @@ def _run_kbs1_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
 
         def run_fn():
             flex_flash_attn_func(q, k, v, **kw)
-
-    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
-
-
-def _run_kbs1_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
-    """FlexAttention with a deterministic block-sparse approximation."""
-    import torch
-    import torch._functorch.config
-    from torch.nn.attention.flex_attention import flex_attention
-
-    torch._functorch.config.donated_buffer = False
-    q = torch.randn(1, NHQ, qseqlen, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
-    block_mask = _build_flex_block_mask(qseqlen, kvseqlen, topk, device)
-    _flex_fn = torch.compile(flex_attention)
-    is_bwd = pass_type != "fwd"
-
-    if is_bwd:
-        q.requires_grad_(True)
-        k.requires_grad_(True)
-        v.requires_grad_(True)
-        o = _flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
-        do = torch.randn_like(o)
-
-        def run_fn():
-            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
-
-    else:
-
-        def run_fn():
-            _flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
 
     return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
@@ -435,8 +411,35 @@ def _run_kbs128_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
 
 
 def _run_kbs128_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
-    """FlexAttention for kbs=128 group (same as kbs1 but different scenario)."""
-    return _run_kbs1_flexattn(kvseqlen, qseqlen, topk, pass_type, device)
+    """FlexAttention over the exact per-query kbs=128 sparse pattern."""
+    import torch
+    import torch._functorch.config
+    from torch.nn.attention.flex_attention import flex_attention
+
+    torch._functorch.config.donated_buffer = False
+    q = torch.randn(1, NHQ, qseqlen, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
+    block_mask = _build_flex_block_mask(qseqlen, kvseqlen, topk, device)
+    flex_fn = torch.compile(flex_attention)
+    is_bwd = pass_type != "fwd"
+
+    if is_bwd:
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        o = flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
+        do = torch.randn_like(o)
+
+        def run_fn():
+            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
+
+    else:
+
+        def run_fn():
+            flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
+
+    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
 
 
 def _run_kbs128_triton(kvseqlen, qseqlen, topk, pass_type, device):
@@ -449,7 +452,6 @@ def _run_kbs128_triton(kvseqlen, qseqlen, topk, pass_type, device):
 
 _KBS1_RUNNERS = {
     "ffa_is": _run_kbs1_ffa_is,
-    "flexattn": _run_kbs1_flexattn,
     "triton": _run_kbs1_triton,
 }
 _KBS128_RUNNERS = {
@@ -519,6 +521,7 @@ def _sanity_check(device):
     token_idx_128 = _build_sparse_indices(
         qseqlen_ck, kvseqlen_ck, topk_ck, KBS_BLOCK, device
     )
+    ref128 = _ref_token_sparse_attn(q, k, v, token_idx_128)
     bs_idx = (
         token_idx_128[:, ::KBS_BLOCK]
         .div(KBS_BLOCK, rounding_mode="floor")
@@ -546,7 +549,9 @@ def _sanity_check(device):
         range_merge=True,
         disable_fwd_atomic_reduction=True,
     )
-    fwd_results["ffa_bs_kbs128"] = 0.0 if torch.isfinite(bs_out).all() else float("inf")
+    fwd_results["ffa_bs_kbs128"] = (
+        (bs_out[:64].float() - ref128.float()).abs().max().item()
+    )
     is128_out, *_ = flex_flash_attn_func(
         q,
         k,
@@ -558,7 +563,7 @@ def _sanity_check(device):
         disable_fwd_atomic_reduction=True,
     )
     fwd_results["ffa_is_kbs128"] = (
-        0.0 if torch.isfinite(is128_out).all() else float("inf")
+        (is128_out[:64].float() - ref128.float()).abs().max().item()
     )
 
     from torch.nn.attention.flex_attention import flex_attention
@@ -570,7 +575,9 @@ def _sanity_check(device):
     flex_out = torch.compile(flex_attention)(
         q_bhsd, k_bhsd, v_bhsd, block_mask=block_mask, enable_gqa=True
     )
-    fwd_results["flexattn"] = 0.0 if torch.isfinite(flex_out).all() else float("inf")
+    fwd_results["flexattn_kbs128"] = (
+        0.0 if torch.isfinite(flex_out).all() else float("inf")
+    )
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
     from token_sparse_attn_triton import token_sparse_bwd, token_sparse_fwd
@@ -639,8 +646,25 @@ def _sanity_check(device):
 def _phase8_bench(force=False, rerun_filter=None):
     import torch
 
-    # A forced run defines a new result schema; do not retain obsolete runner keys.
-    results = {} if force else _load_results(PHASE)
+    valid_keys = {
+        f"{prefix}/{pass_type}/{method}"
+        for prefix, pass_methods in (
+            ("kbs1", KBS1_PASS_METHODS),
+            ("kbs128", KBS128_PASS_METHODS),
+        )
+        for pass_type, methods in pass_methods.items()
+        for method in methods
+    }
+    # Keep cached values only for runners still present in the current schema.
+    results = (
+        {}
+        if force
+        else {
+            key: value
+            for key, value in _load_results(PHASE).items()
+            if key in valid_keys
+        }
+    )
     gpu = _set_gpu()
     device = f"cuda:{gpu}"
     print(f"[{_ts()}] Phase 8: Baseline Comparison (gpu{gpu})", flush=True)
