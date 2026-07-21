@@ -292,6 +292,8 @@ def _flex_flash_attn_fwd(
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
         q_stage = 1
+    if is_index_sparse:
+        q_stage = 1
 
     use_2cta_instrs = (
         major_arch in [10, 11]
