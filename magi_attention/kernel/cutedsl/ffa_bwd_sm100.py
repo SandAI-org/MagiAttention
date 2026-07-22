@@ -17,6 +17,7 @@
 # pyright: reportInvalidTypeForm=false
 
 import math
+import os
 from functools import partial
 from typing import Callable, Optional
 
@@ -159,6 +160,11 @@ class FFABwdSm100:
         self.inner_dir_max_to_min = inner_dir_max_to_min
         self.mask_mode = mask_mode
         self.index_sparse = index_sparse
+        self.is_atomic_scatter = (
+            index_sparse
+            and os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC", "0")
+            == "1"
+        )
         if index_sparse:
             assert swap_bwd_qk_loop, "IndexSparse BWD requires LoopK"
 
@@ -374,10 +380,13 @@ class FFABwdSm100:
         self.dK_reduce_ncol = math.gcd(32, self.tile_hdim // 2)
 
         # IS scatter: dedicated SMEM buffer for row-major staging
-        if self.index_sparse:
+        if self.index_sparse and not self.is_atomic_scatter:
             self.sScatter_size = self.tile_n * self.dK_reduce_ncol
         else:
             self.sScatter_size = 0
+
+        # IS scatter: SMEM buffer for pre-loaded token indices (avoids GMEM in scatter)
+        self.sTokenIndices_size = self.tile_n if self.index_sparse else 0
 
         # CTA group for MMA operations
         self.cta_group = (
@@ -1293,6 +1302,10 @@ class FFABwdSm100:
                     cute.struct.MemRange[self.dqacc_dtype, self.sScatter_size],
                     self.buffer_align_bytes,
                 ]
+                sTokenIndices: cute.struct.Align[
+                    cute.struct.MemRange[cutlass.Int32, self.sTokenIndices_size],
+                    16,
+                ]
 
         else:
 
@@ -1367,6 +1380,10 @@ class FFABwdSm100:
                 sScatter: cute.struct.Align[
                     cute.struct.MemRange[self.dqacc_dtype, self.sScatter_size],
                     self.buffer_align_bytes,
+                ]
+                sTokenIndices: cute.struct.Align[
+                    cute.struct.MemRange[cutlass.Int32, self.sTokenIndices_size],
+                    16,
                 ]
 
         self.shared_storage = SharedStorage
@@ -2018,12 +2035,19 @@ class FFABwdSm100:
         # for both sQ (reused as sdK) and sdO (reused as sdV)
         sdQacc = storage.sdQacc.get_tensor(sdQacc_layout)
 
-        if const_expr(self.index_sparse):
+        if const_expr(self.index_sparse and not self.is_atomic_scatter):
             sScatter = storage.sScatter.get_tensor(
                 cute.make_layout((self.sScatter_size,))
             )
         else:
             sScatter = None
+
+        if const_expr(self.index_sparse):
+            sTokenIndices = storage.sTokenIndices.get_tensor(
+                cute.make_layout((self.sTokenIndices_size,))
+            )
+        else:
+            sTokenIndices = None
 
         # --- Make tmem fragments of tS/tP / tdP / tdV / tdK/tdS / tdQ ---
 
@@ -2498,6 +2522,7 @@ class FFABwdSm100:
                     mV_raw=mV_raw,
                     mTileTokenIndices=mTileTokenIndices,
                     sScatter=sScatter,
+                    sTokenIndices=sTokenIndices,
                     is_print_block=is_print_block,
                 )
             else:
@@ -6564,6 +6589,7 @@ class FFABwdSm100:
         mV_raw: Optional[cute.Tensor] = None,
         mTileTokenIndices: Optional[cute.Tensor] = None,
         sScatter: Optional[cute.Tensor] = None,
+        sTokenIndices: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         """LoopK reduce warps: per-K-iter dKV atomic reduce + end-of-tile dQ reduce."""
@@ -6732,14 +6758,25 @@ class FFABwdSm100:
                 dKV_consumer_state.advance()
 
                 if const_expr(self.index_sparse):
-                    pipeline_dKV.consumer_wait(dKV_consumer_state)
-                    tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
-                    cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
-                    cute.arch.fence_view_async_tmem_load()
-                    cute.arch.sync_warp()
-                    with cute.arch.elect_one():
-                        pipeline_dKV.consumer_release(dKV_consumer_state)
-                    dKV_consumer_state.advance()
+                    m_block_sparse_r = (
+                        m_block // self.qhead_per_kvhead
+                        if const_expr(self.pack_gqa)
+                        else m_block
+                    )
+                    for ti in cutlass.range(
+                        self.tile_n // num_reduce_threads + 1, unroll=1
+                    ):
+                        row = ti * num_reduce_threads + tidx
+                        if row < self.tile_n:
+                            abs_row = n_block * self.tile_n + row
+                            if abs_row < is_valid_total_reduce:
+                                sTokenIndices[row] = mTileTokenIndices[
+                                    batch_idx, head_idx_kv, m_block_sparse_r, abs_row
+                                ]
+                            else:
+                                sTokenIndices[row] = Int32(0)
+                    cute.arch.fence_view_async_shared()
+                    self.reduce_sync_barrier.arrive_and_wait()
 
                 gdK = cute.local_tile(
                     mdK_cur, (self.tile_n * self.tile_hdim,), (n_block,)
@@ -6759,16 +6796,27 @@ class FFABwdSm100:
                     cute.copy(thr_copy_r2s, tdKrdK_r2s, tdKsdK_cur)
                     cute.arch.fence_view_async_shared()
                     self.reduce_sync_barrier.arrive_and_wait()
-                    if const_expr(self.index_sparse):
+                    if const_expr(self.index_sparse and self.is_atomic_scatter):
+                        self._is_atomic_scatter_dKV(
+                            sdQacc,
+                            smem_idx,
+                            mdK_cur,
+                            sTokenIndices,
+                            n_block,
+                            stg,
+                            dK_reduce_ncol,
+                            self.tile_n,
+                            self.tile_hdim,
+                            is_valid_total=is_valid_total_reduce,
+                            num_scatter_threads=num_reduce_threads,
+                        )
+                    elif const_expr(self.index_sparse):
                         self._is_scatter_reduce_dKV(
                             sdQacc,
                             smem_idx,
                             sScatter,
                             mdK_cur,
-                            mTileTokenIndices,
-                            batch_idx,
-                            head_idx_kv,
-                            m_block,
+                            sTokenIndices,
                             n_block,
                             stg,
                             dK_reduce_ncol,
@@ -6796,15 +6844,14 @@ class FFABwdSm100:
                     tma_store_state.advance()
 
                 # ======== Reduce dV ========
-                if const_expr(not self.index_sparse):
-                    pipeline_dKV.consumer_wait(dKV_consumer_state)
-                    tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
-                    cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
-                    cute.arch.fence_view_async_tmem_load()
-                    cute.arch.sync_warp()
-                    with cute.arch.elect_one():
-                        pipeline_dKV.consumer_release(dKV_consumer_state)
-                    dKV_consumer_state.advance()
+                pipeline_dKV.consumer_wait(dKV_consumer_state)
+                tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
+                cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
+                cute.arch.fence_view_async_tmem_load()
+                cute.arch.sync_warp()
+                with cute.arch.elect_one():
+                    pipeline_dKV.consumer_release(dKV_consumer_state)
+                dKV_consumer_state.advance()
 
                 gdV = cute.local_tile(
                     mdV_cur, (self.tile_n * self.tile_hdimv,), (n_block,)
@@ -6824,16 +6871,27 @@ class FFABwdSm100:
                     cute.copy(thr_copy_r2s, tdVrdV_r2s, tdVsdV_cur)
                     cute.arch.fence_view_async_shared()
                     self.reduce_sync_barrier.arrive_and_wait()
-                    if const_expr(self.index_sparse):
+                    if const_expr(self.index_sparse and self.is_atomic_scatter):
+                        self._is_atomic_scatter_dKV(
+                            sdQacc,
+                            smem_idx,
+                            mdV_cur,
+                            sTokenIndices,
+                            n_block,
+                            stg,
+                            dV_reduce_ncol,
+                            self.tile_n,
+                            self.tile_hdimv,
+                            is_valid_total=is_valid_total_reduce,
+                            num_scatter_threads=num_reduce_threads,
+                        )
+                    elif const_expr(self.index_sparse):
                         self._is_scatter_reduce_dKV(
                             sdQacc,
                             smem_idx,
                             sScatter,
                             mdV_cur,
-                            mTileTokenIndices,
-                            batch_idx,
-                            head_idx_kv,
-                            m_block,
+                            sTokenIndices,
                             n_block,
                             stg,
                             dV_reduce_ncol,
@@ -6917,16 +6975,66 @@ class FFABwdSm100:
         cute.arch.cp_async_bulk_wait_group(0, read=True)
 
     @cute.jit
+    def _is_atomic_scatter_dKV(
+        self,
+        sdQacc: cute.Tensor,
+        smem_idx: Int32,
+        mdXV_cur: cute.Tensor,
+        sTokenIndices: cute.Tensor,
+        n_block: Int32,
+        stg: Int32,
+        reduce_ncol: Int32,
+        tile_n: Int32,
+        tile_hdim: Int32,
+        is_valid_total: Int32 = 0,
+        num_scatter_threads: Int32 = 0,
+    ):
+        """E2: Per-element atomicAdd scatter — bypass SMEM transpose.
+
+        Phase 1: Gather from accumulator-layout SMEM (sdQacc) into registers.
+        Phase 2: For each register value, compute GMEM address and atomicAdd.
+        """
+        smem_stage = sdQacc[None, smem_idx]
+
+        elems_per_vec = 4
+        n_threads = (
+            num_scatter_threads if num_scatter_threads > 0 else cute.arch.WARP_SIZE
+        )
+        lane = cute.arch.thread_idx()[0] % n_threads
+        num_groups = reduce_ncol // elems_per_vec
+
+        my_token = lane
+        token_div32 = my_token // 32
+        token_mod32 = my_token % 32
+
+        reg_buf = cute.make_rmem_tensor(32, Float32)
+        for g in cutlass.range(num_groups, unroll=1):
+            local_physical_row = g * elems_per_vec + token_div32
+            physical_col_base = token_mod32 * elems_per_vec
+            src_base = local_physical_row * tile_hdim + physical_col_base
+            for k in cutlass.range_constexpr(4):
+                reg_buf[g * elems_per_vec + k] = smem_stage[src_base + k]
+
+        abs_row = n_block * tile_n + my_token
+        if abs_row < is_valid_total:
+            token_idx = sTokenIndices[my_token]
+            gmem_base_offset = token_idx * tile_hdim + stg * reduce_ncol
+            for g in cutlass.range(num_groups, unroll=1):
+                g_off = g * elems_per_vec
+                for k in cutlass.range_constexpr(4):
+                    gmem_ptr = cutedsl_utils.elem_pointer(
+                        mdXV_cur, (gmem_base_offset + g_off + k,)
+                    )
+                    cutedsl_utils.atomic_add_fp32(reg_buf[g_off + k], gmem_ptr)
+
+    @cute.jit
     def _is_scatter_reduce_dKV(
         self,
         sdQacc: cute.Tensor,
         smem_idx: Int32,
         sScatter: cute.Tensor,
         mdXV_cur: cute.Tensor,
-        mTileTokenIndices: cute.Tensor,
-        batch_idx: Int32,
-        head_idx_kv: Int32,
-        m_block: Int32,
+        sTokenIndices: cute.Tensor,
         n_block: Int32,
         stg: Int32,
         reduce_ncol: Int32,
@@ -6942,9 +7050,6 @@ class FFABwdSm100:
         Phase 3: Fence + barrier (sScatter writes visible).
         Phase 4: One 128B bulk atomic reduce per token from sScatter.
         """
-        m_block_sparse = (
-            m_block // self.qhead_per_kvhead if const_expr(self.pack_gqa) else m_block
-        )
         smem_stage = sdQacc[None, smem_idx]
 
         elems_per_vec = 4
@@ -6981,9 +7086,7 @@ class FFABwdSm100:
         scatter_bytes = reduce_ncol * (Float32.width // 8)
         abs_row = n_block * tile_n + my_token
         if abs_row < is_valid_total:
-            token_idx = mTileTokenIndices[
-                batch_idx, head_idx_kv, m_block_sparse, abs_row
-            ]
+            token_idx = sTokenIndices[my_token]
             dst_offset = token_idx * tile_hdim + stg * reduce_ncol
 
             gmem_ptr = cutedsl_utils.elem_pointer(mdXV_cur, (dst_offset,))
