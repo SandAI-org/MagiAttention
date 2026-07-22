@@ -414,6 +414,10 @@ class IndexSparseKVLoader(ParamsBase):
             token_idx = self.mTileTokenIndices[
                 self.batch_idx, self.head_idx_kv, self.m_block_sparse, global_row
             ]
+            # Clamp -1 sentinel to 0 (safe dummy load, like SM90 CUTLASS).
+            # Padding positions are masked to -inf in softmax via is_valid_total.
+            if token_idx < 0:
+                token_idx = Int32(0)
             self.tPrTokenIdx[i] = token_idx
 
     @cute.jit

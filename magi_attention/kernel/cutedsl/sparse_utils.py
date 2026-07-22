@@ -2586,8 +2586,10 @@ def prepare_index_sparse_tiles(
     # and pad to a multiple of n_block_size.
     max_tokens_per_tile = ceildiv(TOPK, n_block_size) * n_block_size
 
-    tile_token_indices = torch.zeros(
-        (B, NHK, M_blocks, max_tokens_per_tile), dtype=torch.int32, device=device
+    # Fill with -1 sentinel (like SM90 CUTLASS): invalid positions load from
+    # token 0 safely, and the kernel masks them via is_valid_total / seqlen_k.
+    tile_token_indices = torch.full(
+        (B, NHK, M_blocks, max_tokens_per_tile), -1, dtype=torch.int32, device=device
     )
     is_valid_total = torch.zeros((B, NHK, M_blocks), dtype=torch.int32, device=device)
 
