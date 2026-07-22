@@ -379,9 +379,12 @@ class FFABwdSm100:
         # for dKacc and dVacc epilogue (must divide hdim_per_wg)
         self.dK_reduce_ncol = math.gcd(32, self.tile_hdim // 2)
 
-        # IS scatter: dedicated SMEM buffer for row-major staging
+        # IS scatter: dedicated SMEM buffer for row-major staging.
+        # Row stride is padded by 4 fp32 (128B -> 144B, keeps 16B alignment)
+        # to break the 32-way SMEM bank conflict of un-padded row-major writes.
+        self.sScatter_pad = 4
         if self.index_sparse and not self.is_atomic_scatter:
-            self.sScatter_size = self.tile_n * self.dK_reduce_ncol
+            self.sScatter_size = self.tile_n * (self.dK_reduce_ncol + self.sScatter_pad)
         else:
             self.sScatter_size = 0
 
@@ -6757,7 +6760,21 @@ class FFABwdSm100:
                     pipeline_dKV.consumer_release(dKV_consumer_state)
                 dKV_consumer_state.advance()
 
+                gdK = cute.local_tile(
+                    mdK_cur, (self.tile_n * self.tile_hdim,), (n_block,)
+                )
+                gdK_staged = cute.flat_divide(gdK, (self.tile_n * dK_reduce_ncol,))
+                tdKrdK = cute.make_tensor(
+                    tdKrdK_t2r.iterator,
+                    (dK_reduce_ncol, dK_reduce_stage),
+                )
+
                 if const_expr(self.index_sparse):
+                    # P3 v2: 2-stage interleaved batch R2S with early T2R dV
+                    # Process dK R2S in batches of 2 stages (matching sdQacc_stage=2),
+                    # then T2R dV after all dK R2S to release pipeline early.
+
+                    # Token indices GMEM -> SMEM preload
                     m_block_sparse_r = (
                         m_block // self.qhead_per_kvhead
                         if const_expr(self.pack_gqa)
@@ -6776,147 +6793,230 @@ class FFABwdSm100:
                             else:
                                 sTokenIndices[row] = Int32(0)
                     cute.arch.fence_view_async_shared()
-                    self.reduce_sync_barrier.arrive_and_wait()
 
-                gdK = cute.local_tile(
-                    mdK_cur, (self.tile_n * self.tile_hdim,), (n_block,)
-                )
-                gdK_staged = cute.flat_divide(gdK, (self.tile_n * dK_reduce_ncol,))
-                tdKrdK = cute.make_tensor(
-                    tdKrdK_t2r.iterator,
-                    (dK_reduce_ncol, dK_reduce_stage),
-                )
-
-                for stg in cutlass.range_constexpr(dK_reduce_stage):
-                    smem_idx = tma_store_state.index
-                    tdKsdK_cur = tdKsdK[None, None, smem_idx]
-                    tdKrdK_r2s = cute.make_tensor(
-                        tdKrdK[None, stg].iterator, tdKsdK_cur.shape
-                    )
-                    cute.copy(thr_copy_r2s, tdKrdK_r2s, tdKsdK_cur)
-                    cute.arch.fence_view_async_shared()
+                    # Batch 1: R2S dK stg0+1 -> scatter stg0+1
+                    dK_batch1_indices = cute.make_rmem_tensor(2, Int32)
+                    for bi in cutlass.range_constexpr(2):
+                        smem_idx = tma_store_state.index
+                        dK_batch1_indices[bi] = smem_idx
+                        tdKsdK_cur = tdKsdK[None, None, smem_idx]
+                        tdKrdK_r2s = cute.make_tensor(
+                            tdKrdK[None, bi].iterator, tdKsdK_cur.shape
+                        )
+                        cute.copy(thr_copy_r2s, tdKrdK_r2s, tdKsdK_cur)
+                        cute.arch.fence_view_async_shared()
+                        tma_store_state.advance()
                     self.reduce_sync_barrier.arrive_and_wait()
-                    if const_expr(self.index_sparse and self.is_atomic_scatter):
-                        self._is_atomic_scatter_dKV(
-                            sdQacc,
-                            smem_idx,
-                            mdK_cur,
-                            sTokenIndices,
-                            n_block,
-                            stg,
-                            dK_reduce_ncol,
-                            self.tile_n,
-                            self.tile_hdim,
-                            is_valid_total=is_valid_total_reduce,
-                            num_scatter_threads=num_reduce_threads,
-                        )
-                    elif const_expr(self.index_sparse):
-                        self._is_scatter_reduce_dKV(
-                            sdQacc,
-                            smem_idx,
-                            sScatter,
-                            mdK_cur,
-                            sTokenIndices,
-                            n_block,
-                            stg,
-                            dK_reduce_ncol,
-                            self.tile_n,
-                            self.tile_hdim,
-                            is_valid_total=is_valid_total_reduce,
-                            num_scatter_threads=num_reduce_threads,
-                        )
-                        cute.arch.cp_async_bulk_commit_group()
-                        cute.arch.cp_async_bulk_wait_group(
-                            self.sdQacc_stage - 1, read=True
-                        )
-                    elif is_tma_warp:
-                        with cute.arch.elect_one():
-                            copy_utils.cpasync_reduce_bulk_add_f32(
-                                sdQacc[None, smem_idx].iterator,
-                                gdK_staged[None, stg].iterator,
-                                self.tma_copy_bytes["dKacc"],
+                    for bi in cutlass.range_constexpr(2):
+                        smem_idx = dK_batch1_indices[bi]
+                        if const_expr(self.is_atomic_scatter):
+                            self._is_atomic_scatter_dKV(
+                                sdQacc,
+                                smem_idx,
+                                mdK_cur,
+                                sTokenIndices,
+                                n_block,
+                                bi,
+                                dK_reduce_ncol,
+                                self.tile_n,
+                                self.tile_hdim,
+                                is_valid_total=is_valid_total_reduce,
+                                num_scatter_threads=num_reduce_threads,
                             )
-                        cute.arch.cp_async_bulk_commit_group()
-                        cute.arch.cp_async_bulk_wait_group(
-                            self.sdQacc_stage - 1, read=True
-                        )
-                    self.reduce_sync_barrier.arrive_and_wait()
-                    tma_store_state.advance()
-
-                # ======== Reduce dV ========
-                pipeline_dKV.consumer_wait(dKV_consumer_state)
-                tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
-                cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
-                cute.arch.fence_view_async_tmem_load()
-                cute.arch.sync_warp()
-                with cute.arch.elect_one():
-                    pipeline_dKV.consumer_release(dKV_consumer_state)
-                dKV_consumer_state.advance()
-
-                gdV = cute.local_tile(
-                    mdV_cur, (self.tile_n * self.tile_hdimv,), (n_block,)
-                )
-                gdV_staged = cute.flat_divide(gdV, (self.tile_n * dV_reduce_ncol,))
-                tdVrdV = cute.make_tensor(
-                    tdVrdV_t2r.iterator,
-                    (dV_reduce_ncol, dV_reduce_stage),
-                )
-
-                for stg in cutlass.range_constexpr(dV_reduce_stage):
-                    smem_idx = tma_store_state.index
-                    tdVsdV_cur = tdKsdK[None, None, smem_idx]
-                    tdVrdV_r2s = cute.make_tensor(
-                        tdVrdV[None, stg].iterator, tdVsdV_cur.shape
-                    )
-                    cute.copy(thr_copy_r2s, tdVrdV_r2s, tdVsdV_cur)
-                    cute.arch.fence_view_async_shared()
-                    self.reduce_sync_barrier.arrive_and_wait()
-                    if const_expr(self.index_sparse and self.is_atomic_scatter):
-                        self._is_atomic_scatter_dKV(
-                            sdQacc,
-                            smem_idx,
-                            mdV_cur,
-                            sTokenIndices,
-                            n_block,
-                            stg,
-                            dV_reduce_ncol,
-                            self.tile_n,
-                            self.tile_hdimv,
-                            is_valid_total=is_valid_total_reduce,
-                            num_scatter_threads=num_reduce_threads,
-                        )
-                    elif const_expr(self.index_sparse):
-                        self._is_scatter_reduce_dKV(
-                            sdQacc,
-                            smem_idx,
-                            sScatter,
-                            mdV_cur,
-                            sTokenIndices,
-                            n_block,
-                            stg,
-                            dV_reduce_ncol,
-                            self.tile_n,
-                            self.tile_hdimv,
-                            is_valid_total=is_valid_total_reduce,
-                            num_scatter_threads=num_reduce_threads,
-                        )
-                        cute.arch.cp_async_bulk_commit_group()
-                        cute.arch.cp_async_bulk_wait_group(
-                            self.sdQacc_stage - 1, read=True
-                        )
-                    elif is_tma_warp:
-                        with cute.arch.elect_one():
-                            copy_utils.cpasync_reduce_bulk_add_f32(
-                                sdQacc[None, smem_idx].iterator,
-                                gdV_staged[None, stg].iterator,
-                                self.tma_copy_bytes["dKacc"],
+                        else:
+                            self._is_scatter_reduce_dKV(
+                                sdQacc,
+                                smem_idx,
+                                sScatter,
+                                mdK_cur,
+                                sTokenIndices,
+                                n_block,
+                                bi,
+                                dK_reduce_ncol,
+                                self.tile_n,
+                                self.tile_hdim,
+                                is_valid_total=is_valid_total_reduce,
+                                num_scatter_threads=num_reduce_threads,
                             )
-                        cute.arch.cp_async_bulk_commit_group()
-                        cute.arch.cp_async_bulk_wait_group(
-                            self.sdQacc_stage - 1, read=True
-                        )
+                            cute.arch.cp_async_bulk_commit_group()
                     self.reduce_sync_barrier.arrive_and_wait()
-                    tma_store_state.advance()
+
+                    # Batch 2: R2S dK stg2+3 (sdQacc[0,1] now free)
+                    dK_batch2_indices = cute.make_rmem_tensor(2, Int32)
+                    for bi in cutlass.range_constexpr(2):
+                        smem_idx = tma_store_state.index
+                        dK_batch2_indices[bi] = smem_idx
+                        tdKsdK_cur = tdKsdK[None, None, smem_idx]
+                        tdKrdK_r2s = cute.make_tensor(
+                            tdKrdK[None, bi + 2].iterator, tdKsdK_cur.shape
+                        )
+                        cute.copy(thr_copy_r2s, tdKrdK_r2s, tdKsdK_cur)
+                        cute.arch.fence_view_async_shared()
+                        tma_store_state.advance()
+
+                    # P3: T2R dV after all dK R2S — dK regs freed, pipeline released early
+                    pipeline_dKV.consumer_wait(dKV_consumer_state)
+                    tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
+                    cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
+                    cute.arch.fence_view_async_tmem_load()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_dKV.consumer_release(dKV_consumer_state)
+                    dKV_consumer_state.advance()
+
+                    # Scatter dK batch 2
+                    self.reduce_sync_barrier.arrive_and_wait()
+                    for bi in cutlass.range_constexpr(2):
+                        smem_idx = dK_batch2_indices[bi]
+                        if const_expr(self.is_atomic_scatter):
+                            self._is_atomic_scatter_dKV(
+                                sdQacc,
+                                smem_idx,
+                                mdK_cur,
+                                sTokenIndices,
+                                n_block,
+                                bi + 2,
+                                dK_reduce_ncol,
+                                self.tile_n,
+                                self.tile_hdim,
+                                is_valid_total=is_valid_total_reduce,
+                                num_scatter_threads=num_reduce_threads,
+                            )
+                        else:
+                            self._is_scatter_reduce_dKV(
+                                sdQacc,
+                                smem_idx,
+                                sScatter,
+                                mdK_cur,
+                                sTokenIndices,
+                                n_block,
+                                bi + 2,
+                                dK_reduce_ncol,
+                                self.tile_n,
+                                self.tile_hdim,
+                                is_valid_total=is_valid_total_reduce,
+                                num_scatter_threads=num_reduce_threads,
+                            )
+                            cute.arch.cp_async_bulk_commit_group()
+                    self.reduce_sync_barrier.arrive_and_wait()
+
+                    # R2S + scatter dV stages
+                    gdV = cute.local_tile(
+                        mdV_cur, (self.tile_n * self.tile_hdimv,), (n_block,)
+                    )
+                    gdV_staged = cute.flat_divide(gdV, (self.tile_n * dV_reduce_ncol,))
+                    tdVrdV = cute.make_tensor(
+                        tdVrdV_t2r.iterator,
+                        (dV_reduce_ncol, dV_reduce_stage),
+                    )
+                    for stg in cutlass.range_constexpr(dV_reduce_stage):
+                        smem_idx = tma_store_state.index
+                        tdVsdV_cur = tdKsdK[None, None, smem_idx]
+                        tdVrdV_r2s = cute.make_tensor(
+                            tdVrdV[None, stg].iterator, tdVsdV_cur.shape
+                        )
+                        cute.copy(thr_copy_r2s, tdVrdV_r2s, tdVsdV_cur)
+                        cute.arch.fence_view_async_shared()
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        if const_expr(self.is_atomic_scatter):
+                            self._is_atomic_scatter_dKV(
+                                sdQacc,
+                                smem_idx,
+                                mdV_cur,
+                                sTokenIndices,
+                                n_block,
+                                stg,
+                                dV_reduce_ncol,
+                                self.tile_n,
+                                self.tile_hdimv,
+                                is_valid_total=is_valid_total_reduce,
+                                num_scatter_threads=num_reduce_threads,
+                            )
+                        else:
+                            self._is_scatter_reduce_dKV(
+                                sdQacc,
+                                smem_idx,
+                                sScatter,
+                                mdV_cur,
+                                sTokenIndices,
+                                n_block,
+                                stg,
+                                dV_reduce_ncol,
+                                self.tile_n,
+                                self.tile_hdimv,
+                                is_valid_total=is_valid_total_reduce,
+                                num_scatter_threads=num_reduce_threads,
+                            )
+                            cute.arch.cp_async_bulk_commit_group()
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        tma_store_state.advance()
+
+                else:
+                    # Dense / non-IS path: original interleaved R2S+store per stage
+                    for stg in cutlass.range_constexpr(dK_reduce_stage):
+                        smem_idx = tma_store_state.index
+                        tdKsdK_cur = tdKsdK[None, None, smem_idx]
+                        tdKrdK_r2s = cute.make_tensor(
+                            tdKrdK[None, stg].iterator, tdKsdK_cur.shape
+                        )
+                        cute.copy(thr_copy_r2s, tdKrdK_r2s, tdKsdK_cur)
+                        cute.arch.fence_view_async_shared()
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        if is_tma_warp:
+                            with cute.arch.elect_one():
+                                copy_utils.cpasync_reduce_bulk_add_f32(
+                                    sdQacc[None, smem_idx].iterator,
+                                    gdK_staged[None, stg].iterator,
+                                    self.tma_copy_bytes["dKacc"],
+                                )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(
+                                self.sdQacc_stage - 1, read=True
+                            )
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        tma_store_state.advance()
+
+                    # ======== Reduce dV ========
+                    pipeline_dKV.consumer_wait(dKV_consumer_state)
+                    tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
+                    cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
+                    cute.arch.fence_view_async_tmem_load()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_dKV.consumer_release(dKV_consumer_state)
+                    dKV_consumer_state.advance()
+
+                    gdV = cute.local_tile(
+                        mdV_cur, (self.tile_n * self.tile_hdimv,), (n_block,)
+                    )
+                    gdV_staged = cute.flat_divide(gdV, (self.tile_n * dV_reduce_ncol,))
+                    tdVrdV = cute.make_tensor(
+                        tdVrdV_t2r.iterator,
+                        (dV_reduce_ncol, dV_reduce_stage),
+                    )
+
+                    for stg in cutlass.range_constexpr(dV_reduce_stage):
+                        smem_idx = tma_store_state.index
+                        tdVsdV_cur = tdKsdK[None, None, smem_idx]
+                        tdVrdV_r2s = cute.make_tensor(
+                            tdVrdV[None, stg].iterator, tdVsdV_cur.shape
+                        )
+                        cute.copy(thr_copy_r2s, tdVrdV_r2s, tdVsdV_cur)
+                        cute.arch.fence_view_async_shared()
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        if is_tma_warp:
+                            with cute.arch.elect_one():
+                                copy_utils.cpasync_reduce_bulk_add_f32(
+                                    sdQacc[None, smem_idx].iterator,
+                                    gdV_staged[None, stg].iterator,
+                                    self.tma_copy_bytes["dKacc"],
+                                )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(
+                                self.sdQacc_stage - 1, read=True
+                            )
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        tma_store_state.advance()
 
             # --- End-of-tile: reduce dQ ---
             if process_tile:
@@ -7063,25 +7163,31 @@ class FFABwdSm100:
         token_div32 = my_token // 32
         token_mod32 = my_token % 32
 
-        reg_buf = cute.make_rmem_tensor(32, Float32)
+        padded_stride = reduce_ncol + self.sScatter_pad
+        vec_layout = cute.make_layout((elems_per_vec,))
+
+        # Deferred wait: previous bulk read of this thread's sScatter row
+        # must complete before overwrite. Waiting here (instead of right
+        # after issue) overlaps the bulk DRAM round-trip with the preceding
+        # R2S / barrier work of this stage.
+        cute.arch.cp_async_bulk_wait_group(0, read=True)
+
+        # Fused transpose: stream accumulator-layout sdQacc rows directly
+        # into this thread's row-major sScatter row via 16B copies (no
+        # register staging buffer -> no spill).
+        dst_base = my_token * padded_stride
         for g in cutlass.range(num_groups, unroll=1):
             local_physical_row = g * elems_per_vec + token_div32
             physical_col_base = token_mod32 * elems_per_vec
             src_base = local_physical_row * tile_hdim + physical_col_base
-            for k in cutlass.range_constexpr(4):
-                reg_buf[g * elems_per_vec + k] = smem_stage[src_base + k]
+            src_vec = cute.make_tensor(smem_stage.iterator + src_base, vec_layout)
+            dst_vec = cute.make_tensor(
+                sScatter.iterator + dst_base + g * elems_per_vec, vec_layout
+            )
+            cute.autovec_copy(src_vec, dst_vec)
 
-        # Source (sdQacc) != destination (sScatter): no barrier needed here
-
-        padded_stride = reduce_ncol
-        dst_base = my_token * padded_stride
-        for g in cutlass.range(num_groups, unroll=1):
-            g_off = g * elems_per_vec
-            for k in cutlass.range_constexpr(4):
-                sScatter[dst_base + g_off + k] = reg_buf[g_off + k]
-
+        # Only a fence is needed: this thread bulk-reads the row it wrote.
         cute.arch.fence_view_async_shared()
-        self.reduce_sync_barrier.arrive_and_wait()
 
         scatter_bytes = reduce_ncol * (Float32.width // 8)
         abs_row = n_block * tile_n + my_token
