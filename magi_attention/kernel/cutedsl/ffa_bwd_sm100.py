@@ -5252,11 +5252,7 @@ class FFABwdSm100:
                         if const_expr(self.pack_gqa)
                         else head_idx // self.qhead_per_kvhead
                     )
-                    m_block_sparse = (
-                        m_block // self.qhead_per_kvhead
-                        if const_expr(self.pack_gqa)
-                        else m_block
-                    )
+                    m_block_sparse = m_block
                     is_valid_total = blocksparse_tensors.is_valid_total[
                         batch_idx, head_idx_kv_compute, m_block_sparse
                     ]
@@ -6706,11 +6702,7 @@ class FFABwdSm100:
             )
             is_valid_total_reduce = Int32(0)
             if const_expr(self.index_sparse):
-                m_block_sparse_r = (
-                    m_block // self.qhead_per_kvhead
-                    if const_expr(self.pack_gqa)
-                    else m_block
-                )
+                m_block_sparse_r = m_block
                 is_valid_total_reduce = blocksparse_tensors.is_valid_total[
                     batch_idx, head_idx_kv, m_block_sparse_r
                 ]
@@ -6773,11 +6765,7 @@ class FFABwdSm100:
                     # Each reduce thread owns one token row (32 fp32) in each
                     # T2R stage. Scatter directly from that fragment instead
                     # of round-tripping through accumulator-layout sdQacc.
-                    m_block_sparse_r = (
-                        m_block // self.qhead_per_kvhead
-                        if const_expr(self.pack_gqa)
-                        else m_block
-                    )
+                    m_block_sparse_r = m_block
                     for ti in cutlass.range(
                         self.tile_n // num_reduce_threads + 1, unroll=1
                     ):

@@ -337,9 +337,7 @@ class IndexSparseKVLoader(ParamsBase):
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
         transpose_V_smem: cutlass.Constexpr[bool] = False,
     ):
-        m_block_sparse = (
-            m_block // qhead_per_kvhead if const_expr(qhead_per_kvhead > 1) else m_block
-        )
+        m_block_sparse = m_block
 
         # Keep these hardware anchors identical to
         # csrc/flexible_flash_attention/inner_scatter_ldst.hpp:

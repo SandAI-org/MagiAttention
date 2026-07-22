@@ -2236,7 +2236,7 @@ class FFAFwdSm100:
 
                 _is_m_sparse = sparse_tensor_m_block(
                     m_block,
-                    self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                    1,
                     self.q_subtile_factor if self.q_subtile_factor is not None else 1,
                 )
                 _is_vt = blocksparse_tensors.is_valid_total[
@@ -2570,7 +2570,7 @@ class FFAFwdSm100:
 
                 m_block_sparse = sparse_tensor_m_block(
                     m_block,
-                    self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                    1,
                     self.q_subtile_factor if self.q_subtile_factor is not None else 1,
                 )
                 (
@@ -3274,7 +3274,7 @@ class FFAFwdSm100:
 
                 m_block_sparse = sparse_tensor_m_block(
                     m_block,
-                    self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                    1,
                     self.q_subtile_factor if self.q_subtile_factor is not None else 1,
                 )
                 is_valid_total = blocksparse_tensors.is_valid_total[
@@ -4006,7 +4006,7 @@ class FFAFwdSm100:
 
                 m_block_sparse = sparse_tensor_m_block(
                     m_block,
-                    self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                    1,
                     self.q_subtile_factor if self.q_subtile_factor is not None else 1,
                 )
                 is_valid_total = blocksparse_tensors.is_valid_total[
