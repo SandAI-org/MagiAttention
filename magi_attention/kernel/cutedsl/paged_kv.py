@@ -338,9 +338,7 @@ class IndexSparseKVLoader(ParamsBase):
         transpose_V_smem: cutlass.Constexpr[bool] = False,
     ):
         m_block_sparse = (
-            m_block // qhead_per_kvhead
-            if const_expr(qhead_per_kvhead > 1)
-            else m_block
+            m_block // qhead_per_kvhead if const_expr(qhead_per_kvhead > 1) else m_block
         )
 
         # Keep these hardware anchors identical to
@@ -378,10 +376,17 @@ class IndexSparseKVLoader(ParamsBase):
         tPrTokenIdx = cute.make_rmem_tensor((rows_per_thread,), Int32)
 
         return IndexSparseKVLoader(
-            mK, mV, mTileTokenIndices,
-            batch_idx, head_idx_kv, m_block_sparse,
+            mK,
+            mV,
+            mTileTokenIndices,
+            batch_idx,
+            head_idx_kv,
+            m_block_sparse,
             thread_idx,
-            n_block_size, head_dim, head_dim_v, num_threads,
+            n_block_size,
+            head_dim,
+            head_dim_v,
+            num_threads,
             transpose_V_smem,
             threads_per_group,
             rows_per_thread,
@@ -418,9 +423,7 @@ class IndexSparseKVLoader(ParamsBase):
         """Scatter load K or V into SMEM using cp.async (via cute.copy)."""
         assert K_or_V in ("K", "V")
 
-        head_dim = (
-            self.head_dim_v if const_expr(K_or_V == "V") else self.head_dim
-        )
+        head_dim = self.head_dim_v if const_expr(K_or_V == "V") else self.head_dim
         mX = self.mK if const_expr(K_or_V == "K") else self.mV
 
         sX_pi = self._flatten_smem_sm100(sX, K_or_V)

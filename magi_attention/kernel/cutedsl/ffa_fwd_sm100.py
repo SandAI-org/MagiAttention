@@ -2233,6 +2233,7 @@ class FFAFwdSm100:
             # IndexSparse: override seqlen_k with is_valid_total for padding mask
             if const_expr(self.index_sparse):
                 from .sparse_utils import sparse_tensor_m_block
+
                 _is_m_sparse = sparse_tensor_m_block(
                     m_block,
                     self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
@@ -2240,7 +2241,9 @@ class FFAFwdSm100:
                 )
                 _is_vt = blocksparse_tensors.is_valid_total[
                     batch_idx,
-                    head_idx // self.qhead_per_kvhead if const_expr(not self.pack_gqa) else head_idx,
+                    head_idx // self.qhead_per_kvhead
+                    if const_expr(not self.pack_gqa)
+                    else head_idx,
                     _is_m_sparse,
                 ]
                 seqlen_info = SeqlenInfoQK(
@@ -2402,14 +2405,23 @@ class FFAFwdSm100:
             is_loader = None
             if const_expr(self.index_sparse):
                 from .paged_kv import IndexSparseKVLoader
+
                 is_loader = IndexSparseKVLoader.create(
-                    mK_raw, mV_raw, mTileTokenIndices,
-                    batch_idx, head_idx_kv, m_block,
+                    mK_raw,
+                    mV_raw,
+                    mTileTokenIndices,
+                    batch_idx,
+                    head_idx_kv,
+                    m_block,
                     tidx % cute.arch.WARP_SIZE,
-                    self.n_block_size, self.head_dim_padded, self.head_dim_v_padded,
+                    self.n_block_size,
+                    self.head_dim_padded,
+                    self.head_dim_v_padded,
                     num_load_threads,
                     mK_raw.element_type,
-                    qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                    qhead_per_kvhead=self.qhead_per_kvhead
+                    if const_expr(self.pack_gqa)
+                    else 1,
                     transpose_V_smem=True,
                 )
 
@@ -2551,23 +2563,39 @@ class FFAFwdSm100:
                             kv_producer_state.advance()
             elif const_expr(self.index_sparse):
                 # IndexSparse: custom scatter load loop
-                from .sparse_utils import get_curr_blocksparse_tensors, sparse_tensor_m_block
+                from .sparse_utils import (
+                    get_curr_blocksparse_tensors,
+                    sparse_tensor_m_block,
+                )
+
                 m_block_sparse = sparse_tensor_m_block(
                     m_block,
                     self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
                     self.q_subtile_factor if self.q_subtile_factor is not None else 1,
                 )
                 (
-                    curr_mask_cnt, curr_mask_idx, curr_full_cnt, curr_full_idx,
+                    curr_mask_cnt,
+                    curr_mask_idx,
+                    curr_full_cnt,
+                    curr_full_idx,
                 ) = get_curr_blocksparse_tensors(
-                    batch_idx, head_idx, m_block_sparse, blocksparse_tensors, seqlen_info,
+                    batch_idx,
+                    head_idx,
+                    m_block_sparse,
+                    blocksparse_tensors,
+                    seqlen_info,
                 )
                 total_k_iters = curr_mask_cnt
                 if total_k_iters > 0:
                     first_n_block = curr_mask_idx[0]
                     is_loader.preload_token_indices(first_n_block)
                     self._is_load_kv(
-                        is_loader, sK, pipeline_kv, kv_producer_state, "K", first_n_block
+                        is_loader,
+                        sK,
+                        pipeline_kv,
+                        kv_producer_state,
+                        "K",
+                        first_n_block,
                     )
                     kv_producer_state.advance()
                     if issue_q_for_this_warp:
@@ -2576,7 +2604,12 @@ class FFAFwdSm100:
                         load_Q(block=1, stage=1)
                     q_producer_phase ^= 1
                     self._is_load_kv(
-                        is_loader, sV, pipeline_kv, kv_producer_state, "V", first_n_block
+                        is_loader,
+                        sV,
+                        pipeline_kv,
+                        kv_producer_state,
+                        "V",
+                        first_n_block,
                     )
                     kv_producer_state.advance()
                     for iter_idx in cutlass.range(1, total_k_iters, unroll=1):
@@ -3238,12 +3271,11 @@ class FFAFwdSm100:
             # compacted-row length. Otherwise padded IS rows remain visible.
             if const_expr(self.index_sparse):
                 from .sparse_utils import sparse_tensor_m_block
+
                 m_block_sparse = sparse_tensor_m_block(
                     m_block,
                     self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
-                    self.q_subtile_factor
-                    if self.q_subtile_factor is not None
-                    else 1,
+                    self.q_subtile_factor if self.q_subtile_factor is not None else 1,
                 )
                 is_valid_total = blocksparse_tensors.is_valid_total[
                     batch_idx, kv_head_idx, m_block_sparse
@@ -3971,12 +4003,11 @@ class FFAFwdSm100:
             # compacted-row length. Otherwise padded IS rows remain visible.
             if const_expr(self.index_sparse):
                 from .sparse_utils import sparse_tensor_m_block
+
                 m_block_sparse = sparse_tensor_m_block(
                     m_block,
                     self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
-                    self.q_subtile_factor
-                    if self.q_subtile_factor is not None
-                    else 1,
+                    self.q_subtile_factor if self.q_subtile_factor is not None else 1,
                 )
                 is_valid_total = blocksparse_tensors.is_valid_total[
                     batch_idx, kv_head_idx, m_block_sparse
@@ -5107,7 +5138,6 @@ class FFAFwdSm100:
         while work_tile.is_valid_tile:
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
-
 
     @cute.jit
     def _is_load_kv(

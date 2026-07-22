@@ -588,7 +588,10 @@ def to_cute_block_sparse_tensors(
 
     is_valid_total_tensor = (
         to_cute_tensor(
-            tensors.is_valid_total, assumed_align=4, leading_dim=-1, enable_tvm_ffi=enable_tvm_ffi
+            tensors.is_valid_total,
+            assumed_align=4,
+            leading_dim=-1,
+            enable_tvm_ffi=enable_tvm_ffi,
         )
         if tensors.is_valid_total is not None
         else None
@@ -619,6 +622,7 @@ def prepare_block_sparse_fwd(
     tile_m: int,
     tile_n: int,
     q_stage: int,
+    qhead_per_kvhead: int = 1,
 ) -> tuple[BlockSparseTensorsTorch | None, object, int | None, bool]:
     """Host-side block-sparse preparation for the forward pass.
 
@@ -631,15 +635,18 @@ def prepare_block_sparse_fwd(
     if block_sparse_tensors is None:
         return None, None, None, pack_gqa
 
-    # NB: pack_gqa requires block sparse head dim == 1 (broadcasted)
     head_dim_idx = 0 if block_sparse_tensors.mask_block_cnt.ndim == 2 else 1
-    if pack_gqa and block_sparse_tensors.mask_block_cnt.shape[head_dim_idx] != 1:
+    packed_num_head = num_head // qhead_per_kvhead
+    sparse_num_head = block_sparse_tensors.mask_block_cnt.shape[head_dim_idx]
+    if pack_gqa and sparse_num_head not in (1, packed_num_head):
         pack_gqa = False
     if cu_seqlens_q is not None:
         assert (
             block_sparse_tensors.cu_total_m_blocks is not None
         ), "Varlen block sparsity requires block_sparse_tensors.cu_total_m_blocks."
 
+    seqlen_q_norm = seqlen_q * qhead_per_kvhead if pack_gqa else seqlen_q
+    num_head_norm = packed_num_head if pack_gqa else num_head
     (
         normalized_tensors,
         broadcast_pattern,
@@ -647,8 +654,8 @@ def prepare_block_sparse_fwd(
     ) = normalize_block_sparse_config(
         block_sparse_tensors,
         batch_size=batch_size,
-        num_head=num_head,
-        seqlen_q=seqlen_q,
+        num_head=num_head_norm,
+        seqlen_q=seqlen_q_norm,
         seqlen_k=seqlen_k,
         block_size=(tile_m, tile_n),
         q_stage=q_stage,
@@ -732,6 +739,8 @@ def prepare_block_sparse_bwd_loopk(
     seqlen_k: int,
     m_block_size: int,
     n_block_size: int,
+    pack_gqa: bool = False,
+    qhead_per_kvhead: int = 1,
 ) -> tuple[BlockSparseTensorsTorch | None, object, bool]:
     """Host-side block-sparse preparation for LoopK backward.
 
@@ -744,7 +753,8 @@ def prepare_block_sparse_bwd_loopk(
     normalized_tensors = None
     broadcast_pattern = None
     if block_sparse_tensors is not None:
-        expected_m_blocks = ceildiv(seqlen_q, m_block_size)
+        seqlen_q_eff = seqlen_q * qhead_per_kvhead if pack_gqa else seqlen_q
+        expected_m_blocks = ceildiv(seqlen_q_eff, m_block_size)
         expected_n_blocks = ceildiv(seqlen_k, n_block_size)
         expected_count_shape = (batch_size, num_head, expected_m_blocks)
         expected_index_shape = (
@@ -2579,9 +2589,7 @@ def prepare_index_sparse_tiles(
     tile_token_indices = torch.zeros(
         (B, NHK, M_blocks, max_tokens_per_tile), dtype=torch.int32, device=device
     )
-    is_valid_total = torch.zeros(
-        (B, NHK, M_blocks), dtype=torch.int32, device=device
-    )
+    is_valid_total = torch.zeros((B, NHK, M_blocks), dtype=torch.int32, device=device)
 
     # Build tile_token_indices: for each Q-tile, take TOPK indices from the first query
     # in that tile (all queries in same tile share same K set for token-level IS).
@@ -2591,7 +2599,10 @@ def prepare_index_sparse_tiles(
                 if pack_gqa:
                     # PackGQA: m_block covers qhead_per_kvhead * m_block_size queries
                     q_start = m_blk * m_block_size // qhead_per_kvhead
-                    h_q = m_blk * m_block_size % qhead_per_kvhead + h_kv * qhead_per_kvhead
+                    h_q = (
+                        m_blk * m_block_size % qhead_per_kvhead
+                        + h_kv * qhead_per_kvhead
+                    )
                     if q_start >= seqlen_q:
                         continue
                     h_q = min(h_q, NHQ - 1)
@@ -2615,16 +2626,16 @@ def prepare_index_sparse_tiles(
     # Sequential block indices: 0, 1, 2, ...
     mask_block_idx = (
         torch.arange(k_iter_count, dtype=torch.int32, device=device)
-        .unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .unsqueeze(0)
         .expand(B, NHK, M_blocks, k_iter_count)
         .contiguous()
     )
 
     # The generic sparse consumers compile both mask/full branches even when
     # full counts are zero, so provide a dummy full-index tensor instead of None.
-    full_block_cnt = torch.zeros(
-        (B, NHK, M_blocks), dtype=torch.int32, device=device
-    )
+    full_block_cnt = torch.zeros((B, NHK, M_blocks), dtype=torch.int32, device=device)
     full_block_idx = torch.zeros(
         (B, NHK, M_blocks, 1), dtype=torch.int32, device=device
     )

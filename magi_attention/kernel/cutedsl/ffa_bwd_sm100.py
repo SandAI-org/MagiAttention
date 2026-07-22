@@ -373,6 +373,12 @@ class FFABwdSm100:
         # for dKacc and dVacc epilogue (must divide hdim_per_wg)
         self.dK_reduce_ncol = math.gcd(32, self.tile_hdim // 2)
 
+        # IS scatter: dedicated SMEM buffer for row-major staging
+        if self.index_sparse:
+            self.sScatter_size = self.tile_n * self.dK_reduce_ncol
+        else:
+            self.sScatter_size = 0
+
         # CTA group for MMA operations
         self.cta_group = (
             tcgen05.CtaGroup.TWO if self.use_2cta_instrs else tcgen05.CtaGroup.ONE
@@ -814,8 +820,6 @@ class FFABwdSm100:
             [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
         )
         mK, mV = [layout_utils.select(t, mode=KV_layout_transpose) for t in (mK, mV)]
-
-
 
         # --- Make mLSE/mdPsum ---
 
@@ -1285,6 +1289,10 @@ class FFABwdSm100:
                     ],
                     self.buffer_align_bytes if sdS_xchg_size == 0 else 128,
                 ]
+                sScatter: cute.struct.Align[
+                    cute.struct.MemRange[self.dqacc_dtype, self.sScatter_size],
+                    self.buffer_align_bytes,
+                ]
 
         else:
 
@@ -1354,6 +1362,10 @@ class FFABwdSm100:
                     cute.struct.MemRange[
                         self.dqacc_dtype, cute.cosize(self.sdQacc_layout)
                     ],
+                    self.buffer_align_bytes,
+                ]
+                sScatter: cute.struct.Align[
+                    cute.struct.MemRange[self.dqacc_dtype, self.sScatter_size],
                     self.buffer_align_bytes,
                 ]
 
@@ -2006,6 +2018,13 @@ class FFABwdSm100:
         # for both sQ (reused as sdK) and sdO (reused as sdV)
         sdQacc = storage.sdQacc.get_tensor(sdQacc_layout)
 
+        if const_expr(self.index_sparse):
+            sScatter = storage.sScatter.get_tensor(
+                cute.make_layout((self.sScatter_size,))
+            )
+        else:
+            sScatter = None
+
         # --- Make tmem fragments of tS/tP / tdP / tdV / tdK/tdS / tdQ ---
 
         # NOTE: `tmem_ptr` + `make_fragment_C` returns a fake tensor with tmem col offset always at 0,
@@ -2478,6 +2497,7 @@ class FFABwdSm100:
                     mK_raw=mK_raw,
                     mV_raw=mV_raw,
                     mTileTokenIndices=mTileTokenIndices,
+                    sScatter=sScatter,
                     is_print_block=is_print_block,
                 )
             else:
@@ -3467,14 +3487,23 @@ class FFABwdSm100:
             is_loader = None
             if const_expr(self.index_sparse):
                 from .paged_kv import IndexSparseKVLoader
+
                 is_loader = IndexSparseKVLoader.create(
-                    mK_raw, mV_raw, mTileTokenIndices,
-                    batch_idx, head_idx_kv, m_block,
+                    mK_raw,
+                    mV_raw,
+                    mTileTokenIndices,
+                    batch_idx,
+                    head_idx_kv,
+                    m_block,
                     cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE,
-                    self.tile_n, self.tile_hdim, self.tile_hdimv,
+                    self.tile_n,
+                    self.tile_hdim,
+                    self.tile_hdimv,
                     cute.arch.WARP_SIZE,
                     mK_raw.element_type,
-                    qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                    qhead_per_kvhead=self.qhead_per_kvhead
+                    if const_expr(self.pack_gqa)
+                    else 1,
                     transpose_V_smem=False,
                 )
 
@@ -3629,7 +3658,9 @@ class FFABwdSm100:
                 # Load K(0) + V(0)
                 if const_expr(self.index_sparse):
                     is_loader.preload_token_indices(first_n_block)
-                    self._bwd_is_load_kv_pair(is_loader, sK, sV, pipeline_K, producer_state_K, first_n_block)
+                    self._bwd_is_load_kv_pair(
+                        is_loader, sK, sV, pipeline_K, producer_state_K, first_n_block
+                    )
                     producer_state_K.advance()
                 else:
                     pipeline_K.producer_acquire(
@@ -3658,7 +3689,9 @@ class FFABwdSm100:
                             n_block = n_block_min + iter_idx
                     if const_expr(self.index_sparse):
                         is_loader.preload_token_indices(n_block)
-                        self._bwd_is_load_kv_pair(is_loader, sK, sV, pipeline_K, producer_state_K, n_block)
+                        self._bwd_is_load_kv_pair(
+                            is_loader, sK, sV, pipeline_K, producer_state_K, n_block
+                        )
                         producer_state_K.advance()
                     else:
                         pipeline_K.producer_acquire(
@@ -4851,9 +4884,7 @@ class FFABwdSm100:
                         # IS scatter reduce is slower than TMA bulk reduce,
                         # so wait for the reduce warp to copy dV from TMEM
                         # before proceeding to overwrite it with dV(j+1).
-                        pipeline_dKV.sync_object_empty.wait(
-                            1, producer_phase_dKV
-                        )
+                        pipeline_dKV.sync_object_empty.wait(1, producer_phase_dKV)
 
                     # Release K(j-1) buffer so load warp can fill K(j)
                     handle_K.release()
@@ -6532,6 +6563,7 @@ class FFABwdSm100:
         mK_raw: Optional[cute.Tensor] = None,
         mV_raw: Optional[cute.Tensor] = None,
         mTileTokenIndices: Optional[cute.Tensor] = None,
+        sScatter: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         """LoopK reduce warps: per-K-iter dKV atomic reduce + end-of-tile dQ reduce."""
@@ -6699,6 +6731,16 @@ class FFABwdSm100:
                     pipeline_dKV.consumer_release(dKV_consumer_state)
                 dKV_consumer_state.advance()
 
+                if const_expr(self.index_sparse):
+                    pipeline_dKV.consumer_wait(dKV_consumer_state)
+                    tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
+                    cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
+                    cute.arch.fence_view_async_tmem_load()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_dKV.consumer_release(dKV_consumer_state)
+                    dKV_consumer_state.advance()
+
                 gdK = cute.local_tile(
                     mdK_cur, (self.tile_n * self.tile_hdim,), (n_block,)
                 )
@@ -6717,40 +6759,52 @@ class FFABwdSm100:
                     cute.copy(thr_copy_r2s, tdKrdK_r2s, tdKsdK_cur)
                     cute.arch.fence_view_async_shared()
                     self.reduce_sync_barrier.arrive_and_wait()
-                    if is_tma_warp:
-                        if const_expr(self.index_sparse):
-                            self._is_scatter_reduce_dKV(
-                                sdQacc, smem_idx,
-                                mdK_cur, mTileTokenIndices,
-                                batch_idx, head_idx_kv, m_block, n_block,
-                                stg, dK_reduce_ncol, self.tile_n, self.tile_hdim,
-                                is_valid_total=is_valid_total_reduce,
+                    if const_expr(self.index_sparse):
+                        self._is_scatter_reduce_dKV(
+                            sdQacc,
+                            smem_idx,
+                            sScatter,
+                            mdK_cur,
+                            mTileTokenIndices,
+                            batch_idx,
+                            head_idx_kv,
+                            m_block,
+                            n_block,
+                            stg,
+                            dK_reduce_ncol,
+                            self.tile_n,
+                            self.tile_hdim,
+                            is_valid_total=is_valid_total_reduce,
+                            num_scatter_threads=num_reduce_threads,
+                        )
+                        cute.arch.cp_async_bulk_commit_group()
+                        cute.arch.cp_async_bulk_wait_group(
+                            self.sdQacc_stage - 1, read=True
+                        )
+                    elif is_tma_warp:
+                        with cute.arch.elect_one():
+                            copy_utils.cpasync_reduce_bulk_add_f32(
+                                sdQacc[None, smem_idx].iterator,
+                                gdK_staged[None, stg].iterator,
+                                self.tma_copy_bytes["dKacc"],
                             )
-                            cute.arch.cp_async_bulk_commit_group()
-                            cute.arch.cp_async_bulk_wait_group(0, read=True)
-                        else:
-                            with cute.arch.elect_one():
-                                copy_utils.cpasync_reduce_bulk_add_f32(
-                                    sdQacc[None, smem_idx].iterator,
-                                    gdK_staged[None, stg].iterator,
-                                    self.tma_copy_bytes["dKacc"],
-                                )
-                            cute.arch.cp_async_bulk_commit_group()
-                            cute.arch.cp_async_bulk_wait_group(
-                                self.sdQacc_stage - 1, read=True
-                            )
+                        cute.arch.cp_async_bulk_commit_group()
+                        cute.arch.cp_async_bulk_wait_group(
+                            self.sdQacc_stage - 1, read=True
+                        )
                     self.reduce_sync_barrier.arrive_and_wait()
                     tma_store_state.advance()
 
                 # ======== Reduce dV ========
-                pipeline_dKV.consumer_wait(dKV_consumer_state)
-                tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
-                cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
-                cute.arch.fence_view_async_tmem_load()
-                cute.arch.sync_warp()
-                with cute.arch.elect_one():
-                    pipeline_dKV.consumer_release(dKV_consumer_state)
-                dKV_consumer_state.advance()
+                if const_expr(not self.index_sparse):
+                    pipeline_dKV.consumer_wait(dKV_consumer_state)
+                    tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
+                    cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
+                    cute.arch.fence_view_async_tmem_load()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_dKV.consumer_release(dKV_consumer_state)
+                    dKV_consumer_state.advance()
 
                 gdV = cute.local_tile(
                     mdV_cur, (self.tile_n * self.tile_hdimv,), (n_block,)
@@ -6770,28 +6824,39 @@ class FFABwdSm100:
                     cute.copy(thr_copy_r2s, tdVrdV_r2s, tdVsdV_cur)
                     cute.arch.fence_view_async_shared()
                     self.reduce_sync_barrier.arrive_and_wait()
-                    if is_tma_warp:
-                        if const_expr(self.index_sparse):
-                            self._is_scatter_reduce_dKV(
-                                sdQacc, smem_idx,
-                                mdV_cur, mTileTokenIndices,
-                                batch_idx, head_idx_kv, m_block, n_block,
-                                stg, dV_reduce_ncol, self.tile_n, self.tile_hdimv,
-                                is_valid_total=is_valid_total_reduce,
+                    if const_expr(self.index_sparse):
+                        self._is_scatter_reduce_dKV(
+                            sdQacc,
+                            smem_idx,
+                            sScatter,
+                            mdV_cur,
+                            mTileTokenIndices,
+                            batch_idx,
+                            head_idx_kv,
+                            m_block,
+                            n_block,
+                            stg,
+                            dV_reduce_ncol,
+                            self.tile_n,
+                            self.tile_hdimv,
+                            is_valid_total=is_valid_total_reduce,
+                            num_scatter_threads=num_reduce_threads,
+                        )
+                        cute.arch.cp_async_bulk_commit_group()
+                        cute.arch.cp_async_bulk_wait_group(
+                            self.sdQacc_stage - 1, read=True
+                        )
+                    elif is_tma_warp:
+                        with cute.arch.elect_one():
+                            copy_utils.cpasync_reduce_bulk_add_f32(
+                                sdQacc[None, smem_idx].iterator,
+                                gdV_staged[None, stg].iterator,
+                                self.tma_copy_bytes["dKacc"],
                             )
-                            cute.arch.cp_async_bulk_commit_group()
-                            cute.arch.cp_async_bulk_wait_group(0, read=True)
-                        else:
-                            with cute.arch.elect_one():
-                                copy_utils.cpasync_reduce_bulk_add_f32(
-                                    sdQacc[None, smem_idx].iterator,
-                                    gdV_staged[None, stg].iterator,
-                                    self.tma_copy_bytes["dKacc"],
-                                )
-                            cute.arch.cp_async_bulk_commit_group()
-                            cute.arch.cp_async_bulk_wait_group(
-                                self.sdQacc_stage - 1, read=True
-                            )
+                        cute.arch.cp_async_bulk_commit_group()
+                        cute.arch.cp_async_bulk_wait_group(
+                            self.sdQacc_stage - 1, read=True
+                        )
                     self.reduce_sync_barrier.arrive_and_wait()
                     tma_store_state.advance()
 
@@ -6856,6 +6921,7 @@ class FFABwdSm100:
         self,
         sdQacc: cute.Tensor,
         smem_idx: Int32,
+        sScatter: cute.Tensor,
         mdXV_cur: cute.Tensor,
         mTileTokenIndices: cute.Tensor,
         batch_idx: Int32,
@@ -6867,68 +6933,62 @@ class FFABwdSm100:
         tile_n: Int32,
         tile_hdim: Int32,
         is_valid_total: Int32 = 0,
+        num_scatter_threads: Int32 = 0,
     ):
-        """Scatter serialized SM100 accumulator chunks to token destinations.
+        """SMEM transpose + bulk scatter with independent sScatter buffer.
 
-        FfaBwdPostProcess interprets each 128x128 fp32 accumulator tile with:
-          physical_row = (logical_col // 4) * 4 + logical_row // 32
-          physical_col = (logical_row % 32) * 4 + logical_col % 4
-        Preserve that serialization while replacing compact logical_row with
-        the selected token's row inside its destination tile.
+        Phase 1: Gather from accumulator-layout SMEM (sdQacc) into registers.
+        Phase 2: Write row-major to sScatter (separate buffer, no barrier needed).
+        Phase 3: Fence + barrier (sScatter writes visible).
+        Phase 4: One 128B bulk atomic reduce per token from sScatter.
         """
         m_block_sparse = (
-            m_block // self.qhead_per_kvhead
-            if const_expr(self.pack_gqa)
-            else m_block
+            m_block // self.qhead_per_kvhead if const_expr(self.pack_gqa) else m_block
         )
         smem_stage = sdQacc[None, smem_idx]
 
-        elems_per_vec = 4  # 16B fp32 cp.reduce
-        stage_elems = tile_n * reduce_ncol
-        vectors_per_stage = stage_elems // elems_per_vec
-        vectors_per_thread = vectors_per_stage // cute.arch.WARP_SIZE
-        physical_rows_per_stage = stage_elems // tile_hdim
-        lane = cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE
+        elems_per_vec = 4
+        n_threads = (
+            num_scatter_threads if num_scatter_threads > 0 else cute.arch.WARP_SIZE
+        )
+        lane = cute.arch.thread_idx()[0] % n_threads
+        num_groups = reduce_ncol // elems_per_vec
 
-        for vec_iter in cutlass.range(vectors_per_thread, unroll=1):
-            vec_linear = vec_iter * cute.arch.WARP_SIZE + lane
-            local_physical_row = vec_linear // (tile_hdim // elems_per_vec)
-            physical_col_vec = vec_linear % (tile_hdim // elems_per_vec)
-            physical_col = physical_col_vec * elems_per_vec
-            physical_row = stg * physical_rows_per_stage + local_physical_row
+        my_token = lane
+        token_div32 = my_token // 32
+        token_mod32 = my_token % 32
 
-            # Invert the postprocess permutation for this serialized chunk.
-            logical_row = (physical_row % 4) * 32 + physical_col_vec
-            logical_col = (physical_row // 4) * elems_per_vec
-            abs_row = n_block * tile_n + logical_row
+        reg_buf = cute.make_rmem_tensor(32, Float32)
+        for g in cutlass.range(num_groups, unroll=1):
+            local_physical_row = g * elems_per_vec + token_div32
+            physical_col_base = token_mod32 * elems_per_vec
+            src_base = local_physical_row * tile_hdim + physical_col_base
+            for k in cutlass.range_constexpr(4):
+                reg_buf[g * elems_per_vec + k] = smem_stage[src_base + k]
 
-            if abs_row < is_valid_total:
-                token_idx = mTileTokenIndices[
-                    batch_idx, head_idx_kv, m_block_sparse, abs_row
-                ]
-                dst_tile = token_idx // tile_n
-                dst_row = token_idx % tile_n
-                dst_physical_row = (
-                    (logical_col // elems_per_vec) * 4 + dst_row // 32
-                )
-                dst_physical_col = (dst_row % 32) * elems_per_vec
-                dst_offset = (
-                    dst_tile * tile_n * tile_hdim
-                    + dst_physical_row * tile_hdim
-                    + dst_physical_col
-                )
-                src_offset = (
-                    local_physical_row * tile_hdim + physical_col
-                )
-                gmem_ptr = cutedsl_utils.elem_pointer(
-                    mdXV_cur, (dst_offset,)
-                )
-                smem_ptr = cutedsl_utils.elem_pointer(
-                    smem_stage, (src_offset,)
-                )
-                copy_utils.cpasync_reduce_bulk_add_f32(
-                    smem_ptr, gmem_ptr, 16
-                )
+        # Source (sdQacc) != destination (sScatter): no barrier needed here
+
+        padded_stride = reduce_ncol
+        dst_base = my_token * padded_stride
+        for g in cutlass.range(num_groups, unroll=1):
+            g_off = g * elems_per_vec
+            for k in cutlass.range_constexpr(4):
+                sScatter[dst_base + g_off + k] = reg_buf[g_off + k]
+
+        cute.arch.fence_view_async_shared()
+        self.reduce_sync_barrier.arrive_and_wait()
+
+        scatter_bytes = reduce_ncol * (Float32.width // 8)
+        abs_row = n_block * tile_n + my_token
+        if abs_row < is_valid_total:
+            token_idx = mTileTokenIndices[
+                batch_idx, head_idx_kv, m_block_sparse, abs_row
+            ]
+            dst_offset = token_idx * tile_hdim + stg * reduce_ncol
+
+            gmem_ptr = cutedsl_utils.elem_pointer(mdXV_cur, (dst_offset,))
+            smem_ptr = cutedsl_utils.elem_pointer(sScatter, (my_token * padded_stride,))
+            copy_utils.cpasync_reduce_bulk_add_f32(smem_ptr, gmem_ptr, scatter_bytes)
 
     @cute.jit
     def epilogue_dKV(

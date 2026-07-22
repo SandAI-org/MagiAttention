@@ -241,8 +241,22 @@ def _flex_flash_attn_fwd(
     index_sparse_tiles = flex_attn_args.index_sparse_tiles if flex_attn_args else None
     is_index_sparse = index_sparse_tiles is not None
     if is_index_sparse:
-        block_sparse_tensors = index_sparse_tiles.scheduling_bst
-        pack_gqa = False
+        bst = index_sparse_tiles.scheduling_bst
+        nhk_bst = bst.mask_block_cnt.shape[1]
+        if not pack_gqa and nhk_bst not in (num_head, 1):
+            qhpk = num_head // nhk_bst
+            updates = {}
+            for fld in type(bst)._fields:
+                _val = getattr(bst, fld)
+                if (
+                    _val is not None
+                    and hasattr(_val, "repeat_interleave")
+                    and _val.ndim >= 2
+                    and _val.shape[1] == nhk_bst
+                ):
+                    updates[fld] = _val.repeat_interleave(qhpk, dim=1)
+            bst = bst._replace(**updates)
+        block_sparse_tensors = bst
     use_block_sparsity = block_sparse_tensors is not None
 
     local = False
@@ -291,8 +305,6 @@ def _flex_flash_attn_fwd(
     if major_arch == 10:
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
-        q_stage = 1
-    if is_index_sparse:
         q_stage = 1
 
     use_2cta_instrs = (
@@ -349,6 +361,7 @@ def _flex_flash_attn_fwd(
         tile_m=tile_m,
         tile_n=tile_n,
         q_stage=q_stage,
+        qhead_per_kvhead=qhead_per_kvhead,
     )
 
     if aux_tensors is not None:
@@ -529,7 +542,9 @@ def _flex_flash_attn_fwd(
             # FP8 descale tensors removed; SM100 kernel descale slot is always None.
             compile_args.append(None)
         tile_token_indices_tensor = (
-            to_cute_tensor(index_sparse_tiles.tile_token_indices, assumed_align=4, leading_dim=-1)
+            to_cute_tensor(
+                index_sparse_tiles.tile_token_indices, assumed_align=4, leading_dim=-1
+            )
             if is_index_sparse
             else None
         )
@@ -639,14 +654,29 @@ def _flex_flash_attn_bwd(
     # LoopK uses forward-direction block_sparse_tensors (per-Q-tile K-block list);
     # LoopQ uses backward-direction tensors (per-K-tile Q-block list).
     if is_index_sparse and swap_bwd_qk_loop:
-        block_sparse_tensors = index_sparse_tiles.scheduling_bst
+        bst = index_sparse_tiles.scheduling_bst
+        _nhq = q.shape[-2]
+        nhk_bst = bst.mask_block_cnt.shape[1]
+        if not pack_gqa and nhk_bst not in (_nhq, 1):
+            qhpk = _nhq // nhk_bst
+            updates = {}
+            for fld in type(bst)._fields:
+                _val = getattr(bst, fld)
+                if (
+                    _val is not None
+                    and hasattr(_val, "repeat_interleave")
+                    and _val.ndim >= 2
+                    and _val.shape[1] == nhk_bst
+                ):
+                    updates[fld] = _val.repeat_interleave(qhpk, dim=1)
+            bst = bst._replace(**updates)
+        block_sparse_tensors = bst
     elif swap_bwd_qk_loop and flex_attn_args.block_sparse_tensors is not None:
         block_sparse_tensors = flex_attn_args.block_sparse_tensors
     else:
         block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
 
     # IndexAttn: convert token-level indices to block-level BlockSparseTensors.
-    _index_attn_block_sparse = None
     if index_attn_indices is not None:
         assert (
             q_ranges is None and k_ranges is None
@@ -902,8 +932,6 @@ def _flex_flash_attn_bwd(
     # SM80/SM90 BWD kernels do not support PackGQA yet; SM100+ does.
     if major_arch in (8, 9, 12):
         pack_gqa = False
-    if is_index_sparse:
-        pack_gqa = False
 
     if softcap != 0.0:
         assert (
@@ -1087,20 +1115,10 @@ def _flex_flash_attn_bwd(
             .contiguous()
             .view(batch_size, num_head_kv, seqlen_q_rounded * qhead_per_kvhead)
         )
-        dq_accum = (
-            dq_accum.view(
-                batch_size,
-                num_head_kv,
-                qhead_per_kvhead,
-                seqlen_q_rounded * head_dim_rounded,
-            )
-            .permute(0, 1, 3, 2)
-            .contiguous()
-            .view(
-                batch_size,
-                num_head_kv,
-                seqlen_q_rounded * head_dim_rounded * qhead_per_kvhead,
-            )
+        dq_accum = dq_accum.view(
+            batch_size,
+            num_head_kv,
+            seqlen_q_rounded * qhead_per_kvhead * head_dim_rounded,
         )
 
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
@@ -1169,6 +1187,8 @@ def _flex_flash_attn_bwd(
             seqlen_k=seqlen_k,
             m_block_size=m_block_size,
             n_block_size=n_block_size,
+            pack_gqa=pack_gqa,
+            qhead_per_kvhead=qhead_per_kvhead,
         )
     else:
         (
@@ -1379,7 +1399,9 @@ def _flex_flash_attn_bwd(
 
         # IS tile_token_indices for BWD
         tile_token_indices_bwd_tensor = (
-            to_cute_tensor(index_sparse_tiles.tile_token_indices, assumed_align=4, leading_dim=-1)
+            to_cute_tensor(
+                index_sparse_tiles.tile_token_indices, assumed_align=4, leading_dim=-1
+            )
             if is_index_sparse
             else None
         )
@@ -1462,73 +1484,122 @@ def _flex_flash_attn_bwd(
             num_threads_post_dQ = 128
             num_threads_post_dKV = 128
 
-    # Unpack dq_accum from column-major (B, NHK, Sq*D*qhpk) back to (B, NHQ, Sq*D).
-    # Kernel output: packed_idx = h_offset + q_pos * qhpk, each with D elements.
-    # Structure: (B, NHK, Sq, qhpk, D) in memory → permute → (B, NHK, qhpk, Sq, D) → (B, NHQ, Sq*D)
     if pack_gqa and qhead_per_kvhead > 1 and cu_seqlens_q is None:
-        dq_accum = (
-            dq_accum.view(
-                batch_size,
-                num_head_kv,
-                seqlen_q_rounded,
-                qhead_per_kvhead,
-                head_dim_rounded,
-            )
-            .permute(0, 1, 3, 2, 4)
-            .contiguous()
-            .view(batch_size, num_head, seqlen_q_rounded * head_dim_rounded)
+        # dq_accum is still in the tiled-MMA accumulator serialization. Run the
+        # standard postprocess over packed M first, then unfold packed rows into
+        # query heads. Unpacking fp32 accumulators before postprocess scrambles
+        # the architecture-specific accumulator permutation.
+        dq_packed = torch.empty(
+            batch_size,
+            seqlen_q_rounded * qhead_per_kvhead,
+            num_head_kv,
+            head_dim,
+            dtype=dq.dtype,
+            device=dq.device,
         )
-
-    bwd_postprocess(
-        dq_accum,
-        dq,
-        softmax_scale,
-        cu_seqlens_q,
-        None,
-        arch,
-        dtype,
-        head_dim,
-        m_block_size,
-        num_threads_post_dQ,
-        AtomLayoutMdQ,
-        dQ_swapAB,
-        use_2cta_instrs=use_2cta_instrs,
-        cluster_size=1,
-    )
-
-    if dKV_postprocess:
-        # Postprocess: convert dk_accum from float32 to dk in bf16/fp16
         bwd_postprocess(
-            dk_accum,
-            dk,
+            dq_accum,
+            dq_packed,
             softmax_scale,
-            cu_seqlens_k,
+            None,
             None,
             arch,
             dtype,
             head_dim,
-            n_block_size,
-            num_threads_post_dKV,
-            AtomLayoutNdKV,
-            dKV_swapAB,
-            cluster_size=cluster_size,
+            m_block_size,
+            num_threads_post_dQ,
+            AtomLayoutMdQ,
+            dQ_swapAB,
+            use_2cta_instrs=use_2cta_instrs,
+            cluster_size=1,
         )
-        # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
+        dq.copy_(
+            dq_packed.view(
+                batch_size,
+                seqlen_q_rounded,
+                qhead_per_kvhead,
+                num_head_kv,
+                head_dim,
+            )[:, :seqlen_q]
+            .permute(0, 1, 3, 2, 4)
+            .reshape(batch_size, seqlen_q, num_head, head_dim)
+        )
+    else:
         bwd_postprocess(
-            dv_accum,
-            dv,
-            1.0,
-            cu_seqlens_k,
+            dq_accum,
+            dq,
+            softmax_scale,
+            cu_seqlens_q,
             None,
             arch,
             dtype,
-            head_dim_v,
-            n_block_size,
-            num_threads_post_dKV,
-            AtomLayoutNdKV,
-            dKV_swapAB,
-            cluster_size=cluster_size,
+            head_dim,
+            m_block_size,
+            num_threads_post_dQ,
+            AtomLayoutMdQ,
+            dQ_swapAB,
+            use_2cta_instrs=use_2cta_instrs,
+            cluster_size=1,
         )
+
+    if dKV_postprocess:
+        if is_index_sparse:
+            # IS uses row-major dk_accum/dv_accum: simple scale + type convert
+            head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
+            head_dim_rounded_pp = (head_dim + 32 - 1) // 32 * 32
+            if cu_seqlens_k is None:
+                dk_2d = dk_accum.view(
+                    batch_size, num_head_kv, seqlen_k_rounded, head_dim_rounded_pp
+                )
+                dk.copy_(
+                    (
+                        dk_2d[:, :, :seqlen_k, :head_dim].transpose(1, 2)
+                        * softmax_scale
+                    ).to(dk.dtype)
+                )
+                dv_2d = dv_accum.view(
+                    batch_size, num_head_kv, seqlen_k_rounded, head_dim_v_rounded
+                )
+                dv.copy_(
+                    (dv_2d[:, :, :seqlen_k, :head_dim_v].transpose(1, 2)).to(dv.dtype)
+                )
+            else:
+                raise NotImplementedError(
+                    "IS row-major postprocess not implemented for varlen"
+                )
+        else:
+            # Postprocess: convert dk_accum from float32 to dk in bf16/fp16
+            bwd_postprocess(
+                dk_accum,
+                dk,
+                softmax_scale,
+                cu_seqlens_k,
+                None,
+                arch,
+                dtype,
+                head_dim,
+                n_block_size,
+                num_threads_post_dKV,
+                AtomLayoutNdKV,
+                dKV_swapAB,
+                cluster_size=cluster_size,
+            )
+            # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
+            bwd_postprocess(
+                dv_accum,
+                dv,
+                1.0,
+                cu_seqlens_k,
+                None,
+                arch,
+                dtype,
+                head_dim_v,
+                n_block_size,
+                num_threads_post_dKV,
+                AtomLayoutNdKV,
+                dKV_swapAB,
+                cluster_size=cluster_size,
+            )
 
     return dq, dk, dv
 
