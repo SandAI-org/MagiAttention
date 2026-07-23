@@ -92,6 +92,7 @@ class FFABwdSm100:
         mask_mode: int = 0,
         debug_print: bool = False,
         index_sparse: bool = False,
+        inner_load_tma: bool = False,
     ):
         # padding head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
@@ -160,6 +161,7 @@ class FFABwdSm100:
         self.inner_dir_max_to_min = inner_dir_max_to_min
         self.mask_mode = mask_mode
         self.index_sparse = index_sparse
+        self.inner_load_tma = inner_load_tma  # P1: BWD TMA load for kbs>=128
         self.is_atomic_scatter = (
             index_sparse
             and os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC", "0")
@@ -3684,7 +3686,24 @@ class FFABwdSm100:
                 producer_state_dPsum.advance()
 
                 # Load K(0) + V(0)
-                if const_expr(self.index_sparse):
+                if const_expr(self.index_sparse and self.inner_load_tma):
+                    # IS-TMA: derive physical block offset, use TMA
+                    phys_block_0 = mTileTokenIndices[
+                        batch_idx,
+                        head_idx_kv,
+                        m_block,
+                        first_n_block * self.tile_n,
+                    ]
+                    phys_block_0 = Int32(phys_block_0) >> 7  # / 128
+                    pipeline_K.producer_acquire(
+                        producer_state_K,
+                        extra_tx_count=self.tma_copy_bytes["V"],
+                    )
+                    load_K(phys_block_0, producer_state=producer_state_K)
+                    load_V(phys_block_0, producer_state=producer_state_K)
+                    pipeline_K.producer_commit(producer_state_K)
+                    producer_state_K.advance()
+                elif const_expr(self.index_sparse):
                     is_loader.preload_token_indices(first_n_block)
                     self._bwd_is_load_kv_pair(
                         is_loader, sK, sV, pipeline_K, producer_state_K, first_n_block
@@ -3715,7 +3734,24 @@ class FFABwdSm100:
                             n_block = n_block_max - 1 - iter_idx
                         else:
                             n_block = n_block_min + iter_idx
-                    if const_expr(self.index_sparse):
+                    if const_expr(self.index_sparse and self.inner_load_tma):
+                        # IS-TMA: derive physical block offset, use TMA
+                        phys_block = mTileTokenIndices[
+                            batch_idx,
+                            head_idx_kv,
+                            m_block,
+                            n_block * self.tile_n,
+                        ]
+                        phys_block = Int32(phys_block) >> 7  # / 128
+                        pipeline_K.producer_acquire(
+                            producer_state_K,
+                            extra_tx_count=self.tma_copy_bytes["V"],
+                        )
+                        load_K(phys_block, producer_state=producer_state_K)
+                        load_V(phys_block, producer_state=producer_state_K)
+                        pipeline_K.producer_commit(producer_state_K)
+                        producer_state_K.advance()
+                    elif const_expr(self.index_sparse):
                         is_loader.preload_token_indices(n_block)
                         self._bwd_is_load_kv_pair(
                             is_loader, sK, sV, pipeline_K, producer_state_K, n_block
@@ -6761,10 +6797,95 @@ class FFABwdSm100:
                     (dK_reduce_ncol, dK_reduce_stage),
                 )
 
-                if const_expr(self.index_sparse):
-                    # Each reduce thread owns one token row (32 fp32) in each
-                    # T2R stage. Scatter directly from that fragment instead
-                    # of round-tripping through accumulator-layout sdQacc.
+                if const_expr(self.index_sparse and self.inner_load_tma):
+                    # IS-TMA (kbs>=128): block-aligned tokens, use dense-style
+                    # R2S + TMA reduce-add store with physical block addressing.
+                    phys_block = (
+                        Int32(
+                            mTileTokenIndices[
+                                batch_idx,
+                                head_idx_kv,
+                                m_block,
+                                n_block * self.tile_n,
+                            ]
+                        )
+                        >> 7
+                    )
+                    gdK_phys = cute.local_tile(
+                        mdK_cur, (self.tile_n * self.tile_hdim,), (phys_block,)
+                    )
+                    gdK_staged_phys = cute.flat_divide(
+                        gdK_phys, (self.tile_n * dK_reduce_ncol,)
+                    )
+                    for stg in cutlass.range_constexpr(dK_reduce_stage):
+                        smem_idx = tma_store_state.index
+                        tdKsdK_cur = tdKsdK[None, None, smem_idx]
+                        tdKrdK_r2s = cute.make_tensor(
+                            tdKrdK[None, stg].iterator, tdKsdK_cur.shape
+                        )
+                        cute.copy(thr_copy_r2s, tdKrdK_r2s, tdKsdK_cur)
+                        cute.arch.fence_view_async_shared()
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        if is_tma_warp:
+                            with cute.arch.elect_one():
+                                copy_utils.cpasync_reduce_bulk_add_f32(
+                                    sdQacc[None, smem_idx].iterator,
+                                    gdK_staged_phys[None, stg].iterator,
+                                    self.tma_copy_bytes["dKacc"],
+                                )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(
+                                self.sdQacc_stage - 1, read=True
+                            )
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        tma_store_state.advance()
+
+                    # dV: T2R from tmem, then TMA reduce-add store
+                    pipeline_dKV.consumer_wait(dKV_consumer_state)
+                    tdVrdV_t2r = cute.make_rmem_tensor(tdVrdV_t2r_shape, Float32)
+                    cute.copy(thr_copy_t2r_dV, tdVtdV_t2r, tdVrdV_t2r)
+                    cute.arch.fence_view_async_tmem_load()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_dKV.consumer_release(dKV_consumer_state)
+                    dKV_consumer_state.advance()
+
+                    gdV_phys = cute.local_tile(
+                        mdV_cur, (self.tile_n * self.tile_hdimv,), (phys_block,)
+                    )
+                    gdV_staged_phys = cute.flat_divide(
+                        gdV_phys, (self.tile_n * dV_reduce_ncol,)
+                    )
+                    tdVrdV = cute.make_tensor(
+                        tdVrdV_t2r.iterator,
+                        (dV_reduce_ncol, dV_reduce_stage),
+                    )
+
+                    for stg in cutlass.range_constexpr(dV_reduce_stage):
+                        smem_idx = tma_store_state.index
+                        tdVsdV_cur = tdKsdK[None, None, smem_idx]
+                        tdVrdV_r2s = cute.make_tensor(
+                            tdVrdV[None, stg].iterator, tdVsdV_cur.shape
+                        )
+                        cute.copy(thr_copy_r2s, tdVrdV_r2s, tdVsdV_cur)
+                        cute.arch.fence_view_async_shared()
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        if is_tma_warp:
+                            with cute.arch.elect_one():
+                                copy_utils.cpasync_reduce_bulk_add_f32(
+                                    sdQacc[None, smem_idx].iterator,
+                                    gdV_staged_phys[None, stg].iterator,
+                                    self.tma_copy_bytes["dKacc"],
+                                )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(
+                                self.sdQacc_stage - 1, read=True
+                            )
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        tma_store_state.advance()
+
+                elif const_expr(self.index_sparse):
+                    # IS-scatter (kbs<128): per-token scatter store
                     m_block_sparse_r = m_block
                     for ti in cutlass.range(
                         self.tile_n // num_reduce_threads + 1, unroll=1

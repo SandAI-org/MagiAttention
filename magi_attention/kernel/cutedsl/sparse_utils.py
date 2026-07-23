@@ -26,6 +26,7 @@ This module hosts both:
 """
 
 import math
+from enum import IntEnum
 from functools import partial
 from typing import Callable, NamedTuple, Optional, Tuple
 
@@ -38,6 +39,50 @@ from quack import copy_utils
 from .cutedsl_utils import get_broadcast_dims, to_cute_tensor
 from .named_barrier import NamedBarrierBwd
 from .seqlen_info import SeqlenInfoQK
+
+# ---------------------------------------------------------------------------
+# Inner-loop load/store mode enums (mirrors csrc/flexible_flash_attention/inner_ldst_mode.hpp)
+# ---------------------------------------------------------------------------
+
+
+class InnerLoadMode(IntEnum):
+    """Inner-loop KV load strategy for sparse attention.
+
+    Tma:     2D TMA descriptor — used when tiles are physically contiguous (kbs >= n_block_size).
+    CpAsync: cp.async per-row scatter (per-token loads for arbitrary token indices).
+    """
+
+    Tma = 0
+    CpAsync = 2
+
+
+class InnerStoreMode(IntEnum):
+    """Inner-loop store strategy (BWD dK/dV accumulation).
+
+    Tma:        2D TMA reduce-add from swizzled SMEM.
+    Tma1d:      cp.reduce.async.bulk per-row from linear SMEM.
+    AtomicAdd:  scalar atomicAdd from SMEM.
+    BypassSmem: register atomicAdd to gmem (no SMEM buffer).
+    """
+
+    Tma = 0
+    Tma1d = 1
+    AtomicAdd = 2
+    BypassSmem = 3
+
+
+class OuterStoreMode(IntEnum):
+    """Outer-loop store strategy (epilogue O/dQ/dKV write).
+
+    Tma:  2D TMA store / reduce-add.
+    Stg:  per-thread STS + STG.128 with residual guard.
+    Tma1d: R2S to linear SMEM, then per-row cp.async.bulk S2G.
+    """
+
+    Tma = 0
+    Stg = 1
+    Tma1d = 2
+
 
 # ---------------------------------------------------------------------------
 # Block-sparse tensor data structures
@@ -2546,15 +2591,20 @@ class IndexSparseTilesTorch(NamedTuple):
 
     tile_token_indices: (B, NHK, M_blocks, max_tokens_per_tile) int32
         Maps each (batch, kv_head, q_tile, local_row) to a global K token index.
+        When inner_load_mode=Tma, each 128-token chunk is a physically contiguous
+        block and the first element of each chunk encodes the block offset.
     scheduling_bst: BlockSparseTensorsTorch
         Block-sparse scheduling tensors derived from the token indices.
     is_valid_total: torch.Tensor
         (B, NHK, M_blocks) int32 — number of unique valid tokens per Q-tile.
+    inner_load_mode: InnerLoadMode
+        Load strategy: Tma (block-aligned) or CpAsync (per-token scatter).
     """
 
     tile_token_indices: torch.Tensor
     scheduling_bst: "BlockSparseTensorsTorch"
     is_valid_total: torch.Tensor
+    inner_load_mode: InnerLoadMode = InnerLoadMode.CpAsync
 
 
 def prepare_index_sparse_tiles(
@@ -2568,6 +2618,7 @@ def prepare_index_sparse_tiles(
     m_block_size: int = 128,
     n_block_size: int = 128,
     pack_gqa: bool = False,
+    sparse_k_block_size: int = 1,
 ) -> IndexSparseTilesTorch:
     """Convert raw index_sparse_indices to tile-based IndexSparse tensors.
 
@@ -2659,8 +2710,18 @@ def prepare_index_sparse_tiles(
         is_valid_total=is_valid_total,
     )
 
+    # Select inner load mode based on sparse_k_block_size:
+    # When kbs >= n_block_size (128), each tile_token_indices chunk is a physically
+    # contiguous block → TMA can be used instead of per-token scatter.
+    inner_load_mode = (
+        InnerLoadMode.Tma
+        if sparse_k_block_size >= n_block_size
+        else InnerLoadMode.CpAsync
+    )
+
     return IndexSparseTilesTorch(
         tile_token_indices=tile_token_indices,
         scheduling_bst=scheduling_bst,
         is_valid_total=is_valid_total,
+        inner_load_mode=inner_load_mode,
     )

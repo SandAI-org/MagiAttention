@@ -195,8 +195,10 @@ class FFAFwdSm100:
         use_clc_scheduler: bool = False,
         debug_print: bool = False,
         index_sparse: bool = False,
+        inner_load_tma: bool = False,
     ):
         self.index_sparse = index_sparse
+        self.inner_load_tma = inner_load_tma
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -2562,7 +2564,7 @@ class FFAFwdSm100:
                             )
                             kv_producer_state.advance()
             elif const_expr(self.index_sparse):
-                # IndexSparse: custom scatter load loop
+                # IndexSparse load loop: TMA (kbs>=128) or scatter (kbs<128)
                 from .sparse_utils import (
                     get_curr_blocksparse_tensors,
                     sparse_tensor_m_block,
@@ -2586,43 +2588,109 @@ class FFAFwdSm100:
                     seqlen_info,
                 )
                 total_k_iters = curr_mask_cnt
-                if total_k_iters > 0:
-                    first_n_block = curr_mask_idx[0]
-                    is_loader.preload_token_indices(first_n_block)
-                    self._is_load_kv(
-                        is_loader,
-                        sK,
-                        pipeline_kv,
-                        kv_producer_state,
-                        "K",
-                        first_n_block,
-                    )
-                    kv_producer_state.advance()
-                    if issue_q_for_this_warp:
-                        load_Q(block=0, stage=0)
-                    if const_expr(self.q_stage == 2) and issue_q_for_this_warp:
-                        load_Q(block=1, stage=1)
-                    q_producer_phase ^= 1
-                    self._is_load_kv(
-                        is_loader,
-                        sV,
-                        pipeline_kv,
-                        kv_producer_state,
-                        "V",
-                        first_n_block,
-                    )
-                    kv_producer_state.advance()
-                    for iter_idx in cutlass.range(1, total_k_iters, unroll=1):
-                        n_block = curr_mask_idx[iter_idx]
-                        is_loader.preload_token_indices(n_block)
-                        self._is_load_kv(
-                            is_loader, sK, pipeline_kv, kv_producer_state, "K", n_block
+
+                if const_expr(self.inner_load_tma):
+                    # IS-TMA: block-aligned indices (kbs>=128), use TMA like dense/BS.
+                    # Physical block offset = tile_token_indices[m, iter*n_bs] / n_bs.
+                    if total_k_iters > 0:
+                        first_iter = curr_mask_idx[0]
+                        phys_block_0 = mTileTokenIndices[
+                            batch_idx,
+                            head_idx_kv,
+                            m_block_sparse,
+                            first_iter * self.n_block_size,
+                        ]
+                        # n_block_size is always a power of 2 (128); use right-shift for Int32
+                        phys_block_0 = Int32(phys_block_0) >> 7  # / 128
+
+                        load_K(
+                            block=phys_block_0,
+                            producer_state=kv_producer_state,
+                            page_idx=None,
                         )
                         kv_producer_state.advance()
-                        self._is_load_kv(
-                            is_loader, sV, pipeline_kv, kv_producer_state, "V", n_block
+                        if issue_q_for_this_warp:
+                            load_Q(block=0, stage=0)
+                        if const_expr(self.q_stage == 2) and issue_q_for_this_warp:
+                            load_Q(block=1, stage=1)
+                        q_producer_phase ^= 1
+                        load_V(
+                            block=phys_block_0,
+                            producer_state=kv_producer_state,
+                            page_idx=None,
                         )
                         kv_producer_state.advance()
+
+                        for iter_idx in cutlass.range(1, total_k_iters, unroll=1):
+                            n_iter = curr_mask_idx[iter_idx]
+                            phys_block = mTileTokenIndices[
+                                batch_idx,
+                                head_idx_kv,
+                                m_block_sparse,
+                                n_iter * self.n_block_size,
+                            ]
+                            phys_block = Int32(phys_block) >> 7  # / 128
+                            load_K(
+                                block=phys_block,
+                                producer_state=kv_producer_state,
+                                page_idx=None,
+                            )
+                            kv_producer_state.advance()
+                            load_V(
+                                block=phys_block,
+                                producer_state=kv_producer_state,
+                                page_idx=None,
+                            )
+                            kv_producer_state.advance()
+                else:
+                    # IS-scatter: per-token cp.async (kbs<128)
+                    if total_k_iters > 0:
+                        first_n_block = curr_mask_idx[0]
+                        is_loader.preload_token_indices(first_n_block)
+                        self._is_load_kv(
+                            is_loader,
+                            sK,
+                            pipeline_kv,
+                            kv_producer_state,
+                            "K",
+                            first_n_block,
+                        )
+                        kv_producer_state.advance()
+                        if issue_q_for_this_warp:
+                            load_Q(block=0, stage=0)
+                        if const_expr(self.q_stage == 2) and issue_q_for_this_warp:
+                            load_Q(block=1, stage=1)
+                        q_producer_phase ^= 1
+                        self._is_load_kv(
+                            is_loader,
+                            sV,
+                            pipeline_kv,
+                            kv_producer_state,
+                            "V",
+                            first_n_block,
+                        )
+                        kv_producer_state.advance()
+                        for iter_idx in cutlass.range(1, total_k_iters, unroll=1):
+                            n_block = curr_mask_idx[iter_idx]
+                            is_loader.preload_token_indices(n_block)
+                            self._is_load_kv(
+                                is_loader,
+                                sK,
+                                pipeline_kv,
+                                kv_producer_state,
+                                "K",
+                                n_block,
+                            )
+                            kv_producer_state.advance()
+                            self._is_load_kv(
+                                is_loader,
+                                sV,
+                                pipeline_kv,
+                                kv_producer_state,
+                                "V",
+                                n_block,
+                            )
+                            kv_producer_state.advance()
             else:  # block sparse load (TODO: review the logics)
                 (
                     kv_producer_state,

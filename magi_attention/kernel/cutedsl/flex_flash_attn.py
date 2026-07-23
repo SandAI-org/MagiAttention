@@ -502,6 +502,11 @@ def _flex_flash_attn_fwd(
                     use_clc_scheduler=use_clc_scheduler,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                     index_sparse=is_index_sparse,
+                    inner_load_tma=(
+                        is_index_sparse
+                        and index_sparse_tiles is not None
+                        and index_sparse_tiles.inner_load_mode == 0  # InnerLoadMode.Tma
+                    ),
                 )
             case 12:
                 # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
@@ -1386,6 +1391,11 @@ def _flex_flash_attn_bwd(
                     mask_mode=get_ffa_mask_mode(),
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                     index_sparse=is_index_sparse,
+                    inner_load_tma=(
+                        is_index_sparse
+                        and index_sparse_tiles is not None
+                        and index_sparse_tiles.inner_load_mode == 0  # InnerLoadMode.Tma
+                    ),
                 )
 
         # IS tile_token_indices for BWD

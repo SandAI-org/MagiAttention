@@ -12,45 +12,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""IndexSparse (token-level scatter) sweep tests for the cutedsl SM100 kernel.
+"""CuTeDSL SM100 IndexSparse (token-level scatter) sweep tests.
 
-Mirrors the structure of ``tests/test_attn/test_index_sparse.py`` on main, but
-drives the kernel-level entry points directly (``_flex_flash_attn_fwd`` /
-``_flex_flash_attn_bwd`` + ``prepare_index_sparse_tiles``) since this fork does
-not expose the ``index_sparse_indices`` autograd wrapper yet.
+Drives the CuTeDSL kernel-level entry points directly
+(``_flex_flash_attn_fwd`` / ``_flex_flash_attn_bwd`` +
+``prepare_index_sparse_tiles``) and validates against a dense fp32 SDPA
+reference.
 
-Mirrors the tier structure and parameter ranges of SM90's
-``tests/test_attn/test_index_sparse.py`` (all with *random* per-Q-tile token indices):
-  * Tier 1  (test_simple_index_sparse):  PackGQA GQA ratios 128/64/32/16, S=256
-  * Tier 2a (test_sparse_cross_batch):   B = 2 / 3 / 8, uniform topk
-  * Tier 2b (test_sparse_qkv_lengths):   short/unaligned Q vs long KV (64/1024, 8/512, 100/512)
-  * Tier 3a (test_sparse_head_dim):      D = 64 / 128
-  * Tier 3b (test_sparse_long_seq):      S = 8192, topk = 1024
-  * Tier 3c (test_sparse_gqa):           NHK > 1 (GQA), PackGQA on/off
-  * Tier 3d (test_sparse_mha):           NHQ == NHK (MHA)
-  * Tier P  (test_partial_topk_multi_niter): SM100-only partial topk (topk % 128 != 0)
+Sweep structure (mirrors ``tests/test_attn/test_index_sparse.py``):
 
-Differences from SM90 (this fork drives the kernel entry points directly and does
-not expose the ``index_sparse_indices`` autograd wrapper yet):
-  * swap_ab / k_block_size > 1 are not plumbed through the direct-kernel helper
-    (the small-ratio / MHA configs run fine without an explicit swap_ab knob).
-  * Per-batch *variable* topk is unsupported (prepare_index_sparse_tiles takes a
-    scalar topk), so the cross-batch tier uses a *uniform* topk.
-  * The S=65536 int32-overflow regression is omitted (the dense fp32 SDPA ref
-    would OOM); Tier P instead covers partial topk, which SM90 forbids.
+  * ``test_index_sparse_classic_sweep``
+        Q_SEQLENS × KV_SEQLENS × TOPKS cross-product.
+        Fixed: MQA128, D=128, PackGQA=True, kbs=1.
 
-Scatter store modes (bulk cp.async vs per-element atomicAdd) are selected via
-MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC at kernel-compile time, which is
-NOT part of the JIT cache key — so each mode must run in its own process:
+  * ``test_index_sparse_comprehensive_sweep``
+        head_config × head_dim × sparse_k_block_size.
+        8 head configs (MQA / GQA / MHA), D ∈ {64, 128}, kbs ∈ {1, 128}.
+        Skips invalid combos (kbs=128 requires NHK=1 and D=128).
 
-    pytest tests/test_kernel/cutedsl/test_ffa_index_sparse.py -v
-    MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC=1 \
-        pytest tests/test_kernel/cutedsl/test_ffa_index_sparse.py -v
+  * ``test_partial_topk_sweep``
+        SM100-only partial topk (topk % 128 ≠ 0), scatter mode only (kbs=1).
 
-Known constraints (asserted in the kernel):
-  * BWD IndexSparse requires swap_bwd_qk_loop=True (LoopK) and head_dim <= 128
-  * All queries inside one FWD sparse Q-tile must share the same token set
-    (prepare_index_sparse_tiles takes the tile's first query as representative)
+CuTeDSL differences from SM90:
+  * Uses ``_flex_flash_attn_fwd`` / ``_flex_flash_attn_bwd`` directly
+  * Uses ``prepare_index_sparse_tiles()`` for tile preparation
+  * No ``inner_dir`` / ``inner_load_mode`` / ``inner_store_mode`` env vars
+  * BWD requires ``swap_bwd_qk_loop=True`` and ``m_block_size=128``
+
+Index generation uses ``build_index_sparse_indices`` from the shared
+``magi_attention.utils.sparse_utils`` module (SM90 format: global logical
+positions, per-query) and adapts to CuTeDSL format
+(``(B, NHQ, SQ, topk)`` local IDs with per-tile sharing) via
+``_adapt_indices``.
 """
 
 import os
@@ -65,6 +58,7 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
 )
 from magi_attention.kernel.cutedsl.sparse_utils import prepare_index_sparse_tiles
 from magi_attention.testing.precision import assert_close
+from magi_attention.utils.sparse_utils import build_index_sparse_indices
 
 SEED = 42
 
@@ -73,10 +67,15 @@ requires_sm100 = pytest.mark.skipif(
     reason="IndexSparse cutedsl path requires SM100+",
 )
 
+_FWD_ATOL, _FWD_RTOL = 0.01, 0.05
+_BWD_DQ_ATOL, _BWD_DQ_RTOL = 0.02, 0.3
+_BWD_DKV_ATOL, _BWD_DK_RTOL, _BWD_DV_RTOL = 0.02, 0.15, 0.05
+_MISMATCH_THRES = 0.01
 
-# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
 
 
 def _fwd_sparse_m_block(seqlen_q: int, qhpk: int, pack_gqa: bool) -> int:
@@ -86,49 +85,67 @@ def _fwd_sparse_m_block(seqlen_q: int, qhpk: int, pack_gqa: bool) -> int:
     return 256 if seqlen_q_packgqa > 128 else 128
 
 
-def _build_block_random_indices(
+def _adapt_indices(
+    sm90_indices: torch.Tensor,
+    *,
     B: int,
-    NHQ: int,
-    NHK: int,
     SQ: int,
     SK: int,
-    topk: int,
+    NHQ: int,
+    NHK: int,
     tokens_per_block: int,
-    device: str,
+    sparse_k_block_size: int = 1,
 ) -> torch.Tensor:
-    """Random sorted token indices, shared by all queries within one index
-    block and by all Q heads within one KV group.
+    """Convert ``build_index_sparse_indices`` output to CuTeDSL format.
 
-    Returns (B, NHQ, SQ, topk) int32.
+    SM90 format:  ``(B*SQ, NHK, topk)`` int32 with global logical positions
+                  (``b * num_kv_blocks + local_id``).
+    CuTeDSL format: ``(B, NHQ, SQ, topk)`` int32 with local IDs and per-tile
+                    index sharing (all queries in one FWD Q-tile share the same
+                    K index set).
     """
+    topk = sm90_indices.shape[-1]
+    device = sm90_indices.device
+    num_kv_blocks = SK // sparse_k_block_size
     qhpk = NHQ // NHK
-    num_blocks = (SQ + tokens_per_block - 1) // tokens_per_block
-    picks = torch.stack(
-        [torch.randperm(SK, device=device)[:topk] for _ in range(B * NHK * num_blocks)]
-    ).view(B, NHK, num_blocks, topk)
-    picks = picks.sort(dim=-1).values.int()
-    # expand KV-head blocks to Q heads and per-token rows
-    q_to_block = torch.arange(SQ, device=device) // tokens_per_block
-    per_token = picks[:, :, q_to_block, :]  # (B, NHK, SQ, topk)
-    indices = (
-        per_token.unsqueeze(2)
-        .expand(B, NHK, qhpk, SQ, topk)
-        .reshape(B, NHQ, SQ, topk)
-        .contiguous()
+
+    # (B*SQ, NHK, topk) → (B, SQ, NHK, topk), then global → local
+    local = sm90_indices.reshape(B, SQ, NHK, topk).clone()
+    batch_offsets = (
+        torch.arange(B, device=device, dtype=torch.int32).view(B, 1, 1, 1)
+        * num_kv_blocks
     )
-    return indices
+    valid = local >= 0
+    local = torch.where(valid, local - batch_offsets, torch.full_like(local, -1))
+
+    # Per-tile sharing: map each query to the first query in its FWD tile
+    first_in_tile = (
+        torch.arange(SQ, device=device) // tokens_per_block * tokens_per_block
+    )
+    local = local[:, first_in_tile, :, :]
+
+    # Expand NHK → NHQ: replicate for each Q head in the KV group
+    expanded = (
+        local.unsqueeze(3).expand(B, SQ, NHK, qhpk, topk).reshape(B, SQ, NHQ, topk)
+    )
+    return expanded.permute(0, 2, 1, 3).contiguous()
 
 
-def _sdpa_ref_fwd_bwd(q, k, v, dO, indices, softmax_scale):
+def _sdpa_ref_fwd_bwd(q, k, v, dO, indices, softmax_scale, sparse_k_block_size=1):
     """Vectorized fp32 SDPA reference with token-level index mask.
 
-    indices: (B, NHQ, SQ, topk) local KV token ids (all valid, >= 0).
-    Returns (O, dQ, dK, dV) in bf16.
+    Args:
+        indices: ``(B, NHQ, SQ, topk)`` — local token IDs when
+            ``sparse_k_block_size == 1``, or local block IDs otherwise.
+
+    Returns:
+        ``(O, dQ, dK, dV)`` in bf16.
     """
     B, SQ, NHQ, HD = q.shape
     _, SK, NHK, _ = k.shape
     HDV = v.shape[-1]
     qhpk = NHQ // NHK
+    device = q.device
 
     q_f = q.float().detach().requires_grad_(True)
     k_f = k.float().detach().requires_grad_(True)
@@ -139,8 +156,24 @@ def _sdpa_ref_fwd_bwd(q, k, v, dO, indices, softmax_scale):
 
     scores = torch.einsum("bsnh,btnh->bnst", q_f, k_exp) * softmax_scale
 
-    mask = torch.zeros(B, NHQ, SQ, SK, dtype=torch.bool, device=q.device)
-    mask.scatter_(3, indices.long(), True)
+    if sparse_k_block_size == 1:
+        mask = torch.zeros(B, NHQ, SQ, SK, dtype=torch.bool, device=device)
+        mask.scatter_(3, indices.long(), True)
+    else:
+        num_kv_blocks = SK // sparse_k_block_size
+        blk_int = torch.zeros(
+            B, NHQ, SQ, num_kv_blocks, dtype=torch.int32, device=device
+        )
+        safe_idx = indices.clamp(min=0).long()
+        blk_int.scatter_add_(3, safe_idx, (indices >= 0).int())
+        blk_mask = blk_int > 0
+        mask = (
+            blk_mask.unsqueeze(-1)
+            .expand(B, NHQ, SQ, num_kv_blocks, sparse_k_block_size)
+            .reshape(B, NHQ, SQ, num_kv_blocks * sparse_k_block_size)
+        )
+        if mask.shape[-1] > SK:
+            mask = mask[:, :, :, :SK]
 
     scores = scores.masked_fill(~mask, float("-inf"))
     probs = torch.softmax(scores, dim=-1)
@@ -155,29 +188,26 @@ def _sdpa_ref_fwd_bwd(q, k, v, dO, indices, softmax_scale):
     )
 
 
-# Tolerances mirror remote main tests/test_attn/sparse_test_utils.py
-# (DEFAULT_*_ATOL/RTOL + DEFAULT_MISMATCH_THRES). Validation reuses the same
-# magi_attention.testing.precision.assert_close helper as main: element-wise
-# |a-b| <= atol + rtol*|b| with up to MISMATCH_THRES fraction of outliers.
-_FWD_ATOL, _FWD_RTOL = 0.01, 0.05
-_BWD_DQ_ATOL, _BWD_DQ_RTOL = 0.02, 0.3
-_BWD_DKV_ATOL, _BWD_DK_RTOL, _BWD_DV_RTOL = 0.02, 0.15, 0.05
-_MISMATCH_THRES = 0.01
+def _run_config(device: str, cfg: dict):
+    """Run one FWD + BWD IndexSparse config and assert against SDPA reference.
 
-
-def _run_index_sparse_case(
-    *,
-    B: int = 1,
-    NHQ: int,
-    NHK: int,
-    D: int = 128,
-    SQ: int,
-    SK: int,
-    topk: int,
-    pack_gqa: bool,
-    device: str = "cuda",
-):
+    Config dict keys:
+        B, SQ, SK, NHQ, NHK, D, topk, pack_gqa, sparse_k_block_size
+    ``topk`` is always token-level; when ``sparse_k_block_size > 1`` the block
+    count passed to the index builder is ``topk // sparse_k_block_size``.
+    """
     torch.manual_seed(SEED)
+
+    B = cfg.get("B", 1)
+    SQ = cfg["SQ"]
+    SK = cfg["SK"]
+    NHQ = cfg["NHQ"]
+    NHK = cfg["NHK"]
+    D = cfg.get("D", 128)
+    topk = cfg["topk"]
+    pack_gqa = cfg.get("pack_gqa", True)
+    kbs = cfg.get("sparse_k_block_size", 1)
+
     qhpk = NHQ // NHK
     softmax_scale = D**-0.5
 
@@ -186,18 +216,78 @@ def _run_index_sparse_case(
     v = torch.randn_like(k)
     dO = torch.randn_like(q)
 
+    # Determine tile granularity for per-tile index sharing
     fwd_m_block = _fwd_sparse_m_block(SQ, qhpk, pack_gqa)
-    # Indices must be uniform at the coarsest tile granularity (FWD tile);
-    # the 128-row BWD LoopK tiles are then automatically uniform too.
     tokens_per_block = max(fwd_m_block // (qhpk if pack_gqa else 1), 1)
-    indices = _build_block_random_indices(
-        B, NHQ, NHK, SQ, SK, topk, tokens_per_block, device
-    )
 
+    if kbs > 1:
+        # build_index_sparse_indices generates block IDs; expand to token IDs
+        # so that prepare_index_sparse_tiles (which stores token-level IDs)
+        # and the SDPA reference see the same token-level mask.
+        num_selected_blocks = topk // kbs
+        sm90_block_ids = build_index_sparse_indices(
+            B,
+            NHK,
+            SQ,
+            SK,
+            num_selected_blocks,
+            num_selected_blocks,
+            device,
+            sparse_k_block_size=kbs,
+        )
+        block_indices = _adapt_indices(
+            sm90_block_ids,
+            B=B,
+            SQ=SQ,
+            SK=SK,
+            NHQ=NHQ,
+            NHK=NHK,
+            tokens_per_block=tokens_per_block,
+            sparse_k_block_size=kbs,
+        )
+        # Expand block IDs → contiguous token IDs within each block
+        offsets = torch.arange(kbs, device=device, dtype=torch.int32)
+        valid = block_indices >= 0
+        expanded = block_indices.unsqueeze(-1) * kbs + offsets
+        expanded = torch.where(
+            valid.unsqueeze(-1),
+            expanded,
+            torch.full_like(expanded, -1),
+        )
+        indices = expanded.reshape(B, NHQ, SQ, topk)
+    else:
+        sm90_indices = build_index_sparse_indices(
+            B,
+            NHK,
+            SQ,
+            SK,
+            topk,
+            topk,
+            device,
+            sparse_k_block_size=kbs,
+        )
+        indices = _adapt_indices(
+            sm90_indices,
+            B=B,
+            SQ=SQ,
+            SK=SK,
+            NHQ=NHQ,
+            NHK=NHK,
+            tokens_per_block=tokens_per_block,
+            sparse_k_block_size=kbs,
+        )
+
+    # Reference FWD + BWD (always token-level indices after expansion)
     o_ref, dq_ref, dk_ref, dv_ref = _sdpa_ref_fwd_bwd(
-        q, k, v, dO, indices, softmax_scale
+        q,
+        k,
+        v,
+        dO,
+        indices,
+        softmax_scale,
     )
 
+    # ── FWD ──
     fwd_tiles = prepare_index_sparse_tiles(
         indices,
         batch_size=B,
@@ -208,6 +298,7 @@ def _run_index_sparse_case(
         m_block_size=fwd_m_block,
         n_block_size=128,
         pack_gqa=pack_gqa,
+        sparse_k_block_size=kbs,
     )
     out, lse = _flex_flash_attn_fwd(
         q,
@@ -218,6 +309,7 @@ def _run_index_sparse_case(
         pack_gqa=pack_gqa,
     )
 
+    # ── BWD (LoopK, m_block_size=128) ──
     bwd_tiles = prepare_index_sparse_tiles(
         indices,
         batch_size=B,
@@ -225,9 +317,10 @@ def _run_index_sparse_case(
         seqlen_k=SK,
         num_kv_heads=NHK,
         num_q_heads=NHQ,
-        m_block_size=128,  # LoopK BWD native packed-M tile
+        m_block_size=128,
         n_block_size=128,
         pack_gqa=pack_gqa,
+        sparse_k_block_size=kbs,
     )
     dq, dk, dv = _flex_flash_attn_bwd(
         q,
@@ -242,10 +335,11 @@ def _run_index_sparse_case(
         pack_gqa=pack_gqa,
     )
 
+    # ── Check ──
     tc = (
         f"B={B},NHQ={NHQ},NHK={NHK},D={D},SQ={SQ},SK={SK},topk={topk},"
-        f"pack_gqa={pack_gqa},atomic="
-        f"{os.environ.get('MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC', '0')}"
+        f"pack_gqa={pack_gqa},kbs={kbs},"
+        f"atomic={os.environ.get('MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC', '0')}"
     )
     assert_close(
         out,
@@ -281,232 +375,132 @@ def _run_index_sparse_case(
     )
 
 
-# =============================================================================
-# SM90-mirrored sweep (see tests/test_attn/test_index_sparse.py)
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════
+# Sweep tests
+# ═════════════════════════════════════════════════════════════════════
 
 
-def _run_config(cfg: dict):
-    """Map an SM90-style config dict onto the kernel-level runner."""
-    S = cfg.get("S", None)
-    S_kv = cfg.get("S_kv", S)
-    S_q = cfg.get("S_q", min(S_kv, 256))
-    _run_index_sparse_case(
-        B=cfg.get("B", 1),
-        NHQ=cfg["NHQ"],
-        NHK=cfg["NHK"],
-        D=cfg.get("D", 128),
-        SQ=S_q,
-        SK=S_kv,
-        topk=cfg["topk"],
-        pack_gqa=cfg.get("pack_gqa", True),
-    )
-
-
-def _cfgs(configs):
-    return pytest.mark.parametrize("config", configs, ids=[c["name"] for c in configs])
-
-
-# ─── Tier 1: CI quick (PackGQA GQA ratios) ───────────────────────────────────
 @requires_sm100
-@_cfgs(
-    [
-        # ratio=128, kBlockM=128 — canonical DiT
-        {"name": "mqa128_packgqa", "S": 256, "NHQ": 128, "NHK": 1, "topk": 128},
-        # ratio=64, kBlockM=64 full fill
-        {"name": "mqa64_packgqa", "S": 256, "NHQ": 64, "NHK": 1, "topk": 128},
-        # ratio=32, kBlockM=64 half fill
-        {"name": "mqa32_packgqa", "S": 256, "NHQ": 32, "NHK": 1, "topk": 128},
-        # ratio=16, small Q tile
-        {"name": "mqa16_packgqa", "S": 256, "NHQ": 16, "NHK": 1, "topk": 128},
-    ]
-)
-def test_simple_index_sparse(config):
-    _run_config(config)
+def test_index_sparse_classic_sweep():
+    """Classic sweep: Q_SEQLENS × KV_SEQLENS × TOPKS, MQA128 D=128 PackGQA kbs=1."""
+    Q_SEQLENS = [128, 512, 1024]
+    KV_SEQLENS = [512, 1024, 4096]
+    TOPKS = [128, 256]
+    device = "cuda"
+
+    configs = []
+    for sq in Q_SEQLENS:
+        for sk in KV_SEQLENS:
+            for topk in TOPKS:
+                if topk > sk:
+                    continue
+                configs.append(
+                    dict(
+                        B=1,
+                        SQ=sq,
+                        SK=sk,
+                        NHQ=128,
+                        NHK=1,
+                        D=128,
+                        topk=topk,
+                        pack_gqa=True,
+                        sparse_k_block_size=1,
+                    )
+                )
+
+    for i, cfg in enumerate(configs, 1):
+        print(
+            f"Testing config {i}/{len(configs)}: "
+            f"SQ={cfg['SQ']}, SK={cfg['SK']}, topk={cfg['topk']}"
+        )
+        _run_config(device, cfg)
 
 
-# ─── Tier 2a: Cross-batch (uniform topk; SM90 uses variable) ─────────────────
 @requires_sm100
-@_cfgs(
-    [
-        {"name": "mqa128_B2", "B": 2, "S": 256, "NHQ": 128, "NHK": 1, "topk": 128},
-        {"name": "mqa128_B3", "B": 3, "S": 256, "NHQ": 128, "NHK": 1, "topk": 128},
-        {"name": "mqa128_B8", "B": 8, "S": 256, "NHQ": 128, "NHK": 1, "topk": 128},
+def test_index_sparse_comprehensive_sweep():
+    """Comprehensive sweep: head_config × D × sparse_k_block_size."""
+    HEAD_CONFIGS = [
+        # (NHQ, NHK, pack_gqa)
+        (128, 1, True),  # MQA128
+        (64, 1, True),  # MQA64
+        (32, 1, True),  # MQA32
+        (16, 1, True),  # MQA16
+        (4, 4, True),  # GQA 4:4 (effectively MHA4)
+        (8, 2, True),  # GQA 8:2
+        (4, 1, True),  # MQA4
+        (16, 16, True),  # MHA16
     ]
-)
-def test_sparse_cross_batch(config):
-    _run_config(config)
+    DIMS = [64, 128]
+    KBS_LIST = [1, 128]
+    device = "cuda"
+
+    configs = []
+    for nhq, nhk, pack_gqa in HEAD_CONFIGS:
+        for D in DIMS:
+            for kbs in KBS_LIST:
+                if kbs > 1 and (nhk > 1 or D != 128):
+                    continue
+                if kbs == 1:
+                    sq, sk, topk = 256, 512, 128
+                else:
+                    sq, sk, topk = 256, 4096, 256
+                if topk % kbs != 0:
+                    continue
+                configs.append(
+                    dict(
+                        B=1,
+                        SQ=sq,
+                        SK=sk,
+                        NHQ=nhq,
+                        NHK=nhk,
+                        D=D,
+                        topk=topk,
+                        pack_gqa=pack_gqa,
+                        sparse_k_block_size=kbs,
+                    )
+                )
+
+    for i, cfg in enumerate(configs, 1):
+        print(
+            f"Testing config {i}/{len(configs)}: "
+            f"NHQ={cfg['NHQ']}, NHK={cfg['NHK']}, D={cfg['D']}, "
+            f"kbs={cfg['sparse_k_block_size']}"
+        )
+        _run_config(device, cfg)
 
 
-# ─── Tier 2b: Q/KV different lengths ─────────────────────────────────────────
 @requires_sm100
-@_cfgs(
-    [
-        {
-            "name": "short_q_long_kv",
-            "S_q": 64,
-            "S_kv": 1024,
-            "NHQ": 128,
-            "NHK": 1,
-            "topk": 128,
-        },
-        {"name": "tiny_q", "S_q": 8, "S_kv": 512, "NHQ": 128, "NHK": 1, "topk": 128},
-        {
-            "name": "unaligned_q",
-            "S_q": 100,
-            "S_kv": 512,
-            "NHQ": 128,
-            "NHK": 1,
-            "topk": 128,
-        },
+def test_partial_topk_sweep():
+    """SM100-only: topk not a multiple of 128 (scatter mode, kbs=1 only)."""
+    PARTIAL_CONFIGS = [
+        dict(SQ=256, SK=512, topk=192),
+        dict(SQ=256, SK=512, topk=448),
+        dict(SQ=128, SK=1024, topk=320),
+        dict(SQ=512, SK=2048, topk=576),
+        dict(SQ=1024, SK=4096, topk=960),
     ]
-)
-def test_sparse_qkv_lengths(config):
-    _run_config(config)
+    device = "cuda"
 
+    configs = []
+    for pc in PARTIAL_CONFIGS:
+        configs.append(
+            dict(
+                B=1,
+                NHQ=8,
+                NHK=1,
+                D=128,
+                pack_gqa=True,
+                sparse_k_block_size=1,
+                **pc,
+            )
+        )
 
-# ─── Tier 3a: Head dim variants ──────────────────────────────────────────────
-@requires_sm100
-@_cfgs(
-    [
-        {"name": "D64", "S": 256, "NHQ": 128, "NHK": 1, "D": 64, "topk": 128},
-        {"name": "D128", "S": 256, "NHQ": 128, "NHK": 1, "D": 128, "topk": 128},
-    ]
-)
-def test_sparse_head_dim(config):
-    _run_config(config)
-
-
-# ─── Tier 3b: Long sequence ──────────────────────────────────────────────────
-@requires_sm100
-@_cfgs(
-    [
-        {"name": "mqa128_long_seq", "S": 8192, "NHQ": 128, "NHK": 1, "topk": 1024},
-        {"name": "mqa16_long_seq", "S": 8192, "NHQ": 16, "NHK": 1, "topk": 1024},
-    ]
-)
-def test_sparse_long_seq(config):
-    _run_config(config)
-
-
-# ─── Tier 3c: GQA (NHK>1, NHQ>NHK) ───────────────────────────────────────────
-@requires_sm100
-@_cfgs(
-    [
-        {
-            "name": "gqa64x2_packgqa",
-            "S": 256,
-            "NHQ": 128,
-            "NHK": 2,
-            "topk": 128,
-            "pack_gqa": True,
-        },
-        {
-            "name": "gqa64x2_no_packgqa",
-            "S": 256,
-            "NHQ": 128,
-            "NHK": 2,
-            "topk": 128,
-            "pack_gqa": False,
-        },
-        {
-            "name": "gqa4x4_packgqa",
-            "S": 256,
-            "NHQ": 16,
-            "NHK": 4,
-            "topk": 128,
-            "pack_gqa": True,
-        },
-        {
-            "name": "gqa8x2_packgqa",
-            "S": 256,
-            "NHQ": 16,
-            "NHK": 2,
-            "topk": 128,
-            "pack_gqa": True,
-        },
-    ]
-)
-def test_sparse_gqa(config):
-    _run_config(config)
-
-
-# ─── Tier 3d: MHA (NHQ==NHK, multi-KV-head) ──────────────────────────────────
-@requires_sm100
-@_cfgs(
-    [
-        {"name": "mha4", "S": 256, "NHQ": 4, "NHK": 4, "topk": 128, "pack_gqa": False},
-        {
-            "name": "mha16",
-            "S": 256,
-            "NHQ": 16,
-            "NHK": 16,
-            "topk": 128,
-            "pack_gqa": False,
-        },
-    ]
-)
-def test_sparse_mha(config):
-    _run_config(config)
-
-
-# ─── Tier P: SM100-only partial topk (topk % 128 != 0) ───────────────────────
-@requires_sm100
-@_cfgs(
-    [
-        {
-            "name": "partial_256_512_192",
-            "S_q": 256,
-            "S_kv": 512,
-            "NHQ": 8,
-            "NHK": 1,
-            "topk": 192,
-        },
-        {
-            "name": "partial_256_512_448",
-            "S_q": 256,
-            "S_kv": 512,
-            "NHQ": 8,
-            "NHK": 1,
-            "topk": 448,
-        },
-        {
-            "name": "partial_128_1024_320",
-            "S_q": 128,
-            "S_kv": 1024,
-            "NHQ": 8,
-            "NHK": 1,
-            "topk": 320,
-        },
-        {
-            "name": "partial_512_2048_576",
-            "S_q": 512,
-            "S_kv": 2048,
-            "NHQ": 8,
-            "NHK": 1,
-            "topk": 576,
-        },
-        {
-            "name": "partial_1024_4096_960",
-            "S_q": 1024,
-            "S_kv": 4096,
-            "NHQ": 8,
-            "NHK": 1,
-            "topk": 960,
-        },
-    ]
-)
-def test_partial_topk_multi_niter(config):
-    """SM100-only: partial last block (topk % 128 != 0, mask_block_cnt > 1).
-
-    Regression for the block-sparse softmax mask-ordering fix: softmax consumes
-    S-tiles in ascending block order (the reverse of the load order), so the
-    per-step mask label must also be ascending and mask_seqlen must be applied on
-    every mask step, otherwise the seqlen_k / padding mask lands on the wrong
-    physical block and the partial tail is left unmasked. SM90 forbids this case
-    (max_topk must be a multiple of the tile size).
-    """
-    _run_config(config)
+    for i, cfg in enumerate(configs, 1):
+        print(
+            f"Testing config {i}/{len(configs)}: "
+            f"SQ={cfg['SQ']}, SK={cfg['SK']}, topk={cfg['topk']}"
+        )
+        _run_config(device, cfg)
 
 
 if __name__ == "__main__":
