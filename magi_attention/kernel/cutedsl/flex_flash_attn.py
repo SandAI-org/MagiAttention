@@ -45,6 +45,7 @@ from .ffa_fwd_sm100 import FFAFwdSm100
 from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
+    MaskMode,
     TorchFlexAttnArgs,
     convert_from_dlpack_leading_static,
     create_softcap_scoremod,
@@ -54,13 +55,15 @@ from .ffa_utils import (
     is_ffa_2cta_disabled,
     is_ffa_clc_enabled,
     maybe_contiguous,
-    normalize_mask_types,
+    normalize_mask_type_spec,
     ranges_to_cu_seqlens,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
     validate_head_dims,
+    validate_per_range_mask_feature_support,
     validate_tensor,
+    validate_true_ranges,
 )
 from .sparse_utils import (
     block_sparse_call_tuple,
@@ -80,6 +83,8 @@ def _flex_flash_attn_fwd(
     q_ranges: torch.Tensor | None = None,
     k_ranges: torch.Tensor | None = None,
     mask_type: int = MT_MAP.full,
+    mask_mode: MaskMode = MaskMode.STATIC_FULL,
+    mask_types_tensor: torch.Tensor | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
@@ -93,10 +98,18 @@ def _flex_flash_attn_fwd(
 
     Args:
         ...
-        q_ranges/k_ranges: ``[N, 2]`` int32 cuda tensors of [start, end) q/k
-            ranges. For now only ranges equivalent to a cu_seqlens partition are
-            supported (see :func:`ranges_to_cu_seqlens`); they are collapsed to
-            cu_seqlens before reaching the kernel.
+        q_ranges/k_ranges: ``[R, 2]`` int32 cuda tensors of [start, end) q/k
+            ranges (relation IR). Validated by :func:`validate_true_ranges`.
+            While Phase 2 true-range wiring is incomplete, ranges must still
+            form a cu_seqlens partition and are collapsed via
+            :func:`ranges_to_cu_seqlens` (SM100/SM110 only).
+        mask_type: static ``MT_MAP`` int used by kernel constructors that still
+            specialize on a single mask type.
+        mask_mode: host-side :class:`MaskMode` used in the compile key. Static
+            Full/Causal keep today's specialized kernels; ``PER_RANGE``
+            selects the runtime per-range kernel.
+        mask_types_tensor: optional CUDA ``int32[R]`` tensor for per-range
+            mask selection. Must be ``None`` for static modes.
         flex_attn_args: optional torch FlexAttention-style / block-sparse args
             (``score_mod`` / ``mask_mod`` / ``aux_tensors`` /
             ``block_sparse_tensors``). See :class:`TorchFlexAttnArgs`.
@@ -116,12 +129,14 @@ def _flex_flash_attn_fwd(
     assert (
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
-
-    # Step-1 hack: only q/k ranges equivalent to a cu_seqlens partition are
-    # supported, so collapse them to cu_seqlens here and keep the kernel-facing
-    # internals on cu_seqlens for now.
-    cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
-    cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
+    if mask_mode == MaskMode.PER_RANGE:
+        assert (
+            mask_types_tensor is not None
+        ), "PER_RANGE requires mask_types_tensor"
+    else:
+        assert (
+            mask_types_tensor is None
+        ), "static mask modes must not pass mask_types_tensor"
 
     # Unpack the torch FlexAttention-style / block-sparse args (fwd uses these).
     flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
@@ -132,6 +147,14 @@ def _flex_flash_attn_fwd(
 
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
     num_head, head_dim = q.shape[-2:]
+    has_ranges = q_ranges is not None or k_ranges is not None
+    if has_ranges:
+        validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types_tensor)
+    # DEVIATION: collapse validated ranges to cu_seqlens for current kernels
+    # Reason: SeqlenInfo still consumes cu_seqlens until Phase 2 true-range
+    # Recovery: validate_true_ranges above; Phase 2 passes mQRanges/mKRanges
+    cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
+    cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
     if cu_seqlens_q is None:
         batch_size, seqlen_q = q.shape[:2]
         total_q = batch_size * seqlen_q
@@ -231,16 +254,29 @@ def _flex_flash_attn_fwd(
     use_block_sparsity = block_sparse_tensors is not None
 
     local = False
-    # NOTE: only a single mask type shared by all q/k ranges is supported for now,
-    # so collapse mask_type down to the legacy causal bool for the host-side
-    # heuristics and for the kernels that still take is_causal (all but SM100).
-    causal = mask_type == MT_MAP.causal
+    # Static modes collapse to the legacy causal bool for host-side heuristics
+    # and for kernels that still take is_causal. Per-range mode is treated as
+    # may-be-causal for tiling / 2CTA / CLC decisions.
+    #
+    # DEVIATION: per-range forces causal-compatible host heuristics
+    # Reason: one mixed compile entry must reserve causal trip/register budget
+    # Recovery: static Full/Causal paths keep their original specialization
+    use_per_range_mask = mask_mode == MaskMode.PER_RANGE
+    causal = mask_type == MT_MAP.causal or use_per_range_mask
     if mask_mod is not None:
+        assert not use_per_range_mask, "per-range mask cannot combine with mask_mod"
         causal = False
         mask_type = MT_MAP.full
+        mask_mode = MaskMode.STATIC_FULL
 
     requested_use_clc_scheduler = is_ffa_clc_enabled()
     requested_disable_2cta = is_ffa_2cta_disabled(is_fwd=True)
+    if use_per_range_mask:
+        # DEVIATION: force-disable 2CTA/CLC for per-range masks
+        # Reason: V1 mixed kernel keeps 1CTA + static scheduler for correctness
+        # Recovery: none in V1; revisit after runtime mixed path is stable
+        requested_disable_2cta = True
+        requested_use_clc_scheduler = False
 
     current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
 
@@ -344,7 +380,7 @@ def _flex_flash_attn_fwd(
         head_dim,
         head_dim_v,
         qhead_per_kvhead,
-        mask_type,
+        mask_mode,
         score_mod_hash,
         mask_mod_hash,
         use_block_sparsity,
@@ -379,6 +415,11 @@ def _flex_flash_attn_fwd(
             to_cute_tensor(t, assumed_align=4, leading_dim=0) if t is not None else None
             for t in (cu_seqlens_q, cu_seqlens_k, sink)
         ]
+        mask_types_cute_tensor = (
+            to_cute_tensor(mask_types_tensor, assumed_align=4, leading_dim=0)
+            if mask_types_tensor is not None
+            else None
+        )
         seqused_q_tensor = seqused_k_tensor = None
         page_table_tensor = None
         q_tensor, k_tensor, v_tensor, o_tensor = [
@@ -454,7 +495,10 @@ def _flex_flash_attn_fwd(
                     m_block_size=tile_m,
                     n_block_size=tile_n,
                     q_stage=q_stage,
-                    is_persistent=not causal and not local and cu_seqlens_q is None,
+                    is_persistent=not causal
+                    and not local
+                    and cu_seqlens_q is None
+                    and not use_per_range_mask,
                     score_mod=score_mod,
                     mask_mod=mask_mod,
                     has_aux_tensors=aux_tensors is not None,
@@ -463,6 +507,7 @@ def _flex_flash_attn_fwd(
                     q_subtile_factor=q_subtile_factor,
                     use_2cta_instrs=use_2cta_instrs,
                     use_clc_scheduler=use_clc_scheduler,
+                    use_per_range_mask=use_per_range_mask,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 12:
@@ -510,6 +555,7 @@ def _flex_flash_attn_fwd(
         if major_arch in [10, 11]:
             # FP8 descale tensors removed; SM100 kernel descale slot is always None.
             compile_args.append(None)
+            compile_args.append(mask_types_cute_tensor)
         compile_args.extend(
             [
                 sparse_tensors,
@@ -542,6 +588,7 @@ def _flex_flash_attn_fwd(
     if major_arch in [10, 11]:
         # FP8 descale tensors removed; SM100 kernel descale slot is always None.
         call_args.append(None)
+        call_args.append(mask_types_tensor)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
@@ -570,6 +617,8 @@ def _flex_flash_attn_bwd(
     q_ranges: torch.Tensor | None = None,
     k_ranges: torch.Tensor | None = None,
     mask_type: int = MT_MAP.full,
+    mask_mode: MaskMode = MaskMode.STATIC_FULL,
+    mask_types_tensor: torch.Tensor | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
@@ -591,10 +640,21 @@ def _flex_flash_attn_bwd(
     assert (
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
+    if mask_mode == MaskMode.PER_RANGE:
+        assert (
+            mask_types_tensor is not None
+        ), "PER_RANGE requires mask_types_tensor"
+    else:
+        assert (
+            mask_types_tensor is None
+        ), "static mask modes must not pass mask_types_tensor"
 
-    # Step-1 hack: only q/k ranges equivalent to a cu_seqlens partition are
-    # supported, so collapse them to cu_seqlens here and keep the kernel-facing
-    # internals on cu_seqlens for now.
+    has_ranges = q_ranges is not None or k_ranges is not None
+    if has_ranges:
+        validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types_tensor)
+    # DEVIATION: collapse validated ranges to cu_seqlens for current kernels
+    # Reason: SeqlenInfo still consumes cu_seqlens until Phase 2 true-range
+    # Recovery: validate_true_ranges above; Phase 2 passes mQRanges/mKRanges
     cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
     cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
 
@@ -608,10 +668,11 @@ def _flex_flash_attn_bwd(
     block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
 
     local = False
-    # NOTE: only a single mask type shared by all q/k ranges is supported for now,
-    # so collapse mask_type down to the legacy causal bool for the host-side
-    # heuristics and for the kernels that still take is_causal (all but SM100).
-    causal = mask_type == MT_MAP.causal
+    use_per_range_mask = mask_mode == MaskMode.PER_RANGE
+    # DEVIATION: per-range forces causal-compatible host heuristics
+    # Reason: one mixed compile entry must reserve causal trip/register budget
+    # Recovery: static Full/Causal paths keep their original specialization
+    causal = mask_type == MT_MAP.causal or use_per_range_mask
     sparse_q = None
     if block_sparse_tensors is not None and major_arch == 9:
         sparse_q = (
@@ -731,8 +792,16 @@ def _flex_flash_attn_bwd(
                 or score_mod_bwd is not None
                 or mask_mod is not None
                 or block_sparse_tensors is not None
+                or use_per_range_mask
             )
-            cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
+            # DEVIATION: force 1CTA for per-range masks
+            # Reason: V1 mixed bwd keeps 1CTA for correctness
+            # Recovery: none in V1
+            cluster_size = (
+                1
+                if use_per_range_mask
+                else (2 if head_dim >= 128 and not disable_2cta else 1)
+            )
             use_2cta_instrs = cluster_size == 2
 
     q, k, v, out, dout, lse, cu_seqlens_q, cu_seqlens_k = [
@@ -1035,7 +1104,7 @@ def _flex_flash_attn_bwd(
             head_dim,
             head_dim_v,
             qhead_per_kvhead,
-            mask_type,
+            mask_mode,
             m_block_size,
             n_block_size,
             num_threads,
@@ -1075,7 +1144,7 @@ def _flex_flash_attn_bwd(
             head_dim,
             head_dim_v,
             qhead_per_kvhead,
-            mask_type,
+            mask_mode,
             m_block_size,
             n_block_size,
             num_threads,
@@ -1203,6 +1272,7 @@ def _flex_flash_attn_bwd(
                     mask_mod=mask_mod,
                     has_aux_tensors=aux_tensors is not None,
                     subtile_factor=subtile_factor,
+                    use_per_range_mask=use_per_range_mask,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
@@ -1212,8 +1282,13 @@ def _flex_flash_attn_bwd(
             if normalized_block_sparse_tensors is not None
             else None
         )
+        mask_types_cute_tensor = (
+            to_cute_tensor(mask_types_tensor, assumed_align=4, leading_dim=0)
+            if mask_types_tensor is not None
+            else None
+        )
 
-        _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
+        bwd_compile_args = [
             ffa_bwd_obj,
             q_tensor,
             k_tensor,
@@ -1234,12 +1309,21 @@ def _flex_flash_attn_bwd(
             dQ_semaphore_tensor,
             dK_semaphore_tensor,
             dV_semaphore_tensor,
-            cute_aux_tensors,
-            sparse_tensors_compile,
-            current_stream,
+        ]
+        if major_arch in [10, 11]:
+            bwd_compile_args.append(mask_types_cute_tensor)
+        bwd_compile_args.extend(
+            [
+                cute_aux_tensors,
+                sparse_tensors_compile,
+                current_stream,
+            ]
+        )
+        _flex_flash_attn_bwd.compile_cache[compile_key] = cute.compile(
+            *bwd_compile_args,
             options="--enable-tvm-ffi",
         )
-    _flex_flash_attn_bwd.compile_cache[compile_key](
+    bwd_call_args = [
         q.detach(),
         k.detach(),
         v.detach(),
@@ -1259,9 +1343,16 @@ def _flex_flash_attn_bwd(
         dQ_semaphore,
         dK_semaphore,
         dV_semaphore,
-        aux_tensors,
-        block_sparse_call_tuple(normalized_block_sparse_tensors),
+    ]
+    if major_arch in [10, 11]:
+        bwd_call_args.append(mask_types_tensor)
+    bwd_call_args.extend(
+        [
+            aux_tensors,
+            block_sparse_call_tuple(normalized_block_sparse_tensors),
+        ]
     )
+    _flex_flash_attn_bwd.compile_cache[compile_key](*bwd_call_args)
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
     match major_arch:
@@ -1376,7 +1467,41 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         deterministic: bool = False,
         flex_attn_args: TorchFlexAttnArgs | None = None,
     ):
-        mask_type = normalize_mask_types(mask_types)
+        arch, major_arch = get_device_arch()
+        is_varlen = q_ranges is not None or k_ranges is not None
+        if is_varlen:
+            num_ranges = validate_true_ranges(
+                q_ranges, k_ranges, mask_types=mask_types
+            )
+        else:
+            num_ranges = int(q.shape[0])
+
+        mask_spec = normalize_mask_type_spec(
+            mask_types,
+            num_ranges=num_ranges if is_varlen else None,
+            batch_size=None if is_varlen else num_ranges,
+            is_varlen=is_varlen,
+        )
+        flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
+        validate_per_range_mask_feature_support(
+            mask_spec,
+            major_arch=major_arch,
+            has_mask_mod=flex_attn_args.mask_mod is not None,
+            has_block_sparse=flex_attn_args.block_sparse_tensors is not None,
+            has_score_mod=flex_attn_args.score_mod is not None,
+            has_softcap=bool(softcap),
+        )
+        mask_mode = mask_spec.mode
+        mask_types_tensor = mask_spec.per_range_mask_types
+        if mask_spec.is_per_range:
+            # DEVIATION: report causal mask_type for may-be-causal mixed compile
+            # Reason: FFAFwdSm100.is_causal / host heuristics key off mask_type
+            # Recovery: runtime mMaskTypes[batch] selects Full vs Causal
+            mask_type = MT_MAP.causal
+        else:
+            assert mask_spec.static_mask_type is not None
+            mask_type = int(mask_spec.static_mask_type)
+
         out, lse = _flex_flash_attn_fwd(
             q=q,
             k=k,
@@ -1387,6 +1512,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_k=max_seqlen_k,
             softmax_scale=softmax_scale,
             mask_type=mask_type,
+            mask_mode=mask_mode,
+            mask_types_tensor=mask_types_tensor,
             sink=sink,
             sink_layout=sink_layout,
             softcap=softcap,
@@ -1395,6 +1522,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         )
 
         aux_tensors = flex_attn_args.aux_tensors if flex_attn_args else None
+        # mask_types does not require grad tracking; keep it on ctx directly so
+        # save_for_backward stays focused on tensors that participate in autograd.
+        ctx.mask_mode = mask_mode
+        ctx.mask_type = mask_type
+        ctx.mask_types_tensor = mask_types_tensor
         ctx.save_for_backward(
             q,
             k,
@@ -1407,7 +1539,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             *(aux_tensors or ()),
         )
         ctx.softmax_scale = softmax_scale
-        ctx.mask_type = mask_type
         ctx.sink_layout = sink_layout
         ctx.softcap = softcap
         ctx.deterministic = deterministic
@@ -1453,7 +1584,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dout=dout,
             softmax_scale=ctx.softmax_scale,
             mask_type=ctx.mask_type,
-            sink=sink,
+            mask_mode=ctx.mask_mode,
+            mask_types_tensor=ctx.mask_types_tensor,
+             sink=sink,
             sink_layout=ctx.sink_layout,
             softcap=ctx.softcap,
             q_ranges=q_ranges,
@@ -1486,26 +1619,33 @@ def flex_flash_attn_func(
     flex_attn_args: TorchFlexAttnArgs | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
-    Flex-flash-attention interface (dense / varlen).
+    Flex-flash-attention interface (dense / range / varlen).
 
     Explanation of some optional arguments:
 
-    q_ranges/k_ranges: ``[N, 2]`` int32 cuda tensors describing the per-range
+    q_ranges/k_ranges: ``[R, 2]`` int32 cuda tensors describing per-range
         [start, end) intervals over the packed (total_seqlen, nheads, headdim)
-        q/k layout. When provided, q/k/v are expected in that packed layout.
-        For now only ranges equivalent to a cu_seqlens partition (contiguous,
-        non-overlapping, starting at 0) are supported, i.e. plain varlen; the
-        caller must guarantee this. Leave as ``None`` for the dense
+        q/k layout — the CuteDSL relation IR (aligned with C++ FFA ranges under
+        non-overlapping Q/K, i.e. ``disable_*_atomic_reduction=True``).
+        When provided, both must be set, q/k/v must be packed, and the device
+        must be SM100/SM110. Leave as ``None`` for the dense
         (batch, seqlen, nheads, headdim) path.
 
-    max_seqlen_q/max_seqlen_k: max sequence length over the batch (varlen).
+        # DEVIATION: ranges must still be equivalent to a cu_seqlens partition
+        # Reason: kernels still collapse via ranges_to_cu_seqlens until Phase 2
+        # Recovery: Phase 2 passes mQRanges/mKRanges and drops the collapse
+
+    max_seqlen_q/max_seqlen_k: max sequence length over the ranges (varlen).
 
     mask_types: the attention mask type applied to the q/k ranges, using the
-        int keys from ``MT_MAP`` (0=full, 1=causal). It may be:
+        int keys from ``MT_MAP`` (0=full, 1=causal, 2=inv_causal, 3=bi_causal).
+        It may be:
         - ``None``: all ranges use full attention (the default).
-        - ``int``: all ranges share the same mask type.
-        - ``torch.Tensor`` (cuda int32): a distinct mask type per q/k range
-          (not supported yet).
+        - ``int``: all ranges share the same mask type. Only 0/1 are accepted
+          here; 2/3 exist solely on the per-range path below.
+        - ``torch.Tensor`` (cuda int32 ``[R]``): a distinct mask type per range
+          (SM100/SM110). Forward and backward both use a runtime per-range path
+          (1CTA, no CLC).
 
     softcap: tanh logit soft-capping value. Implemented internally via the
         score_mod machinery, but exposed here as a plain scalar.
@@ -1514,7 +1654,7 @@ def flex_flash_attn_func(
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
         ``mask_mod`` / ``aux_tensors``) and block-sparse
         (``block_sparse_tensors`` / ``block_sparse_tensors_bwd``) capabilities.
-        Leave as ``None`` for the plain dense / varlen path.
+        Leave as ``None`` for the plain dense / range path.
     """
     out, lse = FlexFlashAttnFunc.apply(
         q,
