@@ -154,26 +154,28 @@ def _sdpa_ref_fwd_bwd(q, k, v, dO, indices, softmax_scale):
     )
 
 
+# Validation mirrors SM90's tests/test_attn/test_index_attn.py: a pure
+# max-absolute-difference threshold (atol=0.01 for the forward output, 0.05 for
+# gradients). max-abs is more interpretable than cosine (which stays ~1 even
+# under a systematic scale error) and than a per-element relative error (which
+# blows up on the many near-zero dK/dV components at high GQA pack ratios).
+_ATOL = {"O": 0.01, "dQ": 0.05, "dK": 0.05, "dV": 0.05}
+
+
 def _check(name, got, ref, errors):
     diff = (got.float() - ref.float()).abs()
-    # Normalized L1 relative error (sum|diff| / sum|ref|): robust to near-zero
-    # reference entries, unlike a per-element diff/|ref| mean which blows up on
-    # the many tiny dK/dV components at high GQA pack ratios.
-    mean_rel = (diff.sum() / ref.float().abs().sum().clamp(min=1e-6)).item()
     max_abs = diff.max().item()
-    cosine = torch.nn.functional.cosine_similarity(
-        got.float().flatten(), ref.float().flatten(), dim=0
-    ).item()
-    rel_limit = 0.05 if name in ("dK", "dV") else 0.02
-    abs_limit = 1.0 if name in ("dK", "dV") else 0.5
-    ok = mean_rel < rel_limit and max_abs < abs_limit and cosine >= 0.999
+    atol = _ATOL[name]
+    ok = max_abs < atol
+    # non-gating diagnostics
+    mean_rel = (diff.sum() / ref.float().abs().sum().clamp(min=1e-6)).item()
     line = (
-        f"{name}: mean_rel={mean_rel:.6f} max_abs={max_abs:.4f} "
-        f"cosine={cosine:.6f} [{'PASS' if ok else 'FAIL'}]"
+        f"{name}: max_abs={max_abs:.6f} (atol={atol}) "
+        f"rel_l1={mean_rel:.4f} [{'PASS' if ok else 'FAIL'}]"
     )
     print(f"  {line}", flush=True)
     if not ok:
-        errors.append(line)
+        errors.append(f"{line} -- max_abs {max_abs:.6f} >= atol {atol}")
 
 
 def _run_index_sparse_case(
