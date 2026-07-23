@@ -18,7 +18,7 @@
 
 import enum
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, TypeAlias
+from typing import Callable, Optional, Tuple, TypeAlias, cast
 
 import cutlass
 import cutlass.cute as cute
@@ -28,6 +28,7 @@ from quack import layout_utils
 
 from . import cutedsl_utils
 from .block_info import BlockInfo
+from .ffa_utils import MT_MAP
 from .seqlen_info import SeqlenInfoQK
 
 MaskGenFn: TypeAlias = Callable[[int], Uint32]
@@ -165,7 +166,7 @@ class AttentionMask:
         fastdiv_mods=(None, None),
     ) -> None:
         assert not (
-            mask_causal and mask_local
+            cast(bool, mask_causal) and cast(bool, mask_local)
         ), "mask_causal and mask_local cannot be both True"
         acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S, transpose=self.swap_AB)
         acc_shape = (self.tile_m, self.tile_n)
@@ -476,7 +477,7 @@ class AttentionMask:
         rBitmask: Optional[cute.Tensor] = None,
     ) -> None:
         assert not (
-            mask_causal and mask_local
+            cast(bool, mask_causal) and cast(bool, mask_local)
         ), "mask_causal and mask_local cannot be both True"
         acc_shape = (self.tile_m, self.tile_n)
         cS = cute.make_identity_tensor(
@@ -650,6 +651,68 @@ class AttentionMask:
                     mask_r2p_lambda(acc_S, mask_gen_fn, rank1=True)
 
     @cute.jit
+    def apply_mask_sm100_per_range(
+        self,
+        acc_S: cute.Tensor,
+        m_block: Int32,
+        n_block: Int32,
+        thr_mma: cute.TiledMma,
+        thr_tmem_load: cute.TiledCopy,
+        mask_seqlen: cutlass.Constexpr[bool],
+        attn_type: Int32,
+        r2p: bool = True,
+    ) -> None:
+        """Runtime element mask for per-range masks (fwd), all four types.
+
+        Both sides are expressed as column limits and combined into one R2P
+        bitmask. A type that does not constrain a side gets the degenerate limit
+        for that side, which keeps every column.
+        """
+        acc_shape = (self.tile_m, self.tile_n)
+        cS = cute.make_identity_tensor(
+            acc_shape if not self.swap_AB else acc_shape[::-1]
+        )
+        tScS = thr_mma.partition_C(cS)
+        tScS = tScS[(None, None), 0, 0]
+        tScS_t2r = thr_tmem_load.partition_D(tScS)
+        # Completely masked rows can pass n_block_max == 0; treat as block 0.
+        if n_block < 0:
+            n_block = 0
+        seqlenk_col_limit = self.seqlen_k - n_block * self.tile_n
+        row_idx = tScS_t2r[0][0] + m_block * self.tile_m
+        if const_expr(self.qhead_per_kvhead_packgqa != 1):
+            row_idx = row_idx // self.qhead_per_kvhead_packgqa
+
+        col_limit_right = Int32(self.tile_n)
+        if const_expr(mask_seqlen):
+            col_limit_right = seqlenk_col_limit
+        if attn_type == MT_MAP.causal or attn_type == MT_MAP.bi_causal:
+            causal_row_offset = self.seqlen_k - n_block * self.tile_n - self.seqlen_q
+            col_limit_right = row_idx + causal_row_offset + 1
+            if const_expr(mask_seqlen):
+                col_limit_right = cutlass.min(col_limit_right, seqlenk_col_limit)
+
+        col_limit_left = Int32(0)
+        if attn_type == MT_MAP.inv_causal or attn_type == MT_MAP.bi_causal:
+            col_limit_left = row_idx - n_block * self.tile_n
+
+        if const_expr(not r2p):
+            for i in cutlass.range(cute.size(tScS_t2r.shape), unroll_full=True):
+                col = tScS_t2r[i][1]
+                acc_S[i] = (
+                    -Float32.inf
+                    if col >= col_limit_right or col < col_limit_left
+                    else acc_S[i]
+                )
+        else:
+            mask_r2p_lambda(
+                acc_S,
+                lambda s: r2p_bitmask_below(col_limit_right, s)
+                & r2p_bitmask_above(col_limit_left, s),
+                rank1=True,
+            )
+
+    @cute.jit
     def apply_mask_sm100_transposed(
         self,
         acc_S: cute.Tensor,
@@ -680,7 +743,7 @@ class AttentionMask:
                           When iterating m_blocks in forward order, only the last m_block may be partial.
         """
         assert not (
-            mask_causal and mask_local
+            cast(bool, mask_causal) and cast(bool, mask_local)
         ), "mask_causal and mask_local cannot be both True"
         ROW = 0 if const_expr(not self.swap_AB) else 1
         COL = 1 if const_expr(not self.swap_AB) else 0
@@ -848,6 +911,60 @@ class AttentionMask:
                         mask_gen_fn,
                         rank1=True,
                     )
+
+    @cute.jit
+    def apply_mask_sm100_transposed_per_range(
+        self,
+        acc_S: cute.Tensor,
+        tScS_t2r: cute.Tensor,
+        t0ScS_t2r: cute.Tensor,
+        m_block: cutlass.Int32,
+        n_block: cutlass.Int32,
+        mask_seqlen: cutlass.Constexpr,
+        attn_type: Int32,
+        # Accepted for call-site parity with apply_mask_sm100_transposed;
+        # V1 per-range path does not use mask_mod / seqlen_q boundary opts.
+        is_full_block: bool = False,
+        check_m_boundary: bool = True,
+    ) -> None:
+        """Runtime element mask for per-range masks (bwd), all four types.
+
+        Same coordinate convention as :meth:`apply_mask_sm100_transposed`:
+        ROW → Q (``m_block``), COL → KV (``n_block``). Dual of the fwd helper:
+        here the two sides are row limits rather than column limits.
+        """
+        ROW = 0 if const_expr(not self.swap_AB) else 1
+        COL = 1 if const_expr(not self.swap_AB) else 0
+        thr_col_offset = tScS_t2r[0][COL]
+        thr_row_offset = tScS_t2r[0][ROW]
+        seqlenk_col_limit = self.seqlen_k - n_block * self.tile_n - thr_col_offset
+        seqlenq_row_limit = self.seqlen_q - m_block * self.tile_m - thr_row_offset
+        causal_offset = seqlenq_row_limit - seqlenk_col_limit
+
+        row_limit_lo = Int32(0)
+        if attn_type == MT_MAP.causal or attn_type == MT_MAP.bi_causal:
+            row_limit_lo = causal_offset
+        row_limit_hi = Int32(self.tile_m)
+        if attn_type == MT_MAP.inv_causal or attn_type == MT_MAP.bi_causal:
+            # Visible rows are r <= causal_offset + (Sk - Sq); +1 makes it the
+            # exclusive bound that r2p_bitmask_below expects.
+            row_limit_hi = causal_offset + self.seqlen_k - self.seqlen_q + 1
+        if const_expr(mask_seqlen):
+            # Mask out the entire column when K is fully OOB.
+            if seqlenk_col_limit <= 0:
+                row_limit_lo = Int32(self.tile_m)
+
+        num_rep = cute.size(tScS_t2r, mode=[0])  # 16 or 32
+        num_wg = 2
+        # Convert row thresholds before use: row_to_r2p_idx is monotonic but not
+        # linear, so the ±1 above must be applied in row space.
+        lo_elem = row_to_r2p_idx(row_limit_lo, num_rep, num_wg)
+        hi_elem = row_to_r2p_idx(row_limit_hi, num_rep, num_wg)
+        mask_r2p_lambda(
+            acc_S,
+            lambda s: r2p_bitmask_above(lo_elem, s) & r2p_bitmask_below(hi_elem, s),
+            rank1=True,
+        )
 
 
 # -----------------------------------------------------------------------------
