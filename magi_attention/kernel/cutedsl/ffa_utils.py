@@ -19,6 +19,7 @@ import hashlib
 import inspect
 import os
 from dataclasses import dataclass, replace
+from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Callable, ClassVar, Tuple
 
@@ -55,71 +56,295 @@ class _MaskTypeMap:
     full: ClassVar[int] = 0
     causal: ClassVar[int] = 1
 
-    # TODO: support inv_causal and bi_causal
-    # inv_causal: ClassVar[int] = 2
-    # bi_causal: ClassVar[int] = 3
+    inv_causal: ClassVar[int] = 2
+    bi_causal: ClassVar[int] = 3
 
     def is_valid(self, mask_type: int) -> bool:
         """Check if the given mask type is valid."""
-        return mask_type in range(2)  # Update if more mask types are added
+        return mask_type in range(4)  # Update if more mask types are added
 
 
 MT_MAP = _MaskTypeMap()
 
 
-def normalize_mask_types(mask_types: torch.Tensor | int | None) -> int:
-    """Translate the public ``mask_types`` argument into a single mask-type int.
+class MaskMode(Enum):
+    """Host-side specialization mode for attention masks.
 
-    The full q/k ranges semantics allow a distinct mask type per range, but the
-    current kernels only support a single mask type shared by all ranges. So this
-    helper collapses the supported cases down to one ``MT_MAP`` int:
-
-    - ``None``  -> all ranges use full attention (``MT_MAP.full``).
-    - ``int``   -> all ranges share the same mask type (validated against ``MT_MAP``).
-    - ``Tensor``-> per-range mask types (not yet supported by the kernel).
+    Static modes preserve the existing compile-time-specialized kernels. The
+    per-range mode identifies a runtime ``int32[R]`` mask tensor holding one
+    ``MT_MAP`` entry per q/k range row.
     """
+
+    STATIC_FULL = "static_full"
+    STATIC_CAUSAL = "static_causal"
+    PER_RANGE = "per_range"
+
+
+@dataclass(frozen=True, eq=False)
+class NormalizedMaskTypes:
+    """Normalized host representation of the public ``mask_types`` argument."""
+
+    mode: MaskMode
+    static_mask_type: int | None = None
+    per_range_mask_types: torch.Tensor | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode == MaskMode.PER_RANGE:
+            if self.static_mask_type is not None or self.per_range_mask_types is None:
+                raise ValueError(
+                    "Per-range mask mode requires only per_range_mask_types"
+                )
+        elif self.per_range_mask_types is not None or self.static_mask_type is None:
+            raise ValueError("Static mask mode requires only static_mask_type")
+
+    @property
+    def is_per_range(self) -> bool:
+        """True when using a per-range mask tensor."""
+        return self.mode == MaskMode.PER_RANGE
+
+
+def normalize_mask_type_spec(
+    mask_types: torch.Tensor | int | None,
+    *,
+    num_ranges: int | None = None,
+    batch_size: int | None = None,
+    is_varlen: bool | None = None,
+) -> NormalizedMaskTypes:
+    """Normalize ``mask_types`` into an explicit host-side mask mode.
+
+    Args:
+        mask_types: ``None`` for static full attention, a supported integer for
+            a static mask, or a CUDA ``int32[R]`` tensor for per-range
+            mask selection (one entry per q/k range row).
+        num_ranges: Optional number of attention ranges ``R``. When provided, a
+            per-range tensor must have exactly this many entries.
+        batch_size: Deprecated alias for ``num_ranges`` (varlen sequence count
+            when ranges form a cu_seqlens partition).
+        is_varlen: Optional indication of whether the attention problem uses
+            q/k ranges. Passing ``False`` with a per-range tensor is rejected.
+
+    Returns:
+        A :class:`NormalizedMaskTypes` carrying either a static mask type or the
+        original per-range CUDA tensor.
+
+    Note:
+        Tensor values are contractually restricted to ``MT_MAP`` entries. They
+        are not read back on the host here because doing so would introduce a
+        device synchronization in the attention hot path.
+    """
+    if num_ranges is not None and batch_size is not None and num_ranges != batch_size:
+        raise ValueError(
+            f"num_ranges and batch_size disagree: {num_ranges} vs {batch_size}"
+        )
+    range_count = num_ranges if num_ranges is not None else batch_size
+    if range_count is not None and range_count < 0:
+        raise ValueError(f"num_ranges must be non-negative, got {range_count}")
+
     if mask_types is None:
-        return MT_MAP.full
+        return NormalizedMaskTypes(
+            mode=MaskMode.STATIC_FULL,
+            static_mask_type=MT_MAP.full,
+        )
+
+    if isinstance(mask_types, bool):
+        raise TypeError("mask_types must not be a bool")
+
     if isinstance(mask_types, int):
         if not MT_MAP.is_valid(mask_types):
             raise ValueError(f"Invalid mask type: {mask_types}")
-        return mask_types
+        if mask_types in (MT_MAP.inv_causal, MT_MAP.bi_causal):
+            # Only the per-range runtime path implements these; a scalar would
+            # otherwise fall through to the Full specialization and silently
+            # compute the wrong mask.
+            raise NotImplementedError(
+                f"Scalar mask_types={mask_types} (inv_causal / bi_causal) is not "
+                "supported; pass a per-range int32[R] tensor instead"
+            )
+        mode = (
+            MaskMode.STATIC_CAUSAL
+            if mask_types == MT_MAP.causal
+            else MaskMode.STATIC_FULL
+        )
+        return NormalizedMaskTypes(mode=mode, static_mask_type=mask_types)
 
-    # TODO: support per-range mask_types (a cuda int32 tensor) once the kernel
-    # can read a distinct mask type for each q/k range.
-    raise NotImplementedError(
-        "Per-range mask_types (torch.Tensor) is not supported yet."
+    if not isinstance(mask_types, torch.Tensor):
+        raise TypeError(
+            "mask_types must be None, an int, or a torch.Tensor, "
+            f"got {type(mask_types)!r}"
+        )
+    if is_varlen is False:
+        raise ValueError("Per-range mask_types is supported only with q/k ranges")
+    if not mask_types.is_cuda:
+        raise ValueError("Per-range mask_types must be a CUDA tensor")
+    if mask_types.dtype != torch.int32:
+        raise TypeError(
+            "Per-range mask_types must have dtype torch.int32, "
+            f"got {mask_types.dtype}"
+        )
+    if mask_types.dim() != 1:
+        raise ValueError(
+            "Per-range mask_types must have shape [num_ranges], "
+            f"got {tuple(mask_types.shape)}"
+        )
+    if not mask_types.is_contiguous():
+        raise ValueError("Per-range mask_types must be contiguous")
+    if range_count is not None and mask_types.numel() != range_count:
+        raise ValueError(
+            "Per-range mask_types length must match num_ranges: "
+            f"got {mask_types.numel()} and {range_count}"
+        )
+
+    return NormalizedMaskTypes(
+        mode=MaskMode.PER_RANGE,
+        per_range_mask_types=mask_types,
     )
 
 
+def validate_per_range_mask_feature_support(
+    spec: NormalizedMaskTypes,
+    *,
+    major_arch: int,
+    is_local: bool = False,
+    has_mask_mod: bool = False,
+    has_block_sparse: bool = False,
+    has_score_mod: bool = False,
+    has_softcap: bool = False,
+) -> None:
+    """Reject per-range mask combinations that V1 does not support.
+
+    Static mask modes are always accepted here. Value-domain checks for the
+    per-range CUDA tensor remain a caller contract (no host D2H sync).
+    """
+    if not spec.is_per_range:
+        return
+
+    if major_arch not in (10, 11):
+        raise NotImplementedError(
+            "Per-range mask_types is only supported on SM100/SM110"
+        )
+    if is_local:
+        raise NotImplementedError(
+            "Per-range mask_types cannot be combined with local / "
+            "sliding-window masking"
+        )
+    if has_mask_mod:
+        raise NotImplementedError(
+            "Per-range mask_types cannot be combined with mask_mod"
+        )
+    if has_block_sparse:
+        raise NotImplementedError(
+            "Per-range mask_types cannot be combined with block sparsity"
+        )
+    if has_score_mod:
+        raise NotImplementedError(
+            "Per-range mask_types cannot be combined with score_mod"
+        )
+    if has_softcap:
+        raise NotImplementedError(
+            "Per-range mask_types cannot be combined with softcap"
+        )
+
+
+def normalize_mask_types(mask_types: torch.Tensor | int | None) -> int:
+    """Translate supported legacy cases into a single mask-type integer.
+
+    Prefer :func:`normalize_mask_type_spec` in new code. This wrapper keeps the
+    historical scalar-only API:
+
+    - ``None``  -> ``MT_MAP.full``
+    - ``int``   -> validated static mask type
+    - ``Tensor``-> rejected (use the FlexFlashAttn host path instead)
+    """
+    spec = normalize_mask_type_spec(mask_types)
+    if spec.is_per_range:
+        raise NotImplementedError(
+            "Per-range mask_types must go through flex_flash_attn_func / "
+            "normalize_mask_type_spec; the scalar normalize_mask_types API "
+            "only supports a single static mask type."
+        )
+    assert spec.static_mask_type is not None
+    return spec.static_mask_type
+
+
 def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
-    """Collapse q/k ranges down to a cu_seqlens tensor (step-1 hack).
+    """Collapse q/k ranges down to a cu_seqlens tensor.
 
-    The full q/k ranges semantics allow arbitrary (possibly overlapping /
-    non-contiguous) per-range [start, end) intervals, but the current kernels
-    only understand the varlen cu_seqlens layout. So as a first step we only
-    accept ranges that are *equivalent* to a cu_seqlens partition, i.e.
-    contiguous, non-overlapping intervals starting at 0:
-    ``[[0, e0], [e0, e1], ...]`` -> ``[0, e0, e1, ...]``.
-
-    The caller is responsible for guaranteeing this equivalence (no validating
-    device sync is done here); a non-conforming input silently produces a
-    wrong cu_seqlens.
+    # DEVIATION: still collapse validated ranges to cu_seqlens for SM100
+    # Reason: SeqlenInfo / kernels still read cu_seqlens until Phase 2 true-range
+    # Recovery: call validate_true_ranges first; Phase 2 removes this helper
 
     Args:
-        ranges: an ``[N, 2]`` int32 cuda tensor of [start, end) intervals, or
-            ``None`` for the dense (non-varlen) path.
+        ranges: an ``[R, 2]`` int32 cuda tensor of [start, end) intervals, or
+            ``None`` for the dense path. Must already satisfy
+            :func:`validate_true_ranges` (including the temporary cu-partition
+            requirement while this collapse remains).
 
     Returns:
-        An ``[N + 1]`` int32 cu_seqlens tensor, or ``None`` if ``ranges`` is None.
+        An ``[R + 1]`` int32 cu_seqlens tensor, or ``None`` if ``ranges`` is None.
     """
     if ranges is None:
         return None
     assert (
         ranges.dim() == 2 and ranges.shape[1] == 2
-    ), f"ranges must be an [N, 2] tensor, got shape {tuple(ranges.shape)}"
+    ), f"ranges must be an [R, 2] tensor, got shape {tuple(ranges.shape)}"
     cu_seqlens = torch.cat([ranges[:1, 0], ranges[:, 1]]).to(torch.int32)
     return cu_seqlens.contiguous()
+
+
+def _validate_ranges_tensor(ranges: torch.Tensor, *, name: str) -> int:
+    """Check one ``[R, 2]`` ranges tensor structurally and return ``R``."""
+    if not isinstance(ranges, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor, got {type(ranges)!r}")
+    if not ranges.is_cuda:
+        raise ValueError(f"{name} must be a CUDA tensor")
+    if ranges.dtype != torch.int32:
+        raise TypeError(f"{name} must have dtype torch.int32, got {ranges.dtype}")
+    if ranges.dim() != 2 or ranges.shape[1] != 2:
+        raise ValueError(
+            f"{name} must have shape [num_ranges, 2], got {tuple(ranges.shape)}"
+        )
+    if not ranges.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
+
+    num_ranges = int(ranges.shape[0])
+    if num_ranges == 0:
+        raise ValueError(f"{name} must contain at least one range")
+    return num_ranges
+
+
+def validate_true_ranges(
+    q_ranges: torch.Tensor | None,
+    k_ranges: torch.Tensor | None,
+    *,
+    mask_types: torch.Tensor | int | None = None,
+) -> int | None:
+    """Check q/k ranges structurally and return ``R``; both ``None`` is dense.
+
+    Range geometry (bounds, overlap, cross-relation disjointness) is a caller
+    contract: reading the values back would sync the device on the hot path.
+    """
+    if q_ranges is None and k_ranges is None:
+        return None
+    if q_ranges is None or k_ranges is None:
+        raise ValueError(
+            "q_ranges and k_ranges must both be provided, or both be None"
+        )
+
+    num_q = _validate_ranges_tensor(q_ranges, name="q_ranges")
+    num_k = _validate_ranges_tensor(k_ranges, name="k_ranges")
+    if num_q != num_k:
+        raise ValueError(
+            f"q_ranges and k_ranges must have the same number of rows: "
+            f"{num_q} vs {num_k}"
+        )
+
+    if isinstance(mask_types, torch.Tensor) and mask_types.numel() != num_q:
+        raise ValueError(
+            "Per-range mask_types length must match num_ranges: "
+            f"got {mask_types.numel()} and {num_q}"
+        )
+
+    return num_q
 
 
 # ---------------------------------------------------------------------------
