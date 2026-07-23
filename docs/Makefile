@@ -16,11 +16,20 @@ help:
 
 .PHONY: help Makefile
 
-.PHONY: gettext update-po html-en html-zh html-multilang
+.PHONY: gettext update-po html html-en html-zh html-multilang
 
 gettext:
 	@$(SPHINXBUILD) -M gettext "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
 
+# Re-extract all translatable strings from the docs (via `gettext`) and merge
+# them into the zh_CN `.po` catalogs under $(LOCALEDIR). New/changed source
+# strings show up as untranslated or `#, fuzzy` entries that still need to be
+# translated by hand.
+#
+# REMEMBER: run `make update-po` (and translate the new/fuzzy entries) whenever
+# you change any documentation source, including English `.md` files under
+# $(SOURCEDIR) AND the Python API docstrings picked up by autodoc. Otherwise the
+# Chinese docs will fall out of sync with the source.
 update-po: gettext
 	@sphinx-intl update -p "$(GETTEXTDIR)" -d "$(LOCALEDIR)" -l zh_CN
 
@@ -35,6 +44,8 @@ html-zh:
 	@DOCS_LANGUAGE=zh_CN $(SPHINXBUILD) -b html "$(SOURCEDIR)" "$(BUILDDIR)/html/zh_CN" $(SPHINXOPTS) $(O)
 
 html-multilang: html-en html-zh
+
+html: html-multilang
 
 # Catch-all target: route all unknown targets to Sphinx using the new
 # "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).

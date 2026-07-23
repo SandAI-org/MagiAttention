@@ -215,6 +215,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         overlap_config: OverlapConfig,
         cp_group: dist.ProcessGroup,
         cp_mesh: DeviceMesh | None = None,
+        head_dim_v: int | None = None,
     ):
         assert (
             not env.comm.is_qo_comm_enable()
@@ -235,6 +236,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         self.num_heads_kv = num_heads_kv
         self.num_heads_group = 1
         self.head_dim = head_dim
+        self.head_dim_v = head_dim_v
 
         # NOTE: the real overlap degree should be determined in the later code:
         # 1. if overlap mode is static, then its real value equals to the one in the overlap config
@@ -1705,6 +1707,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             num_heads_q=self.org_num_heads_q,
             num_heads_kv=self.org_num_heads_kv,
             head_dim=self.head_dim,
+            head_dim_v=self.head_dim_v,
         )
 
         return comm_meta
@@ -1911,9 +1914,11 @@ class DistAttnSolver(BaseDistAttnSolver):
             remote_attn_args_list=remote_attn_args_list,
             no_overlap=self.overlap_config.no_overlap,
             headdim=self.head_dim,
+            headdim_v=self.head_dim_v,
             seqlen_q_shard=self.shard_seqlen_q,
             seqlen_k_local=self.host_rank_entry_this_rank.host_k_ranges_global.total_seqlen,
             seqlen_k_per_remote_stage=seqlen_k_per_remote_stage,
+            qhead_per_kvhead=self.org_num_heads_q // self.org_num_heads_kv,
         )
 
         return calc_meta

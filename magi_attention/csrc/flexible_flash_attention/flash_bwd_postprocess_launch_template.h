@@ -52,6 +52,7 @@ void run_flash_bwd_dkv_postprocess(Flash_bwd_params& params, cudaStream_t stream
     p.num_k_ranges = params.b;
     p.num_k_ranges_ptr = nullptr;
   }
+  p.kv_covered_mask = params.kv_covered_mask;
 
   dim3 grid(cute::ceil_div(params.total_k, kBlockN), params.h_kv, 1);
   dim3 block(kHeadDim, 1, 1);

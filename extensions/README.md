@@ -76,7 +76,7 @@ nhq, nhkv, hd = 16, 4, 128
 topk = 32
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
-backend = "flex"  # options: {"flex", "ffa_sparse_load", "ffa_index_attn", "sdpa"}
+backend = "flex"  # options: {"flex", "ffa_block_sparse", "ffa_index_sparse", "sdpa"}
 
 q = torch.randn((sq, nhq, hd), dtype=dtype, device=device)
 k = torch.randn((skv, nhkv, hd), dtype=dtype, device=device)

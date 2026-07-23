@@ -51,17 +51,22 @@ template <
     bool Deterministic,
     bool RangeMerge,
     bool PackGQA,
-    int QheadPerKhead,
+    int PackGQAFactor,
     bool SwapAB,
-    bool SparseLoad,
-    bool IndexAttn,
-    bool IntraWGOverlap = true,
+    bool BlockSparse,
+    bool IndexSparse,
+    bool IntraWGOverlap,
     bool InnerDirMaxToMin,
-    int MaskMode = 1,
-    bool ReturnMaxLogits = false,
-    bool ProfileMode = false>
+    int MaskMode,
+    bool ReturnMaxLogits,
+    int ProducerRegs,
+    int ConsumerRegs,
+    int SparseKBlockSize,
+    int InnerLoadMode,
+    int OuterStoreMode,
+    bool ProfileMode>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
-  static_assert(!(SparseLoad && IndexAttn), "SparseLoad and IndexAttn cannot be enabled at the same time");
+  static_assert(!(BlockSparse && IndexSparse), "BlockSparse and IndexSparse cannot be enabled at the same time");
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   static constexpr bool MmaPV_is_RS = !SwapAB;
 
@@ -87,21 +92,23 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       IntraWGOverlap,
       RangeMerge,
       PackGQA,
-      QheadPerKhead,
+      PackGQAFactor,
       SwapAB,
-      SparseLoad,
-      IndexAttn,
+      BlockSparse,
+      IndexSparse,
       InnerDirMaxToMin,
-      MaskMode>;
+      MaskMode,
+      SparseKBlockSize,
+      InnerLoadMode>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerFwd<
       kBlockM,
-      CollectiveMainloop::NumMmaThreads,
+      CollectiveMainloop::NumConsumerThreads,
       CollectiveMainloop::NumProducerThreads,
       /*WarpSpecialized=*/Arch >= 90,
       PackGQA,
       Deterministic,
-      IndexAttn>;
+      IndexSparse>;
 
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
       TileShape_MNK_PV,
@@ -109,15 +116,17 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       ElementOut,
       ArchTag,
       typename Scheduler::BlockCoordType,
-      CollectiveMainloop::NumMmaThreads,
+      CollectiveMainloop::NumConsumerThreads,
       DisableFwdAtomicReduction,
       PackGQA,
-      QheadPerKhead,
+      PackGQAFactor,
       Deterministic,
       SwapAB,
-      ReturnMaxLogits>;
+      ReturnMaxLogits,
+      OuterStoreMode>;
 
-  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin>>;
+  using AttnKernel =
+      flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, ProducerRegs, ConsumerRegs>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
   typename CollectiveMainloop::Arguments mainloop_args = [&]() {
@@ -137,9 +146,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
         params.k_ranges,
         params.attn_type_map,
         params.qk_map,
-        params.equal_k_range_size,
-        params.index_attn_indices,
-        params.index_attn_max_topk};
+        params.index_sparse_indices,
+        params.inner_indices_cnt};
   }();
 
   typename CollectiveEpilogue::Arguments epilogue_args{
@@ -168,10 +176,9 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
                                                         /*range_map=*/params.qk_map,
                                                         /*determin_conflict_state=*/params.determin_conflict_state,
                                                         /*unique_count=*/params.unique_count,
-                                                        /*max_seqlen_q=*/params.max_seqlen_q,
-                                                        /*has_max_seqlen_q=*/params.has_max_seqlen_q,
-                                                        /*blocks_per_batch=*/params.blocks_per_batch,
-                                                        /*tiles_per_batch_per_intergroup=*/params.tiles_per_batch_per_intergroup,
+                                                        /*max_outer_range_width=*/params.max_outer_range_width,
+                                                        /*has_max_outer_range_width=*/params.has_max_outer_range_width,
+                                                        /*batch_stride=*/params.batch_stride,
                                                         /*max_tile_idx=*/params.max_tile_idx};
 
   int device;
@@ -181,10 +188,6 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   dim3 grid_dims = AttnKernel::get_grid_shape(kernel_params);
   dim3 block_dims = AttnKernel::get_block_shape();
   int smem_size = AttnKernel::SharedStorageSize;
-  // int smem_size_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
-  // int smem_size_k = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_k));
-  // int smem_size_v = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v));
-  // printf("smem_size = %d, q = %d, k = %d, v = %d\n", smem_size, smem_size_q, smem_size_k, smem_size_v);
   // Get the ptr to kernel function.
   if constexpr (size(ClusterShape{}) > 1) {
     void const* kernel = (void const*)cutlass::device_kernel<AttnKernel>;
@@ -215,17 +218,22 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool PackGQA,
-    int QheadPerKhead,
+    int PackGQAFactor,
     bool Deterministic,
     bool RangeMerge,
     bool SwapAB,
-    bool kSparseLoad,
-    bool kIndexAttn,
+    bool kBlockSparse,
+    bool kIndexSparse,
     bool kIntraWGOverlap,
     bool kInnerDirMaxToMin,
-    int kMaskMode = 1,
-    bool kReturnMaxLogits = false,
-    bool kProfileMode = false>
+    int kMaskMode,
+    bool kReturnMaxLogits,
+    int kProducerRegs,
+    int kConsumerRegs,
+    int kSparseKBlockSize,
+    int kInnerLoadMode,
+    int kOuterStoreMode,
+    bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only fp16/bf16 dtype are supported");
   static constexpr bool Enable_cluster = false; // TODO: support cluster launch
@@ -249,14 +257,19 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
         /*Deterministic=*/Deterministic,
         /*RangeMerge=*/RangeMerge,
         /*PackGQA=*/PackGQA,
-        /*QheadPerKhead=*/QheadPerKhead,
+        /*PackGQAFactor=*/PackGQAFactor,
         /*SwapAB=*/SwapAB,
-        /*SparseLoad=*/kSparseLoad,
-        /*IndexAttn=*/kIndexAttn,
+        /*BlockSparse=*/kBlockSparse,
+        /*IndexSparse=*/kIndexSparse,
         /*IntraWGOverlap=*/kIntraWGOverlap,
         /*InnerDirMaxToMin=*/kInnerDirMaxToMin,
         /*MaskMode=*/kMaskMode,
         /*ReturnMaxLogits=*/kReturnMaxLogits,
+        /*ProducerRegs=*/kProducerRegs,
+        /*ConsumerRegs=*/kConsumerRegs,
+        /*SparseKBlockSize=*/kSparseKBlockSize,
+        /*InnerLoadMode=*/kInnerLoadMode,
+        /*OuterStoreMode=*/kOuterStoreMode,
         /*ProfileMode=*/kProfileMode>(params, stream);
   });
 }

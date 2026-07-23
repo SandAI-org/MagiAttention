@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-template <bool Deterministic = false, bool DisableDkvAtomic = false, bool SwapBwdQKLoop = false, bool PackGQA = false, bool CatGQA = false>
+template <bool Deterministic, bool OuterStoreNeedReduction, bool BwdInnerLoopK, bool PackGQA, bool CatGQA, bool IndexSparse>
 std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
@@ -99,16 +99,17 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
     std::optional<const at::Tensor>& bwd_unique_count_,
-    bool equal_k_range_size,
-    std::optional<const at::Tensor>& index_attn_indices_,
-    int index_attn_max_topk,
+    std::optional<const at::Tensor>& index_sparse_indices_,
+    int inner_indices_cnt,
+    int sparse_k_block_size,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> dq_type_,
     std::optional<at::ScalarType> dk_type_,
     std::optional<at::ScalarType> dv_type_,
     const std::string& sink_layout_,
-    int const sm_margin) {
+    int const sm_margin,
+    std::optional<const at::Tensor>& kv_covered_mask_) {
 #ifdef FLASHATTENTION_DISABLE_BACKWARD
   TORCH_CHECK(false, "This flash attention build does not support backward.");
 #endif
@@ -119,8 +120,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   // Check compute capability
   TORCH_CHECK(is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
 
-  bool const has_index_attn = index_attn_indices_.has_value();
-  int batch_size = has_index_attn ? index_attn_indices_.value().size(0) : q_ranges_.value().size(0);
+  bool const has_index_sparse = index_sparse_indices_.has_value();
+  int batch_size = has_index_sparse ? index_sparse_indices_.value().size(0) : q_ranges_.value().size(0);
   int const total_q = q.size(0);
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
@@ -144,8 +145,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
   TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1 && out.stride(-1) == 1 && dout.stride(-1) == 1);
   TORCH_CHECK(
-      !DisableDkvAtomic or (num_heads_qo == num_heads_kv or PackGQA or CatGQA),
-      "disable_bwd_dkv_atomic_reduction can only be enabled when num_heads_qo == num_heads_kv, or when PackGQA or CatGQA is enabled");
+      BwdInnerLoopK || OuterStoreNeedReduction || (num_heads_qo == num_heads_kv || PackGQA || CatGQA),
+      "InnerLoopQ + direct outer store requires num_heads_qo == num_heads_kv, or PackGQA/CatGQA enabled");
 
   // check softmax_lse (dtype, device, layout)
   TORCH_CHECK(softmax_lse.dtype() == at::kFloat);
@@ -154,8 +155,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   TORCH_CHECK(softmax_lse.stride(-1) == 1);
 
   at::Tensor q_ranges, k_ranges;
-  if (!has_index_attn) {
-    TORCH_CHECK(q_ranges_.has_value() && k_ranges_.has_value(), "q_ranges and k_ranges must be provided when index_attn_indices is not set");
+  if (!has_index_sparse) {
+    TORCH_CHECK(q_ranges_.has_value() && k_ranges_.has_value(), "q_ranges and k_ranges must be provided when index_sparse_indices is not set");
     q_ranges = q_ranges_.value();
     k_ranges = k_ranges_.value();
     TORCH_CHECK(q_ranges.dtype() == torch::kInt32 && k_ranges.dtype() == torch::kInt32);
@@ -253,32 +254,52 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       (has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count),
       "merge_k_ranges, bwd_kq_map, and bwd_unique_count must all be provided together or all be omitted");
 
-  at::Tensor index_attn_indices;
-  if (has_index_attn) {
-    index_attn_indices = index_attn_indices_.value();
-    TORCH_CHECK(index_attn_indices.dtype() == torch::kInt32);
-    CHECK_DEVICE(index_attn_indices);
-    CHECK_CONTIGUOUS(index_attn_indices);
+  // Validate IndexSparse indices if provided (3D: batch_size × nhk × inner_indices_cnt)
+  at::Tensor index_sparse_indices;
+  if (has_index_sparse) {
+    index_sparse_indices = index_sparse_indices_.value();
+    TORCH_CHECK(index_sparse_indices.dtype() == torch::kInt32, "index_sparse_indices must be int32");
+    CHECK_DEVICE(index_sparse_indices);
+    TORCH_CHECK(index_sparse_indices.dim() == 3, "index_sparse_indices must be 3D (batch, nhk, inner_indices_cnt), got ", index_sparse_indices.dim(), "D");
+    TORCH_CHECK(
+        index_sparse_indices.size(1) == num_heads_kv, "index_sparse_indices dim-1 must equal num_heads_kv (", num_heads_kv, "), got ", index_sparse_indices.size(1));
+    TORCH_CHECK(
+        index_sparse_indices.size(2) == inner_indices_cnt,
+        "index_sparse_indices dim-2 must equal inner_indices_cnt (",
+        inner_indices_cnt,
+        "), got ",
+        index_sparse_indices.size(2));
+    CHECK_CONTIGUOUS(index_sparse_indices);
   }
 
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size % 8 == 0 && head_size <= max_headdim);
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0);
   int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
-  int const kBlockM = std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop>(head_size, element_size, softcap > 0.0));
-  int const kBlockN = std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop>(head_size, element_size, softcap > 0.0));
+  int const kBlockM = std::get<0>(tile_size_bwd_sm90<BwdInnerLoopK, (IndexSparse && !BwdInnerLoopK)>(head_size, element_size, softcap > 0.0));
+  int const kBlockN = std::get<1>(tile_size_bwd_sm90<BwdInnerLoopK, (IndexSparse && !BwdInnerLoopK)>(head_size, element_size, softcap > 0.0));
   // Get rounded max_seqlen
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
 
   // Determine output dtype for dq
+  // InnerLoopK + direct outer dQ store → native dtype ok; otherwise dQ uses atomic reduction → float32
+  constexpr bool dq_outer_uses_direct_store = (BwdInnerLoopK && !OuterStoreNeedReduction);
   at::ScalarType dq_type = dq_type_.has_value() ? dq_type_.value() : (dq_.has_value() ? dq_.value().scalar_type() : at::ScalarType::Float);
-  TORCH_CHECK(dq_type == at::ScalarType::Float);
+  if constexpr (dq_outer_uses_direct_store) {
+    TORCH_CHECK(
+        dq_type == at::ScalarType::Float || dq_type == at::ScalarType::BFloat16 || dq_type == at::ScalarType::Half,
+        "dq only supports float, bf16 and fp16 when outer store has no reduction");
+  } else {
+    TORCH_CHECK(dq_type == at::ScalarType::Float);
+  }
   if (dq_.has_value()) {
     TORCH_CHECK(dq_.value().scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
   }
   // Determine output dtype for dk
+  // InnerLoopQ + direct outer dKV store → native dtype ok
+  constexpr bool dkv_outer_uses_direct_store = (!BwdInnerLoopK && !OuterStoreNeedReduction);
   at::ScalarType dk_type =
-      dk_type_.has_value() ? dk_type_.value() : (dk_.has_value() ? dk_.value().scalar_type() : (!DisableDkvAtomic ? at::ScalarType::Float : q_type));
+      dk_type_.has_value() ? dk_type_.value() : (dk_.has_value() ? dk_.value().scalar_type() : (!dkv_outer_uses_direct_store ? at::ScalarType::Float : q_type));
   TORCH_CHECK(
       dk_type == at::ScalarType::Float || dk_type == at::ScalarType::BFloat16 || dk_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dk");
@@ -287,7 +308,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   }
   // Determine output dtype for dv
   at::ScalarType dv_type =
-      dv_type_.has_value() ? dv_type_.value() : (dv_.has_value() ? dv_.value().scalar_type() : (!DisableDkvAtomic ? at::ScalarType::Float : q_type));
+      dv_type_.has_value() ? dv_type_.value() : (dv_.has_value() ? dv_.value().scalar_type() : (!dkv_outer_uses_direct_store ? at::ScalarType::Float : q_type));
   TORCH_CHECK(
       dv_type == at::ScalarType::Float || dv_type == at::ScalarType::BFloat16 || dv_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dv");
@@ -308,7 +329,14 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     CHECK_SHAPE(dq, total_q, num_heads_qo, head_size);
     TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
   } else {
-    dq = torch::zeros_like(q, opts.dtype(dq_type));
+    if constexpr (dq_outer_uses_direct_store) {
+      // dQ is outer, per-element direct store (single CTA writes each Q position) → no zero-init.
+      dq = torch::empty_like(q, opts.dtype(dq_type));
+    } else {
+      // InnerLoopQ or disabled: dQ is the inner result, mainloop uses TMA_REDUCE_ADD
+      // (gmem[i] += smem[i]), so initial value must be zero.
+      dq = torch::zeros_like(q, opts.dtype(dq_type));
+    }
   }
   if (dk_.has_value()) {
     dk = dk_.value();
@@ -421,14 +449,13 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       dsink, // output tensors
       dsink_reduce_buf,
       dsink_reduce_cnt, // workspace tensors
-      /*q_ranges=*/has_index_attn ? nullptr : q_ranges.data_ptr(),
-      /*k_ranges=*/has_index_attn ? nullptr : k_ranges.data_ptr(),
+      /*q_ranges=*/has_index_sparse ? nullptr : q_ranges.data_ptr(),
+      /*k_ranges=*/has_index_sparse ? nullptr : k_ranges.data_ptr(),
       /*attn_type_map=*/has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
       /*merge_batch_size=*/merge_batch_size,
       /*merge_k_ranges=*/has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
       /*bwd_kq_map=*/has_bwd_kq_map ? bwd_kq_map.data_ptr() : nullptr,
       /*bwd_unique_count=*/has_bwd_unique_count ? bwd_unique_count.data_ptr() : nullptr,
-      /*equal_k_range_size=*/equal_k_range_size,
       /*softmax_lse=*/softmax_lse.data_ptr(),
       /*softmax_lse_log2=*/softmax_lse_log2.data_ptr(),
       /*dsoftmax_sum=*/softmax_d.data_ptr(),
@@ -442,10 +469,11 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*dq_determin_range_locks=*/dq_determin_range_locks.data_ptr(),
       /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
-      /*disable_bwd_dkv_atomic_reduction=*/DisableDkvAtomic);
+      /*disable_bwd_dkv_atomic_reduction=*/dkv_outer_uses_direct_store);
 
-  params.index_attn_indices = has_index_attn ? static_cast<int*>(index_attn_indices.data_ptr()) : nullptr;
-  params.index_attn_max_topk = index_attn_max_topk;
+  params.index_sparse_indices = has_index_sparse ? static_cast<int*>(index_sparse_indices.data_ptr()) : nullptr;
+  params.inner_indices_cnt = inner_indices_cnt;
+  params.kv_covered_mask = kv_covered_mask_.has_value() ? static_cast<bool*>(kv_covered_mask_.value().data_ptr()) : nullptr;
 
   return {params, dq, dk, dv, dsink};
 }

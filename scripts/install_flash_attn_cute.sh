@@ -17,7 +17,7 @@
 # Example:
 #   bash scripts/install_flash_attn_cute.sh "sm80,sm90,sm100"
 
-# Install cute version of ffa-fa4 for Blackwell support
+# Install FFA_FA4 for Blackwell support
 
 set -e
 
@@ -33,11 +33,16 @@ REPO_ROOT="$(pwd)"
 FA_DIR="magi_attention/functional/flash-attention"
 cd "$FA_DIR"
 
-echo "[magiattn] Installing cute ffa-fa4 (Blackwell support)"
-bash install.sh
+echo "[magiattn] Installing FFA_FA4 (Blackwell support)"
+pip install -e flash_attn/cute --no-build-isolation
+
+echo "[magiattn] Installing create_block_mask_cuda"
+pip install -e csrc/utils/create_block_mask --no-build-isolation
+
+echo "[magiattn] Installing magi_to_hstu_cuda"
+pip install -e csrc/utils/magi_to_hstu --no-build-isolation
 
 # Install cutlass version of ffa-fa4 for Ampere/Hopper support
-
 if [[ "$ARCH_ARG" == *sm80* || "$ARCH_ARG" == *sm90* ]]; then
 	cd hopper/
 
@@ -68,8 +73,7 @@ if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 
 	for src_dir in \
 		"${FA_DIR}/csrc/utils/magi_to_hstu" \
-		"${FA_DIR}/csrc/utils/create_block_mask" \
-		"${FA_DIR}/flash_attn"; do
+		"${FA_DIR}/csrc/utils/create_block_mask"; do
 		if [[ -d "${REPO_ROOT}/${src_dir}" ]]; then
 			echo "[magiattn] Building wheel from ${src_dir}..."
 			(cd "${REPO_ROOT}/${src_dir}" \
@@ -78,4 +82,8 @@ if [[ -n "$MAGI_WHEEL_DIR" ]]; then
 				|| echo "[magiattn] WARNING: Could not build wheel from ${src_dir}, skipping"
 		fi
 	done
+
+	(cd "${REPO_ROOT}/${FA_DIR}/flash_attn/cute" \
+		&& pip wheel . --no-deps --no-build-isolation --wheel-dir "$MAGI_WHEEL_DIR") \
+		|| echo "[magiattn] WARNING: Could not build wheel from ${FA_DIR}/flash_attn/cute, skipping"
 fi

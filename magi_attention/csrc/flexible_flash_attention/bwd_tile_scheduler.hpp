@@ -37,7 +37,7 @@ struct TileSchedulerArguments {
   int const num_heads_q; // Number of Q heads
   int const num_heads_kv; // Number of KV heads (for GQA)
   int const num_batches;
-  int* const tile_count_semaphore = nullptr;
+  int* const block_count_semaphore = nullptr;
   int2* const ranges = nullptr;
   int2* const merge_ranges = nullptr;
   int* const range_map = nullptr;
@@ -47,19 +47,11 @@ struct TileSchedulerArguments {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <
-    int kBlock,
-    int NumMmaThreads = 2 * cutlass::NumThreadsPerWarpGroup,
-    int NumProducerThreads = cutlass::NumThreadsPerWarp,
-    bool WarpSpecialized = true,
-    bool PackGQA = false,
-    bool CatGQA = false,
-    bool SwapBwdQKLoop = false,
-    bool Deterministic = false>
+template <int kBlock, int NumConsumerThreads, int NumProducerThreads, bool WarpSpecialized, bool PackGQA, bool CatGQA, bool BwdInnerLoopK, bool Deterministic>
 class DynamicPersistentTileSchedulerBwd {
   using resv_barrier = cutlass::arch::ReservedNamedBarriers;
-  static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
-  static constexpr int NumThreads = WarpSpecialized ? NumMmaThreads + NumProducerThreads : NumMmaThreads;
+  static_assert(WarpSpecialized || NumProducerThreads == NumConsumerThreads);
+  static constexpr int NumThreads = WarpSpecialized ? NumConsumerThreads + NumProducerThreads : NumConsumerThreads;
   static constexpr bool FlattenGQA = PackGQA || CatGQA;
 
  public:
@@ -76,7 +68,7 @@ class DynamicPersistentTileSchedulerBwd {
     int num_heads;
     int seqlen_scale_factor; // FlattenGQA: num_heads_q / num_heads_kv, otherwise 1
     int num_batches;
-    int* const tile_count_semaphore;
+    int* const block_count_semaphore;
     int2* const ranges;
     int2* const merge_ranges;
     int* const range_map;
@@ -86,18 +78,18 @@ class DynamicPersistentTileSchedulerBwd {
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
     // FlattenGQA: seqlen_scale_factor = num_heads_q / num_heads_kv, otherwise 1
-    int seqlen_scale_factor = FlattenGQA && SwapBwdQKLoop ? (args.num_heads_q / args.num_heads_kv) : 1;
+    int seqlen_scale_factor = FlattenGQA && BwdInnerLoopK ? (args.num_heads_q / args.num_heads_kv) : 1;
     // FlattenGQA: num_heads = num_heads_kv, otherwise num_heads_q
     int num_heads = !FlattenGQA ? args.num_heads_q : args.num_heads_kv;
 
-    assert(args.tile_count_semaphore != nullptr);
+    assert(args.block_count_semaphore != nullptr);
     assert(num_heads < (1 << 16));
     int2* const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
     return {
         num_heads,
         seqlen_scale_factor,
         args.num_batches,
-        args.tile_count_semaphore,
+        args.block_count_semaphore,
         ranges,
         args.merge_ranges,
         args.range_map,
@@ -109,8 +101,8 @@ class DynamicPersistentTileSchedulerBwd {
     return {uint32_t(num_sm)};
   }
 
-  struct WorkTileInfo {
-    int tile_idx, block, bidh, bidb;
+  struct WorkBlockInfo {
+    int block_idx, block, bidh, bidb;
 
     // give extra memory when deterministic == true
     using extra_vars_type = std::conditional_t<
@@ -146,7 +138,7 @@ class DynamicPersistentTileSchedulerBwd {
   DynamicPersistentTileSchedulerBwd(SharedStorage* const smem_scheduler) : work_info_smem(smem_scheduler) {};
 
   CUTLASS_DEVICE
-  WorkTileInfo tile_idx_to_work_tile(Params const& params, int next_tile_idx, WorkTileInfo const& current_work) const {
+  WorkBlockInfo block_idx_to_work_info(Params const& params, int next_block_idx, WorkBlockInfo const& current_work) const {
     int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
 
     // Helper function to calculate how many blocks are needed to compute the current batch
@@ -169,31 +161,31 @@ class DynamicPersistentTileSchedulerBwd {
     // Only the lower 16 bits are the actual bidh
     int current_bidh = current_work.bidh;
     int group_end_tile =
-        current_work.tile_idx - current_work.block - current_bidh * warp_uniform(num_m_blocks) + m_blocks_in_group * params.num_heads; // Same for all lanes
+        current_work.block_idx - current_work.block - current_bidh * warp_uniform(num_m_blocks) + m_blocks_in_group * params.num_heads; // Same for all lanes
     int bidb = current_work.bidb;
 
     /* DEBUG */
     // if (blockIdx.x <= 9 && threadIdx.x == 0) {
-    //     printf("Before while, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_tile_idx = %d, cur tile_idx = %d, cur block = %d, cur bidh = %d,
-    //     num_m_blocks = %d, group_end_tile = %d, m_blocks_in_group = %d\n", blockIdx.x, threadIdx.x, current_work.bidb, num_m_blocks, next_tile_idx,
-    //     current_work.tile_idx, current_work.block, current_bidh, num_m_blocks, group_end_tile, m_blocks_in_group);
+    //     printf("Before while, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_block_idx = %d, cur block_idx = %d, cur block = %d, cur bidh =
+    //     %d, num_m_blocks = %d, group_end_tile = %d, m_blocks_in_group = %d\n", blockIdx.x, threadIdx.x, current_work.bidb, num_m_blocks, next_block_idx,
+    //     current_work.block_idx, current_work.block, current_bidh, num_m_blocks, group_end_tile, m_blocks_in_group);
     // }
-    // if (threadIdx.x == 0 && blockIdx.x == 0) { printf("tile_idx = %d, group_end_tile = %d, num_m_blocks_cumulative = %d, m_blocks_in_group = %d\n",
-    // current_work.tile_idx, group_end_tile, num_m_blocks_cumulative, m_blocks_in_group); }
+    // if (threadIdx.x == 0 && blockIdx.x == 0) { printf("block_idx = %d, group_end_tile = %d, num_m_blocks_cumulative = %d, m_blocks_in_group = %d\n",
+    // current_work.block_idx, group_end_tile, num_m_blocks_cumulative, m_blocks_in_group); }
 
-    while (group_end_tile <= next_tile_idx) {
+    while (group_end_tile <= next_block_idx) {
       bidb += cutlass::NumThreadsPerWarp - 1;
       if (bidb >= actual_num_batches) {
         /* DEBUG */
         // if (blockIdx.x <= 9 && threadIdx.x == 0) {
-        //     printf("Returning early, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_tile_idx = %d, group_end_tile = %d, m_blocks_in_group =
-        //     %d\n", blockIdx.x, threadIdx.x, bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group);
+        //     printf("Returning early, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_block_idx = %d, group_end_tile = %d, m_blocks_in_group =
+        //     %d\n", blockIdx.x, threadIdx.x, bidb, num_m_blocks, next_block_idx, group_end_tile, m_blocks_in_group);
         // }
 
         if constexpr (!Deterministic) {
-          return {next_tile_idx, 0, 0, actual_num_batches};
+          return {next_block_idx, 0, 0, actual_num_batches};
         } else {
-          return {next_tile_idx, 0, 0, actual_num_batches, cute::make_tuple(0, 0, 0)};
+          return {next_block_idx, 0, 0, actual_num_batches, cute::make_tuple(0, 0, 0)};
         }
       }
       num_m_blocks = get_num_m_blocks(bidb);
@@ -203,29 +195,29 @@ class DynamicPersistentTileSchedulerBwd {
 
       /* DEBUG */
       // if (blockIdx.x <= 9 && threadIdx.x == 0) {
-      //     printf("Bottom of while, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_tile_idx = %d, group_end_tile = %d, m_blocks_in_group =
-      //     %d\n", blockIdx.x, threadIdx.x, bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group);
+      //     printf("Bottom of while, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_block_idx = %d, group_end_tile = %d, m_blocks_in_group =
+      //     %d\n", blockIdx.x, threadIdx.x, bidb, num_m_blocks, next_block_idx, group_end_tile, m_blocks_in_group);
       // }
     }
     int group_start_tile = group_end_tile - m_blocks_in_group * params.num_heads;
     // The next problem to process is the first one that does not have ending tile position
     // that is greater than or equal to tile index.
-    int batch_idx_in_group = count_in_warp(/*predicate=*/group_start_tile + num_m_blocks_cumulative * params.num_heads <= next_tile_idx);
+    int batch_idx_in_group = count_in_warp(/*predicate=*/group_start_tile + num_m_blocks_cumulative * params.num_heads <= next_block_idx);
 
     /* DEBUG */
-    // if (threadIdx.x == 31 || threadIdx.x == 0) { printf("blockIdx.x = %d, tidx %d, group_start_tile = %d, num_m_blocks_cumulative = %d, num_heads = %d, next_tile_idx
-    // = %d, ballot = %x, batch_idx_in_group = %d\n", blockIdx.x, threadIdx.x, group_start_tile, num_m_blocks_cumulative, params.num_heads, next_tile_idx, tmp,
-    // batch_idx_in_group); }
+    // if (threadIdx.x == 31 || threadIdx.x == 0) { printf("blockIdx.x = %d, tidx %d, group_start_tile = %d, num_m_blocks_cumulative = %d, num_heads = %d,
+    // next_block_idx = %d, ballot = %x, batch_idx_in_group = %d\n", blockIdx.x, threadIdx.x, group_start_tile, num_m_blocks_cumulative, params.num_heads,
+    // next_block_idx, tmp, batch_idx_in_group); }
 
     bidb += batch_idx_in_group;
     num_m_blocks = broadcast_in_warp(num_m_blocks, /*src_lane=*/batch_idx_in_group);
-    int mh_block = next_tile_idx - group_start_tile -
+    int mh_block = next_block_idx - group_start_tile -
         (batch_idx_in_group == 0 ? 0 : broadcast_in_warp(num_m_blocks_cumulative, /*src_lane=*/batch_idx_in_group - 1)) * params.num_heads;
     int bidh = mh_block / num_m_blocks;
     int block = mh_block - bidh * num_m_blocks;
 
     if constexpr (!Deterministic) {
-      return {next_tile_idx, block, bidh, bidb};
+      return {next_block_idx, block, bidh, bidb};
     } else {
       auto get_conflict_batch_msg = [&](int bidb_last, int bidb_now, int block_now) {
         // bidb_last is the previous bidb, need to update conflict state of bidb_last ~ bidb_now
@@ -282,26 +274,26 @@ class DynamicPersistentTileSchedulerBwd {
       };
 
       auto conflict_batch_msg = get_conflict_batch_msg(current_work.bidb, bidb, block);
-      return {next_tile_idx, block, bidh, bidb, conflict_batch_msg};
+      return {next_block_idx, block, bidh, bidb, conflict_batch_msg};
     }
   }
 
-  template <bool IsProducerWarp = false>
-  CUTLASS_DEVICE WorkTileInfo get_initial_work(Params const& params) const {
+  template <bool IsProducerWarp>
+  CUTLASS_DEVICE WorkBlockInfo get_initial_work(Params const& params) const {
     if constexpr (IsProducerWarp) {
-      WorkTileInfo work_info = [&]() {
+      WorkBlockInfo work_info = [&]() {
         if constexpr (!Deterministic) {
-          return tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0});
+          return block_idx_to_work_info(params, int(blockIdx.x), {0, 0, 0, 0});
         } else {
-          return tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0, cute::make_tuple(0, 0, 0)});
+          return block_idx_to_work_info(params, int(blockIdx.x), {0, 0, 0, 0, cute::make_tuple(0, 0, 0)});
         }
       }();
       if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
         if constexpr (!Deterministic) {
-          *work_info_smem = make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb);
+          *work_info_smem = make_int4(work_info.block_idx, work_info.block, work_info.bidh, work_info.bidb);
         } else {
           *work_info_smem = thrust::make_pair<int4, int3>(
-              make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
+              make_int4(work_info.block_idx, work_info.block, work_info.bidh, work_info.bidb),
               make_int3(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg), cute::get<2>(work_info.conflict_batch_msg)));
         }
       }
@@ -322,34 +314,34 @@ class DynamicPersistentTileSchedulerBwd {
   }
 
   CUTLASS_DEVICE
-  void prefetch_next_work(Params const& params, WorkTileInfo& current_work) const {
+  void prefetch_next_work(Params const& params, WorkBlockInfo& current_work) const {
     if (threadIdx.x % NumProducerThreads == 0) {
-      current_work.tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
+      current_work.block_idx = atomicAdd(params.block_count_semaphore, 1) + int(gridDim.x);
     }
   }
 
-  template <bool IsProducerWarp = false>
-  CUTLASS_DEVICE WorkTileInfo get_next_work(Params const& params, WorkTileInfo const& current_work) const {
+  template <bool IsProducerWarp>
+  CUTLASS_DEVICE WorkBlockInfo get_next_work(Params const& params, WorkBlockInfo const& current_work) const {
     if constexpr (IsProducerWarp) {
-      // thread 0 has the next tile_idx, just need to broadcast to the rest of warp 0
-      int new_tile_idx = warp_uniform(current_work.tile_idx);
+      // thread 0 has the next block_idx, just need to broadcast to the rest of warp 0
+      int new_block_idx = warp_uniform(current_work.block_idx);
       if constexpr (!Deterministic) {
-        WorkTileInfo work_info = {broadcast_in_warp(current_work.tile_idx, /*src_lane=*/1), current_work.block, current_work.bidh, current_work.bidb};
-        work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
+        WorkBlockInfo work_info = {broadcast_in_warp(current_work.block_idx, /*src_lane=*/1), current_work.block, current_work.bidh, current_work.bidb};
+        work_info = block_idx_to_work_info(params, new_block_idx, work_info);
         BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
-          *work_info_smem = make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb);
+          *work_info_smem = make_int4(work_info.block_idx, work_info.block, work_info.bidh, work_info.bidb);
         }
         BarrierManager::arrive<NumThreads>(resv_barrier::StreamkBarrier1); // TileCountSmemFull
         return work_info;
       } else {
-        WorkTileInfo work_info = {
-            broadcast_in_warp(current_work.tile_idx, /*src_lane=*/1), current_work.block, current_work.bidh, current_work.bidb, cute::make_tuple(0, 0, 0)};
-        work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
+        WorkBlockInfo work_info = {
+            broadcast_in_warp(current_work.block_idx, /*src_lane=*/1), current_work.block, current_work.bidh, current_work.bidb, cute::make_tuple(0, 0, 0)};
+        work_info = block_idx_to_work_info(params, new_block_idx, work_info);
         BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
           *work_info_smem = thrust::make_pair(
-              make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
+              make_int4(work_info.block_idx, work_info.block, work_info.bidh, work_info.bidb),
               make_int3(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg), cute::get<2>(work_info.conflict_batch_msg)));
         }
         BarrierManager::arrive<NumThreads>(resv_barrier::StreamkBarrier1); // TileCountSmemFull
@@ -360,13 +352,13 @@ class DynamicPersistentTileSchedulerBwd {
         BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier1); // TileCountSmemFull
         int4 work_info = *work_info_smem;
         BarrierManager::arrive<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
-        return WorkTileInfo{work_info.x, work_info.y, work_info.z, work_info.w};
+        return WorkBlockInfo{work_info.x, work_info.y, work_info.z, work_info.w};
       } else {
         BarrierManager::sync<NumThreads>(resv_barrier::StreamkBarrier1); // TileCountSmemFull
         int4 work_info = (*work_info_smem).first;
         int3 conflict_info = (*work_info_smem).second;
         BarrierManager::arrive<NumThreads>(resv_barrier::StreamkBarrier0); // TileCountSmemEmpty
-        return WorkTileInfo{work_info.x, work_info.y, work_info.z, work_info.w, cute::make_tuple(conflict_info.x, conflict_info.y, conflict_info.z)};
+        return WorkBlockInfo{work_info.x, work_info.y, work_info.z, work_info.w, cute::make_tuple(conflict_info.x, conflict_info.y, conflict_info.z)};
       }
     }
   }

@@ -46,11 +46,16 @@ try:
         LinearBlockSparseTensorsTorch,
         bhqk_to_linear_sparse_tensors,
     )
-    from flash_attn_cute.mask_definitions import flex_arbitrary_mask
 
     is_fa4_installed = True
 except ImportError:
     pass
+
+# Optional: only needed for FA4AttnArg.compute_mask with arbitrary masks
+try:
+    from flash_attn_cute.mask_definitions import flex_arbitrary_mask
+except ImportError:
+    flex_arbitrary_mask = None  # type: ignore[assignment]
 
 try:
     COMPUTE_CAPABILITY = torch.cuda.get_device_capability()[0]
@@ -95,6 +100,7 @@ class AttnArg:
         # init `skip_attn_fwd` flag
         batch_size_fwd = len(self.q_ranges)
         self.skip_attn_fwd = batch_size_fwd == 0
+        self.disable_fwd_atomic_reduction = False
 
         # guard clause
         if self.skip_attn_fwd:
@@ -125,7 +131,7 @@ class AttnArg:
                 assert k_ranges_tensor_fwd.shape == torch.Size([batch_size_fwd, 2])
                 assert mask_type_tensor_fwd.shape == torch.Size([batch_size_fwd])
 
-        if env.general.is_auto_range_merge_enable():
+        if env.general.is_range_merge_enable():
             # lazy import to avoid circular import
             from magi_attention.functional.flex_flash_attn import merge_ranges
 
@@ -164,6 +170,7 @@ class AttnArg:
         self.q_ranges_bwd = self.q_ranges
         self.k_ranges_bwd = self.k_ranges
         self.attn_type_map_bwd = self.attn_type_map
+        self.disable_bwd_dkv_atomic_reduction = False
 
         # guard clause
         if self.skip_attn_bwd:
@@ -191,7 +198,7 @@ class AttnArg:
                 assert k_ranges_tensor_bwd.shape == torch.Size([batch_size_bwd, 2])
                 assert attn_type_map.shape == torch.Size([batch_size_bwd])
 
-        if env.general.is_auto_range_merge_enable():
+        if env.general.is_range_merge_enable():
             # lazy import to avoid circular import
             from magi_attention.functional.flex_flash_attn import merge_ranges
 
@@ -233,7 +240,7 @@ class AttnArg:
             and env.general.is_cat_gqa_enable()
             # TODO: support auto range merge:
             #  when enabled, we should use the merged k_ranges above
-        ) and not env.general.is_auto_range_merge_enable()
+        ) and not env.general.is_range_merge_enable()
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         return self.ffa_bwd_args_dict if is_bwd else self.ffa_fwd_args_dict
@@ -274,9 +281,10 @@ class AttnArg:
 def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
     """Resolve the correct **mask** tile sizes for the current GPU architecture.
 
-    On SM100 (Blackwell) the mask tile is always 128x128; the kernel
-    internally doubles the M dimension (``sparse_tile_m = 2 * tile_m``)
-    in ``_make_fa4_args_dict``.
+    On SM100 (Blackwell) the base mask tile is 128x128. Forward uses a
+    q-stage-dependent Q2K block. Backward K2Q granularity is path-specific:
+    the 128/128 and 192/128 2CTA paths use 128x256, while the dedicated
+    256/256 path uses 256x128.
 
     On SM80/SM90, the tile sizes depend on ``headdim`` and are queried
     from the C++ (hopper) backend via ``get_tile_sizes_by_backend``.
@@ -305,10 +313,17 @@ class FA4AttnArg(AttnArg):
     seqlen_q: int = 0
     seqlen_k: int = 0
     headdim: int = 128
+    headdim_v: int | None = None
+    # Q-heads-per-KV-head ratio (== num_heads_q / num_heads_kv). Needed so we can
+    # compute the same fwd `q_stage` as the FA cute backend uses, and build the
+    # block-sparse mask at a matching Q granularity.
+    qhead_per_kvhead: int = 1
 
     def __post_init__(self):
         assert is_fa4_installed, "FlashAttn4 is not installed"
         assert is_magi_to_hstu_installed, "magi_to_hstu_cuda is not installed"
+        if self.headdim_v is None:
+            self.headdim_v = self.headdim
 
         # DEVIATION: sentinel tile sizes (-1) are replaced with arch-specific defaults
         # Reason: -1 is a user-facing sentinel meaning "auto-detect"; the kernel
@@ -336,7 +351,7 @@ class FA4AttnArg(AttnArg):
                 f"FA4 mask tile size on SM {COMPUTE_CAPABILITY}.0 must be "
                 f"{_DEFAULT_FA4_TILE_SIZE}, got fwd=({self.tile_m}, {self.tile_n}), "
                 f"bwd=({self.tile_m_bwd}, {self.tile_n_bwd}). "
-                f"The kernel internally doubles tile_m via sparse_tile_m."
+                f"The SM100 kernel internally expands the linear CSR block size."
             )
 
         super().__post_init__()
@@ -355,10 +370,31 @@ class FA4AttnArg(AttnArg):
         tile_m: int,
         tile_n: int,
     ) -> dict:
+        # Match FA cute backend's `q_stage` heuristic exactly so the sparse mask
+        # we build lines up with `base_m_block = q_stage * tile_m` on the kernel
+        # side (otherwise infer_linear_block_sparse_expected_shapes rejects us).
         if COMPUTE_CAPABILITY == 10:
-            sparse_tile_m = 2 * tile_m
+            seqlen_q_packgqa = self.seqlen_q * self.qhead_per_kvhead
+            q_stage_fwd = 2 if seqlen_q_packgqa > tile_m else 1
         else:
-            sparse_tile_m = tile_m
+            q_stage_fwd = 1
+        sparse_tile_m = q_stage_fwd * tile_m
+        if COMPUTE_CAPABILITY in (10, 11) and (
+            (self.headdim, self.headdim_v) in ((128, 128), (192, 128))
+        ):
+            # The two CTAs form a cluster along N only. Each K2Q CSR Q index
+            # therefore maps directly to one M tile.
+            bwd_sparse_tile_m = tile_m
+            bwd_sparse_tile_n = 2 * tile_n
+        elif COMPUTE_CAPABILITY == 10 and (
+            self.headdim,
+            self.headdim_v,
+        ) == (256, 256):
+            bwd_sparse_tile_m = 2 * tile_m
+            bwd_sparse_tile_n = tile_n
+        else:
+            bwd_sparse_tile_m = tile_m
+            bwd_sparse_tile_n = tile_n
 
         if is_magi_to_hstu_installed:
             with nvtx.add_nvtx_event(
@@ -385,16 +421,21 @@ class FA4AttnArg(AttnArg):
 
                 # Convert to LinearBlockSparseTensorsTorch format
                 # CUDA kernel returns:
-                #   - cnt: [B, H, num_blocks] - directly the counts
+                #   - cnt: [B, H, num_blocks] - kept 3D for FA-cute (>=v1.1.1) expected layout
                 #   - offset: [B * H * num_blocks + 1] - flattened exclusive prefix sum (starts with 0)
                 #   - idx: [total_blocks] - compact indices
                 linear_k_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_k_mask_cnt.flatten(),
+                    mask_block_cnt=cuda_k_mask_cnt,
                     mask_block_offset=cuda_k_mask_offset,
                     mask_block_idx=cuda_k_mask_idx,
-                    full_block_cnt=cuda_k_full_cnt.flatten(),
+                    full_block_cnt=cuda_k_full_cnt,
                     full_block_offset=cuda_k_full_offset,
                     full_block_idx=cuda_k_full_idx,
+                    # The fwd path (and the dq half of bwd) sets q_stage=2 on sm100,
+                    # so base_m_block = q_stage * tile_m = sparse_tile_m. Declare the
+                    # block size explicitly so the new FA backend doesn't have to infer
+                    # it (which fails when seqlen_q <= sparse_tile_m gives only 1 q-block).
+                    block_size=(sparse_tile_m, tile_n),
                 )
             with nvtx.add_nvtx_event(
                 f"create_k2q_csr_sparse_from_func-"
@@ -413,17 +454,19 @@ class FA4AttnArg(AttnArg):
                     hstu_func,
                     self.seqlen_q,
                     self.seqlen_k,
-                    Q_BLOCK_SIZE=tile_m,
-                    KV_BLOCK_SIZE=tile_n,
+                    Q_BLOCK_SIZE=bwd_sparse_tile_m,
+                    KV_BLOCK_SIZE=bwd_sparse_tile_n,
                 )
 
                 linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_q_mask_cnt.flatten(),
+                    mask_block_cnt=cuda_q_mask_cnt,
                     mask_block_offset=cuda_q_mask_offset,
                     mask_block_idx=cuda_q_mask_idx,
-                    full_block_cnt=cuda_q_full_cnt.flatten(),
+                    full_block_cnt=cuda_q_full_cnt,
                     full_block_offset=cuda_q_full_offset,
                     full_block_idx=cuda_q_full_idx,
+                    # Match the K2Q CSR block to the selected backward attention tile.
+                    block_size=(bwd_sparse_tile_m, bwd_sparse_tile_n),
                 )
         else:
             # Prepare mask_mod
@@ -459,7 +502,7 @@ class FA4AttnArg(AttnArg):
                 self.seqlen_q,
                 self.seqlen_k,
                 device="cuda",
-                BLOCK_SIZE=(tile_m, tile_n),
+                BLOCK_SIZE=(bwd_sparse_tile_m, bwd_sparse_tile_n),
             )
             (
                 _,
@@ -702,6 +745,8 @@ class FA4AttnArg(AttnArg):
         repr_str += f"{indent}    tile_n_bwd={self.tile_n_bwd},\n"
         repr_str += f"{indent}    seqlen_q={self.seqlen_q},\n"
         repr_str += f"{indent}    seqlen_k={self.seqlen_k},\n"
+        repr_str += f"{indent}    headdim={self.headdim},\n"
+        repr_str += f"{indent}    headdim_v={self.headdim_v},\n"
         repr_str += f"{indent}    n_func={self.n_func},\n"
 
         repr_str += f"{indent}    # Generated by _transfer_ffa_args_to_fa4_args:\n"
@@ -726,11 +771,15 @@ class CalcMeta:
 
     # Specific meta for FA4 backend
     headdim: int = 128
+    headdim_v: int | None = None
     seqlen_q_shard: int = 0  # local q seqlen from dispatch_meta
     seqlen_k_local: int = 0  # for local_attn_arg
     seqlen_k_per_remote_stage: list[int] = field(
         default_factory=list
     )  # for remote_attn_args_list
+    # Q-heads-per-KV-head ratio. Used by the FA4 path to match the cute backend's
+    # `q_stage` heuristic when building the block-sparse mask. Default 1 (MHA).
+    qhead_per_kvhead: int = 1
 
     @property
     def overlap_degree(self) -> int:
@@ -767,6 +816,8 @@ class CalcMeta:
                 seqlen_q=self.seqlen_q_shard,
                 seqlen_k=self.seqlen_k_local,
                 headdim=self.headdim,
+                headdim_v=self.headdim_v,
+                qhead_per_kvhead=self.qhead_per_kvhead,
             )
             # DEVIATION: remote_attn_args_list entries (AttnArg) replaced with FA4AttnArg
             # Reason: same as local_attn_arg above — FA4 backend requirement.
@@ -785,6 +836,8 @@ class CalcMeta:
                     seqlen_q=self.seqlen_q_shard,
                     seqlen_k=self.seqlen_k_per_remote_stage[stage],
                     headdim=self.headdim,
+                    headdim_v=self.headdim_v,
+                    qhead_per_kvhead=self.qhead_per_kvhead,
                 )
 
         if self.no_overlap and self.overlap_degree > 0:
@@ -845,6 +898,8 @@ class CalcMeta:
                 seqlen_q=self.seqlen_q_shard,
                 seqlen_k=merged_seqlen_k,
                 headdim=self.headdim,
+                headdim_v=self.headdim_v,
+                qhead_per_kvhead=self.qhead_per_kvhead,
             )
 
         return AttnArg(

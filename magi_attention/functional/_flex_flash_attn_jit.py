@@ -68,6 +68,98 @@ def round_up_headdim(head_dim: int) -> int:
         return 256
 
 
+def _assert_register_quota(producer_regs: int, consumer_regs: int):
+    """Mirror of the kernel-side setmaxnreg static_asserts (flash_{fwd,bwd}_kernel_sm90.h)."""
+    for regs in (producer_regs, consumer_regs):
+        assert (
+            regs % 8 == 0 and 24 <= regs <= 256
+        ), f"setmaxnreg quota must be a multiple of 8 in [24, 256], got {regs}"
+
+
+def _ffa_register_quota(
+    direction: str,
+    head_dim: int,
+    kblock_m: int | None,
+    swap_ab: bool,
+    bwd_inner_loop_k: bool,
+    block_sparse: bool,
+    index_sparse: bool,
+    sparse_dx_tma_reduce: bool,
+    sparse_k_block_size: int = 1,
+) -> tuple[int, int]:
+    """Select the setmaxnreg quotas (producer/load WG, consumer/mma WG) for one variant.
+
+    This is the single source of truth for register allocation; the kernels
+    (flash_{fwd,bwd}_kernel_sm90.h) only static_assert the constraints.
+
+    fwd (producer, consumer) by mode:
+      - scatter load ((index_sparse or block_sparse) with kbs<kBlockN): (64, 216)
+        cp.async producer warpgroup needs more registers than the TMA producer warp.
+      - TMA KV (kbs>=kBlockN, i.e. kInnerTilesContiguous=true): use Dense quota
+        since only thread 0 issues TMA.
+      - dense, by MMA warpgroup count (1/2/3 from kBlockM/64, or 1 when SwapAB): (56, 256),
+        (40, 232), (32, 160).
+
+    bwd (producer, consumer) by mode:
+      - dense: (40, 232) at 2 MMA WGs, (40, 152) at 3 (kHeadDim=192).
+      - scatter + TMA inner (sparse_dx_tma_reduce=True): (40, 232). Inner Q/dO are
+        loaded via TMA (1 warp, minimal regs), so producer matches Dense quota.
+        cuobjdump verified: pr=56→STACK=32 (consumer spills), pr=40→STACK=0.
+      - scatter + cp.async inner (sparse_dx_tma_reduce=False, scalar-atomicAdd dX
+        store fallback): (104, ...). The store-warp code spills at 88 (STACK 3272B).
+      Historical note: the sweep that found pr=56 as sweet spot was done with cp.async
+      (BlockSparse LoopQ, S=64K/256K), not TMA. With TMA inner loads, the producer
+      needs far fewer live variables, and pr=40 gives consumer enough regs to avoid
+      MMA accumulator spills.
+
+    Env override MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS (bwd only): producer is forced to
+    the given value and the consumer is rederived from the weighted budget.
+    """
+    kblock_n_fwd = 128  # Default FWD tile N
+    if direction == "fwd":
+        assert kblock_m is not None
+        # CpAsync scatter path is used when kInnerTilesContiguous is false:
+        #   kInnerTilesContiguous = (!IndexSparse && !BlockSparse) || (KBlockSize >= kBlockN)
+        # So scatter is needed when (IndexSparse || BlockSparse) && KBlockSize < kBlockN.
+        uses_scatter = (
+            index_sparse or block_sparse
+        ) and sparse_k_block_size < kblock_n_fwd
+        if uses_scatter:
+            producer_regs, consumer_regs = 64, 216
+        else:
+            # TMA KV paths (Dense, BlockSparse, IndexSparse kbs>=kBlockN): same quota
+            # mirrors NumMmaWarpGroups = size(TiledMmaPV)/128 (AtomLayoutQK in mainloop_fwd)
+            num_mma_wgs = 1 if swap_ab else kblock_m // 64
+            producer_regs, consumer_regs = {1: (56, 256), 2: (40, 232), 3: (32, 160)}[
+                num_mma_wgs
+            ]
+    else:
+        # mirrors NumMmaWarpGroups in run_mha_bwd_ (flash_bwd_launch_template.h)
+        num_mma_wgs = 2 if bwd_inner_loop_k else (3 if head_dim == 192 else 2)
+        inner_use_scatter = block_sparse or index_sparse
+        budget = 168 * (1 + num_mma_wgs)
+        if inner_use_scatter:
+            if sparse_dx_tma_reduce:
+                # TMA path: inner Q/dO loaded via TMA (1 warp), producer needs
+                # minimal regs — match Dense quota so consumer gets 232 for MMA
+                # accumulators. cuobjdump: pr=56→STACK=32 (spills), pr=40→STACK=0.
+                producer_regs = 40
+            else:
+                producer_regs = 104
+            consumer_regs = ((budget - producer_regs) // num_mma_wgs) // 8 * 8
+        else:
+            producer_regs, consumer_regs = 40, (232 if num_mma_wgs == 2 else 152)
+        _bpr = os.environ.get("MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS")
+        if _bpr is not None and int(_bpr) != 0:
+            producer_regs = int(_bpr)
+            consumer_regs = ((budget - producer_regs) // num_mma_wgs) // 8 * 8
+        assert (
+            producer_regs + num_mma_wgs * consumer_regs <= budget
+        ), f"bwd register quota {producer_regs}+{num_mma_wgs}x{consumer_regs} exceeds budget {budget}"
+    _assert_register_quota(producer_regs, consumer_regs)
+    return producer_regs, consumer_regs
+
+
 def get_ffa_uri(
     arch_sm_num: str,
     direction: str,
@@ -76,17 +168,18 @@ def get_ffa_uri(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    disable_dq_atomic_reduction: bool,
     deterministic: bool,
     kblock_m: int | None,
     kblock_n: int | None,
-    auto_range_merge: bool,
+    range_merge: bool,
     swap_ab: bool,
     pack_gqa: bool,
     cat_gqa: bool,
-    qhead_per_khead: int,
-    sparse_load: bool,
-    index_attn: bool,
-    swap_bwd_qk_loop: bool,
+    pack_gqa_factor: int,
+    block_sparse: bool,
+    index_sparse: bool,
+    bwd_inner_loop_k: bool,
     profile_mode: bool,
     return_max_logits: bool,
     dq_dtype: torch.dtype | None = None,
@@ -105,14 +198,15 @@ def get_ffa_uri(
         f"{f'_dkv_{_dtype_name(dkv_dtype)}' if dkv_dtype is not None else ''}"
         f"{'_softcap' if softcap else ''}"
         f"{'' if disable_atomic_reduction else '_atomic'}"
+        f"{'' if not disable_dq_atomic_reduction else '_nodqatomic'}"
         f"{'_deterministic' if deterministic else ''}"
-        f"{'_autorangemerge' if auto_range_merge else ''}"
+        f"{'_rangemerge' if range_merge else ''}"
         f"{'_swapab' if swap_ab else ''}"
-        f"{f'_packgqa{qhead_per_khead}' if pack_gqa else ''}"
-        f"{f'_catgqa{qhead_per_khead}' if cat_gqa else ''}"
-        f"{'_sparse_load' if sparse_load else ''}"
-        f"{'_index_attn' if index_attn else ''}"
-        f"{'_swapbwdqkloop' if swap_bwd_qk_loop else ''}"
+        f"{f'_packgqa{pack_gqa_factor}' if pack_gqa else ''}"
+        f"{f'_catgqa{pack_gqa_factor}' if cat_gqa else ''}"
+        f"{'_block_sparse' if block_sparse else ''}"
+        f"{'_index_sparse' if index_sparse else ''}"
+        f"{'_bwdinnerloopk' if bwd_inner_loop_k else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_return_max_logits' if return_max_logits else ''}"
         + (
@@ -135,9 +229,9 @@ def sanity_check(
     output_dtype: torch.dtype | None,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
-    sparse_load: bool = False,
-    index_attn: bool = False,
-    swap_bwd_qk_loop: bool = False,
+    block_sparse: bool = False,
+    index_sparse: bool = False,
+    bwd_inner_loop_k: bool = False,
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
@@ -194,10 +288,10 @@ def sanity_check(
             assert (
                 kblock_n % 16 == 0 and kblock_n <= 256
             ), "ref_block_size: (kblock_m, kblock_n), kblock_n <= 256 and kblock_n % 16 == 0 must be True"
-    if swap_bwd_qk_loop:
+    if bwd_inner_loop_k:
         assert (
             direction == "bwd"
-        ), "swap_bwd_qk_loop only take effect when direction == 'bwd'"
+        ), "bwd_inner_loop_k only take effect when direction == 'bwd'"
     if return_max_logits:
         assert (
             direction == "fwd"
@@ -215,20 +309,22 @@ def get_ffa_jit_spec(
     output_dtype: torch.dtype | None,
     softcap: bool,
     disable_atomic_reduction: bool,
+    disable_dq_atomic_reduction: bool,
     deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
-    auto_range_merge: bool = False,
+    range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
-    qhead_per_khead: int = 1,
-    sparse_load: bool = False,
-    index_attn: bool = False,
-    swap_bwd_qk_loop: bool = False,
+    pack_gqa_factor: int = 1,
+    block_sparse: bool = False,
+    index_sparse: bool = False,
+    bwd_inner_loop_k: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
+    sparse_k_block_size: int = 1,
 ) -> tuple[JitSpec, str]:
     # TODO: add more sanity checks for the combinations of options
     sanity_check(
@@ -239,9 +335,9 @@ def get_ffa_jit_spec(
         output_dtype=output_dtype,
         ref_block_size=ref_block_size,
         swap_ab=swap_ab,
-        sparse_load=sparse_load,
-        index_attn=index_attn,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        block_sparse=block_sparse,
+        index_sparse=index_sparse,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
@@ -260,6 +356,29 @@ def get_ffa_jit_spec(
         else:
             kblock_m, kblock_n = None, None
 
+    # PackGQA packs Q heads into ((pack_gqa_factor, seqlen), headdim, nheads_kv).
+    # TMA requires kBlockM to divide cleanly within this hierarchy:
+    #   kBlockM % pack_gqa_factor == 0  OR  pack_gqa_factor % kBlockM == 0
+    # When neither holds (e.g. kBlockM=192, pgf=128: 192 straddles the (128,
+    # seqlen) mode boundary), reduce kBlockM to pack_gqa_factor.  The adjusted
+    # value is clamped to [64, 128] — the valid tile range for SM90 FWD kernels
+    # (64 = 1 MMA warp-group, 128 = 2 MMA warp-groups).
+    if pack_gqa and kblock_m is not None and pack_gqa_factor > 1:
+        if kblock_m % pack_gqa_factor != 0 and pack_gqa_factor % kblock_m != 0:
+            old_kblock_m = kblock_m
+            kblock_m = max(64, min(128, pack_gqa_factor))
+            assert kblock_m % pack_gqa_factor == 0 or pack_gqa_factor % kblock_m == 0, (
+                f"pack_gqa: adjusted kBlockM={kblock_m} still incompatible "
+                f"with pack_gqa_factor={pack_gqa_factor}"
+            )
+            logger.info(
+                "pack_gqa: kBlockM %d -> %d for pack_gqa_factor=%d (head_dim=%d)",
+                old_kblock_m,
+                kblock_m,
+                pack_gqa_factor,
+                head_dim,
+            )
+
     uri = get_ffa_uri(
         arch_sm_num=arch_sm_num,
         direction=direction,
@@ -268,17 +387,18 @@ def get_ffa_jit_spec(
         output_dtype=output_dtype,
         softcap=softcap,
         disable_atomic_reduction=disable_atomic_reduction,
+        disable_dq_atomic_reduction=disable_dq_atomic_reduction,
         deterministic=deterministic,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
-        auto_range_merge=auto_range_merge,
+        range_merge=range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
-        qhead_per_khead=qhead_per_khead,
-        sparse_load=sparse_load,
-        index_attn=index_attn,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        pack_gqa_factor=pack_gqa_factor,
+        block_sparse=block_sparse,
+        index_sparse=index_sparse,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,
@@ -289,8 +409,8 @@ def get_ffa_jit_spec(
     logger.info(
         "FFA JIT params: arch=sm%s, direction=%s, head_dim=%d, compute_dtype=%s, "
         "output_dtype=%s, softcap=%s, deterministic=%s, block_size=%s, "
-        "swap_ab=%s, pack_gqa=%s, cat_gqa=%s, qhead_per_khead=%d, "
-        "sparse_load=%s, index_attn=%s, profile_mode=%s, return_max_logits=%s",
+        "swap_ab=%s, pack_gqa=%s, cat_gqa=%s, pack_gqa_factor=%d, "
+        "block_sparse=%s, index_sparse=%s, profile_mode=%s, return_max_logits=%s",
         arch_sm_num,
         direction,
         head_dim,
@@ -302,28 +422,33 @@ def get_ffa_jit_spec(
         swap_ab,
         pack_gqa,
         cat_gqa,
-        qhead_per_khead,
-        sparse_load,
-        index_attn,
+        pack_gqa_factor,
+        block_sparse,
+        index_sparse,
         profile_mode,
         return_max_logits,
     )
 
+    # sparse_k_block_size is a compile-time constant baked into the kernel.
+    # Different values produce separate JIT cache entries.
+    if sparse_k_block_size > 1:
+        uri += f"_kbs{sparse_k_block_size}"
+
     # Optional compile-time overrides for internal kernel tuning knobs (test/bench only)
-    extra_template_args: dict[str, str] = {}
+    extra_template_args: dict[str, str] = {
+        "sparse_k_block_size": str(sparse_k_block_size)
+    }
     _iwg = os.environ.get("MAGI_ATTENTION_FFA_INTRA_WG_OVERLAP")
     if _iwg is not None and direction == "fwd":
         extra_template_args["intra_wg_overlap"] = _iwg.lower()
         uri += f"_iwg{_iwg}"
-    _umd = os.environ.get("MAGI_ATTENTION_FFA_USE_MASK_DISPATCH")
-    if _umd is not None and direction == "bwd":
-        extra_template_args["use_mask_dispatch"] = _umd.lower()
-        uri += f"_umd{_umd}"
     _idm = os.environ.get("MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN")
     if _idm is not None:
         extra_template_args["inner_dir_max_to_min"] = _idm.lower()
         uri += f"_idm{_idm}"
     # mask_mode: "regular"=0 (direct apply), "dispatch"=1 (3-lambda), "unified"=2
+    # BWD default: unified (avoids 3-lambda code bloat that causes register spill).
+    # FWD default: dispatch (template default '1' in jinja).
     _mask_mode_map = {"regular": "0", "dispatch": "1", "unified": "2"}
     _mm = os.environ.get("MAGI_ATTENTION_FFA_MASK_MODE")
     if _mm is not None:
@@ -333,6 +458,186 @@ def get_ffa_jit_spec(
         ), f"MAGI_ATTENTION_FFA_MASK_MODE must be regular/dispatch/unified, got {_mm}"
         extra_template_args["mask_mode_int"] = _mask_mode_map[_mm_lower]
         uri += f"_mm{_mm_lower}"
+    elif direction == "bwd":
+        extra_template_args["mask_mode_int"] = _mask_mode_map["unified"]
+        uri += "_mmunified"
+    # inner_use_scatter mirrors the mainloop predicate (mainloop_bwd_sm90_tma_gmma_ws.hpp):
+    # InnerLoopK scatters K/V when block_sparse or index_sparse, InnerLoopQ scatters Q/dO when block_sparse
+    # or index_sparse (inner_indices).
+    _inner_use_scatter = block_sparse or index_sparse
+    _dxp = os.environ.get("MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER")
+    # Applies to ALL bwd configs (Dense, IndexSparse, BlockSparse).
+    # Default is true (producer store warp handles dX reduce-add to GMEM).
+    # false → consumer WGs handle dX store directly; frees one producer warp but
+    # shifts code pressure to the consumer (Dense: cr needs ~232 to avoid spill).
+    if _dxp is not None and direction == "bwd":
+        _dxp_lower = _dxp.lower()
+        assert _dxp_lower in (
+            "true",
+            "false",
+        ), f"MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER must be true/false, got {_dxp}"
+        extra_template_args["inner_store_in_producer"] = _dxp_lower
+        uri += f"_dxp{_dxp_lower}"
+    # ─── InnerLoadMode: tma=0, cpasync=2 ───
+    # C++ uses template param directly (no default). Always set explicitly.
+    if _inner_use_scatter:
+        _load_mode_map = {"tma": "0", "cpasync": "2"}
+        _load_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_LOAD_MODE")
+        if _load_env is not None:
+            _load_lower = _load_env.lower()
+            assert (
+                _load_lower in _load_mode_map
+            ), f"MAGI_ATTENTION_FFA_INNER_LOAD_MODE must be tma/cpasync, got {_load_env}"
+            extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
+            uri += f"_sload{_load_mode_map[_load_lower]}"
+        else:
+            _kblock_n = 128
+            _contiguous = sparse_k_block_size >= _kblock_n
+            if direction == "bwd" and not bwd_inner_loop_k:
+                _contiguous = pack_gqa and pack_gqa_factor >= 128
+            _auto_mode = "0" if _contiguous else "2"
+            extra_template_args["inner_load_mode"] = _auto_mode
+    else:
+        extra_template_args["inner_load_mode"] = "0"
+    # ─── InnerStoreMode (BWD only): 0=tma(2D), 1=tma1d, 2=atomicadd, 3=bypass_smem ───
+    if direction == "bwd":
+        _store_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_STORE_MODE")
+        _use_smem_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM")
+        if _use_smem_env is not None and _use_smem_env == "0":
+            extra_template_args["inner_store_mode"] = "3"
+            uri += "_sstore3"
+        elif _store_env is not None:
+            _store_lower = _store_env.lower()
+            _store_mode_map = {
+                "tma": "0",
+                "tma2d": "0",
+                "tma1d": "1",
+                "atomicadd": "2",
+                "cpasync": "2",
+                "bypass": "3",
+            }
+            assert (
+                _store_lower in _store_mode_map
+            ), f"MAGI_ATTENTION_FFA_INNER_STORE_MODE must be tma/tma2d/tma1d/atomicadd/bypass, got {_store_env}"
+            extra_template_args["inner_store_mode"] = _store_mode_map[_store_lower]
+            uri += f"_sstore{_store_mode_map[_store_lower]}"
+        elif _inner_use_scatter:
+            extra_template_args["inner_store_mode"] = "1"
+    # Tile/stage overrides for A/B benchmarking (BWD only).
+    # Each distinct combo produces a separate JIT URI → separate .so cache.
+    if direction == "bwd":
+        for _env_name, _tpl_key, _uri_key in [
+            ("MAGI_ATTENTION_FFA_BWD_TILE_M", "bwd_tile_m", "tm"),
+            ("MAGI_ATTENTION_FFA_BWD_TILE_N", "bwd_tile_n", "tn"),
+            ("MAGI_ATTENTION_FFA_BWD_STAGES", "bwd_stages", "stg"),
+            ("MAGI_ATTENTION_FFA_BWD_STAGES_DS", "bwd_stages_ds", "stds"),
+            ("MAGI_ATTENTION_FFA_BWD_STAGES_V", "bwd_stages_v", "stv"),
+        ]:
+            _val = os.environ.get(_env_name)
+            if _val is not None:
+                extra_template_args[_tpl_key] = str(int(_val))
+                _uri_val = _val.replace("-", "n")
+                uri += f"_{_uri_key}{_uri_val}"
+
+        # Default for LoopK: separate dK/dV SMEM buffers (UnionDkvSmem=false) + stgV=1.
+        # Separate mode (+38T, +11%): SMEM 198KB → 214KB (stgV=1 frees 16KB for +32KB).
+        # Convenience override: MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2=1 restores legacy union.
+        # Fine-grained: BWD_UNION_DKV_SMEM / BWD_STAGES_V still work individually.
+        _union_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_UNION_DKV_SMEM")
+        if _union_env is not None:
+            extra_template_args["bwd_union_dkv_smem"] = (
+                "true" if _union_env != "0" else "false"
+            )
+            if _union_env != "0":
+                uri += f"_ud{_union_env}"
+        _perf_union = os.environ.get("MAGI_ATTENTION_FFA_BWD_PERF_UNION_STGV2")
+        if _perf_union is not None and _perf_union != "0":
+            extra_template_args.setdefault("bwd_union_dkv_smem", "true")
+            extra_template_args.setdefault("bwd_stages_v", "2")
+            uri += "_pus1"
+        elif bwd_inner_loop_k:
+            if "bwd_stages_v" not in extra_template_args:
+                extra_template_args["bwd_stages_v"] = "1"
+                uri += "_stv1"
+
+        # Inner store pipeline stages: 1 = single-buffer (default), 2 = double-buffer dKV SMEM.
+        _inner_store_stages = os.environ.get(
+            "MAGI_ATTENTION_FFA_BWD_INNER_STORE_STAGES"
+        )
+        if _inner_store_stages is not None:
+            extra_template_args["inner_store_stages"] = _inner_store_stages
+            if _inner_store_stages != "1":
+                uri += f"_iss{_inner_store_stages}"
+
+        # Per-switch debug overrides (LoopK perf isolation, correctness NOT guaranteed).
+        for _env_name, _tpl_key, _uri_key in [
+            ("MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD", "bwd_skip_v_load", "svl"),
+            ("MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE", "bwd_skip_dv_store", "svs"),
+            ("MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE", "bwd_skip_dk_store", "sks"),
+            ("MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA", "bwd_skip_dv_mma", "svm"),
+        ]:
+            _val = os.environ.get(_env_name)
+            if _val is not None and _val != "0":
+                extra_template_args[_tpl_key] = "true"
+                uri += f"_{_uri_key}1"
+
+        # IndexSparse InnerLoopQ with block-level K: override tile_n to match sparse_k_block_size
+        # so that kBlockN = sparse_k_block_size (full-tile outer K, no waste).
+        if (
+            index_sparse
+            and not bwd_inner_loop_k
+            and "bwd_tile_n" not in extra_template_args
+        ):
+            if sparse_k_block_size >= 128:
+                extra_template_args["bwd_tile_n"] = str(sparse_k_block_size)
+                uri += f"_tn{sparse_k_block_size}"
+
+    # Register quota selection (single source of truth, kernels only assert)
+    _producer_regs, _consumer_regs = _ffa_register_quota(
+        direction=direction,
+        head_dim=head_dim,
+        kblock_m=kblock_m,
+        swap_ab=swap_ab,
+        bwd_inner_loop_k=bwd_inner_loop_k,
+        block_sparse=block_sparse,
+        index_sparse=index_sparse,
+        sparse_dx_tma_reduce=extra_template_args.get("inner_store_mode", "0") == "1",
+        sparse_k_block_size=sparse_k_block_size,
+    )
+    extra_template_args[f"{direction}_producer_regs"] = str(_producer_regs)
+    extra_template_args[f"{direction}_consumer_regs"] = str(_consumer_regs)
+    uri += f"_pr{_producer_regs}_cr{_consumer_regs}"
+
+    # ─── OuterStoreMode: 0=Tma, 1=Stg ───
+    # FWD default: Tma when SwapAB=true and PackGQA shape divides kBlockM.
+    #   SwapAB=false defaults to Stg (bank-conflict-free R2S with SmemLayoutOSTS).
+    #   Env var MAGI_ATTENTION_FFA_OUTER_STORE_MODE can force Tma for SwapAB=false
+    #   (C++ SmemLayoutO follows Use_TMA_O, so TMA store is correct regardless of
+    #   SwapAB; R2S into SmemLayoutOTMA has bank conflicts but TMA store may still win).
+    # BWD: Tma when OuterStoreNeedReduction=true and not IndexSparse partial tile.
+    _outer_store_env = os.environ.get("MAGI_ATTENTION_FFA_OUTER_STORE_MODE")
+    if _outer_store_env is not None:
+        _osm_map = {"tma": "0", "stg": "1", "tma1d": "2", "0": "0", "1": "1", "2": "2"}
+        _osm_lower = _outer_store_env.lower()
+        assert (
+            _osm_lower in _osm_map
+        ), f"MAGI_ATTENTION_FFA_OUTER_STORE_MODE must be tma/stg/tma1d, got {_outer_store_env}"
+        extra_template_args["outer_store_mode"] = _osm_map[_osm_lower]
+        uri += f"_osm{_osm_map[_osm_lower]}"
+    elif direction == "fwd":
+        _can_tma = swap_ab and (
+            not pack_gqa or (kblock_m is not None and kblock_m % pack_gqa_factor == 0)
+        )
+        extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"
+    elif direction == "bwd":
+        # BWD: Tma when reduction is needed and tile is not partial (IndexSparse LoopQ)
+        _outer_needs_reduction = (
+            bwd_inner_loop_k and not disable_dq_atomic_reduction
+        ) or (not bwd_inner_loop_k and not disable_atomic_reduction)
+        _is_partial_tile = index_sparse and not bwd_inner_loop_k
+        _can_tma = _outer_needs_reduction and not _is_partial_tile
+        extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"
+
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
     logger.info("Generated source directory: %s", gen_directory)
@@ -357,14 +662,15 @@ def get_ffa_jit_spec(
     dkv_t = _DTYPE_TO_CUTLASS[dkv_dtype] if dkv_dtype is not None else out_t
     has_softcap = bool(softcap)
     disable_atomic = bool(disable_atomic_reduction)
+    disable_dq_atomic = bool(disable_dq_atomic_reduction)
     deterministic = bool(deterministic)
     profile_mode = bool(profile_mode)
-    auto_range_merge = bool(auto_range_merge)
+    range_merge = bool(range_merge)
     swap_ab = bool(swap_ab)
     pack_gqa = bool(pack_gqa)
     cat_gqa = bool(cat_gqa)
-    sparse_load = bool(sparse_load)
-    swap_bwd_qk_loop = bool(swap_bwd_qk_loop)
+    block_sparse = bool(block_sparse)
+    bwd_inner_loop_k = bool(bwd_inner_loop_k)
 
     rendered = template.render(
         arch_sm_num=arch_sm_num,
@@ -375,18 +681,19 @@ def get_ffa_jit_spec(
         head_dim=head_dim,
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
+        disable_dq_atomic=str(disable_dq_atomic).lower(),
         deterministic=str(deterministic).lower(),
         profile_mode=str(profile_mode).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
-        auto_range_merge=str(auto_range_merge).lower(),
+        range_merge=str(range_merge).lower(),
         swap_ab=str(swap_ab).lower(),
         pack_gqa=str(pack_gqa).lower(),
         cat_gqa=str(cat_gqa).lower(),
-        qhead_per_khead=qhead_per_khead,
-        sparse_load=str(sparse_load).lower(),
-        index_attn=str(index_attn).lower(),
-        swap_bwd_qk_loop=str(swap_bwd_qk_loop).lower(),
+        pack_gqa_factor=pack_gqa_factor,
+        block_sparse=str(block_sparse).lower(),
+        index_sparse=str(index_sparse).lower(),
+        bwd_inner_loop_k=str(bwd_inner_loop_k).lower(),
         return_max_logits=str(bool(return_max_logits)).lower(),
         **extra_template_args,
     )
@@ -471,6 +778,21 @@ def get_ffa_jit_spec(
     return spec, uri
 
 
+_ENV_PREFIX = "MAGI_ATTENTION_FFA_"
+
+
+def _snapshot_env() -> tuple[tuple[str, str], ...]:
+    """Capture all MAGI_ATTENTION_FFA_* env vars into a hashable tuple.
+
+    Passed as ``_env_snapshot`` to ``get_ffa_jit_mod`` so that ``lru_cache``
+    sees different keys when env vars change between calls.
+    Any new env var with the prefix automatically invalidates the cache.
+    """
+    return tuple(
+        sorted((k, v) for k, v in os.environ.items() if k.startswith(_ENV_PREFIX))
+    )
+
+
 def get_ffa_jit_mod(
     direction: Literal["fwd", "bwd"],
     head_dim: int,
@@ -478,20 +800,23 @@ def get_ffa_jit_mod(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    disable_dq_atomic_reduction: bool,
     deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
-    auto_range_merge: bool = False,
+    range_merge: bool = False,
     swap_ab: bool = False,
     pack_gqa: bool = False,
     cat_gqa: bool = False,
-    qhead_per_khead: int = 1,
-    sparse_load: bool = False,
-    index_attn: bool = False,
-    swap_bwd_qk_loop: bool = False,
+    pack_gqa_factor: int = 1,
+    block_sparse: bool = False,
+    index_sparse: bool = False,
+    bwd_inner_loop_k: bool = False,
     profile_mode: bool = False,
     return_max_logits: bool = False,
     dq_dtype: torch.dtype | None = None,
     dkv_dtype: torch.dtype | None = None,
+    sparse_k_block_size: int = 1,
+    _env_snapshot: tuple[tuple[str, str | None], ...] = (),
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -507,7 +832,7 @@ def get_ffa_jit_mod(
         arch,
     )
 
-    qhead_per_khead = 1 if not pack_gqa and not cat_gqa else qhead_per_khead
+    pack_gqa_factor = 1 if not pack_gqa and not cat_gqa else pack_gqa_factor
 
     spec, _ = get_ffa_jit_spec(
         arch=arch,
@@ -517,20 +842,22 @@ def get_ffa_jit_mod(
         output_dtype=output_dtype,
         softcap=softcap,
         disable_atomic_reduction=disable_atomic_reduction,
+        disable_dq_atomic_reduction=disable_dq_atomic_reduction,
         deterministic=deterministic,
         ref_block_size=ref_block_size,
-        auto_range_merge=auto_range_merge,
+        range_merge=range_merge,
         swap_ab=swap_ab,
         pack_gqa=pack_gqa,
         cat_gqa=cat_gqa,
-        qhead_per_khead=qhead_per_khead,
-        sparse_load=sparse_load,
-        index_attn=index_attn,
-        swap_bwd_qk_loop=swap_bwd_qk_loop,
+        pack_gqa_factor=pack_gqa_factor,
+        block_sparse=block_sparse,
+        index_sparse=index_sparse,
+        bwd_inner_loop_k=bwd_inner_loop_k,
         profile_mode=profile_mode,
         return_max_logits=return_max_logits,
         dq_dtype=dq_dtype,
         dkv_dtype=dkv_dtype,
+        sparse_k_block_size=sparse_k_block_size,
     )
 
     logger.info(

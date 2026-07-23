@@ -38,10 +38,10 @@ enum class AttnType {
 };
 
 // Mask struct for applying attention masks
-template <int kBlockM, int kBlockN, typename TiledMma, bool SwapAB = false>
+template <int kBlockM, int kBlockN, typename TiledMma, bool SwapAB>
 struct Mask {
   // Apply mask to the tensor tSrS based on attention type and sequence lengths
-  template <bool Seqlenk_mask = false, bool PackGQA = false, int QheadPerKhead = 1, typename Engine, typename Layout>
+  template <bool Seqlenk_mask, bool PackGQA, int PackGQAFactor, typename Engine, typename Layout>
   CUTLASS_DEVICE void apply(
       Tensor<Engine, Layout>& tSrS,
       const int m_block,
@@ -91,8 +91,8 @@ struct Mask {
 #pragma unroll
         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
           int const physical_row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
-          // for packgqa, the actual row index need to divide by QheadPerKhead
-          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / QheadPerKhead);
+          // for packgqa, the actual row index need to divide by PackGQAFactor
+          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / PackGQAFactor);
           int const col_limit_right = !Seqlenk_mask ? logical_row_idx + causal_row_offset : __viaddmin_s32(logical_row_idx, causal_row_offset, seqlenk_col_limit);
 
 #pragma unroll
@@ -114,9 +114,9 @@ struct Mask {
           int const global_k = col0 + n_block * kBlockN + thread_col_offset;
 
           // Calculate logical query limit: Q_logical >= K_logical - (Sk - Sq)
-          // Convert to physical limit: limit * QheadPerKhead
+          // Convert to physical limit: limit * PackGQAFactor
           // Transform to local coordinate: - m_block_offset - thread_offset
-          int const row_limit_global = (global_k - dist) * (!PackGQA ? 1 : QheadPerKhead);
+          int const row_limit_global = (global_k - dist) * (!PackGQA ? 1 : PackGQAFactor);
           int const row_limit_bottom = row_limit_global - m_block * kBlockM - thread_row_offset;
 
 #pragma unroll
@@ -138,7 +138,7 @@ struct Mask {
 #pragma unroll
         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
           int const physical_row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
-          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / QheadPerKhead);
+          int const logical_row_idx = !PackGQA ? physical_row_idx : (physical_row_idx / PackGQAFactor);
           int const col_limit_left = logical_row_idx - n_block * kBlockN - thread_col_offset;
 
 #pragma unroll
@@ -160,10 +160,10 @@ struct Mask {
 
           // Determine the maximum valid global Query index (Row Limit)
           // InvCausal implies we keep the Upper Triangle where Q_logical <= K_logical.
-          // With PackGQA, one Key corresponds to 'G' Query heads (G = QheadPerKhead).
+          // With PackGQA, one Key corresponds to 'G' Query heads (G = PackGQAFactor).
           // Therefore, for a specific Key 'K', the valid physical Query range extends
           // to the last head in the group: Max_Q_phys = K * G + (G - 1).
-          int const row_limit_global = !PackGQA ? global_k : (global_k * QheadPerKhead + (QheadPerKhead - 1));
+          int const row_limit_global = !PackGQA ? global_k : (global_k * PackGQAFactor + (PackGQAFactor - 1));
 
           // Transform global limit to local coordinate relative to the thread block/warp
           int const row_limit_bottom = row_limit_global - m_block * kBlockM - thread_row_offset;
@@ -180,7 +180,11 @@ struct Mask {
     }
   };
 
-  template <typename Engine, typename Layout>
+  // Mask invalid columns (N-side padding, for BlockSparse LoopK / IndexSparse).
+  // MaskLow=false (default): masks columns >= kBlockN - num_invalid (high end, for MinToMax).
+  // MaskLow=true: masks columns < num_invalid (low end, for MaxToMin where padding
+  //   occupies the beginning of the tile due to the reversed scatter fill order).
+  template <bool MaskLow = false, typename Engine, typename Layout>
   CUTLASS_DEVICE void apply_padding_mask(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");
     auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
@@ -188,7 +192,6 @@ struct Mask {
 
     static constexpr int Col = !SwapAB ? 1 : 0;
 
-    // Create identity tensor for block shape
     Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
     Tensor tScS = thread_mma.partition_C(cS);
     Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
@@ -196,16 +199,73 @@ struct Mask {
     Tensor t0ScS = thread0_mma.partition_C(cS);
     Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
 
-    // Use the column indices of thread0 for comparison, known at compile time
     int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
-    int const seqlenk_col_limit = kBlockN - num_invalid_token - thread_col_offset;
 
+    if constexpr (MaskLow) {
+      int const low_col_limit = num_invalid_token - thread_col_offset;
 #pragma unroll
-    for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
-      if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
+      for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+        if (int(get<Col>(t0ScS_rowcol(_0{}, n))) < low_col_limit) {
 #pragma unroll
-        for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-          tSrS_rowcol(m, n) = -INFINITY;
+          for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+            tSrS_rowcol(m, n) = -INFINITY;
+          }
+        }
+      }
+    } else {
+      int const seqlenk_col_limit = kBlockN - num_invalid_token - thread_col_offset;
+#pragma unroll
+      for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+        if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
+#pragma unroll
+          for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+            tSrS_rowcol(m, n) = -INFINITY;
+          }
+        }
+      }
+    }
+  }
+
+  // Mask invalid rows (M-side padding, for BlockSparse LoopQ).
+  // MaskLow=false (default): masks rows >= kBlockM - num_invalid (high end, MinToMax).
+  // MaskLow=true: masks rows < num_invalid (low end, MaxToMin).
+  template <bool MaskLow = false, typename Engine, typename Layout>
+  CUTLASS_DEVICE void apply_padding_mask_row(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
+    static_assert(Layout::rank == 3, "Only support 3D Tensor");
+    auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
+    auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
+
+    static constexpr int Row = !SwapAB ? 0 : 1;
+
+    Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
+    Tensor tScS = thread_mma.partition_C(cS);
+    Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
+    Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
+    Tensor t0ScS = thread0_mma.partition_C(cS);
+    Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
+
+    int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
+
+    if constexpr (MaskLow) {
+      int const low_row_limit = num_invalid_token - thread_row_offset;
+#pragma unroll
+      for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+        if (int(get<Row>(t0ScS_rowcol(m, _0{}))) < low_row_limit) {
+#pragma unroll
+          for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+            tSrS_rowcol(m, n) = -INFINITY;
+          }
+        }
+      }
+    } else {
+      int const seqlenq_row_limit = kBlockM - num_invalid_token - thread_row_offset;
+#pragma unroll
+      for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+        if (int(get<Row>(t0ScS_rowcol(m, _0{}))) >= seqlenq_row_limit) {
+#pragma unroll
+          for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+            tSrS_rowcol(m, n) = -INFINITY;
+          }
         }
       }
     }
@@ -219,7 +279,7 @@ struct Mask {
 // Template parameters:
 //   Axis: N = iterate over K-blocks (fixed m_block), M = iterate over Q-blocks (fixed n_block)
 //   Direction: MinToMax = ascending, MaxToMin = descending
-//   PackGQA/QheadPerKhead: only used when Axis=M (m-direction needs packed/logical conversion)
+//   PackGQA/PackGQAFactor: only used when Axis=M (m-direction needs packed/logical conversion)
 //
 // seqlen_q: always LOGICAL (= seqlen_info.seqlen_q, unscaled by PackGQA).
 //
@@ -275,14 +335,14 @@ CUTLASS_DEVICE void iterate_range(int& cursor, int lo, int hi, BodyFn body) {
 // and cause register spill (local_ld/st). BWD uses a direct mask_fn(tSrS, block) instead.
 // This function is retained for FWD use only.
 //
-// BlockMetaT must provide: outer_block, inner_block_min, inner_block_max,
+// BlockMetaT must provide: outer_tile_idx, inner_block_min, inner_block_cnt,
 //   seqlen_info.seqlen_q, seqlen_info.seqlen_k, attn_type.
-// MaskT must provide: apply<Seqlenk_mask, PackGQA, QheadPerKhead>(tSrS, m_block, n_block, ...).
+// MaskT must provide: apply<Seqlenk_mask, PackGQA, PackGQAFactor>(tSrS, m_block, n_block, ...).
 template <
     int kBlockM,
     int kBlockN,
     bool PackGQA,
-    int QheadPerKhead,
+    int PackGQAFactor,
     DispatchAxis Axis,
     DispatchDirection Direction,
     typename BlockMetaT,
@@ -294,13 +354,13 @@ CUTLASS_DEVICE void mask_dispatch_unified(BlockMetaT const& block_meta, MaskT co
   constexpr int kBlockOuter = is_N ? kBlockN : kBlockM;
 
   int const block_lo = block_meta.inner_block_min;
-  int const block_hi = block_meta.inner_block_max;
-  int const fixed_block = block_meta.outer_block;
+  int const block_hi = block_meta.inner_block_cnt;
+  int const fixed_block = block_meta.outer_tile_idx;
   int const seqlen_q = block_meta.seqlen_info.seqlen_q;
   int const seqlen_k = block_meta.seqlen_info.seqlen_k;
   auto const attn_type = block_meta.attn_type;
 
-  int const pack_factor = (!is_N && PackGQA) ? QheadPerKhead : 1;
+  int const pack_factor = (!is_N && PackGQA) ? PackGQAFactor : 1;
   int const seqlen_outer = is_N ? seqlen_k : seqlen_q * pack_factor;
   bool const cross_axis_boundary = !is_N && ((fixed_block + 1) * kBlockN > seqlen_k);
 
@@ -330,9 +390,9 @@ CUTLASS_DEVICE void mask_dispatch_unified(BlockMetaT const& block_meta, MaskT co
     int const m_blk = is_N ? fixed_block : block;
     int const n_blk = is_N ? block : fixed_block;
     if (seqlenk_mask)
-      mask.template apply</*Seqlenk_mask=*/true, PackGQA, QheadPerKhead>(tSrS, m_blk, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/true, PackGQA, PackGQAFactor>(tSrS, m_blk, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
     else
-      mask.template apply</*Seqlenk_mask=*/false, PackGQA, QheadPerKhead>(tSrS, m_blk, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply</*Seqlenk_mask=*/false, PackGQA, PackGQAFactor>(tSrS, m_blk, n_blk, attn_type, thread_idx, seqlen_q, seqlen_k);
   };
 
   // Unified mask function: ONE lambda type, runtime dispatch.
@@ -350,11 +410,11 @@ CUTLASS_DEVICE void mask_dispatch_unified(BlockMetaT const& block_meta, MaskT co
     // else: no mask needed — block is fully visible
   };
 
-  // Use inner_block_cur as traversal start (may differ from init_block_cur after head processing).
-  // FWD: mma_head already processed the first block and advanced inner_block_cur,
+  // Use inner_block_idx as traversal start (may differ from init_block_cur after head processing).
+  // FWD: mma_head already processed the first block and advanced inner_block_idx,
   //      so we must start from the advanced position, not from block_lo/block_hi.
-  // BWD: no mma_head pre-processing, inner_block_cur == init_block_cur(block_lo, block_hi).
-  int block_cur = block_meta.inner_block_cur;
+  // BWD: no mma_head pre-processing, inner_block_idx == init_block_cur(block_lo, block_hi).
+  int block_cur = block_meta.inner_block_idx;
   iterate_range<Direction>(block_cur, block_lo, block_hi, [&] { step_fn(block_cur, unified_mask_fn, cute::false_type{}); });
 }
 
@@ -366,7 +426,7 @@ template <
     int kBlockM,
     int kBlockN,
     bool PackGQA,
-    int QheadPerKhead,
+    int PackGQAFactor,
     DispatchAxis Axis,
     DispatchDirection Direction,
     typename StepFn,
@@ -395,7 +455,7 @@ CUTLASS_DEVICE void mask_dispatch(
 
   constexpr bool is_N = (Axis == DispatchAxis::N);
   constexpr int kBlockOuter = is_N ? kBlockN : kBlockM;
-  int const pack_factor = (!is_N && PackGQA) ? QheadPerKhead : 1;
+  int const pack_factor = (!is_N && PackGQA) ? PackGQAFactor : 1;
   int const seqlen_outer = is_N ? seqlen_k : seqlen_q * pack_factor;
   bool const cross_axis_boundary = !is_N && ((fixed_block + 1) * kBlockN > seqlen_k);
 

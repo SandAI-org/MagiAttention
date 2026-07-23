@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  MagiAttention\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-04 06:03+0000\n"
+"POT-Creation-Date: 2026-07-12 18:49+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -46,32 +46,33 @@ msgstr "**MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE**"
 
 #: ../../source/user_guide/env_variables.md:19
 #: ../../source/user_guide/env_variables.md:36
-#: ../../source/user_guide/env_variables.md:113
-#: ../../source/user_guide/env_variables.md:125
-#: ../../source/user_guide/env_variables.md:137
-#: ../../source/user_guide/env_variables.md:149
-#: ../../source/user_guide/env_variables.md:161
-#: ../../source/user_guide/env_variables.md:174
-#: ../../source/user_guide/env_variables.md:186
-#: ../../source/user_guide/env_variables.md:219
-#: ../../source/user_guide/env_variables.md:231
-#: ../../source/user_guide/env_variables.md:249
-#: ../../source/user_guide/env_variables.md:256
-#: ../../source/user_guide/env_variables.md:280
-#: ../../source/user_guide/env_variables.md:291
-#: ../../source/user_guide/env_variables.md:303
-#: ../../source/user_guide/env_variables.md:311
-#: ../../source/user_guide/env_variables.md:333
-#: ../../source/user_guide/env_variables.md:340
-#: ../../source/user_guide/env_variables.md:347
-#: ../../source/user_guide/env_variables.md:354
-#: ../../source/user_guide/env_variables.md:392
-#: ../../source/user_guide/env_variables.md:399
-#: ../../source/user_guide/env_variables.md:406
-#: ../../source/user_guide/env_variables.md:413
-#: ../../source/user_guide/env_variables.md:420
-#: ../../source/user_guide/env_variables.md:441
-#: ../../source/user_guide/env_variables.md:460
+#: ../../source/user_guide/env_variables.md:199
+#: ../../source/user_guide/env_variables.md:211
+#: ../../source/user_guide/env_variables.md:223
+#: ../../source/user_guide/env_variables.md:235
+#: ../../source/user_guide/env_variables.md:247
+#: ../../source/user_guide/env_variables.md:260
+#: ../../source/user_guide/env_variables.md:272
+#: ../../source/user_guide/env_variables.md:305
+#: ../../source/user_guide/env_variables.md:317
+#: ../../source/user_guide/env_variables.md:345
+#: ../../source/user_guide/env_variables.md:356
+#: ../../source/user_guide/env_variables.md:368
+#: ../../source/user_guide/env_variables.md:376
+#: ../../source/user_guide/env_variables.md:387
+#: ../../source/user_guide/env_variables.md:405
+#: ../../source/user_guide/env_variables.md:412
+#: ../../source/user_guide/env_variables.md:419
+#: ../../source/user_guide/env_variables.md:426
+#: ../../source/user_guide/env_variables.md:440
+#: ../../source/user_guide/env_variables.md:451
+#: ../../source/user_guide/env_variables.md:504
+#: ../../source/user_guide/env_variables.md:511
+#: ../../source/user_guide/env_variables.md:518
+#: ../../source/user_guide/env_variables.md:525
+#: ../../source/user_guide/env_variables.md:532
+#: ../../source/user_guide/env_variables.md:553
+#: ../../source/user_guide/env_variables.md:572
 msgid "**Defaults to:** `0`"
 msgstr "**默认值：** `0`"
 
@@ -228,8 +229,8 @@ msgid "**Defaults to:** `ffa`"
 msgstr "**默认值：** `ffa`"
 
 #: ../../source/user_guide/env_variables.md:85
-#: ../../source/user_guide/env_variables.md:114
-#: ../../source/user_guide/env_variables.md:292
+#: ../../source/user_guide/env_variables.md:200
+#: ../../source/user_guide/env_variables.md:357
 msgid "**Used by:** `magi_attention.env.general.kernel_backend`"
 msgstr "**使用方：** `magi_attention.env.general.kernel_backend`"
 
@@ -293,10 +294,276 @@ msgid "For Performance"
 msgstr "性能相关"
 
 #: ../../source/user_guide/env_variables.md:111
+msgid "FFA BWD Kernel Tuning (Advanced)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:113
+msgid ""
+"The following environment variables control low-level kernel "
+"configuration for the backward pass. They override compile-time defaults "
+"and produce distinct JIT-cached kernels per configuration. **For expert "
+"use only** — incorrect combinations may cause correctness issues or "
+"crashes."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:117
+#, fuzzy
+msgid "**MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS**"
+msgstr "**MAGI_ATTENTION_FFA_FA4_CACHE_DIR**"
+
+#: ../../source/user_guide/env_variables.md:119
+msgid "**Defaults to:** auto (40 for sparse, 64 for dense)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:120
+msgid ""
+"**Used by:** `_flex_flash_attn_jit.py` → `kBwdProducerRegs` / "
+"`kBwdConsumerRegs`"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:122
+msgid ""
+"Override the `setmaxnreg` register quota for the producer warp group. "
+"Consumer regs are derived to satisfy the per-SM register budget "
+"constraint: `1×ProducerRegs + 2×ConsumerRegs ≤ 504`."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:125
+#, fuzzy
+msgid "**MAGI_ATTENTION_FFA_BWD_TILE_M** / **MAGI_ATTENTION_FFA_BWD_TILE_N**"
+msgstr "**MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD**"
+
+#: ../../source/user_guide/env_variables.md:127
+msgid "**Defaults to:** `0` (auto from `tile_size_bwd_sm90()`)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:128
+msgid "**Used by:** `kBwdTileM` / `kBwdTileN` in the kernel"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:130
+msgid ""
+"Override the MMA tile dimensions (M×N) for the backward kernel. Common "
+"values: 64, 128."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:132
+msgid ""
+"**MAGI_ATTENTION_FFA_BWD_STAGES** / **MAGI_ATTENTION_FFA_BWD_STAGES_DS** "
+"/ **MAGI_ATTENTION_FFA_BWD_STAGES_V**"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:134
+msgid "**Defaults to:** `0` (auto: stages=2, stages_ds=1 or 2, stages_v=stages)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:135
+msgid "**Used by:** `kBwdStages` / `kBwdStagesDs` / `kBwdStagesV`"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:137
+msgid ""
+"Override the number of pipeline stages for K (main pipeline), dS (double "
+"buffer), and V."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:139
+#, fuzzy
+msgid "**MAGI_ATTENTION_FFA_BWD_UNION_DKV_SMEM**"
+msgstr "**MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**"
+
+#: ../../source/user_guide/env_variables.md:141
+msgid ""
+"**Defaults to:** `0` (smem_inner_dk and smem_inner_dv are unioned into "
+"one buffer)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:142
+msgid "**Used by:** `UnionDkvSmem` template parameter"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:144
+msgid ""
+"Set to `1` to un-union dK/dV SMEM (separate buffers for each). Requires "
+"`stages_v=1` to fit."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:146
+#, fuzzy
+msgid "**MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM**"
+msgstr "**MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE**"
+
+#: ../../source/user_guide/env_variables.md:148
+#, fuzzy
+msgid "**Defaults to:** `1` (use SMEM for inner dKV store)"
+msgstr "**默认值：** 未设置（保持输入 dtype 不变）"
+
+#: ../../source/user_guide/env_variables.md:149
+msgid "**Used by:** `kInnerStoreMode` (`0` forces `InnerStoreMode::BypassSmem`)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:151
+msgid ""
+"Set to `0` to bypass SMEM for dKV — consumer WGs atomicAdd directly to "
+"GMEM from registers. Experimental; may improve performance for bandwidth-"
+"bound configs."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:154
+#, fuzzy
+msgid "**MAGI_ATTENTION_FFA_INNER_LOAD_MODE**"
+msgstr "**MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE**"
+
+#: ../../source/user_guide/env_variables.md:156
+msgid "**Defaults to:** auto (`tma` when tiles are contiguous, else `cpasync`)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:157
+msgid "**Used by:** `kInnerLoadMode` enum (`Tma`=0, `CpAsync`=2)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:159
+msgid "Override the inner-loop load method. Options: `tma`, `cpasync`."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:161
+#, fuzzy
+msgid "**MAGI_ATTENTION_FFA_INNER_STORE_MODE**"
+msgstr "**MAGI_ATTENTION_PROFILE_MODE**"
+
+#: ../../source/user_guide/env_variables.md:163
+msgid "**Defaults to:** `tma` (2D reduce-add for sparse, or auto for dense)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:164
+msgid ""
+"**Used by:** `kInnerStoreMode` enum (`Tma`=0, `Tma1d`=1, `AtomicAdd`=2, "
+"`BypassSmem`=3)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:166
+msgid ""
+"Override the inner-loop store method. Options: `tma`, `tma2d`, `tma1d`, "
+"`atomicadd`, `bypass`."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:168
+#, fuzzy
+msgid "**MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER**"
+msgstr "**MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE**"
+
+#: ../../source/user_guide/env_variables.md:170
+#: ../../source/user_guide/env_variables.md:178
+#, fuzzy
+msgid "**Defaults to:** `true`"
+msgstr "**默认值：** `8`"
+
+#: ../../source/user_guide/env_variables.md:171
+msgid "**Used by:** `InnerStoreInProducer` template parameter"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:173
+msgid ""
+"Set to `false` to have consumer WGs handle dX store directly (frees "
+"producer warps for loading but increases consumer register pressure)."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:176
+#, fuzzy
+msgid "**MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN**"
+msgstr "**MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**"
+
+#: ../../source/user_guide/env_variables.md:179
+msgid "**Used by:** `InnerDirMaxToMin` template parameter"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:181
+msgid ""
+"Set to `false` to iterate the inner loop from min to max instead of max "
+"to min."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:183
+msgid "FFA BWD PerfDebug Switches (Isolation Testing)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:185
+msgid ""
+"These switches disable specific operations in the backward kernel for "
+"performance isolation. **Correctness is NOT guaranteed when any of these "
+"are enabled.**"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+#, fuzzy
+msgid "Env Variable"
+msgstr "环境变量"
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "Kernel Flag"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "Effect"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+#, fuzzy
+msgid "`MAGI_ATTENTION_FFA_BWD_SKIP_V_LOAD`"
+msgstr "**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**"
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "`PerfDebugSkipVLoad`"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "Skip V tile load"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+#, fuzzy
+msgid "`MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE`"
+msgstr "**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**"
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "`PerfDebugSkipDvStore`"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "Skip dV GMEM store (all paths)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+#, fuzzy
+msgid "`MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE`"
+msgstr "**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**"
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "`PerfDebugSkipDkStore`"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "Skip dK GMEM store (all paths)"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+#, fuzzy
+msgid "`MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA`"
+msgstr "**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**"
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "`PerfDebugSkipDvMma`"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:94
+msgid "Skip dV MMA"
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:197
 msgid "**MAGI_ATTENTION_FA4_BACKEND**"
 msgstr "**MAGI_ATTENTION_FA4_BACKEND**"
 
-#: ../../source/user_guide/env_variables.md:116
+#: ../../source/user_guide/env_variables.md:202
 msgid ""
 "Toggle this env variable to `1` to switch the attn kernel backend from "
 "`FFA` to `FFA_FA4`, a monkey patch version of Flash-Attention 4, to "
@@ -305,7 +572,7 @@ msgstr ""
 "将此环境变量设为 ``1`` 以将注意力内核后端从 `FFA` 切换到 `FFA_FA4`——Flash-Attention 4 的 monkey"
 " patch 版本，以临时支持 Blackwell GPU 上的任意掩码。"
 
-#: ../../source/user_guide/env_variables.md:119
+#: ../../source/user_guide/env_variables.md:205
 msgid ""
 "This is a legacy toggle kept for backward compatibility; prefer "
 "`MAGI_ATTENTION_KERNEL_BACKEND=fa4`. This is for now a workaround "
@@ -314,38 +581,38 @@ msgstr ""
 "这是为向后兼容保留的旧开关；推荐使用 "
 "`MAGI_ATTENTION_KERNEL_BACKEND=fa4`。这目前是一个临时解决方案，未来可能会被移除或更新。"
 
-#: ../../source/user_guide/env_variables.md:123
+#: ../../source/user_guide/env_variables.md:209
 msgid "**MAGI_ATTENTION_NATIVE_GRPCOLL**"
 msgstr "**MAGI_ATTENTION_NATIVE_GRPCOLL**"
 
-#: ../../source/user_guide/env_variables.md:126
+#: ../../source/user_guide/env_variables.md:212
 msgid "**Used by:** `magi_attention.env.comm.is_native_grpcoll_enable`"
 msgstr "**使用方：** `magi_attention.env.comm.is_native_grpcoll_enable`"
 
-#: ../../source/user_guide/env_variables.md:128
+#: ../../source/user_guide/env_variables.md:214
 msgid ""
 "Toggle this env variable to `1` to enable native kernel implementation "
 "for group collective comm."
 msgstr "将此环境变量设为 `1` 以启用 group collective 通信的原生内核实现。"
 
-#: ../../source/user_guide/env_variables.md:131
-#: ../../source/user_guide/env_variables.md:143
-#: ../../source/user_guide/env_variables.md:155
+#: ../../source/user_guide/env_variables.md:217
+#: ../../source/user_guide/env_variables.md:229
+#: ../../source/user_guide/env_variables.md:241
 msgid ""
 "This feature is experimental and under active development for now, and "
 "not compatible with many other features, thus please do NOT enable it "
 "unless you know exactly what you are doing."
 msgstr "此功能目前处于实验阶段并在积极开发中，与许多其他功能不兼容，因此请不要启用，除非您清楚了解其影响。"
 
-#: ../../source/user_guide/env_variables.md:135
+#: ../../source/user_guide/env_variables.md:221
 msgid "**MAGI_ATTENTION_QO_COMM**"
 msgstr "**MAGI_ATTENTION_QO_COMM**"
 
-#: ../../source/user_guide/env_variables.md:138
+#: ../../source/user_guide/env_variables.md:224
 msgid "**Used by:** `magi_attention.env.comm.is_qo_comm_enable`"
 msgstr "**使用方：** `magi_attention.env.comm.is_qo_comm_enable`"
 
-#: ../../source/user_guide/env_variables.md:140
+#: ../../source/user_guide/env_variables.md:226
 msgid ""
 "Toggle this env variable to `1` to enable query/output communication, "
 "including fetching remote q (fwd), reducing partial out and lse (fwd), "
@@ -355,51 +622,51 @@ msgstr ""
 "将此环境变量设为 `1` 以启用 query/output 通信，包括获取远程 q（前向）、reduce partial out 和 "
 "lse（前向）、获取远程 q,o,lse,do（反向）、reduce partial dq（反向），以消除通信仅限于 key/value 的限制。"
 
-#: ../../source/user_guide/env_variables.md:147
+#: ../../source/user_guide/env_variables.md:233
 msgid "**MAGI_ATTENTION_FLATTEN_HEAD_GROUPS**"
 msgstr "**MAGI_ATTENTION_FLATTEN_HEAD_GROUPS**"
 
-#: ../../source/user_guide/env_variables.md:150
+#: ../../source/user_guide/env_variables.md:236
 msgid "**Used by:** `magi_attention.env.general.is_flatten_head_groups_enable`"
 msgstr "**使用方：** `magi_attention.env.general.is_flatten_head_groups_enable`"
 
-#: ../../source/user_guide/env_variables.md:152
+#: ../../source/user_guide/env_variables.md:238
 msgid ""
 "Toggle this env variable to `1` to flatten head groups within GQA/MQA "
 "attention to optimize dynamic solver performance."
 msgstr "将此环境变量设为 ``1`` 以展平 GQA/MQA attention 中的 head groups 来优化 dynamic solver 性能。"
 
-#: ../../source/user_guide/env_variables.md:159
-msgid "**MAGI_ATTENTION_AUTO_RANGE_MERGE**"
-msgstr "**MAGI_ATTENTION_AUTO_RANGE_MERGE**"
+#: ../../source/user_guide/env_variables.md:245
+msgid "**MAGI_ATTENTION_RANGE_MERGE**"
+msgstr "**MAGI_ATTENTION_RANGE_MERGE**"
 
-#: ../../source/user_guide/env_variables.md:162
-msgid "**Used by:** `magi_attention.env.general.is_auto_range_merge_enable`"
-msgstr "**使用方：** `magi_attention.env.general.is_auto_range_merge_enable`"
+#: ../../source/user_guide/env_variables.md:248
+msgid "**Used by:** `magi_attention.env.general.is_range_merge_enable`"
+msgstr "**使用方：** `magi_attention.env.general.is_range_merge_enable`"
 
-#: ../../source/user_guide/env_variables.md:164
+#: ../../source/user_guide/env_variables.md:250
 msgid ""
 "Toggle this env variable to `1` to enable automatic range merging for "
 "flex-flash-attention, to improve performance by reducing the number of "
 "attention ranges."
 msgstr "将此环境变量设为 ``1`` 以启用 flex-flash-attention 的自动范围合并，通过减少注意力范围的数量来提升性能。"
 
-#: ../../source/user_guide/env_variables.md:168
-#: ../../source/user_guide/env_variables.md:180
+#: ../../source/user_guide/env_variables.md:254
+#: ../../source/user_guide/env_variables.md:266
 msgid ""
 "This feature is experimental and under active development for now, thus "
 "please do NOT enable it unless you know exactly what you are doing."
 msgstr "此功能目前处于实验阶段并在积极开发中，因此请不要启用，除非您清楚了解其影响。"
 
-#: ../../source/user_guide/env_variables.md:172
+#: ../../source/user_guide/env_variables.md:258
 msgid "**MAGI_ATTENTION_CATGQA**"
 msgstr "**MAGI_ATTENTION_CATGQA**"
 
-#: ../../source/user_guide/env_variables.md:175
+#: ../../source/user_guide/env_variables.md:261
 msgid "**Used by:** `magi_attention.env.general.is_cat_gqa_enable`"
 msgstr "**使用方：** `magi_attention.env.general.is_cat_gqa_enable`"
 
-#: ../../source/user_guide/env_variables.md:177
+#: ../../source/user_guide/env_variables.md:263
 msgid ""
 "Toggle this env variable to `1` to enable CatGQA mode for flex-flash-"
 "attention backward, to further optimize the performance under GQA "
@@ -408,17 +675,17 @@ msgstr ""
 "将此环境变量设为 ``1`` 以启用 flex-flash-attention 反向的 CatGQA 模式，通过拼接共享相同 KV head "
 "的多个 Q head 来进一步优化 GQA 设置下的性能。"
 
-#: ../../source/user_guide/env_variables.md:184
+#: ../../source/user_guide/env_variables.md:270
 msgid "**MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE**"
 msgstr "**MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE**"
 
-#: ../../source/user_guide/env_variables.md:187
+#: ../../source/user_guide/env_variables.md:273
 msgid ""
 "**Used by:** "
 "`magi_attention.env.general.dist_attn_backward_hide_tail_reduce`"
 msgstr "**使用方：** `magi_attention.env.general.dist_attn_backward_hide_tail_reduce`"
 
-#: ../../source/user_guide/env_variables.md:189
+#: ../../source/user_guide/env_variables.md:275
 msgid ""
 "Toggle this env variable to `1` to trade saving the last remote `kv` "
 "activation for reordering overlap stages during backward, hiding the "
@@ -427,75 +694,75 @@ msgstr ""
 "将此环境变量设为 ``1`` 以牺牲保存最后一个远程 `kv` 激活来重排反向传播中的重叠阶段，将最终的远程 `group_reduce` "
 "隐藏在主机 FFA 阶段中。"
 
-#: ../../source/user_guide/env_variables.md:192
+#: ../../source/user_guide/env_variables.md:278
 msgid ""
 "This feature is experimental and under active development for now, and "
 "not compatible with many other features like qo comm, thus please do NOT "
 "enable it unless you know exactly what you are doing."
 msgstr "此功能目前处于实验阶段并在积极开发中，与许多其他功能（如 qo comm）不兼容，因此请不要启用，除非您清楚了解其影响。"
 
-#: ../../source/user_guide/env_variables.md:196
+#: ../../source/user_guide/env_variables.md:282
 msgid "**MAGI_ATTENTION_MIN_CHUNKS_PER_RANK**"
 msgstr "**MAGI_ATTENTION_MIN_CHUNKS_PER_RANK**"
 
-#: ../../source/user_guide/env_variables.md:198
-#: ../../source/user_guide/env_variables.md:270
+#: ../../source/user_guide/env_variables.md:284
+#: ../../source/user_guide/env_variables.md:335
 msgid "**Defaults to:** `8`"
 msgstr "**默认值：** `8`"
 
-#: ../../source/user_guide/env_variables.md:199
+#: ../../source/user_guide/env_variables.md:285
 msgid "**Used by:** `magi_attention.env.general.min_chunks_per_rank`"
 msgstr "**使用方：** `magi_attention.env.general.min_chunks_per_rank`"
 
-#: ../../source/user_guide/env_variables.md:201
+#: ../../source/user_guide/env_variables.md:287
 msgid ""
 "Set the value of this env variable to control the minimum number of "
 "chunks per context parallel rank, to control the granularity of "
 "computational load-balance."
 msgstr "设置此环境变量的值以控制每个上下文并行 rank 的最小 chunk 数量，从而控制计算负载均衡的粒度。"
 
-#: ../../source/user_guide/env_variables.md:203
+#: ../../source/user_guide/env_variables.md:289
 msgid "**MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**"
 msgstr "**MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**"
 
-#: ../../source/user_guide/env_variables.md:205
-#: ../../source/user_guide/env_variables.md:212
+#: ../../source/user_guide/env_variables.md:291
+#: ../../source/user_guide/env_variables.md:298
 msgid "**Defaults to:** `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`"
 msgstr "**默认值：** 当 `CUDA_DEVICE_MAX_CONNECTIONS` > `1` 时为 `4`，否则为 `0`"
 
-#: ../../source/user_guide/env_variables.md:206
+#: ../../source/user_guide/env_variables.md:292
 msgid "**Used by:** `magi_attention.env.comm.ffa_fwd_sm_margin_save_for_comm`"
 msgstr "**使用方：** `magi_attention.env.comm.ffa_fwd_sm_margin_save_for_comm`"
 
-#: ../../source/user_guide/env_variables.md:208
+#: ../../source/user_guide/env_variables.md:294
 msgid ""
 "Set the value of this env variable to control the number of SMs of the "
 "ffa forward kernel saved for comm kernels."
 msgstr "设置此环境变量的值以控制 ffa 前向内核为通信内核预留的 SM 数量。"
 
-#: ../../source/user_guide/env_variables.md:210
+#: ../../source/user_guide/env_variables.md:296
 msgid "**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**"
 msgstr "**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**"
 
-#: ../../source/user_guide/env_variables.md:213
+#: ../../source/user_guide/env_variables.md:299
 msgid "**Used by:** `magi_attention.env.comm.ffa_bwd_sm_margin_save_for_comm`"
 msgstr "**使用方：** `magi_attention.env.comm.ffa_bwd_sm_margin_save_for_comm`"
 
-#: ../../source/user_guide/env_variables.md:215
+#: ../../source/user_guide/env_variables.md:301
 msgid ""
 "Set the value of this env variable to control the number of SMs of the "
 "ffa backward kernel saved for comm kernels."
 msgstr "设置此环境变量的值以控制 ffa 反向内核为通信内核预留的 SM 数量。"
 
-#: ../../source/user_guide/env_variables.md:217
+#: ../../source/user_guide/env_variables.md:303
 msgid "**MAGI_ATTENTION_CPP_BACKEND**"
 msgstr "**MAGI_ATTENTION_CPP_BACKEND**"
 
-#: ../../source/user_guide/env_variables.md:220
+#: ../../source/user_guide/env_variables.md:306
 msgid "**Used by:** `magi_attention.env.general.is_cpp_backend_enable`"
 msgstr "**使用方：** `magi_attention.env.general.is_cpp_backend_enable`"
 
-#: ../../source/user_guide/env_variables.md:222
+#: ../../source/user_guide/env_variables.md:308
 msgid ""
 "Toggle this env variable to `1` to enable C++ backend for core data "
 "structures (`AttnRange`, `AttnMaskType`, etc.) to avoid Python overhead."
@@ -503,22 +770,22 @@ msgstr ""
 "将此环境变量设为 `1` 以启用核心数据结构（`AttnRange`、`AttnMaskType` 等）的 C++ 后端，以避免 Python "
 "开销。"
 
-#: ../../source/user_guide/env_variables.md:225
+#: ../../source/user_guide/env_variables.md:311
 msgid ""
 "This feature is experimental and under active development for now. If the"
 " C++ extension is not found or this variable is set to `0`, it will fall "
 "back to the Python implementation."
 msgstr "此功能目前处于实验阶段并在积极开发中。如果未找到 C++ 扩展或此变量设为 `0`，将回退到 Python 实现。"
 
-#: ../../source/user_guide/env_variables.md:229
+#: ../../source/user_guide/env_variables.md:315
 msgid "**MAGI_ATTENTION_HIERARCHICAL_COMM**"
 msgstr "**MAGI_ATTENTION_HIERARCHICAL_COMM**"
 
-#: ../../source/user_guide/env_variables.md:232
+#: ../../source/user_guide/env_variables.md:318
 msgid "**Used by:** `magi_attention.env.comm.is_hierarchical_comm_enable`"
 msgstr "**使用方：** `magi_attention.env.comm.is_hierarchical_comm_enable`"
 
-#: ../../source/user_guide/env_variables.md:234
+#: ../../source/user_guide/env_variables.md:320
 msgid ""
 "Toggle this env variable to `1` to enable hierarchical group-collective "
 "comm within 2-dim cp group (inter_node group + intra_node group)."
@@ -526,125 +793,82 @@ msgstr ""
 "将此环境变量设为 `1` 以启用二维 cp group（inter_node group + intra_node group）内的分层 "
 "group-collective 通信。"
 
-#: ../../source/user_guide/env_variables.md:237
+#: ../../source/user_guide/env_variables.md:323
 msgid ""
 "This is for now a temporary solution to reduce the redundant inter-node "
 "communication and might be removed or updated in the future."
 msgstr "这目前是减少冗余节点间通信的临时方案，未来可能会被移除或更新。"
 
-#: ../../source/user_guide/env_variables.md:240
+#: ../../source/user_guide/env_variables.md:326
 msgid "**MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**"
 msgstr "**MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**"
 
-#: ../../source/user_guide/env_variables.md:242
+#: ../../source/user_guide/env_variables.md:328
 msgid "**Defaults to:** `1000`"
 msgstr "**默认值：** `1000`"
 
-#: ../../source/user_guide/env_variables.md:243
+#: ../../source/user_guide/env_variables.md:329
 msgid "**Used by:** `magi_attention.env.general.dist_attn_runtime_dict_size`"
 msgstr "**使用方：** `magi_attention.env.general.dist_attn_runtime_dict_size`"
 
-#: ../../source/user_guide/env_variables.md:245
+#: ../../source/user_guide/env_variables.md:331
 msgid ""
 "Set the value of this env variable to control the maximum LRU cache size "
 "of `dist_attn_runtime_dict_mgr`."
 msgstr "设置此环境变量的值以控制 `dist_attn_runtime_dict_mgr` 的最大 LRU 缓存大小。"
 
-#: ../../source/user_guide/env_variables.md:247
-msgid "**MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE**"
-msgstr "**MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE**"
-
-#: ../../source/user_guide/env_variables.md:250
-msgid "**Used by:** `magi_attention.kernel.cutedsl`"
-msgstr "**使用方：** `magi_attention.kernel.cutedsl`"
-
-#: ../../source/user_guide/env_variables.md:252
-msgid ""
-"Toggle this env variable to `1` to enable debug-time checks and "
-"diagnostics for the CuteDSL FFA kernels."
-msgstr "将此环境变量设为 `1` 以为 CuteDSL FFA 内核启用调试期检查和诊断。"
-
-#: ../../source/user_guide/env_variables.md:254
-msgid "**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED**"
-msgstr "**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED**"
-
-#: ../../source/user_guide/env_variables.md:257
-#: ../../source/user_guide/env_variables.md:264
-msgid "**Used by:** `magi_attention.kernel.cutedsl.cache_utils`"
-msgstr "**使用方：** `magi_attention.kernel.cutedsl.cache_utils`"
-
-#: ../../source/user_guide/env_variables.md:259
-msgid ""
-"Toggle this env variable to `1` to enable on-disk caching of compiled "
-"CuteDSL FFA kernels."
-msgstr "将此环境变量设为 `1` 以启用已编译 CuteDSL FFA 内核的磁盘缓存。"
-
-#: ../../source/user_guide/env_variables.md:261
-msgid "**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR**"
-msgstr "**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR**"
-
-#: ../../source/user_guide/env_variables.md:263
-msgid "**Defaults to:** unset (use the default cache location)"
-msgstr "**默认值：** 未设置（使用默认缓存位置）"
-
-#: ../../source/user_guide/env_variables.md:266
-msgid ""
-"Set this env variable to specify the directory for the CuteDSL FFA kernel"
-" cache."
-msgstr "设置此环境变量以指定 CuteDSL FFA 内核缓存的目录。"
-
-#: ../../source/user_guide/env_variables.md:268
+#: ../../source/user_guide/env_variables.md:333
 msgid "**CUDA_DEVICE_MAX_CONNECTIONS**"
 msgstr "**CUDA_DEVICE_MAX_CONNECTIONS**"
 
-#: ../../source/user_guide/env_variables.md:271
+#: ../../source/user_guide/env_variables.md:336
 msgid ""
 "**Used by:** "
 "`magi_attention.env.general.is_cuda_device_max_connections_one`"
 msgstr "**使用方：** `magi_attention.env.general.is_cuda_device_max_connections_one`"
 
-#: ../../source/user_guide/env_variables.md:273
+#: ../../source/user_guide/env_variables.md:338
 msgid ""
 "This environment variable defines the number of hardware queues that CUDA"
 " streams can utilize. Increasing this value can improve the overlap of "
 "communication and computation, but may also increase PCIe traffic."
 msgstr "此环境变量定义了 CUDA stream 可以使用的硬件队列数量。增大此值可以改善通信与计算的重叠，但也可能增加 PCIe 流量。"
 
-#: ../../source/user_guide/env_variables.md:276
+#: ../../source/user_guide/env_variables.md:341
 msgid "For Debug"
 msgstr "调试相关"
 
-#: ../../source/user_guide/env_variables.md:278
+#: ../../source/user_guide/env_variables.md:343
 msgid "**MAGI_ATTENTION_SANITY_CHECK**"
 msgstr "**MAGI_ATTENTION_SANITY_CHECK**"
 
-#: ../../source/user_guide/env_variables.md:281
+#: ../../source/user_guide/env_variables.md:346
 msgid "**Used by:** `magi_attention.env.general.is_sanity_check_enable`"
 msgstr "**使用方：** `magi_attention.env.general.is_sanity_check_enable`"
 
-#: ../../source/user_guide/env_variables.md:283
+#: ../../source/user_guide/env_variables.md:348
 msgid ""
 "Toggle this env variable to `1` to enable many sanity check codes inside "
 "magi_attention."
 msgstr "将此环境变量设为 `1` 以启用 magi_attention 内部的大量健全性检查代码。"
 
-#: ../../source/user_guide/env_variables.md:286
+#: ../../source/user_guide/env_variables.md:351
 msgid ""
 "This is only supposed to be used for testing or debugging, since the "
 "extra sanity-check overhead might be non-negligible."
 msgstr "此功能仅用于测试或调试，因为额外的健全性检查开销可能不容忽视。"
 
-#: ../../source/user_guide/env_variables.md:289
+#: ../../source/user_guide/env_variables.md:354
 msgid "**MAGI_ATTENTION_SDPA_BACKEND**"
 msgstr "**MAGI_ATTENTION_SDPA_BACKEND**"
 
-#: ../../source/user_guide/env_variables.md:294
+#: ../../source/user_guide/env_variables.md:359
 msgid ""
 "Toggle this env variable to `1` can switch the attn kernel backend from "
 "ffa to sdpa-math, to support higher precision like `fp32` or `fp64`."
 msgstr "将此环境变量设为 `1` 可将注意力内核后端从 ffa 切换到 sdpa-math，以支持更高精度（如 `fp32` 或 `fp64`）。"
 
-#: ../../source/user_guide/env_variables.md:297
+#: ../../source/user_guide/env_variables.md:362
 msgid ""
 "This is a legacy toggle kept for backward compatibility; prefer "
 "`MAGI_ATTENTION_KERNEL_BACKEND=sdpa`. This is only supposed to be used "
@@ -653,29 +877,29 @@ msgstr ""
 "这是为向后兼容保留的旧开关；推荐使用 "
 "`MAGI_ATTENTION_KERNEL_BACKEND=sdpa`。此功能仅用于测试或调试，因为其性能不可接受。"
 
-#: ../../source/user_guide/env_variables.md:301
+#: ../../source/user_guide/env_variables.md:366
 msgid "**MAGI_ATTENTION_DETERMINISTIC_MODE**"
 msgstr "**MAGI_ATTENTION_DETERMINISTIC_MODE**"
 
-#: ../../source/user_guide/env_variables.md:304
+#: ../../source/user_guide/env_variables.md:369
 msgid "**Used by:** `magi_attention.env.general.is_deterministic_mode_enable`"
 msgstr "**使用方：** `magi_attention.env.general.is_deterministic_mode_enable`"
 
-#: ../../source/user_guide/env_variables.md:306
+#: ../../source/user_guide/env_variables.md:371
 msgid ""
 "Toggle this env variable to `1` to enable deterministic mode to use "
 "deterministic algorithms for all magi_attention kernels."
 msgstr "将此环境变量设为 `1` 以启用确定性模式，对所有 magi_attention 内核使用确定性算法。"
 
-#: ../../source/user_guide/env_variables.md:309
+#: ../../source/user_guide/env_variables.md:374
 msgid "**MAGI_ATTENTION_PROFILE_MODE**"
 msgstr "**MAGI_ATTENTION_PROFILE_MODE**"
 
-#: ../../source/user_guide/env_variables.md:312
+#: ../../source/user_guide/env_variables.md:377
 msgid "**Used by:** `magi_attention.env.general.is_profile_mode_enable`"
 msgstr "**使用方：** `magi_attention.env.general.is_profile_mode_enable`"
 
-#: ../../source/user_guide/env_variables.md:314
+#: ../../source/user_guide/env_variables.md:379
 msgid ""
 "Toggle this env variable to `1` to enable profiling mode to profile all "
 "magi_attention kernels, currently mainly for ffa kernels (*see "
@@ -686,62 +910,76 @@ msgstr ""
 "内核（*详情请参阅[此处](https://github.com/SandAI-"
 "org/MagiAttention/tree/main/exps/attn/profile_ffa)*）。"
 
-#: ../../source/user_guide/env_variables.md:317
+#: ../../source/user_guide/env_variables.md:382
 msgid ""
 "This is only supposed to be used for development. Please do NOT enable it"
 " in production."
 msgstr "此功能仅用于开发，请勿在生产环境中启用。"
 
-#: ../../source/user_guide/env_variables.md:320
+#: ../../source/user_guide/env_variables.md:385
+msgid "**MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE**"
+msgstr "**MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE**"
+
+#: ../../source/user_guide/env_variables.md:388
+msgid "**Used by:** `magi_attention.kernel.cutedsl`"
+msgstr "**使用方：** `magi_attention.kernel.cutedsl`"
+
+#: ../../source/user_guide/env_variables.md:390
+msgid ""
+"Toggle this env variable to `1` to enable debug-time checks and "
+"diagnostics for the CuteDSL FFA kernels."
+msgstr "将此环境变量设为 `1` 以为 CuteDSL FFA 内核启用调试期检查和诊断。"
+
+#: ../../source/user_guide/env_variables.md:392
 msgid "For Build"
 msgstr "构建相关"
 
-#: ../../source/user_guide/env_variables.md:322
+#: ../../source/user_guide/env_variables.md:394
 msgid "JIT"
 msgstr "JIT"
 
-#: ../../source/user_guide/env_variables.md:324
+#: ../../source/user_guide/env_variables.md:396
 msgid "**MAGI_ATTENTION_WORKSPACE_BASE**"
 msgstr "**MAGI_ATTENTION_WORKSPACE_BASE**"
 
-#: ../../source/user_guide/env_variables.md:326
+#: ../../source/user_guide/env_variables.md:398
 msgid "**Defaults to:** `$HOME`"
 msgstr "**默认值：** `$HOME`"
 
-#: ../../source/user_guide/env_variables.md:327
+#: ../../source/user_guide/env_variables.md:399
 msgid "**Used by:** `magi_attention.env.build.workspace_base_dir`"
 msgstr "**使用方：** `magi_attention.env.build.workspace_base_dir`"
 
-#: ../../source/user_guide/env_variables.md:329
+#: ../../source/user_guide/env_variables.md:401
 msgid ""
 "Specifies the base directory for the MagiAttention workspace, which "
 "includes cache and generated source files."
 msgstr "指定 MagiAttention 工作空间的基础目录，包含缓存和生成的源文件。"
 
-#: ../../source/user_guide/env_variables.md:331
+#: ../../source/user_guide/env_variables.md:403
 msgid "**MAGI_ATTENTION_BUILD_VERBOSE**"
 msgstr "**MAGI_ATTENTION_BUILD_VERBOSE**"
 
-#: ../../source/user_guide/env_variables.md:334
+#: ../../source/user_guide/env_variables.md:406
 msgid "**Used by:** `magi_attention.env.build.is_build_verbose`"
 msgstr "**使用方：** `magi_attention.env.build.is_build_verbose`"
 
-#: ../../source/user_guide/env_variables.md:336
+#: ../../source/user_guide/env_variables.md:408
 msgid ""
 "Toggle this env variable to `1` to enable verbose output during the JIT "
 "compilation process, showing the full ninja build commands being "
 "executed."
 msgstr "将此环境变量设为 `1` 以启用 JIT 编译过程中的详细输出，显示正在执行的完整 ninja 构建命令。"
 
-#: ../../source/user_guide/env_variables.md:338
+#: ../../source/user_guide/env_variables.md:410
 msgid "**MAGI_ATTENTION_BUILD_DEBUG**"
 msgstr "**MAGI_ATTENTION_BUILD_DEBUG**"
 
-#: ../../source/user_guide/env_variables.md:341
+#: ../../source/user_guide/env_variables.md:413
 msgid "**Used by:** `magi_attention.env.build.is_build_debug`"
 msgstr "**使用方：** `magi_attention.env.build.is_build_debug`"
 
-#: ../../source/user_guide/env_variables.md:343
+#: ../../source/user_guide/env_variables.md:415
 msgid ""
 "Toggle this env variable to `1` to enable debug flags for the C++/CUDA "
 "compiler. This includes options like `-g` (debugging symbols) and other "
@@ -750,139 +988,226 @@ msgstr ""
 "将此环境变量设为 `1` 以启用 C++/CUDA 编译器的调试标志。这包括 "
 "`-g`（调试符号）等选项和其他用于获取更详细信息（如寄存器使用情况）的标志。"
 
-#: ../../source/user_guide/env_variables.md:345
+#: ../../source/user_guide/env_variables.md:417
 msgid "**MAGI_ATTENTION_NO_BUILD_CACHE**"
 msgstr "**MAGI_ATTENTION_NO_BUILD_CACHE**"
 
-#: ../../source/user_guide/env_variables.md:348
+#: ../../source/user_guide/env_variables.md:420
 msgid "**Used by:** `magi_attention.env.build.is_no_build_cache`"
 msgstr "**使用方：** `magi_attention.env.build.is_no_build_cache`"
 
-#: ../../source/user_guide/env_variables.md:350
+#: ../../source/user_guide/env_variables.md:422
 msgid "Toggle this env variable to `1` to disable caching for built ffa kernels."
 msgstr "将此环境变量设为 `1` 以禁用已构建 ffa 内核的缓存。"
 
-#: ../../source/user_guide/env_variables.md:352
+#: ../../source/user_guide/env_variables.md:424
 msgid "**MAGI_ATTENTION_FORCE_JIT_BUILD**"
 msgstr "**MAGI_ATTENTION_FORCE_JIT_BUILD**"
 
-#: ../../source/user_guide/env_variables.md:355
+#: ../../source/user_guide/env_variables.md:427
 msgid "**Used by:** `magi_attention.env.build.is_force_jit_build`"
 msgstr "**使用方：** `magi_attention.env.build.is_force_jit_build`"
 
-#: ../../source/user_guide/env_variables.md:357
+#: ../../source/user_guide/env_variables.md:429
 msgid ""
 "Toggle this env variable to `1` to force building FFA in JIT mode, even "
 "the pre-built AOT `libs` exists."
 msgstr "将此环境变量设为 `1` 以强制以 JIT 模式构建 FFA，即使预构建的 AOT `libs` 已存在。"
 
-#: ../../source/user_guide/env_variables.md:359
+#: ../../source/user_guide/env_variables.md:431
 msgid "**NVCC_THREADS**"
 msgstr "**NVCC_THREADS**"
 
-#: ../../source/user_guide/env_variables.md:361
+#: ../../source/user_guide/env_variables.md:433
 msgid "**Defaults to:** `4`"
 msgstr "**默认值：** `4`"
 
-#: ../../source/user_guide/env_variables.md:362
+#: ../../source/user_guide/env_variables.md:434
 msgid "**Used by:** `magi_attention.env.build.nvcc_threads`"
 msgstr "**使用方：** `magi_attention.env.build.nvcc_threads`"
 
-#: ../../source/user_guide/env_variables.md:364
+#: ../../source/user_guide/env_variables.md:436
 msgid ""
 "Sets the number of threads for `nvcc`'s `--split-compile` option, which "
 "can speed up the JIT compilation of CUDA kernels."
 msgstr "设置 `nvcc` 的 `--split-compile` 选项的线程数，可加速 CUDA 内核的 JIT 编译。"
 
-#: ../../source/user_guide/env_variables.md:367
+#: ../../source/user_guide/env_variables.md:438
+#, fuzzy
+msgid "**MAGI_ATTENTION_JIT_COMPILE_DISABLED**"
+msgstr "**MAGI_ATTENTION_PROFILE_MODE**"
+
+#: ../../source/user_guide/env_variables.md:441
+#, fuzzy
+msgid "**Used by:** `magi_attention.common.jit.core.JitSpec.build_and_load`"
+msgstr "**使用方：** `magi_attention.env.build.nvcc_threads`"
+
+#: ../../source/user_guide/env_variables.md:443
+msgid ""
+"Toggle this env variable to `1` to forbid JIT compilation at runtime. If "
+"a kernel is not found in the AOT or JIT cache, a `RuntimeError` is raised"
+" immediately instead of compiling on the fly. Useful for CI to verify "
+"that all required kernels have been precompiled — any missing kernel "
+"surfaces as a clear error with the kernel name and searched paths."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:449
+msgid "**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED**"
+msgstr "**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED**"
+
+#: ../../source/user_guide/env_variables.md:452
+#: ../../source/user_guide/env_variables.md:459
+msgid "**Used by:** `magi_attention.kernel.cutedsl.cache_utils`"
+msgstr "**使用方：** `magi_attention.kernel.cutedsl.cache_utils`"
+
+#: ../../source/user_guide/env_variables.md:454
+msgid ""
+"Toggle this env variable to `1` to enable on-disk caching of compiled "
+"CuteDSL FFA kernels."
+msgstr "将此环境变量设为 `1` 以启用已编译 CuteDSL FFA 内核的磁盘缓存。"
+
+#: ../../source/user_guide/env_variables.md:456
+msgid "**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR**"
+msgstr "**MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR**"
+
+#: ../../source/user_guide/env_variables.md:458
+msgid "**Defaults to:** unset (use the default cache location)"
+msgstr "**默认值：** 未设置（使用默认缓存位置）"
+
+#: ../../source/user_guide/env_variables.md:461
+msgid ""
+"Set this env variable to specify the directory for the CuteDSL FFA kernel"
+" cache."
+msgstr "设置此环境变量以指定 CuteDSL FFA 内核缓存的目录。"
+
+#: ../../source/user_guide/env_variables.md:464
 msgid "AOT"
 msgstr "AOT"
 
-#: ../../source/user_guide/env_variables.md:369
-msgid "**MAGI_ATTENTION_PREBUILD_FFA_JOBS**"
-msgstr "**MAGI_ATTENTION_PREBUILD_FFA_JOBS**"
+#: ../../source/user_guide/env_variables.md:466
+#, fuzzy
+msgid "**MAGI_ATTENTION_PREBUILD_LEVEL**"
+msgstr "**MAGI_ATTENTION_PREBUILD_FFA**"
 
-#: ../../source/user_guide/env_variables.md:371
-#: ../../source/user_guide/env_variables.md:378
-msgid "**Defaults to:** `ceil(num_cpu_cores * 0.9)`"
-msgstr "**默认值：** `ceil(num_cpu_cores * 0.9)`"
+#: ../../source/user_guide/env_variables.md:468
+#, fuzzy
+msgid "**Defaults to:** `lite`"
+msgstr "**默认值：** `8`"
 
-#: ../../source/user_guide/env_variables.md:372
-#: ../../source/user_guide/env_variables.md:379
-#: ../../source/user_guide/env_variables.md:386
-#: ../../source/user_guide/env_variables.md:393
-#: ../../source/user_guide/env_variables.md:400
-#: ../../source/user_guide/env_variables.md:407
-#: ../../source/user_guide/env_variables.md:414
-#: ../../source/user_guide/env_variables.md:421
-#: ../../source/user_guide/env_variables.md:435
-#: ../../source/user_guide/env_variables.md:442
-#: ../../source/user_guide/env_variables.md:449
+#: ../../source/user_guide/env_variables.md:469
+#: ../../source/user_guide/env_variables.md:484
+#: ../../source/user_guide/env_variables.md:491
+#: ../../source/user_guide/env_variables.md:498
+#: ../../source/user_guide/env_variables.md:505
+#: ../../source/user_guide/env_variables.md:512
+#: ../../source/user_guide/env_variables.md:519
+#: ../../source/user_guide/env_variables.md:526
+#: ../../source/user_guide/env_variables.md:533
+#: ../../source/user_guide/env_variables.md:547
+#: ../../source/user_guide/env_variables.md:554
+#: ../../source/user_guide/env_variables.md:561
 msgid "**Used by:** `setup.py`"
 msgstr "**使用方：** `setup.py`"
 
-#: ../../source/user_guide/env_variables.md:374
+#: ../../source/user_guide/env_variables.md:471
+msgid ""
+"Controls the breadth of FFA kernel configurations pre-built during `pip "
+"install`."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:473
+msgid ""
+"`lite` (default): Pre-builds only the basic Dense kernels (fwd/bwd × "
+"head_dim 64/128 × fp16/bf16 × atomic/non-atomic). Sufficient for most "
+"inference and training workloads."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:474
+msgid ""
+"`ci`: Additionally pre-builds all kernel variants declared by test "
+"classes via `precompile_kernel_specs()`. Eliminates JIT compilation "
+"during test runs."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:477
+msgid ""
+"The CI workflow (`build_test.yaml`) explicitly sets "
+"`MAGI_ATTENTION_PREBUILD_LEVEL=ci` in the build step. For local builds, "
+"the default `lite` level is used unless overridden."
+msgstr ""
+
+#: ../../source/user_guide/env_variables.md:481
+msgid "**MAGI_ATTENTION_PREBUILD_FFA_JOBS**"
+msgstr "**MAGI_ATTENTION_PREBUILD_FFA_JOBS**"
+
+#: ../../source/user_guide/env_variables.md:483
+#: ../../source/user_guide/env_variables.md:490
+msgid "**Defaults to:** `ceil(num_cpu_cores * 0.9)`"
+msgstr "**默认值：** `ceil(num_cpu_cores * 0.9)`"
+
+#: ../../source/user_guide/env_variables.md:486
 msgid ""
 "Set the value of this env variable to control the number of parallel "
 "compilation jobs used to pre-build ffa kernels."
 msgstr "设置此环境变量的值以控制预构建 ffa 内核时使用的并行编译任务数。"
 
-#: ../../source/user_guide/env_variables.md:376
+#: ../../source/user_guide/env_variables.md:488
 msgid "**MAX_JOBS**"
 msgstr "**MAX_JOBS**"
 
-#: ../../source/user_guide/env_variables.md:381
+#: ../../source/user_guide/env_variables.md:493
 msgid ""
 "Set the value of this env variable to control the number of parallel "
 "compilation jobs used to build the extension modules other than ffa."
 msgstr "设置此环境变量的值以控制构建 ffa 以外的扩展模块时使用的并行编译任务数。"
 
-#: ../../source/user_guide/env_variables.md:383
+#: ../../source/user_guide/env_variables.md:495
 msgid "**MAGI_ATTENTION_PREBUILD_FFA**"
 msgstr "**MAGI_ATTENTION_PREBUILD_FFA**"
 
-#: ../../source/user_guide/env_variables.md:385
+#: ../../source/user_guide/env_variables.md:497
+#: ../../source/user_guide/env_variables.md:579
 msgid "**Defaults to:** `1`"
 msgstr "**默认值：** `1`"
 
-#: ../../source/user_guide/env_variables.md:388
+#: ../../source/user_guide/env_variables.md:500
 msgid ""
 "Toggle this env variable to `1` to enable pre-build ffa kernels for some "
 "common options with `ref_block_size=None` and leave others built in jit "
 "mode."
 msgstr "将此环境变量设为 `1` 以启用对一些 `ref_block_size=None` 的常见选项预构建 ffa 内核，其余选项则以 JIT 模式构建。"
 
-#: ../../source/user_guide/env_variables.md:390
+#: ../../source/user_guide/env_variables.md:502
 msgid "**MAGI_ATTENTION_SKIP_CUDA_BUILD**"
 msgstr "**MAGI_ATTENTION_SKIP_CUDA_BUILD**"
 
-#: ../../source/user_guide/env_variables.md:395
+#: ../../source/user_guide/env_variables.md:507
 msgid ""
 "Toggle this env variable to `1` to skip building all the CUDA extension "
 "modules entirely (e.g. for a Python-only / docs build)."
 msgstr "将此环境变量设为 `1` 以完全跳过构建所有 CUDA 扩展模块（例如仅 Python / 文档构建时）。"
 
-#: ../../source/user_guide/env_variables.md:397
+#: ../../source/user_guide/env_variables.md:509
 msgid "**MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD**"
 msgstr "**MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD**"
 
-#: ../../source/user_guide/env_variables.md:402
+#: ../../source/user_guide/env_variables.md:514
 msgid "Toggle this env variable to `1` can skip building `magi_attn_ext`."
 msgstr "将此环境变量设为 `1` 可跳过构建 `magi_attn_ext`。"
 
-#: ../../source/user_guide/env_variables.md:404
+#: ../../source/user_guide/env_variables.md:516
 msgid "**MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD**"
 msgstr "**MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD**"
 
-#: ../../source/user_guide/env_variables.md:409
+#: ../../source/user_guide/env_variables.md:521
 msgid "Toggle this env variable to `1` can skip building `magi_attn_comm`."
 msgstr "将此环境变量设为 `1` 可跳过构建 `magi_attn_comm`。"
 
-#: ../../source/user_guide/env_variables.md:411
+#: ../../source/user_guide/env_variables.md:523
 msgid "**MAGI_ATTENTION_FORCE_CXX11_ABI**"
 msgstr "**MAGI_ATTENTION_FORCE_CXX11_ABI**"
 
-#: ../../source/user_guide/env_variables.md:416
+#: ../../source/user_guide/env_variables.md:528
 msgid ""
 "Toggle this env variable to `1` to force building the extension modules "
 "with the C++11 ABI (`_GLIBCXX_USE_CXX11_ABI=1`), to match a PyTorch build"
@@ -891,44 +1216,44 @@ msgstr ""
 "将此环境变量设为 `1` 以强制使用 C++11 ABI（`_GLIBCXX_USE_CXX11_ABI=1`）构建扩展模块，以匹配使用新 ABI"
 " 编译的 PyTorch。"
 
-#: ../../source/user_guide/env_variables.md:418
+#: ../../source/user_guide/env_variables.md:530
 msgid "**MAGI_ATTENTION_DISABLE_SM90_FEATURES**"
 msgstr "**MAGI_ATTENTION_DISABLE_SM90_FEATURES**"
 
-#: ../../source/user_guide/env_variables.md:423
+#: ../../source/user_guide/env_variables.md:535
 msgid ""
 "Toggle this env variable to `1` to disable the SM90 (Hopper)-specific "
 "features when building the extension modules, e.g. when targeting a "
 "toolchain without SM90 support."
 msgstr "将此环境变量设为 `1` 以在构建扩展模块时禁用 SM90（Hopper）专属特性，例如面向不支持 SM90 的工具链时。"
 
-#: ../../source/user_guide/env_variables.md:425
+#: ../../source/user_guide/env_variables.md:537
 msgid "**MAGI_ATTENTION_FFA_FA4_CACHE_DIR**"
 msgstr "**MAGI_ATTENTION_FFA_FA4_CACHE_DIR**"
 
-#: ../../source/user_guide/env_variables.md:427
+#: ../../source/user_guide/env_variables.md:539
 msgid "**Defaults to:** `magi_attention/lib/ffa_fa4_cache/`"
 msgstr "**默认值：** `magi_attention/lib/ffa_fa4_cache/`"
 
-#: ../../source/user_guide/env_variables.md:428
+#: ../../source/user_guide/env_variables.md:540
 msgid "**Used by:** `magi_attention.functional.fa4_utils`"
 msgstr "**使用方：** `magi_attention.functional.fa4_utils`"
 
-#: ../../source/user_guide/env_variables.md:430
+#: ../../source/user_guide/env_variables.md:542
 msgid ""
 "Set this env variable to specify the cache directory for pre-compiled "
 "`FFA_FA4` kernels."
 msgstr "设置此环境变量以指定预编译 `FFA_FA4` 内核的缓存目录。"
 
-#: ../../source/user_guide/env_variables.md:432
+#: ../../source/user_guide/env_variables.md:544
 msgid "**MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**"
 msgstr "**MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY**"
 
-#: ../../source/user_guide/env_variables.md:434
+#: ../../source/user_guide/env_variables.md:546
 msgid "**Defaults to:** unset (auto-detect the current GPU device)"
 msgstr "**默认值：** 未设置（自动检测当前 GPU 设备）"
 
-#: ../../source/user_guide/env_variables.md:437
+#: ../../source/user_guide/env_variables.md:549
 msgid ""
 "Set this env variable to specify the compute capability used to build "
 "MagiAttention extension modules (affects `magi_attn_comm` and "
@@ -942,11 +1267,11 @@ msgstr ""
 "`MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY=90,100`。如果未设置，我们将尝试检测当前 GPU "
 "设备的计算能力。如果检测失败将抛出错误。"
 
-#: ../../source/user_guide/env_variables.md:439
+#: ../../source/user_guide/env_variables.md:551
 msgid "**MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12**"
 msgstr "**MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12**"
 
-#: ../../source/user_guide/env_variables.md:444
+#: ../../source/user_guide/env_variables.md:556
 msgid ""
 "Set this env variable to `1` to allow building MagiAttention extension "
 "modules with `CUDA-12`, which might cause significant performance "
@@ -956,60 +1281,77 @@ msgstr ""
 "将此环境变量设为 `1` 以允许使用 `CUDA-12` 构建 MagiAttention 扩展模块，这可能导致与 `CUDA-13+` "
 "相比显著的性能下降。当为 `0` 时，如果 CUDA 版本低于 `13.0`，我们将抛出错误并中止安装。"
 
-#: ../../source/user_guide/env_variables.md:446
+#: ../../source/user_guide/env_variables.md:558
 msgid "**NVSHMEM_DIR**"
 msgstr "**NVSHMEM_DIR**"
 
-#: ../../source/user_guide/env_variables.md:448
+#: ../../source/user_guide/env_variables.md:560
 msgid ""
 "**Defaults to:** the system module `nvidia-nvshmem-cu12` (as listed in "
 "`requirements.txt`)"
 msgstr "**默认值：** 系统模块 `nvidia-nvshmem-cu12`（如 `requirements.txt` 中所列）"
 
-#: ../../source/user_guide/env_variables.md:451
+#: ../../source/user_guide/env_variables.md:563
 msgid ""
 "Set this env variable to the path of the custom `nvshmem` installation "
 "directory."
 msgstr "设置此环境变量为自定义 `nvshmem` 安装目录的路径。"
 
-#: ../../source/user_guide/env_variables.md:453
+#: ../../source/user_guide/env_variables.md:565
 msgid ""
 "If not found anywhere, all relative features used in native group "
 "collective comm kernels are disabled."
 msgstr "如果在任何位置都未找到，native group collective 通信内核中的所有相关功能将被禁用。"
 
-#: ../../source/user_guide/env_variables.md:456
+#: ../../source/user_guide/env_variables.md:568
 msgid "For Testing"
 msgstr "测试相关"
 
-#: ../../source/user_guide/env_variables.md:458
+#: ../../source/user_guide/env_variables.md:570
 msgid "**MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP**"
 msgstr "**MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP**"
 
-#: ../../source/user_guide/env_variables.md:461
+#: ../../source/user_guide/env_variables.md:573
 msgid "**Used by:** `magi_attention.testing` (`with_run_in_mp`)"
 msgstr "**使用方：** `magi_attention.testing` (`with_run_in_mp`)"
 
-#: ../../source/user_guide/env_variables.md:463
+#: ../../source/user_guide/env_variables.md:575
 msgid ""
 "Whether to run parameterized distributed test cases in a multiprocessing "
 "context. This is set internally by the `@with_run_in_mp` decorator rather"
 " than being configured by users directly."
 msgstr "是否在多进程上下文中运行参数化的分布式测试用例。此变量由 `@with_run_in_mp` 装饰器内部设置，而非由用户直接配置。"
 
-#: ../../source/user_guide/env_variables.md:465
+#: ../../source/user_guide/env_variables.md:577
+msgid "**MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH**"
+msgstr "**MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH**"
+
+#: ../../source/user_guide/env_variables.md:580
+msgid "**Used by:** `magi_attention.testing` (`assert_close`)"
+msgstr "**使用方：** `magi_attention.testing` (`assert_close`)"
+
+#: ../../source/user_guide/env_variables.md:582
+msgid ""
+"Whether to print the \"has no mismatch\" message when two tensors match "
+"in `assert_close`. Set to `0` to disable it, mainly used to reduce "
+"logging noise in CI."
+msgstr ""
+"当两个张量在 `assert_close` 中匹配时，是否打印 “has no mismatch” 消息。设为 `0` 可禁用它，主要用于减少 "
+"CI 中的日志噪声。"
+
+#: ../../source/user_guide/env_variables.md:584
 msgid "**MAGI_ATTENTION_COPYRIGHT_TEST_YEAR**"
 msgstr "**MAGI_ATTENTION_COPYRIGHT_TEST_YEAR**"
 
-#: ../../source/user_guide/env_variables.md:467
+#: ../../source/user_guide/env_variables.md:586
 msgid "**Defaults to:** current calendar year"
 msgstr "**默认值：** 当前日历年份"
 
-#: ../../source/user_guide/env_variables.md:468
+#: ../../source/user_guide/env_variables.md:587
 msgid "**Used by:** `tools/codestyle/copyright.py`"
 msgstr "**使用方：** `tools/codestyle/copyright.py`"
 
-#: ../../source/user_guide/env_variables.md:470
+#: ../../source/user_guide/env_variables.md:589
 msgid ""
 "Overrides the \"current year\" used by the copyright-header check. Useful"
 " for reproducible testing of the copyright tooling."

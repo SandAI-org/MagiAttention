@@ -48,7 +48,10 @@ constexpr std::tuple<int, int, bool> tile_size_fwd_sm90(int headdim, int element
     // Good for long seqlen (>= 4k) but suffers from tile quantization at short seqlen
     // return {192, is_causal || is_local ? 192 : 176, true};
   } else if (headdim <= 128) {
-    return {64, 64, true};
+    // Synced with Python tile_size_fwd_sm90 in _flex_flash_attn_jit.py.
+    // NOTE: this C++ fallback is not used in practice — Python always resolves
+    // tile sizes before Jinja rendering — but must stay in sync to avoid confusion.
+    return {128, 128, true};
     // {128, 192, false} and {192, 128, false} are quite good too
     // 128 x 192 hits the limit of smem if MmaPV_is_RS, 128 x 144 hits the limit if !MmaPV_is_RS
   } else if (headdim <= 192) {
@@ -70,25 +73,36 @@ constexpr std::tuple<int, int, bool> tile_size_fwd_sm90(int headdim, int element
  * @param element_size Element size, defaults to 2 bytes (FP16/BF16)
  * @return std::tuple<int, int> Returns a tuple of tile configuration, {kBlockM, kBlockN}
  *
- * NOTE: when SwapBwdQKLoop is true, the shared memory usage pattern changes,
+ * NOTE: when BwdInnerLoopK is true, the shared memory usage pattern changes,
  * and theoretically, the shared memory storage of mainloop will discard `dq_acc` and add `dk_acc`, `dv_acc`,
  * accordingly, the shared memory storage of epilogue will discard `dk` and `dv`, and add `dq`,
  * so the total shared memory usage may increase `(2 * kBlockN - kBlockM) * kHeadDim * ElementSize` bytes,
  * which might be unacceptable for some cases like `kBlockM=64, kBlockN=128, kHeadDim=128, ElementSize=2`.
  */
-template <bool SwapBwdQKLoop = false>
+template <bool BwdInnerLoopK, bool IndexSparseLoopQ = false>
 constexpr std::tuple<int, int> tile_size_bwd_sm90(int headdim, int element_size = 2, bool softcap = false) {
   // Currently only support FP16/BF16
   assert(element_size == 2);
 
+  // IndexSparse LoopQ (inv-indices): outer=K token (1 valid row), inner=Q tiles.
+  // K can't be packed → minimize kBlockN. Use {64, 64} which satisfies all WGMMA
+  // constraints with the default hd=128 swapAB flags (SdP_swapAB=true → M=kBlockN=64≥64).
+  if constexpr (IndexSparseLoopQ) {
+    static_assert(!BwdInnerLoopK, "IndexSparseLoopQ requires BwdInnerLoopK=false (LoopQ)");
+    if (headdim <= 128)
+      return {64, 64};
+    else
+      return {64, 64};
+  }
+
   if (headdim <= 64) {
-    if constexpr (SwapBwdQKLoop)
+    if constexpr (BwdInnerLoopK)
       return {64, 128}; // {128, 128, 64} => {64, 128, 64}
     else
       return {128, 128};
   } else if (headdim <= 128) {
-    if constexpr (SwapBwdQKLoop)
-      return {64, 64}; // {64, 128, 128} => {64, 64, 128}
+    if constexpr (BwdInnerLoopK)
+      return {128, 64}; // dK_acc/dV_acc union + kStages_dS=1 → 196 KB fits 228 KB SMEM limit
     else
       return {64, 128};
   } else if (headdim <= 192) {

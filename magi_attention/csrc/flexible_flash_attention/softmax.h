@@ -67,11 +67,11 @@ CUTLASS_DEVICE void warp_reduce_column_(Tensor<Engine0, Layout0>& tensor, Operat
   }
 }
 
-template <int NumMmaWarpGroups, int kNRows, typename Engine0, typename Layout0, typename Operator>
+template <int NumConsumerWarpGroups, int kNRows, typename Engine0, typename Layout0, typename Operator>
 CUTLASS_DEVICE void warp_group_reduce_column_(Tensor<Engine0, Layout0>& tensor, Operator& op) {
   // reduce column registers of mma accumulator layout in a warp group
   // each thread have kNRows column, each row have 4 thread
-  __shared__ float shared_result[NumMmaWarpGroups][4][kNRows * 4];
+  __shared__ float shared_result[NumConsumerWarpGroups][4][kNRows * 4];
   // Get the current mma warp group index
   // -1 is because one warp group is the producer
   int const curr_WG = cutlass::canonical_warp_group_idx() - 1;
@@ -244,7 +244,7 @@ CUTLASS_DEVICE Element softmax_backward(Element P, Element dP, Element dPsum) {
 // Softmax
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kNRows, int Max_offset = 0, bool SwapAB = false>
+template <int kNRows, int Max_offset, bool SwapAB>
 struct Softmax {
   using TensorT = decltype(make_tensor<float>(Shape<Int<kNRows>>{}));
   TensorT row_max, row_sum;
@@ -252,7 +252,7 @@ struct Softmax {
 
   CUTLASS_DEVICE Softmax(float const softmax_scale_log2_) : softmax_scale_log2(softmax_scale_log2_) {};
 
-  template <bool Is_first, bool Check_inf = false, int NumMmaWarpGroups = 1, typename Tensor0>
+  template <bool Is_first, bool Check_inf = false, int NumConsumerWarpGroups = 1, typename Tensor0>
   __forceinline__ __device__ TensorT max_get_scale(Tensor0& acc_s) {
     // Reshape acc_s from ((2, 2, V), MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
     Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(acc_s.layout()));
@@ -266,7 +266,7 @@ struct Softmax {
         MaxOp<float> max_op;
         thread_reduce_</*zero_init=*/true>(scores, row_max, max_op);
         warp_reduce_column_(row_max, max_op);
-        warp_group_reduce_column_<NumMmaWarpGroups, kNRows>(row_max, max_op);
+        warp_group_reduce_column_<NumConsumerWarpGroups, kNRows>(row_max, max_op);
         cute::fill(scores_scale, 1.f);
       }
     } else {
@@ -279,7 +279,7 @@ struct Softmax {
         MaxOp<float> max_op;
         thread_reduce_</*zero_init=*/false>(scores, row_max, max_op);
         warp_reduce_column_(row_max, max_op);
-        warp_group_reduce_column_<NumMmaWarpGroups, kNRows>(row_max, max_op);
+        warp_group_reduce_column_<NumConsumerWarpGroups, kNRows>(row_max, max_op);
       }
 #pragma unroll
       for (int mi = 0; mi < size(row_max); ++mi) {
@@ -307,7 +307,7 @@ struct Softmax {
     }
   };
 
-  template <int NumMmaWarpGroups = 1>
+  template <int NumConsumerWarpGroups>
   __forceinline__ __device__ TensorT finalize(float const final_scale = 1.f) {
     SumOp<float> sum_op;
     if constexpr (!SwapAB) {
@@ -315,7 +315,7 @@ struct Softmax {
     } else {
       // reduce sum in column
       warp_reduce_column_(row_sum, sum_op);
-      warp_group_reduce_column_<NumMmaWarpGroups, kNRows>(row_sum, sum_op);
+      warp_group_reduce_column_<NumConsumerWarpGroups, kNRows>(row_sum, sum_op);
     }
     TensorT scores_scale;
 #pragma unroll

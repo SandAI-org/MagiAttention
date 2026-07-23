@@ -54,6 +54,7 @@ jobs:
       # ==========================================================
       - uses: actions/checkout@v4
         with:
+          allow-unsafe-pr-checkout: true
           submodules: 'recursive'
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -104,6 +105,7 @@ jobs:
           curl www.google.com
       - uses: actions/checkout@v4
         with:
+          allow-unsafe-pr-checkout: true
           submodules: 'recursive'
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -128,7 +130,7 @@ jobs:
           rm -rf /github/home/.cache/magi_attention/
       - name: install MagiAttention
         run: |
-          pip install -e . --no-build-isolation -vvv
+          MAGI_ATTENTION_PREBUILD_LEVEL=ci pip install -e . --no-build-isolation -vvv
       - name: verify MagiAttention import
         run: |
           cd /github/home
@@ -149,11 +151,12 @@ jobs:
           python -c "import magi_attention; print('Wheel Installation and Import Success')"
       - name: Test and Generate coverage report
         run: |
-          MAGI_ATTENTION_TEST_BACKEND="*SDPA,*FFA" coverage run --source magi_attention -m pytest --skip-slow --import-mode=append -qsv ./tests
+          MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 MAGI_ATTENTION_TEST_BACKEND="*SDPA,*FFA" coverage run --source magi_attention -m pytest --skip-slow --import-mode=append -qsv ./tests
           coverage combine
           coverage xml -i
         env:
           COVERAGE_RUN: True
+          MAGI_ATTENTION_JIT_COMPILE_DISABLED: "1"
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:

@@ -32,7 +32,7 @@ using namespace cute;
 
 /**
  * Kernel to zero out dK and dV rows that were not covered by the backward pass.
- * This is used when DisableBwdDkvAtomicReduction is true.
+ * This is used when OuterStoreNeedReduction is false (InnerLoopQ, dKV is outer).
  * Threads are parallel in head_dim dimension,
  * so when zeroing a row, threads access contiguous dK/dV elements (stride 1).
  */
@@ -58,6 +58,7 @@ class FlashAttnBwdDkvPostprocess {
     int2* k_ranges;
     int num_k_ranges;
     int* num_k_ranges_ptr;
+    bool* kv_covered_mask;
   };
 
   CUTLASS_DEVICE
@@ -78,22 +79,28 @@ class FlashAttnBwdDkvPostprocess {
       int32_t const n_idx = offset_n + i;
       int valid = 0;
       if (n_idx < total_k) {
-        // Binary search to check if n_idx is in any k_range
-        int l = 0;
-        int r = (params.num_k_ranges_ptr == nullptr) ? params.num_k_ranges : *params.num_k_ranges_ptr;
-        while (l < r) {
-          int mid = (l + r) / 2;
-          if (params.k_ranges[mid].x <= n_idx) {
-            l = mid + 1;
-          } else {
-            r = mid;
+        if (params.kv_covered_mask != nullptr) {
+          valid = params.kv_covered_mask[n_idx] ? 1 : 0;
+        } else if (params.k_ranges == nullptr) {
+          valid = 1;
+        } else {
+          // Binary search to check if n_idx is in any k_range
+          int l = 0;
+          int r = (params.num_k_ranges_ptr == nullptr) ? params.num_k_ranges : *params.num_k_ranges_ptr;
+          while (l < r) {
+            int mid = (l + r) / 2;
+            if (params.k_ranges[mid].x <= n_idx) {
+              l = mid + 1;
+            } else {
+              r = mid;
+            }
           }
-        }
-        // l-1 is the potential range index
-        if (l > 0) {
-          int2 range = params.k_ranges[l - 1];
-          if (n_idx < range.y) {
-            valid = 1;
+          // l-1 is the potential range index
+          if (l > 0) {
+            int2 range = params.k_ranges[l - 1];
+            if (n_idx < range.y) {
+              valid = 1;
+            }
           }
         }
       } else {

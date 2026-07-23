@@ -22,7 +22,7 @@
 #include "profile_utils.h"
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs_ext(torch::Tensor sorted_input_tensor);
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_sparse_load_metadata(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_block_sparse_metadata(
     torch::Tensor k_ranges,
     torch::Tensor cu_k_ranges_num,
     torch::Tensor unique_count,
@@ -612,7 +612,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // FFA Utils (range tensor ops & profiling)
   // ==========================================
   m.def("unique_consecutive_pairs", &unique_consecutive_pairs_ext, "Find unique (int, int) pairs from a pre-sorted [N,2] int32 CUDA tensor");
-  m.def("compute_sparse_load_metadata", &compute_sparse_load_metadata, "Compute sparse load metadata (loop count and invalid count) for each unique Q range");
+  m.def("compute_block_sparse_metadata", &compute_block_sparse_metadata, "Compute sparse load metadata (loop count and invalid count) for each unique Q range");
   m.def("reorder_ranges_and_attn_type_maps", &reorder_ranges_and_attn_type_maps, "Reorder [N,2] int32 ranges using vectorized int2 loads");
   m.def("argsort_ranges", &argsort_ranges, "Argsort [N,2] int32 tensor by first column, returning int32 indices");
   m.def("start_event", &MagiEvents::start, "");

@@ -42,6 +42,7 @@ from magi_attention.env.build import (
     is_build_debug,
     is_build_verbose,
     is_force_jit_build,
+    is_jit_compile_disabled,
     nvcc_threads,
 )
 
@@ -210,6 +211,13 @@ class JitSpec:
                 "Loading cached JIT artifact for '%s' from %s", mod_name, lib_dir
             )
         else:
+            if is_jit_compile_disabled():
+                raise RuntimeError(
+                    f"JIT compilation is disabled (MAGI_ATTENTION_JIT_COMPILE_DISABLED=1) "
+                    f"but no precompiled artifact found for '{mod_name}'. "
+                    f"Searched AOT: {self.aot_path}, JIT cache: {self.workspace_path}. "
+                    f"This kernel must be added to the precompile configuration."
+                )
             logger.info("No AOT artifact for '%s', triggering JIT build", mod_name)
             self.build()
             lib_dir = self.workspace_path

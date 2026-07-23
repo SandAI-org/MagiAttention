@@ -42,7 +42,6 @@ void set_params_fprop(
     void* merge_q_ranges_d,
     void* qk_map_d,
     void* unique_count_d,
-    bool equal_k_range_size,
     void* softmax_lse_d,
     void* max_logit_d,
     float const softmax_scale,
@@ -51,13 +50,12 @@ void set_params_fprop(
     flash::SinkLayout const sink_layout,
     int const sm_margin,
     bool const disable_fwd_atomic_reduction,
-    int const max_seqlen_q,
-    bool const has_max_seqlen_q,
-    int const blocks_per_batch,
-    int const tiles_per_batch_per_intergroup,
+    int const max_outer_range_width,
+    bool const has_max_outer_range_width,
+    int const batch_stride,
     int const max_tile_idx,
-    void* index_attn_indices_d,
-    int const index_attn_max_topk) {
+    void* index_sparse_indices_d,
+    int const inner_indices_cnt) {
   // Reset the parameters
   params = {};
 
@@ -122,9 +120,6 @@ void set_params_fprop(
   params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
   params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
 
-  // Set sparse load
-  params.equal_k_range_size = equal_k_range_size;
-
   // Set softmax
   params.softmax_lse_ptr = softmax_lse_d;
   params.scale_softmax = softmax_scale;
@@ -139,15 +134,14 @@ void set_params_fprop(
   params.num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
 
   // Set optimization params for tile scheduling
-  params.max_seqlen_q = max_seqlen_q;
-  params.has_max_seqlen_q = has_max_seqlen_q;
-  params.blocks_per_batch = blocks_per_batch;
-  params.tiles_per_batch_per_intergroup = tiles_per_batch_per_intergroup;
+  params.max_outer_range_width = max_outer_range_width;
+  params.has_max_outer_range_width = has_max_outer_range_width;
+  params.batch_stride = batch_stride;
   params.max_tile_idx = max_tile_idx;
 
-  // Set IndexAttn indices direct path params
-  params.index_attn_indices = static_cast<int*>(index_attn_indices_d);
-  params.index_attn_max_topk = index_attn_max_topk;
+  // Set IndexSparse indices direct path params
+  params.index_sparse_indices = static_cast<int*>(index_sparse_indices_d);
+  params.inner_indices_cnt = inner_indices_cnt;
 }
 
 void set_params_dgrad(
@@ -181,7 +175,6 @@ void set_params_dgrad(
     void* merge_k_ranges_d,
     void* bwd_kq_map_d,
     void* bwd_unique_count_d,
-    bool equal_k_range_size,
     void* softmax_lse_d,
     void* softmax_lse_log2_d,
     void* dsoftmax_sum_d,
@@ -222,7 +215,6 @@ void set_params_dgrad(
       /*merge_q_ranges_d=*/nullptr,
       /*qk_map_d=*/nullptr,
       /*unique_count_d=*/nullptr,
-      /*equal_k_range_size=*/equal_k_range_size,
       /*softmax_lse_d=*/softmax_lse_d,
       /*max_logit_d=*/nullptr,
       /*softmax_scale=*/softmax_scale,

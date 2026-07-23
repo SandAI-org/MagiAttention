@@ -1186,7 +1186,7 @@ def sparse_tensor_m_block(
 
 
 @cute.jit
-def produce_block_sparse_loads(
+def produce_block_sparse_inner_iters(
     blocksparse_tensors: BlockSparseTensors,
     batch_idx,
     head_idx,
@@ -1330,7 +1330,7 @@ def produce_block_sparse_loads(
 
 
 @cute.jit
-def consume_block_sparse_loads(
+def consume_block_sparse_inner_iters(
     blocksparse_tensors: BlockSparseTensors,
     batch_idx,
     head_idx,
@@ -1354,7 +1354,7 @@ def consume_block_sparse_loads(
 ):
     """Consume the mask and full block lists for a single tile on the consumer side.
 
-    Mirrors `produce_block_sparse_loads` so that the consumer pipeline uses
+    Mirrors `produce_block_sparse_inner_iters` so that the consumer pipeline uses
     the same sparse tensor indexing.
 
     Args:
@@ -1565,7 +1565,7 @@ def load_block_list_sm100(
 
 # SM100-specific tile processor using SM100 helpers
 @cute.jit
-def produce_block_sparse_loads_sm100(
+def produce_block_sparse_inner_iters_sm100(
     blocksparse_tensors: BlockSparseTensors,
     batch_idx,
     head_idx,

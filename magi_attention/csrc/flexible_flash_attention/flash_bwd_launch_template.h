@@ -40,7 +40,7 @@
 
 using namespace cute;
 
-template <typename TileShape_MK, typename Element, typename ArchTag, bool Has_sink, flash::SinkLayout kSinkLayout, bool ProfileMode = false>
+template <typename TileShape_MK, typename Element, typename ArchTag, bool Has_sink, flash::SinkLayout kSinkLayout, bool ProfileMode>
 void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
   if constexpr (ProfileMode)
     MagiEvents::start("bwd_preprocess");
@@ -108,29 +108,42 @@ template <
     typename ElementDq,
     typename ElementDkv,
     bool Deterministic,
-    bool SwapBwdQKLoop,
-    bool PackGQA = false,
-    bool CatGQA = false,
-    int QheadPerKhead = 1,
-    int Stages = 2,
-    int Stages_dO = 2,
-    int Stages_dS = 2,
-    bool SdP_swapAB = true,
-    bool dKV_swapAB = false,
-    bool dQ_swapAB = false,
-    int NumMmaWarpGroups = 2,
-    int AtomLayoutMSdP = 1,
-    int AtomLayoutNdKV = 2,
-    int AtomLayoutMdQ = 1,
-    bool V_in_regs = false,
-    bool RangeMerge = false,
-    bool SparseLoad = false,
-    bool IndexAttn = false,
-    bool UseMaskDispatch = true,
+    bool BwdInnerLoopK,
+    bool PackGQA,
+    bool CatGQA,
+    int PackGQAFactor,
+    int Stages,
+    int Stages_dO,
+    int Stages_dS,
+    bool SdP_swapAB,
+    bool dKV_swapAB,
+    bool dQ_swapAB,
+    int NumConsumerWarpGroups,
+    int AtomLayoutMSdP,
+    int AtomLayoutNdKV,
+    int AtomLayoutMdQ,
+    bool RangeMerge,
+    bool BlockSparse,
+    bool IndexSparse,
     bool InnerDirMaxToMin,
-    int MaskMode = 0,
-    bool DisableBwdDkvAtomicReduction = false,
-    bool ProfileMode = false>
+    int MaskMode,
+    bool InnerStoreInProducer,
+    int BwdProducerRegs,
+    int BwdConsumerRegs,
+    int InnerStoreMode,
+    bool OuterStoreNeedReduction,
+    int OuterStoreMode,
+    int Stages_V,
+    int Tma1dSmemRowPad,
+    int SparseKBlockSize,
+    int InnerLoadMode,
+    bool UnionDkvSmem,
+    int InnerStoreStages,
+    bool ProfileMode,
+    bool PerfDebugSkipVLoad_,
+    bool PerfDebugSkipDvStore_,
+    bool PerfDebugSkipDkStore_,
+    bool PerfDebugSkipDvMma_>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -169,33 +182,43 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       cutlass::arch::Sm90,
       Has_softcap,
       Deterministic,
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       SdP_swapAB,
       dKV_swapAB,
       dQ_swapAB,
       PackGQA,
       CatGQA,
       RangeMerge,
-      SparseLoad,
-      IndexAttn,
-      UseMaskDispatch,
+      BlockSparse,
+      IndexSparse,
       InnerDirMaxToMin,
       MaskMode,
-      QheadPerKhead,
-      NumMmaWarpGroups,
+      InnerStoreInProducer,
+      InnerStoreMode,
+      PackGQAFactor,
+      NumConsumerWarpGroups,
       AtomLayoutMSdP,
       AtomLayoutNdKV,
       AtomLayoutMdQ,
-      V_in_regs>;
+      Stages_V,
+      Tma1dSmemRowPad,
+      SparseKBlockSize,
+      InnerLoadMode,
+      UnionDkvSmem,
+      InnerStoreStages,
+      PerfDebugSkipVLoad_,
+      PerfDebugSkipDvStore_,
+      PerfDebugSkipDkStore_,
+      PerfDebugSkipDvMma_>;
 
   using Scheduler = flash::DynamicPersistentTileSchedulerBwd<
-      SwapBwdQKLoop ? kBlockM : kBlockN,
-      CollectiveMainloop::NumMmaThreads,
+      BwdInnerLoopK ? kBlockM : kBlockN,
+      CollectiveMainloop::NumConsumerThreads,
       CollectiveMainloop::NumProducerThreads,
       /*WarpSpecialized=*/Arch >= 90,
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
-      /*SwapBwdQKLoop*/ SwapBwdQKLoop,
+      /*BwdInnerLoopK*/ BwdInnerLoopK,
       /*Deterministic=*/Deterministic>;
 
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
@@ -207,16 +230,20 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       typename Scheduler::BlockCoordType,
       dQ_swapAB,
       dKV_swapAB,
-      NumMmaWarpGroups,
+      NumConsumerWarpGroups,
       AtomLayoutMdQ,
       AtomLayoutNdKV,
-      DisableBwdDkvAtomicReduction,
+      OuterStoreNeedReduction,
+      OuterStoreMode,
       Deterministic,
-      SwapBwdQKLoop,
+      BwdInnerLoopK,
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
-      /*QheadPerKhead=*/QheadPerKhead>;
-  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin>>;
+      /*PackGQAFactor=*/PackGQAFactor,
+      /*IndexSparse=*/IndexSparse,
+      /*SparseKBlockSize=*/SparseKBlockSize>;
+  using AttnKernel = flash::enable_sm90_or_later<
+      flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge, InnerDirMaxToMin, BwdProducerRegs, BwdConsumerRegs>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{
       static_cast<Element const*>(params.q_ptr),
@@ -231,6 +258,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       static_cast<ElementAccum*>(params.dk_ptr),
       static_cast<ElementAccum*>(params.dv_ptr),
       {params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_KVdKdV
+      {params.total_k, Int<kHeadDim>{}, params.h_kv}, // shape_dKdV
       {params.k_row_stride, _1{}, Int<kHeadDim>{}}, // stride_K
       {params.v_row_stride, _1{}, Int<kHeadDim>{}}, // stride_V
       {params.dk_row_stride, _1{}, Int<kHeadDim>{}}, // stride_dK
@@ -248,9 +276,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.bwd_kq_map,
       params.dq_determin_conflict_state,
       params.dq_determin_range_locks,
-      params.equal_k_range_size,
-      params.index_attn_indices,
-      params.index_attn_max_topk};
+      params.index_sparse_indices,
+      params.inner_indices_cnt};
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       // q for outer-loop and k for inner-loop
@@ -275,7 +302,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
                                                         /*num_heads_kv=*/params.h_kv,
                                                         /*num_batches=*/params.merge_batch_size,
                                                         /*tile_count_semaphore=*/params.tile_count_semaphore,
-                                                        /*ranges=*/SwapBwdQKLoop ? params.q_ranges : params.k_ranges,
+                                                        /*ranges=*/BwdInnerLoopK ? params.q_ranges : params.k_ranges,
                                                         /*merge_ranges=*/params.merge_k_ranges,
                                                         /*range_map=*/params.bwd_kq_map,
                                                         /*determin_conflict_state=*/params.determin_conflict_state,
@@ -288,25 +315,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   dim3 grid_dims = AttnKernel::get_grid_shape(kernel_params);
   dim3 block_dims = AttnKernel::get_block_shape();
   int smem_size = AttnKernel::SharedStorageSize;
-
-  /* DEBUG */
-  // int smem_size_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
-  // int smem_size_do = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_do));
-  // int smem_size_ds = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_ds));
-  // int smem_size_dqacc = [&] {
-  //     if constexpr (Arch >= 90) {
-  //         return sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_dqacc));
-  //     } else {
-  //         return 0;
-  //     }
-  // }();
-  // int smem_size_k = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_k));
-  // int smem_size_v = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v));
-  // int smem_size_lse = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_lse));
-  // int smem_size_dpsum = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_dpsum));
-  // printf("smem_size = %d, q = %d, k = %d, v = %d, do = %d, ds = %d, dqacc = %d, lse = %d, dpsum = %d\n", smem_size,
-  // smem_size_q, smem_size_k, smem_size_v, smem_size_do, smem_size_ds, smem_size_dqacc, smem_size_lse,
-  // smem_size_dpsum);
 
   if constexpr (size(ClusterShape{}) > 1) {
     void const* kernel = (void const*)cutlass::device_kernel<AttnKernel>;
@@ -323,9 +331,10 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   }
   CHECK_CUDA_KERNEL_LAUNCH();
 
-  if constexpr (DisableBwdDkvAtomicReduction) {
+  if constexpr (!BwdInnerLoopK && !OuterStoreNeedReduction) {
     if constexpr (ProfileMode)
       MagiEvents::start("bwd_postprocess");
+
     run_flash_bwd_dkv_postprocess_<ElementDkv, kHeadDim>(params, stream);
     CHECK_CUDA_KERNEL_LAUNCH();
     if constexpr (ProfileMode)
@@ -343,48 +352,69 @@ template <
     typename TDkv,
     int kHeadDim,
     bool Has_softcap,
-    bool DisableBwdDkvAtomicReduction,
+    bool OuterStoreNeedReduction,
     bool Deterministic,
     bool RangeMerge,
-    bool SwapBwdQKLoop,
+    bool BwdInnerLoopK,
     bool PackGQA,
     bool CatGQA,
-    int QheadPerKhead,
-    bool SparseLoad,
-    bool IndexAttn,
-    bool UseMaskDispatch,
+    int PackGQAFactor,
+    bool BlockSparse,
+    bool IndexSparse,
     bool InnerDirMaxToMin,
-    int MaskMode = 0,
-    bool ProfileMode = false>
+    int MaskMode,
+    bool InnerStoreInProducer,
+    int BwdProducerRegs,
+    int BwdConsumerRegs,
+    int InnerStoreMode,
+    int BwdTileM,
+    int BwdTileN,
+    int BwdStages,
+    int BwdStagesDs,
+    int BwdStagesV,
+    int BwdTma1dSmemRowPad,
+    int SparseKBlockSize,
+    int InnerLoadMode,
+    bool BwdUnionDkvSmem,
+    int InnerStoreStages,
+    int OuterStoreMode,
+    bool ProfileMode,
+    bool PerfDebugSkipVLoad,
+    bool PerfDebugSkipDvStore,
+    bool PerfDebugSkipDkStore,
+    bool PerfDebugSkipDvMma>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90<SwapBwdQKLoop>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
-  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90<SwapBwdQKLoop>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+  // BwdTileM/N, BwdStages/Ds: 0 = use default, >0 = override (env: MAGI_ATTENTION_FFA_BWD_TILE_M/N, MAGI_ATTENTION_FFA_BWD_STAGES/DS).
+  static constexpr int kBlockM =
+      BwdTileM > 0 ? BwdTileM : std::get<0>(tile_size_bwd_sm90<BwdInnerLoopK, (IndexSparse && !BwdInnerLoopK)>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+  static constexpr int kBlockN =
+      BwdTileN > 0 ? BwdTileN : std::get<1>(tile_size_bwd_sm90<BwdInnerLoopK, (IndexSparse && !BwdInnerLoopK)>(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
 
-  // TODO: Add a specific tuning function for different kHeadDim
-  static constexpr int Stages = 2;
-  static constexpr int Stages_dO = kHeadDim <= 128 ? 2 : 1;
-  static constexpr int Stages_dS = kHeadDim <= 128 ? 2 : 1;
+  static constexpr int Stages = BwdStages > 0 ? BwdStages : 2;
+  static constexpr int Stages_dO = Stages >= 2 ? (kHeadDim <= 128 ? 2 : 1) : 1;
+  static constexpr int Stages_dS = BwdStagesDs > 0 ? BwdStagesDs : (kHeadDim <= 128 ? (kBlockM <= 64 ? 2 : 1) : 1);
+  static constexpr int Stages_V = BwdStagesV > 0 ? BwdStagesV : Stages;
+  static constexpr int Tma1dSmemRowPad = BwdTma1dSmemRowPad;
+  static constexpr bool UnionDkvSmem = BwdUnionDkvSmem;
 
   static constexpr bool SdP_swapAB = kHeadDim <= 128 ? true : false;
   static constexpr bool dKV_swapAB = kHeadDim <= 128 ? false : true;
   static constexpr bool dQ_swapAB = kHeadDim <= 64 ? false : true;
 
-  // NOTE: when SwapBwdQKLoop is true, we only support 2 NumMmaWarpGroups,
+  // NOTE: when BwdInnerLoopK is true, we only support 2 NumConsumerWarpGroups,
   // since no more named barriers for more groups
-  static constexpr int NumMmaWarpGroups = SwapBwdQKLoop ? 2 : (kHeadDim == 192 ? 3 : 2);
+  static constexpr int NumConsumerWarpGroups = BwdInnerLoopK ? 2 : (kHeadDim == 192 ? 3 : 2);
 
-  // NOTE: when SwapBwdQKLoop is not supported (i.e. always false),
+  // NOTE: when BwdInnerLoopK is not supported (i.e. always false),
   // all the atom layouts are set specifically for tile size (128, 128, 64) and (64, 128, 64),
-  // however, when SwapBwdQKLoop is true, we need to use new tile size due to shared memory limits,
+  // however, when BwdInnerLoopK is true, we need to use new tile size due to shared memory limits,
   // including (64, 128, 64) and (64, 64, 128),
   // thus the atom layouts are accordingly adjusted here case-by-case,
   // but we need to find a better way to set these layout parameters.
   static constexpr int AtomLayoutMSdP = kBlockN <= 64 ? 2 : 1;
   static constexpr int AtomLayoutNdKV = kHeadDim <= 128 ? (kBlockN <= 64 ? 1 : 2) : 1;
   static constexpr int AtomLayoutMdQ = kHeadDim <= 64 ? (kBlockM <= 64 ? 1 : 2) : 1;
-
-  static constexpr bool V_in_regs = false;
 
   if constexpr (RangeMerge) {
     assert(params.merge_k_ranges != nullptr && params.bwd_kq_map != nullptr && params.bwd_unique_count != nullptr);
@@ -400,27 +430,40 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
       /*ElementDq=*/TDq,
       /*ElementDkv=*/TDkv,
       /*Deterministic=*/Deterministic,
-      /*SwapBwdQKLoop=*/SwapBwdQKLoop,
+      /*BwdInnerLoopK=*/BwdInnerLoopK,
       /*PackGQA=*/PackGQA,
       /*CatGQA=*/CatGQA,
-      /*QheadPerKhead=*/QheadPerKhead,
+      /*PackGQAFactor=*/PackGQAFactor,
       /*Stages=*/Stages,
       /*Stages_dO=*/Stages_dO,
       /*Stages_dS=*/Stages_dS,
       /*SdP_swapAB=*/SdP_swapAB,
       /*dKV_swapAB=*/dKV_swapAB,
       /*dQ_swapAB=*/dQ_swapAB,
-      /*NumMmaWarpGroups=*/NumMmaWarpGroups,
+      /*NumConsumerWarpGroups=*/NumConsumerWarpGroups,
       /*AtomLayoutMSdP=*/AtomLayoutMSdP,
       /*AtomLayoutNdKV=*/AtomLayoutNdKV,
       /*AtomLayoutMdQ=*/AtomLayoutMdQ,
-      /*V_in_regs=*/V_in_regs,
       /*RangeMerge=*/RangeMerge,
-      /*SparseLoad=*/SparseLoad,
-      /*IndexAttn=*/IndexAttn,
-      /*UseMaskDispatch=*/UseMaskDispatch,
+      /*BlockSparse=*/BlockSparse,
+      /*IndexSparse=*/IndexSparse,
       /*InnerDirMaxToMin=*/InnerDirMaxToMin,
       /*MaskMode=*/MaskMode,
-      /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
-      /*ProfileMode=*/ProfileMode>(params, stream);
+      /*InnerStoreInProducer=*/InnerStoreInProducer,
+      /*BwdProducerRegs=*/BwdProducerRegs,
+      /*BwdConsumerRegs=*/BwdConsumerRegs,
+      /*InnerStoreMode=*/InnerStoreMode,
+      /*OuterStoreNeedReduction=*/OuterStoreNeedReduction,
+      /*OuterStoreMode=*/OuterStoreMode,
+      /*Stages_V=*/Stages_V,
+      /*Tma1dSmemRowPad=*/Tma1dSmemRowPad,
+      /*SparseKBlockSize=*/SparseKBlockSize,
+      /*InnerLoadMode=*/InnerLoadMode,
+      /*UnionDkvSmem=*/UnionDkvSmem,
+      /*InnerStoreStages=*/InnerStoreStages,
+      /*ProfileMode=*/ProfileMode,
+      /*PerfDebugSkipVLoad=*/PerfDebugSkipVLoad,
+      /*PerfDebugSkipDvStore=*/PerfDebugSkipDvStore,
+      /*PerfDebugSkipDkStore=*/PerfDebugSkipDkStore,
+      /*PerfDebugSkipDvMma=*/PerfDebugSkipDvMma>(params, stream);
 }

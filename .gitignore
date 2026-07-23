@@ -1,4 +1,5 @@
 # magi_attention
+.cursor/
 magi_attention/_version.py
 magi_attention/csrc/comm/grpcoll/instantiations/
 *.nsys-rep
@@ -220,3 +221,10 @@ __marimo__/
 # Temporary debug/scratch files
 .tmp/
 .clangd
+build_ext/
+
+# CMake build artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+detect_cuda_version.cc

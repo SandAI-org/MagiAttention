@@ -53,8 +53,8 @@ from .seqlen_info import SeqlenInfoQK
 from .softmax import Softmax, apply_score_mod_inner
 from .sparse_utils import (
     BlockSparseTensors,
-    consume_block_sparse_loads,
-    produce_block_sparse_loads,
+    consume_block_sparse_inner_iters,
+    produce_block_sparse_inner_iters,
 )
 from .tile_scheduler import (
     SingleTileLPTScheduler,
@@ -1590,7 +1590,7 @@ class FFAFwdSm90:
                         pipeline_q.producer_commit_w_index(0)
                         q_producer_phase ^= 1
                     if is_kv_load_warp:
-                        kv_producer_state = produce_block_sparse_loads(
+                        kv_producer_state = produce_block_sparse_inner_iters(
                             blocksparse_tensors,
                             batch_idx,
                             head_idx,
@@ -2021,7 +2021,7 @@ class FFAFwdSm90:
                     kv_consumer_state,
                     O_should_accumulate,
                     processed_any,
-                ) = consume_block_sparse_loads(
+                ) = consume_block_sparse_inner_iters(
                     blocksparse_tensors,
                     batch_idx,
                     head_idx,

@@ -35,7 +35,7 @@ __all__ = [
     "is_cuda_device_max_connections_one",
     "is_deterministic_mode_enable",
     "is_profile_mode_enable",
-    "is_auto_range_merge_enable",
+    "is_range_merge_enable",
     "is_cat_gqa_enable",
     "dist_attn_backward_hide_tail_reduce",
     "dist_attn_runtime_dict_size",
@@ -203,7 +203,7 @@ def is_profile_mode_enable() -> bool:
 # ------------------------------------------------------------------ #
 
 
-def is_auto_range_merge_enable() -> bool:
+def is_range_merge_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable automatic range merging for flex-flash-attention,
     to improve performance by reducing the number of attention ranges
@@ -213,7 +213,7 @@ def is_auto_range_merge_enable() -> bool:
     NOTE: this feature is experimental and under active development for now,
     thus please do NOT enable it unless you know exactly what you are doing
     """
-    return os.environ.get("MAGI_ATTENTION_AUTO_RANGE_MERGE", "0") == "1"
+    return os.environ.get("MAGI_ATTENTION_RANGE_MERGE", "0") == "1"
 
 
 def is_cat_gqa_enable() -> bool:
@@ -285,3 +285,10 @@ def is_cpp_backend_enable() -> bool:
     Default value is ``0``
     """
     return os.environ.get("MAGI_ATTENTION_CPP_BACKEND", "0") == "1"
+
+
+# ------------------------------------------------------------------ #
+#  Debug
+# ------------------------------------------------------------------ #
+
+ENABLE_REMOTE_DEBUG = "MAGI_ATTENTION_ENABLE_REMOTE_DEBUG"

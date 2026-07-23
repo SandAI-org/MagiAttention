@@ -65,7 +65,6 @@ void set_params_fprop(
     void* merge_q_ranges_d,
     void* qk_map_d,
     void* unique_count_d,
-    bool equal_k_range_size,
     void* softmax_lse_d,
     void* max_logit_d,
     float softmax_scale,
@@ -74,13 +73,12 @@ void set_params_fprop(
     flash::SinkLayout const sink_layout = flash::SinkLayout::SH,
     int const sm_margin = 0,
     bool const disable_fwd_atomic_reduction = false,
-    int const max_seqlen_q = 0,
-    bool const has_max_seqlen_q = false,
-    int const blocks_per_batch = 0,
-    int const tiles_per_batch_per_intergroup = 0,
+    int const max_outer_range_width = 0,
+    bool const has_max_outer_range_width = false,
+    int const batch_stride = 0,
     int const max_tile_idx = 0,
-    void* index_attn_indices_d = nullptr,
-    int const index_attn_max_topk = 0);
+    void* index_sparse_indices_d = nullptr,
+    int const inner_indices_cnt = 0);
 
 void set_params_dgrad(
     Flash_bwd_params& params,
@@ -113,7 +111,6 @@ void set_params_dgrad(
     void* merge_k_ranges_d,
     void* bwd_kq_map_d,
     void* bwd_unique_count_d,
-    bool equal_k_range_size,
     void* softmax_lse_d,
     void* softmax_lse_log2_d,
     void* dsoftmax_sum_d,

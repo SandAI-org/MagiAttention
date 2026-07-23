@@ -15,15 +15,16 @@
 import importlib
 import importlib.resources
 import itertools
-import math
 import os
 import shutil
 import subprocess
 import sys
 import sysconfig
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import torch
 from packaging.version import Version, parse
@@ -74,10 +75,7 @@ DISABLE_AGGRESSIVE_PTX_INSTRS = os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1") 
 # and leave others built in jit mode
 PREBUILD_FFA = os.getenv("MAGI_ATTENTION_PREBUILD_FFA", "1") == "1"
 
-# Set this environment variable to control the number of parallel compilation jobs
-# including pre-build FFA jobs and other ext modules jobs
-# defaults to the ceiling of 90% of the available CPU cores
-default_jobs = math.ceil(os.cpu_count() * 0.9)  # type: ignore[operator]
+default_jobs = os.cpu_count()
 PREBUILD_FFA_JOBS = int(
     os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", str(default_jobs))
 )
@@ -685,7 +683,10 @@ def prebuild_ffa_kernels() -> None:
             "Ensure source tree is available. Error: "
         ) from e
 
-    # determine the combinations of prebuild options
+    # Prebuild level: set MAGI_ATTENTION_PREBUILD_LEVEL=ci in CI yaml,
+    # defaults to "lite" for local builds.
+    prebuild_level = os.environ.get("MAGI_ATTENTION_PREBUILD_LEVEL", "lite").lower()
+    print(f"[prebuild] level={prebuild_level!r}", flush=True)
     directions = ["fwd", "bwd"]
     head_dims = [64, 128]
     compute_output_dtype_tuples = [
@@ -694,20 +695,58 @@ def prebuild_ffa_kernels() -> None:
         (torch.float16, torch.float32),
         (torch.bfloat16, torch.float32),
     ]
-    disable_atomic_reductions = [False, True]
+    disable_dkv_atomic_reductions = [False, True]
     deterministics = [False]
-    auto_range_merges = [False]
+    range_merges = [False]
     cat_gqas = [False]
 
     combos = itertools.product(
         directions,
         head_dims,
         compute_output_dtype_tuples,
-        disable_atomic_reductions,
+        disable_dkv_atomic_reductions,
         deterministics,
-        auto_range_merges,
+        range_merges,
         cat_gqas,
     )
+    # Each combo is a tuple of scalars; extend with sparse/gqa fields below.
+    base_combos = [
+        (
+            *c,
+            False,
+            False,
+            False,
+            1,
+            1,
+            False,
+        )  # block_sparse, index_sparse, bwd_inner_loop_k, pack_gqa_factor, sparse_k_block_size, return_max_logits
+        for c in combos
+    ]
+
+    # CI mode: collect the exact kernel specs declared by test classes via
+    # the standard precompile_kernel_specs() interface. This replaces the old
+    # hand-maintained lists (precompile_sparse_tests.py + ci_dense_features)
+    # and stays in sync with test @parameterize sweeps automatically.
+    ci_test_specs: dict[str, Any] = {}
+    if prebuild_level == "ci":
+        try:
+            from magi_attention.testing.precompile import collect_test_kernel_specs
+
+            ci_test_specs = collect_test_kernel_specs(repo_root=project_root)
+            print(
+                f"[prebuild] CI mode: collected {len(ci_test_specs)} test kernel specs "
+                f"via collect_test_kernel_specs()",
+                flush=True,
+            )
+        except Exception as e:
+            print(
+                f"[prebuild WARNING] failed to collect test kernel specs: {e}",
+                flush=True,
+            )
+
+    # URIs already covered by the test specs — skip duplicates to avoid
+    # two concurrent ninja builds racing in the same kernel directory.
+    _ci_test_uri_set = set(ci_test_specs.keys())
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
@@ -715,12 +754,44 @@ def prebuild_ffa_kernels() -> None:
             direction,
             head_dim,
             compute_output_dtype_tuple,
-            disable_atomic_reduction,
+            disable_dkv_atomic_reduction,
             deterministic,
-            auto_range_merge,
+            range_merge,
             cat_gqa,
+            block_sparse,
+            index_sparse,
+            bwd_inner_loop_k,
+            pack_gqa_factor,
+            sparse_k_block_size,
+            return_max_logits,
         ) = args
+
         compute_dtype, output_dtype = compute_output_dtype_tuple
+        pack_gqa = pack_gqa_factor > 1
+        _is_sparse = block_sparse or index_sparse
+
+        # Sparse FWD: output_dtype=compute_dtype (no fp32 accum needed since no atomic),
+        # disable_dkv_atomic_reduction=True (each Q only processed by one CTA),
+        # ref_block_size=(128,128) forced (sparse paths fix tile size).
+        ref_block_size = None
+        if direction == "fwd" and _is_sparse:
+            output_dtype = compute_dtype
+            disable_dkv_atomic_reduction = True
+            ref_block_size = (128, 128)
+
+        # Sparse BWD dtype derivation:
+        #   dq_dtype: fp32 (inner, needs atomic) or native (outer, direct store)
+        #   dkv_dtype: fp32 (inner for InnerLoopK) — prebuild doesn't generate InnerLoopQ+no_atomic combo
+        disable_dq_atomic_reduction = False
+        if direction == "bwd":
+            if _is_sparse and bwd_inner_loop_k:
+                disable_dq_atomic_reduction = True
+            dq_dtype = compute_dtype if disable_dq_atomic_reduction else torch.float32
+            dkv_dtype = torch.float32
+        else:
+            dq_dtype = None
+            dkv_dtype = None
+
         spec, uri = get_ffa_jit_spec(
             arch=(9, 0),
             direction=direction,
@@ -728,22 +799,30 @@ def prebuild_ffa_kernels() -> None:
             compute_dtype=compute_dtype,
             output_dtype=output_dtype if direction == "fwd" else None,
             softcap=False,
-            disable_atomic_reduction=disable_atomic_reduction,
+            disable_atomic_reduction=disable_dkv_atomic_reduction,
+            disable_dq_atomic_reduction=disable_dq_atomic_reduction,
             deterministic=deterministic,
-            # optional args below mainly for sparse attn
-            ref_block_size=None,
-            auto_range_merge=auto_range_merge,
+            ref_block_size=ref_block_size,
+            range_merge=range_merge,
             swap_ab=False,
-            pack_gqa=False,
+            pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
-            qhead_per_khead=1,
-            sparse_load=False,
-            swap_bwd_qk_loop=False,
+            pack_gqa_factor=pack_gqa_factor,
+            block_sparse=block_sparse,
+            index_sparse=index_sparse,
+            bwd_inner_loop_k=bwd_inner_loop_k,
             profile_mode=False,
-            return_max_logits=False,
-            dq_dtype=output_dtype if direction == "bwd" else None,
-            dkv_dtype=output_dtype if direction == "bwd" else None,
+            return_max_logits=return_max_logits,
+            dq_dtype=dq_dtype,
+            dkv_dtype=dkv_dtype,
+            sparse_k_block_size=sparse_k_block_size,
         )
+        if uri in _ci_test_uri_set:
+            return f"{uri} (deduped with test spec)"
+        return _build_and_install(uri, spec)
+
+    def _build_and_install(uri, spec):
+        """Build a kernel spec and copy artifacts from JIT to AOT directory."""
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
@@ -751,15 +830,57 @@ def prebuild_ffa_kernels() -> None:
             shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
         return uri
 
+    all_combos = base_combos
+    n_total = len(all_combos) + len(ci_test_specs)
+    n_done = 0
+    n_failed = 0
+    t_start = time.time()
+    print(
+        f"[prebuild] building {n_total} kernels "
+        f"({len(base_combos)} base + {len(ci_test_specs)} ci-test) "
+        f"with {PREBUILD_FFA_JOBS} parallel jobs",
+        flush=True,
+    )
     with ThreadPoolExecutor(max_workers=PREBUILD_FFA_JOBS) as ex:
-        futs = {ex.submit(_build_one, c): c for c in combos}
+        futs: dict = {ex.submit(_build_one, c): c for c in all_combos}
+        futs.update(
+            {
+                ex.submit(_build_and_install, uri, spec): uri
+                for uri, spec in ci_test_specs.items()
+            }
+        )
         for fut in as_completed(futs):
             c = futs[fut]
+            n_done += 1
+            elapsed = time.time() - t_start
             try:
                 uri = fut.result()
-                print(f"Prebuilt: {uri}")
+                print(
+                    f"[prebuild {n_done}/{n_total}] ({elapsed:.0f}s) OK: {uri}",
+                    flush=True,
+                )
             except Exception as e:
-                raise RuntimeError(f"Prebuild failed for {c}: {e}") from e
+                n_failed += 1
+                if prebuild_level == "ci":
+                    print(
+                        f"[prebuild {n_done}/{n_total}] ({elapsed:.0f}s) "
+                        f"WARNING: skipping invalid combo {c}: {e}",
+                        flush=True,
+                    )
+                else:
+                    raise RuntimeError(f"Prebuild failed for {c}: {e}") from e
+    print(
+        f"[prebuild] finished: {n_done - n_failed}/{n_total} ok, "
+        f"{n_failed} failed/skipped, total {time.time() - t_start:.0f}s",
+        flush=True,
+    )
+    if n_failed and prebuild_level == "ci":
+        print(
+            "[prebuild WARNING] some kernels failed to prebuild — the "
+            "corresponding tests will JIT-compile at runtime and may be slow "
+            "or time out.",
+            flush=True,
+        )
 
 
 # build ext modules

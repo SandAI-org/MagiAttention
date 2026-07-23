@@ -24,7 +24,7 @@
 
 namespace flash {
 
-template <class SeqlenInfo_t, int kBlockM, int kBlockN, bool PackGQA = false, int QheadPerKhead = 1>
+template <class SeqlenInfo_t, int kBlockM, int kBlockN, bool PackGQA, int PackGQAFactor>
 struct BlockMN {
   static CUTLASS_DEVICE cute::tuple<int, int> get_n_block_min_max(
       SeqlenInfo_t const& seqlen_info,
@@ -35,10 +35,10 @@ struct BlockMN {
     int const seqlen_q = seqlen_info.seqlen_q;
     int n_block_max = cute::ceil_div(seqlen_k, kBlockN);
 
-    // for PackGQA, the actual m_idx_max should be divided by QheadPerKhead
-    int m_idx_max_logical = !PackGQA ? (m_block + 1) * kBlockM : cute::ceil_div((m_block + 1) * kBlockM, QheadPerKhead);
+    // for PackGQA, the actual m_idx_max should be divided by PackGQAFactor
+    int m_idx_max_logical = !PackGQA ? (m_block + 1) * kBlockM : cute::ceil_div((m_block + 1) * kBlockM, PackGQAFactor);
 
-    int m_idx_min_logical = !PackGQA ? m_block * kBlockM : (m_block * kBlockM / QheadPerKhead);
+    int m_idx_min_logical = !PackGQA ? m_block * kBlockM : (m_block * kBlockM / PackGQAFactor);
 
     if (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::InvCausal) {
       // do nothing
@@ -62,8 +62,8 @@ struct BlockMN {
     int const seqlen_q = seqlen_info.seqlen_q;
     int const seqlen_k = seqlen_info.seqlen_k;
 
-    // For PackGQA, the packed seqlen_q is seqlen_q * QheadPerKhead
-    int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * QheadPerKhead;
+    // For PackGQA, the packed seqlen_q is seqlen_q * PackGQAFactor
+    int const seqlen_q_packed = !PackGQA ? seqlen_q : seqlen_q * PackGQAFactor;
     int m_block_max = cute::ceil_div(seqlen_q_packed, kBlockM);
 
     if (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal) {
@@ -71,9 +71,9 @@ struct BlockMN {
     } else if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
       // n_idx_max in logical space (max n_idx for this n_block)
       int n_idx_max = std::min(seqlen_k, (n_block + 1) * kBlockN);
-      // For PackGQA, convert to packed m space: m_idx_packed = m_idx_logical * QheadPerKhead
-      // For InvCausal (m >= n), m_idx must be >= n_idx, so in packed space: m_idx_packed >= n_idx * QheadPerKhead
-      int m_idx_max_packed = !PackGQA ? n_idx_max : n_idx_max * QheadPerKhead;
+      // For PackGQA, convert to packed m space: m_idx_packed = m_idx_logical * PackGQAFactor
+      // For InvCausal (m >= n), m_idx must be >= n_idx, so in packed space: m_idx_packed >= n_idx * PackGQAFactor
+      int m_idx_max_packed = !PackGQA ? n_idx_max : n_idx_max * PackGQAFactor;
       m_block_max = std::min(m_block_max, cute::ceil_div(m_idx_max_packed, kBlockM));
     }
 
@@ -84,7 +84,7 @@ struct BlockMN {
       // m_idx_min (logical) = n_idx_min + seqlen_q - seqlen_k
       int m_idx_min_logical = n_block * kBlockN + seqlen_q - seqlen_k;
       // For PackGQA, convert to packed space
-      int m_idx_min_packed = !PackGQA ? m_idx_min_logical : m_idx_min_logical * QheadPerKhead;
+      int m_idx_min_packed = !PackGQA ? m_idx_min_logical : m_idx_min_logical * PackGQAFactor;
       m_block_min = std::max(m_block_min, m_idx_min_packed / kBlockM);
     } else if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::Full) {
       // do nothing

@@ -13,9 +13,13 @@
 # limitations under the License.
 
 import os
-from contextlib import contextmanager
+import time
+from contextlib import ContextDecorator, contextmanager
+from enum import Enum
 from functools import partial, wraps
-from typing import Callable
+from typing import Any, Callable, Union
+
+import torch
 
 from magi_attention.utils import wrap_to_list
 
@@ -173,3 +177,118 @@ def switch_envvars(
             ctx_mgr.__exit__(None, None, None)
 
     return switch_envvars_back
+
+
+class switch_env(ContextDecorator):
+    """
+    A unified utility that acts as both a Context Manager and a Decorator to temporarily
+    modify environment variables.
+
+    It supports:
+    1. Boolean toggles (converting True/False to "1"/"0").
+    2. Enum values (extracting the value property).
+    3. dictionary inputs for setting multiple variables at once.
+    4. Automatic restoration of previous environment states.
+
+    Args:
+        vars_or_name (str | dict[str, Any]): The name of the environment variable,
+            or a dictionary of {variable_name: value}.
+        value (Any, optional): The value to set if `vars_or_name` is a string.
+            - If bool: converts to "1" or "0".
+            - If Enum: uses enum.value.
+            - Otherwise: converts to string.
+            Defaults to None (implies `vars_or_name` is a dict).
+
+    Usage:
+        >>> # 1. As a Context Manager (Simple Boolean)
+        >>> with switch_env("DEBUG", True):
+        ...     pass
+        ...
+        >>> # 2. As a Decorator (Enum Backend)
+        >>> class MyBackend(Enum):
+        ...     FLASH = "flash_attn"
+        ...
+        >>> @switch_env("ATTN_BACKEND", MyBackend.FLASH)
+        ... def run_model():
+        ...     pass
+        ...
+        >>> # 3. Multiple Variables (dict)
+        >>> with switch_env({"FEATURE_A": "1", "BACKEND": "native"}):
+        ...     pass
+    """
+
+    def __init__(self, vars_or_name: Union[str, dict[str, Any]], value: Any = None):
+        self.original_values: dict[str, Union[str, None]] = {}
+        self.target_values: dict[str, str] = {}
+
+        # Normalize input into a dictionary of {name: str_value}
+        if isinstance(vars_or_name, dict):
+            raw_targets = vars_or_name
+        else:
+            if value is None:
+                raise ValueError(
+                    "If 'vars_or_name' is a string, 'value' must be provided."
+                )
+            raw_targets = {vars_or_name: value}
+
+        for k, v in raw_targets.items():
+            self.target_values[k] = self._normalize_value(v)
+
+    def _normalize_value(self, value: Any) -> str:
+        """Helper to convert various types to environment variable string format."""
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, Enum):
+            return str(value.value)
+        return str(value)
+
+    def __enter__(self):
+        # Save original state and apply new values
+        for name, new_val in self.target_values.items():
+            self.original_values[name] = os.environ.get(name, None)
+            os.environ[name] = new_val
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # Restore original state
+        for name, old_val in self.original_values.items():
+            if old_val is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old_val
+
+
+def poll_cuda_event(
+    *,
+    stream: torch.cuda.Stream | None = None,
+    timeout: float = 30.0,
+    poll_interval: float = 0.05,
+    error_msg: str = "CUDA hang detected",
+) -> None:
+    """Record a CUDA event on *stream* and CPU-poll until it completes.
+
+    Raises :class:`RuntimeError` if the event does not complete within
+    *timeout* seconds, allowing hangs to be detected quickly without
+    waiting for the (much longer) distributed process-group timeout.
+
+    Args:
+        stream (torch.cuda.Stream | None, optional): Stream on which to record
+            the event.  ``None`` records on the current default CUDA stream.
+            Defaults to ``None``.
+        timeout (float, optional): Maximum number of seconds to wait.
+            Defaults to ``30.0``.
+        poll_interval (float, optional): Seconds to sleep between
+            :meth:`~torch.cuda.Event.query` polls.  Defaults to ``0.05``.
+        error_msg (str, optional): Message for the :class:`RuntimeError`
+            raised on timeout.  Defaults to ``"CUDA hang detected"``.
+    """
+    evt = torch.cuda.Event()
+    if stream is None:
+        evt.record()
+    else:
+        evt.record(stream)
+    t0 = time.monotonic()
+    while not evt.query():
+        if time.monotonic() - t0 > timeout:
+            raise RuntimeError(error_msg)
+        time.sleep(poll_interval)

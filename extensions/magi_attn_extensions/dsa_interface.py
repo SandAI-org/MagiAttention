@@ -24,7 +24,7 @@ flex_attn_func = torch.compile(flex_attention)
 
 
 @torch.compile
-def fa_per_token_sparse_ffa_sparse_load_fwd(
+def ffa_block_sparse_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -32,7 +32,7 @@ def fa_per_token_sparse_ffa_sparse_load_fwd(
     softmax_scale: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Forward pass using flex_flash_attn SparseLoad path (q_ranges/k_ranges + sparse_load=True).
+    Forward pass using flex_flash_attn BlockSparse path (q_ranges/k_ranges + block_sparse=True).
     """
     sq, nhq, hd = q.shape
     skv, nhkv, _ = k.shape
@@ -77,8 +77,8 @@ def fa_per_token_sparse_ffa_sparse_load_fwd(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         softmax_scale=softmax_scale,
-        auto_range_merge=True,
-        sparse_load=True,
+        range_merge=True,
+        block_sparse=True,
         pack_gqa=True if group_size > 1 else False,
         ref_block_size=ref_block_size,
     )
@@ -92,7 +92,7 @@ def fa_per_token_sparse_ffa_sparse_load_fwd(
 
 
 @torch.compile
-def fa_per_token_sparse_ffa_index_attn_fwd(
+def ffa_index_sparse_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -100,65 +100,43 @@ def fa_per_token_sparse_ffa_index_attn_fwd(
     softmax_scale: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Forward pass using flex_flash_attn IndexAttn path (index_attn_indices direct to kernel).
+    Forward pass using flex_flash_attn IndexSparse path (index_sparse_indices direct to kernel).
+
+    Q/K/V are passed in natural Dense-style shapes without KV-head flattening.
+    index_map: (nhkv, sq, topk) with logical K positions (0..skv-1).
     """
     sq, nhq, hd = q.shape
     skv, nhkv, _ = k.shape
     topk = index_map.shape[-1]
-
     group_size = nhq // nhkv
 
-    # q_flat: (nhkv * sq, group_size, hd)
-    q_flat = rearrange(
-        q,
-        "sq (nhkv group_size) hd -> (nhkv sq) group_size hd",
-        nhkv=nhkv,
-        group_size=group_size,
-    )
-    # k_flat/v_flat: (nhkv * skv, 1, hd)
-    k_flat = rearrange(k, "skv nhkv hd -> (nhkv skv) 1 hd")
-    v_flat = rearrange(v, "skv nhkv hd -> (nhkv skv) 1 hd")
-
-    # Build index_attn_indices: (total_q, nhkv, topk) with global KV row ids
-    # index_map is (nhkv, sq, topk) with local K indices (0..skv-1)
-    # k_flat layout is (nhkv * skv, 1, hd), so global row id = head_idx * skv + local_k_idx
-    h_kv_offset = rearrange(
-        torch.arange(nhkv, device=q.device, dtype=torch.int32) * skv, "nhkv -> nhkv 1 1"
-    )
-    # (nhkv, sq, topk) with global row ids
-    global_indices = (index_map + h_kv_offset).to(torch.int32)
-    # q_flat layout is (nhkv * sq, group_size, hd) with nhkv-major order,
-    # so index_attn_indices shape = (nhkv * sq, 1, topk) where nhk=1 (fused view)
-    index_attn_indices = global_indices.reshape(nhkv * sq, 1, topk).contiguous()
+    # index_map: (nhkv, sq, topk) → index_sparse_indices: (sq, nhkv, topk)
+    index_sparse_indices = index_map.permute(1, 0, 2).to(torch.int32).contiguous()
 
     tile_size = 128
     if topk % tile_size != 0:
         pad_size = tile_size - (topk % tile_size)
-        index_attn_indices = torch.nn.functional.pad(
-            index_attn_indices, (0, pad_size), value=-1
+        index_sparse_indices = torch.nn.functional.pad(
+            index_sparse_indices, (0, pad_size), value=-1
         )
 
-    out_flat, meta = flex_flash_attn_func(
-        q_flat,
-        k_flat,
-        v_flat,
-        index_attn_indices=index_attn_indices,
+    out, meta = flex_flash_attn_func(
+        q,
+        k,
+        v,
+        index_sparse_indices=index_sparse_indices,
         q_block_size=1,
-        k_block_size=1,
+        sparse_k_block_size=1,
         softmax_scale=softmax_scale,
         pack_gqa=True if group_size > 1 else False,
     )
 
-    # out_flat: (nhkv * sq, group_size, hd) -> (sq, nhq, hd)
-    o = out_flat.view(nhkv, sq, group_size, hd).transpose(0, 1).reshape(sq, nhq, hd)
     assert meta.lse is not None
-    lse = meta.lse.view(nhkv, sq, group_size).transpose(0, 1).reshape(sq, nhq)
-
-    return o, lse
+    return out, meta.lse
 
 
 @torch.compile
-def fa_per_token_sparse_flex_fwd(
+def flex_attn_sparse_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -221,7 +199,7 @@ def fa_per_token_sparse_flex_fwd(
 
 
 @torch.compile
-def fa_per_token_sparse_sdpa_fwd(
+def sdpa_sparse_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -293,17 +271,15 @@ def dsa_attn_func(
         v: (skv, nhkv, hd)
         index_map: (nhkv, sq, topk) - Stores the topk K-token indices for each KV-head.
         softmax_scale: float, scaling factor.
-        backend: str, one of "flex", "ffa_sparse_load", "ffa_index_attn", "sdpa".
+        backend: str, one of "flex", "ffa_block_sparse", "ffa_index_sparse", "sdpa".
     """
     if backend == "flex":
-        return fa_per_token_sparse_flex_fwd(q, k, v, index_map, softmax_scale)
-    elif backend == "ffa_sparse_load":
-        return fa_per_token_sparse_ffa_sparse_load_fwd(
-            q, k, v, index_map, softmax_scale
-        )
-    elif backend == "ffa_index_attn":
-        return fa_per_token_sparse_ffa_index_attn_fwd(q, k, v, index_map, softmax_scale)
+        return flex_attn_sparse_fwd(q, k, v, index_map, softmax_scale)
+    elif backend == "ffa_block_sparse":
+        return ffa_block_sparse_fwd(q, k, v, index_map, softmax_scale)
+    elif backend == "ffa_index_sparse":
+        return ffa_index_sparse_fwd(q, k, v, index_map, softmax_scale)
     elif backend == "sdpa":
-        return fa_per_token_sparse_sdpa_fwd(q, k, v, index_map, softmax_scale)
+        return sdpa_sparse_fwd(q, k, v, index_map, softmax_scale)
     else:
         raise ValueError(f"Invalid backend: {backend}")

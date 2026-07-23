@@ -169,6 +169,7 @@ def magi_attn_varlen_key(
     window_size: tuple[int, int] = (-1, -1),
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
     chunk_size: int | None = None,
+    head_dim_v: int | None = None,
 ) -> DistAttnRuntimeKey:
     """This is a flash-attn-varlen like interface,
     to generate ``q_ranges``, ``k_ranges`` and ``attn_mask_type``
@@ -295,6 +296,7 @@ def magi_attn_varlen_key(
         cp_group_or_mesh=cp_group_or_mesh,
         dist_attn_config=dist_attn_config,
         chunk_size=chunk_size,
+        head_dim_v=head_dim_v,
     )
 
 
@@ -453,6 +455,7 @@ def magi_attn_flex_key(
     is_q_permutable: bool = True,
     is_k_permutable: bool = True,
     chunk_size: int | None = None,
+    head_dim_v: int | None = None,
 ) -> DistAttnRuntimeKey:
     """This is the most flexible interface,
     directly passing in ``q_ranges``, ``k_ranges`` and ``attn_mask_type`` to
@@ -690,6 +693,7 @@ def magi_attn_flex_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        head_dim_v=head_dim_v,
     )
 
     # Init dist attn runtime mgr and map it to the key
@@ -713,6 +717,7 @@ def magi_attn_flex_key(
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
+            head_dim_v=head_dim_v,
         )
 
     return key

@@ -16,19 +16,29 @@ static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
-static constexpr bool kRangeMerge = {{ auto_range_merge }};
+static constexpr bool kRangeMerge = {{ range_merge }};
 static constexpr bool kSwapAB = {{ swap_ab }};
 static constexpr bool kPackGQA = {{ pack_gqa }};
 static constexpr bool kCatGQA = {{ cat_gqa }};
-static constexpr int kQheadPerKhead = {{ qhead_per_khead }};
-static constexpr bool kSparseLoad = {{ sparse_load }};
-static constexpr bool kIndexAttn = {{ index_attn }};
+static constexpr int kPackGQAFactor = {{ pack_gqa_factor }};
+static constexpr bool kBlockSparse = {{ block_sparse }};
+static constexpr bool kIndexSparse = {{ index_sparse }};
 static constexpr bool kReturnMaxLogits = {{ return_max_logits }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kIntraWGOverlap = {{ intra_wg_overlap | default('true') }};
 static constexpr bool kInnerDirMaxToMin = {{ inner_dir_max_to_min | default('false') }};
 // mask_mode: 0=regular(direct apply every block), 1=dispatch(3-lambda zone split), 2=unified(runtime zone dispatch)
 static constexpr int kMaskMode = {{ mask_mode_int | default('1') }};
+// setmaxnreg quotas for the Load/Mma WGs, selected by _ffa_register_quota on the Python
+// side; the kernel only asserts them.
+static constexpr int kFwdProducerRegs = {{ fwd_producer_regs }};
+static constexpr int kFwdConsumerRegs = {{ fwd_consumer_regs }};
+// Sparse K block size: 1 = token-level indices, >1 = block-level (each index covers SparseKBlockSize tokens)
+static constexpr int kSparseKBlockSize = {{ sparse_k_block_size | default(1) }};
+// Inner-loop scatter load mode: 0=Tma(2D,auto), 1=Tma1d(bulk per-row, no-swizzle K), 2=CpAsync(per-row)
+static constexpr int kInnerLoadMode = {{ inner_load_mode }};
+// Outer-loop store mode: 0=Tma(full-tile TMA store), 1=Stg(per-thread vectorized STG.128)
+static constexpr int kOuterStoreMode = {{ outer_store_mode | default(0) }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
@@ -79,13 +89,13 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& q_ranges_,
     std::optional<const at::Tensor>& k_ranges_,
     std::optional<const at::Tensor>& attn_type_map_,
-    std::optional<int> const max_seqlen_q,
+    std::optional<int> const max_outer_range_width,
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
-    bool equal_k_range_size_,
-    std::optional<const at::Tensor>& index_attn_indices_,
-    int const index_attn_max_topk,
+    std::optional<const at::Tensor>& index_sparse_indices_,
+    int const inner_indices_cnt,
+    int sparse_k_block_size,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> out_type_,
@@ -95,11 +105,11 @@ std::vector<at::Tensor> mha_fwd(
 
   // Parameter preparation
   auto [params, out, softmax_lse, max_logit] = prepare_mha_fwd<kBlockM, kDeterministic, kDisableAtomic, kPackGQA, kReturnMaxLogits>(
-      q, k, v, max_seqlen_q, sink_, out_, softmax_lse_, max_logit_,
+      q, k, v, max_outer_range_width, sink_, out_, softmax_lse_, max_logit_,
       q_ranges_, k_ranges_, attn_type_map_, 
       merge_q_ranges_, qk_map_, unique_count_, 
-      equal_k_range_size_,
-      index_attn_indices_, index_attn_max_topk,
+      index_sparse_indices_, inner_indices_cnt,
+      sparse_k_block_size,
       softmax_scale, softcap,
       out_type_, sink_layout_, sm_margin);
   
@@ -112,7 +122,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kRangeMerge, kSwapAB, kSparseLoad, kIndexAttn, kIntraWGOverlap, kInnerDirMaxToMin, kMaskMode, kReturnMaxLogits, kProfileMode>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kPackGQAFactor, kDeterministic, kRangeMerge, kSwapAB, kBlockSparse, kIndexSparse, kIntraWGOverlap, kInnerDirMaxToMin, kMaskMode, kReturnMaxLogits, kFwdProducerRegs, kFwdConsumerRegs, kSparseKBlockSize, kInnerLoadMode, kOuterStoreMode, kProfileMode>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");

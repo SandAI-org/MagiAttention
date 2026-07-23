@@ -28,6 +28,7 @@
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 
 #include "deterministic.h"
+#include "inner_ldst_mode.hpp"
 #include "named_barrier.hpp"
 #include "seqlen.h"
 #include "softmax.h"
@@ -48,10 +49,11 @@ template <
     int NumEpilogueThreads_,
     bool DisableFwdAtomicReduction_,
     bool PackGQA_,
-    int QheadPerKhead_,
-    bool Deterministic_ = false,
-    bool SwapAB_ = false,
-    bool ReturnMaxLogits_ = false>
+    int PackGQAFactor_,
+    bool Deterministic_,
+    bool SwapAB_,
+    bool ReturnMaxLogits_,
+    int OuterStoreMode_>
 struct CollectiveEpilogueFwd {
   using TileShape_MNK_PV = TileShape_MNK_PV_;
   using ClusterShape = ClusterShape_;
@@ -67,10 +69,11 @@ struct CollectiveEpilogueFwd {
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
   static constexpr bool PackGQA = PackGQA_;
-  static constexpr int QheadPerKhead = QheadPerKhead_; // for non packgqa, QheadPerKhead is always 1.
+  static constexpr int PackGQAFactor = PackGQAFactor_; // for non packgqa, PackGQAFactor is always 1.
   static constexpr bool Deterministic = Deterministic_;
   static constexpr bool SwapAB = SwapAB_;
   static constexpr bool ReturnMaxLogits = ReturnMaxLogits_;
+  static constexpr OuterStoreMode kOuterStoreMode = static_cast<OuterStoreMode>(OuterStoreMode_);
 
   static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
   static constexpr int kHeadDim = get<1>(TileShape_MNK_PV{});
@@ -132,23 +135,24 @@ struct CollectiveEpilogueFwd {
   // when sizeof(Element) == 4, we use Swizzle<2,3,2>, otherwize we use swizzle as fa3 to avoid bank conflict
   using SmemLayoutAtomO = decltype(composition(Swizzle<kSwizzle, kSwizzleBase, kSwizzleShift>{}, Layout<Shape<_8, Int<kBlockKGmem>>, Stride<Int<kBlockKGmem>, _1>>{}));
   using SmemLayoutOSTS = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 1>(TileShape_MNK_PV{})));
+  using SmemLayoutOLinear = Layout<Shape<Int<kBlockM>, Int<kHeadDim>>, Stride<Int<kHeadDim>, _1>>;
 
-  // now we don't use TMA
-  // using SmemLayoutO = std::conditional_t<ArchTag::kMinComputeCapability >= 90, SmemLayoutOTMA, SmemLayoutOSTS>;
-  // when SwapAB is true, SmemLayoutOTMA has no bank conflict
-  using SmemLayoutO = std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>;
+  using SmemLayoutO = std::conditional_t<
+      kOuterStoreMode == OuterStoreMode::Tma,
+      SmemLayoutOTMA,
+      std::conditional_t<kOuterStoreMode == OuterStoreMode::Tma1d, SmemLayoutOLinear, std::conditional_t<SwapAB, SmemLayoutOTMA, SmemLayoutOSTS>>>;
 
   // Define ShapeO and StrideO based on PackGQA
   using ShapeO = std::conditional_t<
       PackGQA,
-      // ((QheadPerKhead, seqlen_q), d, nheads_kv)
-      cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t, int32_t>,
+      // ((PackGQAFactor, seqlen_q), d, nheads_kv)
+      cute::Shape<cute::Shape<cute::Int<PackGQAFactor>, int32_t>, int32_t, int32_t>,
       // (seqlen_q, d, head)
       cute::Shape<int32_t, int32_t, int32_t>>;
 
   using StrideO = std::conditional_t<
       PackGQA,
-      // ((stride_d, stride_s), 1, stride_h * QheadPerKhead)
+      // ((stride_d, stride_s), 1, stride_h * PackGQAFactor)
       cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>,
       // (stride_s, 1, stride_h)
       cute::Stride<int64_t, _1, int64_t>>;
@@ -156,8 +160,8 @@ struct CollectiveEpilogueFwd {
   // Define ShapeLSE and StrideLSE based on PackGQA
   using ShapeLSE = std::conditional_t<
       PackGQA,
-      // ((QheadPerKhead, seqlen_q), nheads_kv)
-      cute::Shape<cute::Shape<cute::Int<QheadPerKhead>, int32_t>, int32_t>,
+      // ((PackGQAFactor, seqlen_q), nheads_kv)
+      cute::Shape<cute::Shape<cute::Int<PackGQAFactor>, int32_t>, int32_t>,
       // (seqlen_q, nheads_qo)
       cute::Shape<int32_t, int32_t>>;
 
@@ -179,9 +183,13 @@ struct CollectiveEpilogueFwd {
     cute::array_aligned<Element, cute::cosize_v<SmemLayoutO>> smem_o;
   };
 
+  // When Stg mode, the PackGQA-reshaped ShapeO may be TMA-incompatible. Use a non-PackGQA
+  // shape for the type alias so make_tma_copy compiles; the TMA descriptor is never created at runtime.
+  using TMA_O_ShapeForType = std::conditional_t<kOuterStoreMode == OuterStoreMode::Tma, ShapeO, cute::Shape<int32_t, int32_t, int32_t>>;
+  using TMA_O_StrideForType = std::conditional_t<kOuterStoreMode == OuterStoreMode::Tma, StrideO, cute::Stride<int64_t, _1, int64_t>>;
   using TMA_O = decltype(make_tma_copy(
       GmemTiledCopyOTMA{},
-      make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), ShapeO{}, StrideO{}),
+      make_tensor(make_gmem_ptr(static_cast<Element*>(nullptr)), TMA_O_ShapeForType{}, TMA_O_StrideForType{}),
       SmemLayoutOTMA{},
       select<0, 1>(TileShape_MNK_PV{}),
       _1{})); // no mcast for O
@@ -227,20 +235,26 @@ struct CollectiveEpilogueFwd {
   static Params to_underlying_arguments(Arguments const& args) {
     // Construct ShapeO and StrideO based on PackGQA
     auto const shape_O = cute::conditional_return<!PackGQA>(
-        args.shape_O, make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
+        args.shape_O, make_shape(make_shape(cute::Int<PackGQAFactor>{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
 
     auto const stride_O = cute::conditional_return<!PackGQA>(
-        args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * QheadPerKhead));
+        args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * PackGQAFactor));
 
     // Construct ShapeLSE and StrideLSE based on PackGQA
     auto const shape_LSE = cute::conditional_return<!PackGQA>(
         select<0, 2>(args.shape_O), // (seqlen, nheads)
-        make_shape(make_shape(cute::Int<QheadPerKhead>{}, get<0>(args.shape_O)), args.nheads_kv));
+        make_shape(make_shape(cute::Int<PackGQAFactor>{}, get<0>(args.shape_O)), args.nheads_kv));
 
-    auto const stride_LSE = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), QheadPerKhead));
+    auto const stride_LSE = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), PackGQAFactor));
 
-    Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), shape_O, stride_O);
-    TMA_O tma_store_O = make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutOTMA{}, select<0, 1>(TileShape_MNK_PV{}), _1{}); // no mcast
+    TMA_O tma_store_O = [&]() {
+      if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
+        Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), shape_O, stride_O);
+        return make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutOTMA{}, select<0, 1>(TileShape_MNK_PV{}), _1{});
+      } else {
+        return TMA_O{};
+      }
+    }();
 
     return {
         args.ptr_O,
@@ -249,7 +263,7 @@ struct CollectiveEpilogueFwd {
         args.ptr_LSE,
         shape_LSE,
         stride_LSE,
-        cutlass::FastDivmod(QheadPerKhead),
+        cutlass::FastDivmod(PackGQAFactor),
         tma_store_O,
         args.nheads,
         args.nheads_kv,
@@ -264,7 +278,9 @@ struct CollectiveEpilogueFwd {
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
-    // cute::prefetch_tma_descriptor(params.tma_store_O.get_tma_descriptor());
+    if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
+      cute::prefetch_tma_descriptor(params.tma_store_O.get_tma_descriptor());
+    }
   }
 
   CUTLASS_DEVICE
@@ -354,8 +370,8 @@ struct CollectiveEpilogueFwd {
     // Get offset and seqlen for batch that current tile belongs to
     // In PackGQA, the seqlen info handles packed sequence length.
     // We need to adjust offsets to the packed domain.
-    int offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
-    int seqlen_o = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * QheadPerKhead;
+    int offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
+    int seqlen_o = !PackGQA ? seqlen_info.seqlen_q : seqlen_info.seqlen_q * PackGQAFactor;
 
     // Get warp group index for current thread
     int warp_group_idx = warp_uniform(thread_idx / cutlass::NumThreadsPerWarpGroup);
@@ -575,20 +591,18 @@ struct CollectiveEpilogueFwd {
       correct_output(tOrPrevO_rowcol, tOrO_rowcol, lse_prev, lse, lse_final);
     }
 
-    // Initialize gmem_tiled_copy_O
-    GmemTiledCopyO gmem_tiled_copy_O;
-    auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
-
-    // Initialize tOcO and tOpO to predict OOB access
-    Tensor tOcO = gmem_thr_copy_O.partition_D(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})));
-    Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOcO)));
+    // Per-thread gmem copy infrastructure (only used in non-TMA path)
+    [[maybe_unused]] GmemTiledCopyO gmem_tiled_copy_O;
+    [[maybe_unused]] auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
+    [[maybe_unused]] Tensor tOcO = gmem_thr_copy_O.partition_D(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})));
+    [[maybe_unused]] Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOcO)));
+    if constexpr (kOuterStoreMode != OuterStoreMode::Tma) {
 #pragma unroll
-    for (int k = 0; k < size(tOpO); ++k) {
-      tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O);
+      for (int k = 0; k < size(tOpO); ++k) {
+        tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O);
+      }
     }
-
-    // Initialize tOgO to store O to gmem
-    Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
+    [[maybe_unused]] Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
 
     // Convert tOrO to Element type and copy to smem
     {
@@ -613,36 +627,47 @@ struct CollectiveEpilogueFwd {
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
     }
 
-    // Copy tOsO to tOrFinalO
-    Tensor tOsO = gmem_thr_copy_O.partition_S(sO);
-    Tensor tOrFinalO = make_fragment_like(tOsO);
-    cute::copy(gmem_tiled_copy_O, tOsO, tOrFinalO);
-
-    // Signal producer threads that smem_v is released
-    if constexpr (ArchTag::kMinComputeCapability >= 90) {
+    if constexpr (kOuterStoreMode == OuterStoreMode::Tma) {
       cutlass::arch::fence_view_async_shared();
-#pragma unroll
-      for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-        shared_storage.pipelines.barrier_O.arrive(cta_id);
+      if (cute::elect_one_sync()) {
+        Tensor mdO_tma = params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh);
+        Tensor gdO_tma = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mdO_tma), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
+        auto block_tma = params.tma_store_O.get_slice(_0{});
+        Tensor tOsO_tma = block_tma.partition_S(sO);
+        Tensor tOgO_tma = block_tma.partition_D(gdO_tma);
+        cute::copy(params.tma_store_O, tOsO_tma, tOgO_tma);
+        tma_store_arrive();
       }
+      tma_store_wait<0>();
+    } else if constexpr (kOuterStoreMode == OuterStoreMode::Tma1d) {
+      // TMA1d path: per-row cp.async.bulk from linear (unswizzled) SMEM to GMEM.
+      // SmemLayoutOLinear guarantees each row is kHeadDim contiguous elements in SMEM.
+      // Per-row bulk copy handles non-contiguous GMEM strides (PackGQA hierarchical stride).
+      cutlass::arch::fence_view_async_shared();
+      int const rows_to_store = min(kBlockM, seqlen_o - m_block * kBlockM);
+      if (cute::elect_one_sync()) {
+        constexpr int kRowBytes = kHeadDim * int(sizeof(Element));
+        Element const* smem_base = sO.data().get();
+        for (int row = 0; row < rows_to_store; ++row) {
+          SM90_BULK_COPY_S2G::copy(smem_base + row * kHeadDim, &gO(row, _0{}), kRowBytes);
+        }
+        tma_store_arrive();
+      }
+      tma_store_wait<0>();
+    } else {
+      // Stg path: smem → registers → gmem with per-thread vectorized stores
+      Tensor tOsO = gmem_thr_copy_O.partition_S(sO);
+      Tensor tOrFinalO = make_fragment_like(tOsO);
+      cute::copy(gmem_tiled_copy_O, tOsO, tOrFinalO);
+      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+          gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
     }
 
-    // cutlass::arch::fence_view_async_shared();
-    // BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
-    // int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
-    // if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-    //    // BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
-    //     if (cute::elect_one_sync()) {
-    //         #pragma unroll
-    //         for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-    //             shared_storage.pipelines.barrier_O.arrive(cta_id);
-    //         }
-    //     }
-    // }
-
-    // Clear_OOB_K must be false since we don't want to write zeros to gmem
-    flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
-        gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
+    // Signal barrier_O to allow V load for next tile (smem_o and smem_v are unioned)
+#pragma unroll
+    for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
+      shared_storage.pipelines.barrier_O.arrive(cta_id);
+    }
 
     if constexpr (!DisableFwdAtomicReduction) {
       // Make sure all writes to global memory before this point are completed
@@ -711,7 +736,7 @@ struct CollectiveEpilogueFwd {
           int const row_batch = m_block * kBlockM + row_block;
           if (row_batch < seqlen_o) {
             // PackGQA qhead is contiguous, calculate the qhead index for the current row
-            int const qhead_idx = bidh * QheadPerKhead + row_block % QheadPerKhead;
+            int const qhead_idx = bidh * PackGQAFactor + row_block % PackGQAFactor;
             atomicMaxFloatOnlyIncrease(&shared_storage.tensors.smem_max_logits[qhead_idx], row_max(mi));
           }
         }
@@ -775,7 +800,7 @@ struct CollectiveEpilogueFwd {
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
-    int const offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * QheadPerKhead;
+    int const offset_o = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
 
     if constexpr (!DisableFwdAtomicReduction) {
       if (thread_idx == 0) {

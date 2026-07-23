@@ -35,7 +35,7 @@ except ImportError:
     pass
 
 try:
-    # Original DSL interface.
+    # FFA_FA4 DSL interface.
     from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
 
     _has_cute_backend = True
@@ -209,7 +209,7 @@ def fa4_fwd(
             pack_gqa=False,
             mask_mod=None,
             return_lse=True,
-            block_sparse_tensors=fa4_args["linear_k_block_sparse_mask"],
+            linear_k_block_sparse_tensors=fa4_args["linear_k_block_sparse_mask"],
             aux_tensors=fa4_args["aux_tensors"],
         )
 
@@ -309,7 +309,8 @@ def fa4_bwd(
             causal=False,
             arbitrary=True,  # NOTE: to enable arbitrary mask functionality
             softcap=softcap,
-            block_sparse_tensors=fa4_args["linear_q_block_sparse_mask"],
+            linear_q_block_sparse_tensors=fa4_args["linear_q_block_sparse_mask"],
+            linear_k_block_sparse_tensors=fa4_args["linear_k_block_sparse_mask"],
             aux_tensors=fa4_args["aux_tensors"],
             deterministic=deterministic,
         )
@@ -372,6 +373,7 @@ class FA4AttnFunc(torch.autograd.Function):
                 seqlen_q=seqlen_q,
                 seqlen_k=seqlen_k,
                 headdim=q.shape[-1],
+                headdim_v=v.shape[-1],
             )
             # Cache for future reuse
             FA4AttnFunc._cached_fa4_attn_arg = fa4_attn_arg

@@ -14,6 +14,7 @@
 
 import os
 import random
+from itertools import product
 from typing import Any
 
 import torch
@@ -82,6 +83,94 @@ BACKENDS = "backends"
 
 # TODO: rewrite the specific function for unitest profiling mode
 class TestPipelineBaseWithWorldSize1(DistTestBase):
+    # Dense feature combos for pipeline / flex_flash_attn precompile.
+    # Generated via itertools.product + filter; superset of legacy hand-picked list.
+    _DENSE_FEATURE_AXES = dict(
+        disable_atomic=[False],
+        deterministic=[False, True],
+        range_merge=[False, True],
+        cat_gqa=[False, True],
+        bwd_inner_loop_k=[False, True],
+        pack_gqa_factor=[1, 8, 128],
+        return_max_logits=[False, True],
+    )
+
+    @classmethod
+    def _is_valid_dense_feature(
+        cls,
+        disable_atomic: bool,
+        deterministic: bool,
+        range_merge: bool,
+        cat_gqa: bool,
+        bwd_inner_loop_k: bool,
+        pack_gqa_factor: int,
+        return_max_logits: bool,
+    ) -> bool:
+        if disable_atomic:
+            return False
+        if cat_gqa and pack_gqa_factor <= 1:
+            return False
+        if cat_gqa and bwd_inner_loop_k:
+            return False
+        if cat_gqa and return_max_logits:
+            return False
+        if return_max_logits and bwd_inner_loop_k:
+            return False
+        if return_max_logits and pack_gqa_factor == 128:
+            return False
+        if deterministic and bwd_inner_loop_k:
+            return False
+        return True
+
+    @classmethod
+    def _iter_dense_features(cls):
+        keys = list(cls._DENSE_FEATURE_AXES.keys())
+        for values in product(*(cls._DENSE_FEATURE_AXES[k] for k in keys)):
+            combo = dict(zip(keys, values))
+            if cls._is_valid_dense_feature(**combo):
+                yield combo
+
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Standard precompile interface — see magi_attention/testing/precompile.py.
+
+        Dense extras: feature flag combos × hd × compute_dtype × direction.
+        These kernels are NOT sparse — they cover deterministic, ARM,
+        cat_gqa, return_max_logits, bwd_inner_loop_k flag combos used by
+        test_pipeline and test_flex_flash_attn.
+        """
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+        for hd in [64, 128]:
+            for compute_dt in [torch.float16, torch.bfloat16]:
+                for feat in cls._iter_dense_features():
+                    det = feat["deterministic"]
+                    arm = feat["range_merge"]
+                    cat = feat["cat_gqa"]
+                    swap = feat["bwd_inner_loop_k"]
+                    pgf = feat["pack_gqa_factor"]
+                    rml = feat["return_max_logits"]
+                    directions = ["fwd"] if rml else ["fwd", "bwd"]
+                    for direction in directions:
+                        use_cat = cat and direction == "bwd"
+                        pack_gqa = pgf > 1 and not use_cat
+                        add_ffa_spec(
+                            specs,
+                            direction=direction,
+                            head_dim=hd,
+                            compute_dtype=compute_dt,
+                            output_dtype=torch.float32 if direction == "fwd" else None,
+                            deterministic=det,
+                            range_merge=arm,
+                            pack_gqa=pack_gqa,
+                            cat_gqa=use_cat,
+                            pack_gqa_factor=pgf if not use_cat else 1,
+                            bwd_inner_loop_k=swap and direction == "bwd",
+                            return_max_logits=rml,
+                        )
+        return specs
+
     def init_pg(self) -> None:
         super().init_pg()
 
@@ -885,8 +974,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ],
     )
     @parameterize(
-        "head_dim",
-        [64, 128],
+        "head_dims",
+        [
+            (64, 64),
+            (128, 128),
+            (192, 128),
+            (256, 256),
+        ],
     )
     @parameterize(
         "dtype",
@@ -908,11 +1002,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         self,
         attn_config: dict[str, Any],
         num_heads: tuple[int, int],  # (nhq, nhkv)
-        head_dim: int,
+        head_dims: tuple[int, int],  # (Q/K dim, V dim)
         dtype: torch.dtype,
         backend: MagiAttentionKernelBackend,
         run_bwd: bool = True,
     ):
+        head_dim, head_dim_v = head_dims
+
+        # Extended head dimensions are covered by FFA_FA4 only.
+        if head_dim > 128 and backend != MagiAttentionKernelBackend.FA4:
+            return
+
         # -----    skip if this attn_config is not for the current backend   ---- #
 
         allowed_backends = attn_config.get(BACKENDS, None)
@@ -981,6 +1081,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "backend": backend,
                 "num_heads": num_heads,
                 "head_dim": head_dim,
+                "head_dim_v": head_dim_v,
             }
             flag_comb = self.flag_generator.get_next_valid_comb(
                 test_config=test_config,
@@ -1025,7 +1126,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"world_size=[{self.world_size}] x "
             f"backend=[{backend.value}] x "
             f"attn_config=[{attn_config[NAME]}] x "
-            f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
+            f"dtype=[{dtype}] x (nh,hd,hdv)=[({num_heads},{head_dim},{head_dim_v})] x "
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
             + flag_comb_test_case
         )
@@ -1145,6 +1246,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 cp_group=self.nccl_group,
                 cp_mesh=self.device_mesh,
                 dist_attn_config=dist_attn_config,
+                head_dim_v=head_dim_v if head_dim_v != head_dim else None,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
@@ -1170,7 +1272,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             total_v = torch.randn(
                 total_seqlen_k,
                 num_heads_kv,
-                head_dim,
+                head_dim_v,
                 device=self.device,
                 dtype=dtype,
                 requires_grad=run_bwd,

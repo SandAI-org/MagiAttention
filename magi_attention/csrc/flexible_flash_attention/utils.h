@@ -73,7 +73,7 @@ struct enable_sm80_to_sm89 : Kernel {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Resolve the [start, end) token range for batch `bidb`.
-// `ranges == nullptr` is the IndexAttn convention: every "batch" is a single
+// `ranges == nullptr` is the IndexSparse convention: every "batch" is a single
 // query token, so its range is {bidb, bidb + 1}; otherwise read it from gmem.
 // Takes `int2 const*` so the scheduler (`int2* const ranges`) and the epilogue
 // (`int2 const* k_ranges/q_ranges`) share a single definition.
@@ -672,7 +672,7 @@ CUTLASS_DEVICE void copy2(
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Byte permute and shuffle to match register layout of
-// (FP8 downcasted) accumulator of GEMM-I to FP8 operand A of GEMM-II.
+// (FP8 downcasted) SMEM buffer of GEMM-I to FP8 operand A of GEMM-II.
 template <typename Fragment>
 CUTLASS_DEVICE void permute_Aregs_fp8(Fragment& frag) {
   // frag has shape ((4, 2, 2), MMA_M, MMA_N), each element is 8 bits
@@ -896,7 +896,7 @@ CUTLASS_DEVICE void sync_cga_threads() {
 // Get TMA multi-cast load metadata: multicast mask and cluster block ID
 // RowwiseMask=true: multicast along M (x dim) mode for this N (y dim) load
 // RowwiseMask=false: multicast along N (y dim) mode for this M (x dim) load
-template <typename ClusterShape, typename GmemTiledCopy, bool RowwiseMask = true>
+template <typename ClusterShape, typename GmemTiledCopy, bool RowwiseMask>
 CUTLASS_DEVICE cute::tuple<uint16_t, uint32_t> get_tma_multi_cast_meta() {
   uint32_t block_rank_in_cluster = cute::block_rank_in_cluster();
   constexpr uint32_t cluster_shape_x = get<0>(ClusterShape());

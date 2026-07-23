@@ -14,6 +14,7 @@
 
 import hashlib
 import itertools
+import logging
 import math
 import os
 import pickle
@@ -25,11 +26,19 @@ from tqdm import tqdm
 from tvm_ffi.utils import kwargs_wrapper
 
 from magi_attention.common import AttnRanges
+from magi_attention.env import ffa as ffa_env
 from magi_attention.meta.collection.calc_meta import FA4AttnArg
+
+logger = logging.getLogger(__name__)
 
 is_fa4_installed = False
 try:
-    from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
+    from flash_attn_cute.interface import (
+        _bwd_postprocess_convert,
+        _bwd_preprocess,
+        _flash_attn_bwd,
+        _flash_attn_fwd,
+    )
 
     is_fa4_installed = True
 except ImportError:
@@ -38,9 +47,9 @@ except ImportError:
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
-FFA_FA4_CACHE_DIR = os.path.join(parent_dir, "lib", "ffa_fa4_cache")
 FFA_FA4_CACHE_DIR = os.environ.get(
-    "MAGI_ATTENTION_FFA_FA4_CACHE_DIR", FFA_FA4_CACHE_DIR
+    ffa_env.FA4_CACHE_DIR,
+    os.path.join(parent_dir, "lib", "ffa_fa4_cache"),
 )
 KERNEL_SYMBOL_NAME = "cached_kernel_func"
 _KERNEL_FUNC_NAME_FILE = "func_name.txt"
@@ -97,7 +106,7 @@ COMPILED_META_DICT = {
         ],
     },
     "bwd_pre": {
-        "cache_dict": _flash_attn_bwd.compile_cache_pre,
+        "cache_dict": _bwd_preprocess.compile_cache,
         "arg_names": [
             "out",
             "dout",
@@ -111,7 +120,7 @@ COMPILED_META_DICT = {
         ],
     },
     "bwd_post": {
-        "cache_dict": _flash_attn_bwd.compile_cache_post,
+        "cache_dict": _bwd_postprocess_convert.compile_cache,
         "arg_names": [
             "accum",
             "out",
@@ -129,16 +138,13 @@ def load_precompiled_ffa_fa4():
         is_fa4_installed
     ), "FlashAttn4 is not installed, cannot load pre-compiled kernels"
 
-    print(
-        f"Loading pre-compiled FFA_FA4 kernels from {FFA_FA4_CACHE_DIR} ...",
-        flush=True,
-    )
+    logger.info(f"Loading pre-compiled FFA_FA4 kernels from {FFA_FA4_CACHE_DIR} ...")
 
     has_kernel_loaded = False
     for compiled_cache_name, compiled_meta in COMPILED_META_DICT.items():
         dir_path = os.path.join(FFA_FA4_CACHE_DIR, compiled_cache_name)
         if not os.path.exists(dir_path):
-            print(f"\t=> {compiled_cache_name}: 0 kernels loaded", flush=True)
+            logger.info(f"\t=> {compiled_cache_name}: 0 kernels loaded")
             continue
 
         cache_dict = compiled_meta["cache_dict"]
@@ -170,16 +176,13 @@ def load_precompiled_ffa_fa4():
 
                 cache_dict[key] = wrapped
 
-        print(
-            f"\t=> {compiled_cache_name}: {len(cache_dict)} kernels loaded",
-            flush=True,
-        )
+        logger.info(f"\t=> {compiled_cache_name}: {len(cache_dict)} kernels loaded")
         has_kernel_loaded = has_kernel_loaded or len(cache_dict) > 0
 
     if not has_kernel_loaded:
-        print("No pre-compiled FFA_FA4 kernels to load.", flush=True)
+        logger.info("No pre-compiled FFA_FA4 kernels to load.")
     else:
-        print("Pre-compiled FFA_FA4 kernels loaded successfully.", flush=True)
+        logger.info("Pre-compiled FFA_FA4 kernels loaded successfully.")
 
 
 def precompile_ffa_fa4(
@@ -285,14 +288,12 @@ def precompile_ffa_fa4(
             softmax_scale=softmax_scale,
             softcap=0.0,
         )
-    print("", flush=True)
 
     # 4. Export to keys, .o/.so files for each compiled kernel in each compiled cache
     for compiled_cache_name, compiled_meta in COMPILED_META_DICT.items():
         compiled_cache = compiled_meta["cache_dict"]
-        print(
-            f"Export compiled FFA_FA4 kernels for {compiled_cache_name}: {len(compiled_cache)}",
-            flush=True,
+        logger.info(
+            f"Export compiled FFA_FA4 kernels for {compiled_cache_name}: {len(compiled_cache)}"
         )
         this_cached_dir = os.path.join(FFA_FA4_CACHE_DIR, compiled_cache_name)
         os.makedirs(this_cached_dir, exist_ok=True)
@@ -326,10 +327,9 @@ def precompile_ffa_fa4(
             cmd = ["gcc", "-shared", "-fPIC", "-o", so_path, obj_path, *runtime_libs]
             subprocess.run(cmd, check=True)
 
-            print(f"\t=> Exported: {so_path}")
-        print("", flush=True)
+            logger.info(f"\t=> Exported: {so_path}")
 
     if num_configs == 0:
-        print("No FFA_FA4 kernels to pre-compile.", flush=True)
+        logger.info("No FFA_FA4 kernels to pre-compile.")
     else:
-        print("FFA_FA4 kernels pre-compiled successfully.", flush=True)
+        logger.info("FFA_FA4 kernels pre-compiled successfully.")

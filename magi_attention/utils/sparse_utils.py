@@ -20,68 +20,6 @@ import triton.language as tl
 
 
 @triton.jit
-def block_mask_to_qk_ranges_kernel(
-    # Pointers
-    indices_ptr,  # input: [N, 4] int64 (b, h, q, k)
-    q_ranges_ptr,  # output: [N, 2] int32
-    k_ranges_ptr,  # output: [N, 2] int32
-    # Strides
-    stride_idx_0,
-    stride_idx_1,  # indices strides
-    stride_out_0,
-    stride_out_1,  # output strides
-    # Shapes & Block sizes
-    num_q_blocks,  # Integer
-    num_k_blocks,  # Integer
-    block_m,  # Integer
-    block_n,  # Integer
-    n_elements,  # Total number of true blocks (N)
-    # Meta
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-
-    # indices shape is [N, 4], layout is usually row-major.
-    # We need columns 1 (h), 2 (q), 3 (k). Column 0 is batch (assumed 0).
-    row_ptr = indices_ptr + offsets * stride_idx_0
-
-    h_ptr = row_ptr + 1 * stride_idx_1
-    q_ptr = row_ptr + 2 * stride_idx_1
-    k_ptr = row_ptr + 3 * stride_idx_1
-
-    # Load indices
-    h = tl.load(h_ptr, mask=mask)
-    q = tl.load(q_ptr, mask=mask)
-    k = tl.load(k_ptr, mask=mask)
-
-    # Core Logic (Flattening + Range Calculation)
-    # Corresponding to: q_indices_flat = q_indices + h_indices * num_q
-    #            q_starts = q_indices_flat * block_m
-
-    q_global_idx = q + h * num_q_blocks
-    q_start = q_global_idx * block_m
-    q_end = q_start + block_m
-
-    k_global_idx = k + h * num_k_blocks
-    k_start = k_global_idx * block_n
-    k_end = k_start + block_n
-
-    # Store results
-    # Output shape [N, 2]. Col 0 = start, Col 1 = end.
-
-    q_out_row_ptr = q_ranges_ptr + offsets * stride_out_0
-    tl.store(q_out_row_ptr + 0 * stride_out_1, q_start.to(tl.int32), mask=mask)
-    tl.store(q_out_row_ptr + 1 * stride_out_1, q_end.to(tl.int32), mask=mask)
-
-    k_out_row_ptr = k_ranges_ptr + offsets * stride_out_0
-    tl.store(k_out_row_ptr + 0 * stride_out_1, k_start.to(tl.int32), mask=mask)
-    tl.store(k_out_row_ptr + 1 * stride_out_1, k_end.to(tl.int32), mask=mask)
-
-
-@triton.jit
 def topk_indices_to_qk_ranges_kernel(
     topk_indices_ptr,  # input: [kv_heads, total_num_q_blocks, topk_k_blocks] int32
     q_ranges_ptr,  # output: [N, 2] int32
@@ -446,41 +384,23 @@ def generate_ranges_from_block_mask_triton(
             - k_range_tensor (torch.Tensor): Tensor of shape [num_true_blocks, 2] listing the key ranges.
     """
     assert block_mask.dim() == 4, "block_mask must be 4D [B, H, Q, K]"
-    b, h, num_q, num_k = block_mask.shape
+    _b, _h, num_q, num_k = block_mask.shape
 
-    # 1. Find all True indices in the block mask
-    # FIXME: torch.nonzero causes cpu-gpu sync
-    indices = torch.nonzero(block_mask)  # Shape: [N, 4] -> (batch, h, q, k)
-
-    n_elements = indices.shape[0]
-    if n_elements == 0:
+    indices = torch.nonzero(block_mask)  # [N, 4] → (batch, h, q, k)
+    if indices.shape[0] == 0:
         return (
             torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
             torch.empty((0, 2), dtype=torch.int32, device=block_mask.device),
         )
 
-    q_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
-    k_ranges = torch.empty((n_elements, 2), dtype=torch.int32, device=block_mask.device)
+    h_idx, q_idx, k_idx = indices[:, 1], indices[:, 2], indices[:, 3]
+    q_global = q_idx + h_idx * num_q
+    k_global = k_idx + h_idx * num_k
 
-    def grid(meta):
-        return (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-
-    block_mask_to_qk_ranges_kernel[grid](
-        indices_ptr=indices,
-        q_ranges_ptr=q_ranges,
-        k_ranges_ptr=k_ranges,
-        stride_idx_0=indices.stride(0),
-        stride_idx_1=indices.stride(1),
-        stride_out_0=q_ranges.stride(0),
-        stride_out_1=q_ranges.stride(1),
-        num_q_blocks=num_q,
-        num_k_blocks=num_k,
-        block_m=block_m,
-        block_n=block_n,
-        n_elements=n_elements,
-        BLOCK_SIZE=1024,
-    )
-
+    q_starts = (q_global * block_m).int()
+    k_starts = (k_global * block_n).int()
+    q_ranges = torch.stack([q_starts, q_starts + block_m], dim=1)
+    k_ranges = torch.stack([k_starts, k_starts + block_n], dim=1)
     return q_ranges, k_ranges
 
 
@@ -531,7 +451,7 @@ def generate_ranges_from_block_mask(
 # ================ Utils for Index Attention ================
 
 
-def build_index_attn_indices(
+def build_index_sparse_indices(
     B: int,
     NHK: int,
     S_q: int,
@@ -539,12 +459,12 @@ def build_index_attn_indices(
     topk,
     max_topk: int,
     device: str | torch.device = "cuda",
-    k_block_size: int = 1,
+    sparse_k_block_size: int = 1,
 ) -> torch.Tensor:
-    """Build random index_attn_indices (total_q, NHK, max_topk) with logical KV token positions.
+    """Build random index_sparse_indices (total_q, NHK, max_topk) with logical KV token positions.
 
     Values are logical token positions: ``b * S_kv + token_idx``.
-    The kernel internally converts to physical row via ``logical_pos * NHK + kv_head``.
+    Head selection is handled by the kernel's intergroup mechanism (bidh_kv).
 
     Args:
         topk: int or list[int]. If list, per-batch topk (length must be B).
@@ -552,7 +472,7 @@ def build_index_attn_indices(
     Returns:
         Tensor of shape (B * S_q, NHK, max_topk) with int32 logical positions (-1 = padding).
     """
-    num_kv_blocks = S_kv // k_block_size
+    num_kv_blocks = S_kv // sparse_k_block_size
     total_q = B * S_q
     if isinstance(topk, int):
         topk_per_batch = [topk] * B
@@ -567,52 +487,61 @@ def build_index_attn_indices(
         rand_keys = torch.rand(n_rows, num_kv_blocks, device=device)
         _, perm_all = rand_keys.topk(tk, dim=1, largest=False, sorted=True)
         perm_all = perm_all.reshape(S_q, NHK, tk)
-        # logical token position: batch offset + token index (no head encoding)
-        global_ids = b_idx * S_kv + perm_all
+        # Global block index: perm_all selects among num_kv_blocks blocks within
+        # the batch; offset by b_idx * num_kv_blocks to get the global block id
+        # across all batches.  When sparse_k_block_size == 1, num_kv_blocks == S_kv so
+        # this is equivalent to the token-level encoding.
+        global_ids = b_idx * num_kv_blocks + perm_all
         row_start = b_idx * S_q
         indices[row_start : row_start + S_q, :, :tk] = global_ids.int()
     return indices
 
 
-def get_sdpa_mask_from_index_attn_indices(
-    index_attn_indices: torch.Tensor,
+def get_sdpa_mask_from_index_sparse_indices(
+    index_sparse_indices: torch.Tensor,
     B: int,
     NHQ: int,
     NHK: int,
     S_q: int,
     S_kv: int,
     device: str | torch.device = "cuda",
-    k_block_size: int = 1,
+    sparse_k_block_size: int = 1,
 ) -> torch.Tensor:
-    """Build dense boolean mask [B, NHQ, S_q, S_kv] from index_attn_indices for SDPA ref.
+    """Build dense boolean mask [B, NHK, S_q, S_kv] from index_sparse_indices for SDPA ref.
 
-    index_attn_indices: (total_q, NHK, max_topk) with logical KV token positions.
+    Returns the compact per-KV-head mask — SDPA broadcasts from NHK to NHQ.
+    NHQ is accepted for call-site compatibility but unused (no GQA expansion).
+    index_sparse_indices: (total_q, NHK, max_topk) with logical KV token positions.
     Logical position = b * S_kv + local_token (no head encoding).
     Vectorized: no Python loops.
     """
-    gqa = NHQ // NHK
+    del NHQ
     total_q = B * S_q
-    max_topk = index_attn_indices.shape[2]
+    max_topk = index_sparse_indices.shape[2]
 
-    idx = index_attn_indices.long()
+    idx = index_sparse_indices.long()
     valid_mask = idx >= 0
 
     b_indices = torch.arange(B, device=device).repeat_interleave(S_q)  # (total_q,)
-    # logical position → local token: subtract batch offset (no NHK division needed)
-    local_ids = idx - b_indices[:, None, None] * S_kv
+    # Global index = b * num_kv_blocks + local_block_id (block-level encoding).
+    # Recover local block id by subtracting b * num_kv_blocks.
+    num_kv_blocks = S_kv // sparse_k_block_size
+    local_ids = idx - b_indices[:, None, None] * num_kv_blocks
 
-    if k_block_size == 1:
+    if sparse_k_block_size == 1:
         kv_col = local_ids
         kv_valid = valid_mask
     else:
-        offsets = torch.arange(k_block_size, device=device)
-        kv_col = (local_ids.unsqueeze(-1) * k_block_size + offsets).reshape(
+        offsets = torch.arange(sparse_k_block_size, device=device)
+        kv_col = (local_ids.unsqueeze(-1) * sparse_k_block_size + offsets).reshape(
             total_q, NHK, -1
         )
         kv_valid = (
             valid_mask.unsqueeze(-1)
             .expand_as(
-                local_ids.unsqueeze(-1).expand(total_q, NHK, max_topk, k_block_size)
+                local_ids.unsqueeze(-1).expand(
+                    total_q, NHK, max_topk, sparse_k_block_size
+                )
             )
             .reshape(total_q, NHK, -1)
         )
@@ -627,10 +556,11 @@ def get_sdpa_mask_from_index_attn_indices(
     mask = mask_int > 0
 
     mask = mask.reshape(B, S_q, NHK, S_kv)
-    if gqa > 1:
-        mask = (
-            mask.unsqueeze(3).expand(B, S_q, NHK, gqa, S_kv).reshape(B, S_q, NHQ, S_kv)
-        )
+    # Return compact (B, NHK, S_q, S_kv) — no GQA expansion.
+    # All Q heads within a KV group share the same sparsity pattern,
+    # so SDPA can broadcast the mask from NHK to NHQ.
+    # Expanding here used to materialize O(NHQ × S_q × S_kv) memory
+    # which is catastrophic for large MQA configs (e.g. 128 × 16384²).
     mask = mask.permute(0, 2, 1, 3).contiguous()
     return mask
 
@@ -1167,52 +1097,58 @@ def choose_ref_block(
     Choose the proper reference tile size for different Q/K block sizes, currently for uniform block mask.
 
     Args:
-        block_size: A tuple of (q_block_size, k_block_size).
+        block_size: A tuple of (q_block_size, sparse_k_block_size).
         qhead_per_khead: The number of query heads per key head (GQA group size). Must be a positive integer.
 
     Returns:
         A dictionary containing:
-            - ref_block_size: A tuple of (ref_q_block_size, ref_k_block_size), the reference block sizes.
+            - ref_block_size: A tuple of (ref_q_block_size, ref_sparse_k_block_size), the reference block sizes.
             - swap_ab: Whether to use swap_ab mode.
             - pack_gqa: Whether to use pack_gqa mode.
-            - sparse_load: Whether to use sparse load.
-            - index_attn: Whether to use IndexAttn.
+            - block_sparse: Whether to use sparse load.
+            - index_sparse: Whether to use IndexSparse.
             - (Future parameters can be added here)
 
     Rules:
     - SwapAB and sparse load can't be enabled together
-    - SwapAB and IndexAttn CAN be enabled together
+    - SwapAB and IndexSparse CAN be enabled together
     - Prioritize sparse load and packGQA in small Q/K blocks
-    - For k_block_size < 64:
-        - sparse_load = True
-        - ref_k_block_size = 128
+    - For sparse_k_block_size < 64:
+        - block_sparse = True
+        - ref_sparse_k_block_size = 128
         - swap_ab = False
-    - For k_block_size >= 64:
-        - sparse_load = False
-        - ref_k_block_size must be a multiple of 16
+    - For sparse_k_block_size >= 64:
+        - block_sparse = False
+        - ref_sparse_k_block_size must be a multiple of 16
     - For q_block_size < 128:
         - ref_q_tile_size = min(q_block_size * qhead_per_khead, 128)
-        - If ref_q_tile_size <= 8: swap_ab = True, ref_q_block_size = 8, ref_k_block_size = 64
-        - If 8 < ref_q_tile_size <= 16: swap_ab = True, ref_q_block_size = 16, ref_k_block_size = 64
+        - If ref_q_tile_size <= 8: swap_ab = True, ref_q_block_size = 8, ref_sparse_k_block_size = 64
+        - If 8 < ref_q_tile_size <= 16: swap_ab = True, ref_q_block_size = 16, ref_sparse_k_block_size = 64
         - If ref_q_tile_size > 16: swap_ab = False, ref_q_block_size = min(128, ceil(ref_q_tile_size / 64) * 64)
         - pack_gqa = True if qhead_per_khead > 1, else False
     - For q_block_size >= 128:
         - pack_gqa = False, swap_ab = False
         - ref_q_block_size = min(128, ceil(q_block_size / 64) * 64)
     """
-    q_block_size, k_block_size = block_size
+    q_block_size, sparse_k_block_size = block_size
     swap_ab = False
     pack_gqa = False
-    sparse_load = False
-    index_attn = False
+    block_sparse = False
+    index_sparse = False
 
-    # Handle k_block_size
+    # Handle sparse_k_block_size
     # TODO: is 256 a reasonable number?
-    if k_block_size < 64:
-        sparse_load = True
-        ref_k_block_size = 128
+    if sparse_k_block_size < 64:
+        # block_sparse requires all scatter-dim ranges to share one uniform size
+        # (kernel O(1) cursor seek). This is guaranteed here by construction:
+        # the input is a single uniform block size, and callers generate ranges
+        # from a uniform block mask with this same sparse_k_block_size.
+        # Variable-block-size masks must NOT enable block_sparse (they take the
+        # dense TMA path with range_merge, which has no such requirement).
+        block_sparse = True
+        ref_sparse_k_block_size = 128
     else:
-        ref_k_block_size = min(256, ((k_block_size + 15) // 16) * 16)
+        ref_sparse_k_block_size = min(256, ((sparse_k_block_size + 15) // 16) * 16)
     # Handle q_block_size
     # TODO: add more experiments to check the performance.
     if q_block_size < 128:
@@ -1223,11 +1159,11 @@ def choose_ref_block(
         # Determine swap_ab and ref_q_block_size based on ref_q_tile_size
         if ref_q_tile_size <= 8:
             swap_ab = True
-            ref_k_block_size = 64
+            ref_sparse_k_block_size = 64
             ref_q_block_size = 8
         elif ref_q_tile_size <= 16:
             swap_ab = True
-            ref_k_block_size = 64
+            ref_sparse_k_block_size = 64
             ref_q_block_size = 16
         else:
             # Tile_M must be a multiple of 64
@@ -1238,9 +1174,135 @@ def choose_ref_block(
         ref_q_block_size = min(128, ((q_block_size + 63) // 64) * 64)
 
     return {
-        "ref_block_size": (ref_q_block_size, ref_k_block_size),
+        "ref_block_size": (ref_q_block_size, ref_sparse_k_block_size),
         "swap_ab": swap_ab,
         "pack_gqa": pack_gqa,
-        "sparse_load": sparse_load,
-        "index_attn": index_attn,
+        "block_sparse": block_sparse,
+        "index_sparse": index_sparse,
     }
+
+
+def invert_index_sparse_indices(
+    index_sparse_indices: torch.Tensor,
+    seqlen_k: int,
+    sparse_k_block_size: int = 1,
+    pad_multiple: int = 64,
+) -> tuple[torch.Tensor, int]:
+    """Invert forward IndexSparse indices: Q→K mapping becomes K→Q mapping.
+
+    When ``sparse_k_block_size == 1`` (default), produces a token-level inverse mapping.
+    When ``sparse_k_block_size > 1``, groups K tokens into blocks and deduplicates,
+    producing a block-level inverse mapping.
+
+    Args:
+        index_sparse_indices: (seqlen_q, nhk, topk) int32.
+            Forward Q→K mapping. Trailing -1 entries are padding.
+            When sparse_k_block_size > 1, values are already K block indices.
+        seqlen_k: total number of K tokens.
+        sparse_k_block_size: K block granularity. 1 = token-level (default).
+            When > 1, must divide seqlen_k.
+        pad_multiple: pad inner_topk to this multiple (matches kBlockM).
+
+    Returns:
+        inner_indices: int32 tensor.
+            - sparse_k_block_size == 1: (seqlen_k, nhk, inner_topk)
+            - sparse_k_block_size > 1: (num_k_blocks, nhk, inner_topk)
+            Inverse K→Q mapping (inner-loop indices). Each entry is a Q
+            token position. Trailing -1 entries are padding.
+        inner_topk: int — padded max Q count.
+    """
+    if index_sparse_indices.dim() == 2:
+        raise ValueError(
+            "invert_index_sparse_indices expects 3D input (seqlen_q, nhk, topk). "
+            "Got 2D — reshape before calling."
+        )
+    assert index_sparse_indices.dim() == 3
+    seqlen_q, nhk, topk = index_sparse_indices.shape
+    device = index_sparse_indices.device
+
+    valid_mask = index_sparse_indices >= 0
+    kv_positions = index_sparse_indices.clamp(min=0)
+
+    q_ids = torch.arange(seqlen_q, device=device, dtype=torch.int32)
+    q_ids = q_ids[:, None, None].expand_as(index_sparse_indices)
+    head_ids = torch.arange(nhk, device=device, dtype=torch.int32)
+    head_ids = head_ids[None, :, None].expand_as(index_sparse_indices)
+
+    flat_q = q_ids[valid_mask]
+    flat_k = kv_positions[valid_mask]
+    flat_h = head_ids[valid_mask]
+
+    if sparse_k_block_size > 1:
+        assert (
+            seqlen_k % sparse_k_block_size == 0
+        ), f"seqlen_k ({seqlen_k}) must be divisible by sparse_k_block_size ({sparse_k_block_size})"
+        num_k_slots = seqlen_k // sparse_k_block_size
+
+        # Values are already K block indices — no division needed.
+        flat_k_block = flat_k.long()
+
+        # Deduplicate (k_block, head, q) triples
+        flat_bh = flat_k_block * nhk + flat_h.long()
+        combo = flat_bh * seqlen_q + flat_q.long()
+        combo_unique, _inv = combo.unique(return_inverse=True)
+        flat_bh_unique = combo_unique // seqlen_q
+        flat_q_unique = (combo_unique % seqlen_q).int()
+
+        total_slots = num_k_slots * nhk
+        counts = torch.zeros(total_slots, device=device, dtype=torch.int32)
+        counts.scatter_add_(
+            0,
+            flat_bh_unique.int().long(),
+            torch.ones(flat_bh_unique.shape[0], device=device, dtype=torch.int32),
+        )
+
+        max_inner_topk = int(counts.max().item())
+        inner_topk = (
+            (max_inner_topk + pad_multiple - 1) // pad_multiple
+        ) * pad_multiple
+
+        sorted_order = flat_bh_unique.argsort(stable=True)
+        sorted_q = flat_q_unique[sorted_order]
+        sorted_kh = flat_bh_unique[sorted_order]
+
+        group_starts = torch.zeros(total_slots + 1, device=device, dtype=torch.int64)
+        group_starts[1:] = counts.cumsum(0).long()
+
+        offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
+        offsets = offsets - group_starts[sorted_kh.long()]
+
+        inner_indices = torch.full(
+            (num_k_slots, nhk, inner_topk), -1, device=device, dtype=torch.int32
+        )
+        inner_flat = inner_indices.reshape(total_slots, inner_topk)
+        inner_flat[sorted_kh.long(), offsets.long()] = sorted_q
+    else:
+        flat_kh = flat_k.long() * nhk + flat_h.long()
+        total_kh = seqlen_k * nhk
+        counts = torch.zeros(total_kh, device=device, dtype=torch.int32)
+        counts.scatter_add_(
+            0, flat_kh.int().long(), torch.ones_like(flat_kh, dtype=torch.int32)
+        )
+
+        max_inner_topk = int(counts.max().item())
+        inner_topk = (
+            (max_inner_topk + pad_multiple - 1) // pad_multiple
+        ) * pad_multiple
+
+        sorted_order = flat_kh.argsort(stable=True)
+        sorted_q = flat_q[sorted_order]
+        sorted_kh = flat_kh[sorted_order]
+
+        group_starts = torch.zeros(total_kh + 1, device=device, dtype=torch.int64)
+        group_starts[1:] = counts.cumsum(0).long()
+
+        offsets = torch.arange(len(sorted_q), device=device, dtype=torch.int64)
+        offsets = offsets - group_starts[sorted_kh.long()]
+
+        inner_indices = torch.full(
+            (seqlen_k, nhk, inner_topk), -1, device=device, dtype=torch.int32
+        )
+        inner_indices_flat = inner_indices.reshape(total_kh, inner_topk)
+        inner_indices_flat[sorted_kh.long(), offsets.long()] = sorted_q
+
+    return inner_indices, inner_topk

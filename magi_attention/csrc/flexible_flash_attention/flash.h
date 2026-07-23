@@ -110,22 +110,18 @@ struct Flash_fwd_params : public Qkv_params {
   int num_sm;
   int* __restrict__ tile_count_semaphore;
 
-  // SparseLoad: all K ranges have equal size, enables O(1) cursor seek.
-  bool equal_k_range_size;
-
-  // IndexAttn indices direct path params
+  // IndexSparse indices direct path params (3D: batch × nhk × inner_indices_cnt).
   // Kernel scans trailing -1 entries to compute loop_count / invalid_count.
-  int* __restrict__ index_attn_indices; // [num_unique_q, max_topk] int32, global KV row ids
-  int index_attn_max_topk; // width of index_attn_indices last dim
+  int* __restrict__ index_sparse_indices; // [batch, nhk, inner_indices_cnt] int32, global KV row ids
+  int inner_indices_cnt; // per-head topk width (dim-2 of 3D tensor)
 
   // Optimization params for tile scheduling
-  // for each batch, we assume the seqlen is the same(max_seqlen_q).
+  // for each batch, we assume the seqlen is the same(max_outer_range_width).
   // and precompute some params to avoid computation each time in fwd_tile_scheduler.
-  int max_seqlen_q;
-  bool has_max_seqlen_q; // Whether max_seqlen_q is provided
-  int blocks_per_batch; // number of blocks per batch ((max_seqlen_q * seqlen_scale_factor + kBlockM - 1) / kBlockM)
-  int tiles_per_batch_per_intergroup; // number of tiles per batch each intergroup (blocks_per_batch * qheads_per_kv_group)
-  int max_tile_idx; // maximum tile index when has_max_seqlen_q is true, if tile_id >= max_tile_idx, the tile must be invalid.
+  int max_outer_range_width;
+  bool has_max_outer_range_width; // Whether max_outer_range_width is provided
+  int batch_stride; // number of tiles per batch each intergroup (blocks_per_batch * qheads_per_kv_group)
+  int max_tile_idx; // maximum tile index when has_max_outer_range_width is true, if tile_id >= max_tile_idx, the tile must be invalid.
 
   bool has_sink() const {
     return total_sink > 0;
@@ -185,55 +181,20 @@ struct Flash_bwd_params : public Flash_fwd_params {
   int* __restrict__ dq_determin_conflict_state;
   int* __restrict__ dq_determin_range_locks;
 
-  // IndexAttn params
-  int* __restrict__ index_attn_indices;
-  int index_attn_max_topk;
+  // IndexSparse params (3D: batch × nhk × inner_indices_cnt)
+  int* __restrict__ index_sparse_indices;
+  int inner_indices_cnt; // per-head topk width (dim-2 of 3D tensor)
+
+  // Coverage mask for IndexSparse postprocess (Phase 2):
+  // Boolean mask of shape (total_k,) indicating which KV rows are covered.
+  bool* __restrict__ kv_covered_mask;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <
-    int Arch,
-    int kBlockM,
-    int kBlockN,
-    typename T,
-    typename T_out,
-    int kHeadDim,
-    bool Has_softcap,
-    bool DisableFwdAtomicReduction,
-    bool PackGQA,
-    int QheadPerKhead,
-    bool Deterministic,
-    bool RangeMerge,
-    bool SwapAB,
-    bool kSparseLoad,
-    bool kIndexAttn,
-    bool kIntraWGOverlap,
-    bool kInnerDirMaxToMin,
-    bool kReturnMaxLogits,
-    bool kProfileMode>
-void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
-
-template <
-    int Arch,
-    typename T,
-    typename TDq,
-    typename TDkv,
-    int kHeadDim,
-    bool Has_softcap,
-    bool DisableBwdDkvAtomicReduction,
-    bool Deterministic,
-    bool RangeMerge,
-    bool SwapBwdQKLoop,
-    bool PackGQA,
-    bool CatGQA,
-    int QheadPerKhead,
-    bool SparseLoad,
-    bool IndexAttn,
-    bool UseMaskDispatch,
-    bool InnerDirMaxToMin,
-    bool ProfileMode>
-void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
+// run_mha_fwd_ / run_mha_bwd_ are defined in flash_{fwd,bwd}_launch_template.h, which every
+// JIT instantiation TU includes directly; no forward declarations are kept here to avoid
+// maintaining a second copy of their template parameter lists.
 
 template <typename T_out, uint32_t kHeadDim>
 void run_flash_fwd_post_process_(Flash_fwd_params& params, cudaStream_t stream);

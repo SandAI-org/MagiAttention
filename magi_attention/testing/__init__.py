@@ -24,7 +24,7 @@ from magi_attention.utils import str2seed
 from . import dist_common, utils
 from .dist_common import RUN_IN_MP
 from .gt_dispatcher import GroundTruthDispatcher
-from .precision import assert_close
+from .precision import assert_close, assert_equal
 from .ref_attn import ref_attn_func
 
 __all__ = [
@@ -32,9 +32,12 @@ __all__ = [
     "utils",
     "GroundTruthDispatcher",
     "assert_close",
+    "assert_equal",
     "ref_attn_func",
     "parameterize",
 ]
+
+__version__ = "1.0.1"
 
 
 def parameterize(argument: str, values: list[Any]) -> Callable:
