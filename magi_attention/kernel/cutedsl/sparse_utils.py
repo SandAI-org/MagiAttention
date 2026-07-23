@@ -1858,7 +1858,16 @@ def softmax_block_sparse_sm100(
         sm_stats_barrier.arrive_w_index(index=stage_idx * 4 + warp_idx)
     else:
         if curr_mask_block_cnt > 0:
-            mask_n_block = curr_mask_block_idx[curr_mask_block_cnt - 1]
+            # NOTE: softmax consumes S-tiles in ascending block order (step k -> the
+            # k-th block in curr_mask_block_idx), which is the REVERSE of the load
+            # order. The per-step mask label must therefore also be ascending so that
+            # mask_seqlen's col_limit (= seqlen_k - n_block*n_block_size) and mask_mod's
+            # global-column computation land on the correct physical block. We apply
+            # mask_seqlen=True on every mask step: full/interior blocks yield a col_limit
+            # >= n_block_size (no-op), while the partial tail block (e.g. IndexSparse
+            # padding, or the seqlen_k boundary) is masked correctly regardless of its
+            # processing position. This mirrors SM90's block-identity-driven padding mask.
+            mask_n_block = curr_mask_block_idx[0]
             (
                 mma_si_consumer_phase,
                 si_corr_producer_phase,
@@ -1874,7 +1883,7 @@ def softmax_block_sparse_sm100(
                 ),
             )
             for i in cutlass.range(1, curr_mask_block_cnt):
-                mask_n_block = curr_mask_block_idx[curr_mask_block_cnt - 1 - i]
+                mask_n_block = curr_mask_block_idx[i]
                 (
                     mma_si_consumer_phase,
                     si_corr_producer_phase,
@@ -1885,7 +1894,7 @@ def softmax_block_sparse_sm100(
                     s0_s1_sequence_phase,
                     mask_n_block,
                     mask_fn=partial(
-                        mask_fn, mask_seqlen=False, check_q_boundary=check_m_boundary
+                        mask_fn, mask_seqlen=True, check_q_boundary=check_m_boundary
                     ),
                 )
 

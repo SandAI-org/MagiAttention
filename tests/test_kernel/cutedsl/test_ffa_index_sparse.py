@@ -19,13 +19,25 @@ drives the kernel-level entry points directly (``_flex_flash_attn_fwd`` /
 ``_flex_flash_attn_bwd`` + ``prepare_index_sparse_tiles``) since this fork does
 not expose the ``index_sparse_indices`` autograd wrapper yet.
 
-Sweeps (all with *random* per-Q-tile token indices):
-  * Classic:      seqlen_q x seqlen_kv x topk         (MQA8 + PackGQA, D=128)
-  * Head config:  MHA / GQA / MQA  x  pack_gqa on/off
-  * Partial topk: topk not a multiple of the 128 N-tile (64 / 192)
-  * Batch:        B=2
-  * Head dim:     D=64
-  * Unaligned:    seqlen_q not a multiple of the M-tile
+Mirrors the tier structure and parameter ranges of SM90's
+``tests/test_attn/test_index_attn.py`` (all with *random* per-Q-tile token indices):
+  * Tier 1  (test_simple_index_sparse):  PackGQA GQA ratios 128/64/32/16, S=256
+  * Tier 2a (test_sparse_cross_batch):   B = 2 / 3 / 8, uniform topk
+  * Tier 2b (test_sparse_qkv_lengths):   short/unaligned Q vs long KV (64/1024, 8/512, 100/512)
+  * Tier 3a (test_sparse_head_dim):      D = 64 / 128
+  * Tier 3b (test_sparse_long_seq):      S = 8192, topk = 1024
+  * Tier 3c (test_sparse_gqa):           NHK > 1 (GQA), PackGQA on/off
+  * Tier 3d (test_sparse_mha):           NHQ == NHK (MHA)
+  * Tier P  (test_partial_topk_multi_niter): SM100-only partial topk (topk % 128 != 0)
+
+Differences from SM90 (this fork drives the kernel entry points directly and does
+not expose the ``index_sparse_indices`` autograd wrapper yet):
+  * swap_ab / k_block_size > 1 are not plumbed through the direct-kernel helper
+    (the small-ratio / MHA configs run fine without an explicit swap_ab knob).
+  * Per-batch *variable* topk is unsupported (prepare_index_sparse_tiles takes a
+    scalar topk), so the cross-batch tier uses a *uniform* topk.
+  * The S=65536 int32-overflow regression is omitted (the dense fp32 SDPA ref
+    would OOM); Tier P instead covers partial topk, which SM90 forbids.
 
 Scatter store modes (bulk cp.async vs per-element atomicAdd) are selected via
 MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC at kernel-compile time, which is
@@ -144,7 +156,10 @@ def _sdpa_ref_fwd_bwd(q, k, v, dO, indices, softmax_scale):
 
 def _check(name, got, ref, errors):
     diff = (got.float() - ref.float()).abs()
-    mean_rel = (diff / ref.float().abs().clamp(min=1e-6)).mean().item()
+    # Normalized L1 relative error (sum|diff| / sum|ref|): robust to near-zero
+    # reference entries, unlike a per-element diff/|ref| mean which blows up on
+    # the many tiny dK/dV components at high GQA pack ratios.
+    mean_rel = (diff.sum() / ref.float().abs().sum().clamp(min=1e-6)).item()
     max_abs = diff.max().item()
     cosine = torch.nn.functional.cosine_similarity(
         got.float().flatten(), ref.float().flatten(), dim=0
@@ -251,86 +266,233 @@ def _run_index_sparse_case(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Classic sweep: seqlen_q x seqlen_kv x topk (MQA8 + PackGQA, D=128)
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# SM90-mirrored sweep (see tests/test_attn/test_index_attn.py)
+# =============================================================================
 
 
-@requires_sm100
-@pytest.mark.parametrize("SQ", [128, 512])
-@pytest.mark.parametrize("SK", [512, 2048])
-@pytest.mark.parametrize("topk", [128, 256])
-def test_classic_sweep(SQ, SK, topk):
-    _run_index_sparse_case(NHQ=8, NHK=1, SQ=SQ, SK=SK, topk=topk, pack_gqa=True)
-
-
-@requires_sm100
-def test_long_seq():
-    _run_index_sparse_case(NHQ=8, NHK=1, SQ=1024, SK=4096, topk=384, pack_gqa=True)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Head-config sweep: MHA / GQA / MQA x pack_gqa (SQ=256, SK=1024, topk=256)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@requires_sm100
-@pytest.mark.parametrize(
-    "NHQ,NHK,pack_gqa",
-    [
-        (1, 1, False),  # single head
-        (8, 1, False),  # MQA, no packing
-        (8, 1, True),  # MQA + PackGQA
-        (16, 2, True),  # GQA + PackGQA
-        (4, 4, False),  # MHA
-    ],
-)
-def test_head_configs(NHQ, NHK, pack_gqa):
+def _run_config(cfg: dict):
+    """Map an SM90-style config dict onto the kernel-level runner."""
+    S = cfg.get("S", None)
+    S_kv = cfg.get("S_kv", S)
+    S_q = cfg.get("S_q", min(S_kv, 256))
     _run_index_sparse_case(
-        NHQ=NHQ, NHK=NHK, SQ=256, SK=1024, topk=256, pack_gqa=pack_gqa
+        B=cfg.get("B", 1),
+        NHQ=cfg["NHQ"],
+        NHK=cfg["NHK"],
+        D=cfg.get("D", 128),
+        SQ=S_q,
+        SK=S_kv,
+        topk=cfg["topk"],
+        pack_gqa=cfg.get("pack_gqa", True),
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Edge cases: partial topk / batch / head dim / unaligned seqlen_q
-# ─────────────────────────────────────────────────────────────────────────────
+def _cfgs(configs):
+    return pytest.mark.parametrize("config", configs, ids=[c["name"] for c in configs])
 
 
+# ─── Tier 1: CI quick (PackGQA GQA ratios) ───────────────────────────────────
 @requires_sm100
-@pytest.mark.parametrize("topk", [64])
-def test_partial_topk(topk):
-    """topk not a multiple of the 128 N-tile — exercises is_valid_total tails."""
-    _run_index_sparse_case(NHQ=8, NHK=1, SQ=256, SK=512, topk=topk, pack_gqa=True)
-
-
-@requires_sm100
-@pytest.mark.parametrize("topk", [192])
-@pytest.mark.xfail(
-    reason="Pre-existing bug: softmax_block_sparse_sm100 seqlen_k masking fails "
-    "when mask_block_cnt > 1 and last block is partial (topk % 128 != 0). "
-    "Dense multi-N-iter and single-block partial both work; issue is specific "
-    "to multi-iter correction pipeline in block-sparse softmax.",
-    strict=True,
+@_cfgs(
+    [
+        # ratio=128, kBlockM=128 — canonical DiT
+        {"name": "mqa128_packgqa", "S": 256, "NHQ": 128, "NHK": 1, "topk": 128},
+        # ratio=64, kBlockM=64 full fill
+        {"name": "mqa64_packgqa", "S": 256, "NHQ": 64, "NHK": 1, "topk": 128},
+        # ratio=32, kBlockM=64 half fill
+        {"name": "mqa32_packgqa", "S": 256, "NHQ": 32, "NHK": 1, "topk": 128},
+        # ratio=16, small Q tile
+        {"name": "mqa16_packgqa", "S": 256, "NHQ": 16, "NHK": 1, "topk": 128},
+    ]
 )
-def test_partial_topk_multi_niter_xfail(topk):
-    """Known issue: partial last N-iter when topk > n_block_size."""
-    _run_index_sparse_case(NHQ=8, NHK=1, SQ=256, SK=512, topk=topk, pack_gqa=True)
+def test_simple_index_sparse(config):
+    _run_config(config)
 
 
+# ─── Tier 2a: Cross-batch (uniform topk; SM90 uses variable) ─────────────────
 @requires_sm100
-def test_batch2():
-    _run_index_sparse_case(B=2, NHQ=8, NHK=1, SQ=256, SK=512, topk=128, pack_gqa=True)
+@_cfgs(
+    [
+        {"name": "mqa128_B2", "B": 2, "S": 256, "NHQ": 128, "NHK": 1, "topk": 128},
+        {"name": "mqa128_B3", "B": 3, "S": 256, "NHQ": 128, "NHK": 1, "topk": 128},
+        {"name": "mqa128_B8", "B": 8, "S": 256, "NHQ": 128, "NHK": 1, "topk": 128},
+    ]
+)
+def test_sparse_cross_batch(config):
+    _run_config(config)
 
 
+# ─── Tier 2b: Q/KV different lengths ─────────────────────────────────────────
 @requires_sm100
-def test_head_dim_64():
-    _run_index_sparse_case(NHQ=8, NHK=1, D=64, SQ=256, SK=512, topk=128, pack_gqa=True)
+@_cfgs(
+    [
+        {
+            "name": "short_q_long_kv",
+            "S_q": 64,
+            "S_kv": 1024,
+            "NHQ": 128,
+            "NHK": 1,
+            "topk": 128,
+        },
+        {"name": "tiny_q", "S_q": 8, "S_kv": 512, "NHQ": 128, "NHK": 1, "topk": 128},
+        {
+            "name": "unaligned_q",
+            "S_q": 100,
+            "S_kv": 512,
+            "NHQ": 128,
+            "NHK": 1,
+            "topk": 128,
+        },
+    ]
+)
+def test_sparse_qkv_lengths(config):
+    _run_config(config)
 
 
+# ─── Tier 3a: Head dim variants ──────────────────────────────────────────────
 @requires_sm100
-def test_unaligned_seqlen_q():
-    _run_index_sparse_case(NHQ=1, NHK=1, SQ=192, SK=512, topk=128, pack_gqa=False)
+@_cfgs(
+    [
+        {"name": "D64", "S": 256, "NHQ": 128, "NHK": 1, "D": 64, "topk": 128},
+        {"name": "D128", "S": 256, "NHQ": 128, "NHK": 1, "D": 128, "topk": 128},
+    ]
+)
+def test_sparse_head_dim(config):
+    _run_config(config)
+
+
+# ─── Tier 3b: Long sequence ──────────────────────────────────────────────────
+@requires_sm100
+@_cfgs(
+    [
+        {"name": "mqa128_long_seq", "S": 8192, "NHQ": 128, "NHK": 1, "topk": 1024},
+        {"name": "mqa16_long_seq", "S": 8192, "NHQ": 16, "NHK": 1, "topk": 1024},
+    ]
+)
+def test_sparse_long_seq(config):
+    _run_config(config)
+
+
+# ─── Tier 3c: GQA (NHK>1, NHQ>NHK) ───────────────────────────────────────────
+@requires_sm100
+@_cfgs(
+    [
+        {
+            "name": "gqa64x2_packgqa",
+            "S": 256,
+            "NHQ": 128,
+            "NHK": 2,
+            "topk": 128,
+            "pack_gqa": True,
+        },
+        {
+            "name": "gqa64x2_no_packgqa",
+            "S": 256,
+            "NHQ": 128,
+            "NHK": 2,
+            "topk": 128,
+            "pack_gqa": False,
+        },
+        {
+            "name": "gqa4x4_packgqa",
+            "S": 256,
+            "NHQ": 16,
+            "NHK": 4,
+            "topk": 128,
+            "pack_gqa": True,
+        },
+        {
+            "name": "gqa8x2_packgqa",
+            "S": 256,
+            "NHQ": 16,
+            "NHK": 2,
+            "topk": 128,
+            "pack_gqa": True,
+        },
+    ]
+)
+def test_sparse_gqa(config):
+    _run_config(config)
+
+
+# ─── Tier 3d: MHA (NHQ==NHK, multi-KV-head) ──────────────────────────────────
+@requires_sm100
+@_cfgs(
+    [
+        {"name": "mha4", "S": 256, "NHQ": 4, "NHK": 4, "topk": 128, "pack_gqa": False},
+        {
+            "name": "mha16",
+            "S": 256,
+            "NHQ": 16,
+            "NHK": 16,
+            "topk": 128,
+            "pack_gqa": False,
+        },
+    ]
+)
+def test_sparse_mha(config):
+    _run_config(config)
+
+
+# ─── Tier P: SM100-only partial topk (topk % 128 != 0) ───────────────────────
+@requires_sm100
+@_cfgs(
+    [
+        {
+            "name": "partial_256_512_192",
+            "S_q": 256,
+            "S_kv": 512,
+            "NHQ": 8,
+            "NHK": 1,
+            "topk": 192,
+        },
+        {
+            "name": "partial_256_512_448",
+            "S_q": 256,
+            "S_kv": 512,
+            "NHQ": 8,
+            "NHK": 1,
+            "topk": 448,
+        },
+        {
+            "name": "partial_128_1024_320",
+            "S_q": 128,
+            "S_kv": 1024,
+            "NHQ": 8,
+            "NHK": 1,
+            "topk": 320,
+        },
+        {
+            "name": "partial_512_2048_576",
+            "S_q": 512,
+            "S_kv": 2048,
+            "NHQ": 8,
+            "NHK": 1,
+            "topk": 576,
+        },
+        {
+            "name": "partial_1024_4096_960",
+            "S_q": 1024,
+            "S_kv": 4096,
+            "NHQ": 8,
+            "NHK": 1,
+            "topk": 960,
+        },
+    ]
+)
+def test_partial_topk_multi_niter(config):
+    """SM100-only: partial last block (topk % 128 != 0, mask_block_cnt > 1).
+
+    Regression for the block-sparse softmax mask-ordering fix: softmax consumes
+    S-tiles in ascending block order (the reverse of the load order), so the
+    per-step mask label must also be ascending and mask_seqlen must be applied on
+    every mask step, otherwise the seqlen_k / padding mask lands on the wrong
+    physical block and the partial tail is left unmasked. SM90 forbids this case
+    (max_topk must be a multiple of the tile size).
+    """
+    _run_config(config)
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v", "-x"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))
