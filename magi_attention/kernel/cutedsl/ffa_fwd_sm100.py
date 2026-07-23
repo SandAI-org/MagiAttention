@@ -193,6 +193,7 @@ class FFAFwdSm100:
         is_varlen_q: bool = False,
         use_2cta_instrs: bool = False,
         use_clc_scheduler: bool = False,
+        use_per_range_mask: bool = False,
         debug_print: bool = False,
     ):
         self.use_tma_KV = not paged_kv_non_tma
@@ -271,6 +272,8 @@ class FFAFwdSm100:
 
         self.is_persistent = is_persistent
         self.mask_type = mask_type
+        # When True, mMaskTypes[batch_idx] selects the mask type at runtime.
+        self.use_per_range_mask = use_per_range_mask
         self.is_local = is_local
         self.is_varlen_q = is_varlen_q
         self.use_correction_warps_for_epi = is_varlen_q
@@ -603,6 +606,7 @@ class FFAFwdSm100:
         window_size_right: Int32 | int | None = None,
         learnable_sink: Optional[cute.Tensor] = None,
         descale_tensors: Optional[DescaleTensors] = None,
+        mMaskTypes: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -622,6 +626,14 @@ class FFAFwdSm100:
         6. Kernel launch with appropriate parameters
         """
 
+        if const_expr(self.use_per_range_mask):
+            assert (
+                mMaskTypes is not None
+            ), "use_per_range_mask requires mMaskTypes[batch]"
+        else:
+            assert (
+                mMaskTypes is None
+            ), "static mask specialization must not receive mMaskTypes"
         # ///////////////////////////////////////////////////////////////////////////////
         # Make mQ/mK/mV/mO/mLSE tensors
         # with layout transformations for specific memory access patterns
@@ -1243,6 +1255,7 @@ class FFAFwdSm100:
             window_size_right,
             learnable_sink,
             descale_tensors,
+            mMaskTypes,
             blocksparse_tensors,
             sQ_layout,
             sK_layout,
@@ -1292,6 +1305,7 @@ class FFAFwdSm100:
         window_size_right: Optional[Int32],
         learnable_sink: Optional[cute.Tensor],
         descale_tensors: Optional[DescaleTensors],
+        mMaskTypes: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
         sQ_layout: cute.ComposedLayout,
         sK_layout: cute.ComposedLayout,
@@ -1922,6 +1936,7 @@ class FFAFwdSm100:
                 SeqlenInfoCls,
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                mMaskTypes=mMaskTypes,
                 is_print_block=is_print_block,
             )
 
@@ -1963,6 +1978,7 @@ class FFAFwdSm100:
                 SeqlenInfoCls,
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                mMaskTypes=mMaskTypes,
                 is_print_block=is_print_block,
             )
 
@@ -1998,6 +2014,7 @@ class FFAFwdSm100:
                     num_splits,
                     SeqlenInfoCls,
                     tile_scheduler=tile_scheduler,
+                    mMaskTypes=mMaskTypes,
                     mma_tile_coord_v=mma_tile_coord_v,
                     is_print_block=is_print_block,
                 )
@@ -2042,6 +2059,7 @@ class FFAFwdSm100:
                 fastdiv_mods=fastdiv_mods,
                 head_divmod=head_divmod,
                 blocksparse_tensors=blocksparse_tensors,
+                mMaskTypes=mMaskTypes,
                 is_print_block=is_print_block,
             )
 
@@ -2107,6 +2125,7 @@ class FFAFwdSm100:
                 SeqlenInfoCls,
                 tile_scheduler=tile_scheduler,
                 blocksparse_tensors=blocksparse_tensors,
+                mMaskTypes=mMaskTypes,
                 is_print_block=is_print_block,
             )
 
@@ -2137,6 +2156,7 @@ class FFAFwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
+        mMaskTypes: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         num_load_threads = len(self.load_warp_ids) * cute.arch.WARP_SIZE
@@ -2378,9 +2398,16 @@ class FFAFwdSm100:
             # //////////////////////////////////////////////
 
             if const_expr(not self.use_block_sparsity):
-                n_block_min, n_block_max = block_info.get_n_block_min_max(
-                    seqlen_info, m_block, split_idx, num_splits
-                )
+                if const_expr(self.use_per_range_mask):
+                    assert mMaskTypes is not None
+                    attn_type = Int32(mMaskTypes[batch_idx])
+                    n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                        seqlen_info, m_block, attn_type, split_idx, num_splits
+                    )
+                else:
+                    n_block_min, n_block_max = block_info.get_n_block_min_max(
+                        seqlen_info, m_block, split_idx, num_splits
+                    )
                 if const_expr(not self.is_split_kv) or n_block_min < n_block_max:
                     n_block_first = n_block_max - 1 if n_block_max > 0 else 0
 
@@ -2505,6 +2532,7 @@ class FFAFwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
+        mMaskTypes: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         # /////////////////////////////////////////////////////////////////////////////
@@ -2647,9 +2675,16 @@ class FFAFwdSm100:
                 )
                 process_tile = block_iter_count > Int32(0)
             else:
-                n_block_min, n_block_max = block_info.get_n_block_min_max(
-                    seqlen_info, m_block, split_idx, num_splits
-                )
+                if const_expr(self.use_per_range_mask):
+                    assert mMaskTypes is not None
+                    attn_type = Int32(mMaskTypes[batch_idx])
+                    n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                        seqlen_info, m_block, attn_type, split_idx, num_splits
+                    )
+                else:
+                    n_block_min, n_block_max = block_info.get_n_block_min_max(
+                        seqlen_info, m_block, split_idx, num_splits
+                    )
                 block_iter_count = n_block_max - n_block_min
                 if const_expr(not self.is_split_kv):
                     process_tile = True
@@ -2977,6 +3012,7 @@ class FFAFwdSm100:
         fastdiv_mods=(None, None),
         head_divmod=None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mMaskTypes: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         """Compute softmax on attention scores from QK matrix multiplication.
@@ -3097,21 +3133,20 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen_info, m_block, split_idx, num_splits
-            )
+            if const_expr(self.use_per_range_mask):
+                assert mMaskTypes is not None
+                attn_type = Int32(mMaskTypes[batch_idx])
+                n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                    seqlen_info, m_block, attn_type, split_idx, num_splits
+                )
+            else:
+                attn_type = Int32(MT_MAP.full)
+                n_block_min, n_block_max = block_info.get_n_block_min_max(
+                    seqlen_info, m_block, split_idx, num_splits
+                )
 
             mask = AttentionMaskCls(seqlen_info)
-            shared_mask_kwargs = dict(
-                m_block=(self.q_stage * m_block + stage) * self.cta_group_size,
-                thr_mma=thr_mma_qk,
-                thr_tmem_load=thr_tmem_load,
-                mask_causal=self.is_causal,
-                mask_local=self.is_local,
-                batch_idx=batch_idx,
-                head_idx=head_idx,
-                aux_tensors=aux_tensors,
-            )
+            mask_m_block = (self.q_stage * m_block + stage) * self.cta_group_size
 
             # --- Recompute fastdiv_mods if necessary ---
 
@@ -3137,25 +3172,47 @@ class FFAFwdSm100:
 
             # --- Define attn mask apply fn ---
 
-            mask_mod = self.mask_mod if const_expr(self.mask_mod is not None) else None
-            mask_fn = partial(
-                mask.apply_mask_sm100,
-                mask_mod=mask_mod,
-                fastdiv_mods=fastdiv_mods,
-                head_divmod=head_divmod,
-                **shared_mask_kwargs,
-            )
-            if const_expr(self.use_block_sparsity):
-                #  Full blocks dont need mask_mod
-                mask_fn_none = partial(
+            if const_expr(self.use_per_range_mask):
+                mask_fn = partial(
+                    mask.apply_mask_sm100_per_range,
+                    m_block=mask_m_block,
+                    thr_mma=thr_mma_qk,
+                    thr_tmem_load=thr_tmem_load,
+                    attn_type=attn_type,
+                )
+                mask_fn_none = None
+            else:
+                shared_mask_kwargs = dict(
+                    m_block=mask_m_block,
+                    thr_mma=thr_mma_qk,
+                    thr_tmem_load=thr_tmem_load,
+                    mask_causal=self.is_causal,
+                    mask_local=self.is_local,
+                    batch_idx=batch_idx,
+                    head_idx=head_idx,
+                    aux_tensors=aux_tensors,
+                )
+                mask_mod = (
+                    self.mask_mod if const_expr(self.mask_mod is not None) else None
+                )
+                mask_fn = partial(
                     mask.apply_mask_sm100,
-                    mask_mod=None,
+                    mask_mod=mask_mod,
                     fastdiv_mods=fastdiv_mods,
                     head_divmod=head_divmod,
                     **shared_mask_kwargs,
                 )
-            else:
-                mask_fn_none = None
+                if const_expr(self.use_block_sparsity):
+                    #  Full blocks dont need mask_mod
+                    mask_fn_none = partial(
+                        mask.apply_mask_sm100,
+                        mask_mod=None,
+                        fastdiv_mods=fastdiv_mods,
+                        head_divmod=head_divmod,
+                        **shared_mask_kwargs,
+                    )
+                else:
+                    mask_fn_none = None
 
             # --- Compute sm_scale factor ---
 
@@ -3393,7 +3450,36 @@ class FFAFwdSm100:
                     n_block_max -= 1
 
                     # --- Mainloop-1: S0/S1 with causal masking ---
-                    if const_expr(self.is_causal or self.is_local):
+                    if const_expr(self.use_per_range_mask):
+                        # Full returns n_block_max → empty loop; Causal uses diagonal split.
+                        n_block_min_causal_local_mask = (
+                            block_info.get_n_block_min_causal_local_mask_per_range(
+                                seqlen_info,
+                                m_block,
+                                n_block_min,
+                                n_block_max,
+                                attn_type,
+                            )
+                        )
+                        for n_tile in cutlass.range(
+                            n_block_max - n_block_min_causal_local_mask, unroll=1
+                        ):
+                            n_block = n_block_max - 1 - n_tile
+                            (
+                                mma_si_consumer_phase,
+                                sm_stats_producer_phase,
+                                s0_s1_sequence_phase,
+                            ) = softmax_step(
+                                mma_si_consumer_phase,
+                                sm_stats_producer_phase,
+                                s0_s1_sequence_phase,
+                                n_block,
+                                mask_fn=partial(mask_fn, mask_seqlen=False),
+                            )
+                        n_block_max = cutlass.min(
+                            n_block_max, n_block_min_causal_local_mask
+                        )
+                    elif const_expr(self.is_causal or self.is_local):
                         n_block_min_causal_local_mask = (
                             block_info.get_n_block_min_causal_local_mask(
                                 seqlen_info, m_block, n_block_min
@@ -3420,11 +3506,23 @@ class FFAFwdSm100:
 
                     # --- Mainloop-2: S0/S1 w/o masking ---
                     # NOTE: The remaining iterations have no masking, but may still need mask_mod
-                    n_block_min_before_local_mask = (
-                        block_info.get_n_block_min_before_local_mask(
-                            seqlen_info, m_block, n_block_min
+                    if const_expr(self.use_per_range_mask):
+                        # Full/Causal return n_block_min → empty left segment.
+                        n_block_min_before_local_mask = (
+                            block_info.get_n_block_min_before_local_mask_per_range(
+                                seqlen_info,
+                                m_block,
+                                n_block_min,
+                                n_block_max,
+                                attn_type,
+                            )
                         )
-                    )
+                    else:
+                        n_block_min_before_local_mask = (
+                            block_info.get_n_block_min_before_local_mask(
+                                seqlen_info, m_block, n_block_min
+                            )
+                        )
                     for n_tile in cutlass.range(
                         n_block_max - n_block_min_before_local_mask, unroll=1
                     ):
@@ -3455,9 +3553,12 @@ class FFAFwdSm100:
                                 n_block=n_block,
                             )
 
-                    # --- Mainloop-3: S0/S1 with local masking on the left ---
+                    # --- Mainloop-3: S0/S1 with masking on the left ---
+                    # Per-range compiles this segment for InvCausal/BiCausal;
+                    # other types get an empty range from the bound above.
                     if const_expr(  # TODO: review the logics
-                        self.is_local and block_info.window_size_left is not None
+                        self.use_per_range_mask
+                        or (self.is_local and block_info.window_size_left is not None)
                     ):
                         n_block_max = cutlass.min(
                             n_block_max, n_block_min_before_local_mask
@@ -3763,6 +3864,7 @@ class FFAFwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mMaskTypes: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         num_corr_warps = len(self.correction_warp_ids)
@@ -3800,9 +3902,16 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen_info, m_block, split_idx, num_splits
-            )
+            if const_expr(self.use_per_range_mask):
+                assert mMaskTypes is not None
+                attn_type = Int32(mMaskTypes[batch_idx])
+                n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                    seqlen_info, m_block, attn_type, split_idx, num_splits
+                )
+            else:
+                n_block_min, n_block_max = block_info.get_n_block_min_max(
+                    seqlen_info, m_block, split_idx, num_splits
+                )
 
             # --- Compute sm_scale factor ---
 
@@ -4728,6 +4837,7 @@ class FFAFwdSm100:
         num_splits: int,
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
+        mMaskTypes: Optional[cute.Tensor] = None,
         mma_tile_coord_v: Int32 = 0,
         is_print_block: bool = False,
     ):
@@ -4751,9 +4861,16 @@ class FFAFwdSm100:
 
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             seqlen_info = SeqlenInfoCls(batch_idx)
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen_info, m_block, split_idx, num_splits
-            )
+            if const_expr(self.use_per_range_mask):
+                assert mMaskTypes is not None
+                attn_type = Int32(mMaskTypes[batch_idx])
+                n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                    seqlen_info, m_block, attn_type, split_idx, num_splits
+                )
+            else:
+                n_block_min, n_block_max = block_info.get_n_block_min_max(
+                    seqlen_info, m_block, split_idx, num_splits
+                )
 
             # --- Debug print ---
 
