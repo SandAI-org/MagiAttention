@@ -79,6 +79,25 @@ from .sparse_utils import (
 )
 
 
+def _expand_bst_heads(bst, target_num_heads: int):
+    """Expand BlockSparseTensorsTorch head dim from NHK to NHQ via repeat_interleave."""
+    nhk_bst = bst.mask_block_cnt.shape[1]
+    if nhk_bst in (target_num_heads, 1):
+        return bst
+    qhpk = target_num_heads // nhk_bst
+    updates = {}
+    for fld in type(bst)._fields:
+        _val = getattr(bst, fld)
+        if (
+            _val is not None
+            and hasattr(_val, "repeat_interleave")
+            and _val.ndim >= 2
+            and _val.shape[1] == nhk_bst
+        ):
+            updates[fld] = _val.repeat_interleave(qhpk, dim=1)
+    return bst._replace(**updates)
+
+
 def _flex_flash_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -242,20 +261,8 @@ def _flex_flash_attn_fwd(
     is_index_sparse = index_sparse_tiles is not None
     if is_index_sparse:
         bst = index_sparse_tiles.scheduling_bst
-        nhk_bst = bst.mask_block_cnt.shape[1]
-        if not pack_gqa and nhk_bst not in (num_head, 1):
-            qhpk = num_head // nhk_bst
-            updates = {}
-            for fld in type(bst)._fields:
-                _val = getattr(bst, fld)
-                if (
-                    _val is not None
-                    and hasattr(_val, "repeat_interleave")
-                    and _val.ndim >= 2
-                    and _val.shape[1] == nhk_bst
-                ):
-                    updates[fld] = _val.repeat_interleave(qhpk, dim=1)
-            bst = bst._replace(**updates)
+        if not pack_gqa:
+            bst = _expand_bst_heads(bst, num_head)
         block_sparse_tensors = bst
     use_block_sparsity = block_sparse_tensors is not None
 
@@ -652,32 +659,19 @@ def _flex_flash_attn_bwd(
     # LoopQ uses backward-direction tensors (per-K-tile Q-block list).
     if is_index_sparse and swap_bwd_qk_loop:
         bst = index_sparse_tiles.scheduling_bst
-        _nhq = q.shape[-2]
-        nhk_bst = bst.mask_block_cnt.shape[1]
-        if not pack_gqa and nhk_bst not in (_nhq, 1):
-            qhpk = _nhq // nhk_bst
-            updates = {}
-            for fld in type(bst)._fields:
-                _val = getattr(bst, fld)
-                if (
-                    _val is not None
-                    and hasattr(_val, "repeat_interleave")
-                    and _val.ndim >= 2
-                    and _val.shape[1] == nhk_bst
-                ):
-                    updates[fld] = _val.repeat_interleave(qhpk, dim=1)
-            bst = bst._replace(**updates)
+        if not pack_gqa:
+            bst = _expand_bst_heads(bst, q.shape[-2])
         block_sparse_tensors = bst
     elif swap_bwd_qk_loop and flex_attn_args.block_sparse_tensors is not None:
         block_sparse_tensors = flex_attn_args.block_sparse_tensors
     else:
         block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
 
-    # IndexAttn: convert token-level indices to block-level BlockSparseTensors.
+    # IndexSparse: convert token-level indices to block-level BlockSparseTensors.
     if index_sparse_indices is not None:
         assert (
             q_ranges is None and k_ranges is None
-        ), "IndexAttn does not use q/k ranges"
+        ), "IndexSparse does not use q/k ranges"
 
     local = False
     # NOTE: only a single mask type shared by all q/k ranges is supported for now,
@@ -844,7 +838,7 @@ def _flex_flash_attn_bwd(
     use_block_sparsity = block_sparse_tensors is not None
     subtile_factor = sparse_q // m_block_size if sparse_q is not None else 2
 
-    # IndexAttn: convert token-level indices to block-level sparse after block sizes are known.
+    # IndexSparse: convert token-level indices to block-level sparse after block sizes are known.
     # index_sparse_indices_to_block_sparse produces forward-direction tensors (M→N).
     # LoopK uses forward-direction directly; LoopQ needs backward-direction (N→M),
     # so we transpose the presence matrix when swap_bwd_qk_loop is False.

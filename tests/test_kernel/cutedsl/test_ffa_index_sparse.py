@@ -20,7 +20,7 @@ drives the kernel-level entry points directly (``_flex_flash_attn_fwd`` /
 not expose the ``index_sparse_indices`` autograd wrapper yet.
 
 Mirrors the tier structure and parameter ranges of SM90's
-``tests/test_attn/test_index_attn.py`` (all with *random* per-Q-tile token indices):
+``tests/test_attn/test_index_sparse.py`` (all with *random* per-Q-tile token indices):
   * Tier 1  (test_simple_index_sparse):  PackGQA GQA ratios 128/64/32/16, S=256
   * Tier 2a (test_sparse_cross_batch):   B = 2 / 3 / 8, uniform topk
   * Tier 2b (test_sparse_qkv_lengths):   short/unaligned Q vs long KV (64/1024, 8/512, 100/512)
@@ -282,7 +282,7 @@ def _run_index_sparse_case(
 
 
 # =============================================================================
-# SM90-mirrored sweep (see tests/test_attn/test_index_attn.py)
+# SM90-mirrored sweep (see tests/test_attn/test_index_sparse.py)
 # =============================================================================
 
 

@@ -789,7 +789,7 @@ def index_sparse_indices_to_block_sparse(
     m_block_size: int,
     n_block_size: int,
 ) -> BlockSparseTensorsTorch:
-    """Convert token-level IndexAttn indices to block-level BlockSparseTensors.
+    """Convert token-level IndexSparse indices to block-level BlockSparseTensors.
 
     Produces **forward-direction** tensors (per M-block -> N-block list) suitable
     for BWD LoopK.
