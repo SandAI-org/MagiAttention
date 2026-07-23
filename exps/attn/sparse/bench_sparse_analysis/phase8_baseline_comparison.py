@@ -68,8 +68,8 @@ SPARSITY_SEED = 42
 # Pass-specific matrices avoid invalid and duplicate method/pass products.
 KBS1_PASS_METHODS = {
     "fwd": ["ffa_is", "flexattn", "triton"],
-    "bwd_loopk": ["ffa_is", "flexattn", "triton"],
     "bwd_loopq": ["flexattn", "triton"],
+    "bwd_loopk": ["ffa_is", "flexattn", "triton"],
 }
 KBS1_LABELS = {
     "ffa_is": "FFA IndexSparse (kbs=1)",
@@ -78,8 +78,8 @@ KBS1_LABELS = {
 }
 KBS128_PASS_METHODS = {
     "fwd": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
-    "bwd_loopk": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
     "bwd_loopq": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
+    "bwd_loopk": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
 }
 KBS128_LABELS = {
     "ffa_bs": "FFA BlockSparse",
@@ -375,6 +375,7 @@ def _run_kbs128_ffa_bs(kvseqlen, qseqlen, topk, pass_type, device):
         block_sparse=True,
         range_merge=True,
         disable_fwd_atomic_reduction=True,
+        sparse_k_block_size=KBS_BLOCK,
     )
     if is_bwd:
         kw["swap_bwd_qk_loop"] = swap_qk
@@ -582,6 +583,7 @@ def _sanity_check(device):
         block_sparse=True,
         range_merge=True,
         disable_fwd_atomic_reduction=True,
+        sparse_k_block_size=KBS_BLOCK,
     )
     fwd_results["ffa_bs_kbs128"] = (
         (bs_out[:64].float() - ref128.float()).abs().max().item()
@@ -820,7 +822,11 @@ def _phase8_plot():
         return values
 
     def _plot_group(prefix, pass_methods, labels, title, filename):
-        names = {"fwd": "FWD", "bwd_loopk": "BWD LoopK", "bwd_loopq": "BWD LoopQ"}
+        names = {
+            "fwd": "FWD",
+            "bwd_loopq": "BWD InnerLoopQ",
+            "bwd_loopk": "BWD InnerLoopK",
+        }
         ncols = len(pass_methods)
         fig, axes = plt.subplots(
             1, ncols, figsize=(PLOT_SUBPLOT_WIDTH * ncols, PLOT_SUBPLOT_HEIGHT), dpi=150

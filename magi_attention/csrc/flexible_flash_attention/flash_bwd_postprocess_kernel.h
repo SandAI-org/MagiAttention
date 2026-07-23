@@ -80,7 +80,9 @@ class FlashAttnBwdDkvPostprocess {
       int valid = 0;
       if (n_idx < total_k) {
         if (params.kv_covered_mask != nullptr) {
-          valid = params.kv_covered_mask[n_idx] ? 1 : 0;
+          // Mask layout: (total_k, num_heads_kv) row-major -> per-(token, head).
+          int32_t const num_heads_kv = cute::get<2>(params.shape_dkv);
+          valid = params.kv_covered_mask[(int64_t)n_idx * num_heads_kv + bidh] ? 1 : 0;
         } else if (params.k_ranges == nullptr) {
           valid = 1;
         } else {

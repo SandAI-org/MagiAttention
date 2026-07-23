@@ -713,10 +713,13 @@ def _flex_flash_attn_backward(
                 total_k = k.size(0)
                 num_k_blocks = index_sparse_indices.size(0)
                 kbs_eff = total_k // num_k_blocks
-                per_block_covered = (
-                    index_sparse_indices.reshape(num_k_blocks, -1) >= 0
-                ).any(dim=1)
-                kv_covered_mask = per_block_covered.repeat_interleave(kbs_eff)
+                # Per-(block, kvhead): a (token, head) is covered only when THAT
+                # head has >= 1 valid Q entry. Flattening across heads would leave
+                # uncovered rows of empty_like dK/dV as garbage when nhk > 1.
+                per_block_covered = (index_sparse_indices >= 0).any(dim=2)
+                kv_covered_mask = per_block_covered.repeat_interleave(
+                    kbs_eff, dim=0
+                ).contiguous()  # (total_k, nhk)
             else:
                 dk = torch.empty_like(k, dtype=dk_type or k.dtype)
                 dv = torch.empty_like(v, dtype=dv_type or v.dtype)
@@ -915,6 +918,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             global _ffa_sparse_k_block_size
             _ffa_sparse_k_block_size = sparse_k_block_size
 
+        # Sparse FWD: outer LoopK over Q — each (Q tile, head) is written by one CTA
+        # (disable_fwd_atomic_reduction / direct store). Output o is bitwise deterministic
+        # without in-kernel range-lock. User ctx.deterministic stays True for sparse
+        # BWD dual-pass; only the FWD kernel launch passes Deterministic=False.
+        _fwd_kernel_deterministic = (
+            False if (block_sparse or index_sparse) else deterministic
+        )
+
         out, meta = _flex_flash_attn_forward(
             q=q,
             k=k,
@@ -932,7 +943,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             if disable_fwd_atomic_reduction
             else torch.float32,  # out_type
             disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
-            deterministic=deterministic,
+            deterministic=_fwd_kernel_deterministic,
             sm_margin=sm_margin,
             # optional args below mainly for sparse attn
             ref_block_size=ref_block_size,
@@ -1077,10 +1088,12 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ctx.bwd_inner_loop_k if ctx.bwd_inner_loop_k is not None else False
         )
 
-        # Deterministic mode for sparse BWD: use dual-pass approach.
-        # - LoopQ (outer K, inner Q): dKV is outer accumulation → bitwise deterministic
-        # - LoopK (outer Q, inner K): dQ is outer accumulation → bitwise deterministic
-        # Combined: all gradients are bitwise deterministic with exactly 2x compute cost.
+        # Sparse deterministic (BlockSparse + IndexSparse): structural, not range-lock.
+        # FWD: single-writer outer o (see _fwd_kernel_deterministic above).
+        # BWD: dual-pass; both kernel launches use Deterministic=False below.
+        # - Pass1 LoopQ: dKV outer accumulation (inner dQ discarded)
+        # - Pass2 LoopK: dQ outer direct-store (dKV discarded)
+        # Dense deterministic still uses single-pass LoopQ + kernel Deterministic=True.
         _sparse_deterministic_dual_pass = ctx.deterministic and (
             ctx.block_sparse or ctx.index_sparse
         )
@@ -1120,18 +1133,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             if not bwd_inner_loop_k:
                 # IndexSparse BWD InnerLoopQ: outer=K block, inner=Q from inner_indices
                 _loopq_kbs = ctx.sparse_k_block_size
-                nhk = k.size(1)
                 seqlen_k = v.size(0)
 
                 from magi_attention.utils.sparse_utils import (
                     invert_index_sparse_indices,
                 )
-
-                if _loopq_kbs > 1 and nhk != 1:
-                    raise NotImplementedError(
-                        f"IndexSparse BWD InnerLoopQ with sparse_k_block_size>1 requires nhk=1, "
-                        f"got nhk={nhk}. NHK>1 + kbs>1 has a flat-layout mismatch (P8-BUG-NHK)."
-                    )
 
                 # NOTE: invert_index_sparse_indices contains a GPU→CPU sync
                 # (counts.max().item()) to determine the padded inner_topk.
@@ -1204,7 +1210,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             _ffa_sparse_k_block_size = ctx.sparse_k_block_size
 
         if _sparse_deterministic_dual_pass:
-            # Pass 1 LoopQ → deterministic dKV; Pass 2 LoopK → deterministic dQ.
+            # Sparse dual-pass: both launches use kernel Deterministic=False.
             _, dk, dv, dsink = _flex_flash_attn_backward(
                 dout=dout,
                 q=q,
@@ -1228,7 +1234,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 dv_type=None,
                 disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
                 disable_bwd_dq_atomic_reduction=False,
-                deterministic=ctx.deterministic,
+                deterministic=False,
                 sm_margin=ctx.sm_margin,
                 range_merge=bwd_range_merge,
                 merge_k_ranges=merge_k_ranges,
@@ -1935,15 +1941,6 @@ def flex_flash_attn_func(
         # LoopK keeps the inner loop bounded (topk / kBlockN iterations).
         if index_sparse and bwd_inner_loop_k is None and sparse_k_block_size < 128:
             bwd_inner_loop_k = True
-
-        # IndexSparse + LoopK: each Q-tile (M=128) must cover exactly one
-        # original seq position's packed heads.  When pack_gqa_factor < 128,
-        # one Q-tile spans multiple seq positions with different index patterns
-        # → BWD dQ is incorrect.  Fall back to LoopQ.
-        if index_sparse and bwd_inner_loop_k is True and pack_gqa:
-            _pack_f = q.size(1) // k.size(1)
-            if _pack_f < 128:
-                bwd_inner_loop_k = None
 
         # Deterministic mode requires LoopQ: dKV is naturally deterministic (single CTA
         # writer per K-tile), dQ uses range-lock serialization.  LoopK would need a

@@ -179,7 +179,9 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr bool kInnerTilesContiguous = !IsSparse || (!BwdInnerLoopK && PackGQA && PackGQAFactor >= kBlockM) ||
       (BwdInnerLoopK && ((BlockSparse && SparseKBlockSize >= kBlockN) || (IndexSparse && PackGQA && PackGQAFactor >= kBlockM && SparseKBlockSize >= kBlockN)));
   static constexpr InnerLoadMode kInnerLoadMode = static_cast<InnerLoadMode>(InnerLoadMode_);
+  static_assert(kInnerLoadMode == InnerLoadMode::Tma || kInnerLoadMode == InnerLoadMode::CpAsync, "Invalid InnerLoadMode");
   static_assert(kInnerLoadMode != InnerLoadMode::Tma || kInnerTilesContiguous, "TMA inner load requires contiguous tiles");
+  static_assert(!IsSparse || kInnerStoreMode != InnerStoreMode::Tma || kInnerTilesContiguous, "TMA2D inner store requires contiguous sparse tiles");
 
   using MainloopPipeline =
       std::conditional_t<kInnerLoadMode == InnerLoadMode::Tma, typename cutlass::PipelineTmaAsync<kStages>, typename cutlass::PipelineAsync<kStages>>;
@@ -441,14 +443,15 @@ struct CollectiveMainloopBwdSm90 {
   // are 8*128B apart. So the 1D bulk-reduce path uses a row-contiguous layout.
   // A 4-float (16B) row pad keeps rows 16B-aligned (bulk reduce requirement) while breaking
   // the worst r2s store bank conflicts (8-way unpadded -> <=2-way padded).
-  // kInnerLoadMode == InnerLoadMode::Tma && IsSparse bypasses 1D bulk-reduce entirely (2D TMA reduce instead),
-  // keeping the swizzled TMA layout → no bank conflicts, no padding needed.
+  // kInnerStoreMode == InnerStoreMode::Tma keeps the swizzled TMA layout (2D TMA reduce-add).
+  // kInnerStoreMode == InnerStoreMode::Tma1d uses linear layout + 4-float pad for bulk-reduce per-row.
+  // InnerLoadMode and InnerStoreMode are now fully decoupled: TMA load + Tma1d store is valid.
   static constexpr int kTma1dSmemRowPad = Tma1dSmemRowPad_ >= 0 ? Tma1dSmemRowPad_ : 4; // floats; -1 = auto (default 4)
   // Store-side inner layouts: r2s writes and scatter-store reads go through these.
   // Defaults to SmemLayoutd*Swizzled; only switches to row-contiguous (linear + pad)
-  // when Tma1d mode is active AND 2D TMA load is not available (fallback scatter).
-  static constexpr bool kUseTma1dLinearDkv = (kInnerStoreMode == InnerStoreMode::Tma1d) && BwdInnerLoopK && kInnerLoadMode != InnerLoadMode::Tma;
-  static constexpr bool kUseTma1dLinearDq = (kInnerStoreMode == InnerStoreMode::Tma1d) && !BwdInnerLoopK && kInnerLoadMode != InnerLoadMode::Tma;
+  // when Tma1d store mode is active (InnerStoreMode::Tma1d). Independent of InnerLoadMode.
+  static constexpr bool kUseTma1dLinearDkv = (kInnerStoreMode == InnerStoreMode::Tma1d) && BwdInnerLoopK;
+  static constexpr bool kUseTma1dLinearDq = (kInnerStoreMode == InnerStoreMode::Tma1d) && !BwdInnerLoopK;
   using SmemLayoutdKVStore =
       std::conditional_t<kUseTma1dLinearDkv, Layout<Shape<Int<kBlockN>, Int<kHeadDim>>, Stride<Int<kHeadDim + kTma1dSmemRowPad>, _1>>, SmemLayoutdKVSwizzled>;
   using SmemLayoutdQStore =
@@ -1509,7 +1512,18 @@ struct CollectiveMainloopBwdSm90 {
           if (thread_idx != 0)
             return;
           int const tile_first_compound_idx = inner_block_meta.get_tile_first_compound_idx();
-          shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockM] = tile_first_compound_idx;
+          int* const stage_indices = &shared_storage.tensors.mainloop.smem_sparse_inner_indices[stage * kBlockM];
+          if constexpr (kInnerStoreMode == InnerStoreMode::Tma) {
+            // TMA2D store only needs the contiguous tile origin.
+            stage_indices[0] = tile_first_compound_idx;
+          } else {
+            // Tma1d/AtomicAdd stores address every row independently. TMA load
+            // still gives us a contiguous tile, so materialize all row indices.
+            CUTE_UNROLL
+            for (int r = 0; r < kBlockM; ++r) {
+              stage_indices[r] = tile_first_compound_idx + r;
+            }
+          }
           // domain_offset at the exact tile start; index tile 0
           auto const qdo_off = make_coord(tile_first_compound_idx, _0{});
           Tensor gQ_ = local_tile(domain_offset(qdo_off, mQ), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{}));
@@ -2022,15 +2036,6 @@ struct CollectiveMainloopBwdSm90 {
     // PackGQA: offset_q is already scaled by PackGQAFactor (set in the main loop below),
     // so we use offset_q here to keep conflict indices consistent with the packed m_block range.
     auto m_block_sync = [&](int m_block_id) {
-      // For BlockSparse: skip deterministic sync entirely.
-      // The dense range-lock protocol requires ALL K-tiles to participate for ALL batches,
-      // but in block-sparse, the sparse mask means not all K-tiles serve every batch.
-      // Single-writer batches are inherently deterministic; 2-writer batches are deterministic
-      // due to FP commutativity (a+b == b+a). For 3+ writers, TMA reduce-add provides
-      // atomicity but not ordering — full determinism requires the extra-buffer approach (TODO).
-      if constexpr (BlockSparse) {
-        return;
-      }
       uint32_t smid = blockIdx.x;
       uint32_t sm_stride = gridDim.x;
       int left_dq_conflict_index = offset_q / kBlockM + m_block_id;
@@ -2044,10 +2049,6 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto m_block_arrive = [&](int m_block_id) {
-      // For BlockSparse: skip deterministic arrive (see rationale in m_block_sync).
-      if constexpr (BlockSparse) {
-        return;
-      }
       bool l_arrive_twice = (m_block_id == 0) && (offset_q % kBlockM != 0);
       bool r_arrive_twice = (m_block_id == m_block_num - 1) && (offset_q % kBlockM != 0);
       int const global_k_tile = n_block;
@@ -2070,10 +2071,6 @@ struct CollectiveMainloopBwdSm90 {
     // if the next operation requires all threads (e.g. update_conflict_state).
     auto deterministic_pass_through = [&](int from, int to) {
       if constexpr (Deterministic) {
-        // For BlockSparse: sync protocol is disabled (sparse mask prevents all-CTA participation).
-        // Skip pass-through entirely to avoid OOB batch metadata access.
-        if constexpr (BlockSparse)
-          return;
         if (lane_predicate) {
           for (int m_block = from; m_block < to; ++m_block) {
             m_block_sync(m_block);
@@ -2088,9 +2085,6 @@ struct CollectiveMainloopBwdSm90 {
     // m_block_sync for n_block==0 knows which batch's arrive signal to wait for.
     auto update_conflict_state = [&](int bidb_last, int bidb_cur) {
       if constexpr (Deterministic) {
-        // For BlockSparse: sync protocol disabled, conflict_state unused.
-        if constexpr (BlockSparse)
-          return;
         int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
@@ -2132,7 +2126,7 @@ struct CollectiveMainloopBwdSm90 {
 
       // BlockSparse + Deterministic: no in-kernel range-lock yet (early-return in
       // m_block_sync/arrive). Sparse bitwise det uses Python dual-pass instead.
-      if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
+      if constexpr (kInnerStoreMode == InnerStoreMode::Tma && IsSparse) {
         // 2D TMA reduce: entire tile written in one TMA reduce-add instruction.
         // Read compound_idx from SMEM (all threads see same value after dQFull barrier).
         int const tile_first_compound_idx = shared_storage.tensors.mainloop.smem_sparse_store_staging_indices[0];
@@ -2305,7 +2299,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dVFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (!PerfDebugSkipDvStore) {
-        if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
+        if constexpr (kInnerStoreMode == InnerStoreMode::Tma && IsSparse) {
           if (lane_predicate && warp_idx_in_warpgroup == ProducerConsts::kInnerLoaderWarps) {
             tma_inner_store(params.tma_add_dV, sdV_tma, mdV_reduce, TileShape_InnerDkv{}, make_coord(_, _0{}), idx_staging[0] / kBlockN);
           }
@@ -2345,7 +2339,7 @@ struct CollectiveMainloopBwdSm90 {
         BarrierManager::sync<NumInnerStoreBarrierThreads>(BwdNamedBarriers::dKFullWG1, /*warp_group_idx=*/warpgroup_idx);
       }
       if constexpr (!PerfDebugSkipDkStore) {
-        if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
+        if constexpr (kInnerStoreMode == InnerStoreMode::Tma && IsSparse) {
           if (lane_predicate && warp_idx_in_warpgroup == ProducerConsts::kInnerLoaderWarps) {
             tma_inner_store(params.tma_add_dK, sdK_tma, mdK_reduce, TileShape_InnerDkv{}, make_coord(_, _0{}), idx_staging[kBlockN] / kBlockN);
           }
@@ -2936,7 +2930,7 @@ struct CollectiveMainloopBwdSm90 {
             // dQFull/dQEmpty barriers are NOT sufficient.
             BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
 
-            if constexpr (kInnerLoadMode == InnerLoadMode::Tma && IsSparse) {
+            if constexpr (kInnerStoreMode == InnerStoreMode::Tma && IsSparse) {
               // Sparse TMA reduce: use domain_offset at exact sparse origin (mirrors load at L1512).
               if (thread_idx == 0) {
                 Tensor sdQ_tma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_inner_dq.data()), SmemLayoutdQSwizzled{});
@@ -3663,7 +3657,7 @@ struct CollectiveMainloopBwdSm90 {
 
           BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
 
-          if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
+          if constexpr (kInnerStoreMode == InnerStoreMode::Tma) {
             // Contiguous sparse: TMA 2D reduce (thread 0 only)
             if (thread_idx == 0) {
               Tensor sdV_tma_c = make_tensor(make_smem_ptr(smem_inner_dv_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVSwizzled{});
@@ -3799,7 +3793,7 @@ struct CollectiveMainloopBwdSm90 {
 
           BarrierManager::sync<NumConsumerThreads>(BwdNamedBarriers::PdS);
 
-          if constexpr (kInnerLoadMode == InnerLoadMode::Tma) {
+          if constexpr (kInnerStoreMode == InnerStoreMode::Tma) {
             // Contiguous sparse: TMA 2D reduce (thread 0 only)
             if (thread_idx == 0) {
               Tensor sdK_tma_c = make_tensor(make_smem_ptr(smem_inner_dk_ptr(shared_storage.tensors.mainloop)), SmemLayoutdKVSwizzled{});

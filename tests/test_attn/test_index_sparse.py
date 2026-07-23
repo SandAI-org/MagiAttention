@@ -434,6 +434,55 @@ class TestIndexSparseViewTrick(unittest.TestCase):
                 sparse_k_block_size=1,
             )
 
+        # Native NHK>1 kernels (no fold): only kbs=1, cpasync load, tma1d store
+        for nhq, nhk, pack_gqa in cls._PARAM_SPACE["head_config"]:
+            pack_f = nhq // nhk
+            if nhk <= 1 or pack_f <= 1:
+                # native path targets true GQA (multi-kvhead, factor>1)
+                continue
+            for hd in cls._PARAM_SPACE["head_dim"]:
+                native_common = dict(
+                    head_dim=hd,
+                    pack_gqa=True,
+                    pack_gqa_factor=pack_f,
+                    sparse_k_block_size=1,
+                )
+                native_env = {
+                    "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": "true",
+                    "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": "cpasync",
+                    "MAGI_ATTENTION_FFA_INNER_STORE_MODE": "tma1d",
+                }
+                # FWD
+                add_ffa_spec(
+                    specs,
+                    direction="fwd",
+                    env=native_env,
+                    disable_atomic=True,
+                    index_sparse=True,
+                    **native_common,
+                )
+                # BWD LoopQ
+                add_ffa_spec(
+                    specs,
+                    direction="bwd",
+                    env=native_env,
+                    disable_atomic=True,
+                    index_sparse=True,
+                    **native_common,
+                )
+                # BWD LoopK (only if factor >= 128)
+                if pack_f >= 128:
+                    add_ffa_spec(
+                        specs,
+                        direction="bwd",
+                        env=native_env,
+                        disable_dq_atomic=True,
+                        bwd_inner_loop_k=True,
+                        bwd_dq_bf16=True,
+                        index_sparse=True,
+                        **native_common,
+                    )
+
         return specs
 
     @property
@@ -499,6 +548,126 @@ class TestIndexSparseViewTrick(unittest.TestCase):
 
         diff = (o_view.float() - o_ref.float()).abs().max().item()
         assert diff < 0.02, f"MHA 32h permute: max_diff={diff:.6f} >= 0.02"
+
+
+def _run_native_nhk_config(device, cfg: dict[str, Any]):
+    """Test true multi-KV-head (nhk>1) correctness WITHOUT folding NHK into seq dim.
+
+    Regression guard for the kv_covered_mask bug: the coverage mask was built
+    per-token (flattened across heads), so with nhk>1 a (token, head) row
+    referenced by a sibling head but not by its own head was neither written
+    by the kernel nor zeroed by the dKV postprocess, leaking uninitialized
+    empty_like memory into dK/dV. The allocator pool is primed with garbage
+    so any such leak fails deterministically.
+    """
+    set_random_seed(SEED)
+    nhq = cfg["NHQ"]
+    nhk = cfg["NHK"]
+    hd = cfg.get("D", 128)
+    kbs = cfg.get("sparse_k_block_size", 1)
+    qseq = cfg.get("S_q", cfg.get("S", 64))
+    kvseq = cfg.get("S_kv", cfg.get("S", 512))
+    topk = cfg["topk"]
+    swap_bwd_qk_loop = bool(cfg.get("swap_bwd_qk_loop", False))
+    factor = nhq // nhk
+    atol = cfg.get("atol", 0.05)
+
+    # Build per-(q, head) indices: shape (qseq, nhk, topk)
+    if kbs > 1:
+        n_kv_blocks = kvseq // kbs
+        idx = torch.stack(
+            [
+                torch.stack(
+                    [
+                        torch.randperm(n_kv_blocks, device=device)[:topk]
+                        for _ in range(nhk)
+                    ]
+                )
+                for _ in range(qseq)
+            ]
+        ).to(torch.int32)
+    else:
+        idx = torch.stack(
+            [
+                torch.stack(
+                    [torch.randperm(kvseq, device=device)[:topk] for _ in range(nhk)]
+                )
+                for _ in range(qseq)
+            ]
+        ).to(torch.int32)
+
+    q = torch.randn(qseq, nhq, hd, dtype=torch.bfloat16, device=device)
+    k = torch.randn(kvseq, nhk, hd, dtype=torch.bfloat16, device=device)
+    v = torch.randn(kvseq, nhk, hd, dtype=torch.bfloat16, device=device)
+    do = torch.randn(qseq, nhq, hd, dtype=torch.bfloat16, device=device)
+
+    # fp32 reference with explicit mask
+    qf = q.float().requires_grad_(True)
+    kf = k.float().requires_grad_(True)
+    vf = v.float().requires_grad_(True)
+    mask = torch.zeros(qseq, nhk, kvseq, dtype=torch.bool, device=device)
+    if kbs > 1:
+        block_idx = idx.long()  # (qseq, nhk, topk)
+        for qi in range(qseq):
+            for hi in range(nhk):
+                for ti in range(topk):
+                    blk = block_idx[qi, hi, ti].item()
+                    if blk >= 0:
+                        mask[qi, hi, blk * kbs : (blk + 1) * kbs] = True
+    else:
+        mask.scatter_(2, idx.long(), True)
+
+    scale = hd**-0.5
+    o_heads = []
+    for h in range(nhq):
+        g = h // factor
+        s = (qf[:, h] @ kf[:, g].T) * scale
+        s = s.masked_fill(~mask[:, g], float("-inf"))
+        o_heads.append(s.softmax(-1) @ vf[:, g])
+    o_ref = torch.stack(o_heads, dim=1)
+    dq_ref, dk_ref, dv_ref = torch.autograd.grad(o_ref, (qf, kf, vf), do.float())
+
+    # Prime the caching allocator with garbage so uninitialized
+    # empty_like rows are guaranteed non-zero.
+    junk = torch.full((256 * 1024 * 1024 // 4,), 1e30, device=device)
+    del junk
+
+    qt = q.clone().requires_grad_(True)
+    kt = k.clone().requires_grad_(True)
+    vt = v.clone().requires_grad_(True)
+    # Force the non-atomic (empty_like) store path in the outer direction so the
+    # kv_covered_mask / uninitialized-dKV regression is actually exercised:
+    #   LoopK (swap=True)  -> outer is dQ  -> disable_bwd_dq_atomic_reduction
+    #   LoopQ (swap=False) -> outer is dKV -> disable_bwd_dkv_atomic_reduction
+    _loopk = swap_bwd_qk_loop is True
+    o, *_ = flex_flash_attn_func(
+        qt,
+        kt,
+        vt,
+        index_sparse_indices=idx,
+        q_block_size=1,
+        sparse_k_block_size=kbs,
+        pack_gqa=True,
+        disable_fwd_atomic_reduction=True,
+        disable_bwd_dq_atomic_reduction=_loopk,
+        disable_bwd_dkv_atomic_reduction=not _loopk,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
+    )
+    dq, dk, dv = torch.autograd.grad(o, (qt, kt, vt), do)
+
+    test_case = (
+        f"[native_nhk: NHQ={nhq},NHK={nhk},D={hd},kbs={kbs},"
+        f"qseq={qseq},kvseq={kvseq},topk={topk},"
+        f"swap_bwd_qk_loop={swap_bwd_qk_loop}]"
+    )
+    for name, got, ref in (
+        ("o", o, o_ref),
+        ("dq", dq, dq_ref),
+        ("dk", dk, dk_ref),
+        ("dv", dv, dv_ref),
+    ):
+        err = (got.float() - ref).abs().max().item()
+        assert err < atol, f"{test_case} nhk={nhk} {name}: max_abs={err:.5f} >= {atol}"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -745,6 +914,13 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
                         **common,
                     )
                     for inner_store in cls._PARAM_SPACE["inner_store_mode"]:
+                        # Conservative common predicate for the test matrix.
+                        # Exact tile-dependent validity is enforced by the JIT resolver.
+                        inner_contiguous = kbs >= kBlockN and pack_f >= kBlockN
+                        if inner_load == "tma" and not inner_contiguous:
+                            continue
+                        if inner_store == "tma" and not inner_contiguous:
+                            continue
                         env_bwd = {
                             "MAGI_ATTENTION_FFA_INNER_DIR_MAX_TO_MIN": inner_dir,
                             "MAGI_ATTENTION_FFA_INNER_LOAD_MODE": inner_load,
@@ -800,13 +976,19 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
         inner_load_mode,
         inner_store_mode,
         swap_bwd_qk_loop=False,
+        fold_nhk=True,
     ):
         nhq, nhk, pack_gqa = head_config
         if kbs > 1 and (nhk > 1 or not pack_gqa or hd != 128):
             return
+        if not fold_nhk and nhk == 1:
+            return  # fold_nhk=False only meaningful when nhk > 1
         kBlockN = 128
         pgf = nhq // nhk if pack_gqa and nhk > 0 else 1
-        if inner_load_mode == "tma" and (kbs < kBlockN or pgf < kBlockN):
+        inner_contiguous = kbs >= kBlockN and pgf >= kBlockN
+        if inner_load_mode == "tma" and not inner_contiguous:
+            return
+        if inner_store_mode == "tma" and not inner_contiguous:
             return
 
         if kbs <= 1:
@@ -838,7 +1020,10 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store_mode,
         }
         with inner_loop_env(inner_env):
-            _run_index_sparse_config(self.device, config)
+            if not fold_nhk:
+                _run_native_nhk_config(self.device, config)
+            else:
+                _run_index_sparse_config(self.device, config)
 
     @with_run_in_mp
     @parameterize("head_config", _PARAM_SPACE["head_config"])
@@ -912,6 +1097,76 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
             inner_load_mode,
             inner_store_mode,
             swap_bwd_qk_loop=True,
+        )
+
+    @with_run_in_mp
+    @parameterize(
+        "head_config",
+        [c for c in _PARAM_SPACE["head_config"] if c[1] > 1 and c[0] // c[1] > 1],
+    )
+    @parameterize("kbs", [1])
+    @parameterize("inner_dir", ["true"])
+    @parameterize("inner_load_mode", ["cpasync"])
+    @parameterize("inner_store_mode", ["tma1d"])
+    def test_index_sparse_native_nhk_hd128(
+        self, head_config, kbs, inner_dir, inner_load_mode, inner_store_mode
+    ):
+        """True multi-KV-head (no fold) correctness for hd=128."""
+        self._run_comprehensive_case(
+            head_config,
+            128,
+            kbs,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+            fold_nhk=False,
+        )
+
+    @with_run_in_mp
+    @parameterize(
+        "head_config",
+        [c for c in _PARAM_SPACE["head_config"] if c[1] > 1 and c[0] // c[1] > 1],
+    )
+    @parameterize("kbs", [1])
+    @parameterize("inner_dir", ["true"])
+    @parameterize("inner_load_mode", ["cpasync"])
+    @parameterize("inner_store_mode", ["tma1d"])
+    def test_index_sparse_native_nhk_hd64(
+        self, head_config, kbs, inner_dir, inner_load_mode, inner_store_mode
+    ):
+        """True multi-KV-head (no fold) correctness for hd=64."""
+        self._run_comprehensive_case(
+            head_config,
+            64,
+            kbs,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+            fold_nhk=False,
+        )
+
+    @with_run_in_mp
+    @parameterize(
+        "head_config",
+        [c for c in _PARAM_SPACE["head_config"] if c[1] > 1 and c[0] // c[1] > 1],
+    )
+    @parameterize("kbs", [1])
+    @parameterize("inner_dir", ["true"])
+    @parameterize("inner_load_mode", ["cpasync"])
+    @parameterize("inner_store_mode", ["tma1d"])
+    def test_index_sparse_native_nhk_loopk_hd128(
+        self, head_config, kbs, inner_dir, inner_load_mode, inner_store_mode
+    ):
+        """True multi-KV-head (no fold) LoopK correctness for hd=128."""
+        self._run_comprehensive_case(
+            head_config,
+            128,
+            kbs,
+            inner_dir,
+            inner_load_mode,
+            inner_store_mode,
+            swap_bwd_qk_loop=True,
+            fold_nhk=False,
         )
 
 

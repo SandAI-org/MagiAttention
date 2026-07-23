@@ -347,11 +347,12 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                                     "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store,
                                 }
                                 for swap in cls._PARAM_SPACE["swap_bwd_qk_loop"]:
-                                    if (
-                                        not swap
-                                        and inner_load == "tma"
-                                        and pack_f < kBlockM
-                                    ):
+                                    inner_contiguous = (
+                                        k_size >= kBlockN if swap else pack_f >= kBlockM
+                                    )
+                                    if inner_load == "tma" and not inner_contiguous:
+                                        continue
+                                    if inner_store == "tma" and not inner_contiguous:
                                         continue
                                     add_ffa_spec(
                                         specs,
@@ -385,11 +386,12 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         if inner_load_mode == "tma" and k_size < kBlockN:
             return
         pack_gqa_factor = nhq // nhk
-        if (
-            not swap_bwd_qk_loop
-            and inner_load_mode == "tma"
-            and pack_gqa_factor < kBlockM
-        ):
+        inner_contiguous = (
+            k_size >= kBlockN if swap_bwd_qk_loop else pack_gqa_factor >= kBlockM
+        )
+        if inner_load_mode == "tma" and not inner_contiguous:
+            return
+        if inner_store_mode == "tma" and not inner_contiguous:
             return
 
         loop_tag = "loopk" if swap_bwd_qk_loop else "loopq"
