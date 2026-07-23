@@ -68,7 +68,7 @@ from .sparse_utils import (
     BlockSparseTensorsTorch,
     block_sparse_call_tuple,
     get_sparse_q_block_size,
-    index_attn_indices_to_block_sparse,
+    index_sparse_indices_to_block_sparse,
     prepare_block_sparse_bwd,
     prepare_block_sparse_bwd_loopk,
     prepare_block_sparse_fwd,
@@ -620,7 +620,7 @@ def _flex_flash_attn_bwd(
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
     swap_bwd_qk_loop: bool = False,
-    index_attn_indices: torch.Tensor | None = None,
+    index_sparse_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
@@ -677,7 +677,7 @@ def _flex_flash_attn_bwd(
         block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
 
     # IndexAttn: convert token-level indices to block-level BlockSparseTensors.
-    if index_attn_indices is not None:
+    if index_sparse_indices is not None:
         assert (
             q_ranges is None and k_ranges is None
         ), "IndexAttn does not use q/k ranges"
@@ -806,7 +806,7 @@ def _flex_flash_attn_bwd(
                 or score_mod_bwd is not None
                 or mask_mod is not None
                 or block_sparse_tensors is not None
-                or index_attn_indices is not None
+                or index_sparse_indices is not None
                 or swap_bwd_qk_loop
                 or pack_gqa
             )
@@ -848,12 +848,12 @@ def _flex_flash_attn_bwd(
     subtile_factor = sparse_q // m_block_size if sparse_q is not None else 2
 
     # IndexAttn: convert token-level indices to block-level sparse after block sizes are known.
-    # index_attn_indices_to_block_sparse produces forward-direction tensors (M→N).
+    # index_sparse_indices_to_block_sparse produces forward-direction tensors (M→N).
     # LoopK uses forward-direction directly; LoopQ needs backward-direction (N→M),
     # so we transpose the presence matrix when swap_bwd_qk_loop is False.
-    if index_attn_indices is not None and block_sparse_tensors is None:
-        block_sparse_tensors = index_attn_indices_to_block_sparse(
-            index_attn_indices,
+    if index_sparse_indices is not None and block_sparse_tensors is None:
+        block_sparse_tensors = index_sparse_indices_to_block_sparse(
+            index_sparse_indices,
             batch_size=batch_size,
             seqlen_q=seqlen_q,
             seqlen_k=seqlen_k,

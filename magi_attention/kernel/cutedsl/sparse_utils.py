@@ -780,8 +780,8 @@ def prepare_block_sparse_bwd_loopk(
     return normalized_tensors, broadcast_pattern, spt
 
 
-def index_attn_indices_to_block_sparse(
-    index_attn_indices: torch.Tensor,
+def index_sparse_indices_to_block_sparse(
+    index_sparse_indices: torch.Tensor,
     batch_size: int,
     seqlen_q: int,
     seqlen_k: int,
@@ -795,20 +795,20 @@ def index_attn_indices_to_block_sparse(
     for BWD LoopK.
 
     Args:
-        index_attn_indices: (total_q, NHK, max_topk) int32 tensor.
+        index_sparse_indices: (total_q, NHK, max_topk) int32 tensor.
             Values are logical KV token positions ``batch * S_kv + token_idx``.
             ``-1`` indicates padding.
     """
-    device = index_attn_indices.device
-    total_q, NHK, max_topk = index_attn_indices.shape
+    device = index_sparse_indices.device
+    total_q, NHK, max_topk = index_sparse_indices.shape
     assert NHK == num_kv_heads
     assert total_q == batch_size * seqlen_q
 
     M_blocks = ceildiv(seqlen_q, m_block_size)
     N_blocks = ceildiv(seqlen_k, n_block_size)
 
-    valid = index_attn_indices >= 0
-    k_local = index_attn_indices % seqlen_k
+    valid = index_sparse_indices >= 0
+    k_local = index_sparse_indices % seqlen_k
     k_block = (k_local // n_block_size).clamp(0, N_blocks - 1)
 
     q_idx = torch.arange(total_q, device=device)
@@ -2558,7 +2558,7 @@ class IndexSparseTilesTorch(NamedTuple):
 
 
 def prepare_index_sparse_tiles(
-    index_attn_indices: torch.Tensor,
+    index_sparse_indices: torch.Tensor,
     *,
     batch_size: int,
     seqlen_q: int,
@@ -2569,21 +2569,21 @@ def prepare_index_sparse_tiles(
     n_block_size: int = 128,
     pack_gqa: bool = False,
 ) -> IndexSparseTilesTorch:
-    """Convert raw index_attn_indices to tile-based IndexSparse tensors.
+    """Convert raw index_sparse_indices to tile-based IndexSparse tensors.
 
     Args:
-        index_attn_indices: (B, NHQ, SQ, TOPK) int32 — per-query token indices into K.
+        index_sparse_indices: (B, NHQ, SQ, TOPK) int32 — per-query token indices into K.
         Other args define the tiling geometry.
 
     Returns:
         IndexSparseTilesTorch with scheduling BST and tile_token_indices.
     """
-    device = index_attn_indices.device
+    device = index_sparse_indices.device
     B = batch_size
     NHQ = num_q_heads
     NHK = num_kv_heads
     qhead_per_kvhead = NHQ // NHK
-    TOPK = index_attn_indices.shape[-1]
+    TOPK = index_sparse_indices.shape[-1]
 
     # Determine M_blocks (Q tiles)
     if pack_gqa:
@@ -2624,7 +2624,7 @@ def prepare_index_sparse_tiles(
                         continue
 
                 # Take indices from the representative query
-                indices = index_attn_indices[b, h_q, q_start, :TOPK]
+                indices = index_sparse_indices[b, h_q, q_start, :TOPK]
                 valid_count = min(TOPK, seqlen_k)
                 tile_token_indices[b, h_kv, m_blk, :valid_count] = indices[:valid_count]
                 is_valid_total[b, h_kv, m_blk] = valid_count
