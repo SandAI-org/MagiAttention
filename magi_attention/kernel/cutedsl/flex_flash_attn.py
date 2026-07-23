@@ -539,22 +539,21 @@ def _flex_flash_attn_fwd(
             sink_tensor,
         ]
         if major_arch in [10, 11]:
-            # FP8 descale tensors removed; SM100 kernel descale slot is always None.
-            compile_args.append(None)
-        tile_token_indices_tensor = (
-            to_cute_tensor(
-                index_sparse_tiles.tile_token_indices, assumed_align=4, leading_dim=-1
+            # SM100/SM110 kernel signature includes descale_tensors + mTileTokenIndices.
+            compile_args.append(None)  # descale_tensors (always None for SM100)
+        compile_args.append(sparse_tensors)
+        if major_arch in [10, 11]:
+            tile_token_indices_tensor = (
+                to_cute_tensor(
+                    index_sparse_tiles.tile_token_indices,
+                    assumed_align=4,
+                    leading_dim=-1,
+                )
+                if is_index_sparse
+                else None
             )
-            if is_index_sparse
-            else None
-        )
-        compile_args.extend(
-            [
-                sparse_tensors,
-                tile_token_indices_tensor,
-                cute_aux_tensors,
-            ]
-        )
+            compile_args.append(tile_token_indices_tensor)
+        compile_args.append(cute_aux_tensors)
         compile_args.append(current_stream)
 
         _flex_flash_attn_fwd.compile_cache[compile_key] = cute.compile(
@@ -579,15 +578,13 @@ def _flex_flash_attn_fwd(
         sink,
     ]
     if major_arch in [10, 11]:
-        # FP8 descale tensors removed; SM100 kernel descale slot is always None.
-        call_args.append(None)
-    call_args.extend(
-        [
-            block_sparse_call_tuple(normalized_block_sparse_tensors),
-            index_sparse_tiles.tile_token_indices if is_index_sparse else None,
-            aux_tensors,
-        ]
-    )
+        call_args.append(None)  # descale_tensors
+    call_args.append(block_sparse_call_tuple(normalized_block_sparse_tensors))
+    if major_arch in [10, 11]:
+        call_args.append(
+            index_sparse_tiles.tile_token_indices if is_index_sparse else None
+        )
+    call_args.append(aux_tensors)
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
 
@@ -1436,7 +1433,7 @@ def _flex_flash_attn_bwd(
             dV_semaphore_tensor,
             cute_aux_tensors,
             sparse_tensors_compile,
-            tile_token_indices_bwd_tensor,
+            *([tile_token_indices_bwd_tensor] if major_arch in [10, 11] else []),
             current_stream,
             options="--enable-tvm-ffi",
         )
@@ -1462,7 +1459,11 @@ def _flex_flash_attn_bwd(
         dV_semaphore,
         aux_tensors,
         block_sparse_call_tuple(normalized_block_sparse_tensors),
-        index_sparse_tiles.tile_token_indices if is_index_sparse else None,
+        *(
+            [index_sparse_tiles.tile_token_indices if is_index_sparse else None]
+            if major_arch in [10, 11]
+            else []
+        ),
     )
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
