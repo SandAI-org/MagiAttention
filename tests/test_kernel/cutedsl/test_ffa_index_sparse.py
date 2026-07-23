@@ -64,6 +64,7 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_fwd,
 )
 from magi_attention.kernel.cutedsl.sparse_utils import prepare_index_sparse_tiles
+from magi_attention.testing.precision import assert_close
 
 SEED = 42
 
@@ -154,28 +155,14 @@ def _sdpa_ref_fwd_bwd(q, k, v, dO, indices, softmax_scale):
     )
 
 
-# Validation mirrors SM90's tests/test_attn/test_index_attn.py: a pure
-# max-absolute-difference threshold (atol=0.01 for the forward output, 0.05 for
-# gradients). max-abs is more interpretable than cosine (which stays ~1 even
-# under a systematic scale error) and than a per-element relative error (which
-# blows up on the many near-zero dK/dV components at high GQA pack ratios).
-_ATOL = {"O": 0.01, "dQ": 0.05, "dK": 0.05, "dV": 0.05}
-
-
-def _check(name, got, ref, errors):
-    diff = (got.float() - ref.float()).abs()
-    max_abs = diff.max().item()
-    atol = _ATOL[name]
-    ok = max_abs < atol
-    # non-gating diagnostics
-    mean_rel = (diff.sum() / ref.float().abs().sum().clamp(min=1e-6)).item()
-    line = (
-        f"{name}: max_abs={max_abs:.6f} (atol={atol}) "
-        f"rel_l1={mean_rel:.4f} [{'PASS' if ok else 'FAIL'}]"
-    )
-    print(f"  {line}", flush=True)
-    if not ok:
-        errors.append(f"{line} -- max_abs {max_abs:.6f} >= atol {atol}")
+# Tolerances mirror remote main tests/test_attn/sparse_test_utils.py
+# (DEFAULT_*_ATOL/RTOL + DEFAULT_MISMATCH_THRES). Validation reuses the same
+# magi_attention.testing.precision.assert_close helper as main: element-wise
+# |a-b| <= atol + rtol*|b| with up to MISMATCH_THRES fraction of outliers.
+_FWD_ATOL, _FWD_RTOL = 0.01, 0.05
+_BWD_DQ_ATOL, _BWD_DQ_RTOL = 0.02, 0.3
+_BWD_DKV_ATOL, _BWD_DK_RTOL, _BWD_DV_RTOL = 0.02, 0.15, 0.05
+_MISMATCH_THRES = 0.01
 
 
 def _run_index_sparse_case(
@@ -255,16 +242,42 @@ def _run_index_sparse_case(
         pack_gqa=pack_gqa,
     )
 
-    errors: list[str] = []
-    _check("O", out, o_ref, errors)
-    _check("dQ", dq, dq_ref, errors)
-    _check("dK", dk, dk_ref, errors)
-    _check("dV", dv, dv_ref, errors)
-    assert not errors, (
-        f"[B={B},NHQ={NHQ},NHK={NHK},D={D},SQ={SQ},SK={SK},topk={topk},"
+    tc = (
+        f"B={B},NHQ={NHQ},NHK={NHK},D={D},SQ={SQ},SK={SK},topk={topk},"
         f"pack_gqa={pack_gqa},atomic="
-        f"{os.environ.get('MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC', '0')}]\n"
-        + "\n".join(errors)
+        f"{os.environ.get('MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC', '0')}"
+    )
+    assert_close(
+        out,
+        o_ref,
+        atol=_FWD_ATOL,
+        rtol=_FWD_RTOL,
+        mismatch_threshold=_MISMATCH_THRES,
+        test_case=f"[{tc}] => fwd_out",
+    )
+    assert_close(
+        dq,
+        dq_ref,
+        atol=_BWD_DQ_ATOL,
+        rtol=_BWD_DQ_RTOL,
+        mismatch_threshold=_MISMATCH_THRES,
+        test_case=f"[{tc}] => dq",
+    )
+    assert_close(
+        dk,
+        dk_ref,
+        atol=_BWD_DKV_ATOL,
+        rtol=_BWD_DK_RTOL,
+        mismatch_threshold=_MISMATCH_THRES,
+        test_case=f"[{tc}] => dk",
+    )
+    assert_close(
+        dv,
+        dv_ref,
+        atol=_BWD_DKV_ATOL,
+        rtol=_BWD_DV_RTOL,
+        mismatch_threshold=_MISMATCH_THRES,
+        test_case=f"[{tc}] => dv",
     )
 
 
