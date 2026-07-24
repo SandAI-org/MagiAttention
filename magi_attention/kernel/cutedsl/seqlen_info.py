@@ -45,23 +45,31 @@ class SeqlenInfo:
         cu_seqlens: Optional[cute.Tensor] = None,
         seqused: Optional[cute.Tensor] = None,
         tile: cutlass.Constexpr[int] = 128,
+        ranges: Optional[cute.Tensor] = None,
     ):
-        offset = 0 if const_expr(cu_seqlens is None) else cu_seqlens[batch_idx]
+        assert cu_seqlens is None or ranges is None
+        is_varlen = cu_seqlens is not None or ranges is not None
+        if const_expr(ranges is not None):
+            offset = ranges[batch_idx, 0]
+        elif const_expr(cu_seqlens is not None):
+            offset = cu_seqlens[batch_idx]
+        else:
+            offset = 0
         offset_padded = (
             0
-            if const_expr(cu_seqlens is None)
+            if const_expr(not is_varlen)
             # Add divby so that the compiler knows the alignment when moving by offset_padded
             else cute.assume((offset + batch_idx * tile) // tile * tile, divby=tile)
         )
         if const_expr(seqused is not None):
             seqlen = seqused[batch_idx]
+        elif const_expr(ranges is not None):
+            seqlen = ranges[batch_idx, 1] - offset
         elif const_expr(cu_seqlens is not None):
             seqlen = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx]
         else:
             seqlen = seqlen_static
-        return SeqlenInfo(
-            offset, offset_padded, seqlen, has_cu_seqlens=cu_seqlens is not None
-        )
+        return SeqlenInfo(offset, offset_padded, seqlen, has_cu_seqlens=is_varlen)
 
     def offset_batch(
         self,
@@ -113,47 +121,68 @@ class SeqlenInfoQK:
         mCuBlockIdxOffsets: Optional[cute.Tensor] = None,
         tile_m: cutlass.Constexpr[Int32] = 128,
         tile_n: cutlass.Constexpr[Int32] = 128,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
     ) -> "SeqlenInfoQK":
-        offset_q = 0 if const_expr(mCuSeqlensQ is None) else mCuSeqlensQ[batch_idx]
-        offset_k = 0 if const_expr(mCuSeqlensK is None) else mCuSeqlensK[batch_idx]
+        assert mQRanges is None or mCuSeqlensQ is None
+        assert mKRanges is None or mCuSeqlensK is None
+        varlen_q = mCuSeqlensQ is not None or mQRanges is not None
+        varlen_k = mCuSeqlensK is not None or mKRanges is not None
+        if const_expr(mQRanges is not None):
+            # Padding tiles may carry batch_idx == num_batch (see the cu clamp
+            # below); with [R, 2] rows the row index itself must be clamped.
+            q_row = cutlass.min(batch_idx, mQRanges.shape[0] - 1)
+            offset_q = mQRanges[q_row, 0]
+        elif const_expr(mCuSeqlensQ is not None):
+            offset_q = mCuSeqlensQ[batch_idx]
+        else:
+            offset_q = 0
+        if const_expr(mKRanges is not None):
+            k_row = cutlass.min(batch_idx, mKRanges.shape[0] - 1)
+            offset_k = mKRanges[k_row, 0]
+        elif const_expr(mCuSeqlensK is not None):
+            offset_k = mCuSeqlensK[batch_idx]
+        else:
+            offset_k = 0
         padded_offset_q = (
             0
-            if const_expr(mCuSeqlensQ is None)
+            if const_expr(not varlen_q)
+            # Add divby so that the compiler knows the alignment when moving by offset_padded
             else cute.assume(
                 (offset_q + batch_idx * tile_m) // tile_m * tile_m, divby=tile_m
             )
         )
         padded_offset_k = (
             0
-            if const_expr(mCuSeqlensK is None)
+            if const_expr(not varlen_k)
             else cute.assume(
                 (offset_k + batch_idx * tile_n) // tile_n * tile_n, divby=tile_n
             )
         )
         if const_expr(mSeqUsedQ is not None):
             seqlen_q = mSeqUsedQ[batch_idx]
+        elif const_expr(mQRanges is not None):
+            seqlen_q = mQRanges[q_row, 1] - offset_q
+        elif const_expr(mCuSeqlensQ is not None):
+            # NOTE: Clamp the +1 lookup to the last valid cu_seqlens entry.
+            # since non-persistent single-tile kernels (e.g. sm80)
+            # launch padding tiles with `batch_idx == num_batch`;
+            # without this clamp, `mCuSeqlensQ[batch_idx + 1]` reads one element
+            # out of bounds, yielding a garbage seqlen and illegal K/V loads.
+            # While for every real tile (batch_idx < num_batch), this clamp is a no-op.
+            last_q = mCuSeqlensQ.shape[0] - 1
+            seqlen_q = mCuSeqlensQ[cutlass.min(batch_idx + 1, last_q)] - offset_q
         else:
-            if const_expr(mCuSeqlensQ is None):
-                seqlen_q = seqlen_q_static
-            else:
-                assert mCuSeqlensQ is not None  # mypy
-                # NOTE: Clamp the +1 lookup to the last valid cu_seqlens entry.
-                # since non-persistent single-tile kernels (e.g. sm80)
-                # launch padding tiles with `batch_idx == num_batch`;
-                # without this clamp, `mCuSeqlensQ[batch_idx + 1]` reads one element
-                # out of bounds, yielding a garbage seqlen and illegal K/V loads.
-                # While for every real tile (batch_idx < num_batch), this clamp is a no-op.
-                last_q = mCuSeqlensQ.shape[0] - 1
-                seqlen_q = mCuSeqlensQ[cutlass.min(batch_idx + 1, last_q)] - offset_q
+            seqlen_q = seqlen_q_static
         if const_expr(mSeqUsedK is not None):
             seqlen_k = mSeqUsedK[batch_idx]
+        elif const_expr(mKRanges is not None):
+            seqlen_k = mKRanges[k_row, 1] - offset_k
+        elif const_expr(mCuSeqlensK is not None):
+            last_k = mCuSeqlensK.shape[0] - 1
+            seqlen_k = mCuSeqlensK[cutlass.min(batch_idx + 1, last_k)] - offset_k
         else:
-            if const_expr(mCuSeqlensK is None):
-                seqlen_k = seqlen_k_static
-            else:
-                assert mCuSeqlensK is not None  # mypy
-                last_k = mCuSeqlensK.shape[0] - 1
-                seqlen_k = mCuSeqlensK[cutlass.min(batch_idx + 1, last_k)] - offset_k
+            seqlen_k = seqlen_k_static
         m_block_offset = (
             0 if const_expr(mCuTotalMBlocks is None) else mCuTotalMBlocks[batch_idx]
         )
@@ -173,8 +202,8 @@ class SeqlenInfoQK:
             m_block_offset,
             block_idx_offset,
             num_n_blocks,
-            has_cu_seqlens_q=mCuSeqlensQ is not None,
-            has_cu_seqlens_k=mCuSeqlensK is not None,
+            has_cu_seqlens_q=varlen_q,
+            has_cu_seqlens_k=varlen_k,
             has_seqused_q=mSeqUsedQ is not None,
             has_seqused_k=mSeqUsedK is not None,
         )

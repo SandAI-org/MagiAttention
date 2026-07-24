@@ -645,8 +645,8 @@ class FFABwdSm100:
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         softmax_scale: Float32,
-        mCuSeqlensQ: Optional[cute.Tensor] = None,
-        mCuSeqlensK: Optional[cute.Tensor] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
         mSeqUsedQ: Optional[cute.Tensor] = None,
         mSeqUsedK: Optional[cute.Tensor] = None,
         window_size_left: Int32 | int | None = None,
@@ -686,10 +686,13 @@ class FFABwdSm100:
         self.dv_dtype = mdV.element_type
         self.ds_dtype = self.q_dtype
 
-        self.is_varlen_k = mCuSeqlensK is not None or mSeqUsedK is not None
-        self.is_varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
+        assert (mQRanges is None) == (
+            mKRanges is None
+        ), "mQRanges and mKRanges must be passed together"
+        self.is_varlen_k = mKRanges is not None or mSeqUsedK is not None
+        self.is_varlen_q = mQRanges is not None or mSeqUsedQ is not None
         self.use_tma_store = not (
-            self.qhead_per_kvhead == 1 and mCuSeqlensK is not None
+            self.qhead_per_kvhead == 1 and mKRanges is not None
         )
         self.dKV_postprocess = self.qhead_per_kvhead > 1
 
@@ -710,13 +713,13 @@ class FFABwdSm100:
         # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
         # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
         QO_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
+            [1, 3, 2, 0] if const_expr(mQRanges is None) else [0, 2, 1]
         )
         mQ, mdO = [layout_utils.select(t, mode=QO_layout_transpose) for t in (mQ, mdO)]
 
         # (sq, hd, nhq, b) --> (hd, sq, nhq, b)
         # or (sq, hd, nhq) -> (hd, sq, nhq) if there's cu_seqlens_q
-        dO_transpose = [1, 0, 2, 3] if const_expr(mCuSeqlensQ is None) else [1, 0, 2]
+        dO_transpose = [1, 0, 2, 3] if const_expr(mQRanges is None) else [1, 0, 2]
         mdO = layout_utils.select(mdO, mode=dO_transpose)  # => actually dO.T
 
         # --- Make mK/mV ---
@@ -724,7 +727,7 @@ class FFABwdSm100:
         # (b, sk, nhk, hd) -> (sk, hd, nhk, b)
         # or (sk, nhk, hd) -> (sk, hd, nhk) if there's cu_seqlens_k
         KV_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
+            [1, 3, 2, 0] if const_expr(mKRanges is None) else [0, 2, 1]
         )
         mK, mV = [layout_utils.select(t, mode=KV_layout_transpose) for t in (mK, mV)]
 
@@ -733,7 +736,7 @@ class FFABwdSm100:
         # (b, nhq, sq) --> (sq, nhq, b)
         # or (nhq, sq) --> (sq, nhq) if there's cu_seqlens_q
         LSE_dPsum_dQacc_transpose = (
-            [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
+            [2, 1, 0] if const_expr(mQRanges is None) else [1, 0]
         )
         mLSE, mdPsum = [
             layout_utils.select(t, mode=LSE_dPsum_dQacc_transpose)
@@ -754,7 +757,7 @@ class FFABwdSm100:
             layout_dKV_transpose = KV_layout_transpose
         else:
             layout_dKV_transpose = (
-                [2, 1, 0] if const_expr(mCuSeqlensK is None) else [1, 0]
+                [2, 1, 0] if const_expr(mKRanges is None) else [1, 0]
             )
         mdK, mdV = [
             layout_utils.select(t, mode=layout_dKV_transpose) for t in (mdK, mdV)
@@ -924,7 +927,7 @@ class FFABwdSm100:
 
         # Transposes for 2-CTA K/Q paths (Q follows Q seqlens, K follows K seqlens)
         transpose_sh_q = dO_transpose
-        transpose_sh_k = [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
+        transpose_sh_k = [1, 0, 2, 3] if const_expr(mKRanges is None) else [1, 0, 2]
         tma_atom_dOt = tma_tensor_dOt = None
         if const_expr(self.use_2cta_instrs):
             tma_atom_dOt, tma_tensor_dOt = cute.nvgpu.make_tiled_tma_atom_B(
@@ -1004,18 +1007,18 @@ class FFABwdSm100:
             num_block=cute.ceil_div(cute.size(mK.shape[0]), self.cta_tiler[0]),
             num_head=cute.size(mQ.shape[2]),
             num_batch=cute.size(mK.shape[3])
-            if const_expr(mCuSeqlensK is None)
-            else cute.size(mCuSeqlensK.shape[0] - 1),  # type: ignore[union-attr]
+            if const_expr(mKRanges is None)
+            else cute.size(mKRanges.shape[0]),
             num_splits=1,
             seqlen_k=cute.size(mQ.shape[0]),
             headdim=mQ.shape[1],
             headdim_v=mV.shape[1],
             total_q=cute.size(mK.shape[0])
-            if const_expr(mCuSeqlensK is not None)
+            if const_expr(mKRanges is not None)
             else cute.size(mK.shape[0]) * cute.size(mK.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],  # (tile_n, tile_m)
             cluster_shape_mn=self.cluster_shape_mnk[:2],
-            mCuSeqlensQ=mCuSeqlensK,
+            mQRanges=mKRanges,
             mSeqUsedQ=mSeqUsedK,
             qhead_per_kvhead_packgqa=1,  # pack_gqa disabled for bwd
             element_size=self.k_dtype.width // 8,
@@ -1269,7 +1272,7 @@ class FFABwdSm100:
             )
         if const_expr(self.use_block_sparsity or aux_tensors is not None):
             assert all(
-                x is None for x in (mCuSeqlensQ, mCuSeqlensK, mSeqUsedQ, mSeqUsedK)
+                x is None for x in (mQRanges, mKRanges, mSeqUsedQ, mSeqUsedK)
             ), "Variable sequence length is not supported yet for blocksparse or aux tensors in bwd"
 
         # ///////////////////////////////////////////////////////////////////////////////
@@ -1367,8 +1370,8 @@ class FFABwdSm100:
             mdQ_semaphore,
             mdK_semaphore,
             mdV_semaphore,
-            mCuSeqlensQ,
-            mCuSeqlensK,
+            mQRanges,
+            mKRanges,
             mSeqUsedQ,
             mSeqUsedK,
             tma_atom_Q,
@@ -1443,8 +1446,8 @@ class FFABwdSm100:
         mdQ_semaphore: Optional[cute.Tensor],
         mdK_semaphore: Optional[cute.Tensor],
         mdV_semaphore: Optional[cute.Tensor],
-        mCuSeqlensQ: Optional[cute.Tensor],
-        mCuSeqlensK: Optional[cute.Tensor],
+        mQRanges: Optional[cute.Tensor],
+        mKRanges: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mSeqUsedK: Optional[cute.Tensor],
         tma_atom_Q: cute.CopyAtom,
@@ -1922,8 +1925,8 @@ class FFABwdSm100:
             SeqlenInfoQK.create,
             seqlen_q_static=mQ.shape[0],
             seqlen_k_static=mK.shape[0],
-            mCuSeqlensQ=mCuSeqlensQ,
-            mCuSeqlensK=mCuSeqlensK,
+            mQRanges=mQRanges,
+            mKRanges=mKRanges,
             mSeqUsedQ=mSeqUsedQ,
             mSeqUsedK=mSeqUsedK,
             tile_m=self.tile_m,
@@ -4900,7 +4903,7 @@ class FFABwdSm100:
 
             if process_tile:
                 if const_expr(not self.use_tma_store):
-                    # when self.qhead_per_kvhead == 1 and mCuSeqlensK is not None
+                    # when self.qhead_per_kvhead == 1 and mKRanges is not None
                     # Non-TMA store dK/dV
                     consumer_state_dKV = self.epilogue_dKV(
                         dp_idx,

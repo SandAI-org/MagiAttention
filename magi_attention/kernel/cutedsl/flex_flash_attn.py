@@ -150,35 +150,33 @@ def _flex_flash_attn_fwd(
     has_ranges = q_ranges is not None or k_ranges is not None
     if has_ranges:
         validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types_tensor)
-    # DEVIATION: collapse validated ranges to cu_seqlens for current kernels
-    # Reason: SeqlenInfo still consumes cu_seqlens until Phase 2 true-range
-    # Recovery: validate_true_ranges above; Phase 2 passes mQRanges/mKRanges
-    cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
-    cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
-    if cu_seqlens_q is None:
+    # SM100/SM110 kernels consume mQRanges/mKRanges directly. Other arches
+    # still read cu_seqlens, and the host block-sparse prep does too, so the
+    # collapse remains only for them (ranges are cu-partition-equivalent
+    # until 2B).
+    if has_ranges and (
+        major_arch not in (10, 11) or flex_attn_args.block_sparse_tensors is not None
+    ):
+        cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
+        cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
+    else:
+        cu_seqlens_q = cu_seqlens_k = None
+    if not has_ranges:
         batch_size, seqlen_q = q.shape[:2]
         total_q = batch_size * seqlen_q
     else:
-        batch_size = cu_seqlens_q.shape[0] - 1
+        batch_size = q_ranges.shape[0]
         seqlen_q = None
         total_q = q.shape[0]
     seqlen_k = k.shape[-3]
     num_head_kv = k.shape[-2]
     head_dim_v = v.shape[-1]
-    if cu_seqlens_k is None:
+    if not has_ranges:
         assert k.shape == (batch_size, seqlen_k, num_head_kv, head_dim)
         assert v.shape == (batch_size, seqlen_k, num_head_kv, head_dim_v)
     else:
         assert k.shape == (seqlen_k, num_head_kv, head_dim)
         assert v.shape == (seqlen_k, num_head_kv, head_dim_v)
-        assert cu_seqlens_k.shape == (
-            batch_size + 1,
-        ), "cu_seqlens_k must have shape (batch_size + 1,)"
-
-    if cu_seqlens_q is not None:
-        assert cu_seqlens_q.shape == (
-            batch_size + 1,
-        ), "cu_seqlens_q must have shape (batch_size + 1,)"
     assert q.dtype in [
         torch.float16,
         torch.bfloat16,
@@ -214,11 +212,11 @@ def _flex_flash_attn_fwd(
     out_torch_dtype = q.dtype
     device = q.device
     q_batch_seqlen_shape = (
-        (batch_size, seqlen_q) if cu_seqlens_q is None else (total_q,)
+        (batch_size, seqlen_q) if not has_ranges else (total_q,)
     )
     lse_shape = (  # (b, nh, sq) or (nh, tq)
         (batch_size, num_head, seqlen_q)
-        if cu_seqlens_q is None
+        if not has_ranges
         else (num_head, total_q)
     )
 
@@ -305,7 +303,7 @@ def _flex_flash_attn_fwd(
             intra_wg_overlap = fwd_cfg.intra_wg_overlap
 
     if max_seqlen_q is None:
-        max_seqlen_q = seqlen_q if cu_seqlens_q is None else total_q
+        max_seqlen_q = seqlen_q if not has_ranges else total_q
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
     seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
@@ -319,7 +317,7 @@ def _flex_flash_attn_fwd(
         and not requested_disable_2cta
         and not causal
         and not local
-        and cu_seqlens_q is None
+        and not has_ranges
         and not use_block_sparsity
         and int(math.ceil(head_dim / 16) * 16) in [128, 192]
         and int(math.ceil(head_dim_v / 16) * 16) == 128
@@ -340,7 +338,7 @@ def _flex_flash_attn_fwd(
     score_mod_hash = hash_callable(score_mod) if score_mod is not None else False
     mask_mod_hash = hash_callable(mask_mod) if mask_mod is not None else False
 
-    is_varlen = cu_seqlens_q is not None or cu_seqlens_k is not None
+    is_varlen = has_ranges
 
     # CLC regressed for varlen MHA and dense noncausal. Imbalanced varlen shapes
     # keep more K/V blocks in flight and hurt L2; dense noncausal mostly just
@@ -387,8 +385,8 @@ def _flex_flash_attn_fwd(
         block_sparse_broadcast_pattern,
         aux_tensor_metadata,
         lse is None,
-        cu_seqlens_q is None,
-        cu_seqlens_k is None,
+        q_ranges is None,
+        k_ranges is None,
         sink is not None,
         block_sparse_tensors is None or block_sparse_tensors.cu_total_m_blocks is None,
         block_sparse_tensors is None
@@ -406,14 +404,23 @@ def _flex_flash_attn_fwd(
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
 
+    # The SM100/SM110 kernel takes [R, 2] ranges in the slots where the other
+    # arches take cu_seqlens; both sides of the positional ABI switch together.
+    if major_arch in (10, 11):
+        kernel_varlen_q_meta, kernel_varlen_k_meta = q_ranges, k_ranges
+    else:
+        kernel_varlen_q_meta, kernel_varlen_k_meta = cu_seqlens_q, cu_seqlens_k
+
     if compile_key not in _flex_flash_attn_fwd.compile_cache:
         (
-            cu_seqlens_q_tensor,
-            cu_seqlens_k_tensor,
+            varlen_q_meta_tensor,
+            varlen_k_meta_tensor,
             sink_tensor,
         ) = [
-            to_cute_tensor(t, assumed_align=4, leading_dim=0) if t is not None else None
-            for t in (cu_seqlens_q, cu_seqlens_k, sink)
+            to_cute_tensor(t, assumed_align=4, leading_dim=t.ndim - 1)
+            if t is not None
+            else None
+            for t in (kernel_varlen_q_meta, kernel_varlen_k_meta, sink)
         ]
         mask_types_cute_tensor = (
             to_cute_tensor(mask_types_tensor, assumed_align=4, leading_dim=0)
@@ -495,15 +502,12 @@ def _flex_flash_attn_fwd(
                     m_block_size=tile_m,
                     n_block_size=tile_n,
                     q_stage=q_stage,
-                    is_persistent=not causal
-                    and not local
-                    and cu_seqlens_q is None
-                    and not use_per_range_mask,
+                    is_persistent=not causal and not local and not has_ranges,
                     score_mod=score_mod,
                     mask_mod=mask_mod,
                     has_aux_tensors=aux_tensors is not None,
                     paged_kv_non_tma=False,
-                    is_varlen_q=cu_seqlens_q is not None,
+                    is_varlen_q=has_ranges,
                     q_subtile_factor=q_subtile_factor,
                     use_2cta_instrs=use_2cta_instrs,
                     use_clc_scheduler=use_clc_scheduler,
@@ -543,8 +547,8 @@ def _flex_flash_attn_fwd(
             o_tensor,
             lse_tensor,
             softmax_scale,
-            cu_seqlens_q_tensor,
-            cu_seqlens_k_tensor,
+            varlen_q_meta_tensor,
+            varlen_k_meta_tensor,
             seqused_q_tensor,
             seqused_k_tensor,
             page_table_tensor,
@@ -576,8 +580,8 @@ def _flex_flash_attn_fwd(
         out.detach(),
         lse,
         softmax_scale,
-        cu_seqlens_q,
-        cu_seqlens_k,
+        kernel_varlen_q_meta,
+        kernel_varlen_k_meta,
         None,  # seqlen_used_q
         None,  # seqlen_used_k
         None,  # page_table
@@ -652,11 +656,13 @@ def _flex_flash_attn_bwd(
     has_ranges = q_ranges is not None or k_ranges is not None
     if has_ranges:
         validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types_tensor)
-    # DEVIATION: collapse validated ranges to cu_seqlens for current kernels
-    # Reason: SeqlenInfo still consumes cu_seqlens until Phase 2 true-range
-    # Recovery: validate_true_ranges above; Phase 2 passes mQRanges/mKRanges
-    cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
-    cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
+    # SM100/SM110 pre/main/post kernels consume ranges directly; other arches
+    # still read cu_seqlens (ranges are cu-partition-equivalent until 2B).
+    if has_ranges and major_arch not in (10, 11):
+        cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
+        cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
+    else:
+        cu_seqlens_q = cu_seqlens_k = None
 
     # Unpack the torch FlexAttention-style / block-sparse args (bwd uses these;
     # note block sparsity reads the bwd-specific tensors).
@@ -817,19 +823,15 @@ def _flex_flash_attn_bwd(
             cu_seqlens_k,
         )
     ]
-    if cu_seqlens_q is None:
+    if not has_ranges:
         batch_size, seqlen_q = q.shape[:2]
         total_q = batch_size * seqlen_q
-    else:
-        batch_size = cu_seqlens_q.shape[0] - 1
-        total_q = q.shape[0]
-        seqlen_q = max_seqlen_q if max_seqlen_q is not None else total_q
-
-    if cu_seqlens_k is None:
         batch_size, seqlen_k = k.shape[:2]
         total_k = batch_size * seqlen_k
     else:
-        batch_size = cu_seqlens_k.shape[0] - 1
+        batch_size = q_ranges.shape[0]
+        total_q = q.shape[0]
+        seqlen_q = max_seqlen_q if max_seqlen_q is not None else total_q
         total_k = k.shape[0]
         seqlen_k = max_seqlen_k if max_seqlen_k is not None else total_k
 
@@ -843,21 +845,14 @@ def _flex_flash_attn_bwd(
     if cluster_size == 2 and num_n_blocks % cluster_size != 0:
         seqlen_k_rounded = seqlen_k_rounded + n_block_size
 
-    if cu_seqlens_k is None:
+    if not has_ranges:
         assert k.shape == (batch_size, seqlen_k, num_head_kv, head_dim)
         assert v.shape == (batch_size, seqlen_k, num_head_kv, head_dim_v)
     else:
         assert k.shape == (total_k, num_head_kv, head_dim)
         assert v.shape == (total_k, num_head_kv, head_dim_v)
-        assert cu_seqlens_k.shape == (
-            batch_size + 1,
-        ), "cu_seqlens_k must have shape (batch_size + 1,)"
 
-    if cu_seqlens_q is not None:
-        assert cu_seqlens_q.shape == (
-            batch_size + 1,
-        ), "cu_seqlens_q must have shape (batch_size + 1,)"
-
+    if has_ranges:
         assert out.shape == (total_q, num_head, head_dim_v)
         assert dout.shape == (total_q, num_head, head_dim_v)
         assert lse.shape == (
@@ -906,9 +901,7 @@ def _flex_flash_attn_bwd(
         assert (
             score_mod_bwd is not None
         ), "score_mod_bwd is required when score_mod is provided"
-        assert (
-            cu_seqlens_q is None and cu_seqlens_k is None
-        ), "varlen + score_mod not supported in bwd yet"
+        assert not has_ranges, "varlen + score_mod not supported in bwd yet"
         if major_arch == 8:
             raise NotImplementedError(
                 "Custom user-provided score_mod is not supported on SM8x architectures."
@@ -934,7 +927,7 @@ def _flex_flash_attn_bwd(
 
     head_dim_rounded = (head_dim + 32 - 1) // 32 * 32
 
-    if cu_seqlens_q is None:
+    if not has_ranges:
         dq_accum = torch.empty(
             batch_size,
             num_head,
@@ -950,7 +943,7 @@ def _flex_flash_attn_bwd(
         )
     else:
         total_q_rounded_padded = (
-            (total_q + cu_seqlens_q.shape[0] * m_block_size - 1)
+            (total_q + (batch_size + 1) * m_block_size - 1)
             // m_block_size
             * m_block_size
         )
@@ -973,7 +966,7 @@ def _flex_flash_attn_bwd(
     dKV_postprocess = qhead_per_kvhead > 1
     if dKV_postprocess:
         head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
-        if cu_seqlens_k is None:
+        if not has_ranges:
             dk_accum = torch.zeros(
                 batch_size,
                 num_head_kv,
@@ -991,7 +984,7 @@ def _flex_flash_attn_bwd(
         else:
             cluster_tile_n = cluster_size * n_block_size
             total_k_rounded_padded = (
-                (total_k + cu_seqlens_k.shape[0] * cluster_tile_n - 1)
+                (total_k + (batch_size + 1) * cluster_tile_n - 1)
                 // cluster_tile_n
                 * cluster_tile_n
             )
@@ -1045,6 +1038,13 @@ def _flex_flash_attn_bwd(
         dV_semaphore = None
 
     # Preprocess kernel: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum.
+    # SM100/SM110: pre/main/post all consume the same [R, 2] range metadata;
+    # other arches keep cu_seqlens (cu_seqlens_q is None on the SM100 path).
+    kernel_varlen_q_meta = q_ranges if major_arch in (10, 11) else cu_seqlens_q
+    kernel_varlen_k_meta = k_ranges if major_arch in (10, 11) else cu_seqlens_k
+    pre_post_q_ranges = q_ranges if major_arch in (10, 11) else None
+    pre_post_k_ranges = k_ranges if major_arch in (10, 11) else None
+
     bwd_preprocess(
         out,
         dout,
@@ -1060,6 +1060,7 @@ def _flex_flash_attn_bwd(
         head_dim_v,
         m_block_size,
         use_padded_offsets=False,
+        q_ranges=pre_post_q_ranges,
     )
 
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
@@ -1120,8 +1121,8 @@ def _flex_flash_attn_bwd(
             V_in_regs,
             dQ_single_wg,
             deterministic,
-            cu_seqlens_q is None,
-            cu_seqlens_k is None,
+            q_ranges is None,
+            k_ranges is None,
             score_mod_hash,
             score_mod_bwd_hash,
             mask_mod_hash,
@@ -1159,8 +1160,8 @@ def _flex_flash_attn_bwd(
             num_aux_tensors,
             use_block_sparsity,
             block_sparse_broadcast_pattern,
-            cu_seqlens_q is None,
-            cu_seqlens_k is None,
+            q_ranges is None,
+            k_ranges is None,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
             get_broadcast_dims(v),
@@ -1181,9 +1182,9 @@ def _flex_flash_attn_bwd(
             dk_accum_tensor, dv_accum_tensor = [
                 to_cute_tensor(t) for t in (dk_accum, dv_accum)
             ]
-        cu_seqlens_q_tensor, cu_seqlens_k_tensor = [
+        varlen_q_meta_tensor, varlen_k_meta_tensor = [
             to_cute_tensor(t, assumed_align=4) if t is not None else None
-            for t in (cu_seqlens_q, cu_seqlens_k)
+            for t in (kernel_varlen_q_meta, kernel_varlen_k_meta)
         ]
         seqused_q_tensor = seqused_k_tensor = None
         dQ_semaphore_tensor, dK_semaphore_tensor, dV_semaphore_tensor = [
@@ -1300,8 +1301,8 @@ def _flex_flash_attn_bwd(
             dk_tensor if not dKV_postprocess else dk_accum_tensor,
             dv_tensor if not dKV_postprocess else dv_accum_tensor,
             softmax_scale,
-            cu_seqlens_q_tensor,
-            cu_seqlens_k_tensor,
+            varlen_q_meta_tensor,
+            varlen_k_meta_tensor,
             seqused_q_tensor,
             seqused_k_tensor,
             None,  # window_size_left
@@ -1334,8 +1335,8 @@ def _flex_flash_attn_bwd(
         dk if not dKV_postprocess else dk_accum,
         dv if not dKV_postprocess else dv_accum,
         softmax_scale,
-        cu_seqlens_q,
-        cu_seqlens_k,
+        kernel_varlen_q_meta,
+        kernel_varlen_k_meta,
         None,  # seqlen_used_q
         None,  # seqlen_used_k
         None,  # window_size_left
@@ -1388,6 +1389,7 @@ def _flex_flash_attn_bwd(
         dQ_swapAB,
         use_2cta_instrs=use_2cta_instrs,
         cluster_size=1,
+        ranges=pre_post_q_ranges,
     )
 
     if dKV_postprocess:
@@ -1406,6 +1408,7 @@ def _flex_flash_attn_bwd(
             AtomLayoutNdKV,
             dKV_swapAB,
             cluster_size=cluster_size,
+            ranges=pre_post_k_ranges,
         )
         # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
         bwd_postprocess(
@@ -1422,6 +1425,7 @@ def _flex_flash_attn_bwd(
             AtomLayoutNdKV,
             dKV_swapAB,
             cluster_size=cluster_size,
+            ranges=pre_post_k_ranges,
         )
 
     return dq, dk, dv

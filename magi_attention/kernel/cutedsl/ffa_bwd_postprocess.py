@@ -240,6 +240,7 @@ class FFABwdPostProcess:
         scale: cutlass.Float32,
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
+        mQRanges: Optional[cute.Tensor],
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -263,7 +264,12 @@ class FFABwdPostProcess:
             cute.size_in_bytes(self.dtype, self.sdQ_layout),
         )
 
-        if const_expr(mCuSeqlensQ is not None):
+        if const_expr(mQRanges is not None):
+            TileScheduler = SingleTileVarlenScheduler
+            num_head = mdQ.shape[1]
+            num_batch = mQRanges.shape[0]
+            num_block = cute.ceil_div(mdQ.shape[0], self.tile_m)
+        elif const_expr(mCuSeqlensQ is not None):
             assert mCuSeqlensQ is not None  # mypy
             TileScheduler = SingleTileVarlenScheduler
             num_head = mdQ.shape[1]
@@ -287,6 +293,7 @@ class FFABwdPostProcess:
             tile_shape_mn=(self.tile_m, 1),
             mCuSeqlensQ=mCuSeqlensQ,
             mSeqUsedQ=mSeqUsedQ,
+            mQRanges=mQRanges,
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
@@ -298,6 +305,7 @@ class FFABwdPostProcess:
             mdQ,
             mCuSeqlensQ,
             mSeqUsedQ,
+            mQRanges,
             scale,
             self.tiled_mma,
             self.dQ_swapAB,
@@ -322,6 +330,7 @@ class FFABwdPostProcess:
         mdQ: cute.Tensor,
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
+        mQRanges: Optional[cute.Tensor],
         scale: cutlass.Float32,
         tiled_mma: cute.TiledMma,
         dQ_swapAB: cutlass.Constexpr,
@@ -376,6 +385,7 @@ class FFABwdPostProcess:
                 mCuSeqlensK=None,
                 mSeqUsedQ=mSeqUsedQ,
                 mSeqUsedK=None,
+                mQRanges=mQRanges,
                 tile_m=self.tile_m * self.cluster_size,
             )
             if const_expr(not seqlen.has_cu_seqlens_q):
@@ -657,6 +667,7 @@ def _compile_bwd_postprocess(
     atom_layout,
     swap_ab,
     has_cuseqlens_q,
+    has_ranges,
     has_seqused_q,
     use_2cta_instrs,
     cluster_size,
@@ -679,13 +690,19 @@ def _compile_bwd_postprocess(
         mdKaccum,
         mdVaccum,
     ) = make_fake_bwd_tensors(
-        dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False
+        dtype, has_gqa=True, varlen_q=has_cuseqlens_q or has_ranges, varlen_k=False
     )
-    batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
+    varlen_q = has_cuseqlens_q or has_ranges
+    batch = mQ.shape[0] if not varlen_q else cute.sym_int()
     batchp1 = cute.sym_int()
     mCuSeqlensQ = (
         fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
         if has_cuseqlens_q
+        else None
+    )
+    mQRanges = (
+        fake_tensor(cutlass.Int32, (cute.sym_int(), 2), divisibility=1)
+        if has_ranges
         else None
     )
     mSeqUsedQ = (
@@ -709,6 +726,7 @@ def _compile_bwd_postprocess(
         cutlass.Float32(0.0),
         mCuSeqlensQ,
         mSeqUsedQ,
+        mQRanges,
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--enable-tvm-ffi",
     )
@@ -729,6 +747,7 @@ def bwd_postprocess(
     swap_ab,
     use_2cta_instrs=False,
     cluster_size=1,
+    ranges=None,
 ):
     """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
     compile_key = (
@@ -739,6 +758,7 @@ def bwd_postprocess(
         atom_layout,
         swap_ab,
         cu_seqlens is not None,
+        ranges is not None,
         seqused is not None,
         use_2cta_instrs,
         cluster_size,
@@ -754,6 +774,7 @@ def bwd_postprocess(
         scale,
         cu_seqlens,
         seqused,
+        ranges,
     )
 
 

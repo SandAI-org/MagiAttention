@@ -174,6 +174,9 @@ class TileSchedulerArguments(ParamsBase):
     cluster_shape_mn: cutlass.Constexpr[Tuple[int, int]] = (1, 1)
     mCuSeqlensQ: Optional[cute.Tensor] = None
     mSeqUsedQ: Optional[cute.Tensor] = None
+    # [R, 2] ranges; the scheduler only needs per-batch lengths, so it reads
+    # mQRanges[b, 1] - mQRanges[b, 0] where the cu path reads adjacent diffs.
+    mQRanges: Optional[cute.Tensor] = None
     qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
     element_size: cutlass.Constexpr[int] = 2
     is_persistent: cutlass.Constexpr[bool] = False
@@ -832,6 +835,7 @@ class SingleTileVarlenScheduler:
         tile_shape_mn: cutlass.Constexpr[Tuple[int, int]]
         mCuSeqlensQ: Optional[cute.Tensor] = None
         mSeqUsedQ: Optional[cute.Tensor] = None
+        mQRanges: Optional[cute.Tensor] = None
         qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
         lpt: cutlass.Constexpr[bool] = False
         is_split_kv: cutlass.Constexpr[bool] = False
@@ -864,8 +868,10 @@ class SingleTileVarlenScheduler:
                 kv_block_size += args.headdim * 4 * args.tile_shape_mn[1]
             max_kvblock_in_l2 = size_l2 // kv_block_size
             assert (
-                args.mCuSeqlensQ is not None or args.mSeqUsedQ is not None
-            ), "At least one of mCuSeqlensQ or mSeqUsedQ must be provided"
+                args.mCuSeqlensQ is not None
+                or args.mSeqUsedQ is not None
+                or args.mQRanges is not None
+            ), "One of mCuSeqlensQ, mSeqUsedQ or mQRanges must be provided"
             assert (
                 args.cluster_shape_mn[1] == 1
             ), "Only cluster_shape_mn[1] == 1 is supported"
@@ -883,6 +889,7 @@ class SingleTileVarlenScheduler:
                 tile_shape_mn=args.tile_shape_mn,
                 mCuSeqlensQ=args.mCuSeqlensQ,
                 mSeqUsedQ=args.mSeqUsedQ,
+                mQRanges=args.mQRanges,
                 qhead_per_kvhead_packgqa=args.qhead_per_kvhead_packgqa,
                 lpt=args.lpt,
                 is_split_kv=args.is_split_kv,
@@ -977,6 +984,12 @@ class SingleTileVarlenScheduler:
             if batch_idx < params.num_batch:
                 assert params.mSeqUsedQ is not None  # mypy
                 seqlen = params.mSeqUsedQ[batch_idx]
+        elif cutlass.const_expr(params.mQRanges is not None):
+            # Each lane reads its own row; no neighbour shuffle needed.
+            seqlen = Int32(0)
+            if batch_idx < params.num_batch:
+                assert params.mQRanges is not None  # mypy
+                seqlen = params.mQRanges[batch_idx, 1] - params.mQRanges[batch_idx, 0]
         else:
             assert params.mCuSeqlensQ is not None
             cur_cu_seqlen = Int32(0)

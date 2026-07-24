@@ -597,8 +597,8 @@ class FFAFwdSm100:
         mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
         softmax_scale: Float32,
-        mCuSeqlensQ: Optional[cute.Tensor] = None,
-        mCuSeqlensK: Optional[cute.Tensor] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
         mSeqUsedQ: Optional[cute.Tensor] = None,
         mSeqUsedK: Optional[cute.Tensor] = None,
         mPageTable: Optional[cute.Tensor] = None,
@@ -634,6 +634,12 @@ class FFAFwdSm100:
             assert (
                 mMaskTypes is None
             ), "static mask specialization must not receive mMaskTypes"
+        assert (mQRanges is None) == (
+            mKRanges is None
+        ), "mQRanges and mKRanges must be passed together"
+        assert (
+            (mQRanges is not None) == self.is_varlen_q
+        ), "is_varlen_q compile flag disagrees with mQRanges argument"
         # ///////////////////////////////////////////////////////////////////////////////
         # Make mQ/mK/mV/mO/mLSE tensors
         # with layout transformations for specific memory access patterns
@@ -652,7 +658,7 @@ class FFAFwdSm100:
         # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
         # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
         Q_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
+            [1, 3, 2, 0] if const_expr(mQRanges is None) else [0, 2, 1]
         )
         mQ = cute.make_tensor(
             mQ.iterator, cute.select(mQ.layout, mode=Q_layout_transpose)
@@ -663,7 +669,7 @@ class FFAFwdSm100:
         # (b, sk, nhk, hd) -> (sk, hd, nhk, b)
         # or (sk, nhk, hd) -> (sk, hd, nhk) if there's cu_seqlens_k
         KV_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
+            [1, 3, 2, 0] if const_expr(mKRanges is None) else [0, 2, 1]
         )
         mK, mV = [
             cute.make_tensor(
@@ -675,7 +681,7 @@ class FFAFwdSm100:
         # (sk, hd, nhk, b) -> (hd, sk, nhk, b)
         # or (sk, nhk, hd) -> (hd, sk, nhk) if there's cu_seqlens_k
         V_layout_transpose = (
-            [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
+            [1, 0, 2, 3] if const_expr(mKRanges is None) else [1, 0, 2]
         )
         mV = cute.make_tensor(  # actually => actually V.T
             mV.iterator, cute.select(mV.layout, mode=V_layout_transpose)
@@ -685,23 +691,23 @@ class FFAFwdSm100:
 
         if const_expr(self.is_split_kv):
             O_layout_transpose = (
-                [2, 4, 3, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 3, 2, 0]
+                [2, 4, 3, 1, 0] if const_expr(mQRanges is None) else [1, 3, 2, 0]
             )
             LSE_layout_transpose = (
-                [3, 2, 1, 0] if const_expr(mCuSeqlensQ is None) else [2, 1, 0]
+                [3, 2, 1, 0] if const_expr(mQRanges is None) else [2, 1, 0]
             )
             num_splits = mO.shape[0]
         else:
             # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
             # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
             O_layout_transpose = (
-                [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
+                [1, 3, 2, 0] if const_expr(mQRanges is None) else [0, 2, 1]
             )
 
             # (b, nhq, sq) -> (sq, nhq, b)
             # or (nhq, sq) -> (sq, nhq) if there's cu_seqlens_q
             LSE_layout_transpose = (
-                [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
+                [2, 1, 0] if const_expr(mQRanges is None) else [1, 0]
             )
             num_splits = Int32(1)
 
@@ -759,7 +765,7 @@ class FFAFwdSm100:
 
         self.use_tma_O = (
             self.arch >= Arch.sm_90
-            and mCuSeqlensQ is None
+            and mQRanges is None
             and mSeqUsedQ is None
             and not (self.pack_gqa and self.m_block_size % self.qhead_per_kvhead != 0)
             and not (self.pack_gqa and self.is_split_kv)
@@ -776,7 +782,7 @@ class FFAFwdSm100:
             ):
                 self.ex2_emu_freq = (
                     32
-                    if mCuSeqlensQ is not None or mSeqUsedQ is not None
+                    if mQRanges is not None or mSeqUsedQ is not None
                     else self._tune.get("ex2_emu_freq", 10)
                 )
 
@@ -1027,8 +1033,8 @@ class FFAFwdSm100:
             num_block=cute.ceil_div(cute.size(mQ.shape[0]), _num_block_divisor),
             num_head=cute.size(mQ.shape[2]),
             num_batch=cute.size(mQ.shape[3])
-            if const_expr(mCuSeqlensQ is None)
-            else cute.size(mCuSeqlensQ.shape[0] - 1),
+            if const_expr(mQRanges is None)
+            else cute.size(mQRanges.shape[0]),
             num_splits=num_splits,
             seqlen_k=cute.size(mK.shape[0])
             if const_expr(mPageTable is None)
@@ -1038,10 +1044,10 @@ class FFAFwdSm100:
                 0
             ],  # Note that this is different from Sm90 since we transpose mV in Sm100
             total_q=cute.size(mQ.shape[0])
-            if const_expr(mCuSeqlensQ is not None)
+            if const_expr(mQRanges is not None)
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],
-            mCuSeqlensQ=mCuSeqlensQ,
+            mQRanges=mQRanges,
             mSeqUsedQ=mSeqUsedQ,
             qhead_per_kvhead_packgqa=self.qhead_per_kvhead
             if const_expr(self.pack_gqa)
@@ -1240,8 +1246,8 @@ class FFAFwdSm100:
             mV,
             mO,
             mLSE,
-            mCuSeqlensQ,
-            mCuSeqlensK,
+            mQRanges,
+            mKRanges,
             mSeqUsedQ,
             mSeqUsedK,
             mPageTable,
@@ -1290,8 +1296,8 @@ class FFAFwdSm100:
         mV: cute.Tensor,
         mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
-        mCuSeqlensQ: Optional[cute.Tensor],
-        mCuSeqlensK: Optional[cute.Tensor],
+        mQRanges: Optional[cute.Tensor],
+        mKRanges: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mSeqUsedK: Optional[cute.Tensor],
         mPageTable: Optional[cute.Tensor],
@@ -1778,8 +1784,8 @@ class FFAFwdSm100:
             seqlen_k_static=mK.shape[0]
             if const_expr(mPageTable is None)
             else mK.shape[0] * mPageTable.shape[1],
-            mCuSeqlensQ=mCuSeqlensQ,
-            mCuSeqlensK=mCuSeqlensK,
+            mQRanges=mQRanges,
+            mKRanges=mKRanges,
             mSeqUsedQ=mSeqUsedQ,
             mSeqUsedK=mSeqUsedK,
             mCuTotalMBlocks=(
