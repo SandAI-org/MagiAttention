@@ -166,7 +166,8 @@ def _flex_flash_attn_fwd(
         batch_size, seqlen_q = q.shape[:2]
         total_q = batch_size * seqlen_q
     else:
-        batch_size = q_ranges.shape[0]
+        num_ranges = q_ranges.shape[0]
+        batch_size = num_ranges  # each relation occupies one scheduler batch slot
         seqlen_q = None
         total_q = q.shape[0]
     seqlen_k = k.shape[-3]
@@ -830,7 +831,8 @@ def _flex_flash_attn_bwd(
         batch_size, seqlen_k = k.shape[:2]
         total_k = batch_size * seqlen_k
     else:
-        batch_size = q_ranges.shape[0]
+        num_ranges = q_ranges.shape[0]
+        batch_size = num_ranges  # each relation occupies one scheduler batch slot
         total_q = q.shape[0]
         seqlen_q = max_seqlen_q if max_seqlen_q is not None else total_q
         total_k = k.shape[0]
@@ -944,7 +946,7 @@ def _flex_flash_attn_bwd(
         )
     else:
         total_q_rounded_padded = (
-            (total_q + (batch_size + 1) * m_block_size - 1)
+            (total_q + (num_ranges + 1) * m_block_size - 1)
             // m_block_size
             * m_block_size
         )
@@ -985,7 +987,7 @@ def _flex_flash_attn_bwd(
         else:
             cluster_tile_n = cluster_size * n_block_size
             total_k_rounded_padded = (
-                (total_k + (batch_size + 1) * cluster_tile_n - 1)
+                (total_k + (num_ranges + 1) * cluster_tile_n - 1)
                 // cluster_tile_n
                 * cluster_tile_n
             )
