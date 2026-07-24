@@ -406,6 +406,10 @@ def _flex_flash_attn_fwd(
         intra_wg_overlap,
         use_clc_scheduler,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+        is_index_sparse,
+        index_sparse_tiles.inner_load_mode
+        if is_index_sparse and index_sparse_tiles is not None
+        else None,
     )
 
     if compile_key not in _flex_flash_attn_fwd.compile_cache:

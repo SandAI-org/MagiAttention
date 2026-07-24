@@ -191,14 +191,14 @@ def _make_bst_bwd(sq, n_blocks, topk_blocks, sel):
     )
 
 
-def _make_is_tiles(sq, sk, topk_blocks, sel):
-    """IS-TMA tiles for FWD (m=256) and BWD-LoopK (m=128), kbs=128."""
+def _make_is_indices(sq, topk_blocks, sel):
+    """Build block-aligned token indices (B, NHQ, SQ, topk) for IS-TMA."""
     topk = topk_blocks * N_BLOCK_SIZE
     indices = (
         sel.unsqueeze(-1) * N_BLOCK_SIZE
         + torch.arange(N_BLOCK_SIZE, device="cuda").unsqueeze(0)
     ).reshape(-1)
-    indices = (
+    return (
         indices.unsqueeze(0)
         .unsqueeze(0)
         .unsqueeze(0)
@@ -206,9 +206,14 @@ def _make_is_tiles(sq, sk, topk_blocks, sel):
         .contiguous()
         .int()
     )
+
+
+def _make_is_tiles_fwd(sq, sk, topk_blocks, sel):
+    """IS-TMA tiles for FWD (m=256), kbs=128."""
+    indices = _make_is_indices(sq, topk_blocks, sel)
     qhpk = NHQ // NHK
     fwd_m = _fwd_m_block(sq, qhpk, True)
-    fwd_tiles = prepare_index_sparse_tiles(
+    return prepare_index_sparse_tiles(
         indices,
         batch_size=1,
         seqlen_q=sq,
@@ -220,7 +225,12 @@ def _make_is_tiles(sq, sk, topk_blocks, sel):
         pack_gqa=True,
         sparse_k_block_size=128,
     )
-    bwd_tiles = prepare_index_sparse_tiles(
+
+
+def _make_is_tiles_bwd(sq, sk, topk_blocks, sel):
+    """IS-TMA tiles for BWD-LoopK (m=128), kbs=128."""
+    indices = _make_is_indices(sq, topk_blocks, sel)
+    return prepare_index_sparse_tiles(
         indices,
         batch_size=1,
         seqlen_q=sq,
@@ -232,7 +242,6 @@ def _make_is_tiles(sq, sk, topk_blocks, sel):
         pack_gqa=True,
         sparse_k_block_size=128,
     )
-    return fwd_tiles, bwd_tiles
 
 
 def _run_experiment(force=False, max_kvseqlen=None):
@@ -247,7 +256,6 @@ def _run_experiment(force=False, max_kvseqlen=None):
     print(f"  NHQ={NHQ}, NHK={NHK}, HD={HD}, PackGQA, bf16, B300", flush=True)
     print("  Methods: Dense (gathered KV) / BS kbs=128 / IS-TMA kbs=128\n", flush=True)
 
-    qhpk = NHQ // NHK
     scale = HD**-0.5
 
     for kvseqlen, qseqlen, topk in scenarios:
@@ -335,6 +343,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                     softmax_scale=scale,
                                     flex_attn_args=fwd_args,
                                     pack_gqa=True,
+                                    swap_bwd_qk_loop=True,
                                 )
 
                     elif method == "block_sparse":
@@ -392,19 +401,19 @@ def _run_experiment(force=False, max_kvseqlen=None):
                         v = torch.randn(
                             1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
                         )
-                        fwd_tiles, bwd_tiles = _make_is_tiles(
-                            qseqlen, kvseqlen, topk_blocks, sel
-                        )
-                        fwd_args = TorchFlexAttnArgs(index_sparse_tiles=fwd_tiles)
-                        out, lse = _flex_flash_attn_fwd(
-                            q,
-                            k,
-                            v,
-                            softmax_scale=scale,
-                            flex_attn_args=fwd_args,
-                            pack_gqa=True,
-                        )
                         if not is_bwd:
+                            fwd_tiles = _make_is_tiles_fwd(
+                                qseqlen, kvseqlen, topk_blocks, sel
+                            )
+                            fwd_args = TorchFlexAttnArgs(index_sparse_tiles=fwd_tiles)
+                            _flex_flash_attn_fwd(
+                                q,
+                                k,
+                                v,
+                                softmax_scale=scale,
+                                flex_attn_args=fwd_args,
+                                pack_gqa=True,
+                            )
 
                             def run_fn():
                                 _flex_flash_attn_fwd(
@@ -417,6 +426,24 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                 )
 
                         else:
+                            fwd_tiles = _make_is_tiles_fwd(
+                                qseqlen, kvseqlen, topk_blocks, sel
+                            )
+                            fwd_args = TorchFlexAttnArgs(index_sparse_tiles=fwd_tiles)
+                            out, lse = _flex_flash_attn_fwd(
+                                q,
+                                k,
+                                v,
+                                softmax_scale=scale,
+                                flex_attn_args=fwd_args,
+                                pack_gqa=True,
+                            )
+                            del fwd_tiles, fwd_args
+                            gc.collect()
+                            torch.cuda.empty_cache()
+                            bwd_tiles = _make_is_tiles_bwd(
+                                qseqlen, kvseqlen, topk_blocks, sel
+                            )
                             bwd_args = TorchFlexAttnArgs(index_sparse_tiles=bwd_tiles)
                             dO = torch.randn_like(out)
 
