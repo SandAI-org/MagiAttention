@@ -152,6 +152,7 @@ class FFABwdPreProcess:
         mdQaccum: Optional[cute.Tensor],
         mCuSeqlensQ: Optional[cute.Tensor],  # (batch + 1,)
         mSeqUsedQ: Optional[cute.Tensor],  # (batch,)
+        mQRanges: Optional[cute.Tensor],  # (batch, 2)
         mdLSE: Optional[cute.Tensor],  # (batch, nheads, seqlen) or (nheads, total_q)
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
@@ -185,7 +186,8 @@ class FFABwdPreProcess:
         self._setup_attributes()
 
         # (batch, nheads, seqlen) -> (seqlen, nheads, batch) or (total_q, nheads) -> (nheads, total_q)
-        transpose = [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
+        is_varlen = mCuSeqlensQ is not None or mQRanges is not None
+        transpose = [2, 1, 0] if const_expr(not is_varlen) else [1, 0]
         mPdPsum = layout_utils.select(mPdPsum, transpose)
         if const_expr(mLSE is not None):
             mLSE = layout_utils.select(mLSE, transpose)
@@ -195,7 +197,11 @@ class FFABwdPreProcess:
         if const_expr(mdQaccum is not None):
             mdQaccum = layout_utils.select(mdQaccum, transpose)
 
-        if const_expr(mCuSeqlensQ is not None):
+        if const_expr(mQRanges is not None):
+            TileScheduler = SingleTileVarlenScheduler
+            num_head = mO.shape[1]
+            num_batch = mQRanges.shape[0]
+        elif const_expr(mCuSeqlensQ is not None):
             assert mCuSeqlensQ is not None  # mypy
             TileScheduler = SingleTileVarlenScheduler
             num_head = mO.shape[1]
@@ -217,6 +223,7 @@ class FFABwdPreProcess:
             tile_shape_mn=(self.tile_m, 1),
             mCuSeqlensQ=mCuSeqlensQ,
             mSeqUsedQ=mSeqUsedQ,
+            mQRanges=mQRanges,
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
@@ -231,6 +238,7 @@ class FFABwdPreProcess:
             mdQaccum,
             mCuSeqlensQ,
             mSeqUsedQ,
+            mQRanges,
             mdLSE,
             self.gmem_tiled_copy_O,
             self.gmem_tiled_copy_dQaccum,
@@ -254,6 +262,7 @@ class FFABwdPreProcess:
         mdQaccum: Optional[cute.Tensor],
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
+        mQRanges: Optional[cute.Tensor],
         mdLSE: Optional[cute.Tensor],
         gmem_tiled_copy_O: cute.TiledCopy,
         gmem_tiled_copy_dQaccum: cute.TiledCopy,
@@ -280,7 +289,12 @@ class FFABwdPreProcess:
             # Get the appropriate tiles for this thread block.
             # ///////////////////////////////////////////////////////////////////////////////
             seqlen = SeqlenInfo.create(
-                batch_idx, mO.shape[1], mCuSeqlensQ, mSeqUsedQ, tile=self.tile_m
+                batch_idx,
+                mO.shape[1],
+                mCuSeqlensQ,
+                mSeqUsedQ,
+                tile=self.tile_m,
+                ranges=mQRanges,
             )
             mO_cur = seqlen.offset_batch(mO, batch_idx, dim=0)[None, head_idx, None]
             mdO_cur = seqlen.offset_batch(mdO, batch_idx, dim=0)[None, head_idx, None]
@@ -404,6 +418,7 @@ def _compile_bwd_preprocess(
     head_dim_v,
     m_block_size,
     has_cuseqlens_q,
+    has_ranges,
     has_seqused_q,
     has_dlse,
     has_dq_accum,
@@ -426,13 +441,19 @@ def _compile_bwd_preprocess(
         mdKaccum,
         mdVaccum,
     ) = make_fake_bwd_tensors(
-        dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False
+        dtype, has_gqa=True, varlen_q=has_cuseqlens_q or has_ranges, varlen_k=False
     )
-    batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
+    varlen_q = has_cuseqlens_q or has_ranges
+    batch = mQ.shape[0] if not varlen_q else cute.sym_int()
     batchp1 = cute.sym_int()
     mCuSeqlensQ = (
         fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
         if has_cuseqlens_q
+        else None
+    )
+    mQRanges = (
+        fake_tensor(cutlass.Int32, (cute.sym_int(), 2), divisibility=1)
+        if has_ranges
         else None
     )
     mSequsedQ = (
@@ -455,6 +476,7 @@ def _compile_bwd_preprocess(
         mdQaccum,
         mCuSeqlensQ,
         mSequsedQ,
+        mQRanges,
         mdLSE,
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--enable-tvm-ffi",
@@ -476,15 +498,16 @@ def bwd_preprocess(
     head_dim_v: int,
     m_block_size: int,
     use_padded_offsets: bool = True,
+    q_ranges: torch.Tensor | None = None,
 ):
     """Backward preprocess: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum."""
-    is_varlen = cu_seqlens_q is not None
     compile_key = (
         dtype,
         head_dim,
         head_dim_v,
         m_block_size,
-        is_varlen,
+        cu_seqlens_q is not None,
+        q_ranges is not None,
         seqused_q is not None,
         dlse is not None,
         dq_accum is not None,
@@ -495,7 +518,7 @@ def bwd_preprocess(
             *compile_key
         )
     bwd_preprocess.compile_cache[compile_key](
-        out, dout, dpsum, lse, lse_log2, dq_accum, cu_seqlens_q, seqused_q, dlse
+        out, dout, dpsum, lse, lse_log2, dq_accum, cu_seqlens_q, seqused_q, q_ranges, dlse
     )
 
 
