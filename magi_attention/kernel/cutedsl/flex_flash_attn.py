@@ -57,6 +57,7 @@ from .ffa_utils import (
     maybe_contiguous,
     normalize_mask_type_spec,
     ranges_to_cu_seqlens,
+    ranges_workspace_offsets,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
@@ -1044,6 +1045,19 @@ def _flex_flash_attn_bwd(
     kernel_varlen_k_meta = k_ranges if major_arch in (10, 11) else cu_seqlens_k
     pre_post_q_ranges = q_ranges if major_arch in (10, 11) else None
     pre_post_k_ranges = k_ranges if major_arch in (10, 11) else None
+    # Workspace starts for dq_accum/dpsum/lse_log2 (and dKV accum under GQA).
+    # K side uses the cluster tile: the dKV accum regions are laid out at
+    # cluster_size * n_block_size granularity.
+    q_ws_offsets = (
+        ranges_workspace_offsets(q_ranges, m_block_size)
+        if pre_post_q_ranges is not None
+        else None
+    )
+    k_ws_offsets = (
+        ranges_workspace_offsets(k_ranges, cluster_size * n_block_size)
+        if pre_post_k_ranges is not None and dKV_postprocess
+        else None
+    )
 
     bwd_preprocess(
         out,
@@ -1061,6 +1075,7 @@ def _flex_flash_attn_bwd(
         m_block_size,
         use_padded_offsets=False,
         q_ranges=pre_post_q_ranges,
+        q_ws_offsets=q_ws_offsets,
     )
 
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
@@ -1186,6 +1201,10 @@ def _flex_flash_attn_bwd(
             to_cute_tensor(t, assumed_align=4) if t is not None else None
             for t in (kernel_varlen_q_meta, kernel_varlen_k_meta)
         ]
+        q_ws_tensor, k_ws_tensor = [
+            to_cute_tensor(t, assumed_align=4, leading_dim=0) if t is not None else None
+            for t in (q_ws_offsets, k_ws_offsets)
+        ]
         seqused_q_tensor = seqused_k_tensor = None
         dQ_semaphore_tensor, dK_semaphore_tensor, dV_semaphore_tensor = [
             convert_from_dlpack_leading_static(
@@ -1305,6 +1324,11 @@ def _flex_flash_attn_bwd(
             varlen_k_meta_tensor,
             seqused_q_tensor,
             seqused_k_tensor,
+        ]
+        if major_arch in [10, 11]:
+            # Workspace-offset slots exist only in the SM100 __call__ signature.
+            bwd_compile_args.extend([q_ws_tensor, k_ws_tensor])
+        bwd_compile_args += [
             None,  # window_size_left
             None,  # window_size_right
             dQ_semaphore_tensor,
@@ -1339,6 +1363,10 @@ def _flex_flash_attn_bwd(
         kernel_varlen_k_meta,
         None,  # seqlen_used_q
         None,  # seqlen_used_k
+    ]
+    if major_arch in [10, 11]:
+        bwd_call_args.extend([q_ws_offsets, k_ws_offsets])
+    bwd_call_args += [
         None,  # window_size_left
         None,  # window_size_right
         dQ_semaphore,
@@ -1390,6 +1418,7 @@ def _flex_flash_attn_bwd(
         use_2cta_instrs=use_2cta_instrs,
         cluster_size=1,
         ranges=pre_post_q_ranges,
+        ws_offsets=q_ws_offsets,
     )
 
     if dKV_postprocess:
@@ -1409,6 +1438,7 @@ def _flex_flash_attn_bwd(
             dKV_swapAB,
             cluster_size=cluster_size,
             ranges=pre_post_k_ranges,
+            ws_offsets=k_ws_offsets,
         )
         # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
         bwd_postprocess(
@@ -1426,6 +1456,7 @@ def _flex_flash_attn_bwd(
             dKV_swapAB,
             cluster_size=cluster_size,
             ranges=pre_post_k_ranges,
+            ws_offsets=k_ws_offsets,
         )
 
     return dq, dk, dv

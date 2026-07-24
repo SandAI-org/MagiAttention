@@ -241,6 +241,7 @@ class FFABwdPostProcess:
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mQRanges: Optional[cute.Tensor],
+        mQWSOffsets: Optional[cute.Tensor],
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -306,6 +307,7 @@ class FFABwdPostProcess:
             mCuSeqlensQ,
             mSeqUsedQ,
             mQRanges,
+            mQWSOffsets,
             scale,
             self.tiled_mma,
             self.dQ_swapAB,
@@ -331,6 +333,7 @@ class FFABwdPostProcess:
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mQRanges: Optional[cute.Tensor],
+        mQWSOffsets: Optional[cute.Tensor],
         scale: cutlass.Float32,
         tiled_mma: cute.TiledMma,
         dQ_swapAB: cutlass.Constexpr,
@@ -386,6 +389,7 @@ class FFABwdPostProcess:
                 mSeqUsedQ=mSeqUsedQ,
                 mSeqUsedK=None,
                 mQRanges=mQRanges,
+                mQWSOffsets=mQWSOffsets,
                 tile_m=self.tile_m * self.cluster_size,
             )
             if const_expr(not seqlen.has_cu_seqlens_q):
@@ -590,7 +594,7 @@ class FFABwdPostProcess:
                     tiled_copy_t2r = tcgen05.make_tmem_copy(tmem_load_atom, tdQtdQ)
                     thr_copy_t2r = tiled_copy_t2r.get_slice(tidx)
                     tdQrdQ_t2r_shape = thr_copy_t2r.partition_D(tdQcdQ).shape
-                    acc = cute.make_fragment(tdQrdQ_t2r_shape, Float32)
+                    acc = cute.make_rmem_tensor(tdQrdQ_t2r_shape, Float32)
                 tdQrdQaccum = cute.make_tensor(
                     acc.iterator, cute.make_layout(tdQsdQaccum.shape)
                 )
@@ -668,6 +672,7 @@ def _compile_bwd_postprocess(
     swap_ab,
     has_cuseqlens_q,
     has_ranges,
+    has_ws_offsets,
     has_seqused_q,
     use_2cta_instrs,
     cluster_size,
@@ -700,9 +705,19 @@ def _compile_bwd_postprocess(
         if has_cuseqlens_q
         else None
     )
+    mQWSOffsets = (
+        fake_tensor(cutlass.Int32, (cute.sym_int(),), divisibility=1)
+        if has_ws_offsets
+        else None
+    )
     mQRanges = (
         fake_tensor(cutlass.Int32, (cute.sym_int(), 2), divisibility=1)
         if has_ranges
+        else None
+    )
+    mQWSOffsets = (
+        fake_tensor(cutlass.Int32, (cute.sym_int(),), divisibility=1)
+        if has_ws_offsets
         else None
     )
     mSeqUsedQ = (
@@ -727,6 +742,7 @@ def _compile_bwd_postprocess(
         mCuSeqlensQ,
         mSeqUsedQ,
         mQRanges,
+        mQWSOffsets,
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--enable-tvm-ffi",
     )
@@ -748,6 +764,7 @@ def bwd_postprocess(
     use_2cta_instrs=False,
     cluster_size=1,
     ranges=None,
+    ws_offsets=None,
 ):
     """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
     compile_key = (
@@ -759,6 +776,7 @@ def bwd_postprocess(
         swap_ab,
         cu_seqlens is not None,
         ranges is not None,
+        ws_offsets is not None,
         seqused is not None,
         use_2cta_instrs,
         cluster_size,
@@ -775,6 +793,7 @@ def bwd_postprocess(
         cu_seqlens,
         seqused,
         ranges,
+        ws_offsets,
     )
 
 
