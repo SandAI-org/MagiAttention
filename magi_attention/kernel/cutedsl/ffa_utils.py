@@ -279,6 +279,55 @@ def ranges_workspace_offsets(ranges: torch.Tensor, tile: int) -> torch.Tensor:
     return starts.to(torch.int32).contiguous()
 
 
+def merge_ranges(
+    outer_ranges: torch.Tensor,
+    inner_ranges: torch.Tensor,
+    mask_types: torch.Tensor,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
+    """Sort relations by outer range and deduplicate for merged-range scheduling.
+
+    Torch-native mirror of the magi_attn_ext helper of the same name: returns
+    (merge_outer_ranges, sorted_outer_ranges, sorted_inner_ranges,
+    sorted_mask_types, qk_map, unique_count). Rows past unique_count are
+    zero-padded; qk_map[j] is where merged range j starts in the sorted arrays.
+    """
+    num_ranges = outer_ranges.shape[0]
+    device = outer_ranges.device
+    key = (outer_ranges[:, 0].to(torch.int64) << 32) | outer_ranges[:, 1].to(
+        torch.int64
+    )
+    order = torch.argsort(key, stable=True)
+    sorted_outer = outer_ranges.index_select(0, order)
+    sorted_inner = inner_ranges.index_select(0, order)
+    sorted_types = mask_types.index_select(0, order)
+    sorted_key = key.index_select(0, order)
+
+    is_first = torch.ones(num_ranges, dtype=torch.bool, device=device)
+    is_first[1:] = sorted_key[1:] != sorted_key[:-1]
+    unique_count = is_first.sum(dtype=torch.int32)
+    merged_idx = torch.cumsum(is_first, dim=0) - 1
+
+    qk_map = torch.zeros(num_ranges, dtype=torch.int32, device=device)
+    qk_map.scatter_reduce_(
+        0,
+        merged_idx,
+        torch.arange(num_ranges, dtype=torch.int32, device=device),
+        reduce="amin",
+        include_self=False,
+    )
+    merge_outer = torch.zeros_like(sorted_outer)
+    merge_outer.scatter_reduce_(
+        0,
+        merged_idx.unsqueeze(1).expand(-1, 2),
+        sorted_outer,
+        reduce="amin",
+        include_self=False,
+    )
+    return merge_outer, sorted_outer, sorted_inner, sorted_types, qk_map, unique_count
+
+
 def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
     """Collapse q/k ranges down to a cu_seqlens tensor.
 
