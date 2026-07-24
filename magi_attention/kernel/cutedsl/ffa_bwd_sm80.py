@@ -899,720 +899,723 @@ class FFABwdSm80:
         work_tile = tile_scheduler.initial_work_tile_info()
         n_block, head_idx, batch_idx, _ = work_tile.tile_idx
 
-        # --- Set up seqlen info ---
+        # Varlen upper-bound grids launch surplus CTAs; nothing below is
+        # predicated against them, so bail out before touching gmem.
+        if work_tile.is_valid_tile:
+            # --- Set up seqlen info ---
 
-        seqlen_info = SeqlenInfoQK.create(
-            batch_idx,
-            mQ.shape[1],
-            mK.shape[1],
-            mCuSeqlensQ=mCuSeqlensQ,
-            mCuSeqlensK=mCuSeqlensK,
-            mSeqUsedQ=mSeqUsedQ,
-            mSeqUsedK=mSeqUsedK,
-            tile_m=self.m_block_size,
-            tile_n=self.n_block_size,
-        )
-
-        # TODO: return early if m_block_max == 0
-        m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.m_block_size)
-        m_block_min = 0
-        if cutlass.const_expr(self.is_causal):
-            m_block_min = max(
-                (
-                    n_block * self.n_block_size
-                    + seqlen_info.seqlen_q
-                    - seqlen_info.seqlen_k
-                )
-                // self.m_block_size,
-                m_block_min,
+            seqlen_info = SeqlenInfoQK.create(
+                batch_idx,
+                mQ.shape[1],
+                mK.shape[1],
+                mCuSeqlensQ=mCuSeqlensQ,
+                mCuSeqlensK=mCuSeqlensK,
+                mSeqUsedQ=mSeqUsedQ,
+                mSeqUsedK=mSeqUsedK,
+                tile_m=self.m_block_size,
+                tile_n=self.n_block_size,
             )
 
-        # NOTE: Start async loads of the last mn-tile, where we take care of the mn residue
-        m_block = m_block_min
-
-        d_head = mQ.shape[cute.rank(mQ) - 1]
-        d_head_v = mdO.shape[cute.rank(mdO) - 1]
-        head_idx_kv = (
-            head_idx // self.qhead_per_kvhead
-            if cutlass.const_expr(not self.pack_gqa)
-            else head_idx
-        )
-
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Make gmem tiles for Q/K/V/dO/LSE/dPsum/dQacc
-        # ///////////////////////////////////////////////////////////////////////////////
-
-        # mQ_cur/mdO_cur: (sQ,HD):(HD*nhQ,1)
-        # mK_cur/mV_cur: (sK,HD):(HD*nhK,1)
-        # mLSE_cur/mdPsum_cur: (sQ):(1)
-        # mdQacc_cur: (sQ*HD):(1)
-        blkQ_shape = (self.m_block_size, self.head_dim_padded)
-        blkK_shape = (self.n_block_size, self.head_dim_padded)
-        blkV_shape = (self.n_block_size, self.head_dim_v_padded)
-        blkdO_shape = (self.m_block_size, self.head_dim_v_padded)
-        if cutlass.const_expr(not seqlen_info.has_cu_seqlens_q):
-            mQ_cur = mQ[batch_idx, None, head_idx, None]
-            mLSE_cur = mLSE[batch_idx, head_idx, None]
-            mdO_cur = mdO[batch_idx, None, head_idx, None]
-            mdPsum_cur = mdPsum[batch_idx, head_idx, None]
-            mdQacc_cur = mdQacc[batch_idx, head_idx, None]
-        else:
-            padded_offset_q = seqlen_info.padded_offset_q
-            mQ_cur = cute.domain_offset(
-                (seqlen_info.offset_q, 0), mQ[None, head_idx, None]
-            )
-            mLSE_cur = cute.domain_offset((padded_offset_q,), mLSE[head_idx, None])
-            mdO_cur = cute.domain_offset(
-                (seqlen_info.offset_q, 0), mdO[None, head_idx, None]
-            )
-            mdPsum_cur = cute.domain_offset((padded_offset_q,), mdPsum[head_idx, None])
-            mdQacc_cur = cute.domain_offset(
-                (padded_offset_q * self.head_dim_padded,), mdQacc[head_idx, None]
-            )
-        if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
-            mK_cur, mV_cur = [t[batch_idx, None, head_idx_kv, None] for t in (mK, mV)]
-        else:
-            mK_cur, mV_cur = [
-                cute.domain_offset(
-                    (seqlen_info.offset_k, 0), t[None, head_idx_kv, None]
-                )
-                for t in (mK, mV)
-            ]
-
-        # gQ/gdO: (tileQ64,tileHD128,restQ):(HD*nhQ,1,HD*nhQ*tileQ)
-        # gK/gV: (tileK128,tileHD128):(HD*nhK,1)
-        # gLSE/gdPsum: (tileQ64,restQ):(1,tileQ)
-        # gdQacc: (tileQ64*tileHD128,restQ):(1,tileQ*tileHD)
-        # where restQ = sQ // tileQ64
-        gQ = cute.local_tile(mQ_cur, blkQ_shape, (None, 0))
-        gK = cute.local_tile(mK_cur, blkK_shape, (n_block, 0))
-        gV = cute.local_tile(mV_cur, blkV_shape, (n_block, 0))
-        gdO = cute.local_tile(mdO_cur, blkdO_shape, (None, 0))
-        gLSE = cute.local_tile(mLSE_cur, (self.m_block_size,), (None,))
-        gdPsum = cute.local_tile(mdPsum_cur, (self.m_block_size,), (None,))
-        gdQacc = cute.local_tile(
-            mdQacc_cur, (self.m_block_size * self.head_dim_padded,), (None,)
-        )
-
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Alloc smem storage and make smem tensors for sQ/sK/sV
-        # ///////////////////////////////////////////////////////////////////////////////
-
-        smem = cutlass.utils.SmemAllocator()
-        storage = smem.allocate(self.shared_storage_cls)
-
-        # sQ/sdO: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_HD64,LAY_tileHD2),(1,1)):((64,512),(1,4096),(0,0))
-        # sK/sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
-        # sP/sdS: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_K64,LAY_tileK2)):((64,512),(1,4096))
-        # sLSE/sdPsum: (tileQ64,1):(1,64) | sLSEMma/sdPsumMma: (tileQ64,tileHD128,1):(1,0,64)
-        sQ: cute.Tensor = storage.sQ.get_tensor(sQ_layout)
-        sK: cute.Tensor = storage.sK.get_tensor(sK_layout)
-        if cutlass.const_expr(not self.share_QV_smem):
-            sV: cute.Tensor = storage.sV.get_tensor(sV_layout)
-        else:
-            sV = cute.make_tensor(
-                cute.recast_ptr(sQ.iterator, dtype=self.dtype), sV_layout
-            )
-        sdO: cute.Tensor = storage.sdO.get_tensor(sdO_layout)
-        sP: cute.Tensor = storage.sP.get_tensor(sPdS_layout)
-        sdS: cute.Tensor = storage.sdS.get_tensor(sPdS_layout)
-        sLSE: cute.Tensor = storage.sLSE.get_tensor(sLSE_layout)
-        sdPsum: cute.Tensor = storage.sdPsum.get_tensor(sLSE_layout)
-        sLSEMma: cute.Tensor = storage.sLSE.get_tensor(sLSEMma_layout)
-        sdPsumMma: cute.Tensor = storage.sdPsum.get_tensor(sLSEMma_layout)
-        # Transpose view of tensors for tiled mma
-        sQt, sdOt, sKt, sPt, sdSt = [
-            layout_utils.transpose_view(t) for t in (sQ, sdO, sK, sP, sdS)
-        ]
-        # Reuse sK/sV buffer for sdK/sdV
-        sdK = cute.make_tensor(sK.iterator, sK_layout)
-        sdV = cute.make_tensor(sV.iterator, sV_layout)
-
-        # ///////////////////////////////////////////////////////////////////////////////
-        # G2S/S2G tiled copy partitions for Q/K/V/dO/LSE/dPsum/dQacc
-        # ///////////////////////////////////////////////////////////////////////////////
-
-        # tQgQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,restQ):((1,0),32768,64,65536)
-        # tQsQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,STAGE=(1,1)):((1,0),2048,4096,(0,0))
-        # tKgK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),8192,64)
-        # tKsK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),2048,8192)
-        gmem_thr_copy_QK = gmem_tiled_copy_QK.get_slice(tidx)
-        tQgQ = gmem_thr_copy_QK.partition_S(gQ)
-        tQsQ = gmem_thr_copy_QK.partition_D(sQ)
-        tKgK = gmem_thr_copy_QK.partition_S(gK)
-        tKsK = gmem_thr_copy_QK.partition_D(sK)
-
-        # tVgV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),8192,64)
-        # tVsV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),2048,8192)
-        # tdOgdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,restQ):((1,0),32768,64,65536)
-        # tdOsdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,STAGE=(1,1)):((1,0),2048,4096,(0,0))
-        gmem_thr_copy_VdO = gmem_tiled_copy_VdO.get_slice(tidx)
-        tVgV = gmem_thr_copy_VdO.partition_S(gV)
-        tVsV = gmem_thr_copy_VdO.partition_D(sV)
-        tdOgdO = gmem_thr_copy_VdO.partition_S(gdO)
-        tdOsdO = gmem_thr_copy_VdO.partition_D(sdO)
-
-        # tLSEgLSE: (CPY_ATOM=(4,1),CPY_Q1,restQ):((1,0),0,64)
-        # tLSEsLSE: (CPY_ATOM=(4,1),CPY_Q1,STAGE1):((1,0),0,64)
-        # tLSEgdPsum: (CPY_ATOM=(4,1),CPY_Q1,restQ):((1,0),0,64)
-        # tLSEsdPsum: (CPY_ATOM=(4,1),CPY_Q1,STAGE1):((1,0),0,64)
-        gmem_thr_copy_lse = gmem_tiled_copy_LSE.get_slice(tidx)
-        tLSEgLSE = gmem_thr_copy_lse.partition_S(gLSE)
-        tLSEsLSE = gmem_thr_copy_lse.partition_D(sLSE)
-        tLSEgdPsum = gmem_thr_copy_lse.partition_S(gdPsum)
-        tLSEsdPsum = gmem_thr_copy_lse.partition_D(sdPsum)
-
-        # tdQgdQacc: (CPY_ATOM=(1,1),CPY_V32,restQ):((0,0),256,8192)
-        gmem_thr_copy_dQacc = gmem_tiled_copy_dQacc.get_slice(tidx)
-        tdQgdQacc = gmem_thr_copy_dQacc.partition_S(gdQacc)
-
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Tile MMA partitions and allocate accumulators
-        # ///////////////////////////////////////////////////////////////////////////////
-
-        # tSrQ: (MMA_ATOM=(2,2,2),MMA_Q4,MMA_HD=((2,2),2)):((1,2,4),8,((64,128),32))
-        # tSrK: (MMA_ATOM=(2,2),MMA_K2,MMA_HD=((2,2),2)):((1,2),4,((16,32),8))
-        # tdPrdO: (MMA_ATOM=(2,2,2),MMA_Q4,MMA_HD=((2,2),2)):((1,2,4),8,((64,128),32))
-        # tdPrV: (MMA_ATOM=(2,2),MMA_K2,MMA_HD=((2,2),2)):((1,2),4,((16,32),8))
-        thr_mma_sdp = tiled_mma_sdp.get_slice(tidx)
-        tSrQ = cutedsl_utils.mma_make_fragment_A(
-            sQ[None, None, 0], thr_mma_sdp, swapAB=self.SdP_swapAB
-        )
-        tSrK = cutedsl_utils.mma_make_fragment_B(
-            sK, thr_mma_sdp, swapAB=self.SdP_swapAB
-        )
-        tdPrdO = cutedsl_utils.mma_make_fragment_A(
-            sdO[None, None, 0], thr_mma_sdp, swapAB=self.SdP_swapAB
-        )
-        tdPrV = cutedsl_utils.mma_make_fragment_B(
-            sV, thr_mma_sdp, swapAB=self.SdP_swapAB
-        )
-
-        # tdVrP: (MMA_ATOM=(2,2,2),MMA_K1,MMA_Q4):((1,2,4),0,8)
-        # tdVrdO: (MMA_ATOM=(2,2),MMA_HD=(8,2),MMA_Q4):((1,2),(4,128),32)
-        # tdKrdS: (MMA_ATOM=(2,2,2),MMA_K1,MMA_Q4):((1,2,4),0,8)
-        # tdKrQ: (MMA_ATOM=(2,2),MMA_HD=(8,2),MMA_Q4):((1,2),(4,128),32)
-        thr_mma_dkv = tiled_mma_dkv.get_slice(tidx)
-        tdVrP = cutedsl_utils.mma_make_fragment_A(
-            sPt, thr_mma_dkv, swapAB=self.dKV_swapAB
-        )
-        tdVrdO = cutedsl_utils.mma_make_fragment_B(
-            sdOt[None, None, 0], thr_mma_dkv, swapAB=self.dKV_swapAB
-        )
-        tdKrdS = cutedsl_utils.mma_make_fragment_A(
-            sdSt, thr_mma_dkv, swapAB=self.dKV_swapAB
-        )
-        tdKrQ = cutedsl_utils.mma_make_fragment_B(
-            sQt[None, None, 0], thr_mma_dkv, swapAB=self.dKV_swapAB
-        )
-
-        # acc_dK/dV: (MMA_ATOM=(2,2),MMA_K1,MMA_HD16):((1,2),0,4)
-        acc_shape_dK = thr_mma_dkv.partition_shape_C(
-            (self.n_block_size, self.head_dim_padded)
-        )
-        acc_shape_dV = thr_mma_dkv.partition_shape_C(
-            (self.n_block_size, self.head_dim_v_padded)
-        )
-        acc_dK = cute.make_rmem_tensor(acc_shape_dK, cutlass.Float32)
-        acc_dV = cute.make_rmem_tensor(acc_shape_dV, cutlass.Float32)
-        acc_dK.fill(0.0)
-        acc_dV.fill(0.0)
-
-        # tdQrdS: (MMA_ATOM=(2,2,2),MMA_Q4,MMA_K=((2,2),2)):((1,2,4),8,((64,128),32))
-        # tdQrK: (MMA_ATOM=(2,2),MMA_HD2,MMA_K8):((1,2),32,4)
-        thr_mma_dq = tiled_mma_dq.get_slice(tidx)
-        tdQrdS = cutedsl_utils.mma_make_fragment_A(
-            sdS, thr_mma_dq, swapAB=self.dQ_swapAB
-        )
-        tdQrK = cutedsl_utils.mma_make_fragment_B(
-            sKt, thr_mma_dq, swapAB=self.dQ_swapAB
-        )
-
-        # tSsLSEMma_/tSsdPsumMma_: (MMA_ATOM=(ATOM_Q2,ATOM_K2),MMA_Q4,MMA_K2,STAGE1):((0,8),16,0,64)
-        # tSsLSEMma/tSsdPsumMma: (MMA_ATOM=(ATOM_Q2,MMA_Q4),1):((8,16),0)
-        tSsLSEMma_ = thr_mma_sdp.partition_C(sLSEMma)
-        tSsdPsumMma_ = thr_mma_sdp.partition_C(sdPsumMma)
-        LSEslice = (
-            (None, 0, None)
-            if cutlass.const_expr(not self.SdP_swapAB)
-            else (0, None, None)
-        )
-        tSsLSEMma = layout_utils.reshape_acc_to_mn(tSsLSEMma_)[LSEslice]
-        tSsdPsumMma = layout_utils.reshape_acc_to_mn(tSsdPsumMma_)[LSEslice]
-
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Make S2R/R2S tiled copy and partitions for Q/K/V/dO/P/dS
-        # ///////////////////////////////////////////////////////////////////////////////
-
-        # S2R copy atom for Q/K/V/dO with `ldmatrix.sync.aligned.m8n8.x4` => m32xn8
-        # layout_src_tv=(32,8):(8,1)
-        # layout_dst_tv=(32,(2,4)):(2,(1,64))
-        smem_copy_atom = cute.make_copy_atom(
-            warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=4),
-            self.dtype,
-        )
-
-        # S2R copy atom for Pt/dSt/Qt/dOt/Kt with `ldmatrix.sync.aligned.m8n8.x4.trans` => m8xn32
-        # layout_src_tv=(32,8):(8,1)
-        # layout_dst_tv=((4,8),(1,2,4)):((16,1),(1,8,64))
-        smem_copy_atom_trans = cute.make_copy_atom(
-            warp.LdMatrix8x8x16bOp(transpose=True, num_matrices=4),
-            self.dtype,
-        )
-
-        # R2S copy atom for P/dS with universal `st.shared`
-        # layout_src_tv=(1,2):(0,1)
-        # layout_dst_tv=(1,2):(0,1)
-        r2s_copy_atom = cute.make_copy_atom(
-            cute.nvgpu.CopyUniversalOp(),
-            self.dtype,
-            # TODO(REVIEW): what's the number of bits? What if SdP_swapAB
-            num_bits_per_copy=2 * self.dtype.width,
-        )
-
-        # tSsQ/tdPsdO: (CPY_ATOM=(8,1),CPY_Q4,CPY_HD=((2,2),2),STAGE=(1,1)):((1,0),1024,((-16,-32),4096),(0,0))
-        smem_thr_copy_QdO = cutedsl_utils.make_tiled_copy_A(
-            smem_copy_atom, tiled_mma_sdp, swapAB=self.SdP_swapAB
-        ).get_slice(tidx)
-        tSsQ = smem_thr_copy_QdO.partition_S(sQ)
-        tdPsdO = smem_thr_copy_QdO.partition_S(sdO)
-
-        # tSsK/tdPsV: (CPY_ATOM=(8,1),CPY_K1,CPY_HD=((2,2),2)):((1,0),0,((-16,-32),8192))
-        smem_thr_copy_KV = cutedsl_utils.make_tiled_copy_B(
-            smem_copy_atom, tiled_mma_sdp, swapAB=self.SdP_swapAB
-        ).get_slice(tidx)
-        tSsK = smem_thr_copy_KV.partition_S(sK)
-        tdPsV = smem_thr_copy_KV.partition_S(sV)
-
-        # tdVsPt/tdKsdSt: (CPY_ATOM=(8,1),CPY_K1,CPY_Q4):((1,0),0,1024)
-        # TODO(REVIEW): should this be smem_copy_atom_transposed?
-        smem_thr_copy_PdSt = cutedsl_utils.make_tiled_copy_A(
-            smem_copy_atom_trans, tiled_mma_dkv, swapAB=self.dKV_swapAB
-        ).get_slice(tidx)
-        tdVsPt = smem_thr_copy_PdSt.partition_S(sPt)
-        tdKsdSt = smem_thr_copy_PdSt.partition_S(sdSt)
-
-        # tdVsdOt/tdKsQt: (CPY_ATOM=(8,1),CPY_HD=((2,2),2),CPY_Q4,STAGE=(1,1)):((1,0),((-16,-32),4096),1024,(0,0))
-        smem_thr_copy_QdOt = cutedsl_utils.make_tiled_copy_B(
-            smem_copy_atom_trans, tiled_mma_dkv, swapAB=self.dKV_swapAB
-        ).get_slice(tidx)
-        tdVsdOt = smem_thr_copy_QdOt.partition_S(sdOt)
-        tdKsQt = smem_thr_copy_QdOt.partition_S(sQt)
-
-        # tdQsdS: (CPY_ATOM=(8,1),CPY_Q4,CPY_K=((2,2),2)):((1,0),1024,((-16,-32),4096))
-        smem_thr_copy_dS = cutedsl_utils.make_tiled_copy_A(
-            smem_copy_atom, tiled_mma_dq, swapAB=self.dQ_swapAB
-        ).get_slice(tidx)
-        tdQsdS = smem_thr_copy_dS.partition_S(sdS)
-
-        # tdQsKt: (CPY_ATOM=(8,1),CPY_HD1,CPY_K8):((1,0),0,1024)
-        smem_thr_copy_Kt = cutedsl_utils.make_tiled_copy_B(
-            smem_copy_atom_trans, tiled_mma_dq, swapAB=self.dQ_swapAB
-        ).get_slice(tidx)
-        tdQsKt = smem_thr_copy_Kt.partition_S(sKt)
-
-        # tPsP/tdSsdS: (CPY_ATOM=(2,(2,2)),CPY_Q4,CPY_K1):((1,(512,4096)),1024,0)
-        r2s_thr_copy_PdS = cute.make_tiled_copy_C(
-            r2s_copy_atom,
-            tiled_mma_sdp,
-        ).get_slice(tidx)
-        tPsP = r2s_thr_copy_PdS.partition_D(sP)
-        tdSsdS = r2s_thr_copy_PdS.partition_D(sdS)
-
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Make predicate tensors for Q/LSE G2S loads
-        # ///////////////////////////////////////////////////////////////////////////////
-
-        # cQ: (tileQ64,tileHD128):(1@0,1@1)
-        # tQcQ/t0QcQ/tdOcdO/t0dOcdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2):((1@1,0),32@0,64@1)
-        # cLSE: (tileQ64):(1@0)
-        # tLSEcLSE/tdPsumcdPsum: (CPY_ATOM=(4,1),CPY_Q=(1)):((1@0,0),(0))
-        cQ = cute.make_identity_tensor((self.m_block_size, self.head_dim_padded))
-        tQcQ = gmem_thr_copy_QK.partition_S(cQ)
-        t0QcQ = gmem_thr_copy_QK.get_slice(0).partition_S(cQ)
-        if cutlass.const_expr(self.head_dim_padded == self.head_dim_v_padded):
-            tdOcdO = tQcQ
-            t0dOcdO = t0QcQ
-        else:
-            cdO = cute.make_identity_tensor((self.m_block_size, self.head_dim_v_padded))
-            tdOcdO = gmem_thr_copy_VdO.partition_S(cdO)
-            t0dOcdO = gmem_thr_copy_VdO.get_slice(0).partition_S(cdO)
-        cLSE = cute.make_identity_tensor((self.m_block_size,))
-        tLSEcLSE = gmem_thr_copy_lse.partition_S(cLSE)
-        tdPsumcdPsum = tLSEcLSE
-
-        # tQpQ/tdOpdO: (ATOM_REST_V1,CPY_Q2,CPY_HD2):(2,0,1) => the same predicate along CPY_Q
-        tQpQ = cutedsl_utils.predicate_k(tQcQ, limit=d_head)
-        if cutlass.const_expr(self.same_hdim_kv):
-            tdOpdO = tQpQ
-        else:
-            tdOpdO = cutedsl_utils.predicate_k(tdOcdO, limit=d_head_v)
-
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Make others
-        # ///////////////////////////////////////////////////////////////////////////////
-
-        # --- Make partial functions for Q,LSE/dO,dPsum loads ---
-
-        load_Q_LSE = partial(
-            self.load_Q_LSE,
-            gmem_tiled_copy_QK,
-            gmem_tiled_copy_LSE,
-            tQgQ,
-            tQsQ,
-            tQcQ,
-            t0QcQ,
-            tQpQ,
-            tLSEgLSE,
-            tLSEsLSE,
-            tLSEcLSE,
-            seqlen=seqlen_info.seqlen_q,
-        )
-        load_dO_dPsum = partial(
-            self.load_dO_dPsum,
-            gmem_tiled_copy_VdO,
-            gmem_tiled_copy_LSE,
-            tdOgdO,
-            tdOsdO,
-            tdOcdO,
-            t0dOcdO,
-            tdOpdO,
-            tLSEgdPsum,
-            tLSEsdPsum,
-            tdPsumcdPsum,
-            seqlen=seqlen_info.seqlen_q,
-        )
-
-        # --- Make partial functions for compute_one_m_block ---
-
-        mma_params = SimpleNamespace(
-            thr_mma_sdp=thr_mma_sdp,
-            thr_mma_dkv=thr_mma_dkv,
-            thr_mma_dq=thr_mma_dq,
-            tSrQ=tSrQ,
-            tSrK=tSrK,
-            tdPrdO=tdPrdO,
-            tdPrV=tdPrV,
-            tdVrP=tdVrP,
-            tdVrdO=tdVrdO,
-            tdKrdS=tdKrdS,
-            tdKrQ=tdKrQ,
-            tdQrdS=tdQrdS,
-            tdQrK=tdQrK,
-            acc_dK=acc_dK,
-            acc_dV=acc_dV,
-        )
-        smem_copy_params = SimpleNamespace(
-            smem_thr_copy_QdO=smem_thr_copy_QdO,
-            smem_thr_copy_KV=smem_thr_copy_KV,
-            smem_thr_copy_PdSt=smem_thr_copy_PdSt,
-            smem_thr_copy_QdOt=smem_thr_copy_QdOt,
-            smem_thr_copy_dS=smem_thr_copy_dS,
-            smem_thr_copy_Kt=smem_thr_copy_Kt,
-            r2s_thr_copy_PdS=r2s_thr_copy_PdS,
-            tSsQ=tSsQ,
-            tSsK=tSsK,
-            tdPsdO=tdPsdO,
-            tdPsV=tdPsV,
-            tSsLSEMma=tSsLSEMma,
-            tSsdPsumMma=tSsdPsumMma,
-            tPsP=tPsP,
-            tdSsdS=tdSsdS,
-            tdVsPt=tdVsPt,
-            tdVsdOt=tdVsdOt,
-            tdKsdSt=tdKsdSt,
-            tdKsQt=tdKsQt,
-            tdQsdS=tdQsdS,
-            tdQsKt=tdQsKt,
-        )
-        gmem_copy_params = SimpleNamespace(
-            gmem_thr_copy_dQacc=gmem_thr_copy_dQacc, tdQgdQacc=tdQgdQacc
-        )
-        compute_one_m_block = partial(
-            self.compute_one_m_block,
-            mma_params=mma_params,
-            smem_copy_params=smem_copy_params,
-            gmem_copy_params=gmem_copy_params,
-            load_Q_LSE=load_Q_LSE,
-            load_dO_dPsum=load_dO_dPsum,
-            m_block_max=m_block_max,
-            softmax_scale=softmax_scale,
-            softmax_scale_log2=softmax_scale_log2,
-        )
-
-        # --- Debug print ---
-
-        if const_expr(self.debug_print):
-            if is_print_thread:
-                prefix = "[bwd_sm80_kernel_setup] "
-                cute.printf("")
-                cute.printf(
-                    prefix
-                    + "bidx={}, bidy={}, bidz={}, tidx={}, n_block={}, head_idx={}, batch_idx={}",
-                    bidx,
-                    bidy,
-                    bidz,
-                    tidx,
-                    n_block,
-                    head_idx,
-                    batch_idx,
-                )
-                cute.printf(
-                    prefix + "m_block_min={}, m_block_max={}",
+            # TODO: return early if m_block_max == 0
+            m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.m_block_size)
+            m_block_min = 0
+            if cutlass.const_expr(self.is_causal):
+                m_block_min = max(
+                    (
+                        n_block * self.n_block_size
+                        + seqlen_info.seqlen_q
+                        - seqlen_info.seqlen_k
+                    )
+                    // self.m_block_size,
                     m_block_min,
-                    m_block_max,
                 )
-                cute.printf("")
-                cute.printf(prefix + "mQ_cur: {}", mQ_cur.layout)
-                cute.printf(prefix + "mK_cur: {}", mK_cur.layout)
-                cute.printf(prefix + "mV_cur: {}", mV_cur.layout)
-                cute.printf(prefix + "mdO_cur: {}", mdO_cur.layout)
-                cute.printf(prefix + "mLSE_cur: {}", mLSE_cur.layout)
-                cute.printf(prefix + "mdPsum_cur: {}", mdPsum_cur.layout)
-                cute.printf(prefix + "mdQacc_cur: {}", mdQacc_cur.layout)
-                cute.printf("")
-                cute.printf(prefix + "gQ: {}", gQ.layout)
-                cute.printf(prefix + "gK: {}", gK.layout)
-                cute.printf(prefix + "gV: {}", gV.layout)
-                cute.printf(prefix + "gdO: {}", gdO.layout)
-                cute.printf(prefix + "gLSE: {}", gLSE.layout)
-                cute.printf(prefix + "gdPsum: {}", gdPsum.layout)
-                cute.printf(prefix + "gdQacc: {}", gdQacc.layout)
-                cute.printf("")
-                cute.printf(prefix + "sQ: {}", sQ.layout)
-                cute.printf(prefix + "sK: {}", sK.layout)
-                cute.printf(prefix + "sV: {}", sV.layout)
-                cute.printf(prefix + "sdO: {}", sdO.layout)
-                cute.printf(prefix + "sP: {}", sP.layout)
-                cute.printf(prefix + "sdS: {}", sdS.layout)
-                cute.printf(prefix + "sLSE: {}", sLSE.layout)
-                cute.printf(prefix + "sdPsum: {}", sdPsum.layout)
-                cute.printf("")
-                cute.printf(prefix + "sQt: {}", sQt.layout)
-                cute.printf(prefix + "sdOt: {}", sdOt.layout)
-                cute.printf(prefix + "sKt: {}", sKt.layout)
-                cute.printf(prefix + "sPt: {}", sPt.layout)
-                cute.printf(prefix + "sdSt: {}", sdSt.layout)
-                cute.printf("")
-                cute.printf(prefix + "tQgQ: {}", tQgQ.layout)
-                cute.printf(prefix + "tQsQ: {}", tQsQ.layout)
-                cute.printf(prefix + "tKgK: {}", tKgK.layout)
-                cute.printf(prefix + "tKsK: {}", tKsK.layout)
-                cute.printf(prefix + "tVgV: {}", tVgV.layout)
-                cute.printf(prefix + "tVsV: {}", tVsV.layout)
-                cute.printf(prefix + "tLSEgLSE: {}", tLSEgLSE.layout)
-                cute.printf(prefix + "tLSEsLSE: {}", tLSEsLSE.layout)
-                cute.printf(prefix + "tLSEgdPsum: {}", tLSEgdPsum.layout)
-                cute.printf(prefix + "tLSEsdPsum: {}", tLSEsdPsum.layout)
-                cute.printf(prefix + "tdOgdO: {}", tdOgdO.layout)
-                cute.printf(prefix + "tdOsdO: {}", tdOsdO.layout)
-                cute.printf(prefix + "tdQgdQacc: {}", tdQgdQacc.layout)
-                cute.printf("")
-                cute.printf(prefix + "acc_dK: {}", acc_dK.layout)
-                cute.printf(prefix + "acc_dV: {}", acc_dV.layout)
-                cute.printf(prefix + "tSrQ: {}", tSrQ.layout)
-                cute.printf(prefix + "tSrK: {}", tSrK.layout)
-                cute.printf(prefix + "tdPrdO: {}", tdPrdO.layout)
-                cute.printf(prefix + "tdPrV: {}", tdPrV.layout)
-                cute.printf(prefix + "tdVrP: {}", tdVrP.layout)
-                cute.printf(prefix + "tdVrdO: {}", tdVrdO.layout)
-                cute.printf(prefix + "tdKrdS: {}", tdKrdS.layout)
-                cute.printf(prefix + "tdKrQ: {}", tdKrQ.layout)
-                cute.printf(prefix + "tdQrdS: {}", tdQrdS.layout)
-                cute.printf(prefix + "tdQrK: {}", tdQrK.layout)
-                cute.printf(prefix + "tSsLSEMma_: {}", tSsLSEMma_.layout)
-                cute.printf(prefix + "tSsdPsumMma_: {}", tSsdPsumMma_.layout)
-                cute.printf(prefix + "tSsLSEMma: {}", tSsLSEMma.layout)
-                cute.printf(prefix + "tSsdPsumMma: {}", tSsdPsumMma.layout)
-                cute.printf("")
-                cute.printf(
-                    prefix + "smem_copy_atom: layout_src_tv={}, layout_dst_tv={}",
-                    smem_copy_atom.layout_src_tv,
-                    smem_copy_atom.layout_dst_tv,
-                )
-                cute.printf(
-                    prefix + "smem_copy_atom_trans: layout_src_tv={}, layout_dst_tv={}",
-                    smem_copy_atom_trans.layout_src_tv,
-                    smem_copy_atom_trans.layout_dst_tv,
-                )
-                cute.printf(
-                    prefix + "r2s_copy_atom: layout_src_tv={}, layout_dst_tv={}",
-                    r2s_copy_atom.layout_src_tv,
-                    r2s_copy_atom.layout_dst_tv,
-                )
-                cute.printf(prefix + "tSsQ: {}", tSsQ.layout)
-                cute.printf(prefix + "tSsK: {}", tSsK.layout)
-                cute.printf(prefix + "tdPsdO: {}", tdPsdO.layout)
-                cute.printf(prefix + "tdPsV: {}", tdPsV.layout)
-                cute.printf(prefix + "tdVsPt: {}", tdVsPt.layout)
-                cute.printf(prefix + "tdVsdOt: {}", tdVsdOt.layout)
-                cute.printf(prefix + "tdKsdSt: {}", tdKsdSt.layout)
-                cute.printf(prefix + "tdKsQt: {}", tdKsQt.layout)
-                cute.printf(prefix + "tdQsdS: {}", tdQsdS.layout)
-                cute.printf(prefix + "tdQsKt: {}", tdQsKt.layout)
-                cute.printf(prefix + "tPsP: {}", tPsP.layout)
-                cute.printf(prefix + "tdSsdS: {}", tdSsdS.layout)
-                cute.printf("")
-                cute.printf(prefix + "cQ: {}", cQ.layout)
-                cute.printf(prefix + "tQcQ: {}", tQcQ.layout)
-                cute.printf(prefix + "t0QcQ: {}", t0QcQ.layout)
-                cute.printf(prefix + "tdOcdO: {}", tdOcdO.layout)
-                cute.printf(prefix + "t0dOcdO: {}", t0dOcdO.layout)
-                cute.printf(prefix + "cLSE: {}", cLSE.layout)
-                cute.printf(prefix + "tLSEcLSE: {}", tLSEcLSE.layout)
-                cute.printf(prefix + "tdPsumcdPsum: {}", tdPsumcdPsum.layout)
-                cute.printf(prefix + "tQpQ: {}", tQpQ.layout)
-                cute.printf(prefix + "tdOpdO: {}", tdOpdO.layout)
-                cute.printf("")
 
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Prologue: Load sK/sV, and one full stages of sQ/sLSE/sdO/sdPsum
-        # ///////////////////////////////////////////////////////////////////////////////
+            # NOTE: Start async loads of the last mn-tile, where we take care of the mn residue
+            m_block = m_block_min
 
-        # Load sV
-        self.load_V(
-            gmem_thr_copy_VdO,
-            tVgV,
-            tVsV,
-            n_block,
-            seqlen=seqlen_info.seqlen_k,
-            headdim=d_head_v,
-            is_print_thread_and_tile=is_print_thread,
-        )
-        if cutlass.const_expr(self.V_in_regs):
+            d_head = mQ.shape[cute.rank(mQ) - 1]
+            d_head_v = mdO.shape[cute.rank(mdO) - 1]
+            head_idx_kv = (
+                head_idx // self.qhead_per_kvhead
+                if cutlass.const_expr(not self.pack_gqa)
+                else head_idx
+            )
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            # Make gmem tiles for Q/K/V/dO/LSE/dPsum/dQacc
+            # ///////////////////////////////////////////////////////////////////////////////
+
+            # mQ_cur/mdO_cur: (sQ,HD):(HD*nhQ,1)
+            # mK_cur/mV_cur: (sK,HD):(HD*nhK,1)
+            # mLSE_cur/mdPsum_cur: (sQ):(1)
+            # mdQacc_cur: (sQ*HD):(1)
+            blkQ_shape = (self.m_block_size, self.head_dim_padded)
+            blkK_shape = (self.n_block_size, self.head_dim_padded)
+            blkV_shape = (self.n_block_size, self.head_dim_v_padded)
+            blkdO_shape = (self.m_block_size, self.head_dim_v_padded)
+            if cutlass.const_expr(not seqlen_info.has_cu_seqlens_q):
+                mQ_cur = mQ[batch_idx, None, head_idx, None]
+                mLSE_cur = mLSE[batch_idx, head_idx, None]
+                mdO_cur = mdO[batch_idx, None, head_idx, None]
+                mdPsum_cur = mdPsum[batch_idx, head_idx, None]
+                mdQacc_cur = mdQacc[batch_idx, head_idx, None]
+            else:
+                padded_offset_q = seqlen_info.padded_offset_q
+                mQ_cur = cute.domain_offset(
+                    (seqlen_info.offset_q, 0), mQ[None, head_idx, None]
+                )
+                mLSE_cur = cute.domain_offset((padded_offset_q,), mLSE[head_idx, None])
+                mdO_cur = cute.domain_offset(
+                    (seqlen_info.offset_q, 0), mdO[None, head_idx, None]
+                )
+                mdPsum_cur = cute.domain_offset((padded_offset_q,), mdPsum[head_idx, None])
+                mdQacc_cur = cute.domain_offset(
+                    (padded_offset_q * self.head_dim_padded,), mdQacc[head_idx, None]
+                )
+            if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
+                mK_cur, mV_cur = [t[batch_idx, None, head_idx_kv, None] for t in (mK, mV)]
+            else:
+                mK_cur, mV_cur = [
+                    cute.domain_offset(
+                        (seqlen_info.offset_k, 0), t[None, head_idx_kv, None]
+                    )
+                    for t in (mK, mV)
+                ]
+
+            # gQ/gdO: (tileQ64,tileHD128,restQ):(HD*nhQ,1,HD*nhQ*tileQ)
+            # gK/gV: (tileK128,tileHD128):(HD*nhK,1)
+            # gLSE/gdPsum: (tileQ64,restQ):(1,tileQ)
+            # gdQacc: (tileQ64*tileHD128,restQ):(1,tileQ*tileHD)
+            # where restQ = sQ // tileQ64
+            gQ = cute.local_tile(mQ_cur, blkQ_shape, (None, 0))
+            gK = cute.local_tile(mK_cur, blkK_shape, (n_block, 0))
+            gV = cute.local_tile(mV_cur, blkV_shape, (n_block, 0))
+            gdO = cute.local_tile(mdO_cur, blkdO_shape, (None, 0))
+            gLSE = cute.local_tile(mLSE_cur, (self.m_block_size,), (None,))
+            gdPsum = cute.local_tile(mdPsum_cur, (self.m_block_size,), (None,))
+            gdQacc = cute.local_tile(
+                mdQacc_cur, (self.m_block_size * self.head_dim_padded,), (None,)
+            )
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            # Alloc smem storage and make smem tensors for sQ/sK/sV
+            # ///////////////////////////////////////////////////////////////////////////////
+
+            smem = cutlass.utils.SmemAllocator()
+            storage = smem.allocate(self.shared_storage_cls)
+
+            # sQ/sdO: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_HD64,LAY_tileHD2),(1,1)):((64,512),(1,4096),(0,0))
+            # sK/sV: S<3,3,3> o 0 o ((ATOM_K8,LAY_tileK16),(ATOM_HD64,LAY_tileHD2)):((64,512),(1,8192))
+            # sP/sdS: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_K64,LAY_tileK2)):((64,512),(1,4096))
+            # sLSE/sdPsum: (tileQ64,1):(1,64) | sLSEMma/sdPsumMma: (tileQ64,tileHD128,1):(1,0,64)
+            sQ: cute.Tensor = storage.sQ.get_tensor(sQ_layout)
+            sK: cute.Tensor = storage.sK.get_tensor(sK_layout)
+            if cutlass.const_expr(not self.share_QV_smem):
+                sV: cute.Tensor = storage.sV.get_tensor(sV_layout)
+            else:
+                sV = cute.make_tensor(
+                    cute.recast_ptr(sQ.iterator, dtype=self.dtype), sV_layout
+                )
+            sdO: cute.Tensor = storage.sdO.get_tensor(sdO_layout)
+            sP: cute.Tensor = storage.sP.get_tensor(sPdS_layout)
+            sdS: cute.Tensor = storage.sdS.get_tensor(sPdS_layout)
+            sLSE: cute.Tensor = storage.sLSE.get_tensor(sLSE_layout)
+            sdPsum: cute.Tensor = storage.sdPsum.get_tensor(sLSE_layout)
+            sLSEMma: cute.Tensor = storage.sLSE.get_tensor(sLSEMma_layout)
+            sdPsumMma: cute.Tensor = storage.sdPsum.get_tensor(sLSEMma_layout)
+            # Transpose view of tensors for tiled mma
+            sQt, sdOt, sKt, sPt, sdSt = [
+                layout_utils.transpose_view(t) for t in (sQ, sdO, sK, sP, sdS)
+            ]
+            # Reuse sK/sV buffer for sdK/sdV
+            sdK = cute.make_tensor(sK.iterator, sK_layout)
+            sdV = cute.make_tensor(sV.iterator, sV_layout)
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            # G2S/S2G tiled copy partitions for Q/K/V/dO/LSE/dPsum/dQacc
+            # ///////////////////////////////////////////////////////////////////////////////
+
+            # tQgQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,restQ):((1,0),32768,64,65536)
+            # tQsQ: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,STAGE=(1,1)):((1,0),2048,4096,(0,0))
+            # tKgK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),8192,64)
+            # tKsK: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),2048,8192)
+            gmem_thr_copy_QK = gmem_tiled_copy_QK.get_slice(tidx)
+            tQgQ = gmem_thr_copy_QK.partition_S(gQ)
+            tQsQ = gmem_thr_copy_QK.partition_D(sQ)
+            tKgK = gmem_thr_copy_QK.partition_S(gK)
+            tKsK = gmem_thr_copy_QK.partition_D(sK)
+
+            # tVgV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),8192,64)
+            # tVsV: (CPY_ATOM=(8,1),CPY_K4,CPY_HD2):((1,0),2048,8192)
+            # tdOgdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,restQ):((1,0),32768,64,65536)
+            # tdOsdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2,STAGE=(1,1)):((1,0),2048,4096,(0,0))
+            gmem_thr_copy_VdO = gmem_tiled_copy_VdO.get_slice(tidx)
+            tVgV = gmem_thr_copy_VdO.partition_S(gV)
+            tVsV = gmem_thr_copy_VdO.partition_D(sV)
+            tdOgdO = gmem_thr_copy_VdO.partition_S(gdO)
+            tdOsdO = gmem_thr_copy_VdO.partition_D(sdO)
+
+            # tLSEgLSE: (CPY_ATOM=(4,1),CPY_Q1,restQ):((1,0),0,64)
+            # tLSEsLSE: (CPY_ATOM=(4,1),CPY_Q1,STAGE1):((1,0),0,64)
+            # tLSEgdPsum: (CPY_ATOM=(4,1),CPY_Q1,restQ):((1,0),0,64)
+            # tLSEsdPsum: (CPY_ATOM=(4,1),CPY_Q1,STAGE1):((1,0),0,64)
+            gmem_thr_copy_lse = gmem_tiled_copy_LSE.get_slice(tidx)
+            tLSEgLSE = gmem_thr_copy_lse.partition_S(gLSE)
+            tLSEsLSE = gmem_thr_copy_lse.partition_D(sLSE)
+            tLSEgdPsum = gmem_thr_copy_lse.partition_S(gdPsum)
+            tLSEsdPsum = gmem_thr_copy_lse.partition_D(sdPsum)
+
+            # tdQgdQacc: (CPY_ATOM=(1,1),CPY_V32,restQ):((0,0),256,8192)
+            gmem_thr_copy_dQacc = gmem_tiled_copy_dQacc.get_slice(tidx)
+            tdQgdQacc = gmem_thr_copy_dQacc.partition_S(gdQacc)
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            # Tile MMA partitions and allocate accumulators
+            # ///////////////////////////////////////////////////////////////////////////////
+
+            # tSrQ: (MMA_ATOM=(2,2,2),MMA_Q4,MMA_HD=((2,2),2)):((1,2,4),8,((64,128),32))
+            # tSrK: (MMA_ATOM=(2,2),MMA_K2,MMA_HD=((2,2),2)):((1,2),4,((16,32),8))
+            # tdPrdO: (MMA_ATOM=(2,2,2),MMA_Q4,MMA_HD=((2,2),2)):((1,2,4),8,((64,128),32))
+            # tdPrV: (MMA_ATOM=(2,2),MMA_K2,MMA_HD=((2,2),2)):((1,2),4,((16,32),8))
+            thr_mma_sdp = tiled_mma_sdp.get_slice(tidx)
+            tSrQ = cutedsl_utils.mma_make_fragment_A(
+                sQ[None, None, 0], thr_mma_sdp, swapAB=self.SdP_swapAB
+            )
+            tSrK = cutedsl_utils.mma_make_fragment_B(
+                sK, thr_mma_sdp, swapAB=self.SdP_swapAB
+            )
+            tdPrdO = cutedsl_utils.mma_make_fragment_A(
+                sdO[None, None, 0], thr_mma_sdp, swapAB=self.SdP_swapAB
+            )
+            tdPrV = cutedsl_utils.mma_make_fragment_B(
+                sV, thr_mma_sdp, swapAB=self.SdP_swapAB
+            )
+
+            # tdVrP: (MMA_ATOM=(2,2,2),MMA_K1,MMA_Q4):((1,2,4),0,8)
+            # tdVrdO: (MMA_ATOM=(2,2),MMA_HD=(8,2),MMA_Q4):((1,2),(4,128),32)
+            # tdKrdS: (MMA_ATOM=(2,2,2),MMA_K1,MMA_Q4):((1,2,4),0,8)
+            # tdKrQ: (MMA_ATOM=(2,2),MMA_HD=(8,2),MMA_Q4):((1,2),(4,128),32)
+            thr_mma_dkv = tiled_mma_dkv.get_slice(tidx)
+            tdVrP = cutedsl_utils.mma_make_fragment_A(
+                sPt, thr_mma_dkv, swapAB=self.dKV_swapAB
+            )
+            tdVrdO = cutedsl_utils.mma_make_fragment_B(
+                sdOt[None, None, 0], thr_mma_dkv, swapAB=self.dKV_swapAB
+            )
+            tdKrdS = cutedsl_utils.mma_make_fragment_A(
+                sdSt, thr_mma_dkv, swapAB=self.dKV_swapAB
+            )
+            tdKrQ = cutedsl_utils.mma_make_fragment_B(
+                sQt[None, None, 0], thr_mma_dkv, swapAB=self.dKV_swapAB
+            )
+
+            # acc_dK/dV: (MMA_ATOM=(2,2),MMA_K1,MMA_HD16):((1,2),0,4)
+            acc_shape_dK = thr_mma_dkv.partition_shape_C(
+                (self.n_block_size, self.head_dim_padded)
+            )
+            acc_shape_dV = thr_mma_dkv.partition_shape_C(
+                (self.n_block_size, self.head_dim_v_padded)
+            )
+            acc_dK = cute.make_rmem_tensor(acc_shape_dK, cutlass.Float32)
+            acc_dV = cute.make_rmem_tensor(acc_shape_dV, cutlass.Float32)
+            acc_dK.fill(0.0)
+            acc_dV.fill(0.0)
+
+            # tdQrdS: (MMA_ATOM=(2,2,2),MMA_Q4,MMA_K=((2,2),2)):((1,2,4),8,((64,128),32))
+            # tdQrK: (MMA_ATOM=(2,2),MMA_HD2,MMA_K8):((1,2),32,4)
+            thr_mma_dq = tiled_mma_dq.get_slice(tidx)
+            tdQrdS = cutedsl_utils.mma_make_fragment_A(
+                sdS, thr_mma_dq, swapAB=self.dQ_swapAB
+            )
+            tdQrK = cutedsl_utils.mma_make_fragment_B(
+                sKt, thr_mma_dq, swapAB=self.dQ_swapAB
+            )
+
+            # tSsLSEMma_/tSsdPsumMma_: (MMA_ATOM=(ATOM_Q2,ATOM_K2),MMA_Q4,MMA_K2,STAGE1):((0,8),16,0,64)
+            # tSsLSEMma/tSsdPsumMma: (MMA_ATOM=(ATOM_Q2,MMA_Q4),1):((8,16),0)
+            tSsLSEMma_ = thr_mma_sdp.partition_C(sLSEMma)
+            tSsdPsumMma_ = thr_mma_sdp.partition_C(sdPsumMma)
+            LSEslice = (
+                (None, 0, None)
+                if cutlass.const_expr(not self.SdP_swapAB)
+                else (0, None, None)
+            )
+            tSsLSEMma = layout_utils.reshape_acc_to_mn(tSsLSEMma_)[LSEslice]
+            tSsdPsumMma = layout_utils.reshape_acc_to_mn(tSsdPsumMma_)[LSEslice]
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            # Make S2R/R2S tiled copy and partitions for Q/K/V/dO/P/dS
+            # ///////////////////////////////////////////////////////////////////////////////
+
+            # S2R copy atom for Q/K/V/dO with `ldmatrix.sync.aligned.m8n8.x4` => m32xn8
+            # layout_src_tv=(32,8):(8,1)
+            # layout_dst_tv=(32,(2,4)):(2,(1,64))
+            smem_copy_atom = cute.make_copy_atom(
+                warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=4),
+                self.dtype,
+            )
+
+            # S2R copy atom for Pt/dSt/Qt/dOt/Kt with `ldmatrix.sync.aligned.m8n8.x4.trans` => m8xn32
+            # layout_src_tv=(32,8):(8,1)
+            # layout_dst_tv=((4,8),(1,2,4)):((16,1),(1,8,64))
+            smem_copy_atom_trans = cute.make_copy_atom(
+                warp.LdMatrix8x8x16bOp(transpose=True, num_matrices=4),
+                self.dtype,
+            )
+
+            # R2S copy atom for P/dS with universal `st.shared`
+            # layout_src_tv=(1,2):(0,1)
+            # layout_dst_tv=(1,2):(0,1)
+            r2s_copy_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(),
+                self.dtype,
+                # TODO(REVIEW): what's the number of bits? What if SdP_swapAB
+                num_bits_per_copy=2 * self.dtype.width,
+            )
+
+            # tSsQ/tdPsdO: (CPY_ATOM=(8,1),CPY_Q4,CPY_HD=((2,2),2),STAGE=(1,1)):((1,0),1024,((-16,-32),4096),(0,0))
+            smem_thr_copy_QdO = cutedsl_utils.make_tiled_copy_A(
+                smem_copy_atom, tiled_mma_sdp, swapAB=self.SdP_swapAB
+            ).get_slice(tidx)
+            tSsQ = smem_thr_copy_QdO.partition_S(sQ)
+            tdPsdO = smem_thr_copy_QdO.partition_S(sdO)
+
+            # tSsK/tdPsV: (CPY_ATOM=(8,1),CPY_K1,CPY_HD=((2,2),2)):((1,0),0,((-16,-32),8192))
+            smem_thr_copy_KV = cutedsl_utils.make_tiled_copy_B(
+                smem_copy_atom, tiled_mma_sdp, swapAB=self.SdP_swapAB
+            ).get_slice(tidx)
+            tSsK = smem_thr_copy_KV.partition_S(sK)
+            tdPsV = smem_thr_copy_KV.partition_S(sV)
+
+            # tdVsPt/tdKsdSt: (CPY_ATOM=(8,1),CPY_K1,CPY_Q4):((1,0),0,1024)
+            # TODO(REVIEW): should this be smem_copy_atom_transposed?
+            smem_thr_copy_PdSt = cutedsl_utils.make_tiled_copy_A(
+                smem_copy_atom_trans, tiled_mma_dkv, swapAB=self.dKV_swapAB
+            ).get_slice(tidx)
+            tdVsPt = smem_thr_copy_PdSt.partition_S(sPt)
+            tdKsdSt = smem_thr_copy_PdSt.partition_S(sdSt)
+
+            # tdVsdOt/tdKsQt: (CPY_ATOM=(8,1),CPY_HD=((2,2),2),CPY_Q4,STAGE=(1,1)):((1,0),((-16,-32),4096),1024,(0,0))
+            smem_thr_copy_QdOt = cutedsl_utils.make_tiled_copy_B(
+                smem_copy_atom_trans, tiled_mma_dkv, swapAB=self.dKV_swapAB
+            ).get_slice(tidx)
+            tdVsdOt = smem_thr_copy_QdOt.partition_S(sdOt)
+            tdKsQt = smem_thr_copy_QdOt.partition_S(sQt)
+
+            # tdQsdS: (CPY_ATOM=(8,1),CPY_Q4,CPY_K=((2,2),2)):((1,0),1024,((-16,-32),4096))
+            smem_thr_copy_dS = cutedsl_utils.make_tiled_copy_A(
+                smem_copy_atom, tiled_mma_dq, swapAB=self.dQ_swapAB
+            ).get_slice(tidx)
+            tdQsdS = smem_thr_copy_dS.partition_S(sdS)
+
+            # tdQsKt: (CPY_ATOM=(8,1),CPY_HD1,CPY_K8):((1,0),0,1024)
+            smem_thr_copy_Kt = cutedsl_utils.make_tiled_copy_B(
+                smem_copy_atom_trans, tiled_mma_dq, swapAB=self.dQ_swapAB
+            ).get_slice(tidx)
+            tdQsKt = smem_thr_copy_Kt.partition_S(sKt)
+
+            # tPsP/tdSsdS: (CPY_ATOM=(2,(2,2)),CPY_Q4,CPY_K1):((1,(512,4096)),1024,0)
+            r2s_thr_copy_PdS = cute.make_tiled_copy_C(
+                r2s_copy_atom,
+                tiled_mma_sdp,
+            ).get_slice(tidx)
+            tPsP = r2s_thr_copy_PdS.partition_D(sP)
+            tdSsdS = r2s_thr_copy_PdS.partition_D(sdS)
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            # Make predicate tensors for Q/LSE G2S loads
+            # ///////////////////////////////////////////////////////////////////////////////
+
+            # cQ: (tileQ64,tileHD128):(1@0,1@1)
+            # tQcQ/t0QcQ/tdOcdO/t0dOcdO: (CPY_ATOM=(8,1),CPY_Q2,CPY_HD2):((1@1,0),32@0,64@1)
+            # cLSE: (tileQ64):(1@0)
+            # tLSEcLSE/tdPsumcdPsum: (CPY_ATOM=(4,1),CPY_Q=(1)):((1@0,0),(0))
+            cQ = cute.make_identity_tensor((self.m_block_size, self.head_dim_padded))
+            tQcQ = gmem_thr_copy_QK.partition_S(cQ)
+            t0QcQ = gmem_thr_copy_QK.get_slice(0).partition_S(cQ)
+            if cutlass.const_expr(self.head_dim_padded == self.head_dim_v_padded):
+                tdOcdO = tQcQ
+                t0dOcdO = t0QcQ
+            else:
+                cdO = cute.make_identity_tensor((self.m_block_size, self.head_dim_v_padded))
+                tdOcdO = gmem_thr_copy_VdO.partition_S(cdO)
+                t0dOcdO = gmem_thr_copy_VdO.get_slice(0).partition_S(cdO)
+            cLSE = cute.make_identity_tensor((self.m_block_size,))
+            tLSEcLSE = gmem_thr_copy_lse.partition_S(cLSE)
+            tdPsumcdPsum = tLSEcLSE
+
+            # tQpQ/tdOpdO: (ATOM_REST_V1,CPY_Q2,CPY_HD2):(2,0,1) => the same predicate along CPY_Q
+            tQpQ = cutedsl_utils.predicate_k(tQcQ, limit=d_head)
+            if cutlass.const_expr(self.same_hdim_kv):
+                tdOpdO = tQpQ
+            else:
+                tdOpdO = cutedsl_utils.predicate_k(tdOcdO, limit=d_head_v)
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            # Make others
+            # ///////////////////////////////////////////////////////////////////////////////
+
+            # --- Make partial functions for Q,LSE/dO,dPsum loads ---
+
+            load_Q_LSE = partial(
+                self.load_Q_LSE,
+                gmem_tiled_copy_QK,
+                gmem_tiled_copy_LSE,
+                tQgQ,
+                tQsQ,
+                tQcQ,
+                t0QcQ,
+                tQpQ,
+                tLSEgLSE,
+                tLSEsLSE,
+                tLSEcLSE,
+                seqlen=seqlen_info.seqlen_q,
+            )
+            load_dO_dPsum = partial(
+                self.load_dO_dPsum,
+                gmem_tiled_copy_VdO,
+                gmem_tiled_copy_LSE,
+                tdOgdO,
+                tdOsdO,
+                tdOcdO,
+                t0dOcdO,
+                tdOpdO,
+                tLSEgdPsum,
+                tLSEsdPsum,
+                tdPsumcdPsum,
+                seqlen=seqlen_info.seqlen_q,
+            )
+
+            # --- Make partial functions for compute_one_m_block ---
+
+            mma_params = SimpleNamespace(
+                thr_mma_sdp=thr_mma_sdp,
+                thr_mma_dkv=thr_mma_dkv,
+                thr_mma_dq=thr_mma_dq,
+                tSrQ=tSrQ,
+                tSrK=tSrK,
+                tdPrdO=tdPrdO,
+                tdPrV=tdPrV,
+                tdVrP=tdVrP,
+                tdVrdO=tdVrdO,
+                tdKrdS=tdKrdS,
+                tdKrQ=tdKrQ,
+                tdQrdS=tdQrdS,
+                tdQrK=tdQrK,
+                acc_dK=acc_dK,
+                acc_dV=acc_dV,
+            )
+            smem_copy_params = SimpleNamespace(
+                smem_thr_copy_QdO=smem_thr_copy_QdO,
+                smem_thr_copy_KV=smem_thr_copy_KV,
+                smem_thr_copy_PdSt=smem_thr_copy_PdSt,
+                smem_thr_copy_QdOt=smem_thr_copy_QdOt,
+                smem_thr_copy_dS=smem_thr_copy_dS,
+                smem_thr_copy_Kt=smem_thr_copy_Kt,
+                r2s_thr_copy_PdS=r2s_thr_copy_PdS,
+                tSsQ=tSsQ,
+                tSsK=tSsK,
+                tdPsdO=tdPsdO,
+                tdPsV=tdPsV,
+                tSsLSEMma=tSsLSEMma,
+                tSsdPsumMma=tSsdPsumMma,
+                tPsP=tPsP,
+                tdSsdS=tdSsdS,
+                tdVsPt=tdVsPt,
+                tdVsdOt=tdVsdOt,
+                tdKsdSt=tdKsdSt,
+                tdKsQt=tdKsQt,
+                tdQsdS=tdQsdS,
+                tdQsKt=tdQsKt,
+            )
+            gmem_copy_params = SimpleNamespace(
+                gmem_thr_copy_dQacc=gmem_thr_copy_dQacc, tdQgdQacc=tdQgdQacc
+            )
+            compute_one_m_block = partial(
+                self.compute_one_m_block,
+                mma_params=mma_params,
+                smem_copy_params=smem_copy_params,
+                gmem_copy_params=gmem_copy_params,
+                load_Q_LSE=load_Q_LSE,
+                load_dO_dPsum=load_dO_dPsum,
+                m_block_max=m_block_max,
+                softmax_scale=softmax_scale,
+                softmax_scale_log2=softmax_scale_log2,
+            )
+
+            # --- Debug print ---
+
+            if const_expr(self.debug_print):
+                if is_print_thread:
+                    prefix = "[bwd_sm80_kernel_setup] "
+                    cute.printf("")
+                    cute.printf(
+                        prefix
+                        + "bidx={}, bidy={}, bidz={}, tidx={}, n_block={}, head_idx={}, batch_idx={}",
+                        bidx,
+                        bidy,
+                        bidz,
+                        tidx,
+                        n_block,
+                        head_idx,
+                        batch_idx,
+                    )
+                    cute.printf(
+                        prefix + "m_block_min={}, m_block_max={}",
+                        m_block_min,
+                        m_block_max,
+                    )
+                    cute.printf("")
+                    cute.printf(prefix + "mQ_cur: {}", mQ_cur.layout)
+                    cute.printf(prefix + "mK_cur: {}", mK_cur.layout)
+                    cute.printf(prefix + "mV_cur: {}", mV_cur.layout)
+                    cute.printf(prefix + "mdO_cur: {}", mdO_cur.layout)
+                    cute.printf(prefix + "mLSE_cur: {}", mLSE_cur.layout)
+                    cute.printf(prefix + "mdPsum_cur: {}", mdPsum_cur.layout)
+                    cute.printf(prefix + "mdQacc_cur: {}", mdQacc_cur.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "gQ: {}", gQ.layout)
+                    cute.printf(prefix + "gK: {}", gK.layout)
+                    cute.printf(prefix + "gV: {}", gV.layout)
+                    cute.printf(prefix + "gdO: {}", gdO.layout)
+                    cute.printf(prefix + "gLSE: {}", gLSE.layout)
+                    cute.printf(prefix + "gdPsum: {}", gdPsum.layout)
+                    cute.printf(prefix + "gdQacc: {}", gdQacc.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "sQ: {}", sQ.layout)
+                    cute.printf(prefix + "sK: {}", sK.layout)
+                    cute.printf(prefix + "sV: {}", sV.layout)
+                    cute.printf(prefix + "sdO: {}", sdO.layout)
+                    cute.printf(prefix + "sP: {}", sP.layout)
+                    cute.printf(prefix + "sdS: {}", sdS.layout)
+                    cute.printf(prefix + "sLSE: {}", sLSE.layout)
+                    cute.printf(prefix + "sdPsum: {}", sdPsum.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "sQt: {}", sQt.layout)
+                    cute.printf(prefix + "sdOt: {}", sdOt.layout)
+                    cute.printf(prefix + "sKt: {}", sKt.layout)
+                    cute.printf(prefix + "sPt: {}", sPt.layout)
+                    cute.printf(prefix + "sdSt: {}", sdSt.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "tQgQ: {}", tQgQ.layout)
+                    cute.printf(prefix + "tQsQ: {}", tQsQ.layout)
+                    cute.printf(prefix + "tKgK: {}", tKgK.layout)
+                    cute.printf(prefix + "tKsK: {}", tKsK.layout)
+                    cute.printf(prefix + "tVgV: {}", tVgV.layout)
+                    cute.printf(prefix + "tVsV: {}", tVsV.layout)
+                    cute.printf(prefix + "tLSEgLSE: {}", tLSEgLSE.layout)
+                    cute.printf(prefix + "tLSEsLSE: {}", tLSEsLSE.layout)
+                    cute.printf(prefix + "tLSEgdPsum: {}", tLSEgdPsum.layout)
+                    cute.printf(prefix + "tLSEsdPsum: {}", tLSEsdPsum.layout)
+                    cute.printf(prefix + "tdOgdO: {}", tdOgdO.layout)
+                    cute.printf(prefix + "tdOsdO: {}", tdOsdO.layout)
+                    cute.printf(prefix + "tdQgdQacc: {}", tdQgdQacc.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "acc_dK: {}", acc_dK.layout)
+                    cute.printf(prefix + "acc_dV: {}", acc_dV.layout)
+                    cute.printf(prefix + "tSrQ: {}", tSrQ.layout)
+                    cute.printf(prefix + "tSrK: {}", tSrK.layout)
+                    cute.printf(prefix + "tdPrdO: {}", tdPrdO.layout)
+                    cute.printf(prefix + "tdPrV: {}", tdPrV.layout)
+                    cute.printf(prefix + "tdVrP: {}", tdVrP.layout)
+                    cute.printf(prefix + "tdVrdO: {}", tdVrdO.layout)
+                    cute.printf(prefix + "tdKrdS: {}", tdKrdS.layout)
+                    cute.printf(prefix + "tdKrQ: {}", tdKrQ.layout)
+                    cute.printf(prefix + "tdQrdS: {}", tdQrdS.layout)
+                    cute.printf(prefix + "tdQrK: {}", tdQrK.layout)
+                    cute.printf(prefix + "tSsLSEMma_: {}", tSsLSEMma_.layout)
+                    cute.printf(prefix + "tSsdPsumMma_: {}", tSsdPsumMma_.layout)
+                    cute.printf(prefix + "tSsLSEMma: {}", tSsLSEMma.layout)
+                    cute.printf(prefix + "tSsdPsumMma: {}", tSsdPsumMma.layout)
+                    cute.printf("")
+                    cute.printf(
+                        prefix + "smem_copy_atom: layout_src_tv={}, layout_dst_tv={}",
+                        smem_copy_atom.layout_src_tv,
+                        smem_copy_atom.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix + "smem_copy_atom_trans: layout_src_tv={}, layout_dst_tv={}",
+                        smem_copy_atom_trans.layout_src_tv,
+                        smem_copy_atom_trans.layout_dst_tv,
+                    )
+                    cute.printf(
+                        prefix + "r2s_copy_atom: layout_src_tv={}, layout_dst_tv={}",
+                        r2s_copy_atom.layout_src_tv,
+                        r2s_copy_atom.layout_dst_tv,
+                    )
+                    cute.printf(prefix + "tSsQ: {}", tSsQ.layout)
+                    cute.printf(prefix + "tSsK: {}", tSsK.layout)
+                    cute.printf(prefix + "tdPsdO: {}", tdPsdO.layout)
+                    cute.printf(prefix + "tdPsV: {}", tdPsV.layout)
+                    cute.printf(prefix + "tdVsPt: {}", tdVsPt.layout)
+                    cute.printf(prefix + "tdVsdOt: {}", tdVsdOt.layout)
+                    cute.printf(prefix + "tdKsdSt: {}", tdKsdSt.layout)
+                    cute.printf(prefix + "tdKsQt: {}", tdKsQt.layout)
+                    cute.printf(prefix + "tdQsdS: {}", tdQsdS.layout)
+                    cute.printf(prefix + "tdQsKt: {}", tdQsKt.layout)
+                    cute.printf(prefix + "tPsP: {}", tPsP.layout)
+                    cute.printf(prefix + "tdSsdS: {}", tdSsdS.layout)
+                    cute.printf("")
+                    cute.printf(prefix + "cQ: {}", cQ.layout)
+                    cute.printf(prefix + "tQcQ: {}", tQcQ.layout)
+                    cute.printf(prefix + "t0QcQ: {}", t0QcQ.layout)
+                    cute.printf(prefix + "tdOcdO: {}", tdOcdO.layout)
+                    cute.printf(prefix + "t0dOcdO: {}", t0dOcdO.layout)
+                    cute.printf(prefix + "cLSE: {}", cLSE.layout)
+                    cute.printf(prefix + "tLSEcLSE: {}", tLSEcLSE.layout)
+                    cute.printf(prefix + "tdPsumcdPsum: {}", tdPsumcdPsum.layout)
+                    cute.printf(prefix + "tQpQ: {}", tQpQ.layout)
+                    cute.printf(prefix + "tdOpdO: {}", tdOpdO.layout)
+                    cute.printf("")
+
+            # ///////////////////////////////////////////////////////////////////////////////
+            # Prologue: Load sK/sV, and one full stages of sQ/sLSE/sdO/sdPsum
+            # ///////////////////////////////////////////////////////////////////////////////
+
+            # Load sV
+            self.load_V(
+                gmem_thr_copy_VdO,
+                tVgV,
+                tVsV,
+                n_block,
+                seqlen=seqlen_info.seqlen_k,
+                headdim=d_head_v,
+                is_print_thread_and_tile=is_print_thread,
+            )
+            if cutlass.const_expr(self.V_in_regs):
+                cute.arch.cp_async_commit_group()
+
+            # Load sK
+            self.load_K(
+                gmem_thr_copy_QK,
+                tKgK,
+                tKsK,
+                n_block,
+                seqlen=seqlen_info.seqlen_k,
+                headdim=d_head,
+                is_print_thread_and_tile=is_print_thread,
+            )
             cute.arch.cp_async_commit_group()
 
-        # Load sK
-        self.load_K(
-            gmem_thr_copy_QK,
-            tKgK,
-            tKsK,
-            n_block,
-            seqlen=seqlen_info.seqlen_k,
-            headdim=d_head,
-            is_print_thread_and_tile=is_print_thread,
-        )
-        cute.arch.cp_async_commit_group()
+            # S2R copy sV to rV if V_in_regs
+            if cutlass.const_expr(self.V_in_regs):
+                # Wait for sV load to finish before S2R copy
+                cute.arch.cp_async_wait_group(1)
+                cute.arch.barrier()
 
-        # S2R copy sV to rV if V_in_regs
-        if cutlass.const_expr(self.V_in_regs):
-            # Wait for sV load to finish before S2R copy
-            cute.arch.cp_async_wait_group(1)
-            cute.arch.barrier()
+                # S2R copy rotated V from smem buffer that Q/V share to rmem
+                tdPrV_copy_view = smem_thr_copy_KV.retile(tdPrV)
+                cute.copy(smem_thr_copy_KV, tdPsV, tdPrV_copy_view)
 
-            # S2R copy rotated V from smem buffer that Q/V share to rmem
-            tdPrV_copy_view = smem_thr_copy_KV.retile(tdPrV)
-            cute.copy(smem_thr_copy_KV, tdPsV, tdPrV_copy_view)
+                # Make sure all threads have read smem before loading Q
+                cute.arch.barrier()
 
-            # Make sure all threads have read smem before loading Q
-            cute.arch.barrier()
+            # Load sQ,sLSE/sdO,sdPsum for one full stages
+            assert self.num_stages_Q >= self.num_stages_dO
+            for stage in cutlass.range_constexpr(self.num_stages_Q):
+                if cutlass.const_expr(
+                    self.num_stages_Q == 1 or stage < self.num_stages_Q - 1
+                ):
+                    if stage == 0 or m_block + stage < m_block_max:
+                        load_Q_LSE(
+                            m_block + stage,
+                            smem_pipe_write_q=stage,
+                            is_print_thread_and_tile=is_print_thread and stage == 0,
+                        )
+                    cute.arch.cp_async_commit_group()
 
-        # Load sQ,sLSE/sdO,sdPsum for one full stages
-        assert self.num_stages_Q >= self.num_stages_dO
-        for stage in cutlass.range_constexpr(self.num_stages_Q):
-            if cutlass.const_expr(
-                self.num_stages_Q == 1 or stage < self.num_stages_Q - 1
-            ):
-                if stage == 0 or m_block + stage < m_block_max:
-                    load_Q_LSE(
-                        m_block + stage,
-                        smem_pipe_write_q=stage,
-                        is_print_thread_and_tile=is_print_thread and stage == 0,
-                    )
-                cute.arch.cp_async_commit_group()
+                if cutlass.const_expr(stage < self.num_stages_dO):
+                    if stage == 0 or m_block + stage < m_block_max:
+                        load_dO_dPsum(
+                            m_block + stage,
+                            smem_pipe_write_q=stage,
+                            is_print_thread_and_tile=is_print_thread and stage == 0,
+                        )
+                    cute.arch.cp_async_commit_group()
 
-            if cutlass.const_expr(stage < self.num_stages_dO):
-                if stage == 0 or m_block + stage < m_block_max:
-                    load_dO_dPsum(
-                        m_block + stage,
-                        smem_pipe_write_q=stage,
-                        is_print_thread_and_tile=is_print_thread and stage == 0,
-                    )
-                cute.arch.cp_async_commit_group()
+            # ///////////////////////////////////////////////////////////////////////////////
+            # Mainloop: Compute each m block iteration of
+            #   1. recompute with softmax: S=Q*K^T, P=softmax(S)=exp(S - LSE)
+            #   2. backward before softmax: dV=P^T*dO, dP=dO*V^T
+            #   3. backward of softmax: dS=P*(dP-sum(dP*P))=P*(dP-sum(dO*O))=P*(dP-dPsum))
+            #   4. backward after softmax: dK=dS^T*Q, dQ=dS*K
+            # ///////////////////////////////////////////////////////////////////////////////
 
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Mainloop: Compute each m block iteration of
-        #   1. recompute with softmax: S=Q*K^T, P=softmax(S)=exp(S - LSE)
-        #   2. backward before softmax: dV=P^T*dO, dP=dO*V^T
-        #   3. backward of softmax: dS=P*(dP-sum(dP*P))=P*(dP-sum(dO*O))=P*(dP-dPsum))
-        #   4. backward after softmax: dK=dS^T*Q, dQ=dS*K
-        # ///////////////////////////////////////////////////////////////////////////////
+            # --- Make mask object and partial fn ---
 
-        # --- Make mask object and partial fn ---
-
-        # NOTE: use_r2p=False because the SM80 backward SdP MMA tiles the N (key)
-        # dimension across multiple warp-columns (n_block_size=128 over 8 warps),
-        # which the R2P bitmask fast path does not handle (it ignores each warp's
-        # column offset). Thus fall back to the layout-agnostic per-column mask path.
-        mask = AttentionMask(
-            self.m_block_size, self.n_block_size, seqlen_info, use_r2p=False
-        )
-        mask_fn = partial(
-            mask.apply_mask,
-            n_block=n_block,
-            thr_mma=thr_mma_sdp,
-            batch_idx=batch_idx,
-            head_idx=head_idx,
-            mask_seqlen=True,
-            mask_causal=self.is_causal,
-        )
-
-        # --- compute each m block iteration ---
-
-        smem_pipe_read_q = cutlass.Int32(0)
-        smem_pipe_read_do = cutlass.Int32(0)
-        smem_pipe_write_q = cutlass.Int32(self.num_stages_Q - 1)
-        smem_pipe_write_do = cutlass.Int32(0)
-        for m_tile in cutlass.range(m_block_min, m_block_max, unroll=1):
-            compute_one_m_block(
-                m_tile,
-                smem_pipe_read_q,
-                smem_pipe_read_do,
-                smem_pipe_write_q,
-                smem_pipe_write_do,
-                mask_fn=mask_fn,
-                is_print_thread_and_tile=is_print_thread and m_tile == m_block_min,
+            # NOTE: use_r2p=False because the SM80 backward SdP MMA tiles the N (key)
+            # dimension across multiple warp-columns (n_block_size=128 over 8 warps),
+            # which the R2P bitmask fast path does not handle (it ignores each warp's
+            # column offset). Thus fall back to the layout-agnostic per-column mask path.
+            mask = AttentionMask(
+                self.m_block_size, self.n_block_size, seqlen_info, use_r2p=False
             )
-            smem_pipe_read_q = self.advance_pipeline(
-                smem_pipe_read_q, self.num_stages_Q
-            )
-            smem_pipe_read_do = self.advance_pipeline(
-                smem_pipe_read_do, self.num_stages_dO
-            )
-            smem_pipe_write_q = self.advance_pipeline(
-                smem_pipe_write_q, self.num_stages_Q
-            )
-            smem_pipe_write_do = self.advance_pipeline(
-                smem_pipe_write_do, self.num_stages_dO
+            mask_fn = partial(
+                mask.apply_mask,
+                n_block=n_block,
+                thr_mma=thr_mma_sdp,
+                batch_idx=batch_idx,
+                head_idx=head_idx,
+                mask_seqlen=True,
+                mask_causal=self.is_causal,
             )
 
-        # ///////////////////////////////////////////////////////////////////////////////
-        # Epilogue
-        # ///////////////////////////////////////////////////////////////////////////////
+            # --- compute each m block iteration ---
 
-        # NOTE: If GQA, we scale dK in the postprocessing kernel instead
-        if cutlass.const_expr(self.qhead_per_kvhead == 1):
-            acc_dK.store(acc_dK.load() * softmax_scale)
+            smem_pipe_read_q = cutlass.Int32(0)
+            smem_pipe_read_do = cutlass.Int32(0)
+            smem_pipe_write_q = cutlass.Int32(self.num_stages_Q - 1)
+            smem_pipe_write_do = cutlass.Int32(0)
+            for m_tile in cutlass.range(m_block_min, m_block_max, unroll=1):
+                compute_one_m_block(
+                    m_tile,
+                    smem_pipe_read_q,
+                    smem_pipe_read_do,
+                    smem_pipe_write_q,
+                    smem_pipe_write_do,
+                    mask_fn=mask_fn,
+                    is_print_thread_and_tile=is_print_thread and m_tile == m_block_min,
+                )
+                smem_pipe_read_q = self.advance_pipeline(
+                    smem_pipe_read_q, self.num_stages_Q
+                )
+                smem_pipe_read_do = self.advance_pipeline(
+                    smem_pipe_read_do, self.num_stages_dO
+                )
+                smem_pipe_write_q = self.advance_pipeline(
+                    smem_pipe_write_q, self.num_stages_Q
+                )
+                smem_pipe_write_do = self.advance_pipeline(
+                    smem_pipe_write_do, self.num_stages_dO
+                )
 
-        self.epilogue(
-            acc_dK,
-            acc_dV,
-            mdK,
-            mdV,
-            sdK,
-            sdV,
-            gmem_tiled_copy_dK,
-            gmem_tiled_copy_dV,
-            tiled_mma_dkv,
-            tidx,
-            n_block,
-            head_idx,
-            batch_idx,
-            seqlen_info,
-            d_head,
-            d_head_v,
-            is_print_thread_and_tile=is_print_thread,
-        )
+            # ///////////////////////////////////////////////////////////////////////////////
+            # Epilogue
+            # ///////////////////////////////////////////////////////////////////////////////
+
+            # NOTE: If GQA, we scale dK in the postprocessing kernel instead
+            if cutlass.const_expr(self.qhead_per_kvhead == 1):
+                acc_dK.store(acc_dK.load() * softmax_scale)
+
+            self.epilogue(
+                acc_dK,
+                acc_dV,
+                mdK,
+                mdV,
+                sdK,
+                sdV,
+                gmem_tiled_copy_dK,
+                gmem_tiled_copy_dV,
+                tiled_mma_dkv,
+                tidx,
+                n_block,
+                head_idx,
+                batch_idx,
+                seqlen_info,
+                d_head,
+                d_head_v,
+                is_print_thread_and_tile=is_print_thread,
+            )
 
     @cute.jit
     def compute_one_m_block(
