@@ -195,8 +195,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
                     idx = d["kvseqlen"].index(kvseqlen)
                     tf = d["tflops"][idx]
                     print(
-                        f"    {pass_type:4s} {method:14s}: "
-                        f"{tf:>7.1f} T (cached)",
+                        f"    {pass_type:4s} {method:14s}: " f"{tf:>7.1f} T (cached)",
                         flush=True,
                     )
                     continue
@@ -264,9 +263,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
 
                         # Build random sorted token indices (B, NHQ, SQ, topk)
                         gen = torch.Generator(device="cpu").manual_seed(42)
-                        rand_vals = torch.rand(
-                            B, qseqlen, kvseqlen, generator=gen
-                        )
+                        rand_vals = torch.rand(B, qseqlen, kvseqlen, generator=gen)
                         indices = (
                             rand_vals.argsort(dim=-1)[..., :topk]
                             .sort(dim=-1)
@@ -481,16 +478,11 @@ def _plot():
                     )
 
         ax.set_title(pname, fontsize=14, fontweight="bold")
-        ax.set_xlabel(
-            "kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)", fontsize=10
-        )
+        ax.set_xlabel("kvseqlen (qseqlen=kvseqlen/64, topk=kvseqlen/8)", fontsize=10)
         ax.set_ylabel("TFLOPS", fontsize=12)
         ax.set_xticks(x)
         ax.set_xticklabels(
-            [
-                f"{kv // 1024}K\n(q={kv // 64}, top={kv // 8192}K)"
-                for kv in kvseqlens
-            ],
+            [f"{kv // 1024}K\n(q={kv // 64}, top={kv // 8192}K)" for kv in kvseqlens],
             fontsize=9,
         )
         ax.tick_params(axis="y", labelsize=11)
@@ -519,8 +511,12 @@ def main():
         description="CuTeDSL SM100 sparse benchmark — Video Production scenario"
     )
     parser.add_argument("--exp", action="store_true", help="Run benchmark experiment")
-    parser.add_argument("--plot", action="store_true", help="Generate plot from results")
-    parser.add_argument("--force", action="store_true", help="Re-run all (ignore cache)")
+    parser.add_argument(
+        "--plot", action="store_true", help="Generate plot from results"
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="Re-run all (ignore cache)"
+    )
     parser.add_argument(
         "--max-kvseqlen",
         type=int,

@@ -66,6 +66,7 @@ from .ffa_utils import (
 )
 from .sparse_utils import (
     BlockSparseTensorsTorch,
+    InnerLoadMode,
     block_sparse_call_tuple,
     get_sparse_q_block_size,
     index_sparse_indices_to_block_sparse,
@@ -502,10 +503,10 @@ def _flex_flash_attn_fwd(
                     use_clc_scheduler=use_clc_scheduler,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                     index_sparse=is_index_sparse,
-                    inner_load_tma=(
-                        is_index_sparse
-                        and index_sparse_tiles is not None
-                        and index_sparse_tiles.inner_load_mode == 0  # InnerLoadMode.Tma
+                    inner_load_mode=(
+                        index_sparse_tiles.inner_load_mode
+                        if is_index_sparse and index_sparse_tiles is not None
+                        else InnerLoadMode.CpAsync
                     ),
                 )
             case 12:
@@ -1391,10 +1392,10 @@ def _flex_flash_attn_bwd(
                     mask_mode=get_ffa_mask_mode(),
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                     index_sparse=is_index_sparse,
-                    inner_load_tma=(
-                        is_index_sparse
-                        and index_sparse_tiles is not None
-                        and index_sparse_tiles.inner_load_mode == 0  # InnerLoadMode.Tma
+                    inner_load_mode=(
+                        index_sparse_tiles.inner_load_mode
+                        if is_index_sparse and index_sparse_tiles is not None
+                        else InnerLoadMode.CpAsync
                     ),
                 )
 

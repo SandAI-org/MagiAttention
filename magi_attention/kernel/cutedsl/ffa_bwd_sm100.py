@@ -49,6 +49,7 @@ from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_utils import (
     BlockSparseTensors,
+    InnerLoadMode,
     get_block_sparse_iteration_info_bwd,
     get_curr_blocksparse_tensors,
     get_m_block_from_iter_bwd,
@@ -92,7 +93,7 @@ class FFABwdSm100:
         mask_mode: int = 0,
         debug_print: bool = False,
         index_sparse: bool = False,
-        inner_load_tma: bool = False,
+        inner_load_mode: int = InnerLoadMode.CpAsync,
     ):
         # padding head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
@@ -161,7 +162,7 @@ class FFABwdSm100:
         self.inner_dir_max_to_min = inner_dir_max_to_min
         self.mask_mode = mask_mode
         self.index_sparse = index_sparse
-        self.inner_load_tma = inner_load_tma  # P1: BWD TMA load for kbs>=128
+        self.inner_load_mode = inner_load_mode
         self.is_atomic_scatter = (
             index_sparse
             and os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC", "0")
@@ -385,13 +386,21 @@ class FFABwdSm100:
         # Row stride is padded by 4 fp32 (128B -> 144B, keeps 16B alignment)
         # to break the 32-way SMEM bank conflict of un-padded row-major writes.
         self.sScatter_pad = 4
-        if self.index_sparse and not self.is_atomic_scatter:
+        if (
+            self.index_sparse
+            and not self.is_atomic_scatter
+            and self.inner_load_mode != InnerLoadMode.Tma
+        ):
             self.sScatter_size = self.tile_n * (self.dK_reduce_ncol + self.sScatter_pad)
         else:
             self.sScatter_size = 0
 
         # IS scatter: SMEM buffer for pre-loaded token indices (avoids GMEM in scatter)
-        self.sTokenIndices_size = self.tile_n if self.index_sparse else 0
+        self.sTokenIndices_size = (
+            self.tile_n
+            if (self.index_sparse and self.inner_load_mode != InnerLoadMode.Tma)
+            else 0
+        )
 
         # CTA group for MMA operations
         self.cta_group = (
@@ -790,7 +799,8 @@ class FFABwdSm100:
         # IS loader indexes as (token_idx, col, head_kv, batch), so we need
         # K in (SK, HD, NHK, B) layout and V in (HD, SK, NHK, B) layout.
         # Use explicit shape/stride to avoid ComposedLayout.
-        if const_expr(self.index_sparse):
+        # IS-TMA (kbs>=128) uses TMA loads, so these raw tensors are not needed.
+        if const_expr(self.index_sparse and self.inner_load_mode != InnerLoadMode.Tma):
             if const_expr(mCuSeqlensK is None):
                 # mK is (B, SK, NHK, HD) → reorder to (SK, HD, NHK, B)
                 mK_raw = cute.make_tensor(
@@ -2040,14 +2050,18 @@ class FFABwdSm100:
         # for both sQ (reused as sdK) and sdO (reused as sdV)
         sdQacc = storage.sdQacc.get_tensor(sdQacc_layout)
 
-        if const_expr(self.index_sparse and not self.is_atomic_scatter):
+        if const_expr(
+            self.index_sparse
+            and not self.is_atomic_scatter
+            and self.inner_load_mode != InnerLoadMode.Tma
+        ):
             sScatter = storage.sScatter.get_tensor(
                 cute.make_layout((self.sScatter_size,))
             )
         else:
             sScatter = None
 
-        if const_expr(self.index_sparse):
+        if const_expr(self.index_sparse and self.inner_load_mode != InnerLoadMode.Tma):
             sTokenIndices = storage.sTokenIndices.get_tensor(
                 cute.make_layout((self.sTokenIndices_size,))
             )
@@ -3513,9 +3527,11 @@ class FFABwdSm100:
                 else head_idx // self.qhead_per_kvhead
             )
 
-            # IndexSparse KV loader
+            # IndexSparse KV loader (only for IS-scatter; IS-TMA uses TMA directly)
             is_loader = None
-            if const_expr(self.index_sparse):
+            if const_expr(
+                self.index_sparse and self.inner_load_mode != InnerLoadMode.Tma
+            ):
                 from .paged_kv import IndexSparseKVLoader
 
                 is_loader = IndexSparseKVLoader.create(
@@ -3686,7 +3702,9 @@ class FFABwdSm100:
                 producer_state_dPsum.advance()
 
                 # Load K(0) + V(0)
-                if const_expr(self.index_sparse and self.inner_load_tma):
+                if const_expr(
+                    self.index_sparse and self.inner_load_mode == InnerLoadMode.Tma
+                ):
                     # IS-TMA: derive physical block offset, use TMA
                     phys_block_0 = mTileTokenIndices[
                         batch_idx,
@@ -3734,7 +3752,9 @@ class FFABwdSm100:
                             n_block = n_block_max - 1 - iter_idx
                         else:
                             n_block = n_block_min + iter_idx
-                    if const_expr(self.index_sparse and self.inner_load_tma):
+                    if const_expr(
+                        self.index_sparse and self.inner_load_mode == InnerLoadMode.Tma
+                    ):
                         # IS-TMA: derive physical block offset, use TMA
                         phys_block = mTileTokenIndices[
                             batch_idx,
@@ -4944,7 +4964,9 @@ class FFABwdSm100:
                     )
                     producer_phase_dKV ^= 1
 
-                    if const_expr(self.index_sparse):
+                    if const_expr(
+                        self.index_sparse and self.inner_load_mode != InnerLoadMode.Tma
+                    ):
                         # IS scatter reduce is slower than TMA bulk reduce,
                         # so wait for the reduce warp to copy dV from TMEM
                         # before proceeding to overwrite it with dV(j+1).
@@ -6797,7 +6819,9 @@ class FFABwdSm100:
                     (dK_reduce_ncol, dK_reduce_stage),
                 )
 
-                if const_expr(self.index_sparse and self.inner_load_tma):
+                if const_expr(
+                    self.index_sparse and self.inner_load_mode == InnerLoadMode.Tma
+                ):
                     # IS-TMA (kbs>=128): block-aligned tokens, use dense-style
                     # R2S + TMA reduce-add store with physical block addressing.
                     phys_block = (

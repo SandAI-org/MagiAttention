@@ -56,6 +56,7 @@ from .seqlen_info import SeqlenInfoQK
 from .softmax import SoftmaxSm100, apply_score_mod_inner
 from .sparse_utils import (
     BlockSparseTensors,
+    InnerLoadMode,
     get_total_block_count,
     handle_block_sparse_empty_tile_correction_sm100,
     produce_block_sparse_inner_iters_sm100,
@@ -195,10 +196,10 @@ class FFAFwdSm100:
         use_clc_scheduler: bool = False,
         debug_print: bool = False,
         index_sparse: bool = False,
-        inner_load_tma: bool = False,
+        inner_load_mode: int = InnerLoadMode.CpAsync,
     ):
         self.index_sparse = index_sparse
-        self.inner_load_tma = inner_load_tma
+        self.inner_load_mode = inner_load_mode
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -657,7 +658,8 @@ class FFAFwdSm100:
         # IS loader indexes as (token_idx, col, head_kv, batch), so we need
         # K in (SK, HD, NHK, B) and V in (HD, SK, NHK, B).
         # Use explicit shape/stride to avoid ComposedLayout.
-        if const_expr(self.index_sparse):
+        # IS-TMA (kbs>=128) uses TMA loads, so these raw tensors are not needed.
+        if const_expr(self.index_sparse and self.inner_load_mode != InnerLoadMode.Tma):
             if const_expr(mCuSeqlensK is None):
                 mK_raw = cute.make_tensor(
                     mK.iterator,
@@ -2403,9 +2405,11 @@ class FFAFwdSm100:
                 tKsK, tKgK = None, None
                 tVsV, tVgV = None, None
 
-            # IndexSparse KV loader (created independently of TMA setup)
+            # IndexSparse KV loader (only for IS-scatter; IS-TMA uses TMA directly)
             is_loader = None
-            if const_expr(self.index_sparse):
+            if const_expr(
+                self.index_sparse and self.inner_load_mode != InnerLoadMode.Tma
+            ):
                 from .paged_kv import IndexSparseKVLoader
 
                 is_loader = IndexSparseKVLoader.create(
@@ -2589,7 +2593,7 @@ class FFAFwdSm100:
                 )
                 total_k_iters = curr_mask_cnt
 
-                if const_expr(self.inner_load_tma):
+                if const_expr(self.inner_load_mode == InnerLoadMode.Tma):
                     # IS-TMA: block-aligned indices (kbs>=128), use TMA like dense/BS.
                     # Physical block offset = tile_token_indices[m, iter*n_bs] / n_bs.
                     if total_k_iters > 0:
