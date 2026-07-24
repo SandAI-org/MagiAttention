@@ -1285,6 +1285,9 @@ def _flex_flash_attn_bwd(
             magiattn_cutedsl.is_ffa_debug_mode_enabled(),
             swap_bwd_qk_loop,
             is_index_sparse,
+            index_sparse_tiles.inner_load_mode
+            if is_index_sparse and index_sparse_tiles is not None
+            else -1,
             is_ffa_inner_dir_max_to_min(),
             get_ffa_mask_mode(),
         )
@@ -1552,9 +1555,14 @@ def _flex_flash_attn_bwd(
             cluster_size=1,
         )
 
+    _is_scatter_store = (
+        is_index_sparse
+        and index_sparse_tiles is not None
+        and index_sparse_tiles.inner_load_mode != InnerLoadMode.Tma
+    )
     if dKV_postprocess:
-        if is_index_sparse:
-            # IS uses row-major dk_accum/dv_accum: simple scale + type convert
+        if _is_scatter_store:
+            # IS-scatter uses row-major dk_accum/dv_accum: simple scale + type convert
             head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
             head_dim_rounded_pp = (head_dim + 32 - 1) // 32 * 32
             if cu_seqlens_k is None:
@@ -1691,11 +1699,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
+        ctx.pack_gqa = pack_gqa
         # Drop the direct aux_tensors reference on ctx; the real tensors are
         # tracked via save_for_backward and restored in backward. Keeping them
         # here too would bypass autograd's save_for_backward bookkeeping.
         ctx.flex_attn_args = (
             flex_attn_args.drop_aux_tensors() if flex_attn_args is not None else None
+        )
+        ctx.index_sparse_tiles_bwd = (
+            getattr(flex_attn_args, "index_sparse_tiles_bwd", None)
+            if flex_attn_args is not None
+            else None
         )
         ctx.set_materialize_grads(False)
 
@@ -1721,6 +1735,19 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         flex_attn_args: TorchFlexAttnArgs | None = ctx.flex_attn_args
         if flex_attn_args is not None:
             flex_attn_args = flex_attn_args.with_aux_tensors(aux)
+            # BWD needs different m_block_size tiles than FWD.
+            if ctx.index_sparse_tiles_bwd is not None:
+                from dataclasses import replace
+
+                flex_attn_args = replace(
+                    flex_attn_args,
+                    index_sparse_tiles=ctx.index_sparse_tiles_bwd,
+                )
+
+        # IndexSparse BWD requires LoopK (swap_bwd_qk_loop=True).
+        _is_index_sparse = (
+            flex_attn_args is not None and flex_attn_args.index_sparse_tiles is not None
+        )
 
         dq, dk, dv = _flex_flash_attn_bwd(
             q=q,
@@ -1740,6 +1767,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_k=ctx.max_seqlen_k,
             deterministic=ctx.deterministic,
             flex_attn_args=flex_attn_args,
+            pack_gqa=ctx.pack_gqa,
+            swap_bwd_qk_loop=_is_index_sparse,
         )
 
         return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
@@ -1762,6 +1791,8 @@ def flex_flash_attn_func(
     pack_gqa: bool | None = None,
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    index_sparse_indices: torch.Tensor | None = None,
+    sparse_k_block_size: int = 1,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / varlen).
@@ -1794,6 +1825,61 @@ def flex_flash_attn_func(
         (``block_sparse_tensors`` / ``block_sparse_tensors_bwd``) capabilities.
         Leave as ``None`` for the plain dense / varlen path.
     """
+    if index_sparse_indices is not None:
+        from magi_attention.kernel.cutedsl.sparse_utils import (
+            prepare_index_sparse_tiles,
+        )
+
+        B, SQ, NHQ, HD = q.shape
+        _, SK, NHK, _ = k.shape
+        qhpk = NHQ // NHK
+        _pack_gqa = pack_gqa if pack_gqa is not None else (qhpk > 1)
+        _sq_packed = SQ * qhpk if _pack_gqa else SQ
+        fwd_m = 256 if _sq_packed > 128 else 128
+        bwd_m = 128
+        n_block = 128
+
+        fwd_tiles = prepare_index_sparse_tiles(
+            index_sparse_indices,
+            batch_size=B,
+            seqlen_q=SQ,
+            seqlen_k=SK,
+            num_kv_heads=NHK,
+            num_q_heads=NHQ,
+            m_block_size=fwd_m,
+            n_block_size=n_block,
+            pack_gqa=_pack_gqa,
+            sparse_k_block_size=sparse_k_block_size,
+        )
+        bwd_tiles = prepare_index_sparse_tiles(
+            index_sparse_indices,
+            batch_size=B,
+            seqlen_q=SQ,
+            seqlen_k=SK,
+            num_kv_heads=NHK,
+            num_q_heads=NHQ,
+            m_block_size=bwd_m,
+            n_block_size=n_block,
+            pack_gqa=_pack_gqa,
+            sparse_k_block_size=sparse_k_block_size,
+        )
+        if flex_attn_args is None:
+            flex_attn_args = TorchFlexAttnArgs(
+                index_sparse_tiles=fwd_tiles,
+                index_sparse_tiles_bwd=bwd_tiles,
+            )
+        else:
+            flex_attn_args = TorchFlexAttnArgs(
+                score_mod=flex_attn_args.score_mod,
+                score_mod_bwd=flex_attn_args.score_mod_bwd,
+                mask_mod=flex_attn_args.mask_mod,
+                aux_tensors=flex_attn_args.aux_tensors,
+                block_sparse_tensors=flex_attn_args.block_sparse_tensors,
+                block_sparse_tensors_bwd=flex_attn_args.block_sparse_tensors_bwd,
+                index_sparse_tiles=fwd_tiles,
+                index_sparse_tiles_bwd=bwd_tiles,
+            )
+
     out, lse = FlexFlashAttnFunc.apply(
         q,
         k,
