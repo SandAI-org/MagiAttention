@@ -266,6 +266,19 @@ def normalize_mask_types(mask_types: torch.Tensor | int | None) -> int:
     return spec.static_mask_type
 
 
+def ranges_workspace_offsets(ranges: torch.Tensor, tile: int) -> torch.Tensor:
+    """Per-range workspace starts: exclusive scan of tile-rounded range lengths.
+
+    Replaces `(physical_start + b * tile) // tile * tile`, which is only
+    collision-free when ranges form a cu_seqlens partition.
+    """
+    lens = (ranges[:, 1] - ranges[:, 0]).to(torch.int64)
+    padded = (lens + (tile - 1)).div(tile, rounding_mode="floor") * tile
+    starts = torch.zeros_like(padded)
+    torch.cumsum(padded[:-1], dim=0, out=starts[1:])
+    return starts.to(torch.int32).contiguous()
+
+
 def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
     """Collapse q/k ranges down to a cu_seqlens tensor.
 

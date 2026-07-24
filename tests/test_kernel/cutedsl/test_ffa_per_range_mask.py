@@ -464,5 +464,227 @@ class TestFfaPerRangeMask(DistTestBase):
 
 
 
+    @with_run_in_mp
+    @parameterize("mha_type", ["mha", "gqa"])
+    def test_per_range_scattered_ranges(self, mha_type):
+        """Arbitrary non-overlapping ranges: non-zero starts, holes, shuffled row
+        order, and Q/K geometries decoupled. Covered rows are gather-compared
+        against the reference; uncovered rows are undefined until the fwd
+        postprocess lands (2E1) and are exercised by the sentinel test below.
+        """
+        major = torch.cuda.get_device_capability()[0]
+        if major not in (10, 11):
+            self.skipTest("True q/k ranges require SM100/SM110")
+
+        device = self.device
+        torch.random.manual_seed(self.seed)
+        total_q, total_k = 1024, 1536
+        nheads = 4
+        nheads_kv = {"mha": nheads, "gqa": 2}[mha_type]
+        d, dtype = 64, torch.bfloat16
+        q_rows = [[640, 897], [64, 191], [320, 448]]
+        k_rows = [[1024, 1324], [0, 256], [512, 767]]
+        attn_type_map = [MT_MAP.causal, MT_MAP.bi_causal, MT_MAP.inv_causal]
+
+        q = torch.randn(total_q, nheads, d, device=device, dtype=dtype).requires_grad_()
+        k = torch.randn(
+            total_k, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+        v = torch.randn(
+            total_k, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+        q_ranges_t = torch.tensor(q_rows, device=device, dtype=torch.int32)
+        k_ranges_t = torch.tensor(k_rows, device=device, dtype=torch.int32)
+        mask_types = torch.tensor(attn_type_map, device=device, dtype=torch.int32)
+
+        def run(deterministic):
+            out, _ = flex_flash_attn_func(
+                q,
+                k,
+                v,
+                q_ranges=q_ranges_t,
+                k_ranges=k_ranges_t,
+                mask_types=mask_types,
+                max_seqlen_q=max(b - a for a, b in q_rows),
+                max_seqlen_k=max(b - a for a, b in k_rows),
+                deterministic=deterministic,
+            )
+            return (out,) + torch.autograd.grad(out, (q, k, v), g)
+
+        g = torch.randn(total_q, nheads, d, device=device, dtype=dtype)
+        out, dq, dk, dv = run(deterministic=False)
+
+        test_case = f"[RANK {self.rank}][scattered][{mha_type=}]"
+        for name, t in (("o", out), ("dq", dq), ("dk", dk), ("dv", dv)):
+            covered = t[
+                torch.cat(
+                    [
+                        torch.arange(a, b, device=device)
+                        for a, b in (q_rows if name in ("o", "dq") else k_rows)
+                    ]
+                )
+            ]
+            self.assertFalse(
+                covered.isnan().any(), msg=f"For {test_case}: {name} contains NaN"
+            )
+
+        mask = make_attn_mask_from_ffa_args(
+            q_ranges=AttnRanges.from_ranges(q_rows),
+            k_ranges=AttnRanges.from_ranges(k_rows),
+            attn_type_map=attn_type_map,
+            total_seqlen_q=total_q,
+            total_seqlen_k=total_k,
+            device=device,
+        )
+
+        def _ref(high_precision):
+            qr, kr, vr = (t.clone().detach().requires_grad_() for t in (q, k, v))
+            out_ref, _ = ref_attn_func(
+                q=qr,
+                k=kr,
+                v=vr,
+                mask=mask,
+                layout="thd",
+                backend="sdpa",
+                high_precision=high_precision,
+            )
+            return (out_ref,) + torch.autograd.grad(out_ref, (qr, kr, vr), g)
+
+        hi, lo = _ref(True), _ref(False)
+        qsel = torch.cat([torch.arange(a, b, device=device) for a, b in q_rows])
+        ksel = torch.cat([torch.arange(a, b, device=device) for a, b in k_rows])
+        err_msg_list: list[str] = []
+        for name, actual, ref_hi, ref_lo, sel in (
+            ("o", out, hi[0], lo[0], qsel),
+            ("dq", dq, hi[1], lo[1], qsel),
+            ("dk", dk, hi[2], lo[2], ksel),
+            ("dv", dv, hi[3], lo[3], ksel),
+        ):
+            self._compare(
+                name=name,
+                actual=actual[sel],
+                ref_hi=ref_hi[sel],
+                ref_lo=ref_lo[sel],
+                rtol=_RTOL[name][dtype],
+                test_case=test_case,
+                err_msg_list=err_msg_list,
+            )
+        if err_msg_list:
+            raise AssertionError("\n\n".join(err_msg_list))
+
+        # Bit-compare covered rows only: uncovered rows come from torch.empty
+        # and are different garbage on every allocation (undefined until 2E1).
+        sels = {"o": qsel, "dq": qsel, "dk": ksel, "dv": ksel}
+        first = run(deterministic=True)
+        for _ in range(2):
+            for name, expected, actual in zip(
+                ("o", "dq", "dk", "dv"), first, run(deterministic=True)
+            ):
+                self.assertTrue(
+                    torch.equal(expected[sels[name]], actual[sels[name]]),
+                    msg=f"For {test_case}: {name} not bit-reproducible",
+                )
+
+    @with_run_in_mp
+    @parameterize("dummy", [0])
+    def test_per_range_kernel_leaves_uncovered_rows_untouched(self, dummy):
+        """With holes, no kernel stage may write a row outside every range.
+
+        Output buffers are prefilled with a sentinel through the internal entry
+        points (the public API allocates internally); uncovered rows must come
+        back bit-identical. The *values* of uncovered rows are defined only once
+        the fwd postprocess lands (2E1).
+        """
+        major = torch.cuda.get_device_capability()[0]
+        if major not in (10, 11):
+            self.skipTest("True q/k ranges require SM100/SM110")
+
+        from magi_attention.kernel.cutedsl.ffa_utils import MaskMode
+        from magi_attention.kernel.cutedsl.flex_flash_attn import (
+            _flex_flash_attn_bwd,
+            _flex_flash_attn_fwd,
+        )
+
+        device = self.device
+        torch.random.manual_seed(self.seed)
+        total_q, total_k, nheads, d = 512, 768, 2, 64
+        dtype = torch.bfloat16
+        q_rows = [[320, 449], [64, 191]]
+        k_rows = [[512, 768], [128, 384]]
+        q_ranges_t = torch.tensor(q_rows, device=device, dtype=torch.int32)
+        k_ranges_t = torch.tensor(k_rows, device=device, dtype=torch.int32)
+
+        q = torch.randn(total_q, nheads, d, device=device, dtype=dtype)
+        k = torch.randn(total_k, nheads, d, device=device, dtype=dtype)
+        v = torch.randn(total_k, nheads, d, device=device, dtype=dtype)
+        s_o, s_lse, s_g = 3.140625, 12345.0, 2.75  # exactly representable
+
+        out = torch.full((total_q, nheads, d), s_o, device=device, dtype=dtype)
+        lse = torch.full((nheads, total_q), s_lse, device=device, dtype=torch.float32)
+        out, lse = _flex_flash_attn_fwd(
+            q,
+            k,
+            v,
+            out=out,
+            lse=lse,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_type=MT_MAP.causal,
+            mask_mode=MaskMode.STATIC_CAUSAL,
+            max_seqlen_q=max(b - a for a, b in q_rows),
+            max_seqlen_k=max(b - a for a, b in k_rows),
+        )
+
+        q_cov = torch.zeros(total_q, dtype=torch.bool, device=device)
+        for a, b in q_rows:
+            q_cov[a:b] = True
+        k_cov = torch.zeros(total_k, dtype=torch.bool, device=device)
+        for a, b in k_rows:
+            k_cov[a:b] = True
+
+        test_case = f"[RANK {self.rank}][sentinel]"
+        self.assertTrue(
+            (out[~q_cov] == s_o).all(),
+            msg=f"{test_case}: fwd wrote uncovered O rows",
+        )
+        self.assertTrue(
+            (lse[:, ~q_cov] == s_lse).all(),
+            msg=f"{test_case}: fwd wrote uncovered LSE rows",
+        )
+        self.assertFalse((out[q_cov] == s_o).all(), msg=f"{test_case}: O not written")
+
+        dout = torch.full((total_q, nheads, d), s_g, device=device, dtype=dtype)
+        dq = torch.full_like(q, s_o)
+        dk = torch.full_like(k, s_o)
+        dv = torch.full_like(v, s_o)
+        _flex_flash_attn_bwd(
+            q,
+            k,
+            v,
+            out,
+            lse,
+            dout,
+            dq=dq,
+            dk=dk,
+            dv=dv,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_type=MT_MAP.causal,
+            mask_mode=MaskMode.STATIC_CAUSAL,
+            max_seqlen_q=max(b - a for a, b in q_rows),
+            max_seqlen_k=max(b - a for a, b in k_rows),
+        )
+        self.assertTrue(
+            (dq[~q_cov] == s_o).all(), msg=f"{test_case}: bwd wrote uncovered dQ rows"
+        )
+        self.assertTrue(
+            (dk[~k_cov] == s_o).all(), msg=f"{test_case}: bwd wrote uncovered dK rows"
+        )
+        self.assertTrue(
+            (dv[~k_cov] == s_o).all(), msg=f"{test_case}: bwd wrote uncovered dV rows"
+        )
+
+
+
 if __name__ == "__main__":
     run_tests()
