@@ -46,6 +46,7 @@ class SeqlenInfo:
         seqused: Optional[cute.Tensor] = None,
         tile: cutlass.Constexpr[int] = 128,
         ranges: Optional[cute.Tensor] = None,
+        ws_offsets: Optional[cute.Tensor] = None,
     ):
         assert cu_seqlens is None or ranges is None
         is_varlen = cu_seqlens is not None or ranges is not None
@@ -55,12 +56,17 @@ class SeqlenInfo:
             offset = cu_seqlens[batch_idx]
         else:
             offset = 0
-        offset_padded = (
-            0
-            if const_expr(not is_varlen)
+        if const_expr(ws_offsets is not None):
+            # Host-precomputed exclusive_scan(round_up(len, tile)); the formula
+            # below only stays collision-free for cu-partition geometry.
+            offset_padded = cute.assume(ws_offsets[batch_idx], divby=tile)
+        elif const_expr(not is_varlen):
+            offset_padded = 0
+        else:
             # Add divby so that the compiler knows the alignment when moving by offset_padded
-            else cute.assume((offset + batch_idx * tile) // tile * tile, divby=tile)
-        )
+            offset_padded = cute.assume(
+                (offset + batch_idx * tile) // tile * tile, divby=tile
+            )
         if const_expr(seqused is not None):
             seqlen = seqused[batch_idx]
         elif const_expr(ranges is not None):
@@ -123,9 +129,14 @@ class SeqlenInfoQK:
         tile_n: cutlass.Constexpr[Int32] = 128,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
+        mQWSOffsets: Optional[cute.Tensor] = None,
+        mKWSOffsets: Optional[cute.Tensor] = None,
     ) -> "SeqlenInfoQK":
         assert mQRanges is None or mCuSeqlensQ is None
         assert mKRanges is None or mCuSeqlensK is None
+        # ws tables index by the (clamped) range row, so they require ranges
+        assert mQWSOffsets is None or mQRanges is not None
+        assert mKWSOffsets is None or mKRanges is not None
         varlen_q = mCuSeqlensQ is not None or mQRanges is not None
         varlen_k = mCuSeqlensK is not None or mKRanges is not None
         if const_expr(mQRanges is not None):
@@ -144,21 +155,25 @@ class SeqlenInfoQK:
             offset_k = mCuSeqlensK[batch_idx]
         else:
             offset_k = 0
-        padded_offset_q = (
-            0
-            if const_expr(not varlen_q)
+        if const_expr(mQWSOffsets is not None):
+            # Host-precomputed exclusive_scan(round_up(len, tile)); the formula
+            # below only stays collision-free for cu-partition geometry.
+            padded_offset_q = cute.assume(mQWSOffsets[q_row], divby=tile_m)
+        elif const_expr(not varlen_q):
+            padded_offset_q = 0
+        else:
             # Add divby so that the compiler knows the alignment when moving by offset_padded
-            else cute.assume(
+            padded_offset_q = cute.assume(
                 (offset_q + batch_idx * tile_m) // tile_m * tile_m, divby=tile_m
             )
-        )
-        padded_offset_k = (
-            0
-            if const_expr(not varlen_k)
-            else cute.assume(
+        if const_expr(mKWSOffsets is not None):
+            padded_offset_k = cute.assume(mKWSOffsets[k_row], divby=tile_n)
+        elif const_expr(not varlen_k):
+            padded_offset_k = 0
+        else:
+            padded_offset_k = cute.assume(
                 (offset_k + batch_idx * tile_n) // tile_n * tile_n, divby=tile_n
             )
-        )
         if const_expr(mSeqUsedQ is not None):
             seqlen_q = mSeqUsedQ[batch_idx]
         elif const_expr(mQRanges is not None):
