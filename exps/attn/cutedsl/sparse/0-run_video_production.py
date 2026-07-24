@@ -192,24 +192,27 @@ def _make_bst_bwd(sq, n_blocks, topk_blocks, sel):
 
 
 def _make_is_indices(sq, topk_blocks, sel):
-    """Build block-aligned token indices (B, NHQ, SQ, topk) for IS-TMA."""
+    """Build block-aligned token indices (B, NHQ, SQ, topk) for IS kbs=128.
+
+    All Q heads share the same sparse pattern (NHK=1), so we use expand()
+    without .contiguous() to avoid materializing NHQ copies.
+    Memory: O(SQ * topk) instead of O(NHQ * SQ * topk).
+    """
     topk = topk_blocks * N_BLOCK_SIZE
-    indices = (
-        sel.unsqueeze(-1) * N_BLOCK_SIZE
-        + torch.arange(N_BLOCK_SIZE, device="cuda").unsqueeze(0)
-    ).reshape(-1)
-    return (
-        indices.unsqueeze(0)
-        .unsqueeze(0)
-        .unsqueeze(0)
-        .expand(1, NHQ, sq, topk)
-        .contiguous()
+    base = (
+        (
+            sel.unsqueeze(-1) * N_BLOCK_SIZE
+            + torch.arange(N_BLOCK_SIZE, device="cuda").unsqueeze(0)
+        )
+        .reshape(-1)
         .int()
     )
+    # (1, 1, SQ, topk) -> expand to (1, NHQ, SQ, topk) as a zero-copy view
+    return base.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(1, NHQ, sq, topk)
 
 
 def _make_is_tiles_fwd(sq, sk, topk_blocks, sel):
-    """IS-TMA tiles for FWD (m=256), kbs=128."""
+    """IS tiles for FWD (m=256), kbs=128."""
     indices = _make_is_indices(sq, topk_blocks, sel)
     qhpk = NHQ // NHK
     fwd_m = _fwd_m_block(sq, qhpk, True)
@@ -228,7 +231,7 @@ def _make_is_tiles_fwd(sq, sk, topk_blocks, sel):
 
 
 def _make_is_tiles_bwd(sq, sk, topk_blocks, sel):
-    """IS-TMA tiles for BWD-LoopK (m=128), kbs=128."""
+    """IS tiles for BWD-LoopK (m=128), kbs=128."""
     indices = _make_is_indices(sq, topk_blocks, sel)
     return prepare_index_sparse_tiles(
         indices,
@@ -254,7 +257,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
 
     print(f"[{_ts()}] CuTeDSL SM100 Sparse Bench: Video Production", flush=True)
     print(f"  NHQ={NHQ}, NHK={NHK}, HD={HD}, PackGQA, bf16, B300", flush=True)
-    print("  Methods: Dense (gathered KV) / BS kbs=128 / IS-TMA kbs=128\n", flush=True)
+    print("  Methods: Dense (gathered KV) / BS kbs=128 / IS kbs=128\n", flush=True)
 
     scale = HD**-0.5
 
@@ -501,7 +504,7 @@ def _print_summary(results):
     print(f"\n{header}")
     print("  " + "-" * len(header))
     for kvseqlen, qseqlen, topk in scenarios:
-        row = f"  {kvseqlen//1024:>5d}k {qseqlen:>6d} {topk//1024:>5d}k"
+        row = f"  {kvseqlen // 1024:>5d}k {qseqlen:>6d} {topk // 1024:>5d}k"
         for p in PASSES:
             for m in METHODS:
                 key = f"{p}/{m}"
@@ -532,7 +535,7 @@ def _plot():
     PLOT_METHODS = [
         ("dense", "Dense (gathered KV)", "#5A5A5A"),
         ("block_sparse", "BlockSparse (kbs=128)", "#2E86C1"),
-        ("index_sparse", "IndexSparse-TMA (kbs=128)", "#C0392B"),
+        ("index_sparse", "IndexSparse (kbs=128)", "#C0392B"),
     ]
 
     kvseqlens = sorted(
