@@ -12,20 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CuTeDSL SM100 sparse benchmark — Video Production scenario.
+"""CuTeDSL SM100 sparse benchmark -- Video Production scenario.
 
-Mirrors ``exps/attn/sparse/bench_sparse_analysis/phase6_video_production.py``
-but drives the CuTeDSL kernel entry points directly (``_flex_flash_attn_fwd`` /
-``_flex_flash_attn_bwd`` + ``prepare_index_sparse_tiles``) on Blackwell (SM100).
+Mirrors exps/attn/sparse/bench_sparse_analysis/phase6_video_production.py
+but drives the CuTeDSL kernel entry points directly on Blackwell (SM100).
 
 Production config: 1080p, qhead=32, kvhead=8, hd=128.
 32-GPU training: 8 KV-heads distributed -> per-rank nhk=1, nhq=128.
 Per-rank: qseqlen = kvseqlen/64, topk = kvseqlen/8.
 Post-distribution: NHQ=128, NHK=1, PackGQA, bf16.
 
-Methods compared:
-  - Dense (full attention, CuTeDSL SM100 FWD/BWD)
-  - IndexSparse (token-level scatter, CuTeDSL SM100 FWD/BWD-LoopK)
+Methods compared (all kbs=128):
+  - Dense: gathered KV baseline (K/V size = topk)
+  - BlockSparse: block-level masks on full KV
+  - IndexSparse-TMA: token-index TMA loads on full KV
 
 Run:
     cd exps/attn/cutedsl/sparse
@@ -40,18 +40,24 @@ import gc
 import json
 import os
 import sys
+from math import ceil
 
 import torch
 
-# ═══════════════════════════════════════════════════════════════
-#  Global Config (same as phase6)
-# ═══════════════════════════════════════════════════════════════
+from magi_attention.kernel.cutedsl.ffa_utils import TorchFlexAttnArgs
+from magi_attention.kernel.cutedsl.flex_flash_attn import (
+    _flex_flash_attn_bwd,
+    _flex_flash_attn_fwd,
+)
+from magi_attention.kernel.cutedsl.sparse_utils import (
+    BlockSparseTensorsTorch,
+    prepare_index_sparse_tiles,
+)
+
 NHQ, NHK, HD = 128, 1, 128
 N_BLOCK_SIZE = 128
 WARMUP, ITERS = 8, 20
 
-# kvseqlen -> (qseqlen, topk)
-# qseqlen = kvseqlen / 64, topk = kvseqlen / 8
 SCENARIOS = [
     # (kvseqlen, qseqlen, topk)
     (32768, 512, 4096),
@@ -61,17 +67,14 @@ SCENARIOS = [
     (524288, 8192, 65536),
 ]
 
+METHODS = ["dense", "block_sparse", "index_sparse"]
 PASSES = ["fwd", "bwd"]
-METHODS = ["dense", "index_sparse"]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _OUT_DIR = os.path.join(_SCRIPT_DIR, "outs", "0-video-production")
 _RESULTS_PATH = os.path.join(_OUT_DIR, "results.json")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Utilities
-# ═══════════════════════════════════════════════════════════════
 def _ts():
     return datetime.datetime.now().strftime("%H:%M:%S")
 
@@ -118,7 +121,6 @@ def _set_entry(results, key, kvseqlen, tflops, ms):
 
 
 def _bench_kernel(run_fn, flops, device):
-    """Median-of-N timing with L2 flush between iterations."""
     for _ in range(WARMUP):
         run_fn()
     torch.cuda.synchronize(device)
@@ -137,55 +139,133 @@ def _bench_kernel(run_fn, flops, device):
     return flops / ms * 1e-9, ms
 
 
-def _calc_flops(qseqlen, topk_or_kvseqlen, is_bwd):
-    """Effective sparse TFLOPS formula: FWD = 4 * SQ * SK * NHQ * HD."""
-    fwd = 4 * qseqlen * topk_or_kvseqlen * NHQ * HD
+def _calc_flops(qseqlen, topk, is_bwd):
+    fwd = 4 * qseqlen * topk * NHQ * HD
     return fwd * 2.5 if is_bwd else fwd
 
 
-def _fwd_sparse_m_block(seqlen_q, qhpk, pack_gqa):
+def _fwd_m_block(seqlen_q, qhpk, pack_gqa):
     seqlen_q_packgqa = seqlen_q * qhpk if pack_gqa else seqlen_q
     return 256 if seqlen_q_packgqa > 128 else 128
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Experiment
-# ═══════════════════════════════════════════════════════════════
-def _run_experiment(force=False, max_kvseqlen=None):
-    from magi_attention.kernel.cutedsl.ffa_utils import TorchFlexAttnArgs
-    from magi_attention.kernel.cutedsl.flex_flash_attn import (
-        _flex_flash_attn_bwd,
-        _flex_flash_attn_fwd,
+def _make_bst_fwd(sq, n_blocks, topk_blocks, sel):
+    """BST for FWD or BWD-LoopK (M-indexed -> N-block list)."""
+    qhpk = NHQ // NHK
+    m_bs = _fwd_m_block(sq, qhpk, True)
+    M = ceil(sq * qhpk / m_bs)
+    mask_cnt = torch.zeros(1, NHK, M, dtype=torch.int32, device="cuda")
+    mask_idx = torch.zeros(1, NHK, M, n_blocks, dtype=torch.int32, device="cuda")
+    full_cnt = torch.full((1, NHK, M), topk_blocks, dtype=torch.int32, device="cuda")
+    full_idx = torch.zeros(1, NHK, M, n_blocks, dtype=torch.int32, device="cuda")
+    full_idx[:, :, :, :topk_blocks] = sel.view(1, 1, 1, -1).expand(
+        1, NHK, M, topk_blocks
     )
-    from magi_attention.kernel.cutedsl.sparse_utils import prepare_index_sparse_tiles
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=mask_cnt,
+        mask_block_idx=mask_idx,
+        full_block_cnt=full_cnt,
+        full_block_idx=full_idx,
+        block_size=(m_bs, N_BLOCK_SIZE),
+    )
 
+
+def _make_bst_bwd(sq, n_blocks, topk_blocks, sel):
+    """BST for BWD-LoopK (M-indexed, m_bs=128)."""
+    qhpk = NHQ // NHK
+    m_bs = 128
+    M = ceil(sq * qhpk / m_bs)
+    mask_cnt = torch.zeros(1, NHK, M, dtype=torch.int32, device="cuda")
+    mask_idx = torch.zeros(1, NHK, M, n_blocks, dtype=torch.int32, device="cuda")
+    full_cnt = torch.full((1, NHK, M), topk_blocks, dtype=torch.int32, device="cuda")
+    full_idx = torch.zeros(1, NHK, M, n_blocks, dtype=torch.int32, device="cuda")
+    full_idx[:, :, :, :topk_blocks] = sel.view(1, 1, 1, -1).expand(
+        1, NHK, M, topk_blocks
+    )
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=mask_cnt,
+        mask_block_idx=mask_idx,
+        full_block_cnt=full_cnt,
+        full_block_idx=full_idx,
+        block_size=(m_bs, N_BLOCK_SIZE),
+    )
+
+
+def _make_is_tiles(sq, sk, topk_blocks, sel):
+    """IS-TMA tiles for FWD (m=256) and BWD-LoopK (m=128), kbs=128."""
+    topk = topk_blocks * N_BLOCK_SIZE
+    indices = (
+        sel.unsqueeze(-1) * N_BLOCK_SIZE
+        + torch.arange(N_BLOCK_SIZE, device="cuda").unsqueeze(0)
+    ).reshape(-1)
+    indices = (
+        indices.unsqueeze(0)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .expand(1, NHQ, sq, topk)
+        .contiguous()
+        .int()
+    )
+    qhpk = NHQ // NHK
+    fwd_m = _fwd_m_block(sq, qhpk, True)
+    fwd_tiles = prepare_index_sparse_tiles(
+        indices,
+        batch_size=1,
+        seqlen_q=sq,
+        seqlen_k=sk,
+        num_kv_heads=NHK,
+        num_q_heads=NHQ,
+        m_block_size=fwd_m,
+        n_block_size=N_BLOCK_SIZE,
+        pack_gqa=True,
+        sparse_k_block_size=128,
+    )
+    bwd_tiles = prepare_index_sparse_tiles(
+        indices,
+        batch_size=1,
+        seqlen_q=sq,
+        seqlen_k=sk,
+        num_kv_heads=NHK,
+        num_q_heads=NHQ,
+        m_block_size=128,
+        n_block_size=N_BLOCK_SIZE,
+        pack_gqa=True,
+        sparse_k_block_size=128,
+    )
+    return fwd_tiles, bwd_tiles
+
+
+def _run_experiment(force=False, max_kvseqlen=None):
     device = "cuda"
-    results = _load_results()
+    results = {} if force else _load_results()
 
     scenarios = SCENARIOS
     if max_kvseqlen is not None:
         scenarios = [(kv, q, t) for kv, q, t in SCENARIOS if kv <= max_kvseqlen]
 
-    print(
-        f"[{_ts()}] CuTeDSL SM100 Sparse Bench: Video Production",
-        flush=True,
-    )
-    print(
-        f"  NHQ={NHQ}, NHK={NHK}, HD={HD}, PackGQA, bf16, B300\n",
-        flush=True,
-    )
+    print(f"[{_ts()}] CuTeDSL SM100 Sparse Bench: Video Production", flush=True)
+    print(f"  NHQ={NHQ}, NHK={NHK}, HD={HD}, PackGQA, bf16, B300", flush=True)
+    print("  Methods: Dense (gathered KV) / BS kbs=128 / IS-TMA kbs=128\n", flush=True)
 
     qhpk = NHQ // NHK
+    scale = HD**-0.5
 
     for kvseqlen, qseqlen, topk in scenarios:
+        topk_blocks = topk // N_BLOCK_SIZE
+        n_blocks = kvseqlen // N_BLOCK_SIZE
+
         print(
-            f"  ── kvseqlen={kvseqlen // 1024}k, "
-            f"qseqlen={qseqlen}, topk={topk // 1024}k ──",
+            f"  -- kvseqlen={kvseqlen // 1024}k, qseqlen={qseqlen}, "
+            f"topk={topk // 1024}k ({topk_blocks} blocks) --",
             flush=True,
         )
 
+        torch.manual_seed(42)
+        sel = torch.randperm(n_blocks, device=device)[:topk_blocks].sort().values
+
         for pass_type in PASSES:
             is_bwd = pass_type == "bwd"
+            flops = _calc_flops(qseqlen, topk, is_bwd)
 
             for method in METHODS:
                 key = f"{pass_type}/{method}"
@@ -195,7 +275,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
                     idx = d["kvseqlen"].index(kvseqlen)
                     tf = d["tflops"][idx]
                     print(
-                        f"    {pass_type:4s} {method:14s}: " f"{tf:>7.1f} T (cached)",
+                        f"    {pass_type:4s} {method:14s}: {tf:>7.1f} T (cached)",
                         flush=True,
                     )
                     continue
@@ -204,108 +284,31 @@ def _run_experiment(force=False, max_kvseqlen=None):
                 torch.cuda.empty_cache()
 
                 try:
+                    # Clear JIT cache to avoid type mismatches between methods
+                    _flex_flash_attn_fwd.compile_cache.clear()
+                    _flex_flash_attn_bwd.compile_cache.clear()
+
                     torch.manual_seed(42)
+                    q = torch.randn(
+                        1, qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device
+                    )
 
                     if method == "dense":
-                        # Dense: Q attends to full topk-length KV (simulates
-                        # the "gather topk tokens then dense attention" baseline)
-                        B = 1
-                        q = torch.randn(
-                            B, qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device
-                        )
                         k = torch.randn(
-                            B, topk, NHK, HD, dtype=torch.bfloat16, device=device
+                            1, topk, NHK, HD, dtype=torch.bfloat16, device=device
                         )
                         v = torch.randn(
-                            B, topk, NHK, HD, dtype=torch.bfloat16, device=device
+                            1, topk, NHK, HD, dtype=torch.bfloat16, device=device
                         )
-
-                        flops = _calc_flops(qseqlen, topk, is_bwd)
-
-                        # Warmup + compile
-                        out, lse = _flex_flash_attn_fwd(
-                            q, k, v, softmax_scale=HD**-0.5, pack_gqa=True
-                        )
-
-                        if not is_bwd:
-
-                            def run_fn():
-                                _flex_flash_attn_fwd(
-                                    q, k, v, softmax_scale=HD**-0.5, pack_gqa=True
-                                )
-
-                        else:
-                            dO = torch.randn_like(out)
-
-                            def run_fn():
-                                _flex_flash_attn_bwd(
-                                    q,
-                                    k,
-                                    v,
-                                    out,
-                                    lse,
-                                    dO,
-                                    softmax_scale=HD**-0.5,
-                                    pack_gqa=True,
-                                )
-
-                    elif method == "index_sparse":
-                        B = 1
-                        q = torch.randn(
-                            B, qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device
-                        )
-                        k = torch.randn(
-                            B, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
-                        )
-                        v = torch.randn(
-                            B, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
-                        )
-
-                        # Build random sorted token indices (B, NHQ, SQ, topk)
-                        gen = torch.Generator(device="cpu").manual_seed(42)
-                        rand_vals = torch.rand(B, qseqlen, kvseqlen, generator=gen)
-                        indices = (
-                            rand_vals.argsort(dim=-1)[..., :topk]
-                            .sort(dim=-1)
-                            .values.int()
-                            .to(device=device)
-                        )
-                        # Expand to (B, NHQ, SQ, topk) — all Q heads share same pattern
-                        indices = (
-                            indices.unsqueeze(2)
-                            .expand(B, qseqlen, NHQ, topk)
-                            .permute(0, 2, 1, 3)
-                            .contiguous()
-                        )
-
-                        flops = _calc_flops(qseqlen, topk, is_bwd)
-
-                        # Prepare FWD tiles
-                        fwd_m_block = _fwd_sparse_m_block(qseqlen, qhpk, True)
-                        fwd_tiles = prepare_index_sparse_tiles(
-                            indices,
-                            batch_size=B,
-                            seqlen_q=qseqlen,
-                            seqlen_k=kvseqlen,
-                            num_kv_heads=NHK,
-                            num_q_heads=NHQ,
-                            m_block_size=fwd_m_block,
-                            n_block_size=N_BLOCK_SIZE,
-                            pack_gqa=True,
-                        )
-
-                        # Warmup FWD
+                        fwd_args = TorchFlexAttnArgs()
                         out, lse = _flex_flash_attn_fwd(
                             q,
                             k,
                             v,
-                            softmax_scale=HD**-0.5,
-                            flex_attn_args=TorchFlexAttnArgs(
-                                index_sparse_tiles=fwd_tiles
-                            ),
+                            softmax_scale=scale,
+                            flex_attn_args=fwd_args,
                             pack_gqa=True,
                         )
-
                         if not is_bwd:
 
                             def run_fn():
@@ -313,26 +316,12 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                     q,
                                     k,
                                     v,
-                                    softmax_scale=HD**-0.5,
-                                    flex_attn_args=TorchFlexAttnArgs(
-                                        index_sparse_tiles=fwd_tiles
-                                    ),
+                                    softmax_scale=scale,
+                                    flex_attn_args=fwd_args,
                                     pack_gqa=True,
                                 )
 
                         else:
-                            # BWD tiles (LoopK uses 128-row M blocks)
-                            bwd_tiles = prepare_index_sparse_tiles(
-                                indices,
-                                batch_size=B,
-                                seqlen_q=qseqlen,
-                                seqlen_k=kvseqlen,
-                                num_kv_heads=NHK,
-                                num_q_heads=NHQ,
-                                m_block_size=128,
-                                n_block_size=N_BLOCK_SIZE,
-                                pack_gqa=True,
-                            )
                             dO = torch.randn_like(out)
 
                             def run_fn():
@@ -343,39 +332,122 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                     out,
                                     lse,
                                     dO,
-                                    softmax_scale=HD**-0.5,
-                                    flex_attn_args=TorchFlexAttnArgs(
-                                        index_sparse_tiles=bwd_tiles
-                                    ),
-                                    swap_bwd_qk_loop=True,
+                                    softmax_scale=scale,
+                                    flex_attn_args=fwd_args,
                                     pack_gqa=True,
+                                )
+
+                    elif method == "block_sparse":
+                        k = torch.randn(
+                            1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
+                        )
+                        v = torch.randn(
+                            1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
+                        )
+                        fwd_bst = _make_bst_fwd(qseqlen, n_blocks, topk_blocks, sel)
+                        fwd_args = TorchFlexAttnArgs(block_sparse_tensors=fwd_bst)
+                        out, lse = _flex_flash_attn_fwd(
+                            q,
+                            k,
+                            v,
+                            softmax_scale=scale,
+                            flex_attn_args=fwd_args,
+                            pack_gqa=True,
+                        )
+                        if not is_bwd:
+
+                            def run_fn():
+                                _flex_flash_attn_fwd(
+                                    q,
+                                    k,
+                                    v,
+                                    softmax_scale=scale,
+                                    flex_attn_args=fwd_args,
+                                    pack_gqa=True,
+                                )
+
+                        else:
+                            bwd_bst = _make_bst_bwd(qseqlen, n_blocks, topk_blocks, sel)
+                            bwd_args = TorchFlexAttnArgs(block_sparse_tensors=bwd_bst)
+                            dO = torch.randn_like(out)
+
+                            def run_fn():
+                                _flex_flash_attn_bwd(
+                                    q,
+                                    k,
+                                    v,
+                                    out,
+                                    lse,
+                                    dO,
+                                    softmax_scale=scale,
+                                    flex_attn_args=bwd_args,
+                                    pack_gqa=True,
+                                    swap_bwd_qk_loop=True,
+                                )
+
+                    elif method == "index_sparse":
+                        k = torch.randn(
+                            1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
+                        )
+                        v = torch.randn(
+                            1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
+                        )
+                        fwd_tiles, bwd_tiles = _make_is_tiles(
+                            qseqlen, kvseqlen, topk_blocks, sel
+                        )
+                        fwd_args = TorchFlexAttnArgs(index_sparse_tiles=fwd_tiles)
+                        out, lse = _flex_flash_attn_fwd(
+                            q,
+                            k,
+                            v,
+                            softmax_scale=scale,
+                            flex_attn_args=fwd_args,
+                            pack_gqa=True,
+                        )
+                        if not is_bwd:
+
+                            def run_fn():
+                                _flex_flash_attn_fwd(
+                                    q,
+                                    k,
+                                    v,
+                                    softmax_scale=scale,
+                                    flex_attn_args=fwd_args,
+                                    pack_gqa=True,
+                                )
+
+                        else:
+                            bwd_args = TorchFlexAttnArgs(index_sparse_tiles=bwd_tiles)
+                            dO = torch.randn_like(out)
+
+                            def run_fn():
+                                _flex_flash_attn_bwd(
+                                    q,
+                                    k,
+                                    v,
+                                    out,
+                                    lse,
+                                    dO,
+                                    softmax_scale=scale,
+                                    flex_attn_args=bwd_args,
+                                    pack_gqa=True,
+                                    swap_bwd_qk_loop=True,
                                 )
 
                     tf, ms = _bench_kernel(run_fn, flops, device)
                     _set_entry(results, key, kvseqlen, round(tf, 1), round(ms, 3))
                     print(
-                        f"    {pass_type:4s} {method:14s}: "
-                        f"{tf:>7.1f} T ({ms:.3f}ms)",
+                        f"    {pass_type:4s} {method:14s}: {tf:>7.1f} T ({ms:.3f}ms)",
                         flush=True,
                     )
 
                 except torch.cuda.OutOfMemoryError:
                     _set_entry(results, key, kvseqlen, None, None)
-                    print(
-                        f"    {pass_type:4s} {method:14s}: OOM",
-                        flush=True,
-                    )
+                    print(f"    {pass_type:4s} {method:14s}: OOM", flush=True)
                 except Exception as e:
                     _set_entry(results, key, kvseqlen, None, None)
-                    print(
-                        f"    {pass_type:4s} {method:14s}: FAIL - {e}",
-                        flush=True,
-                    )
+                    print(f"    {pass_type:4s} {method:14s}: FAIL - {e}", flush=True)
                 finally:
-                    # Free tensors
-                    for name in ["q", "k", "v", "out", "lse", "dO", "indices"]:
-                        if name in dir():
-                            exec(f"del {name}", {}, locals())
                     gc.collect()
                     torch.cuda.empty_cache()
 
@@ -386,32 +458,37 @@ def _run_experiment(force=False, max_kvseqlen=None):
 
 
 def _print_summary(results):
-    """Print summary table."""
-    print("\n  ╔═════════════════════════════════╦════════════════════════════╗")
-    print("  ║ kvseqlen (qseq, topk)          ║  fwd_dense  fwd_is  bwd_d  bwd_is ║")
-    print("  ╠═════════════════════════════════╬════════════════════════════╣")
-    for kvseqlen, qseqlen, topk in SCENARIOS:
-        label = f"{kvseqlen // 1024:>3d}k (q={qseqlen:>5d}, top={topk // 1024:>3d}k)"
-        vals = []
-        for pass_type in PASSES:
-            for method in METHODS:
-                key = f"{pass_type}/{method}"
+    scenarios = [
+        (kv, q, t)
+        for kv, q, t in SCENARIOS
+        if any(
+            kv in results.get(f"{p}/{m}", {}).get("kvseqlen", [])
+            for p in PASSES
+            for m in METHODS
+        )
+    ]
+    header = f"  {'kv':>6s} {'sq':>6s} {'topk':>6s}"
+    for p in PASSES:
+        for m in METHODS:
+            header += f" | {p[:1].upper()+'_'+m[:5]:>9s}"
+    print(f"\n{header}")
+    print("  " + "-" * len(header))
+    for kvseqlen, qseqlen, topk in scenarios:
+        row = f"  {kvseqlen//1024:>5d}k {qseqlen:>6d} {topk//1024:>5d}k"
+        for p in PASSES:
+            for m in METHODS:
+                key = f"{p}/{m}"
                 d = results.get(key, {})
                 if kvseqlen in d.get("kvseqlen", []):
                     idx = d["kvseqlen"].index(kvseqlen)
                     tf = d["tflops"][idx]
-                    vals.append(f"{tf:>6.0f}" if tf else "  FAIL")
+                    row += f" | {tf:>7.0f} T" if tf else " |    FAIL "
                 else:
-                    vals.append("     -")
-        print(f"  ║ {label:<31s} ║ {'  '.join(vals)} ║")
-    print("  ╚═════════════════════════════════╩════════════════════════════╝")
+                    row += " |       - "
+        print(row)
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Plot
-# ═══════════════════════════════════════════════════════════════
 def _plot():
-    """Generate grouped bar chart: Dense vs IndexSparse TFLOPS by kvseqlen."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -422,21 +499,24 @@ def _plot():
     if not results:
         print(f"ERROR: {_RESULTS_PATH} not found. Run --exp first.")
         return
-
     os.makedirs(_OUT_DIR, exist_ok=True)
 
-    PLOT_PASSES = [
-        ("fwd", "FWD"),
-        ("bwd", "BWD (LoopK)"),
-    ]
+    PLOT_PASSES = [("fwd", "FWD"), ("bwd", "BWD (LoopK)")]
     PLOT_METHODS = [
-        ("dense", "Dense (K=topk, PackGQA)", (0.58, 0.58, 0.58)),
-        ("index_sparse", "IndexSparse (scatter, PackGQA)", (0.77, 0.34, 0.49)),
+        ("dense", "Dense (gathered KV)", "#5A5A5A"),
+        ("block_sparse", "BlockSparse (kbs=128)", "#2E86C1"),
+        ("index_sparse", "IndexSparse-TMA (kbs=128)", "#C0392B"),
     ]
 
-    kvseqlens = [s[0] for s in SCENARIOS]
+    kvseqlens = sorted(
+        set(kv for d in results.values() for kv in d.get("kvseqlen", []))
+    )
+    if not kvseqlens:
+        print("No data to plot.")
+        return
+
     x = np.arange(len(kvseqlens))
-    bw = 0.25
+    bw = 0.22
 
     fig, axes = plt.subplots(1, 2, figsize=(18, 7), dpi=150)
 
@@ -473,7 +553,7 @@ def _plot():
                         f"{v:.0f}",
                         ha="center",
                         va="bottom",
-                        fontsize=8,
+                        fontsize=7,
                         fontweight="bold",
                     )
 
@@ -486,11 +566,11 @@ def _plot():
             fontsize=9,
         )
         ax.tick_params(axis="y", labelsize=11)
-        ax.legend(loc="upper left", fontsize=10)
+        ax.legend(loc="upper left", fontsize=9)
         ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle(
-        "CuTeDSL SM100 IndexSparse — Video Production Scenario\n"
+        "CuTeDSL SM100 Sparse -- Video Production Scenario (kbs=128)\n"
         f"NHQ={NHQ}, NHK={NHK}, HD={HD}, PackGQA, bf16, B300",
         fontsize=14,
         fontweight="bold",
@@ -503,12 +583,9 @@ def _plot():
     print(f"[{_ts()}] Plot saved -> {path}")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  CLI
-# ═══════════════════════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(
-        description="CuTeDSL SM100 sparse benchmark — Video Production scenario"
+        description="CuTeDSL SM100 sparse benchmark -- Video Production scenario"
     )
     parser.add_argument("--exp", action="store_true", help="Run benchmark experiment")
     parser.add_argument(
@@ -521,14 +598,12 @@ def main():
         "--max-kvseqlen",
         type=int,
         default=None,
-        help="Cap kvseqlen (e.g. 65536 for quick test)",
+        help="Cap kvseqlen (e.g. 131072 for quick test)",
     )
     args = parser.parse_args()
-
     if not args.exp and not args.plot:
         parser.print_help()
         sys.exit(1)
-
     if args.exp:
         _run_experiment(force=args.force, max_kvseqlen=args.max_kvseqlen)
     if args.plot:
