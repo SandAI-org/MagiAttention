@@ -25,7 +25,7 @@ from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
+from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, merge_ranges
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import (
@@ -684,6 +684,59 @@ class TestFfaPerRangeMask(DistTestBase):
             (dv[~k_cov] == s_o).all(), msg=f"{test_case}: bwd wrote uncovered dV rows"
         )
 
+    @with_run_in_mp
+    @parameterize("dummy", [0])
+    def test_merge_ranges_contract(self, dummy):
+        """Torch-native merge_ranges must reproduce the magi_attn_ext contract."""
+        dev = torch.cuda.current_device()
+
+        def t(data, dtype=torch.int32):
+            return torch.tensor(data, device=dev, dtype=dtype)
+
+        # The documented example of the ext helper, verbatim.
+        merged, s_outer, s_inner, s_types, qk_map, count = merge_ranges(
+            t([[20, 30], [10, 20], [10, 20], [20, 30]]),
+            t([[100, 110], [120, 130], [140, 150], [160, 170]]),
+            t([0, 1, 0, 0]),
+        )
+        self.assertTrue(torch.equal(merged, t([[10, 20], [20, 30], [0, 0], [0, 0]])))
+        self.assertTrue(
+            torch.equal(s_outer, t([[10, 20], [10, 20], [20, 30], [20, 30]]))
+        )
+        self.assertTrue(
+            torch.equal(
+                s_inner, t([[120, 130], [140, 150], [100, 110], [160, 170]])
+            )
+        )
+        self.assertTrue(torch.equal(s_types, t([1, 0, 0, 0])))
+        self.assertTrue(torch.equal(qk_map, t([0, 2, 0, 0])))
+        self.assertEqual(count.item(), 2)
+
+        # All-unique input: merge is the sorted identity.
+        outer = t([[30, 40], [0, 10], [10, 30]])
+        inner = t([[0, 5], [5, 9], [9, 12]])
+        types = t([2, 3, 0])
+        merged, s_outer, s_inner, s_types, qk_map, count = merge_ranges(
+            outer, inner, types
+        )
+        self.assertTrue(torch.equal(merged, t([[0, 10], [10, 30], [30, 40]])))
+        self.assertTrue(torch.equal(merged, s_outer))
+        self.assertTrue(torch.equal(s_inner, t([[5, 9], [9, 12], [0, 5]])))
+        self.assertTrue(torch.equal(s_types, t([3, 0, 2])))
+        self.assertTrue(torch.equal(qk_map, t([0, 1, 2])))
+        self.assertEqual(count.item(), 3)
+
+        # All rows share one outer range; sort must stay stable.
+        merged, s_outer, s_inner, s_types, qk_map, count = merge_ranges(
+            t([[5, 8], [5, 8], [5, 8]]),
+            t([[1, 2], [3, 4], [5, 6]]),
+            t([1, 2, 3]),
+        )
+        self.assertTrue(torch.equal(merged, t([[5, 8], [0, 0], [0, 0]])))
+        self.assertTrue(torch.equal(s_inner, t([[1, 2], [3, 4], [5, 6]])))
+        self.assertTrue(torch.equal(s_types, t([1, 2, 3])))
+        self.assertTrue(torch.equal(qk_map, t([0, 0, 0])))
+        self.assertEqual(count.item(), 1)
 
 
 if __name__ == "__main__":
