@@ -17,7 +17,6 @@
 # pyright: reportInvalidTypeForm=false
 
 import math
-import os
 from functools import partial
 from typing import Callable, Optional
 
@@ -50,6 +49,7 @@ from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_utils import (
     BlockSparseTensors,
     InnerLoadMode,
+    InnerStoreMode,
     get_block_sparse_iteration_info_bwd,
     get_curr_blocksparse_tensors,
     get_m_block_from_iter_bwd,
@@ -94,6 +94,7 @@ class FFABwdSm100:
         debug_print: bool = False,
         index_sparse: bool = False,
         inner_load_mode: int = InnerLoadMode.CpAsync,
+        inner_store_mode: int = InnerStoreMode.Tma1d,
     ):
         # padding head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
@@ -163,11 +164,8 @@ class FFABwdSm100:
         self.mask_mode = mask_mode
         self.index_sparse = index_sparse
         self.inner_load_mode = inner_load_mode
-        self.is_atomic_scatter = (
-            index_sparse
-            and os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_IS_SCATTER_ATOMIC", "0")
-            == "1"
-        )
+        self.inner_store_mode = inner_store_mode
+        self.is_scatter_store = index_sparse and inner_store_mode != InnerStoreMode.Tma
         if index_sparse:
             assert swap_bwd_qk_loop, "IndexSparse BWD requires LoopK"
 
@@ -386,11 +384,7 @@ class FFABwdSm100:
         # Row stride is padded by 4 fp32 (128B -> 144B, keeps 16B alignment)
         # to break the 32-way SMEM bank conflict of un-padded row-major writes.
         self.sScatter_pad = 4
-        if (
-            self.index_sparse
-            and not self.is_atomic_scatter
-            and self.inner_load_mode != InnerLoadMode.Tma
-        ):
+        if self.is_scatter_store and self.inner_store_mode != InnerStoreMode.BypassSmem:
             self.sScatter_size = self.tile_n * (self.dK_reduce_ncol + self.sScatter_pad)
         else:
             self.sScatter_size = 0
@@ -2051,9 +2045,7 @@ class FFABwdSm100:
         sdQacc = storage.sdQacc.get_tensor(sdQacc_layout)
 
         if const_expr(
-            self.index_sparse
-            and not self.is_atomic_scatter
-            and self.inner_load_mode != InnerLoadMode.Tma
+            self.is_scatter_store and self.inner_store_mode != InnerStoreMode.BypassSmem
         ):
             sScatter = storage.sScatter.get_tensor(
                 cute.make_layout((self.sScatter_size,))
@@ -6933,7 +6925,9 @@ class FFABwdSm100:
                             tdKrdK[None, stg].iterator,
                             cute.make_layout((dK_reduce_ncol,)),
                         )
-                        if const_expr(self.is_atomic_scatter):
+                        if const_expr(
+                            self.inner_store_mode == InnerStoreMode.BypassSmem
+                        ):
                             self._is_direct_atomic_scatter_dKV(
                                 tdKrdK_direct,
                                 mdK_cur,
@@ -6982,7 +6976,9 @@ class FFABwdSm100:
                             tdVrdV[None, stg].iterator,
                             cute.make_layout((dV_reduce_ncol,)),
                         )
-                        if const_expr(self.is_atomic_scatter):
+                        if const_expr(
+                            self.inner_store_mode == InnerStoreMode.BypassSmem
+                        ):
                             self._is_direct_atomic_scatter_dKV(
                                 tdVrdV_direct,
                                 mdV_cur,

@@ -2599,12 +2599,15 @@ class IndexSparseTilesTorch(NamedTuple):
         (B, NHK, M_blocks) int32 — number of unique valid tokens per Q-tile.
     inner_load_mode: InnerLoadMode
         Load strategy: Tma (block-aligned) or CpAsync (per-token scatter).
+    inner_store_mode: InnerStoreMode
+        BWD dK/dV store strategy: Tma (TMA reduce-add), Tma1d (bulk scatter), etc.
     """
 
     tile_token_indices: torch.Tensor
     scheduling_bst: "BlockSparseTensorsTorch"
     is_valid_total: torch.Tensor
     inner_load_mode: InnerLoadMode = InnerLoadMode.CpAsync
+    inner_store_mode: InnerStoreMode = InnerStoreMode.Tma1d
 
 
 def prepare_index_sparse_tiles(
@@ -2724,4 +2727,9 @@ def prepare_index_sparse_tiles(
         scheduling_bst=scheduling_bst,
         is_valid_total=is_valid_total,
         inner_load_mode=inner_load_mode,
+        inner_store_mode=(
+            InnerStoreMode.Tma
+            if inner_load_mode == InnerLoadMode.Tma
+            else InnerStoreMode.Tma1d
+        ),
     )
