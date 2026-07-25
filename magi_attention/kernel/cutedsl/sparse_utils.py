@@ -2698,12 +2698,53 @@ def prepare_index_sparse_tiles(
         .contiguous()
     )
 
-    # The generic sparse consumers compile both mask/full branches even when
-    # full counts are zero, so provide a dummy full-index tensor instead of None.
-    full_block_cnt = torch.zeros((B, NHK, M_blocks), dtype=torch.int32, device=device)
-    full_block_idx = torch.zeros(
-        (B, NHK, M_blocks, 1), dtype=torch.int32, device=device
-    )
+    # For IS-TMA (kbs>=128), classify fully-valid blocks as 'full' to skip
+    # per-tile softmax masking. Only the tail block needs masking if TOPK is
+    # not a multiple of n_block_size (padding with -1 sentinels).
+    has_tail_mask = (TOPK % n_block_size) != 0
+    if sparse_k_block_size >= n_block_size and k_iter_count > 0:
+        # IS-TMA: most blocks are full, at most 1 mask block for the tail
+        n_full = k_iter_count - (1 if has_tail_mask else 0)
+        n_mask = k_iter_count - n_full
+        full_block_cnt = torch.full(
+            (B, NHK, M_blocks), n_full, dtype=torch.int32, device=device
+        )
+        full_block_idx = (
+            torch.arange(n_full, dtype=torch.int32, device=device)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .expand(B, NHK, M_blocks, n_full)
+            .contiguous()
+        )
+        mask_block_cnt = torch.full(
+            (B, NHK, M_blocks), n_mask, dtype=torch.int32, device=device
+        )
+        if n_mask > 0:
+            mask_block_idx = torch.full(
+                (B, NHK, M_blocks, 1),
+                k_iter_count - 1,
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            mask_block_idx = torch.zeros(
+                (B, NHK, M_blocks, 1),
+                dtype=torch.int32,
+                device=device,
+            )
+    else:
+        # IS-scatter or zero-block: all blocks are mask blocks (original behavior)
+        full_block_cnt = torch.zeros(
+            (B, NHK, M_blocks),
+            dtype=torch.int32,
+            device=device,
+        )
+        full_block_idx = torch.zeros(
+            (B, NHK, M_blocks, 1),
+            dtype=torch.int32,
+            device=device,
+        )
     scheduling_bst = BlockSparseTensorsTorch(
         mask_block_cnt=mask_block_cnt,
         mask_block_idx=mask_block_idx,

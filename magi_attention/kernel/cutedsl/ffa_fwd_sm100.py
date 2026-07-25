@@ -2594,58 +2594,61 @@ class FFAFwdSm100:
                 total_k_iters = curr_mask_cnt
 
                 if const_expr(self.inner_load_mode == InnerLoadMode.Tma):
-                    # IS-TMA: block-aligned indices (kbs>=128), use TMA like dense/BS.
-                    # Physical block offset = tile_token_indices[m, iter*n_bs] / n_bs.
-                    if total_k_iters > 0:
-                        first_iter = curr_mask_idx[0]
-                        phys_block_0 = mTileTokenIndices[
-                            batch_idx,
-                            head_idx_kv,
-                            m_block_sparse,
-                            first_iter * self.n_block_size,
-                        ]
-                        # n_block_size is always a power of 2 (128); use right-shift for Int32
-                        phys_block_0 = Int32(phys_block_0) >> 7  # / 128
-
+                    # IS-TMA: use generic BS producer with a wrapper that
+                    # translates logical block index → physical via mTileTokenIndices.
+                    def _load_K_is_tma(block, producer_state, page_idx):
+                        phys = (
+                            Int32(
+                                mTileTokenIndices[
+                                    batch_idx,
+                                    head_idx_kv,
+                                    m_block_sparse,
+                                    block * self.n_block_size,
+                                ]
+                            )
+                            >> 7
+                        )
                         load_K(
-                            block=phys_block_0,
-                            producer_state=kv_producer_state,
-                            page_idx=None,
+                            block=phys, producer_state=producer_state, page_idx=page_idx
                         )
-                        kv_producer_state.advance()
-                        if issue_q_for_this_warp:
-                            load_Q(block=0, stage=0)
-                        if const_expr(self.q_stage == 2) and issue_q_for_this_warp:
-                            load_Q(block=1, stage=1)
-                        q_producer_phase ^= 1
-                        load_V(
-                            block=phys_block_0,
-                            producer_state=kv_producer_state,
-                            page_idx=None,
-                        )
-                        kv_producer_state.advance()
 
-                        for iter_idx in cutlass.range(1, total_k_iters, unroll=1):
-                            n_iter = curr_mask_idx[iter_idx]
-                            phys_block = mTileTokenIndices[
-                                batch_idx,
-                                head_idx_kv,
-                                m_block_sparse,
-                                n_iter * self.n_block_size,
-                            ]
-                            phys_block = Int32(phys_block) >> 7  # / 128
-                            load_K(
-                                block=phys_block,
-                                producer_state=kv_producer_state,
-                                page_idx=None,
+                    def _load_V_is_tma(block, producer_state, page_idx):
+                        phys = (
+                            Int32(
+                                mTileTokenIndices[
+                                    batch_idx,
+                                    head_idx_kv,
+                                    m_block_sparse,
+                                    block * self.n_block_size,
+                                ]
                             )
-                            kv_producer_state.advance()
-                            load_V(
-                                block=phys_block,
-                                producer_state=kv_producer_state,
-                                page_idx=None,
-                            )
-                            kv_producer_state.advance()
+                            >> 7
+                        )
+                        load_V(
+                            block=phys, producer_state=producer_state, page_idx=page_idx
+                        )
+
+                    (
+                        kv_producer_state,
+                        q_producer_phase,
+                    ) = produce_block_sparse_inner_iters_sm100(
+                        blocksparse_tensors,
+                        batch_idx,
+                        head_idx,
+                        m_block,
+                        seqlen_info,
+                        kv_producer_state,
+                        load_Q,
+                        _load_K_is_tma,
+                        _load_V_is_tma,
+                        pipeline_kv,
+                        self.q_stage,
+                        q_producer_phase,
+                        self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                        self.q_subtile_factor
+                        if self.q_subtile_factor is not None
+                        else 1,
+                    )
                 else:
                     # IS-scatter: per-token cp.async (kbs<128)
                     if total_k_iters > 0:
