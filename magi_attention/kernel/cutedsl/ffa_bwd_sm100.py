@@ -166,8 +166,8 @@ class FFABwdSm100:
         self.inner_load_mode = inner_load_mode
         self.inner_store_mode = inner_store_mode
         self.is_scatter_store = index_sparse and inner_store_mode != InnerStoreMode.Tma
-        if index_sparse:
-            assert swap_bwd_qk_loop, "IndexSparse BWD requires LoopK"
+        if index_sparse and inner_load_mode != InnerLoadMode.Tma:
+            assert swap_bwd_qk_loop, "IndexSparse scatter BWD requires LoopK"
 
         # Score mod and mask mod support
         self.score_mod = score_mod

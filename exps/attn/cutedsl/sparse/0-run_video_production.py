@@ -68,7 +68,7 @@ SCENARIOS = [
 ]
 
 METHODS = ["dense", "block_sparse", "index_sparse"]
-PASSES = ["fwd", "bwd"]
+PASSES = ["fwd", "bwd_q", "bwd"]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _OUT_DIR = os.path.join(_SCRIPT_DIR, "outs", "0-video-production")
@@ -191,6 +191,32 @@ def _make_bst_bwd(sq, n_blocks, topk_blocks, sel):
     )
 
 
+def _make_bst_loopq(sq, n_blocks, topk_blocks, sel):
+    """BST for BWD-InnerLoopQ (N-indexed -> M-block list).
+
+    All Q-blocks attend to the same set of K-blocks. For PackGQA,
+    uses packed sequence length to cover all Q sub-tiles.
+    """
+    qhpk = NHQ // NHK
+    sq_packed = sq * qhpk
+    sparse_q = 2 * 128  # subtile_factor * m_block_size
+    M_coarse = max(ceil(sq_packed / sparse_q), 1)
+    bwd_cnt = torch.zeros(1, NHK, n_blocks, dtype=torch.int32, device="cuda")
+    src = torch.full((1, NHK, topk_blocks), M_coarse, dtype=torch.int32, device="cuda")
+    bwd_cnt.scatter_(2, sel.view(1, 1, -1).expand(1, NHK, topk_blocks), src)
+    bwd_idx = (
+        torch.arange(M_coarse, dtype=torch.int32, device="cuda")
+        .view(1, 1, 1, M_coarse)
+        .expand(1, NHK, n_blocks, M_coarse)
+        .contiguous()
+    )
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=bwd_cnt,
+        mask_block_idx=bwd_idx,
+        block_size=(sparse_q, N_BLOCK_SIZE),
+    )
+
+
 def _make_is_indices(sq, topk_blocks, sel):
     """Build block-aligned token indices (B, NHQ, SQ, topk) for IS kbs=128.
 
@@ -275,7 +301,8 @@ def _run_experiment(force=False, max_kvseqlen=None):
         sel = torch.randperm(n_blocks, device=device)[:topk_blocks].sort().values
 
         for pass_type in PASSES:
-            is_bwd = pass_type == "bwd"
+            is_bwd = pass_type in ("bwd", "bwd_q")
+            swap_loop = pass_type == "bwd"  # bwd=LoopK, bwd_q=InnerLoopQ
             flops = _calc_flops(qseqlen, topk, is_bwd)
 
             for method in METHODS:
@@ -346,7 +373,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                     softmax_scale=scale,
                                     flex_attn_args=fwd_args,
                                     pack_gqa=True,
-                                    swap_bwd_qk_loop=True,
+                                    swap_bwd_qk_loop=swap_loop,
                                 )
 
                     elif method == "block_sparse":
@@ -379,8 +406,20 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                 )
 
                         else:
-                            bwd_bst = _make_bst_bwd(qseqlen, n_blocks, topk_blocks, sel)
-                            bwd_args = TorchFlexAttnArgs(block_sparse_tensors=bwd_bst)
+                            if swap_loop:
+                                bwd_bst = _make_bst_bwd(
+                                    qseqlen, n_blocks, topk_blocks, sel
+                                )
+                                bwd_args = TorchFlexAttnArgs(
+                                    block_sparse_tensors=bwd_bst
+                                )
+                            else:
+                                loopq_bst = _make_bst_loopq(
+                                    qseqlen, n_blocks, topk_blocks, sel
+                                )
+                                bwd_args = TorchFlexAttnArgs(
+                                    block_sparse_tensors_bwd=loopq_bst
+                                )
                             dO = torch.randn_like(out)
 
                             def run_fn():
@@ -394,7 +433,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                     softmax_scale=scale,
                                     flex_attn_args=bwd_args,
                                     pack_gqa=True,
-                                    swap_bwd_qk_loop=True,
+                                    swap_bwd_qk_loop=swap_loop,
                                 )
 
                     elif method == "index_sparse":
@@ -461,8 +500,15 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                     softmax_scale=scale,
                                     flex_attn_args=bwd_args,
                                     pack_gqa=True,
-                                    swap_bwd_qk_loop=True,
+                                    swap_bwd_qk_loop=swap_loop,
                                 )
+
+                            if not swap_loop:
+                                # IS-TMA InnerLoopQ warmup: first call triggers JIT
+                                try:
+                                    run_fn()
+                                except Exception:
+                                    pass
 
                     tf, ms = _bench_kernel(run_fn, flops, device)
                     _set_entry(results, key, kvseqlen, round(tf, 1), round(ms, 3))
@@ -531,7 +577,11 @@ def _plot():
         return
     os.makedirs(_OUT_DIR, exist_ok=True)
 
-    PLOT_PASSES = [("fwd", "FWD"), ("bwd", "BWD (LoopK)")]
+    PLOT_PASSES = [
+        ("fwd", "FWD"),
+        ("bwd_q", "BWD (InnerLoopQ)"),
+        ("bwd", "BWD (LoopK)"),
+    ]
     PLOT_METHODS = [
         ("dense", "Dense (gathered KV)", "#5A5A5A"),
         ("block_sparse", "BlockSparse (kbs=128)", "#2E86C1"),
@@ -548,7 +598,7 @@ def _plot():
     x = np.arange(len(kvseqlens))
     bw = 0.22
 
-    fig, axes = plt.subplots(1, 2, figsize=(18, 7), dpi=150)
+    fig, axes = plt.subplots(1, 3, figsize=(26, 7), dpi=150)
 
     for col_idx, (pid, pname) in enumerate(PLOT_PASSES):
         ax = axes[col_idx]

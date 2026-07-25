@@ -612,6 +612,70 @@ def _flex_flash_attn_fwd(
 _flex_flash_attn_fwd.compile_cache = get_jit_cache("fwd")
 
 
+def _build_is_tma_bwd_loopq_bst(
+    index_sparse_tiles,
+    seqlen_q: int,
+    seqlen_k: int,
+    num_kv_heads: int,
+    num_q_heads: int,
+    m_block_size: int,
+    n_block_size: int,
+    pack_gqa: bool,
+    subtile_factor: int = 2,
+) -> "BlockSparseTensorsTorch":
+    """Build InnerLoopQ (N->M) BST for IS-TMA.
+
+    For IS-TMA, all Q-blocks attend to the same set of K-blocks.
+    Transpose: for each selected K-block, list all coarse Q-blocks.
+    Non-selected K-blocks get count=0 and are skipped by the scheduler.
+
+    For PackGQA, uses packed seqlen_q (seqlen_q * qhpk) since the kernel
+    iterates over packed Q-tiles in InnerLoopQ.
+    """
+    from math import ceil as _ceil
+
+    import torch
+
+    bst_fwd = index_sparse_tiles.scheduling_bst
+    tile_indices = index_sparse_tiles.tile_token_indices
+    B = tile_indices.shape[0]
+    NHK = num_kv_heads
+    qhpk = num_q_heads // num_kv_heads
+    sq_packed = seqlen_q * qhpk if pack_gqa else seqlen_q
+    N_blocks = seqlen_k // n_block_size
+    sparse_q = subtile_factor * m_block_size
+    M_coarse = _ceil(sq_packed / sparse_q)
+    device = tile_indices.device
+
+    # Extract selected K-block physical indices from first Q-tile
+    # tile_token_indices: (B, NHK, M_blocks, TOPK_padded)
+    k_iter_count = int(bst_fwd.full_block_cnt[0, 0, 0].item()) + int(
+        bst_fwd.mask_block_cnt[0, 0, 0].item()
+    )
+    selected = (tile_indices[:, :, 0, ::n_block_size][:, :, :k_iter_count] >> 7).long()
+    selected = selected.clamp(0, N_blocks - 1)
+
+    # Build BWD counts: M_coarse for selected K-blocks, 0 for others
+    bwd_cnt = torch.zeros(B, NHK, N_blocks, dtype=torch.int32, device=device)
+    src_cnt = torch.full_like(selected, M_coarse, dtype=torch.int32)
+    bwd_cnt.scatter_(2, selected, src_cnt)
+
+    # Build BWD indices: [0, 1, ..., M_coarse-1] for all N-blocks
+    M_coarse = max(M_coarse, 1)
+    bwd_idx = (
+        torch.arange(M_coarse, dtype=torch.int32, device=device)
+        .view(1, 1, 1, M_coarse)
+        .expand(B, NHK, N_blocks, M_coarse)
+        .contiguous()
+    )
+
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=bwd_cnt,
+        mask_block_idx=bwd_idx,
+        block_size=(sparse_q, n_block_size),
+    )
+
+
 def _flex_flash_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -668,11 +732,30 @@ def _flex_flash_attn_bwd(
 
     # LoopK uses forward-direction block_sparse_tensors (per-Q-tile K-block list);
     # LoopQ uses backward-direction tensors (per-K-tile Q-block list).
+    _is_tma_loopq = False
     if is_index_sparse and swap_bwd_qk_loop:
         bst = index_sparse_tiles.scheduling_bst
         if not pack_gqa:
             bst = _expand_bst_heads(bst, q.shape[-2])
         block_sparse_tensors = bst
+    elif is_index_sparse and not swap_bwd_qk_loop:
+        # IS-TMA InnerLoopQ: build transposed BST (per-K-block -> Q-block list).
+        # The kernel runs as pure BlockSparse InnerLoopQ — no mTileTokenIndices
+        # needed since the outer n_block IS the physical K-block.
+        _qhpk_loopq = q.shape[-2] // k.shape[-2]
+        block_sparse_tensors = _build_is_tma_bwd_loopq_bst(
+            index_sparse_tiles,
+            seqlen_q=q.shape[1],
+            seqlen_k=k.shape[1],
+            num_kv_heads=k.shape[-2],
+            num_q_heads=q.shape[-2],
+            m_block_size=128,
+            n_block_size=128,
+            pack_gqa=pack_gqa,
+        )
+        is_index_sparse = False
+        index_sparse_tiles = None
+        _is_tma_loopq = True
     elif swap_bwd_qk_loop and flex_attn_args.block_sparse_tensors is not None:
         block_sparse_tensors = flex_attn_args.block_sparse_tensors
     else:
@@ -1193,6 +1276,9 @@ def _flex_flash_attn_bwd(
             qhead_per_kvhead=qhead_per_kvhead,
         )
     else:
+        _bwd_seqlen_q = seqlen_q
+        if not swap_bwd_qk_loop and pack_gqa and qhead_per_kvhead > 1:
+            _bwd_seqlen_q = seqlen_q * qhead_per_kvhead
         (
             normalized_block_sparse_tensors,
             block_sparse_broadcast_pattern,
@@ -1204,7 +1290,7 @@ def _flex_flash_attn_bwd(
             local=local,
             batch_size=batch_size,
             num_head=bst_num_head,
-            seqlen_q=seqlen_q,
+            seqlen_q=_bwd_seqlen_q,
             seqlen_k=seqlen_k,
             m_block_size=m_block_size,
             n_block_size=n_block_size,
