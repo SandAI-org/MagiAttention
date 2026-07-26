@@ -787,14 +787,130 @@ class TestFfaPerRangeMask(DistTestBase):
         )
         self.assertLess(rel, 5e-3, msg=f"{test_case}: O mismatch (rel {rel:.3e})")
         self.assertLess(lse_err, 1e-3, msg=f"{test_case}: LSE mismatch")
+        # The sentinel prefill proves these zeros came from the postprocess
+        # (-inf rows -> 0), not from a lucky allocation.
         self.assertTrue(
-            (out[~covered] == s_o).all(),
-            msg=f"{test_case}: atomic fwd wrote uncovered O rows",
+            (out[~covered] == 0).all(),
+            msg=f"{test_case}: postprocess left uncovered O rows non-zero",
         )
         self.assertTrue(
             (lse[:, ~covered] == float("-inf")).all(),
             msg=f"{test_case}: atomic fwd wrote uncovered LSE rows",
         )
+
+    @with_run_in_mp
+    @parameterize("with_sink", [False, True])
+    def test_fwd_atomic_public_api_e2e(self, with_sink):
+        """Overlapping Q ranges through the public API: postprocess must zero
+        uncovered rows, fold the sink in once, and autograd must run bwd off
+        the fp32 O (dq checked on single-writer rows; overlap-dq is 2E3)."""
+        major = torch.cuda.get_device_capability()[0]
+        if major not in (10, 11):
+            self.skipTest("fwd atomic reduction requires SM100/SM110")
+
+        device = self.device
+        torch.random.manual_seed(self.seed + int(with_sink))
+        total, H, d = 1024, 4, 128
+        q_rows, k_rows, types = [[0, 192], [128, 320]], [[512, 704], [704, 896]], [0, 0]
+        qr = torch.tensor(q_rows, device=device, dtype=torch.int32)
+        kr = torch.tensor(k_rows, device=device, dtype=torch.int32)
+        mt = torch.tensor(types, device=device, dtype=torch.int32)
+        q = torch.randn(
+            total, H, d, device=device, dtype=torch.bfloat16, requires_grad=True
+        )
+        k = torch.randn(
+            total, H, d, device=device, dtype=torch.bfloat16, requires_grad=True
+        )
+        v = torch.randn(
+            total, H, d, device=device, dtype=torch.bfloat16, requires_grad=True
+        )
+        sink = (
+            torch.randn(H, device=device, dtype=torch.bfloat16) if with_sink else None
+        )
+
+        out, meta = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=qr,
+            k_ranges=kr,
+            mask_types=mt,
+            max_seqlen_q=total,
+            max_seqlen_k=total,
+            sink=sink,
+            disable_fwd_atomic_reduction=False,
+        )
+        lse = meta.lse
+        self.assertEqual(out.dtype, torch.float32)
+
+        mask = make_attn_mask_from_ffa_args(
+            q_ranges=AttnRanges.from_ranges(q_rows),
+            k_ranges=AttnRanges.from_ranges(k_rows),
+            attn_type_map=types,
+            total_seqlen_q=total,
+            total_seqlen_k=total,
+            device=device,
+        )
+        covered = mask.any(dim=1)
+
+        def _ref(qt, kt, vt):
+            s = (
+                qt.transpose(0, 1) @ kt.transpose(0, 1).transpose(-1, -2) / d**0.5
+            ).masked_fill(~mask.unsqueeze(0), float("-inf"))
+            lse_ref = torch.logsumexp(s, dim=-1)
+            o = torch.softmax(s, dim=-1).nan_to_num(0.0) @ vt.transpose(0, 1)
+            if sink is not None:
+                sk = sink.to(torch.float64)[:, None]
+                lse_new = torch.logaddexp(lse_ref, sk)
+                o = o * torch.exp(lse_ref - lse_new)[..., None].nan_to_num(0.0)
+                lse_ref = lse_new
+            return o.transpose(0, 1), lse_ref
+
+        o_ref, lse_ref = _ref(
+            q.to(torch.float64), k.to(torch.float64), v.to(torch.float64)
+        )
+        test_case = f"[RANK {self.rank}][fwd_atomic_e2e:{with_sink=}]"
+        rel = (
+            (out.to(torch.float64)[covered] - o_ref[covered]).abs().max()
+            / o_ref[covered].abs().max()
+        ).item()
+        lse_err = (lse.to(torch.float64) - lse_ref)[:, covered].abs().max().item()
+        self.assertLess(rel, 5e-3, msg=f"{test_case}: O mismatch")
+        self.assertLess(lse_err, 1e-3, msg=f"{test_case}: LSE mismatch")
+        self.assertTrue(
+            (out[~covered] == 0).all(),
+            msg=f"{test_case}: postprocess left uncovered O rows non-zero",
+        )
+        if not with_sink:
+            self.assertTrue(
+                (lse[:, ~covered] == float("-inf")).all(),
+                msg=f"{test_case}: uncovered LSE rows not -inf",
+            )
+
+        dout = torch.randn_like(out)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), dout)
+        qf = q.detach().to(torch.float64).requires_grad_()
+        kf = k.detach().to(torch.float64).requires_grad_()
+        vf = v.detach().to(torch.float64).requires_grad_()
+        o_r, _ = _ref(qf, kf, vf)
+        dq_r, dk_r, dv_r = torch.autograd.grad(
+            o_r, (qf, kf, vf), dout.to(torch.float64)
+        )
+        single = covered.clone()
+        single[128:192] = False
+        k_cov = torch.zeros(total, dtype=torch.bool, device=device)
+        for a, b in k_rows:
+            k_cov[a:b] = True
+        for name, got, expect, sel in (
+            ("dq", dq, dq_r, single),
+            ("dk", dk, dk_r, k_cov),
+            ("dv", dv, dv_r, k_cov),
+        ):
+            r = (
+                (got.to(torch.float64)[sel] - expect[sel]).abs().max()
+                / (expect[sel].abs().max() + 1e-9)
+            ).item()
+            self.assertLess(r, 5e-2, msg=f"{test_case}: bwd {name} mismatch")
 
     @with_run_in_mp
     @parameterize("dummy", [0])
