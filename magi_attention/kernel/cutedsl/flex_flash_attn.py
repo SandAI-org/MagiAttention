@@ -94,6 +94,7 @@ def _flex_flash_attn_fwd(
     sink_layout: AttnSinkLayout = "sh",
     pack_gqa: bool | None = None,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    disable_fwd_atomic_reduction: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -211,7 +212,14 @@ def _flex_flash_attn_fwd(
     if major_arch == 8:
         pack_gqa = False
 
-    out_torch_dtype = q.dtype
+    if not disable_fwd_atomic_reduction:
+        assert has_ranges and major_arch in (10, 11), (
+            "fwd atomic reduction is the SM100/SM110 true-range overlap path"
+        )
+        # The atomic epilogue reads/writes prev-O by unpacked row.
+        pack_gqa = False
+
+    out_torch_dtype = q.dtype if disable_fwd_atomic_reduction else torch.float32
     device = q.device
     q_batch_seqlen_shape = (
         (batch_size, seqlen_q) if not has_ranges else (total_q,)
@@ -240,7 +248,14 @@ def _flex_flash_attn_fwd(
         )
 
     if lse is None:
-        lse = torch.empty(lse_shape, dtype=torch.float32, device=device)
+        # Atomic reduction merges through LSE: -inf marks a never-written row,
+        # so the buffer must be prefilled (callers passing lse own this).
+        if disable_fwd_atomic_reduction:
+            lse = torch.empty(lse_shape, dtype=torch.float32, device=device)
+        else:
+            lse = torch.full(
+                lse_shape, float("-inf"), dtype=torch.float32, device=device
+            )
     else:
         validate_tensor(lse, "lse", lse_shape, torch.float32, device)
 
@@ -313,6 +328,10 @@ def _flex_flash_attn_fwd(
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
         q_stage = 1
+    if not disable_fwd_atomic_reduction:
+        # fp32 sO at q_stage=2 eats the smem budget down to kv_stage=1, which
+        # deadlocks the KV pipeline. Correctness path runs single-stage Q.
+        q_stage = 1
 
     use_2cta_instrs = (
         major_arch in [10, 11]
@@ -375,12 +394,22 @@ def _flex_flash_attn_fwd(
     else:
         aux_tensor_metadata = None
 
+    range_locks = None
+    if not disable_fwd_atomic_reduction:
+        # One int32 per (physical Q block, head); +1 block so the second lock
+        # of a straddling tile always has a slot.
+        num_lock_blocks = (total_q + tile_m - 1) // tile_m + 1
+        range_locks = torch.zeros(
+            num_lock_blocks, num_head, dtype=torch.int32, device=device
+        )
+
     compile_key = (
         dtype,
         head_dim,
         head_dim_v,
         qhead_per_kvhead,
         mask_mode,
+        disable_fwd_atomic_reduction,
         score_mod_hash,
         mask_mod_hash,
         use_block_sparsity,
@@ -514,6 +543,7 @@ def _flex_flash_attn_fwd(
                     use_2cta_instrs=use_2cta_instrs,
                     use_clc_scheduler=use_clc_scheduler,
                     use_per_range_mask=use_per_range_mask,
+                    disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 12:
@@ -562,6 +592,11 @@ def _flex_flash_attn_fwd(
             # FP8 descale tensors removed; SM100 kernel descale slot is always None.
             compile_args.append(None)
             compile_args.append(mask_types_cute_tensor)
+            compile_args.append(
+                to_cute_tensor(range_locks, assumed_align=4)
+                if range_locks is not None
+                else None
+            )
         compile_args.extend(
             [
                 sparse_tensors,
@@ -595,6 +630,7 @@ def _flex_flash_attn_fwd(
         # FP8 descale tensors removed; SM100 kernel descale slot is always None.
         call_args.append(None)
         call_args.append(mask_types_tensor)
+        call_args.append(range_locks)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),

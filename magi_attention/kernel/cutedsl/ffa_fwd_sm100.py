@@ -162,6 +162,7 @@ _FP8_SMALL_HDIM_REGS = {
 # === END TUNING KNOBS ===
 
 
+
 class DescaleTensors(NamedTuple):
     q_descale: Optional[cute.Tensor] = None
     k_descale: Optional[cute.Tensor] = None
@@ -194,6 +195,7 @@ class FFAFwdSm100:
         use_2cta_instrs: bool = False,
         use_clc_scheduler: bool = False,
         use_per_range_mask: bool = False,
+        disable_fwd_atomic_reduction: bool = True,
         debug_print: bool = False,
     ):
         self.use_tma_KV = not paged_kv_non_tma
@@ -280,6 +282,13 @@ class FFAFwdSm100:
         self.qhead_per_kvhead = qhead_per_kvhead
         self.is_split_kv = is_split_kv
         self.pack_gqa = pack_gqa
+        self.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction
+        if not disable_fwd_atomic_reduction:
+            # Overlapping Q ranges merge under range locks in the correction
+            # epilogue; that path only exists on the varlen/STG store route.
+            assert is_varlen_q and not is_split_kv and not pack_gqa
+            # The prev-O gmem read is unpredicated along head_dim.
+            assert not self.check_hdim_v_oob
         self.q_subtile_factor = q_subtile_factor
 
         assert not (
@@ -557,6 +566,12 @@ class FFAFwdSm100:
         ):
             # For hdim 192,128, we can fit 3 stages if we use uneven_kv_smem
             kv_stage = 3
+        # A 1-deep KV pipeline deadlocks the load/MMA handshake; the fp32-O
+        # atomic path must shrink q_stage instead of eating the KV budget.
+        assert kv_stage >= 2, (
+            f"smem budget leaves kv_stage={kv_stage} < 2 "
+            f"(q_stage={self.q_stage}, o_dtype={self.o_dtype})"
+        )
         self.kv_stage = kv_stage
         # print("kv_stage", self.kv_stage)
         self.s_stage = 2
@@ -607,6 +622,7 @@ class FFAFwdSm100:
         learnable_sink: Optional[cute.Tensor] = None,
         descale_tensors: Optional[DescaleTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
+        mRangeLocks: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -640,6 +656,12 @@ class FFAFwdSm100:
         assert (
             (mQRanges is not None) == self.is_varlen_q
         ), "is_varlen_q compile flag disagrees with mQRanges argument"
+        assert (mRangeLocks is not None) == (
+            not self.disable_fwd_atomic_reduction
+        ), "range locks required iff fwd atomic reduction is enabled"
+        if const_expr(not self.disable_fwd_atomic_reduction):
+            assert mLSE is not None, "atomic reduction merges through LSE"
+            assert mO.element_type == Float32, "atomic reduction stores fp32 O"
         # ///////////////////////////////////////////////////////////////////////////////
         # Make mQ/mK/mV/mO/mLSE tensors
         # with layout transformations for specific memory access patterns
@@ -1262,6 +1284,7 @@ class FFAFwdSm100:
             learnable_sink,
             descale_tensors,
             mMaskTypes,
+            mRangeLocks,
             blocksparse_tensors,
             sQ_layout,
             sK_layout,
@@ -1312,6 +1335,7 @@ class FFAFwdSm100:
         learnable_sink: Optional[cute.Tensor],
         descale_tensors: Optional[DescaleTensors],
         mMaskTypes: Optional[cute.Tensor],
+        mRangeLocks: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
         sQ_layout: cute.ComposedLayout,
         sK_layout: cute.ComposedLayout,
@@ -2132,6 +2156,7 @@ class FFAFwdSm100:
                 tile_scheduler=tile_scheduler,
                 blocksparse_tensors=blocksparse_tensors,
                 mMaskTypes=mMaskTypes,
+                mRangeLocks=mRangeLocks,
                 is_print_block=is_print_block,
             )
 
@@ -3871,6 +3896,7 @@ class FFAFwdSm100:
         tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
+        mRangeLocks: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         num_corr_warps = len(self.correction_warp_ids)
@@ -3962,6 +3988,15 @@ class FFAFwdSm100:
                 gO = cute.flat_divide(
                     gO, (self.mma_tiler_pv[0] // self.cta_group_size,)
                 )[None, mma_tile_coord_v, None, None]
+
+            # --- Make gLSE view for the atomic merge ---
+
+            mLSE_cur_atomic = None
+            if const_expr(not self.disable_fwd_atomic_reduction):
+                assert mLSE is not None
+                mLSE_cur_atomic = cute.domain_offset(
+                    (seqlen_info.offset_q,), mLSE[None, head_idx]
+                )
 
             # --- Init softmax stats ---
 
@@ -4212,6 +4247,91 @@ class FFAFwdSm100:
                     gO_stage = (
                         gO[None, None, stage] if const_expr(gO is not None) else None
                     )
+
+                    # --- Atomic reduction: lock the physical blocks, merge LSE ---
+                    #
+                    # Thread t owns row t of this stage tile (the T2R layout below is
+                    # 1:1 thread-to-row), so the whole merge is thread-private and the
+                    # C++ warp-wide skip_correction vote degenerates to a per-row flag.
+                    o_scale = rowsum_norm_scale
+                    coeff_prev = Float32(0.0)
+                    has_prev = False
+                    lock_offset = Int32(0)
+                    if const_expr(not self.disable_fwd_atomic_reduction):
+                        assert mRangeLocks is not None
+                        m_tile_idx = (
+                            m_block * self.q_stage + stage
+                        ) * self.cta_group_size + mma_tile_coord_v
+                        LN2 = math.log(2.0)
+                        LOG2_E = math.log2(math.e)
+                        lse_cur = (
+                            (
+                                row_max * softmax_scale_log2_eff
+                                + (
+                                    cute.math.log2(row_sum, fastmath=True)
+                                    - max_offset
+                                )
+                            )
+                            * LN2
+                            if not acc_O_mn_row_is_zero_or_nan
+                            else -Float32.inf
+                        )
+                        row_ok = (
+                            tidx < seqlen_info.seqlen_q - m_tile_idx * self.m_block_size
+                        )
+                        if not row_ok:
+                            lse_cur = -Float32.inf
+
+                        lock_offset = (
+                            seqlen_info.offset_q + m_tile_idx * self.m_block_size
+                        )
+                        if tidx == 0:
+                            self._acquire_range_locks(
+                                mRangeLocks, head_idx, lock_offset
+                            )
+                        cute.arch.barrier(
+                            barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                            number_of_threads=len(self.correction_warp_ids)
+                            * cute.arch.WARP_SIZE,
+                        )
+
+                        gLSE_stage = cute.local_tile(
+                            mLSE_cur_atomic, (self.m_block_size,), (m_tile_idx,)
+                        )
+                        lse_prev = -Float32.inf
+                        if row_ok:
+                            lse_prev = Float32(gLSE_stage[tidx])
+                        has_prev = lse_prev != -Float32.inf
+
+                        lse_final = lse_cur
+                        if has_prev:
+                            lse_final = lse_prev
+                            if lse_cur != -Float32.inf:
+                                lse_hi = cutlass.max(lse_prev, lse_cur)
+                                lse_lo = cutlass.min(lse_prev, lse_cur)
+                                lse_ratio = cute.math.exp2(
+                                    (lse_lo - lse_hi) * LOG2_E, fastmath=True
+                                )
+                                lse_final = (
+                                    lse_hi
+                                    + cute.math.log2(
+                                        Float32(1.0 + lse_ratio), fastmath=True
+                                    )
+                                    * LN2
+                                )
+                        if row_ok:
+                            gLSE_stage[tidx] = lse_final
+                        if has_prev:
+                            coeff_prev = cute.math.exp2(
+                                (lse_prev - lse_final) * LOG2_E, fastmath=True
+                            )
+                        coeff_cur = Float32(0.0)
+                        if lse_cur != -Float32.inf:
+                            coeff_cur = cute.math.exp2(
+                                (lse_cur - lse_final) * LOG2_E, fastmath=True
+                            )
+                        o_scale = rowsum_norm_scale * coeff_cur
+
                     self.correction_epilogue(
                         thr_mma_pv,
                         tOtO[None, None, None, stage],
@@ -4219,13 +4339,29 @@ class FFAFwdSm100:
                         stage,
                         m_block,
                         seqlen_info.seqlen_q,
-                        rowsum_norm_scale,
+                        o_scale,
                         sO[None, None, stage],
                         mO_cur,
                         gO_stage,
                         gmem_tiled_copy_O,
+                        coeff_prev=coeff_prev,
+                        has_prev=has_prev,
                         is_print_thread_and_tile=is_print_thread_and_tile,
                     )
+
+                    if const_expr(not self.disable_fwd_atomic_reduction):
+                        # All threads' O/LSE stores must be gpu-visible before the
+                        # lock drops (C++ does __threadfence + barrier + exch).
+                        cute.arch.fence_acq_rel_gpu()
+                        cute.arch.barrier(
+                            barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                            number_of_threads=len(self.correction_warp_ids)
+                            * cute.arch.WARP_SIZE,
+                        )
+                        if tidx == 0:
+                            self._release_range_locks(
+                                mRangeLocks, head_idx, lock_offset
+                            )
 
                     # Signal for the next work tile that tO are already read,
                     # so mma warp can write to them
@@ -4286,8 +4422,9 @@ class FFAFwdSm100:
                     )
 
             # --- Compute LSE and write to gmem ---
+            # (atomic mode already wrote the merged LSE under the range lock)
 
-            if const_expr(mLSE is not None):
+            if const_expr(mLSE is not None and self.disable_fwd_atomic_reduction):
                 if const_expr(not seqlen_info.has_cu_seqlens_q):
                     if const_expr(self.is_split_kv):
                         mLSE_cur = mLSE[None, head_idx, batch_idx, split_idx]
@@ -4361,6 +4498,55 @@ class FFAFwdSm100:
             pipeline_o_epi.producer_acquire_w_index_phase(
                 self.q_stage - 1, corr_epi_producer_phase
             )
+
+    @cute.jit
+    def _range_lock_ptrs(self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32):
+        """Pointers for the (up to two) physical-block locks a stage tile touches.
+
+        Unaligned range starts make a 128-row tile straddle two physical blocks;
+        taking the lower block first keeps every writer's acquire order identical,
+        which is what makes the double lock deadlock-free.
+        """
+        block_1 = row_offset // self.m_block_size
+        block_2 = (row_offset + self.m_block_size - 1) // self.m_block_size
+        ptr_1 = cutedsl_utils.elem_pointer(mRangeLocks, (block_1, head_idx))
+        ptr_2 = cutedsl_utils.elem_pointer(mRangeLocks, (block_2, head_idx))
+        return ptr_1, ptr_2, block_1 != block_2
+
+    @cute.jit
+    def _acquire_range_locks(
+        self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32
+    ):
+        ptr_1, ptr_2, two_locks = self._range_lock_ptrs(
+            mRangeLocks, head_idx, row_offset
+        )
+        # Loop-carried spin state: the CAS must re-execute every iteration.
+        acquired = cute.arch.atomic_cas(
+            ptr_1, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+        )
+        while acquired != 0:
+            acquired = cute.arch.atomic_cas(
+                ptr_1, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+            )
+        if two_locks:
+            acquired_2 = cute.arch.atomic_cas(
+                ptr_2, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+            )
+            while acquired_2 != 0:
+                acquired_2 = cute.arch.atomic_cas(
+                    ptr_2, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+                )
+
+    @cute.jit
+    def _release_range_locks(
+        self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32
+    ):
+        ptr_1, ptr_2, two_locks = self._range_lock_ptrs(
+            mRangeLocks, head_idx, row_offset
+        )
+        if two_locks:
+            cute.arch.atomic_exch(ptr_2, Int32(0), sem="release", scope="gpu")
+        cute.arch.atomic_exch(ptr_1, Int32(0), sem="release", scope="gpu")
 
     @cute.jit
     def correction_rescale(
@@ -4529,6 +4715,8 @@ class FFAFwdSm100:
         mO_cur: Optional[cute.Tensor] = None,
         gO: Optional[cute.Tensor] = None,
         gmem_tiled_copy_O: Optional[cute.TiledCopy] = None,
+        coeff_prev: Float32 = 0.0,
+        has_prev: bool = False,
         is_print_thread_and_tile: bool = False,
     ):
         """Apply final scaling and transformation to attention output before writing to global memory.
@@ -4723,6 +4911,22 @@ class FFAFwdSm100:
                 tOrO_i[j], tOrO_i[j + 1] = cute.arch.mul_packed_f32x2(
                     (tOrO_i[j], tOrO_i[j + 1]), (scale, scale)
                 )
+
+            # Merge with the previous writer's fp32 O (this thread's own row;
+            # the caller holds the range lock and already folded coeff_cur into
+            # `scale`, so only the coeff_prev * prev term is added here).
+            if const_expr(not self.disable_fwd_atomic_reduction):
+                if has_prev:
+                    assert gO is not None
+                    gO_chunk = cute.local_tile(
+                        gO[tidx, None], (corr_tile_hd,), (i,)
+                    )
+                    tOrPrevO_i = cute.make_rmem_tensor(
+                        (corr_tile_hd,), self.pv_acc_dtype
+                    )
+                    cute.autovec_copy(gO_chunk, tOrPrevO_i)
+                    for j in cutlass.range(cute.size(tOrO_i), unroll_full=True):
+                        tOrO_i[j] = tOrO_i[j] + coeff_prev * tOrPrevO_i[j]
 
             # R2S copy rO(i) -> sO(i) with dtype downcast
             copy_utils.cvt_copy(tiled_smem_store, tOrO_i, tOsO_r2s_i)
