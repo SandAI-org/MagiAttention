@@ -685,6 +685,164 @@ class TestFfaPerRangeMask(DistTestBase):
         )
 
     @with_run_in_mp
+    @parameterize(
+        "layout",
+        ["same_q_disjoint_k", "unaligned_partial", "three_writers_mixed", "gqa"],
+    )
+    def test_fwd_atomic_overlapping_q_ranges(self, layout):
+        """Overlapping Q ranges must merge into one softmax under range locks.
+
+        Runs the fwd atomic-reduction path (fp32 O, LSE prefilled -inf) and
+        compares covered rows against a single fp64 softmax over each row's
+        visible-key union; uncovered rows must keep their sentinel.
+        """
+        major = torch.cuda.get_device_capability()[0]
+        if major not in (10, 11):
+            self.skipTest("fwd atomic reduction requires SM100/SM110")
+
+        from magi_attention.kernel.cutedsl.ffa_utils import MaskMode
+        from magi_attention.kernel.cutedsl.flex_flash_attn import _flex_flash_attn_fwd
+
+        device = self.device
+        torch.random.manual_seed(self.seed)
+        total, d = 1024, 128
+        configs = {
+            "same_q_disjoint_k": (
+                [[0, 128], [0, 128]],
+                [[128, 320], [320, 512]],
+                [0, 0],
+                (4, 4),
+            ),
+            "unaligned_partial": (
+                [[0, 192], [128, 320]],
+                [[512, 704], [704, 896]],
+                [0, 0],
+                (4, 4),
+            ),
+            "three_writers_mixed": (
+                [[0, 128], [64, 256], [64, 128]],
+                [[0, 128], [256, 512], [896, 1024]],
+                [1, 0, 2],
+                (4, 4),
+            ),
+            "gqa": (
+                [[0, 192], [128, 320]],
+                [[512, 704], [704, 896]],
+                [0, 1],
+                (8, 2),
+            ),
+        }
+        q_rows, k_rows, types, (H, Hkv) = configs[layout]
+        qr = torch.tensor(q_rows, device=device, dtype=torch.int32)
+        kr = torch.tensor(k_rows, device=device, dtype=torch.int32)
+        mt = torch.tensor(types, device=device, dtype=torch.int32)
+        q = torch.randn(total, H, d, device=device, dtype=torch.bfloat16)
+        k = torch.randn(total, Hkv, d, device=device, dtype=torch.bfloat16)
+        v = torch.randn(total, Hkv, d, device=device, dtype=torch.bfloat16)
+
+        s_o = 3.140625
+        out = torch.full((total, H, d), s_o, device=device, dtype=torch.float32)
+        lse = torch.full((H, total), float("-inf"), device=device, dtype=torch.float32)
+        out, lse = _flex_flash_attn_fwd(
+            q,
+            k,
+            v,
+            out=out,
+            lse=lse,
+            q_ranges=qr,
+            k_ranges=kr,
+            mask_mode=MaskMode.PER_RANGE,
+            mask_types_tensor=mt,
+            max_seqlen_q=total,
+            max_seqlen_k=total,
+            disable_fwd_atomic_reduction=False,
+        )
+
+        mask = make_attn_mask_from_ffa_args(
+            q_ranges=AttnRanges.from_ranges(q_rows),
+            k_ranges=AttnRanges.from_ranges(k_rows),
+            attn_type_map=types,
+            total_seqlen_q=total,
+            total_seqlen_k=total,
+            device=device,
+        )
+        covered = mask.any(dim=1)
+        qf = q.to(torch.float64).transpose(0, 1)
+        kf = k.to(torch.float64).transpose(0, 1)
+        vf = v.to(torch.float64).transpose(0, 1)
+        if Hkv != H:
+            kf = kf.repeat_interleave(H // Hkv, dim=0)
+            vf = vf.repeat_interleave(H // Hkv, dim=0)
+        s = qf @ kf.transpose(-1, -2) / (d**0.5)
+        s = s.masked_fill(~mask.unsqueeze(0), float("-inf"))
+        lse_ref = torch.logsumexp(s, dim=-1)
+        o_ref = torch.softmax(s, dim=-1).nan_to_num(0.0) @ vf
+
+        test_case = f"[RANK {self.rank}][fwd_atomic:{layout}]"
+        o_got = out.to(torch.float64)[covered]
+        o_exp = o_ref.transpose(0, 1)[covered]
+        rel = (o_got - o_exp).abs().max().item() / o_exp.abs().max().item()
+        lse_err = (
+            (lse.to(torch.float64) - lse_ref)[:, covered].abs().max().item()
+        )
+        self.assertLess(rel, 5e-3, msg=f"{test_case}: O mismatch (rel {rel:.3e})")
+        self.assertLess(lse_err, 1e-3, msg=f"{test_case}: LSE mismatch")
+        self.assertTrue(
+            (out[~covered] == s_o).all(),
+            msg=f"{test_case}: atomic fwd wrote uncovered O rows",
+        )
+        self.assertTrue(
+            (lse[:, ~covered] == float("-inf")).all(),
+            msg=f"{test_case}: atomic fwd wrote uncovered LSE rows",
+        )
+
+    @with_run_in_mp
+    @parameterize("dummy", [0])
+    def test_fwd_atomic_matches_direct_on_disjoint(self, dummy):
+        """On non-overlapping input the atomic path must be bit-equal to the
+        direct-write path: skip_correction folds coeff_cur == 1.0 exactly."""
+        major = torch.cuda.get_device_capability()[0]
+        if major not in (10, 11):
+            self.skipTest("fwd atomic reduction requires SM100/SM110")
+
+        from magi_attention.kernel.cutedsl.ffa_utils import MaskMode
+        from magi_attention.kernel.cutedsl.flex_flash_attn import _flex_flash_attn_fwd
+
+        device = self.device
+        torch.random.manual_seed(self.seed + 1)
+        B, s, H, d = 4, 256, 4, 128
+        total = B * s
+        cu = torch.arange(0, total + 1, s, device=device, dtype=torch.int32)
+        qr = torch.stack([cu[:-1], cu[1:]], 1).contiguous()
+        mt = torch.ones(B, device=device, dtype=torch.int32)
+        q = torch.randn(total, H, d, device=device, dtype=torch.bfloat16)
+        k = torch.randn(total, H, d, device=device, dtype=torch.bfloat16)
+        v = torch.randn(total, H, d, device=device, dtype=torch.bfloat16)
+
+        common = dict(
+            q_ranges=qr,
+            k_ranges=qr.clone(),
+            mask_mode=MaskMode.PER_RANGE,
+            mask_types_tensor=mt,
+            max_seqlen_q=s,
+            max_seqlen_k=s,
+        )
+        out_direct, lse_direct = _flex_flash_attn_fwd(q, k, v, **common)
+        out_atomic, lse_atomic = _flex_flash_attn_fwd(
+            q, k, v, disable_fwd_atomic_reduction=False, **common
+        )
+
+        test_case = f"[RANK {self.rank}][fwd_atomic:disjoint]"
+        self.assertTrue(
+            torch.equal(out_atomic.to(torch.bfloat16), out_direct),
+            msg=f"{test_case}: O not bit-equal to the direct path",
+        )
+        self.assertTrue(
+            torch.equal(lse_atomic, lse_direct),
+            msg=f"{test_case}: LSE not bit-equal to the direct path",
+        )
+
+    @with_run_in_mp
     @parameterize("dummy", [0])
     def test_ws_offsets_cache(self, dummy):
         import gc
