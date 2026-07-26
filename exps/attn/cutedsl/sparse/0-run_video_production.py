@@ -647,6 +647,8 @@ def _plot():
         )
         ax.tick_params(axis="y", labelsize=11)
         ax.legend(loc="upper left", fontsize=9)
+        ax.set_ylim(0, 2500)
+        ax.axhline(y=2500, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
         ax.grid(axis="y", alpha=0.3)
 
     fig.suptitle(
