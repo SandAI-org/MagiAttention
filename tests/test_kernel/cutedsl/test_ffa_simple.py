@@ -111,7 +111,9 @@ class TestFfaSimple(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600
+        # varlen_fwd_bwd JIT-compiles per (arch, seqlen, mask) sub-config and
+        # sits right at 600s from a cold cache.
+        return 1200
 
     @property
     def world_size(self) -> int:
