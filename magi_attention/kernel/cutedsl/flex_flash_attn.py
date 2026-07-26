@@ -623,11 +623,11 @@ def _build_is_tma_bwd_loopq_bst(
     pack_gqa: bool,
     subtile_factor: int = 2,
 ) -> "BlockSparseTensorsTorch":
-    """Build InnerLoopQ (N->M) BST for IS-TMA.
+    """Build InnerLoopQ (N->M) BST for IS-TMA using proper index inversion.
 
-    For IS-TMA, all Q-blocks attend to the same set of K-blocks.
-    Transpose: for each selected K-block, list all coarse Q-blocks.
-    Non-selected K-blocks get count=0 and are skipped by the scheduler.
+    Uses invert_index_sparse_indices to correctly invert per-Q-tile K-block
+    selections into per-K-block Q-tile lists, supporting the general case where
+    different Q-tiles may select different K-blocks.
 
     For PackGQA, uses packed seqlen_q (seqlen_q * qhpk) since the kernel
     iterates over packed Q-tiles in InnerLoopQ.
@@ -636,38 +636,108 @@ def _build_is_tma_bwd_loopq_bst(
 
     import torch
 
+    from magi_attention.utils.sparse_utils import invert_index_sparse_indices
+
     bst_fwd = index_sparse_tiles.scheduling_bst
     tile_indices = index_sparse_tiles.tile_token_indices
-    B = tile_indices.shape[0]
-    NHK = num_kv_heads
+    B, NHK, M_blocks, TOPK_padded = tile_indices.shape
     qhpk = num_q_heads // num_kv_heads
-    sq_packed = seqlen_q * qhpk if pack_gqa else seqlen_q
     N_blocks = seqlen_k // n_block_size
     sparse_q = subtile_factor * m_block_size
-    M_coarse = _ceil(sq_packed / sparse_q)
     device = tile_indices.device
 
-    # Extract selected K-block physical indices from first Q-tile
-    # tile_token_indices: (B, NHK, M_blocks, TOPK_padded)
+    sq_packed = seqlen_q * qhpk if pack_gqa else seqlen_q
+    M_coarse = _ceil(sq_packed / sparse_q)
+
+    # K-iteration count per Q-tile (from forward BST)
     k_iter_count = int(bst_fwd.full_block_cnt[0, 0, 0].item()) + int(
         bst_fwd.mask_block_cnt[0, 0, 0].item()
     )
-    selected = (tile_indices[:, :, 0, ::n_block_size][:, :, :k_iter_count] >> 7).long()
-    selected = selected.clamp(0, N_blocks - 1)
+    if k_iter_count == 0:
+        bwd_cnt = torch.zeros(B, NHK, N_blocks, dtype=torch.int32, device=device)
+        bwd_idx = torch.zeros(B, NHK, N_blocks, 1, dtype=torch.int32, device=device)
+        return BlockSparseTensorsTorch(
+            mask_block_cnt=bwd_cnt,
+            mask_block_idx=bwd_idx,
+            block_size=(sparse_q, n_block_size),
+        )
 
-    # Build BWD counts: M_coarse for selected K-blocks, 0 for others
-    bwd_cnt = torch.zeros(B, NHK, N_blocks, dtype=torch.int32, device=device)
-    src_cnt = torch.full_like(selected, M_coarse, dtype=torch.int32)
-    bwd_cnt.scatter_(2, selected, src_cnt)
+    # Extract K-block indices per fine Q-tile from tile_token_indices.
+    # Values are K-token addresses; >>7 (÷128) gives K-block index for kbs=128.
+    k_blocks_per_qtile = (
+        tile_indices[:, :, :, ::n_block_size][:, :, :, :k_iter_count] >> 7
+    ).int()
+    # Shape: (B, NHK, M_blocks, k_iter_count)
+    k_blocks_per_qtile = k_blocks_per_qtile.clamp(-1, N_blocks - 1)
 
-    # Build BWD indices: [0, 1, ..., M_coarse-1] for all N-blocks
-    M_coarse = max(M_coarse, 1)
-    bwd_idx = (
-        torch.arange(M_coarse, dtype=torch.int32, device=device)
-        .view(1, 1, 1, M_coarse)
-        .expand(B, NHK, N_blocks, M_coarse)
-        .contiguous()
-    )
+    # Invert per batch: for each K-block, which fine Q-tiles attend to it?
+    all_bwd_cnt = []
+    all_bwd_idx = []
+    max_coarse_cnt = 0
+
+    for b in range(B):
+        # invert_index_sparse_indices expects (seqlen_q, nhk, topk)
+        # Here seqlen_q = M_blocks (fine Q-tiles), topk = k_iter_count
+        fwd_b = k_blocks_per_qtile[b].permute(1, 0, 2).contiguous()
+        # fwd_b: (M_blocks, NHK, k_iter_count), values = K-block indices
+
+        inner_b, _ = invert_index_sparse_indices(
+            fwd_b,
+            seqlen_k=N_blocks,
+            sparse_k_block_size=1,
+            pad_multiple=1,
+        )
+        # inner_b: (N_blocks, NHK, inner_topk_fine) — fine Q-tile indices per K-block
+
+        # Convert fine Q-tile index -> coarse Q-block index
+        valid = inner_b >= 0
+        coarse_b = torch.where(valid, inner_b // subtile_factor, M_coarse)
+
+        # Deduplicate coarse indices per (K-block, head) via sort + unique
+        coarse_sorted, _ = coarse_b.sort(dim=-1)
+        # Mark first occurrence: differs from predecessor
+        shifted = torch.cat(
+            [torch.full_like(coarse_sorted[:, :, :1], -1), coarse_sorted[:, :, :-1]],
+            dim=-1,
+        )
+        unique_mask = (coarse_sorted != shifted) & (coarse_sorted < M_coarse)
+
+        # Count unique coarse blocks per (K-block, head)
+        counts_b = unique_mask.sum(dim=-1).int()  # (N_blocks, NHK)
+        max_cnt_b = int(counts_b.max().item())
+        max_cnt_b = max(max_cnt_b, 1)
+        max_coarse_cnt = max(max_coarse_cnt, max_cnt_b)
+
+        # Compact unique coarse indices into dense output
+        idx_b = torch.zeros(N_blocks, NHK, max_cnt_b, dtype=torch.int32, device=device)
+        for n in range(N_blocks):
+            for h in range(NHK):
+                vals = coarse_sorted[n, h][unique_mask[n, h]]
+                if vals.numel() > 0:
+                    idx_b[n, h, : vals.numel()] = vals.int()
+
+        all_bwd_cnt.append(counts_b.permute(1, 0))  # (NHK, N_blocks)
+        all_bwd_idx.append(idx_b.permute(1, 0, 2))  # (NHK, N_blocks, max_cnt_b)
+
+    # Stack batch dimension and pad to uniform last dim
+    bwd_cnt = torch.stack(all_bwd_cnt, dim=0)  # (B, NHK, N_blocks)
+    if B == 1:
+        bwd_idx = torch.stack(all_bwd_idx, dim=0)  # (B, NHK, N_blocks, max_cnt)
+    else:
+        # Pad per-batch idx tensors to the same last dim
+        padded = []
+        for idx_b in all_bwd_idx:
+            if idx_b.shape[-1] < max_coarse_cnt:
+                pad = torch.zeros(
+                    NHK,
+                    N_blocks,
+                    max_coarse_cnt - idx_b.shape[-1],
+                    dtype=torch.int32,
+                    device=device,
+                )
+                idx_b = torch.cat([idx_b, pad], dim=-1)
+            padded.append(idx_b)
+        bwd_idx = torch.stack(padded, dim=0)
 
     return BlockSparseTensorsTorch(
         mask_block_cnt=bwd_cnt,
