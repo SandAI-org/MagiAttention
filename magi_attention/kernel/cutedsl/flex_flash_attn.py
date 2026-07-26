@@ -35,6 +35,7 @@ from .cutedsl_utils import (
 )
 from .ffa_bwd_postprocess import bwd_postprocess
 from .ffa_bwd_preprocess import bwd_preprocess
+from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_bwd_sm80 import FFABwdSm80
 from .ffa_bwd_sm90 import FFABwdSm90
 from .ffa_bwd_sm100 import FFABwdSm100
@@ -218,6 +219,9 @@ def _flex_flash_attn_fwd(
         )
         # The atomic epilogue reads/writes prev-O by unpacked row.
         pack_gqa = False
+    # Under atomic reduction each overlapping relation would re-add the sink,
+    # so it leaves the main kernel and folds in once in the fwd postprocess.
+    kernel_sink = sink if disable_fwd_atomic_reduction else None
 
     out_torch_dtype = q.dtype if disable_fwd_atomic_reduction else torch.float32
     device = q.device
@@ -418,7 +422,7 @@ def _flex_flash_attn_fwd(
         lse is None,
         q_ranges is None,
         k_ranges is None,
-        sink is not None,
+        kernel_sink is not None,
         block_sparse_tensors is None or block_sparse_tensors.cu_total_m_blocks is None,
         block_sparse_tensors is None
         or block_sparse_tensors.cu_block_idx_offsets is None,
@@ -451,7 +455,7 @@ def _flex_flash_attn_fwd(
             to_cute_tensor(t, assumed_align=4, leading_dim=t.ndim - 1)
             if t is not None
             else None
-            for t in (kernel_varlen_q_meta, kernel_varlen_k_meta, sink)
+            for t in (kernel_varlen_q_meta, kernel_varlen_k_meta, kernel_sink)
         ]
         mask_types_cute_tensor = (
             to_cute_tensor(mask_types_tensor, assumed_align=4, leading_dim=0)
@@ -624,7 +628,7 @@ def _flex_flash_attn_fwd(
         None,  # page_table
         None,  # window_size_left
         None,  # window_size_right
-        sink,
+        kernel_sink,
     ]
     if major_arch in [10, 11]:
         # FP8 descale tensors removed; SM100 kernel descale slot is always None.
@@ -639,6 +643,9 @@ def _flex_flash_attn_fwd(
     )
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
+
+    if not disable_fwd_atomic_reduction:
+        fwd_postprocess(out, lse, sink)
 
     return out, lse
 
@@ -1539,6 +1546,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         pack_gqa: bool | None = None,
         deterministic: bool = False,
         flex_attn_args: TorchFlexAttnArgs | None = None,
+        disable_fwd_atomic_reduction: bool = True,
     ):
         arch, major_arch = get_device_arch()
         is_varlen = q_ranges is not None or k_ranges is not None
@@ -1592,6 +1600,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             softcap=softcap,
             pack_gqa=pack_gqa,
             flex_attn_args=flex_attn_args,
+            disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
         )
 
         aux_tensors = flex_attn_args.aux_tensors if flex_attn_args else None
@@ -1642,6 +1651,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ) = ctx.saved_tensors
         if dout is None:
             dout = torch.zeros_like(out)
+        if out.dtype != q.dtype:
+            # Atomic-reduction fwd returns fp32 O; the bwd kernels consume the
+            # target dtype (same contract as the distributed C++ path).
+            out = out.to(q.dtype)
+            dout = dout.to(q.dtype)
 
         # Restore aux_tensors from the saved tail (kept tracked by autograd).
         flex_attn_args: TorchFlexAttnArgs | None = ctx.flex_attn_args
@@ -1690,6 +1704,7 @@ def flex_flash_attn_func(
     pack_gqa: bool | None = None,
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    disable_fwd_atomic_reduction: bool = True,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / range / varlen).
@@ -1745,6 +1760,7 @@ def flex_flash_attn_func(
         pack_gqa,
         deterministic,
         flex_attn_args,
+        disable_fwd_atomic_reduction,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)
