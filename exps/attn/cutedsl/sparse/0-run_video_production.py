@@ -46,6 +46,7 @@ import torch
 
 from magi_attention.kernel.cutedsl.ffa_utils import TorchFlexAttnArgs
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
+    _build_is_tma_bwd_loopq_bst,
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
 )
@@ -139,8 +140,9 @@ def _bench_kernel(run_fn, flops, device):
     return flops / ms * 1e-9, ms
 
 
-def _calc_flops(qseqlen, topk, is_bwd):
-    fwd = 4 * qseqlen * topk * NHQ * HD
+def _calc_flops(qseqlen, effective_k, is_bwd):
+    """FLOPS: effective_k = kvseqlen for dense, topk for sparse."""
+    fwd = 4 * qseqlen * effective_k * NHQ * HD
     return fwd * 2.5 if is_bwd else fwd
 
 
@@ -149,8 +151,8 @@ def _fwd_m_block(seqlen_q, qhpk, pack_gqa):
     return 256 if seqlen_q_packgqa > 128 else 128
 
 
-def _make_bst_fwd(sq, n_blocks, topk_blocks, sel):
-    """BST for FWD or BWD-LoopK (M-indexed -> N-block list)."""
+def _make_bst_fwd(sq, n_blocks, topk_blocks, per_q_sel):
+    """BST for FWD or BWD-LoopK with per-Q selection."""
     qhpk = NHQ // NHK
     m_bs = _fwd_m_block(sq, qhpk, True)
     M = ceil(sq * qhpk / m_bs)
@@ -158,9 +160,9 @@ def _make_bst_fwd(sq, n_blocks, topk_blocks, sel):
     mask_idx = torch.zeros(1, NHK, M, n_blocks, dtype=torch.int32, device="cuda")
     full_cnt = torch.full((1, NHK, M), topk_blocks, dtype=torch.int32, device="cuda")
     full_idx = torch.zeros(1, NHK, M, n_blocks, dtype=torch.int32, device="cuda")
-    full_idx[:, :, :, :topk_blocks] = sel.view(1, 1, 1, -1).expand(
-        1, NHK, M, topk_blocks
-    )
+    for m in range(M):
+        q_pos = min((m * m_bs) // qhpk, sq - 1)
+        full_idx[0, 0, m, :topk_blocks] = per_q_sel[q_pos]
     return BlockSparseTensorsTorch(
         mask_block_cnt=mask_cnt,
         mask_block_idx=mask_idx,
@@ -170,8 +172,8 @@ def _make_bst_fwd(sq, n_blocks, topk_blocks, sel):
     )
 
 
-def _make_bst_bwd(sq, n_blocks, topk_blocks, sel):
-    """BST for BWD-LoopK (M-indexed, m_bs=128)."""
+def _make_bst_bwd(sq, n_blocks, topk_blocks, per_q_sel):
+    """BST for BWD-LoopK (M-indexed, m_bs=128) with per-Q selection."""
     qhpk = NHQ // NHK
     m_bs = 128
     M = ceil(sq * qhpk / m_bs)
@@ -179,9 +181,9 @@ def _make_bst_bwd(sq, n_blocks, topk_blocks, sel):
     mask_idx = torch.zeros(1, NHK, M, n_blocks, dtype=torch.int32, device="cuda")
     full_cnt = torch.full((1, NHK, M), topk_blocks, dtype=torch.int32, device="cuda")
     full_idx = torch.zeros(1, NHK, M, n_blocks, dtype=torch.int32, device="cuda")
-    full_idx[:, :, :, :topk_blocks] = sel.view(1, 1, 1, -1).expand(
-        1, NHK, M, topk_blocks
-    )
+    for m in range(M):
+        q_pos = min((m * m_bs) // qhpk, sq - 1)
+        full_idx[0, 0, m, :topk_blocks] = per_q_sel[q_pos]
     return BlockSparseTensorsTorch(
         mask_block_cnt=mask_cnt,
         mask_block_idx=mask_idx,
@@ -191,25 +193,61 @@ def _make_bst_bwd(sq, n_blocks, topk_blocks, sel):
     )
 
 
-def _make_bst_loopq(sq, n_blocks, topk_blocks, sel):
-    """BST for BWD-InnerLoopQ (N-indexed -> M-block list).
+def _make_bst_loopq(sq, n_blocks, topk_blocks, per_q_sel):
+    """BST for BWD-InnerLoopQ (N-indexed -> M-block list) with per-Q inversion.
 
-    All Q-blocks attend to the same set of K-blocks. For PackGQA,
-    uses packed sequence length to cover all Q sub-tiles.
+    For each K-block, finds which coarse Q-blocks (packed) attend to it.
+    With per-Q selection, almost all K-blocks have work -> no wave quantization.
     """
     qhpk = NHQ // NHK
     sq_packed = sq * qhpk
     sparse_q = 2 * 128  # subtile_factor * m_block_size
     M_coarse = max(ceil(sq_packed / sparse_q), 1)
-    bwd_cnt = torch.zeros(1, NHK, n_blocks, dtype=torch.int32, device="cuda")
-    src = torch.full((1, NHK, topk_blocks), M_coarse, dtype=torch.int32, device="cuda")
-    bwd_cnt.scatter_(2, sel.view(1, 1, -1).expand(1, NHK, topk_blocks), src)
-    bwd_idx = (
-        torch.arange(M_coarse, dtype=torch.int32, device="cuda")
-        .view(1, 1, 1, M_coarse)
-        .expand(1, NHK, n_blocks, M_coarse)
-        .contiguous()
+    device = per_q_sel.device
+
+    # Map Q positions to coarse Q-block starts in packed space
+    q_arange = torch.arange(sq, device=device)
+    coarse_starts = (q_arange * qhpk) // sparse_q  # (SQ,)
+
+    # Flatten (q_pos, k_block) pairs
+    flat_k = per_q_sel.reshape(-1).long()  # (SQ * topk_blocks,)
+    flat_cq = coarse_starts.unsqueeze(1).expand(-1, topk_blocks).reshape(-1)
+
+    # Group by K-block and deduplicate coarse Q indices
+    sort_idx = flat_k.argsort(stable=True)
+    sorted_k = flat_k[sort_idx]
+    sorted_cq = flat_cq[sort_idx]
+
+    changes = torch.cat(
+        [torch.tensor([True], device=device), sorted_k[1:] != sorted_k[:-1]]
     )
+    group_starts = changes.nonzero(as_tuple=True)[0]
+    group_k_vals = sorted_k[group_starts]
+
+    bwd_cnt = torch.zeros(1, NHK, n_blocks, dtype=torch.int32, device=device)
+    max_cnt = 0
+    k_to_cq = {}
+    for gi in range(len(group_starts)):
+        k_val = int(group_k_vals[gi].item())
+        start = int(group_starts[gi].item())
+        end = (
+            int(group_starts[gi + 1].item())
+            if gi + 1 < len(group_starts)
+            else len(sorted_k)
+        )
+        cq_unique = sorted_cq[start:end].unique()
+        cq_unique = cq_unique[cq_unique < M_coarse]
+        k_to_cq[k_val] = cq_unique
+        cnt = len(cq_unique)
+        bwd_cnt[0, 0, k_val] = cnt
+        max_cnt = max(max_cnt, cnt)
+
+    max_cnt = max(max_cnt, 1)
+    bwd_idx = torch.zeros(1, NHK, n_blocks, max_cnt, dtype=torch.int32, device=device)
+    for k_val, cq_vals in k_to_cq.items():
+        if len(cq_vals) > 0:
+            bwd_idx[0, 0, k_val, : len(cq_vals)] = cq_vals.int()
+
     return BlockSparseTensorsTorch(
         mask_block_cnt=bwd_cnt,
         mask_block_idx=bwd_idx,
@@ -217,29 +255,34 @@ def _make_bst_loopq(sq, n_blocks, topk_blocks, sel):
     )
 
 
-def _make_is_indices(sq, topk_blocks, sel):
-    """Build block-aligned token indices (B, NHQ, SQ, topk) for IS kbs=128.
+def _make_perq_block_sel(sq, n_blocks, topk_blocks):
+    """Per-Q random K-block selection (matching SM90 phase6).
 
-    All Q heads share the same sparse pattern (NHK=1), so we use expand()
-    without .contiguous() to avoid materializing NHQ copies.
-    Memory: O(SQ * topk) instead of O(NHQ * SQ * topk).
+    Each Q position independently selects topk_blocks from n_blocks.
+    Returns: (SQ, topk_blocks) int32 sorted K-block indices.
+    """
+    gen = torch.Generator(device="cuda").manual_seed(42)
+    rand_vals = torch.rand(sq, n_blocks, generator=gen, device="cuda")
+    perms = rand_vals.argsort(dim=1)[:, :topk_blocks].sort(dim=1).values
+    return perms.int()
+
+
+def _make_is_indices(sq, n_blocks, topk_blocks, per_q_sel):
+    """Build block-aligned token indices from per-Q selection.
+
+    per_q_sel: (SQ, topk_blocks) K-block indices per Q position.
+    Expands to token addresses: block_id * 128 + offset.
     """
     topk = topk_blocks * N_BLOCK_SIZE
-    base = (
-        (
-            sel.unsqueeze(-1) * N_BLOCK_SIZE
-            + torch.arange(N_BLOCK_SIZE, device="cuda").unsqueeze(0)
-        )
-        .reshape(-1)
-        .int()
-    )
-    # (1, 1, SQ, topk) -> expand to (1, NHQ, SQ, topk) as a zero-copy view
-    return base.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(1, NHQ, sq, topk)
+    offsets = torch.arange(N_BLOCK_SIZE, device="cuda", dtype=torch.int32)
+    tokens = per_q_sel.unsqueeze(-1) * N_BLOCK_SIZE + offsets.view(1, 1, -1)
+    tokens = tokens.reshape(sq, topk).int()
+    return tokens.unsqueeze(0).unsqueeze(0).expand(1, NHQ, sq, topk)
 
 
-def _make_is_tiles_fwd(sq, sk, topk_blocks, sel):
+def _make_is_tiles_fwd(sq, sk, n_blocks, topk_blocks, per_q_sel):
     """IS tiles for FWD (m=256), kbs=128."""
-    indices = _make_is_indices(sq, topk_blocks, sel)
+    indices = _make_is_indices(sq, n_blocks, topk_blocks, per_q_sel)
     qhpk = NHQ // NHK
     fwd_m = _fwd_m_block(sq, qhpk, True)
     return prepare_index_sparse_tiles(
@@ -256,9 +299,9 @@ def _make_is_tiles_fwd(sq, sk, topk_blocks, sel):
     )
 
 
-def _make_is_tiles_bwd(sq, sk, topk_blocks, sel):
+def _make_is_tiles_bwd(sq, sk, n_blocks, topk_blocks, per_q_sel):
     """IS tiles for BWD-LoopK (m=128), kbs=128."""
-    indices = _make_is_indices(sq, topk_blocks, sel)
+    indices = _make_is_indices(sq, n_blocks, topk_blocks, per_q_sel)
     return prepare_index_sparse_tiles(
         indices,
         batch_size=1,
@@ -298,14 +341,15 @@ def _run_experiment(force=False, max_kvseqlen=None):
         )
 
         torch.manual_seed(42)
-        sel = torch.randperm(n_blocks, device=device)[:topk_blocks].sort().values
+        per_q_sel = _make_perq_block_sel(qseqlen, n_blocks, topk_blocks)
 
         for pass_type in PASSES:
             is_bwd = pass_type in ("bwd", "bwd_q")
             swap_loop = pass_type == "bwd"  # bwd=LoopK, bwd_q=InnerLoopQ
-            flops = _calc_flops(qseqlen, topk, is_bwd)
 
             for method in METHODS:
+                effective_k = kvseqlen if method == "dense" else topk
+                flops = _calc_flops(qseqlen, effective_k, is_bwd)
                 key = f"{pass_type}/{method}"
 
                 if not force and _has_entry(results, key, kvseqlen):
@@ -333,10 +377,10 @@ def _run_experiment(force=False, max_kvseqlen=None):
 
                     if method == "dense":
                         k = torch.randn(
-                            1, topk, NHK, HD, dtype=torch.bfloat16, device=device
+                            1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
                         )
                         v = torch.randn(
-                            1, topk, NHK, HD, dtype=torch.bfloat16, device=device
+                            1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
                         )
                         fwd_args = TorchFlexAttnArgs()
                         out, lse = _flex_flash_attn_fwd(
@@ -383,7 +427,9 @@ def _run_experiment(force=False, max_kvseqlen=None):
                         v = torch.randn(
                             1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
                         )
-                        fwd_bst = _make_bst_fwd(qseqlen, n_blocks, topk_blocks, sel)
+                        fwd_bst = _make_bst_fwd(
+                            qseqlen, n_blocks, topk_blocks, per_q_sel
+                        )
                         fwd_args = TorchFlexAttnArgs(block_sparse_tensors=fwd_bst)
                         out, lse = _flex_flash_attn_fwd(
                             q,
@@ -408,14 +454,14 @@ def _run_experiment(force=False, max_kvseqlen=None):
                         else:
                             if swap_loop:
                                 bwd_bst = _make_bst_bwd(
-                                    qseqlen, n_blocks, topk_blocks, sel
+                                    qseqlen, n_blocks, topk_blocks, per_q_sel
                                 )
                                 bwd_args = TorchFlexAttnArgs(
                                     block_sparse_tensors=bwd_bst
                                 )
                             else:
                                 loopq_bst = _make_bst_loopq(
-                                    qseqlen, n_blocks, topk_blocks, sel
+                                    qseqlen, n_blocks, topk_blocks, per_q_sel
                                 )
                                 bwd_args = TorchFlexAttnArgs(
                                     block_sparse_tensors_bwd=loopq_bst
@@ -445,7 +491,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
                         )
                         if not is_bwd:
                             fwd_tiles = _make_is_tiles_fwd(
-                                qseqlen, kvseqlen, topk_blocks, sel
+                                qseqlen, kvseqlen, n_blocks, topk_blocks, per_q_sel
                             )
                             fwd_args = TorchFlexAttnArgs(index_sparse_tiles=fwd_tiles)
                             _flex_flash_attn_fwd(
@@ -469,7 +515,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
 
                         else:
                             fwd_tiles = _make_is_tiles_fwd(
-                                qseqlen, kvseqlen, topk_blocks, sel
+                                qseqlen, kvseqlen, n_blocks, topk_blocks, per_q_sel
                             )
                             fwd_args = TorchFlexAttnArgs(index_sparse_tiles=fwd_tiles)
                             out, lse = _flex_flash_attn_fwd(
@@ -483,10 +529,34 @@ def _run_experiment(force=False, max_kvseqlen=None):
                             del fwd_tiles, fwd_args
                             gc.collect()
                             torch.cuda.empty_cache()
-                            bwd_tiles = _make_is_tiles_bwd(
-                                qseqlen, kvseqlen, topk_blocks, sel
-                            )
-                            bwd_args = TorchFlexAttnArgs(index_sparse_tiles=bwd_tiles)
+
+                            if swap_loop:
+                                # BWD LoopK: pass IS tiles directly
+                                bwd_tiles = _make_is_tiles_bwd(
+                                    qseqlen, kvseqlen, n_blocks, topk_blocks, per_q_sel
+                                )
+                                bwd_args = TorchFlexAttnArgs(
+                                    index_sparse_tiles=bwd_tiles
+                                )
+                            else:
+                                # BWD InnerLoopQ: pre-compute inverted BST
+                                bwd_tiles = _make_is_tiles_bwd(
+                                    qseqlen, kvseqlen, n_blocks, topk_blocks, per_q_sel
+                                )
+                                is_loopq_bst = _build_is_tma_bwd_loopq_bst(
+                                    bwd_tiles,
+                                    seqlen_q=qseqlen,
+                                    seqlen_k=kvseqlen,
+                                    num_kv_heads=NHK,
+                                    num_q_heads=NHQ,
+                                    m_block_size=128,
+                                    n_block_size=N_BLOCK_SIZE,
+                                    pack_gqa=True,
+                                )
+                                del bwd_tiles
+                                bwd_args = TorchFlexAttnArgs(
+                                    block_sparse_tensors_bwd=is_loopq_bst
+                                )
                             dO = torch.randn_like(out)
 
                             def run_fn():
@@ -503,12 +573,11 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                     swap_bwd_qk_loop=swap_loop,
                                 )
 
-                            if not swap_loop:
-                                # IS-TMA InnerLoopQ warmup: first call triggers JIT
-                                try:
-                                    run_fn()
-                                except Exception:
-                                    pass
+                            # Warmup: first call triggers JIT
+                            try:
+                                run_fn()
+                            except Exception:
+                                pass
 
                     tf, ms = _bench_kernel(run_fn, flops, device)
                     _set_entry(results, key, kvseqlen, round(tf, 1), round(ms, 3))
