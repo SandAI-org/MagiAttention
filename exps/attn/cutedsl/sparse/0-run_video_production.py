@@ -248,23 +248,32 @@ def _make_bst_loopq(sq, n_blocks, topk_blocks, per_q_sel):
         if len(cq_vals) > 0:
             bwd_idx[0, 0, k_val, : len(cq_vals)] = cq_vals.int()
 
+    empty_cnt = torch.zeros(1, NHK, n_blocks, dtype=torch.int32, device=device)
+    empty_idx = torch.zeros(1, NHK, n_blocks, 1, dtype=torch.int32, device=device)
     return BlockSparseTensorsTorch(
-        mask_block_cnt=bwd_cnt,
-        mask_block_idx=bwd_idx,
+        mask_block_cnt=empty_cnt,
+        mask_block_idx=empty_idx,
+        full_block_cnt=bwd_cnt,
+        full_block_idx=bwd_idx,
         block_size=(sparse_q, N_BLOCK_SIZE),
     )
 
 
 def _make_perq_block_sel(sq, n_blocks, topk_blocks):
-    """Per-Q random K-block selection (matching SM90 phase6).
+    """Per-coarse-Q-block random K-block selection.
 
-    Each Q position independently selects topk_blocks from n_blocks.
-    Returns: (SQ, topk_blocks) int32 sorted K-block indices.
+    Adjacent pairs of Q positions share the same K-block selection, aligned to
+    BWD InnerLoopQ coarse block boundary (subtile_factor=2, tile_m=128,
+    qhpk=128 -> 2 Q per coarse block). This eliminates wasted computation from
+    partially-valid coarse blocks while preserving the same per-Q FLOPS formula.
     """
+    group_size = 2
+    n_groups = (sq + group_size - 1) // group_size
     gen = torch.Generator(device="cuda").manual_seed(42)
-    rand_vals = torch.rand(sq, n_blocks, generator=gen, device="cuda")
-    perms = rand_vals.argsort(dim=1)[:, :topk_blocks].sort(dim=1).values
-    return perms.int()
+    rand_vals = torch.rand(n_groups, n_blocks, generator=gen, device="cuda")
+    group_sel = rand_vals.argsort(dim=1)[:, :topk_blocks].sort(dim=1).values
+    per_q_sel = group_sel.repeat_interleave(group_size, dim=0)[:sq]
+    return per_q_sel.int()
 
 
 def _make_is_indices(sq, n_blocks, topk_blocks, per_q_sel):
