@@ -700,6 +700,16 @@ def _flex_flash_attn_bwd(
     has_ranges = q_ranges is not None or k_ranges is not None
     if has_ranges:
         validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types_tensor)
+        if deterministic:
+            # The deterministic bwd still runs the interleaved bulk
+            # accumulator layout, which aliases between unaligned
+            # neighbouring ranges once offsets are physical: gradients
+            # come out bit-stable but wrong. 2E4 rebuilds it on the
+            # row-major layout; until then reject loudly.
+            raise NotImplementedError(
+                "deterministic backward with q/k ranges is unsupported "
+                "until the row-major deterministic path lands"
+            )
     # SM100/SM110 pre/main/post kernels consume ranges directly; other arches
     # still read cu_seqlens (ranges are cu-partition-equivalent until 2B).
     if has_ranges and major_arch not in (10, 11):
@@ -844,12 +854,14 @@ def _flex_flash_attn_bwd(
                 or block_sparse_tensors is not None
                 or use_per_range_mask
             )
-            # DEVIATION: force 1CTA for per-range masks
+            # DEVIATION: force 1CTA whenever ranges are present — the
+            # atomic accum path asserts 1CTA, and det+ranges is rejected
+            # upstream until 2E4.
             # Reason: V1 mixed bwd keeps 1CTA for correctness
             # Recovery: none in V1
             cluster_size = (
                 1
-                if use_per_range_mask
+                if use_per_range_mask or has_ranges
                 else (2 if head_dim >= 128 and not disable_2cta else 1)
             )
             use_2cta_instrs = cluster_size == 2

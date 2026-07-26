@@ -390,15 +390,13 @@ class TestFfaPerRangeMask(DistTestBase):
     @with_run_in_mp
     @parameterize("mha_type", ["mha", "gqa"])
     def test_per_range_deterministic_bwd(self, mha_type):
-        """deterministic bwd on the per-range path must be bit-reproducible.
+        """deterministic + ranges must be rejected until 2E4.
 
-        Exercised because ``spt = (is_causal or is_local) and deterministic`` is
-        true here (per-range forces ``causal``), which routes dQ's semaphore lock
-        value through ``get_n_block_max_for_m_block_per_range``.
-
-        Sk is kept large so a Q tile spans many K tiles: with few writers the
-        non-deterministic path happens to be stable too and the test would not
-        distinguish the two.
+        The deterministic bwd still runs the interleaved bulk accumulator
+        layout, which aliases between unaligned neighbouring ranges once
+        offsets are physical — bit-stable but wrong gradients. The host
+        rejects the combination; the row-major deterministic path (2E4)
+        restores it.
         """
         major = torch.cuda.get_device_capability()[0]
         if major not in (10, 11):
@@ -431,36 +429,23 @@ class TestFfaPerRangeMask(DistTestBase):
         )
         mask_types = torch.tensor(attn_type_map, device=device, dtype=torch.int32)
 
-        def run():
-            out, _ = flex_flash_attn_func(
-                q,
-                k,
-                v,
-                q_ranges=torch.stack([cu_q[:-1], cu_q[1:]], dim=1),
-                k_ranges=torch.stack([cu_k[:-1], cu_k[1:]], dim=1),
-                mask_types=mask_types,
-                max_seqlen_q=seqlen_q,
-                max_seqlen_k=seqlen_k,
-                deterministic=True,
-            )
-            return (out,) + torch.autograd.grad(out, (q, k, v), g)
-
+        out, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=torch.stack([cu_q[:-1], cu_q[1:]], dim=1),
+            k_ranges=torch.stack([cu_k[:-1], cu_k[1:]], dim=1),
+            mask_types=mask_types,
+            max_seqlen_q=seqlen_q,
+            max_seqlen_k=seqlen_k,
+            deterministic=True,
+        )
         test_case = f"[RANK {self.rank}][deterministic][{mha_type=}]"
-        first = run()
-        for name, tensor in zip(("o", "dq", "dk", "dv"), first):
-            self.assertFalse(
-                tensor.isnan().any(), msg=f"For {test_case}: {name} contains NaN"
-            )
-        for _ in range(2):
-            for name, expected, actual in zip(("o", "dq", "dk", "dv"), first, run()):
-                self.assertTrue(
-                    torch.equal(expected, actual),
-                    msg=(
-                        f"For {test_case}: {name} is not bit-reproducible across "
-                        f"deterministic runs (max diff "
-                        f"{(expected.float() - actual.float()).abs().max().item():.3e})"
-                    ),
-                )
+        with self.assertRaises(
+            NotImplementedError,
+            msg=f"For {test_case}: det+ranges bwd must be rejected until 2E4",
+        ):
+            torch.autograd.grad(out, (q, k, v), g)
 
 
 
@@ -572,18 +557,13 @@ class TestFfaPerRangeMask(DistTestBase):
         if err_msg_list:
             raise AssertionError("\n\n".join(err_msg_list))
 
-        # Bit-compare covered rows only: uncovered rows come from torch.empty
-        # and are different garbage on every allocation (undefined until 2E1).
-        sels = {"o": qsel, "dq": qsel, "dk": ksel, "dv": ksel}
-        first = run(deterministic=True)
-        for _ in range(2):
-            for name, expected, actual in zip(
-                ("o", "dq", "dk", "dv"), first, run(deterministic=True)
-            ):
-                self.assertTrue(
-                    torch.equal(expected[sels[name]], actual[sels[name]]),
-                    msg=f"For {test_case}: {name} not bit-reproducible",
-                )
+        # det+ranges is rejected until the row-major deterministic path
+        # (2E4) lands; keep the leg as a rejection check.
+        with self.assertRaises(
+            NotImplementedError,
+            msg=f"For {test_case}: det+ranges bwd must be rejected until 2E4",
+        ):
+            run(deterministic=True)
 
     @with_run_in_mp
     @parameterize("dummy", [0])
