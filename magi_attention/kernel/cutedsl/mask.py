@@ -837,6 +837,26 @@ class AttentionMask:
 
         elif const_expr(not mask_causal and not mask_local):
             if const_expr(mask_seqlen):
+                # Clamp visible rows to seqlen_q: with accumulators in the
+                # original token space, a tail tile's OOB Q rows read a
+                # neighbouring range's finite stats and leak through dK/dV's
+                # Q contraction (dQ's row predicate cannot cover them).
+                thr_row_offset = tScS_t2r[0][ROW]
+                seqlenq_row_limit = (
+                    self.seqlen_q - m_block * self.tile_m - thr_row_offset
+                )
+                num_rep = cute.size(tScS_t2r, mode=[0])  # 16 or 32
+                num_wg = 2
+                hi_elem = row_to_r2p_idx(
+                    cutlass.min(Int32(self.tile_m), seqlenq_row_limit),
+                    num_rep,
+                    num_wg,
+                )
+                mask_r2p_lambda(
+                    acc_S,
+                    lambda s: r2p_bitmask_below(hi_elem, s),
+                    rank1=True,
+                )
                 if seqlenk_col_limit <= 0:
                     for i in cutlass.range(cute.size(acc_S.shape), unroll_full=True):
                         acc_S[i] = -cutlass.Float32.inf
@@ -866,9 +886,18 @@ class AttentionMask:
                     num_rep = cute.size(tScS_t2r, mode=[0])  # 16 or 32
                     num_wg = 2
                     row_limit = row_to_r2p_idx(row_limit_top, num_rep, num_wg)
+                    # Same seqlen_q high clamp as the Full branch; folds to
+                    # all-ones when mask_seqlen is off.
+                    hi_row = (
+                        cutlass.min(Int32(self.tile_m), seqlenq_row_limit)
+                        if const_expr(mask_seqlen)
+                        else Int32(self.tile_m)
+                    )
+                    hi_elem = row_to_r2p_idx(hi_row, num_rep, num_wg)
                     mask_r2p_lambda(
                         acc_S,
-                        lambda s: r2p_bitmask_above(row_limit, s),
+                        lambda s: r2p_bitmask_above(row_limit, s)
+                        & r2p_bitmask_below(hi_elem, s),
                         rank1=True,
                     )
             else:
@@ -903,6 +932,16 @@ class AttentionMask:
                                 row_limit_bot + 1, num_rep, num_wg
                             )
                             mask = mask & r2p_bitmask_below(row_limit_bottom, s)
+
+                        # seqlen_q high clamp (see the Full branch); folds to
+                        # all-ones when mask_seqlen is off.
+                        hi_row = (
+                            cutlass.min(Int32(self.tile_m), seqlenq_row_limit)
+                            if const_expr(mask_seqlen)
+                            else Int32(self.tile_m)
+                        )
+                        hi_elem = row_to_r2p_idx(hi_row, num_rep, num_wg)
+                        mask = mask & r2p_bitmask_below(hi_elem, s)
 
                         return mask
 

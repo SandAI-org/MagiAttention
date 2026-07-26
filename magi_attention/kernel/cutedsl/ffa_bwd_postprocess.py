@@ -24,6 +24,7 @@ from typing import Callable, Optional, Type
 
 import cuda.bindings.driver as cuda
 import cutlass
+import torch
 import cutlass.cute as cute
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
@@ -241,7 +242,6 @@ class FFABwdPostProcess:
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mQRanges: Optional[cute.Tensor],
-        mQWSOffsets: Optional[cute.Tensor],
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -307,7 +307,6 @@ class FFABwdPostProcess:
             mCuSeqlensQ,
             mSeqUsedQ,
             mQRanges,
-            mQWSOffsets,
             scale,
             self.tiled_mma,
             self.dQ_swapAB,
@@ -333,7 +332,6 @@ class FFABwdPostProcess:
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mQRanges: Optional[cute.Tensor],
-        mQWSOffsets: Optional[cute.Tensor],
         scale: cutlass.Float32,
         tiled_mma: cute.TiledMma,
         dQ_swapAB: cutlass.Constexpr,
@@ -389,7 +387,6 @@ class FFABwdPostProcess:
                 mSeqUsedQ=mSeqUsedQ,
                 mSeqUsedK=None,
                 mQRanges=mQRanges,
-                mQWSOffsets=mQWSOffsets,
                 tile_m=self.tile_m * self.cluster_size,
             )
             if const_expr(not seqlen.has_cu_seqlens_q):
@@ -672,7 +669,6 @@ def _compile_bwd_postprocess(
     swap_ab,
     has_cuseqlens_q,
     has_ranges,
-    has_ws_offsets,
     has_seqused_q,
     use_2cta_instrs,
     cluster_size,
@@ -705,19 +701,9 @@ def _compile_bwd_postprocess(
         if has_cuseqlens_q
         else None
     )
-    mQWSOffsets = (
-        fake_tensor(cutlass.Int32, (cute.sym_int(),), divisibility=1)
-        if has_ws_offsets
-        else None
-    )
     mQRanges = (
         fake_tensor(cutlass.Int32, (cute.sym_int(), 2), divisibility=1)
         if has_ranges
-        else None
-    )
-    mQWSOffsets = (
-        fake_tensor(cutlass.Int32, (cute.sym_int(),), divisibility=1)
-        if has_ws_offsets
         else None
     )
     mSeqUsedQ = (
@@ -742,7 +728,6 @@ def _compile_bwd_postprocess(
         mCuSeqlensQ,
         mSeqUsedQ,
         mQRanges,
-        mQWSOffsets,
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--enable-tvm-ffi",
     )
@@ -764,7 +749,6 @@ def bwd_postprocess(
     use_2cta_instrs=False,
     cluster_size=1,
     ranges=None,
-    ws_offsets=None,
 ):
     """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
     compile_key = (
@@ -776,7 +760,6 @@ def bwd_postprocess(
         swap_ab,
         cu_seqlens is not None,
         ranges is not None,
-        ws_offsets is not None,
         seqused is not None,
         use_2cta_instrs,
         cluster_size,
@@ -793,8 +776,118 @@ def bwd_postprocess(
         cu_seqlens,
         seqused,
         ranges,
-        ws_offsets,
     )
 
 
 bwd_postprocess.compile_cache = get_jit_cache("bwd_post")
+
+
+class FFABwdPostProcessRowMajor:
+    """Cast the row-major fp32 accumulator to the output dtype, row per thread.
+
+    The non-deterministic true-range bwd stores gradients with plain fp32
+    atomics in original-token-space row-major layout, so the postprocess
+    collapses to a scale+cast sweep. The grid walks (range, tile) like the
+    C++ convert kernels: rows outside every range are never touched (callers
+    may hand in prefilled buffers), and rows shared by overlapping ranges
+    are written twice with the same already-merged value.
+    """
+
+    def __init__(self, out_dtype, head_dim: int, tile_m: int = 128):
+        self.out_dtype = out_dtype
+        self.head_dim = head_dim
+        # The main kernel strides accumulator rows at head_dim padded to 16
+        # (tile_hdim/tile_hdimv), not at the raw head_dim.
+        self.accum_stride = (head_dim + 15) // 16 * 16
+        self.tile_m = tile_m
+        self.vec_elems = 128 // cutlass.Float32.width  # 16B fp32 vectors
+
+    @cute.jit
+    def __call__(
+        self,
+        mAccum: cute.Tensor,  # (num_head, total_padded * head_dim) fp32
+        mOut: cute.Tensor,  # (total, num_head, head_dim) out dtype
+        mRanges: cute.Tensor,  # (num_ranges, 2) int32
+        max_seqlen: cutlass.Int32,  # upper bound on any range length
+        scale: cutlass.Float32,
+        stream: cuda.CUstream = None,
+    ):
+        num_head = mOut.shape[1]
+        num_ranges = mRanges.shape[0]
+        grid = (cute.ceil_div(max_seqlen, self.tile_m), num_ranges, num_head)
+        self.kernel(mAccum, mOut, mRanges, scale).launch(
+            grid=grid, block=[self.tile_m, 1, 1], stream=stream
+        )
+
+    @cute.kernel
+    def kernel(
+        self,
+        mAccum: cute.Tensor,
+        mOut: cute.Tensor,
+        mRanges: cute.Tensor,
+        scale: cutlass.Float32,
+    ):
+        tidx = cute.arch.thread_idx()[0]
+        block, range_idx, head_idx = (
+            cute.arch.block_idx()[0],
+            cute.arch.block_idx()[1],
+            cute.arch.block_idx()[2],
+        )
+        row_start = cutlass.Int32(mRanges[range_idx, 0])
+        row_in_range = block * self.tile_m + tidx
+        if row_in_range < cutlass.Int32(mRanges[range_idx, 1]) - row_start:
+            row = row_start + row_in_range
+            gAcc_row = cute.local_tile(
+                mAccum[head_idx, None], (self.accum_stride,), (row,)
+            )
+            gOut_row = mOut[row, head_idx, None]
+            num_vecs = self.head_dim // self.vec_elems
+            for i in cutlass.range(num_vecs, unroll_full=True):
+                rAcc = cute.make_rmem_tensor((self.vec_elems,), cutlass.Float32)
+                cute.autovec_copy(
+                    cute.local_tile(gAcc_row, (self.vec_elems,), (i,)), rAcc
+                )
+                rOut = cute.make_rmem_tensor((self.vec_elems,), self.out_dtype)
+                for j in cutlass.range(self.vec_elems, unroll_full=True):
+                    rOut[j] = self.out_dtype(rAcc[j] * scale)
+                cute.autovec_copy(
+                    rOut, cute.local_tile(gOut_row, (self.vec_elems,), (i,))
+                )
+
+
+def _compile_bwd_postprocess_rowmajor(out_torch_dtype, head_dim: int):
+    from magi_attention.utils.dtype import to_cute_dtype
+
+    cache_key = (out_torch_dtype, head_dim)
+    cache = get_jit_cache("bwd_post_rowmajor")
+    if cache_key not in cache:
+        out_dtype = to_cute_dtype(out_torch_dtype)
+        obj = FFABwdPostProcessRowMajor(out_dtype, head_dim)
+        sym = cute.sym_int
+        div = 128 // cutlass.Float32.width
+        mAccum = fake_tensor(cutlass.Float32, (sym(), sym()), divisibility=div)
+        mOut = fake_tensor(out_dtype, (sym(), sym(), head_dim), divisibility=div)
+        mRanges = fake_tensor(cutlass.Int32, (sym(), 2), divisibility=1)
+        cache[cache_key] = cute.compile(
+            obj,
+            mAccum,
+            mOut,
+            mRanges,
+            cutlass.Int32(0),
+            cutlass.Float32(0.0),
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options="--enable-tvm-ffi",
+        )
+    return cache[cache_key]
+
+
+def bwd_postprocess_rowmajor(
+    accum: torch.Tensor,
+    output: torch.Tensor,
+    ranges: torch.Tensor,
+    max_seqlen: int,
+    scale: float,
+) -> None:
+    """Row-major accumulator -> output dtype (non-deterministic range path)."""
+    compiled = _compile_bwd_postprocess_rowmajor(output.dtype, output.shape[-1])
+    compiled(accum, output, ranges, max_seqlen, scale)

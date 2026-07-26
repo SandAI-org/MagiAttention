@@ -33,7 +33,7 @@ from .cutedsl_utils import (
     to_cute_aux_tensor,
     to_cute_tensor,
 )
-from .ffa_bwd_postprocess import bwd_postprocess
+from .ffa_bwd_postprocess import bwd_postprocess, bwd_postprocess_rowmajor
 from .ffa_bwd_preprocess import bwd_preprocess
 from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_bwd_sm80 import FFABwdSm80
@@ -58,7 +58,6 @@ from .ffa_utils import (
     maybe_contiguous,
     normalize_mask_type_spec,
     ranges_to_cu_seqlens,
-    cached_ranges_workspace_offsets,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
@@ -956,18 +955,22 @@ def _flex_flash_attn_bwd(
     device = q.device
     out_torch_dtype = q.dtype
 
+    # Uncovered rows keep zero gradients on the ranges path; kernels never
+    # visit them, so the allocation must provide the zeros.
+    grad_alloc = torch.zeros_like if has_ranges else torch.empty_like
+
     if dq is None:
-        dq = torch.empty_like(q)
+        dq = grad_alloc(q)
     else:
         validate_tensor(dq, "dq", q.shape, out_torch_dtype, device)
 
     if dk is None:
-        dk = torch.empty_like(k)
+        dk = grad_alloc(k)
     else:
         validate_tensor(dk, "dk", k.shape, out_torch_dtype, device)
 
     if dv is None:
-        dv = torch.empty_like(v)
+        dv = grad_alloc(v)
     else:
         validate_tensor(dv, "dv", v.shape, out_torch_dtype, device)
 
@@ -988,28 +991,37 @@ def _flex_flash_attn_bwd(
             batch_size, num_head, seqlen_q_rounded, dtype=torch.float32, device=device
         )
     else:
+        # Original-token-space accumulators: overlap is absorbed by the same
+        # atomics, and a tail tile running past a range end only adds rows the
+        # mask already zeroed. One extra tile keeps the last tail in bounds.
         total_q_rounded_padded = (
-            (total_q + (num_ranges + 1) * m_block_size - 1)
-            // m_block_size
-            * m_block_size
-        )
-        dq_accum = torch.empty(
+            (total_q + m_block_size - 1) // m_block_size + 1
+        ) * m_block_size
+        # Zeros: the row-major postprocess sweeps every row, so uncovered
+        # rows must read back the accumulator's zeros.
+        dq_accum = torch.zeros(
             num_head,
             total_q_rounded_padded * head_dim_rounded,
             dtype=torch.float32,
             device=device,
         )
-        dpsum = torch.empty(
+        # Zeros, not empty: rows in coverage gaps are never written by the
+        # preprocess, yet a neighbour range's tail tile may read them —
+        # exp(-inf - garbage) can go NaN if the garbage happens to be -inf.
+        dpsum = torch.zeros(
             num_head, total_q_rounded_padded, dtype=torch.float32, device=device
         )
-        lse_log2 = torch.empty(
+        lse_log2 = torch.zeros(
             num_head, total_q_rounded_padded, dtype=torch.float32, device=device
         )
 
     # GQA (qhead_per_kvhead > 1) needs dK/dV accum+postprocess since multiple Q heads
     # accumulate into the same dK/dV. SM90 varlen_k with qhead_per_kvhead==1 now uses
     # ragged TMA tensors for direct store, so no longer needs accum+postprocess.
-    dKV_postprocess = qhead_per_kvhead > 1
+    # Ranges force the accum+postprocess path even for MHA: overlapping K
+    # ranges make several CTAs write the same dK/dV rows, so direct stores
+    # would clobber each other. (GQA needs it regardless.)
+    dKV_postprocess = qhead_per_kvhead > 1 or (has_ranges and major_arch in (10, 11))
     if dKV_postprocess:
         head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
         if not has_ranges:
@@ -1030,10 +1042,8 @@ def _flex_flash_attn_bwd(
         else:
             cluster_tile_n = cluster_size * n_block_size
             total_k_rounded_padded = (
-                (total_k + (num_ranges + 1) * cluster_tile_n - 1)
-                // cluster_tile_n
-                * cluster_tile_n
-            )
+                (total_k + cluster_tile_n - 1) // cluster_tile_n + 1
+            ) * cluster_tile_n
             dk_accum = torch.zeros(
                 num_head_kv,
                 total_k_rounded_padded * head_dim_rounded,
@@ -1090,19 +1100,6 @@ def _flex_flash_attn_bwd(
     kernel_varlen_k_meta = k_ranges if major_arch in (10, 11) else cu_seqlens_k
     pre_post_q_ranges = q_ranges if major_arch in (10, 11) else None
     pre_post_k_ranges = k_ranges if major_arch in (10, 11) else None
-    # Workspace starts for dq_accum/dpsum/lse_log2 (and dKV accum under GQA).
-    # K side uses the cluster tile: the dKV accum regions are laid out at
-    # cluster_size * n_block_size granularity.
-    q_ws_offsets = (
-        cached_ranges_workspace_offsets(q_ranges, m_block_size)
-        if pre_post_q_ranges is not None
-        else None
-    )
-    k_ws_offsets = (
-        cached_ranges_workspace_offsets(k_ranges, cluster_size * n_block_size)
-        if pre_post_k_ranges is not None and dKV_postprocess
-        else None
-    )
 
     bwd_preprocess(
         out,
@@ -1110,7 +1107,10 @@ def _flex_flash_attn_bwd(
         dpsum,
         lse,
         lse_log2,
-        dq_accum,
+        # zeros-allocated accum needs no per-range clearing; skipping it also
+        # removes the PDL window where one range's clear could race another
+        # range's main-kernel atomics on shared physical rows.
+        None if pre_post_q_ranges is not None and not deterministic else dq_accum,
         cu_seqlens_q,
         None,  # seqused_q
         None,  # dlse
@@ -1120,7 +1120,6 @@ def _flex_flash_attn_bwd(
         m_block_size,
         use_padded_offsets=False,
         q_ranges=pre_post_q_ranges,
-        q_ws_offsets=q_ws_offsets,
     )
 
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
@@ -1246,10 +1245,6 @@ def _flex_flash_attn_bwd(
             to_cute_tensor(t, assumed_align=4) if t is not None else None
             for t in (kernel_varlen_q_meta, kernel_varlen_k_meta)
         ]
-        q_ws_tensor, k_ws_tensor = [
-            to_cute_tensor(t, assumed_align=4, leading_dim=0) if t is not None else None
-            for t in (q_ws_offsets, k_ws_offsets)
-        ]
         seqused_q_tensor = seqused_k_tensor = None
         dQ_semaphore_tensor, dK_semaphore_tensor, dV_semaphore_tensor = [
             convert_from_dlpack_leading_static(
@@ -1370,9 +1365,6 @@ def _flex_flash_attn_bwd(
             seqused_q_tensor,
             seqused_k_tensor,
         ]
-        if major_arch in [10, 11]:
-            # Workspace-offset slots exist only in the SM100 __call__ signature.
-            bwd_compile_args.extend([q_ws_tensor, k_ws_tensor])
         bwd_compile_args += [
             None,  # window_size_left
             None,  # window_size_right
@@ -1409,8 +1401,6 @@ def _flex_flash_attn_bwd(
         None,  # seqlen_used_q
         None,  # seqlen_used_k
     ]
-    if major_arch in [10, 11]:
-        bwd_call_args.extend([q_ws_offsets, k_ws_offsets])
     bwd_call_args += [
         None,  # window_size_left
         None,  # window_size_right
@@ -1447,26 +1437,35 @@ def _flex_flash_attn_bwd(
             num_threads_post_dQ = 128
             num_threads_post_dKV = 128
 
-    bwd_postprocess(
-        dq_accum,
-        dq,
-        softmax_scale,
-        cu_seqlens_q,
-        None,
-        arch,
-        dtype,
-        head_dim,
-        m_block_size,
-        num_threads_post_dQ,
-        AtomLayoutMdQ,
-        dQ_swapAB,
-        use_2cta_instrs=use_2cta_instrs,
-        cluster_size=1,
-        ranges=pre_post_q_ranges,
-        ws_offsets=q_ws_offsets,
-    )
+    # Non-deterministic true-range bwd stores row-major fp32 atomics; its
+    # postprocess is a per-(range, tile) scale+cast sweep that never touches
+    # rows outside every range.
+    rowmajor_post = pre_post_q_ranges is not None and not deterministic
+    if rowmajor_post:
+        bwd_postprocess_rowmajor(dq_accum, dq, q_ranges, seqlen_q, softmax_scale)
+    else:
+        bwd_postprocess(
+            dq_accum,
+            dq,
+            softmax_scale,
+            cu_seqlens_q,
+            None,
+            arch,
+            dtype,
+            head_dim,
+            m_block_size,
+            num_threads_post_dQ,
+            AtomLayoutMdQ,
+            dQ_swapAB,
+            use_2cta_instrs=use_2cta_instrs,
+            cluster_size=1,
+            ranges=pre_post_q_ranges,
+        )
 
-    if dKV_postprocess:
+    if dKV_postprocess and rowmajor_post:
+        bwd_postprocess_rowmajor(dk_accum, dk, k_ranges, seqlen_k, softmax_scale)
+        bwd_postprocess_rowmajor(dv_accum, dv, k_ranges, seqlen_k, 1.0)
+    elif dKV_postprocess:
         # Postprocess: convert dk_accum from float32 to dk in bf16/fp16
         bwd_postprocess(
             dk_accum,
@@ -1483,7 +1482,6 @@ def _flex_flash_attn_bwd(
             dKV_swapAB,
             cluster_size=cluster_size,
             ranges=pre_post_k_ranges,
-            ws_offsets=k_ws_offsets,
         )
         # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
         bwd_postprocess(
@@ -1501,7 +1499,6 @@ def _flex_flash_attn_bwd(
             dKV_swapAB,
             cluster_size=cluster_size,
             ranges=pre_post_k_ranges,
-            ws_offsets=k_ws_offsets,
         )
 
     return dq, dk, dv

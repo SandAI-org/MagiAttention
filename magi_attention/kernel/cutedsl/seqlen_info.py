@@ -46,7 +46,6 @@ class SeqlenInfo:
         seqused: Optional[cute.Tensor] = None,
         tile: cutlass.Constexpr[int] = 128,
         ranges: Optional[cute.Tensor] = None,
-        ws_offsets: Optional[cute.Tensor] = None,
     ):
         assert cu_seqlens is None or ranges is None
         is_varlen = cu_seqlens is not None or ranges is not None
@@ -56,10 +55,10 @@ class SeqlenInfo:
             offset = cu_seqlens[batch_idx]
         else:
             offset = 0
-        if const_expr(ws_offsets is not None):
-            # Host-precomputed exclusive_scan(round_up(len, tile)); the formula
-            # below only stays collision-free for cu-partition geometry.
-            offset_padded = cute.assume(ws_offsets[batch_idx], divby=tile)
+        if const_expr(ranges is not None):
+            # True-range workspaces live in the original token space (overlap
+            # is absorbed by the accumulators' atomics).
+            offset_padded = offset
         elif const_expr(not is_varlen):
             offset_padded = 0
         else:
@@ -90,9 +89,13 @@ class SeqlenInfo:
             idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mT) - 1 - dim)
             return mT[idx]
         else:
+            # multiple is a static row width; the product's divisibility is
+            # exact even when the physical offset itself is unaligned.
             off = multiple * (
                 self.offset if const_expr(not padded) else self.offset_padded
             )
+            if const_expr(multiple > 1):
+                off = cute.assume(off, divby=multiple)
             offset = off if const_expr(cute.rank(mT.shape[0]) == 1) else (0, off)
             idx = (offset,) + (None,) * (cute.rank(mT) - 1)
             return cute.domain_offset(idx, mT)
@@ -129,14 +132,9 @@ class SeqlenInfoQK:
         tile_n: cutlass.Constexpr[Int32] = 128,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
-        mQWSOffsets: Optional[cute.Tensor] = None,
-        mKWSOffsets: Optional[cute.Tensor] = None,
     ) -> "SeqlenInfoQK":
         assert mQRanges is None or mCuSeqlensQ is None
         assert mKRanges is None or mCuSeqlensK is None
-        # ws tables index by the (clamped) range row, so they require ranges
-        assert mQWSOffsets is None or mQRanges is not None
-        assert mKWSOffsets is None or mKRanges is not None
         varlen_q = mCuSeqlensQ is not None or mQRanges is not None
         varlen_k = mCuSeqlensK is not None or mKRanges is not None
         if const_expr(mQRanges is not None):
@@ -155,10 +153,11 @@ class SeqlenInfoQK:
             offset_k = mCuSeqlensK[batch_idx]
         else:
             offset_k = 0
-        if const_expr(mQWSOffsets is not None):
-            # Host-precomputed exclusive_scan(round_up(len, tile)); the formula
-            # below only stays collision-free for cu-partition geometry.
-            padded_offset_q = cute.assume(mQWSOffsets[q_row], divby=tile_m)
+        if const_expr(mQRanges is not None):
+            # True-range workspaces live in the original token space: overlap
+            # is absorbed by the accumulators' atomics, and a tail tile running
+            # past the range end only ever adds mask-zeroed rows.
+            padded_offset_q = offset_q
         elif const_expr(not varlen_q):
             padded_offset_q = 0
         else:
@@ -166,8 +165,8 @@ class SeqlenInfoQK:
             padded_offset_q = cute.assume(
                 (offset_q + batch_idx * tile_m) // tile_m * tile_m, divby=tile_m
             )
-        if const_expr(mKWSOffsets is not None):
-            padded_offset_k = cute.assume(mKWSOffsets[k_row], divby=tile_n)
+        if const_expr(mKRanges is not None):
+            padded_offset_k = offset_k
         elif const_expr(not varlen_k):
             padded_offset_k = 0
         else:
@@ -288,7 +287,9 @@ class SeqlenInfoQK:
                 offset_k = (
                     self.offset_k if const_expr(not padded) else self.padded_offset_k
                 )
-                offset_k *= multiple
+                offset_k = offset_k * multiple
+                if const_expr(multiple > 1):
+                    offset_k = cute.assume(offset_k, divby=multiple)
                 idx = (offset_k,) + (None,) * (cute.rank(mK) - 1)
                 return cute.domain_offset(idx, mK)
         else:
@@ -300,7 +301,9 @@ class SeqlenInfoQK:
                 offset_k = (
                     self.offset_k if const_expr(not padded) else self.padded_offset_k
                 )
-                offset_k *= multiple
+                offset_k = offset_k * multiple
+                if const_expr(multiple > 1):
+                    offset_k = cute.assume(offset_k, divby=multiple)
             return copy_utils.offset_ragged_tensor(
                 mK, offset_k, self.seqlen_k, ragged_dim=0, ptr_shift=True
             )

@@ -153,7 +153,6 @@ class FFABwdPreProcess:
         mCuSeqlensQ: Optional[cute.Tensor],  # (batch + 1,)
         mSeqUsedQ: Optional[cute.Tensor],  # (batch,)
         mQRanges: Optional[cute.Tensor],  # (batch, 2)
-        mQWSOffsets: Optional[cute.Tensor],  # (batch,) tile-aligned workspace starts
         mdLSE: Optional[cute.Tensor],  # (batch, nheads, seqlen) or (nheads, total_q)
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
@@ -240,7 +239,6 @@ class FFABwdPreProcess:
             mCuSeqlensQ,
             mSeqUsedQ,
             mQRanges,
-            mQWSOffsets,
             mdLSE,
             self.gmem_tiled_copy_O,
             self.gmem_tiled_copy_dQaccum,
@@ -265,7 +263,6 @@ class FFABwdPreProcess:
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mQRanges: Optional[cute.Tensor],
-        mQWSOffsets: Optional[cute.Tensor],
         mdLSE: Optional[cute.Tensor],
         gmem_tiled_copy_O: cute.TiledCopy,
         gmem_tiled_copy_dQaccum: cute.TiledCopy,
@@ -298,7 +295,6 @@ class FFABwdPreProcess:
                 mSeqUsedQ,
                 tile=self.tile_m,
                 ranges=mQRanges,
-                ws_offsets=mQWSOffsets,
             )
             mO_cur = seqlen.offset_batch(mO, batch_idx, dim=0)[None, head_idx, None]
             mdO_cur = seqlen.offset_batch(mdO, batch_idx, dim=0)[None, head_idx, None]
@@ -386,7 +382,14 @@ class FFABwdPreProcess:
                         if const_expr(mdLSE is not None):
                             assert gdLSE is not None  # mypy
                             PdPsum_val -= gdLSE[row]
-                    gPdPsum[row] = PdPsum_val
+                    # In original-token space a tail tile's pad rows can be a
+                    # neighbouring range's valid rows; padding them here would
+                    # race that range's real write. The zeros allocation keeps
+                    # rows no range covers defined instead.
+                    if const_expr(mQRanges is None):
+                        gPdPsum[row] = PdPsum_val
+                    elif row < seqlen_limit:
+                        gPdPsum[row] = PdPsum_val
 
             # Clear dQaccum
             if const_expr(mdQaccum is not None):
@@ -412,7 +415,15 @@ class FFABwdPreProcess:
                 )[None, head_idx]
                 gLSElog2 = cute.local_tile(mLSElog2_cur, (self.tile_m,), (m_block,))
                 LOG2_E = math.log2(math.e)
-                if tidx < seqlen_q_rounded - m_block * self.tile_m:
+                # Same collision rule as the PdPsum store above: with ranges,
+                # pad rows would overwrite a neighbour's valid lse with the
+                # +inf placeholder, which the main kernel turns into P == 0.
+                lse_row_bound = (
+                    seqlen_limit
+                    if const_expr(mQRanges is not None)
+                    else seqlen_q_rounded - m_block * self.tile_m
+                )
+                if tidx < lse_row_bound:
                     gLSElog2[tidx] = lse * LOG2_E if lse != -Float32.inf else 0.0
 
 
@@ -423,7 +434,6 @@ def _compile_bwd_preprocess(
     m_block_size,
     has_cuseqlens_q,
     has_ranges,
-    has_ws_offsets,
     has_seqused_q,
     has_dlse,
     has_dq_accum,
@@ -461,11 +471,6 @@ def _compile_bwd_preprocess(
         if has_ranges
         else None
     )
-    mQWSOffsets = (
-        fake_tensor(cutlass.Int32, (cute.sym_int(),), divisibility=1)
-        if has_ws_offsets
-        else None
-    )
     mSequsedQ = (
         fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
     )
@@ -487,7 +492,6 @@ def _compile_bwd_preprocess(
         mCuSeqlensQ,
         mSequsedQ,
         mQRanges,
-        mQWSOffsets,
         mdLSE,
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--enable-tvm-ffi",
@@ -510,7 +514,6 @@ def bwd_preprocess(
     m_block_size: int,
     use_padded_offsets: bool = True,
     q_ranges: torch.Tensor | None = None,
-    q_ws_offsets: torch.Tensor | None = None,
 ):
     """Backward preprocess: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum."""
     compile_key = (
@@ -520,7 +523,6 @@ def bwd_preprocess(
         m_block_size,
         cu_seqlens_q is not None,
         q_ranges is not None,
-        q_ws_offsets is not None,
         seqused_q is not None,
         dlse is not None,
         dq_accum is not None,
@@ -540,7 +542,6 @@ def bwd_preprocess(
         cu_seqlens_q,
         seqused_q,
         q_ranges,
-        q_ws_offsets,
         dlse,
     )
 

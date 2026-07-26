@@ -960,33 +960,6 @@ class TestFfaPerRangeMask(DistTestBase):
 
     @with_run_in_mp
     @parameterize("dummy", [0])
-    def test_ws_offsets_cache(self, dummy):
-        import gc
-
-        from magi_attention.kernel.cutedsl import ffa_utils
-
-        dev = torch.cuda.current_device()
-        ranges = torch.tensor([[0, 100], [100, 300]], device=dev, dtype=torch.int32)
-
-        t1 = ffa_utils.cached_ranges_workspace_offsets(ranges, 64)
-        self.assertIs(ffa_utils.cached_ranges_workspace_offsets(ranges, 64), t1)
-        self.assertIsNot(ffa_utils.cached_ranges_workspace_offsets(ranges, 128), t1)
-
-        ranges.add_(0)  # version bump must invalidate
-        t2 = ffa_utils.cached_ranges_workspace_offsets(ranges, 64)
-        self.assertIsNot(t2, t1)
-        self.assertTrue(torch.equal(t2, t1))
-        self.assertTrue(
-            torch.equal(t2, torch.tensor([0, 128], device=dev, dtype=torch.int32))
-        )
-
-        key = id(ranges)
-        del ranges, t1, t2
-        gc.collect()
-        self.assertNotIn(key, ffa_utils._ws_offsets_cache)
-
-    @with_run_in_mp
-    @parameterize("dummy", [0])
     def test_merge_ranges_contract(self, dummy):
         """Torch-native merge_ranges must reproduce the magi_attn_ext contract."""
         dev = torch.cuda.current_device()
