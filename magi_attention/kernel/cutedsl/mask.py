@@ -950,6 +950,11 @@ class AttentionMask:
             # exclusive bound that r2p_bitmask_below expects.
             row_limit_hi = causal_offset + self.seqlen_k - self.seqlen_q + 1
         if const_expr(mask_seqlen):
+            # Clamp the visible-row bound to seqlen_q: a tail tile's OOB rows
+            # read a neighbouring range's finite LSE once accumulators live in
+            # the original token space, so their P/dS residue must die here
+            # (dK/dV contract over Q and cannot predicate it away).
+            row_limit_hi = cutlass.min(row_limit_hi, seqlenq_row_limit)
             # Mask out the entire column when K is fully OOB.
             if seqlenk_col_limit <= 0:
                 row_limit_lo = Int32(self.tile_m)
