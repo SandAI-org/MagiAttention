@@ -57,7 +57,7 @@ from .ffa_utils import (
     maybe_contiguous,
     normalize_mask_type_spec,
     ranges_to_cu_seqlens,
-    ranges_workspace_offsets,
+    cached_ranges_workspace_offsets,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
@@ -1051,12 +1051,12 @@ def _flex_flash_attn_bwd(
     # K side uses the cluster tile: the dKV accum regions are laid out at
     # cluster_size * n_block_size granularity.
     q_ws_offsets = (
-        ranges_workspace_offsets(q_ranges, m_block_size)
+        cached_ranges_workspace_offsets(q_ranges, m_block_size)
         if pre_post_q_ranges is not None
         else None
     )
     k_ws_offsets = (
-        ranges_workspace_offsets(k_ranges, cluster_size * n_block_size)
+        cached_ranges_workspace_offsets(k_ranges, cluster_size * n_block_size)
         if pre_post_k_ranges is not None and dKV_postprocess
         else None
     )

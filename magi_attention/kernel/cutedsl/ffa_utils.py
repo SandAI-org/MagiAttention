@@ -18,6 +18,7 @@ and fake-tensor builders for bwd kernels."""
 import hashlib
 import inspect
 import os
+import weakref
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import lru_cache
@@ -277,6 +278,31 @@ def ranges_workspace_offsets(ranges: torch.Tensor, tile: int) -> torch.Tensor:
     starts = torch.zeros_like(padded)
     torch.cumsum(padded[:-1], dim=0, out=starts[1:])
     return starts.to(torch.int32).contiguous()
+
+
+# Keyed by id() with a weakref identity check rather than WeakKeyDictionary:
+# Tensor.__eq__ is elementwise, so hash-collision probing there would blow up.
+_ws_offsets_cache: dict = {}
+
+
+def cached_ranges_workspace_offsets(ranges: torch.Tensor, tile: int) -> torch.Tensor:
+    """ranges_workspace_offsets memoized on (tensor identity, _version, tile).
+
+    Training reuses the same ranges tensor while the dispatch is unchanged, so
+    the scan runs once per dispatch instead of once per bwd call.
+    """
+    key = id(ranges)
+    entry = _ws_offsets_cache.get(key)
+    if entry is None or entry[0]() is not ranges:
+        ref = weakref.ref(ranges, lambda _, k=key: _ws_offsets_cache.pop(k, None))
+        entry = (ref, {})
+        _ws_offsets_cache[key] = entry
+    hit = entry[1].get(tile)
+    if hit is not None and hit[0] == ranges._version:
+        return hit[1]
+    table = ranges_workspace_offsets(ranges, tile)
+    entry[1][tile] = (ranges._version, table)
+    return table
 
 
 def merge_ranges(
