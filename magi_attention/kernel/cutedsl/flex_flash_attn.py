@@ -1003,12 +1003,23 @@ def _flex_flash_attn_bwd(
             batch_size, num_head, seqlen_q_rounded, dtype=torch.float32, device=device
         )
     else:
-        # Original-token-space accumulators: overlap is absorbed by the same
-        # atomics, and a tail tile running past a range end only adds rows the
-        # mask already zeroed. One extra tile keeps the last tail in bounds.
-        total_q_rounded_padded = (
-            (total_q + m_block_size - 1) // m_block_size + 1
-        ) * m_block_size
+        if major_arch in (10, 11):
+            # Original-token-space accumulators: overlap is absorbed by the
+            # same atomics, and a tail tile running past a range end only
+            # adds rows the mask already zeroed. One extra tile keeps the
+            # last tail in bounds.
+            total_q_rounded_padded = (
+                (total_q + m_block_size - 1) // m_block_size + 1
+            ) * m_block_size
+        else:
+            # Other arches collapse ranges to cu_seqlens and still address
+            # per-sequence padded slots, so capacity is the sum of per-range
+            # round-ups, not the round-up of the total.
+            total_q_rounded_padded = (
+                (total_q + (num_ranges + 1) * m_block_size - 1)
+                // m_block_size
+                * m_block_size
+            )
         # Zeros: the row-major postprocess sweeps every row, so uncovered
         # rows must read back the accumulator's zeros.
         dq_accum = torch.zeros(
@@ -1053,9 +1064,17 @@ def _flex_flash_attn_bwd(
             )
         else:
             cluster_tile_n = cluster_size * n_block_size
-            total_k_rounded_padded = (
-                (total_k + cluster_tile_n - 1) // cluster_tile_n + 1
-            ) * cluster_tile_n
+            if major_arch in (10, 11):
+                total_k_rounded_padded = (
+                    (total_k + cluster_tile_n - 1) // cluster_tile_n + 1
+                ) * cluster_tile_n
+            else:
+                # Same per-sequence padded capacity rule as the Q-side stats.
+                total_k_rounded_padded = (
+                    (total_k + (num_ranges + 1) * cluster_tile_n - 1)
+                    // cluster_tile_n
+                    * cluster_tile_n
+                )
             dk_accum = torch.zeros(
                 num_head_kv,
                 total_k_rounded_padded * head_dim_rounded,
