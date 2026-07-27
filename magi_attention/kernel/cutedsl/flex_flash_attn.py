@@ -68,7 +68,9 @@ from .sparse_utils import (
     BlockSparseTensorsTorch,
     InnerLoadMode,
     InnerStoreMode,
+    OuterStoreMode,
     block_sparse_call_tuple,
+    derive_outer_store_mode,
     get_sparse_q_block_size,
     index_sparse_indices_to_block_sparse,
     prepare_block_sparse_bwd,
@@ -378,6 +380,18 @@ def _flex_flash_attn_fwd(
     else:
         aux_tensor_metadata = None
 
+    # Derive FWD outer store mode
+    _fwd_outer_store_mode = (
+        derive_outer_store_mode(
+            cu_seqlens_q_present=cu_seqlens_q is not None,
+            pack_gqa=pack_gqa,
+            m_block_size=tile_m,
+            qhead_per_kvhead=qhead_per_kvhead,
+        )
+        if arch // 10 >= 10
+        else OuterStoreMode.Tma
+    )
+
     compile_key = (
         dtype,
         head_dim,
@@ -411,6 +425,7 @@ def _flex_flash_attn_fwd(
         index_sparse_tiles.inner_load_mode
         if is_index_sparse and index_sparse_tiles is not None
         else None,
+        _fwd_outer_store_mode if arch // 10 >= 10 else None,
     )
 
     if compile_key not in _flex_flash_attn_fwd.compile_cache:
@@ -513,6 +528,7 @@ def _flex_flash_attn_fwd(
                         if is_index_sparse and index_sparse_tiles is not None
                         else InnerLoadMode.CpAsync
                     ),
+                    outer_store_mode=_fwd_outer_store_mode,
                 )
             case 12:
                 # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
@@ -1426,6 +1442,9 @@ def _flex_flash_attn_bwd(
             index_sparse_tiles.inner_store_mode
             if is_index_sparse and index_sparse_tiles is not None
             else -1,
+            OuterStoreMode.Stg
+            if (qhead_per_kvhead == 1 and cu_seqlens_k is not None)
+            else OuterStoreMode.Tma,
             is_ffa_inner_dir_max_to_min(),
             get_ffa_mask_mode(),
         )
@@ -1546,6 +1565,11 @@ def _flex_flash_attn_bwd(
                         index_sparse_tiles.inner_store_mode
                         if is_index_sparse and index_sparse_tiles is not None
                         else InnerStoreMode.Tma
+                    ),
+                    outer_store_mode=(
+                        OuterStoreMode.Stg
+                        if (qhead_per_kvhead == 1 and cu_seqlens_k is not None)
+                        else OuterStoreMode.Tma
                     ),
                 )
 

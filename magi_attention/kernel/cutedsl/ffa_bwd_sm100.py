@@ -50,6 +50,7 @@ from .sparse_utils import (
     BlockSparseTensors,
     InnerLoadMode,
     InnerStoreMode,
+    OuterStoreMode,
     get_block_sparse_iteration_info_bwd,
     get_curr_blocksparse_tensors,
     get_m_block_from_iter_bwd,
@@ -95,6 +96,7 @@ class FFABwdSm100:
         index_sparse: bool = False,
         inner_load_mode: int = InnerLoadMode.CpAsync,
         inner_store_mode: int = InnerStoreMode.Tma1d,
+        outer_store_mode: int = OuterStoreMode.Tma,
     ):
         # padding head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
@@ -165,6 +167,7 @@ class FFABwdSm100:
         self.index_sparse = index_sparse
         self.inner_load_mode = inner_load_mode
         self.inner_store_mode = inner_store_mode
+        self.outer_store_mode = outer_store_mode
         self.is_scatter_store = index_sparse and inner_store_mode != InnerStoreMode.Tma
         if index_sparse and inner_load_mode != InnerLoadMode.Tma:
             assert swap_bwd_qk_loop, "IndexSparse scatter BWD requires LoopK"
@@ -747,9 +750,6 @@ class FFABwdSm100:
 
         self.is_varlen_k = mCuSeqlensK is not None or mSeqUsedK is not None
         self.is_varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
-        self.use_tma_store = not (
-            self.qhead_per_kvhead == 1 and mCuSeqlensK is not None
-        )
         self.dKV_postprocess = self.qhead_per_kvhead > 1 or self.swap_bwd_qk_loop
 
         if const_expr(self.dKV_postprocess):
@@ -942,7 +942,9 @@ class FFABwdSm100:
             if const_expr(dV_major_mode != tcgen05.OperandMajorMode.K):
                 raise RuntimeError("The layout of mdV is wrong")
 
-        if const_expr(self.use_tma_store and not self.dKV_postprocess):
+        if const_expr(
+            self.outer_store_mode == OuterStoreMode.Tma and not self.dKV_postprocess
+        ):
             tma_copy_op_dKV = cpasync.CopyBulkTensorTileS2GOp()
             tma_atom_dK, mdK_tma_tensor = cpasync.make_tiled_tma_atom(
                 tma_copy_op_dKV,
@@ -1479,7 +1481,7 @@ class FFABwdSm100:
             print(f"{prefix}num_epi_stages_v: {self.num_epi_stages_v}")
             print(f"{prefix}num_compute_wgs: {self.num_compute_wgs}")
             print(f"{prefix}dKV_postprocess: {self.dKV_postprocess}")
-            print(f"{prefix}use_tma_store: {self.use_tma_store}")
+            print(f"{prefix}outer_store_mode: {self.outer_store_mode}")
             print(
                 f"{prefix}use_2cta_instrs: {self.use_2cta_instrs} | "
                 f"use_block_sparsity: {self.use_block_sparsity}"
@@ -5986,7 +5988,7 @@ class FFABwdSm100:
                 # LoopK: dKV is handled per-iter by reduce warps, no epilogue here
             else:
                 if process_tile:
-                    if const_expr(not self.use_tma_store):
+                    if const_expr(not self.outer_store_mode == OuterStoreMode.Tma):
                         consumer_state_dKV = self.epilogue_dKV(
                             dp_idx,
                             warp_idx,

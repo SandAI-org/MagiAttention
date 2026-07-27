@@ -84,6 +84,26 @@ class OuterStoreMode(IntEnum):
     Tma1d = 2
 
 
+def derive_outer_store_mode(
+    cu_seqlens_q_present: bool = False,
+    seqused_q_present: bool = False,
+    pack_gqa: bool = False,
+    m_block_size: int = 128,
+    qhead_per_kvhead: int = 1,
+) -> OuterStoreMode:
+    """Derive OuterStoreMode from kernel configuration.
+
+    Tma:   2D tile store when output is fully contiguous in 2D.
+    Tma1d: Per-row bulk S2G when rows are contiguous but tile is not (varlen/PackGQA).
+    Stg:   Fallback per-element store.
+    """
+    if cu_seqlens_q_present or seqused_q_present:
+        return OuterStoreMode.Tma1d
+    if pack_gqa and m_block_size % qhead_per_kvhead != 0:
+        return OuterStoreMode.Tma1d
+    return OuterStoreMode.Tma
+
+
 # ---------------------------------------------------------------------------
 # Block-sparse tensor data structures
 # ---------------------------------------------------------------------------

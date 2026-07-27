@@ -57,6 +57,7 @@ from .softmax import SoftmaxSm100, apply_score_mod_inner
 from .sparse_utils import (
     BlockSparseTensors,
     InnerLoadMode,
+    OuterStoreMode,
     get_total_block_count,
     handle_block_sparse_empty_tile_correction_sm100,
     produce_block_sparse_inner_iters_sm100,
@@ -197,9 +198,11 @@ class FFAFwdSm100:
         debug_print: bool = False,
         index_sparse: bool = False,
         inner_load_mode: int = InnerLoadMode.CpAsync,
+        outer_store_mode: int = OuterStoreMode.Tma,
     ):
         self.index_sparse = index_sparse
         self.inner_load_mode = inner_load_mode
+        self.outer_store_mode = outer_store_mode
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -791,13 +794,7 @@ class FFAFwdSm100:
 
         self._setup_attributes()
 
-        self.use_tma_O = (
-            self.arch >= Arch.sm_90
-            and mCuSeqlensQ is None
-            and mSeqUsedQ is None
-            and not (self.pack_gqa and self.m_block_size % self.qhead_per_kvhead != 0)
-            and not (self.pack_gqa and self.is_split_kv)
-        )
+        # outer_store_mode is passed from flex_flash_attn.py dispatch
         self.ex2_emu_freq = 0
         self.ex2_emu_start_frg = self._tune.get("ex2_emu_start_frg", 1)
         if const_expr(self.enable_ex2_emu):
@@ -1017,7 +1014,7 @@ class FFAFwdSm100:
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
 
         tma_atom_O = None
-        if const_expr(self.use_tma_O):
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma):
             # TMA store atom for O
             # layout_src_tv=(1,8192):(0,1)
             # layout_dst_tv=(1,8192):(0,1)
@@ -1218,7 +1215,7 @@ class FFAFwdSm100:
                 f"{prefix}q_stage: {self.q_stage} | kv_stage: {self.kv_stage} | s_stage: {self.s_stage}"
             )
             print(
-                f"{prefix}use_tma_Q: {self.use_tma_Q} | use_tma_KV: {self.use_tma_KV} | use_tma_O: {self.use_tma_O}"
+                f"{prefix}use_tma_Q: {self.use_tma_Q} | use_tma_KV: {self.use_tma_KV} | outer_store_mode: {self.outer_store_mode}"
             )
             print(f"{prefix}threads_per_cta: {self.threads_per_cta}")
             print()
@@ -1258,7 +1255,7 @@ class FFAFwdSm100:
                     tma_atom_V.layout_src_tv,
                     tma_atom_V.layout_dst_tv,
                 )
-            if const_expr(self.use_tma_O):
+            if const_expr(self.outer_store_mode == OuterStoreMode.Tma):
                 cute.printf(
                     prefix + "tma_atom_O: layout_src_tv={}, layout_dst_tv={}",
                     tma_atom_O.layout_src_tv,
@@ -4137,7 +4134,9 @@ class FFAFwdSm100:
                     None, None, head_idx
                 ]
             gO = None
-            if const_expr(self.use_tma_O or not self.pack_gqa):
+            if const_expr(
+                self.outer_store_mode == OuterStoreMode.Tma or not self.pack_gqa
+            ):
                 # gO_2CTA: (tileQ128*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
                 tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
                     (self.mma_tiler_pv[0] * self.q_stage),
@@ -4924,7 +4923,7 @@ class FFAFwdSm100:
         # --- S2G copy O to gemm (if needed) ---
 
         if const_expr(self.use_correction_warps_for_epi):
-            assert not self.use_tma_O
+            assert self.outer_store_mode != OuterStoreMode.Tma
             assert gmem_tiled_copy_O is not None
 
             # Sync this correction warp group to ensure all R2S stores done
@@ -5101,7 +5100,9 @@ class FFAFwdSm100:
                         None, None, head_idx
                     ]
                 gO = None
-                if const_expr(self.use_tma_O or not self.pack_gqa):
+                if const_expr(
+                    self.outer_store_mode == OuterStoreMode.Tma or not self.pack_gqa
+                ):
                     # gO_2CTA: (tileQ*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
                     tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
                         (self.mma_tiler_pv[0] * self.q_stage),
@@ -5119,7 +5120,7 @@ class FFAFwdSm100:
 
                 # --- S2G copy O to gmem with or w/o TMA ---
 
-                if const_expr(self.use_tma_O):
+                if const_expr(self.outer_store_mode == OuterStoreMode.Tma):
                     # Define TMA store fn for O
                     store_O, _, _ = copy_utils.tma_get_copy_fn(
                         tma_atom_O, tma_cta_coord, tma_cta_layout, sO, gO
@@ -5148,6 +5149,8 @@ class FFAFwdSm100:
                         # Release sOi buffer to be empty for next tile
                         pipeline_o_epi.consumer_release_w_index(stage)
                 else:
+                    # OuterStoreMode.Tma1d and OuterStoreMode.Stg share same path
+                    # (Tma1d per-row bulk S2G from linear SMEM is a future optimization)
                     for stage in cutlass.range_constexpr(self.q_stage):
                         # Wait for final corrected sOi to be full
                         pipeline_o_epi.consumer_wait_w_index_phase(
