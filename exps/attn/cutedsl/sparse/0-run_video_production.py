@@ -68,7 +68,7 @@ SCENARIOS = [
     (524288, 8192, 65536),
 ]
 
-METHODS = ["dense", "d1b", "block_sparse", "index_sparse"]
+METHODS = ["dense_nb", "d1b", "block_sparse", "index_sparse"]
 PASSES = ["fwd", "bwd_q", "bwd"]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -357,7 +357,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
             swap_loop = pass_type == "bwd"  # bwd=LoopK, bwd_q=InnerLoopQ
 
             for method in METHODS:
-                effective_k = kvseqlen if method == "dense" else topk
+                effective_k = kvseqlen if method == "dense_nb" else topk
                 flops = _calc_flops(qseqlen, effective_k, is_bwd)
                 key = f"{pass_type}/{method}"
 
@@ -384,7 +384,10 @@ def _run_experiment(force=False, max_kvseqlen=None):
                         1, qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device
                     )
 
-                    if method == "dense":
+                    if method == "dense_nb":
+                        # Dense-NB: full KV (seqlen_k=kvseqlen), no sparsity
+                        # outer K-tiles = kvseqlen/128 -> no wave quantization
+                        # TFLOPS for reference only (FLOPS != sparse FLOPS)
                         k = torch.randn(
                             1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
                         )
@@ -707,10 +710,10 @@ def _plot():
         ("bwd", "BWD (LoopK)"),
     ]
     PLOT_METHODS = [
-        ("dense", "Dense (full Q×K)", "#5A5A5A"),
-        ("d1b", "Dense (K=topk)", "#27AE60"),
-        ("block_sparse", "BlockSparse (kbs=128)", "#2E86C1"),
-        ("index_sparse", "IndexSparse (kbs=128)", "#C0392B"),
+        ("dense_nb", "Dense-NB (full KV)", (0.2, 0.2, 0.2)),
+        ("d1b", "Dense (K=topk)", (0.58, 0.58, 0.58)),
+        ("block_sparse", "BlockSparse (kbs=128)", (0.29, 0.57, 0.60)),
+        ("index_sparse", "IndexSparse (kbs=128)", (0.77, 0.34, 0.49)),
     ]
 
     kvseqlens = sorted(
