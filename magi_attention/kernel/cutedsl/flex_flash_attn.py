@@ -643,6 +643,7 @@ def _build_is_tma_bwd_loopq_bst(
     B, NHK, M_blocks, TOPK_padded = tile_indices.shape
     qhpk = num_q_heads // num_kv_heads
     N_blocks = seqlen_k // n_block_size
+    n_block_shift = (n_block_size - 1).bit_length()  # log2(n_block_size)
     sparse_q = subtile_factor * m_block_size
     device = tile_indices.device
 
@@ -663,9 +664,9 @@ def _build_is_tma_bwd_loopq_bst(
         )
 
     # Extract K-block indices per fine Q-tile from tile_token_indices.
-    # Values are K-token addresses; >>7 (÷128) gives K-block index for kbs=128.
+    # Values are K-token addresses; >>n_block_shift gives K-block index.
     k_blocks_per_qtile = (
-        tile_indices[:, :, :, ::n_block_size][:, :, :, :k_iter_count] >> 7
+        tile_indices[:, :, :, ::n_block_size][:, :, :, :k_iter_count] >> n_block_shift
     ).int()
     # Shape: (B, NHK, M_blocks, k_iter_count)
     k_blocks_per_qtile = k_blocks_per_qtile.clamp(-1, N_blocks - 1)
@@ -802,7 +803,6 @@ def _flex_flash_attn_bwd(
 
     # LoopK uses forward-direction block_sparse_tensors (per-Q-tile K-block list);
     # LoopQ uses backward-direction tensors (per-K-tile Q-block list).
-    _is_tma_loopq = False
     if is_index_sparse and swap_bwd_qk_loop:
         bst = index_sparse_tiles.scheduling_bst
         if not pack_gqa:
@@ -825,7 +825,7 @@ def _flex_flash_attn_bwd(
         )
         is_index_sparse = False
         index_sparse_tiles = None
-        _is_tma_loopq = True
+
     elif swap_bwd_qk_loop and flex_attn_args.block_sparse_tensors is not None:
         block_sparse_tensors = flex_attn_args.block_sparse_tensors
     else:
@@ -1289,29 +1289,7 @@ def _flex_flash_attn_bwd(
     if block_sparse_tensors is not None and num_head != num_head_kv:
         bst_h = block_sparse_tensors.mask_block_cnt.shape[1]
         if bst_h == num_head_kv and not pack_gqa:
-            _is_vt = block_sparse_tensors.is_valid_total
-            block_sparse_tensors = BlockSparseTensorsTorch(
-                mask_block_cnt=block_sparse_tensors.mask_block_cnt.repeat_interleave(
-                    qhead_per_kvhead, dim=1
-                ),
-                mask_block_idx=block_sparse_tensors.mask_block_idx.repeat_interleave(
-                    qhead_per_kvhead, dim=1
-                ),
-                full_block_cnt=block_sparse_tensors.full_block_cnt.repeat_interleave(
-                    qhead_per_kvhead, dim=1
-                )
-                if block_sparse_tensors.full_block_cnt is not None
-                else None,
-                full_block_idx=block_sparse_tensors.full_block_idx.repeat_interleave(
-                    qhead_per_kvhead, dim=1
-                )
-                if block_sparse_tensors.full_block_idx is not None
-                else None,
-                block_size=block_sparse_tensors.block_size,
-                is_valid_total=_is_vt.repeat_interleave(qhead_per_kvhead, dim=1)
-                if _is_vt is not None
-                else None,
-            )
+            block_sparse_tensors = _expand_bst_heads(block_sparse_tensors, num_head)
         elif pack_gqa:
             bst_num_head = num_head_kv
 
