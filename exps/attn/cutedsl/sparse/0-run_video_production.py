@@ -68,7 +68,7 @@ SCENARIOS = [
     (524288, 8192, 65536),
 ]
 
-METHODS = ["dense", "block_sparse", "index_sparse"]
+METHODS = ["dense", "d1b", "block_sparse", "index_sparse"]
 PASSES = ["fwd", "bwd_q", "bwd"]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -429,6 +429,52 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                     swap_bwd_qk_loop=swap_loop,
                                 )
 
+                    elif method == "d1b":
+                        # Dense-1B: gathered KV (seqlen_k=topk), same FLOPS as sparse
+                        k = torch.randn(
+                            1, topk, NHK, HD, dtype=torch.bfloat16, device=device
+                        )
+                        v = torch.randn(
+                            1, topk, NHK, HD, dtype=torch.bfloat16, device=device
+                        )
+                        fwd_args = TorchFlexAttnArgs()
+                        out, lse = _flex_flash_attn_fwd(
+                            q,
+                            k,
+                            v,
+                            softmax_scale=scale,
+                            flex_attn_args=fwd_args,
+                            pack_gqa=True,
+                        )
+                        if not is_bwd:
+
+                            def run_fn():
+                                _flex_flash_attn_fwd(
+                                    q,
+                                    k,
+                                    v,
+                                    softmax_scale=scale,
+                                    flex_attn_args=fwd_args,
+                                    pack_gqa=True,
+                                )
+
+                        else:
+                            dO = torch.randn_like(out)
+
+                            def run_fn():
+                                _flex_flash_attn_bwd(
+                                    q,
+                                    k,
+                                    v,
+                                    out,
+                                    lse,
+                                    dO,
+                                    softmax_scale=scale,
+                                    flex_attn_args=fwd_args,
+                                    pack_gqa=True,
+                                    swap_bwd_qk_loop=swap_loop,
+                                )
+
                     elif method == "block_sparse":
                         k = torch.randn(
                             1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
@@ -661,7 +707,8 @@ def _plot():
         ("bwd", "BWD (LoopK)"),
     ]
     PLOT_METHODS = [
-        ("dense", "Dense (gathered KV)", "#5A5A5A"),
+        ("dense", "Dense (full Q×K)", "#5A5A5A"),
+        ("d1b", "Dense (K=topk)", "#27AE60"),
         ("block_sparse", "BlockSparse (kbs=128)", "#2E86C1"),
         ("index_sparse", "IndexSparse (kbs=128)", "#C0392B"),
     ]
@@ -674,7 +721,7 @@ def _plot():
         return
 
     x = np.arange(len(kvseqlens))
-    bw = 0.22
+    bw = 0.18
 
     fig, axes = plt.subplots(1, 3, figsize=(26, 7), dpi=150)
 
