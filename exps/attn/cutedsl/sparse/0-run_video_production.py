@@ -68,7 +68,7 @@ SCENARIOS = [
     (524288, 8192, 65536),
 ]
 
-METHODS = ["dense_nb", "d1b", "block_sparse", "index_sparse"]
+METHODS = ["d1b", "dense_nb", "block_sparse", "index_sparse"]
 PASSES = ["fwd", "bwd_q", "bwd"]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -726,8 +726,8 @@ def _plot():
         ("bwd", "BWD InnerLoopK"),
     ]
     PLOT_METHODS = [
-        ("dense_nb", "Dense-NB (=BS data)", (0.2, 0.2, 0.2)),
         ("d1b", "Dense (K=topk)", (0.58, 0.58, 0.58)),
+        ("dense_nb", "Dense-NB (=BS data)", (0.2, 0.2, 0.2)),
         ("block_sparse", "BlockSparse (kbs=128)", (0.29, 0.57, 0.60)),
         ("index_sparse", "IndexSparse (kbs=128)", (0.77, 0.34, 0.49)),
     ]
