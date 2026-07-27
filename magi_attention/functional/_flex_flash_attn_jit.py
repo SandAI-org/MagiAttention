@@ -540,17 +540,7 @@ def get_ffa_jit_spec(
     # ─── InnerStoreMode (BWD only): 0=tma2d, 1=tma1d, 2=atomicadd, 3=bypass ───
     if direction == "bwd":
         _store_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_STORE_MODE")
-        _use_smem_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM")
-        assert _use_smem_env in (None, "0", "1"), (
-            "MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM must be 0/1, " f"got {_use_smem_env}"
-        )
-        assert not (_use_smem_env == "0" and _store_env is not None), (
-            "MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM=0 conflicts with "
-            "MAGI_ATTENTION_FFA_INNER_STORE_MODE; set only one"
-        )
-        if _use_smem_env == "0":
-            _resolved_store_mode = "3"
-        elif _store_env is not None:
+        if _store_env is not None:
             _store_lower = _store_env.lower()
             _store_mode_map = {
                 "tma": "0",

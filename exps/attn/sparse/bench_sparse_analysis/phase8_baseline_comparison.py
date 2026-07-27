@@ -306,7 +306,7 @@ def _run_triton(kvseqlen, qseqlen, topk, pass_type, device, sparse_k_block_size)
 
         is_bwd = False
     elif pass_type in ("bwd_loopk", "bwd_loopq"):
-        dkv_mode = "split" if pass_type == "bwd_loopk" else "loopq_token"
+        bwd_mode = "loopk" if pass_type == "bwd_loopk" else "loopq"
         q.requires_grad_(True)
         k.requires_grad_(True)
         v.requires_grad_(True)
@@ -315,7 +315,7 @@ def _run_triton(kvseqlen, qseqlen, topk, pass_type, device, sparse_k_block_size)
             k,
             v,
             indices,
-            dkv_mode=dkv_mode,
+            bwd_mode=bwd_mode,
             sparse_k_block_size=sparse_k_block_size,
         )
         do = torch.randn_like(o)
@@ -634,7 +634,7 @@ def _sanity_check(device):
             o,
             do,
             lse,
-            dkv_mode="split",
+            bwd_mode="loopk",
             sparse_k_block_size=kbs,
         )
         loopq = token_sparse_bwd(
@@ -645,7 +645,7 @@ def _sanity_check(device):
             o,
             do,
             lse,
-            dkv_mode="loopq_token",
+            bwd_mode="loopq",
             sparse_k_block_size=kbs,
         )
         for name, lhs, rhs in zip(("dQ", "dK", "dV"), loopk, loopq):

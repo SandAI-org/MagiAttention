@@ -23,14 +23,17 @@ FWD: Grid (total_q_positions,) — 1 thread block processes all nhq heads.
      Q[BLOCK_M, D] @ gathered_K[BLOCK_N, D]^T → S[BLOCK_M, BLOCK_N]  (tl.dot)
      P[BLOCK_M, BLOCK_N] @ gathered_V[BLOCK_N, D] → O[BLOCK_M, D]    (tl.dot)
 
-BWD: Two dKV strategies:
-     (a) "split" (default): separate dQ kernel (fp32 accum, no atomics) +
-         head-chunked dKV kernel (BLOCK_MH=32, BLOCK_N=64, bf16 atomics).
-         Head chunking reduces register pressure from 576+ to ~240, eliminating
-         spilling. Larger BLOCK_N=64 halves atomic write batches. ~98-105 TFLOPS.
-     (b) "loopq_token": LoopQ with inverted index. kbs=1 uses CSR + 64-bit
-         bitmask; kbs=128 uses block-level inverse via invert_index_sparse_indices.
-         dKV accumulated without atomics (each CTA owns its KV tile exclusively).
+BWD: Two modes controlled by bwd_mode (= inner loop direction):
+     (a) "loopk" (default): inner loop over K. Each CTA owns one Q position
+         and iterates over its topk KV positions.
+         dQ: local register accumulation, no write conflicts.
+         dK/dV: bf16 atomic scatter (multiple Q CTAs write the same KV).
+         Implemented as separate dQ kernel + head-chunked dKV kernel.
+     (b) "loopq": inner loop over Q. Each CTA owns one KV tile and iterates
+         over all Q positions that reference it (via inverted index).
+         dK/dV: local register accumulation, no write conflicts, no atomics.
+         dQ: computed by a separate LoopK-direction dQ kernel.
+         kbs=1: CSR + 64-bit bitmask; kbs=128: block-level inverse index.
 
 Input:
     q: (total_q, nhq, D)
@@ -201,7 +204,7 @@ def token_sparse_fwd(q, k, v, indices, return_lse=False):
 
 
 @triton.jit
-def _token_sparse_bwd_dq_kernel(
+def _bwd_dq_kernel(
     Q,
     K,
     V,
@@ -223,7 +226,9 @@ def _token_sparse_bwd_dq_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """Compute dQ for one query position (all heads)."""
+    """BWD dQ kernel (LoopK direction): inner loop over K positions.
+    Each CTA owns one Q position and loops over its topk KV tiles.
+    dQ accumulated locally in fp32, no write conflicts."""
     pid_q = tl.program_id(0).to(tl.int64)
 
     offs_m = tl.arange(0, BLOCK_M)
@@ -286,7 +291,7 @@ def _token_sparse_bwd_dq_kernel(
 
 
 @triton.jit
-def _dkv_headchunked_kernel(
+def _bwd_loopk_dkv_kernel(
     Q,
     K,
     V,
@@ -310,10 +315,10 @@ def _dkv_headchunked_kernel(
     BLOCK_MH: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """dKV with head chunking: processes heads in groups of BLOCK_MH to reduce
-    register pressure from 576+ (full BLOCK_M=128) to ~240.
-    dK/dV accumulated across head groups in fp32, then bf16 atomic scatter.
-    Optimal: BLOCK_MH=32, BLOCK_N=64 — balances register budget vs loop count."""
+    """BWD dKV kernel (LoopK direction): inner loop over K positions.
+    Each CTA loops over Q positions that reference a given KV tile.
+    Heads are chunked in groups of BLOCK_MH to reduce register pressure.
+    dK/dV accumulated in fp32 across head groups, then bf16 atomic scatter."""
     pid_q = tl.program_id(0).to(tl.int64)
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, D)
@@ -407,7 +412,7 @@ def _preprocess_bwd_kernel(
 
 
 @triton.jit
-def _loopq_inverted_dkv_kernel(
+def _bwd_loopq_dkv_kernel(
     Q,
     K,
     V,
@@ -437,12 +442,11 @@ def _loopq_inverted_dkv_kernel(
     USE_CSR: tl.constexpr,
     USE_MASK: tl.constexpr,
 ):
-    """Standard-grid LoopQ dKV kernel for token and block sparse layouts.
-
-    Grid: one CTA per physical KV tile. Each CTA exclusively owns its tile,
-    follows its runtime-length inverse Q list, accumulates in fp32, and stores
-    directly. Token sparsity uses a per-Q-reference bitmask; those masked lanes
-    still occupy tensor-core work even though they contribute zero gradient.
+    """BWD dKV kernel (LoopQ direction): inner loop over Q positions.
+    Each CTA owns one KV tile exclusively and iterates over all Q positions
+    that reference it (via inverted index). dK/dV accumulated locally in fp32,
+    no atomics needed. kbs=1 uses CSR + 64-bit bitmask for token-level masking;
+    kbs=128 uses block-level inverse index without masks.
     """
     pid_slot = tl.program_id(0).to(tl.int64)
     kv_start = pid_slot * BLOCK_KV
@@ -583,7 +587,7 @@ def _build_block_inverse_indices(indices, total_kv, BLOCK_N):
 
 
 def token_sparse_bwd(
-    q, k, v, indices, o, do, lse, dkv_mode="split", sparse_k_block_size=1
+    q, k, v, indices, o, do, lse, bwd_mode="loopk", sparse_k_block_size=1
 ):
     """Token-sparse attention backward (MQA-optimized).
 
@@ -595,8 +599,10 @@ def token_sparse_bwd(
         o: (total_q, nhq, D) — FWD output
         do: (total_q, nhq, D) — gradient of output
         lse: (total_q, nhq) — log-sum-exp from FWD
-        dkv_mode: "split" | "loopq_token"
-        sparse_k_block_size: int (default 1). For loopq_token: 1=token-level, 128=block-level.
+        bwd_mode: "loopk" | "loopq" — controls BWD inner loop direction.
+            "loopk": dQ local, dKV via bf16 atomic scatter.
+            "loopq": dKV local (no atomics), needs inverted index.
+        sparse_k_block_size: int (default 1). For loopq: 1=token-level, 128=block-level.
 
     Returns:
         dq: (total_q, nhq, D)
@@ -626,7 +632,7 @@ def token_sparse_bwd(
     k_flat = k.squeeze(1)
     v_flat = v.squeeze(1)
 
-    if dkv_mode == "loopq_token":
+    if bwd_mode == "loopq":
         # Standard-grid LoopQ: one CTA exclusively owns each physical KV tile.
         # kbs=1 uses CSR inverse metadata plus a 64-bit token mask. The mask
         # preserves sparse semantics but masked lanes still consume tl.dot work.
@@ -642,7 +648,7 @@ def token_sparse_bwd(
         # dQ remains standard LoopK for both LoopQ metadata layouts.
         BLOCK_N_DQ = 64
         dq = torch.empty_like(q)
-        _token_sparse_bwd_dq_kernel[(total_q,)](
+        _bwd_dq_kernel[(total_q,)](
             q,
             k_flat,
             v_flat,
@@ -699,7 +705,7 @@ def token_sparse_bwd(
 
         dk = torch.empty(total_kv, D, device=q.device, dtype=torch.float32)
         dv = torch.empty(total_kv, D, device=q.device, dtype=torch.float32)
-        _loopq_inverted_dkv_kernel[(num_kv_slots,)](
+        _bwd_loopq_dkv_kernel[(num_kv_slots,)](
             q,
             k_flat,
             v_flat,
@@ -735,7 +741,7 @@ def token_sparse_bwd(
         dv = dv.unsqueeze(1).to(q.dtype)
         return dq, dk, dv
 
-    if dkv_mode == "split":
+    if bwd_mode == "loopk":
         # Split: separate dQ (fp32, no atomics) + head-chunked dKV (bf16 atomics).
         # Head chunking (BLOCK_MH=32) reduces register pressure from 576+ to ~240,
         # eliminating spilling. BLOCK_N=64 halves atomic write batches vs BN=32.
@@ -744,7 +750,7 @@ def token_sparse_bwd(
         BLOCK_N_DKV = 64
 
         dq = torch.empty_like(q)
-        _token_sparse_bwd_dq_kernel[(total_q,)](
+        _bwd_dq_kernel[(total_q,)](
             q,
             k_flat,
             v_flat,
@@ -769,7 +775,7 @@ def token_sparse_bwd(
 
         dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
         dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
-        _dkv_headchunked_kernel[(total_q,)](
+        _bwd_loopk_dkv_kernel[(total_q,)](
             q,
             k_flat,
             v_flat,
@@ -797,7 +803,7 @@ def token_sparse_bwd(
         dv = dv.unsqueeze(1).to(q.dtype)
         return dq, dk, dv
 
-    raise ValueError(f"Unknown dkv_mode: {dkv_mode!r}. Use 'split' or 'loopq_token'.")
+    raise ValueError(f"Unknown bwd_mode: {bwd_mode!r}. Use 'split' or 'loopq_token'.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -807,10 +813,10 @@ def token_sparse_bwd(
 
 class TokenSparseAttnFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, indices, dkv_mode, sparse_k_block_size):
+    def forward(ctx, q, k, v, indices, bwd_mode, sparse_k_block_size):
         o, lse = token_sparse_fwd(q, k, v, indices, return_lse=True)
         ctx.save_for_backward(q, k, v, indices, o, lse)
-        ctx.dkv_mode = dkv_mode
+        ctx.bwd_mode = bwd_mode
         ctx.sparse_k_block_size = sparse_k_block_size
         return o
 
@@ -825,13 +831,13 @@ class TokenSparseAttnFunc(torch.autograd.Function):
             o,
             do.contiguous(),
             lse,
-            dkv_mode=ctx.dkv_mode,
+            bwd_mode=ctx.bwd_mode,
             sparse_k_block_size=ctx.sparse_k_block_size,
         )
         return dq, dk, dv, None, None, None
 
 
-def token_sparse_attn(q, k, v, indices, dkv_mode="split", sparse_k_block_size=1):
+def token_sparse_attn(q, k, v, indices, bwd_mode="loopk", sparse_k_block_size=1):
     """Token-sparse attention with autograd support.
 
     Args:
@@ -839,10 +845,10 @@ def token_sparse_attn(q, k, v, indices, dkv_mode="split", sparse_k_block_size=1)
         k: (total_kv, 1, D) — requires_grad
         v: (total_kv, 1, D) — requires_grad
         indices: (total_q, topk) int32
-        dkv_mode: dKV traversal mode passed to ``token_sparse_bwd``
-        sparse_k_block_size: sparsity granularity used by LoopQ inverse metadata
+        bwd_mode: "loopk" | "loopq" — BWD inner loop direction.
+        sparse_k_block_size: sparsity granularity for LoopQ inverse index (1 or 128).
 
     Returns:
         o: (total_q, nhq, D)
     """
-    return TokenSparseAttnFunc.apply(q, k, v, indices, dkv_mode, sparse_k_block_size)
+    return TokenSparseAttnFunc.apply(q, k, v, indices, bwd_mode, sparse_k_block_size)
