@@ -54,6 +54,8 @@ from bench_sparse_analysis._common import (
     plot_grouped_bars,
 )
 
+from magi_attention.utils.sparse_utils import build_index_sparse_indices
+
 # ═══════════════════════════════════════════════════════════════
 #  Constants
 # ═══════════════════════════════════════════════════════════════
@@ -99,53 +101,28 @@ def _calc_sparse_flops(qseqlen, topk, is_bwd):
     return fwd * 2.5 if is_bwd else fwd
 
 
-def _build_unique_indices(num_rows, population, count, device, seed=SPARSITY_SEED):
-    """Return sorted unique indices without a rows-by-population random matrix.
-
-    Phase8 populations are powers of two.  Each row takes a prefix of an
-    odd-stride permutation modulo ``population``, so all selected items are
-    unique.  Only the required rows-by-count index payload is materialized.
-    """
+def _build_token_indices(qseqlen, kvseqlen, topk, kbs, device):
+    """Build 2D token-level indices (qseqlen, topk) for Triton and sanity checks."""
     import torch
 
-    assert population > 1 and population & (population - 1) == 0
-    assert 0 < count <= population
-    mask = population - 1
-    half_mask = population // 2 - 1
-    rows = torch.arange(num_rows, dtype=torch.int32, device=device)
-    offsets = (rows * 65537 + seed * 17) & mask
-    strides = (((rows * 8191 + seed * 31) & half_mask) * 2 + 1).to(torch.int32)
-    indices = (
-        torch.arange(count, dtype=torch.int32, device=device)
-        .expand(num_rows, -1)
-        .clone()
-    )
-    indices.mul_(strides[:, None])
-    indices.add_(offsets[:, None])
-    indices.bitwise_and_(mask)
-    return indices.sort(dim=1).values
-
-
-def _build_sparse_indices(
-    qseqlen, kvseqlen, topk, sparse_k_block_size, device, seed=SPARSITY_SEED
-):
-    """Build deterministic token indices, preserving full blocks for kbs=128."""
-    import torch
-
-    if sparse_k_block_size == 1:
-        return _build_unique_indices(qseqlen, kvseqlen, topk, device, seed)
-    assert sparse_k_block_size == KBS_BLOCK
-    block_indices = _build_unique_indices(
+    if kbs == 1:
+        return build_index_sparse_indices(
+            1, 1, qseqlen, kvseqlen, topk, topk, device, seed=SPARSITY_SEED
+        ).squeeze(1)
+    topk_blocks = topk // kbs
+    block_idx = build_index_sparse_indices(
+        1,
+        1,
         qseqlen,
-        kvseqlen // sparse_k_block_size,
-        topk // sparse_k_block_size,
+        kvseqlen,
+        topk_blocks,
+        topk_blocks,
         device,
-        seed,
-    )
-    offsets = torch.arange(sparse_k_block_size, dtype=torch.int32, device=device)
-    return (block_indices.unsqueeze(-1) * sparse_k_block_size + offsets).reshape(
-        qseqlen, topk
-    )
+        sparse_k_block_size=kbs,
+        seed=SPARSITY_SEED,
+    ).squeeze(1)
+    offsets = torch.arange(kbs, dtype=torch.int32, device=device)
+    return (block_idx.unsqueeze(-1) * kbs + offsets).reshape(qseqlen, topk)
 
 
 def _build_flex_block_mask(qseqlen, kvseqlen, topk, device):
@@ -162,9 +139,20 @@ def _build_flex_block_mask(qseqlen, kvseqlen, topk, device):
     num_kv_blocks = kvseqlen // KBS_BLOCK
     kv_blocks_needed = min(topk // KBS_BLOCK, num_kv_blocks)
 
-    selected = _build_unique_indices(
-        num_q_blocks, num_kv_blocks, kv_blocks_needed, device
-    ).long()
+    selected = (
+        build_index_sparse_indices(
+            1,
+            1,
+            num_q_blocks,
+            num_kv_blocks,
+            kv_blocks_needed,
+            kv_blocks_needed,
+            device,
+            seed=SPARSITY_SEED,
+        )
+        .squeeze(1)
+        .long()
+    )
     mask_dense = torch.zeros(
         num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device
     )
@@ -235,15 +223,18 @@ def _bench_fwd_or_bwd(fwd_fn, q, k, v, is_bwd, flops, device):
 
 
 def _block_indices_3d(qseqlen, kvseqlen, topk, device):
-    """Block-level indices (sq, nhk, topk_blocks) shared by kbs=128 paths."""
-    return (
-        _build_sparse_indices(qseqlen, kvseqlen, topk, KBS_BLOCK, device)[
-            :, ::KBS_BLOCK
-        ]
-        .div(KBS_BLOCK, rounding_mode="floor")
-        .unsqueeze(1)
-        .expand(-1, NHK, -1)
-        .contiguous()
+    """Block-level indices (qseqlen, NHK, topk_blocks) shared by kbs=128 paths."""
+    topk_blocks = topk // KBS_BLOCK
+    return build_index_sparse_indices(
+        1,
+        NHK,
+        qseqlen,
+        kvseqlen,
+        topk_blocks,
+        topk_blocks,
+        device,
+        sparse_k_block_size=KBS_BLOCK,
+        seed=SPARSITY_SEED,
     )
 
 
@@ -282,11 +273,8 @@ def _run_ffa(
         )
     else:
         if kbs == 1:
-            indices = (
-                _build_sparse_indices(qseqlen, kvseqlen, topk, 1, device)
-                .unsqueeze(1)
-                .expand(-1, NHK, -1)
-                .contiguous()
+            indices = build_index_sparse_indices(
+                1, NHK, qseqlen, kvseqlen, topk, topk, device, seed=SPARSITY_SEED
             )
         else:
             indices = _block_indices_3d(qseqlen, kvseqlen, topk, device)
@@ -341,9 +329,7 @@ def _run_triton(kvseqlen, qseqlen, topk, pass_type, device, sparse_k_block_size)
     q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
     k = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
     v = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
-    indices = _build_sparse_indices(
-        qseqlen, kvseqlen, topk, sparse_k_block_size, device
-    )
+    indices = _build_token_indices(qseqlen, kvseqlen, topk, sparse_k_block_size, device)
     is_bwd = pass_type != "fwd"
     if is_bwd:
         bwd_mode = "loopk" if pass_type == "bwd_loopk" else "loopq"
@@ -423,7 +409,7 @@ def _sanity_check(device):
     q = torch.randn(qseqlen_ck, NHQ, HD, dtype=torch.bfloat16, device=device)
     k = torch.randn(kvseqlen_ck, NHK, HD, dtype=torch.bfloat16, device=device)
     v = torch.randn(kvseqlen_ck, NHK, HD, dtype=torch.bfloat16, device=device)
-    indices_2d = _build_sparse_indices(qseqlen_ck, kvseqlen_ck, topk_ck, 1, device)
+    indices_2d = _build_token_indices(qseqlen_ck, kvseqlen_ck, topk_ck, 1, device)
     assert torch.all(indices_2d[:, 1:] > indices_2d[:, :-1])
     ref = _ref_token_sparse_attn(q, k, v, indices_2d)
     fwd_results = {}
@@ -441,7 +427,7 @@ def _sanity_check(device):
     )
     fwd_results["ffa_is_kbs1"] = (ffa_out[:64].float() - ref.float()).abs().max().item()
 
-    token_idx_128 = _build_sparse_indices(
+    token_idx_128 = _build_token_indices(
         qseqlen_ck, kvseqlen_ck, topk_ck, KBS_BLOCK, device
     )
     ref128 = _ref_token_sparse_attn(q, k, v, token_idx_128)
