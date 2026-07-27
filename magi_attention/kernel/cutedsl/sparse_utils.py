@@ -94,13 +94,16 @@ def derive_outer_store_mode(
     """Derive OuterStoreMode from kernel configuration.
 
     Tma:   2D tile store when output is fully contiguous in 2D.
-    Tma1d: Per-row bulk S2G when rows are contiguous but tile is not (varlen/PackGQA).
-    Stg:   Fallback per-element store.
+    Tma1d: Per-row bulk S2G when rows are contiguous but tile is not (varlen only,
+           without PackGQA which makes row→gmem mapping non-trivial).
+    Stg:   Fallback per-element store (varlen+PackGQA, or PackGQA misalignment).
     """
     if cu_seqlens_q_present or seqused_q_present:
+        if pack_gqa and qhead_per_kvhead > 1:
+            return OuterStoreMode.Stg
         return OuterStoreMode.Tma1d
     if pack_gqa and m_block_size % qhead_per_kvhead != 0:
-        return OuterStoreMode.Tma1d
+        return OuterStoreMode.Stg
     return OuterStoreMode.Tma
 
 

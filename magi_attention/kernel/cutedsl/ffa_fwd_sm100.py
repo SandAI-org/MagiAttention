@@ -39,6 +39,8 @@ from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import ClcDynamicPersistentTileScheduler
 
 # isort: split
+from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import dsl_user_op
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
@@ -171,6 +173,31 @@ class DescaleTensors(NamedTuple):
 
     def __new_from_mlir_values__(self, values):
         return DescaleTensors(*((*values, None, None, None)[:3]))
+
+
+@dsl_user_op
+def cpasync_bulk_copy_s2g(
+    smem_ptr: cute.Pointer,
+    gmem_ptr: cute.Pointer,
+    copy_bytes: Int32,
+    *,
+    loc=None,
+    ip=None,
+):
+    """Per-row cp.async.bulk S2G (non-reduce, non-TMA-descriptor).
+
+    PTX: cp.async.bulk.global.shared::cta.bulk_group [$gmem], [$smem], $bytes;
+    Requires: smem source region is contiguous (linear layout).
+    """
+    smem_ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
+    llvm.inline_asm(
+        None,
+        [gmem_ptr.llvm_ptr, smem_ptr_i32, Int32(copy_bytes).ir_value()],
+        "cp.async.bulk.global.shared::cta.bulk_group [$0], [$1], $2;",
+        "l,r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+    )
 
 
 class FFAFwdSm100:
@@ -894,9 +921,26 @@ class FFAFwdSm100:
         sV_layout = sm100_utils_basic.make_smem_layout_b(
             tiled_mma_pv, self.mma_tiler_pv, self.v_dtype, self.kv_stage
         )
-        sO_layout = sm100_utils_basic.make_smem_layout_epi(
-            self.o_dtype, self.o_layout, self.epi_tile, self.q_stage
-        )
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            # Linear row-major sO for per-row bulk S2G.
+            # Wrapped in ComposedLayout with identity swizzle (B=0) for JIT type compat.
+            sO_linear_outer = cute.make_layout(
+                (self.m_block_size, self.head_dim_v_padded, self.q_stage),
+                stride=(
+                    self.head_dim_v_padded,
+                    1,
+                    self.m_block_size * self.head_dim_v_padded,
+                ),
+            )
+            sO_layout = cute.make_composed_layout(
+                cute.make_swizzle(0, 4, 3), 0, sO_linear_outer
+            )
+            sO_layout_is_linear = True
+        else:
+            sO_layout = sm100_utils_basic.make_smem_layout_epi(
+                self.o_dtype, self.o_layout, self.epi_tile, self.q_stage
+            )
+            sO_layout_is_linear = False
 
         # TODO: review the logics here
         if const_expr(not self.same_hdim_kv_padded):
@@ -1014,18 +1058,20 @@ class FFAFwdSm100:
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
 
         tma_atom_O = None
+        gmem_tiled_copy_O = None
         if const_expr(self.outer_store_mode == OuterStoreMode.Tma):
             # TMA store atom for O
-            # layout_src_tv=(1,8192):(0,1)
-            # layout_dst_tv=(1,8192):(0,1)
             tma_atom_O, mO = cpasync.make_tiled_tma_atom(
                 tma_store_op, mO, cute.select(sO_layout, mode=[0, 1]), self.epi_tile
             )
-            gmem_tiled_copy_O = None
+        elif const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            # Per-row bulk S2G: no TMA atom, no gmem_tiled_copy needed
+            self.tma1d_row_bytes = self.head_dim_v_padded * self.o_dtype.width // 8
         else:
+            # OuterStoreMode.Stg: per-element S2R then R2G
             universal_copy_bits = 128
             async_copy_elems = universal_copy_bits // self.o_dtype.width
-            atom_universal_copy = cute.make_copy_atom(  # st.shared
+            atom_universal_copy = cute.make_copy_atom(
                 cute.nvgpu.CopyUniversalOp(),
                 self.o_dtype,
                 num_bits_per_copy=universal_copy_bits,
@@ -1035,7 +1081,6 @@ class FFAFwdSm100:
                 (self.num_epilogue_threads // tO_shape_dim_1, tO_shape_dim_1),
                 order=(1, 0),
             )
-            # So that we don't have to check if we overshoot kBlockM when we store O
             assert self.m_block_size % tO_layout.shape[0] == 0
             vO_layout = cute.make_layout((1, async_copy_elems))
             gmem_tiled_copy_O = cute.make_tiled_copy_tv(
@@ -1094,15 +1139,23 @@ class FFAFwdSm100:
 
         # --- Make smem storage ---
 
-        sO_size = cute.cosize(sO_layout) if const_expr(not self.overlap_sO_sQ) else 0
-        sQ_size = (
-            cute.cosize(sQ_layout)
-            if const_expr(not self.overlap_sO_sQ)
-            else cutlass.max(
-                cute.cosize(sQ_layout),
-                cute.cosize(sO_layout) * self.o_dtype.width // self.q_dtype.width,
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            sO_size = self.m_block_size * self.head_dim_v_padded * self.q_stage
+        else:
+            sO_size = (
+                cute.cosize(sO_layout) if const_expr(not self.overlap_sO_sQ) else 0
             )
-        )
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            sQ_size = cute.cosize(sQ_layout)
+        else:
+            sQ_size = (
+                cute.cosize(sQ_layout)
+                if const_expr(not self.overlap_sO_sQ)
+                else cutlass.max(
+                    cute.cosize(sQ_layout),
+                    cute.cosize(sO_layout) * self.o_dtype.width // self.q_dtype.width,
+                )
+            )
 
         clc_response_size = self.sched_stages * 4 if self.use_clc_scheduler else 0
         clc_mbar_size = self.sched_stages * 2 if self.use_clc_scheduler else 0
@@ -1733,7 +1786,10 @@ class FFAFwdSm100:
             sV_layout.outer,
         )
         # sO: S<3,4,3> o 0 o (EPI_Q=(8,16),EPI_HD=(64,2),EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
-        if const_expr(not self.overlap_sO_sQ):
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            # Linear sO: identity swizzle (B=0), rows are physically contiguous
+            sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
+        elif const_expr(not self.overlap_sO_sQ):
             sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
         else:
             sO = cute.make_tensor(
@@ -4820,9 +4876,13 @@ class FFAFwdSm100:
         #   Correct example (after fix):
         #     tOsO_r2s[None, 0, 0, 0]  # i=0: layout computes swizzle explicitly, correct
         #     tOsO_r2s[None, 0, 0, 1]  # i=1: layout independently computes swizzle for offset 1*corr_tile_hd, correct
-        tOsO_r2s = copy_utils.partition_D_position_independent(
-            thr_tmem_load, tOsO_i[(None, None), None]
-        )
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            # Linear sO (no swizzle): plain partition_D is correct and sufficient
+            tOsO_r2s = thr_tmem_load.partition_D(tOsO_i[(None, None), None])
+        else:
+            tOsO_r2s = copy_utils.partition_D_position_independent(
+                thr_tmem_load, tOsO_i[(None, None), None]
+            )
 
         # --- Make R2S copy for O ---
 
@@ -4924,7 +4984,6 @@ class FFAFwdSm100:
 
         if const_expr(self.use_correction_warps_for_epi):
             assert self.outer_store_mode != OuterStoreMode.Tma
-            assert gmem_tiled_copy_O is not None
 
             # Sync this correction warp group to ensure all R2S stores done
             cute.arch.barrier(
@@ -4932,23 +4991,38 @@ class FFAFwdSm100:
                 number_of_threads=len(self.epilogue_warp_ids) * cute.arch.WARP_SIZE,
             )
 
-            # S2G copy sO -> gO using non-TMA by:
-            #   1. S2R copy sO -> rO
-            #   2. R2G copy rO -> gO with predicate for OOB guard
             mma_tile_coord_v = thr_mma.thr_idx
             m_tile_idx = (
                 m_block * self.q_stage + stage
             ) * self.cta_group_size + mma_tile_coord_v
-            self._store_O_to_gmem(
-                sO,
-                gO,
-                mO_cur,
-                gmem_tiled_copy_O,
-                tidx,
-                seqlen_q,
-                m_tile_idx,
-                is_print_thread_and_tile=(stage == 0 and is_print_thread_and_tile),
-            )
+
+            if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+                # Per-row bulk S2G from linear sO (correction warp path)
+                row_bytes = self.tma1d_row_bytes
+                with cute.arch.elect_one():
+                    for row in cutlass.range(self.m_block_size, unroll_full=False):
+                        q_row = m_tile_idx * self.m_block_size + row
+                        if q_row < seqlen_q:
+                            smem_row_ptr = sO[row, None].iterator
+                            gmem_row_ptr = mO_cur[q_row, None].iterator
+                            cpasync_bulk_copy_s2g(smem_row_ptr, gmem_row_ptr, row_bytes)
+                    cute.arch.cp_async_bulk_commit_group()
+                    cute.arch.cp_async_bulk_wait_group(0, read=True)
+            else:
+                # S2G copy sO -> gO using non-TMA by:
+                #   1. S2R copy sO -> rO
+                #   2. R2G copy rO -> gO with predicate for OOB guard
+                assert gmem_tiled_copy_O is not None
+                self._store_O_to_gmem(
+                    sO,
+                    gO,
+                    mO_cur,
+                    gmem_tiled_copy_O,
+                    tidx,
+                    seqlen_q,
+                    m_tile_idx,
+                    is_print_thread_and_tile=(stage == 0 and is_print_thread_and_tile),
+                )
 
     @cute.jit
     def _store_O_to_gmem(
@@ -5148,18 +5222,43 @@ class FFAFwdSm100:
 
                         # Release sOi buffer to be empty for next tile
                         pipeline_o_epi.consumer_release_w_index(stage)
-                else:
-                    # OuterStoreMode.Tma1d and OuterStoreMode.Stg share same path
-                    # (Tma1d per-row bulk S2G from linear SMEM is a future optimization)
+                elif const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+                    # Per-row bulk S2G from linear SMEM
+                    row_bytes = self.tma1d_row_bytes
                     for stage in cutlass.range_constexpr(self.q_stage):
-                        # Wait for final corrected sOi to be full
                         pipeline_o_epi.consumer_wait_w_index_phase(
                             stage, epi_consumer_phase
                         )
 
-                        # S2G copy sO -> gO using non-TMA by:
-                        #   1. S2R copy sO -> rO
-                        #   2. R2G copy rO -> gO with predicate for OOB guard
+                        # Compute base SMEM pointer for this stage
+                        sO_stage = sO[None, None, stage]
+                        # Compute gO row base for this stage+tile
+                        m_tile_idx = (
+                            m_block * self.q_stage + stage
+                        ) * self.cta_group_size + mma_tile_coord_v
+
+                        with cute.arch.elect_one():
+                            for row in cutlass.range(
+                                self.m_block_size, unroll_full=False
+                            ):
+                                q_row = m_tile_idx * self.m_block_size + row
+                                if q_row < seqlen_info.seqlen_q:
+                                    smem_row_ptr = sO_stage[row, None].iterator
+                                    gmem_row_ptr = mO_cur[q_row, None].iterator
+                                    cpasync_bulk_copy_s2g(
+                                        smem_row_ptr, gmem_row_ptr, row_bytes
+                                    )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(0, read=True)
+
+                        pipeline_o_epi.consumer_release_w_index(stage)
+                else:
+                    # OuterStoreMode.Stg: S2R then R2G with predicate
+                    for stage in cutlass.range_constexpr(self.q_stage):
+                        pipeline_o_epi.consumer_wait_w_index_phase(
+                            stage, epi_consumer_phase
+                        )
+
                         m_tile_idx = (
                             m_block * self.q_stage + stage
                         ) * self.cta_group_size + mma_tile_coord_v
@@ -5181,7 +5280,6 @@ class FFAFwdSm100:
                             ),
                         )
 
-                        # Release sOi buffer to be empty for next tile
                         pipeline_o_epi.consumer_release_w_index(stage)
 
                 # Flip consumer phase after consuming all stages for this tile
