@@ -31,6 +31,7 @@ Config: nhq=128, nhk=1, hd=128, video-production scenario
 import gc
 import os
 import sys
+from functools import partial
 
 from bench_sparse_analysis._common import (
     COLOR_BLOCK_SPARSE,
@@ -68,8 +69,8 @@ SPARSITY_SEED = 42
 # Pass-specific matrices avoid invalid and duplicate method/pass products.
 KBS1_PASS_METHODS = {
     "fwd": ["ffa_is", "flexattn", "triton"],
-    "bwd_loopq": ["flexattn", "triton"],
     "bwd_loopk": ["ffa_is", "flexattn", "triton"],
+    "bwd_loopq": ["flexattn", "triton"],
 }
 KBS1_LABELS = {
     "ffa_is": "FFA IndexSparse (kbs=1)",
@@ -78,8 +79,8 @@ KBS1_LABELS = {
 }
 KBS128_PASS_METHODS = {
     "fwd": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
-    "bwd_loopq": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
     "bwd_loopk": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
+    "bwd_loopq": ["ffa_bs", "ffa_is128", "flexattn", "triton"],
 }
 KBS128_LABELS = {
     "ffa_bs": "FFA BlockSparse",
@@ -208,12 +209,48 @@ def _set_entry(results, key, kvseqlen, tflops, ms):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  8a: kbs=1 Runners
+#  Runners
 # ═══════════════════════════════════════════════════════════════
 
 
-def _run_kbs1_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
-    """FFA IndexSparse kbs=1 with pass-selected BWD traversal."""
+def _bench_fwd_or_bwd(fwd_fn, q, k, v, is_bwd, flops, device):
+    """Shared fwd/bwd benchmark pattern: time fwd_fn or autograd.grad."""
+    import torch
+
+    if is_bwd:
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        o = fwd_fn()
+        if isinstance(o, tuple):
+            o = o[0]
+        do = torch.randn_like(o)
+
+        def run_fn():
+            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
+
+    else:
+        run_fn = fwd_fn
+    return _bench_kernel(run_fn, flops, device)
+
+
+def _block_indices_3d(qseqlen, kvseqlen, topk, device):
+    """Block-level indices (sq, nhk, topk_blocks) shared by kbs=128 paths."""
+    return (
+        _build_sparse_indices(qseqlen, kvseqlen, topk, KBS_BLOCK, device)[
+            :, ::KBS_BLOCK
+        ]
+        .div(KBS_BLOCK, rounding_mode="floor")
+        .unsqueeze(1)
+        .expand(-1, NHK, -1)
+        .contiguous()
+    )
+
+
+def _run_ffa(
+    kvseqlen, qseqlen, topk, pass_type, device, *, kbs=1, variant="index_sparse"
+):
+    """Unified FFA runner: IndexSparse (kbs=1/128) or BlockSparse."""
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
@@ -221,41 +258,59 @@ def _run_kbs1_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
     q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
     k = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
     v = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
-    indices = (
-        _build_sparse_indices(qseqlen, kvseqlen, topk, 1, device)
-        .unsqueeze(1)
-        .expand(-1, NHK, -1)
-        .contiguous()
-    )
     is_bwd = pass_type != "fwd"
-    kw = dict(
-        index_sparse_indices=indices,
-        q_block_size=1,
-        sparse_k_block_size=1,
-        pack_gqa=True,
-        disable_fwd_atomic_reduction=True,
-    )
+
+    if variant == "block_sparse":
+        from magi_attention.utils.sparse_utils import generate_ranges_from_topk_indices
+
+        indices = _block_indices_3d(qseqlen, kvseqlen, topk, device)
+        q_ranges, k_ranges = generate_ranges_from_topk_indices(
+            indices.permute(1, 0, 2).contiguous(),
+            block_m=1,
+            block_n=KBS_BLOCK,
+            num_k_blocks=kvseqlen // KBS_BLOCK,
+        )
+        atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device=device)
+        kw = dict(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=atm,
+            pack_gqa=True,
+            block_sparse=True,
+            range_merge=True,
+            disable_fwd_atomic_reduction=True,
+        )
+    else:
+        if kbs == 1:
+            indices = (
+                _build_sparse_indices(qseqlen, kvseqlen, topk, 1, device)
+                .unsqueeze(1)
+                .expand(-1, NHK, -1)
+                .contiguous()
+            )
+        else:
+            indices = _block_indices_3d(qseqlen, kvseqlen, topk, device)
+        kw = dict(
+            index_sparse_indices=indices,
+            q_block_size=1,
+            sparse_k_block_size=kbs,
+            pack_gqa=True,
+            disable_fwd_atomic_reduction=True,
+        )
+
     if is_bwd:
         kw["swap_bwd_qk_loop"] = pass_type == "bwd_loopk"
-        q.requires_grad_(True)
-        k.requires_grad_(True)
-        v.requires_grad_(True)
-        o, *_ = flex_flash_attn_func(q, k, v, **kw)
-        do = torch.randn_like(o)
 
-        def run_fn():
-            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
+    def fwd_fn():
+        return flex_flash_attn_func(q, k, v, **kw)
 
-    else:
-
-        def run_fn():
-            flex_flash_attn_func(q, k, v, **kw)
-
-    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
+    return _bench_fwd_or_bwd(
+        fwd_fn, q, k, v, is_bwd, _calc_sparse_flops(qseqlen, topk, is_bwd), device
+    )
 
 
-def _run_kbs1_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
-    """FlexAttention with Q-BLOCK-level block-sparse mask for the same sparsity ratio."""
+def _run_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
+    """FlexAttention with Q-BLOCK-level sparse mask."""
     import torch
     import torch._functorch.config
     from torch.nn.attention.flex_attention import flex_attention
@@ -268,26 +323,16 @@ def _run_kbs1_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
     flex_fn = torch.compile(flex_attention)
     is_bwd = pass_type != "fwd"
 
-    if is_bwd:
-        q.requires_grad_(True)
-        k.requires_grad_(True)
-        v.requires_grad_(True)
-        o = flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
-        do = torch.randn_like(o)
+    def fwd_fn():
+        return flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
 
-        def run_fn():
-            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
-
-    else:
-
-        def run_fn():
-            flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
-
-    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
+    return _bench_fwd_or_bwd(
+        fwd_fn, q, k, v, is_bwd, _calc_sparse_flops(qseqlen, topk, is_bwd), device
+    )
 
 
 def _run_triton(kvseqlen, qseqlen, topk, pass_type, device, sparse_k_block_size):
-    """Time Triton through the same autograd boundary as FFA and FlexAttention."""
+    """Triton token-sparse kernel."""
     import torch
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
@@ -299,185 +344,28 @@ def _run_triton(kvseqlen, qseqlen, topk, pass_type, device, sparse_k_block_size)
     indices = _build_sparse_indices(
         qseqlen, kvseqlen, topk, sparse_k_block_size, device
     )
-    if pass_type == "fwd":
-
-        def run_fn():
-            token_sparse_fwd(q, k, v, indices)
-
-        is_bwd = False
-    elif pass_type in ("bwd_loopk", "bwd_loopq"):
+    is_bwd = pass_type != "fwd"
+    if is_bwd:
         bwd_mode = "loopk" if pass_type == "bwd_loopk" else "loopq"
-        q.requires_grad_(True)
-        k.requires_grad_(True)
-        v.requires_grad_(True)
-        o = token_sparse_attn(
-            q,
-            k,
-            v,
-            indices,
-            bwd_mode=bwd_mode,
-            sparse_k_block_size=sparse_k_block_size,
-        )
-        do = torch.randn_like(o)
 
-        def run_fn():
-            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
-
-        is_bwd = True
-    else:
-        raise ValueError(f"unsupported Triton pass_type={pass_type!r}")
-    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
-
-
-def _run_kbs1_triton(kvseqlen, qseqlen, topk, pass_type, device):
-    return _run_triton(kvseqlen, qseqlen, topk, pass_type, device, 1)
-
-
-# ═══════════════════════════════════════════════════════════════
-#  8b: kbs=128 Runners
-# ═══════════════════════════════════════════════════════════════
-
-
-def _run_kbs128_ffa_bs(kvseqlen, qseqlen, topk, pass_type, device):
-    """FFA BlockSparse (q_ranges/k_ranges + block_sparse + range_merge)."""
-    import torch
-
-    from magi_attention.functional import flex_flash_attn_func
-    from magi_attention.utils.sparse_utils import generate_ranges_from_topk_indices
-
-    q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
-
-    n_kv_blocks = kvseqlen // KBS_BLOCK
-    indices = (
-        _build_sparse_indices(qseqlen, kvseqlen, topk, KBS_BLOCK, device)[
-            :, ::KBS_BLOCK
-        ]
-        .div(KBS_BLOCK, rounding_mode="floor")
-        .unsqueeze(1)
-        .expand(-1, NHK, -1)
-        .contiguous()
-    )
-    ia_3d = indices.permute(1, 0, 2).contiguous()
-    q_ranges, k_ranges = generate_ranges_from_topk_indices(
-        ia_3d, block_m=1, block_n=KBS_BLOCK, num_k_blocks=n_kv_blocks
-    )
-    atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device=device)
-
-    is_bwd = pass_type != "fwd"
-    swap_qk = pass_type == "bwd_loopk"
-    kw = dict(
-        q_ranges=q_ranges,
-        k_ranges=k_ranges,
-        attn_type_map=atm,
-        pack_gqa=True,
-        block_sparse=True,
-        range_merge=True,
-        disable_fwd_atomic_reduction=True,
-        sparse_k_block_size=KBS_BLOCK,
-    )
-    if is_bwd:
-        kw["swap_bwd_qk_loop"] = swap_qk
-        q.requires_grad_(True)
-        k.requires_grad_(True)
-        v.requires_grad_(True)
-        o, *_ = flex_flash_attn_func(q, k, v, **kw)
-        do = torch.randn_like(o)
-
-        def run_fn():
-            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
+        def fwd_fn():
+            return token_sparse_attn(
+                q,
+                k,
+                v,
+                indices,
+                bwd_mode=bwd_mode,
+                sparse_k_block_size=sparse_k_block_size,
+            )
 
     else:
 
-        def run_fn():
-            flex_flash_attn_func(q, k, v, **kw)
+        def fwd_fn():
+            return token_sparse_fwd(q, k, v, indices)
 
-    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
-
-
-def _run_kbs128_ffa_is(kvseqlen, qseqlen, topk, pass_type, device):
-    """FFA IndexSparse with kbs=128 (index_sparse_indices with block indices)."""
-    import torch
-
-    from magi_attention.functional import flex_flash_attn_func
-
-    q = torch.randn(qseqlen, NHQ, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device)
-
-    indices = (
-        _build_sparse_indices(qseqlen, kvseqlen, topk, KBS_BLOCK, device)[
-            :, ::KBS_BLOCK
-        ]
-        .div(KBS_BLOCK, rounding_mode="floor")
-        .unsqueeze(1)
-        .expand(-1, NHK, -1)
-        .contiguous()
+    return _bench_fwd_or_bwd(
+        fwd_fn, q, k, v, is_bwd, _calc_sparse_flops(qseqlen, topk, is_bwd), device
     )
-
-    is_bwd = pass_type != "fwd"
-    swap_qk = pass_type == "bwd_loopk"
-    kw = dict(
-        index_sparse_indices=indices,
-        q_block_size=1,
-        sparse_k_block_size=KBS_BLOCK,
-        pack_gqa=True,
-        disable_fwd_atomic_reduction=True,
-    )
-    if is_bwd:
-        kw["swap_bwd_qk_loop"] = swap_qk
-        q.requires_grad_(True)
-        k.requires_grad_(True)
-        v.requires_grad_(True)
-        o, *_ = flex_flash_attn_func(q, k, v, **kw)
-        do = torch.randn_like(o)
-
-        def run_fn():
-            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
-
-    else:
-
-        def run_fn():
-            flex_flash_attn_func(q, k, v, **kw)
-
-    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
-
-
-def _run_kbs128_flexattn(kvseqlen, qseqlen, topk, pass_type, device):
-    """FlexAttention over the exact per-query kbs=128 sparse pattern."""
-    import torch
-    import torch._functorch.config
-    from torch.nn.attention.flex_attention import flex_attention
-
-    torch._functorch.config.donated_buffer = False
-    q = torch.randn(1, NHQ, qseqlen, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(1, NHK, kvseqlen, HD, dtype=torch.bfloat16, device=device)
-    block_mask = _build_flex_block_mask(qseqlen, kvseqlen, topk, device)
-    flex_fn = torch.compile(flex_attention)
-    is_bwd = pass_type != "fwd"
-
-    if is_bwd:
-        q.requires_grad_(True)
-        k.requires_grad_(True)
-        v.requires_grad_(True)
-        o = flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
-        do = torch.randn_like(o)
-
-        def run_fn():
-            torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
-
-    else:
-
-        def run_fn():
-            flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
-
-    return _bench_kernel(run_fn, _calc_sparse_flops(qseqlen, topk, is_bwd), device)
-
-
-def _run_kbs128_triton(kvseqlen, qseqlen, topk, pass_type, device):
-    return _run_triton(kvseqlen, qseqlen, topk, pass_type, device, KBS_BLOCK)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -485,15 +373,15 @@ def _run_kbs128_triton(kvseqlen, qseqlen, topk, pass_type, device):
 # ═══════════════════════════════════════════════════════════════
 
 _KBS1_RUNNERS = {
-    "ffa_is": _run_kbs1_ffa_is,
-    "flexattn": _run_kbs1_flexattn,
-    "triton": _run_kbs1_triton,
+    "ffa_is": partial(_run_ffa, kbs=1),
+    "flexattn": _run_flexattn,
+    "triton": partial(_run_triton, sparse_k_block_size=1),
 }
 _KBS128_RUNNERS = {
-    "ffa_bs": _run_kbs128_ffa_bs,
-    "ffa_is128": _run_kbs128_ffa_is,
-    "flexattn": _run_kbs128_flexattn,
-    "triton": _run_kbs128_triton,
+    "ffa_bs": partial(_run_ffa, kbs=KBS_BLOCK, variant="block_sparse"),
+    "ffa_is128": partial(_run_ffa, kbs=KBS_BLOCK),
+    "flexattn": _run_flexattn,
+    "triton": partial(_run_triton, sparse_k_block_size=KBS_BLOCK),
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -583,7 +471,6 @@ def _sanity_check(device):
         block_sparse=True,
         range_merge=True,
         disable_fwd_atomic_reduction=True,
-        sparse_k_block_size=KBS_BLOCK,
     )
     fwd_results["ffa_bs_kbs128"] = (
         (bs_out[:64].float() - ref128.float()).abs().max().item()
@@ -822,11 +709,7 @@ def _phase8_plot():
         return values
 
     def _plot_group(prefix, pass_methods, labels, title, filename):
-        names = {
-            "fwd": "FWD",
-            "bwd_loopq": "BWD InnerLoopQ",
-            "bwd_loopk": "BWD InnerLoopK",
-        }
+        names = {"fwd": "FWD", "bwd_loopk": "BWD LoopK", "bwd_loopq": "BWD LoopQ"}
         ncols = len(pass_methods)
         fig, axes = plt.subplots(
             1, ncols, figsize=(PLOT_SUBPLOT_WIDTH * ncols, PLOT_SUBPLOT_HEIGHT), dpi=150
