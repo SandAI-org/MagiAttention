@@ -306,7 +306,7 @@ def _run_config(device: str, cfg: dict):
         pack_gqa=pack_gqa,
     )
 
-    # ── BWD (LoopK, m_block_size=128) ──
+    # ── BWD (LoopK for kbs<128, LoopQ for kbs>=128) ──
     bwd_tiles = prepare_index_sparse_tiles(
         indices,
         batch_size=B,
@@ -319,6 +319,10 @@ def _run_config(device: str, cfg: dict):
         pack_gqa=pack_gqa,
         sparse_k_block_size=kbs,
     )
+    # IS-TMA (kbs>=128) uses InnerLoopQ: each CTA exclusively owns one
+    # K-block, so dKV accumulation is inherently deterministic (no atomic
+    # contention). IS-scatter (kbs<128) uses LoopK.
+    _use_loopk = kbs < 128
     dq, dk, dv = _flex_flash_attn_bwd(
         q,
         k,
@@ -328,7 +332,7 @@ def _run_config(device: str, cfg: dict):
         dO,
         softmax_scale=softmax_scale,
         flex_attn_args=TorchFlexAttnArgs(index_sparse_tiles=bwd_tiles),
-        swap_bwd_qk_loop=True,
+        swap_bwd_qk_loop=_use_loopk,
         pack_gqa=pack_gqa,
     )
 
@@ -362,23 +366,12 @@ def _run_config(device: str, cfg: dict):
         mismatch_threshold=_MISMATCH_THRES,
         test_case=f"[{tc}] => dk",
     )
-    # LoopK BWD atomic reduce-add: with qhpk > 1, multiple Q-heads
-    # accumulate into the same dV non-deterministically.  This is NOT
-    # IS-specific — Dense LoopK has the same mismatch level (verified
-    # empirically: Dense MQA128 LoopK dV mismatch ≈ 47%).
-    # SM90 avoids this via non-atomic inner_store_mode=tma; SM100
-    # currently only supports atomic TMA reduce-add.  Relax the
-    # mismatch threshold to match Dense LoopK behavior.
-    _qhpk = NHQ // NHK
-    _dv_mismatch = _MISMATCH_THRES
-    if kbs >= 128 and _qhpk > 1:
-        _dv_mismatch = 0.50  # matches Dense LoopK atomic non-determinism
     assert_close(
         dv,
         dv_ref,
         atol=_BWD_DKV_ATOL,
         rtol=_BWD_DV_RTOL,
-        mismatch_threshold=_dv_mismatch,
+        mismatch_threshold=_MISMATCH_THRES,
         test_case=f"[{tc}] => dv",
     )
 
