@@ -706,8 +706,8 @@ def _plot():
 
     PLOT_PASSES = [
         ("fwd", "FWD"),
-        ("bwd_q", "BWD (InnerLoopQ)"),
-        ("bwd", "BWD (LoopK)"),
+        ("bwd_q", "BWD InnerLoopQ"),
+        ("bwd", "BWD InnerLoopK"),
     ]
     PLOT_METHODS = [
         ("dense_nb", "Dense-NB (full KV)", (0.2, 0.2, 0.2)),
