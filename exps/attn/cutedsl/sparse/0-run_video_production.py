@@ -357,7 +357,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
             swap_loop = pass_type == "bwd"  # bwd=LoopK, bwd_q=InnerLoopQ
 
             for method in METHODS:
-                effective_k = kvseqlen if method == "dense_nb" else topk
+                effective_k = topk
                 flops = _calc_flops(qseqlen, effective_k, is_bwd)
                 key = f"{pass_type}/{method}"
 
@@ -385,16 +385,18 @@ def _run_experiment(force=False, max_kvseqlen=None):
                     )
 
                     if method == "dense_nb":
-                        # Dense-NB: full KV (seqlen_k=kvseqlen), no sparsity
-                        # outer K-tiles = kvseqlen/128 -> no wave quantization
-                        # TFLOPS for reference only (FLOPS != sparse FLOPS)
+                        # Dense-NB: same Q-K pairs as BlockSparse (BST full_block)
+                        # Placeholder for future RangeMerge; currently same path as BS
                         k = torch.randn(
                             1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
                         )
                         v = torch.randn(
                             1, kvseqlen, NHK, HD, dtype=torch.bfloat16, device=device
                         )
-                        fwd_args = TorchFlexAttnArgs()
+                        fwd_bst = _make_bst_fwd(
+                            qseqlen, n_blocks, topk_blocks, per_q_sel
+                        )
+                        fwd_args = TorchFlexAttnArgs(block_sparse_tensors=fwd_bst)
                         out, lse = _flex_flash_attn_fwd(
                             q,
                             k,
@@ -416,6 +418,20 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                 )
 
                         else:
+                            if swap_loop:
+                                bwd_bst = _make_bst_bwd(
+                                    qseqlen, n_blocks, topk_blocks, per_q_sel
+                                )
+                                bwd_args = TorchFlexAttnArgs(
+                                    block_sparse_tensors=bwd_bst
+                                )
+                            else:
+                                loopq_bst = _make_bst_loopq(
+                                    qseqlen, n_blocks, topk_blocks, per_q_sel
+                                )
+                                bwd_args = TorchFlexAttnArgs(
+                                    block_sparse_tensors_bwd=loopq_bst
+                                )
                             dO = torch.randn_like(out)
 
                             def run_fn():
@@ -427,7 +443,7 @@ def _run_experiment(force=False, max_kvseqlen=None):
                                     lse,
                                     dO,
                                     softmax_scale=scale,
-                                    flex_attn_args=fwd_args,
+                                    flex_attn_args=bwd_args,
                                     pack_gqa=True,
                                     swap_bwd_qk_loop=swap_loop,
                                 )
@@ -710,7 +726,7 @@ def _plot():
         ("bwd", "BWD InnerLoopK"),
     ]
     PLOT_METHODS = [
-        ("dense_nb", "Dense-NB (full KV)", (0.2, 0.2, 0.2)),
+        ("dense_nb", "Dense-NB (=BS data)", (0.2, 0.2, 0.2)),
         ("d1b", "Dense (K=topk)", (0.58, 0.58, 0.58)),
         ("block_sparse", "BlockSparse (kbs=128)", (0.29, 0.57, 0.60)),
         ("index_sparse", "IndexSparse (kbs=128)", (0.77, 0.34, 0.49)),
