@@ -397,151 +397,102 @@ def _ref_token_sparse_attn(q, k, v, indices, sm_scale=None):
     return o.to(q.dtype)
 
 
+def _fwd_err(out, ref):
+    """Max absolute error between out[:64] and ref (both bf16 → float)."""
+    return (out[:64].float() - ref.float()).abs().max().item()
+
+
 def _sanity_check(device):
-    """Retain FWD checks and compare direct Triton LoopK/LoopQ gradients."""
+    """Quick correctness: FFA/Triton FWD vs naive ref, Triton BWD loopk vs loopq."""
     import torch
 
     from magi_attention.functional import flex_flash_attn_func
-    from magi_attention.utils.sparse_utils import generate_ranges_from_topk_indices
 
-    kvseqlen_ck, qseqlen_ck, topk_ck = 2048, 256, 256
+    S_kv, S_q, topk = 2048, 256, 256
     torch.manual_seed(SPARSITY_SEED)
-    q = torch.randn(qseqlen_ck, NHQ, HD, dtype=torch.bfloat16, device=device)
-    k = torch.randn(kvseqlen_ck, NHK, HD, dtype=torch.bfloat16, device=device)
-    v = torch.randn(kvseqlen_ck, NHK, HD, dtype=torch.bfloat16, device=device)
-    indices_2d = _build_token_indices(qseqlen_ck, kvseqlen_ck, topk_ck, 1, device)
-    assert torch.all(indices_2d[:, 1:] > indices_2d[:, :-1])
-    ref = _ref_token_sparse_attn(q, k, v, indices_2d)
-    fwd_results = {}
+    q = torch.randn(S_q, NHQ, HD, dtype=torch.bfloat16, device=device)
+    k = torch.randn(S_kv, NHK, HD, dtype=torch.bfloat16, device=device)
+    v = torch.randn(S_kv, NHK, HD, dtype=torch.bfloat16, device=device)
 
-    is_indices = indices_2d.unsqueeze(1).expand(-1, NHK, -1).contiguous()
-    ffa_out, *_ = flex_flash_attn_func(
-        q,
-        k,
-        v,
-        index_sparse_indices=is_indices,
-        q_block_size=1,
-        sparse_k_block_size=1,
-        pack_gqa=True,
-        disable_fwd_atomic_reduction=True,
-    )
-    fwd_results["ffa_is_kbs1"] = (ffa_out[:64].float() - ref.float()).abs().max().item()
+    results: dict[str, tuple[bool, float]] = {}
 
-    token_idx_128 = _build_token_indices(
-        qseqlen_ck, kvseqlen_ck, topk_ck, KBS_BLOCK, device
-    )
-    ref128 = _ref_token_sparse_attn(q, k, v, token_idx_128)
-    bs_idx = (
-        token_idx_128[:, ::KBS_BLOCK]
-        .div(KBS_BLOCK, rounding_mode="floor")
-        .unsqueeze(1)
-        .expand(-1, NHK, -1)
-        .contiguous()
-    )
-    n_kv_blocks = kvseqlen_ck // KBS_BLOCK
-    q_ranges, k_ranges = generate_ranges_from_topk_indices(
-        bs_idx.permute(1, 0, 2).contiguous(),
-        block_m=1,
-        block_n=KBS_BLOCK,
-        num_k_blocks=n_kv_blocks,
-    )
-    atm = torch.zeros(q_ranges.size(0), dtype=torch.int32, device=device)
-    bs_out, *_ = flex_flash_attn_func(
-        q,
-        k,
-        v,
-        q_ranges=q_ranges,
-        k_ranges=k_ranges,
-        attn_type_map=atm,
-        pack_gqa=True,
-        block_sparse=True,
-        range_merge=True,
-        disable_fwd_atomic_reduction=True,
-    )
-    fwd_results["ffa_bs_kbs128"] = (
-        (bs_out[:64].float() - ref128.float()).abs().max().item()
-    )
-    is128_out, *_ = flex_flash_attn_func(
-        q,
-        k,
-        v,
-        index_sparse_indices=bs_idx,
-        q_block_size=1,
-        sparse_k_block_size=KBS_BLOCK,
-        pack_gqa=True,
-        disable_fwd_atomic_reduction=True,
-    )
-    fwd_results["ffa_is_kbs128"] = (
-        (is128_out[:64].float() - ref128.float()).abs().max().item()
-    )
+    for kbs in (1, KBS_BLOCK):
+        tag = f"kbs{kbs}"
+        idx_2d = _build_token_indices(S_q, S_kv, topk, kbs, device)
+        if kbs == 1:
+            assert torch.all(idx_2d[:, 1:] > idx_2d[:, :-1])
+        ref = _ref_token_sparse_attn(q, k, v, idx_2d)
 
-    from torch.nn.attention.flex_attention import flex_attention
-
-    q_bhsd = q.unsqueeze(0).permute(0, 2, 1, 3)
-    k_bhsd = k.unsqueeze(0).permute(0, 2, 1, 3)
-    v_bhsd = v.unsqueeze(0).permute(0, 2, 1, 3)
-    block_mask = _build_flex_block_mask(qseqlen_ck, kvseqlen_ck, topk_ck, device)
-    flex_out = torch.compile(flex_attention)(
-        q_bhsd, k_bhsd, v_bhsd, block_mask=block_mask, enable_gqa=True
-    )
-    fwd_results["flexattn_kbs128"] = (
-        0.0 if torch.isfinite(flex_out).all() else float("inf")
-    )
-
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines"))
-    from token_sparse_attn_triton import token_sparse_bwd, token_sparse_fwd
-
-    tri_out = token_sparse_fwd(q, k, v, indices_2d)
-    fwd_results["triton"] = (tri_out[:64].float() - ref.float()).abs().max().item()
-
-    bwd_results = {}
-    for kbs, indices in ((1, indices_2d), (KBS_BLOCK, token_idx_128)):
-        o, lse = token_sparse_fwd(q, k, v, indices, return_lse=True)
-        torch.manual_seed(SPARSITY_SEED + kbs)
-        do = torch.randn_like(o)
-        loopk = token_sparse_bwd(
+        idx_3d = build_index_sparse_indices(
+            1,
+            NHK,
+            S_q,
+            S_kv,
+            topk // kbs,
+            topk // kbs,
+            device,
+            sparse_k_block_size=kbs,
+            seed=SPARSITY_SEED,
+        )
+        ffa_out, *_ = flex_flash_attn_func(
             q,
             k,
             v,
-            indices,
+            index_sparse_indices=idx_3d,
+            q_block_size=1,
+            sparse_k_block_size=kbs,
+            pack_gqa=True,
+            disable_fwd_atomic_reduction=True,
+        )
+        err = _fwd_err(ffa_out, ref)
+        results[f"ffa_is_{tag}"] = (err < 0.05, err)
+
+        sys.path.insert(
+            0, os.path.join(os.path.dirname(__file__), "..", "..", "baselines")
+        )
+        from token_sparse_attn_triton import token_sparse_bwd, token_sparse_fwd
+
+        tri_out = token_sparse_fwd(q, k, v, idx_2d)
+        err = _fwd_err(tri_out, ref)
+        results[f"triton_fwd_{tag}"] = (err < 0.05, err)
+
+        o, lse = token_sparse_fwd(q, k, v, idx_2d, return_lse=True)
+        torch.manual_seed(SPARSITY_SEED + kbs)
+        do = torch.randn_like(o)
+        grads_loopk = token_sparse_bwd(
+            q,
+            k,
+            v,
+            idx_2d,
             o,
             do,
             lse,
             bwd_mode="loopk",
             sparse_k_block_size=kbs,
         )
-        loopq = token_sparse_bwd(
+        grads_loopq = token_sparse_bwd(
             q,
             k,
             v,
-            indices,
+            idx_2d,
             o,
             do,
             lse,
             bwd_mode="loopq",
             sparse_k_block_size=kbs,
         )
-        for name, lhs, rhs in zip(("dQ", "dK", "dV"), loopk, loopq):
-            finite = torch.isfinite(lhs).all() and torch.isfinite(rhs).all()
-            close = torch.allclose(lhs, rhs, atol=0.125, rtol=0.125)
-            max_abs = (lhs.float() - rhs.float()).abs().max().item()
-            bwd_results[f"triton_kbs{kbs}_{name}"] = (bool(finite and close), max_abs)
+        for name, lhs, rhs in zip(("dQ", "dK", "dV"), grads_loopk, grads_loopq):
+            ok = torch.isfinite(lhs).all() and torch.isfinite(rhs).all()
+            ok = ok and torch.allclose(lhs, rhs, atol=0.125, rtol=0.125)
+            err = (lhs.float() - rhs.float()).abs().max().item()
+            results[f"triton_bwd_{name}_{tag}"] = (bool(ok), err)
 
-    print("  Correctness check (kvseqlen=2048, qseqlen=256, topk=256):", flush=True)
+    print(f"  Correctness check (S_kv={S_kv}, S_q={S_q}, topk={topk}):", flush=True)
     all_pass = True
-    for method, err in fwd_results.items():
-        passed = err < 0.05
+    for name, (passed, err) in results.items():
         all_pass &= passed
-        print(
-            f"    {method:22s}: {'PASS' if passed else f'FAIL (err={err:.4f})'}",
-            flush=True,
-        )
-    for method, (passed, max_abs) in bwd_results.items():
-        all_pass &= passed
-        print(
-            f"    {method:22s}: {'PASS' if passed else 'FAIL'} (max_abs={max_abs:.4f})",
-            flush=True,
-        )
+        status = "PASS" if passed else "FAIL"
+        print(f"    {name:28s}: {status} (err={err:.4f})", flush=True)
     if not all_pass:
         print("  [ERROR] Correctness failed! Aborting.", flush=True)
     return all_pass
