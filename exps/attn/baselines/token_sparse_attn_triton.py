@@ -291,7 +291,7 @@ def _bwd_dq_kernel(
 
 
 @triton.jit
-def _bwd_loopk_dkv_kernel(
+def _bwd_dkv_loopk_kernel(
     Q,
     K,
     V,
@@ -412,7 +412,7 @@ def _preprocess_bwd_kernel(
 
 
 @triton.jit
-def _bwd_loopq_dkv_kernel(
+def _bwd_dkv_loopq_kernel(
     Q,
     K,
     V,
@@ -705,7 +705,7 @@ def token_sparse_bwd(
 
         dk = torch.empty(total_kv, D, device=q.device, dtype=torch.float32)
         dv = torch.empty(total_kv, D, device=q.device, dtype=torch.float32)
-        _bwd_loopq_dkv_kernel[(num_kv_slots,)](
+        _bwd_dkv_loopq_kernel[(num_kv_slots,)](
             q,
             k_flat,
             v_flat,
@@ -775,7 +775,7 @@ def token_sparse_bwd(
 
         dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
         dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
-        _bwd_loopk_dkv_kernel[(total_q,)](
+        _bwd_dkv_loopk_kernel[(total_q,)](
             q,
             k_flat,
             v_flat,
