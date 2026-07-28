@@ -2052,7 +2052,10 @@ struct CollectiveMainloopBwdSm90 {
       bool l_arrive_twice = (m_block_id == 0) && (offset_q % kBlockM != 0);
       bool r_arrive_twice = (m_block_id == m_block_num - 1) && (offset_q % kBlockM != 0);
       int const global_k_tile = n_block;
-      bool const is_last_k_tile = (global_k_tile == params.n_block_max_num - 1);
+      // Dense: n_block is batch-local, so compare against this batch's last K block.
+      // n_block_max_num is a global max; using it would silently skip the
+      // "batch done" arrive for any batch with fewer K blocks.
+      bool const is_last_k_tile = IsSparse ? (global_k_tile == params.n_block_max_num - 1) : (global_k_tile == last_n_block);
       int arrive_num = is_last_k_tile ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + global_k_tile + 1;
       deterministic_arrive(params.inner_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
     };
@@ -2436,7 +2439,10 @@ struct CollectiveMainloopBwdSm90 {
       bool l_arrive_twice = (n_block_id == 0) && (offset_k % kBlockN_det != 0);
       bool r_arrive_twice = (n_block_id == n_block_num - 1) && (offset_k % kBlockN_det != 0);
       int const global_outer_tile = m_block_outer;
-      bool const is_last_outer = (global_outer_tile == params.n_block_max_num - 1);
+      // n_block_max_num is a global max over batches; compare against this
+      // batch's last outer Q tile so short batches still publish "batch done".
+      int const seqlen_q_outer = !PackGQA ? inner_block_meta.seqlen_info.seqlen_q : inner_block_meta.seqlen_info.seqlen_q * PackGQAFactor;
+      bool const is_last_outer = (seqlen_q_outer - global_outer_tile * kBlockM <= kBlockM);
       int arrive_num = is_last_outer ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + global_outer_tile + 1;
       deterministic_arrive(
           params.inner_determin_range_locks, bidh_kv, offset_k + n_block_id * kBlockN_det, kBlockN_det, num_heads_kv, arrive_num, l_arrive_twice, r_arrive_twice);
