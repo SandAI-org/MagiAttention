@@ -2426,8 +2426,7 @@ struct CollectiveMainloopBwdSm90 {
                                              : bidb * params.n_block_max_num + global_outer_tile;
       int sync_num2 = global_outer_tile == 0 ? params.inner_determin_conflict_state[right_idx * sm_stride + smid] * params.n_block_max_num
                                              : bidb * params.n_block_max_num + global_outer_tile;
-      deterministic_sync(
-          params.inner_determin_range_locks, bidh_kv, offset_k + n_block_id * kBlockN_det, kBlockN_det, num_heads_kv, sync_num1, sync_num2);
+      deterministic_sync(params.inner_determin_range_locks, bidh_kv, offset_k + n_block_id * kBlockN_det, kBlockN_det, num_heads_kv, sync_num1, sync_num2);
     };
 
     auto n_block_arrive = [&](int n_block_id) {
@@ -2440,14 +2439,7 @@ struct CollectiveMainloopBwdSm90 {
       bool const is_last_outer = (global_outer_tile == params.n_block_max_num - 1);
       int arrive_num = is_last_outer ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + global_outer_tile + 1;
       deterministic_arrive(
-          params.inner_determin_range_locks,
-          bidh_kv,
-          offset_k + n_block_id * kBlockN_det,
-          kBlockN_det,
-          num_heads_kv,
-          arrive_num,
-          l_arrive_twice,
-          r_arrive_twice);
+          params.inner_determin_range_locks, bidh_kv, offset_k + n_block_id * kBlockN_det, kBlockN_det, num_heads_kv, arrive_num, l_arrive_twice, r_arrive_twice);
     };
 
     auto deterministic_pass_through = [&](int from, int to) {
@@ -2522,8 +2514,7 @@ struct CollectiveMainloopBwdSm90 {
 
         deterministic_pass_through(0, n_block_min);
 
-        flash::iterate_range<kInnerDir, 2>(
-            inner_block_meta.inner_block_idx, inner_block_meta.inner_block_min, inner_block_meta.inner_block_cnt, [&] { store_tile(); });
+        flash::iterate_range<kInnerDir, 2>(inner_block_meta.inner_block_idx, inner_block_meta.inner_block_min, inner_block_meta.inner_block_cnt, [&] { store_tile(); });
 
         deterministic_pass_through(n_block_max, n_block_num);
       }
