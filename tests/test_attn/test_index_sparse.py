@@ -147,12 +147,15 @@ def _run_dsa_index_sparse(device, sq, skv, topk, nhq=128, nhkv=1, hd=128):
     k = torch.randn(skv, nhkv, hd, dtype=dtype, device=device, requires_grad=True)
     v = torch.randn(skv, nhkv, hd, dtype=dtype, device=device, requires_grad=True)
 
-    indices = (
-        torch.stack(
-            [torch.randperm(skv, device=device)[:topk] for _ in range(sq * nhkv)]
-        )
-        .reshape(sq, nhkv, topk)
-        .to(torch.int32)
+    indices = build_index_sparse_indices(
+        B=1,
+        NHK=nhkv,
+        S_q=sq,
+        S_kv=skv,
+        topk=topk,
+        max_topk=topk,
+        device=device,
+        seed=SEED,
     )
 
     out, lse = dsa_attn_func(q, k, v, indices, backend="ffa_index_sparse")
@@ -669,28 +672,18 @@ def _run_native_nhk_config(device, cfg: dict[str, Any]):
     atol = cfg.get("atol", 0.05)
 
     # Build per-(q, head) indices: shape (qseq, nhk, topk)
-    if kbs > 1:
-        n_kv_blocks = kvseq // kbs
-        idx = torch.stack(
-            [
-                torch.stack(
-                    [
-                        torch.randperm(n_kv_blocks, device=device)[:topk]
-                        for _ in range(nhk)
-                    ]
-                )
-                for _ in range(qseq)
-            ]
-        ).to(torch.int32)
-    else:
-        idx = torch.stack(
-            [
-                torch.stack(
-                    [torch.randperm(kvseq, device=device)[:topk] for _ in range(nhk)]
-                )
-                for _ in range(qseq)
-            ]
-        ).to(torch.int32)
+    # For kbs > 1 the values are KV *block* ids, otherwise KV *token* ids.
+    idx = build_index_sparse_indices(
+        B=1,
+        NHK=nhk,
+        S_q=qseq,
+        S_kv=kvseq,
+        topk=topk,
+        max_topk=topk,
+        device=device,
+        sparse_k_block_size=kbs,
+        seed=SEED,
+    )
 
     q = torch.randn(qseq, nhq, hd, dtype=torch.bfloat16, device=device)
     k = torch.randn(kvseq, nhk, hd, dtype=torch.bfloat16, device=device)

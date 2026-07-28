@@ -21,6 +21,7 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.template import assert_deterministic, assert_overlap_safe
 from magi_attention.utils.sparse_utils import (
+    build_index_sparse_indices,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask_triton,
     get_sdpa_mask_from_block_sparse_mask,
@@ -67,21 +68,21 @@ def _run_dsa_block_sparse(
     set_random_seed(SEED)
     dtype = torch.bfloat16
     group_size = nhq // nhkv
-    num_kv_blocks = skv // kbs
 
     q = torch.randn(sq, nhq, hd, dtype=dtype, device=device, requires_grad=True)
     k = torch.randn(skv, nhkv, hd, dtype=dtype, device=device, requires_grad=True)
     v = torch.randn(skv, nhkv, hd, dtype=dtype, device=device, requires_grad=True)
 
-    block_indices = (
-        torch.stack(
-            [
-                torch.randperm(num_kv_blocks, device=device)[:topk_blocks]
-                for _ in range(sq * nhkv)
-            ]
-        )
-        .reshape(sq, nhkv, topk_blocks)
-        .to(torch.int32)
+    block_indices = build_index_sparse_indices(
+        B=1,
+        NHK=nhkv,
+        S_q=sq,
+        S_kv=skv,
+        topk=topk_blocks,
+        max_topk=topk_blocks,
+        device=device,
+        sparse_k_block_size=kbs,
+        seed=SEED,
     )
 
     out, _lse = dsa_attn_func(

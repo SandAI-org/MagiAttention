@@ -26,6 +26,7 @@ from magi_attention.testing.precision import (
     assert_close,
     extract_mismatch_threshold,
 )
+from magi_attention.utils.sparse_utils import build_index_sparse_indices
 
 from .dsa_ref_attn import dsa_ref_attn_func
 
@@ -80,18 +81,17 @@ class TestDSASparseInterface(TestCase):
         k = torch.randn((skv, nhkv, hd), dtype=dtype, device=self.device)
         v = torch.randn((skv, nhkv, hd), dtype=dtype, device=self.device)
 
-        # construct random index_sparse_indices: (sq, nhkv, topk)
-        index_sparse_indices = torch.stack(
-            [
-                torch.stack(
-                    [
-                        torch.randperm(skv, device=self.device)[:topk]
-                        for _ in range(nhkv)
-                    ]
-                )
-                for _ in range(sq)
-            ]
-        ).to(torch.int32)
+        # (sq, nhkv, topk) token indices via shared sparse utils helper
+        index_sparse_indices = build_index_sparse_indices(
+            B=1,
+            NHK=nhkv,
+            S_q=sq,
+            S_kv=skv,
+            topk=topk,
+            max_topk=topk,
+            device=self.device,
+            seed=self.seed,
+        )
 
         softmax_scale = hd**-0.5
 
