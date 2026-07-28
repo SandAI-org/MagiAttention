@@ -713,6 +713,7 @@ class TestFlexFlashAttn(DistTestBase):
         ref_block_size: tuple[int, int] | None,
         pack_gqa: bool,
         cat_gqa: bool,
+        swap_bwd_qk_loop: bool,
         test_case: str,
     ) -> list[str]:
         """Check deterministic behavior
@@ -744,6 +745,7 @@ class TestFlexFlashAttn(DistTestBase):
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
             block_sparse=block_sparse,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
         lse = meta.lse
         o.backward(do)
@@ -1703,6 +1705,7 @@ class TestFlexFlashAttn(DistTestBase):
                 ref_block_size=ref_block_size,
                 pack_gqa=pack_gqa,
                 cat_gqa=cat_gqa,
+                swap_bwd_qk_loop=swap_bwd_qk_loop,
                 test_case=test_case,
             )
 
