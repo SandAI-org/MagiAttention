@@ -1098,9 +1098,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ctx.block_sparse or ctx.index_sparse
         )
 
-        # Dense deterministic + InnerLoopK: in-kernel outer/inner range-locks
-        # (see outer_determin_* / inner_determin_* role mapping in prepare_mha_bwd).
-        # Sparse deterministic still uses dual-pass below (kernel Deterministic=False).
+        # Dense deterministic still forces LoopQ (uses range-lock protocol for dQ).
+        if (
+            ctx.deterministic
+            and bwd_inner_loop_k
+            and not _sparse_deterministic_dual_pass
+        ):
+            bwd_inner_loop_k = False
 
         # Dual-pass: first pass is always LoopQ, so merge_ranges below uses K-merge.
         if _sparse_deterministic_dual_pass:
@@ -1938,8 +1942,14 @@ def flex_flash_attn_func(
         if index_sparse and bwd_inner_loop_k is None and sparse_k_block_size < 128:
             bwd_inner_loop_k = True
 
-        # Deterministic + LoopK is supported via outer/inner range-locks
-        # (role-mapped in prepare_mha_bwd). Sparse det still uses dual-pass in backward.
+        # Deterministic mode requires LoopQ. The range-lock rendezvous publishes a
+        # boundary only when its counter is exactly 2, i.e. when one chain of
+        # adjacent inner tiles advances it. LoopQ locks dQ while iterating K as
+        # outer, so sync serializes the writers of a Q block. LoopK inverts the
+        # roles and lets several outer-Q CTAs hit the same K boundary at once;
+        # the counter overshoots 2 and the boundary is never published.
+        if deterministic and bwd_inner_loop_k is True:
+            bwd_inner_loop_k = False
 
         # BWD InnerLoopQ (bwd_inner_loop_k != True): dKV is outer accumulation.
         # Safe only when GQA heads are packed (no cross-CTA dKV overlap).
