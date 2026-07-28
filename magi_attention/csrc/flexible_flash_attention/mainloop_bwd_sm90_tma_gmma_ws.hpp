@@ -794,8 +794,8 @@ struct CollectiveMainloopBwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map = nullptr;
     int const* const cu_batches = nullptr;
-    int* inner_outer_determin_conflict_state;
-    int* inner_outer_determin_range_locks;
+    int* inner_determin_conflict_state;
+    int* inner_determin_range_locks;
     /* index_sparse */
     int const* const index_sparse_indices;
     int inner_indices_cnt;
@@ -841,8 +841,8 @@ struct CollectiveMainloopBwdSm90 {
     int const* const attn_type_map = nullptr;
     int const* const cu_batches = nullptr;
     /* deterministic */
-    int* inner_outer_determin_conflict_state;
-    int* inner_outer_determin_range_locks;
+    int* inner_determin_conflict_state;
+    int* inner_determin_range_locks;
     /* sparse load (InnerLoopQ: scatter Q/dO/dQ) */
     Element const* const ptr_Q;
     StrideQKV const stride_Q;
@@ -879,8 +879,8 @@ struct CollectiveMainloopBwdSm90 {
       // In deterministic mode, we use atomic operations to update dQ,
       // which requires extra arguments to manage conflicts.
       // We assert that these arguments are not null.
-      assert(args.inner_outer_determin_conflict_state != nullptr);
-      assert(args.inner_outer_determin_range_locks != nullptr);
+      assert(args.inner_determin_conflict_state != nullptr);
+      assert(args.inner_determin_range_locks != nullptr);
     }
 
     // Create shape for Q, dO and dQ
@@ -1071,8 +1071,8 @@ struct CollectiveMainloopBwdSm90 {
         /*n_block_max_num=*/!BwdInnerLoopK ? cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN) : cute::ceil_div(get<0>(args.shape_QdOdQ), kBlockM),
         /*attn_type_map=*/args.attn_type_map,
         /*cu_batches=*/args.cu_batches,
-        /*inner_outer_determin_conflict_state=*/args.inner_outer_determin_conflict_state,
-        /*inner_outer_determin_range_locks=*/args.inner_outer_determin_range_locks,
+        /*inner_determin_conflict_state=*/args.inner_determin_conflict_state,
+        /*inner_determin_range_locks=*/args.inner_determin_range_locks,
         /*ptr_Q=*/args.ptr_Q,
         /*stride_Q=*/args.stride_Q,
         /*ptr_dO=*/args.ptr_dO,
@@ -2041,11 +2041,11 @@ struct CollectiveMainloopBwdSm90 {
       int left_dq_conflict_index = offset_q / kBlockM + m_block_id;
       int right_dq_conflict_index = (offset_q + kBlockM - 1) / kBlockM + m_block_id;
       int const global_k_tile = n_block;
-      int sync_num1 = global_k_tile == 0 ? params.inner_outer_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
+      int sync_num1 = global_k_tile == 0 ? params.inner_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                          : bidb * params.n_block_max_num + global_k_tile;
-      int sync_num2 = global_k_tile == 0 ? params.inner_outer_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
+      int sync_num2 = global_k_tile == 0 ? params.inner_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                          : bidb * params.n_block_max_num + global_k_tile;
-      deterministic_sync(params.inner_outer_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
+      deterministic_sync(params.inner_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
     };
 
     auto m_block_arrive = [&](int m_block_id) {
@@ -2054,7 +2054,7 @@ struct CollectiveMainloopBwdSm90 {
       int const global_k_tile = n_block;
       bool const is_last_k_tile = (global_k_tile == params.n_block_max_num - 1);
       int arrive_num = is_last_k_tile ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + global_k_tile + 1;
-      deterministic_arrive(params.inner_outer_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
+      deterministic_arrive(params.inner_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
     };
 
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
@@ -2088,7 +2088,7 @@ struct CollectiveMainloopBwdSm90 {
         int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
-        int* conflict_state = params.inner_outer_determin_conflict_state;
+        int* conflict_state = params.inner_determin_conflict_state;
         while (bidb_last < bidb_cur) {
           int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
           if constexpr (PackGQA) {
@@ -2236,10 +2236,18 @@ struct CollectiveMainloopBwdSm90 {
   template <flash::DispatchDirection kInnerDir, typename SharedStorage, typename InnerBlockMetaT>
   CUTLASS_DEVICE void store_dkv(Params const& params, SharedStorage& shared_storage, InnerBlockMetaT& inner_block_meta) {
     static_assert(BwdInnerLoopK, "store_dkv() must be called when BwdInnerLoopK is true");
-    static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
     if constexpr (kInnerStoreMode == InnerStoreMode::BypassSmem) {
       return;
+    }
+
+    // Deterministic dense LoopK: serialize inner dKV stores onto the dV-owning warp.
+    // dV (warp1) and dK (warp2) otherwise run concurrently on independent barrier chains;
+    // concurrent arrive would double-count the range-lock protocol.
+    if constexpr (Deterministic && !IsSparse) {
+      if (canonical_warp_idx_in_warpgroup_sync() != 1) {
+        return;
+      }
     }
 
     // ─── Definitions hoisted to function top: shared by the Dense TMA-store path and the
@@ -2331,8 +2339,14 @@ struct CollectiveMainloopBwdSm90 {
 
     auto store_dK = [&]() {
       if constexpr (!IsSparse) {
-        if (warp_idx_in_warpgroup != 2)
-          return;
+        // Non-det: warp 2 owns dK. Deterministic: warp 1 owns both dV and dK (serialized).
+        if constexpr (Deterministic) {
+          if (warp_idx_in_warpgroup != 1)
+            return;
+        } else {
+          if (warp_idx_in_warpgroup != 2)
+            return;
+        }
       }
 #pragma unroll
       for (int warpgroup_idx = 0; warpgroup_idx < NumConsumerWarpGroups; ++warpgroup_idx) {
@@ -2385,19 +2399,111 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
+    // Deterministic (dense LoopK): order atomic dKV writes with inner (K-dim) range locks.
+    // Mirror of store_dq/store_inner_dq protocol with Q↔K roles swapped.
+    // Local constexpr needed for device lambdas (class statics are not ODR-usable in device code).
+    static constexpr int kBlockN_det = kBlockN;
+    int const m_block_outer = inner_block_meta.outer_tile_idx; // outer Q tile
+    int bidb = inner_block_meta.bidb;
+    int bidb_last = 0;
+    int offset_k = 0;
+    int n_block_min = 0;
+    int n_block_max = 0;
+    int n_block_num = 0;
+    bool const lane_predicate_det = cute::elect_one_sync();
+    int const num_heads_kv = get<2>(params.shape_KVdKdV);
+
+    auto n_block_sync = [&](int n_block_id) {
+      if constexpr (!Deterministic || IsSparse) {
+        return;
+      }
+      uint32_t smid = blockIdx.x;
+      uint32_t sm_stride = gridDim.x;
+      int left_idx = offset_k / kBlockN_det + n_block_id;
+      int right_idx = (offset_k + kBlockN_det - 1) / kBlockN_det + n_block_id;
+      int const global_outer_tile = m_block_outer;
+      int sync_num1 = global_outer_tile == 0 ? params.inner_determin_conflict_state[left_idx * sm_stride + smid] * params.n_block_max_num
+                                             : bidb * params.n_block_max_num + global_outer_tile;
+      int sync_num2 = global_outer_tile == 0 ? params.inner_determin_conflict_state[right_idx * sm_stride + smid] * params.n_block_max_num
+                                             : bidb * params.n_block_max_num + global_outer_tile;
+      deterministic_sync(
+          params.inner_determin_range_locks, bidh_kv, offset_k + n_block_id * kBlockN_det, kBlockN_det, num_heads_kv, sync_num1, sync_num2);
+    };
+
+    auto n_block_arrive = [&](int n_block_id) {
+      if constexpr (!Deterministic || IsSparse) {
+        return;
+      }
+      bool l_arrive_twice = (n_block_id == 0) && (offset_k % kBlockN_det != 0);
+      bool r_arrive_twice = (n_block_id == n_block_num - 1) && (offset_k % kBlockN_det != 0);
+      int const global_outer_tile = m_block_outer;
+      bool const is_last_outer = (global_outer_tile == params.n_block_max_num - 1);
+      int arrive_num = is_last_outer ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + global_outer_tile + 1;
+      deterministic_arrive(
+          params.inner_determin_range_locks,
+          bidh_kv,
+          offset_k + n_block_id * kBlockN_det,
+          kBlockN_det,
+          num_heads_kv,
+          arrive_num,
+          l_arrive_twice,
+          r_arrive_twice);
+    };
+
+    auto deterministic_pass_through = [&](int from, int to) {
+      if constexpr (Deterministic && !IsSparse) {
+        if (lane_predicate_det) {
+          for (int n_block = from; n_block < to; ++n_block) {
+            n_block_sync(n_block);
+            n_block_arrive(n_block);
+          }
+        }
+      }
+    };
+
+    auto update_conflict_state = [&](int bidb_last_v, int bidb_cur) {
+      if constexpr (Deterministic && !IsSparse) {
+        int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
+        uint32_t smid = blockIdx.x;
+        uint32_t sm_stride = gridDim.x;
+        int* conflict_state = params.inner_determin_conflict_state;
+        while (bidb_last_v < bidb_cur) {
+          int bidb_last_l = params.k_ranges[bidb_last_v].x, bidb_last_r = params.k_ranges[bidb_last_v].y;
+          int l = bidb_last_l / kBlockN_det + lane;
+          int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockN_det);
+          int r = (bidb_last_l + block_num * kBlockN_det - 1) / kBlockN_det;
+          while (l <= r) {
+            conflict_state[l * sm_stride + smid] = bidb_last_v + 1;
+            l += cutlass::NumThreadsPerWarp;
+          }
+          bidb_last_v++;
+        }
+        __syncwarp();
+      }
+    };
+
     // One inner tile's store: rebind buffers to the current stage, drain dV+dK, advance.
     // The stage must advance per inner tile (not per store_body) to stay in lockstep with
     // the consumer's consumer_store_stage, which advances after each tile's dK R2S. The
     // dense path iterates multiple inner tiles per store_body via iterate_range.
     auto store_tile = [&]() {
       update_store_bufs();
-      // NOTE(058 P2a-2): an overlapped dV/dK variant (defer the dV bulk wait until after the
-      // dK issue via staged tma_store_wait<1>/<0>) was implemented and benched: zero gain on
-      // sparseload-loopk / indexattn-loopk (159/161 TF unchanged) — the store warps' wait is
-      // not on the critical path once bulk reduce is enabled. Reverted to keep the simple
-      // sequential form; see .tmp/058-fwd-tokenidx/NOTES.md.
+      int const n_block_id = inner_block_meta.inner_block_idx;
+      if constexpr (Deterministic && !IsSparse) {
+        if (lane_predicate_det) {
+          n_block_sync(n_block_id);
+        }
+        __syncwarp();
+      }
       store_dV();
       store_dK();
+      if constexpr (Deterministic && !IsSparse) {
+        // tma_inner_store waits for completion; both dV and dK issued by warp 1.
+        if (lane_predicate_det) {
+          n_block_arrive(n_block_id);
+        }
+        __syncwarp();
+      }
       advance_store_stage();
     };
 
@@ -2405,13 +2511,35 @@ struct CollectiveMainloopBwdSm90 {
       if constexpr (IsSparse) {
         store_tile();
       } else {
-        flash::iterate_range<kInnerDir, 2>(inner_block_meta.inner_block_idx, inner_block_meta.inner_block_min, inner_block_meta.inner_block_cnt, [&] { store_tile(); });
+        n_block_min = inner_block_meta.inner_block_min;
+        n_block_max = inner_block_meta.inner_block_cnt;
+        bidb = inner_block_meta.bidb;
+        offset_k = inner_block_meta.seqlen_info.offset_k;
+        n_block_num = cute::ceil_div(inner_block_meta.seqlen_info.seqlen_k, kBlockN_det);
+
+        update_conflict_state(bidb_last, bidb);
+        bidb_last = bidb;
+
+        deterministic_pass_through(0, n_block_min);
+
+        flash::iterate_range<kInnerDir, 2>(
+            inner_block_meta.inner_block_idx, inner_block_meta.inner_block_min, inner_block_meta.inner_block_cnt, [&] { store_tile(); });
+
+        deterministic_pass_through(n_block_max, n_block_num);
       }
     };
 
     // ─── Unified control flow ───
-    if (inner_block_meta.skip_to_first_valid())
+    if (inner_block_meta.skip_to_first_valid()) {
+      if constexpr (Deterministic && !IsSparse) {
+        // Entire outer tile invalid: still pass-through all K locks for this batch.
+        bidb = inner_block_meta.bidb;
+        offset_k = inner_block_meta.seqlen_info.offset_k;
+        n_block_num = cute::ceil_div(inner_block_meta.seqlen_info.seqlen_k, kBlockN_det);
+        deterministic_pass_through(0, n_block_num);
+      }
       return;
+    }
 
     inner_block_meta.template update_block_cur<kInnerDir>();
 

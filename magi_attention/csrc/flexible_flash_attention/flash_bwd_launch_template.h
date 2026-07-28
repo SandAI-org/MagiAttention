@@ -274,8 +274,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.k_ranges,
       params.attn_type_map,
       params.bwd_kq_map,
-      params.inner_outer_determin_conflict_state,
-      params.inner_outer_determin_range_locks,
+      params.inner_determin_conflict_state,
+      params.inner_determin_range_locks,
       params.index_sparse_indices,
       params.inner_indices_cnt};
 

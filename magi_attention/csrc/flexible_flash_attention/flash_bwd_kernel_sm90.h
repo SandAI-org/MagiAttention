@@ -580,6 +580,7 @@ class FlashAttnBwdSm90 {
       for (auto work_block_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_block_info.is_valid(params.scheduler);
            work_block_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_block_info)) {
         auto block_coord = work_block_info.get_block_coord();
+        auto det_msg = work_block_info.get_det_msg();
 
         // Init the zero-initialized register SMEM buffer for dQ
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
@@ -608,18 +609,10 @@ class FlashAttnBwdSm90 {
             tdQrdQ(i) *= params.mainloop.softmax_scale;
           }
           ++work_idx;
-          if constexpr (!Deterministic) {
-            epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord);
-          } else {
-            static_assert(!Deterministic, "Deterministic mode is not supported yet when BwdInnerLoopK is true.");
-          }
+          epilogue.store_dq(params.epilogue, tdQrdQ, shared_storage, tiled_mma_dQ, threadIdx.x - NumCopyThreads, epilogue_block_coord, det_msg);
           BarrierManager::arrive<NumConsumerThreads + NumProducerLoaderThreads>(BwdNamedBarriers::QdOEmpty);
         } else {
-          if constexpr (!Deterministic) {
-            epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, epilogue_block_coord);
-          } else {
-            static_assert(!Deterministic, "Deterministic mode is not supported yet when BwdInnerLoopK is true.");
-          }
+          epilogue.store_zero_dq(params.epilogue, threadIdx.x - NumCopyThreads, epilogue_block_coord, det_msg);
         }
       }
       epilogue.store_tail();

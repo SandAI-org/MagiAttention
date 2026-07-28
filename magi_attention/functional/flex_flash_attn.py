@@ -1093,18 +1093,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         # BWD: dual-pass; both kernel launches use Deterministic=False below.
         # - Pass1 LoopQ: dKV outer accumulation (inner dQ discarded)
         # - Pass2 LoopK: dQ outer direct-store (dKV discarded)
-        # Dense deterministic still uses single-pass LoopQ + kernel Deterministic=True.
+        # Dense deterministic: single-pass with kernel Deterministic=True (LoopQ or LoopK).
         _sparse_deterministic_dual_pass = ctx.deterministic and (
             ctx.block_sparse or ctx.index_sparse
         )
 
-        # Dense deterministic still forces LoopQ (uses range-lock protocol for dQ).
-        if (
-            ctx.deterministic
-            and bwd_inner_loop_k
-            and not _sparse_deterministic_dual_pass
-        ):
-            bwd_inner_loop_k = False
+        # Dense deterministic + InnerLoopK: in-kernel outer/inner range-locks
+        # (see outer_determin_* / inner_determin_* role mapping in prepare_mha_bwd).
+        # Sparse deterministic still uses dual-pass below (kernel Deterministic=False).
 
         # Dual-pass: first pass is always LoopQ, so merge_ranges below uses K-merge.
         if _sparse_deterministic_dual_pass:
@@ -1942,11 +1938,8 @@ def flex_flash_attn_func(
         if index_sparse and bwd_inner_loop_k is None and sparse_k_block_size < 128:
             bwd_inner_loop_k = True
 
-        # Deterministic mode requires LoopQ: dKV is naturally deterministic (single CTA
-        # writer per K-tile), dQ uses range-lock serialization.  LoopK would need a
-        # symmetric dKV range-lock which is not yet implemented.
-        if deterministic and bwd_inner_loop_k is True:
-            bwd_inner_loop_k = False
+        # Deterministic + LoopK is supported via outer/inner range-locks
+        # (role-mapped in prepare_mha_bwd). Sparse det still uses dual-pass in backward.
 
         # BWD InnerLoopQ (bwd_inner_loop_k != True): dKV is outer accumulation.
         # Safe only when GQA heads are packed (no cross-CTA dKV overlap).

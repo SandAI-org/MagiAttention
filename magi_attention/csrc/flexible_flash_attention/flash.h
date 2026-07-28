@@ -180,8 +180,8 @@ struct Flash_bwd_params : public Flash_fwd_params {
   bool disable_bwd_dkv_atomic_reduction;
 
   // Deterministic params
-  int* __restrict__ inner_outer_determin_conflict_state;
-  int* __restrict__ inner_outer_determin_range_locks;
+  int* __restrict__ inner_determin_conflict_state;
+  int* __restrict__ inner_determin_range_locks;
 
   // IndexSparse params (3D: batch × nhk × inner_indices_cnt)
   int* __restrict__ index_sparse_indices;

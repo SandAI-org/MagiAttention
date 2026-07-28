@@ -120,8 +120,8 @@ void set_params_dgrad(
     bool const deterministic = false,
     void* outer_determin_range_locks_d = nullptr,
     void* outer_determin_conflict_state_d = nullptr,
-    void* inner_outer_determin_conflict_state_d = nullptr,
-    void* inner_outer_determin_range_locks_d = nullptr,
+    void* inner_determin_conflict_state_d = nullptr,
+    void* inner_determin_range_locks_d = nullptr,
     flash::SinkLayout const sink_layout = flash::SinkLayout::SH,
     int const sm_margin = 0,
     bool const disable_bwd_dkv_atomic_reduction = false);

@@ -184,8 +184,8 @@ void set_params_dgrad(
     bool const deterministic,
     void* outer_determin_range_locks_d,
     void* outer_determin_conflict_state_d,
-    void* inner_outer_determin_conflict_state_d,
-    void* inner_outer_determin_range_locks_d,
+    void* inner_determin_conflict_state_d,
+    void* inner_determin_range_locks_d,
     flash::SinkLayout const sink_layout,
     int const sm_margin,
     bool const disable_bwd_dkv_atomic_reduction) {
@@ -260,8 +260,8 @@ void set_params_dgrad(
   params.dsoftmax_sum = dsoftmax_sum_d;
 
   // Set the deterministic flag for dq path
-  params.inner_outer_determin_conflict_state = static_cast<int*>(inner_outer_determin_conflict_state_d);
-  params.inner_outer_determin_range_locks = static_cast<int*>(inner_outer_determin_range_locks_d);
+  params.inner_determin_conflict_state = static_cast<int*>(inner_determin_conflict_state_d);
+  params.inner_determin_range_locks = static_cast<int*>(inner_determin_range_locks_d);
 }
 
 void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {

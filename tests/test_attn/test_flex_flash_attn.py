@@ -374,7 +374,7 @@ class TestFlexFlashAttn(DistTestBase):
                 deterministic=det,
                 range_merge=rm,
             )
-            # BWD LoopK (only with range_merge)
+            # BWD LoopK (only with range_merge); include Deterministic×LoopK when det
             if rm:
                 for p in [1, pgf]:
                     add_ffa_spec(
@@ -387,6 +387,7 @@ class TestFlexFlashAttn(DistTestBase):
                         pack_gqa=p > 1,
                         pack_gqa_factor=p,
                         range_merge=True,
+                        deterministic=det,
                     )
                     if p == 1:
                         for dda in [True, False]:
@@ -400,6 +401,7 @@ class TestFlexFlashAttn(DistTestBase):
                                 pack_gqa=True,
                                 pack_gqa_factor=1,
                                 range_merge=True,
+                                deterministic=det,
                             )
 
         # ═══════════════════════════════════════════════════════════════════

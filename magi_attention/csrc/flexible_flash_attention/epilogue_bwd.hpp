@@ -307,7 +307,8 @@ struct CollectiveEpilogueBwd {
         args.q_ranges,
         args.k_ranges,
         /*qhead_per_khead_divmod=*/cutlass::FastDivmod(cute::ceil_div(args.num_heads_q, get<2>(args.shape_dK))),
-        args.num_heads_kv,
+        // LoopK outer locks index dQ: non-FlattenGQA uses num_heads_q; else num_heads_kv.
+        (BwdInnerLoopK && !FlattenGQA) ? args.num_heads_q : args.num_heads_kv,
         args.outer_determin_range_locks};
   }
 
@@ -511,16 +512,16 @@ struct CollectiveEpilogueBwd {
 
   // Perform a Consumer Epilogue -- TMA store for dQ
   // q for outer-loop and k for inner-loop
-  template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
+  template <typename SharedStorage, typename FrgTensorO, typename TiledMma, typename DetMsgT = cute::tuple<>>
   CUTLASS_DEVICE void store_dq(
       Params const& params,
       FrgTensorO const& tdQrdQ,
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
-      BlockCoordType const& block_coord) {
+      BlockCoordType const& block_coord,
+      DetMsgT const& det_msg = {}) {
     static_assert(BwdInnerLoopK, "store_dq() must be called when BwdInnerLoopK is true");
-    static_assert(!Deterministic, "Deterministic mode is not supported yet");
 
     // Get block coordinates for current job (tile)
     int m_block = get<0>(block_coord), bidh = get<1>(block_coord), bidb = get<2>(block_coord);
@@ -561,6 +562,23 @@ struct CollectiveEpilogueBwd {
     if constexpr (kOuterStoreMode != OuterStoreMode::Tma) {
       // Per-element direct store: outer Q range is unique per CTA (rangemerge / sparse),
       // so no atomic reduction needed.
+      if constexpr (Deterministic) {
+        int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
+        if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+          int left_range_conflict_msg = get<0>(det_msg);
+          int right_range_conflict_msg = get<1>(det_msg);
+          int const lock_bidh = bidh;
+          int const offset_q_scaled_det = offset_q * PackGQAFactor;
+          deterministic_sync(
+              params.outer_determin_range_locks,
+              lock_bidh,
+              offset_q_scaled_det + m_block * kBlockM,
+              kBlockM,
+              params.nheads,
+              (left_range_conflict_msg >> 1),
+              (right_range_conflict_msg >> 1));
+        }
+      }
       BarrierManager::sync<NumEpilogueThreads>(resv_barrier::EpilogueBarrier);
 
       GmemTiledCopydQ gmem_tiled_copy_dQ;
@@ -581,6 +599,25 @@ struct CollectiveEpilogueBwd {
           gmem_thr_copy_dQ.partition_D(make_identity_tensor(select<0, 2>(TileShape_MNK{}))),
           gmem_thr_copy_dQ.partition_D(make_tensor<bool>(make_shape(Int<kBlockM>{}, Int<kHeadDim>{}))),
           residual_m);
+      if constexpr (Deterministic) {
+        int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
+        if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+          int left_range_conflict_msg = get<0>(det_msg);
+          int right_range_conflict_msg = get<1>(det_msg);
+          int arrive_num = get<2>(det_msg) + 1;
+          int const lock_bidh = bidh;
+          int const offset_q_scaled_det = offset_q * PackGQAFactor;
+          deterministic_arrive(
+              params.outer_determin_range_locks,
+              lock_bidh,
+              offset_q_scaled_det + m_block * kBlockM,
+              kBlockM,
+              params.nheads,
+              arrive_num,
+              left_range_conflict_msg & 1,
+              right_range_conflict_msg & 1);
+        }
+      }
     } else {
       // TMA atomic reduce-add: multiple CTAs may contribute to the same outer Q position.
       cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
@@ -596,6 +633,21 @@ struct CollectiveEpilogueBwd {
       Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+        if constexpr (Deterministic) {
+          if (cute::elect_one_sync()) {
+            int left_range_conflict_msg = get<0>(det_msg);
+            int right_range_conflict_msg = get<1>(det_msg);
+            int const lock_bidh = bidh;
+            deterministic_sync(
+                params.outer_determin_range_locks,
+                lock_bidh,
+                offset_q_scaled + m_block * kBlockM,
+                kBlockM,
+                params.nheads,
+                (left_range_conflict_msg >> 1),
+                (right_range_conflict_msg >> 1));
+          }
+        }
         BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
         if (cute::elect_one_sync()) {
           cute::copy(params.tma_store_dQ, tdQsdQ, tdQgdQ);
@@ -604,6 +656,24 @@ struct CollectiveEpilogueBwd {
       }
 
       tma_store_wait<0>();
+
+      if constexpr (Deterministic) {
+        if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+          int left_range_conflict_msg = get<0>(det_msg);
+          int right_range_conflict_msg = get<1>(det_msg);
+          int arrive_num = get<2>(det_msg) + 1;
+          int const lock_bidh = bidh;
+          deterministic_arrive(
+              params.outer_determin_range_locks,
+              lock_bidh,
+              offset_q_scaled + m_block * kBlockM,
+              kBlockM,
+              params.nheads,
+              arrive_num,
+              left_range_conflict_msg & 1,
+              right_range_conflict_msg & 1);
+        }
+      }
     }
   }
 
@@ -648,11 +718,38 @@ struct CollectiveEpilogueBwd {
     }
   }
 
-  // Write 0 to dQ
+  // Write 0 to dQ (or pass-through Deterministic range locks for invalid tiles)
   // q for outer-loop and k for inner-loop
-  CUTLASS_DEVICE void store_zero_dq(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
+  template <typename DetMsgT = cute::tuple<>>
+  CUTLASS_DEVICE void store_zero_dq(Params const& params, int thread_idx, BlockCoordType const& block_coord, DetMsgT const& det_msg = {}) {
     if constexpr (Deterministic) {
-      static_assert(!Deterministic, "Deterministic mode is not supported yet");
+      int warp_idx_sync = warp_uniform(thread_idx / cutlass::NumThreadsPerWarp);
+      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+        int m_block = get<0>(block_coord);
+        int bidh = get<1>(block_coord);
+        int bidb = get<2>(block_coord);
+        int left_range_conflict_msg = get<0>(det_msg);
+        int right_range_conflict_msg = get<1>(det_msg);
+        int arrive_num = get<2>(det_msg) + 1;
+        int offset_q = get_batch_range(params.q_ranges, bidb).x * PackGQAFactor;
+        deterministic_sync(
+            params.outer_determin_range_locks,
+            bidh,
+            offset_q + m_block * kBlockM,
+            kBlockM,
+            params.nheads,
+            (left_range_conflict_msg >> 1),
+            (right_range_conflict_msg >> 1));
+        deterministic_arrive(
+            params.outer_determin_range_locks,
+            bidh,
+            offset_q + m_block * kBlockM,
+            kBlockM,
+            params.nheads,
+            arrive_num,
+            left_range_conflict_msg & 1,
+            right_range_conflict_msg & 1);
+      }
     }
   }
 };
