@@ -14,7 +14,7 @@
 
 """CuTeDSL SM100 BlockSparse attention — correctness sweep.
 
-Tests both FWD and BWD (LoopK) by comparing BlockSparse output against
+Tests FWD and BWD (LoopK + LoopQ) by comparing BlockSparse output against
 Dense attention on the gathered (selected) KV blocks.
 
 Sweep structure (mirrors ``tests/test_attn/test_block_sparse.py``):
@@ -107,6 +107,53 @@ def _build_uniform_bst(
     )
 
 
+def _build_loopq_bst(
+    N_blocks: int,
+    n_attend: int,
+    sel: "torch.Tensor",
+    *,
+    seqlen_q_packed: int,
+    B: int,
+    NHK: int,
+    n_block_size: int,
+    subtile_factor: int = 2,
+) -> BlockSparseTensorsTorch:
+    """Build LoopQ BST: outer=K-blocks, inner=coarse Q-blocks.
+
+    For the uniform pattern (all Q-blocks attend to same K-blocks):
+    - Selected K-blocks: ALL coarse Q-blocks attend
+    - Non-selected K-blocks: no Q-blocks attend
+    """
+    bwd_m = 128
+    sparse_q = subtile_factor * bwd_m  # coarse Q-block size = 256
+    M_coarse = math.ceil(seqlen_q_packed / sparse_q)
+
+    # For selected K-blocks: full_block_cnt = M_coarse (all Q attend)
+    full_cnt = torch.zeros(B, NHK, N_blocks, dtype=torch.int32, device=sel.device)
+    full_idx = torch.zeros(
+        B, NHK, N_blocks, M_coarse, dtype=torch.int32, device=sel.device
+    )
+    q_range = torch.arange(M_coarse, device=sel.device, dtype=torch.int32)
+
+    for i, k_block in enumerate(sel.tolist()):
+        full_cnt[:, :, k_block] = M_coarse
+        full_idx[:, :, k_block, :] = q_range
+
+    # No mask blocks needed (uniform full attention per selected K-block)
+    mask_cnt = torch.zeros(B, NHK, N_blocks, dtype=torch.int32, device=sel.device)
+    mask_idx = torch.zeros(
+        B, NHK, N_blocks, M_coarse, dtype=torch.int32, device=sel.device
+    )
+
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=mask_cnt,
+        mask_block_idx=mask_idx,
+        full_block_cnt=full_cnt,
+        full_block_idx=full_idx,
+        block_size=(sparse_q, n_block_size),
+    )
+
+
 def _gather_kv(k, v, sel, n_block_size=128):
     block_indices = (
         sel.unsqueeze(-1) * n_block_size
@@ -142,7 +189,7 @@ def _sdpa_ref_gathered(q, k_gather, v_gather, dO, softmax_scale):
     )
 
 
-def _run_bs_config(device: str, cfg: dict):
+def _run_bs_config(device: str, cfg: dict, *, swap_bwd_qk_loop: bool = True):
     """Run one FWD + BWD BlockSparse config and assert against fp32 SDPA reference.
 
     Uses fp32 SDPA on gathered KV as the deterministic reference, eliminating
@@ -150,6 +197,9 @@ def _run_bs_config(device: str, cfg: dict):
 
     Config dict keys:
         B, SQ, SK, NHQ, NHK, D, sparsity, pack_gqa
+
+    When swap_bwd_qk_loop=False (LoopQ), each CTA exclusively owns one K-block,
+    so dKV is inherently deterministic -- strict threshold is used.
     """
     torch.manual_seed(SEED)
 
@@ -236,6 +286,21 @@ def _run_bs_config(device: str, cfg: dict):
 
     _flex_flash_attn_fwd.compile_cache.clear()
     _flex_flash_attn_bwd.compile_cache.clear()
+
+    if swap_bwd_qk_loop:
+        bwd_flex_args = TorchFlexAttnArgs(block_sparse_tensors=bwd_bst)
+    else:
+        loopq_bst = _build_loopq_bst(
+            N_blocks,
+            n_attend,
+            sel,
+            seqlen_q_packed=SQ * qhpk if pack_gqa else SQ,
+            B=B,
+            NHK=NHK,
+            n_block_size=n_block_size,
+        )
+        bwd_flex_args = TorchFlexAttnArgs(block_sparse_tensors_bwd=loopq_bst)
+
     dq_bs, dk_bs, dv_bs = _flex_flash_attn_bwd(
         q,
         k,
@@ -244,9 +309,9 @@ def _run_bs_config(device: str, cfg: dict):
         lse_bs,
         dO,
         softmax_scale=scale,
-        flex_attn_args=TorchFlexAttnArgs(block_sparse_tensors=bwd_bst),
+        flex_attn_args=bwd_flex_args,
         pack_gqa=pack_gqa,
-        swap_bwd_qk_loop=True,
+        swap_bwd_qk_loop=swap_bwd_qk_loop,
     )
 
     # dQ: always deterministic (no atomics in dQ path)
@@ -272,7 +337,10 @@ def _run_bs_config(device: str, cfg: dict):
     dk_bs_gather = dk_bs[:, block_indices]
     dv_bs_gather = dv_bs[:, block_indices]
 
-    if qhpk <= 1:
+    if not swap_bwd_qk_loop:
+        # LoopQ: dKV is inherently deterministic (no atomics)
+        _dkv_mismatch = _MISMATCH_THRES
+    elif qhpk <= 1:
         _dkv_mismatch = 0.15
     elif qhpk <= 8:
         _dkv_mismatch = 0.55
@@ -397,6 +465,54 @@ def test_block_sparse_comprehensive_sweep():
             f"sp={cfg['sparsity']}"
         )
         _run_bs_config(device, cfg)
+
+
+@requires_sm100
+def test_block_sparse_comprehensive_sweep_loopq():
+    """Comprehensive sweep (LoopQ): head_config x D x sparsity.
+
+    Same configs as test_block_sparse_comprehensive_sweep, but with
+    swap_bwd_qk_loop=False (LoopQ). LoopQ outer=K-blocks gives inherently
+    deterministic dKV -- strict mismatch threshold (0.01) applies.
+
+    Mirrors SM90: test_block_sparse_comprehensive_sweep_loopq_hd64/hd128.
+    """
+    HEAD_CONFIGS = [
+        (128, 1, True),  # MQA128
+        (4, 1, True),  # MQA4
+        (128, 2, True),  # GQA 128:2
+        (32, 4, True),  # GQA 32:4
+        (4, 4, True),  # GQA 4:4 (MHA4)
+        (32, 32, True),  # MHA32
+    ]
+    DIMS = [64, 128]
+    SPARSITIES = [0.5]
+
+    configs = []
+    for nhq, nhk, pack_gqa in HEAD_CONFIGS:
+        for D in DIMS:
+            for sp in SPARSITIES:
+                sq, sk = 256, 1024
+                configs.append(
+                    dict(
+                        B=1,
+                        SQ=sq,
+                        SK=sk,
+                        NHQ=nhq,
+                        NHK=nhk,
+                        D=D,
+                        sparsity=sp,
+                        pack_gqa=pack_gqa,
+                    )
+                )
+
+    for i, cfg in enumerate(configs, 1):
+        print(
+            f"LoopQ {i}/{len(configs)}: "
+            f"NHQ={cfg['NHQ']}, NHK={cfg['NHK']}, D={cfg['D']}, "
+            f"sp={cfg['sparsity']}"
+        )
+        _run_bs_config(device, cfg, swap_bwd_qk_loop=False)
 
 
 if __name__ == "__main__":
