@@ -93,23 +93,25 @@ def ffa_block_sparse(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    index_sparse_indices: torch.Tensor,
+    block_sparse_indices: torch.Tensor,
     softmax_scale: float | None = None,
     deterministic: bool = False,
+    sparse_k_block_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Block-sparse attention via FFA kernel. Supports forward + backward.
 
-    Flattens Q/K/V by KV-head and constructs per-token ranges for block-sparse path.
-    Best suited for block-level sparse patterns (topk of 128-token blocks);
-    for per-token topk, prefer ffa_index_sparse.
+    Each Q-token attends to ``topk`` KV-blocks of size ``sparse_k_block_size``.
+    Indices are **block indices** (not token indices).
 
     Args:
         q: (sq, nhq, hd)
         k: (skv, nhkv, hd)
         v: (skv, nhkv, hd)
-        index_sparse_indices: (sq, nhkv, topk) int32 with K-token indices in [0, skv).
+        block_sparse_indices: (sq, nhkv, topk) int32 — KV *block* indices in
+            ``[0, skv // sparse_k_block_size)``.
         softmax_scale: optional scaling factor (default: hd**-0.5).
         deterministic: if True, use bitwise-deterministic backward.
+        sparse_k_block_size: number of KV tokens per block (default 128).
 
     Returns:
         out: (sq, nhq, hd)
@@ -117,11 +119,12 @@ def ffa_block_sparse(
     """
     sq, nhq, hd = q.shape
     skv, nhkv, _ = k.shape
-    topk = index_sparse_indices.shape[-1]
+    kbs = sparse_k_block_size
+    topk = block_sparse_indices.shape[-1]
     group_size = nhq // nhkv
 
-    # Convert (sq, nhkv, topk) -> (nhkv, sq, topk) for range construction
-    index_map = index_sparse_indices.permute(1, 0, 2).contiguous()
+    # (sq, nhkv, topk) -> (nhkv, sq, topk)
+    index_map = block_sparse_indices.to(torch.int32).permute(1, 0, 2).contiguous()
 
     # flatten along KV-head dimension
     q_flat = rearrange(
@@ -133,21 +136,21 @@ def ffa_block_sparse(
     k_flat = rearrange(k, "skv nhkv hd -> (nhkv skv) 1 hd")
     v_flat = rearrange(v, "skv nhkv hd -> (nhkv skv) 1 hd")
 
-    # build per-token q_ranges and k_ranges from index_map
+    # q_ranges: each Q-token is a 1-token range
     q_idx_flat = (
-        rearrange(
-            torch.arange(nhkv * sq, device=q.device, dtype=torch.int32), "n -> n 1"
-        )
-        .repeat(1, topk)
+        torch.arange(nhkv * sq, device=q.device, dtype=torch.int32)
+        .unsqueeze(1)
+        .expand(-1, topk)
         .flatten()
     )
-    h_kv_offset = rearrange(
-        torch.arange(nhkv, device=q.device, dtype=torch.int32) * skv, "nhkv -> nhkv 1 1"
-    )
-    k_idx_flat = rearrange(index_map + h_kv_offset, "nhkv sq topk -> (nhkv sq topk)")
-
     q_ranges = torch.stack([q_idx_flat, q_idx_flat + 1], dim=-1)
-    k_ranges = torch.stack([k_idx_flat, k_idx_flat + 1], dim=-1)
+
+    # k_ranges: each block index maps to a kbs-token range
+    h_kv_offset = (torch.arange(nhkv, device=q.device, dtype=torch.int32) * skv).view(
+        nhkv, 1, 1
+    )
+    k_start = (index_map * kbs + h_kv_offset).reshape(-1)
+    k_ranges = torch.stack([k_start, k_start + kbs], dim=-1)
 
     ref_block_size = (64, 128) if group_size <= 64 else (128, 128)
 
@@ -286,6 +289,7 @@ def dsa_attn_func(
     softmax_scale: float | None = None,
     deterministic: bool = False,
     backend: str = "ffa_index_sparse",
+    sparse_k_block_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-token per-KV-head Top-K sparse attention.
 
@@ -293,16 +297,18 @@ def dsa_attn_func(
         q: (sq, nhq, hd) — query tensor.
         k: (skv, nhkv, hd) — key tensor.
         v: (skv, nhkv, hd) — value tensor.
-        index_sparse_indices: (sq, nhkv, topk) int32 — top-K KV indices for each
-            Q-token per KV-head. Same format as flex_flash_attn_func expects.
+        index_sparse_indices: (sq, nhkv, topk) int32 — sparse KV indices.
+            For ``ffa_index_sparse`` / ``flex`` / ``sdpa``: **token** indices in ``[0, skv)``.
+            For ``ffa_block_sparse``: **block** indices in ``[0, skv // sparse_k_block_size)``.
         softmax_scale: scaling factor (default: hd**-0.5).
         deterministic: if True, use bitwise-deterministic backward (FFA backends only).
         backend: one of "ffa_index_sparse" (default), "ffa_block_sparse", "flex", "sdpa".
             - "ffa_index_sparse": recommended for training (forward + backward).
             - "ffa_block_sparse": block-sparse FFA path (forward + backward).
-              Best for block-level sparse (topk of 128-token blocks).
             - "flex": PyTorch FlexAttention baseline (forward-only, torch.compile).
             - "sdpa": SDPA baseline (forward-only, torch.compile).
+        sparse_k_block_size: KV block size for ``ffa_block_sparse`` (default 128).
+            Ignored by other backends.
 
     Returns:
         out: (sq, nhq, hd) — attention output.
@@ -314,7 +320,13 @@ def dsa_attn_func(
         )
     elif backend == "ffa_block_sparse":
         return ffa_block_sparse(
-            q, k, v, index_sparse_indices, softmax_scale, deterministic
+            q,
+            k,
+            v,
+            index_sparse_indices,
+            softmax_scale,
+            deterministic,
+            sparse_k_block_size=sparse_k_block_size,
         )
     elif backend == "flex":
         return _flex_attn_sparse_fwd(q, k, v, index_sparse_indices, softmax_scale)

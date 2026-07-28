@@ -132,6 +132,102 @@ def _run_sparse_attn_and_get_output(
     return o_unpacked, o_sparse, q_ffa, k_ffa, v_ffa
 
 
+def _run_dsa_index_sparse(device, sq, skv, topk, nhq=128, nhkv=1, hd=128):
+    """Test dsa_attn_func(backend='ffa_index_sparse') FWD+BWD against SDPA."""
+    import torch.nn.functional as F
+    from magi_attn_extensions.dsa_interface import dsa_attn_func
+
+    from magi_attention.testing.precision import assert_close
+
+    set_random_seed(SEED)
+    dtype = torch.bfloat16
+    group_size = nhq // nhkv
+
+    q = torch.randn(sq, nhq, hd, dtype=dtype, device=device, requires_grad=True)
+    k = torch.randn(skv, nhkv, hd, dtype=dtype, device=device, requires_grad=True)
+    v = torch.randn(skv, nhkv, hd, dtype=dtype, device=device, requires_grad=True)
+
+    indices = (
+        torch.stack(
+            [torch.randperm(skv, device=device)[:topk] for _ in range(sq * nhkv)]
+        )
+        .reshape(sq, nhkv, topk)
+        .to(torch.int32)
+    )
+
+    out, lse = dsa_attn_func(q, k, v, indices, backend="ffa_index_sparse")
+
+    # SDPA reference (per KV-head)
+    mask_kv = torch.zeros(nhkv, sq, skv, device=device, dtype=torch.bool)
+    mask_kv.scatter_(2, indices.permute(1, 0, 2).long(), True)
+
+    o_parts = []
+    with torch.no_grad():
+        for h_kv in range(nhkv):
+            h_q_s, h_q_e = h_kv * group_size, (h_kv + 1) * group_size
+            q_h = q[:, h_q_s:h_q_e, :].unsqueeze(0).transpose(1, 2)
+            k_h = k[:, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+            v_h = v[:, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+            m_h = mask_kv[h_kv].unsqueeze(0).unsqueeze(0).expand(1, group_size, sq, skv)
+            o_h = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=m_h)
+            o_parts.append(o_h.squeeze(0).transpose(0, 1))
+    out_ref = torch.cat(o_parts, dim=1)
+
+    tc = f"dsa_index_sparse [sq={sq},skv={skv},topk={topk}]"
+    assert_close(
+        out,
+        out_ref,
+        atol=DEFAULT_FWD_ATOL,
+        rtol=0.05,
+        mismatch_threshold=0.01,
+        test_case=f"{tc} fwd",
+    )
+
+    # BWD
+    do = torch.randn_like(out)
+    out.backward(do)
+
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    o_parts2 = []
+    for h_kv in range(nhkv):
+        h_q_s, h_q_e = h_kv * group_size, (h_kv + 1) * group_size
+        q_h = q2[:, h_q_s:h_q_e, :].unsqueeze(0).transpose(1, 2)
+        k_h = k2[:, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+        v_h = v2[:, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+        m_h = mask_kv[h_kv].unsqueeze(0).unsqueeze(0).expand(1, group_size, sq, skv)
+        o_h = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=m_h)
+        o_parts2.append(o_h.squeeze(0).transpose(0, 1))
+    out_ref2 = torch.cat(o_parts2, dim=1)
+    out_ref2.backward(do)
+
+    assert_close(
+        q.grad,
+        q2.grad,
+        atol=DEFAULT_BWD_DQ_ATOL,
+        rtol=0.3,
+        mismatch_threshold=0.01,
+        test_case=f"{tc} dq",
+    )
+    assert_close(
+        k.grad,
+        k2.grad,
+        atol=0.02,
+        rtol=0.15,
+        mismatch_threshold=0.01,
+        test_case=f"{tc} dk",
+    )
+    assert_close(
+        v.grad,
+        v2.grad,
+        atol=0.02,
+        rtol=0.05,
+        mismatch_threshold=0.01,
+        test_case=f"{tc} dv",
+    )
+
+
 def _run_index_sparse_config(device, cfg: dict[str, Any]):
     """Run one index_sparse_indices test config and assert against SDPA."""
     set_random_seed(SEED)
@@ -778,6 +874,16 @@ class TestIndexSparseSweep(DistTestBase):
             "swap_bwd_qk_loop": True,
         }
         _run_index_sparse_config(self.device, config)
+
+    @with_run_in_mp
+    @parameterize("q_seqlen", [128, 512])
+    @parameterize("kv_seqlen", [512, 1000])
+    @parameterize("topk", [128, 256])
+    def test_dsa_index_sparse_classic(self, q_seqlen, kv_seqlen, topk):
+        """DSA wrapper (ffa_index_sparse) FWD+BWD against SDPA reference."""
+        if topk > kv_seqlen:
+            return
+        _run_dsa_index_sparse(self.device, q_seqlen, kv_seqlen, topk)
 
     @with_run_in_mp
     def test_index_sparse_deterministic(self):
