@@ -794,8 +794,8 @@ struct CollectiveMainloopBwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map = nullptr;
     int const* const cu_batches = nullptr;
-    int* dq_determin_conflict_state;
-    int* dq_determin_range_locks;
+    int* inner_outer_determin_conflict_state;
+    int* inner_outer_determin_range_locks;
     /* index_sparse */
     int const* const index_sparse_indices;
     int inner_indices_cnt;
@@ -841,8 +841,8 @@ struct CollectiveMainloopBwdSm90 {
     int const* const attn_type_map = nullptr;
     int const* const cu_batches = nullptr;
     /* deterministic */
-    int* dq_determin_conflict_state;
-    int* dq_determin_range_locks;
+    int* inner_outer_determin_conflict_state;
+    int* inner_outer_determin_range_locks;
     /* sparse load (InnerLoopQ: scatter Q/dO/dQ) */
     Element const* const ptr_Q;
     StrideQKV const stride_Q;
@@ -879,8 +879,8 @@ struct CollectiveMainloopBwdSm90 {
       // In deterministic mode, we use atomic operations to update dQ,
       // which requires extra arguments to manage conflicts.
       // We assert that these arguments are not null.
-      assert(args.dq_determin_conflict_state != nullptr);
-      assert(args.dq_determin_range_locks != nullptr);
+      assert(args.inner_outer_determin_conflict_state != nullptr);
+      assert(args.inner_outer_determin_range_locks != nullptr);
     }
 
     // Create shape for Q, dO and dQ
@@ -1071,8 +1071,8 @@ struct CollectiveMainloopBwdSm90 {
         /*n_block_max_num=*/!BwdInnerLoopK ? cute::ceil_div(get<0>(args.shape_KVdKdV), kBlockN) : cute::ceil_div(get<0>(args.shape_QdOdQ), kBlockM),
         /*attn_type_map=*/args.attn_type_map,
         /*cu_batches=*/args.cu_batches,
-        /*dq_determin_conflict_state=*/args.dq_determin_conflict_state,
-        /*dq_determin_range_locks=*/args.dq_determin_range_locks,
+        /*inner_outer_determin_conflict_state=*/args.inner_outer_determin_conflict_state,
+        /*inner_outer_determin_range_locks=*/args.inner_outer_determin_range_locks,
         /*ptr_Q=*/args.ptr_Q,
         /*stride_Q=*/args.stride_Q,
         /*ptr_dO=*/args.ptr_dO,
@@ -2041,11 +2041,11 @@ struct CollectiveMainloopBwdSm90 {
       int left_dq_conflict_index = offset_q / kBlockM + m_block_id;
       int right_dq_conflict_index = (offset_q + kBlockM - 1) / kBlockM + m_block_id;
       int const global_k_tile = n_block;
-      int sync_num1 = global_k_tile == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
+      int sync_num1 = global_k_tile == 0 ? params.inner_outer_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                          : bidb * params.n_block_max_num + global_k_tile;
-      int sync_num2 = global_k_tile == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
+      int sync_num2 = global_k_tile == 0 ? params.inner_outer_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                          : bidb * params.n_block_max_num + global_k_tile;
-      deterministic_sync(params.dq_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
+      deterministic_sync(params.inner_outer_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
     };
 
     auto m_block_arrive = [&](int m_block_id) {
@@ -2054,7 +2054,7 @@ struct CollectiveMainloopBwdSm90 {
       int const global_k_tile = n_block;
       bool const is_last_k_tile = (global_k_tile == params.n_block_max_num - 1);
       int arrive_num = is_last_k_tile ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + global_k_tile + 1;
-      deterministic_arrive(params.dq_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
+      deterministic_arrive(params.inner_outer_determin_range_locks, bidh, offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
     };
 
     auto const mQdOdQLSEdPsum_coord = make_coord(_, _, cute::conditional_return<CatGQA>(make_coord(_, bidh), bidh));
@@ -2088,7 +2088,7 @@ struct CollectiveMainloopBwdSm90 {
         int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
-        int* conflict_state = params.dq_determin_conflict_state;
+        int* conflict_state = params.inner_outer_determin_conflict_state;
         while (bidb_last < bidb_cur) {
           int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
           if constexpr (PackGQA) {

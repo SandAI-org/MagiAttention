@@ -28,13 +28,13 @@ namespace flash {
 //   arrive_num is published and the counter is reset, unblocking the next sync.
 
 CUTLASS_DEVICE
-void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
+void deterministic_sync(int* range_lock, int bidh, int offset, int range_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
   if (left_range_sync_num == 0 && right_range_sync_num == 0)
     return;
 
-  int left_range_block_idx = offset / q_block_size;
+  int left_range_block_idx = offset / range_block_size;
   int left_range_index = left_range_block_idx * num_heads + bidh;
-  int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+  int right_range_block_idx = (offset + range_block_size - 1) / range_block_size;
 
 #pragma unroll 1
   while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
@@ -54,14 +54,14 @@ void deterministic_arrive(
     int* range_lock,
     int bidh,
     int offset,
-    int q_block_size,
+    int range_block_size,
     int num_heads,
     int arrive_num,
     bool left_range_arrive_twice,
     bool right_range_arrive_twice) {
-  int left_range_block_idx = offset / q_block_size;
+  int left_range_block_idx = offset / range_block_size;
   int left_range_index = left_range_block_idx * num_heads + bidh;
-  int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+  int right_range_block_idx = (offset + range_block_size - 1) / range_block_size;
   int right_range_index = right_range_block_idx * num_heads + bidh;
 
   int add_cnt = right_range_arrive_twice ? 2 : 1;

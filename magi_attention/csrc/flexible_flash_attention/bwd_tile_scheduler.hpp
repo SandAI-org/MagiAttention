@@ -41,7 +41,7 @@ struct TileSchedulerArguments {
   int2* const ranges = nullptr;
   int2* const merge_ranges = nullptr;
   int* const range_map = nullptr;
-  int* determin_conflict_state = nullptr;
+  int* outer_determin_conflict_state = nullptr;
   int* const unique_count = nullptr;
 };
 
@@ -72,7 +72,7 @@ class DynamicPersistentTileSchedulerBwd {
     int2* const ranges;
     int2* const merge_ranges;
     int* const range_map;
-    int* determin_conflict_state;
+    int* outer_determin_conflict_state;
     int* const unique_count = nullptr;
   };
 
@@ -93,7 +93,7 @@ class DynamicPersistentTileSchedulerBwd {
         ranges,
         args.merge_ranges,
         args.range_map,
-        args.determin_conflict_state,
+        args.outer_determin_conflict_state,
         args.unique_count};
   }
 
@@ -225,7 +225,7 @@ class DynamicPersistentTileSchedulerBwd {
         // params.ranges[2 * bidb] ~ params.ranges[2 * bidb + 1] is the range of bidb
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
-        int* conflict_state = params.determin_conflict_state;
+        int* conflict_state = params.outer_determin_conflict_state;
         // update missed batch's conflict state, loop for bidb_last ~ bidb_now
         while (bidb_last < bidb_now) {
           // bidb_last_l ~ bidb_last_r is the range of bidb_last

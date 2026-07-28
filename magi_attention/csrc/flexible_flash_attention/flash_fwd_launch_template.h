@@ -161,7 +161,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       params.range_locks,
       params.q_ranges,
       params.k_ranges,
-      params.determin_range_locks,
+      params.outer_determin_range_locks,
       static_cast<float*>(params.max_logit_ptr), // max_logit
       params.scale_softmax,
   };
@@ -174,7 +174,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
                                                         /*ranges=*/params.q_ranges,
                                                         /*merge_ranges=*/params.merge_q_ranges,
                                                         /*range_map=*/params.qk_map,
-                                                        /*determin_conflict_state=*/params.determin_conflict_state,
+                                                        /*outer_determin_conflict_state=*/params.outer_determin_conflict_state,
                                                         /*unique_count=*/params.unique_count,
                                                         /*max_outer_range_width=*/params.max_outer_range_width,
                                                         /*has_max_outer_range_width=*/params.has_max_outer_range_width,

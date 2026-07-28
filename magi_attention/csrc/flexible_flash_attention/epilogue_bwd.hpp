@@ -234,7 +234,7 @@ struct CollectiveEpilogueBwd {
     int const num_heads_kv;
     int2 const* q_ranges;
     int2 const* k_ranges;
-    int* determin_range_locks = nullptr;
+    int* outer_determin_range_locks = nullptr;
   };
 
   // Device side kernel params
@@ -255,7 +255,7 @@ struct CollectiveEpilogueBwd {
     int2 const* k_ranges;
     cutlass::FastDivmod qhead_per_khead_divmod;
     int const nheads;
-    int* determin_range_locks = nullptr;
+    int* outer_determin_range_locks = nullptr;
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
@@ -308,7 +308,7 @@ struct CollectiveEpilogueBwd {
         args.k_ranges,
         /*qhead_per_khead_divmod=*/cutlass::FastDivmod(cute::ceil_div(args.num_heads_q, get<2>(args.shape_dK))),
         args.num_heads_kv,
-        args.determin_range_locks};
+        args.outer_determin_range_locks};
   }
 
   // Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -431,7 +431,7 @@ struct CollectiveEpilogueBwd {
             int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
             int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
             int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
-            deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+            deterministic_sync(params.outer_determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
           }
         }
         BarrierManager::sync<NumEpilogueThreads + cutlass::NumThreadsPerWarp>(resv_barrier::EpilogueBarrier);
@@ -453,7 +453,7 @@ struct CollectiveEpilogueBwd {
           int arrive_num = get<2>(det_msg);
           arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
           deterministic_arrive(
-              params.determin_range_locks,
+              params.outer_determin_range_locks,
               bidh_kv,
               offset_k + n_block * kBlockN,
               kBlockN,
@@ -633,10 +633,10 @@ struct CollectiveEpilogueBwd {
         int qheads_per_kheads = !FlattenGQA ? static_cast<int>(params.qhead_per_khead_divmod) : 1;
         int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
         int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
-        deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+        deterministic_sync(params.outer_determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
         arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
         deterministic_arrive(
-            params.determin_range_locks,
+            params.outer_determin_range_locks,
             bidh_kv,
             offset_k + n_block * kBlockN,
             kBlockN,

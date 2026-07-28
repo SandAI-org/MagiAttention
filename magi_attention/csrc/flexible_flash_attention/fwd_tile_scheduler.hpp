@@ -42,7 +42,7 @@ struct TileSchedulerArguments {
   int2* const ranges = nullptr;
   int2* const merge_ranges = nullptr;
   int* const range_map = nullptr;
-  int* determin_conflict_state = nullptr;
+  int* outer_determin_conflict_state = nullptr;
   int* const unique_count = nullptr;
   int const max_outer_range_width = 0; // Optional: maximum seqlen across all batches for optimization
   bool const has_max_outer_range_width = false; // Whether max_outer_range_width is provided
@@ -82,7 +82,7 @@ class DynamicPersistentTileSchedulerFwd {
     int2* const ranges;
     int2* const merge_ranges;
     int* const range_map;
-    int* determin_conflict_state;
+    int* outer_determin_conflict_state;
     int* const unique_count = nullptr;
     int max_outer_range_width = 0; // Optional: maximum seqlen across all batches for optimization
     bool has_max_outer_range_width = false; // Whether max_outer_range_width is provided
@@ -112,7 +112,7 @@ class DynamicPersistentTileSchedulerFwd {
         ranges,
         args.merge_ranges,
         args.range_map,
-        args.determin_conflict_state,
+        args.outer_determin_conflict_state,
         args.unique_count,
         args.max_outer_range_width,
         args.has_max_outer_range_width,
@@ -235,7 +235,7 @@ class DynamicPersistentTileSchedulerFwd {
         // we should take inter_head into account, the conflict state of bidb in each inter group is different.
         uint32_t block_stride = (total_seqlen_q + kBlock - 1) / kBlock + 1;
         uint32_t head_offset = intergroup_idx_param * block_stride;
-        int* conflict_state = params.determin_conflict_state;
+        int* conflict_state = params.outer_determin_conflict_state;
 
         // update missed batch's conflict state, loop for bidb_last ~ bidb_now
         while (bidb_last < bidb_now) {
