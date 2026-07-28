@@ -813,6 +813,7 @@ def _flex_flash_attn_bwd(
     score_mod_bwd = flex_attn_args.score_mod_bwd
     mask_mod = flex_attn_args.mask_mod
     aux_tensors = flex_attn_args.aux_tensors
+    _det_forced_loopq = False
     # IndexSparse token-level tiles for BWD
     index_sparse_tiles = flex_attn_args.index_sparse_tiles if flex_attn_args else None
     is_index_sparse = index_sparse_tiles is not None
@@ -1044,6 +1045,25 @@ def _flex_flash_attn_bwd(
                 subtile_factor=subtile_factor,
             )
         use_block_sparsity = True
+
+    # Deterministic forced LoopQ: transpose LoopK BST to LoopQ direction
+    if (
+        _det_forced_loopq
+        and block_sparse_tensors is not None
+        and index_sparse_indices is None
+    ):
+        _transpose_sq = seqlen_q * qhead_per_kvhead if pack_gqa else seqlen_q
+        block_sparse_tensors = _transpose_block_sparse_tensors(
+            block_sparse_tensors,
+            batch_size=batch_size,
+            num_kv_heads=num_head_kv,
+            seqlen_q=_transpose_sq,
+            seqlen_k=seqlen_k,
+            m_block_size=m_block_size,
+            n_block_size=n_block_size,
+            subtile_factor=subtile_factor,
+        )
+
     seqlen_q_rounded = (seqlen_q + m_block_size - 1) // m_block_size * m_block_size
     seqlen_k_rounded = (seqlen_k + n_block_size - 1) // n_block_size * n_block_size
     num_n_blocks = seqlen_k_rounded // n_block_size
@@ -1103,6 +1123,20 @@ def _flex_flash_attn_bwd(
     # SM80/SM90 BWD kernels do not support PackGQA yet; SM100+ does.
     if major_arch in (8, 9, 12):
         pack_gqa = False
+
+    # Deterministic dKV: LoopK reduce warps use atomic TMA reduce-add without
+    # semaphore protection. Force LoopQ when deterministic=True and qhpk>1 to
+    # guarantee bit-exact dKV (LoopQ epilogue has semaphore ordering).
+    if deterministic and swap_bwd_qk_loop and qhead_per_kvhead > 1 and major_arch >= 10:
+        swap_bwd_qk_loop = False
+        _det_forced_loopq = True
+        # User gave LoopK BST but we switched to LoopQ: recover the LoopK BST
+        if (
+            block_sparse_tensors is None
+            and flex_attn_args is not None
+            and flex_attn_args.block_sparse_tensors is not None
+        ):
+            block_sparse_tensors = flex_attn_args.block_sparse_tensors
 
     if softcap != 0.0:
         assert (

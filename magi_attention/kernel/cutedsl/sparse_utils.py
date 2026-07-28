@@ -951,9 +951,6 @@ def transpose_block_sparse_tensors(
     sparse_q = subtile_factor * m_block_size
     M_blocks_coarse = ceildiv(seqlen_q, sparse_q)
 
-    cnt = fwd_tensors.mask_block_cnt
-    idx = fwd_tensors.mask_block_idx
-
     presence = torch.zeros(
         batch_size,
         num_kv_heads,
@@ -962,11 +959,26 @@ def transpose_block_sparse_tensors(
         dtype=torch.bool,
         device=device,
     )
-    max_n = idx.shape[-1]
-    n_positions = torch.arange(max_n, device=device)
-    valid = n_positions[None, None, None, :] < cnt.unsqueeze(-1)
-    valid_idx = idx.clamp(0, N_blocks - 1)
-    presence.scatter_(3, valid_idx.long() * valid.long(), valid)
+
+    # Include mask blocks in presence
+    cnt = fwd_tensors.mask_block_cnt
+    idx = fwd_tensors.mask_block_idx
+    if cnt.any():
+        max_n = idx.shape[-1]
+        n_positions = torch.arange(max_n, device=device)
+        valid = n_positions[None, None, None, :] < cnt.unsqueeze(-1)
+        valid_idx = idx.clamp(0, N_blocks - 1)
+        presence.scatter_(3, valid_idx.long() * valid.long(), valid)
+
+    # Include full blocks in presence (previously missing)
+    if fwd_tensors.full_block_cnt is not None and fwd_tensors.full_block_cnt.any():
+        full_cnt = fwd_tensors.full_block_cnt
+        full_idx = fwd_tensors.full_block_idx
+        max_n_full = full_idx.shape[-1]
+        n_pos_full = torch.arange(max_n_full, device=device)
+        valid_full = n_pos_full[None, None, None, :] < full_cnt.unsqueeze(-1)
+        valid_full_idx = full_idx.clamp(0, N_blocks - 1)
+        presence.scatter_(3, valid_full_idx.long() * valid_full.long(), valid_full)
 
     if subtile_factor > 1 and M_blocks_fine > M_blocks_coarse:
         pad = M_blocks_coarse * subtile_factor - M_blocks_fine

@@ -381,62 +381,51 @@ def _run_config(device: str, cfg: dict):
 # ═════════════════════════════════════════════════════════════════════
 
 
-@requires_sm100
-def test_index_sparse_classic_sweep():
-    """Classic sweep: Q_SEQLENS × KV_SEQLENS × TOPKS, MQA128 D=128 PackGQA kbs=1."""
-    Q_SEQLENS = [512, 1024, 4096]
-    KV_SEQLENS = [512, 1024, 4096]
-    TOPKS = [128, 256]
-    device = "cuda"
-
-    configs = []
-    for sq in Q_SEQLENS:
-        for sk in KV_SEQLENS:
-            for topk in TOPKS:
-                if topk > sk:
-                    continue
-                configs.append(
-                    dict(
-                        B=1,
-                        SQ=sq,
-                        SK=sk,
-                        NHQ=128,
-                        NHK=1,
-                        D=128,
-                        topk=topk,
-                        pack_gqa=True,
-                        sparse_k_block_size=1,
-                    )
-                )
-
-    for i, cfg in enumerate(configs, 1):
-        print(
-            f"Testing config {i}/{len(configs)}: "
-            f"SQ={cfg['SQ']}, SK={cfg['SK']}, topk={cfg['topk']}"
-        )
-        _run_config(device, cfg)
+_CLASSIC_CONFIGS = [
+    (sq, sk, topk)
+    for sq in [512, 1024, 4096]
+    for sk in [512, 1024, 4096]
+    for topk in [128, 256]
+    if topk <= sk
+]
 
 
 @requires_sm100
-def test_index_sparse_comprehensive_sweep():
-    """Comprehensive sweep: head_config × D × sparse_k_block_size."""
-    HEAD_CONFIGS = [
-        # (NHQ, NHK, pack_gqa) — aligned with SM90 test_index_sparse.py
-        (128, 1, True),  # MQA128
-        (4, 1, True),  # MQA4
-        (128, 2, True),  # GQA 128:2
-        (32, 4, True),  # GQA 32:4
-        (4, 4, True),  # MHA4
-        (32, 32, True),  # MHA32
-    ]
-    DIMS = [64, 128]
-    KBS_LIST = [1, 8, 128]
-    device = "cuda"
+@pytest.mark.parametrize("sq,sk,topk", _CLASSIC_CONFIGS)
+def test_index_sparse_classic_sweep(sq, sk, topk):
+    """Classic sweep: seqlen x topk, MQA128 D=128 kbs=1."""
+    cfg = dict(
+        B=1,
+        SQ=sq,
+        SK=sk,
+        NHQ=128,
+        NHK=1,
+        D=128,
+        topk=topk,
+        pack_gqa=True,
+        sparse_k_block_size=1,
+    )
+    _run_config("cuda", cfg)
 
+
+_IS_HEAD_CONFIGS = [
+    (128, 1, True),  # MQA128
+    (4, 1, True),  # MQA4
+    (128, 2, True),  # GQA 128:2
+    (32, 4, True),  # GQA 32:4
+    (4, 4, True),  # MHA4
+    (32, 32, True),  # MHA32
+]
+_IS_DIMS = [64, 128]
+_IS_KBS = [1, 8, 128]
+
+
+def _gen_comprehensive_configs():
+    """Generate IS comprehensive configs with kbs-dependent filtering."""
     configs = []
-    for nhq, nhk, pack_gqa in HEAD_CONFIGS:
-        for D in DIMS:
-            for kbs in KBS_LIST:
+    for nhq, nhk, pack_gqa in _IS_HEAD_CONFIGS:
+        for D in _IS_DIMS:
+            for kbs in _IS_KBS:
                 if kbs > 1 and (nhk > 1 or D != 128):
                     continue
                 if kbs == 1:
@@ -458,14 +447,21 @@ def test_index_sparse_comprehensive_sweep():
                         sparse_k_block_size=kbs,
                     )
                 )
+    return configs
 
-    for i, cfg in enumerate(configs, 1):
-        print(
-            f"Testing config {i}/{len(configs)}: "
-            f"NHQ={cfg['NHQ']}, NHK={cfg['NHK']}, D={cfg['D']}, "
-            f"kbs={cfg['sparse_k_block_size']}"
-        )
-        _run_config(device, cfg)
+
+_COMPREHENSIVE_CONFIGS = _gen_comprehensive_configs()
+_COMPREHENSIVE_IDS = [
+    f"NHQ{c['NHQ']}_NHK{c['NHK']}_D{c['D']}_kbs{c['sparse_k_block_size']}"
+    for c in _COMPREHENSIVE_CONFIGS
+]
+
+
+@requires_sm100
+@pytest.mark.parametrize("cfg", _COMPREHENSIVE_CONFIGS, ids=_COMPREHENSIVE_IDS)
+def test_index_sparse_comprehensive_sweep(cfg):
+    """Comprehensive sweep: head_config x D x kbs."""
+    _run_config("cuda", cfg)
 
 
 if __name__ == "__main__":

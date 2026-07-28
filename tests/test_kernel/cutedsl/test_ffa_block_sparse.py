@@ -383,137 +383,51 @@ def _run_bs_config(device: str, cfg: dict, *, swap_bwd_qk_loop: bool = True):
 # ═════════════════════════════════════════════════════════════════════
 
 
-@requires_sm100
-def test_block_sparse_classic_sweep():
-    """Classic sweep: seqlen × sparsity, MQA128 D=128 kbs=128.
-
-    Mirrors ``tests/test_attn/test_block_sparse.py::TestBlockSparseSweep``.
-    """
-    Q_SEQLENS = [256, 512, 1024]
-    KV_SEQLENS = [512, 1024, 2048]
-    SPARSITIES = [0.2, 0.5]
-
-    configs = []
-    for sq in Q_SEQLENS:
-        for sk in KV_SEQLENS:
-            for sp in SPARSITIES:
-                if sq > sk:
-                    continue
-                configs.append(
-                    dict(
-                        B=1,
-                        SQ=sq,
-                        SK=sk,
-                        NHQ=128,
-                        NHK=1,
-                        D=128,
-                        sparsity=sp,
-                        pack_gqa=True,
-                    )
-                )
-
-    for i, cfg in enumerate(configs, 1):
-        print(
-            f"Classic {i}/{len(configs)}: "
-            f"SQ={cfg['SQ']}, SK={cfg['SK']}, sp={cfg['sparsity']}"
-        )
-        _run_bs_config(device, cfg)
+_CLASSIC_CONFIGS = [
+    (sq, sk, sp)
+    for sq in [256, 512, 1024]
+    for sk in [512, 1024, 2048]
+    for sp in [0.2, 0.5]
+    if sq <= sk
+]
 
 
 @requires_sm100
-def test_block_sparse_comprehensive_sweep():
-    """Comprehensive sweep: head_config × D × sparsity.
+@pytest.mark.parametrize("sq,sk,sp", _CLASSIC_CONFIGS)
+def test_block_sparse_classic_sweep(sq, sk, sp):
+    """Classic sweep: seqlen x sparsity, MQA128 D=128 kbs=128."""
+    cfg = dict(B=1, SQ=sq, SK=sk, NHQ=128, NHK=1, D=128, sparsity=sp, pack_gqa=True)
+    _run_bs_config(device, cfg)
 
-    Head configs aligned with SM90
-    ``tests/test_attn/test_block_sparse.py::TestBlockSparseComprehensiveSweep``:
-        [(128,1), (4,1), (128,2), (32,4), (4,4), (32,32)]
-    """
-    HEAD_CONFIGS = [
-        # (NHQ, NHK, pack_gqa) — aligned with SM90
-        (128, 1, True),  # MQA128
-        (4, 1, True),  # MQA4
-        (128, 2, True),  # GQA 128:2
-        (32, 4, True),  # GQA 32:4
-        (4, 4, True),  # GQA 4:4 (MHA4)
-        (32, 32, True),  # MHA32
-    ]
-    DIMS = [64, 128]
-    SPARSITIES = [0.5]
 
-    configs = []
-    for nhq, nhk, pack_gqa in HEAD_CONFIGS:
-        for D in DIMS:
-            for sp in SPARSITIES:
-                sq, sk = 256, 1024
-                configs.append(
-                    dict(
-                        B=1,
-                        SQ=sq,
-                        SK=sk,
-                        NHQ=nhq,
-                        NHK=nhk,
-                        D=D,
-                        sparsity=sp,
-                        pack_gqa=pack_gqa,
-                    )
-                )
-
-    for i, cfg in enumerate(configs, 1):
-        print(
-            f"Comprehensive {i}/{len(configs)}: "
-            f"NHQ={cfg['NHQ']}, NHK={cfg['NHK']}, D={cfg['D']}, "
-            f"sp={cfg['sparsity']}"
-        )
-        _run_bs_config(device, cfg)
+_COMPREHENSIVE_HEAD_CONFIGS = [
+    (128, 1, True),  # MQA128
+    (4, 1, True),  # MQA4
+    (128, 2, True),  # GQA 128:2
+    (32, 4, True),  # GQA 32:4
+    (4, 4, True),  # GQA 4:4 (MHA4)
+    (32, 32, True),  # MHA32
+]
+_COMPREHENSIVE_DIMS = [64, 128]
 
 
 @requires_sm100
-def test_block_sparse_comprehensive_sweep_loopq():
-    """Comprehensive sweep (LoopQ): head_config x D x sparsity.
-
-    Same configs as test_block_sparse_comprehensive_sweep, but with
-    swap_bwd_qk_loop=False (LoopQ). LoopQ outer=K-blocks gives inherently
-    deterministic dKV -- strict mismatch threshold (0.01) applies.
-
-    Mirrors SM90: test_block_sparse_comprehensive_sweep_loopq_hd64/hd128.
-    """
-    HEAD_CONFIGS = [
-        (128, 1, True),  # MQA128
-        (4, 1, True),  # MQA4
-        (128, 2, True),  # GQA 128:2
-        (32, 4, True),  # GQA 32:4
-        (4, 4, True),  # GQA 4:4 (MHA4)
-        (32, 32, True),  # MHA32
-    ]
-    DIMS = [64, 128]
-    SPARSITIES = [0.5]
-
-    configs = []
-    for nhq, nhk, pack_gqa in HEAD_CONFIGS:
-        for D in DIMS:
-            for sp in SPARSITIES:
-                sq, sk = 256, 1024
-                configs.append(
-                    dict(
-                        B=1,
-                        SQ=sq,
-                        SK=sk,
-                        NHQ=nhq,
-                        NHK=nhk,
-                        D=D,
-                        sparsity=sp,
-                        pack_gqa=pack_gqa,
-                    )
-                )
-
-    for i, cfg in enumerate(configs, 1):
-        print(
-            f"LoopQ {i}/{len(configs)}: "
-            f"NHQ={cfg['NHQ']}, NHK={cfg['NHK']}, D={cfg['D']}, "
-            f"sp={cfg['sparsity']}"
-        )
-        _run_bs_config(device, cfg, swap_bwd_qk_loop=False)
+@pytest.mark.parametrize("nhq,nhk,pack_gqa", _COMPREHENSIVE_HEAD_CONFIGS)
+@pytest.mark.parametrize("D", _COMPREHENSIVE_DIMS)
+def test_block_sparse_comprehensive_sweep(nhq, nhk, pack_gqa, D):
+    """Comprehensive sweep, LoopK: head_config x D."""
+    cfg = dict(
+        B=1, SQ=256, SK=1024, NHQ=nhq, NHK=nhk, D=D, sparsity=0.5, pack_gqa=pack_gqa
+    )
+    _run_bs_config(device, cfg)
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
+@requires_sm100
+@pytest.mark.parametrize("nhq,nhk,pack_gqa", _COMPREHENSIVE_HEAD_CONFIGS)
+@pytest.mark.parametrize("D", _COMPREHENSIVE_DIMS)
+def test_block_sparse_comprehensive_sweep_loopq(nhq, nhk, pack_gqa, D):
+    """Comprehensive sweep, LoopQ: head_config x D. dKV deterministic."""
+    cfg = dict(
+        B=1, SQ=256, SK=1024, NHQ=nhq, NHK=nhk, D=D, sparsity=0.5, pack_gqa=pack_gqa
+    )
+    _run_bs_config(device, cfg, swap_bwd_qk_loop=False)
