@@ -44,6 +44,7 @@ from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
+    GrpCollConfig,
     MinHeapDispatchAlg,
     OverlapConfig,
     UniformOverlapAlg,
@@ -264,6 +265,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
                 "chunk_size": 568,
+                "head_dim_v": 64,
             },
             # varlen block causal with total seqlen 960
             {
@@ -428,6 +430,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]
         num_heads_q, num_heads_kv = num_heads
+        head_dim_v: int | None = attn_config.get("head_dim_v")
 
         dist_attn_config = DistAttnConfig(
             # TODO: test other dispatch algs
@@ -498,6 +501,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     else self.nccl_group,
                     causal=is_causal,
                     dist_attn_config=dist_attn_config,
+                    head_dim_v=head_dim_v,
                 )
             case "magi_attn_varlen":
                 assert is_list_value_all(
@@ -522,6 +526,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     else self.nccl_group,
                     causal=is_causal,
                     dist_attn_config=dist_attn_config,
+                    head_dim_v=head_dim_v,
                 )
             case "magi_attn_flex":
                 use_str_masktype: bool = attn_config["use_str_masktype"]
@@ -542,6 +547,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     if env.comm.is_hierarchical_comm_enable()
                     else self.nccl_group,
                     dist_attn_config=dist_attn_config,
+                    head_dim_v=head_dim_v,
                 )
                 local_x_padded = dispatch(x, key=dist_attn_runtime_key)
             case "set_mesh_and_group":
@@ -627,6 +633,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             cp_group=self.nccl_group,
             cp_mesh=self.device_mesh,
             dist_attn_config=dist_attn_config,
+            head_dim_v=head_dim_v,
         )
 
         # -------   check mgr equality to ref -------- #
@@ -671,7 +678,9 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     AttnMaskType.from_int_type(new_attn_type_mapping)
                 ] * len(new_q_ranges)
 
-            new_dist_attn_config = DistAttnConfig()
+            new_dist_attn_config = DistAttnConfig(
+                grpcoll_config=GrpCollConfig(num_sms=8)
+            )
 
             match interface:
                 case "magi_attn_varlen":
@@ -707,6 +716,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             assert new_key.total_seqlen_q == dist_attn_runtime_key.total_seqlen_q
             assert new_key.total_seqlen_k == dist_attn_runtime_key.total_seqlen_k
             assert new_key.dist_attn_config == new_dist_attn_config
+            assert new_key.head_dim_v == head_dim_v
 
             new_mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict_mgr[new_key]
             ref_new_mgr = init_dist_attn_runtime_mgr(
@@ -724,6 +734,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 dist_attn_config=new_dist_attn_config,
                 ref_dispatch_meta_q=dist_attn_runtime_mgr.dispatch_meta_q,
                 ref_dispatch_meta_k=dist_attn_runtime_mgr.dispatch_meta_k,
+                head_dim_v=head_dim_v,
             )
             assert (
                 new_mgr == ref_new_mgr
