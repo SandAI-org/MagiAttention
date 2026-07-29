@@ -2181,23 +2181,27 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
+    auto load_batch_locals = [&]() {
+      m_block_min = inner_block_meta.inner_block_min;
+      m_block_max = inner_block_meta.inner_block_cnt;
+      seqlen_info = inner_block_meta.seqlen_info;
+      bidb = inner_block_meta.bidb;
+      attn_type = inner_block_meta.attn_type;
+      offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
+      last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
+      if constexpr (BlockSparse) {
+        k_start_tile = seqlen_info.offset_k / kBlockN;
+      }
+      m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(PackGQAFactor, 1), kBlockM);
+    };
+
     auto store_body = [&]() {
       if constexpr (IsSparse) {
         // Sparse: one inner m_block per store_body call; prefetch() advances a single block.
         // Deterministic ordering is handled inside store_inner_dq via range-lock sync/arrive.
         store_inner_dq(inner_block_meta.inner_block_idx, 0, 0);
       } else {
-        m_block_min = inner_block_meta.inner_block_min;
-        m_block_max = inner_block_meta.inner_block_cnt;
-        seqlen_info = inner_block_meta.seqlen_info;
-        bidb = inner_block_meta.bidb;
-        attn_type = inner_block_meta.attn_type;
-        offset_q = !PackGQA ? seqlen_info.offset_q : seqlen_info.offset_q * PackGQAFactor;
-        last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
-        if constexpr (BlockSparse) {
-          k_start_tile = seqlen_info.offset_k / kBlockN;
-        }
-        m_block_num = cute::ceil_div(seqlen_info.seqlen_q * cute::conditional_return<PackGQA>(PackGQAFactor, 1), kBlockM);
+        load_batch_locals();
 
         update_conflict_state(bidb_last, bidb);
         bidb_last = bidb;
@@ -2213,10 +2217,25 @@ struct CollectiveMainloopBwdSm90 {
       }
     };
 
+    // Advance past batches with no dQ data for this tile. Deterministic mode cannot
+    // simply jump over them: each batch owns range locks for its own Q blocks, and a
+    // batch that never arrives strands every CTA waiting behind it.
+    auto skip_invalid_batches = [&]() {
+      while (!inner_block_meta.is_valid() && !inner_block_meta.is_finish()) {
+        if constexpr (Deterministic && !IsSparse) {
+          load_batch_locals();
+          update_conflict_state(bidb_last, bidb);
+          bidb_last = bidb;
+          deterministic_pass_through(0, m_block_num);
+          __syncwarp();
+        }
+        inner_block_meta.prefetch();
+      }
+      return inner_block_meta.is_finish();
+    };
+
     // ─── Unified control flow ───
-    if (inner_block_meta.skip_to_first_valid()) {
-      // Tile entirely invalid: deterministic path still needs to arrive all range locks.
-      deterministic_pass_through(0, m_block_num);
+    if (skip_invalid_batches()) {
       return;
     }
 
@@ -2224,7 +2243,7 @@ struct CollectiveMainloopBwdSm90 {
       while (true) {
         store_body();
         inner_block_meta.prefetch();
-        if (inner_block_meta.skip_to_first_valid())
+        if (skip_invalid_batches())
           break;
       }
     } else {
