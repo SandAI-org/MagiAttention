@@ -797,6 +797,12 @@ class TestFlexFlashAttn(DistTestBase):
         max_seqlen_q: int | None = None,
         swap_bwd_qk_loop: bool = False,
     ):
+        # Dense deterministic runs LoopQ only; flex_flash_attn_func re-gates this for
+        # its own callers, and this helper has to do the same before building the
+        # range-merge metadata, which differs between the two loop directions.
+        if deterministic and swap_bwd_qk_loop:
+            swap_bwd_qk_loop = False
+
         t, h, d = q.shape
         o_acc = torch.randn_like(q, dtype=torch.float32)
         lse_acc = torch.randn([t, h], device=q.device, dtype=torch.float32)
