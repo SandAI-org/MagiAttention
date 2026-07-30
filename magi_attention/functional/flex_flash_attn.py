@@ -1943,11 +1943,13 @@ def flex_flash_attn_func(
             bwd_inner_loop_k = True
 
         # Deterministic mode requires LoopQ. The range-lock rendezvous publishes a
-        # boundary only when its counter is exactly 2, i.e. when one chain of
-        # adjacent inner tiles advances it. LoopQ locks dQ while iterating K as
-        # outer, so sync serializes the writers of a Q block. LoopK inverts the
-        # roles and lets several outer-Q CTAs hit the same K boundary at once;
-        # the counter overshoots 2 and the boundary is never published.
+        # boundary only once its counter reaches exactly 2, which holds because a
+        # writer syncs on the boundary before arriving on it: the writers of a block
+        # form a serial relay that contributes two arrivals per round. LoopK mirrors
+        # that encoding with Q and K swapped and works on simple shapes, but still
+        # deadlocks with range_merge + pack_gqa over merged batches, the counter
+        # observed past 2. The condition that breaks the relay is not pinned down,
+        # so gate the pairing off until it is.
         if deterministic and bwd_inner_loop_k is True:
             bwd_inner_loop_k = False
 
