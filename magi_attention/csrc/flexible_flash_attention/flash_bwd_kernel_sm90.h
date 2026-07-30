@@ -398,13 +398,19 @@ class FlashAttnBwdSm90 {
             inner_block_meta,
             shared_storage);
 
+        // work_idx is the phase of barrier_KV, and the producer arrives on it once per
+        // work tile -- including tiles with no valid inner block, which it signals with
+        // zero expected bytes. Counting only valid tiles leaves the phase one behind
+        // from the first empty tile onwards, so every later wait() checks the wrong
+        // parity: it either passes before K/V has landed or blocks forever.
+        ++work_idx;
+
         // Run the epilogue to store reduced dK (scaled),dV
         if (tile_valid) {
 #pragma unroll
           for (int i = 0; i < size(tdKrdK); ++i) {
             tdKrdK(i) *= params.mainloop.softmax_scale;
           }
-          ++work_idx;
           epilogue.store_dkv(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, epilogue_block_coord, det_msg);
           BarrierManager::arrive<NumConsumerThreads + NumProducerLoaderThreads>(BwdNamedBarriers::KVEmpty);
         } else {
