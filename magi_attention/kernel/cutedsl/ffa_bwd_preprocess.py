@@ -66,6 +66,7 @@ class FFABwdPreProcess:
         tile_m: int = 128,
         num_threads: int = 256,
         use_padded_offsets: bool = True,
+        dq_accum_hdim_multiple: int = 32,
     ):
         """
         All contiguous dimensions must be at least 16 bytes aligned which indicates the head dimension
@@ -89,6 +90,12 @@ class FFABwdPreProcess:
         )
         self.head_dim_v_padded = int(
             math.ceil(head_dim_v / hdim_multiple_of) * hdim_multiple_of
+        )
+        # SM100/SM110 true-range accumulators use the main kernel's 16-wide
+        # token-space padding.  Other paths retain the legacy 32-wide layout.
+        self.dq_accum_head_dim_padded = int(
+            math.ceil(head_dim / dq_accum_hdim_multiple)
+            * dq_accum_hdim_multiple
         )
         self.check_hdim_v_oob = head_dim_v != self.head_dim_v_padded
         self.num_threads = num_threads
@@ -134,7 +141,9 @@ class FFABwdPreProcess:
         universal_copy_bits = 128
         num_copy_elems_dQaccum = universal_copy_bits // Float32.width
         assert (
-            self.tile_m * self.head_dim_padded // num_copy_elems_dQaccum
+            self.tile_m
+            * self.dq_accum_head_dim_padded
+            // num_copy_elems_dQaccum
         ) % self.num_threads == 0
         self.gmem_tiled_copy_dQaccum = copy_utils.tiled_copy_1d(
             Float32, self.num_threads, num_copy_elems_dQaccum
@@ -398,9 +407,11 @@ class FFABwdPreProcess:
                     batch_idx,
                     dim=2,
                     padded=True,
-                    multiple=self.head_dim_padded,
+                    multiple=self.dq_accum_head_dim_padded,
                 )[None, head_idx]
-                blkdQaccum_shape = (self.tile_m * self.head_dim_padded,)
+                blkdQaccum_shape = (
+                    self.tile_m * self.dq_accum_head_dim_padded,
+                )
                 gdQaccum = cute.local_tile(mdQaccum_cur, blkdQaccum_shape, (m_block,))
                 gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_slice(tidx)
                 tdQgdQaccum = gmem_thr_copy_dQaccum.partition_S(gdQaccum)
