@@ -48,7 +48,7 @@ from .tile_scheduler import (
     TileSchedulerArguments,
 )
 
-
+# g->s(fp32), s2r, *scale->fp16/bf16, r2s(layout), s2g(tma)
 class FFABwdPostProcess:
     def __init__(
         self,
@@ -462,7 +462,7 @@ class FFABwdPostProcess:
                     tiler_mn=tiled_tmem_ld.tiler_mn,
                 )
                 tdQsdQ_r2s = thr_tmem_ld.partition_D(thr_mma_dsk.partition_C(sdQ))
-                tdQrdQ_r2s = cute.make_fragment(tdQsdQ_r2s.shape, self.dtype)
+                tdQrdQ_r2s = cute.make_rmem_tensor(tdQsdQ_r2s.shape, self.dtype)
 
                 num_stages = cute.size(tdQrdQ_fp32, mode=[1])
                 stage_stride = self.dQ_reduce_ncol
@@ -571,7 +571,7 @@ class FFABwdPostProcess:
                     acc_shape = tiled_mma.partition_shape_C(
                         tile_shape if const_expr(not dQ_swapAB) else tile_shape[::-1]
                     )
-                    acc = cute.make_fragment(acc_shape, cutlass.Float32)
+                    acc = cute.make_rmem_tensor(acc_shape, cutlass.Float32)
                     assert cute.size(acc) == cute.size(tdQsdQaccum)
                 else:
                     thr_mma = tiled_mma.get_slice(0)  # 1-CTA
@@ -783,24 +783,38 @@ bwd_postprocess.compile_cache = get_jit_cache("bwd_post")
 
 
 class FFABwdPostProcessRowMajor:
-    """Cast the row-major fp32 accumulator to the output dtype, row per thread.
+    """Cast a row-major fp32 accumulator with coalesced 2D thread mapping.
 
-    The non-deterministic true-range bwd stores gradients with plain fp32
-    atomics in original-token-space row-major layout, so the postprocess
-    collapses to a scale+cast sweep. The grid walks (range, tile) like the
-    C++ convert kernels: rows outside every range are never touched (callers
-    may hand in prefilled buffers), and rows shared by overlapping ranges
-    are written twice with the same already-merged value.
+    The non-deterministic true-range backward stores gradients through fp32
+    TMA add-reduction in original-token-space row-major layout. A power-of-two
+    group of adjacent threads cooperates on each row, so every group issues
+    contiguous 16-byte accumulator loads instead of a warp striding between
+    distant rows. The grid still walks (range, tile): rows outside every range
+    remain untouched, while overlapping ranges write the same merged value.
     """
 
-    def __init__(self, out_dtype, head_dim: int, tile_m: int = 128):
+    def __init__(self, out_dtype, head_dim: int):
         self.out_dtype = out_dtype
         self.head_dim = head_dim
         # The main kernel strides accumulator rows at head_dim padded to 16
         # (tile_hdim/tile_hdimv), not at the raw head_dim.
         self.accum_stride = (head_dim + 15) // 16 * 16
-        self.tile_m = tile_m
         self.vec_elems = 128 // cutlass.Float32.width  # 16B fp32 vectors
+        assert self.head_dim % self.vec_elems == 0
+        self.vectors_per_row = self.head_dim // self.vec_elems
+
+        # Use at most eight adjacent threads per row. Keeping the group size a
+        # power of two makes each group warp-local and keeps row/lane indexing
+        # cheap for small head dimensions as well.
+        self.threads_per_row = min(
+            8, 1 << (self.vectors_per_row - 1).bit_length()
+        )
+        self.num_threads = 256
+        assert self.num_threads % self.threads_per_row == 0
+        self.rows_per_cta = self.num_threads // self.threads_per_row
+        self.vector_groups = (
+            self.vectors_per_row + self.threads_per_row - 1
+        ) // self.threads_per_row
 
     @cute.jit
     def __call__(
@@ -814,9 +828,13 @@ class FFABwdPostProcessRowMajor:
     ):
         num_head = mOut.shape[1]
         num_ranges = mRanges.shape[0]
-        grid = (cute.ceil_div(max_seqlen, self.tile_m), num_ranges, num_head)
+        grid = (
+            cute.ceil_div(max_seqlen, self.rows_per_cta),
+            num_ranges,
+            num_head,
+        )
         self.kernel(mAccum, mOut, mRanges, scale).launch(
-            grid=grid, block=[self.tile_m, 1, 1], stream=stream
+            grid=grid, block=[self.num_threads, 1, 1], stream=stream
         )
 
     @cute.kernel
@@ -834,32 +852,43 @@ class FFABwdPostProcessRowMajor:
             cute.arch.block_idx()[2],
         )
         row_start = cutlass.Int32(mRanges[range_idx, 0])
-        row_in_range = block * self.tile_m + tidx
+        lane_in_row = tidx % self.threads_per_row
+        row_in_cta = tidx // self.threads_per_row
+        row_in_range = block * self.rows_per_cta + row_in_cta
         if row_in_range < cutlass.Int32(mRanges[range_idx, 1]) - row_start:
             row = row_start + row_in_range
             gAcc_row = cute.local_tile(
                 mAccum[head_idx, None], (self.accum_stride,), (row,)
             )
             gOut_row = mOut[row, head_idx, None]
-            num_vecs = self.head_dim // self.vec_elems
-            for i in cutlass.range(num_vecs, unroll_full=True):
-                rAcc = cute.make_rmem_tensor((self.vec_elems,), cutlass.Float32)
-                cute.autovec_copy(
-                    cute.local_tile(gAcc_row, (self.vec_elems,), (i,)), rAcc
-                )
-                rOut = cute.make_rmem_tensor((self.vec_elems,), self.out_dtype)
-                for j in cutlass.range(self.vec_elems, unroll_full=True):
-                    rOut[j] = self.out_dtype(rAcc[j] * scale)
-                cute.autovec_copy(
-                    rOut, cute.local_tile(gOut_row, (self.vec_elems,), (i,))
-                )
+            for group in cutlass.range_constexpr(self.vector_groups):
+                vector = group * self.threads_per_row + lane_in_row
+                if vector < self.vectors_per_row:
+                    gAcc = cute.local_tile(
+                        gAcc_row, (self.vec_elems,), (vector,)
+                    )
+                    rAcc = cute.make_rmem_tensor(
+                        (self.vec_elems,), cutlass.Float32
+                    )
+                    cute.autovec_copy(gAcc, rAcc)
+
+                    rOut = cute.make_rmem_tensor(
+                        (self.vec_elems,), self.out_dtype
+                    )
+                    rOut.store((rAcc.load() * scale).to(self.out_dtype))
+                    gOut = cute.local_tile(
+                        gOut_row, (self.vec_elems,), (vector,)
+                    )
+                    cute.autovec_copy(rOut, gOut)
 
 
 def _compile_bwd_postprocess_rowmajor(out_torch_dtype, head_dim: int):
     from magi_attention.utils.dtype import to_cute_dtype
 
     cache_key = (out_torch_dtype, head_dim)
-    cache = get_jit_cache("bwd_post_rowmajor")
+    # Module-level cache instance: the factory returns a fresh object per call,
+    # so a local one only survives through the persistent disk layer.
+    cache = bwd_postprocess_rowmajor.compile_cache
     if cache_key not in cache:
         out_dtype = to_cute_dtype(out_torch_dtype)
         obj = FFABwdPostProcessRowMajor(out_dtype, head_dim)
@@ -891,3 +920,136 @@ def bwd_postprocess_rowmajor(
     """Row-major accumulator -> output dtype (non-deterministic range path)."""
     compiled = _compile_bwd_postprocess_rowmajor(output.dtype, output.shape[-1])
     compiled(accum, output, ranges, max_seqlen, scale)
+
+
+bwd_postprocess_rowmajor.compile_cache = get_jit_cache("bwd_post_rowmajor")
+
+
+class FFABwdGradHoleCleanup:
+    """Zero gradient rows that no range covers.
+
+    The unique-writer direct-store backward writes every in-range dK/dV row
+    from the main kernel, so a full zeros allocation only exists to blank the
+    coverage holes. This kernel is the torch-free replacement (C++:
+    flash_bwd_postprocess_kernel): one thread per token row and stores only
+    into uncovered rows — no host sync, near-zero cost under full coverage.
+
+    Sorted ranges use binary search (the dK/dV direct-store contract).  The
+    dQ unique-writer contract guarantees disjointness but not ordering, so it
+    uses a linear membership scan over the small metadata tensor instead.
+    """
+
+    def __init__(self, dtype, row_elems: int, ranges_sorted: bool):
+        self.dtype = dtype
+        self.row_elems = row_elems
+        self.ranges_sorted = ranges_sorted
+        self.vec_elems = 128 // dtype.width
+        assert row_elems % self.vec_elems == 0, (
+            "flattened (heads * head_dim) row must be 16B-divisible"
+        )
+        self.vectors_per_row = row_elems // self.vec_elems
+        self.num_threads = 128
+
+    @cute.jit
+    def __call__(
+        self,
+        mGrad: cute.Tensor,  # (total_rows, row_elems) grad dtype, row-major
+        mRanges: cute.Tensor,  # (num_ranges, 2) int32, sorted + disjoint
+        stream: cuda.CUstream = None,
+    ):
+        self.kernel(mGrad, mRanges).launch(
+            grid=(cute.ceil_div(mGrad.shape[0], self.num_threads), 1, 1),
+            block=[self.num_threads, 1, 1],
+            stream=stream,
+        )
+
+    @cute.kernel
+    def kernel(self, mGrad: cute.Tensor, mRanges: cute.Tensor):
+        tidx = cute.arch.thread_idx()[0]
+        row = (
+            cutlass.Int32(cute.arch.block_idx()[0]) * self.num_threads + tidx
+        )
+        num_ranges = cutlass.Int32(mRanges.shape[0])
+        in_bounds = row < cutlass.Int32(mGrad.shape[0])
+
+        if const_expr(self.ranges_sorted):
+            # upper_bound over starts, so lo ends as the count of starts <=
+            # row. Fixed 32-step trip count instead of log2(dynamic R);
+            # converged iterations skip the load and update via scalar selects.
+            lo = cutlass.Int32(0)
+            hi = num_ranges if in_bounds else cutlass.Int32(0)
+            for _ in cutlass.range_constexpr(32):
+                active = lo < hi
+                mid = (lo + hi) >> 1
+                start_mid = cutlass.Int32(0)
+                if active:
+                    start_mid = cutlass.Int32(mRanges[mid, 0])
+                go_right = start_mid <= row
+                lo_next = mid + 1 if go_right else lo
+                hi_next = hi if go_right else mid
+                lo = lo_next if active else lo
+                hi = hi_next if active else hi
+
+            prev_end = cutlass.Int32(mRanges[cutlass.max(lo - 1, 0), 1])
+            outside_prev = row >= prev_end
+            is_hole = cutlass.Boolean(True) if lo == 0 else outside_prev
+            is_hole = is_hole if in_bounds else cutlass.Boolean(False)
+        else:
+            # disable_fwd_atomic_reduction certifies disjoint Q ranges, but
+            # deliberately does not require them to be sorted.  Scan metadata
+            # without any host readback; scalar selects keep the result in SSA.
+            covered = cutlass.Boolean(False)
+            for range_idx in cutlass.range(num_ranges, unroll=1):
+                start = cutlass.Int32(mRanges[range_idx, 0])
+                end = cutlass.Int32(mRanges[range_idx, 1])
+                in_range = row >= start and row < end
+                covered = cutlass.Boolean(True) if in_range else covered
+            is_hole = cutlass.Boolean(False) if covered else in_bounds
+
+        # A lone thread zeroing its own 16B-vectorized row trades coalescing
+        # for zero work under full coverage, which is the common case.
+        if is_hole:
+            zero_vec = cute.make_rmem_tensor((self.vec_elems,), self.dtype)
+            zero_vec.fill(0.0)
+            gRow = mGrad[row, None]
+            for vector in cutlass.range_constexpr(self.vectors_per_row):
+                gVec = cute.local_tile(gRow, (self.vec_elems,), (vector,))
+                cute.autovec_copy(zero_vec, gVec)
+
+
+def _compile_grad_hole_cleanup(
+    torch_dtype, row_elems: int, ranges_sorted: bool
+):
+    from magi_attention.utils.dtype import to_cute_dtype
+
+    cache_key = (torch_dtype, row_elems, ranges_sorted)
+    cache = bwd_grad_zero_holes.compile_cache
+    if cache_key not in cache:
+        dtype = to_cute_dtype(torch_dtype)
+        obj = FFABwdGradHoleCleanup(dtype, row_elems, ranges_sorted)
+        sym = cute.sym_int
+        div = 128 // dtype.width
+        mGrad = fake_tensor(dtype, (sym(), row_elems), divisibility=div)
+        mRanges = fake_tensor(cutlass.Int32, (sym(), 2), divisibility=1)
+        cache[cache_key] = cute.compile(
+            obj,
+            mGrad,
+            mRanges,
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options="--enable-tvm-ffi",
+        )
+    return cache[cache_key]
+
+
+def bwd_grad_zero_holes(
+    grad: torch.Tensor, ranges: torch.Tensor, *, ranges_sorted: bool = True
+) -> None:
+    """Zero rows of a packed (total, heads, head_dim) grad outside all ranges."""
+    g2d = grad.view(grad.shape[0], -1)
+    compiled = _compile_grad_hole_cleanup(
+        grad.dtype, g2d.shape[1], ranges_sorted
+    )
+    compiled(g2d, ranges)
+
+
+bwd_grad_zero_holes.compile_cache = get_jit_cache("bwd_hole_cleanup")

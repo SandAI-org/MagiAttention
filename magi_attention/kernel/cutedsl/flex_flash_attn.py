@@ -33,7 +33,11 @@ from .cutedsl_utils import (
     to_cute_aux_tensor,
     to_cute_tensor,
 )
-from .ffa_bwd_postprocess import bwd_postprocess, bwd_postprocess_rowmajor
+from .ffa_bwd_postprocess import (
+    bwd_grad_zero_holes,
+    bwd_postprocess,
+    bwd_postprocess_rowmajor,
+)
 from .ffa_bwd_preprocess import bwd_preprocess
 from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_bwd_sm80 import FFABwdSm80
@@ -675,6 +679,8 @@ def _flex_flash_attn_bwd(
     sink_layout: AttnSinkLayout = "sh",
     pack_gqa: bool = False,
     deterministic: bool = False,
+    disable_fwd_atomic_reduction: bool = False,
+    disable_bwd_dkv_atomic_reduction: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
@@ -947,6 +953,14 @@ def _flex_flash_attn_bwd(
         pack_gqa = qhead_per_kvhead > 1  # type: ignore[unreachable]
     # pack_gqa backward not yet supported in bwd
     pack_gqa = False
+    if disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11):
+        # Same contract as the C++ flag: sorted, pairwise-disjoint k_ranges
+        # and a unique CTA writer per KV head. Without catGQA/PackGQA in this
+        # bwd, only MHA satisfies the unique-writer half.
+        assert qhead_per_kvhead == 1, (
+            "disable_bwd_dkv_atomic_reduction requires MHA "
+            "(unique dK/dV writer per KV head)"
+        )
 
     if softcap != 0.0:
         assert (
@@ -970,24 +984,61 @@ def _flex_flash_attn_bwd(
     # Uncovered rows keep zero gradients on the ranges path; kernels never
     # visit them, so the allocation must provide the zeros.
     grad_alloc = torch.zeros_like if has_ranges else torch.empty_like
+    # Unique-writer direct path: kernels write every in-range dK/dV/dQ row,
+    # so only coverage holes need zeros, blanked on device instead of a full
+    # fill (C++: flash_bwd_postprocess_kernel next to OuterStoreMode=Stg).
+    # Torch has no sync-free hole fill: bool-mask writes cost ~3x a plain
+    # fill and index builds force a device sync.
+    direct_dkv = (
+        disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11)
+    )
+    # The fwd unique-writer contract also certifies disjoint Q ranges, so
+    # preprocess can clear each covered accumulator row exactly once and the
+    # output only needs a hole cleanup instead of a full fill.
+    direct_dq_init = (
+        disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
+    )
+    dkv_alloc = torch.empty_like if direct_dkv else grad_alloc
+    # DEVIATION: caller-provided dk/dv keep their own content in rows no
+    # range covers — C++ FFA zero-fills those holes too
+    # (flash_bwd_launch_template.h). Porting callers must pre-clear their
+    # buffers or accept stale holes.
+    dk_self_alloc = dk is None
+    dv_self_alloc = dv is None
+    dq_self_alloc = dq is None
 
+    # Q ranges covered by the direct contract may still arrive unsorted; the
+    # dQ cleanup therefore uses its ordering-agnostic metadata scan.
     if dq is None:
-        dq = grad_alloc(q)
+        dq = torch.empty_like(q) if direct_dq_init else grad_alloc(q)
     else:
         validate_tensor(dq, "dq", q.shape, out_torch_dtype, device)
 
     if dk is None:
-        dk = grad_alloc(k)
+        dk = dkv_alloc(k)
     else:
         validate_tensor(dk, "dk", k.shape, out_torch_dtype, device)
 
     if dv is None:
-        dv = grad_alloc(v)
+        dv = dkv_alloc(v)
     else:
         validate_tensor(dv, "dv", v.shape, out_torch_dtype, device)
 
-    head_dim_rounded = (head_dim + 32 - 1) // 32 * 32
+    if direct_dkv:
+        if dk_self_alloc:
+            bwd_grad_zero_holes(dk, k_ranges)
+        if dv_self_alloc:
+            bwd_grad_zero_holes(dv, k_ranges)
 
+    # The SM100/SM110 true-range path addresses row-major token-space
+    # accumulators with the kernel's 16-element padded head dimension.
+    # Keep dense/legacy paths on their existing 32-element allocation rule.
+    accum_hdim_multiple = 16 if has_ranges and major_arch in (10, 11) else 32
+    head_dim_rounded = (
+        (head_dim + accum_hdim_multiple - 1)
+        // accum_hdim_multiple
+        * accum_hdim_multiple
+    )
     if not has_ranges:
         dq_accum = torch.empty(
             batch_size,
@@ -1005,9 +1056,9 @@ def _flex_flash_attn_bwd(
     else:
         if major_arch in (10, 11):
             # Original-token-space accumulators: overlap is absorbed by the
-            # same atomics, and a tail tile running past a range end only
-            # adds rows the mask already zeroed. One extra tile keeps the
-            # last tail in bounds.
+            # same TMA add-reductions. A tail tile running past a range end
+            # contributes explicit zeros; one extra tile keeps the descriptor
+            # footprint in bounds.
             total_q_rounded_padded = (
                 (total_q + m_block_size - 1) // m_block_size + 1
             ) * m_block_size
@@ -1020,9 +1071,8 @@ def _flex_flash_attn_bwd(
                 // m_block_size
                 * m_block_size
             )
-        # Zeros: the row-major postprocess sweeps every row, so uncovered
-        # rows must read back the accumulator's zeros.
-        dq_accum = torch.zeros(
+        dq_accum_alloc = torch.empty if direct_dq_init else torch.zeros
+        dq_accum = dq_accum_alloc(
             num_head,
             total_q_rounded_padded * head_dim_rounded,
             dtype=torch.float32,
@@ -1043,10 +1093,20 @@ def _flex_flash_attn_bwd(
     # ragged TMA tensors for direct store, so no longer needs accum+postprocess.
     # Ranges force the accum+postprocess path even for MHA: overlapping K
     # ranges make several CTAs write the same dK/dV rows, so direct stores
-    # would clobber each other. (GQA needs it regardless.)
-    dKV_postprocess = qhead_per_kvhead > 1 or (has_ranges and major_arch in (10, 11))
+    # would clobber each other. (GQA needs it regardless.) The caller can
+    # certify sorted disjoint k_ranges via disable_bwd_dkv_atomic_reduction
+    # to restore the direct in-kernel dK/dV store (C++ OuterStoreMode=Stg).
+    dKV_postprocess = qhead_per_kvhead > 1 or (
+        has_ranges
+        and major_arch in (10, 11)
+        and not disable_bwd_dkv_atomic_reduction
+    )
     if dKV_postprocess:
-        head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
+        head_dim_v_rounded = (
+            (head_dim_v + accum_hdim_multiple - 1)
+            // accum_hdim_multiple
+            * accum_hdim_multiple
+        )
         if not has_ranges:
             dk_accum = torch.zeros(
                 batch_size,
@@ -1138,10 +1198,13 @@ def _flex_flash_attn_bwd(
         dpsum,
         lse,
         lse_log2,
-        # zeros-allocated accum needs no per-range clearing; skipping it also
-        # removes the PDL window where one range's clear could race another
-        # range's main-kernel atomics on shared physical rows.
-        None if pre_post_q_ranges is not None and not deterministic else dq_accum,
+        # Unique Q writers safely clear their own token-space rows in this
+        # preprocess (including under PDL). Overlapping Q ranges keep the
+        # zeros allocation: per-range clears could race another relation's
+        # main-kernel reductions on the same physical row.
+        dq_accum
+        if direct_dq_init or pre_post_q_ranges is None or deterministic
+        else None,
         cu_seqlens_q,
         None,  # seqused_q
         None,  # dlse
@@ -1252,6 +1315,7 @@ def _flex_flash_attn_bwd(
             block_sparse_broadcast_pattern,
             q_ranges is None,
             k_ranges is None,
+            disable_bwd_dkv_atomic_reduction,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
             get_broadcast_dims(v),
@@ -1364,6 +1428,7 @@ def _flex_flash_attn_bwd(
                     has_aux_tensors=aux_tensors is not None,
                     subtile_factor=subtile_factor,
                     use_per_range_mask=use_per_range_mask,
+                    disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
@@ -1468,9 +1533,9 @@ def _flex_flash_attn_bwd(
             num_threads_post_dQ = 128
             num_threads_post_dKV = 128
 
-    # Non-deterministic true-range bwd stores row-major fp32 atomics; its
-    # postprocess is a per-(range, tile) scale+cast sweep that never touches
-    # rows outside every range.
+    # Non-deterministic true-range bwd stores row-major fp32 TMA reductions;
+    # its postprocess is a per-(range, tile) scale+cast sweep that never
+    # touches rows outside every range.
     rowmajor_post = pre_post_q_ranges is not None and not deterministic
     if rowmajor_post:
         bwd_postprocess_rowmajor(dq_accum, dq, q_ranges, seqlen_q, softmax_scale)
@@ -1492,6 +1557,10 @@ def _flex_flash_attn_bwd(
             cluster_size=1,
             ranges=pre_post_q_ranges,
         )
+
+    if direct_dq_init and dq_self_alloc:
+        assert q_ranges is not None
+        bwd_grad_zero_holes(dq, q_ranges, ranges_sorted=False)
 
     if dKV_postprocess and rowmajor_post:
         bwd_postprocess_rowmajor(dk_accum, dk, k_ranges, seqlen_k, softmax_scale)
@@ -1575,6 +1644,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         deterministic: bool = False,
         flex_attn_args: TorchFlexAttnArgs | None = None,
         disable_fwd_atomic_reduction: bool = True,
+        disable_bwd_dkv_atomic_reduction: bool = False,
     ):
         arch, major_arch = get_device_arch()
         is_varlen = q_ranges is not None or k_ranges is not None
@@ -1652,6 +1722,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.sink_layout = sink_layout
         ctx.softcap = softcap
         ctx.deterministic = deterministic
+        ctx.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction
+        ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         # Drop the direct aux_tensors reference on ctx; the real tensors are
@@ -1709,6 +1781,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_q=ctx.max_seqlen_q,
             max_seqlen_k=ctx.max_seqlen_k,
             deterministic=ctx.deterministic,
+            disable_fwd_atomic_reduction=ctx.disable_fwd_atomic_reduction,
+            disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             flex_attn_args=flex_attn_args,
         )
 
@@ -1733,6 +1807,7 @@ def flex_flash_attn_func(
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
     disable_fwd_atomic_reduction: bool = True,
+    disable_bwd_dkv_atomic_reduction: bool = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / range / varlen).
@@ -1766,6 +1841,23 @@ def flex_flash_attn_func(
     softcap: tanh logit soft-capping value. Implemented internally via the
         score_mod machinery, but exposed here as a plain scalar.
 
+    disable_fwd_atomic_reduction: caller contract that ``q_ranges`` are
+        pairwise disjoint (not necessarily sorted), so forward can skip the
+        fp32 atomic out reduction. On SM100/SM110 ranges backward it also
+        selects the unique-writer dQ path: dq/dq_accum start uninitialized,
+        preprocess clears the covered rows, and a final cleanup zeroes the
+        holes of self-allocated dq. Defaults to True — pass False whenever
+        q ranges may overlap. Geometry is never read back (that would sync),
+        so a wrong certification silently corrupts out/dQ — exactly like C++.
+
+    disable_bwd_dkv_atomic_reduction: caller contract (same as the C++
+        flag) that ``k_ranges`` are sorted and pairwise disjoint, so every
+        dK/dV row has a unique CTA writer. SM100/SM110 ranges backward then
+        stores dK/dV directly from the main kernel (native dtype, no fp32
+        accumulator, no dK/dV postprocess) and only zeroes coverage holes.
+        MHA only; range geometry is never read back (that would sync), so a
+        wrong certification silently corrupts dK/dV — exactly like C++.
+
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
         ``mask_mod`` / ``aux_tensors``) and block-sparse
@@ -1789,6 +1881,7 @@ def flex_flash_attn_func(
         deterministic,
         flex_attn_args,
         disable_fwd_atomic_reduction,
+        disable_bwd_dkv_atomic_reduction,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)
