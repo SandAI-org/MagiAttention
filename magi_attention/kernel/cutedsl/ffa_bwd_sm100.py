@@ -2083,7 +2083,9 @@ class FFABwdSm100:
         dkacc_shape = thr_mma_dK.partition_shape_C(self.mma_tiler_dsq[:2])
         tdKtdK = thr_mma_dK.make_fragment_C(dkacc_shape)
         tdKtdK = cute.make_tensor(tmem_ptr + self.tmem_dK_offset, tdKtdK.layout)
-        # tdQtdQ: (MMA_tC=(intraRow64,(col64,interRow2)),MMA_Q1,MMA_HD1):((65536,(1,4194304)),0,0)
+        # tdQtdQ: (MMA_tC=(row64,(col64,hdimHalf2)),MMA_Q1,MMA_HD1):((65536,(1,4194304)),0,0)
+        # NOTE: the trailing "2" mode selects the head-dim half (n_hi), not an
+        # interleaved row: each CTA rank owns 64 whole rows x the full head dim.
         thr_mma_dQ = tiled_mma_dQ.get_slice(mma_tile_coord_v)
         dQacc_shape = thr_mma_dQ.partition_shape_C(self.mma_tiler_dsk[:2])
         tdQtdQ = thr_mma_dQ.make_fragment_C(dQacc_shape)
@@ -5348,7 +5350,9 @@ class FFABwdSm100:
         tiled_copy_t2r = tcgen05.make_tmem_copy(tmem_load_atom, tdQtdQ)
         thr_copy_t2r = tiled_copy_t2r.get_slice(tidx)
 
-        # tdQtdQ: (MMA_tC=(intraRow64,(col64,interRow2)),MMA_Q1,MMA_HD1):((65536,(1,4194304)),0,0)
+        # tdQtdQ: (MMA_tC=(row64,(col64,hdimHalf2)),MMA_Q1,MMA_HD1):((65536,(1,4194304)),0,0)
+        # NOTE: the trailing "2" mode selects the head-dim half (n_hi), not an
+        # interleaved row: each CTA rank owns 64 whole rows x the full head dim.
         # tdQtdQ_t2r: (T2R_CPY_ATOM=((col32,row32),1),CPY_HD2,MMA_Q1,MMA_HD1):(((1,65536),0),32,0,0)
         # tdQcdQ: (MMA_tC=(64,128),MMA_Q1,MMA_HD1):((1@0,1@1),0,0)
         # tdQrdQ_t2r: (T2R_CPY_ATOM=(32,1),CPY_HD2,MMA_Q1,MMA_HD1)
@@ -5366,11 +5370,17 @@ class FFABwdSm100:
             self.tile_hdim // self.cta_group_size // self.dQ_reduce_ncol,
         )
         tdQ_zero = None
+        tdQ_zero_tma = None
         if const_expr(self.token_space_grads):
             tdQ_zero = cute.make_rmem_tensor(
                 tdQcdQ_t2r[None, 0, 0, 0].shape, Float32
             )
             tdQ_zero.fill(0.0)
+            if const_expr(self.use_2cta_instrs):
+                tdQ_zero_tma = cute.make_rmem_tensor(
+                    (self.dQ_reduce_ncol,), Float32
+                )
+                tdQ_zero_tma.fill(0.0)
 
         # NOTE: in 2-CTA mode, each CTA rank will reduce half dQacc along tileQ
         # since each CTA holds a (tileQ//2,tileHD) slice of the full dQacc tile,
@@ -5736,6 +5746,24 @@ class FFABwdSm100:
                                 cute.autovec_copy(tdQrdQ_stage, tdQsdQ_stage)
                             else:
                                 cute.autovec_copy(tdQ_zero, tdQsdQ_stage)
+                        else:
+                        # 2-CTA fold: rank 0/1 owns rows 0:64 / 64:128;
+                        # within a rank, threads 0:64 and 64:128 stage the
+                        # low/high column halves into independent SMEM slots.
+                            row_base = (
+                                cta_rank_in_cluster * self.dQ_reduce_rows
+                            )
+                            column_group = tidx // self.dQ_reduce_rows
+                            frag_r = tdQrdQ[None, stage]
+                            row_local = tidx % self.dQ_reduce_rows
+                            row = row_base + row_local
+                            tdQsdQ_stage = sdQacc[
+                                row_local, None, column_group
+                            ]
+                            if row < rows_valid:
+                                cute.autovec_copy(frag_r, tdQsdQ_stage)
+                            else:
+                                cute.autovec_copy(tdQ_zero_tma, tdQsdQ_stage)
                         cute.arch.fence_view_async_shared()
 
                     # Semaphore acquire
@@ -5797,6 +5825,33 @@ class FFABwdSm100:
                             cute.arch.cp_async_bulk_commit_group()
                             cute.arch.cp_async_bulk_wait_group(
                                 self.sdQacc_stage - 1, read=read_flag
+                            )
+                        elif is_tma_warp:
+                            cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
+
+                    if const_expr(
+                        self.token_space_grads and self.use_2cta_instrs
+                    ):
+                        if is_tma_warp and not m_block_oob_upper:
+                            for column_group in cutlass.range_constexpr(
+                                self.cta_group_size
+                            ):
+                                strip_global = stage + column_group * cute.size(
+                                    tdQrdQ, mode=[1]
+                                )
+                                cute.copy(
+                                    tma_atom_dQacc,
+                                    tdQsdQ_tma[None, column_group],
+                                    tdQgdQ_tma[
+                                        None,
+                                        m_block * self.cta_group_size
+                                        + cta_rank_in_cluster,
+                                        strip_global,
+                                    ],
+                                )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(
+                                0, read=read_flag
                             )
                         elif is_tma_warp:
                             cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
@@ -6350,7 +6405,17 @@ class FFABwdSm100:
                 # Tail rows must write explicit zeros: descriptor OOB
                 # predication cannot see a relation boundary.
                 rows_valid = seqlen_info.seqlen_k - n_block * self.tile_n
-                k_row = tdKVcdKV_t2r[0][0]
+                # partition_C rows are cluster-relative (rank 1 sees
+                # [tile_n, 2*tile_n)); rows_valid and the strip are per-CTA.
+                # Without normalizing, rank 1 never writes its strip and the
+                # TMA reduce adds stale smem (aliased bf16 V bytes) to gmem.
+                if const_expr(self.use_2cta_instrs):
+                    _cta_rank = cute.arch.make_warp_uniform(
+                        cute.arch.block_in_cluster_idx()[0]
+                    )
+                    k_row = tdKVcdKV_t2r[0][0] - _cta_rank * self.tile_n
+                else:
+                    k_row = tdKVcdKV_t2r[0][0]
                 sdKV_row = sdKV_tma[k_row, None]
                 sdKV_row_fragment = cute.make_tensor(
                     sdKV_row.iterator, tdKVrdKV_t2r.layout

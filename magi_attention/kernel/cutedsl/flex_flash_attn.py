@@ -860,14 +860,9 @@ def _flex_flash_attn_bwd(
                 or block_sparse_tensors is not None
                 or use_per_range_mask
             )
-            # DEVIATION: force 1CTA whenever ranges are present — the
-            # atomic accum path asserts 1CTA, and det+ranges is rejected
-            # upstream until 2E4.
-            # Reason: V1 mixed bwd keeps 1CTA for correctness
-            # Recovery: none in V1
             cluster_size = (
                 1
-                if use_per_range_mask or has_ranges
+                if use_per_range_mask
                 else (2 if head_dim >= 128 and not disable_2cta else 1)
             )
             use_2cta_instrs = cluster_size == 2
