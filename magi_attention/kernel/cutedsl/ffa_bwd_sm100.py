@@ -648,13 +648,21 @@ class FFABwdSm100:
             self.dQ_reduce_rows = self.tile_m
             self.sdQacc_tma_stage = self.sdQacc_stage
             self.sdQacc_tma_layout = self.sdQacc_layout
+        # Aligned-bulk ranges staging widens each stats buffer by 4 floats so
+        # the 16B-aligned-down box (tile_m+4 floats) fits per stage.
+        if self.stats_bulk_aligned:
+            self.stats_rows = self.tile_m + 4
+            self.stats_pitch = self.stats_rows
+        else:
+            self.stats_rows = self.tile_m
+            self.stats_pitch = cute.round_up(self.tile_m, 64)
         self.sLSE_layout = cute.make_layout(
-            shape=(self.tile_m, self.Q_stage),
-            stride=(1, cute.round_up(self.tile_m, 64)),
+            shape=(self.stats_rows, self.Q_stage),
+            stride=(1, self.stats_pitch),
         )
         self.sdPsum_layout = cute.make_layout(
-            shape=(self.tile_m, self.dO_stage),
-            stride=(1, cute.round_up(self.tile_m, 64)),
+            shape=(self.stats_rows, self.dO_stage),
+            stride=(1, self.stats_pitch),
         )
 
         # --- Make epilogue smem layouts ---
@@ -775,10 +783,18 @@ class FFABwdSm100:
         ), "mQRanges and mKRanges must be passed together"
         self.is_varlen_k = mKRanges is not None or mSeqUsedK is not None
         self.is_varlen_q = mQRanges is not None or mSeqUsedQ is not None
-        # Physical range offsets are only 4B-aligned, which breaks the 16B
-        # requirement of the bulk stats copies; ranges stage LSE/dPsum with
-        # plain per-lane loads under an AsyncThread pipeline instead.
+        # Range offsets are only 4B-aligned, which breaks the 16B base
+        # requirement of the bulk stats copies, so ranges stage LSE/dPsum
+        # with plain per-lane loads.
+        # The C++-style x4 (16B/token) stats layout stays infeasible: x4 smem
+        # staging (+4.6KB) exceeds the 227KB dynamic cap, and TMA tiled cannot
+        # compact-gather lane 0 (boxDim[0]*elemsize must be a 16B multiple).
+        # The align-down bulk variant (stats_bulk_aligned) measured slower
+        # (+2.7pp on the 16k direct-dKV gap): the small stats bulk queues
+        # behind the 64KB Q/dO TMA loads, while per-lane LDGs bypass that
+        # queue.  Kept gated off.
         self.stats_generic_stage = mQRanges is not None
+        self.stats_bulk_aligned = False
         # Non-deterministic ranges accumulate gradients in row-major token
         # space via 2D TMA add-reduction; other shapes keep the interleaved
         # smem+bulk layout their postprocess reads.
@@ -1135,8 +1151,8 @@ class FFABwdSm100:
                 ("dO", mdO, self.sdO_layout),
             ]
         }
-        self.tma_copy_bytes["LSE"] = self.tile_m * Float32.width // 8
-        self.tma_copy_bytes["dPsum"] = self.tile_m * Float32.width // 8
+        self.tma_copy_bytes["LSE"] = self.stats_rows * Float32.width // 8
+        self.tma_copy_bytes["dPsum"] = self.stats_rows * Float32.width // 8
         self.tma_copy_bytes["dQ"] = (
             self.tile_m * self.dQ_reduce_ncol * Float32.width // 8
         )
@@ -1882,9 +1898,7 @@ class FFABwdSm100:
             defer_sync=True,
         )
 
-        # Load LSE / dPsum pipelines (load -> compute). The generic-stage
-        # variant drops the TMA transaction protocol: the producer commits
-        # after its plain smem stores instead.
+        # Load LSE / dPsum pipelines (load -> compute).
         if const_expr(self.stats_generic_stage):
             pipeline_LSE = pipeline.PipelineAsync.create(
                 barrier_storage=LSE_mbar_ptr,
@@ -2815,8 +2829,31 @@ class FFABwdSm100:
             )[None, head_idx]
             # gLSE: (tileQ128,restQ):(1,128)
             # gdPsum: (tileQ128,restQ):(1,128)
-            gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
-            gdPsum = cute.local_tile(mdPsum_cur, (self.tile_m,), (None,))
+            if const_expr(self.stats_bulk_aligned):
+                # Overlapping (tile_m+4)-float boxes at tile_m stride from the
+                # 16B aligned-down base; prefix is uniform across the range.
+                stats_off = seqlen_info.padded_offset_q
+                stats_off_al = cute.assume(stats_off - stats_off % 4, divby=4)
+                mLSE_al = cute.domain_offset((stats_off_al, None), mLSE)[
+                    None, head_idx
+                ]
+                mdPsum_al = cute.domain_offset((stats_off_al, None), mdPsum)[
+                    None, head_idx
+                ]
+                stats_g_layout = cute.make_layout(
+                    (
+                        self.stats_rows,
+                        cute.ceil_div(
+                            cute.size(mLSE_cur, mode=[0]), self.tile_m
+                        ),
+                    ),
+                    stride=(1, self.tile_m),
+                )
+                gLSE = cute.make_tensor(mLSE_al.iterator, stats_g_layout)
+                gdPsum = cute.make_tensor(mdPsum_al.iterator, stats_g_layout)
+            else:
+                gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
+                gdPsum = cute.local_tile(mdPsum_cur, (self.tile_m,), (None,))
 
             # mQt_cur: (HD,seqQ):(1@0,1@1)
             # mKt_cur: (HD,seqK):(1@0,1@1)
@@ -4524,14 +4561,14 @@ class FFABwdSm100:
             sLSE.iterator,
             cute.make_layout(
                 (self.tile_m, self.tile_n, self.Q_stage),
-                stride=(1, 0, cute.round_up(self.tile_m, 64)),
+                stride=(1, 0, self.stats_pitch),
             ),
         )
         sdPsum_2D_ = cute.make_tensor(
             sdPsum.iterator,
             cute.make_layout(
                 (self.tile_m, self.tile_n, self.dO_stage),
-                stride=(1, 0, cute.round_up(self.tile_m, 64)),
+                stride=(1, 0, self.stats_pitch),
             ),
         )
         sLSE_2D = layout_utils.transpose_view(sLSE_2D_)
@@ -4749,6 +4786,20 @@ class FFABwdSm100:
                     seqlen_info, n_block_for_bounds
                 )
 
+
+            # Aligned-bulk staging places row 0 at smem[prefix]; shift the
+            # consumer views so the compute indexing stays row-origin.
+            if const_expr(self.stats_bulk_aligned):
+                stats_prefix = seqlen_info.padded_offset_q % 4
+                tSsLSE_v = cute.make_tensor(
+                    tSsLSE.iterator + stats_prefix, tSsLSE.layout
+                )
+                tSsdPsum_v = cute.make_tensor(
+                    tSsdPsum.iterator + stats_prefix, tSsdPsum.layout
+                )
+            else:
+                tSsLSE_v = tSsLSE
+                tSsdPsum_v = tSsdPsum
 
             # --- Define attn mask apply fn ---
 
@@ -4990,7 +5041,7 @@ class FFABwdSm100:
                         )
                         if const_expr(prefetch_LSE and not self.shuffle_LSE):
                             cute.autovec_copy(
-                                tSsLSE[None, 0, 0, 0, consumer_state_LSE.index],
+                                tSsLSE_v[None, 0, 0, 0, consumer_state_LSE.index],
                                 tSrLSE_s2r,
                             )
 
@@ -5060,7 +5111,7 @@ class FFABwdSm100:
                         tSrP_r2t = cute.recast_tensor(tSrP_r2t_f32, self.q_dtype)
                         for stage in cutlass.range_constexpr(num_cpy_stages):  # CPY_Q2
                             tSrS_cur = tSrS_t2r[None, stage, 0, 0]
-                            tSsLSE_cur = tSsLSE[None, stage, 0, 0, consumer_state_LSE.index]
+                            tSsLSE_cur = tSsLSE_v[None, stage, 0, 0, consumer_state_LSE.index]
 
                             # S2R copy sLSE(i) if not to prefetch
                             if const_expr(not self.shuffle_LSE):
@@ -5169,7 +5220,7 @@ class FFABwdSm100:
                             tSrS_cur = tSrS_t2r[None, stage, 0, 0]
 
                             # S2R copy sdPsum to rdPsum
-                            tSsdPsum_cur = tSsdPsum[
+                            tSsdPsum_cur = tSsdPsum_v[
                                 None, stage, 0, 0, consumer_state_dPsum.index
                             ]
                             if const_expr(not self.shuffle_dPsum):
@@ -5386,7 +5437,7 @@ class FFABwdSm100:
                     )
                     if const_expr(prefetch_LSE and not self.shuffle_LSE):
                         cute.autovec_copy(
-                            tSsLSE[None, 0, 0, 0, consumer_state_LSE.index],
+                            tSsLSE_v[None, 0, 0, 0, consumer_state_LSE.index],
                             tSrLSE_s2r,
                         )
 
@@ -5456,7 +5507,7 @@ class FFABwdSm100:
                     tSrP_r2t = cute.recast_tensor(tSrP_r2t_f32, self.q_dtype)
                     for stage in cutlass.range_constexpr(num_cpy_stages):  # CPY_Q2
                         tSrS_cur = tSrS_t2r[None, stage, 0, 0]
-                        tSsLSE_cur = tSsLSE[None, stage, 0, 0, consumer_state_LSE.index]
+                        tSsLSE_cur = tSsLSE_v[None, stage, 0, 0, consumer_state_LSE.index]
 
                         # S2R copy sLSE(i) if not to prefetch
                         if const_expr(not self.shuffle_LSE):
@@ -5565,7 +5616,7 @@ class FFABwdSm100:
                         tSrS_cur = tSrS_t2r[None, stage, 0, 0]
 
                         # S2R copy sdPsum to rdPsum
-                        tSsdPsum_cur = tSsdPsum[
+                        tSsdPsum_cur = tSsdPsum_v[
                             None, stage, 0, 0, consumer_state_dPsum.index
                         ]
                         if const_expr(not self.shuffle_dPsum):
