@@ -560,7 +560,19 @@ class FA4AttnArg(AttnArg):
                 n_max_func=n_ub_func,
             )
 
-            # Get actual func count from sliced output
+            # Drop the over-allocated tail before FA4 sees it: FA4 unrolls
+            # over func_num at O(elements * func_num) bwd cost, so dead rows
+            # cost minutes of JIT per variant (257 -> 1: ~19 min -> ~18 s).
+            # Live rows vary per column, so keep the global max; an all-zero
+            # row 0 is legitimate (first interval not at k=0), hence floor 1.
+            # n_max_func above must stay at n_ub_func: the kernel's bound
+            # check (magi_to_hstu.cu:99) under-counts by one interval.
+            live_rows = hstu_func.ne(0).any(dim=1)
+            row_ordinal = torch.arange(
+                1, hstu_func.size(0) + 1, device=hstu_func.device
+            )
+            n_keep = max(int((live_rows * row_ordinal).max().item()), 1)
+            hstu_func = hstu_func[:n_keep]
             self.n_func = hstu_func.size(0)
 
             hstu_func = hstu_func.unsqueeze(0).unsqueeze(0)
