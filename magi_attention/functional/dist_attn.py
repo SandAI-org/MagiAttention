@@ -2543,11 +2543,21 @@ class DistAttnRuntime:
         # we need to zero-initialize them since they might be reduced later
         dq = torch.zeros_like(
             q,
-            dtype=self._maybe_hp_dtype(q.dtype, not self.bwd_local_dq_lp_init),
+            dtype=self._maybe_hp_dtype(
+                q.dtype,
+                # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
+                need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
+                and not self.bwd_local_dq_lp_init,
+            ),
         )
         dkv = torch.zeros(
             dkv_shape,
-            dtype=self._maybe_hp_dtype(k.dtype, not self.bwd_local_dkv_lp_init),
+            dtype=self._maybe_hp_dtype(
+                k.dtype,
+                # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
+                need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
+                and not self.bwd_local_dkv_lp_init,
+            ),
             device=k.device,
         )
         if not self.concat_dkv:  # make partial_dkv tupled tensors
@@ -2578,7 +2588,12 @@ class DistAttnRuntime:
         # we need to zero-initialize them since they might be reduced later
         dq = torch.zeros_like(
             q,
-            dtype=self._maybe_hp_dtype(q.dtype, not self.bwd_local_dq_lp_init),
+            dtype=self._maybe_hp_dtype(
+                q.dtype,
+                # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
+                need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
+                and not self.bwd_local_dq_lp_init,
+            ),
         )
 
         return dq
@@ -2595,7 +2610,12 @@ class DistAttnRuntime:
 
         dkv = torch.zeros(
             dkv_shape,
-            dtype=self._maybe_hp_dtype(k.dtype, not self.bwd_local_dkv_lp_init),
+            dtype=self._maybe_hp_dtype(
+                k.dtype,
+                # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
+                need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
+                and not self.bwd_local_dkv_lp_init,
+            ),
             device=k.device,
         )
         if not self.concat_dkv:  # make partial_dkv tupled tensors
