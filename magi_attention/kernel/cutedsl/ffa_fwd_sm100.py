@@ -623,6 +623,9 @@ class FFAFwdSm100:
         descale_tensors: Optional[DescaleTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
+        # Runtime scalar on purpose (not a ctor/compile-key entry): one
+        # compiled variant serves every max relation length.
+        max_seqlen_q: Int32 | None = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -1088,6 +1091,33 @@ class FFAFwdSm100:
 
         # (max_ctas, 1, 1), where max_ctas = sm_counts // cluster_size
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+        if const_expr(mQRanges is not None):
+            # The generic varlen bound assumes ranges partition token space;
+            # overlapping Q ranges can need more tiles than it launches, and
+            # a dropped tile silently loses whole relations (out partial,
+            # lse stuck at -inf). Launch the per-range cluster-aligned
+            # bound; excess tiles exit via is_valid_tile.
+            assert max_seqlen_q is not None, "ranges fwd needs max_seqlen_q"
+            # Packed GQA folds the q-head repetition into the token dim, so
+            # the bound scales by qhead_per_kvhead to match the decode.
+            qhead_packgqa = (
+                self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1
+            )
+            cluster_m = self.cluster_shape_mn[0]
+            blocks_per_range = (
+                cute.ceil_div(
+                    max_seqlen_q * qhead_packgqa,
+                    self.cta_tiler[0] * cluster_m,
+                )
+                * cluster_m
+            )
+            grid_dim = (
+                blocks_per_range
+                * cute.size(mQRanges.shape[0])
+                * cute.size(mQ.shape[2]),
+                grid_dim[1],
+                grid_dim[2],
+            )
 
         # --- Make smem storage ---
 

@@ -721,6 +721,9 @@ class FFABwdSm100:
         mdK_semaphore: Optional[cute.Tensor] = None,
         mdV_semaphore: Optional[cute.Tensor] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
+        # Runtime scalar on purpose (not a ctor/compile-key entry): one
+        # compiled variant serves every max relation length.
+        max_seqlen_k: Int32 | None = None,
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -1179,6 +1182,25 @@ class FFABwdSm100:
         self.tile_scheduler_cls = TileScheduler
 
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+        if const_expr(
+            mKRanges is not None
+            and not self.disable_bwd_dkv_atomic_reduction
+        ):
+            # The generic varlen bound assumes ranges partition token space;
+            # overlapping K ranges can need more tiles than it launches.
+            # Heavy dKV is exactly where K overlap is legal, so launch a
+            # per-relation cluster-aligned bound from max_seqlen_k instead.
+            assert max_seqlen_k is not None, "heavy ranges bwd needs max_seqlen_k"
+            cluster_tile_n = self.tile_n * self.cta_group_size
+            blocks_per_cluster = cute.ceil_div(max_seqlen_k, cluster_tile_n)
+            max_blocks_per_range = blocks_per_cluster * self.cta_group_size
+            grid_dim = (
+                max_blocks_per_range
+                * cute.size(mKRanges.shape[0])
+                * cute.size(mQ.shape[2]),
+                Int32(1),
+                Int32(1),
+            )
 
         # --- Make smem storage ---
 
@@ -1500,6 +1522,10 @@ class FFABwdSm100:
 
         # --- Launch the kernel ---
 
+        assert self.shared_storage.size_in_bytes() <= 232448, (  # type: ignore[attr-defined]
+            f"bwd smem request {self.shared_storage.size_in_bytes()}B "  # type: ignore[attr-defined]
+            f"exceeds the SM100 227KB dynamic smem cap"
+        )
         self.kernel(
             tma_tensor_Q,
             tma_tensor_Qt,
@@ -2126,7 +2152,6 @@ class FFABwdSm100:
             tile_m=self.tile_m,
             tile_n=self.tile_n * self.cluster_shape_mnk[0],
         )
-        # TODO(cher): why swap_AB = true
         AttentionMaskCls = partial(
             AttentionMask,
             self.tile_m,
@@ -2536,6 +2561,7 @@ class FFABwdSm100:
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 
+    # TODO(cher): bench the overhead of this function
     @cute.jit
     def _copy_stats(self, pipe, state, gBlk, sBlk, lane):
         """Stage a (tile_m,) fp32 stats block into smem.
@@ -2613,8 +2639,6 @@ class FFABwdSm100:
         tidx = cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE
         copy_atom_stats = cute.make_copy_atom(cpasync.CopyBulkG2SOp(), Float32)
         copy_stats_fn = partial(cute.copy, copy_atom_stats)
-
-
         a_cta_layout = cute.make_layout(
             cute.slice_(cta_layout_vmnk, (0, 0, None, 0)).shape
         )
@@ -4732,7 +4756,8 @@ class FFABwdSm100:
                 )
                 if const_expr(prefetch_LSE and not self.shuffle_LSE):
                     cute.autovec_copy(
-                        tSsLSE[None, 0, 0, 0, consumer_state_LSE.index], tSrLSE_s2r
+                        tSsLSE[None, 0, 0, 0, consumer_state_LSE.index],
+                        tSrLSE_s2r,
                     )
 
                 # Wait for tS to be full

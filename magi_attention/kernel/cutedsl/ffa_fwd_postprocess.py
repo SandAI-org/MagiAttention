@@ -14,11 +14,6 @@
 
 """Forward postprocess for the atomic-reduction path.
 
-Port of flash_fwd_postprocess_kernel.h: rows whose merged LSE stayed -inf get
-O written to zero (the uncovered/empty-row contract), and the attention sink
-is folded in globally — one rescale per row, so the locked epilogue never has
-to reason about sink x overlap.  No dtype conversion happens here: like the
-C++ path, atomic-reduction O stays fp32 for the caller.
 """
 
 import math
@@ -127,7 +122,7 @@ def _compile_fwd_postprocess(
     from magi_attention.utils.dtype import to_cute_dtype
 
     cache_key = (o_torch_dtype, head_dim_v, has_sink)
-    cache = get_jit_cache("ffa_fwd_postprocess")
+    cache = fwd_postprocess.compile_cache
     if cache_key not in cache:
         o_dtype = to_cute_dtype(o_torch_dtype)
         obj = FFAFwdPostProcess(o_dtype, head_dim_v, has_sink=has_sink)
@@ -160,3 +155,6 @@ def fwd_postprocess(
     """In-place: zero O rows whose LSE is -inf, fold the sink into O/LSE."""
     compiled = _compile_fwd_postprocess(out.dtype, out.shape[-1], sink is not None)
     compiled(out, lse, sink)
+
+
+fwd_postprocess.compile_cache = get_jit_cache("ffa_fwd_postprocess")

@@ -163,6 +163,8 @@ class FFABwdPreProcess:
         mSeqUsedQ: Optional[cute.Tensor],  # (batch,)
         mQRanges: Optional[cute.Tensor],  # (batch, 2)
         mdLSE: Optional[cute.Tensor],  # (batch, nheads, seqlen) or (nheads, total_q)
+        # Runtime scalar on purpose: keeps the compile cache seqlen-agnostic.
+        max_seqlen_q: cutlass.Int32 | None = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -237,6 +239,18 @@ class FFABwdPreProcess:
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+        if const_expr(mQRanges is not None):
+            # The generic varlen bound assumes ranges partition token space;
+            # overlapping Q ranges can need more tiles than it launches, and
+            # a dropped tile keeps dpsum/lse_log2 at zero — the main kernel
+            # then rebuilds P against lse_log2=0 and gradients explode.
+            # Launch the per-range bound; excess tiles exit via is_valid_tile.
+            assert max_seqlen_q is not None, "ranges preprocess needs max_seqlen_q"
+            grid_dim = (
+                cute.ceil_div(max_seqlen_q, self.tile_m) * num_batch * num_head,
+                cutlass.Int32(1),
+                cutlass.Int32(1),
+            )
 
         self.kernel(
             mO,
@@ -490,7 +504,12 @@ def _compile_bwd_preprocess(
     )
     mdQaccum = mdQaccum if has_dq_accum else None
     fa_bwd_pre = FFABwdPreProcess(
-        dtype, head_dim, head_dim_v, m_block_size, use_padded_offsets=use_padded_offsets
+        dtype,
+        head_dim,
+        head_dim_v,
+        m_block_size,
+        use_padded_offsets=use_padded_offsets,
+        dq_accum_hdim_multiple=16 if has_ranges else 32,
     )
     return cute.compile(
         fa_bwd_pre,
@@ -504,6 +523,7 @@ def _compile_bwd_preprocess(
         mSequsedQ,
         mQRanges,
         mdLSE,
+        cutlass.Int32(0),
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--enable-tvm-ffi",
     )
@@ -525,6 +545,7 @@ def bwd_preprocess(
     m_block_size: int,
     use_padded_offsets: bool = True,
     q_ranges: torch.Tensor | None = None,
+    max_seqlen_q: int = 0,
 ):
     """Backward preprocess: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum."""
     compile_key = (
@@ -539,6 +560,9 @@ def bwd_preprocess(
         dq_accum is not None,
         use_padded_offsets,
     )
+    assert (
+        q_ranges is None or max_seqlen_q > 0
+    ), "ranges preprocess requires max_seqlen_q (the per-range launch bound)"
     if compile_key not in bwd_preprocess.compile_cache:
         bwd_preprocess.compile_cache[compile_key] = _compile_bwd_preprocess(
             *compile_key
@@ -554,6 +578,7 @@ def bwd_preprocess(
         seqused_q,
         q_ranges,
         dlse,
+        max_seqlen_q,
     )
 
 

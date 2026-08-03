@@ -20,6 +20,7 @@ import math
 
 import cutlass.cute as cute
 import torch
+from cutlass import Int32
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.common import AttnForwardMeta
@@ -255,8 +256,7 @@ def _flex_flash_attn_fwd(
         )
 
     if lse is None:
-        # Atomic reduction merges through LSE: -inf marks a never-written row,
-        # so the buffer must be prefilled (callers passing lse own this).
+        # Atomic reduction merges through LSE: -inf marks a never-written row.
         if disable_fwd_atomic_reduction:
             lse = torch.empty(lse_shape, dtype=torch.float32, device=device)
         else:
@@ -328,6 +328,13 @@ def _flex_flash_attn_fwd(
 
     if max_seqlen_q is None:
         max_seqlen_q = seqlen_q if not has_ranges else total_q
+    if has_ranges and magiattn_cutedsl.is_ffa_debug_mode_enabled():
+        # The fwd per-range launch bound is sized from max_seqlen_q; an
+        # underestimate silently drops relations (out partial, lse=-inf).
+        _q_max = int((q_ranges[:, 1] - q_ranges[:, 0]).max().item())
+        assert max_seqlen_q >= _q_max, (
+            f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
+        )
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
     seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
@@ -604,6 +611,8 @@ def _flex_flash_attn_fwd(
                 if range_locks is not None
                 else None
             )
+            # Runtime scalar: the compiled variant stays max_seqlen_q-agnostic.
+            compile_args.append(Int32(max_seqlen_q))
         compile_args.extend(
             [
                 sparse_tensors,
@@ -638,6 +647,7 @@ def _flex_flash_attn_fwd(
         call_args.append(None)
         call_args.append(mask_types_tensor)
         call_args.append(range_locks)
+        call_args.append(max_seqlen_q)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
@@ -892,6 +902,18 @@ def _flex_flash_attn_bwd(
         seqlen_q = max_seqlen_q if max_seqlen_q is not None else total_q
         total_k = k.shape[0]
         seqlen_k = max_seqlen_k if max_seqlen_k is not None else total_k
+        if magiattn_cutedsl.is_ffa_debug_mode_enabled():
+            # Main kernel, preprocess and rowmajor postprocess all size
+            # per-range launch bounds from max_seqlen_q/k; an underestimate
+            # silently truncates work. The sync below is debug-only.
+            _q_max = int((q_ranges[:, 1] - q_ranges[:, 0]).max().item())
+            _k_max = int((k_ranges[:, 1] - k_ranges[:, 0]).max().item())
+            assert seqlen_q >= _q_max, (
+                f"max_seqlen_q={seqlen_q} < longest q range {_q_max}"
+            )
+            assert seqlen_k >= _k_max, (
+                f"max_seqlen_k={seqlen_k} < longest k range {_k_max}"
+            )
 
     num_head_kv = k.shape[-2]
 
@@ -1209,6 +1231,7 @@ def _flex_flash_attn_bwd(
         m_block_size,
         use_padded_offsets=False,
         q_ranges=pre_post_q_ranges,
+        max_seqlen_q=seqlen_q if pre_post_q_ranges is not None else 0,
     )
 
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
@@ -1465,6 +1488,8 @@ def _flex_flash_attn_bwd(
         ]
         if major_arch in [10, 11]:
             bwd_compile_args.append(mask_types_cute_tensor)
+            # Runtime scalar: the compiled variant stays max_seqlen_k-agnostic.
+            bwd_compile_args.append(Int32(seqlen_k))
         bwd_compile_args.extend(
             [
                 cute_aux_tensors,
@@ -1501,6 +1526,7 @@ def _flex_flash_attn_bwd(
     ]
     if major_arch in [10, 11]:
         bwd_call_args.append(mask_types_tensor)
+        bwd_call_args.append(seqlen_k)
     bwd_call_args.extend(
         [
             aux_tensors,
@@ -1822,6 +1848,10 @@ def flex_flash_attn_func(
         # Recovery: Phase 2 passes mQRanges/mKRanges and drops the collapse
 
     max_seqlen_q/max_seqlen_k: max sequence length over the ranges (varlen).
+        Hard contract: each must be >= its longest range; per-range launch
+        bounds are sized from these, so an underestimate silently truncates
+        work. Omitting falls back to total_q/total_k — always safe, but the
+        loosest bound. Debug mode validates against the ranges (a sync).
 
     mask_types: the attention mask type applied to the q/k ranges, using the
         int keys from ``MT_MAP`` (0=full, 1=causal, 2=inv_causal, 3=bi_causal).
