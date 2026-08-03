@@ -745,6 +745,7 @@ def _flex_flash_attn_bwd(
     disable_fwd_atomic_reduction: bool = False,
     disable_bwd_dkv_atomic_reduction: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    range_merge: "bool | RangeMergePlan" = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
@@ -779,6 +780,48 @@ def _flex_flash_attn_bwd(
                 "deterministic backward with q/k ranges is unsupported "
                 "until the row-major deterministic path lands"
             )
+    range_merge_active = bool(range_merge) and has_ranges
+    cu_batches = None
+    if range_merge_active:
+        assert major_arch in (10, 11), "bwd RangeMerge is SM100/SM110 only"
+        # K-merge exists to direct-store shared-K dKV: the caller certifies
+        # the MERGED K intervals are pairwise disjoint (and sorted, which the
+        # merge produces), re-legalizing the unique-writer contract.
+        assert disable_bwd_dkv_atomic_reduction, (
+            "bwd RangeMerge requires disable_bwd_dkv_atomic_reduction "
+            "(merged K intervals pairwise disjoint)"
+        )
+        assert not deterministic
+        assert flex_attn_args is None or (
+            flex_attn_args.score_mod is None
+            and flex_attn_args.score_mod_bwd is None
+            and flex_attn_args.mask_mod is None
+            and flex_attn_args.block_sparse_tensors_bwd is None
+        )
+        if isinstance(range_merge, RangeMergePlan):
+            plan = range_merge
+            assert plan.merged_outer_ranges.shape[0] == k_ranges.shape[0]
+            k_ranges = plan.merged_outer_ranges  # merged K groups
+            q_ranges = plan.sorted_inner_ranges  # pair list, group-contiguous
+            mask_types_tensor = plan.sorted_mask_types
+            cu_batches = plan.cu_batches
+            mask_mode = MaskMode.PER_RANGE
+        else:
+            if mask_mode != MaskMode.PER_RANGE:
+                mask_types_tensor = torch.full(
+                    (q_ranges.shape[0],),
+                    mask_type,
+                    dtype=torch.int32,
+                    device=q_ranges.device,
+                )
+                mask_mode = MaskMode.PER_RANGE
+            (
+                k_ranges,  # merged K groups, [0,0]-padded
+                _sorted_k_ranges,
+                q_ranges,  # pair list, group-contiguous
+                mask_types_tensor,
+                cu_batches,
+            ) = merge_qk_ranges(k_ranges, q_ranges, mask_types_tensor)
     # SM100/SM110 pre/main/post kernels consume ranges directly; other arches
     # still read cu_seqlens (ranges are cu-partition-equivalent until 2B).
     if has_ranges and major_arch not in (10, 11):
@@ -1387,6 +1430,7 @@ def _flex_flash_attn_bwd(
             q_ranges is None,
             k_ranges is None,
             disable_bwd_dkv_atomic_reduction,
+            range_merge_active,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
             get_broadcast_dims(v),
@@ -1500,6 +1544,7 @@ def _flex_flash_attn_bwd(
                     subtile_factor=subtile_factor,
                     use_per_range_mask=use_per_range_mask,
                     disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
+                    range_merge=range_merge_active,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
@@ -1541,6 +1586,11 @@ def _flex_flash_attn_bwd(
         ]
         if major_arch in [10, 11]:
             bwd_compile_args.append(mask_types_cute_tensor)
+            bwd_compile_args.append(
+                to_cute_tensor(cu_batches, assumed_align=4, leading_dim=0)
+                if cu_batches is not None
+                else None
+            )
             # Runtime scalar: the compiled variant stays max_seqlen_k-agnostic.
             bwd_compile_args.append(Int32(seqlen_k))
         bwd_compile_args.extend(
@@ -1579,6 +1629,7 @@ def _flex_flash_attn_bwd(
     ]
     if major_arch in [10, 11]:
         bwd_call_args.append(mask_types_tensor)
+        bwd_call_args.append(cu_batches)
         bwd_call_args.append(seqlen_k)
     bwd_call_args.extend(
         [
@@ -1720,6 +1771,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_fwd_atomic_reduction: bool = True,
         disable_bwd_dkv_atomic_reduction: bool = False,
         range_merge: "bool | RangeMergePlan" = False,
+        range_merge_bwd: "bool | RangeMergePlan" = False,
     ):
         arch, major_arch = get_device_arch()
         is_varlen = q_ranges is not None or k_ranges is not None
@@ -1800,6 +1852,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction
         ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
+        ctx.range_merge_bwd = range_merge_bwd
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         # Drop the direct aux_tensors reference on ctx; the real tensors are
@@ -1860,6 +1913,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_fwd_atomic_reduction=ctx.disable_fwd_atomic_reduction,
             disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             flex_attn_args=flex_attn_args,
+            range_merge=ctx.range_merge_bwd,
         )
 
         return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
@@ -1885,6 +1939,7 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = True,
     disable_bwd_dkv_atomic_reduction: bool = False,
     range_merge: "bool | RangeMergePlan" = False,
+    range_merge_bwd: "bool | RangeMergePlan" = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / range / varlen).
@@ -1964,6 +2019,7 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         disable_bwd_dkv_atomic_reduction,
         range_merge,
+        range_merge_bwd,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)

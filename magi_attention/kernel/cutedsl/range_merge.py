@@ -33,6 +33,7 @@ __all__ = [
     "merge_qk_ranges",
     "RangeMergePlan",
     "plan_range_merge",
+    "plan_range_merge_bwd",
 ]
 
 
@@ -70,6 +71,32 @@ def plan_range_merge(
         )
     merged, sq, sk, sm, cu = merge_qk_ranges(q_ranges, k_ranges, mask_types)
     return RangeMergePlan(merged, sq, sk, sm, cu)
+
+
+def plan_range_merge_bwd(
+    q_ranges: torch.Tensor,
+    k_ranges: torch.Tensor,
+    mask_types: torch.Tensor | int | None = None,
+) -> RangeMergePlan:
+    """Backward K-merge preprocessing: outer = K interval.
+
+    Groups relations that share one K interval so a single backward CTA per
+    K tile walks all their Q ranges, accumulating dK/dV in TMEM across pairs
+    before one direct store (mirrors C++ ``merge_ranges(k_ranges, q_ranges)``).
+    Caller contract: the merged K intervals are pairwise disjoint, which is
+    what re-legalizes ``disable_bwd_dkv_atomic_reduction`` under shared K.
+    """
+    num_ranges = q_ranges.shape[0]
+    if mask_types is None:
+        mask_types = torch.zeros(
+            num_ranges, dtype=torch.int32, device=q_ranges.device
+        )
+    elif isinstance(mask_types, int):
+        mask_types = torch.full(
+            (num_ranges,), mask_types, dtype=torch.int32, device=q_ranges.device
+        )
+    merged_k, sk, sq, sm, cu = merge_qk_ranges(k_ranges, q_ranges, mask_types)
+    return RangeMergePlan(merged_k, sk, sq, sm, cu)
 
 
 def merge_qk_ranges(

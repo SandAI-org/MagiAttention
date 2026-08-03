@@ -311,6 +311,80 @@ class TestFfaPerRangeMask(DistTestBase):
         )
 
     @with_run_in_mp
+    @parameterize("mha_type", ["mha", "gqa"])
+    def test_bwd_exact_shared_k_d96(self, mha_type):
+        """Three disjoint Q relations reduce into the same physical K rows.
+
+        D=96 is intentional: each dK/dV compute WG emits three 16-column
+        tensor-reduce strips rather than the 32-column strips used by D=64/128.
+        """
+        major = torch.cuda.get_device_capability()[0]
+        if major not in (10, 11):
+            self.skipTest("Tensor-TMA range backward requires SM100/SM110")
+
+        device = self.device
+        torch.random.manual_seed(self.seed + 96)
+        q_rows = [[0, 192], [192, 384], [384, 576]]
+        k_rows = [[1024, 1536], [1024, 1536], [1024, 1536]]
+        attn_type_map = [MT_MAP.full] * len(q_rows)
+        total_q, total_k = 576, 1536
+        nheads = 4
+        nheads_kv = {"mha": nheads, "gqa": 2}[mha_type]
+        d, dtype = 96, torch.bfloat16
+
+        q = torch.randn(
+            total_q, nheads, d, device=device, dtype=dtype
+        ).requires_grad_()
+        k = torch.randn(
+            total_k, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+        v = torch.randn(
+            total_k, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+        q_ranges_t = torch.tensor(q_rows, device=device, dtype=torch.int32)
+        k_ranges_t = torch.tensor(k_rows, device=device, dtype=torch.int32)
+        mask_types = torch.tensor(
+            attn_type_map, device=device, dtype=torch.int32
+        )
+
+        out, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_types=mask_types,
+            max_seqlen_q=192,
+            max_seqlen_k=512,
+        )
+        do = torch.randn_like(out)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+
+        test_case = f"[RANK {self.rank}][exact_shared_k_d96][{mha_type=}]"
+        for name, tensor in (("o", out), ("dq", dq), ("dk", dk), ("dv", dv)):
+            self.assertFalse(
+                tensor.isnan().any(), msg=f"For {test_case}: {name} contains NaN"
+            )
+
+        self.assert_close_to_torch_ref(
+            q_thd=q.detach(),
+            k_thd=k.detach(),
+            v_thd=v.detach(),
+            do_thd=do,
+            out_thd=out,
+            dq_thd=dq,
+            dk_thd=dk,
+            dv_thd=dv,
+            q_ranges=AttnRanges.from_ranges(q_rows),
+            k_ranges=AttnRanges.from_ranges(k_rows),
+            attn_type_map=attn_type_map,
+            total_seqlen_q=total_q,
+            total_seqlen_k=total_k,
+            dtype=dtype,
+            test_case=test_case,
+        )
+
+    @with_run_in_mp
     @parameterize("seqlen_k", [64, 127])
     def test_per_range_fully_masked_rows(self, seqlen_k):
         # Sq > Sk leaves Q rows with no visible key: Causal masks the leading
