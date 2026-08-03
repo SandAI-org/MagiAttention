@@ -22,9 +22,12 @@ from .ffa_utils import (
     validate_true_ranges,
 )
 from .flex_flash_attn import flex_flash_attn_func
+from .range_merge import RangeMergePlan, plan_range_merge
 
 __all__ = [
     "flex_flash_attn_func",
+    "RangeMergePlan",
+    "plan_range_merge",
     "TorchFlexAttnArgs",
     "MT_MAP",
     "MaskMode",

@@ -162,7 +162,6 @@ _FP8_SMALL_HDIM_REGS = {
 # === END TUNING KNOBS ===
 
 
-
 class DescaleTensors(NamedTuple):
     q_descale: Optional[cute.Tensor] = None
     k_descale: Optional[cute.Tensor] = None
@@ -195,6 +194,7 @@ class FFAFwdSm100:
         use_2cta_instrs: bool = False,
         use_clc_scheduler: bool = False,
         use_per_range_mask: bool = False,
+        range_merge: bool = False,
         disable_fwd_atomic_reduction: bool = True,
         debug_print: bool = False,
     ):
@@ -276,6 +276,18 @@ class FFAFwdSm100:
         self.mask_type = mask_type
         # When True, mMaskTypes[batch_idx] selects the mask type at runtime.
         self.use_per_range_mask = use_per_range_mask
+        # RangeMerge: the scheduler batch is a merged group of relations that
+        # share one Q interval; each work tile walks the group's K ranges
+        # (mCuBatches CSR over the sorted pair list) with one softmax.
+        self.range_merge = range_merge
+        if range_merge:
+            assert use_per_range_mask, "RangeMerge rides the per-range entry"
+            assert not use_2cta_instrs and not is_split_kv and not pack_gqa
+            assert not is_persistent
+            # The group-level softmax_step binding (seqlen/batch_idx) is only
+            # consumed by score/mask mods; keep them off so per-pair rebinding
+            # is unnecessary.
+            assert score_mod is None and mask_mod is None
         self.is_local = is_local
         self.is_varlen_q = is_varlen_q
         self.use_correction_warps_for_epi = is_varlen_q
@@ -626,6 +638,9 @@ class FFAFwdSm100:
         # Runtime scalar on purpose (not a ctor/compile-key entry): one
         # compiled variant serves every max relation length.
         max_seqlen_q: Int32 | None = None,
+        # RangeMerge CSR: group g owns sorted pairs
+        # [mCuBatches[g], mCuBatches[g+1]).
+        mCuBatches: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -662,6 +677,9 @@ class FFAFwdSm100:
         assert (mRangeLocks is not None) == (
             not self.disable_fwd_atomic_reduction
         ), "range locks required iff fwd atomic reduction is enabled"
+        assert (mCuBatches is not None) == self.range_merge, (
+            "RangeMerge requires the cu_batches CSR (and only then)"
+        )
         if const_expr(not self.disable_fwd_atomic_reduction):
             assert mLSE is not None, "atomic reduction merges through LSE"
             assert mO.element_type == Float32, "atomic reduction stores fp32 O"
@@ -1315,6 +1333,7 @@ class FFAFwdSm100:
             descale_tensors,
             mMaskTypes,
             mRangeLocks,
+            mCuBatches,
             blocksparse_tensors,
             sQ_layout,
             sK_layout,
@@ -1366,6 +1385,7 @@ class FFAFwdSm100:
         descale_tensors: Optional[DescaleTensors],
         mMaskTypes: Optional[cute.Tensor],
         mRangeLocks: Optional[cute.Tensor],
+        mCuBatches: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
         sQ_layout: cute.ComposedLayout,
         sK_layout: cute.ComposedLayout,
@@ -1997,6 +2017,7 @@ class FFAFwdSm100:
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
                 mMaskTypes=mMaskTypes,
+                mCuBatches=mCuBatches,
                 is_print_block=is_print_block,
             )
 
@@ -2039,6 +2060,7 @@ class FFAFwdSm100:
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
                 mMaskTypes=mMaskTypes,
+                mCuBatches=mCuBatches,
                 is_print_block=is_print_block,
             )
 
@@ -2075,6 +2097,7 @@ class FFAFwdSm100:
                     SeqlenInfoCls,
                     tile_scheduler=tile_scheduler,
                     mMaskTypes=mMaskTypes,
+                    mCuBatches=mCuBatches,
                     mma_tile_coord_v=mma_tile_coord_v,
                     is_print_block=is_print_block,
                 )
@@ -2120,6 +2143,7 @@ class FFAFwdSm100:
                 head_divmod=head_divmod,
                 blocksparse_tensors=blocksparse_tensors,
                 mMaskTypes=mMaskTypes,
+                mCuBatches=mCuBatches,
                 is_print_block=is_print_block,
             )
 
@@ -2186,6 +2210,7 @@ class FFAFwdSm100:
                 tile_scheduler=tile_scheduler,
                 blocksparse_tensors=blocksparse_tensors,
                 mMaskTypes=mMaskTypes,
+                mCuBatches=mCuBatches,
                 mRangeLocks=mRangeLocks,
                 is_print_block=is_print_block,
             )
@@ -2218,6 +2243,7 @@ class FFAFwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
         mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         num_load_threads = len(self.load_warp_ids) * cute.arch.WARP_SIZE
@@ -2458,7 +2484,92 @@ class FFAFwdSm100:
             #  G2S-load sQ/sK/sV
             # //////////////////////////////////////////////
 
-            if const_expr(not self.use_block_sparsity):
+            if const_expr(self.range_merge and not self.use_block_sparsity):
+                assert mMaskTypes is not None and mCuBatches is not None
+                assert mPageTable is None, "RangeMerge does not support paged KV"
+                # --- RangeMerge: Q once, then the group's K ranges in order.
+                # (Q ahead of K0 gives up a little first-tile overlap vs the
+                # dense interleave; V1 keeps the ordering simple.)
+                if issue_q_for_this_warp:
+                    load_Q(block=0, stage=0)
+                    if const_expr(self.q_stage == 2):
+                        load_Q(block=1, stage=1)
+                q_producer_phase ^= 1
+                pair_beg = Int32(mCuBatches[batch_idx])
+                pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
+                for pj in cutlass.range(pair_cnt, unroll=1):
+                    seqlen_pair = SeqlenInfoCls(batch_idx, k_batch_idx=pair_beg + pj)
+                    attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
+                    lo_p, hi_p = block_info.get_n_block_min_max_per_range(
+                        seqlen_pair, m_block, attn_type_pair, split_idx, num_splits
+                    )
+                    mK_p = cute.domain_offset(
+                        (seqlen_pair.offset_k, 0), mK[None, None, head_idx_kv]
+                    )
+                    mV_p = cute.domain_offset(
+                        (0, seqlen_pair.offset_k), mV[None, None, head_idx_kv]
+                    )
+                    gK_p = cute.local_tile(
+                        mK_p, cute.select(self.mma_tiler_qk, mode=[1, 2]), (None, 0)
+                    )
+                    gV_p = cute.local_tile(
+                        mV_p, cute.select(self.mma_tiler_pv, mode=[1, 2]), (0, None)
+                    )
+                    tKsK_p, tKgK_p = cpasync.tma_partition(
+                        tma_atom_K,
+                        tma_cta_coord,
+                        tma_cta_layout,
+                        cute.group_modes(sK, 0, 3),
+                        cute.group_modes(thr_mma_qk.partition_B(gK_p), 0, 3),
+                    )
+                    tVsV_p, tVgV_p = cpasync.tma_partition(
+                        tma_atom_V,
+                        tma_cta_coord,
+                        tma_cta_layout,
+                        cute.group_modes(sV, 0, 3),
+                        cute.group_modes(thr_mma_pv.partition_B(gV_p), 0, 3),
+                    )
+                    load_K_p = partial(
+                        self.load_KV,
+                        tma_atom_K,
+                        tKgK_p,
+                        tKsK_p,
+                        None,
+                        sK,
+                        pipeline_kv=pipeline_kv,
+                        K_or_V="K",
+                    )
+                    load_V_p = partial(
+                        self.load_KV,
+                        tma_atom_V,
+                        tVgV_p,
+                        tVsV_p,
+                        None,
+                        sV,
+                        pipeline_kv=pipeline_kv,
+                        K_or_V="V",
+                    )
+                    # Dense-mirror per pair: an unconditional first block
+                    # (clamped like the dense empty-interval case) plus the
+                    # descending remainder — eff count max(hi-lo, 1).
+                    first_blk = hi_p - 1 if hi_p > 0 else Int32(0)
+                    if issue_kv_for_this_warp:
+                        load_K_p(block=first_blk, producer_state=kv_producer_state)
+                        kv_producer_state.advance()
+                        load_V_p(block=first_blk, producer_state=kv_producer_state)
+                        kv_producer_state.advance()
+                    for i in cutlass.range(hi_p - 1 - lo_p, unroll=1):
+                        n_block = hi_p - 2 - i
+                        if issue_kv_for_this_warp:
+                            load_K_p(
+                                block=n_block, producer_state=kv_producer_state
+                            )
+                            kv_producer_state.advance()
+                            load_V_p(
+                                block=n_block, producer_state=kv_producer_state
+                            )
+                            kv_producer_state.advance()
+            elif const_expr(not self.use_block_sparsity):
                 if const_expr(self.use_per_range_mask):
                     assert mMaskTypes is not None
                     attn_type = Int32(mMaskTypes[batch_idx])
@@ -2594,6 +2705,7 @@ class FFAFwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
         mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         # /////////////////////////////////////////////////////////////////////////////
@@ -2736,17 +2848,44 @@ class FFAFwdSm100:
                 )
                 process_tile = block_iter_count > Int32(0)
             else:
-                if const_expr(self.use_per_range_mask):
+                if const_expr(self.range_merge):
+                    assert mMaskTypes is not None and mCuBatches is not None
+                    # One merged work tile walks the whole pair group; the
+                    # MMA consumes K/V smem stages blindly, so only the
+                    # summed K-tile count matters here.
+                    pair_beg = Int32(mCuBatches[batch_idx])
+                    pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
+                    block_iter_count = Int32(0)
+                    for pj in cutlass.range(pair_cnt, unroll=1):
+                        seqlen_pair = SeqlenInfoCls(
+                            batch_idx, k_batch_idx=pair_beg + pj
+                        )
+                        attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
+                        lo_p, hi_p = block_info.get_n_block_min_max_per_range(
+                            seqlen_pair,
+                            m_block,
+                            attn_type_pair,
+                            split_idx,
+                            num_splits,
+                        )
+                        # Mirror the dense empty-interval semantics: every
+                        # pair contributes at least one (fully masked) block
+                        # so the four roles' pipeline counts stay in lockstep.
+                        block_iter_count += cutlass.max(hi_p - lo_p, Int32(1))
+                    n_block_min = Int32(0)
+                    n_block_max = block_iter_count
+                elif const_expr(self.use_per_range_mask):
                     assert mMaskTypes is not None
                     attn_type = Int32(mMaskTypes[batch_idx])
                     n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
                         seqlen_info, m_block, attn_type, split_idx, num_splits
                     )
+                    block_iter_count = n_block_max - n_block_min
                 else:
                     n_block_min, n_block_max = block_info.get_n_block_min_max(
                         seqlen_info, m_block, split_idx, num_splits
                     )
-                block_iter_count = n_block_max - n_block_min
+                    block_iter_count = n_block_max - n_block_min
                 if const_expr(not self.is_split_kv):
                     process_tile = True
                 else:
@@ -3074,6 +3213,7 @@ class FFAFwdSm100:
         head_divmod=None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         """Compute softmax on attention scores from QK matrix multiplication.
@@ -3491,6 +3631,102 @@ class FFAFwdSm100:
                             + self.q_stage * self.m_block_size
                         ] = softmax.row_max[0]
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
+            elif const_expr(self.range_merge):
+                assert mMaskTypes is not None and mCuBatches is not None
+                # One softmax spans the group's pair list: each pair replays
+                # the dense tile body against its own K range and mask, with
+                # running row_max/row_sum carried across pairs. is_first
+                # stays False: from the reset state the correction scale is
+                # exp2(-inf)=0 and the first sScale write is ignored.
+                pair_beg = Int32(mCuBatches[batch_idx])
+                pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
+                for pj in cutlass.range(pair_cnt, unroll=1):
+                    pair_row = pair_beg + pj
+                    seqlen_pair = SeqlenInfoCls(batch_idx, k_batch_idx=pair_row)
+                    attn_type_p = Int32(mMaskTypes[pair_row])
+                    lo_p, hi_p = block_info.get_n_block_min_max_per_range(
+                        seqlen_pair, m_block, attn_type_p, split_idx, num_splits
+                    )
+                    mask_p = AttentionMaskCls(seqlen_pair)
+                    mask_fn_p = partial(
+                        mask_p.apply_mask_sm100_per_range,
+                        m_block=mask_m_block,
+                        thr_mma=thr_mma_qk,
+                        thr_tmem_load=thr_tmem_load,
+                        attn_type=attn_type_p,
+                    )
+                    (
+                        mma_si_consumer_phase,
+                        sm_stats_producer_phase,
+                        s0_s1_sequence_phase,
+                    ) = softmax_step(
+                        mma_si_consumer_phase,
+                        sm_stats_producer_phase,
+                        s0_s1_sequence_phase,
+                        n_block=hi_p - 1,
+                        is_first=False,
+                        mask_fn=partial(mask_fn_p, mask_seqlen=True),
+                    )
+                    nb = hi_p - 1
+                    nmin_c = (
+                        block_info.get_n_block_min_causal_local_mask_per_range(
+                            seqlen_pair, m_block, lo_p, nb, attn_type_p
+                        )
+                    )
+                    for n_tile in cutlass.range(nb - nmin_c, unroll=1):
+                        (
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                        ) = softmax_step(
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                            n_block=nb - 1 - n_tile,
+                            mask_fn=partial(mask_fn_p, mask_seqlen=False),
+                        )
+                    nb = cutlass.min(nb, nmin_c)
+                    nmin_b = (
+                        block_info.get_n_block_min_before_local_mask_per_range(
+                            seqlen_pair, m_block, lo_p, nb, attn_type_p
+                        )
+                    )
+                    for n_tile in cutlass.range(nb - nmin_b, unroll=1):
+                        (
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                        ) = softmax_step(
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                            n_block=nb - n_tile - 1,
+                        )
+                    nb = cutlass.min(nb, nmin_b)
+                    for n_tile in cutlass.range(0, nb - lo_p, unroll=1):
+                        (
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                        ) = softmax_step(
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                            n_block=nb - 1 - n_tile,
+                            mask_fn=partial(mask_fn_p, mask_seqlen=False),
+                        )
+
+                # --- Epilogue: final row_sum/row_max once per merged tile ---
+                sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
+                if const_expr(mLSE is not None or learnable_sink is not None):
+                    sScale[
+                        tidx
+                        + stage * self.m_block_size
+                        + self.q_stage * self.m_block_size
+                    ] = softmax.row_max[0]
+                sm_stats_barrier.arrive_w_index(
+                    index=stage * num_softmax_warps + warp_idx
+                )
             else:
                 if const_expr(not self.is_split_kv) or tile_block_count > Int32(0):
                     # --- Prologue: S0/S1(0) ---
@@ -3926,6 +4162,7 @@ class FFAFwdSm100:
         tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
@@ -3964,7 +4201,24 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
-            if const_expr(self.use_per_range_mask):
+            if const_expr(self.range_merge):
+                assert mMaskTypes is not None and mCuBatches is not None
+                # Correction only needs the summed K-tile count of the pair
+                # group; its epilogue is Q-side and stays per work tile.
+                pair_beg = Int32(mCuBatches[batch_idx])
+                pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
+                merged_block_count = Int32(0)
+                for pj in cutlass.range(pair_cnt, unroll=1):
+                    seqlen_pair = SeqlenInfoCls(batch_idx, k_batch_idx=pair_beg + pj)
+                    attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
+                    lo_p, hi_p = block_info.get_n_block_min_max_per_range(
+                        seqlen_pair, m_block, attn_type_pair, split_idx, num_splits
+                    )
+                    # Same eff-count rule as the MMA: >=1 block per pair.
+                    merged_block_count += cutlass.max(hi_p - lo_p, Int32(1))
+                n_block_min = Int32(0)
+                n_block_max = merged_block_count
+            elif const_expr(self.use_per_range_mask):
                 assert mMaskTypes is not None
                 attn_type = Int32(mMaskTypes[batch_idx])
                 n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
@@ -5078,6 +5332,7 @@ class FFAFwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
         mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
         mma_tile_coord_v: Int32 = 0,
         is_print_block: bool = False,
     ):
