@@ -132,11 +132,15 @@ class SeqlenInfoQK:
         tile_n: cutlass.Constexpr[Int32] = 128,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
+        k_batch_idx: Optional[Int32] = None,
     ) -> "SeqlenInfoQK":
         assert mQRanges is None or mCuSeqlensQ is None
         assert mKRanges is None or mCuSeqlensK is None
         varlen_q = mCuSeqlensQ is not None or mQRanges is not None
         varlen_k = mCuSeqlensK is not None or mKRanges is not None
+        # RangeMerge: the scheduler batch selects the merged Q group while the
+        # K range comes from a different (pair) row.
+        k_sel = batch_idx if const_expr(k_batch_idx is None) else k_batch_idx
         if const_expr(mQRanges is not None):
             # Padding tiles may carry batch_idx == num_batch (see the cu clamp
             # below); with [R, 2] rows the row index itself must be clamped.
@@ -147,7 +151,7 @@ class SeqlenInfoQK:
         else:
             offset_q = 0
         if const_expr(mKRanges is not None):
-            k_row = cutlass.min(batch_idx, mKRanges.shape[0] - 1)
+            k_row = cutlass.min(k_sel, mKRanges.shape[0] - 1)
             offset_k = mKRanges[k_row, 0]
         elif const_expr(mCuSeqlensK is not None):
             offset_k = mCuSeqlensK[batch_idx]
