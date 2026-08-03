@@ -28,6 +28,7 @@ from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.utils.dtype import to_cute_dtype
 
 from .cache_utils import get_jit_cache
+from .range_merge import RangeMergePlan, merge_qk_ranges
 from .cutedsl_utils import (
     get_aux_tensor_metadata,
     get_broadcast_dims,
@@ -100,6 +101,7 @@ def _flex_flash_attn_fwd(
     pack_gqa: bool | None = None,
     flex_attn_args: TorchFlexAttnArgs | None = None,
     disable_fwd_atomic_reduction: bool = True,
+    range_merge: "bool | RangeMergePlan" = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -157,6 +159,49 @@ def _flex_flash_attn_fwd(
     has_ranges = q_ranges is not None or k_ranges is not None
     if has_ranges:
         validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types_tensor)
+    range_merge_active = bool(range_merge) and has_ranges
+    cu_batches = None
+    if range_merge_active:
+        assert major_arch in (10, 11), "RangeMerge is SM100/SM110 only"
+        # Merge exists to bypass the atomic out path; the caller certifies
+        # the MERGED Q intervals are pairwise disjoint (never read back).
+        assert disable_fwd_atomic_reduction, (
+            "RangeMerge requires the non-atomic forward "
+            "(merged Q intervals pairwise disjoint)"
+        )
+        assert score_mod is None and mask_mod is None, (
+            "RangeMerge v1 does not compose with score/mask mods"
+        )
+        assert flex_attn_args.block_sparse_tensors is None
+        if isinstance(range_merge, RangeMergePlan):
+            # Precomputed plan: reuse across calls, no per-call merge work.
+            plan = range_merge
+            assert plan.merged_outer_ranges.shape[0] == q_ranges.shape[0], (
+                "RangeMergePlan row count disagrees with q_ranges"
+            )
+            q_ranges = plan.merged_outer_ranges
+            k_ranges = plan.sorted_inner_ranges
+            mask_types_tensor = plan.sorted_mask_types
+            cu_batches = plan.cu_batches
+            mask_mode = MaskMode.PER_RANGE
+        else:
+            # Normalize onto the per-range mask entry (1-CTA STATIC).
+            if mask_mode != MaskMode.PER_RANGE:
+                mask_types_tensor = torch.full(
+                    (q_ranges.shape[0],),
+                    mask_type,
+                    dtype=torch.int32,
+                    device=q_ranges.device,
+                )
+                mask_mode = MaskMode.PER_RANGE
+            (
+                q_ranges,  # merged groups, [0,0]-padded to R rows
+                _sorted_q_ranges,
+                k_ranges,  # pair list, group-contiguous
+                mask_types_tensor,
+                cu_batches,
+            ) = merge_qk_ranges(q_ranges, k_ranges, mask_types_tensor)
+        pack_gqa = False
     # SM100/SM110 kernels consume mQRanges/mKRanges directly. Other arches
     # still read cu_seqlens, and the host block-sparse prep does too, so the
     # collapse remains only for them (ranges are cu-partition-equivalent
@@ -446,6 +491,7 @@ def _flex_flash_attn_fwd(
         mma_pv_is_rs,
         intra_wg_overlap,
         use_clc_scheduler,
+        range_merge_active,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
 
@@ -557,6 +603,7 @@ def _flex_flash_attn_fwd(
                     use_2cta_instrs=use_2cta_instrs,
                     use_clc_scheduler=use_clc_scheduler,
                     use_per_range_mask=use_per_range_mask,
+                    range_merge=range_merge_active,
                     disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
@@ -613,6 +660,11 @@ def _flex_flash_attn_fwd(
             )
             # Runtime scalar: the compiled variant stays max_seqlen_q-agnostic.
             compile_args.append(Int32(max_seqlen_q))
+            compile_args.append(
+                to_cute_tensor(cu_batches, assumed_align=4, leading_dim=0)
+                if cu_batches is not None
+                else None
+            )
         compile_args.extend(
             [
                 sparse_tensors,
@@ -648,6 +700,7 @@ def _flex_flash_attn_fwd(
         call_args.append(mask_types_tensor)
         call_args.append(range_locks)
         call_args.append(max_seqlen_q)
+        call_args.append(cu_batches)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
@@ -1666,6 +1719,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         flex_attn_args: TorchFlexAttnArgs | None = None,
         disable_fwd_atomic_reduction: bool = True,
         disable_bwd_dkv_atomic_reduction: bool = False,
+        range_merge: "bool | RangeMergePlan" = False,
     ):
         arch, major_arch = get_device_arch()
         is_varlen = q_ranges is not None or k_ranges is not None
@@ -1720,6 +1774,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             pack_gqa=pack_gqa,
             flex_attn_args=flex_attn_args,
             disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
+            range_merge=range_merge,
         )
 
         aux_tensors = flex_attn_args.aux_tensors if flex_attn_args else None
@@ -1829,6 +1884,7 @@ def flex_flash_attn_func(
     flex_attn_args: TorchFlexAttnArgs | None = None,
     disable_fwd_atomic_reduction: bool = True,
     disable_bwd_dkv_atomic_reduction: bool = False,
+    range_merge: "bool | RangeMergePlan" = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / range / varlen).
@@ -1907,6 +1963,7 @@ def flex_flash_attn_func(
         flex_attn_args,
         disable_fwd_atomic_reduction,
         disable_bwd_dkv_atomic_reduction,
+        range_merge,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)
