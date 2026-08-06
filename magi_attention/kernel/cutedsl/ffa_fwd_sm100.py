@@ -578,8 +578,7 @@ class FFAFwdSm100:
         ):
             # For hdim 192,128, we can fit 3 stages if we use uneven_kv_smem
             kv_stage = 3
-        # A 1-deep KV pipeline deadlocks the load/MMA handshake; the fp32-O
-        # atomic path must shrink q_stage instead of eating the KV budget.
+        # fp32-O atomic should shrink q_stage.
         assert kv_stage >= 2, (
             f"smem budget leaves kv_stage={kv_stage} < 2 "
             f"(q_stage={self.q_stage}, o_dtype={self.o_dtype})"
@@ -635,8 +634,6 @@ class FFAFwdSm100:
         descale_tensors: Optional[DescaleTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
-        # Runtime scalar on purpose (not a ctor/compile-key entry): one
-        # compiled variant serves every max relation length.
         max_seqlen_q: Int32 | None = None,
         # RangeMerge CSR: group g owns sorted pairs
         # [mCuBatches[g], mCuBatches[g+1]).
@@ -1031,6 +1028,29 @@ class FFAFwdSm100:
         tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
 
+        # Correction-epilogue TMA O store for ranges via the dynamic box-size
+        # trick (legalized variant, validated by ffa_bench/poc_tma_dynbox.py):
+        # the packed (sq, hd, nhq) O is viewed as a 4D (sq, hd, nhq, PAD)
+        # descriptor whose d2(row) keeps globalDim = total_q with box = tile_m
+        # and whose d3(pad) shares the row stride with box = 1, while the base
+        # pointer is shifted BACK by total_q * row_stride elements.  A tile
+        # store issued at d2 coord (total_q - H) and d3 coord (off + len) lands
+        # at addr(j) = ptr + (off + m_block*span + j) * row_stride exactly,
+        # and d2's OOB clamp keeps only min(H, tile_m) rows; H <= 0 puts the
+        # start coord at/above globalDim so the whole box is dropped.  All
+        # coords stay non-negative, which matters because a negative TMA
+        # coordinate raises illegal instruction.
+        # Requires the unique-writer contract: no atomic merge
+        # (disable_fwd_atomic_reduction), no split-kv (mO's leading mode is
+        # splits there), and no pack_gqa (its layout rewrite reshapes mO).
+        self.corr_epi_tma_store = const_expr(
+            mQRanges is not None
+            and not self.use_tma_O
+            and self.disable_fwd_atomic_reduction
+            and not self.is_split_kv
+            and not self.pack_gqa
+        )
+
         tma_atom_O = None
         if const_expr(self.use_tma_O):
             # TMA store atom for O
@@ -1038,6 +1058,30 @@ class FFAFwdSm100:
             # layout_dst_tv=(1,8192):(0,1)
             tma_atom_O, mO = cpasync.make_tiled_tma_atom(
                 tma_store_op, mO, cute.select(sO_layout, mode=[0, 1]), self.epi_tile
+            )
+            gmem_tiled_copy_O = None
+        elif const_expr(self.corr_epi_tma_store):
+            # Append a pad mode sharing the row stride and shift the base back
+            # by total_q rows; the kernel smuggles each tile's valid height
+            # through the d2 coordinate and cancels the shifted base through
+            # the d3 coordinate (see the comment above).  PAD only bounds the
+            # d3 coord (off + len <= total_q), so 1<<26 rows is ample.
+            total_q_o = mO.shape[0]
+            row_stride_o = mO.layout.stride[0]
+            mO_desc = cute.make_tensor(
+                (mO.iterator - cutlass.Int64(total_q_o) * row_stride_o).align(16),
+                cute.make_layout(
+                    (total_q_o, mO.shape[1], mO.shape[2], 1 << 26),
+                    stride=(
+                        row_stride_o,
+                        mO.layout.stride[1],
+                        mO.layout.stride[2],
+                        row_stride_o,
+                    ),
+                ),
+            )
+            tma_atom_O, mO = cpasync.make_tiled_tma_atom(
+                tma_store_op, mO_desc, cute.select(sO_layout, mode=[0, 1]), self.epi_tile
             )
             gmem_tiled_copy_O = None
         else:
@@ -1091,6 +1135,13 @@ class FFAFwdSm100:
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],
             mQRanges=mQRanges,
+            # Overlapping Q ranges can need more tiles than the generic
+            # partition bound; the quota mode launches the per-range
+            # cluster-aligned bound AND decodes it affinely (C++
+            # max_outer_range_width), replacing the prefix-sum scan.
+            max_outer_range_width=(
+                max_seqlen_q if const_expr(mQRanges is not None) else None
+            ),
             mSeqUsedQ=mSeqUsedQ,
             qhead_per_kvhead_packgqa=self.qhead_per_kvhead
             if const_expr(self.pack_gqa)
@@ -1108,34 +1159,11 @@ class FFAFwdSm100:
         self.tile_scheduler_cls = TileScheduler
 
         # (max_ctas, 1, 1), where max_ctas = sm_counts // cluster_size
-        grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
         if const_expr(mQRanges is not None):
-            # The generic varlen bound assumes ranges partition token space;
-            # overlapping Q ranges can need more tiles than it launches, and
-            # a dropped tile silently loses whole relations (out partial,
-            # lse stuck at -inf). Launch the per-range cluster-aligned
-            # bound; excess tiles exit via is_valid_tile.
+            # Quota grid + affine decode both come from the scheduler's
+            # max_outer_range_width mode now (see tile_sched_args above).
             assert max_seqlen_q is not None, "ranges fwd needs max_seqlen_q"
-            # Packed GQA folds the q-head repetition into the token dim, so
-            # the bound scales by qhead_per_kvhead to match the decode.
-            qhead_packgqa = (
-                self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1
-            )
-            cluster_m = self.cluster_shape_mn[0]
-            blocks_per_range = (
-                cute.ceil_div(
-                    max_seqlen_q * qhead_packgqa,
-                    self.cta_tiler[0] * cluster_m,
-                )
-                * cluster_m
-            )
-            grid_dim = (
-                blocks_per_range
-                * cute.size(mQRanges.shape[0])
-                * cute.size(mQ.shape[2]),
-                grid_dim[1],
-                grid_dim[2],
-            )
+        grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
 
         # --- Make smem storage ---
 
@@ -4248,17 +4276,56 @@ class FFAFwdSm100:
 
             # --- Make gO of current tile ---
 
-            if const_expr(self.is_split_kv):
-                mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
-                    None, None, head_idx, split_idx
-                ]
-            else:
-                mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
-                    None, None, head_idx
-                ]
+            mO_cur = None
+            if const_expr(not self.corr_epi_tma_store):
+                if const_expr(self.is_split_kv):
+                    mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
+                        None, None, head_idx, split_idx
+                    ]
+                else:
+                    mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
+                        None, None, head_idx
+                    ]
             gO = None
-            if const_expr(self.use_tma_O or not self.pack_gqa):
-                # gO_2CTA: (tileQ128*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
+            gO_tma = None
+            if const_expr(self.corr_epi_tma_store):
+                # mO is the 4D (total_q, hd, nhq, PAD) TMA-descriptor coord
+                # tensor whose base is shifted back by total_q rows (see
+                # __call__).  The d2 start coord smuggles this tile's valid
+                # height H0 so the OOB clamp keeps exactly the in-range rows
+                # (stage s slices shift the d2 coord by s*tile_m, so each
+                # stage clamps H0 - s*tile_m; <= 0 discards the whole box),
+                # while the d3 coord cancels the shifted base so the box
+                # lands at ptr + (off + m_block*span) rows.  Coords stay
+                # non-negative for any H0 <= total_q.
+                len_q = seqlen_info.seqlen_q
+                h0 = len_q - m_block * (self.mma_tiler_pv[0] * self.q_stage)
+                blk = cute.domain_offset(
+                    (
+                        mO.shape[0] - h0,
+                        0,
+                        head_idx,
+                        seqlen_info.offset_q + len_q,
+                    ),
+                    mO,
+                )
+                # Fix the (nhq, pad) modes at the shifted origin, mirroring
+                # the dense path's 2D (rows, hd) coord tensor.
+                blk_2d = blk[(None, None, 0, 0)]
+                tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
+                    (self.mma_tiler_pv[0] * self.q_stage),
+                    self.head_dim_v_padded,
+                )
+                gO_tma = cute.local_tile(blk_2d, tiler_gO, (0, 0))
+                gO_tma = layout_utils.select(
+                    cute.flat_divide(gO_tma, (self.mma_tiler_pv[0],)), mode=[0, 2, 1]
+                )
+                # Slice current CTA of gO: (tileQ128,tileHD128,stageQ)
+                gO_tma = cute.flat_divide(
+                    gO_tma, (self.mma_tiler_pv[0] // self.cta_group_size,)
+                )[None, mma_tile_coord_v, None, None]
+            elif const_expr(self.use_tma_O or not self.pack_gqa):
+                # gO_2CTA: (tileQ128*CTA2*stageQ,tileHD128,stageQ):(1@1,1@0,256@1)
                 tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
                     (self.mma_tiler_pv[0] * self.q_stage),
                     self.head_dim_v_padded,
@@ -4274,7 +4341,6 @@ class FFAFwdSm100:
                 )[None, mma_tile_coord_v, None, None]
 
             # --- Make gLSE view for the atomic merge ---
-
             mLSE_cur_atomic = None
             if const_expr(not self.disable_fwd_atomic_reduction):
                 assert mLSE is not None
@@ -4293,7 +4359,7 @@ class FFAFwdSm100:
                     else None,
                     True,
                 )
-            ] * self.q_stage
+            ] * self.q_stage  # ty:ignore[unsupported-operator]
 
             # --- Determine tile counts ---
 
@@ -4531,6 +4597,11 @@ class FFAFwdSm100:
                     gO_stage = (
                         gO[None, None, stage] if const_expr(gO is not None) else None
                     )
+                    gO_tma_stage = (
+                        gO_tma[None, None, stage]
+                        if const_expr(gO_tma is not None)
+                        else None
+                    )
 
                     # --- Atomic reduction: lock the physical blocks, merge LSE ---
                     #
@@ -4630,6 +4701,8 @@ class FFAFwdSm100:
                         gmem_tiled_copy_O,
                         coeff_prev=coeff_prev,
                         has_prev=has_prev,
+                        gO_tma=gO_tma_stage,
+                        tma_atom_O=tma_atom_O,
                         is_print_thread_and_tile=is_print_thread_and_tile,
                     )
 
@@ -4775,6 +4848,11 @@ class FFAFwdSm100:
 
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
+
+        if const_expr(self.corr_epi_tma_store):
+            # Drain in-flight TMA stores so the last tiles' smem reads
+            # complete before this CTA retires.
+            cute.arch.cp_async_bulk_wait_group(0, read=True)
 
         # This is equivalent to pipeline_o_epi.consumer_tail
         if const_expr(not self.use_correction_warps_for_epi):
@@ -5001,6 +5079,8 @@ class FFAFwdSm100:
         gmem_tiled_copy_O: Optional[cute.TiledCopy] = None,
         coeff_prev: Float32 = 0.0,
         has_prev: bool = False,
+        gO_tma: Optional[cute.Tensor] = None,
+        tma_atom_O: Optional[cute.CopyAtom] = None,
         is_print_thread_and_tile: bool = False,
     ):
         """Apply final scaling and transformation to attention output before writing to global memory.
@@ -5025,6 +5105,19 @@ class FFAFwdSm100:
         :param sO: Shared memory tensor for the final output
         :type sO: cute.Tensor
         """
+
+        if const_expr(self.corr_epi_tma_store):
+            # sO[stage] reuse guard: the previous tile's TMA store of this
+            # stage must have drained its smem reads before the R2S below
+            # overwrites the buffer. Each tile issues q_stage bulk groups in
+            # stage order, so wait_group(q_stage - 1) guarantees the previous
+            # tile's same-stage store is done while leaving this tile's
+            # earlier stages in flight.
+            cute.arch.cp_async_bulk_wait_group(self.q_stage - 1, read=True)
+            cute.arch.barrier(
+                barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                number_of_threads=len(self.epilogue_warp_ids) * cute.arch.WARP_SIZE,
+            )
 
         corr_tile_hd = 8 * 32 // self.o_dtype.width  # 32B per tile => corrHD=16
         num_corr_tiles_hd = (
@@ -5222,8 +5315,11 @@ class FFAFwdSm100:
         # --- S2G copy O to gemm (if needed) ---
 
         if const_expr(self.use_correction_warps_for_epi):
-            assert not self.use_tma_O
-            assert gmem_tiled_copy_O is not None
+            if const_expr(self.corr_epi_tma_store):
+                assert tma_atom_O is not None and gO_tma is not None
+            else:
+                assert not self.use_tma_O
+                assert gmem_tiled_copy_O is not None
 
             # Sync this correction warp group to ensure all R2S stores done
             cute.arch.barrier(
@@ -5231,23 +5327,41 @@ class FFAFwdSm100:
                 number_of_threads=len(self.epilogue_warp_ids) * cute.arch.WARP_SIZE,
             )
 
-            # S2G copy sO -> gO using non-TMA by:
-            #   1. S2R copy sO -> rO
-            #   2. R2G copy rO -> gO with predicate for OOB guard
-            mma_tile_coord_v = thr_mma.thr_idx
-            m_tile_idx = (
-                m_block * self.q_stage + stage
-            ) * self.cta_group_size + mma_tile_coord_v
-            self._store_O_to_gmem(
-                sO,
-                gO,
-                mO_cur,
-                gmem_tiled_copy_O,
-                tidx,
-                seqlen_q,
-                m_tile_idx,
-                is_print_thread_and_tile=(stage == 0 and is_print_thread_and_tile),
-            )
+            if const_expr(self.corr_epi_tma_store):
+                # S2G copy sO -> gO with one TMA store for this stage, issued
+                # by the leader warp (cute.copy elects a single thread). The
+                # smem-read drain is deferred to the reuse guard at the top of
+                # the next tile's epilogue for this stage.
+                tdOsO_tma, tdOgO_tma = cpasync.tma_partition(
+                    tma_atom_O,
+                    0,  # no multicast
+                    cute.make_layout(1),
+                    cute.group_modes(sO, 0, 2),
+                    cute.group_modes(gO_tma, 0, 2),
+                )
+                if tidx < cute.arch.WARP_SIZE:
+                    cute.copy(tma_atom_O, tdOsO_tma, tdOgO_tma)
+                    cute.arch.cp_async_bulk_commit_group()
+            else:
+                # S2G copy sO -> gO using non-TMA by:
+                #   1. S2R copy sO -> rO
+                #   2. R2G copy rO -> gO with predicate for OOB guard
+                mma_tile_coord_v = thr_mma.thr_idx
+                m_tile_idx = (
+                    m_block * self.q_stage + stage
+                ) * self.cta_group_size + mma_tile_coord_v
+                self._store_O_to_gmem(
+                    sO,
+                    gO,
+                    mO_cur,
+                    gmem_tiled_copy_O,
+                    tidx,
+                    seqlen_q,
+                    m_tile_idx,
+                    is_print_thread_and_tile=(
+                        stage == 0 and is_print_thread_and_tile
+                    ),
+                )
 
     @cute.jit
     def _store_O_to_gmem(

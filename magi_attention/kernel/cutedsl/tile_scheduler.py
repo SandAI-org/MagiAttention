@@ -177,6 +177,13 @@ class TileSchedulerArguments(ParamsBase):
     # [R, 2] ranges; the scheduler only needs per-batch lengths, so it reads
     # mQRanges[b, 1] - mQRanges[b, 0] where the cu path reads adjacent diffs.
     mQRanges: Optional[cute.Tensor] = None
+    # C++-aligned max-quota affine decode (fwd_tile_scheduler.hpp
+    # max_outer_range_width): every batch gets the same cluster-rounded
+    # m-block quota sized by the maximum range length; the decode is a
+    # divide plus one ranges-row read for validity, and quota tiles past a
+    # range's actual block count exit as invalid work.  Use when the launch
+    # is already quota-sized (overlapping ranges paths); requires mQRanges.
+    max_outer_range_width: Optional[Int32] = None
     qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
     element_size: cutlass.Constexpr[int] = 2
     is_persistent: cutlass.Constexpr[bool] = False
@@ -836,12 +843,23 @@ class SingleTileVarlenScheduler:
         mCuSeqlensQ: Optional[cute.Tensor] = None
         mSeqUsedQ: Optional[cute.Tensor] = None
         mQRanges: Optional[cute.Tensor] = None
+        max_outer_range_width: Optional[Int32] = None
         qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
         lpt: cutlass.Constexpr[bool] = False
         is_split_kv: cutlass.Constexpr[bool] = False
         head_swizzle: cutlass.Constexpr[bool] = False
         cluster_shape_m: cutlass.Constexpr[int] = 1
+        # Cluster-wide m_block semantics: the fwd 2-CTA kernel consumes
+        # m_block in cluster units (both CTAs of a pair share one m_block,
+        # like SingleTileScheduler's cluster_idx decode).  bwd 2-CTA keeps
+        # the per-CTA decode (each CTA owns its own 128-row block).
+        use_cluster_idx: cutlass.Constexpr[bool] = False
         scheduling_mode: cutlass.Constexpr[SchedulingMode] = SchedulingMode.STATIC
+        # Static grid-stride persistence: launch one resident CTA per SM and
+        # let each walk tiles in grid order (same order as the non-persistent
+        # launch, so L2 behaviour is unchanged) instead of paying a full CTA
+        # prologue/epilogue per tile.
+        is_persistent: cutlass.Constexpr[bool] = False
 
         @staticmethod
         @cute.jit
@@ -856,6 +874,9 @@ class SingleTileVarlenScheduler:
                 SchedulingMode.STATIC,
                 SchedulingMode.CLC,
             ), f"Only STATIC and CLC are supported, got {scheduling_mode!r}"
+            assert (
+                not args.is_persistent or scheduling_mode == SchedulingMode.STATIC
+            ), "persistent varlen scheduling is a STATIC-mode feature"
             size_l2 = 50 * 1024 * 1024  # 50 MB for K & V
             # if backward, this is qdo block size
             kv_block_size = (
@@ -872,6 +893,18 @@ class SingleTileVarlenScheduler:
                 or args.mSeqUsedQ is not None
                 or args.mQRanges is not None
             ), "One of mCuSeqlensQ, mSeqUsedQ or mQRanges must be provided"
+            if cutlass.const_expr(args.max_outer_range_width is not None):
+                assert args.mQRanges is not None, (
+                    "max_outer_range_width quota decode needs ranges rows"
+                )
+                # Persistent keeps the prefix-sum decode (it packs valid
+                # tiles contiguously, so the grid-stride walk never meets a
+                # mid-stream invalid); the width then only sizes the walk
+                # bound.  The affine decode applies to non-persistent only.
+                assert scheduling_mode == SchedulingMode.STATIC, (
+                    "quota decode emits invalid mid-stream tiles; the CLC "
+                    "work loop would stop at them"
+                )
             assert (
                 args.cluster_shape_mn[1] == 1
             ), "Only cluster_shape_mn[1] == 1 is supported"
@@ -890,12 +923,15 @@ class SingleTileVarlenScheduler:
                 mCuSeqlensQ=args.mCuSeqlensQ,
                 mSeqUsedQ=args.mSeqUsedQ,
                 mQRanges=args.mQRanges,
+                max_outer_range_width=args.max_outer_range_width,
                 qhead_per_kvhead_packgqa=args.qhead_per_kvhead_packgqa,
                 lpt=args.lpt,
                 is_split_kv=args.is_split_kv,
                 head_swizzle=args.head_swizzle,
                 cluster_shape_m=args.cluster_shape_mn[0],
+                use_cluster_idx=args.use_cluster_idx,
                 scheduling_mode=scheduling_mode,
+                is_persistent=args.is_persistent,
             )
 
     def __init__(
@@ -965,15 +1001,40 @@ class SingleTileVarlenScheduler:
         loc=None,
         ip=None,
     ) -> Tuple[Int32, Int32, Int32]:
-        total_blocks_max = (
-            params.total_q
-            + params.num_batch * (params.cluster_shape_m * params.tile_shape_mn[0] - 1)
-        ) // params.tile_shape_mn[0]
-        # Round down to nearest multiple of cluster since odd excess is always padding.
-        total_blocks_max = (
-            total_blocks_max // params.cluster_shape_m * params.cluster_shape_m
-        )
-        return (total_blocks_max * params.num_head, params.num_splits, Int32(1))
+        if cutlass.const_expr(params.max_outer_range_width is not None):
+            # Quota bound (C++ max_outer_range_width): every batch gets the
+            # maximum range's cluster-rounded m-block allotment; quota tiles
+            # past a range's actual count decode as invalid work.  Safe for
+            # overlapping ranges (each range is enumerated independently).
+            num_m_blocks = cute.ceil_div(
+                cute.ceil_div(
+                    params.max_outer_range_width * params.qhead_per_kvhead_packgqa,
+                    params.tile_shape_mn[0],
+                ),
+                params.cluster_shape_m,
+            )
+            total_blocks = num_m_blocks * params.cluster_shape_m * params.num_batch
+            bound = total_blocks * params.num_head
+        else:
+            total_blocks_max = (
+                params.total_q
+                + params.num_batch
+                * (params.cluster_shape_m * params.tile_shape_mn[0] - 1)
+            ) // params.tile_shape_mn[0]
+            # Round down to nearest multiple of cluster since odd excess is always padding.
+            total_blocks_max = (
+                total_blocks_max // params.cluster_shape_m * params.cluster_shape_m
+            )
+            bound = total_blocks_max * params.num_head
+        if cutlass.const_expr(params.is_persistent):
+            # Persistent grid-stride: one resident CTA per SM (cluster-aligned)
+            # walks tiles in the same order the full launch would use.
+            hardware_info = cutlass.utils.HardwareInfo()
+            sm_count = hardware_info.get_device_multiprocessor_count()
+            max_ctas = (sm_count // params.cluster_shape_m) * params.cluster_shape_m
+            grid_x = cutlass.min(max_ctas, bound)
+            return (grid_x, params.num_splits, Int32(1))
+        return (bound, params.num_splits, Int32(1))
 
     @cute.jit
     def _get_num_m_blocks(self, lane: Int32, bidb_start: Int32) -> Int32:
@@ -1008,9 +1069,122 @@ class SingleTileVarlenScheduler:
         )
 
     @cute.jit
+    def _decode_mh_block(self, num_m_blocks: Int32, mh_block: Int32):
+        """Split a batch-local (m, head) flat index into (block, head_idx)."""
+        params = self.params
+        if cutlass.const_expr(params.lpt or params.head_swizzle):
+            # This is a version of the SingleTileLPTScheduler, complicated by the fact that
+            # the seqlen can vary per batch.
+            # TODO: is there any case where num_m_blocks is 0?
+            # TODO: by right we should read the seqlen_kv but we're assuming seqlen_q == seqlen_k here
+            num_n_blocks = (
+                num_m_blocks
+                * params.tile_shape_mn[0]
+                * params.cluster_shape_m
+                // params.qhead_per_kvhead_packgqa
+                // params.tile_shape_mn[1]
+            )
+            # nheads_in_l2 = min(max(self.max_kvblock_in_l2 // num_n_blocks, 1), self.num_head)
+            # Seems faster to have this be a power of 2
+            nheads_in_l2 = (
+                16
+                if num_n_blocks * 16 <= params.max_kvblock_in_l2
+                else (
+                    8
+                    if num_n_blocks * 8 <= params.max_kvblock_in_l2
+                    else (
+                        4
+                        if num_n_blocks * 4 <= params.max_kvblock_in_l2
+                        else (
+                            2 if num_n_blocks * 2 <= params.max_kvblock_in_l2 else 1
+                        )
+                    )
+                )
+            )
+            nheads_in_l2 = min(nheads_in_l2, params.num_head)
+            mh_in_l2 = nheads_in_l2 * num_m_blocks
+            section_idx = mh_block // mh_in_l2
+            l2_mod = mh_block - section_idx * mh_in_l2
+            # Deal with tail section
+            nheads_in_this_section = (
+                nheads_in_l2
+                if nheads_in_l2 * (section_idx + 1) <= params.num_head
+                else params.num_head - section_idx * nheads_in_l2
+            )
+            block = l2_mod // nheads_in_this_section
+            head_idx_residual = l2_mod - block * nheads_in_this_section
+            head_idx = section_idx * nheads_in_l2 + head_idx_residual
+            if cutlass.const_expr(params.lpt):
+                block = num_m_blocks - 1 - block
+        else:
+            head_idx = mh_block // num_m_blocks
+            block = mh_block - head_idx * num_m_blocks
+        if cutlass.const_expr(
+            params.cluster_shape_m > 1
+            and not (params.use_cluster_idx or params.is_persistent)
+        ):
+            # Per-CTA block decode (bwd 2-CTA): expand the cluster-level
+            # block by the in-cluster rank.  fwd 2-CTA (use_cluster_idx) and
+            # persistent walks instead keep cluster units: the fwd kernel
+            # consumes m_block in cluster units (mma_tiler covers the whole
+            # pair), and the persistent walk's tile_idx is already a CTA
+            # index that the decode divides back down to cluster units.
+            bidx_in_cluster = cute.arch.block_in_cluster_idx()
+            block = block * params.cluster_shape_m + bidx_in_cluster[0]
+        return block, head_idx
+
+    @cute.jit
     def _varlen_coord_map(self) -> WorkTileInfo:
         """Map self._tile_idx to (block, head, batch) via warp-level prefix sums."""
         params = self.params
+        if cutlass.const_expr(
+            params.max_outer_range_width is not None and not params.is_persistent
+        ):
+            # Quota affine decode (C++ max_outer_range_width): divide, then
+            # one ranges-row read bounds the block against
+            # the range's actual count — quota tail tiles become invalid work.
+            # (Persistent walks fall through to the prefix-sum decode below,
+            # which never yields mid-stream invalid tiles.  A C++-style
+            # skip-and-continue walk was attempted here but abandoned: the
+            # DSL's dynamic-while cannot carry ÷/×/mod intermediates — they
+            # lower to cute.tuple_* int_tuples and break MLIR region rules.)
+            assert params.mQRanges is not None
+            num_m_blocks = cute.ceil_div(
+                cute.ceil_div(
+                    params.max_outer_range_width * params.qhead_per_kvhead_packgqa,
+                    params.tile_shape_mn[0],
+                ),
+                params.cluster_shape_m,
+            )
+            next_tile_idx = self._tile_idx // params.cluster_shape_m
+            tiles_per_batch = num_m_blocks * params.num_head
+            batch_idx = next_tile_idx // tiles_per_batch
+            block, head_idx = Int32(0), Int32(0)
+            is_valid = False
+            if batch_idx < params.num_batch:
+                mh_block = next_tile_idx - batch_idx * tiles_per_batch
+                block, head_idx = self._decode_mh_block(num_m_blocks, mh_block)
+                seqlen_b = (
+                    params.mQRanges[batch_idx, 1] - params.mQRanges[batch_idx, 0]
+                ) * params.qhead_per_kvhead_packgqa
+                actual_blocks = cute.ceil_div(seqlen_b, params.tile_shape_mn[0])
+                # Validity must be cluster-uniform (a split cluster deadlocks
+                # its barriers): judge by the cluster's leading block; an
+                # empty trailing half is absorbed by the kernels' row bounds.
+                cluster_first = (
+                    block // params.cluster_shape_m
+                ) * params.cluster_shape_m
+                is_valid = self._is_first_block and cluster_first < actual_blocks
+            else:
+                batch_idx = Int32(params.num_batch)
+            split_idx = (
+                self._split_idx
+                if cutlass.const_expr(params.is_split_kv)
+                else Int32(0)
+            )
+            return WorkTileInfo(
+                (Int32(block), Int32(head_idx), Int32(batch_idx), split_idx), is_valid
+            )
         lane_idx = cute.arch.lane_idx()
         num_m_blocks = self._get_num_m_blocks(lane_idx, bidb_start=0)
         num_m_blocks_cumulative = cutedsl_utils.warp_prefix_sum(num_m_blocks, lane_idx)
@@ -1065,57 +1239,12 @@ class SingleTileVarlenScheduler:
                 - group_start_tile
                 - num_m_blocks_prev_lane * params.num_head
             )
-            if cutlass.const_expr(params.lpt or params.head_swizzle):
-                # This is a version of the SingleTileLPTScheduler, complicated by the fact that
-                # the seqlen can vary per batch.
-                # TODO: is there any case where num_m_blocks is 0?
-                # TODO: by right we should read the seqlen_kv but we're assuming seqlen_q == seqlen_k here
-                num_n_blocks = (
-                    num_m_blocks
-                    * params.tile_shape_mn[0]
-                    * params.cluster_shape_m
-                    // params.qhead_per_kvhead_packgqa
-                    // params.tile_shape_mn[1]
-                )
-                # nheads_in_l2 = min(max(self.max_kvblock_in_l2 // num_n_blocks, 1), self.num_head)
-                # Seems faster to have this be a power of 2
-                nheads_in_l2 = (
-                    16
-                    if num_n_blocks * 16 <= params.max_kvblock_in_l2
-                    else (
-                        8
-                        if num_n_blocks * 8 <= params.max_kvblock_in_l2
-                        else (
-                            4
-                            if num_n_blocks * 4 <= params.max_kvblock_in_l2
-                            else (
-                                2 if num_n_blocks * 2 <= params.max_kvblock_in_l2 else 1
-                            )
-                        )
-                    )
-                )
-                nheads_in_l2 = min(nheads_in_l2, params.num_head)
-                mh_in_l2 = nheads_in_l2 * num_m_blocks
-                section_idx = mh_block // mh_in_l2
-                l2_mod = mh_block - section_idx * mh_in_l2
-                # Deal with tail section
-                nheads_in_this_section = (
-                    nheads_in_l2
-                    if nheads_in_l2 * (section_idx + 1) <= params.num_head
-                    else params.num_head - section_idx * nheads_in_l2
-                )
-                block = l2_mod // nheads_in_this_section
-                head_idx_residual = l2_mod - block * nheads_in_this_section
-                head_idx = section_idx * nheads_in_l2 + head_idx_residual
-                if cutlass.const_expr(params.lpt):
-                    block = num_m_blocks - 1 - block
-            else:
-                head_idx = mh_block // num_m_blocks
-                block = mh_block - head_idx * num_m_blocks
-            is_valid = self._is_first_block and batch_idx < params.num_batch
-            if cutlass.const_expr(params.cluster_shape_m > 1):
-                bidx_in_cluster = cute.arch.block_in_cluster_idx()
-                block = block * params.cluster_shape_m + bidx_in_cluster[0]
+            block, head_idx = self._decode_mh_block(num_m_blocks, mh_block)
+            is_valid = (
+                batch_idx < params.num_batch
+                if cutlass.const_expr(params.is_persistent)
+                else self._is_first_block and batch_idx < params.num_batch
+            )
         # if cute.arch.thread_idx()[0] == 128: cute.printf("SingleTileVarlenScheduler: tile_idx=%d, batch_idx=%d, head_idx=%d, block=%d, is_valid = %d", self._tile_idx, batch_idx, head_idx, block, is_valid)  # noqa: E501
         split_idx = self._split_idx if const_expr(params.is_split_kv) else Int32(0)
         return WorkTileInfo(
@@ -1167,6 +1296,10 @@ class SingleTileVarlenScheduler:
             self.clc.consumer_release(loc=loc, ip=ip)
             return work
         self._is_first_block = False
+        if cutlass.const_expr(self.params.is_persistent):
+            # Grid-stride: the decode invalidates tiles that run past the last
+            # batch, so overshoot terminates the persistent loop by itself.
+            self._tile_idx += cute.arch.grid_dim()[0]
         return self.get_current_work()
 
     def producer_tail(self, *, loc=None, ip=None):
