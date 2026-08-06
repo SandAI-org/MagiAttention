@@ -28,7 +28,6 @@ from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.utils.dtype import to_cute_dtype
 
 from .cache_utils import get_jit_cache
-from .range_merge import RangeMergePlan, merge_qk_ranges
 from .cutedsl_utils import (
     get_aux_tensor_metadata,
     get_broadcast_dims,
@@ -41,11 +40,11 @@ from .ffa_bwd_postprocess import (
     bwd_postprocess_rowmajor,
 )
 from .ffa_bwd_preprocess import bwd_preprocess
-from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_bwd_sm80 import FFABwdSm80
 from .ffa_bwd_sm90 import FFABwdSm90
 from .ffa_bwd_sm100 import FFABwdSm100
 from .ffa_bwd_sm120 import FFABwdSm120
+from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_fwd_sm80 import FFAFwdSm80
 from .ffa_fwd_sm90 import FFAFwdSm90
 from .ffa_fwd_sm100 import FFAFwdSm100
@@ -53,6 +52,7 @@ from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
     MaskMode,
+    RangesLayout,
     TorchFlexAttnArgs,
     convert_from_dlpack_leading_static,
     create_softcap_scoremod,
@@ -61,17 +61,21 @@ from .ffa_utils import (
     hash_callable,
     is_ffa_2cta_disabled,
     is_ffa_clc_enabled,
+    is_ffa_persistent_disabled,
+    is_ffa_stats_vec16_disabled,
     maybe_contiguous,
     normalize_mask_type_spec,
     ranges_to_cu_seqlens,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
+    validate_dense_layout_preconditions,
     validate_head_dims,
     validate_per_range_mask_feature_support,
     validate_tensor,
     validate_true_ranges,
 )
+from .range_merge import RangeMergePlan, merge_qk_ranges
 from .sparse_utils import (
     block_sparse_call_tuple,
     get_sparse_q_block_size,
@@ -139,9 +143,7 @@ def _flex_flash_attn_fwd(
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
     if mask_mode == MaskMode.PER_RANGE:
-        assert (
-            mask_types_tensor is not None
-        ), "PER_RANGE requires mask_types_tensor"
+        assert mask_types_tensor is not None, "PER_RANGE requires mask_types_tensor"
     else:
         assert (
             mask_types_tensor is None
@@ -169,16 +171,16 @@ def _flex_flash_attn_fwd(
             "RangeMerge requires the non-atomic forward "
             "(merged Q intervals pairwise disjoint)"
         )
-        assert score_mod is None and mask_mod is None, (
-            "RangeMerge v1 does not compose with score/mask mods"
-        )
+        assert (
+            score_mod is None and mask_mod is None
+        ), "RangeMerge v1 does not compose with score/mask mods"
         assert flex_attn_args.block_sparse_tensors is None
         if isinstance(range_merge, RangeMergePlan):
             # Precomputed plan: reuse across calls, no per-call merge work.
             plan = range_merge
-            assert plan.merged_outer_ranges.shape[0] == q_ranges.shape[0], (
-                "RangeMergePlan row count disagrees with q_ranges"
-            )
+            assert (
+                plan.merged_outer_ranges.shape[0] == q_ranges.shape[0]
+            ), "RangeMergePlan row count disagrees with q_ranges"
             q_ranges = plan.merged_outer_ranges
             k_ranges = plan.sorted_inner_ranges
             mask_types_tensor = plan.sorted_mask_types
@@ -263,9 +265,10 @@ def _flex_flash_attn_fwd(
         pack_gqa = False
 
     if not disable_fwd_atomic_reduction:
-        assert has_ranges and major_arch in (10, 11), (
-            "fwd atomic reduction is the SM100/SM110 true-range overlap path"
-        )
+        assert has_ranges and major_arch in (
+            10,
+            11,
+        ), "fwd atomic reduction is the SM100/SM110 true-range overlap path"
         # The atomic epilogue reads/writes prev-O by unpacked row.
         pack_gqa = False
     # Under atomic reduction each overlapping relation would re-add the sink,
@@ -274,13 +277,9 @@ def _flex_flash_attn_fwd(
 
     out_torch_dtype = q.dtype if disable_fwd_atomic_reduction else torch.float32
     device = q.device
-    q_batch_seqlen_shape = (
-        (batch_size, seqlen_q) if not has_ranges else (total_q,)
-    )
+    q_batch_seqlen_shape = (batch_size, seqlen_q) if not has_ranges else (total_q,)
     lse_shape = (  # (b, nh, sq) or (nh, tq)
-        (batch_size, num_head, seqlen_q)
-        if not has_ranges
-        else (num_head, total_q)
+        (batch_size, num_head, seqlen_q) if not has_ranges else (num_head, total_q)
     )
 
     if out is None:
@@ -377,9 +376,9 @@ def _flex_flash_attn_fwd(
         # The fwd per-range launch bound is sized from max_seqlen_q; an
         # underestimate silently drops relations (out partial, lse=-inf).
         _q_max = int((q_ranges[:, 1] - q_ranges[:, 0]).max().item())
-        assert max_seqlen_q >= _q_max, (
-            f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
-        )
+        assert (
+            max_seqlen_q >= _q_max
+        ), f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
     seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
@@ -397,12 +396,25 @@ def _flex_flash_attn_fwd(
         and not requested_disable_2cta
         and not causal
         and not local
-        and not has_ranges
         and not use_block_sparsity
         and int(math.ceil(head_dim / 16) * 16) in [128, 192]
         and int(math.ceil(head_dim_v / 16) * 16) == 128
         and seqlen_q_packgqa > 2 * tile_m
         and (tile_m % qhead_per_kvhead == 0 or not pack_gqa)
+        # Ranges join the dense 2-CTA path only on the TMA-store contract:
+        # static full-mask ranges (causal/per-range already stay 1-CTA like
+        # dense causal via `causal` / requested_disable_2cta above), no
+        # range-merge or pack_gqa combos, and the unique-writer direct store
+        # (the atomic fp32-merge epilogue is written for 1-CTA).
+        and (
+            not has_ranges
+            or (
+                disable_fwd_atomic_reduction
+                and not range_merge_active
+                and not use_per_range_mask
+                and not pack_gqa
+            )
+        )
     )
 
     if softcap is not None:
@@ -427,6 +439,19 @@ def _flex_flash_attn_fwd(
     is_dense_noncausal = not is_varlen and not causal and not local
     use_clc_scheduler = (
         requested_use_clc_scheduler and not is_varlen_mha and not is_dense_noncausal
+    )
+    # Static persistent grid-stride launch (dense and ranges alike); mutually
+    # exclusive with CLC, which is its own persistence mode. Ranges go
+    # persistent too: uniform declarations decode exactly, and non-uniform
+    # quota+persistent falls through to the prefix-sum decode (which packs
+    # valid tiles contiguously, so the walk never meets a mid-stream
+    # invalid). Consumed by the compile key and the FFAFwdSm100 ctor —
+    # keep in sync.
+    persistent_launch = (
+        not causal
+        and not local
+        and not use_clc_scheduler
+        and not is_ffa_persistent_disabled()
     )
 
     # Prepare block sparse for forward
@@ -491,6 +516,7 @@ def _flex_flash_attn_fwd(
         mma_pv_is_rs,
         intra_wg_overlap,
         use_clc_scheduler,
+        persistent_launch,
         range_merge_active,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
@@ -508,9 +534,11 @@ def _flex_flash_attn_fwd(
             varlen_k_meta_tensor,
             sink_tensor,
         ) = [
-            to_cute_tensor(t, assumed_align=4, leading_dim=t.ndim - 1)
-            if t is not None
-            else None
+            (
+                to_cute_tensor(t, assumed_align=4, leading_dim=t.ndim - 1)
+                if t is not None
+                else None
+            )
             for t in (kernel_varlen_q_meta, kernel_varlen_k_meta, kernel_sink)
         ]
         mask_types_cute_tensor = (
@@ -593,7 +621,10 @@ def _flex_flash_attn_fwd(
                     m_block_size=tile_m,
                     n_block_size=tile_n,
                     q_stage=q_stage,
-                    is_persistent=not causal and not local and not has_ranges,
+                    # Ranges keep persistence too: the varlen scheduler's
+                    # static grid-stride mode walks tiles in the same order
+                    # the full launch would.
+                    is_persistent=persistent_launch,
                     score_mod=score_mod,
                     mask_mod=mask_mod,
                     has_aux_tensors=aux_tensors is not None,
@@ -746,8 +777,16 @@ def _flex_flash_attn_bwd(
     disable_bwd_dkv_atomic_reduction: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
     range_merge: "bool | RangeMergePlan" = False,
+    declared_full_coverage: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
+
+    Args:
+        declared_full_coverage: caller declaration that q_ranges/k_ranges
+            each form a contiguous cu-partition of their token space (from
+            ``RangesLayout.VARLEN``), so no coverage holes exist and the
+            hole-zeroing sweeps are skipped. Trust-based: never validated
+            against the geometry (that would sync).
 
     Returns:
         A tuple of (dQ, dK, dV) gradients with the same shapes and dtypes as the input q, k, v tensors.
@@ -759,9 +798,7 @@ def _flex_flash_attn_bwd(
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
     if mask_mode == MaskMode.PER_RANGE:
-        assert (
-            mask_types_tensor is not None
-        ), "PER_RANGE requires mask_types_tensor"
+        assert mask_types_tensor is not None, "PER_RANGE requires mask_types_tensor"
     else:
         assert (
             mask_types_tensor is None
@@ -784,9 +821,6 @@ def _flex_flash_attn_bwd(
     cu_batches = None
     if range_merge_active:
         assert major_arch in (10, 11), "bwd RangeMerge is SM100/SM110 only"
-        # K-merge exists to direct-store shared-K dKV: the caller certifies
-        # the MERGED K intervals are pairwise disjoint (and sorted, which the
-        # merge produces), re-legalizing the unique-writer contract.
         assert disable_bwd_dkv_atomic_reduction, (
             "bwd RangeMerge requires disable_bwd_dkv_atomic_reduction "
             "(merged K intervals pairwise disjoint)"
@@ -972,6 +1006,9 @@ def _flex_flash_attn_bwd(
                 else (2 if head_dim >= 128 and not disable_2cta else 1)
             )
             use_2cta_instrs = cluster_size == 2
+            # A/B gate for the per-range 16B-vectorized stats staging
+            # (kernel-side attribute; only ranges kernels consult it).
+            stats_vec16_enabled = not is_ffa_stats_vec16_disabled()
 
     q, k, v, out, dout, lse, cu_seqlens_q, cu_seqlens_k = [
         maybe_contiguous(t)
@@ -1004,12 +1041,12 @@ def _flex_flash_attn_bwd(
             # silently truncates work. The sync below is debug-only.
             _q_max = int((q_ranges[:, 1] - q_ranges[:, 0]).max().item())
             _k_max = int((k_ranges[:, 1] - k_ranges[:, 0]).max().item())
-            assert seqlen_q >= _q_max, (
-                f"max_seqlen_q={seqlen_q} < longest q range {_q_max}"
-            )
-            assert seqlen_k >= _k_max, (
-                f"max_seqlen_k={seqlen_k} < longest k range {_k_max}"
-            )
+            assert (
+                seqlen_q >= _q_max
+            ), f"max_seqlen_q={seqlen_q} < longest q range {_q_max}"
+            assert (
+                seqlen_k >= _k_max
+            ), f"max_seqlen_k={seqlen_k} < longest k range {_k_max}"
 
     num_head_kv = k.shape[-2]
 
@@ -1094,14 +1131,15 @@ def _flex_flash_attn_bwd(
     device = q.device
     out_torch_dtype = q.dtype
 
-    # Uncovered rows keep zero gradients on the ranges path; kernels never
-    # visit them, so the allocation must provide the zeros.
     grad_alloc = torch.zeros_like if has_ranges else torch.empty_like
     # Unique-writer direct path: kernels write every in-range dK/dV/dQ row,
     # so only coverage holes need zeros, blanked on device instead of a full
     # fill (C++: flash_bwd_postprocess_kernel next to OuterStoreMode=Stg).
     # Torch has no sync-free hole fill: bool-mask writes cost ~3x a plain
     # fill and index builds force a device sync.
+    # The MHA (qhead == kvhead) half of the direct-store gate lives in
+    # FlexFlashAttnFunc.backward next to the VARLEN declaration that derives
+    # the flag; keep this site flag-consumption only.
     direct_dkv = (
         disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
@@ -1137,7 +1175,7 @@ def _flex_flash_attn_bwd(
     else:
         validate_tensor(dv, "dv", v.shape, out_torch_dtype, device)
 
-    if direct_dkv:
+    if direct_dkv and not declared_full_coverage:
         if dk_self_alloc:
             bwd_grad_zero_holes(dk, k_ranges)
         if dv_self_alloc:
@@ -1210,9 +1248,7 @@ def _flex_flash_attn_bwd(
     # certify sorted disjoint k_ranges via disable_bwd_dkv_atomic_reduction
     # to restore the direct in-kernel dK/dV store (C++ OuterStoreMode=Stg).
     dKV_postprocess = qhead_per_kvhead > 1 or (
-        has_ranges
-        and major_arch in (10, 11)
-        and not disable_bwd_dkv_atomic_reduction
+        has_ranges and major_arch in (10, 11) and not disable_bwd_dkv_atomic_reduction
     )
     if dKV_postprocess:
         head_dim_v_rounded = (
@@ -1315,9 +1351,11 @@ def _flex_flash_attn_bwd(
         # preprocess (including under PDL). Overlapping Q ranges keep the
         # zeros allocation: per-range clears could race another relation's
         # main-kernel reductions on the same physical row.
-        dq_accum
-        if direct_dq_init or pre_post_q_ranges is None or deterministic
-        else None,
+        (
+            dq_accum
+            if direct_dq_init or pre_post_q_ranges is None or deterministic
+            else None
+        ),
         cu_seqlens_q,
         None,  # seqused_q
         None,  # dlse
@@ -1431,6 +1469,7 @@ def _flex_flash_attn_bwd(
             k_ranges is None,
             disable_bwd_dkv_atomic_reduction,
             range_merge_active,
+            stats_vec16_enabled,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
             get_broadcast_dims(v),
@@ -1457,11 +1496,13 @@ def _flex_flash_attn_bwd(
         ]
         seqused_q_tensor = seqused_k_tensor = None
         dQ_semaphore_tensor, dK_semaphore_tensor, dV_semaphore_tensor = [
-            convert_from_dlpack_leading_static(
-                t.detach(), leading_dim=3, alignment=4, stride_order=t.dim_order()
+            (
+                convert_from_dlpack_leading_static(
+                    t.detach(), leading_dim=3, alignment=4, stride_order=t.dim_order()
+                )
+                if t is not None
+                else None
             )
-            if t is not None
-            else None
             for t in (dQ_semaphore, dK_semaphore, dV_semaphore)
         ]
         match major_arch:
@@ -1546,6 +1587,7 @@ def _flex_flash_attn_bwd(
                     disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
                     range_merge=range_merge_active,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                    stats_vec16=stats_vec16_enabled,
                 )
 
         # Block sparse tensors for backward use Q-direction indexing (transposed from forward).
@@ -1683,7 +1725,7 @@ def _flex_flash_attn_bwd(
             ranges=pre_post_q_ranges,
         )
 
-    if direct_dq_init and dq_self_alloc:
+    if direct_dq_init and dq_self_alloc and not declared_full_coverage:
         assert q_ranges is not None
         bwd_grad_zero_holes(dq, q_ranges, ranges_sorted=False)
 
@@ -1772,13 +1814,60 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_bwd_dkv_atomic_reduction: bool = False,
         range_merge: "bool | RangeMergePlan" = False,
         range_merge_bwd: "bool | RangeMergePlan" = False,
+        ranges_layout: RangesLayout = RangesLayout.GENERAL,
+        dense_shape: tuple[int, int] | None = None,
     ):
         arch, major_arch = get_device_arch()
         is_varlen = q_ranges is not None or k_ranges is not None
-        if is_varlen:
-            num_ranges = validate_true_ranges(
-                q_ranges, k_ranges, mask_types=mask_types
+        if ranges_layout != RangesLayout.GENERAL and not is_varlen:
+            raise ValueError(
+                f"ranges_layout={ranges_layout.name} requires q_ranges/k_ranges"
             )
+        if is_varlen and ranges_layout != RangesLayout.GENERAL:
+            assert (
+                q_ranges is not None and k_ranges is not None
+            ), "ranges_layout requires both q_ranges and k_ranges"
+            if ranges_layout == RangesLayout.VARLEN and (
+                range_merge or range_merge_bwd
+            ):
+                # VARLEN declares a Q-side cu-partition, which fwd Q-merge
+                # contradicts; bwd K-merge is a no-op under disjoint k_ranges.
+                # Reject for symmetry with the DENSE preconditions rather than
+                # silently deriving flags on a self-contradictory geometry.
+                raise ValueError(
+                    "ranges_layout=VARLEN is incompatible with "
+                    "range_merge/range_merge_bwd"
+                )
+        if ranges_layout == RangesLayout.DENSE:
+            batch, seqlen = validate_dense_layout_preconditions(
+                dense_shape=dense_shape,
+                num_q_ranges=q_ranges.shape[0],
+                num_k_ranges=k_ranges.shape[0],
+                total_q=q.shape[0],
+                total_k=k.shape[0],
+                mask_types=mask_types,
+                pack_gqa=pack_gqa,
+                range_merge=range_merge,
+                range_merge_bwd=range_merge_bwd,
+                flex_attn_args=flex_attn_args,
+            )
+            for name, t in (("q", q), ("k", k), ("v", v)):
+                if not t.is_contiguous():
+                    raise ValueError(
+                        f"DENSE dispatch requires contiguous {name}, "
+                        f"got strides {t.stride()}"
+                    )
+            # Uniform ranges <=> 4D dense: dispatch to the dense kernels
+            # outright; backward reshapes symmetrically via ctx.dense_shape.
+            q = q.view(batch, seqlen, q.shape[1], q.shape[2])
+            k = k.view(batch, seqlen, k.shape[1], k.shape[2])
+            v = v.view(batch, seqlen, v.shape[1], v.shape[2])
+            q_ranges = k_ranges = None
+            is_varlen = False
+            max_seqlen_q = seqlen
+            max_seqlen_k = seqlen
+        if is_varlen:
+            num_ranges = validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
         else:
             num_ranges = int(q.shape[0])
 
@@ -1855,6 +1944,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.range_merge_bwd = range_merge_bwd
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
+        ctx.ranges_layout = ranges_layout
+        ctx.dense_shape = dense_shape
         # Drop the direct aux_tensors reference on ctx; the real tensors are
         # tracked via save_for_backward and restored in backward. Keeping them
         # here too would bypass autograd's save_for_backward bookkeeping.
@@ -1862,6 +1953,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             flex_attn_args.drop_aux_tensors() if flex_attn_args is not None else None
         )
         ctx.set_materialize_grads(False)
+
+        if ranges_layout == RangesLayout.DENSE:
+            # DEVIATION: DENSE dispatch returns a repacked lse copy
+            # Reason: dense kernels emit lse as (B,H,S) but the ranges
+            #   contract is (H,T); the two are stride-incompatible, so a view
+            #   cannot express the repack and one small permute copy is made.
+            # Recovery: ctx keeps the dense-layout lse, so backward consumes
+            #   it without any extra repack.
+            total_q = out.shape[0] * out.shape[1]
+            out = out.view(total_q, out.shape[2], out.shape[3])
+            lse = lse.permute(1, 0, 2).contiguous().view(lse.shape[1], total_q)
 
         return out, lse
 
@@ -1878,6 +1980,15 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sink,
             *aux,
         ) = ctx.saved_tensors
+        declared_dense_shape: tuple[int, int] | None = None
+        if ctx.ranges_layout == RangesLayout.DENSE:
+            # Forward dispatched to the dense kernels; dout arrives packed
+            # (like the returned out) and must be reshaped symmetrically.
+            assert ctx.dense_shape is not None
+            declared_dense_shape = ctx.dense_shape
+            if dout is not None:
+                batch, seqlen = ctx.dense_shape
+                dout = dout.reshape(batch, seqlen, dout.shape[1], dout.shape[2])
         if dout is None:
             dout = torch.zeros_like(out)
         if out.dtype != q.dtype:
@@ -1891,6 +2002,26 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if flex_attn_args is not None:
             flex_attn_args = flex_attn_args.with_aux_tensors(aux)
 
+        disable_bwd_dkv_atomic_reduction = ctx.disable_bwd_dkv_atomic_reduction
+        declared_full_coverage = False
+        if ctx.ranges_layout == RangesLayout.VARLEN:
+            # DEVIATION: VARLEN declaration derives direct-dKV + full coverage
+            # Reason: declaring a cu-partition certifies sorted/disjoint
+            #   k_ranges (unique-writer dKV) and hole-free coverage, so the
+            #   direct store and the hole-zeroing skip apply automatically;
+            #   this is the documented semantics of RangesLayout.VARLEN.
+            # Recovery: ranges_layout=RangesLayout.GENERAL restores the
+            #   explicit per-flag contracts.
+            declared_full_coverage = True
+            # MHA-only: qhead == kvhead means every K/V row has a unique
+            # writer, so the in-kernel direct dKV store is sound. This shape
+            # check is the single source of the MHA gate; the host-side
+            # `direct_dkv` derivation in _flex_flash_attn_bwd only re-gates
+            # the flag (has_ranges + arch), it must not grow its own head
+            # comparison.
+            if q.shape[1] == k.shape[1] and not ctx.deterministic:
+                disable_bwd_dkv_atomic_reduction = True
+
         dq, dk, dv = _flex_flash_attn_bwd(
             q=q,
             k=k,
@@ -1902,7 +2033,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             mask_type=ctx.mask_type,
             mask_mode=ctx.mask_mode,
             mask_types_tensor=ctx.mask_types_tensor,
-             sink=sink,
+            sink=sink,
             sink_layout=ctx.sink_layout,
             softcap=ctx.softcap,
             q_ranges=q_ranges,
@@ -1911,12 +2042,22 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_k=ctx.max_seqlen_k,
             deterministic=ctx.deterministic,
             disable_fwd_atomic_reduction=ctx.disable_fwd_atomic_reduction,
-            disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
+            disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
             flex_attn_args=flex_attn_args,
             range_merge=ctx.range_merge_bwd,
+            declared_full_coverage=declared_full_coverage,
         )
 
-        return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
+        if declared_dense_shape is not None:
+            # The dense bwd produced dense-layout grads; repack to the packed
+            # input layout autograd expects.
+            batch, seqlen = declared_dense_shape
+            total = batch * seqlen
+            dq = dq.view(total, dq.shape[2], dq.shape[3])
+            dk = dk.view(total, dk.shape[2], dk.shape[3])
+            dv = dv.view(total, dv.shape[2], dv.shape[3])
+
+        return dq, dk, dv, *((None,) * 31)  # Extra Nones is fine
 
 
 def flex_flash_attn_func(
@@ -1940,6 +2081,8 @@ def flex_flash_attn_func(
     disable_bwd_dkv_atomic_reduction: bool = False,
     range_merge: "bool | RangeMergePlan" = False,
     range_merge_bwd: "bool | RangeMergePlan" = False,
+    ranges_layout: RangesLayout = RangesLayout.GENERAL,
+    dense_shape: tuple[int, int] | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / range / varlen).
@@ -1952,11 +2095,26 @@ def flex_flash_attn_func(
         non-overlapping Q/K, i.e. ``disable_*_atomic_reduction=True``).
         When provided, both must be set, q/k/v must be packed, and the device
         must be SM100/SM110. Leave as ``None`` for the dense
-        (batch, seqlen, nheads, headdim) path.
+        (batch, seqlen, nheads, headdim) path. On SM100/SM110 the pre/main/post
+        kernels consume ranges natively; other arches collapse them via
+        ``ranges_to_cu_seqlens``.
 
-        # DEVIATION: ranges must still be equivalent to a cu_seqlens partition
-        # Reason: kernels still collapse via ranges_to_cu_seqlens until Phase 2
-        # Recovery: Phase 2 passes mQRanges/mKRanges and drops the collapse
+    ranges_layout: declared geometry of the ranges IR
+        (:class:`RangesLayout`, default ``GENERAL``). ``VARLEN`` declares a
+        cu-partition (sorted, contiguous, disjoint, full coverage): backward
+        then auto-enables the direct-dKV store (MHA) and skips gradient hole
+        zeroing. ``DENSE`` declares a uniform partition with one static mask
+        (full/causal): the call is dispatched to the 4D dense kernels
+        outright and requires ``dense_shape``; unsupported combinations
+        (per-range mask tensor, pack_gqa, range_merge, flex_attn_args) raise
+        ``ValueError``. Geometry is never read back (that would sync), so a
+        wrong declaration silently corrupts out/dq/dk/dv — exactly like the
+        other contract flags.
+
+    dense_shape: ``(batch, seqlen)`` describing the uniform ranges, required
+        iff ``ranges_layout=RangesLayout.DENSE``. Forward still returns packed
+        ``(total, nheads, headdim)`` out and ``(nheads, total)`` lse (the lse
+        repack costs one small permute copy).
 
     max_seqlen_q/max_seqlen_k: max sequence length over the ranges (varlen).
         Hard contract: each must be >= its longest range; per-range launch
@@ -1983,16 +2141,14 @@ def flex_flash_attn_func(
         selects the unique-writer dQ path: dq/dq_accum start uninitialized,
         preprocess clears the covered rows, and a final cleanup zeroes the
         holes of self-allocated dq. Defaults to True — pass False whenever
-        q ranges may overlap. Geometry is never read back (that would sync),
-        so a wrong certification silently corrupts out/dQ — exactly like C++.
+        q ranges may overlap.
 
     disable_bwd_dkv_atomic_reduction: caller contract (same as the C++
         flag) that ``k_ranges`` are sorted and pairwise disjoint, so every
         dK/dV row has a unique CTA writer. SM100/SM110 ranges backward then
         stores dK/dV directly from the main kernel (native dtype, no fp32
         accumulator, no dK/dV postprocess) and only zeroes coverage holes.
-        MHA only; range geometry is never read back (that would sync), so a
-        wrong certification silently corrupts dK/dV — exactly like C++.
+        MHA only.
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
@@ -2020,6 +2176,8 @@ def flex_flash_attn_func(
         disable_bwd_dkv_atomic_reduction,
         range_merge,
         range_merge_bwd,
+        ranges_layout,
+        dense_shape,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)

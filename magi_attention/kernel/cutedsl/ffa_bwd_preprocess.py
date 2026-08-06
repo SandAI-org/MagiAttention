@@ -163,7 +163,6 @@ class FFABwdPreProcess:
         mSeqUsedQ: Optional[cute.Tensor],  # (batch,)
         mQRanges: Optional[cute.Tensor],  # (batch, 2)
         mdLSE: Optional[cute.Tensor],  # (batch, nheads, seqlen) or (nheads, total_q)
-        # Runtime scalar on purpose: keeps the compile cache seqlen-agnostic.
         max_seqlen_q: cutlass.Int32 | None = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
@@ -235,22 +234,15 @@ class FFABwdPreProcess:
             mCuSeqlensQ=mCuSeqlensQ,
             mSeqUsedQ=mSeqUsedQ,
             mQRanges=mQRanges,
+            max_outer_range_width=(
+                max_seqlen_q if const_expr(mQRanges is not None) else None
+            ),
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
-        grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
         if const_expr(mQRanges is not None):
-            # The generic varlen bound assumes ranges partition token space;
-            # overlapping Q ranges can need more tiles than it launches, and
-            # a dropped tile keeps dpsum/lse_log2 at zero — the main kernel
-            # then rebuilds P against lse_log2=0 and gradients explode.
-            # Launch the per-range bound; excess tiles exit via is_valid_tile.
             assert max_seqlen_q is not None, "ranges preprocess needs max_seqlen_q"
-            grid_dim = (
-                cute.ceil_div(max_seqlen_q, self.tile_m) * num_batch * num_head,
-                cutlass.Int32(1),
-                cutlass.Int32(1),
-            )
+        grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
 
         self.kernel(
             mO,
@@ -405,10 +397,6 @@ class FFABwdPreProcess:
                         if const_expr(mdLSE is not None):
                             assert gdLSE is not None  # mypy
                             PdPsum_val -= gdLSE[row]
-                    # In original-token space a tail tile's pad rows can be a
-                    # neighbouring range's valid rows; padding them here would
-                    # race that range's real write. The zeros allocation keeps
-                    # rows no range covers defined instead.
                     if const_expr(mQRanges is None):
                         gPdPsum[row] = PdPsum_val
                     elif row < seqlen_limit:
@@ -440,9 +428,6 @@ class FFABwdPreProcess:
                 )[None, head_idx]
                 gLSElog2 = cute.local_tile(mLSElog2_cur, (self.tile_m,), (m_block,))
                 LOG2_E = math.log2(math.e)
-                # Same collision rule as the PdPsum store above: with ranges,
-                # pad rows would overwrite a neighbour's valid lse with the
-                # +inf placeholder, which the main kernel turns into P == 0.
                 lse_row_bound = (
                     seqlen_limit
                     if const_expr(mQRanges is not None)
