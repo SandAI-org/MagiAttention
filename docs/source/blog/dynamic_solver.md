@@ -53,13 +53,11 @@ To address this, MagiAttention introduces the **`Dynamic Attention Solver`**. Th
 In the following sections, we describe the detailed formulation and scheduling algorithms of the `dynamic attn solver` ([Overview](#overview)), present its user interface ([User Interface](#user-interface)), and outline current limitations and future roadmap ([Current Limitations & Future Roadmap](#current-limitations--future-roadmap)).
 
 
-## Overview
+## System Abstraction & Cost Modeling
 
 The **Dynamic Attention Solver** formulates Context Parallelism (CP) scheduling as a **mask-aware online task-to-rank mapping problem without token reordering**. By maintaining sequence tokens in their original, contiguous physical layout {math}`(0..P-1)`, it preserves strict activation memory balance. For each distinct dynamic mask, the solver inspects its structure to perceive true FLOP workloads across {math}`\mathrm{Q} \times \mathrm{KV} \times \text{Head}` dimensions. Its core objective is to **strictly equalize non-zero compute FLOPs across ranks while minimizing bottleneck {math}`\mathrm{QO}`/{math}`\mathrm{KV}` communication volume**.
 
-### Problem Formulation & System Abstraction
-
-#### Fixed Sequential Sharding
+### Fixed Sequential Sharding
 
 Without pre-iteration token dispatch, the dynamic solver adopts **fixed sequential sharding** as its default data layout. A sequence of length {math}`S` is evenly partitioned into {math}`P` contiguous chunks {math}`(0..P-1)`, where rank {math}`p` stores the {math}`p`-th chunk. This ensures every rank holds exactly {math}`S/P` tokens, guaranteeing perfectly balanced activation memory across all CP ranks by construction.
 
@@ -76,7 +74,7 @@ Furthermore, this sharding induces a natural grid structure over the global atte
 Illustration of fixed sequential sharding with {math}`P = 4` ranks on a variable-length (varlen) causal mask containing two sequence samples of lengths 21 and 11. The vertical axis represents Query/Output ({math}`\mathrm{QO}`) and the horizontal axis represents Key/Value ({math}`\mathrm{KV}`), both ordered by token ID. Colored entries indicate valid non-masked positions requiring computation. Blue tiles represent {math}`\mathrm{KV}` stored on rank `r1`, yellow tiles represent {math}`\mathrm{QO}` stored on rank `r2`, and green tiles represent the cross-rank attention block where {math}`\mathrm{QO}` resides on `r2` while {math}`\mathrm{KV}` resides on `r1`. Because {math}`\mathrm{QO}` and {math}`\mathrm{KV}` belong to different ranks, the green block cannot be computed locally and strictly requires inter-rank communication.
 ```
 
-#### Computation Cost Estimation
+### Computation Cost Estimation
 
 The computational workload of attention is directly estimated by the **sum of effective mask areas**. Since attention FLOPs scale linearly with the number of valid (non-masked) entries, the global attention space ({math}`\mathrm{Q} \times \mathrm{KV} \times \text{Head}`) is partitioned into basic computation blocks {math}`B_{i,j,h}`, where each block represents the sub-matrix computation between query chunk {math}`i`, key-value chunk {math}`j`, and attention head {math}`h`.
 
@@ -96,7 +94,7 @@ For instance, typical patterns within a block include:
 Illustration of computation workload estimation based on effective mask area across different block composition cases.
 ```
 
-#### Communication Cost Estimation
+### Communication Cost Estimation
 
 When a rank is assigned to compute an attention block whose required data does not fully reside locally, **inter-rank communication** is triggered to transfer the missing data chunks. The communication cost of a data chunk is estimated by its **volume**, defined as the number of tokens in the chunk multiplied by the number of attention heads:
 
@@ -131,11 +129,103 @@ The online solver searches for an optimal block-to-rank mapping {math}`\mathcal{
 ```
 3. **Local Priority & Overlap Maximization**: Prioritize assigning local tasks to their host ranks. This allows the system to immediately begin local computation, effectively overlapping it with the communication required for remote tasks.
 
-### Online Heuristic Solving Pipeline
+## Dynamic Solver Algorithm
 
+Given the optimization model defined above, the dynamic solver employs a **binary-search-driven greedy heuristic** to find a near-optimal block-to-rank mapping in real time. The algorithm is designed for parallelizable execution on multi-core CPUs with millisecond-level latency.
 
-### Overlapped Execution with Calc/Comm Metadata
+### Algorithm Pipeline
 
+The solver runs three stages inside a binary search loop over the communication threshold {math}`K`:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Binary Search over Threshold K                       │
+│                                                                         │
+│  for each candidate K in [0, K_max]:                                    │
+│    ┌─────────────────────────────────────────────────────────────────┐  │
+│    │ Stage 1: Candidate Edge Scoring & Greedy Selection              │  │
+│    │   • Score each candidate comm edge by benefit/cost ratio        │  │
+│    │   • Greedily select edges under per-rank budget K               │  │
+│    ├─────────────────────────────────────────────────────────────────┤  │
+│    │ Stage 2: Greedy Task Assignment                                 │  │
+│    │   • Build per-task executable rank set from selected edges      │  │
+│    │   • Assign tasks sorted by (degree↑, area↓)                     │  │
+│    │   • Local-first → USP-heuristic → min-load fallback             │  │
+│    ├─────────────────────────────────────────────────────────────────┤  │
+│    │ Stage 3: Local Refinement                                       │  │
+│    │   • Iteratively migrate tasks from overloaded ranks             │  │
+│    │   • Check feasibility: max_load ≤ μ × avg_load                  │  │
+│    └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  if feasible: shrink K_max (tighter comm budget)                        │
+│  else:        raise K_min (relax comm budget)                           │
+│  stop when: K_max - K_min < ε × K_max                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Stage 1: Candidate Edge Scoring & Greedy Selection.**
+Each candidate communication edge represents transferring a {math}`\mathrm{QO}` or {math}`\mathrm{KV}` chunk from its host rank to a computing rank. The solver scores each edge by a benefit-to-cost ratio:
+
+```{math}
+\text{score}(e) = \frac{W(e)}{C(e)}
+```
+
+where {math}`W(e)` estimates the compute workload that edge {math}`e` would unlock for the target rank (combining already-assigned tasks, a fraction of unassigned tasks, and a smoothing term), and {math}`C(e) = S_{\text{chunk}} \times H` is the communication cost. Edges are sorted by score in descending order and greedily accepted as long as neither the sender's nor receiver's accumulated cost exceeds threshold {math}`K`.
+
+**Stage 2: Greedy Task Assignment.**
+After edge selection determines data accessibility, the solver constructs a **bitmask of executable ranks** for each grid task {math}`B_{i,j}` by intersecting the {math}`\mathrm{QO}`-reachable ranks for chunk {math}`i` and {math}`\mathrm{KV}`-reachable ranks for chunk {math}`j`. Tasks are sorted by ascending degree (number of candidate ranks) and descending area, then assigned with the following priority:
+
+1. **Local priority**: if both {math}`\mathrm{QO}` and {math}`\mathrm{KV}` reside on the same rank, assign locally (zero communication cost).
+2. **USP heuristic**: prefer the rank suggested by head-group affinity mapping.
+3. **Min-load fallback**: choose the candidate rank with the smallest current load.
+
+**Stage 3: Local Refinement.**
+After initial assignment, the solver performs a bounded number of refinement passes. For each task currently on an overloaded rank (load exceeding {math}`\mu \times \bar{L}`), it attempts migration to a lower-load candidate rank. This step reduces the maximum compute imbalance without changing the overall assignment structure.
+
+### Benchmark
+
+**Solving Latency.** Under GQA (64:8 heads) with per-device sequence length 8192, the solver completes within 30 ms for all mask types (full, causal, full document, causal document) at CP ≤ 64. For document-sparse masks specifically, solving stays below 45 ms up to CP = 128. Under MHA (64:64 heads), the task count inflates by ~8× due to head-dimension flattening; document-sparse masks remain within 32 ms at CP ≤ 32.
+
+**Communication Volume.** Under GQA (64:8) with variable-length document packing on 8–64 GPUs (H100), the dynamic solver reduces communication volume relative to USP:
+- **Full document mask**: forward −48%~55%, backward −6%~42%.
+- **Causal document mask**: forward −62%~70%, backward −33%~64%.
+
+## Overlapped Execution
+
+Once the solver determines the block-to-rank mapping, the remaining problem is how to overlap communication with computation during execution. As the simplest possible design, the current implementation adopts a **two-stage** execution model — just a **local stage** and a **remote stage** — and generates `CalcMeta` and `CommMeta` to drive each stage. More sophisticated multi-stage pipelining is left for future work.
+
+### Two-Stage Execution Model
+
+**Stage 0 (Local):** Each rank immediately begins computing attention tasks whose {math}`\mathrm{QO}` and {math}`\mathrm{KV}` data both reside locally — no communication is needed. In parallel, the communication stream starts fetching remote {math}`\mathrm{Q}`, {math}`\mathrm{K}`, {math}`\mathrm{V}` chunks required by the next stage.
+
+**Stage 1 (Remote):** After remote data arrives, each rank computes attention tasks that depend on non-local chunks. Once computation finishes, the output {math}`\mathrm{O}` is sent back (reduced) to the {math}`\mathrm{QO}` host rank.
+
+```{figure} ../../../assets/dynamic_solver/two_stage_streaming.png
+:name: two_stage_streaming
+:align: center
+:width: 800px
+:alt: Two-Stage Overlapped Execution
+
+Illustration of the two-stage overlapped execution model. Local attention computation overlaps with remote data fetching on separate CUDA streams.
+```
+
+The solver's local-priority assignment directly maximizes Stage 0 workload. The more local computation available, the more communication latency can be hidden behind useful work.
+
+### CalcMeta & CommMeta
+
+The solver output is encoded into two metadata objects that fully specify the execution plan:
+
+- **`CalcMeta`**: records the attention tasks for each stage.
+  - `local_attn_arg`: list of `(q_range, k_range, mask_type)` for Stage 0.
+  - `remote_attn_args_list`: list of `(q_range, k_range, mask_type)` for Stage 1, with ranges expressed in local buffer coordinates.
+
+- **`CommMeta`**: records the data movement plan per stage.
+  - `num_remote_kv_tokens_per_stage`: number of remote {math}`\mathrm{KV}` tokens to receive at each stage.
+  - `kv_group_collective_args_list`: per-stage `GroupCollectiveArg` specifying how to group-cast {math}`\mathrm{K}`, {math}`\mathrm{V}` (forward) or group-reduce {math}`\mathrm{dK}`, {math}`\mathrm{dV}` (backward).
+  - `num_remote_qo_tokens_per_stage`: number of remote {math}`\mathrm{QO}` tokens to receive at each stage.
+  - `qo_group_collective_args_list`: per-stage `GroupCollectiveArg` specifying how to group-cast {math}`\mathrm{Q}` (forward) or group-reduce {math}`\mathrm{dQ}` (backward), and how to reduce {math}`\mathrm{O}` back to host ranks.
+
+  Each `GroupCollectiveArg` contains: `input_split_size_list` (how to split local data for sending), `output_split_size_list` (expected receive sizes), `dst_indices_list` (target ranks for each send chunk), and `src_index_list` (source rank for each receive chunk).
 
 ## User Interface
 
