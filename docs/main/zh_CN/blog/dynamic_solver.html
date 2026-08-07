@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Dynamic Attention Solver（即将推出） &#8212; MagiAttention main 文档</title>
+    <title>Dynamic Attention Solver &#8212; MagiAttention main 文档</title>
   
   
   
@@ -46,6 +46,7 @@
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="../_static/copybutton.js?v=fd10adb8"></script>
     <script src="../_static/translations.js?v=540d3cec"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'blog/dynamic_solver';</script>
     <script>
         DOCUMENTATION_OPTIONS.theme_version = '0.20.0';
@@ -926,7 +927,7 @@
     
     <li class="breadcrumb-item"><a href="toc.html" class="nav-link">博客</a></li>
     
-    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Dynamic Attention Solver（即将推出）</span></li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Dynamic Attention Solver</span></li>
   </ul>
 </nav>
 </div>
@@ -942,12 +943,269 @@
                 
 <div id="searchbox"></div>
                 <article class="bd-article">
-                   <section id="dynamic-attention-solver-coming-soon">
-<h1>Dynamic Attention Solver（即将推出）<a class="headerlink" href="#dynamic-attention-solver-coming-soon" title="链接到此标题。">#</a></h1>
-<div class="admonition-todo admonition" id="id1">
-<p class="admonition-title">待处理</p>
-<p>即将发布的博客文章将在不久的将来发布，敬请期待！</p>
+                   <section id="dynamic-attention-solver">
+<h1>Dynamic Attention Solver<a class="headerlink" href="#dynamic-attention-solver" title="链接到此标题。">#</a></h1>
+<section id="introduction">
+<h2>引言<a class="headerlink" href="#introduction" title="链接到此标题。">#</a></h2>
+<p>上下文并行（CP）将序列 activation 分片到分布式设备上，以突破长上下文训练的显存限制。在 MagiAttention 中，<code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 已基本解决了标准长上下文负载下的 CP 调度问题——这些场景中 mask 在 iteration 前是静态或可确定的（如 causal、causal document、sliding window）。通过在 iteration 开始前进行初始 token dispatch，静态 solver 确保各 rank 间的计算均衡，同时将数据搬运限制为 <strong>仅 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 通信</strong>，保持 Query/Output（<span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>）token 固定在其 home device 上。</p>
+<section id="limitations-of-the-static-solver">
+<h3>静态 Solver 的局限性<a class="headerlink" href="#limitations-of-the-static-solver" title="链接到此标题。">#</a></h3>
+<p>为实现分布式 rank 间的计算负载均衡，静态 solver 依赖 <strong>迭代前 token dispatch</strong>：将序列切分为多个 chunk，估计每个 chunk 的 FLOP 计算量，并在执行前启发式地将这些 chunk dispatch 到各 CP rank。</p>
+<p>关键在于，该方法要求全局 attention mask 在 <strong>iteration 开始前是静态且完全确定的</strong>，使得每个 chunk 的 attention FLOP 计算量可以提前评估，从而驱动启发式 dispatch 算法。</p>
+<p>然而，静态 solver 面临两个根本性限制，使其无法支持动态稀疏 attention 机制：</p>
+<ul class="simple">
+<li><p><strong>运行时动态稀疏 Attention</strong>：DeepSeek Sparse Attention (DSA) <span class="bibtex-citation" id="id1">[<a class="reference internal" href="magi_attn.html#id63" title="DeepSeek-AI, Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenhao Xu, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Erhang Li, Fangqi Zhou, Fangyun Lin, Fucong Dai, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Hanwei Xu, Hao Li, Haofen Liang, Haoran Wei, Haowei Zhang, Haowen Luo, Haozhe Ji, Honghui Ding, Hongxuan Tang, Huanqi Cao, Huazuo Gao, Hui Qu, Hui Zeng, Jialiang Huang, Jiashi Li, Jiaxin Xu, Jiewen Hu, Jingchang Chen, Jingting Xiang, Jingyang Yuan, Jingyuan Cheng, Jinhua Zhu, Jun Ran, Junguang Jiang, Junjie Qiu, Junlong Li, Junxiao Song, Kai Dong, Kaige Gao, Kang Guan, Kexin Huang, Kexing Zhou, Kezhao Huang, Kuai Yu, Lean Wang, Lecong Zhang, Lei Wang, Liang Zhao, Liangsheng Yin, Lihua Guo, Lingxiao Luo, Linwang Ma, Litong Wang, Liyue Zhang, M. S. Di, M. Y Xu, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Mingxu Zhou, Panpan Huang, Peixin Cong, Peiyi Wang, Qiancheng Wang, Qihao Zhu, Qingyang Li, Qinyu Chen, Qiushi Du, Ruiling Xu, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, Runqiu Yin, Runxin Xu, Ruomeng Shen, Ruoyu Zhang, S. H. Liu, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shaofei Cai, Shaoyuan Chen, Shengding Hu, Shengyu Liu, Shiqiang Hu, Shirong Ma, Shiyu Wang, Shuiping Yu, Shunfeng Zhou, Shuting Pan, Songyang Zhou, Tao Ni, Tao Yun, Tian Pei, Tian Ye, Tianyuan Yue, Wangding Zeng, Wen Liu, Wenfeng Liang, Wenjie Pang, Wenjing Luo, Wenjun Gao, Wentao Zhang, Xi Gao, Xiangwen Wang, Xiao Bi, Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaokang Zhang, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie, Xingchao Liu, Xingkai Yu, Xingyou Li, Xinyu Yang, Xinyuan Li, Xu Chen, Xuecheng Su, Xuehai Pan, Xuheng Lin, Xuwei Fu, Y. Q. Wang, Yang Zhang, Yanhong Xu, Yanru Ma, Yao Li, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Qian, Yi Yu, Yichao Zhang, Yifan Ding, Yifan Shi, Yiliang Xiong, Ying He, Ying Zhou, Yinmin Zhong, Yishi Piao, Yisong Wang, Yixiao Chen, Yixuan Tan, Yixuan Wei, Yiyang Ma, Yiyuan Liu, Yonglun Yang, Yongqiang Guo, Yongtong Wu, Yu Wu, Yuan Cheng, Yuan Ou, Yuanfan Xu, Yuduan Wang, Yue Gong, Yuhan Wu, Yuheng Zou, Yukun Li, Yunfan Xiong, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang Zhou, Z. F. Wu, Z. Z. Ren, Zehua Zhao, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao, Zhibin Gou, Zhicheng Ma, Zhigang Yan, Zhihong Shao, Zhixian Huang, Zhiyu Wu, Zhuoshu Li, Zhuping Zhang, Zian Xu, Zihao Wang, Zihui Gu, Zijia Zhu, Zilin Li, Zipeng Zhang, Ziwei Xie, Ziyi Gao, Zizheng Pan, Zongqing Yao, Bei Feng, Hui Li, J. L. Cai, Jiaqi Ni, Lei Xu, Meng Li, Ning Tian, R. J. Chen, R. L. Jin, S. S. Li, Shuang Zhou, Tianyu Sun, X. Q. Li, Xiangyue Jin, Xiaojin Shen, Xiaosha Chen, Xinnan Song, Xinyi Zhou, Y. X. Zhu, Yanping Huang, Yaohui Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, Dongjie Ji, Jian Liang, Jianzhong Guo, Jin Chen, Leyi Xia, Miaojun Wang, Mingming Li, Peng Zhang, Ruyi Chen, Shangmian Sun, Shaoqing Wu, Shengfeng Ye, T. Wang, W. L. Xiao, Wei An, Xianzu Wang, Xiaowen Sun, Xiaoxiang Wang, Ying Tang, Yukun Zha, Zekai Zhang, Zhe Ju, Zhen Zhang, and Zihua Qu. Deepseek-v3.2: pushing the frontier of open large language models. 2025. URL: https://arxiv.org/abs/2512.02556, arXiv:2512.02556.">DeepSeek-AI <em>et al.</em>, 2025</a>]</span> 和 Native Sparse Attention (NSA) <span class="bibtex-citation" id="id2">[<a class="reference internal" href="magi_attn.html#id62" title="Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. Native sparse attention: hardware-aligned and natively trainable sparse attention. 2025. URL: https://arxiv.org/abs/2502.11089, arXiv:2502.11089.">Yuan <em>et al.</em>, 2025</a>]</span> 等架构在每层前向中通过轻量级 indexer 在运行时计算稀疏 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 选择。由于产生的 attention mask 直接依赖动态 activation 状态和学习参数，mask 结构在 iteration 执行前无法获知，使得迭代前 token dispatch 完全不可行。</p></li>
+<li><p><strong>仅支持 CPU 端 Mask 表示</strong>：静态 solver 仅接受 <strong>CPU 端 mask 描述符</strong>（如 mask 类型枚举、文档边界索引）。它无法直接使用以 <strong>GPU 端 tensor</strong> 表示的 attention mask。许多现代 attention 变体天然以 device 端 tensor 的形式生成或操作 mask，与静态 solver 的 CPU-only mask 接口不兼容。</p></li>
+</ul>
+<p>这些限制使得静态 solver 无法支持现代动态和 device 原生的 attention 机制。</p>
+</section>
+<section id="core-problem-design-approach">
+<h3>核心问题与设计思路<a class="headerlink" href="#core-problem-design-approach" title="链接到此标题。">#</a></h3>
+<p>动态上下文并行中的核心系统挑战是：<strong>在严格的 activation 显存均衡约束下（每个 rank 持有均匀的序列分片），当 token dispatch/重排不可用且 attention mask 在运行时动态生成时，如何进行在线负载划分和计算-通信协同调度？</strong></p>
+<p>为此，MagiAttention 引入了 <strong><code class="docutils literal notranslate"><span class="pre">Dynamic</span> <span class="pre">Attention</span> <span class="pre">Solver</span></code></strong>。核心思想基于两个关键设计选择：</p>
+<ol class="arabic simple">
+<li><p><strong>固定 Token 分片 + 启用 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 通信</strong>：无迭代前 token dispatch 时，每个 rank 持有固定的序列分片。此设置下仅通信 KV 会严格固定每个 rank 的计算量，没有负载再均衡的空间。因此 solver 同时启用 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 的通信（<strong>启用 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 通信</strong>）。同时通信 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 使得任何计算任务都可以调度到任意 rank。</p></li>
+<li><p><strong>逐层在线求解</strong>：在每个 attention 层的前向过程中，动态 solver 感知当前层的 mask 结构，计算每个 attention tile 的 FLOP 计算量，并动态地将计算任务分配给各 CP rank。它在各设备间均衡计算 FLOPs 的同时最小化所有 rank 的最大通信量（即瓶颈最小化），<strong>实时</strong> 生成执行元数据（<code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> 和 <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code>）。</p></li>
+</ol>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>            ┌─────────────────────────────────────────────────────────┐
+            │               Context Parallelism Design                │
+            └────────────────────────────┬────────────────────────────┘
+                                         │
+                ┌────────────────────────┴────────────────────────┐
+                ▼                                                 ▼
+     MagiAttention Static Solver                     MagiAttention Dynamic Solver
+┌───────────────────────────────────┐             ┌────────────────────────────────────┐
+│ • Mask: Static / Pre-iter known   │             │ • Mask: Dynamic / Per-layer runtime│
+│ • Token Sharding: Heuristic       │             │ • Token Sharding: Fixed sequential │
+│   reordering (Pre-iteration)      │             │   sharding                         │
+│ • Comm Space: KV-only comm        │             │ • Comm Space: QO &amp; KV dual comm    │
+│ • Schedule: Local QO, pull KV     │             │ • Schedule: Dynamic tile-to-rank   │
+└───────────────────────────────────┘             └────────────────────────────────────┘
+</pre></div>
 </div>
+<p>以下章节中，我们描述 <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 的详细建模和调度算法（<a class="reference internal" href="#overview"><span class="xref myst">概览</span></a>），介绍其用户接口（<a class="reference internal" href="#user-interface"><span class="xref myst">用户接口</span></a>），并概述当前局限性和未来路线图（<a class="reference internal" href="#current-limitations--future-roadmap"><span class="xref myst">当前局限性与未来路线图</span></a>）。</p>
+</section>
+</section>
+<section id="system-abstraction-cost-modeling">
+<h2>系统抽象与开销建模<a class="headerlink" href="#system-abstraction-cost-modeling" title="链接到此标题。">#</a></h2>
+<p><strong>Dynamic Attention Solver</strong> 将上下文并行（CP）调度建模为 <strong>感知 mask 的在线 task-to-rank 映射问题（无 token 重排）</strong>。通过保持序列 token 在其原始连续物理布局 <span class="math notranslate nohighlight">\((0..P-1)\)</span> 中不动，严格保证 activation 显存均衡。对于每个不同的动态 mask，solver 检查其结构以感知 <span class="math notranslate nohighlight">\(\mathrm{Q} \times \mathrm{KV} \times \text{Head}\)</span> 维度上的真实 FLOP 计算量。核心目标是 <strong>严格均衡各 rank 的非零计算 FLOPs，同时最小化瓶颈 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>/<span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 通信量</strong>。</p>
+<section id="fixed-sequential-sharding">
+<h3>固定顺序分片<a class="headerlink" href="#fixed-sequential-sharding" title="链接到此标题。">#</a></h3>
+<p>无迭代前 token dispatch 时，动态 solver 采用 <strong>固定顺序分片</strong> 作为默认数据布局。长度为 <span class="math notranslate nohighlight">\(S\)</span> 的序列被均匀切分为 <span class="math notranslate nohighlight">\(P\)</span> 个连续 chunk <span class="math notranslate nohighlight">\((0..P-1)\)</span>，rank <span class="math notranslate nohighlight">\(p\)</span> 存储第 <span class="math notranslate nohighlight">\(p\)</span> 个 chunk。这确保每个 rank 恰好持有 <span class="math notranslate nohighlight">\(S/P\)</span> 个 token，天然保证所有 CP rank 的 activation 显存完美均衡。</p>
+<p>在无 attention mask 先验知识的情况下，顺序分片是一种有效的 mask-agnostic 布局，可保持 token locality。将相邻 token 存储在同一 rank 上，契合相邻 token 频繁相互 attend 的常见 attention 模式。保持该 locality 增加了本地计算占比并减少跨 rank 数据搬运，使顺序分片对动态 solver 友好。</p>
+<p>此外，该分片在全局 attention 空间上产生自然的网格结构。<span class="math notranslate nohighlight">\(P\)</span> 个 query chunk 和 <span class="math notranslate nohighlight">\(P\)</span> 个 key-value chunk 将完整的 <span class="math notranslate nohighlight">\(\mathrm{Q} \times \mathrm{KV}\)</span> attention 矩阵划分为 <span class="math notranslate nohighlight">\(P \times P\)</span> 网格。块 <span class="math notranslate nohighlight">\((i, j)\)</span> 表示 query chunk <span class="math notranslate nohighlight">\(i\)</span> 与 key-value chunk <span class="math notranslate nohighlight">\(j\)</span> 之间的 attention。主对角线块 <span class="math notranslate nohighlight">\((i, i)\)</span> 对 rank <span class="math notranslate nohighlight">\(i\)</span> 是 <strong>本地的</strong>，非对角线块则需要通信才能计算。</p>
+<figure class="align-center" id="sequential-sharding">
+<a class="reference internal image-reference" href="../_images/sequential_sharding.png"><img alt="固定顺序分片" src="../_images/sequential_sharding.png" style="width: 600px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 71 </span><span class="caption-text">固定顺序分片示意图：在包含长度为 21 和 11 的两条序列的变长（varlen）causal mask 上使用 <span class="math notranslate nohighlight">\(P = 4\)</span> 个 rank。纵轴为 Query/Output（<span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>），横轴为 Key/Value（<span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>），均按 token ID 排序。着色条目表示需要计算的有效（非 mask）位置。蓝色 tile 表示存储在 rank <code class="docutils literal notranslate"><span class="pre">r1</span></code> 的 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>，黄色 tile 表示存储在 rank <code class="docutils literal notranslate"><span class="pre">r2</span></code> 的 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>，绿色 tile 表示跨 rank attention 块——<span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 在 <code class="docutils literal notranslate"><span class="pre">r2</span></code> 而 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 在 <code class="docutils literal notranslate"><span class="pre">r1</span></code>。由于 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 属于不同 rank，绿色块无法本地计算，必须通过 rank 间通信。</span><a class="headerlink" href="#sequential-sharding" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="computation-cost-estimation">
+<h3>计算开销估计<a class="headerlink" href="#computation-cost-estimation" title="链接到此标题。">#</a></h3>
+<p>Attention 的计算量直接通过 <strong>有效 mask 面积之和</strong> 估计。由于 attention FLOPs 与有效（非 mask）条目数量线性相关，全局 attention 空间（<span class="math notranslate nohighlight">\(\mathrm{Q} \times \mathrm{KV} \times \text{Head}\)</span>）被划分为基本计算块 <span class="math notranslate nohighlight">\(B_{i,j,h}\)</span>，每个块表示 query chunk <span class="math notranslate nohighlight">\(i\)</span>、key-value chunk <span class="math notranslate nohighlight">\(j\)</span> 和 attention head <span class="math notranslate nohighlight">\(h\)</span> 之间的子矩阵计算。</p>
+<p>每个块 <span class="math notranslate nohighlight">\(B_{i,j,h}\)</span> 的计算量通过其 <strong>有效 mask 面积</strong> <span class="math notranslate nohighlight">\(A(B_{i,j,h})\)</span> 量化——定义为该子矩阵内有效（非 mask）条目的总数。实际中（如打包变长序列、多文档边界或动态稀疏 mask），单个块可能没有均匀结构，而是包含多个子区域的组合、任意形状或分散的有效条目。无论内部布局如何，<span class="math notranslate nohighlight">\(A(B_{i,j,h})\)</span> 均通过直接统计对应 mask 子矩阵中的有效非零条目确定。</p>
+<p>例如，块内典型模式包括：</p>
+<ul class="simple">
+<li><p><strong>Full Mask</strong>：所有条目均有效，<span class="math notranslate nohighlight">\(A = S_q \times S_k\)</span>（其中 <span class="math notranslate nohighlight">\(S_q\)</span> 和 <span class="math notranslate nohighlight">\(S_k\)</span> 分别为 query 和 key-value chunk 大小）。</p></li>
+<li><p><strong>Causal Mask</strong>：条目受因果约束限制，对角块面积为 <span class="math notranslate nohighlight">\(A = \frac{S_q \times (S_q + 1)}{2}\)</span>（假设 <span class="math notranslate nohighlight">\(S_q = S_k\)</span>）。</p></li>
+<li><p><strong>混合或不规则组合</strong>：块跨越多个序列边界或动态稀疏选择，形成多种形状或稀疏模式的组合。</p></li>
+</ul>
+<figure class="align-center" id="id3">
+<a class="reference internal image-reference" href="../_images/computation_cost_estimation.png"><img alt="计算开销估计" src="../_images/computation_cost_estimation.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 72 </span><span class="caption-text">基于有效 mask 面积的计算量估计示意图，展示不同块组合情况。</span><a class="headerlink" href="#id3" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="communication-cost-estimation">
+<h3>通信开销估计<a class="headerlink" href="#communication-cost-estimation" title="链接到此标题。">#</a></h3>
+<p>当某个 rank 被分配计算一个所需数据未完全驻留在本地的 attention 块时，会触发 <strong>rank 间通信</strong> 以传输缺失的数据 chunk。数据 chunk 的通信开销通过其 <strong>通信量</strong> 估计，定义为 chunk 中的 token 数乘以 attention head 数：</p>
+<div class="math notranslate nohighlight">
+\[\text{Vol}(\text{chunk}) = S_{\text{chunk}} \times H\]</div>
+<p>以 <strong>前向</strong> 为例：计算一个 attention 块需要 <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span>、<span class="math notranslate nohighlight">\(\mathrm{K}\)</span>、<span class="math notranslate nohighlight">\(\mathrm{V}\)</span> 作为输入，产生 <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> 和 <span class="math notranslate nohighlight">\(\text{lse}\)</span>（log-sum-exp）作为输出。由于 <span class="math notranslate nohighlight">\(\text{lse}\)</span> 相对于 activation tensor 大小可忽略，在开销估计中省略。因此一次 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> chunk 通信将 <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span> 发送到计算 rank 并将 <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> 回传，而一次 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> chunk 通信将 <span class="math notranslate nohighlight">\(\mathrm{K}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{V}\)</span> 一起传输。</p>
+<p>每次通信涉及一个 <strong>sender</strong> 和一个 <strong>receiver</strong>：当数据 chunk 从 rank <span class="math notranslate nohighlight">\(s\)</span> 传输到 rank <span class="math notranslate nohighlight">\(d\)</span> 时，同时增加 rank <span class="math notranslate nohighlight">\(s\)</span> 的 <strong>send volume</strong> 和 rank <span class="math notranslate nohighlight">\(d\)</span> 的 <strong>recv volume</strong>。Solver 分别跟踪每个 rank 的 send/recv volume，因为两个方向都贡献于整体通信瓶颈。其次要目标是 <strong>最小化所有 rank 中的最大通信量</strong>（瓶颈最小化），防止任何单个 rank 成为通信 straggler。</p>
+<figure class="align-center" id="id4">
+<a class="reference internal image-reference" href="../_images/communication_cost_estimation.png"><img alt="通信开销估计" src="../_images/communication_cost_estimation.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 73 </span><span class="caption-text">通信开销估计示意图。在 <span class="math notranslate nohighlight">\(P = 4\)</span> 顺序分片下，红色 attention tile（右下角）被调度到 rank 3 (r3)。虽然 r3 对该任务有较高的数据 locality，但部分依赖触发了从 r2 的远程 fetch。该跨 rank 传输开销为 <span class="math notranslate nohighlight">\(S_{\text{chunk}} \times H\)</span>，增加 r2 和 r3 的通信量。当多个本地 tile 共享同一 chunk 时，远程 fetch 开销通过数据复用得以摊销。</span><a class="headerlink" href="#id4" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="optimization-model">
+<h3>优化模型<a class="headerlink" href="#optimization-model" title="链接到此标题。">#</a></h3>
+<p>在线 solver 搜索最优的 block-to-rank 映射 <span class="math notranslate nohighlight">\(\mathcal{M}: \{B_{i,j,h}\} \to \{0, \dots, P-1\}\)</span>，在严格的显存和依赖约束下优化通信与计算的 overlap：</p>
+<ol class="arabic simple">
+<li><p><strong>计算负载均衡约束</strong>：计算均衡不作为严格最小化问题，而是使用 imbalance ratio <span class="math notranslate nohighlight">\(\mu\)</span> 建模为不等式约束。对每个 rank <span class="math notranslate nohighlight">\(r\)</span>，其分配的计算量必须严格小于 <span class="math notranslate nohighlight">\(\mu\)</span> 乘以全局总计算量：</p></li>
+</ol>
+<div class="math notranslate nohighlight">
+\[\sum_{B \in \mathcal{M}^{-1}(r)} A(B) &lt; \mu \sum_{p=0}^{P-1} \sum_{B \in \mathcal{M}^{-1}(p)} A(B)\]</div>
+<ol class="arabic simple" start="2">
+<li><p><strong>瓶颈通信最小化</strong>：最小化所有 rank 中最大的单向通信量（send 或 recv），防止网络 straggler：</p></li>
+</ol>
+<div class="math notranslate nohighlight">
+\[\min_{\mathcal{M}} \max_{r \in [0, P-1]} \max \left( \text{SendVol}(r), \text{RecvVol}(r) \right)\]</div>
+<ol class="arabic simple" start="3">
+<li><p><strong>本地优先与 Overlap 最大化</strong>：优先将本地任务分配给其 home rank。使系统可以立即开始本地计算，有效地与远程任务所需的通信 overlap。</p></li>
+</ol>
+</section>
+</section>
+<section id="dynamic-solver-algorithm">
+<h2>动态 Solver 算法<a class="headerlink" href="#dynamic-solver-algorithm" title="链接到此标题。">#</a></h2>
+<p>基于上述优化模型，动态 solver 采用 <strong>二分搜索驱动的贪心启发式算法</strong> 实时寻找近优的 block-to-rank 映射。算法设计为可在多核 CPU 上并行执行，毫秒级耗时。</p>
+<section id="algorithm-pipeline">
+<h3>算法流水线<a class="headerlink" href="#algorithm-pipeline" title="链接到此标题。">#</a></h3>
+<p>Solver 在对通信阈值 <span class="math notranslate nohighlight">\(K\)</span> 的二分搜索循环内执行三个阶段：</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>┌─────────────────────────────────────────────────────────────────────────┐
+│                    Binary Search over Threshold K                       │
+│                                                                         │
+│  for each candidate K in [0, K_max]:                                    │
+│    ┌─────────────────────────────────────────────────────────────────┐  │
+│    │ Stage 1: Candidate Edge Scoring &amp; Greedy Selection              │  │
+│    │   • Score each candidate comm edge by benefit/cost ratio        │  │
+│    │   • Greedily select edges under per-rank budget K               │  │
+│    ├─────────────────────────────────────────────────────────────────┤  │
+│    │ Stage 2: Greedy Task Assignment                                 │  │
+│    │   • Build per-task executable rank set from selected edges      │  │
+│    │   • Assign tasks sorted by (degree↑, area↓)                     │  │
+│    │   • Local-first → USP-heuristic → min-load fallback             │  │
+│    ├─────────────────────────────────────────────────────────────────┤  │
+│    │ Stage 3: Local Refinement                                       │  │
+│    │   • Iteratively migrate tasks from overloaded ranks             │  │
+│    │   • Check feasibility: max_load ≤ μ × avg_load                  │  │
+│    └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  if feasible: shrink K_max (tighter comm budget)                        │
+│  else:        raise K_min (relax comm budget)                           │
+│  stop when: K_max - K_min &lt; ε × K_max                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+</pre></div>
+</div>
+<p><strong>Stage 1：候选边评分与贪心选择。</strong> 每条候选通信边表示将一个 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 或 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> chunk 从其 home rank 传输到计算 rank。Solver 按收益/开销比对每条边评分：</p>
+<div class="math notranslate nohighlight">
+\[\text{score}(e) = \frac{W(e)}{C(e)}\]</div>
+<p>其中 <span class="math notranslate nohighlight">\(W(e)\)</span> 估计边 <span class="math notranslate nohighlight">\(e\)</span> 为目标 rank 解锁的计算量（综合已分配任务、未分配任务的占比和平滑项），<span class="math notranslate nohighlight">\(C(e) = S_{\text{chunk}} \times H\)</span> 为通信开销。边按 score 降序排列并贪心接受，只要 sender 和 receiver 的累积开销均未超过阈值 <span class="math notranslate nohighlight">\(K\)</span>。</p>
+<p><strong>Stage 2：贪心任务分配。</strong> 边选择确定数据可达性后，solver 为每个网格任务 <span class="math notranslate nohighlight">\(B_{i,j}\)</span> 构建 <strong>可执行 rank 的 bitmask</strong>——取 chunk <span class="math notranslate nohighlight">\(i\)</span> 的 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 可达 rank 集合与 chunk <span class="math notranslate nohighlight">\(j\)</span> 的 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 可达 rank 集合的交集。任务按 degree（候选 rank 数）升序、area 降序排序，然后按以下优先级分配：</p>
+<ol class="arabic simple">
+<li><p><strong>Local priority</strong>：若 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 都在同一 rank 上，则本地分配（零通信开销）。</p></li>
+<li><p><strong>USP heuristic</strong>：优先选择 head-group affinity mapping 建议的 rank。</p></li>
+<li><p><strong>Min-load fallback</strong>：选择当前负载最小的候选 rank。</p></li>
+</ol>
+<p><strong>Stage 3：局部精调。</strong> 初始分配后，solver 执行有限次精调 pass。对于当前位于过载 rank（负载超过 <span class="math notranslate nohighlight">\(\mu \times \bar{L}\)</span>）上的每个任务，尝试迁移到负载更低的候选 rank。该步骤在不改变整体分配结构的前提下降低最大计算 imbalance。</p>
+</section>
+<section id="benchmark">
+<h3>Benchmark<a class="headerlink" href="#benchmark" title="链接到此标题。">#</a></h3>
+<p><strong>求解耗时。</strong> 在 GQA（64:8 heads）、per-device 序列长度 8192 条件下，solver 在 CP ≤ 64 时对所有 mask 类型（full、causal、full document、causal document）均在 30 ms 内完成。对 document-sparse mask，CP = 128 时求解仍低于 45 ms。在 MHA（64:64 heads）下，由于 head 维度展平，任务数膨胀约 8×；document-sparse mask 在 CP ≤ 32 时仍在 32 ms 内完成。</p>
+<p><strong>通信量。</strong> 在 GQA（64:8）、8–64 GPU（H100）变长文档 packing 条件下，动态 solver 相对 USP 减少了通信量：</p>
+<ul class="simple">
+<li><p><strong>Full document mask</strong>：forward −48%~55%，backward −6%~42%。</p></li>
+<li><p><strong>Causal document mask</strong>：forward −62%~70%，backward −33%~64%。</p></li>
+</ul>
+</section>
+</section>
+<section id="overlapped-execution">
+<h2>Overlapped Execution<a class="headerlink" href="#overlapped-execution" title="链接到此标题。">#</a></h2>
+<p>Solver 确定 block-to-rank 映射后，剩余问题是如何在执行中将通信与计算 overlap。作为最简设计，当前实现采用 <strong>two-stage</strong> 执行模型——仅一个 <strong>local stage</strong> 和一个 <strong>remote stage</strong>——并生成 <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> 和 <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code> 驱动各阶段。更复杂的多阶段 pipelining 留待未来工作。</p>
+<section id="two-stage-execution-model">
+<h3>Two-Stage 执行模型<a class="headerlink" href="#two-stage-execution-model" title="链接到此标题。">#</a></h3>
+<p><strong>Stage 0（Local）：</strong> 每个 rank 立即开始计算 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 和 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 数据均在本地的 attention 任务——无需通信。同时，通信 stream 开始 fetch 下一阶段所需的远程 <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span>、<span class="math notranslate nohighlight">\(\mathrm{K}\)</span>、<span class="math notranslate nohighlight">\(\mathrm{V}\)</span> chunk。</p>
+<p><strong>Stage 1（Remote）：</strong> 远程数据到达后，每个 rank 计算依赖非本地 chunk 的 attention 任务。计算完成后，输出 <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> 被 reduce 回 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> 的 home rank。</p>
+<figure class="align-center" id="two-stage-streaming">
+<a class="reference internal image-reference" href="../_images/two_stage_streaming.png"><img alt="Two-Stage Overlapped Execution" src="../_images/two_stage_streaming.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">图 74 </span><span class="caption-text">Two-stage overlapped execution 模型示意图。本地 attention 计算与远程数据 fetch 在独立 CUDA stream 上 overlap。</span><a class="headerlink" href="#two-stage-streaming" title="链接到此图片">#</a></p>
+</figcaption>
+</figure>
+<p>Solver 的 local-priority 分配策略直接最大化 Stage 0 计算量。本地计算越多，能被有效计算隐藏的通信延迟就越多。</p>
+</section>
+<section id="calcmeta-commmeta">
+<h3>CalcMeta &amp; CommMeta<a class="headerlink" href="#calcmeta-commmeta" title="链接到此标题。">#</a></h3>
+<p>Solver 输出编码为两个完整描述执行计划的 metadata 对象：</p>
+<ul>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code></strong>：记录每个 stage 的 attention 任务。</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">local_attn_arg</span></code>：Stage 0 的 <code class="docutils literal notranslate"><span class="pre">(q_range,</span> <span class="pre">k_range,</span> <span class="pre">mask_type)</span></code> 列表。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">remote_attn_args_list</span></code>：Stage 1 的 <code class="docutils literal notranslate"><span class="pre">(q_range,</span> <span class="pre">k_range,</span> <span class="pre">mask_type)</span></code> 列表，range 以 local buffer 坐标表示。</p></li>
+</ul>
+</li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">CommMeta</span></code></strong>：记录每个 stage 的数据搬运计划。</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">num_remote_kv_tokens_per_stage</span></code>：每个 stage 需接收的远程 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> token 数。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">kv_group_collective_args_list</span></code>：per-stage <code class="docutils literal notranslate"><span class="pre">GroupCollectiveArg</span></code>，指定如何 group-cast <span class="math notranslate nohighlight">\(\mathrm{K}\)</span>、<span class="math notranslate nohighlight">\(\mathrm{V}\)</span>（forward）或 group-reduce <span class="math notranslate nohighlight">\(\mathrm{dK}\)</span>、<span class="math notranslate nohighlight">\(\mathrm{dV}\)</span>（backward）。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">num_remote_qo_tokens_per_stage</span></code>：每个 stage 需接收的远程 <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> token 数。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">qo_group_collective_args_list</span></code>：per-stage <code class="docutils literal notranslate"><span class="pre">GroupCollectiveArg</span></code>，指定如何 group-cast <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span>（forward）或 group-reduce <span class="math notranslate nohighlight">\(\mathrm{dQ}\)</span>（backward），以及如何将 <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> reduce 回 home rank。</p></li>
+</ul>
+<p>每个 <code class="docutils literal notranslate"><span class="pre">GroupCollectiveArg</span></code> 包含：<code class="docutils literal notranslate"><span class="pre">input_split_size_list</span></code>（如何切分本地数据以发送）、<code class="docutils literal notranslate"><span class="pre">output_split_size_list</span></code>（预期接收大小）、<code class="docutils literal notranslate"><span class="pre">dst_indices_list</span></code>（每个 send chunk 的目标 rank）和 <code class="docutils literal notranslate"><span class="pre">src_index_list</span></code>（每个 recv chunk 的源 rank）。</p>
+</li>
+</ul>
+</section>
+</section>
+<section id="user-interface">
+<h2>用户接口<a class="headerlink" href="#user-interface" title="链接到此标题。">#</a></h2>
+<p>通过在 MagiAttention 环境配置中启用 <strong>QO-communication 模式</strong> 激活动态 solver。启用后系统自动从静态 solver 切换到动态 solver 路径。</p>
+<section id="environment-configuration">
+<h3>环境配置<a class="headerlink" href="#environment-configuration" title="链接到此标题。">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Enable QO-comm to activate dynamic solver</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_QO_COMM</span><span class="o">=</span><span class="m">1</span>
+
+<span class="c1"># Optional: enable head-group flattening for better load balance granularity</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_FLATTEN_HEAD_GROUPS</span><span class="o">=</span><span class="m">1</span>
+</pre></div>
+</div>
+<p>API 用法与静态 solver 完全一致——用户照常调用 <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_key</span></code> → <code class="docutils literal notranslate"><span class="pre">dispatch</span></code> → <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> → <code class="docutils literal notranslate"><span class="pre">undispatch</span></code>。设置 <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_QO_COMM=1</span></code> 后，系统内部自动切换到动态 solver 路径，依次调用 <code class="docutils literal notranslate"><span class="pre">DynamicAttnSolver.solve()</span></code> → <code class="docutils literal notranslate"><span class="pre">make_calc_meta()</span></code> → <code class="docutils literal notranslate"><span class="pre">make_comm_meta()</span></code> → <code class="docutils literal notranslate"><span class="pre">dist_attn_func()</span></code>，并对重复 mask pattern 缓存结果。除设置环境变量外无需代码改动。</p>
+</section>
+<section id="direct-solver-api">
+<h3>直接 Solver API<a class="headerlink" href="#direct-solver-api" title="链接到此标题。">#</a></h3>
+<p>对于高级用例（如 simulation、benchmarking 或自定义执行 pipeline），可直接调用 solver：</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.meta.solver.dynamic_attn_solver</span><span class="w"> </span><span class="kn">import</span> <span class="n">DynamicAttnSolver</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.meta.algorithms</span><span class="w"> </span><span class="kn">import</span> <span class="n">BinaryGreedyParallelDynamicAttnAlgorithm</span>
+
+<span class="c1"># Create solver instance</span>
+<span class="n">solver</span> <span class="o">=</span> <span class="n">DynamicAttnSolver</span><span class="p">(</span>
+    <span class="n">algorithm</span><span class="o">=</span><span class="n">BinaryGreedyParallelDynamicAttnAlgorithm</span><span class="p">(),</span>
+    <span class="n">num_heads_q</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+    <span class="n">num_heads_kv</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span>
+    <span class="n">head_dim</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span>
+    <span class="n">cp_group</span><span class="o">=</span><span class="n">cp_group</span><span class="p">,</span>
+    <span class="n">dispatch_meta_q</span><span class="o">=</span><span class="n">dispatch_meta_q</span><span class="p">,</span>
+    <span class="n">dispatch_meta_k</span><span class="o">=</span><span class="n">dispatch_meta_k</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Solve for current layer&#39;s mask</span>
+<span class="n">solver</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">q_ranges</span><span class="p">,</span> <span class="n">k_ranges</span><span class="p">,</span> <span class="n">attn_mask_type</span><span class="p">)</span>
+
+<span class="c1"># Extract execution metadata</span>
+<span class="n">calc_meta</span> <span class="o">=</span> <span class="n">solver</span><span class="o">.</span><span class="n">make_calc_meta</span><span class="p">()</span>
+<span class="n">comm_meta</span> <span class="o">=</span> <span class="n">solver</span><span class="o">.</span><span class="n">make_comm_meta</span><span class="p">()</span>
+
+<span class="c1"># Optionally visualize the partition result</span>
+<span class="n">solver</span><span class="o">.</span><span class="n">output_solve_result</span><span class="p">(</span><span class="n">visualize</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">save_path</span><span class="o">=</span><span class="s2">&quot;solver_output.png&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="current-limitations-future-roadmap">
+<h2>当前局限性与未来路线图<a class="headerlink" href="#current-limitations-future-roadmap" title="链接到此标题。">#</a></h2>
+<section id="current-limitations">
+<h3>当前局限性<a class="headerlink" href="#current-limitations" title="链接到此标题。">#</a></h3>
+<ol class="arabic simple">
+<li><p><strong>Host 端求解</strong>：Solver 当前运行在 CPU 上。对于 mask 由 device 端 indexer 生成的动态稀疏 attention，将 mask metadata 从 device 搬到 host 会引入 sync barrier。</p></li>
+<li><p><strong>仅 two-stage overlap</strong>：当前执行引擎仅支持单个 local + 单个 remote stage。多阶段 pipelining 尚未实现，限制了 overlap 效率。</p></li>
+<li><p><strong>大规模 CP 下的 CPU 开销</strong>：随 CP 数增长 solver 耗时增加，导致更高的 CPU overhead。</p></li>
+</ol>
+</section>
+<section id="future-roadmap">
+<h3>未来路线图<a class="headerlink" href="#future-roadmap" title="链接到此标题。">#</a></h3>
+<ol class="arabic simple">
+<li><p><strong>Device 端 solver</strong>：设计并行友好的 solver 算法直接在 device 上运行，消除 host-device sync 和 CPU 开销。Solver 将 mask metadata 作为 device 端 tensor 输入，完全在 device 端输出 <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code>/<code class="docutils literal notranslate"><span class="pre">CommMeta</span></code>，随 CP 数增长实现更好的扩展性。</p></li>
+<li><p><strong>多阶段 overlapped execution</strong>：扩展执行引擎支持 N-stage pipelining，将远程任务进一步分解为交错通信和计算的 sub-stage，最大化高通信负载下的 overlap。</p></li>
+</ol>
+</section>
+</section>
 <section id="citation">
 <h2>引用<a class="headerlink" href="#citation" title="链接到此标题。">#</a></h2>
 <p>如果你在研究中发现 MagiAttention 有用，请引用：</p>
@@ -962,7 +1220,7 @@
 </section>
 <section id="references">
 <h2>参考文献<a class="headerlink" href="#references" title="链接到此标题。">#</a></h2>
-<span class="target" id="id2"></span></section>
+<span class="target" id="id5"></span></section>
 </section>
 
 <div class="section ablog__blog_comments">
@@ -1015,6 +1273,38 @@
   </div>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">引言</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#limitations-of-the-static-solver">静态 Solver 的局限性</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#core-problem-design-approach">核心问题与设计思路</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#system-abstraction-cost-modeling">系统抽象与开销建模</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#fixed-sequential-sharding">固定顺序分片</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#computation-cost-estimation">计算开销估计</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#communication-cost-estimation">通信开销估计</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#optimization-model">优化模型</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#dynamic-solver-algorithm">动态 Solver 算法</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#algorithm-pipeline">算法流水线</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark">Benchmark</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overlapped-execution">Overlapped Execution</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#two-stage-execution-model">Two-Stage 执行模型</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#calcmeta-commmeta">CalcMeta &amp; CommMeta</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">用户接口</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-configuration">环境配置</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#direct-solver-api">直接 Solver API</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#current-limitations-future-roadmap">当前局限性与未来路线图</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#current-limitations">当前局限性</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#future-roadmap">未来路线图</a></li>
+</ul>
+</li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">引用</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">参考文献</a></li>
 </ul>

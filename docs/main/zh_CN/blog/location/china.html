@@ -1424,7 +1424,7 @@
   
   <div class="section ablog-post">
     <h2 class="ablog-post-title">
-      <a href="../dynamic_solver.html">Dynamic Attention Solver（即将推出）</a>
+      <a href="../dynamic_solver.html">Dynamic Attention Solver</a>
     </h2>
     <ul class="ablog-archive">
       <li>
@@ -1496,7 +1496,7 @@
    
 </div>
     </ul>
-    <p class="ablog-post-excerpt"><p>即将发布的博客文章将在不久的将来发布，敬请期待！</p>
+    <p class="ablog-post-excerpt"><p>上下文并行（CP）将序列 activation 分片到分布式设备上，以突破长上下文训练的显存限制。在 MagiAttention 中，<code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> 已基本解决了标准长上下文负载下的 CP 调度问题——这些场景中 mask 在 iteration 前是静态或可确定的（如 causal、causal document、sliding window）。通过在 iteration 开始前进行初始 token dispatch，静态 solver 确保各 rank 间的计算均衡，同时将数据搬运限制为 <strong>仅 <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> 通信</strong>，保持 Query/Output（<span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>）token 固定在其 home device 上。</p>
 </p>
 
     <p class="ablog-post-expand">

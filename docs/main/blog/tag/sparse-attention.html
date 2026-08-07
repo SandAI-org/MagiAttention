@@ -961,7 +961,7 @@
   
   <div class="section ablog-post">
     <h2 class="ablog-post-title">
-      <a href="../dynamic_solver.html">Dynamic Attention Solver (Coming Soon)</a>
+      <a href="../dynamic_solver.html">Dynamic Attention Solver</a>
     </h2>
     <ul class="ablog-archive">
       <li>
@@ -1033,7 +1033,7 @@
    
 </div>
     </ul>
-    <p class="ablog-post-excerpt"><p>The upcoming blog post will be released in the near future. Stay tuned!</p>
+    <p class="ablog-post-excerpt"><p>Context Parallelism (CP) shards sequence activations across distributed devices to overcome memory constraints in long-context training. In MagiAttention, the <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> has largely solved CP scheduling for standard long-context workloads where masks are static or deterministic prior to the iteration (e.g. causal, causal document, sliding window). By leveraging initial token dispatch before the iteration starts, the static solver ensures compute balance across ranks while restricting data movement to <strong><span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>-communication only</strong>, keeping Query/Output (<span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>) tokens fixed on their host devices.</p>
 </p>
 
     <p class="ablog-post-expand">

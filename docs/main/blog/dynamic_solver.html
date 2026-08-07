@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Dynamic Attention Solver (Coming Soon) &#8212; MagiAttention main documentation</title>
+    <title>Dynamic Attention Solver &#8212; MagiAttention main documentation</title>
   
   
   
@@ -45,6 +45,7 @@
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'blog/dynamic_solver';</script>
     <script>
         DOCUMENTATION_OPTIONS.theme_version = '0.20.0';
@@ -925,7 +926,7 @@
     
     <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Blogs</a></li>
     
-    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Dynamic Attention Solver (Coming Soon)</span></li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Dynamic Attention Solver</span></li>
   </ul>
 </nav>
 </div>
@@ -941,12 +942,272 @@
                 
 <div id="searchbox"></div>
                 <article class="bd-article">
-                   <section id="dynamic-attention-solver-coming-soon">
-<h1>Dynamic Attention Solver (Coming Soon)<a class="headerlink" href="#dynamic-attention-solver-coming-soon" title="Link to this heading">#</a></h1>
-<div class="admonition-todo admonition" id="id1">
-<p class="admonition-title">Todo</p>
-<p>The upcoming blog post will be released in the near future. Stay tuned!</p>
+                   <section id="dynamic-attention-solver">
+<h1>Dynamic Attention Solver<a class="headerlink" href="#dynamic-attention-solver" title="Link to this heading">#</a></h1>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading">#</a></h2>
+<p>Context Parallelism (CP) shards sequence activations across distributed devices to overcome memory constraints in long-context training. In MagiAttention, the <code class="docutils literal notranslate"><span class="pre">static</span> <span class="pre">attn</span> <span class="pre">solver</span></code> has largely solved CP scheduling for standard long-context workloads where masks are static or deterministic prior to the iteration (e.g. causal, causal document, sliding window). By leveraging initial token dispatch before the iteration starts, the static solver ensures compute balance across ranks while restricting data movement to <strong><span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>-communication only</strong>, keeping Query/Output (<span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>) tokens fixed on their host devices.</p>
+<section id="limitations-of-the-static-solver">
+<h3>Limitations of the Static Solver<a class="headerlink" href="#limitations-of-the-static-solver" title="Link to this heading">#</a></h3>
+<p>To achieve computation load balancing across distributed ranks, the static solver relies on <strong>pre-iteration token dispatch</strong>: it splits the sequence into chunks, estimates the FLOP workload for each chunk, and heuristically dispatches these chunks to CP ranks prior to execution.</p>
+<p>Crucially, this approach requires the global attention mask to be <strong>static and fully deterministic before the iteration begins</strong>, so that each chunk’s attention FLOP workload can be evaluated in advance to drive the heuristic dispatch algorithm.</p>
+<p>However, the static solver faces two fundamental limitations that prevent it from supporting dynamic sparse attention mechanisms:</p>
+<ul class="simple">
+<li><p><strong>Runtime Dynamic Sparse Attention</strong>: Architectures such as DeepSeek Sparse Attention (DSA) <span class="bibtex-citation" id="id1">[<a class="reference internal" href="magi_attn.html#id63" title="DeepSeek-AI, Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenhao Xu, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Erhang Li, Fangqi Zhou, Fangyun Lin, Fucong Dai, Guangbo Hao, Guanting Chen, Guowei Li, H. Zhang, Hanwei Xu, Hao Li, Haofen Liang, Haoran Wei, Haowei Zhang, Haowen Luo, Haozhe Ji, Honghui Ding, Hongxuan Tang, Huanqi Cao, Huazuo Gao, Hui Qu, Hui Zeng, Jialiang Huang, Jiashi Li, Jiaxin Xu, Jiewen Hu, Jingchang Chen, Jingting Xiang, Jingyang Yuan, Jingyuan Cheng, Jinhua Zhu, Jun Ran, Junguang Jiang, Junjie Qiu, Junlong Li, Junxiao Song, Kai Dong, Kaige Gao, Kang Guan, Kexin Huang, Kexing Zhou, Kezhao Huang, Kuai Yu, Lean Wang, Lecong Zhang, Lei Wang, Liang Zhao, Liangsheng Yin, Lihua Guo, Lingxiao Luo, Linwang Ma, Litong Wang, Liyue Zhang, M. S. Di, M. Y Xu, Mingchuan Zhang, Minghua Zhang, Minghui Tang, Mingxu Zhou, Panpan Huang, Peixin Cong, Peiyi Wang, Qiancheng Wang, Qihao Zhu, Qingyang Li, Qinyu Chen, Qiushi Du, Ruiling Xu, Ruiqi Ge, Ruisong Zhang, Ruizhe Pan, Runji Wang, Runqiu Yin, Runxin Xu, Ruomeng Shen, Ruoyu Zhang, S. H. Liu, Shanghao Lu, Shangyan Zhou, Shanhuang Chen, Shaofei Cai, Shaoyuan Chen, Shengding Hu, Shengyu Liu, Shiqiang Hu, Shirong Ma, Shiyu Wang, Shuiping Yu, Shunfeng Zhou, Shuting Pan, Songyang Zhou, Tao Ni, Tao Yun, Tian Pei, Tian Ye, Tianyuan Yue, Wangding Zeng, Wen Liu, Wenfeng Liang, Wenjie Pang, Wenjing Luo, Wenjun Gao, Wentao Zhang, Xi Gao, Xiangwen Wang, Xiao Bi, Xiaodong Liu, Xiaohan Wang, Xiaokang Chen, Xiaokang Zhang, Xiaotao Nie, Xin Cheng, Xin Liu, Xin Xie, Xingchao Liu, Xingkai Yu, Xingyou Li, Xinyu Yang, Xinyuan Li, Xu Chen, Xuecheng Su, Xuehai Pan, Xuheng Lin, Xuwei Fu, Y. Q. Wang, Yang Zhang, Yanhong Xu, Yanru Ma, Yao Li, Yao Li, Yao Zhao, Yaofeng Sun, Yaohui Wang, Yi Qian, Yi Yu, Yichao Zhang, Yifan Ding, Yifan Shi, Yiliang Xiong, Ying He, Ying Zhou, Yinmin Zhong, Yishi Piao, Yisong Wang, Yixiao Chen, Yixuan Tan, Yixuan Wei, Yiyang Ma, Yiyuan Liu, Yonglun Yang, Yongqiang Guo, Yongtong Wu, Yu Wu, Yuan Cheng, Yuan Ou, Yuanfan Xu, Yuduan Wang, Yue Gong, Yuhan Wu, Yuheng Zou, Yukun Li, Yunfan Xiong, Yuxiang Luo, Yuxiang You, Yuxuan Liu, Yuyang Zhou, Z. F. Wu, Z. Z. Ren, Zehua Zhao, Zehui Ren, Zhangli Sha, Zhe Fu, Zhean Xu, Zhenda Xie, Zhengyan Zhang, Zhewen Hao, Zhibin Gou, Zhicheng Ma, Zhigang Yan, Zhihong Shao, Zhixian Huang, Zhiyu Wu, Zhuoshu Li, Zhuping Zhang, Zian Xu, Zihao Wang, Zihui Gu, Zijia Zhu, Zilin Li, Zipeng Zhang, Ziwei Xie, Ziyi Gao, Zizheng Pan, Zongqing Yao, Bei Feng, Hui Li, J. L. Cai, Jiaqi Ni, Lei Xu, Meng Li, Ning Tian, R. J. Chen, R. L. Jin, S. S. Li, Shuang Zhou, Tianyu Sun, X. Q. Li, Xiangyue Jin, Xiaojin Shen, Xiaosha Chen, Xinnan Song, Xinyi Zhou, Y. X. Zhu, Yanping Huang, Yaohui Li, Yi Zheng, Yuchen Zhu, Yunxian Ma, Zhen Huang, Zhipeng Xu, Zhongyu Zhang, Dongjie Ji, Jian Liang, Jianzhong Guo, Jin Chen, Leyi Xia, Miaojun Wang, Mingming Li, Peng Zhang, Ruyi Chen, Shangmian Sun, Shaoqing Wu, Shengfeng Ye, T. Wang, W. L. Xiao, Wei An, Xianzu Wang, Xiaowen Sun, Xiaoxiang Wang, Ying Tang, Yukun Zha, Zekai Zhang, Zhe Ju, Zhen Zhang, and Zihua Qu. Deepseek-v3.2: pushing the frontier of open large language models. 2025. URL: https://arxiv.org/abs/2512.02556, arXiv:2512.02556.">DeepSeek-AI <em>et al.</em>, 2025</a>]</span> and Native Sparse Attention (NSA) <span class="bibtex-citation" id="id2">[<a class="reference internal" href="magi_attn.html#id62" title="Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. Native sparse attention: hardware-aligned and natively trainable sparse attention. 2025. URL: https://arxiv.org/abs/2502.11089, arXiv:2502.11089.">Yuan <em>et al.</em>, 2025</a>]</span> compute sparse <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> selections at runtime via lightweight indexers during each layer’s forward pass. Because the resulting attention masks depend directly on dynamic activation states and learned parameters, mask structure cannot be known prior to iteration execution, making pre-iteration token dispatch completely infeasible.</p></li>
+<li><p><strong>CPU-Only Mask Representation</strong>: The static solver only accepts <strong>CPU-side mask descriptors</strong> (e.g., mask type enums, document boundary indices). It cannot directly consume attention masks represented as <strong>GPU-resident tensors</strong>. Many modern attention variants naturally produce or manipulate masks as on-device tensors, making them incompatible with the static solver’s CPU-only mask interface.</p></li>
+</ul>
+<p>These limitations leave the static solver incapable of supporting modern dynamic and device-native attention mechanisms.</p>
+</section>
+<section id="core-problem-design-approach">
+<h3>Core Problem &amp; Design Approach<a class="headerlink" href="#core-problem-design-approach" title="Link to this heading">#</a></h3>
+<p>The core systems challenge in dynamic Context Parallelism is: <strong>under strict activation memory balance constraints (where each rank maintains a uniform sequence shard), how to perform online workload partitioning and compute-communication co-scheduling when token dispatching/reordering is unavailable and attention masks are resolved dynamically at runtime?</strong></p>
+<p>To address this, MagiAttention introduces the <strong><code class="docutils literal notranslate"><span class="pre">Dynamic</span> <span class="pre">Attention</span> <span class="pre">Solver</span></code></strong>. The core idea rests on two key design choices:</p>
+<ol class="arabic simple">
+<li><p><strong>Fixed Token Sharding with <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>-Comm Enabled</strong>: Without pre-iteration token dispatch, each rank holds a fixed sequence shard. In this setup, communicating KV only strictly fixes each rank’s computation workload. This leaves no room for load rebalancing. Therefore, the solver enables communication for both <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> (<strong><span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>-comm enabled</strong>). Communicating both <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> allows any computation workload to be scheduled onto any rank.</p></li>
+<li><p><strong>Per-Layer Online Solving</strong>: During each attention layer’s forward pass, the dynamic solver perceives the current layer’s mask structure, calculates the FLOP workload for each attention tile, and dynamically assigns computation tasks to CP ranks. It balances compute FLOPs across devices while minimizing the maximum communication volume among all ranks (i.e., bottleneck minimization), generating execution metadata (<code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> and <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code>) <strong>in real time</strong>.</p></li>
+</ol>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>            ┌─────────────────────────────────────────────────────────┐
+            │               Context Parallelism Design                │
+            └────────────────────────────┬────────────────────────────┘
+                                         │
+                ┌────────────────────────┴────────────────────────┐
+                ▼                                                 ▼
+     MagiAttention Static Solver                     MagiAttention Dynamic Solver
+┌───────────────────────────────────┐             ┌────────────────────────────────────┐
+│ • Mask: Static / Pre-iter known   │             │ • Mask: Dynamic / Per-layer runtime│
+│ • Token Sharding: Heuristic       │             │ • Token Sharding: Fixed sequential │
+│   reordering (Pre-iteration)      │             │   sharding                         │
+│ • Comm Space: KV-only comm        │             │ • Comm Space: QO &amp; KV dual comm    │
+│ • Schedule: Local QO, pull KV     │             │ • Schedule: Dynamic tile-to-rank   │
+└───────────────────────────────────┘             └────────────────────────────────────┘
+</pre></div>
 </div>
+<p>In the following sections, we describe the detailed formulation and scheduling algorithms of the <code class="docutils literal notranslate"><span class="pre">dynamic</span> <span class="pre">attn</span> <span class="pre">solver</span></code> (<a class="reference internal" href="#overview"><span class="xref myst">Overview</span></a>), present its user interface (<a class="reference internal" href="#user-interface"><span class="xref myst">User Interface</span></a>), and outline current limitations and future roadmap (<a class="reference internal" href="#current-limitations--future-roadmap"><span class="xref myst">Current Limitations &amp; Future Roadmap</span></a>).</p>
+</section>
+</section>
+<section id="system-abstraction-cost-modeling">
+<h2>System Abstraction &amp; Cost Modeling<a class="headerlink" href="#system-abstraction-cost-modeling" title="Link to this heading">#</a></h2>
+<p>The <strong>Dynamic Attention Solver</strong> formulates Context Parallelism (CP) scheduling as a <strong>mask-aware online task-to-rank mapping problem without token reordering</strong>. By maintaining sequence tokens in their original, contiguous physical layout <span class="math notranslate nohighlight">\((0..P-1)\)</span>, it preserves strict activation memory balance. For each distinct dynamic mask, the solver inspects its structure to perceive true FLOP workloads across <span class="math notranslate nohighlight">\(\mathrm{Q} \times \mathrm{KV} \times \text{Head}\)</span> dimensions. Its core objective is to <strong>strictly equalize non-zero compute FLOPs across ranks while minimizing bottleneck <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>/<span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> communication volume</strong>.</p>
+<section id="fixed-sequential-sharding">
+<h3>Fixed Sequential Sharding<a class="headerlink" href="#fixed-sequential-sharding" title="Link to this heading">#</a></h3>
+<p>Without pre-iteration token dispatch, the dynamic solver adopts <strong>fixed sequential sharding</strong> as its default data layout. A sequence of length <span class="math notranslate nohighlight">\(S\)</span> is evenly partitioned into <span class="math notranslate nohighlight">\(P\)</span> contiguous chunks <span class="math notranslate nohighlight">\((0..P-1)\)</span>, where rank <span class="math notranslate nohighlight">\(p\)</span> stores the <span class="math notranslate nohighlight">\(p\)</span>-th chunk. This ensures every rank holds exactly <span class="math notranslate nohighlight">\(S/P\)</span> tokens, guaranteeing perfectly balanced activation memory across all CP ranks by construction.</p>
+<p>Without prior knowledge of the attention mask, sequential sharding serves as an effective mask-agnostic layout that preserves token locality. By storing adjacent tokens on the same rank, it aligns with common attention patterns where neighboring tokens frequently attend to each other. Maintaining this locality increases the proportion of local computation and reduces cross-rank data transfers, making sequential sharding friendly to the dynamic solver.</p>
+<p>Furthermore, this sharding induces a natural grid structure over the global attention space. With <span class="math notranslate nohighlight">\(P\)</span> query chunks and <span class="math notranslate nohighlight">\(P\)</span> key-value chunks, the full <span class="math notranslate nohighlight">\(\mathrm{Q} \times \mathrm{KV}\)</span> attention matrix is partitioned into a <span class="math notranslate nohighlight">\(P \times P\)</span> grid. Block <span class="math notranslate nohighlight">\((i, j)\)</span> represents the attention between query chunk <span class="math notranslate nohighlight">\(i\)</span> and key-value chunk <span class="math notranslate nohighlight">\(j\)</span>. Blocks on the principal diagonal <span class="math notranslate nohighlight">\((i, i)\)</span> are <strong>local</strong> to rank <span class="math notranslate nohighlight">\(i\)</span>, whereas off-diagonal blocks require communication to compute.</p>
+<figure class="align-center" id="sequential-sharding">
+<a class="reference internal image-reference" href="../_images/sequential_sharding.png"><img alt="Fixed Sequential Sharding" src="../_images/sequential_sharding.png" style="width: 600px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 71 </span><span class="caption-text">Illustration of fixed sequential sharding with <span class="math notranslate nohighlight">\(P = 4\)</span> ranks on a variable-length (varlen) causal mask containing two sequence samples of lengths 21 and 11. The vertical axis represents Query/Output (<span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>) and the horizontal axis represents Key/Value (<span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>), both ordered by token ID. Colored entries indicate valid non-masked positions requiring computation. Blue tiles represent <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> stored on rank <code class="docutils literal notranslate"><span class="pre">r1</span></code>, yellow tiles represent <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> stored on rank <code class="docutils literal notranslate"><span class="pre">r2</span></code>, and green tiles represent the cross-rank attention block where <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> resides on <code class="docutils literal notranslate"><span class="pre">r2</span></code> while <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> resides on <code class="docutils literal notranslate"><span class="pre">r1</span></code>. Because <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> belong to different ranks, the green block cannot be computed locally and strictly requires inter-rank communication.</span><a class="headerlink" href="#sequential-sharding" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="computation-cost-estimation">
+<h3>Computation Cost Estimation<a class="headerlink" href="#computation-cost-estimation" title="Link to this heading">#</a></h3>
+<p>The computational workload of attention is directly estimated by the <strong>sum of effective mask areas</strong>. Since attention FLOPs scale linearly with the number of valid (non-masked) entries, the global attention space (<span class="math notranslate nohighlight">\(\mathrm{Q} \times \mathrm{KV} \times \text{Head}\)</span>) is partitioned into basic computation blocks <span class="math notranslate nohighlight">\(B_{i,j,h}\)</span>, where each block represents the sub-matrix computation between query chunk <span class="math notranslate nohighlight">\(i\)</span>, key-value chunk <span class="math notranslate nohighlight">\(j\)</span>, and attention head <span class="math notranslate nohighlight">\(h\)</span>.</p>
+<p>The workload of each block <span class="math notranslate nohighlight">\(B_{i,j,h}\)</span> is quantified by its <strong>effective mask area</strong> <span class="math notranslate nohighlight">\(A(B_{i,j,h})\)</span> — defined as the total count of valid (non-masked) entries within that sub-matrix. In practice (e.g., with packed variable-length sequences, multi-document boundaries, or dynamic sparse masks), a single block may not possess a uniform structure; instead, it can contain a combination of multiple sub-regions, arbitrary shapes, or scattered valid entries. Regardless of the internal layout, <span class="math notranslate nohighlight">\(A(B_{i,j,h})\)</span> is determined by directly counting the valid non-zero entries in the corresponding mask sub-matrix.</p>
+<p>For instance, typical patterns within a block include:</p>
+<ul class="simple">
+<li><p><strong>Full Mask</strong>: Every entry is valid, yielding <span class="math notranslate nohighlight">\(A = S_q \times S_k\)</span> (where <span class="math notranslate nohighlight">\(S_q\)</span> and <span class="math notranslate nohighlight">\(S_k\)</span> are the query and key-value chunk sizes).</p></li>
+<li><p><strong>Causal Mask</strong>: Entries are restricted by causality, yielding <span class="math notranslate nohighlight">\(A = \frac{S_q \times (S_q + 1)}{2}\)</span> for diagonal blocks (assuming <span class="math notranslate nohighlight">\(S_q = S_k\)</span>).</p></li>
+<li><p><strong>Mixed or irregular composition</strong>: The block intersects multiple sequence boundaries or dynamic sparse selections, forming a combination of multiple shapes or sparse patterns.</p></li>
+</ul>
+<figure class="align-center" id="id3">
+<a class="reference internal image-reference" href="../_images/computation_cost_estimation.png"><img alt="Computation Cost Estimation" src="../_images/computation_cost_estimation.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 72 </span><span class="caption-text">Illustration of computation workload estimation based on effective mask area across different block composition cases.</span><a class="headerlink" href="#id3" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="communication-cost-estimation">
+<h3>Communication Cost Estimation<a class="headerlink" href="#communication-cost-estimation" title="Link to this heading">#</a></h3>
+<p>When a rank is assigned to compute an attention block whose required data does not fully reside locally, <strong>inter-rank communication</strong> is triggered to transfer the missing data chunks. The communication cost of a data chunk is estimated by its <strong>volume</strong>, defined as the number of tokens in the chunk multiplied by the number of attention heads:</p>
+<div class="math notranslate nohighlight">
+\[\text{Vol}(\text{chunk}) = S_{\text{chunk}} \times H\]</div>
+<p>Taking the <strong>forward pass</strong> as an example: computing an attention block requires <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span>, <span class="math notranslate nohighlight">\(\mathrm{K}\)</span>, <span class="math notranslate nohighlight">\(\mathrm{V}\)</span> as inputs and produces <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> and <span class="math notranslate nohighlight">\(\text{lse}\)</span> (log-sum-exp) as outputs. Since the size of <span class="math notranslate nohighlight">\(\text{lse}\)</span> is negligible compared to activation tensors, it is omitted from cost estimation. Therefore, a <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> chunk communication transfers <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span> to the computing rank and <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> back, while a <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> chunk communication transfers <span class="math notranslate nohighlight">\(\mathrm{K}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{V}\)</span> together.</p>
+<p>Each communication event involves a <strong>sender</strong> and a <strong>receiver</strong>: when a data chunk is transferred from rank <span class="math notranslate nohighlight">\(s\)</span> to rank <span class="math notranslate nohighlight">\(d\)</span>, the transfer simultaneously increases rank <span class="math notranslate nohighlight">\(s\)</span>’s <strong>send volume</strong> and rank <span class="math notranslate nohighlight">\(d\)</span>’s <strong>receive volume</strong>. The solver tracks per-rank send and receive volumes separately, as both directions contribute to the overall communication bottleneck. Its secondary objective is to <strong>minimize the maximum communication volume across all ranks</strong> (bottleneck minimization), preventing any single rank from becoming a communication straggler.</p>
+<figure class="align-center" id="id4">
+<a class="reference internal image-reference" href="../_images/communication_cost_estimation.png"><img alt="Communication Cost Estimation" src="../_images/communication_cost_estimation.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 73 </span><span class="caption-text">Illustration of communication cost estimation. Under <span class="math notranslate nohighlight">\(P = 4\)</span> sequential sharding, the red attention tile (bottom right) is scheduled on rank 3 (r3). While r3 exhibits high data locality for this task, a partial dependency triggers a remote fetch from r2. This cross-rank transfer costs <span class="math notranslate nohighlight">\(S_{\text{chunk}} \times H\)</span>, incrementing r2’s and r3’s communication volumes. Remote fetch overhead is amortized via data reuse when multiple local tiles share the same chunk.</span><a class="headerlink" href="#id4" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="optimization-model">
+<h3>Optimization Model<a class="headerlink" href="#optimization-model" title="Link to this heading">#</a></h3>
+<p>The online solver searches for an optimal block-to-rank mapping <span class="math notranslate nohighlight">\(\mathcal{M}: \{B_{i,j,h}\} \to \{0, \dots, P-1\}\)</span> that optimizes communication and computation overlap under strict memory and dependency constraints:</p>
+<ol class="arabic simple">
+<li><p><strong>Compute Load Balance Constraint</strong>: Rather than a strict minimization, compute balance is formulated as an inequality constraint using an imbalance ratio <span class="math notranslate nohighlight">\(\mu\)</span>. For each rank <span class="math notranslate nohighlight">\(r\)</span>, its assigned workload must be strictly less than <span class="math notranslate nohighlight">\(\mu\)</span> times the total global workload:</p></li>
+</ol>
+<div class="math notranslate nohighlight">
+\[\sum_{B \in \mathcal{M}^{-1}(r)} A(B) &lt; \mu \sum_{p=0}^{P-1} \sum_{B \in \mathcal{M}^{-1}(p)} A(B)\]</div>
+<ol class="arabic simple" start="2">
+<li><p><strong>Bottleneck Communication Minimization</strong>: Minimize the maximum unidirectional communication volume (either send or receive) across all ranks, preventing network stragglers:</p></li>
+</ol>
+<div class="math notranslate nohighlight">
+\[\min_{\mathcal{M}} \max_{r \in [0, P-1]} \max \left( \text{SendVol}(r), \text{RecvVol}(r) \right)\]</div>
+<ol class="arabic simple" start="3">
+<li><p><strong>Local Priority &amp; Overlap Maximization</strong>: Prioritize assigning local tasks to their host ranks. This allows the system to immediately begin local computation, effectively overlapping it with the communication required for remote tasks.</p></li>
+</ol>
+</section>
+</section>
+<section id="dynamic-solver-algorithm">
+<h2>Dynamic Solver Algorithm<a class="headerlink" href="#dynamic-solver-algorithm" title="Link to this heading">#</a></h2>
+<p>Given the optimization model defined above, the dynamic solver employs a <strong>binary-search-driven greedy heuristic</strong> to find a near-optimal block-to-rank mapping in real time. The algorithm is designed for parallelizable execution on multi-core CPUs with millisecond-level latency.</p>
+<section id="algorithm-pipeline">
+<h3>Algorithm Pipeline<a class="headerlink" href="#algorithm-pipeline" title="Link to this heading">#</a></h3>
+<p>The solver runs three stages inside a binary search loop over the communication threshold <span class="math notranslate nohighlight">\(K\)</span>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>┌─────────────────────────────────────────────────────────────────────────┐
+│                    Binary Search over Threshold K                       │
+│                                                                         │
+│  for each candidate K in [0, K_max]:                                    │
+│    ┌─────────────────────────────────────────────────────────────────┐  │
+│    │ Stage 1: Candidate Edge Scoring &amp; Greedy Selection              │  │
+│    │   • Score each candidate comm edge by benefit/cost ratio        │  │
+│    │   • Greedily select edges under per-rank budget K               │  │
+│    ├─────────────────────────────────────────────────────────────────┤  │
+│    │ Stage 2: Greedy Task Assignment                                 │  │
+│    │   • Build per-task executable rank set from selected edges      │  │
+│    │   • Assign tasks sorted by (degree↑, area↓)                     │  │
+│    │   • Local-first → USP-heuristic → min-load fallback             │  │
+│    ├─────────────────────────────────────────────────────────────────┤  │
+│    │ Stage 3: Local Refinement                                       │  │
+│    │   • Iteratively migrate tasks from overloaded ranks             │  │
+│    │   • Check feasibility: max_load ≤ μ × avg_load                  │  │
+│    └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  if feasible: shrink K_max (tighter comm budget)                        │
+│  else:        raise K_min (relax comm budget)                           │
+│  stop when: K_max - K_min &lt; ε × K_max                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+</pre></div>
+</div>
+<p><strong>Stage 1: Candidate Edge Scoring &amp; Greedy Selection.</strong>
+Each candidate communication edge represents transferring a <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> or <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> chunk from its host rank to a computing rank. The solver scores each edge by a benefit-to-cost ratio:</p>
+<div class="math notranslate nohighlight">
+\[\text{score}(e) = \frac{W(e)}{C(e)}\]</div>
+<p>where <span class="math notranslate nohighlight">\(W(e)\)</span> estimates the compute workload that edge <span class="math notranslate nohighlight">\(e\)</span> would unlock for the target rank (combining already-assigned tasks, a fraction of unassigned tasks, and a smoothing term), and <span class="math notranslate nohighlight">\(C(e) = S_{\text{chunk}} \times H\)</span> is the communication cost. Edges are sorted by score in descending order and greedily accepted as long as neither the sender’s nor receiver’s accumulated cost exceeds threshold <span class="math notranslate nohighlight">\(K\)</span>.</p>
+<p><strong>Stage 2: Greedy Task Assignment.</strong>
+After edge selection determines data accessibility, the solver constructs a <strong>bitmask of executable ranks</strong> for each grid task <span class="math notranslate nohighlight">\(B_{i,j}\)</span> by intersecting the <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span>-reachable ranks for chunk <span class="math notranslate nohighlight">\(i\)</span> and <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span>-reachable ranks for chunk <span class="math notranslate nohighlight">\(j\)</span>. Tasks are sorted by ascending degree (number of candidate ranks) and descending area, then assigned with the following priority:</p>
+<ol class="arabic simple">
+<li><p><strong>Local priority</strong>: if both <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> reside on the same rank, assign locally (zero communication cost).</p></li>
+<li><p><strong>USP heuristic</strong>: prefer the rank suggested by head-group affinity mapping.</p></li>
+<li><p><strong>Min-load fallback</strong>: choose the candidate rank with the smallest current load.</p></li>
+</ol>
+<p><strong>Stage 3: Local Refinement.</strong>
+After initial assignment, the solver performs a bounded number of refinement passes. For each task currently on an overloaded rank (load exceeding <span class="math notranslate nohighlight">\(\mu \times \bar{L}\)</span>), it attempts migration to a lower-load candidate rank. This step reduces the maximum compute imbalance without changing the overall assignment structure.</p>
+</section>
+<section id="benchmark">
+<h3>Benchmark<a class="headerlink" href="#benchmark" title="Link to this heading">#</a></h3>
+<p><strong>Solving Latency.</strong> Under GQA (64:8 heads) with per-device sequence length 8192, the solver completes within 30 ms for all mask types (full, causal, full document, causal document) at CP ≤ 64. For document-sparse masks specifically, solving stays below 45 ms up to CP = 128. Under MHA (64:64 heads), the task count inflates by ~8× due to head-dimension flattening; document-sparse masks remain within 32 ms at CP ≤ 32.</p>
+<p><strong>Communication Volume.</strong> Under GQA (64:8) with variable-length document packing on 8–64 GPUs (H100), the dynamic solver reduces communication volume relative to USP:</p>
+<ul class="simple">
+<li><p><strong>Full document mask</strong>: forward −48%~55%, backward −6%~42%.</p></li>
+<li><p><strong>Causal document mask</strong>: forward −62%~70%, backward −33%~64%.</p></li>
+</ul>
+</section>
+</section>
+<section id="overlapped-execution">
+<h2>Overlapped Execution<a class="headerlink" href="#overlapped-execution" title="Link to this heading">#</a></h2>
+<p>Once the solver determines the block-to-rank mapping, the remaining problem is how to overlap communication with computation during execution. As the simplest possible design, the current implementation adopts a <strong>two-stage</strong> execution model — just a <strong>local stage</strong> and a <strong>remote stage</strong> — and generates <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code> and <code class="docutils literal notranslate"><span class="pre">CommMeta</span></code> to drive each stage. More sophisticated multi-stage pipelining is left for future work.</p>
+<section id="two-stage-execution-model">
+<h3>Two-Stage Execution Model<a class="headerlink" href="#two-stage-execution-model" title="Link to this heading">#</a></h3>
+<p><strong>Stage 0 (Local):</strong> Each rank immediately begins computing attention tasks whose <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> and <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> data both reside locally — no communication is needed. In parallel, the communication stream starts fetching remote <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span>, <span class="math notranslate nohighlight">\(\mathrm{K}\)</span>, <span class="math notranslate nohighlight">\(\mathrm{V}\)</span> chunks required by the next stage.</p>
+<p><strong>Stage 1 (Remote):</strong> After remote data arrives, each rank computes attention tasks that depend on non-local chunks. Once computation finishes, the output <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> is sent back (reduced) to the <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> host rank.</p>
+<figure class="align-center" id="two-stage-streaming">
+<a class="reference internal image-reference" href="../_images/two_stage_streaming.png"><img alt="Two-Stage Overlapped Execution" src="../_images/two_stage_streaming.png" style="width: 800px;" />
+</a>
+<figcaption>
+<p><span class="caption-number">Fig. 74 </span><span class="caption-text">Illustration of the two-stage overlapped execution model. Local attention computation overlaps with remote data fetching on separate CUDA streams.</span><a class="headerlink" href="#two-stage-streaming" title="Link to this image">#</a></p>
+</figcaption>
+</figure>
+<p>The solver’s local-priority assignment directly maximizes Stage 0 workload. The more local computation available, the more communication latency can be hidden behind useful work.</p>
+</section>
+<section id="calcmeta-commmeta">
+<h3>CalcMeta &amp; CommMeta<a class="headerlink" href="#calcmeta-commmeta" title="Link to this heading">#</a></h3>
+<p>The solver output is encoded into two metadata objects that fully specify the execution plan:</p>
+<ul>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code></strong>: records the attention tasks for each stage.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">local_attn_arg</span></code>: list of <code class="docutils literal notranslate"><span class="pre">(q_range,</span> <span class="pre">k_range,</span> <span class="pre">mask_type)</span></code> for Stage 0.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">remote_attn_args_list</span></code>: list of <code class="docutils literal notranslate"><span class="pre">(q_range,</span> <span class="pre">k_range,</span> <span class="pre">mask_type)</span></code> for Stage 1, with ranges expressed in local buffer coordinates.</p></li>
+</ul>
+</li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">CommMeta</span></code></strong>: records the data movement plan per stage.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">num_remote_kv_tokens_per_stage</span></code>: number of remote <span class="math notranslate nohighlight">\(\mathrm{KV}\)</span> tokens to receive at each stage.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">kv_group_collective_args_list</span></code>: per-stage <code class="docutils literal notranslate"><span class="pre">GroupCollectiveArg</span></code> specifying how to group-cast <span class="math notranslate nohighlight">\(\mathrm{K}\)</span>, <span class="math notranslate nohighlight">\(\mathrm{V}\)</span> (forward) or group-reduce <span class="math notranslate nohighlight">\(\mathrm{dK}\)</span>, <span class="math notranslate nohighlight">\(\mathrm{dV}\)</span> (backward).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">num_remote_qo_tokens_per_stage</span></code>: number of remote <span class="math notranslate nohighlight">\(\mathrm{QO}\)</span> tokens to receive at each stage.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">qo_group_collective_args_list</span></code>: per-stage <code class="docutils literal notranslate"><span class="pre">GroupCollectiveArg</span></code> specifying how to group-cast <span class="math notranslate nohighlight">\(\mathrm{Q}\)</span> (forward) or group-reduce <span class="math notranslate nohighlight">\(\mathrm{dQ}\)</span> (backward), and how to reduce <span class="math notranslate nohighlight">\(\mathrm{O}\)</span> back to host ranks.</p></li>
+</ul>
+<p>Each <code class="docutils literal notranslate"><span class="pre">GroupCollectiveArg</span></code> contains: <code class="docutils literal notranslate"><span class="pre">input_split_size_list</span></code> (how to split local data for sending), <code class="docutils literal notranslate"><span class="pre">output_split_size_list</span></code> (expected receive sizes), <code class="docutils literal notranslate"><span class="pre">dst_indices_list</span></code> (target ranks for each send chunk), and <code class="docutils literal notranslate"><span class="pre">src_index_list</span></code> (source rank for each receive chunk).</p>
+</li>
+</ul>
+</section>
+</section>
+<section id="user-interface">
+<h2>User Interface<a class="headerlink" href="#user-interface" title="Link to this heading">#</a></h2>
+<p>The dynamic solver is activated by enabling <strong>QO-communication mode</strong> in MagiAttention’s environment configuration. Once enabled, the system automatically switches from the static solver to the dynamic solver path.</p>
+<section id="environment-configuration">
+<h3>Environment Configuration<a class="headerlink" href="#environment-configuration" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Enable QO-comm to activate dynamic solver</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_QO_COMM</span><span class="o">=</span><span class="m">1</span>
+
+<span class="c1"># Optional: enable head-group flattening for better load balance granularity</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAGI_ATTENTION_FLATTEN_HEAD_GROUPS</span><span class="o">=</span><span class="m">1</span>
+</pre></div>
+</div>
+<p>The API usage is identical to the static solver — users call <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_key</span></code> → <code class="docutils literal notranslate"><span class="pre">dispatch</span></code> → <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code> → <code class="docutils literal notranslate"><span class="pre">undispatch</span></code> as usual. When <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_QO_COMM=1</span></code> is set, the system automatically switches to the dynamic solver path internally, invoking <code class="docutils literal notranslate"><span class="pre">DynamicAttnSolver.solve()</span></code> → <code class="docutils literal notranslate"><span class="pre">make_calc_meta()</span></code> → <code class="docutils literal notranslate"><span class="pre">make_comm_meta()</span></code> → <code class="docutils literal notranslate"><span class="pre">dist_attn_func()</span></code> and caching results for repeated mask patterns. No code changes are needed beyond setting the environment variable.</p>
+</section>
+<section id="direct-solver-api">
+<h3>Direct Solver API<a class="headerlink" href="#direct-solver-api" title="Link to this heading">#</a></h3>
+<p>For advanced use cases (e.g., simulation, benchmarking, or custom execution pipelines), the solver can be invoked directly:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.meta.solver.dynamic_attn_solver</span><span class="w"> </span><span class="kn">import</span> <span class="n">DynamicAttnSolver</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.meta.algorithms</span><span class="w"> </span><span class="kn">import</span> <span class="n">BinaryGreedyParallelDynamicAttnAlgorithm</span>
+
+<span class="c1"># Create solver instance</span>
+<span class="n">solver</span> <span class="o">=</span> <span class="n">DynamicAttnSolver</span><span class="p">(</span>
+    <span class="n">algorithm</span><span class="o">=</span><span class="n">BinaryGreedyParallelDynamicAttnAlgorithm</span><span class="p">(),</span>
+    <span class="n">num_heads_q</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+    <span class="n">num_heads_kv</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span>
+    <span class="n">head_dim</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span>
+    <span class="n">cp_group</span><span class="o">=</span><span class="n">cp_group</span><span class="p">,</span>
+    <span class="n">dispatch_meta_q</span><span class="o">=</span><span class="n">dispatch_meta_q</span><span class="p">,</span>
+    <span class="n">dispatch_meta_k</span><span class="o">=</span><span class="n">dispatch_meta_k</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Solve for current layer&#39;s mask</span>
+<span class="n">solver</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">q_ranges</span><span class="p">,</span> <span class="n">k_ranges</span><span class="p">,</span> <span class="n">attn_mask_type</span><span class="p">)</span>
+
+<span class="c1"># Extract execution metadata</span>
+<span class="n">calc_meta</span> <span class="o">=</span> <span class="n">solver</span><span class="o">.</span><span class="n">make_calc_meta</span><span class="p">()</span>
+<span class="n">comm_meta</span> <span class="o">=</span> <span class="n">solver</span><span class="o">.</span><span class="n">make_comm_meta</span><span class="p">()</span>
+
+<span class="c1"># Optionally visualize the partition result</span>
+<span class="n">solver</span><span class="o">.</span><span class="n">output_solve_result</span><span class="p">(</span><span class="n">visualize</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">save_path</span><span class="o">=</span><span class="s2">&quot;solver_output.png&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="current-limitations-future-roadmap">
+<h2>Current Limitations &amp; Future Roadmap<a class="headerlink" href="#current-limitations-future-roadmap" title="Link to this heading">#</a></h2>
+<section id="current-limitations">
+<h3>Current Limitations<a class="headerlink" href="#current-limitations" title="Link to this heading">#</a></h3>
+<ol class="arabic simple">
+<li><p><strong>Host-side solving</strong>: The solver currently runs on CPU. For dynamic sparse attention where masks are generated by on-device indexers, transferring mask metadata from device to host introduces a synchronization barrier.</p></li>
+<li><p><strong>Two-stage overlap only</strong>: The current execution engine supports a single local + single remote stage. Multi-stage pipelining is not yet implemented, limiting overlap efficiency.</p></li>
+<li><p><strong>CPU overhead at large CP scales</strong>: The solver time increases as the CP count grows, resulting in higher CPU overhead.</p></li>
+</ol>
+</section>
+<section id="future-roadmap">
+<h3>Future Roadmap<a class="headerlink" href="#future-roadmap" title="Link to this heading">#</a></h3>
+<ol class="arabic simple">
+<li><p><strong>Device-side solver</strong>: Design a parallel-friendly solver algorithm that runs directly on device, eliminating host-device synchronization and CPU overhead. The solver would take mask metadata as on-device tensors and output <code class="docutils literal notranslate"><span class="pre">CalcMeta</span></code>/<code class="docutils literal notranslate"><span class="pre">CommMeta</span></code> entirely on device side, achieving better scalability as CP count grows.</p></li>
+<li><p><strong>Multi-stage overlapped execution</strong>: Extend the execution engine to support N-stage pipelining, where remote tasks are further decomposed into sub-stages with interleaved communication and computation, maximizing overlap for high-communication workloads.</p></li>
+</ol>
+</section>
+</section>
 <section id="citation">
 <h2>Citation<a class="headerlink" href="#citation" title="Link to this heading">#</a></h2>
 <p>If you find MagiAttention useful in your research, please cite:</p>
@@ -961,7 +1222,7 @@
 </section>
 <section id="references">
 <h2>References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
-<span class="target" id="id2"></span></section>
+<span class="target" id="id5"></span></section>
 </section>
 
 <div class="section ablog__blog_comments">
@@ -1014,6 +1275,38 @@
   </div>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#introduction">Introduction</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#limitations-of-the-static-solver">Limitations of the Static Solver</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#core-problem-design-approach">Core Problem &amp; Design Approach</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#system-abstraction-cost-modeling">System Abstraction &amp; Cost Modeling</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#fixed-sequential-sharding">Fixed Sequential Sharding</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#computation-cost-estimation">Computation Cost Estimation</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#communication-cost-estimation">Communication Cost Estimation</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#optimization-model">Optimization Model</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#dynamic-solver-algorithm">Dynamic Solver Algorithm</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#algorithm-pipeline">Algorithm Pipeline</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark">Benchmark</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overlapped-execution">Overlapped Execution</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#two-stage-execution-model">Two-Stage Execution Model</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#calcmeta-commmeta">CalcMeta &amp; CommMeta</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#user-interface">User Interface</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-configuration">Environment Configuration</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#direct-solver-api">Direct Solver API</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#current-limitations-future-roadmap">Current Limitations &amp; Future Roadmap</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#current-limitations">Current Limitations</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#future-roadmap">Future Roadmap</a></li>
+</ul>
+</li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#citation">Citation</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">References</a></li>
 </ul>
