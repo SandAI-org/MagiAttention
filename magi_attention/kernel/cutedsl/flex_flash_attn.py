@@ -777,16 +777,22 @@ def _flex_flash_attn_bwd(
     disable_bwd_dkv_atomic_reduction: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
     range_merge: "bool | RangeMergePlan" = False,
-    declared_full_coverage: bool = False,
+    declared_q_full_coverage: bool = False,
+    declared_k_full_coverage: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
     Args:
-        declared_full_coverage: caller declaration that q_ranges/k_ranges
-            each form a contiguous cu-partition of their token space (from
-            ``RangesLayout.VARLEN``), so no coverage holes exist and the
-            hole-zeroing sweeps are skipped. Trust-based: never validated
-            against the geometry (that would sync).
+        declared_q_full_coverage: caller declaration that the union of
+            q_ranges covers the whole Q token space, so no dQ coverage holes
+            exist and the dQ hole-zeroing sweep is skipped. Trust-based: never
+            validated against the geometry (that would sync). Sourced from
+            ``RangesLayout.VARLEN`` or an explicit range-merge declaration.
+        declared_k_full_coverage: same as above but for k_ranges / the dK/dV
+            hole-zeroing sweep. Declared independently of the Q flag because
+            the dQ and dK/dV sweeps read different ranges (q_ranges vs the
+            merged k_ranges), so one may be full-coverage while the other has
+            holes.
 
     Returns:
         A tuple of (dQ, dK, dV) gradients with the same shapes and dtypes as the input q, k, v tensors.
@@ -1180,7 +1186,7 @@ def _flex_flash_attn_bwd(
     else:
         validate_tensor(dv, "dv", v.shape, out_torch_dtype, device)
 
-    if direct_dkv and not declared_full_coverage:
+    if direct_dkv and not declared_k_full_coverage:
         if dk_self_alloc:
             bwd_grad_zero_holes(dk, k_ranges)
         if dv_self_alloc:
@@ -1730,7 +1736,7 @@ def _flex_flash_attn_bwd(
             ranges=pre_post_q_ranges,
         )
 
-    if direct_dq_init and dq_self_alloc and not declared_full_coverage:
+    if direct_dq_init and dq_self_alloc and not declared_q_full_coverage:
         assert q_ranges is not None
         bwd_grad_zero_holes(dq, q_ranges, ranges_sorted=False)
 
@@ -1821,6 +1827,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         range_merge_bwd: "bool | RangeMergePlan" = False,
         ranges_layout: RangesLayout = RangesLayout.GENERAL,
         dense_shape: tuple[int, int] | None = None,
+        bwd_q_full_coverage: bool = False,
+        bwd_k_full_coverage: bool = False,
     ):
         arch, major_arch = get_device_arch()
         is_varlen = q_ranges is not None or k_ranges is not None
@@ -1947,6 +1955,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction
         ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
         ctx.range_merge_bwd = range_merge_bwd
+        ctx.bwd_q_full_coverage = bwd_q_full_coverage
+        ctx.bwd_k_full_coverage = bwd_k_full_coverage
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         ctx.ranges_layout = ranges_layout
@@ -2008,7 +2018,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             flex_attn_args = flex_attn_args.with_aux_tensors(aux)
 
         disable_bwd_dkv_atomic_reduction = ctx.disable_bwd_dkv_atomic_reduction
-        declared_full_coverage = False
+        declared_q_full_coverage = False
+        declared_k_full_coverage = False
         if ctx.ranges_layout == RangesLayout.VARLEN:
             # DEVIATION: VARLEN declaration derives direct-dKV + full coverage
             # Reason: declaring a cu-partition certifies sorted/disjoint
@@ -2017,7 +2028,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             #   this is the documented semantics of RangesLayout.VARLEN.
             # Recovery: ranges_layout=RangesLayout.GENERAL restores the
             #   explicit per-flag contracts.
-            declared_full_coverage = True
+            declared_q_full_coverage = True
+            declared_k_full_coverage = True
             # MHA-only: qhead == kvhead means every K/V row has a unique
             # writer, so the in-kernel direct dKV store is sound. This shape
             # check is the single source of the MHA gate; the host-side
@@ -2026,6 +2038,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             # comparison.
             if q.shape[1] == k.shape[1] and not ctx.deterministic:
                 disable_bwd_dkv_atomic_reduction = True
+        elif ctx.range_merge_bwd:
+            # range-merge declares no cu-partition (VARLEN is mutually
+            # exclusive), so coverage comes from the caller's explicit
+            # declaration. dQ reads q_ranges while dK/dV read the merged
+            # k_ranges, so the two are declared independently.
+            declared_q_full_coverage = ctx.bwd_q_full_coverage
+            declared_k_full_coverage = ctx.bwd_k_full_coverage
 
         dq, dk, dv = _flex_flash_attn_bwd(
             q=q,
@@ -2050,7 +2069,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
             flex_attn_args=flex_attn_args,
             range_merge=ctx.range_merge_bwd,
-            declared_full_coverage=declared_full_coverage,
+            declared_q_full_coverage=declared_q_full_coverage,
+            declared_k_full_coverage=declared_k_full_coverage,
         )
 
         if declared_dense_shape is not None:
@@ -2088,6 +2108,8 @@ def flex_flash_attn_func(
     range_merge_bwd: "bool | RangeMergePlan" = False,
     ranges_layout: RangesLayout = RangesLayout.GENERAL,
     dense_shape: tuple[int, int] | None = None,
+    bwd_q_full_coverage: bool = False,
+    bwd_k_full_coverage: bool = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / range / varlen).
@@ -2115,6 +2137,13 @@ def flex_flash_attn_func(
         ``ValueError``. Geometry is never read back (that would sync), so a
         wrong declaration silently corrupts out/dq/dk/dv — exactly like the
         other contract flags.
+
+    bwd_q_full_coverage / bwd_k_full_coverage: caller declarations (default
+        ``False``) that the union of q_ranges / k_ranges covers the whole
+        Q / K token space, letting backward skip the dQ / dK / dV hole-zeroing
+        sweeps. Only consulted on the range-merge backward path (VARLEN already
+        implies both). Trust-based like the other contract flags: a wrong
+        ``True`` leaves uncovered gradient rows uninitialized.
 
     dense_shape: ``(batch, seqlen)`` describing the uniform ranges, required
         iff ``ranges_layout=RangesLayout.DENSE``. Forward still returns packed
@@ -2183,6 +2212,8 @@ def flex_flash_attn_func(
         range_merge_bwd,
         ranges_layout,
         dense_shape,
+        bwd_q_full_coverage,
+        bwd_k_full_coverage,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)
