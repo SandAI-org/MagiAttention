@@ -1066,6 +1066,118 @@ class TestFfaPerRangeMask(DistTestBase):
         self.assertTrue(torch.equal(qk_map, t([0, 0, 0])))
         self.assertEqual(count.item(), 1)
 
+    def _run_merge_bwd_cov_case(
+        self,
+        *,
+        k_rows,
+        bwd_k_full_coverage,
+        max_seqlen_k,
+        total_k,
+        test_case,
+    ):
+        """Shared driver for range-merge backward coverage tests (MHA, bf16).
+
+        Q ranges always tile [0, total_q) disjointly; the K geometry (and the
+        declared K coverage) is the variable under test. Returns the gradients
+        so callers can add explicit hole-row assertions.
+        """
+        device = self.device
+        total_q = 512
+        q_rows = [[0, 256], [256, 512]]
+        attn_type_map = [MT_MAP.full] * len(q_rows)
+        nheads, d, dtype = 4, 128, torch.bfloat16
+
+        q = torch.randn(total_q, nheads, d, device=device, dtype=dtype).requires_grad_()
+        k = torch.randn(total_k, nheads, d, device=device, dtype=dtype).requires_grad_()
+        v = torch.randn(total_k, nheads, d, device=device, dtype=dtype).requires_grad_()
+        q_ranges_t = torch.tensor(q_rows, device=device, dtype=torch.int32)
+        k_ranges_t = torch.tensor(k_rows, device=device, dtype=torch.int32)
+        mask_types = torch.tensor(attn_type_map, device=device, dtype=torch.int32)
+
+        out, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_types=mask_types,
+            max_seqlen_q=256,
+            max_seqlen_k=max_seqlen_k,
+            disable_fwd_atomic_reduction=True,
+            disable_bwd_dkv_atomic_reduction=True,
+            range_merge_bwd=True,
+            bwd_q_full_coverage=True,
+            bwd_k_full_coverage=bwd_k_full_coverage,
+        )
+        do = torch.randn_like(out)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+
+        for name, tensor in (("o", out), ("dq", dq), ("dk", dk), ("dv", dv)):
+            self.assertFalse(
+                tensor.isnan().any(), msg=f"For {test_case}: {name} contains NaN"
+            )
+
+        self.assert_close_to_torch_ref(
+            q_thd=q.detach(),
+            k_thd=k.detach(),
+            v_thd=v.detach(),
+            do_thd=do,
+            out_thd=out,
+            dq_thd=dq,
+            dk_thd=dk,
+            dv_thd=dv,
+            q_ranges=AttnRanges.from_ranges(q_rows),
+            k_ranges=AttnRanges.from_ranges(k_rows),
+            attn_type_map=attn_type_map,
+            total_seqlen_q=total_q,
+            total_seqlen_k=total_k,
+            dtype=dtype,
+            test_case=test_case,
+        )
+        return dq, dk, dv
+
+    @with_run_in_mp
+    @parameterize("dummy", [0])
+    def test_merge_bwd_full_coverage_skip(self, dummy):
+        """range-merge bwd + declared full coverage: hole cleanup is skipped,
+        yet dq/dk/dv must still match the sdpa reference (no holes exist)."""
+        major = torch.cuda.get_device_capability()[0]
+        if major not in (10, 11):
+            self.skipTest("range-merge backward requires SM100/SM110")
+        torch.random.manual_seed(self.seed + 101)
+        self._run_merge_bwd_cov_case(
+            k_rows=[[0, 512], [0, 512]],  # overlapping dup; union covers [0,512)
+            bwd_k_full_coverage=True,
+            max_seqlen_k=512,
+            total_k=512,
+            test_case=f"[RANK {self.rank}][merge_bwd_full_cov_skip]",
+        )
+
+    @with_run_in_mp
+    @parameterize("dummy", [0])
+    def test_merge_bwd_k_hole_no_skip(self, dummy):
+        """range-merge bwd with a real K hole and K coverage NOT declared: hole
+        cleanup must still run, zeroing the uncovered dK/dV rows [0, 256)."""
+        major = torch.cuda.get_device_capability()[0]
+        if major not in (10, 11):
+            self.skipTest("range-merge backward requires SM100/SM110")
+        torch.random.manual_seed(self.seed + 102)
+        _, dk, dv = self._run_merge_bwd_cov_case(
+            k_rows=[[256, 512], [256, 512]],  # overlapping dup; hole [0, 256)
+            bwd_k_full_coverage=False,
+            max_seqlen_k=256,
+            total_k=512,
+            test_case=f"[RANK {self.rank}][merge_bwd_k_hole_no_skip]",
+        )
+        # The K hole rows are never written by the direct-store kernel, so the
+        # cleanup sweep must have zeroed them (exact zero, not just "close").
+        self.assertEqual(
+            dk[:256].abs().max().item(), 0.0, msg="dK hole rows must be zeroed"
+        )
+        self.assertEqual(
+            dv[:256].abs().max().item(), 0.0, msg="dV hole rows must be zeroed"
+        )
+
 
 if __name__ == "__main__":
     run_tests()

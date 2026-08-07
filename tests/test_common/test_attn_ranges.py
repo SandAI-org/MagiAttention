@@ -1035,6 +1035,48 @@ class TestAttnRanges:
         ranges = AttnRanges.from_ranges([(5, 10), (10, 20)])
         assert not ranges.is_cu_seqlens(20)
 
+    @pytest.mark.parametrize(
+        "ranges_list, seqlen, expected",
+        [
+            ([(0, 2048), (2048, 4096)], 4096, True),
+            ([(0, 8192)] * 4, 8192, True),
+            ([(2048, 4096), (0, 2048)], 4096, True),
+            ([(0, 4096), (6144, 8192)], 8192, False),
+            ([(0, 4096)], 8192, False),
+            ([(2048, 8192)], 8192, False),
+            ([(0, 0), (0, 8192)], 8192, True),
+            ([(0, 100)], 50, False),
+            ([], 0, True),
+            ([], 5, False),
+        ],
+        ids=[
+            "sorted_disjoint_contiguous",
+            "overlapping_duplicates_merge_scenario",
+            "unsorted",
+            "middle_gap",
+            "tail_gap",
+            "head_gap",
+            "empty_range_ignored",
+            "out_of_bound_conservative",
+            "empty_ranges_empty_space",
+            "empty_ranges_nonzero_space",
+        ],
+    )
+    def test_is_full_coverage(self, backend, ranges_list, seqlen, expected):
+        # DEVIATION: cpp backend not parametrized for is_full_coverage
+        # Reason: is_full_coverage is added python-side only; magi_attn_ext's
+        #   AttnRanges has not synced it yet (cpp callers can equivalently use
+        #   merge().is_cu_seqlens(seqlen), both of which exist on the cpp side).
+        # Tracking: sync is_full_coverage into magi_attn_ext when the CuTeDSL
+        #   backend is wired into the production dispatch.
+        if backend == "cpp":
+            pytest.skip(
+                "is_full_coverage is python-side only until magi_attn_ext syncs it"
+            )
+        from magi_attention.common import AttnRanges
+
+        assert AttnRanges.from_ranges(ranges_list).is_full_coverage(seqlen) is expected
+
     def test_max_seqlen(self, backend):
         from magi_attention.common import AttnRanges
 
