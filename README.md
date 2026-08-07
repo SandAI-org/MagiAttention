@@ -188,6 +188,9 @@ We would like to thank everyone who contributed to the development of MagiAttent
 | Mingyu Liang  | Nanjing University          | <mingyuliang518@gmail.com>      | [gaomusiki](https://github.com/gaomusiki)         |
 | Jingwei Xu    | Nanjing University          | <jingweix@nju.edu.cn>           | [paragonlight](https://github.com/paragonlight)   |
 
+### Special Thanks
+
+We sincerely thank the NVIDIA DevTech team—especially Jerry Chen <cjerry@nvidia.com>, Jiayu Sun <jiayus@nvidia.com>, and Jemiry Guo <jemiryg@nvidia.com>—for their continuous technical support.
 
 ## Star History ⭐
 
