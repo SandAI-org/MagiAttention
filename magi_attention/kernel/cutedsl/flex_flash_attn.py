@@ -992,17 +992,22 @@ def _flex_flash_attn_bwd(
             AtomLayoutMdQ = 1
             AtomLayoutNdKV = 1
             requested_disable_2cta = is_ffa_2cta_disabled()
+            # RangeMerge rides the per-range entry but consumes per-pair mask
+            # constants inside its merge pair loop, which is 2-CTA-compatible;
+            # only genuine runtime per-range masks (V1 mixed kernel) still
+            # require the 1-CTA fallback.
+            per_range_requires_1cta = use_per_range_mask and not range_merge_active
             disable_2cta = (
                 requested_disable_2cta
                 or score_mod is not None
                 or score_mod_bwd is not None
                 or mask_mod is not None
                 or block_sparse_tensors is not None
-                or use_per_range_mask
+                or per_range_requires_1cta
             )
             cluster_size = (
                 1
-                if use_per_range_mask
+                if per_range_requires_1cta
                 else (2 if head_dim >= 128 and not disable_2cta else 1)
             )
             use_2cta_instrs = cluster_size == 2
