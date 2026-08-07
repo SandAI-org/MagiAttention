@@ -6,40 +6,885 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: MagiAttention\n"
+"Project-Id-Version:  MagiAttention\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-03-31 18:08+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"POT-Creation-Date: 2026-08-07 07:11+0000\n"
+"PO-Revision-Date: 2026-08-07 15:59+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/blog/dynamic_solver.md:11
-msgid "Dynamic Attention Solver (Coming Soon)"
-msgstr "Dynamic Attention Solver（即将推出）"
+#: ../../source/blog/dynamic_solver.md:10
+msgid "Dynamic Attention Solver"
+msgstr "Dynamic Attention Solver"
 
-#: ../../source/blog/dynamic_solver.md:13
-msgid "Todo"
-msgstr "待办"
+#: ../../source/blog/dynamic_solver.md:12
+msgid "Introduction"
+msgstr "引言"
 
 #: ../../source/blog/dynamic_solver.md:14
+#, python-brace-format
 msgid ""
-"The upcoming blog post will be released in the near future. Stay tuned!"
-msgstr "即将发布的博客文章将在不久的将来发布，敬请期待！"
+"Context Parallelism (CP) shards sequence activations across distributed "
+"devices to overcome memory constraints in long-context training. In "
+"MagiAttention, the `static attn solver` has largely solved CP scheduling "
+"for standard long-context workloads where masks are static or "
+"deterministic prior to the iteration (e.g. causal, causal document, "
+"sliding window). By leveraging initial token dispatch before the "
+"iteration starts, the static solver ensures compute balance across ranks "
+"while restricting data movement to **{math}`\\mathrm{KV}`-communication "
+"only**, keeping Query/Output ({math}`\\mathrm{QO}`) tokens fixed on their"
+" host devices."
+msgstr ""
+"上下文并行（CP）将序列 activation 分片到分布式设备上，以突破长上下文训练的显存限制。在 "
+"MagiAttention 中，`static attn solver` 已基本解决了标准长上下文负载下的 CP "
+"调度问题——这些场景中 mask 在 iteration 前是静态或可确定的（如 causal、causal "
+"document、sliding window）。通过在 iteration 开始前进行初始 token "
+"dispatch，静态 solver 确保各 rank 间的计算均衡，同时将数据搬运限制为 **仅 "
+"{math}`\\mathrm{KV}` 通信**，保持 Query/Output（{math}`\\mathrm{QO}`）token "
+"固定在其 home device 上。"
+
+#: ../../source/blog/dynamic_solver.md:16
+msgid "Limitations of the Static Solver"
+msgstr "静态 Solver 的局限性"
 
 #: ../../source/blog/dynamic_solver.md:18
+msgid ""
+"To achieve computation load balancing across distributed ranks, the "
+"static solver relies on **pre-iteration token dispatch**: it splits the "
+"sequence into chunks, estimates the FLOP workload for each chunk, and "
+"heuristically dispatches these chunks to CP ranks prior to execution."
+msgstr ""
+"为实现分布式 rank 间的计算负载均衡，静态 solver 依赖 **迭代前 token "
+"dispatch**：将序列切分为多个 chunk，估计每个 chunk 的 FLOP "
+"计算量，并在执行前启发式地将这些 chunk dispatch 到各 CP rank。"
+
+#: ../../source/blog/dynamic_solver.md:20
+msgid ""
+"Crucially, this approach requires the global attention mask to be "
+"**static and fully deterministic before the iteration begins**, so that "
+"each chunk's attention FLOP workload can be evaluated in advance to drive"
+" the heuristic dispatch algorithm."
+msgstr ""
+"关键在于，该方法要求全局 attention mask 在 **iteration "
+"开始前是静态且完全确定的**，使得每个 chunk 的 attention FLOP 计算量可以提前评估，从而驱动启发式 dispatch 算法。"
+
+#: ../../source/blog/dynamic_solver.md:22
+msgid ""
+"However, modern dynamic sparse attention mechanisms break this static "
+"assumption:"
+msgstr "然而，现代动态稀疏 attention 机制打破了这一静态假设："
+
+#: ../../source/blog/dynamic_solver.md:23
+#, python-brace-format
+msgid ""
+"**Runtime Dynamic Sparse Attention**: Architectures such as DeepSeek "
+"Sparse Attention (DSA) "
+"{cite}`deepseekai2025deepseekv32pushingfrontieropen` and Native Sparse "
+"Attention (NSA) {cite}`yuan2025nativesparseattentionhardwarealigned` "
+"compute sparse {math}`\\mathrm{KV}` selections at runtime via lightweight"
+" indexers during each layer's forward pass. Because the resulting "
+"attention masks depend directly on dynamic activation states and learned "
+"parameters, mask structure cannot be known prior to iteration execution."
+msgstr ""
+"**运行时动态稀疏 Attention**：DeepSeek Sparse Attention (DSA) "
+"{cite}`deepseekai2025deepseekv32pushingfrontieropen` 和 Native Sparse "
+"Attention (NSA) {cite}`yuan2025nativesparseattentionhardwarealigned` "
+"等架构在每层前向中通过轻量级 indexer 在运行时计算稀疏 {math}`\\mathrm{KV}` "
+"选择。由于产生的 attention mask 直接依赖动态 activation 状态和学习参数，mask 结构在 iteration 执行前无法获知。"
+
+#: ../../source/blog/dynamic_solver.md:25
+msgid ""
+"In these scenarios, pre-iteration token dispatch is completely "
+"infeasible, leaving the static solver incapable of balancing "
+"computational workloads."
+msgstr ""
+"在这些场景下，迭代前 token dispatch 完全不可行，使得静态 solver 无法均衡计算负载。"
+
+#: ../../source/blog/dynamic_solver.md:27
+msgid "Core Problem & Design Approach"
+msgstr "核心问题与设计思路"
+
+#: ../../source/blog/dynamic_solver.md:29
+msgid ""
+"The core systems challenge in dynamic Context Parallelism is: **under "
+"strict activation memory balance constraints (where each rank maintains a"
+" uniform sequence shard), how to perform online workload partitioning and"
+" compute-communication co-scheduling when token dispatching/reordering is"
+" unavailable and attention masks are resolved dynamically at runtime?**"
+msgstr ""
+"动态上下文并行中的核心系统挑战是：**在严格的 activation 显存均衡约束下（每个 rank "
+"持有均匀的序列分片），当 token dispatch/重排不可用且 attention mask 在运行时动态生成时，如何进行在线负载划分和计算-通信协同调度？**"
+
+#: ../../source/blog/dynamic_solver.md:31
+msgid ""
+"To address this, MagiAttention introduces the **`Dynamic Attention "
+"Solver`**. The core idea rests on two key design choices:"
+msgstr ""
+"为此，MagiAttention 引入了 **`Dynamic Attention Solver`**。核心思想基于两个关键设计选择："
+
+#: ../../source/blog/dynamic_solver.md:33
+#, python-brace-format
+msgid ""
+"**Fixed Token Sharding with {math}`\\mathrm{QO}`-Comm Enabled**: Without "
+"pre-iteration token dispatch, each rank holds a fixed sequence shard. In "
+"this setup, communicating KV only strictly fixes each rank's computation "
+"workload. This leaves no room for load rebalancing. Therefore, the solver"
+" enables communication for both {math}`\\mathrm{QO}` and "
+"{math}`\\mathrm{KV}` (**{math}`\\mathrm{QO}`-comm enabled**). "
+"Communicating both {math}`\\mathrm{QO}` and {math}`\\mathrm{KV}` allows "
+"any computation workload to be scheduled onto any rank."
+msgstr ""
+"**固定 Token 分片 + 启用 {math}`\\mathrm{QO}` 通信**：无迭代前 token "
+"dispatch 时，每个 rank 持有固定的序列分片。此设置下仅通信 KV "
+"会严格固定每个 rank 的计算量，没有负载再均衡的空间。因此 solver 同时启用 "
+"{math}`\\mathrm{QO}` 和 {math}`\\mathrm{KV}` 的通信（**启用 "
+"{math}`\\mathrm{QO}` 通信**）。同时通信 {math}`\\mathrm{QO}` 和 "
+"{math}`\\mathrm{KV}` 使得任何计算任务都可以调度到任意 rank。"
+
+#: ../../source/blog/dynamic_solver.md:34
+msgid ""
+"**Per-Layer Online Solving**: During each attention layer's forward pass,"
+" the dynamic solver perceives the current layer's mask structure, "
+"calculates the FLOP workload for each attention tile, and dynamically "
+"assigns computation tasks to CP ranks. It balances compute FLOPs across "
+"devices while minimizing the maximum communication volume among all ranks"
+" (i.e., bottleneck minimization), generating execution metadata "
+"(`CalcMeta` and `CommMeta`) **in real time**."
+msgstr ""
+"**逐层在线求解**：在每个 attention 层的前向过程中，动态 solver 感知当前层的 mask "
+"结构，计算每个 attention tile 的 FLOP "
+"计算量，并动态地将计算任务分配给各 CP rank。它在各设备间均衡计算 FLOPs "
+"的同时最小化所有 rank 的最大通信量（即瓶颈最小化），**实时** 生成执行元数据（`CalcMeta` 和 `CommMeta`）。"
+
+#: ../../source/blog/dynamic_solver.md:53
+msgid ""
+"In the following sections, we describe the detailed formulation and "
+"scheduling algorithms of the `dynamic attn solver` "
+"([Overview](#overview)), present its user interface ([User Interface"
+"](#user-interface)), and outline current limitations and future roadmap "
+"([Current Limitations & Future Roadmap](#current-limitations--future-"
+"roadmap))."
+msgstr ""
+"以下章节中，我们描述 `dynamic attn solver` 的详细建模和调度算法（[概览](#overview)），介绍其用户接口（[用户接口](#user-interface)），并概述当前局限性和未来路线图（[当前局限性与未来路线图](#current-limitations--future-roadmap)）。"
+
+#: ../../source/blog/dynamic_solver.md:56
+msgid "System Abstraction & Cost Modeling"
+msgstr "系统抽象与开销建模"
+
+#: ../../source/blog/dynamic_solver.md:58
+#, python-brace-format
+msgid ""
+"The **Dynamic Attention Solver** formulates Context Parallelism (CP) "
+"scheduling as a **mask-aware online task-to-rank mapping problem without "
+"token reordering**. By maintaining sequence tokens in their original, "
+"contiguous physical layout {math}`(0..P-1)`, it preserves strict "
+"activation memory balance. For each distinct dynamic mask, the solver "
+"inspects its structure to perceive true FLOP workloads across "
+"{math}`\\mathrm{Q} \\times \\mathrm{KV} \\times \\text{Head}` dimensions."
+" Its core objective is to **strictly equalize non-zero compute FLOPs "
+"across ranks while minimizing bottleneck "
+"{math}`\\mathrm{QO}`/{math}`\\mathrm{KV}` communication volume**."
+msgstr ""
+"**Dynamic Attention Solver** 将上下文并行（CP）调度建模为 **感知 mask 的在线 task-to-rank "
+"映射问题（无 token 重排）**。通过保持序列 token 在其原始连续物理布局 "
+"{math}`(0..P-1)` 中不动，严格保证 activation 显存均衡。对于每个不同的动态 mask，solver 检查其结构以感知 "
+"{math}`\\mathrm{Q} \\times \\mathrm{KV} \\times \\text{Head}` "
+"维度上的真实 FLOP 计算量。核心目标是 **严格均衡各 rank 的非零计算 FLOPs，同时最小化瓶颈 "
+"{math}`\\mathrm{QO}`/{math}`\\mathrm{KV}` 通信量**。"
+
+#: ../../source/blog/dynamic_solver.md:60
+#: ../../source/blog/dynamic_solver.md:68
+msgid "Fixed Sequential Sharding"
+msgstr "固定顺序分片"
+
+#: ../../source/blog/dynamic_solver.md:62
+#, python-brace-format
+msgid ""
+"Without pre-iteration token dispatch, the dynamic solver adopts **fixed "
+"sequential sharding** as its default data layout. A sequence of length "
+"{math}`S` is evenly partitioned into {math}`P` contiguous chunks "
+"{math}`(0..P-1)`, where rank {math}`p` stores the {math}`p`-th chunk. "
+"This ensures every rank holds exactly {math}`S/P` tokens, guaranteeing "
+"perfectly balanced activation memory across all CP ranks by construction."
+msgstr ""
+"无迭代前 token dispatch 时，动态 solver 采用 **固定顺序分片** 作为默认数据布局。长度为 "
+"{math}`S` 的序列被均匀切分为 {math}`P` 个连续 chunk "
+"{math}`(0..P-1)`，rank {math}`p` 存储第 {math}`p` 个 chunk。这确保每个 "
+"rank 恰好持有 {math}`S/P` 个 token，天然保证所有 CP rank 的 activation 显存完美均衡。"
+
+#: ../../source/blog/dynamic_solver.md:64
+msgid ""
+"Without prior knowledge of the attention mask, sequential sharding serves"
+" as an effective mask-agnostic layout that preserves token locality. By "
+"storing adjacent tokens on the same rank, it aligns with common attention"
+" patterns where neighboring tokens frequently attend to each other. "
+"Maintaining this locality increases the proportion of local computation "
+"and reduces cross-rank data transfers, making sequential sharding "
+"friendly to the dynamic solver."
+msgstr ""
+"在无 attention mask 先验知识的情况下，顺序分片是一种有效的 mask-agnostic "
+"布局，可保持 token locality。将相邻 token 存储在同一 rank "
+"上，契合相邻 token 频繁相互 attend 的常见 attention "
+"模式。保持该 locality 增加了本地计算占比并减少跨 rank 数据搬运，使顺序分片对动态 solver 友好。"
+
+#: ../../source/blog/dynamic_solver.md:66
+#, python-brace-format
+msgid ""
+"Furthermore, this sharding induces a natural grid structure over the "
+"global attention space. With {math}`P` query chunks and {math}`P` key-"
+"value chunks, the full {math}`\\mathrm{Q} \\times \\mathrm{KV}` attention"
+" matrix is partitioned into a {math}`P \\times P` grid. Block {math}`(i, "
+"j)` represents the attention between query chunk {math}`i` and key-value "
+"chunk {math}`j`. Blocks on the principal diagonal {math}`(i, i)` are "
+"**local** to rank {math}`i`, whereas off-diagonal blocks require "
+"communication to compute."
+msgstr ""
+"此外，该分片在全局 attention 空间上产生自然的网格结构。{math}`P` 个 query chunk 和 "
+"{math}`P` 个 key-value chunk 将完整的 {math}`\\mathrm{Q} \\times "
+"\\mathrm{KV}` attention 矩阵划分为 {math}`P \\times P` 网格。块 "
+"{math}`(i, j)` 表示 query chunk {math}`i` 与 key-value chunk {math}`j` "
+"之间的 attention。主对角线块 {math}`(i, i)` 对 rank {math}`i` "
+"是 **本地的**，非对角线块则需要通信才能计算。"
+
+#: ../../source/blog/dynamic_solver.md:74
+#, python-brace-format
+msgid ""
+"Illustration of fixed sequential sharding with {math}`P = 4` ranks on a "
+"variable-length (varlen) causal mask containing two sequence samples of "
+"lengths 21 and 11. The vertical axis represents Query/Output "
+"({math}`\\mathrm{QO}`) and the horizontal axis represents Key/Value "
+"({math}`\\mathrm{KV}`), both ordered by token ID. Colored entries "
+"indicate valid non-masked positions requiring computation. Blue tiles "
+"represent {math}`\\mathrm{KV}` stored on rank `r1`, yellow tiles "
+"represent {math}`\\mathrm{QO}` stored on rank `r2`, and green tiles "
+"represent the cross-rank attention block where {math}`\\mathrm{QO}` "
+"resides on `r2` while {math}`\\mathrm{KV}` resides on `r1`. Because "
+"{math}`\\mathrm{QO}` and {math}`\\mathrm{KV}` belong to different ranks, "
+"the green block cannot be computed locally and strictly requires inter-"
+"rank communication."
+msgstr ""
+"固定顺序分片示意图：在包含长度为 21 和 11 的两条序列的变长（varlen）causal mask 上使用 "
+"{math}`P = 4` 个 rank。纵轴为 Query/Output（{math}`\\mathrm{QO}`），横轴为 "
+"Key/Value（{math}`\\mathrm{KV}`），均按 token ID 排序。着色条目表示需要计算的有效（非 mask）位置。蓝色 "
+"tile 表示存储在 rank `r1` 的 {math}`\\mathrm{KV}`，黄色 tile 表示存储在 rank `r2` "
+"的 {math}`\\mathrm{QO}`，绿色 tile 表示跨 rank attention 块——"
+"{math}`\\mathrm{QO}` 在 `r2` 而 {math}`\\mathrm{KV}` 在 `r1`。由于 "
+"{math}`\\mathrm{QO}` 和 {math}`\\mathrm{KV}` 属于不同 rank，绿色块无法本地计算，必须通过 rank 间通信。"
+
+#: ../../source/blog/dynamic_solver.md:77
+#: ../../source/blog/dynamic_solver.md:88
+msgid "Computation Cost Estimation"
+msgstr "计算开销估计"
+
+#: ../../source/blog/dynamic_solver.md:79
+#, python-brace-format
+msgid ""
+"The computational workload of attention is directly estimated by the "
+"**sum of effective mask areas**. Since attention FLOPs scale linearly "
+"with the number of valid (non-masked) entries, the global attention space"
+" ({math}`\\mathrm{Q} \\times \\mathrm{KV} \\times \\text{Head}`) is "
+"partitioned into basic computation blocks {math}`B_{i,j,h}`, where each "
+"block represents the sub-matrix computation between query chunk "
+"{math}`i`, key-value chunk {math}`j`, and attention head {math}`h`."
+msgstr ""
+"Attention 的计算量直接通过 **有效 mask 面积之和** 估计。由于 attention FLOPs "
+"与有效（非 mask）条目数量线性相关，全局 attention 空间（{math}`\\mathrm{Q} \\times "
+"\\mathrm{KV} \\times \\text{Head}`）被划分为基本计算块 "
+"{math}`B_{i,j,h}`，每个块表示 query chunk {math}`i`、key-value chunk "
+"{math}`j` 和 attention head {math}`h` 之间的子矩阵计算。"
+
+#: ../../source/blog/dynamic_solver.md:81
+#, python-brace-format
+msgid ""
+"The workload of each block {math}`B_{i,j,h}` is quantified by its "
+"**effective mask area** {math}`A(B_{i,j,h})` — defined as the total count"
+" of valid (non-masked) entries within that sub-matrix. In practice (e.g.,"
+" with packed variable-length sequences, multi-document boundaries, or "
+"dynamic sparse masks), a single block may not possess a uniform "
+"structure; instead, it can contain a combination of multiple sub-regions,"
+" arbitrary shapes, or scattered valid entries. Regardless of the internal"
+" layout, {math}`A(B_{i,j,h})` is determined by directly counting the "
+"valid non-zero entries in the corresponding mask sub-matrix."
+msgstr ""
+"每个块 {math}`B_{i,j,h}` 的计算量通过其 **有效 mask 面积** "
+"{math}`A(B_{i,j,h})` 量化——定义为该子矩阵内有效（非 mask）条目的总数。实际中（如打包变长序列、多文档边界或动态稀疏 mask），单个块可能没有均匀结构，而是包含多个子区域的组合、任意形状或分散的有效条目。无论内部布局如何，{math}`A(B_{i,j,h})` 均通过直接统计对应 mask 子矩阵中的有效非零条目确定。"
+
+#: ../../source/blog/dynamic_solver.md:83
+msgid "For instance, typical patterns within a block include:"
+msgstr "例如，块内典型模式包括："
+
+#: ../../source/blog/dynamic_solver.md:84
+#, python-brace-format
+msgid ""
+"**Full Mask**: Every entry is valid, yielding {math}`A = S_q \\times S_k`"
+" (where {math}`S_q` and {math}`S_k` are the query and key-value chunk "
+"sizes)."
+msgstr ""
+"**Full Mask**：所有条目均有效，{math}`A = S_q \\times S_k`（其中 "
+"{math}`S_q` 和 {math}`S_k` 分别为 query 和 key-value chunk 大小）。"
+
+#: ../../source/blog/dynamic_solver.md:85
+#, python-brace-format
+msgid ""
+"**Causal Mask**: Entries are restricted by causality, yielding {math}`A ="
+" \\frac{S_q \\times (S_q + 1)}{2}` for diagonal blocks (assuming "
+"{math}`S_q = S_k`)."
+msgstr ""
+"**Causal Mask**：条目受因果约束限制，对角块面积为 {math}`A = \\frac{S_q "
+"\\times (S_q + 1)}{2}`（假设 {math}`S_q = S_k`）。"
+
+#: ../../source/blog/dynamic_solver.md:86
+msgid ""
+"**Mixed or irregular composition**: The block intersects multiple "
+"sequence boundaries or dynamic sparse selections, forming a combination "
+"of multiple shapes or sparse patterns."
+msgstr ""
+"**混合或不规则组合**：块跨越多个序列边界或动态稀疏选择，形成多种形状或稀疏模式的组合。"
+
+#: ../../source/blog/dynamic_solver.md:94
+msgid ""
+"Illustration of computation workload estimation based on effective mask "
+"area across different block composition cases."
+msgstr "基于有效 mask 面积的计算量估计示意图，展示不同块组合情况。"
+
+#: ../../source/blog/dynamic_solver.md:97
+#: ../../source/blog/dynamic_solver.md:109
+msgid "Communication Cost Estimation"
+msgstr "通信开销估计"
+
+#: ../../source/blog/dynamic_solver.md:99
+msgid ""
+"When a rank is assigned to compute an attention block whose required data"
+" does not fully reside locally, **inter-rank communication** is triggered"
+" to transfer the missing data chunks. The communication cost of a data "
+"chunk is estimated by its **volume**, defined as the number of tokens in "
+"the chunk multiplied by the number of attention heads:"
+msgstr ""
+"当某个 rank 被分配计算一个所需数据未完全驻留在本地的 attention 块时，会触发 **rank "
+"间通信** 以传输缺失的数据 chunk。数据 chunk 的通信开销通过其 **通信量** 估计，定义为 chunk 中的 token 数乘以 attention head 数："
+
+#: ../../source/blog/dynamic_solver.md:101
+msgid "\\text{Vol}(\\text{chunk}) = S_{\\text{chunk}} \\times H"
+msgstr "\\text{Vol}(\\text{chunk}) = S_{\\text{chunk}} \\times H"
+
+#: ../../source/blog/dynamic_solver.md:105
+#, python-brace-format
+msgid ""
+"Taking the **forward pass** as an example: computing an attention block "
+"requires {math}`\\mathrm{Q}`, {math}`\\mathrm{K}`, {math}`\\mathrm{V}` as"
+" inputs and produces {math}`\\mathrm{O}` and {math}`\\text{lse}` (log-"
+"sum-exp) as outputs. Since the size of {math}`\\text{lse}` is negligible "
+"compared to activation tensors, it is omitted from cost estimation. "
+"Therefore, a {math}`\\mathrm{QO}` chunk communication transfers "
+"{math}`\\mathrm{Q}` to the computing rank and {math}`\\mathrm{O}` back, "
+"while a {math}`\\mathrm{KV}` chunk communication transfers "
+"{math}`\\mathrm{K}` and {math}`\\mathrm{V}` together."
+msgstr ""
+"以 **前向** 为例：计算一个 attention 块需要 {math}`\\mathrm{Q}`、{math}`\\mathrm{K}`、"
+"{math}`\\mathrm{V}` 作为输入，产生 {math}`\\mathrm{O}` 和 "
+"{math}`\\text{lse}`（log-sum-exp）作为输出。由于 {math}`\\text{lse}` "
+"相对于 activation tensor 大小可忽略，在开销估计中省略。因此一次 "
+"{math}`\\mathrm{QO}` chunk 通信将 {math}`\\mathrm{Q}` 发送到计算 rank 并将 "
+"{math}`\\mathrm{O}` 回传，而一次 {math}`\\mathrm{KV}` chunk 通信将 "
+"{math}`\\mathrm{K}` 和 {math}`\\mathrm{V}` 一起传输。"
+
+#: ../../source/blog/dynamic_solver.md:107
+#, python-brace-format
+msgid ""
+"Each communication event involves a **sender** and a **receiver**: when a"
+" data chunk is transferred from rank {math}`s` to rank {math}`d`, the "
+"transfer simultaneously increases rank {math}`s`'s **send volume** and "
+"rank {math}`d`'s **receive volume**. The solver tracks per-rank send and "
+"receive volumes separately, as both directions contribute to the overall "
+"communication bottleneck. Its secondary objective is to **minimize the "
+"maximum communication volume across all ranks** (bottleneck "
+"minimization), preventing any single rank from becoming a communication "
+"straggler."
+msgstr ""
+"每次通信涉及一个 **sender** 和一个 **receiver**：当数据 chunk 从 rank {math}`s` "
+"传输到 rank {math}`d` 时，同时增加 rank {math}`s` 的 **send volume** 和 rank "
+"{math}`d` 的 **recv volume**。Solver 分别跟踪每个 rank 的 send/recv "
+"volume，因为两个方向都贡献于整体通信瓶颈。其次要目标是 **最小化所有 rank "
+"中的最大通信量**（瓶颈最小化），防止任何单个 rank 成为通信 straggler。"
+
+#: ../../source/blog/dynamic_solver.md:115
+msgid ""
+"Illustration of communication cost estimation. Under {math}`P = 4` "
+"sequential sharding, the red attention tile (bottom right) is scheduled "
+"on rank 3 (r3). While r3 exhibits high data locality for this task, a "
+"partial dependency triggers a remote fetch from r2. This cross-rank "
+"transfer costs {math}`S_{\\text{chunk}} \\times H`, incrementing r2's and"
+" r3's communication volumes. Remote fetch overhead is amortized via data "
+"reuse when multiple local tiles share the same chunk."
+msgstr ""
+"通信开销估计示意图。在 {math}`P = 4` 顺序分片下，红色 attention tile（右下角）被调度到 rank 3 "
+"(r3)。虽然 r3 对该任务有较高的数据 locality，但部分依赖触发了从 r2 的远程 fetch。该跨 rank "
+"传输开销为 {math}`S_{\\text{chunk}} \\times H`，增加 r2 和 r3 "
+"的通信量。当多个本地 tile 共享同一 chunk 时，远程 fetch 开销通过数据复用得以摊销。"
+
+#: ../../source/blog/dynamic_solver.md:118
+msgid "Optimization Model"
+msgstr "优化模型"
+
+#: ../../source/blog/dynamic_solver.md:120
+msgid ""
+"The online solver searches for an optimal block-to-rank mapping "
+"{math}`\\mathcal{M}: \\{B_{i,j,h}\\} \\to \\{0, \\dots, P-1\\}` that "
+"optimizes communication and computation overlap under strict memory and "
+"dependency constraints:"
+msgstr ""
+"在线 solver 搜索最优的 block-to-rank 映射 {math}`\\mathcal{M}: \\{B_{i,j,h}\\} \\to "
+"\\{0, \\dots, P-1\\}`，在严格的显存和依赖约束下优化通信与计算的 overlap："
+
+#: ../../source/blog/dynamic_solver.md:122
+#, python-brace-format
+msgid ""
+"**Compute Load Balance Constraint**: Rather than a strict minimization, "
+"compute balance is formulated as an inequality constraint using an "
+"imbalance ratio {math}`\\mu`. For each rank {math}`r`, its assigned "
+"workload must be strictly less than {math}`\\mu` times the total global "
+"workload:"
+msgstr ""
+"**计算负载均衡约束**：计算均衡不作为严格最小化问题，而是使用 imbalance ratio {math}`\\mu` "
+"建模为不等式约束。对每个 rank {math}`r`，其分配的计算量必须严格小于 {math}`\\mu` 乘以全局总计算量："
+
+#: ../../source/blog/dynamic_solver.md:123
+msgid ""
+"\\sum_{B \\in \\mathcal{M}^{-1}(r)} A(B) < \\mu \\sum_{p=0}^{P-1} "
+"\\sum_{B \\in \\mathcal{M}^{-1}(p)} A(B)"
+msgstr ""
+"\\sum_{B \\in \\mathcal{M}^{-1}(r)} A(B) < \\mu \\sum_{p=0}^{P-1} "
+"\\sum_{B \\in \\mathcal{M}^{-1}(p)} A(B)"
+
+#: ../../source/blog/dynamic_solver.md:126
+msgid ""
+"**Bottleneck Communication Minimization**: Minimize the maximum "
+"unidirectional communication volume (either send or receive) across all "
+"ranks, preventing network stragglers:"
+msgstr ""
+"**瓶颈通信最小化**：最小化所有 rank 中最大的单向通信量（send 或 recv），防止网络 straggler："
+
+#: ../../source/blog/dynamic_solver.md:127
+msgid ""
+"\\min_{\\mathcal{M}} \\max_{r \\in [0, P-1]} \\max \\left( "
+"\\text{SendVol}(r), \\text{RecvVol}(r) \\right)"
+msgstr ""
+"\\min_{\\mathcal{M}} \\max_{r \\in [0, P-1]} \\max \\left( "
+"\\text{SendVol}(r), \\text{RecvVol}(r) \\right)"
+
+#: ../../source/blog/dynamic_solver.md:130
+msgid ""
+"**Local Priority & Overlap Maximization**: Prioritize assigning local "
+"tasks to their host ranks. This allows the system to immediately begin "
+"local computation, effectively overlapping it with the communication "
+"required for remote tasks."
+msgstr ""
+"**本地优先与 Overlap 最大化**：优先将本地任务分配给其 home rank。使系统可以立即开始本地计算，有效地与远程任务所需的通信 overlap。"
+
+#: ../../source/blog/dynamic_solver.md:132
+msgid "Dynamic Solver Algorithm"
+msgstr "动态 Solver 算法"
+
+#: ../../source/blog/dynamic_solver.md:134
+msgid ""
+"Given the optimization model defined above, the dynamic solver employs a "
+"**binary-search-driven greedy heuristic** to find a near-optimal block-"
+"to-rank mapping in real time. The algorithm is designed for "
+"parallelizable execution on multi-core CPUs with millisecond-level "
+"latency."
+msgstr ""
+"基于上述优化模型，动态 solver 采用 **二分搜索驱动的贪心启发式算法** 实时寻找近优的 block-to-rank "
+"映射。算法设计为可在多核 CPU 上并行执行，毫秒级耗时。"
+
+#: ../../source/blog/dynamic_solver.md:136
+msgid "Algorithm Pipeline"
+msgstr "算法流水线"
+
+#: ../../source/blog/dynamic_solver.md:138
+#, python-brace-format
+msgid ""
+"The solver runs three stages inside a binary search loop over the "
+"communication threshold {math}`K`:"
+msgstr "Solver 在对通信阈值 {math}`K` 的二分搜索循环内执行三个阶段："
+
+#: ../../source/blog/dynamic_solver.md:166
+#, python-brace-format
+msgid ""
+"**Stage 1: Candidate Edge Scoring & Greedy Selection.** Each candidate "
+"communication edge represents transferring a {math}`\\mathrm{QO}` or "
+"{math}`\\mathrm{KV}` chunk from its host rank to a computing rank. The "
+"solver scores each edge by a benefit-to-cost ratio:"
+msgstr ""
+"**Stage 1：候选边评分与贪心选择。** 每条候选通信边表示将一个 "
+"{math}`\\mathrm{QO}` 或 {math}`\\mathrm{KV}` chunk 从其 home rank "
+"传输到计算 rank。Solver 按收益/开销比对每条边评分："
+
+#: ../../source/blog/dynamic_solver.md:169
+#, python-brace-format
+msgid "\\text{score}(e) = \\frac{W(e)}{C(e)}"
+msgstr "\\text{score}(e) = \\frac{W(e)}{C(e)}"
+
+#: ../../source/blog/dynamic_solver.md:173
+msgid ""
+"where {math}`W(e)` estimates the compute workload that edge {math}`e` "
+"would unlock for the target rank (combining already-assigned tasks, a "
+"fraction of unassigned tasks, and a smoothing term), and {math}`C(e) = "
+"S_{\\text{chunk}} \\times H` is the communication cost. Edges are sorted "
+"by score in descending order and greedily accepted as long as neither the"
+" sender's nor receiver's accumulated cost exceeds threshold {math}`K`."
+msgstr ""
+"其中 {math}`W(e)` 估计边 {math}`e` "
+"为目标 rank 解锁的计算量（综合已分配任务、未分配任务的占比和平滑项），{math}`C(e) = "
+"S_{\\text{chunk}} \\times H` 为通信开销。边按 score 降序排列并贪心接受，只要 sender 和 receiver 的累积开销均未超过阈值 "
+"{math}`K`。"
+
+#: ../../source/blog/dynamic_solver.md:175
+#, python-brace-format
+msgid ""
+"**Stage 2: Greedy Task Assignment.** After edge selection determines data"
+" accessibility, the solver constructs a **bitmask of executable ranks** "
+"for each grid task {math}`B_{i,j}` by intersecting the "
+"{math}`\\mathrm{QO}`-reachable ranks for chunk {math}`i` and "
+"{math}`\\mathrm{KV}`-reachable ranks for chunk {math}`j`. Tasks are "
+"sorted by ascending degree (number of candidate ranks) and descending "
+"area, then assigned with the following priority:"
+msgstr ""
+"**Stage 2：贪心任务分配。** 边选择确定数据可达性后，solver 为每个网格任务 "
+"{math}`B_{i,j}` 构建 **可执行 rank 的 bitmask**——取 chunk {math}`i` 的 "
+"{math}`\\mathrm{QO}` 可达 rank 集合与 chunk {math}`j` 的 "
+"{math}`\\mathrm{KV}` 可达 rank "
+"集合的交集。任务按 degree（候选 rank 数）升序、area 降序排序，然后按以下优先级分配："
+
+#: ../../source/blog/dynamic_solver.md:178
+#, python-brace-format
+msgid ""
+"**Local priority**: if both {math}`\\mathrm{QO}` and {math}`\\mathrm{KV}`"
+" reside on the same rank, assign locally (zero communication cost)."
+msgstr ""
+"**Local priority**：若 {math}`\\mathrm{QO}` 和 {math}`\\mathrm{KV}` "
+"都在同一 rank 上，则本地分配（零通信开销）。"
+
+#: ../../source/blog/dynamic_solver.md:179
+msgid ""
+"**USP heuristic**: prefer the rank suggested by head-group affinity "
+"mapping."
+msgstr "**USP heuristic**：优先选择 head-group affinity mapping 建议的 rank。"
+
+#: ../../source/blog/dynamic_solver.md:180
+msgid ""
+"**Min-load fallback**: choose the candidate rank with the smallest "
+"current load."
+msgstr "**Min-load fallback**：选择当前负载最小的候选 rank。"
+
+#: ../../source/blog/dynamic_solver.md:182
+#, python-brace-format
+msgid ""
+"**Stage 3: Local Refinement.** After initial assignment, the solver "
+"performs a bounded number of refinement passes. For each task currently "
+"on an overloaded rank (load exceeding {math}`\\mu \\times \\bar{L}`), it "
+"attempts migration to a lower-load candidate rank. This step reduces the "
+"maximum compute imbalance without changing the overall assignment "
+"structure."
+msgstr ""
+"**Stage 3：局部精调。** 初始分配后，solver "
+"执行有限次精调 pass。对于当前位于过载 rank（负载超过 {math}`\\mu \\times \\bar{L}`）上的每个任务，尝试迁移到负载更低的候选 "
+"rank。该步骤在不改变整体分配结构的前提下降低最大计算 imbalance。"
+
+#: ../../source/blog/dynamic_solver.md:185
+msgid "Benchmark"
+msgstr "Benchmark"
+
+#: ../../source/blog/dynamic_solver.md:187
+msgid ""
+"**Solving Latency.** Under GQA (64:8 heads) with per-device sequence "
+"length 8192, the solver completes within 30 ms for all mask types (full, "
+"causal, full document, causal document) at CP ≤ 64. For document-sparse "
+"masks specifically, solving stays below 45 ms up to CP = 128. Under MHA "
+"(64:64 heads), the task count inflates by ~8× due to head-dimension "
+"flattening; document-sparse masks remain within 32 ms at CP ≤ 32."
+msgstr ""
+"**求解耗时。** 在 GQA（64:8 heads）、per-device 序列长度 8192 条件下，solver 在 CP ≤ 64 "
+"时对所有 mask 类型（full、causal、full document、causal document）均在 30 ms "
+"内完成。对 document-sparse mask，CP = 128 时求解仍低于 45 ms。在 "
+"MHA（64:64 heads）下，由于 head 维度展平，任务数膨胀约 8×；document-sparse "
+"mask 在 CP ≤ 32 时仍在 32 ms 内完成。"
+
+#: ../../source/blog/dynamic_solver.md:189
+msgid ""
+"**Communication Volume.** Under GQA (64:8) with variable-length document "
+"packing on 8–64 GPUs (H100), the dynamic solver reduces communication "
+"volume relative to USP:"
+msgstr ""
+"**通信量。** 在 GQA（64:8）、8–64 GPU（H100）变长文档 packing 条件下，动态 solver 相对 USP 减少了通信量："
+
+#: ../../source/blog/dynamic_solver.md:190
+msgid "**Full document mask**: forward −48%~55%, backward −6%~42%."
+msgstr "**Full document mask**：forward −48%~55%，backward −6%~42%。"
+
+#: ../../source/blog/dynamic_solver.md:191
+msgid "**Causal document mask**: forward −62%~70%, backward −33%~64%."
+msgstr "**Causal document mask**：forward −62%~70%，backward −33%~64%。"
+
+#: ../../source/blog/dynamic_solver.md:194
+msgid "Overlapped Execution"
+msgstr "Overlapped Execution"
+
+#: ../../source/blog/dynamic_solver.md:196
+msgid ""
+"Once the solver determines the block-to-rank mapping, the remaining "
+"problem is how to overlap communication with computation during "
+"execution. As the simplest possible design, the current implementation "
+"adopts a **two-stage** execution model — just a **local stage** and a "
+"**remote stage** — and generates `CalcMeta` and `CommMeta` to drive each "
+"stage. More sophisticated multi-stage pipelining is left for future work."
+msgstr ""
+"Solver 确定 block-to-rank 映射后，剩余问题是如何在执行中将通信与计算 overlap。作为最简设计，当前实现采用 "
+"**two-stage** 执行模型——仅一个 **local stage** 和一个 **remote stage**——并生成 "
+"`CalcMeta` 和 `CommMeta` 驱动各阶段。更复杂的多阶段 pipelining 留待未来工作。"
+
+#: ../../source/blog/dynamic_solver.md:198
+msgid "Two-Stage Execution Model"
+msgstr "Two-Stage 执行模型"
+
+#: ../../source/blog/dynamic_solver.md:200
+#, python-brace-format
+msgid ""
+"**Stage 0 (Local):** Each rank immediately begins computing attention "
+"tasks whose {math}`\\mathrm{QO}` and {math}`\\mathrm{KV}` data both "
+"reside locally — no communication is needed. In parallel, the "
+"communication stream starts fetching remote {math}`\\mathrm{Q}`, "
+"{math}`\\mathrm{K}`, {math}`\\mathrm{V}` chunks required by the next "
+"stage."
+msgstr ""
+"**Stage 0（Local）：** 每个 rank 立即开始计算 {math}`\\mathrm{QO}` 和 "
+"{math}`\\mathrm{KV}` 数据均在本地的 attention 任务——无需通信。同时，通信 stream 开始 fetch 下一阶段所需的远程 "
+"{math}`\\mathrm{Q}`、{math}`\\mathrm{K}`、{math}`\\mathrm{V}` chunk。"
+
+#: ../../source/blog/dynamic_solver.md:202
+#, python-brace-format
+msgid ""
+"**Stage 1 (Remote):** After remote data arrives, each rank computes "
+"attention tasks that depend on non-local chunks. Once computation "
+"finishes, the output {math}`\\mathrm{O}` is sent back (reduced) to the "
+"{math}`\\mathrm{QO}` host rank."
+msgstr ""
+"**Stage 1（Remote）：** 远程数据到达后，每个 rank 计算依赖非本地 chunk "
+"的 attention 任务。计算完成后，输出 {math}`\\mathrm{O}` 被 reduce 回 "
+"{math}`\\mathrm{QO}` 的 home rank。"
+
+#: ../../source/blog/dynamic_solver.md:204
+msgid "Two-Stage Overlapped Execution"
+msgstr "Two-Stage Overlapped Execution"
+
+#: ../../source/blog/dynamic_solver.md:210
+msgid ""
+"Illustration of the two-stage overlapped execution model. Local attention"
+" computation overlaps with remote data fetching on separate CUDA streams."
+msgstr "Two-stage overlapped execution 模型示意图。本地 attention 计算与远程数据 fetch 在独立 CUDA stream 上 overlap。"
+
+#: ../../source/blog/dynamic_solver.md:213
+msgid ""
+"The solver's local-priority assignment directly maximizes Stage 0 "
+"workload. The more local computation available, the more communication "
+"latency can be hidden behind useful work."
+msgstr ""
+"Solver 的 local-priority 分配策略直接最大化 Stage 0 计算量。本地计算越多，能被有效计算隐藏的通信延迟就越多。"
+
+#: ../../source/blog/dynamic_solver.md:215
+msgid "CalcMeta & CommMeta"
+msgstr "CalcMeta & CommMeta"
+
+#: ../../source/blog/dynamic_solver.md:217
+msgid ""
+"The solver output is encoded into two metadata objects that fully specify"
+" the execution plan:"
+msgstr "Solver 输出编码为两个完整描述执行计划的 metadata 对象："
+
+#: ../../source/blog/dynamic_solver.md:219
+msgid "**`CalcMeta`**: records the attention tasks for each stage."
+msgstr "**`CalcMeta`**：记录每个 stage 的 attention 任务。"
+
+#: ../../source/blog/dynamic_solver.md:220
+msgid "`local_attn_arg`: list of `(q_range, k_range, mask_type)` for Stage 0."
+msgstr "`local_attn_arg`：Stage 0 的 `(q_range, k_range, mask_type)` 列表。"
+
+#: ../../source/blog/dynamic_solver.md:221
+msgid ""
+"`remote_attn_args_list`: list of `(q_range, k_range, mask_type)` for "
+"Stage 1, with ranges expressed in local buffer coordinates."
+msgstr ""
+"`remote_attn_args_list`：Stage 1 的 `(q_range, k_range, mask_type)` 列表，range 以 local buffer 坐标表示。"
+
+#: ../../source/blog/dynamic_solver.md:223
+msgid "**`CommMeta`**: records the data movement plan per stage."
+msgstr "**`CommMeta`**：记录每个 stage 的数据搬运计划。"
+
+#: ../../source/blog/dynamic_solver.md:224
+#, python-brace-format
+msgid ""
+"`num_remote_kv_tokens_per_stage`: number of remote {math}`\\mathrm{KV}` "
+"tokens to receive at each stage."
+msgstr ""
+"`num_remote_kv_tokens_per_stage`：每个 stage 需接收的远程 {math}`\\mathrm{KV}` token 数。"
+
+#: ../../source/blog/dynamic_solver.md:225
+#, python-brace-format
+msgid ""
+"`kv_group_collective_args_list`: per-stage `GroupCollectiveArg` "
+"specifying how to group-cast {math}`\\mathrm{K}`, {math}`\\mathrm{V}` "
+"(forward) or group-reduce {math}`\\mathrm{dK}`, {math}`\\mathrm{dV}` "
+"(backward)."
+msgstr ""
+"`kv_group_collective_args_list`：per-stage `GroupCollectiveArg`，指定如何 "
+"group-cast {math}`\\mathrm{K}`、{math}`\\mathrm{V}`（forward）或 group-reduce "
+"{math}`\\mathrm{dK}`、{math}`\\mathrm{dV}`（backward）。"
+
+#: ../../source/blog/dynamic_solver.md:226
+#, python-brace-format
+msgid ""
+"`num_remote_qo_tokens_per_stage`: number of remote {math}`\\mathrm{QO}` "
+"tokens to receive at each stage."
+msgstr ""
+"`num_remote_qo_tokens_per_stage`：每个 stage 需接收的远程 {math}`\\mathrm{QO}` token 数。"
+
+#: ../../source/blog/dynamic_solver.md:227
+#, python-brace-format
+msgid ""
+"`qo_group_collective_args_list`: per-stage `GroupCollectiveArg` "
+"specifying how to group-cast {math}`\\mathrm{Q}` (forward) or group-"
+"reduce {math}`\\mathrm{dQ}` (backward), and how to reduce "
+"{math}`\\mathrm{O}` back to host ranks."
+msgstr ""
+"`qo_group_collective_args_list`：per-stage `GroupCollectiveArg`，指定如何 "
+"group-cast {math}`\\mathrm{Q}`（forward）或 group-reduce "
+"{math}`\\mathrm{dQ}`（backward），以及如何将 {math}`\\mathrm{O}` reduce 回 home rank。"
+
+#: ../../source/blog/dynamic_solver.md:229
+msgid ""
+"Each `GroupCollectiveArg` contains: `input_split_size_list` (how to split"
+" local data for sending), `output_split_size_list` (expected receive "
+"sizes), `dst_indices_list` (target ranks for each send chunk), and "
+"`src_index_list` (source rank for each receive chunk)."
+msgstr ""
+"每个 `GroupCollectiveArg` 包含：`input_split_size_list`（如何切分本地数据以发送）、"
+"`output_split_size_list`（预期接收大小）、`dst_indices_list`（每个 send chunk 的目标 "
+"rank）和 `src_index_list`（每个 recv chunk 的源 rank）。"
+
+#: ../../source/blog/dynamic_solver.md:232
+msgid "User Interface"
+msgstr "用户接口"
+
+#: ../../source/blog/dynamic_solver.md:234
+msgid ""
+"The dynamic solver is activated by enabling **QO-communication mode** in "
+"MagiAttention's environment configuration. Once enabled, the system "
+"automatically switches from the static solver to the dynamic solver path."
+msgstr ""
+"通过在 MagiAttention 环境配置中启用 **QO-communication 模式** 激活动态 solver。启用后系统自动从静态 solver 切换到动态 solver 路径。"
+
+#: ../../source/blog/dynamic_solver.md:236
+msgid "Environment Configuration"
+msgstr "环境配置"
+
+#: ../../source/blog/dynamic_solver.md:246
+msgid ""
+"The API usage is identical to the static solver — users call "
+"`magi_attn_flex_key` → `dispatch` → `calc_attn` → `undispatch` as usual. "
+"When `MAGI_ATTENTION_QO_COMM=1` is set, the system automatically switches"
+" to the dynamic solver path internally, invoking "
+"`DynamicAttnSolver.solve()` → `make_calc_meta()` → `make_comm_meta()` → "
+"`dist_attn_func()` and caching results for repeated mask patterns. No "
+"code changes are needed beyond setting the environment variable."
+msgstr ""
+"API 用法与静态 solver 完全一致——用户照常调用 `magi_attn_flex_key` → `dispatch` → "
+"`calc_attn` → `undispatch`。设置 `MAGI_ATTENTION_QO_COMM=1` "
+"后，系统内部自动切换到动态 solver 路径，依次调用 `DynamicAttnSolver.solve()` → "
+"`make_calc_meta()` → `make_comm_meta()` → "
+"`dist_attn_func()`，并对重复 mask pattern 缓存结果。除设置环境变量外无需代码改动。"
+
+#: ../../source/blog/dynamic_solver.md:248
+msgid "Direct Solver API"
+msgstr "直接 Solver API"
+
+#: ../../source/blog/dynamic_solver.md:250
+msgid ""
+"For advanced use cases (e.g., simulation, benchmarking, or custom "
+"execution pipelines), the solver can be invoked directly:"
+msgstr ""
+"对于高级用例（如 simulation、benchmarking 或自定义执行 pipeline），可直接调用 solver："
+
+#: ../../source/blog/dynamic_solver.md:279
+msgid "Current Limitations & Future Roadmap"
+msgstr "当前局限性与未来路线图"
+
+#: ../../source/blog/dynamic_solver.md:281
+msgid "Current Limitations"
+msgstr "当前局限性"
+
+#: ../../source/blog/dynamic_solver.md:283
+msgid ""
+"**Host-side solving**: The solver currently runs on CPU. For dynamic "
+"sparse attention where masks are generated by on-device indexers, "
+"transferring mask metadata from device to host introduces a "
+"synchronization barrier."
+msgstr ""
+"**Host 端求解**：Solver 当前运行在 CPU 上。对于 mask 由 device 端 indexer 生成的动态稀疏 attention，将 mask metadata 从 device 搬到 host 会引入 sync barrier。"
+
+#: ../../source/blog/dynamic_solver.md:285
+msgid ""
+"**Two-stage overlap only**: The current execution engine supports a "
+"single local + single remote stage. Multi-stage pipelining is not yet "
+"implemented, limiting overlap efficiency."
+msgstr ""
+"**仅 two-stage overlap**：当前执行引擎仅支持单个 local + 单个 remote stage。多阶段 pipelining 尚未实现，限制了 overlap 效率。"
+
+#: ../../source/blog/dynamic_solver.md:287
+msgid ""
+"**CPU overhead at large CP scales**: The solver time increases as the CP "
+"count grows, resulting in higher CPU overhead."
+msgstr ""
+"**大规模 CP 下的 CPU 开销**：随 CP 数增长 solver 耗时增加，导致更高的 CPU overhead。"
+
+#: ../../source/blog/dynamic_solver.md:289
+msgid "Future Roadmap"
+msgstr "未来路线图"
+
+#: ../../source/blog/dynamic_solver.md:291
+msgid ""
+"**Device-side solver**: Design a parallel-friendly solver algorithm that "
+"runs directly on device, eliminating host-device synchronization and CPU "
+"overhead. The solver would take mask metadata as on-device tensors and "
+"output `CalcMeta`/`CommMeta` entirely on device side, achieving better "
+"scalability as CP count grows."
+msgstr ""
+"**Device 端 solver**：设计并行友好的 solver 算法直接在 device 上运行，消除 host-device sync 和 CPU "
+"开销。Solver 将 mask metadata 作为 device 端 tensor 输入，完全在 device 端输出 "
+"`CalcMeta`/`CommMeta`，随 CP 数增长实现更好的扩展性。"
+
+#: ../../source/blog/dynamic_solver.md:293
+msgid ""
+"**Multi-stage overlapped execution**: Extend the execution engine to "
+"support N-stage pipelining, where remote tasks are further decomposed "
+"into sub-stages with interleaved communication and computation, "
+"maximizing overlap for high-communication workloads."
+msgstr ""
+"**多阶段 overlapped execution**：扩展执行引擎支持 N-stage "
+"pipelining，将远程任务进一步分解为交错通信和计算的 sub-stage，最大化高通信负载下的 overlap。"
+
+#: ../../source/blog/dynamic_solver.md:296
 msgid "Citation"
 msgstr "引用"
 
-#: ../../source/blog/dynamic_solver.md:20
+#: ../../source/blog/dynamic_solver.md:298
 msgid "If you find MagiAttention useful in your research, please cite:"
 msgstr "如果你在研究中发现 MagiAttention 有用，请引用："
 
-#: ../../source/blog/dynamic_solver.md:31
+#: ../../source/blog/dynamic_solver.md:309
 msgid "References"
 msgstr "参考文献"
