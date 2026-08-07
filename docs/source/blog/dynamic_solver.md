@@ -19,10 +19,11 @@ To achieve computation load balancing across distributed ranks, the static solve
 
 Crucially, this approach requires the global attention mask to be **static and fully deterministic before the iteration begins**, so that each chunk's attention FLOP workload can be evaluated in advance to drive the heuristic dispatch algorithm.
 
-However, modern dynamic sparse attention mechanisms break this static assumption:
-- **Runtime Dynamic Sparse Attention**: Architectures such as DeepSeek Sparse Attention (DSA) {cite}`deepseekai2025deepseekv32pushingfrontieropen` and Native Sparse Attention (NSA) {cite}`yuan2025nativesparseattentionhardwarealigned` compute sparse {math}`\mathrm{KV}` selections at runtime via lightweight indexers during each layer's forward pass. Because the resulting attention masks depend directly on dynamic activation states and learned parameters, mask structure cannot be known prior to iteration execution.
+However, the static solver faces two fundamental limitations that prevent it from supporting dynamic sparse attention mechanisms:
+- **Runtime Dynamic Sparse Attention**: Architectures such as DeepSeek Sparse Attention (DSA) {cite}`deepseekai2025deepseekv32pushingfrontieropen` and Native Sparse Attention (NSA) {cite}`yuan2025nativesparseattentionhardwarealigned` compute sparse {math}`\mathrm{KV}` selections at runtime via lightweight indexers during each layer's forward pass. Because the resulting attention masks depend directly on dynamic activation states and learned parameters, mask structure cannot be known prior to iteration execution, making pre-iteration token dispatch completely infeasible.
+- **CPU-Only Mask Representation**: The static solver only accepts **CPU-side mask descriptors** (e.g., mask type enums, document boundary indices). It cannot directly consume attention masks represented as **GPU-resident tensors**. Many modern attention variants naturally produce or manipulate masks as on-device tensors, making them incompatible with the static solver's CPU-only mask interface.
 
-In these scenarios, pre-iteration token dispatch is completely infeasible, leaving the static solver incapable of balancing computational workloads.
+These limitations leave the static solver incapable of supporting modern dynamic and device-native attention mechanisms.
 
 ### Core Problem & Design Approach
 

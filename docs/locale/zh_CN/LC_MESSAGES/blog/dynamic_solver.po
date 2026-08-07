@@ -76,9 +76,10 @@ msgstr ""
 
 #: ../../source/blog/dynamic_solver.md:22
 msgid ""
-"However, modern dynamic sparse attention mechanisms break this static "
-"assumption:"
-msgstr "然而，现代动态稀疏 attention 机制打破了这一静态假设："
+"However, the static solver faces two fundamental limitations that prevent"
+" it from supporting dynamic sparse attention mechanisms:"
+msgstr ""
+"然而，静态 solver 面临两个根本性限制，使其无法支持动态稀疏 attention 机制："
 
 #: ../../source/blog/dynamic_solver.md:23
 #, python-brace-format
@@ -90,21 +91,36 @@ msgid ""
 "compute sparse {math}`\\mathrm{KV}` selections at runtime via lightweight"
 " indexers during each layer's forward pass. Because the resulting "
 "attention masks depend directly on dynamic activation states and learned "
-"parameters, mask structure cannot be known prior to iteration execution."
+"parameters, mask structure cannot be known prior to iteration execution, "
+"making pre-iteration token dispatch completely infeasible."
 msgstr ""
 "**运行时动态稀疏 Attention**：DeepSeek Sparse Attention (DSA) "
 "{cite}`deepseekai2025deepseekv32pushingfrontieropen` 和 Native Sparse "
 "Attention (NSA) {cite}`yuan2025nativesparseattentionhardwarealigned` "
 "等架构在每层前向中通过轻量级 indexer 在运行时计算稀疏 {math}`\\mathrm{KV}` "
-"选择。由于产生的 attention mask 直接依赖动态 activation 状态和学习参数，mask 结构在 iteration 执行前无法获知。"
+"选择。由于产生的 attention mask 直接依赖动态 activation 状态和学习参数，mask "
+"结构在 iteration 执行前无法获知，使得迭代前 token dispatch 完全不可行。"
 
-#: ../../source/blog/dynamic_solver.md:25
+#: ../../source/blog/dynamic_solver.md:24
 msgid ""
-"In these scenarios, pre-iteration token dispatch is completely "
-"infeasible, leaving the static solver incapable of balancing "
-"computational workloads."
+"**CPU-Only Mask Representation**: The static solver only accepts **CPU-"
+"side mask descriptors** (e.g., mask type enums, document boundary "
+"indices). It cannot directly consume attention masks represented as "
+"**GPU-resident tensors**. Many modern attention variants naturally "
+"produce or manipulate masks as on-device tensors, making them "
+"incompatible with the static solver's CPU-only mask interface."
 msgstr ""
-"在这些场景下，迭代前 token dispatch 完全不可行，使得静态 solver 无法均衡计算负载。"
+"**仅支持 CPU 端 Mask 表示**：静态 solver 仅接受 **CPU 端 mask 描述符**"
+"（如 mask 类型枚举、文档边界索引）。它无法直接使用以 **GPU 端 tensor** "
+"表示的 attention mask。许多现代 attention 变体天然以 device 端 tensor "
+"的形式生成或操作 mask，与静态 solver 的 CPU-only mask 接口不兼容。"
+
+#: ../../source/blog/dynamic_solver.md:26
+msgid ""
+"These limitations leave the static solver incapable of supporting modern "
+"dynamic and device-native attention mechanisms."
+msgstr ""
+"这些限制使得静态 solver 无法支持现代动态和 device 原生的 attention 机制。"
 
 #: ../../source/blog/dynamic_solver.md:27
 msgid "Core Problem & Design Approach"
