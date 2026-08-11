@@ -23,7 +23,7 @@ index 8142def..fcb4f12 100644
              raise TypeError("PdPsum tensor must be Float32")
          if const_expr(mdQaccum is not None):
 diff --git a/flash_attn/cute/flash_fwd_sm100.py b/flash_attn/cute/flash_fwd_sm100.py
-index 4d38174..fac810b 100644
+index 4d38174..885d76e 100644
 --- a/flash_attn/cute/flash_fwd_sm100.py
 +++ b/flash_attn/cute/flash_fwd_sm100.py
 @@ -134,6 +134,9 @@ class FlashAttentionForwardSm100:
@@ -36,7 +36,7 @@ index 4d38174..fac810b 100644
      ):
          self.use_tma_KV = not paged_kv_non_tma
          # self.dtype = dtype
-@@ -196,11 +199,24 @@ class FlashAttentionForwardSm100:
+@@ -196,11 +199,23 @@ class FlashAttentionForwardSm100:
          _default_enable_ex2_emu = (self.head_dim_padded <= 128 or (self.head_dim_padded == 192 and self.use_2cta_instrs and not self.is_causal and not self.is_local)) and not is_sm103
          self.enable_ex2_emu = _default_enable_ex2_emu
          self.s0_s1_barrier = False
@@ -58,12 +58,11 @@ index 4d38174..fac810b 100644
 -        if self.overlap_sO_sQ:
 +        assert not (self.sO_borrow_kv and self.overlap_sO_sQ)
 +
-+        # Both smem overlays invalidate cross-tile persistence.
 +        if self.sO_borrow_kv or self.overlap_sO_sQ:
              self.is_persistent = False
  
          assert self.use_tma_KV or not (self.check_hdim_oob or self.check_hdim_v_oob), (
-@@ -212,6 +228,7 @@ class FlashAttentionForwardSm100:
+@@ -212,6 +227,7 @@ class FlashAttentionForwardSm100:
              use_clc_scheduler
              and self.use_tma_KV
              and not self.overlap_sO_sQ
@@ -71,7 +70,7 @@ index 4d38174..fac810b 100644
          )
          self.sched_stages = 1
          if self.use_clc_scheduler:
-@@ -314,6 +331,65 @@ class FlashAttentionForwardSm100:
+@@ -314,6 +330,65 @@ class FlashAttentionForwardSm100:
  
          self.buffer_align_bytes = 1024
  
@@ -137,7 +136,7 @@ index 4d38174..fac810b 100644
      def _setup_attributes(self):
          """Set up configurations and parameters for the FMHA kernel operation.
  
-@@ -326,7 +402,13 @@ class FlashAttentionForwardSm100:
+@@ -326,7 +401,13 @@ class FlashAttentionForwardSm100:
  
          smem_size_q = self.q_stage * self.m_block_size * self.head_dim_padded * self.q_dtype.width // 8
          smem_size_o = self.q_stage * self.m_block_size * self.head_dim_v_padded * self.o_dtype.width // 8
@@ -152,7 +151,7 @@ index 4d38174..fac810b 100644
          smem_size_k_per_stage = self.n_block_size * self.head_dim_padded * self.k_dtype.width // 8
          smem_size_v_per_stage = self.n_block_size * self.head_dim_v_padded * self.v_dtype.width // 8
          smem_size_kv_per_stage = max(smem_size_k_per_stage, smem_size_v_per_stage) // self.cta_group_size
-@@ -354,6 +436,37 @@ class FlashAttentionForwardSm100:
+@@ -354,6 +435,39 @@ class FlashAttentionForwardSm100:
          )
          assert self.uneven_kv_smem_offset % 1024 == 0
  
@@ -160,6 +159,8 @@ index 4d38174..fac810b 100644
 +        # Default: one full-width chunk (= no chunking).
 +        # For fp32 O, optionally split head_dim_v into chunks that each fill exactly
 +        # one KV stage buffer (needed by sO_borrow_kv; also used by chunked TMA).
++
++        # we get epi_chunk_cols and epi_n_chunks
 +        self.epi_chunk_cols = self.head_dim_v_padded
 +        swizzle_atom_cols = 1024 // self.o_dtype.width  # 128B atom width in elems
 +        cols_fitting_one_kv_stage = (
@@ -190,7 +191,15 @@ index 4d38174..fac810b 100644
      @cute.jit
      def __call__(
          self,
-@@ -453,6 +566,10 @@ class FlashAttentionForwardSm100:
+@@ -394,6 +508,7 @@ class FlashAttentionForwardSm100:
+         self.q_dtype = mQ.element_type
+         self.k_dtype = mK.element_type
+         self.v_dtype = mV.element_type
++        # fp32 
+         self.o_dtype = mO.element_type
+         mQ, mK, mV, mO = [assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)]
+         Q_layout_transpose = [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
+@@ -453,6 +568,10 @@ class FlashAttentionForwardSm100:
              and not (self.pack_gqa and self.m_block_size % self.qhead_per_kvhead != 0)
              and not (self.pack_gqa and self.is_split_kv)
          )
@@ -201,26 +210,29 @@ index 4d38174..fac810b 100644
          self.ex2_emu_freq = 0
          self.ex2_emu_start_frg = self._tune.get("ex2_emu_start_frg", 1)
          if const_expr(self.enable_ex2_emu):
-@@ -511,6 +628,18 @@ class FlashAttentionForwardSm100:
+@@ -511,6 +630,21 @@ class FlashAttentionForwardSm100:
          sO_layout = sm100_utils_basic.make_smem_layout_epi(
              self.o_dtype, self.o_layout, self.epi_tile, self.q_stage
          )
 +        # Chunked view of the same sO memory: each stage is split into epi_n_chunks
 +        # column panels of width epi_chunk_cols. Flat index:
-+        #   chunk_idx = stage * epi_n_chunks + chunk
++        # chunk_idx = stage * epi_n_chunks + chunk
++
++        # Re-layout the same logical sO to be one chunk wide, 
++        # making it convenient to perform TMA borrow per slot.
 +        sO_chunk_layout = None
 +        if const_expr(self.epi_n_chunks > 1):
 +            sO_chunk_layout = sm100_utils_basic.make_smem_layout_epi(
 +                self.o_dtype,
 +                self.o_layout,
-+                (self.epi_tile[0], self.epi_chunk_cols),
++                (self.epi_tile[0], self.epi_chunk_cols), # epi_tile = (m_block_size, head_dim_v_padded)
 +                self.q_stage * self.epi_n_chunks,
 +            )
 +            assert cute.cosize(sO_chunk_layout) == cute.cosize(sO_layout)
          if const_expr(not self.same_hdim_kv_padded):
              # sK and sV are using the same physical smem so we need to adjust the stride so that they line up
              stride_sK = const_expr(
-@@ -604,9 +733,17 @@ class FlashAttentionForwardSm100:
+@@ -604,9 +738,17 @@ class FlashAttentionForwardSm100:
  
          self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
          if const_expr(self.use_tma_O):
@@ -235,13 +247,13 @@ index 4d38174..fac810b 100644
 +                tma_atom_O, mO = cpasync.make_tiled_tma_atom(
 +                    tma_store_op,
 +                    mO,
-+                    cute.select(sO_chunk_layout, mode=[0, 1]),
++                    cute.select(sO_chunk_layout, mode=[0, 1]), # sO layout one stage
 +                    (self.epi_tile[0], self.epi_chunk_cols),
 +                )
              gmem_tiled_copy_O = None
          else:
              tma_atom_O = None
-@@ -661,11 +798,20 @@ class FlashAttentionForwardSm100:
+@@ -661,11 +803,20 @@ class FlashAttentionForwardSm100:
          self.tile_scheduler_cls = TileScheduler
          grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
  
@@ -267,7 +279,7 @@ index 4d38174..fac810b 100644
  
          clc_response_size = self.sched_stages * 4 if self.use_clc_scheduler else 0
          clc_mbar_size = self.sched_stages * 2 if self.use_clc_scheduler else 0
-@@ -755,6 +901,7 @@ class FlashAttentionForwardSm100:
+@@ -755,6 +906,7 @@ class FlashAttentionForwardSm100:
              tP_layout,
              sV_layout,
              sO_layout,
@@ -275,7 +287,7 @@ index 4d38174..fac810b 100644
              gmem_tiled_copy_Q,
              gmem_tiled_copy_O,
              tiled_mma_qk,
-@@ -802,6 +949,7 @@ class FlashAttentionForwardSm100:
+@@ -802,6 +954,7 @@ class FlashAttentionForwardSm100:
          tP_layout: cute.ComposedLayout,
          sV_layout: cute.ComposedLayout,
          sO_layout: cute.ComposedLayout,
@@ -283,7 +295,7 @@ index 4d38174..fac810b 100644
          gmem_tiled_copy_Q: Optional[cute.TiledCopy],
          gmem_tiled_copy_O: Optional[cute.TiledCopy],
          tiled_mma_qk: cute.TiledMma,
-@@ -1004,10 +1152,41 @@ class FlashAttentionForwardSm100:
+@@ -1004,10 +1157,41 @@ class FlashAttentionForwardSm100:
          # (MMA, MMA_K, MMA_D, PIPE)
          # Strip swizzle info to reuse smem
          sV = cute.make_tensor(cute.recast_ptr(sK.iterator, sV_layout.inner), sV_layout.outer)
@@ -296,8 +308,8 @@ index 4d38174..fac810b 100644
 +        #   otherwise  → dedicated `storage.sO`
 +        if const_expr(self.sO_borrow_kv):
 +            sO = cute.make_tensor(
-+                cute.recast_ptr(sK.iterator, sO_layout.inner, self.o_dtype),
-+                sO_layout.outer,
++                cute.recast_ptr(sK.iterator, sO_layout.inner, self.o_dtype), # swizzle
++                sO_layout.outer, # raw layout
 +            )
 +        elif const_expr(self.overlap_sO_sQ):
 +            sO = cute.make_tensor(
@@ -328,7 +340,7 @@ index 4d38174..fac810b 100644
  
          sScale = storage.sScale.get_tensor(cute.make_layout(self.q_stage * self.m_block_size * 2))
  
-@@ -1204,6 +1383,7 @@ class FlashAttentionForwardSm100:
+@@ -1204,6 +1388,7 @@ class FlashAttentionForwardSm100:
                  self.epilogue_s2g(
                      mO,
                      sO,
@@ -336,7 +348,7 @@ index 4d38174..fac810b 100644
                      gmem_tiled_copy_O,
                      tma_atom_O,
                      pipeline_o_epi,
-@@ -2387,7 +2567,6 @@ class FlashAttentionForwardSm100:
+@@ -2387,7 +2572,6 @@ class FlashAttentionForwardSm100:
          sm_stats_consumer_phase = Int32(0)
          o_corr_consumer_phase = Int32(0)
          corr_epi_producer_phase = Int32(1)
@@ -344,7 +356,7 @@ index 4d38174..fac810b 100644
          work_tile = tile_scheduler.initial_work_tile_info()
          while work_tile.is_valid_tile:
              m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
-@@ -2404,6 +2583,9 @@ class FlashAttentionForwardSm100:
+@@ -2404,6 +2588,9 @@ class FlashAttentionForwardSm100:
              )
              seqlen = SeqlenInfoCls(batch_idx)
              n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block, split_idx, num_splits)
@@ -354,7 +366,7 @@ index 4d38174..fac810b 100644
  
              if const_expr(self.is_split_kv):
                  mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[None, None, head_idx, split_idx]
-@@ -2532,6 +2714,7 @@ class FlashAttentionForwardSm100:
+@@ -2532,6 +2719,7 @@ class FlashAttentionForwardSm100:
                          mO_cur,
                          gO_stage,
                          gmem_tiled_copy_O,
@@ -362,7 +374,7 @@ index 4d38174..fac810b 100644
                      )
                      # Signal for the next work tile that O buffers in tmem are already read, so
                      # mma warp can write to them
-@@ -2691,6 +2874,65 @@ class FlashAttentionForwardSm100:
+@@ -2691,6 +2879,64 @@ class FlashAttentionForwardSm100:
              cute.copy(thr_tmem_store, tOrO_frg, tOtO_r2t_i)
          cute.arch.fence_view_async_tmem_store()
  
@@ -383,9 +395,8 @@ index 4d38174..fac810b 100644
 +    @cute.jit
 +    def _kv_ring_index(self, slot: Int32) -> Int32:
 +        """Normalize slot into [0, kv_stage). Caller must pass slot in [0, 2*kv_stage)."""
-+        if slot >= self.kv_stage:
-+            return slot - self.kv_stage
-+        return slot
++        # DSL forbids early return under a dynamic condition; use a select
++        return slot - self.kv_stage if slot >= self.kv_stage else slot
 +
 +    @cute.jit
 +    def _borrow_first_slot(self, n_block_min: Int32, n_block_max: Int32) -> Int32:
@@ -428,7 +439,7 @@ index 4d38174..fac810b 100644
      @cute.jit
      def correction_epilogue(
          self,
-@@ -2705,6 +2947,7 @@ class FlashAttentionForwardSm100:
+@@ -2705,6 +2951,7 @@ class FlashAttentionForwardSm100:
          mO_cur: Optional[cute.Tensor] = None,
          gO: Optional[cute.Tensor] = None,
          gmem_tiled_copy_O: Optional[cute.TiledCopy] = None,
@@ -436,7 +447,15 @@ index 4d38174..fac810b 100644
      ):
          """Apply final scaling and transformation to attention output before writing to global memory.
  
-@@ -2757,16 +3000,30 @@ class FlashAttentionForwardSm100:
+@@ -2749,6 +2996,7 @@ class FlashAttentionForwardSm100:
+         )
+         tiled_tmem_load = tcgen05.make_tmem_copy(tmem_copy_atom, tOtO_i[(None, None), 0])
+         thr_tmem_load = tiled_tmem_load.get_slice(tidx)
++        # o_dtype = fp32
+         smem_copy_atom = sm100_utils_basic.get_smem_store_op(
+             self.o_layout, self.o_dtype, self.pv_acc_dtype, tiled_tmem_load
+         )
+@@ -2757,16 +3005,33 @@ class FlashAttentionForwardSm100:
          tOtO_t2r = thr_tmem_load.partition_S(tOtO_i[(None, None), None])
          tOsO_s2r = copy_utils.partition_D_position_independent(thr_tmem_load, tOsO_i[(None, None), None])
          tOcO_t2r = thr_tmem_load.partition_D(tOcO_i[(None, None), None])
@@ -454,12 +473,15 @@ index 4d38174..fac810b 100644
 +        assert self.head_dim_v_padded % corr_tile_size == 0
 +        assert self.epi_chunk_cols % corr_tile_size == 0
 +        for chunk in cutlass.range_constexpr(self.epi_n_chunks):
++            # 全局 chunk
 +            chunk_idx = stage * self.epi_n_chunks + chunk
 +            for corr_tile in cutlass.range_constexpr(corr_tiles_per_chunk):
++                # 当前 chunk 第几个 tile
 +                i = chunk * corr_tiles_per_chunk + corr_tile
 +                tOtO_t2r_i = tOtO_t2r[None, 0, 0, i]
 +                tOsO_r2s_i = tOsO_s2r[None, 0, 0, i]
 +                if const_expr(self.sO_borrow_kv):
++                    # physical = (first_borrowed_slot + chunk_idx) % kv_stage
 +                    tOsO_r2s_i = self._borrow_chunk_view(
 +                        tOsO_r2s_i, first_borrowed_slot, chunk_idx
 +                    )
@@ -476,7 +498,7 @@ index 4d38174..fac810b 100644
          cute.arch.fence_view_async_shared()
  
          if const_expr(self.use_correction_warps_for_epi):
-@@ -2777,7 +3034,8 @@ class FlashAttentionForwardSm100:
+@@ -2777,9 +3042,11 @@ class FlashAttentionForwardSm100:
              mma_tile_coord_v = thr_mma.thr_idx
              m_tile_idx = (m_block * self.q_stage + stage) * self.cta_group_size + mma_tile_coord_v
              self._store_O_to_gmem(
@@ -485,8 +507,11 @@ index 4d38174..fac810b 100644
 +                stage=stage, first_borrowed_slot=first_borrowed_slot,
              )
  
++    # varlen
      @cute.jit
-@@ -2790,6 +3048,8 @@ class FlashAttentionForwardSm100:
+     def _store_O_to_gmem(
+         self,
+@@ -2790,9 +3057,12 @@ class FlashAttentionForwardSm100:
          tidx: Int32,
          seqlen_q: Int32,
          m_tile_idx: Int32,
@@ -495,33 +520,45 @@ index 4d38174..fac810b 100644
      ):
          """Copy a single stage of O from smem to gmem via registers."""
          gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
-@@ -2807,7 +3067,24 @@ class FlashAttentionForwardSm100:
++        # tOsO[atomic,  rest_M,  k_idx(head_dim_v)]
+         tOsO = gmem_thr_copy_O.partition_S(sO_stage)
+         cO = cute.make_identity_tensor((self.m_block_size, self.head_dim_v_padded))
+         tOcO = gmem_thr_copy_O.partition_S(cO)
+@@ -2807,7 +3077,24 @@ class FlashAttentionForwardSm100:
  
          # load acc O from smem to rmem for wider vectorization
          tOrO = cute.make_fragment_like(tOsO, self.o_dtype)
 -        cute.autovec_copy(tOsO, tOrO)
 +        if const_expr(self.sO_borrow_kv):
-+            # K-mode of the partition walks column panels left→right. Each O
-+            # chunk owns `k_tiles_per_chunk` consecutive panels that all map to
-+            # the same borrowed KV slot.
 +            assert first_borrowed_slot is not None
 +            n_k_tiles = cute.size(tOsO, mode=[2])
 +            assert n_k_tiles % self.epi_n_chunks == 0
++            # 每 chunk 拿到的 k tiles
 +            k_tiles_per_chunk = n_k_tiles // self.epi_n_chunks
 +            for chunk in cutlass.range_constexpr(self.epi_n_chunks):
 +                chunk_idx = stage * self.epi_n_chunks + chunk
 +                for kk in cutlass.range_constexpr(k_tiles_per_chunk):
 +                    k_idx = chunk * k_tiles_per_chunk + kk
++                    # physical = (first_borrowed_slot + chunk_idx) % kv_stage
 +                    src = self._borrow_chunk_view(
 +                        tOsO[None, None, k_idx], first_borrowed_slot, chunk_idx
 +                    )
++                    # physical smem -> reg 
 +                    cute.autovec_copy(src, tOrO[None, None, k_idx])
 +        else:
 +            cute.autovec_copy(tOsO, tOrO)
          # copy acc O from rmem to gmem
          if const_expr(not self.pack_gqa):
              assert gO is not None
-@@ -2834,6 +3111,7 @@ class FlashAttentionForwardSm100:
+@@ -2828,12 +3115,14 @@ class FlashAttentionForwardSm100:
+             pack_gqa.store_O(
+                 mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_tile_idx, seqlen_q
+             )
+-
++    
++    # dense
+     @cute.jit
+     def epilogue_s2g(
          self,
          mO: cute.Tensor,
          sO: cute.Tensor,
@@ -529,7 +566,7 @@ index 4d38174..fac810b 100644
          gmem_tiled_copy_O: cute.TiledCopy,
          tma_atom_O: Optional[cute.CopyAtom],
          pipeline_o_epi: pipeline.PipelineAsync,
-@@ -2865,19 +3143,57 @@ class FlashAttentionForwardSm100:
+@@ -2865,19 +3154,57 @@ class FlashAttentionForwardSm100:
                      gO = cute.flat_divide(gO, (self.mma_tiler_pv[0] // self.cta_group_size,))[None, mma_tile_coord_v, None, None]
  
                  if const_expr(self.use_tma_O):
@@ -596,3 +633,154 @@ index 4d38174..fac810b 100644
                          pipeline_o_epi.consumer_release_w_index(stage)
                  else:
                      tidx = cute.arch.thread_idx()[0] % (
+diff --git a/flash_attn/cute/interface.py b/flash_attn/cute/interface.py
+index 45354e6..2496441 100644
+--- a/flash_attn/cute/interface.py
++++ b/flash_attn/cute/interface.py
+@@ -320,6 +320,7 @@ def _flash_attn_fwd(
+     block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
+     return_lse: bool = False,
+     out: Optional[torch.Tensor] = None,
++    out_dtype: Optional[torch.dtype] = None,
+     lse: Optional[torch.Tensor] = None,
+     aux_tensors: Optional[list[torch.Tensor]] = None,
+     q_descale: Optional[torch.Tensor] = None,
+@@ -439,6 +440,12 @@ def _flash_attn_fwd(
+     if is_fp8 and (q.requires_grad or k.requires_grad or v.requires_grad):
+         raise NotImplementedError("FA4 CuTe FP8 backward is not supported yet (forward-only).")
+     out_torch_dtype = torch.bfloat16 if is_fp8 else q.dtype
++    if out_dtype is not None and out_dtype != out_torch_dtype:
++        assert out_dtype == torch.float32, "out_dtype override only supports torch.float32"
++        assert not is_fp8, "fp32 out is not supported with FP8 inputs"
++        assert qv is None, "fp32 out is not supported with MLA (qv)"
++        assert arch // 10 in [10, 11], "fp32 out is only supported on SM100/SM110"
++        out_torch_dtype = torch.float32
+     device = q.device
+     q_batch_seqlen_shape = (batch_size, seqlen_q) if cu_seqlens_q is None else (total_q,)
+     lse_shape = (batch_size, num_head, seqlen_q) if cu_seqlens_q is None else (num_head, total_q)
+@@ -681,6 +688,7 @@ def _flash_attn_fwd(
+ 
+     compile_key = (
+         dtype,
++        out.dtype,
+         head_dim,
+         head_dim_v,
+         qhead_per_kvhead,
+@@ -883,6 +891,10 @@ def _flash_attn_fwd(
+                     if use_dedicated_hd256_kernel
+                     else FlashAttentionForwardSm100
+                 )
++                if out.dtype == torch.float32:
++                    assert not use_dedicated_hd256_kernel, (
++                        "fp32 out is not supported with the dedicated hd256 kernel"
++                    )
+ 
+                 fa_fwd = flash_fwd_obj_cls(
+                     head_dim,
+@@ -908,6 +920,15 @@ def _flash_attn_fwd(
+                     q_subtile_factor=q_subtile_factor,
+                     use_2cta_instrs=use_2cta_instrs,
+                     use_clc_scheduler=use_clc_scheduler,
++                    **(
++                        {
++                            "fp32_O": out.dtype == torch.float32,
++                            "use_block_sparsity": use_block_sparsity,
++                            "has_page_table": page_table is not None,
++                        }
++                        if not use_dedicated_hd256_kernel
++                        else {}
++                    ),
+                 )
+         elif arch // 10 == 12:
+             # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
+@@ -1395,8 +1416,10 @@ def _flash_attn_bwd(
+         )
+ 
+     assert q.dtype in [torch.float16, torch.bfloat16], "inputs must be float16 or bfloat16"
+-    assert q.dtype == k.dtype == v.dtype == out.dtype == dout.dtype, (
+-        "inputs must have the same dtype"
++    assert q.dtype == k.dtype == v.dtype, "q, k, v must have the same dtype"
++    assert out.dtype == dout.dtype, "out and dout must have the same dtype"
++    assert out.dtype in [q.dtype, torch.float32], (
++        "out must have the same dtype as q or be float32"
+     )
+     for t in [cu_seqlens_q, cu_seqlens_k]:
+         if t is not None:
+@@ -1546,9 +1569,12 @@ def _flash_attn_bwd(
+     _bwd_preprocess(
+         out, dout, dpsum, lse, lse_log2, dq_accum,
+         cu_seqlens_q, seqused_q, dlse,
+-        dtype, head_dim, head_dim_v, m_block_size,
++        torch2cute_dtype_map[out.dtype], head_dim, head_dim_v, m_block_size,
+         use_padded_offsets=use_dedicated_hd256_kernel,
+     )
++    # dO is an MMA operand in the main bwd kernel; fp32 out/dout only feed preprocess
++    if dout.dtype != q.dtype:
++        dout = dout.to(q.dtype)
+     # num_threads: SM90 derives from BwdConfig.num_wg, SM120 is set to 128 above,
+     # SM100/SM110 uses default from function signature (384).
+     if arch // 10 not in [9, 12]:
+@@ -1943,6 +1969,7 @@ class FlashAttnFunc(torch.autograd.Function):
+         block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
+         block_sparse_tensors_bwd: Optional[BlockSparseTensorsTorch] = None,
+         return_lse: bool = False,
++        out_dtype: Optional[torch.dtype] = None,
+     ):
+         out, lse = _flash_attn_fwd(
+             q,
+@@ -1963,6 +1990,7 @@ class FlashAttnFunc(torch.autograd.Function):
+             block_sparse_tensors=block_sparse_tensors,
+             return_lse=return_lse,
+             gather_kv_indices=gather_kv_indices,
++            out_dtype=out_dtype,
+         )
+         ctx.save_for_backward(q, k, v, out, lse, *(aux_tensors or ()))
+         ctx.softmax_scale = softmax_scale
+@@ -2040,6 +2068,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
+         block_sparse_tensors: Optional[list] = None,
+         aux_tensors: Optional[list] = None,
+         return_lse: bool = False,
++        out_dtype: Optional[torch.dtype] = None,
+     ):
+         out, lse = _flash_attn_fwd(
+             q,
+@@ -2068,6 +2097,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
+             aux_tensors=aux_tensors,
+             return_lse=return_lse,
+             gather_kv_indices=gather_kv_indices,
++            out_dtype=out_dtype,
+         )
+         ctx.save_for_backward(
+             q,
+@@ -2151,6 +2181,7 @@ def flash_attn_func(
+     block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
+     block_sparse_tensors_bwd: Optional[BlockSparseTensorsTorch] = None,
+     return_lse: bool = False,
++    out_dtype: Optional[torch.dtype] = None,
+ ):
+     return FlashAttnFunc.apply(
+         q,
+@@ -2173,6 +2204,7 @@ def flash_attn_func(
+         block_sparse_tensors,
+         block_sparse_tensors_bwd,
+         return_lse,
++        out_dtype,
+     )
+ 
+ 
+@@ -2204,6 +2236,7 @@ def flash_attn_varlen_func(
+     block_sparse_tensors: Optional[BlockSparseTensorsTorch] = None,
+     aux_tensors: Optional[list] = None,
+     return_lse: bool = False,
++    out_dtype: Optional[torch.dtype] = None,
+ ):
+     """
+     Explanation of some optional arguments:
+@@ -2247,6 +2280,7 @@ def flash_attn_varlen_func(
+         block_sparse_tensors,
+         aux_tensors,
+         return_lse,
++        out_dtype,
+     )
+ 
+ 
