@@ -34,7 +34,6 @@ from magi_attention.utils.arch import get_dev_cap_num
 from magi_attention.utils.version import is_cuda_version_ge, is_cuda_version_lt
 
 if TYPE_CHECKING:
-    from .range_merge import RangeMergePlan
     from .sparse_utils import BlockSparseTensorsTorch
 
 # ---------------------------------------------------------------------------
@@ -78,33 +77,6 @@ class MaskMode(Enum):
     STATIC_FULL = "static_full"
     STATIC_CAUSAL = "static_causal"
     PER_RANGE = "per_range"
-
-
-class RangesLayout(Enum):
-    """Declared geometry of the q/k ranges IR (trust-based contract).
-
-    The declaration tells the host which geometry-aware optimizations are
-    applicable, without ever reading the ranges back (that would sync):
-
-    - ``GENERAL``: nothing declared (default); geometry-aware optimizations
-      stay under their explicit per-flag contracts.
-    - ``VARLEN``: q/k ranges each form a cu-partition — sorted, contiguous,
-      pairwise disjoint, jointly covering ``[0, total)``. Masks may still be
-      mixed per range. Enables the auto direct-dKV store (MHA backward) and
-      skips gradient hole zeroing (full coverage has no holes).
-    - ``DENSE``: a uniform cu-partition — all ranges share one length and one
-      static mask type (full/causal). Geometrically identical to 4D dense, so
-      the call is dispatched to the dense kernels outright
-      (``dense_shape=(batch, seqlen)`` required).
-
-    A wrong declaration silently corrupts out/dq/dk/dv — same semantics as
-    ``disable_fwd_atomic_reduction`` / ``disable_bwd_dkv_atomic_reduction``;
-    the geometry is never read back (that would sync).
-    """
-
-    GENERAL = 0
-    VARLEN = 1
-    DENSE = 2
 
 
 @dataclass(frozen=True, eq=False)
@@ -466,80 +438,6 @@ class TorchFlexAttnArgs:
         ``ctx.saved_tensors`` (which were dropped in ``forward``).
         """
         return replace(self, aux_tensors=list(aux_tensors) if aux_tensors else None)
-
-
-# ---------------------------------------------------------------------------
-# RangesLayout declaration helpers
-# ---------------------------------------------------------------------------
-
-
-def validate_dense_layout_preconditions(
-    *,
-    dense_shape: tuple[int, int] | None,
-    num_q_ranges: int,
-    num_k_ranges: int,
-    total_q: int,
-    total_k: int,
-    mask_types: torch.Tensor | int | None,
-    pack_gqa: bool | None,
-    range_merge: "bool | RangeMergePlan",
-    range_merge_bwd: "bool | RangeMergePlan",
-    flex_attn_args: TorchFlexAttnArgs | None,
-) -> tuple[int, int]:
-    """Sync-free host preconditions for dispatching declared-DENSE ranges to
-    the 4D dense kernels. Returns the validated ``(batch, seqlen)``.
-
-    Only tensor shapes and already-materialized host values are checked; the
-    range geometry itself is never read back (that would sync) — a false
-    DENSE declaration that passes these checks corrupts silently, exactly
-    like the other contract flags (see :class:`RangesLayout`).
-    """
-    if dense_shape is None:
-        raise ValueError(
-            "ranges_layout=RangesLayout.DENSE requires dense_shape=(batch, seqlen)"
-        )
-    batch, seqlen = dense_shape
-    if total_q != batch * seqlen or total_k != batch * seqlen:
-        raise ValueError(
-            f"DENSE declaration mismatch: dense_shape={dense_shape} implies "
-            f"{batch * seqlen} tokens, got total_q={total_q}, total_k={total_k}"
-        )
-    if num_q_ranges != batch or num_k_ranges != batch:
-        raise ValueError(
-            f"DENSE declaration requires exactly one range per batch row "
-            f"({batch}), got {num_q_ranges} q_ranges and {num_k_ranges} k_ranges"
-        )
-    if isinstance(mask_types, torch.Tensor) or (
-        mask_types is not None and int(mask_types) not in (MT_MAP.full, MT_MAP.causal)
-    ):
-        raise ValueError(
-            "DENSE dispatch requires a uniform static mask (None, 0=full or "
-            f"1=causal), got {mask_types!r}; use RangesLayout.VARLEN for mixed "
-            "or per-range masks"
-        )
-    if pack_gqa:
-        raise ValueError(
-            "pack_gqa is a ranges-side layout and cannot be "
-            "combined with ranges_layout=RangesLayout.DENSE"
-        )
-    if range_merge or range_merge_bwd:
-        raise ValueError(
-            "range_merge is meaningless under a DENSE declaration (no "
-            "overlap exists to merge)"
-        )
-    if flex_attn_args is not None and (
-        flex_attn_args.score_mod is not None
-        or flex_attn_args.score_mod_bwd is not None
-        or flex_attn_args.mask_mod is not None
-        or flex_attn_args.aux_tensors is not None
-        or flex_attn_args.block_sparse_tensors is not None
-        or flex_attn_args.block_sparse_tensors_bwd is not None
-    ):
-        raise ValueError(
-            "flex_attn_args (score_mod/mask_mod/block_sparse) is not yet "
-            "verified with DENSE dispatch; use RangesLayout.GENERAL/VARLEN"
-        )
-    return batch, seqlen
 
 
 # ---------------------------------------------------------------------------
