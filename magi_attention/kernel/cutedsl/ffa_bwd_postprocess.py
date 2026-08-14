@@ -61,6 +61,7 @@ class FFABwdPostProcess:
         dQ_swapAB: bool = False,
         use_2cta_instrs: bool = False,
         cluster_size: int = 1,  # for varlen offsets
+        range_workspace_padded: bool = False,
     ):
         """
         :param head_dim: head dimension
@@ -88,6 +89,7 @@ class FFABwdPostProcess:
         self.dQ_swapAB = dQ_swapAB
         self.use_2cta_instrs = use_2cta_instrs and arch // 10 == 10 and head_dim != 64
         self.cluster_size = cluster_size
+        self.range_workspace_padded = range_workspace_padded
 
     def _check_tile(self) -> None:
         """Validate the kernel config (dtype, head dim, threads)."""
@@ -388,6 +390,7 @@ class FFABwdPostProcess:
                 mSeqUsedK=None,
                 mQRanges=mQRanges,
                 tile_m=self.tile_m * self.cluster_size,
+                range_workspace_padded_q=self.range_workspace_padded,
             )
             if const_expr(not seqlen.has_cu_seqlens_q):
                 mdQ_cur = mdQ[batch_idx, None, head_idx, None]
@@ -673,6 +676,7 @@ def _compile_bwd_postprocess(
     use_2cta_instrs,
     cluster_size,
     arch,
+    range_workspace_padded,
 ):
     """Compile bwd postprocess kernel using cute fake tensors."""
     (
@@ -719,6 +723,7 @@ def _compile_bwd_postprocess(
         swap_ab,
         use_2cta_instrs=use_2cta_instrs,
         cluster_size=cluster_size,
+        range_workspace_padded=range_workspace_padded,
     )
     return cute.compile(
         fa_bwd_post,
@@ -749,6 +754,7 @@ def bwd_postprocess(
     use_2cta_instrs=False,
     cluster_size=1,
     ranges=None,
+    range_workspace_padded=False,
 ):
     """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
     compile_key = (
@@ -764,6 +770,7 @@ def bwd_postprocess(
         use_2cta_instrs,
         cluster_size,
         arch,
+        range_workspace_padded,
     )
     if compile_key not in bwd_postprocess.compile_cache:
         bwd_postprocess.compile_cache[compile_key] = _compile_bwd_postprocess(
@@ -786,7 +793,7 @@ class FFABwdPostProcessRowMajor:
     """Cast a row-major fp32 accumulator with coalesced 2D thread mapping.
 
     The non-deterministic true-range backward stores gradients through fp32
-    TMA add-reduction in original-token-space row-major layout. A power-of-two
+    TMA add-reduction in packed row-major layout. A power-of-two
     group of adjacent threads cooperates on each row, so every group issues
     contiguous 16-byte accumulator loads instead of a warp striding between
     distant rows. The grid still walks (range, tile): rows outside every range
