@@ -46,6 +46,7 @@ class SeqlenInfo:
         seqused: Optional[cute.Tensor] = None,
         tile: cutlass.Constexpr[int] = 128,
         ranges: Optional[cute.Tensor] = None,
+        range_workspace_padded: cutlass.Constexpr[bool] = False,
     ):
         assert cu_seqlens is None or ranges is None
         is_varlen = cu_seqlens is not None or ranges is not None
@@ -56,9 +57,14 @@ class SeqlenInfo:
         else:
             offset = 0
         if const_expr(ranges is not None):
-            # True-range workspaces live in the original token space (overlap
-            # is absorbed by the accumulators' atomics).
-            offset_padded = offset
+            if const_expr(range_workspace_padded):
+                offset_padded = cute.assume(
+                    (offset + batch_idx * tile) // tile * tile, divby=tile
+                )
+            else:
+                # Default true-range workspaces use packed row-major offsets;
+                # overlap is absorbed by the accumulators' atomics.
+                offset_padded = offset
         elif const_expr(not is_varlen):
             offset_padded = 0
         else:
@@ -133,6 +139,7 @@ class SeqlenInfoQK:
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
         k_batch_idx: Optional[Int32] = None,
+        range_workspace_padded_q: cutlass.Constexpr[bool] = False,
     ) -> "SeqlenInfoQK":
         assert mQRanges is None or mCuSeqlensQ is None
         assert mKRanges is None or mCuSeqlensK is None
@@ -158,10 +165,15 @@ class SeqlenInfoQK:
         else:
             offset_k = 0
         if const_expr(mQRanges is not None):
-            # True-range workspaces live in the original token space: overlap
-            # is absorbed by the accumulators' atomics, and a tail tile running
-            # past the range end only ever adds mask-zeroed rows.
-            padded_offset_q = offset_q
+            if const_expr(range_workspace_padded_q):
+                padded_offset_q = cute.assume(
+                    (offset_q + batch_idx * tile_m) // tile_m * tile_m,
+                    divby=tile_m,
+                )
+            else:
+                # Default true-range workspaces use packed row-major offsets:
+                # overlap is absorbed by accumulator atomics.
+                padded_offset_q = offset_q
         elif const_expr(not varlen_q):
             padded_offset_q = 0
         else:
@@ -201,6 +213,7 @@ class SeqlenInfoQK:
             seqlen_k = mCuSeqlensK[cutlass.min(batch_idx + 1, last_k)] - offset_k
         else:
             seqlen_k = seqlen_k_static
+        # Range offsets are already warp-uniform.
         m_block_offset = (
             0 if const_expr(mCuTotalMBlocks is None) else mCuTotalMBlocks[batch_idx]
         )
