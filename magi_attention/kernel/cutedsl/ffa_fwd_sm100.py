@@ -195,7 +195,7 @@ class FFAFwdSm100:
         use_clc_scheduler: bool = False,
         use_per_range_mask: bool = False,
         range_merge: bool = False,
-        disable_fwd_atomic_reduction: bool = True,
+        disable_fwd_atomic_reduction: bool = False,
         debug_print: bool = False,
     ):
         self.use_tma_KV = not paged_kv_non_tma
@@ -284,9 +284,6 @@ class FFAFwdSm100:
             assert use_per_range_mask, "RangeMerge rides the per-range entry"
             assert not use_2cta_instrs and not is_split_kv and not pack_gqa
             assert not is_persistent
-            # The group-level softmax_step binding (seqlen/batch_idx) is only
-            # consumed by score/mask mods; keep them off so per-pair rebinding
-            # is unnecessary.
             assert score_mod is None and mask_mod is None
         self.is_local = is_local
         self.is_varlen_q = is_varlen_q
@@ -1028,21 +1025,7 @@ class FFAFwdSm100:
         tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
 
-        # Correction-epilogue TMA O store for ranges via the dynamic box-size
-        # trick (legalized variant, validated by ffa_bench/poc_tma_dynbox.py):
-        # the packed (sq, hd, nhq) O is viewed as a 4D (sq, hd, nhq, PAD)
-        # descriptor whose d2(row) keeps globalDim = total_q with box = tile_m
-        # and whose d3(pad) shares the row stride with box = 1, while the base
-        # pointer is shifted BACK by total_q * row_stride elements.  A tile
-        # store issued at d2 coord (total_q - H) and d3 coord (off + len) lands
-        # at addr(j) = ptr + (off + m_block*span + j) * row_stride exactly,
-        # and d2's OOB clamp keeps only min(H, tile_m) rows; H <= 0 puts the
-        # start coord at/above globalDim so the whole box is dropped.  All
-        # coords stay non-negative, which matters because a negative TMA
-        # coordinate raises illegal instruction.
-        # Requires the unique-writer contract: no atomic merge
-        # (disable_fwd_atomic_reduction), no split-kv (mO's leading mode is
-        # splits there), and no pack_gqa (its layout rewrite reshapes mO).
+        # Unique-writer ranges TMA O.
         self.corr_epi_tma_store = const_expr(
             mQRanges is not None
             and not self.use_tma_O
@@ -1061,11 +1044,8 @@ class FFAFwdSm100:
             )
             gmem_tiled_copy_O = None
         elif const_expr(self.corr_epi_tma_store):
-            # Append a pad mode sharing the row stride and shift the base back
-            # by total_q rows; the kernel smuggles each tile's valid height
-            # through the d2 coordinate and cancels the shifted base through
-            # the d3 coordinate (see the comment above).  PAD only bounds the
-            # d3 coord (off + len <= total_q), so 1<<26 rows is ample.
+            # 4D desc: pad mode shares row stride, base -= total_q rows.
+            # PAD=1<<26 only bounds d3 (off+len).
             total_q_o = mO.shape[0]
             row_stride_o = mO.layout.stride[0]
             mO_desc = cute.make_tensor(
@@ -2248,6 +2228,31 @@ class FFAFwdSm100:
             tmem_alloc_barrier.arrive()
 
     @cute.jit
+    def _fwd_merge_n_iters(
+        self,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
+        block_info: BlockInfo,
+        mMaskTypes: cute.Tensor,
+        mCuBatches: cute.Tensor,
+        batch_idx: Int32,
+        m_block: Int32,
+        split_idx: Int32,
+        num_splits: Int32,
+    ) -> Int32:
+        """K-tile trip count across one merged Q-group. debug_rangemerge/fwd_merge_load.md"""
+        pair_beg = Int32(mCuBatches[batch_idx])
+        pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
+        n_iters = Int32(0)
+        for pj in cutlass.range(pair_cnt, unroll=1):
+            seqlen_pair = SeqlenInfoCls(batch_idx, k_batch_idx=pair_beg + pj)
+            attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
+            lo_p, hi_p = block_info.get_n_block_min_max_per_range(
+                seqlen_pair, m_block, attn_type_pair, split_idx, num_splits
+            )
+            n_iters += cutlass.max(hi_p - lo_p, Int32(1))
+        return n_iters
+
+    @cute.jit
     def load(
         self,
         thr_mma_qk: cute.ThrMma,
@@ -2515,9 +2520,7 @@ class FFAFwdSm100:
             if const_expr(self.range_merge and not self.use_block_sparsity):
                 assert mMaskTypes is not None and mCuBatches is not None
                 assert mPageTable is None, "RangeMerge does not support paged KV"
-                # --- RangeMerge: Q once, then the group's K ranges in order.
-                # (Q ahead of K0 gives up a little first-tile overlap vs the
-                # dense interleave; V1 keeps the ordering simple.)
+                # Q once, then each pair's K/V.
                 if issue_q_for_this_warp:
                     load_Q(block=0, stage=0)
                     if const_expr(self.q_stage == 2):
@@ -2577,9 +2580,7 @@ class FFAFwdSm100:
                         pipeline_kv=pipeline_kv,
                         K_or_V="V",
                     )
-                    # Dense-mirror per pair: an unconditional first block
-                    # (clamped like the dense empty-interval case) plus the
-                    # descending remainder — eff count max(hi-lo, 1).
+                    # Unconditional first K/V block, then descending remainder.
                     first_blk = hi_p - 1 if hi_p > 0 else Int32(0)
                     if issue_kv_for_this_warp:
                         load_K_p(block=first_blk, producer_state=kv_producer_state)
@@ -2878,30 +2879,17 @@ class FFAFwdSm100:
             else:
                 if const_expr(self.range_merge):
                     assert mMaskTypes is not None and mCuBatches is not None
-                    # One merged work tile walks the whole pair group; the
-                    # MMA consumes K/V smem stages blindly, so only the
-                    # summed K-tile count matters here.
-                    pair_beg = Int32(mCuBatches[batch_idx])
-                    pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
-                    block_iter_count = Int32(0)
-                    for pj in cutlass.range(pair_cnt, unroll=1):
-                        seqlen_pair = SeqlenInfoCls(
-                            batch_idx, k_batch_idx=pair_beg + pj
-                        )
-                        attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
-                        lo_p, hi_p = block_info.get_n_block_min_max_per_range(
-                            seqlen_pair,
-                            m_block,
-                            attn_type_pair,
-                            split_idx,
-                            num_splits,
-                        )
-                        # Mirror the dense empty-interval semantics: every
-                        # pair contributes at least one (fully masked) block
-                        # so the four roles' pipeline counts stay in lockstep.
-                        block_iter_count += cutlass.max(hi_p - lo_p, Int32(1))
-                    n_block_min = Int32(0)
-                    n_block_max = block_iter_count
+                    # Trip count only; load/softmax walk the pairs.
+                    block_iter_count = self._fwd_merge_n_iters(
+                        SeqlenInfoCls,
+                        block_info,
+                        mMaskTypes,
+                        mCuBatches,
+                        batch_idx,
+                        m_block,
+                        split_idx,
+                        num_splits,
+                    )
                 elif const_expr(self.use_per_range_mask):
                     assert mMaskTypes is not None
                     attn_type = Int32(mMaskTypes[batch_idx])
@@ -2946,7 +2934,9 @@ class FFAFwdSm100:
                         block_iter_count,
                         process_tile,
                     )
-                    if const_expr(not self.use_block_sparsity):
+                    if const_expr(
+                        not self.use_block_sparsity and not self.range_merge
+                    ):
                         cute.printf(
                             prefix + "n_block_min={} n_block_max={}",
                             n_block_min,
@@ -3362,7 +3352,11 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
-            if const_expr(self.use_per_range_mask):
+            if const_expr(self.range_merge):
+                attn_type = Int32(MT_MAP.full)
+                n_block_min = Int32(0)
+                n_block_max = Int32(0)
+            elif const_expr(self.use_per_range_mask):
                 assert mMaskTypes is not None
                 attn_type = Int32(mMaskTypes[batch_idx])
                 n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
@@ -3661,11 +3655,7 @@ class FFAFwdSm100:
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
             elif const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
-                # One softmax spans the group's pair list: each pair replays
-                # the dense tile body against its own K range and mask, with
-                # running row_max/row_sum carried across pairs. is_first
-                # stays False: from the reset state the correction scale is
-                # exp2(-inf)=0 and the first sScale write is ignored.
+                # One softmax over the pair list. debug_rangemerge/fwd_merge_load.md
                 pair_beg = Int32(mCuBatches[batch_idx])
                 pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
                 for pj in cutlass.range(pair_cnt, unroll=1):
@@ -4231,21 +4221,18 @@ class FFAFwdSm100:
             seqlen_info = SeqlenInfoCls(batch_idx)
             if const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
-                # Correction only needs the summed K-tile count of the pair
-                # group; its epilogue is Q-side and stays per work tile.
-                pair_beg = Int32(mCuBatches[batch_idx])
-                pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
-                merged_block_count = Int32(0)
-                for pj in cutlass.range(pair_cnt, unroll=1):
-                    seqlen_pair = SeqlenInfoCls(batch_idx, k_batch_idx=pair_beg + pj)
-                    attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
-                    lo_p, hi_p = block_info.get_n_block_min_max_per_range(
-                        seqlen_pair, m_block, attn_type_pair, split_idx, num_splits
-                    )
-                    # Same eff-count rule as the MMA: >=1 block per pair.
-                    merged_block_count += cutlass.max(hi_p - lo_p, Int32(1))
+                # Trip count handshake with softmax/MMA.
                 n_block_min = Int32(0)
-                n_block_max = merged_block_count
+                n_block_max = self._fwd_merge_n_iters(
+                    SeqlenInfoCls,
+                    block_info,
+                    mMaskTypes,
+                    mCuBatches,
+                    batch_idx,
+                    m_block,
+                    split_idx,
+                    num_splits,
+                )
             elif const_expr(self.use_per_range_mask):
                 assert mMaskTypes is not None
                 attn_type = Int32(mMaskTypes[batch_idx])
@@ -4289,15 +4276,7 @@ class FFAFwdSm100:
             gO = None
             gO_tma = None
             if const_expr(self.corr_epi_tma_store):
-                # mO is the 4D (total_q, hd, nhq, PAD) TMA-descriptor coord
-                # tensor whose base is shifted back by total_q rows (see
-                # __call__).  The d2 start coord smuggles this tile's valid
-                # height H0 so the OOB clamp keeps exactly the in-range rows
-                # (stage s slices shift the d2 coord by s*tile_m, so each
-                # stage clamps H0 - s*tile_m; <= 0 discards the whole box),
-                # while the d3 coord cancels the shifted base so the box
-                # lands at ptr + (off + m_block*span) rows.  Coords stay
-                # non-negative for any H0 <= total_q.
+                # d2 = total_q - H0, d3 = off + len.
                 len_q = seqlen_info.seqlen_q
                 h0 = len_q - m_block * (self.mma_tiler_pv[0] * self.q_stage)
                 blk = cute.domain_offset(
@@ -4850,8 +4829,7 @@ class FFAFwdSm100:
             work_tile = tile_scheduler.advance_to_next_work()
 
         if const_expr(self.corr_epi_tma_store):
-            # Drain in-flight TMA stores so the last tiles' smem reads
-            # complete before this CTA retires.
+            # Drain leftover TMA smem reads before the CTA retires.
             cute.arch.cp_async_bulk_wait_group(0, read=True)
 
         # This is equivalent to pipeline_o_epi.consumer_tail
@@ -5107,12 +5085,7 @@ class FFAFwdSm100:
         """
 
         if const_expr(self.corr_epi_tma_store):
-            # sO[stage] reuse guard: the previous tile's TMA store of this
-            # stage must have drained its smem reads before the R2S below
-            # overwrites the buffer. Each tile issues q_stage bulk groups in
-            # stage order, so wait_group(q_stage - 1) guarantees the previous
-            # tile's same-stage store is done while leaving this tile's
-            # earlier stages in flight.
+            # Drain previous tile's same-stage TMA smem read.
             cute.arch.cp_async_bulk_wait_group(self.q_stage - 1, read=True)
             cute.arch.barrier(
                 barrier_id=int(NamedBarrierFwdSm100.Epilogue),
@@ -5328,10 +5301,7 @@ class FFAFwdSm100:
             )
 
             if const_expr(self.corr_epi_tma_store):
-                # S2G copy sO -> gO with one TMA store for this stage, issued
-                # by the leader warp (cute.copy elects a single thread). The
-                # smem-read drain is deferred to the reuse guard at the top of
-                # the next tile's epilogue for this stage.
+                # Leader-warp TMA S2G; drain is the next tile's reuse guard.
                 tdOsO_tma, tdOgO_tma = cpasync.tma_partition(
                     tma_atom_O,
                     0,  # no multicast
@@ -5470,7 +5440,11 @@ class FFAFwdSm100:
 
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             seqlen_info = SeqlenInfoCls(batch_idx)
-            if const_expr(self.use_per_range_mask):
+            if const_expr(self.range_merge):
+                # Q-side epi; n_block unused.
+                n_block_min = Int32(0)
+                n_block_max = Int32(0)
+            elif const_expr(self.use_per_range_mask):
                 assert mMaskTypes is not None
                 attn_type = Int32(mMaskTypes[batch_idx])
                 n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
