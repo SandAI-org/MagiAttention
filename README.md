@@ -195,8 +195,8 @@ We sincerely thank the NVIDIA DevTech team—especially Jerry Chen <cjerry@nvidi
 ## Star History ⭐
 
 <div align="center">
-  <a href="https://star-history.com/#SandAI-org/MagiAttention&Date">
-    <img src="https://api.star-history.com/svg?repos=SandAI-org/MagiAttention&type=Date" alt="Star History Chart" style="max-width: 60%; height: auto;"/>
+  <a href="https://star-history.dera.page/#SandAI-org/MagiAttention&Date">
+    <img src="https://star-history.dera.page/svg?repos=SandAI-org/MagiAttention&type=Date" alt="Star History Chart" style="max-width: 60%; height: auto;"/>
   </a>
 </div>
 
