@@ -1063,12 +1063,6 @@ class TestAttnRanges:
         ],
     )
     def test_is_full_coverage(self, backend, ranges_list, seqlen, expected):
-        # DEVIATION: cpp backend not parametrized for is_full_coverage
-        # Reason: is_full_coverage is added python-side only; magi_attn_ext's
-        #   AttnRanges has not synced it yet (cpp callers can equivalently use
-        #   merge().is_cu_seqlens(seqlen), both of which exist on the cpp side).
-        # Tracking: sync is_full_coverage into magi_attn_ext when the CuTeDSL
-        #   backend is wired into the production dispatch.
         if backend == "cpp":
             pytest.skip(
                 "is_full_coverage is python-side only until magi_attn_ext syncs it"
