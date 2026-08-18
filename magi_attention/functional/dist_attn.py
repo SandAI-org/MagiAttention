@@ -37,6 +37,7 @@ from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import is_same_process_group, nvtx
 from magi_attention.utils.dtype import max_fp_dtype
 
+from .cutedsl_ffa import cutedsl_bwd, cutedsl_fwd
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
@@ -102,6 +103,10 @@ _BACKEND_SUPPORTED_PRECISIONS: dict[
         MagiAttentionPrecision.FP16,
         MagiAttentionPrecision.FP32,
         MagiAttentionPrecision.FP64,
+    },
+    MagiAttentionKernelBackend.CUTEDSL: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
     },
 }
 
@@ -1297,6 +1302,19 @@ class DistAttnRuntime:
                     sink_layout="sh",
                 )
                 meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
+            elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+                partial_out, partial_lse = cutedsl_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    # sink is unsupported by the CUTEDSL backend
+                    sink=None,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                )
+                meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             else:
                 partial_out, meta = _flex_flash_attn_forward(
                     q=q,
@@ -1407,6 +1425,24 @@ class DistAttnRuntime:
                     softcap=softcap,
                     sink_layout="sh",
                     deterministic=self.deterministic,
+                )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+                partial_dq, partial_dk, partial_dv, partial_dsink = cutedsl_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    # sink is unsupported by the CUTEDSL backend
+                    sink=None,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
                 )
                 partial_dkv = self._maybe_concat(
                     partial_dk, partial_dv, need_concat=self.concat_dkv
