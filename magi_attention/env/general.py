@@ -107,12 +107,13 @@ def kernel_backend() -> "MagiAttentionKernelBackend":
     """
     Set env variable ``MAGI_ATTENTION_KERNEL_BACKEND`` to choose the attn kernel backend.
 
-    Valid values: ``"ffa"`` (default), ``"sdpa"``, ``"sdpa_ol"``, ``"fa4"``
+    Valid values: ``"ffa"`` (default), ``"sdpa"``, ``"sdpa_ol"``, ``"fa4"``, ``"cutedsl"``
 
     - ``ffa``: flex-flash-attention (default, high-performance persistent kernel)
     - ``sdpa``: offline SDPA implementation (for testing / high precision like fp32/fp64)
     - ``sdpa_ol``: online (block-wise) SDPA implementation (for testing, lower memory than sdpa)
     - ``fa4``: Flash-Attention 4 monkey-patch (workaround for Blackwell GPUs)
+    - ``cutedsl``: CuteDSL FFA kernel(WIP)
 
     Backward compatibility: the legacy env vars ``MAGI_ATTENTION_SDPA_BACKEND=1``
     and ``MAGI_ATTENTION_FA4_BACKEND=1`` are still supported, but must NOT be set
