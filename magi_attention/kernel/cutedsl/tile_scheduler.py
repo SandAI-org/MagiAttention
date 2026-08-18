@@ -1015,6 +1015,19 @@ class SingleTileVarlenScheduler:
             )
             total_blocks = num_m_blocks * params.cluster_shape_m * params.num_batch
             bound = total_blocks * params.num_head
+            if cutlass.const_expr(
+                not params.is_persistent
+                and not params.is_split_kv
+                and not params.lpt
+                and not params.head_swizzle
+            ):
+                # Quota allotment is a rectangle; take (block, head, batch)
+                # from blockIdx.
+                return (
+                    num_m_blocks * params.cluster_shape_m,
+                    params.num_head,
+                    params.num_batch,
+                )
         else:
             total_blocks_max = (
                 params.total_q
@@ -1156,14 +1169,25 @@ class SingleTileVarlenScheduler:
                 ),
                 params.cluster_shape_m,
             )
-            next_tile_idx = self._tile_idx // params.cluster_shape_m
-            tiles_per_batch = num_m_blocks * params.num_head
-            batch_idx = next_tile_idx // tiles_per_batch
-            block, head_idx = Int32(0), Int32(0)
+            grid3d = cutlass.const_expr(
+                not params.is_persistent
+                and not params.is_split_kv
+                and not params.lpt
+                and not params.head_swizzle
+            )
+            if cutlass.const_expr(grid3d):
+                bx, by, bz = cute.arch.block_idx()
+                block, head_idx, batch_idx = Int32(bx), Int32(by), Int32(bz)
+            else:
+                next_tile_idx = self._tile_idx // params.cluster_shape_m
+                tiles_per_batch = num_m_blocks * params.num_head
+                batch_idx = next_tile_idx // tiles_per_batch
+                block, head_idx = Int32(0), Int32(0)
+                if batch_idx < params.num_batch:
+                    mh_block = next_tile_idx - batch_idx * tiles_per_batch
+                    block, head_idx = self._decode_mh_block(num_m_blocks, mh_block)
             is_valid = False
             if batch_idx < params.num_batch:
-                mh_block = next_tile_idx - batch_idx * tiles_per_batch
-                block, head_idx = self._decode_mh_block(num_m_blocks, mh_block)
                 seqlen_b = (
                     params.mQRanges[batch_idx, 1] - params.mQRanges[batch_idx, 0]
                 ) * params.qhead_per_kvhead_packgqa
