@@ -2239,7 +2239,7 @@ class FFAFwdSm100:
         split_idx: Int32,
         num_splits: Int32,
     ) -> Int32:
-        """K-tile trip count across one merged Q-group. debug_rangemerge/fwd_merge_load.md"""
+        """K-tile trip count across one merged Q-group."""
         pair_beg = Int32(mCuBatches[batch_idx])
         pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
         n_iters = Int32(0)
@@ -3655,7 +3655,7 @@ class FFAFwdSm100:
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
             elif const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
-                # One softmax over the pair list. debug_rangemerge/fwd_merge_load.md
+                # One softmax over the pair list. 
                 pair_beg = Int32(mCuBatches[batch_idx])
                 pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
                 for pj in cutlass.range(pair_cnt, unroll=1):
