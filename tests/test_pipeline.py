@@ -472,6 +472,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if deterministic or fwd_hp or bwd_hp or qo_comm:
                 return False
 
+        if backend == MagiAttentionKernelBackend.CUTEDSL:
+            # CuteDSL kernel: sink is per-head scalar bf16 (dist contract is
+            # [n_sink, nhq] fp32) — exclude sink configs; deterministic+ranges
+            # is NotImplementedError; qo comm relies on sm_margin which the
+            # kernel does not expose.
+            if has_sink or deterministic or qo_comm:
+                return False
+
         if backend in (
             MagiAttentionKernelBackend.SDPA,
             MagiAttentionKernelBackend.SDPA_OL,
@@ -748,6 +756,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 BACKENDS: {
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.FA4,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 NAME: "full_attn_144k",
                 SKIP_WORLD_SIZE: [],
@@ -773,6 +782,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 BACKENDS: {
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.FA4,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 NAME: "varlen_block_causal_144k",
                 SKIP_WORLD_SIZE: [],
@@ -996,6 +1006,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             MagiAttentionKernelBackend.SDPA,
             MagiAttentionKernelBackend.SDPA_OL,
             MagiAttentionKernelBackend.FA4,
+            MagiAttentionKernelBackend.CUTEDSL,
         ],
     )
     def test_pipeline(
@@ -1009,8 +1020,22 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     ):
         head_dim, head_dim_v = head_dims
 
+        # FFA (C++ SM90 JIT) is hard-asserted to arch (9, 0); skip it elsewhere
+        # so that non-Hopper machines (e.g. B300 / SM100) can run the other
+        # backends' full parametrization without dying at the first FFA combo.
+        if backend == MagiAttentionKernelBackend.FFA and (
+            torch.cuda.get_device_capability() != (9, 0)
+        ):
+            return
+
         # Extended head dimensions are covered by FFA_FA4 only.
         if head_dim > 128 and backend != MagiAttentionKernelBackend.FA4:
+            return
+
+        # CUTEDSL True-range kernels are SM100/SM110 only.
+        if backend == MagiAttentionKernelBackend.CUTEDSL and (
+            torch.cuda.get_device_capability()[0] not in (10, 11)
+        ):
             return
 
         # -----    skip if this attn_config is not for the current backend   ---- #
@@ -1164,7 +1189,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         total_seqlen_sink: int = (
             0
-            if backend == MagiAttentionKernelBackend.FA4
+            if backend
+            in (
+                MagiAttentionKernelBackend.FA4,
+                # CuteDSL kernel only supports per-head scalar bf16 sink,
+                # while dist contract is [n_sink, nhq] fp32; skip sink.
+                MagiAttentionKernelBackend.CUTEDSL,
+            )
             else attn_config.get("total_seqlen_sink", 0)
         )
         chunk_size: int = attn_config["chunk_size"]
@@ -1175,6 +1206,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         softcap = 0.0  # not supported for test
         sink_layout: AttnSinkLayout = attn_config.get("sink_layout", "sh")
         return_max_logits: bool = attn_config.get("return_max_logits", False)
+        if backend == MagiAttentionKernelBackend.CUTEDSL:
+            # CuteDSL kernel has no max-logits output; drop the request so the
+            # config can still exercise the other comparisons.
+            return_max_logits = False
 
         uneven_shard: bool = attn_config.get("uneven_shard", False)
 
