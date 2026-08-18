@@ -409,6 +409,59 @@ class AttnRanges:
 
         return self.total_seqlen == self.merge().total_seqlen
 
+    def is_2d_disjoint(self, other: "AttnRanges") -> bool:
+        """Whether the (q, k) rectangles formed by pairing self[i] with
+        other[i] are pairwise disjoint.
+
+        Relations are given by zip(self, other): relation i attends tokens
+        in q-range ``self[i]`` to tokens in k-range ``other[i]``. Two
+        relations overlap 2D when both their q-ranges and their k-ranges
+        intersect, yielding a rectangular region of (q, k) covered by both.
+
+        The atomic-reduction merge path in the attention kernels is only
+        well-defined when such overlap does not exist; otherwise a (q, k)
+        point is counted twice. Use :meth:`find_2d_overlap` for a debugging
+        view of the offending pairs.
+        """
+        if len(self._ranges) != len(other._ranges):
+            raise ValueError(
+                f"self and other must have the same number of relations, "
+                f"got {len(self._ranges)} vs {len(other._ranges)}"
+            )
+        return not any(self.find_2d_overlap_pairs(other))
+
+    def find_2d_overlap_pairs(self, other: "AttnRanges") -> list[tuple[int, int]]:
+        """Return ``[(i, j), ...]`` of relation-index pairs whose (q, k)
+        rectangles overlap, i.e. both q-ranges and k-ranges intersect."""
+        if len(self._ranges) != len(other._ranges):
+            raise ValueError(
+                f"self and other must have the same number of relations, "
+                f"got {len(self._ranges)} vs {len(other._ranges)}"
+            )
+        pairs: list[tuple[int, int]] = []
+        n = len(self._ranges)
+        # Build per-relation (q_start, q_end, k_start, k_end) tuples once.
+        rels = [
+            (
+                self._ranges[i].start,
+                self._ranges[i].end,
+                other._ranges[i].start,
+                other._ranges[i].end,
+            )
+            for i in range(n)
+        ]
+        for i in range(n):
+            qi_s, qi_e, ki_s, ki_e = rels[i]
+            for j in range(i + 1, n):
+                qj_s, qj_e, kj_s, kj_e = rels[j]
+                q_overlap = (qi_s < qj_e) and (qj_s < qi_e)
+                if not q_overlap:
+                    continue
+                k_overlap = (ki_s < kj_e) and (kj_s < ki_e)
+                if k_overlap:
+                    pairs.append((i, j))
+        return pairs
+
     def is_cu_seqlens(self, seqlen: int) -> bool:
         """Return True if ranges form a valid cu_seqlens partition of [0, seqlen).
 
