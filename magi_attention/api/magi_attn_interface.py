@@ -1463,6 +1463,9 @@ def make_flex_key_for_new_mask_after_dispatch(
         overlap_config=dist_attn_config.overlap_config
         if dist_attn_config is not None
         else key_for_dispatch.dist_attn_config.overlap_config,
+        grpcoll_config=dist_attn_config.grpcoll_config
+        if dist_attn_config is not None
+        else key_for_dispatch.dist_attn_config.grpcoll_config,
     )
 
     # Extract the common attributes from the mgr for dispatch
@@ -1480,6 +1483,7 @@ def make_flex_key_for_new_mask_after_dispatch(
     num_heads_q = num_heads_q if num_heads_q is not None else mgr.num_heads_q
     num_heads_kv = num_heads_kv if num_heads_kv is not None else mgr.num_heads_kv
     head_dim = head_dim if head_dim is not None else mgr.head_dim
+    head_dim_v = key_for_dispatch.head_dim_v
 
     # Apply real padding to the new mask ranges (skip when uneven_shard)
     if uneven_shard:
@@ -1508,6 +1512,7 @@ def make_flex_key_for_new_mask_after_dispatch(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=new_dist_attn_config,
+        head_dim_v=head_dim_v,
     )
 
     # Init new dist attn runtime mgr and map it to the new key
@@ -1531,6 +1536,7 @@ def make_flex_key_for_new_mask_after_dispatch(
             is_k_permutable=is_k_permutable,
             ref_dispatch_meta_q=ref_dispatch_meta_q,
             ref_dispatch_meta_k=ref_dispatch_meta_k,
+            head_dim_v=head_dim_v,
         )
 
     return new_key
