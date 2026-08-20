@@ -29,8 +29,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class RangeMergePlan:
-    """Precomputed merge tables. Pass as ``range_merge=plan``.
-    """
+    """Precomputed merge tables for RangeMerge."""
 
     merged_outer_ranges: torch.Tensor  # [R, 2], pad [0, 0]
     sorted_outer_ranges: torch.Tensor  # [R, 2], group-contiguous
@@ -81,7 +80,7 @@ def plan_range_merge_bwd(
 def bwd_range_merge_arg(
     range_merge: "bool | RangeMergePlan",
 ) -> "bool | RangeMergePlan":
-    """Pick the K-merge plan, or ``True`` to rebuild. """
+    """Pick the K-merge plan, or ``True`` to rebuild."""
     if isinstance(range_merge, RangeMergePlan):
         if range_merge.bwd is not None:
             return range_merge.bwd
@@ -115,7 +114,7 @@ def merge_qk_ranges(
         group_head[1:] = (sorted_q[1:] != sorted_q[:-1]).any(dim=1)
     group_idx = torch.cumsum(group_head, dim=0) - 1
 
-    # Pad-to-R via index_copy (no host sync). 
+    # Pad-to-R via index_copy (no host sync).
     merged_q = torch.zeros_like(q_ranges)
     merged_q.index_copy_(0, group_idx, sorted_q)
 

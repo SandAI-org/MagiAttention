@@ -62,8 +62,6 @@ class SeqlenInfo:
                     (offset + batch_idx * tile) // tile * tile, divby=tile
                 )
             else:
-                # Default true-range workspaces use packed row-major offsets;
-                # overlap is absorbed by the accumulators' atomics.
                 offset_padded = offset
         elif const_expr(not is_varlen):
             offset_padded = 0
@@ -149,8 +147,6 @@ class SeqlenInfoQK:
         # K range comes from a different (pair) row.
         k_sel = batch_idx if const_expr(k_batch_idx is None) else k_batch_idx
         if const_expr(mQRanges is not None):
-            # Padding tiles may carry batch_idx == num_batch (see the cu clamp
-            # below); with [R, 2] rows the row index itself must be clamped.
             q_row = cutlass.min(batch_idx, mQRanges.shape[0] - 1)
             offset_q = mQRanges[q_row, 0]
         elif const_expr(mCuSeqlensQ is not None):
@@ -171,8 +167,6 @@ class SeqlenInfoQK:
                     divby=tile_m,
                 )
             else:
-                # Default true-range workspaces use packed row-major offsets:
-                # overlap is absorbed by accumulator atomics.
                 padded_offset_q = offset_q
         elif const_expr(not varlen_q):
             padded_offset_q = 0
@@ -194,12 +188,7 @@ class SeqlenInfoQK:
         elif const_expr(mQRanges is not None):
             seqlen_q = mQRanges[q_row, 1] - offset_q
         elif const_expr(mCuSeqlensQ is not None):
-            # NOTE: Clamp the +1 lookup to the last valid cu_seqlens entry.
-            # since non-persistent single-tile kernels (e.g. sm80)
-            # launch padding tiles with `batch_idx == num_batch`;
-            # without this clamp, `mCuSeqlensQ[batch_idx + 1]` reads one element
-            # out of bounds, yielding a garbage seqlen and illegal K/V loads.
-            # While for every real tile (batch_idx < num_batch), this clamp is a no-op.
+            # Clamp +1 lookup to guard against out-of-bounds reads on padding tiles
             last_q = mCuSeqlensQ.shape[0] - 1
             seqlen_q = mCuSeqlensQ[cutlass.min(batch_idx + 1, last_q)] - offset_q
         else:
@@ -213,7 +202,6 @@ class SeqlenInfoQK:
             seqlen_k = mCuSeqlensK[cutlass.min(batch_idx + 1, last_k)] - offset_k
         else:
             seqlen_k = seqlen_k_static
-        # Range offsets are already warp-uniform.
         m_block_offset = (
             0 if const_expr(mCuTotalMBlocks is None) else mCuTotalMBlocks[batch_idx]
         )
