@@ -1247,9 +1247,10 @@ class DistAttnRuntime:
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
         _backend = self.kernel_backend
         if return_max_logits:
-            assert (
-                _backend != MagiAttentionKernelBackend.FA4
-            ), "FA4 backend does not support return max logits"
+            assert _backend not in (
+                MagiAttentionKernelBackend.FA4,
+                MagiAttentionKernelBackend.CUTEDSL,
+            ), "FA4/CUTEDSL backends do not support return max logits"
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
             f"{attn_arg.total_area=} | "
@@ -1303,11 +1304,13 @@ class DistAttnRuntime:
                 )
                 meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+                assert (
+                    sink is None or not is_host_stage
+                ), "CUTEDSL backend does not support sink for now"
                 partial_out, partial_lse = cutedsl_fwd(
                     q=q,
                     k=k,
                     v=v,
-                    # sink is unsupported by the CUTEDSL backend
                     sink=None,
                     attn_arg=attn_arg,
                     softmax_scale=softmax_scale,
@@ -1430,12 +1433,14 @@ class DistAttnRuntime:
                     partial_dk, partial_dv, need_concat=self.concat_dkv
                 )
             elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+                assert (
+                    sink is None or not is_host_stage
+                ), "CUTEDSL backend does not support sink for now"
                 partial_dq, partial_dk, partial_dv, partial_dsink = cutedsl_bwd(
                     do=do,
                     q=q,
                     k=k,
                     v=v,
-                    # sink is unsupported by the CUTEDSL backend
                     sink=None,
                     o=o,
                     lse=lse,
