@@ -48,7 +48,7 @@ from .tile_scheduler import (
     TileSchedulerArguments,
 )
 
-# g->s(fp32), s2r, *scale->fp16/bf16, r2s(layout), s2g(tma)
+
 class FFABwdPostProcess:
     def __init__(
         self,
@@ -790,29 +790,16 @@ bwd_postprocess.compile_cache = get_jit_cache("bwd_post")
 
 
 class FFABwdPostProcessRowMajor:
-    """Cast a row-major fp32 accumulator with coalesced 2D thread mapping.
-
-    The non-deterministic true-range backward stores gradients through fp32
-    TMA add-reduction in packed row-major layout. A power-of-two
-    group of adjacent threads cooperates on each row, so every group issues
-    contiguous 16-byte accumulator loads instead of a warp striding between
-    distant rows. The grid still walks (range, tile): rows outside every range
-    remain untouched, while overlapping ranges write the same merged value.
-    """
+    """Cast a row-major fp32 accumulator to output dtype with 2D thread mapping."""
 
     def __init__(self, out_dtype, head_dim: int):
         self.out_dtype = out_dtype
         self.head_dim = head_dim
-        # The main kernel strides accumulator rows at head_dim padded to 16
-        # (tile_hdim/tile_hdimv), not at the raw head_dim.
         self.accum_stride = (head_dim + 15) // 16 * 16
         self.vec_elems = 128 // cutlass.Float32.width  # 16B fp32 vectors
         assert self.head_dim % self.vec_elems == 0
         self.vectors_per_row = self.head_dim // self.vec_elems
 
-        # Use at most eight adjacent threads per row. Keeping the group size a
-        # power of two makes each group warp-local and keeps row/lane indexing
-        # cheap for small head dimensions as well.
         self.threads_per_row = min(
             8, 1 << (self.vectors_per_row - 1).bit_length()
         )
@@ -933,18 +920,7 @@ bwd_postprocess_rowmajor.compile_cache = get_jit_cache("bwd_post_rowmajor")
 
 
 class FFABwdGradHoleCleanup:
-    """Zero gradient rows that no range covers.
-
-    The unique-writer direct-store backward writes every in-range dK/dV row
-    from the main kernel, so a full zeros allocation only exists to blank the
-    coverage holes. This kernel is the torch-free replacement (C++:
-    flash_bwd_postprocess_kernel): one thread per token row and stores only
-    into uncovered rows — no host sync, near-zero cost under full coverage.
-
-    Sorted ranges use binary search (the dK/dV direct-store contract).  The
-    dQ unique-writer contract guarantees disjointness but not ordering, so it
-    uses a linear membership scan over the small metadata tensor instead.
-    """
+    """Zero gradient rows not covered by any range."""
 
     def __init__(self, dtype, row_elems: int, ranges_sorted: bool):
         self.dtype = dtype
@@ -980,9 +956,7 @@ class FFABwdGradHoleCleanup:
         in_bounds = row < cutlass.Int32(mGrad.shape[0])
 
         if const_expr(self.ranges_sorted):
-            # upper_bound over starts, so lo ends as the count of starts <=
-            # row. Fixed 32-step trip count instead of log2(dynamic R);
-            # converged iterations skip the load and update via scalar selects.
+            # Fixed 32-step binary search over range starts
             lo = cutlass.Int32(0)
             hi = num_ranges if in_bounds else cutlass.Int32(0)
             for _ in cutlass.range_constexpr(32):
@@ -1002,9 +976,7 @@ class FFABwdGradHoleCleanup:
             is_hole = cutlass.Boolean(True) if lo == 0 else outside_prev
             is_hole = is_hole if in_bounds else cutlass.Boolean(False)
         else:
-            # disable_fwd_atomic_reduction certifies disjoint Q ranges, but
-            # deliberately does not require them to be sorted.  Scan metadata
-            # without any host readback; scalar selects keep the result in SSA.
+            # Linear scan for unsorted disjoint ranges
             covered = cutlass.Boolean(False)
             for range_idx in cutlass.range(num_ranges, unroll=1):
                 start = cutlass.Int32(mRanges[range_idx, 0])
@@ -1013,8 +985,6 @@ class FFABwdGradHoleCleanup:
                 covered = cutlass.Boolean(True) if in_range else covered
             is_hole = cutlass.Boolean(False) if covered else in_bounds
 
-        # A lone thread zeroing its own 16B-vectorized row trades coalescing
-        # for zero work under full coverage, which is the common case.
         if is_hole:
             zero_vec = cute.make_rmem_tensor((self.vec_elems,), self.dtype)
             zero_vec.fill(0.0)

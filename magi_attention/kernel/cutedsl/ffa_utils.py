@@ -791,21 +791,10 @@ def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k):
 _MIXER_ATTRS = ("__vec_size__",)
 
 
+@lru_cache(maxsize=1)
 def _is_cuda_12() -> bool:
     """Check if the CUDA toolkit version is 12.x."""
     return is_cuda_version_ge("12") and is_cuda_version_lt("13")
-
-
-def is_ffa_clc_enabled() -> bool:
-    return os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_CLC", "0") == "1"
-
-
-def is_ffa_persistent_disabled() -> bool:
-    return os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_PERSISTENT", "0") == "1"
-
-
-def is_ffa_stats_vec16_disabled() -> bool:
-    return os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_STATS_VEC16", "0") == "1"
 
 
 def is_ffa_2cta_disabled(is_fwd: bool = False) -> bool:
