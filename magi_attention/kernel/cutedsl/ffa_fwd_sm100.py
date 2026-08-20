@@ -162,6 +162,40 @@ _FP8_SMALL_HDIM_REGS = {
 # === END TUNING KNOBS ===
 
 
+def fwd_atomic_can_borrow_kv_smem(
+    head_dim_padded: int,
+    head_dim_v_padded: int,
+    m_block_size: int,
+    n_block_size: int,
+    cta_group_size: int,
+    q_stage: int,
+) -> bool:
+    """Whether fp32-O sO can stage in finished KV ring slots."""
+    if head_dim_padded == 192 and head_dim_v_padded == 128:
+        return False
+    bytes_per_kv_stage = (
+        n_block_size
+        * max(head_dim_padded, head_dim_v_padded)
+        * 2  # bf16/fp16 K/V
+        // cta_group_size
+    )
+    fp32_width = 32
+    cols_per_chunk = bytes_per_kv_stage * 8 // (fp32_width * m_block_size)
+    swizzle_atom_cols = 128 * 8 // fp32_width  # 128B atom → 32 fp32 elems
+    if cols_per_chunk < swizzle_atom_cols:
+        return False
+    if cols_per_chunk % swizzle_atom_cols != 0:
+        return False
+    if cols_per_chunk >= head_dim_v_padded:
+        return False
+    if head_dim_v_padded % cols_per_chunk != 0:
+        return False
+    n_chunks = head_dim_v_padded // cols_per_chunk
+    bytes_for_sQ = q_stage * m_block_size * head_dim_padded * 2
+    estimated_kv_stages = (224 * 1024 - bytes_for_sQ) // bytes_per_kv_stage
+    return estimated_kv_stages >= q_stage * n_chunks + 1
+
+
 class DescaleTensors(NamedTuple):
     q_descale: Optional[cute.Tensor] = None
     k_descale: Optional[cute.Tensor] = None
@@ -274,11 +308,8 @@ class FFAFwdSm100:
 
         self.is_persistent = is_persistent
         self.mask_type = mask_type
-        # When True, mMaskTypes[batch_idx] selects the mask type at runtime.
         self.use_per_range_mask = use_per_range_mask
-        # RangeMerge: the scheduler batch is a merged group of relations that
-        # share one Q interval; each work tile walks the group's K ranges
-        # (mCuBatches CSR over the sorted pair list) with one softmax.
+        # RangeMerge groups relations with identical Q interval for unified softmax.
         self.range_merge = range_merge
         if range_merge:
             assert use_per_range_mask, "RangeMerge rides the per-range entry"
@@ -298,6 +329,21 @@ class FFAFwdSm100:
             assert is_varlen_q and not is_split_kv and not pack_gqa
             # The prev-O gmem read is unpredicated along head_dim.
             assert not self.check_hdim_v_oob
+        # fp32-O atomic: borrow finished KV ring slots for sO (one work tile per CTA only).
+        self.sO_borrow_kv = (
+            not disable_fwd_atomic_reduction
+            and self.use_tma_KV
+            and fwd_atomic_can_borrow_kv_smem(
+                self.head_dim_padded,
+                self.head_dim_v_padded,
+                self.m_block_size,
+                self.n_block_size,
+                self.cta_group_size,
+                self.q_stage,
+            )
+        )
+        if self.sO_borrow_kv:
+            self.is_persistent = False
         self.q_subtile_factor = q_subtile_factor
 
         assert not (
@@ -336,6 +382,7 @@ class FFAFwdSm100:
         ) or (self.head_dim_v_padded >= 128 and self.is_split_kv)
         if self.overlap_sO_sQ:
             self.is_persistent = False
+        assert not (self.sO_borrow_kv and self.overlap_sO_sQ)
 
         assert self.use_tma_KV or not (
             self.check_hdim_oob or self.check_hdim_v_oob
@@ -343,7 +390,11 @@ class FFAFwdSm100:
 
         # ClC does not compose with these other features, so disable even if requested
         self.use_clc_scheduler = (
-            use_clc_scheduler and self.use_tma_KV and not self.overlap_sO_sQ
+            use_clc_scheduler
+            and self.use_tma_KV
+            and not self.overlap_sO_sQ
+            # CLC reloads KV slots the previous epilogue still reads.
+            and not self.sO_borrow_kv
         )
         if self.use_clc_scheduler:
             assert (
@@ -558,6 +609,8 @@ class FFAFwdSm100:
             if not self.overlap_sO_sQ
             else max(smem_size_q, smem_size_o)
         )
+        if self.sO_borrow_kv:
+            smem_size_q_o = smem_size_q
         smem_size_k_per_stage = (
             self.n_block_size * self.head_dim_padded * self.k_dtype.width // 8
         )
@@ -575,7 +628,14 @@ class FFAFwdSm100:
         ):
             # For hdim 192,128, we can fit 3 stages if we use uneven_kv_smem
             kv_stage = 3
-        # fp32-O atomic should shrink q_stage.
+        if self.sO_borrow_kv:
+            cols_per_slot = smem_size_kv_per_stage * 8 // (32 * self.m_block_size)
+            n_chunks = self.head_dim_v_padded // cols_per_slot
+            assert kv_stage >= self.q_stage * n_chunks + 1, (
+                f"sO borrow needs kv_stage >= {self.q_stage * n_chunks + 1} "
+                f"(q_stage={self.q_stage} x n_chunks={n_chunks} + 1 free), "
+                f"got {kv_stage}"
+            )
         assert kv_stage >= 2, (
             f"smem budget leaves kv_stage={kv_stage} < 2 "
             f"(q_stage={self.q_stage}, o_dtype={self.o_dtype})"
@@ -632,9 +692,7 @@ class FFAFwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
         max_seqlen_q: Int32 | None = None,
-        # RangeMerge CSR: group g owns sorted pairs
-        # [mCuBatches[g], mCuBatches[g+1]).
-        mCuBatches: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,  # [R + 1] CSR offsets for RangeMerge
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -1025,7 +1083,7 @@ class FFAFwdSm100:
         tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
 
-        # Unique-writer ranges TMA O.
+        # TMA store for unique-writer Q-ranges
         self.corr_epi_tma_store = const_expr(
             mQRanges is not None
             and not self.use_tma_O
@@ -1044,8 +1102,7 @@ class FFAFwdSm100:
             )
             gmem_tiled_copy_O = None
         elif const_expr(self.corr_epi_tma_store):
-            # 4D desc: pad mode shares row stride, base -= total_q rows.
-            # PAD=1<<26 only bounds d3 (off+len).
+            # 4D descriptor with base shifted by total_q rows for offset-based indexing
             total_q_o = mO.shape[0]
             row_stride_o = mO.layout.stride[0]
             mO_desc = cute.make_tensor(
@@ -1115,10 +1172,7 @@ class FFAFwdSm100:
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],
             mQRanges=mQRanges,
-            # Overlapping Q ranges can need more tiles than the generic
-            # partition bound; the quota mode launches the per-range
-            # cluster-aligned bound AND decodes it affinely (C++
-            # max_outer_range_width), replacing the prefix-sum scan.
+            # Quota affine decode upper bound on per-range tiles
             max_outer_range_width=(
                 max_seqlen_q if const_expr(mQRanges is not None) else None
             ),
@@ -1140,14 +1194,16 @@ class FFAFwdSm100:
 
         # (max_ctas, 1, 1), where max_ctas = sm_counts // cluster_size
         if const_expr(mQRanges is not None):
-            # Quota grid + affine decode both come from the scheduler's
-            # max_outer_range_width mode now (see tile_sched_args above).
             assert max_seqlen_q is not None, "ranges fwd needs max_seqlen_q"
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
 
         # --- Make smem storage ---
 
-        sO_size = cute.cosize(sO_layout) if const_expr(not self.overlap_sO_sQ) else 0
+        sO_size = (
+            0
+            if const_expr(self.sO_borrow_kv or self.overlap_sO_sQ)
+            else cute.cosize(sO_layout)
+        )
         sQ_size = (
             cute.cosize(sQ_layout)
             if const_expr(not self.overlap_sO_sQ)
@@ -1786,7 +1842,13 @@ class FFAFwdSm100:
             sV_layout.outer,
         )
         # sO: S<3,4,3> o 0 o (EPI_Q=(8,16),EPI_HD=(64,2),EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
-        if const_expr(not self.overlap_sO_sQ):
+        if const_expr(self.sO_borrow_kv):
+            # Overlay sO onto drained KV ring storage in non-persistent mode
+            sO = cute.make_tensor(
+                cute.recast_ptr(sK.iterator, sO_layout.inner, self.o_dtype),
+                sO_layout.outer,
+            )
+        elif const_expr(not self.overlap_sO_sQ):
             sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
         else:
             sO = cute.make_tensor(
@@ -2520,7 +2582,6 @@ class FFAFwdSm100:
             if const_expr(self.range_merge and not self.use_block_sparsity):
                 assert mMaskTypes is not None and mCuBatches is not None
                 assert mPageTable is None, "RangeMerge does not support paged KV"
-                # Q once, then each pair's K/V.
                 if issue_q_for_this_warp:
                     load_Q(block=0, stage=0)
                     if const_expr(self.q_stage == 2):
@@ -2580,7 +2641,6 @@ class FFAFwdSm100:
                         pipeline_kv=pipeline_kv,
                         K_or_V="V",
                     )
-                    # Unconditional first K/V block, then descending remainder.
                     first_blk = hi_p - 1 if hi_p > 0 else Int32(0)
                     if issue_kv_for_this_warp:
                         load_K_p(block=first_blk, producer_state=kv_producer_state)
@@ -3655,7 +3715,7 @@ class FFAFwdSm100:
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
             elif const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
-                # One softmax over the pair list. 
+                # One softmax over the pair list.
                 pair_beg = Int32(mCuBatches[batch_idx])
                 pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
                 for pj in cutlass.range(pair_cnt, unroll=1):
@@ -3734,7 +3794,7 @@ class FFAFwdSm100:
                             mask_fn=partial(mask_fn_p, mask_seqlen=False),
                         )
 
-                # --- Epilogue: final row_sum/row_max once per merged tile ---
+                # Final row_sum/row_max once per merged tile
                 sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
                 if const_expr(mLSE is not None or learnable_sink is not None):
                     sScale[
@@ -3766,7 +3826,6 @@ class FFAFwdSm100:
 
                     # --- Mainloop-1: S0/S1 with causal masking ---
                     if const_expr(self.use_per_range_mask):
-                        # Full returns n_block_max → empty loop; Causal uses diagonal split.
                         n_block_min_causal_local_mask = (
                             block_info.get_n_block_min_causal_local_mask_per_range(
                                 seqlen_info,
@@ -3822,7 +3881,6 @@ class FFAFwdSm100:
                     # --- Mainloop-2: S0/S1 w/o masking ---
                     # NOTE: The remaining iterations have no masking, but may still need mask_mod
                     if const_expr(self.use_per_range_mask):
-                        # Full/Causal return n_block_min → empty left segment.
                         n_block_min_before_local_mask = (
                             block_info.get_n_block_min_before_local_mask_per_range(
                                 seqlen_info,
@@ -3869,8 +3927,6 @@ class FFAFwdSm100:
                             )
 
                     # --- Mainloop-3: S0/S1 with masking on the left ---
-                    # Per-range compiles this segment for InvCausal/BiCausal;
-                    # other types get an empty range from the bound above.
                     if const_expr(  # TODO: review the logics
                         self.use_per_range_mask
                         or (self.is_local and block_info.window_size_left is not None)
@@ -4319,7 +4375,7 @@ class FFAFwdSm100:
                     gO, (self.mma_tiler_pv[0] // self.cta_group_size,)
                 )[None, mma_tile_coord_v, None, None]
 
-            # --- Make gLSE view for the atomic merge ---
+            # Make gLSE view for the atomic merge
             mLSE_cur_atomic = None
             if const_expr(not self.disable_fwd_atomic_reduction):
                 assert mLSE is not None
@@ -4582,7 +4638,7 @@ class FFAFwdSm100:
                         else None
                     )
 
-                    # --- Atomic reduction: lock the physical blocks, merge LSE ---
+                    # Atomic reduction: lock the physical blocks, merge LSE
                     #
                     # Thread t owns row t of this stage tile (the T2R layout below is
                     # 1:1 thread-to-row), so the whole merge is thread-private and the
@@ -4619,15 +4675,20 @@ class FFAFwdSm100:
                         lock_offset = (
                             seqlen_info.offset_q + m_tile_idx * self.m_block_size
                         )
-                        if tidx == 0:
-                            self._acquire_range_locks(
-                                mRangeLocks, head_idx, lock_offset
-                            )
-                        cute.arch.barrier(
-                            barrier_id=int(NamedBarrierFwdSm100.Epilogue),
-                            number_of_threads=len(self.correction_warp_ids)
-                            * cute.arch.WARP_SIZE,
+                        # Skip lock/release for phantom stages (no valid rows).
+                        tile_has_rows = (
+                            seqlen_info.seqlen_q > m_tile_idx * self.m_block_size
                         )
+                        if tile_has_rows:
+                            if tidx == 0:
+                                self._acquire_range_locks(
+                                    mRangeLocks, head_idx, lock_offset
+                                )
+                            cute.arch.barrier(
+                                barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                                number_of_threads=len(self.correction_warp_ids)
+                                * cute.arch.WARP_SIZE,
+                            )
 
                         gLSE_stage = cute.local_tile(
                             mLSE_cur_atomic, (self.m_block_size,), (m_tile_idx,)
@@ -4686,18 +4747,18 @@ class FFAFwdSm100:
                     )
 
                     if const_expr(not self.disable_fwd_atomic_reduction):
-                        # All threads' O/LSE stores must be gpu-visible before the
-                        # lock drops (C++ does __threadfence + barrier + exch).
-                        cute.arch.fence_acq_rel_gpu()
-                        cute.arch.barrier(
-                            barrier_id=int(NamedBarrierFwdSm100.Epilogue),
-                            number_of_threads=len(self.correction_warp_ids)
-                            * cute.arch.WARP_SIZE,
-                        )
-                        if tidx == 0:
-                            self._release_range_locks(
-                                mRangeLocks, head_idx, lock_offset
+                        # Ensure O/LSE stores are GPU-visible before releasing lock.
+                        if tile_has_rows:
+                            cute.arch.fence_acq_rel_gpu()
+                            cute.arch.barrier(
+                                barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                                number_of_threads=len(self.correction_warp_ids)
+                                * cute.arch.WARP_SIZE,
                             )
+                            if tidx == 0:
+                                self._release_range_locks(
+                                    mRangeLocks, head_idx, lock_offset
+                                )
 
                     # Signal for the next work tile that tO are already read,
                     # so mma warp can write to them
@@ -4841,12 +4902,7 @@ class FFAFwdSm100:
 
     @cute.jit
     def _range_lock_ptrs(self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32):
-        """Pointers for the (up to two) physical-block locks a stage tile touches.
-
-        Unaligned range starts make a 128-row tile straddle two physical blocks;
-        taking the lower block first keeps every writer's acquire order identical,
-        which is what makes the double lock deadlock-free.
-        """
+        """Acquires lower physical-block lock first to avoid deadlocks on straddling tiles."""
         block_1 = row_offset // self.m_block_size
         block_2 = (row_offset + self.m_block_size - 1) // self.m_block_size
         ptr_1 = cutedsl_utils.elem_pointer(mRangeLocks, (block_1, head_idx))
@@ -5262,9 +5318,7 @@ class FFAFwdSm100:
                     (tOrO_i[j], tOrO_i[j + 1]), (scale, scale)
                 )
 
-            # Merge with the previous writer's fp32 O (this thread's own row;
-            # the caller holds the range lock and already folded coeff_cur into
-            # `scale`, so only the coeff_prev * prev term is added here).
+            # Merge with previous writer's fp32 O under range lock
             if const_expr(not self.disable_fwd_atomic_reduction):
                 if has_prev:
                     assert gO is not None
@@ -5301,7 +5355,6 @@ class FFAFwdSm100:
             )
 
             if const_expr(self.corr_epi_tma_store):
-                # Leader-warp TMA S2G; drain is the next tile's reuse guard.
                 tdOsO_tma, tdOgO_tma = cpasync.tma_partition(
                     tma_atom_O,
                     0,  # no multicast
@@ -5313,9 +5366,6 @@ class FFAFwdSm100:
                     cute.copy(tma_atom_O, tdOsO_tma, tdOgO_tma)
                     cute.arch.cp_async_bulk_commit_group()
             else:
-                # S2G copy sO -> gO using non-TMA by:
-                #   1. S2R copy sO -> rO
-                #   2. R2G copy rO -> gO with predicate for OOB guard
                 mma_tile_coord_v = thr_mma.thr_idx
                 m_tile_idx = (
                     m_block * self.q_stage + stage
