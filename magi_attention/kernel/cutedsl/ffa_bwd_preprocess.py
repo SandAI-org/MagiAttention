@@ -92,8 +92,7 @@ class FFABwdPreProcess:
         self.head_dim_v_padded = int(
             math.ceil(head_dim_v / hdim_multiple_of) * hdim_multiple_of
         )
-        # qkrange accumulators use the main kernel's 16-wide
-        # row-major packing.  Other paths retain the legacy 32-wide layout.
+        # 16-padded for row-major ranges, 32-padded for legacy paths.
         self.dq_accum_head_dim_padded = int(
             math.ceil(head_dim / dq_accum_hdim_multiple)
             * dq_accum_hdim_multiple

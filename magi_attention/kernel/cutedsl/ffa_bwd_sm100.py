@@ -92,9 +92,12 @@ class FFABwdSm100:
         disable_bwd_dkv_atomic_reduction: bool = False,
         range_merge: bool = False,
         use_dense_dqacc_for_ranges: bool = False,
+        k_ranges_sorted_disjoint: bool = False,
         debug_print: bool = False,
         stats_vec16: bool = True,
     ):
+        # Sorted-disjoint k projections bound the valid tile count by total_k.
+        self.k_ranges_sorted_disjoint = k_ranges_sorted_disjoint
         self.stats_vec16 = stats_vec16
         # padding head_dim to a multiple of 16 as k_block_size
         hdim_multiple_of = 16
@@ -750,6 +753,8 @@ class FFABwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         max_seqlen_k: Int32 | None = None,
+        # Exact bwd grid bound for undeclared ranges; replaces the quota grid.
+        total_kblocks_hint: Int32 | None = None,
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -788,8 +793,8 @@ class FFABwdSm100:
         self.is_varlen_q = mQRanges is not None or mSeqUsedQ is not None
         # LSE/dPsum are 4B-aligned on ranges, so stage them per-lane.
         self.stats_generic_stage = mQRanges is not None
-        # dK/dV always retain the ranges row-major accumulator protocol. dQ may
-        # opt into range-local padded slots and the dense legacy 1D bulk protocol.
+        # Ranges default to the token-space row-major accumulator; dQ may
+        # opt into padded range-local slots (dense-dqacc).
         self.rowmajor_accum = mQRanges is not None and not self.deterministic
         self.dQ_rowmajor_accum = (
             self.rowmajor_accum and not self.use_dense_dqacc_for_ranges
@@ -1232,9 +1237,15 @@ class FFABwdSm100:
             mQRanges=mKRanges,
             max_outer_range_width=(
                 max_seqlen_k
-                if const_expr(mKRanges is not None and mCuBatches is None)
+                if const_expr(
+                    mKRanges is not None
+                    and mCuBatches is None
+                    and not self.k_ranges_sorted_disjoint
+                    and total_kblocks_hint is None
+                )
                 else None
             ),
+            total_tile_hint=total_kblocks_hint,
             mSeqUsedQ=mSeqUsedK,
             qhead_per_kvhead_packgqa=1,  # pack_gqa disabled for bwd
             element_size=self.k_dtype.width // 8,
@@ -1246,7 +1257,12 @@ class FFABwdSm100:
 
         self.tile_scheduler_cls = TileScheduler
 
-        if const_expr(mKRanges is not None and mCuBatches is None):
+        if const_expr(
+            mKRanges is not None
+            and mCuBatches is None
+            and not self.k_ranges_sorted_disjoint
+            and total_kblocks_hint is None
+        ):
             assert max_seqlen_k is not None, "quota ranges bwd needs max_seqlen_k"
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
 
@@ -2553,6 +2569,27 @@ class FFABwdSm100:
         return n_iters
 
     @cute.jit
+    def _bwd_tile_m_iters(
+        self,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
+        block_info: BlockInfo,
+        mMaskTypes: Optional[cute.Tensor],
+        batch_idx: Int32,
+        seqlen_info: SeqlenInfoQK,
+        n_block: Int32,
+    ) -> Int32:
+        """Per-tile m-block trip count for the dS_xchg relay warp."""
+        if const_expr(self.use_per_range_mask):
+            assert mMaskTypes is not None
+            attn_type = Int32(mMaskTypes[batch_idx])
+            m_min, m_max = block_info.get_m_block_min_max_per_range(
+                seqlen_info, n_block, attn_type
+            )
+        else:
+            m_min, m_max = block_info.get_m_block_min_max(seqlen_info, n_block)
+        return m_max - m_min
+
+    @cute.jit
     def relay(
         self,
         dS_cluster_full_mbar_ptr: cute.Pointer,
@@ -2630,23 +2667,23 @@ class FFABwdSm100:
                             )
                         dS_cluster_phase ^= 1
             else:
-                if const_expr(self.use_per_range_mask):
-                    assert mMaskTypes is not None
-                    attn_type = Int32(mMaskTypes[batch_idx])
-                    m_block_min, m_block_max = block_info.get_m_block_min_max_per_range(
-                        seqlen_info, n_block_for_bounds, attn_type
-                    )
-                else:
-                    m_block_min, m_block_max = block_info.get_m_block_min_max(
-                        seqlen_info, n_block_for_bounds
-                    )
-
-                process_tile = (
-                    const_expr(not self.is_local and not self.is_varlen_q)
-                    or m_block_min < m_block_max
+                # dS_xchg warp is a pure signal relay: it never consumes the
+                # bounds itself. Compute the trip count once per tile (the
+                # same value every other warp derives independently) instead
+                # of re-running the full bounds expression here.
+                num_iters = self._bwd_tile_m_iters(
+                    SeqlenInfoCls,
+                    block_info,
+                    mMaskTypes,
+                    batch_idx,
+                    seqlen_info,
+                    n_block_for_bounds,
                 )
+                if const_expr(not self.is_local and not self.is_varlen_q):
+                    process_tile = True
+                else:
+                    process_tile = num_iters > Int32(0)
                 if process_tile:
-                    num_iters = m_block_max - m_block_min
                     for _ in cutlass.range(num_iters, unroll=1):
                         # Wait for sdS_xchg to be full from peer CTA
                         cute.arch.mbarrier_wait(
@@ -5658,8 +5695,6 @@ class FFABwdSm100:
                         self.compute_sync_barrier.arrive_and_wait()
 
                         # Release sdPsum to be empty
-                        # Normally we'd need syncwarp here since only 1 thread will signal in
-                        # consumer_release, but we already have the self.compute_sync_barrier before this
                         if const_expr(self.stats_generic_stage):
                             with cute.arch.elect_one():
                                 pipeline_dPsum.consumer_release(consumer_state_dPsum)
@@ -5883,8 +5918,6 @@ class FFABwdSm100:
                             pipeline_S_P.consumer_release(consumer_state_S_P_dP)
 
                     # Release sLSE(i) to be empty
-                    # NOTE: Normally we'd need syncwarp here since only 1 thread will signal in
-                    # consumer_release, but we already have the self.compute_sync_barrier before this
                     if const_expr(self.stats_generic_stage):
                         # PipelineAsync arrives per calling thread; keep it at one
                         # lane per warp to match the consumer group's arrive count.
@@ -6082,8 +6115,6 @@ class FFABwdSm100:
                     self.compute_sync_barrier.arrive_and_wait()
 
                     # Release sdPsum to be empty
-                    # Normally we'd need syncwarp here since only 1 thread will signal in
-                    # consumer_release, but we already have the self.compute_sync_barrier before this
                     if const_expr(self.stats_generic_stage):
                         with cute.arch.elect_one():
                             pipeline_dPsum.consumer_release(consumer_state_dPsum)
