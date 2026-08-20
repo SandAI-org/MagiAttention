@@ -111,7 +111,8 @@ class TestFfaSimple(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600
+        # 144 varlen combos jit-compile many kernel variants on a cold cache.
+        return 3600
 
     @property
     def world_size(self) -> int:
@@ -378,9 +379,96 @@ class TestFfaSimple(DistTestBase):
                 mask_types=mask_types,
                 max_seqlen_q=seqlen,
                 max_seqlen_k=seqlen,
+                # The atomic fwd merge is SM100/SM110-only; the SM80 varlen
+                # path collapses ranges to cu_seqlens with direct store.
+                disable_fwd_atomic_reduction=force_sm80,
             )
+            # The default varlen fwd takes the atomic path and returns fp32
+            # out; cast to the compute dtype for the reference comparison.
+            out_v = out_v.to(dtype)
             g = torch.randn_like(out_v)
             dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
+
+        q_ranges = AttnRanges.from_ranges(
+            [[i * seqlen, (i + 1) * seqlen] for i in range(batch_size)]
+        )
+        self.assert_close_to_torch_ref(
+            q_thd=q_v.detach(),
+            k_thd=k_v.detach(),
+            v_thd=v_v.detach(),
+            do_thd=g,
+            out_thd=out_v,
+            dq_thd=dq_v,
+            dk_thd=dk_v,
+            dv_thd=dv_v,
+            q_ranges=q_ranges,
+            k_ranges=q_ranges,
+            attn_type_map=[mask_types] * batch_size,
+            total_seqlen_q=batch_size * seqlen,
+            total_seqlen_k=batch_size * seqlen,
+            dtype=dtype,
+            test_case=test_case,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Varlen opt-flag contract (mirrors the bench opt-on kwargs)
+    # ─────────────────────────────────────────────────────────────────────
+
+    @with_run_in_mp
+    @parameterize("mha_type", ["mha", "gqa"])
+    @parameterize("mask_types", [MT_MAP.full, MT_MAP.causal])
+    def test_varlen_opt_flags(self, mask_types, mha_type):
+        """Ranges opt flags: direct store + coverage + dense dqacc/dkvacc."""
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            return
+
+        device = self.device
+        dtype = torch.bfloat16
+        seqlen, batch_size, nheads, d = 512, 8, 6, 128
+        nheads_kv = {"mha": nheads, "gqa": 3}[mha_type]
+        seed = self.seed + seqlen + d + mask_types * 7
+        torch.random.manual_seed(seed)
+        random.seed(seed)
+
+        q_v = torch.randn(
+            batch_size * seqlen, nheads, d, device=device, dtype=dtype
+        ).requires_grad_()
+        k_v = torch.randn(
+            batch_size * seqlen, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+        v_v = torch.randn(
+            batch_size * seqlen, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * seqlen, seqlen, device=device, dtype=torch.int32
+        )
+        q_ranges_t = torch.stack([cu_seqlens[:-1], cu_seqlens[1:]], dim=1)
+        k_ranges_t = q_ranges_t.clone()
+
+        test_case = (
+            f"[RANK {self.rank}][test_varlen_opt_flags][{mask_types=}][{mha_type=}]"
+        )
+
+        out_v, _ = flex_flash_attn_func(
+            q_v,
+            k_v,
+            v_v,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_types=mask_types,
+            max_seqlen_q=seqlen,
+            max_seqlen_k=seqlen,
+            disable_fwd_atomic_reduction=True,
+            # direct-store disjoint dKV is MHA-only (unique-writer contract)
+            disable_bwd_dkv_atomic_reduction=(mha_type == "mha"),
+            bwd_q_full_coverage=True,
+            bwd_k_full_coverage=True,
+            use_dense_dqacc_for_ranges=True,
+        )
+        g = torch.randn_like(out_v)
+        dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
 
         q_ranges = AttnRanges.from_ranges(
             [[i * seqlen, (i + 1) * seqlen] for i in range(batch_size)]

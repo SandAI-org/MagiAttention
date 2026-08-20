@@ -37,6 +37,15 @@ import os
 
 import torch
 
+import inspect
+
+# Deterministic RNG: every run must generate identical varlen doc splits and
+# tensors, otherwise cross-run comparisons (main vs branch) are meaningless.
+import random as _random
+
+_random.seed(20260818)
+torch.manual_seed(20260818)
+
 from magi_attention.benchmarking import (
     BENCH_CASE_NOT_SUPPORTED,
     BENCH_CASE_OOM,
@@ -97,7 +106,11 @@ elif IS_SM100:
         ffa_fa4_func,
     )
 
-    impls = ["ffa", "fa4", "ffa_fa4"]
+    # NOTE: the raw flash-attn-cute "fa4" baseline asserts on this machine for
+    # the benchmark configs (flash_fwd_sm100 requires use_tma_O or
+    # use_correction_warps_for_epi); magi's ffa_fa4 wrapper avoids that path,
+    # so only ffa_fa4 is kept as the SM100 reference.
+    impls = ["ffa", "ffa_fa4"]
 else:
     impls = ["ffa"]
 
@@ -164,6 +177,49 @@ attn_flops_configs = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ffa (cutedsl) optimization flags
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The benchmark's varlen ranges are sorted, pairwise-disjoint, full-coverage
+# cu-partitions, so every ranges-native optimization flag is legal. They are
+# passed only when the running ``flex_flash_attn_func`` signature supports
+# them, so the same script runs unchanged on both the main branch (which has
+# none of them) and feature branches that add them.
+#
+#   BENCH_FFA_OPT=0   disable all optional flags (default: on)
+
+_FFA_OPT = os.environ.get("BENCH_FFA_OPT", "1") == "1"
+_ffa_sig = inspect.signature(ffa_func).parameters
+
+
+def _ffa_opt_kwargs(is_varlen_case: bool, is_mha: bool) -> dict:
+    kw: dict = {}
+    # Dense (no ranges) cannot take the atomic fwd path at all, so the direct
+    # store is mandatory regardless of the opt switch (correctness, not perf).
+    if not is_varlen_case and "disable_fwd_atomic_reduction" in _ffa_sig:
+        kw["disable_fwd_atomic_reduction"] = True
+    if not _FFA_OPT:
+        return kw
+    if "disable_fwd_atomic_reduction" in _ffa_sig:
+        kw["disable_fwd_atomic_reduction"] = True
+    if is_varlen_case:
+        # direct-store disjoint dKV is MHA-only (unique-writer contract)
+        if is_mha and "disable_bwd_dkv_atomic_reduction" in _ffa_sig:
+            kw["disable_bwd_dkv_atomic_reduction"] = True
+        if "bwd_q_full_coverage" in _ffa_sig:
+            kw["bwd_q_full_coverage"] = True
+        if "bwd_k_full_coverage" in _ffa_sig:
+            kw["bwd_k_full_coverage"] = True
+        if "use_dense_dqacc_for_ranges" in _ffa_sig:
+            kw["use_dense_dqacc_for_ranges"] = True
+    return kw
+
+
+# whether any ranges-native optimization is actually applicable on this build
+_opt_applied = _FFA_OPT and "use_dense_dqacc_for_ranges" in _ffa_sig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Benchmark function
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -184,6 +240,10 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
 
     # ── ranges / cu_seqlens / attn flops ──
     if is_varlen:
+        # Re-seed per case so the doc split depends only on seqlen (not on the
+        # worker's RNG consumption order) — required for cross-run comparisons.
+        _random.seed(20260818 + seqlen)
+        torch.manual_seed(20260818 + seqlen)
         # split the total seqlen into a list of variable-length docs
         seqlens = generate_seqlens(varlen_seqlen_distribution, seqlen)
         cu_ranges = seqlens2curanges(seqlens)
@@ -248,6 +308,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
 
     # ── define fn ──
     if attn_impl == "ffa":
+        opt_kwargs = _ffa_opt_kwargs(is_varlen, is_mha=(nhk == nhq))
         if is_varlen:
 
             def fn():
@@ -260,12 +321,15 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
                     mask_types=ffa_mask_types,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_k=max_seqlen_k,
+                    **opt_kwargs,
                 )
 
         else:
 
             def fn():
-                return ffa_func(q, k, v, mask_types=ffa_mask_types)
+                return ffa_func(
+                    q, k, v, mask_types=ffa_mask_types, **opt_kwargs
+                )
 
         if wd == "bwd":
             try:
@@ -488,7 +552,10 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    out_root = gen_save_path(f"bench_simple_{arch}", add_timestamp_suffix=False)
+    out_root = gen_save_path(
+        f"bench_simple_{arch}{'_opt' if _opt_applied else ''}",
+        add_timestamp_suffix=False,
+    )
 
     attn_benchmark.run(
         print_data=True,
