@@ -24,11 +24,11 @@ from typing import Callable, Optional, Type
 
 import cuda.bindings.driver as cuda
 import cutlass
-import torch
 import cutlass.cute as cute
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
 import cutlass.utils.hopper_helpers as sm90_utils_basic
+import torch
 from cutlass import Float32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp, warpgroup
 from cutlass.utils import LayoutEnum
@@ -268,6 +268,7 @@ class FFABwdPostProcess:
         )
 
         if const_expr(mQRanges is not None):
+            assert mQRanges is not None  # mypy
             TileScheduler = SingleTileVarlenScheduler
             num_head = mdQ.shape[1]
             num_batch = mQRanges.shape[0]
@@ -800,9 +801,7 @@ class FFABwdPostProcessRowMajor:
         assert self.head_dim % self.vec_elems == 0
         self.vectors_per_row = self.head_dim // self.vec_elems
 
-        self.threads_per_row = min(
-            8, 1 << (self.vectors_per_row - 1).bit_length()
-        )
+        self.threads_per_row = min(8, 1 << (self.vectors_per_row - 1).bit_length())
         self.num_threads = 256
         assert self.num_threads % self.threads_per_row == 0
         self.rows_per_cta = self.num_threads // self.threads_per_row
@@ -858,21 +857,13 @@ class FFABwdPostProcessRowMajor:
             for group in cutlass.range_constexpr(self.vector_groups):
                 vector = group * self.threads_per_row + lane_in_row
                 if vector < self.vectors_per_row:
-                    gAcc = cute.local_tile(
-                        gAcc_row, (self.vec_elems,), (vector,)
-                    )
-                    rAcc = cute.make_rmem_tensor(
-                        (self.vec_elems,), cutlass.Float32
-                    )
+                    gAcc = cute.local_tile(gAcc_row, (self.vec_elems,), (vector,))
+                    rAcc = cute.make_rmem_tensor((self.vec_elems,), cutlass.Float32)
                     cute.autovec_copy(gAcc, rAcc)
 
-                    rOut = cute.make_rmem_tensor(
-                        (self.vec_elems,), self.out_dtype
-                    )
+                    rOut = cute.make_rmem_tensor((self.vec_elems,), self.out_dtype)
                     rOut.store((rAcc.load() * scale).to(self.out_dtype))
-                    gOut = cute.local_tile(
-                        gOut_row, (self.vec_elems,), (vector,)
-                    )
+                    gOut = cute.local_tile(gOut_row, (self.vec_elems,), (vector,))
                     cute.autovec_copy(rOut, gOut)
 
 
@@ -927,9 +918,9 @@ class FFABwdGradHoleCleanup:
         self.row_elems = row_elems
         self.ranges_sorted = ranges_sorted
         self.vec_elems = 128 // dtype.width
-        assert row_elems % self.vec_elems == 0, (
-            "flattened (heads * head_dim) row must be 16B-divisible"
-        )
+        assert (
+            row_elems % self.vec_elems == 0
+        ), "flattened (heads * head_dim) row must be 16B-divisible"
         self.vectors_per_row = row_elems // self.vec_elems
         self.num_threads = 128
 
@@ -949,9 +940,7 @@ class FFABwdGradHoleCleanup:
     @cute.kernel
     def kernel(self, mGrad: cute.Tensor, mRanges: cute.Tensor):
         tidx = cute.arch.thread_idx()[0]
-        row = (
-            cutlass.Int32(cute.arch.block_idx()[0]) * self.num_threads + tidx
-        )
+        row = cutlass.Int32(cute.arch.block_idx()[0]) * self.num_threads + tidx
         num_ranges = cutlass.Int32(mRanges.shape[0])
         in_bounds = row < cutlass.Int32(mGrad.shape[0])
 
@@ -994,9 +983,7 @@ class FFABwdGradHoleCleanup:
                 cute.autovec_copy(zero_vec, gVec)
 
 
-def _compile_grad_hole_cleanup(
-    torch_dtype, row_elems: int, ranges_sorted: bool
-):
+def _compile_grad_hole_cleanup(torch_dtype, row_elems: int, ranges_sorted: bool):
     from magi_attention.utils.dtype import to_cute_dtype
 
     cache_key = (torch_dtype, row_elems, ranges_sorted)
@@ -1023,9 +1010,7 @@ def bwd_grad_zero_holes(
 ) -> None:
     """Zero rows of a packed (total, heads, head_dim) grad outside all ranges."""
     g2d = grad.view(grad.shape[0], -1)
-    compiled = _compile_grad_hole_cleanup(
-        grad.dtype, g2d.shape[1], ranges_sorted
-    )
+    compiled = _compile_grad_hole_cleanup(grad.dtype, g2d.shape[1], ranges_sorted)
     compiled(g2d, ranges)
 
 

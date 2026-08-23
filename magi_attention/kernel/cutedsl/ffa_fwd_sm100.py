@@ -181,7 +181,9 @@ def fwd_atomic_can_borrow_kv_smem(
     )
     fp32_width = 32
     cols_per_chunk = bytes_per_kv_stage * 8 // (fp32_width * m_block_size)
-    swizzle_atom_cols = 128 * 8 // fp32_width  # TMA swizzle atom width (128B) in fp32 elems
+    swizzle_atom_cols = (
+        128 * 8 // fp32_width
+    )  # TMA swizzle atom width (128B) in fp32 elems
     if cols_per_chunk < swizzle_atom_cols:
         return False
     if cols_per_chunk % swizzle_atom_cols != 0:
@@ -729,14 +731,16 @@ class FFAFwdSm100:
             mKRanges is None
         ), "mQRanges and mKRanges must be passed together"
         assert (
-            (mQRanges is not None) == self.is_varlen_q
-        ), "is_varlen_q compile flag disagrees with mQRanges argument"
+            mQRanges is not None
+        ) == self.is_varlen_q, (
+            "is_varlen_q compile flag disagrees with mQRanges argument"
+        )
         assert (mRangeLocks is not None) == (
             not self.disable_fwd_atomic_reduction
         ), "range locks required iff fwd atomic reduction is enabled"
-        assert (mCuBatches is not None) == self.range_merge, (
-            "RangeMerge requires the cu_batches CSR (and only then)"
-        )
+        assert (
+            mCuBatches is not None
+        ) == self.range_merge, "RangeMerge requires the cu_batches CSR (and only then)"
         if const_expr(not self.disable_fwd_atomic_reduction):
             assert mLSE is not None, "atomic reduction merges through LSE"
             assert mO.element_type == self.o_dtype
@@ -757,9 +761,7 @@ class FFAFwdSm100:
 
         # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
         # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
-        Q_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mQRanges is None) else [0, 2, 1]
-        )
+        Q_layout_transpose = [1, 3, 2, 0] if const_expr(mQRanges is None) else [0, 2, 1]
         mQ = cute.make_tensor(
             mQ.iterator, cute.select(mQ.layout, mode=Q_layout_transpose)
         )
@@ -780,9 +782,7 @@ class FFAFwdSm100:
 
         # (sk, hd, nhk, b) -> (hd, sk, nhk, b)
         # or (sk, nhk, hd) -> (hd, sk, nhk) if there's cu_seqlens_k
-        V_layout_transpose = (
-            [1, 0, 2, 3] if const_expr(mKRanges is None) else [1, 0, 2]
-        )
+        V_layout_transpose = [1, 0, 2, 3] if const_expr(mKRanges is None) else [1, 0, 2]
         mV = cute.make_tensor(  # actually => actually V.T
             mV.iterator, cute.select(mV.layout, mode=V_layout_transpose)
         )
@@ -806,9 +806,7 @@ class FFAFwdSm100:
 
             # (b, nhq, sq) -> (sq, nhq, b)
             # or (nhq, sq) -> (sq, nhq) if there's cu_seqlens_q
-            LSE_layout_transpose = (
-                [2, 1, 0] if const_expr(mQRanges is None) else [1, 0]
-            )
+            LSE_layout_transpose = [2, 1, 0] if const_expr(mQRanges is None) else [1, 0]
             num_splits = Int32(1)
 
         mO = cute.make_tensor(
@@ -1123,7 +1121,10 @@ class FFAFwdSm100:
                 ),
             )
             tma_atom_O, mO = cpasync.make_tiled_tma_atom(
-                tma_store_op, mO_desc, cute.select(sO_layout, mode=[0, 1]), self.epi_tile
+                tma_store_op,
+                mO_desc,
+                cute.select(sO_layout, mode=[0, 1]),
+                self.epi_tile,
             )
             gmem_tiled_copy_O = None
         else:
@@ -2661,13 +2662,9 @@ class FFAFwdSm100:
                     for i in cutlass.range(hi_p - 1 - lo_p, unroll=1):
                         n_block = hi_p - 2 - i
                         if issue_kv_for_this_warp:
-                            load_K_p(
-                                block=n_block, producer_state=kv_producer_state
-                            )
+                            load_K_p(block=n_block, producer_state=kv_producer_state)
                             kv_producer_state.advance()
-                            load_V_p(
-                                block=n_block, producer_state=kv_producer_state
-                            )
+                            load_V_p(block=n_block, producer_state=kv_producer_state)
                             kv_producer_state.advance()
             elif const_expr(not self.use_block_sparsity):
                 if const_expr(self.use_per_range_mask):
@@ -3005,9 +3002,7 @@ class FFAFwdSm100:
                         block_iter_count,
                         process_tile,
                     )
-                    if const_expr(
-                        not self.use_block_sparsity and not self.range_merge
-                    ):
+                    if const_expr(not self.use_block_sparsity and not self.range_merge):
                         cute.printf(
                             prefix + "n_block_min={} n_block_max={}",
                             n_block_min,
@@ -3756,10 +3751,8 @@ class FFAFwdSm100:
                         mask_fn=partial(mask_fn_p, mask_seqlen=True),
                     )
                     nb = hi_p - 1
-                    nmin_c = (
-                        block_info.get_n_block_min_causal_local_mask_per_range(
-                            seqlen_pair, m_block, lo_p, nb, attn_type_p
-                        )
+                    nmin_c = block_info.get_n_block_min_causal_local_mask_per_range(
+                        seqlen_pair, m_block, lo_p, nb, attn_type_p
                     )
                     for n_tile in cutlass.range(nb - nmin_c, unroll=1):
                         (
@@ -3774,10 +3767,8 @@ class FFAFwdSm100:
                             mask_fn=partial(mask_fn_p, mask_seqlen=False),
                         )
                     nb = cutlass.min(nb, nmin_c)
-                    nmin_b = (
-                        block_info.get_n_block_min_before_local_mask_per_range(
-                            seqlen_pair, m_block, lo_p, nb, attn_type_p
-                        )
+                    nmin_b = block_info.get_n_block_min_before_local_mask_per_range(
+                        seqlen_pair, m_block, lo_p, nb, attn_type_p
                     )
                     for n_tile in cutlass.range(nb - nmin_b, unroll=1):
                         (
@@ -4667,10 +4658,7 @@ class FFAFwdSm100:
                         lse_cur = (
                             (
                                 row_max * softmax_scale_log2_eff
-                                + (
-                                    cute.math.log2(row_sum, fastmath=True)
-                                    - max_offset
-                                )
+                                + (cute.math.log2(row_sum, fastmath=True) - max_offset)
                             )
                             * LN2
                             if not acc_O_mn_row_is_zero_or_nan
@@ -4911,8 +4899,13 @@ class FFAFwdSm100:
             )
 
     @cute.jit
-    def _range_lock_ptrs(self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32):
-        """Lock pointers for the one or two physical blocks the row range straddles; lower block first so all writers share one acquire order."""
+    def _range_lock_ptrs(
+        self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32
+    ):
+        """Lock pointers for the one or two physical blocks the row range straddles.
+
+        Lower block first so all writers share one acquire order.
+        """
         block_1 = row_offset // self.m_block_size
         block_2 = (row_offset + self.m_block_size - 1) // self.m_block_size
         ptr_1 = cutedsl_utils.elem_pointer(mRangeLocks, (block_1, head_idx))
@@ -5332,9 +5325,7 @@ class FFAFwdSm100:
             if const_expr(not self.disable_fwd_atomic_reduction):
                 if has_prev:
                     assert gO is not None
-                    gO_chunk = cute.local_tile(
-                        gO[tidx, None], (corr_tile_hd,), (i,)
-                    )
+                    gO_chunk = cute.local_tile(gO[tidx, None], (corr_tile_hd,), (i,))
                     tOrPrevO_i = cute.make_rmem_tensor(
                         (corr_tile_hd,), self.pv_acc_dtype
                     )
@@ -5392,9 +5383,7 @@ class FFAFwdSm100:
                     tidx,
                     seqlen_q,
                     m_tile_idx,
-                    is_print_thread_and_tile=(
-                        stage == 0 and is_print_thread_and_tile
-                    ),
+                    is_print_thread_and_tile=(stage == 0 and is_print_thread_and_tile),
                 )
 
     @cute.jit

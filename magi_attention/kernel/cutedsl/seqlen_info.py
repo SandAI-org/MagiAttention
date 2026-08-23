@@ -147,6 +147,7 @@ class SeqlenInfoQK:
         # K range comes from a different (pair) row.
         k_sel = batch_idx if const_expr(k_batch_idx is None) else k_batch_idx
         if const_expr(mQRanges is not None):
+            assert mQRanges is not None  # mypy
             q_row = cutlass.min(batch_idx, mQRanges.shape[0] - 1)
             offset_q = mQRanges[q_row, 0]
         elif const_expr(mCuSeqlensQ is not None):
@@ -154,6 +155,7 @@ class SeqlenInfoQK:
         else:
             offset_q = 0
         if const_expr(mKRanges is not None):
+            assert mKRanges is not None  # mypy
             k_row = cutlass.min(k_sel, mKRanges.shape[0] - 1)
             offset_k = mKRanges[k_row, 0]
         elif const_expr(mCuSeqlensK is not None):
@@ -188,6 +190,7 @@ class SeqlenInfoQK:
         elif const_expr(mQRanges is not None):
             seqlen_q = mQRanges[q_row, 1] - offset_q
         elif const_expr(mCuSeqlensQ is not None):
+            assert mCuSeqlensQ is not None  # mypy
             # Clamp +1 lookup to guard against out-of-bounds reads on padding tiles
             last_q = mCuSeqlensQ.shape[0] - 1
             seqlen_q = mCuSeqlensQ[cutlass.min(batch_idx + 1, last_q)] - offset_q
@@ -198,6 +201,7 @@ class SeqlenInfoQK:
         elif const_expr(mKRanges is not None):
             seqlen_k = mKRanges[k_row, 1] - offset_k
         elif const_expr(mCuSeqlensK is not None):
+            assert mCuSeqlensK is not None  # mypy
             last_k = mCuSeqlensK.shape[0] - 1
             seqlen_k = mCuSeqlensK[cutlass.min(batch_idx + 1, last_k)] - offset_k
         else:
