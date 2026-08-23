@@ -968,12 +968,16 @@ class FFABwdSm80:
                 mdO_cur = cute.domain_offset(
                     (seqlen_info.offset_q, 0), mdO[None, head_idx, None]
                 )
-                mdPsum_cur = cute.domain_offset((padded_offset_q,), mdPsum[head_idx, None])
+                mdPsum_cur = cute.domain_offset(
+                    (padded_offset_q,), mdPsum[head_idx, None]
+                )
                 mdQacc_cur = cute.domain_offset(
                     (padded_offset_q * self.head_dim_padded,), mdQacc[head_idx, None]
                 )
             if cutlass.const_expr(not seqlen_info.has_cu_seqlens_k):
-                mK_cur, mV_cur = [t[batch_idx, None, head_idx_kv, None] for t in (mK, mV)]
+                mK_cur, mV_cur = [
+                    t[batch_idx, None, head_idx_kv, None] for t in (mK, mV)
+                ]
             else:
                 mK_cur, mV_cur = [
                     cute.domain_offset(
@@ -1237,7 +1241,9 @@ class FFABwdSm80:
                 tdOcdO = tQcQ
                 t0dOcdO = t0QcQ
             else:
-                cdO = cute.make_identity_tensor((self.m_block_size, self.head_dim_v_padded))
+                cdO = cute.make_identity_tensor(
+                    (self.m_block_size, self.head_dim_v_padded)
+                )
                 tdOcdO = gmem_thr_copy_VdO.partition_S(cdO)
                 t0dOcdO = gmem_thr_copy_VdO.get_slice(0).partition_S(cdO)
             cLSE = cute.make_identity_tensor((self.m_block_size,))
@@ -1434,7 +1440,8 @@ class FFABwdSm80:
                         smem_copy_atom.layout_dst_tv,
                     )
                     cute.printf(
-                        prefix + "smem_copy_atom_trans: layout_src_tv={}, layout_dst_tv={}",
+                        prefix
+                        + "smem_copy_atom_trans: layout_src_tv={}, layout_dst_tv={}",
                         smem_copy_atom_trans.layout_src_tv,
                         smem_copy_atom_trans.layout_dst_tv,
                     )
