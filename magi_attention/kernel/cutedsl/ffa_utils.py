@@ -69,7 +69,7 @@ MT_MAP = _MaskTypeMap()
 class MaskMode(Enum):
     """Host-side specialization mode for attention masks.
 
-    Static modes preserve the existing compile-time-specialized kernels. The
+    Static modes map to compile-time-specialized kernels. The
     per-range mode identifies a runtime ``int32[R]`` mask tensor holding one
     ``MT_MAP`` entry per q/k range row.
     """
@@ -98,7 +98,6 @@ class NormalizedMaskTypes:
 
     @property
     def is_per_range(self) -> bool:
-        """True when using a per-range mask tensor."""
         return self.mode == MaskMode.PER_RANGE
 
 
@@ -209,7 +208,7 @@ def validate_per_range_mask_feature_support(
     has_score_mod: bool = False,
     has_softcap: bool = False,
 ) -> None:
-    """Reject per-range mask combinations that V1 does not support.
+    """Reject unsupported per-range mask combinations.
 
     Static mask modes are always accepted here. Value-domain checks for the
     per-range CUDA tensor remain a caller contract (no host D2H sync).
@@ -274,8 +273,7 @@ def merge_ranges(
 ]:
     """Sort relations by outer range and deduplicate for merged-range scheduling.
 
-    Torch-native mirror of the magi_attn_ext helper of the same name: returns
-    (merge_outer_ranges, sorted_outer_ranges, sorted_inner_ranges,
+    Returns (merge_outer_ranges, sorted_outer_ranges, sorted_inner_ranges,
     sorted_mask_types, qk_map, unique_count). Rows past unique_count are
     zero-padded; qk_map[j] is where merged range j starts in the sorted arrays.
     """
@@ -318,14 +316,14 @@ def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
     """Collapse q/k ranges down to a cu_seqlens tensor.
 
     # DEVIATION: still collapse validated ranges to cu_seqlens for SM100
-    # Reason: SeqlenInfo / kernels still read cu_seqlens until Phase 2 true-range
-    # Recovery: call validate_true_ranges first; Phase 2 removes this helper
+    # Reason: SeqlenInfo / kernels consume the cu_seqlens layout, not true ranges
+    # Recovery: call validate_true_ranges first; drop this helper once kernels consume true ranges directly
 
     Args:
         ranges: an ``[R, 2]`` int32 cuda tensor of [start, end) intervals, or
             ``None`` for the dense path. Must already satisfy
-            :func:`validate_true_ranges` (including the temporary cu-partition
-            requirement while this collapse remains).
+            :func:`validate_true_ranges` (including the cu-partition
+            requirement).
 
     Returns:
         An ``[R + 1]`` int32 cu_seqlens tensor, or ``None`` if ``ranges`` is None.
