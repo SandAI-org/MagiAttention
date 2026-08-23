@@ -23,7 +23,7 @@
 
 import math
 from functools import partial
-from typing import Callable, Literal, NamedTuple, Optional, Tuple
+from typing import Callable, Literal, NamedTuple, Optional, Tuple, Type
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -181,7 +181,7 @@ def fwd_atomic_can_borrow_kv_smem(
     )
     fp32_width = 32
     cols_per_chunk = bytes_per_kv_stage * 8 // (fp32_width * m_block_size)
-    swizzle_atom_cols = 128 * 8 // fp32_width  # 128B atom → 32 fp32 elems
+    swizzle_atom_cols = 128 * 8 // fp32_width  # TMA swizzle atom width (128B) in fp32 elems
     if cols_per_chunk < swizzle_atom_cols:
         return False
     if cols_per_chunk % swizzle_atom_cols != 0:
@@ -230,8 +230,12 @@ class FFAFwdSm100:
         use_per_range_mask: bool = False,
         range_merge: bool = False,
         disable_fwd_atomic_reduction: bool = False,
+        # GMEM O dtype on the atomic path (fp32 = lossless merge; fp16/bf16
+        # trades K-1 cascading truncation for half the merge traffic/smem).
+        o_dtype: Type[cutlass.Numeric] = Float32,
         debug_print: bool = False,
     ):
+        self.o_dtype = o_dtype
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -333,6 +337,7 @@ class FFAFwdSm100:
         self.sO_borrow_kv = (
             not disable_fwd_atomic_reduction
             and self.use_tma_KV
+            and o_dtype == Float32
             and fwd_atomic_can_borrow_kv_smem(
                 self.head_dim_padded,
                 self.head_dim_v_padded,
@@ -734,7 +739,7 @@ class FFAFwdSm100:
         )
         if const_expr(not self.disable_fwd_atomic_reduction):
             assert mLSE is not None, "atomic reduction merges through LSE"
-            assert mO.element_type == Float32, "atomic reduction stores fp32 O"
+            assert mO.element_type == self.o_dtype
         # ///////////////////////////////////////////////////////////////////////////////
         # Make mQ/mK/mV/mO/mLSE tensors
         # with layout transformations for specific memory access patterns
@@ -1172,9 +1177,15 @@ class FFAFwdSm100:
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],
             mQRanges=mQRanges,
-            # Quota affine decode upper bound on per-range tiles
+            # Quota affine decode upper bound on per-range tiles; dropped when
+            # Q ranges are certified disjoint, so the prefix-sum decode sizes
+            # the grid near-exactly from total_q instead of max_seqlen_q.
             max_outer_range_width=(
-                max_seqlen_q if const_expr(mQRanges is not None) else None
+                max_seqlen_q
+                if const_expr(
+                    mQRanges is not None and not self.disable_fwd_atomic_reduction
+                )
+                else None
             ),
             mSeqUsedQ=mSeqUsedQ,
             qhead_per_kvhead_packgqa=self.qhead_per_kvhead
@@ -3715,7 +3726,6 @@ class FFAFwdSm100:
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
             elif const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
-                # One softmax over the pair list.
                 pair_beg = Int32(mCuBatches[batch_idx])
                 pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
                 for pj in cutlass.range(pair_cnt, unroll=1):
@@ -4642,7 +4652,7 @@ class FFAFwdSm100:
                     #
                     # Thread t owns row t of this stage tile (the T2R layout below is
                     # 1:1 thread-to-row), so the whole merge is thread-private and the
-                    # C++ warp-wide skip_correction vote degenerates to a per-row flag.
+                    # skip test is a per-row flag.
                     o_scale = rowsum_norm_scale
                     coeff_prev = Float32(0.0)
                     has_prev = False
@@ -4902,7 +4912,7 @@ class FFAFwdSm100:
 
     @cute.jit
     def _range_lock_ptrs(self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32):
-        """Acquires lower physical-block lock first to avoid deadlocks on straddling tiles."""
+        """Lock pointers for the one or two physical blocks the row range straddles; lower block first so all writers share one acquire order."""
         block_1 = row_offset // self.m_block_size
         block_2 = (row_offset + self.m_block_size - 1) // self.m_block_size
         ptr_1 = cutedsl_utils.elem_pointer(mRangeLocks, (block_1, head_idx))
@@ -5318,7 +5328,7 @@ class FFAFwdSm100:
                     (tOrO_i[j], tOrO_i[j + 1]), (scale, scale)
                 )
 
-            # Merge with previous writer's fp32 O under range lock
+            # Merge with previous writer's O under range lock
             if const_expr(not self.disable_fwd_atomic_reduction):
                 if has_prev:
                     assert gO is not None
@@ -5328,7 +5338,11 @@ class FFAFwdSm100:
                     tOrPrevO_i = cute.make_rmem_tensor(
                         (corr_tile_hd,), self.pv_acc_dtype
                     )
-                    cute.autovec_copy(gO_chunk, tOrPrevO_i)
+                    if const_expr(self.o_dtype == Float32):
+                        cute.autovec_copy(gO_chunk, tOrPrevO_i)
+                    else:
+                        for j in cutlass.range(corr_tile_hd, unroll_full=True):
+                            tOrPrevO_i[j] = Float32(gO_chunk[j])
                     for j in cutlass.range(cute.size(tOrO_i), unroll_full=True):
                         tOrO_i[j] = tOrO_i[j] + coeff_prev * tOrPrevO_i[j]
 

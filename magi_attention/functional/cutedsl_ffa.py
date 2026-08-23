@@ -17,12 +17,12 @@
 The dist runtime's ``DistAttnFunc`` manually interleaves per-stage partial
 attention and gradient merges, so it cannot reuse
 :func:`magi_attention.kernel.cutedsl.flex_flash_attn_func` (an autograd
-Function). Like the FA4 wrappers, these two functions call the raw
+Function). These two functions call the raw
 ``_flex_flash_attn_fwd`` / ``_flex_flash_attn_bwd`` kernels directly and adapt
 the LSE layout; all other contracts (q/k ranges tensors, mask type map) match
 ``AttnArg.to_ffa_args()`` verbatim.
 
-Current limitations (guarded by asserts and by flag filtering at the dist
+Limitations (guarded by asserts and by flag filtering at the dist
 level):
 
 - sink is not supported (CUTEDSL kernel requires per-head scalar bf16 sink,
@@ -64,12 +64,12 @@ def cutedsl_fwd(
     softcap: float,
     sink_layout: str = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run the CuteDSL fwd kernel, returning (out, lse) with dist's lse layout."""
+    """Forward wrapper: returns (out, lse) with lse in the dist contract's (sq, nhq) layout."""
     assert sink is None, "CUTEDSL backend does not support attention sink"
     assert sink_layout == "sh", f"unsupported sink layout: {sink_layout}"
 
     ffa_args = attn_arg.to_ffa_args(is_bwd=False)
-    if not ffa_args:  # empty stage: mirror sdpa behavior via zeros
+    if not ffa_args:
         raise RuntimeError("cutedsl_fwd called with skip_attn_fwd=True")
 
     out, lse_nhtq = _flex_flash_attn_fwd(
@@ -85,9 +85,9 @@ def cutedsl_fwd(
         # Force fp32 partial out for the dist multi-stage merge. The dist
         # overlap path rescales partial (out, lse) pairs in fp32
         # (correct_attn_out_lse); a bf16/fp16 partial underflows that merge.
-        # With disable_fwd_atomic_reduction=False the kernel takes the atomic
-        # path and returns fp32 out — which is exactly what the merge needs.
+        # The atomic path defaults O to the input dtype, so ask for fp32 here.
         disable_fwd_atomic_reduction=False,
+        out_dtype=torch.float32,
         # range_merge: the dist layer's pre-merged relation IR is already the
         # input to AttnArg (merge happens in calc_meta), so the kernel sees the
         # plain per-range problem — no in-kernel merge needed.
@@ -112,7 +112,7 @@ def cutedsl_bwd(
     softcap: float,
     sink_layout: str = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
-    """Run the CuteDSL bwd kernel; partial_dsink is always None (sink excluded)."""
+    """Backward wrapper: partial_dsink is always None since sink is unsupported."""
     assert sink is None, "CUTEDSL backend does not support attention sink"
     assert sink_layout == "sh", f"unsupported sink layout: {sink_layout}"
 
@@ -121,7 +121,7 @@ def cutedsl_bwd(
         raise RuntimeError("cutedsl_bwd called with skip_attn_bwd=True")
 
     # If fwd went down the atomic path it returns fp32 out; the bwd kernel
-    # consumes the input dtype, matching FlexFlashAttnFunc.backward's cast.
+    # consumes the input dtype, so cast back.
     if o.dtype != q.dtype:
         o = o.to(q.dtype)
         do = do.to(q.dtype)
@@ -139,8 +139,7 @@ def cutedsl_bwd(
         max_seqlen_q=attn_arg.q_ranges.max_seqlen,
         max_seqlen_k=attn_arg.k_ranges.max_seqlen,
         # Host-side ranges are available here, so the exact scheduler grid
-        # totals cost nothing (the autograd path derives them from an async
-        # device snapshot instead). Rows must match ffa_args["k_ranges"],
+        # totals cost nothing. Rows must match ffa_args["k_ranges"],
         # which comes from the bwd-transformed k_ranges_bwd.
         k_tile_hints=(
             sum((r.seqlen + 127) // 128 for r in attn_arg.k_ranges_bwd),
@@ -148,7 +147,7 @@ def cutedsl_bwd(
         ),
         softmax_scale=softmax_scale,
         softcap=softcap,
-        deterministic=False,  # ranges + deterministic is NotImplementedError upstream
+        deterministic=False,  # the kernel raises NotImplementedError for ranges + deterministic
         disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
         disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
         range_merge=False,

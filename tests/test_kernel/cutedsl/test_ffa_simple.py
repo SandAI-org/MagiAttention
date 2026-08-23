@@ -383,8 +383,6 @@ class TestFfaSimple(DistTestBase):
                 # path collapses ranges to cu_seqlens with direct store.
                 disable_fwd_atomic_reduction=force_sm80,
             )
-            # The default varlen fwd takes the atomic path and returns fp32
-            # out; cast to the compute dtype for the reference comparison.
             out_v = out_v.to(dtype)
             g = torch.randn_like(out_v)
             dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
@@ -411,7 +409,72 @@ class TestFfaSimple(DistTestBase):
         )
 
     # ─────────────────────────────────────────────────────────────────────
-    # Varlen opt-flag contract (mirrors the bench opt-on kwargs)
+    # Overlapping q_ranges: atomic merge with fp32-O (default) vs dtype RMW
+    # ─────────────────────────────────────────────────────────────────────
+
+    @with_run_in_mp
+    @parameterize("out_dtype", [None, torch.float32])
+    def test_overlap_atomic_out_dtype(self, out_dtype):
+        """Overlapping q_ranges atomic merge: dtype-O default vs fp32 lossless."""
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            return
+
+        device = self.device
+        dtype = torch.bfloat16
+        d, nheads, total = 128, 4, 768
+        seed = self.seed + d + (0 if out_dtype is None else 1)
+        torch.random.manual_seed(seed)
+
+        q = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+        k = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+        v = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+
+        # q[256:512] is covered by both relations -> exercised by the atomic
+        # merge. k ranges are disjoint across relations (2D-disjoint contract:
+        # the merge would otherwise double-count the shared k rows).
+        q_ranges_t = torch.tensor(
+            [[0, 512], [256, 768]], device=device, dtype=torch.int32
+        )
+        k_ranges_t = torch.tensor(
+            [[0, 512], [512, 768]], device=device, dtype=torch.int32
+        )
+        test_case = f"[RANK {self.rank}][test_overlap_atomic_out_dtype][{out_dtype=}]"
+
+        out, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_types=MT_MAP.full,
+            max_seqlen_q=total,
+            max_seqlen_k=total,
+            out_dtype=out_dtype,
+        )
+        g = torch.randn_like(out)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), g)
+
+        self.assert_close_to_torch_ref(
+            q_thd=q.detach(),
+            k_thd=k.detach(),
+            v_thd=v.detach(),
+            do_thd=g,
+            out_thd=out.to(dtype),
+            dq_thd=dq,
+            dk_thd=dk,
+            dv_thd=dv,
+            q_ranges=AttnRanges.from_ranges([[0, 512], [256, 768]]),
+            k_ranges=AttnRanges.from_ranges([[0, 512], [512, 768]]),
+            attn_type_map=[MT_MAP.full, MT_MAP.full],
+            total_seqlen_q=total,
+            total_seqlen_k=total,
+            dtype=dtype,
+            test_case=test_case,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Varlen opt-flag contract
     # ─────────────────────────────────────────────────────────────────────
 
     @with_run_in_mp
