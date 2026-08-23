@@ -62,7 +62,6 @@ from .tile_scheduler import (
 
 
 # Named-barrier timing probe for CTA (0,0,0). Off: compiles out.
-# Driver: scratch/debug_rangemerge/probe_bar_timing.py
 DEBUG_BAR_PROBE = False
 
 
@@ -799,14 +798,12 @@ class FFABwdSm100:
         self.dQ_rowmajor_accum = (
             self.rowmajor_accum and not self.use_dense_dqacc_for_ranges
         )
-        # Compile-time gate for the named-barrier timing probe.
         self.debug_bar_probe = DEBUG_BAR_PROBE
     
         self.dKV_postprocess = self.qhead_per_kvhead > 1 or (
             mKRanges is not None and not self.disable_bwd_dkv_atomic_reduction
         )
 
-        # Ranges direct-dKV TMA store.
         self.use_tma_store = True
        
         self.ranges_dkv_tma = const_expr(
@@ -2644,7 +2641,7 @@ class FFABwdSm100:
             n_block_for_bounds = n_block // self.cluster_shape_mnk[0]
             if const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
-                # C++ DenseBlockMeta: one signal per valid Q tile of each
+                # One signal per valid Q tile of each
                 # pair; empty pairs (hi <= lo) contribute zero iterations.
                 pair_beg = Int32(mCuBatches[batch_idx])
                 pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
@@ -3316,8 +3313,7 @@ class FFABwdSm100:
 
                     cnt_p = hi_p - lo_p
                     if cnt_p > 0:
-                        # First valid pair: 2-CTA Kt once. C++ load_KV runs
-                        # only after skip_to_first_valid().
+                        # First valid pair: load the 2-CTA Kt once.
                         if const_expr(self.use_2cta_instrs):
                             if kv_pending:
                                 pipeline_Kt.producer_acquire(producer_state_Kt)
@@ -5628,10 +5624,8 @@ class FFABwdSm100:
                                 for i in cutlass.range(
                                     cute.size(tdPrdP_cur), unroll_full=True
                                 ):
-                                    # [0] (kv) follows the score_mod_bwd precedent;
-                                    # [1]'s q semantics proved wrong experimentally
-                                    # (it kills valid elements) — q residue must be
-                                    # handled elsewhere.
+                                    # Mask only the kv residue ([0]); the q-side residue ([1]) must not be
+                                    # zeroed here — it kills valid elements — and is handled elsewhere.
                                     kv_oob = tScS_res_cur[i][0] >= seqlen_pair.seqlen_k
                                     tdPrdP_cur[i] = 0.0 if kv_oob else tdPrdP_cur[i]
 

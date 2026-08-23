@@ -40,7 +40,7 @@ import torch
 import inspect
 
 # Deterministic RNG: every run must generate identical varlen doc splits and
-# tensors, otherwise cross-run comparisons (main vs branch) are meaningless.
+# tensors, otherwise cross-run comparisons are meaningless.
 import random as _random
 
 _random.seed(20260818)
@@ -182,9 +182,8 @@ attn_flops_configs = [
 #
 # The benchmark's varlen ranges are sorted, pairwise-disjoint, full-coverage
 # cu-partitions, so every ranges-native optimization flag is legal. They are
-# passed only when the running ``flex_flash_attn_func`` signature supports
-# them, so the same script runs unchanged on both the main branch (which has
-# none of them) and feature branches that add them.
+# passed only when the running ``flex_flash_attn_func`` signature
+# supports them.
 #
 #   BENCH_FFA_OPT=0   disable all optional flags (default: on)
 
@@ -215,7 +214,6 @@ def _ffa_opt_kwargs(is_varlen_case: bool, is_mha: bool) -> dict:
     return kw
 
 
-# whether any ranges-native optimization is actually applicable on this build
 _opt_applied = _FFA_OPT and "use_dense_dqacc_for_ranges" in _ffa_sig
 
 
