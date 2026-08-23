@@ -882,9 +882,9 @@ class SingleTileVarlenScheduler:
                 or args.mQRanges is not None
             ), "One of mCuSeqlensQ, mSeqUsedQ or mQRanges must be provided"
             if cutlass.const_expr(args.max_outer_range_width is not None):
-                assert args.mQRanges is not None, (
-                    "max_outer_range_width quota decode needs ranges rows"
-                )
+                assert (
+                    args.mQRanges is not None
+                ), "max_outer_range_width quota decode needs ranges rows"
                 assert scheduling_mode == SchedulingMode.STATIC, (
                     "quota decode emits invalid mid-stream tiles; the CLC "
                     "work loop would stop at them"
@@ -1087,9 +1087,7 @@ class SingleTileVarlenScheduler:
                     else (
                         4
                         if num_n_blocks * 4 <= params.max_kvblock_in_l2
-                        else (
-                            2 if num_n_blocks * 2 <= params.max_kvblock_in_l2 else 1
-                        )
+                        else (2 if num_n_blocks * 2 <= params.max_kvblock_in_l2 else 1)
                     )
                 )
             )
@@ -1166,9 +1164,7 @@ class SingleTileVarlenScheduler:
             else:
                 batch_idx = Int32(params.num_batch)
             split_idx = (
-                self._split_idx
-                if cutlass.const_expr(params.is_split_kv)
-                else Int32(0)
+                self._split_idx if cutlass.const_expr(params.is_split_kv) else Int32(0)
             )
             return WorkTileInfo(
                 (Int32(block), Int32(head_idx), Int32(batch_idx), split_idx), is_valid
