@@ -94,8 +94,7 @@ class FFABwdPreProcess:
         )
         # 16-padded for row-major ranges, 32-padded for legacy paths.
         self.dq_accum_head_dim_padded = int(
-            math.ceil(head_dim / dq_accum_hdim_multiple)
-            * dq_accum_hdim_multiple
+            math.ceil(head_dim / dq_accum_hdim_multiple) * dq_accum_hdim_multiple
         )
         self.check_hdim_v_oob = head_dim_v != self.head_dim_v_padded
         self.num_threads = num_threads
@@ -142,9 +141,7 @@ class FFABwdPreProcess:
         universal_copy_bits = 128
         num_copy_elems_dQaccum = universal_copy_bits // Float32.width
         assert (
-            self.tile_m
-            * self.dq_accum_head_dim_padded
-            // num_copy_elems_dQaccum
+            self.tile_m * self.dq_accum_head_dim_padded // num_copy_elems_dQaccum
         ) % self.num_threads == 0
         self.gmem_tiled_copy_dQaccum = copy_utils.tiled_copy_1d(
             Float32, self.num_threads, num_copy_elems_dQaccum
@@ -209,6 +206,7 @@ class FFABwdPreProcess:
             mdQaccum = layout_utils.select(mdQaccum, transpose)
 
         if const_expr(mQRanges is not None):
+            assert mQRanges is not None  # mypy
             TileScheduler = SingleTileVarlenScheduler
             num_head = mO.shape[1]
             num_batch = mQRanges.shape[0]
@@ -413,9 +411,7 @@ class FFABwdPreProcess:
                     padded=True,
                     multiple=self.dq_accum_head_dim_padded,
                 )[None, head_idx]
-                blkdQaccum_shape = (
-                    self.tile_m * self.dq_accum_head_dim_padded,
-                )
+                blkdQaccum_shape = (self.tile_m * self.dq_accum_head_dim_padded,)
                 gdQaccum = cute.local_tile(mdQaccum_cur, blkdQaccum_shape, (m_block,))
                 gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_slice(tidx)
                 tdQgdQaccum = gmem_thr_copy_dQaccum.partition_S(gdQaccum)
@@ -497,9 +493,7 @@ def _compile_bwd_preprocess(
         head_dim_v,
         m_block_size,
         use_padded_offsets=use_padded_offsets,
-        dq_accum_hdim_multiple=(
-            32 if range_workspace_padded or not has_ranges else 16
-        ),
+        dq_accum_hdim_multiple=(32 if range_workspace_padded or not has_ranges else 16),
         range_workspace_padded=range_workspace_padded,
     )
     return cute.compile(

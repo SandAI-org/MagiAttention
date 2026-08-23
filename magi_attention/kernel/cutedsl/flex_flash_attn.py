@@ -97,9 +97,7 @@ def _acquire_pinned_ranges_snapshot(
     )
 
 
-def _release_pinned_ranges_snapshot(
-    buf: torch.Tensor, event: torch.cuda.Event
-) -> None:
+def _release_pinned_ranges_snapshot(buf: torch.Tensor, event: torch.cuda.Event) -> None:
     _pinned_ranges_pool.setdefault(buf.shape[0], []).append((buf, event))
 
 
@@ -128,8 +126,7 @@ def _validate_dense_dqacc_flag(
         raise ValueError(f"{name} requires disable_fwd_atomic_reduction=True")
     if q.shape[-1] % 32 != 0:
         raise NotImplementedError(
-            f"{name} currently requires head_dim divisible by 32, "
-            f"got {q.shape[-1]}"
+            f"{name} currently requires head_dim divisible by 32, " f"got {q.shape[-1]}"
         )
     if magiattn_cutedsl.is_ffa_debug_mode_enabled():
         sorted_disjoint = bool((q_ranges[1:, 0] >= q_ranges[:-1, 1]).all().item())
@@ -230,7 +227,7 @@ def _flex_flash_attn_fwd(
         if isinstance(range_merge, RangeMergePlan):
             plan = range_merge
             assert (
-                plan.merged_outer_ranges.shape[0] == q_ranges.shape[0]
+                plan.merged_outer_ranges.shape[0] == q_ranges.shape[0]  # type: ignore[union-attr] # has_ranges
             ), "RangeMergePlan row count disagrees with q_ranges"
             q_ranges = plan.merged_outer_ranges
             k_ranges = plan.sorted_inner_ranges
@@ -240,10 +237,10 @@ def _flex_flash_attn_fwd(
         else:
             if mask_mode != MaskMode.PER_RANGE:
                 mask_types_tensor = torch.full(
-                    (q_ranges.shape[0],),
+                    (q_ranges.shape[0],),  # type: ignore[union-attr] # has_ranges implies q_ranges
                     mask_type,
                     dtype=torch.int32,
-                    device=q_ranges.device,
+                    device=q_ranges.device,  # type: ignore[union-attr] # has_ranges implies q_ranges
                 )
                 mask_mode = MaskMode.PER_RANGE
             (
@@ -267,7 +264,7 @@ def _flex_flash_attn_fwd(
         batch_size, seqlen_q = q.shape[:2]
         total_q = batch_size * seqlen_q
     else:
-        num_ranges = q_ranges.shape[0]
+        num_ranges = q_ranges.shape[0]  # type: ignore[union-attr] # has_ranges implies q_ranges
         batch_size = num_ranges
         seqlen_q = None
         total_q = q.shape[0]
@@ -432,7 +429,9 @@ def _flex_flash_attn_fwd(
     if has_ranges and magiattn_cutedsl.is_ffa_debug_mode_enabled():
         # The fwd per-range launch bound is sized from max_seqlen_q; an
         # underestimate silently drops relations (out partial, lse=-inf).
-        _q_max = int((q_ranges[:, 1] - q_ranges[:, 0]).max().item())
+        _q_max = int(
+            (q_ranges[:, 1] - q_ranges[:, 0]).max().item()  # type: ignore[index] # has_ranges implies q_ranges
+        )
         assert (
             max_seqlen_q >= _q_max
         ), f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
@@ -475,9 +474,7 @@ def _flex_flash_attn_fwd(
         and (
             not has_ranges
             or (
-                disable_fwd_atomic_reduction
-                and not use_per_range_mask
-                and not pack_gqa
+                disable_fwd_atomic_reduction and not use_per_range_mask and not pack_gqa
             )
         )
     )
@@ -509,10 +506,7 @@ def _flex_flash_attn_fwd(
         and not fwd_atomic_borrow_kv
     )
     persistent_launch = (
-        not causal
-        and not local
-        and not use_clc_scheduler
-        and not fwd_atomic_borrow_kv
+        not causal and not local and not use_clc_scheduler and not fwd_atomic_borrow_kv
     )
 
     # Prepare block sparse for forward
@@ -905,7 +899,7 @@ def _flex_flash_attn_bwd(
         )
         if isinstance(range_merge, RangeMergePlan):
             plan = range_merge
-            assert plan.merged_outer_ranges.shape[0] == k_ranges.shape[0]
+            assert plan.merged_outer_ranges.shape[0] == k_ranges.shape[0]  # type: ignore[union-attr] # has_ranges
             k_ranges = plan.merged_outer_ranges
             q_ranges = plan.sorted_inner_ranges
             mask_types_tensor = plan.sorted_mask_types
@@ -914,10 +908,10 @@ def _flex_flash_attn_bwd(
         else:
             if mask_mode != MaskMode.PER_RANGE:
                 mask_types_tensor = torch.full(
-                    (q_ranges.shape[0],),
+                    (q_ranges.shape[0],),  # type: ignore[union-attr] # has_ranges implies q_ranges
                     mask_type,
                     dtype=torch.int32,
-                    device=q_ranges.device,
+                    device=q_ranges.device,  # type: ignore[union-attr] # has_ranges implies q_ranges
                 )
                 mask_mode = MaskMode.PER_RANGE
             (
@@ -1102,7 +1096,7 @@ def _flex_flash_attn_bwd(
         batch_size, seqlen_k = k.shape[:2]
         total_k = batch_size * seqlen_k
     else:
-        num_ranges = q_ranges.shape[0]
+        num_ranges = q_ranges.shape[0]  # type: ignore[union-attr] # has_ranges implies q_ranges
         batch_size = num_ranges
         total_q = q.shape[0]
         seqlen_q = max_seqlen_q if max_seqlen_q is not None else total_q
@@ -1208,7 +1202,7 @@ def _flex_flash_attn_bwd(
         exact_ctas = k_tile_hints[0] if cluster_size == 1 else 2 * k_tile_hints[1]
         quota_blocks = (seqlen_k + n_block_size - 1) // n_block_size
         quota_units = (quota_blocks + cluster_size - 1) // cluster_size
-        quota_ctas = quota_units * cluster_size * k_ranges.shape[0]
+        quota_ctas = quota_units * cluster_size * k_ranges.shape[0]  # type: ignore[union-attr] # has_ranges
         # The per-CTA prefix-sum decode only pays off above ~2x quota waste.
         if quota_ctas >= 2 * exact_ctas:
             k_total_blocks_hint = exact_ctas
@@ -1260,9 +1254,7 @@ def _flex_flash_attn_bwd(
 
     rowmajor_accum = has_ranges and major_arch in (10, 11)
     dq_accum_hdim_multiple = (
-        16
-        if rowmajor_accum and not use_dense_dqacc_for_ranges
-        else 32
+        16 if rowmajor_accum and not use_dense_dqacc_for_ranges else 32
     )
     dq_head_dim_rounded = (
         (head_dim + dq_accum_hdim_multiple - 1)
@@ -1718,9 +1710,7 @@ def _flex_flash_attn_bwd(
             bwd_compile_args.append(Int32(seqlen_k))
             # Runtime scalar: presence is a compile-key bit, the value is not.
             bwd_compile_args.append(
-                Int32(k_total_blocks_hint)
-                if k_total_blocks_hint is not None
-                else None
+                Int32(k_total_blocks_hint) if k_total_blocks_hint is not None else None
             )
         bwd_compile_args.extend(
             [
@@ -1923,8 +1913,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         )
         if (bwd_q_full_coverage or bwd_k_full_coverage) and not is_varlen:
             raise ValueError(
-                "bwd_q_full_coverage/bwd_k_full_coverage require "
-                "q_ranges/k_ranges"
+                "bwd_q_full_coverage/bwd_k_full_coverage require " "q_ranges/k_ranges"
             )
         if is_varlen:
             num_ranges = validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)

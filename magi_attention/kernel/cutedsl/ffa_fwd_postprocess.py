@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: disable-error-code="attr-defined"
+
 """Forward postprocess for the atomic-reduction path.
 
 """
@@ -23,7 +25,7 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import torch
-from cutlass import Float32, Int32, const_expr
+from cutlass import Float32, const_expr
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
 from .cache_utils import get_jit_cache
@@ -94,9 +96,7 @@ class FFAFwdPostProcess:
                         lse_hi
                         + cute.math.log2(Float32(1.0 + lse_ratio), fastmath=True) * LN2
                     )
-                    o_scale = cute.math.exp2(
-                        (lse - lse_final) * LOG2_E, fastmath=True
-                    )
+                    o_scale = cute.math.exp2((lse - lse_final) * LOG2_E, fastmath=True)
                 mLSE[head_idx, row] = lse_final
 
             if is_empty or const_expr(self.has_sink):
