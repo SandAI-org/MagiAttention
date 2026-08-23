@@ -162,6 +162,7 @@ def _flex_flash_attn_fwd(
     disable_fwd_atomic_reduction: bool = False,
     range_merge: "bool | RangeMergePlan" = False,
     clc_scheduler: bool = False,
+    out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -304,13 +305,19 @@ def _flex_flash_attn_fwd(
     if pack_gqa is None:
         pack_gqa = qhead_per_kvhead > 1
 
-    # Unpacked store for SM80 GQA
+    # The SM80 fwd kernel indexes mQ by query head directly; the packed-GQA
+    # epilogue path is unsupported, so force unpacked store.
     if major_arch == 8:
         pack_gqa = False
 
     # The atomic merge is a ranges-overlap path; a no-op for dense.
     if not has_ranges:
         disable_fwd_atomic_reduction = True
+    if out_dtype is not None:
+        assert (
+            not disable_fwd_atomic_reduction
+        ), "out_dtype only applies to the atomic fwd path"
+        assert out_dtype in (torch.float16, torch.bfloat16, torch.float32)
     if not disable_fwd_atomic_reduction:
         assert has_ranges and major_arch in (
             10,
@@ -321,7 +328,11 @@ def _flex_flash_attn_fwd(
     # the fwd postprocess instead.
     kernel_sink = sink if disable_fwd_atomic_reduction else None
 
-    out_torch_dtype = q.dtype if disable_fwd_atomic_reduction else torch.float32
+    out_torch_dtype = (
+        q.dtype
+        if disable_fwd_atomic_reduction
+        else (out_dtype if out_dtype is not None else q.dtype)
+    )
     device = q.device
     q_batch_seqlen_shape = (batch_size, seqlen_q) if not has_ranges else (total_q,)
     lse_shape = (
@@ -366,7 +377,7 @@ def _flex_flash_attn_fwd(
     use_block_sparsity = block_sparse_tensors is not None
 
     local = False
-    # Static modes collapse to the legacy causal bool for host-side heuristics
+    # Static modes collapse to a causal boolean for host-side heuristics
     # and for kernels that still take is_causal. Per-range mode is treated as
     # may-be-causal for tiling / 2CTA / CLC decisions.
     #
@@ -385,8 +396,8 @@ def _flex_flash_attn_fwd(
     requested_disable_2cta = is_ffa_2cta_disabled(is_fwd=True)
     if use_per_range_mask:
         # DEVIATION: force-disable 2CTA/CLC for per-range masks
-        # Reason: V1 mixed kernel keeps 1CTA + static scheduler for correctness
-        # Recovery: none in V1; revisit after runtime mixed path is stable
+        # Reason: the per-range kernel supports only 1CTA + static scheduler
+        # Recovery: none; static Full/Causal paths keep 2CTA/CLC
         requested_disable_2cta = True
         requested_use_clc_scheduler = False
 
@@ -434,10 +445,11 @@ def _flex_flash_attn_fwd(
         q_stage = 1
     fwd_atomic_borrow_kv = False
     if not disable_fwd_atomic_reduction:
-        # Atomic fwd requires double smem for fp32 sO at q_stage=2; fall back
-        # to single-stage Q when KV ring smem cannot be borrowed.
+        # fp32 sO doubles smem at q_stage=2: borrow KV ring slots, else fall
+        # back to single-stage Q. dtype-O has no smem premium.
         fwd_atomic_borrow_kv = (
             major_arch in (10, 11)
+            and out_torch_dtype is torch.float32
             and fwd_atomic_can_borrow_kv_smem(
                 int(math.ceil(head_dim / 16) * 16),
                 int(math.ceil(head_dim_v / 16) * 16),
@@ -447,7 +459,7 @@ def _flex_flash_attn_fwd(
                 q_stage,
             )
         )
-        if not fwd_atomic_borrow_kv:
+        if not fwd_atomic_borrow_kv and out_torch_dtype is torch.float32:
             q_stage = 1
 
     use_2cta_instrs = (
@@ -542,6 +554,7 @@ def _flex_flash_attn_fwd(
         qhead_per_kvhead,
         mask_mode,
         disable_fwd_atomic_reduction,
+        out_torch_dtype,
         score_mod_hash,
         mask_mod_hash,
         use_block_sparsity,
@@ -681,6 +694,7 @@ def _flex_flash_attn_fwd(
                     use_per_range_mask=use_per_range_mask,
                     range_merge=range_merge_active,
                     disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
+                    o_dtype=to_cute_dtype(out_torch_dtype),
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 12:
@@ -1214,9 +1228,9 @@ def _flex_flash_attn_bwd(
     dq_alloc = torch.empty_like if dq_empty else torch.zeros_like
 
     # DEVIATION: caller-provided dk/dv keep their own content in rows no
-    # range covers — C++ FFA zero-fills those holes too
-    # (flash_bwd_launch_template.h). Porting callers must pre-clear their
-    # buffers or accept stale holes.
+    # range covers
+    # Reason: hole-zeroing only runs for self-allocated gradient buffers
+    # Recovery: callers passing their own buffers must pre-clear them or accept stale holes
     dk_self_alloc = dk is None
     dv_self_alloc = dv is None
     dq_self_alloc = dq is None
@@ -1893,6 +1907,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         bwd_q_full_coverage: bool = False,
         bwd_k_full_coverage: bool = False,
         use_dense_dqacc_for_ranges: bool = False,
+        out_dtype: torch.dtype | None = None,
     ):
         arch, major_arch = get_device_arch()
         is_varlen = q_ranges is not None or k_ranges is not None
@@ -1935,7 +1950,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         mask_types_tensor = mask_spec.per_range_mask_types
         if mask_spec.is_per_range:
             # DEVIATION: report causal mask_type for may-be-causal mixed compile
-            # Reason: FFAFwdSm100.is_causal / host heuristics key off mask_type
+            # Reason: the kernel's is_causal specialization and host heuristics key off mask_type
             # Recovery: runtime mMaskTypes[batch] selects Full vs Causal
             mask_type = MT_MAP.causal
         else:
@@ -1961,6 +1976,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             flex_attn_args=flex_attn_args,
             disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
             range_merge=range_merge,
+            out_dtype=out_dtype,
         )
 
         aux_tensors = flex_attn_args.aux_tensors if flex_attn_args else None
@@ -1985,8 +2001,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction
         ctx.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
-        # Forward Q-merges; backward K-merges
-        # (InnerLoopQ: merge_ranges(k, q)). Derived, not a second user flag.
+        # Forward merges Q ranges; backward merges the dual K ranges.
+        # Derived from the fwd flag, not a second user flag.
         ctx.bwd_range_merge = bwd_range_merge_arg(range_merge)
         ctx.bwd_q_full_coverage = bwd_q_full_coverage
         ctx.bwd_k_full_coverage = bwd_k_full_coverage
@@ -2035,7 +2051,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dout = torch.zeros_like(out)
         if out.dtype != q.dtype:
             # Atomic-reduction fwd returns fp32 O; the bwd kernels consume the
-            # target dtype (same contract as the distributed C++ path).
+            # target dtype.
             out = out.to(q.dtype)
             dout = dout.to(q.dtype)
 
@@ -2092,7 +2108,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             use_dense_dqacc_for_ranges=ctx.use_dense_dqacc_for_ranges,
         )
 
-        return dq, dk, dv, *((None,) * 32)  # Extra Nones is fine
+        return dq, dk, dv, *((None,) * 33)  # Extra Nones is fine
 
 
 def flex_flash_attn_func(
@@ -2118,6 +2134,7 @@ def flex_flash_attn_func(
     bwd_q_full_coverage: bool = False,
     bwd_k_full_coverage: bool = False,
     use_dense_dqacc_for_ranges: bool = False,
+    out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / range / varlen).
@@ -2126,8 +2143,8 @@ def flex_flash_attn_func(
 
     q_ranges/k_ranges: ``[R, 2]`` int32 cuda tensors describing per-range
         [start, end) intervals over the packed (total_seqlen, nheads, headdim)
-        q/k layout — the CuteDSL relation IR (aligned with C++ FFA ranges under
-        non-overlapping Q/K, i.e. ``disable_*_atomic_reduction=True``).
+        q/k layout — the CuteDSL relation IR; under non-overlapping Q/K
+        (``disable_*_atomic_reduction=True``) each row has a unique writer.
         When provided, both must be set, q/k/v must be packed, and the device
         must be SM100/SM110. Leave as ``None`` for the dense
         (batch, seqlen, nheads, headdim) path. On SM100/SM110 the pre/main/post
@@ -2144,7 +2161,7 @@ def flex_flash_attn_func(
     use_dense_dqacc_for_ranges: SM100/SM110 backward-only optimization for
         ranges-native calls. When ``True``, q/k ranges still drive the
         scheduler, loads and masks, but dQ uses range-local tile-padded
-        accumulator slots and the dense legacy 1D bulk-reduce protocol.
+        accumulator slots and the dense 1D bulk-reduce protocol.
         Requires ``deterministic=False``,
         ``disable_fwd_atomic_reduction=True``, sorted pairwise-disjoint
         q_ranges, head_dim divisible by 32, and no ``range_merge``. This
@@ -2180,8 +2197,13 @@ def flex_flash_attn_func(
         holes of self-allocated dq. Defaults to False — pass True only when
         q ranges are pairwise disjoint.
 
-    disable_bwd_dkv_atomic_reduction: caller contract (same as the C++
-        flag) that ``k_ranges`` are sorted and pairwise disjoint, so every
+    out_dtype: GMEM O dtype on the atomic path (``None`` = input dtype).
+        Pass ``torch.float32`` for the
+        lossless merge — K-1 cascading truncation applies otherwise when K
+        relations overlap a row.
+
+    disable_bwd_dkv_atomic_reduction: caller contract that
+        ``k_ranges`` are sorted and pairwise disjoint, so every
         dK/dV row has a unique CTA writer. SM100/SM110 ranges backward then
         stores dK/dV directly from the main kernel (native dtype, no fp32
         accumulator, no dK/dV postprocess) and only zeroes coverage holes.
@@ -2221,6 +2243,7 @@ def flex_flash_attn_func(
         bwd_q_full_coverage,
         bwd_k_full_coverage,
         use_dense_dqacc_for_ranges,
+        out_dtype,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)
