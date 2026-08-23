@@ -33,20 +33,19 @@ Run:
     BENCH_FORCE_SM80=1 PYTHONPATH=../../.. python run_benchmark_simple.py
 """
 
-import os
-
-import torch
-
 import inspect
+import os
 
 # Deterministic RNG: every run must generate identical varlen doc splits and
 # tensors, otherwise cross-run comparisons are meaningless.
 import random as _random
 
+import torch
+
 _random.seed(20260818)
 torch.manual_seed(20260818)
 
-from magi_attention.benchmarking import (
+from magi_attention.benchmarking import (  # noqa: E402
     BENCH_CASE_NOT_SUPPORTED,
     BENCH_CASE_OOM,
     Benchmark,
@@ -54,11 +53,11 @@ from magi_attention.benchmarking import (
     gen_save_path,
     perf_report,
 )
-from magi_attention.common.enum import AttnMaskType
-from magi_attention.common.ranges import AttnRanges
-from magi_attention.kernel.cutedsl import MT_MAP
-from magi_attention.kernel.cutedsl import flex_flash_attn_func as ffa_func
-from magi_attention.utils.arch import (
+from magi_attention.common.enum import AttnMaskType  # noqa: E402
+from magi_attention.common.ranges import AttnRanges  # noqa: E402
+from magi_attention.kernel.cutedsl import MT_MAP  # noqa: E402
+from magi_attention.kernel.cutedsl import flex_flash_attn_func as ffa_func  # noqa: E402
+from magi_attention.utils.arch import (  # noqa: E402
     get_dev_cap_str,
     is_ampere,
     is_blackwell,
@@ -66,7 +65,7 @@ from magi_attention.utils.arch import (
 )
 
 # isort: split
-from exps.attn.baselines.utils import (
+from exps.attn.baselines.utils import (  # noqa: E402
     calculate_attn_flops,
     generate_seqlens,
     seqlens2cu_seqlens,
@@ -325,9 +324,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
         else:
 
             def fn():
-                return ffa_func(
-                    q, k, v, mask_types=ffa_mask_types, **opt_kwargs
-                )
+                return ffa_func(q, k, v, mask_types=ffa_mask_types, **opt_kwargs)
 
         if wd == "bwd":
             try:

@@ -14,6 +14,7 @@
 
 # Copyright (c) 2025, Ted Zadouri, Markus Hoehnerbach, Jay Shah, Tri Dao.
 
+# mypy: disable-error-code="union-attr,index,misc"
 # pyright: reportInvalidTypeForm=false
 
 import math
@@ -59,7 +60,6 @@ from .tile_scheduler import (
     TileSchedulerArguments,
     TileSchedulerProtocol,
 )
-
 
 # Named-barrier timing probe for CTA (0,0,0). Off: compiles out.
 DEBUG_BAR_PROBE = False
@@ -348,8 +348,8 @@ class FFABwdSm100:
             if self.use_2cta_instrs:
                 self.dQ_reduce_ncol_t2r = 32
                 if self.dQ_rowmajor_accum:
-                    # One SMEM buffer; two 32-col TMA boxes cover D=128, 
-                    # then wait_group(0). 
+                    # One SMEM buffer; two 32-col TMA boxes cover D=128,
+                    # then wait_group(0).
                     self.dQ_reduce_ncol = 32
                     self.sdQacc_stage = 1
                 else:
@@ -799,13 +799,13 @@ class FFABwdSm100:
             self.rowmajor_accum and not self.use_dense_dqacc_for_ranges
         )
         self.debug_bar_probe = DEBUG_BAR_PROBE
-    
+
         self.dKV_postprocess = self.qhead_per_kvhead > 1 or (
             mKRanges is not None and not self.disable_bwd_dkv_atomic_reduction
         )
 
         self.use_tma_store = True
-       
+
         self.ranges_dkv_tma = const_expr(
             mKRanges is not None and not self.dKV_postprocess
         )
@@ -1007,10 +1007,9 @@ class FFABwdSm100:
                 total_k_dkv = mdK.shape[0]
                 row_stride_dkv = mdK.layout.stride[0]
                 mdK_desc = cute.make_tensor(
-                    (
-                        mdK.iterator
-                        - cutlass.Int64(total_k_dkv) * row_stride_dkv
-                    ).align(16),
+                    (mdK.iterator - cutlass.Int64(total_k_dkv) * row_stride_dkv).align(
+                        16
+                    ),
                     cute.make_layout(
                         (total_k_dkv, mdK.shape[1], mdK.shape[2], 1 << 26),
                         stride=(
@@ -1024,10 +1023,9 @@ class FFABwdSm100:
                 total_k_dvv = mdV.shape[0]
                 row_stride_dvv = mdV.layout.stride[0]
                 mdV_desc = cute.make_tensor(
-                    (
-                        mdV.iterator
-                        - cutlass.Int64(total_k_dvv) * row_stride_dvv
-                    ).align(16),
+                    (mdV.iterator - cutlass.Int64(total_k_dvv) * row_stride_dvv).align(
+                        16
+                    ),
                     cute.make_layout(
                         (total_k_dvv, mdV.shape[1], mdV.shape[2], 1 << 26),
                         stride=(
@@ -1219,9 +1217,11 @@ class FFABwdSm100:
         tile_sched_args = TileSchedulerArguments(
             num_block=cute.ceil_div(cute.size(mK.shape[0]), self.cta_tiler[0]),
             num_head=cute.size(mQ.shape[2]),
-            num_batch=cute.size(mK.shape[3])
-            if const_expr(mKRanges is None)
-            else cute.size(mKRanges.shape[0]),
+            num_batch=(
+                cute.size(mK.shape[3])
+                if const_expr(mKRanges is None)
+                else cute.size(mKRanges.shape[0])  # type: ignore[union-attr] # const_expr guards None
+            ),
             num_splits=1,
             seqlen_k=cute.size(mQ.shape[0]),
             headdim=mQ.shape[1],
@@ -2549,7 +2549,7 @@ class FFABwdSm100:
     ) -> Int32:
         """Q-tile trip count across one merged K-group's pair CSR.
 
-        SM100 MMA's prologue/mainloop split is once per K-tile rather than 
+        SM100 MMA's prologue/mainloop split is once per K-tile rather than
         per pair, so this warp still consumes a scalar count. Load, compute,
         reduce, and relay walk the pairs directly.
         """
@@ -2704,8 +2704,7 @@ class FFABwdSm100:
 
     @cute.jit
     def _copy_stats(self, pipe, state, gBlk, sBlk, lane, bulk_ok):
-        """Stage a (tile_m,) fp32 stats block into smem.
-        """
+        """Stage a (tile_m,) fp32 stats block into smem."""
         if const_expr(self.stats_generic_stage):
             use_vec = cutlass.Boolean(False)
             if const_expr(self.stats_vec16):
@@ -3208,9 +3207,7 @@ class FFABwdSm100:
                 process_tile = cutlass.Boolean(False)
                 kv_pending = cutlass.Boolean(True)
                 for pj in cutlass.range(pair_cnt, unroll=1):
-                    seqlen_pair = SeqlenInfoCls(
-                        pair_beg + pj, k_batch_idx=batch_idx
-                    )
+                    seqlen_pair = SeqlenInfoCls(pair_beg + pj, k_batch_idx=batch_idx)
                     attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
                     lo_p, hi_p = block_info.get_m_block_min_max_per_range(
                         seqlen_pair, n_block_for_bounds, attn_type_pair
@@ -3237,12 +3234,8 @@ class FFABwdSm100:
                     mdPsum_p = seqlen_pair.offset_batch_Q(
                         mdPsum, pair_beg + pj, dim=2, padded=True
                     )[None, head_idx]
-                    gLSE_p = cute.local_tile(
-                        mLSE_p, (self.tile_m,), (None,)
-                    )
-                    gdPsum_p = cute.local_tile(
-                        mdPsum_p, (self.tile_m,), (None,)
-                    )
+                    gLSE_p = cute.local_tile(mLSE_p, (self.tile_m,), (None,))
+                    gdPsum_p = cute.local_tile(mdPsum_p, (self.tile_m,), (None,))
                     load_Q_p, _tQs_p, _tQg_p = copy_utils.tma_get_copy_fn(
                         tma_atom_Q,
                         cta_coord=block_in_cluster_coord_vmnk[1],
@@ -3251,9 +3244,7 @@ class FFABwdSm100:
                         dst_tensor=sQ,
                         mcast_mask=q_do_mcast_mask,
                     )
-                    load_Q_p = copy_utils.tma_producer_copy_fn(
-                        load_Q_p, pipeline_Q
-                    )
+                    load_Q_p = copy_utils.tma_producer_copy_fn(load_Q_p, pipeline_Q)
                     load_dO_p, _tdOs_p, _tdOg_p = copy_utils.tma_get_copy_fn(
                         tma_atom_dO,
                         cta_coord=block_in_cluster_coord_vmnk[1],
@@ -3262,20 +3253,18 @@ class FFABwdSm100:
                         dst_tensor=sdO,
                         mcast_mask=q_do_mcast_mask,
                     )
-                    load_dO_p = copy_utils.tma_producer_copy_fn(
-                        load_dO_p, pipeline_dO
-                    )
+                    load_dO_p = copy_utils.tma_producer_copy_fn(load_dO_p, pipeline_dO)
                     # 2-CTA per-pair transposed closures: Qt feeds the dK
                     # GEMM (sQt), dOt feeds the dV GEMM (sdOt).
                     load_Qt_p = None
                     load_dOt_p = None
                     if const_expr(self.use_2cta_instrs):
-                        mQt_p = cute.domain_offset(
-                            (0, seqlen_pair.offset_q, 0), mQt
-                        )[None, None, head_idx]
-                        mdOt_p = cute.domain_offset(
-                            (seqlen_pair.offset_q, 0, 0), mdOt
-                        )[None, None, head_idx]
+                        mQt_p = cute.domain_offset((0, seqlen_pair.offset_q, 0), mQt)[
+                            None, None, head_idx
+                        ]
+                        mdOt_p = cute.domain_offset((seqlen_pair.offset_q, 0, 0), mdOt)[
+                            None, None, head_idx
+                        ]
                         gQt_p = cute.local_tile(
                             mQt_p,
                             cute.select(self.mma_tiler_dsq, mode=[1, 2]),
@@ -3339,9 +3328,7 @@ class FFABwdSm100:
                                     )
                                 )
                             else:
-                                pipeline_Q.producer_acquire(
-                                    producer_state_Q_LSE
-                                )
+                                pipeline_Q.producer_acquire(producer_state_Q_LSE)
                             load_Q_p(lo_p, producer_state=producer_state_Q_LSE)
                             pipeline_Q.producer_commit(producer_state_Q_LSE)
                             pipeline_LSE.producer_acquire(producer_state_Q_LSE)
@@ -3385,13 +3372,9 @@ class FFABwdSm100:
                             if const_expr(
                                 self.use_2cta_instrs and tma_atom_dOt is not None
                             ):
-                                load_dOt_p(
-                                    lo_p, producer_state=producer_state_dO_dPsum
-                                )
+                                load_dOt_p(lo_p, producer_state=producer_state_dO_dPsum)
                             pipeline_dO.producer_commit(producer_state_dO_dPsum)
-                            pipeline_dPsum.producer_acquire(
-                                producer_state_dO_dPsum
-                            )
+                            pipeline_dPsum.producer_acquire(producer_state_dO_dPsum)
                             self._copy_stats(
                                 pipeline_dPsum,
                                 producer_state_dO_dPsum,
@@ -3409,8 +3392,7 @@ class FFABwdSm100:
                             m_block = lo_p + it
                             if const_expr(should_load_Q):
                                 if const_expr(
-                                    self.use_2cta_instrs
-                                    and tma_atom_Qt is not None
+                                    self.use_2cta_instrs and tma_atom_Qt is not None
                                 ):
                                     pipeline_Qt.producer_acquire(producer_state_Qt)
                                     load_Qt_p(
@@ -3420,9 +3402,7 @@ class FFABwdSm100:
                                     pipeline_Qt.producer_commit(producer_state_Qt)
                                     producer_state_Qt.advance()
                                 pipeline_Q.producer_acquire(producer_state_Q_LSE)
-                                load_Q_p(
-                                    m_block, producer_state=producer_state_Q_LSE
-                                )
+                                load_Q_p(m_block, producer_state=producer_state_Q_LSE)
                                 pipeline_Q.producer_commit(producer_state_Q_LSE)
                                 pipeline_LSE.producer_acquire(producer_state_Q_LSE)
                                 self._copy_stats(
@@ -3448,17 +3428,14 @@ class FFABwdSm100:
                                     m_block, producer_state=producer_state_dO_dPsum
                                 )
                                 if const_expr(
-                                    self.use_2cta_instrs
-                                    and tma_atom_dOt is not None
+                                    self.use_2cta_instrs and tma_atom_dOt is not None
                                 ):
                                     load_dOt_p(
                                         m_block,
                                         producer_state=producer_state_dO_dPsum,
                                     )
                                 pipeline_dO.producer_commit(producer_state_dO_dPsum)
-                                pipeline_dPsum.producer_acquire(
-                                    producer_state_dO_dPsum
-                                )
+                                pipeline_dPsum.producer_acquire(producer_state_dO_dPsum)
                                 self._copy_stats(
                                     pipeline_dPsum,
                                     producer_state_dO_dPsum,
@@ -3475,9 +3452,7 @@ class FFABwdSm100:
                                 self.use_2cta_instrs and tma_atom_Qt is not None
                             ):
                                 pipeline_Qt.producer_acquire(producer_state_Qt)
-                                load_Qt_p(
-                                    hi_p - 1, producer_state=producer_state_Qt
-                                )
+                                load_Qt_p(hi_p - 1, producer_state=producer_state_Qt)
                                 pipeline_Qt.producer_commit(producer_state_Qt)
                                 producer_state_Qt.advance()
             else:
@@ -3675,7 +3650,9 @@ class FFABwdSm100:
                                         producer_state_Q_LSE
                                     )
                                 )
-                                load_Q(first_m_block, producer_state=producer_state_Q_LSE)
+                                load_Q(
+                                    first_m_block, producer_state=producer_state_Q_LSE
+                                )
                                 pipeline_Q.producer_commit(producer_state_Q_LSE)
 
                                 # Load LSE0
@@ -3707,7 +3684,8 @@ class FFABwdSm100:
                                     )
                                 )
                                 load_dO(
-                                    first_m_block, producer_state=producer_state_dO_dPsum
+                                    first_m_block,
+                                    producer_state=producer_state_dO_dPsum,
                                 )
                                 if const_expr(tma_atom_dOt is not None):
                                     load_dOt(
@@ -3750,7 +3728,8 @@ class FFABwdSm100:
                                     if const_expr(tma_atom_Qt is not None):
                                         pipeline_Qt.producer_acquire(producer_state_Qt)
                                         load_Qt(
-                                            m_block - 1, producer_state=producer_state_Qt
+                                            m_block - 1,
+                                            producer_state=producer_state_Qt,
                                         )
                                         pipeline_Qt.producer_commit(producer_state_Qt)
                                         producer_state_Qt.advance()
@@ -3782,15 +3761,20 @@ class FFABwdSm100:
                                         if const_expr(tma_atom_dOt is not None)
                                         else 0,
                                     )
-                                    load_dO(m_block, producer_state=producer_state_dO_dPsum)
+                                    load_dO(
+                                        m_block, producer_state=producer_state_dO_dPsum
+                                    )
                                     if const_expr(tma_atom_dOt is not None):
                                         load_dOt(
-                                            m_block, producer_state=producer_state_dO_dPsum
+                                            m_block,
+                                            producer_state=producer_state_dO_dPsum,
                                         )
                                     pipeline_dO.producer_commit(producer_state_dO_dPsum)
 
                                     # Load dPsum(i)
-                                    pipeline_dPsum.producer_acquire(producer_state_dO_dPsum)
+                                    pipeline_dPsum.producer_acquire(
+                                        producer_state_dO_dPsum
+                                    )
                                     self._copy_stats(
                                         pipeline_dPsum,
                                         producer_state_dO_dPsum,
@@ -3808,7 +3792,8 @@ class FFABwdSm100:
                                 if const_expr(tma_atom_Qt is not None):
                                     pipeline_Qt.producer_acquire(producer_state_Qt)
                                     load_Qt(
-                                        m_block_max - 1, producer_state=producer_state_Qt
+                                        m_block_max - 1,
+                                        producer_state=producer_state_Qt,
                                     )
                                     pipeline_Qt.producer_commit(producer_state_Qt)
                                     producer_state_Qt.advance()
@@ -3816,7 +3801,7 @@ class FFABwdSm100:
             if process_tile:
                 # --- Producer tail ---
                 # Merge walks Q_LSE even at hdim 192 (the 2-CTA-192 dense
-                # path uses Q_Qt). 
+                # path uses Q_Qt).
                 # Empty groups skip tail: the consumer never acquired those stages.
                 if const_expr(
                     self.use_2cta_instrs
@@ -4119,9 +4104,7 @@ class FFABwdSm100:
 
             # TODO: review the logics
             if const_expr(
-                self.use_2cta_instrs
-                and self.tile_hdim == 192
-                and not self.range_merge
+                self.use_2cta_instrs and self.tile_hdim == 192 and not self.range_merge
             ):
                 if is_leader_cta and process_tile:
                     accumulate_dK = False
@@ -5122,9 +5105,7 @@ class FFABwdSm100:
             curr_full_cnt = Int32(0)
             curr_full_idx = None
             loop_count = (
-                Int32(0)
-                if const_expr(self.range_merge)
-                else m_block_max - m_block_min
+                Int32(0) if const_expr(self.range_merge) else m_block_max - m_block_min
             )
             if const_expr(not self.range_merge):
                 process_tile = (
@@ -5311,7 +5292,7 @@ class FFABwdSm100:
                         # TODO: review the logics
                         if const_expr(self.use_block_sparsity):
                             m_block, is_full_block = get_m_block_from_iter_bwd(
-                                iter_idx,
+                                merge_iter_idx,
                                 curr_q_cnt,
                                 curr_q_idx,
                                 curr_full_cnt,
@@ -6396,9 +6377,7 @@ class FFABwdSm100:
         # layout_src_tv=(32,1024):(0,1) => (row32,col32) cells in tmem per warp
         # layout_dst_tv=(32,32):(32,1) => 32 fp32 elems in rmem per thread
         tmem_load_atom = cute.make_copy_atom(
-            tcgen05.copy.Ld32x32bOp(
-                tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)
-            ),
+            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(self.dQ_reduce_ncol_t2r)),
             Float32,
         )
 
@@ -6500,6 +6479,13 @@ class FFABwdSm100:
         )
         read_flag = const_expr(not self.deterministic)
 
+        # Range-merge counterpart of compute_loop's merge_iter_idx: the pair
+        # loop iterates (pair, it) and never defines `iter_idx`, so keep a
+        # dedicated counter for get_m_block_from_iter_bwd /
+        # _dq_semaphore_lock_value. Only the increment below was dropped in
+        # the refactor; add it at the end of the (pair, it) body.
+        dq_iter_idx = Int32(0)
+
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
@@ -6584,9 +6570,7 @@ class FFABwdSm100:
             )
 
             loop_count = (
-                Int32(0)
-                if const_expr(self.range_merge)
-                else m_block_max - m_block_min
+                Int32(0) if const_expr(self.range_merge) else m_block_max - m_block_min
             )
             if const_expr(not self.range_merge):
                 process_tile = (
@@ -6737,9 +6721,7 @@ class FFABwdSm100:
 
             # Hoisted per-thread 2-CTA dQ-fold coordinates: pure functions of
             # tidx / cta_rank_in_cluster, invariant across pair / m_block / stage.
-            if const_expr(
-                self.dQ_rowmajor_accum and self.use_2cta_instrs
-            ):
+            if const_expr(self.dQ_rowmajor_accum and self.use_2cta_instrs):
                 dQacc_fold_row_base = cta_rank_in_cluster * self.dQ_reduce_rows
                 dQacc_fold_column_group = tidx // self.dQ_reduce_rows
                 dQacc_fold_row_local = tidx % self.dQ_reduce_rows
@@ -6818,7 +6800,7 @@ class FFABwdSm100:
                             # TODO: review the logics
                             if const_expr(self.use_block_sparsity):
                                 m_block, _ = get_m_block_from_iter_bwd(
-                                    iter_idx,
+                                    dq_iter_idx,
                                     curr_q_cnt,
                                     curr_q_idx,
                                     curr_full_cnt,
@@ -6851,9 +6833,7 @@ class FFABwdSm100:
                             tdQrdQ = cute.make_tensor(tdQrdQ_t2r.iterator, tdQrdQ_shape)
 
                             n_reduce_stages = const_expr(cute.size(tdQrdQ, mode=[1]))
-                            for stage in cutlass.range_constexpr(
-                                n_reduce_stages
-                            ):
+                            for stage in cutlass.range_constexpr(n_reduce_stages):
                                 # R2S copy dQacc (bulk path)
                                 smem_idx = dQ_tma_store_producer_state.index
                                 if const_expr(not self.dQ_rowmajor_accum):
@@ -6888,17 +6868,15 @@ class FFABwdSm100:
                                             * (stage % self.sdQacc_stage),
                                         ]
                                         if dQacc_fold_row < rows_valid:
-                                            cute.autovec_copy(
-                                                frag_r, tdQsdQ_fold
-                                            )
+                                            cute.autovec_copy(frag_r, tdQsdQ_fold)
                                         else:
-                                            cute.autovec_copy(
-                                                tdQ_zero_tma, tdQsdQ_fold
-                                            )
+                                            cute.autovec_copy(tdQ_zero_tma, tdQsdQ_fold)
                                     else:
                                         tdQcdQ_stage = tdQcdQ_t2r[None, stage, 0, 0]
                                         tdQrdQ_stage = tdQrdQ_t2r[None, stage, 0, 0]
-                                        tdQsdQ_stage = tdQsdQ_tma_r2s[None, 0, 0, 0, smem_idx]
+                                        tdQsdQ_stage = tdQsdQ_tma_r2s[
+                                            None, 0, 0, 0, smem_idx
+                                        ]
                                         # T2R distributes one Q row to each thread and keeps
                                         # its 32 columns in the value mode, so tail validity
                                         # is uniform across the vector.
@@ -6908,7 +6886,7 @@ class FFABwdSm100:
                                             )
                                         else:
                                             cute.autovec_copy(tdQ_zero, tdQsdQ_stage)
-                                    
+
                                     cute.arch.fence_view_async_shared()
 
                                 # Semaphore acquire
@@ -6916,7 +6894,7 @@ class FFABwdSm100:
                                 if const_expr(self.deterministic and stage == 0):
                                     if not m_block_oob_upper:
                                         lock_value = self._dq_semaphore_lock_value(
-                                            iter_idx,
+                                            dq_iter_idx,
                                             curr_q_cnt,
                                             curr_dq_write_order,
                                             curr_dq_write_order_full,
@@ -6975,8 +6953,7 @@ class FFABwdSm100:
                                         )
 
                                 if const_expr(
-                                    self.dQ_rowmajor_accum
-                                    and not self.use_2cta_instrs
+                                    self.dQ_rowmajor_accum and not self.use_2cta_instrs
                                 ):
                                     if is_tma_warp and not m_block_oob_upper:
                                         cute.copy(
@@ -7141,9 +7118,7 @@ class FFABwdSm100:
                     tdQrdQ = cute.make_tensor(tdQrdQ_t2r.iterator, tdQrdQ_shape)
 
                     n_reduce_stages = const_expr(cute.size(tdQrdQ, mode=[1]))
-                    for stage in cutlass.range_constexpr(
-                        n_reduce_stages
-                    ):
+                    for stage in cutlass.range_constexpr(n_reduce_stages):
                         # R2S copy dQacc (bulk path)
                         smem_idx = dQ_tma_store_producer_state.index
                         if const_expr(not self.dQ_rowmajor_accum):
@@ -7183,8 +7158,7 @@ class FFABwdSm100:
                                 tdQsdQ_fold = tdQsdQ_fold_rows[
                                     None,
                                     dQacc_fold_column_group
-                                    + self.cta_group_size
-                                    * (stage % self.sdQacc_stage),
+                                    + self.cta_group_size * (stage % self.sdQacc_stage),
                                 ]
                                 if dQacc_fold_row < rows_valid:
                                     cute.autovec_copy(frag_r, tdQsdQ_fold)
@@ -7269,9 +7243,7 @@ class FFABwdSm100:
                             elif is_tma_warp:
                                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
 
-                        if const_expr(
-                            self.dQ_rowmajor_accum and self.use_2cta_instrs
-                        ):
+                        if const_expr(self.dQ_rowmajor_accum and self.use_2cta_instrs):
                             if is_tma_warp and not m_block_oob_upper:
                                 for column_group in cutlass.range_constexpr(
                                     self.cta_group_size
@@ -7363,6 +7335,8 @@ class FFABwdSm100:
                                 cta_rank_in_cluster,
                                 1,
                             )
+
+                    dq_iter_idx += 1
 
             if process_tile:
                 if is_tma_warp:
@@ -7629,7 +7603,6 @@ class FFABwdSm100:
 
         return consumer_state_dKV
 
-
     @cute.jit
     def epilogue_dK_or_dV_tma(
         self,
@@ -7742,9 +7715,7 @@ class FFABwdSm100:
                     mdKV_tma_tensor,
                 )
                 mdKV_cur = blk[(None, None, 0, 0)]  # (rows, hdim)
-                gdKV_p = cute.local_tile(
-                    mdKV_cur, (self.tile_n, tile_hdim), (0, 0)
-                )
+                gdKV_p = cute.local_tile(mdKV_cur, (self.tile_n, tile_hdim), (0, 0))
             else:
                 mdKV_cur = mdKV_tma_tensor[
                     None, None, head_idx_kv, batch_idx
