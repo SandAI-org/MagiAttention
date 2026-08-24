@@ -307,8 +307,9 @@ def _flex_flash_attn_fwd(
     if major_arch == 8:
         pack_gqa = False
 
-    # The atomic merge is a ranges-overlap path; a no-op for dense.
-    if not has_ranges:
+    # The atomic merge is a ranges-overlap path; a no-op for dense, and
+    # unsupported outside SM100/SM110 — fall back to the direct store there.
+    if not has_ranges or major_arch not in (10, 11):
         disable_fwd_atomic_reduction = True
     if out_dtype is not None:
         assert (
