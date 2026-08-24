@@ -474,14 +474,14 @@ class TestFfaSimple(DistTestBase):
         )
 
     # ─────────────────────────────────────────────────────────────────────
-    # Overlapping ranges on non-SM100 arch: collapse to direct store (no-op)
+    # Overlapping ranges gate: SM100-only (no correct fallback elsewhere)
     # ─────────────────────────────────────────────────────────────────────
 
     @with_run_in_mp
     def test_overlap_collapse_sm90(self):
-        """On non-SM100 the ranges atomic gate must degrade to direct store."""
+        """Overlapping ranges atomic merge runs only on SM100/SM110."""
         _, major_arch = get_device_arch()
-        if major_arch in (10, 11):
+        if major_arch not in (10, 11):
             return
 
         device = self.device
