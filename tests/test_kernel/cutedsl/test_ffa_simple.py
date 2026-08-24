@@ -474,6 +474,66 @@ class TestFfaSimple(DistTestBase):
         )
 
     # ─────────────────────────────────────────────────────────────────────
+    # Overlapping ranges on non-SM100 arch: collapse to direct store (no-op)
+    # ─────────────────────────────────────────────────────────────────────
+
+    @with_run_in_mp
+    def test_overlap_collapse_sm90(self):
+        """On non-SM100 the ranges atomic gate must degrade to direct store."""
+        _, major_arch = get_device_arch()
+        if major_arch in (10, 11):
+            return
+
+        device = self.device
+        dtype = torch.bfloat16
+        d, nheads, total = 128, 4, 768
+        seed = self.seed + d
+        torch.random.manual_seed(seed)
+
+        q = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+        k = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+        v = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+
+        q_ranges_t = torch.tensor(
+            [[0, 512], [256, 768]], device=device, dtype=torch.int32
+        )
+        k_ranges_t = torch.tensor(
+            [[0, 512], [512, 768]], device=device, dtype=torch.int32
+        )
+        test_case = f"[RANK {self.rank}][test_overlap_collapse_sm90]"
+
+        out, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_types=MT_MAP.full,
+            max_seqlen_q=total,
+            max_seqlen_k=total,
+        )
+        g = torch.randn_like(out)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), g)
+
+        self.assert_close_to_torch_ref(
+            q_thd=q.detach(),
+            k_thd=k.detach(),
+            v_thd=v.detach(),
+            do_thd=g,
+            out_thd=out,
+            dq_thd=dq,
+            dk_thd=dk,
+            dv_thd=dv,
+            q_ranges=AttnRanges.from_ranges([[0, 512], [256, 768]]),
+            k_ranges=AttnRanges.from_ranges([[0, 512], [512, 768]]),
+            attn_type_map=[MT_MAP.full, MT_MAP.full],
+            total_seqlen_q=total,
+            total_seqlen_k=total,
+            dtype=dtype,
+            test_case=test_case,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
     # Varlen opt-flag contract
     # ─────────────────────────────────────────────────────────────────────
 
