@@ -805,6 +805,9 @@ class SingleTileLPTBwdScheduler:
         self._tile_idx = self.params.total_blocks
         return self.get_current_work()
 
+    def producer_tail(self, *, loc=None, ip=None):
+        pass
+
     def __extract_mlir_values__(self):
         values, self._values_pos = [], []
         for obj in [self.params, self._tile_idx]:

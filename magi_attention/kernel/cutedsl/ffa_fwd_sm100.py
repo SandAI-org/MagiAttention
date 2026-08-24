@@ -39,6 +39,8 @@ from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import ClcDynamicPersistentTileScheduler
 
 # isort: split
+from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import dsl_user_op
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
@@ -56,6 +58,8 @@ from .seqlen_info import SeqlenInfoQK
 from .softmax import SoftmaxSm100, apply_score_mod_inner
 from .sparse_utils import (
     BlockSparseTensors,
+    InnerLoadMode,
+    OuterStoreMode,
     get_total_block_count,
     handle_block_sparse_empty_tile_correction_sm100,
     produce_block_sparse_inner_iters_sm100,
@@ -171,6 +175,31 @@ class DescaleTensors(NamedTuple):
         return DescaleTensors(*((*values, None, None, None)[:3]))
 
 
+@dsl_user_op
+def cpasync_bulk_copy_s2g(
+    smem_ptr: cute.Pointer,
+    gmem_ptr: cute.Pointer,
+    copy_bytes: Int32,
+    *,
+    loc=None,
+    ip=None,
+):
+    """Per-row cp.async.bulk S2G (non-reduce, non-TMA-descriptor).
+
+    PTX: cp.async.bulk.global.shared::cta.bulk_group [$gmem], [$smem], $bytes;
+    Requires: smem source region is contiguous (linear layout).
+    """
+    smem_ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
+    llvm.inline_asm(
+        None,
+        [gmem_ptr.llvm_ptr, smem_ptr_i32, Int32(copy_bytes).ir_value()],
+        "cp.async.bulk.global.shared::cta.bulk_group [$0], [$1], $2;",
+        "l,r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+    )
+
+
 class FFAFwdSm100:
     def __init__(
         self,
@@ -194,7 +223,13 @@ class FFAFwdSm100:
         use_2cta_instrs: bool = False,
         use_clc_scheduler: bool = False,
         debug_print: bool = False,
+        index_sparse: bool = False,
+        inner_load_mode: int = InnerLoadMode.CpAsync,
+        outer_store_mode: int = OuterStoreMode.Tma,
     ):
+        self.index_sparse = index_sparse
+        self.inner_load_mode = inner_load_mode
+        self.outer_store_mode = outer_store_mode
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -604,6 +639,7 @@ class FFAFwdSm100:
         learnable_sink: Optional[cute.Tensor] = None,
         descale_tensors: Optional[DescaleTensors] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mTileTokenIndices: Optional[cute.Tensor] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
@@ -647,6 +683,46 @@ class FFAFwdSm100:
         )
 
         # --- Make mK/mV ---
+
+        # Save raw K/V before layout transpose for IndexSparse scatter loads.
+        # IS loader indexes as (token_idx, col, head_kv, batch), so we need
+        # K in (SK, HD, NHK, B) and V in (HD, SK, NHK, B).
+        # Use explicit shape/stride to avoid ComposedLayout.
+        # IS-TMA (kbs>=128) uses TMA loads, so these raw tensors are not needed.
+        if const_expr(self.index_sparse and self.inner_load_mode != InnerLoadMode.Tma):
+            if const_expr(mCuSeqlensK is None):
+                mK_raw = cute.make_tensor(
+                    mK.iterator,
+                    cute.make_layout(
+                        (mK.shape[1], mK.shape[3], mK.shape[2], mK.shape[0]),
+                        stride=(mK.stride[1], mK.stride[3], mK.stride[2], mK.stride[0]),
+                    ),
+                )
+                mV_raw = cute.make_tensor(
+                    mV.iterator,
+                    cute.make_layout(
+                        (mV.shape[3], mV.shape[1], mV.shape[2], mV.shape[0]),
+                        stride=(mV.stride[3], mV.stride[1], mV.stride[2], mV.stride[0]),
+                    ),
+                )
+            else:
+                mK_raw = cute.make_tensor(
+                    mK.iterator,
+                    cute.make_layout(
+                        (mK.shape[0], mK.shape[2], mK.shape[1]),
+                        stride=(mK.stride[0], mK.stride[2], mK.stride[1]),
+                    ),
+                )
+                mV_raw = cute.make_tensor(
+                    mV.iterator,
+                    cute.make_layout(
+                        (mV.shape[2], mV.shape[0], mV.shape[1]),
+                        stride=(mV.stride[2], mV.stride[0], mV.stride[1]),
+                    ),
+                )
+        else:
+            mK_raw = None
+            mV_raw = None
 
         # (b, sk, nhk, hd) -> (sk, hd, nhk, b)
         # or (sk, nhk, hd) -> (sk, hd, nhk) if there's cu_seqlens_k
@@ -745,13 +821,7 @@ class FFAFwdSm100:
 
         self._setup_attributes()
 
-        self.use_tma_O = (
-            self.arch >= Arch.sm_90
-            and mCuSeqlensQ is None
-            and mSeqUsedQ is None
-            and not (self.pack_gqa and self.m_block_size % self.qhead_per_kvhead != 0)
-            and not (self.pack_gqa and self.is_split_kv)
-        )
+        # outer_store_mode is passed from flex_flash_attn.py dispatch
         self.ex2_emu_freq = 0
         self.ex2_emu_start_frg = self._tune.get("ex2_emu_start_frg", 1)
         if const_expr(self.enable_ex2_emu):
@@ -851,9 +921,26 @@ class FFAFwdSm100:
         sV_layout = sm100_utils_basic.make_smem_layout_b(
             tiled_mma_pv, self.mma_tiler_pv, self.v_dtype, self.kv_stage
         )
-        sO_layout = sm100_utils_basic.make_smem_layout_epi(
-            self.o_dtype, self.o_layout, self.epi_tile, self.q_stage
-        )
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            # Linear row-major sO for per-row bulk S2G.
+            # Wrapped in ComposedLayout with identity swizzle (B=0) for JIT type compat.
+            sO_linear_outer = cute.make_layout(
+                (self.m_block_size, self.head_dim_v_padded, self.q_stage),
+                stride=(
+                    self.head_dim_v_padded,
+                    1,
+                    self.m_block_size * self.head_dim_v_padded,
+                ),
+            )
+            sO_layout = cute.make_composed_layout(
+                cute.make_swizzle(0, 4, 3), 0, sO_linear_outer
+            )
+            sO_layout_is_linear = True
+        else:
+            sO_layout = sm100_utils_basic.make_smem_layout_epi(
+                self.o_dtype, self.o_layout, self.epi_tile, self.q_stage
+            )
+            sO_layout_is_linear = False
 
         # TODO: review the logics here
         if const_expr(not self.same_hdim_kv_padded):
@@ -971,18 +1058,20 @@ class FFAFwdSm100:
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
 
         tma_atom_O = None
-        if const_expr(self.use_tma_O):
+        gmem_tiled_copy_O = None
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma):
             # TMA store atom for O
-            # layout_src_tv=(1,8192):(0,1)
-            # layout_dst_tv=(1,8192):(0,1)
             tma_atom_O, mO = cpasync.make_tiled_tma_atom(
                 tma_store_op, mO, cute.select(sO_layout, mode=[0, 1]), self.epi_tile
             )
-            gmem_tiled_copy_O = None
+        elif const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            # Per-row bulk S2G: no TMA atom, no gmem_tiled_copy needed
+            self.tma1d_row_bytes = self.head_dim_v_padded * self.o_dtype.width // 8
         else:
+            # OuterStoreMode.Stg: per-element S2R then R2G
             universal_copy_bits = 128
             async_copy_elems = universal_copy_bits // self.o_dtype.width
-            atom_universal_copy = cute.make_copy_atom(  # st.shared
+            atom_universal_copy = cute.make_copy_atom(
                 cute.nvgpu.CopyUniversalOp(),
                 self.o_dtype,
                 num_bits_per_copy=universal_copy_bits,
@@ -992,7 +1081,6 @@ class FFAFwdSm100:
                 (self.num_epilogue_threads // tO_shape_dim_1, tO_shape_dim_1),
                 order=(1, 0),
             )
-            # So that we don't have to check if we overshoot kBlockM when we store O
             assert self.m_block_size % tO_layout.shape[0] == 0
             vO_layout = cute.make_layout((1, async_copy_elems))
             gmem_tiled_copy_O = cute.make_tiled_copy_tv(
@@ -1051,15 +1139,23 @@ class FFAFwdSm100:
 
         # --- Make smem storage ---
 
-        sO_size = cute.cosize(sO_layout) if const_expr(not self.overlap_sO_sQ) else 0
-        sQ_size = (
-            cute.cosize(sQ_layout)
-            if const_expr(not self.overlap_sO_sQ)
-            else cutlass.max(
-                cute.cosize(sQ_layout),
-                cute.cosize(sO_layout) * self.o_dtype.width // self.q_dtype.width,
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            sO_size = self.m_block_size * self.head_dim_v_padded * self.q_stage
+        else:
+            sO_size = (
+                cute.cosize(sO_layout) if const_expr(not self.overlap_sO_sQ) else 0
             )
-        )
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            sQ_size = cute.cosize(sQ_layout)
+        else:
+            sQ_size = (
+                cute.cosize(sQ_layout)
+                if const_expr(not self.overlap_sO_sQ)
+                else cutlass.max(
+                    cute.cosize(sQ_layout),
+                    cute.cosize(sO_layout) * self.o_dtype.width // self.q_dtype.width,
+                )
+            )
 
         clc_response_size = self.sched_stages * 4 if self.use_clc_scheduler else 0
         clc_mbar_size = self.sched_stages * 2 if self.use_clc_scheduler else 0
@@ -1172,7 +1268,7 @@ class FFAFwdSm100:
                 f"{prefix}q_stage: {self.q_stage} | kv_stage: {self.kv_stage} | s_stage: {self.s_stage}"
             )
             print(
-                f"{prefix}use_tma_Q: {self.use_tma_Q} | use_tma_KV: {self.use_tma_KV} | use_tma_O: {self.use_tma_O}"
+                f"{prefix}use_tma_Q: {self.use_tma_Q} | use_tma_KV: {self.use_tma_KV} | outer_store_mode: {self.outer_store_mode}"
             )
             print(f"{prefix}threads_per_cta: {self.threads_per_cta}")
             print()
@@ -1212,7 +1308,7 @@ class FFAFwdSm100:
                     tma_atom_V.layout_src_tv,
                     tma_atom_V.layout_dst_tv,
                 )
-            if const_expr(self.use_tma_O):
+            if const_expr(self.outer_store_mode == OuterStoreMode.Tma):
                 cute.printf(
                     prefix + "tma_atom_O: layout_src_tv={}, layout_dst_tv={}",
                     tma_atom_O.layout_src_tv,
@@ -1244,6 +1340,9 @@ class FFAFwdSm100:
             learnable_sink,
             descale_tensors,
             blocksparse_tensors,
+            mK_raw,
+            mV_raw,
+            mTileTokenIndices,
             sQ_layout,
             sK_layout,
             tP_layout,
@@ -1293,6 +1392,9 @@ class FFAFwdSm100:
         learnable_sink: Optional[cute.Tensor],
         descale_tensors: Optional[DescaleTensors],
         blocksparse_tensors: Optional[BlockSparseTensors],
+        mK_raw: Optional[cute.Tensor],
+        mV_raw: Optional[cute.Tensor],
+        mTileTokenIndices: Optional[cute.Tensor],
         sQ_layout: cute.ComposedLayout,
         sK_layout: cute.ComposedLayout,
         tP_layout: cute.ComposedLayout,
@@ -1684,7 +1786,10 @@ class FFAFwdSm100:
             sV_layout.outer,
         )
         # sO: S<3,4,3> o 0 o (EPI_Q=(8,16),EPI_HD=(64,2),EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
-        if const_expr(not self.overlap_sO_sQ):
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            # Linear sO: identity swizzle (B=0), rows are physically contiguous
+            sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
+        elif const_expr(not self.overlap_sO_sQ):
             sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
         else:
             sO = cute.make_tensor(
@@ -1922,6 +2027,9 @@ class FFAFwdSm100:
                 SeqlenInfoCls,
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                mK_raw=mK_raw,
+                mV_raw=mV_raw,
+                mTileTokenIndices=mTileTokenIndices,
                 is_print_block=is_print_block,
             )
 
@@ -2137,6 +2245,9 @@ class FFAFwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
+        mK_raw: Optional[cute.Tensor],
+        mV_raw: Optional[cute.Tensor],
+        mTileTokenIndices: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         num_load_threads = len(self.load_warp_ids) * cute.arch.WARP_SIZE
@@ -2175,6 +2286,38 @@ class FFAFwdSm100:
                 else head_idx
             )
             seqlen_info = SeqlenInfoCls(batch_idx)
+
+            # IndexSparse: override seqlen_k with is_valid_total for padding mask
+            if const_expr(self.index_sparse):
+                from .sparse_utils import sparse_tensor_m_block
+
+                _is_m_sparse = sparse_tensor_m_block(
+                    m_block,
+                    1,
+                    self.q_subtile_factor if self.q_subtile_factor is not None else 1,
+                )
+                _is_vt = blocksparse_tensors.is_valid_total[
+                    batch_idx,
+                    head_idx // self.qhead_per_kvhead
+                    if const_expr(not self.pack_gqa)
+                    else head_idx,
+                    _is_m_sparse,
+                ]
+                seqlen_info = SeqlenInfoQK(
+                    offset_q=seqlen_info.offset_q,
+                    offset_k=seqlen_info.offset_k,
+                    padded_offset_q=seqlen_info.padded_offset_q,
+                    padded_offset_k=seqlen_info.padded_offset_k,
+                    seqlen_q=seqlen_info.seqlen_q,
+                    seqlen_k=_is_vt,
+                    m_block_offset=seqlen_info.m_block_offset,
+                    block_idx_offset=seqlen_info.block_idx_offset,
+                    num_n_blocks=seqlen_info.num_n_blocks,
+                    has_cu_seqlens_q=seqlen_info.has_cu_seqlens_q,
+                    has_cu_seqlens_k=seqlen_info.has_cu_seqlens_k,
+                    has_seqused_q=seqlen_info.has_seqused_q,
+                    has_seqused_k=seqlen_info.has_seqused_k,
+                )
 
             # Used only for debug print
             is_print_thread_and_tile = const_expr(self.debug_print) and (
@@ -2315,6 +2458,32 @@ class FFAFwdSm100:
                 tKsK, tKgK = None, None
                 tVsV, tVgV = None, None
 
+            # IndexSparse KV loader (only for IS-scatter; IS-TMA uses TMA directly)
+            is_loader = None
+            if const_expr(
+                self.index_sparse and self.inner_load_mode != InnerLoadMode.Tma
+            ):
+                from .paged_kv import IndexSparseKVLoader
+
+                is_loader = IndexSparseKVLoader.create(
+                    mK_raw,
+                    mV_raw,
+                    mTileTokenIndices,
+                    batch_idx,
+                    head_idx_kv,
+                    m_block,
+                    tidx % cute.arch.WARP_SIZE,
+                    self.n_block_size,
+                    self.head_dim_padded,
+                    self.head_dim_v_padded,
+                    num_load_threads,
+                    mK_raw.element_type,
+                    qhead_per_kvhead=self.qhead_per_kvhead
+                    if const_expr(self.pack_gqa)
+                    else 1,
+                    transpose_V_smem=True,
+                )
+
             load_K = partial(
                 self.load_KV,
                 tma_atom_K,
@@ -2449,6 +2618,137 @@ class FFAFwdSm100:
                                 block=n_block,
                                 producer_state=kv_producer_state,
                                 page_idx=page_idx,
+                            )
+                            kv_producer_state.advance()
+            elif const_expr(self.index_sparse):
+                # IndexSparse load loop: TMA (kbs>=128) or scatter (kbs<128)
+                from .sparse_utils import (
+                    get_curr_blocksparse_tensors,
+                    sparse_tensor_m_block,
+                )
+
+                m_block_sparse = sparse_tensor_m_block(
+                    m_block,
+                    1,
+                    self.q_subtile_factor if self.q_subtile_factor is not None else 1,
+                )
+                (
+                    curr_mask_cnt,
+                    curr_mask_idx,
+                    curr_full_cnt,
+                    curr_full_idx,
+                ) = get_curr_blocksparse_tensors(
+                    batch_idx,
+                    head_idx,
+                    m_block_sparse,
+                    blocksparse_tensors,
+                    seqlen_info,
+                )
+                total_k_iters = curr_mask_cnt
+
+                if const_expr(self.inner_load_mode == InnerLoadMode.Tma):
+                    # IS-TMA: use generic BS producer with a wrapper that
+                    # translates logical block index → physical via mTileTokenIndices.
+                    def _load_K_is_tma(block, producer_state, page_idx):
+                        phys = (
+                            Int32(
+                                mTileTokenIndices[
+                                    batch_idx,
+                                    head_idx_kv,
+                                    m_block_sparse,
+                                    block * self.n_block_size,
+                                ]
+                            )
+                            >> 7
+                        )
+                        load_K(
+                            block=phys, producer_state=producer_state, page_idx=page_idx
+                        )
+
+                    def _load_V_is_tma(block, producer_state, page_idx):
+                        phys = (
+                            Int32(
+                                mTileTokenIndices[
+                                    batch_idx,
+                                    head_idx_kv,
+                                    m_block_sparse,
+                                    block * self.n_block_size,
+                                ]
+                            )
+                            >> 7
+                        )
+                        load_V(
+                            block=phys, producer_state=producer_state, page_idx=page_idx
+                        )
+
+                    (
+                        kv_producer_state,
+                        q_producer_phase,
+                    ) = produce_block_sparse_inner_iters_sm100(
+                        blocksparse_tensors,
+                        batch_idx,
+                        head_idx,
+                        m_block,
+                        seqlen_info,
+                        kv_producer_state,
+                        load_Q,
+                        _load_K_is_tma,
+                        _load_V_is_tma,
+                        pipeline_kv,
+                        self.q_stage,
+                        q_producer_phase,
+                        self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                        self.q_subtile_factor
+                        if self.q_subtile_factor is not None
+                        else 1,
+                    )
+                else:
+                    # IS-scatter: per-token cp.async (kbs<128)
+                    if total_k_iters > 0:
+                        first_n_block = curr_mask_idx[0]
+                        is_loader.preload_token_indices(first_n_block)
+                        self._is_load_kv(
+                            is_loader,
+                            sK,
+                            pipeline_kv,
+                            kv_producer_state,
+                            "K",
+                            first_n_block,
+                        )
+                        kv_producer_state.advance()
+                        if issue_q_for_this_warp:
+                            load_Q(block=0, stage=0)
+                        if const_expr(self.q_stage == 2) and issue_q_for_this_warp:
+                            load_Q(block=1, stage=1)
+                        q_producer_phase ^= 1
+                        self._is_load_kv(
+                            is_loader,
+                            sV,
+                            pipeline_kv,
+                            kv_producer_state,
+                            "V",
+                            first_n_block,
+                        )
+                        kv_producer_state.advance()
+                        for iter_idx in cutlass.range(1, total_k_iters, unroll=1):
+                            n_block = curr_mask_idx[iter_idx]
+                            is_loader.preload_token_indices(n_block)
+                            self._is_load_kv(
+                                is_loader,
+                                sK,
+                                pipeline_kv,
+                                kv_producer_state,
+                                "K",
+                                n_block,
+                            )
+                            kv_producer_state.advance()
+                            self._is_load_kv(
+                                is_loader,
+                                sV,
+                                pipeline_kv,
+                                kv_producer_state,
+                                "V",
+                                n_block,
                             )
                             kv_producer_state.advance()
             else:  # block sparse load (TODO: review the logics)
@@ -3097,6 +3397,35 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
+            # The load warp already uses is_valid_total, but the actual score
+            # mask is applied here in the softmax warp and needs the same
+            # compacted-row length. Otherwise padded IS rows remain visible.
+            if const_expr(self.index_sparse):
+                from .sparse_utils import sparse_tensor_m_block
+
+                m_block_sparse = sparse_tensor_m_block(
+                    m_block,
+                    1,
+                    self.q_subtile_factor if self.q_subtile_factor is not None else 1,
+                )
+                is_valid_total = blocksparse_tensors.is_valid_total[
+                    batch_idx, kv_head_idx, m_block_sparse
+                ]
+                seqlen_info = SeqlenInfoQK(
+                    offset_q=seqlen_info.offset_q,
+                    offset_k=seqlen_info.offset_k,
+                    padded_offset_q=seqlen_info.padded_offset_q,
+                    padded_offset_k=seqlen_info.padded_offset_k,
+                    seqlen_q=seqlen_info.seqlen_q,
+                    seqlen_k=is_valid_total,
+                    m_block_offset=seqlen_info.m_block_offset,
+                    block_idx_offset=seqlen_info.block_idx_offset,
+                    num_n_blocks=seqlen_info.num_n_blocks,
+                    has_cu_seqlens_q=seqlen_info.has_cu_seqlens_q,
+                    has_cu_seqlens_k=seqlen_info.has_cu_seqlens_k,
+                    has_seqused_q=seqlen_info.has_seqused_q,
+                    has_seqused_k=seqlen_info.has_seqused_k,
+                )
             n_block_min, n_block_max = block_info.get_n_block_min_max(
                 seqlen_info, m_block, split_idx, num_splits
             )
@@ -3800,6 +4129,35 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
+            # The load warp already uses is_valid_total, but the actual score
+            # mask is applied here in the softmax warp and needs the same
+            # compacted-row length. Otherwise padded IS rows remain visible.
+            if const_expr(self.index_sparse):
+                from .sparse_utils import sparse_tensor_m_block
+
+                m_block_sparse = sparse_tensor_m_block(
+                    m_block,
+                    1,
+                    self.q_subtile_factor if self.q_subtile_factor is not None else 1,
+                )
+                is_valid_total = blocksparse_tensors.is_valid_total[
+                    batch_idx, kv_head_idx, m_block_sparse
+                ]
+                seqlen_info = SeqlenInfoQK(
+                    offset_q=seqlen_info.offset_q,
+                    offset_k=seqlen_info.offset_k,
+                    padded_offset_q=seqlen_info.padded_offset_q,
+                    padded_offset_k=seqlen_info.padded_offset_k,
+                    seqlen_q=seqlen_info.seqlen_q,
+                    seqlen_k=is_valid_total,
+                    m_block_offset=seqlen_info.m_block_offset,
+                    block_idx_offset=seqlen_info.block_idx_offset,
+                    num_n_blocks=seqlen_info.num_n_blocks,
+                    has_cu_seqlens_q=seqlen_info.has_cu_seqlens_q,
+                    has_cu_seqlens_k=seqlen_info.has_cu_seqlens_k,
+                    has_seqused_q=seqlen_info.has_seqused_q,
+                    has_seqused_k=seqlen_info.has_seqused_k,
+                )
             n_block_min, n_block_max = block_info.get_n_block_min_max(
                 seqlen_info, m_block, split_idx, num_splits
             )
@@ -3832,7 +4190,9 @@ class FFAFwdSm100:
                     None, None, head_idx
                 ]
             gO = None
-            if const_expr(self.use_tma_O or not self.pack_gqa):
+            if const_expr(
+                self.outer_store_mode == OuterStoreMode.Tma or not self.pack_gqa
+            ):
                 # gO_2CTA: (tileQ128*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
                 tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
                     (self.mma_tiler_pv[0] * self.q_stage),
@@ -4516,9 +4876,13 @@ class FFAFwdSm100:
         #   Correct example (after fix):
         #     tOsO_r2s[None, 0, 0, 0]  # i=0: layout computes swizzle explicitly, correct
         #     tOsO_r2s[None, 0, 0, 1]  # i=1: layout independently computes swizzle for offset 1*corr_tile_hd, correct
-        tOsO_r2s = copy_utils.partition_D_position_independent(
-            thr_tmem_load, tOsO_i[(None, None), None]
-        )
+        if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+            # Linear sO (no swizzle): plain partition_D is correct and sufficient
+            tOsO_r2s = thr_tmem_load.partition_D(tOsO_i[(None, None), None])
+        else:
+            tOsO_r2s = copy_utils.partition_D_position_independent(
+                thr_tmem_load, tOsO_i[(None, None), None]
+            )
 
         # --- Make R2S copy for O ---
 
@@ -4619,8 +4983,7 @@ class FFAFwdSm100:
         # --- S2G copy O to gemm (if needed) ---
 
         if const_expr(self.use_correction_warps_for_epi):
-            assert not self.use_tma_O
-            assert gmem_tiled_copy_O is not None
+            assert self.outer_store_mode != OuterStoreMode.Tma
 
             # Sync this correction warp group to ensure all R2S stores done
             cute.arch.barrier(
@@ -4628,23 +4991,38 @@ class FFAFwdSm100:
                 number_of_threads=len(self.epilogue_warp_ids) * cute.arch.WARP_SIZE,
             )
 
-            # S2G copy sO -> gO using non-TMA by:
-            #   1. S2R copy sO -> rO
-            #   2. R2G copy rO -> gO with predicate for OOB guard
             mma_tile_coord_v = thr_mma.thr_idx
             m_tile_idx = (
                 m_block * self.q_stage + stage
             ) * self.cta_group_size + mma_tile_coord_v
-            self._store_O_to_gmem(
-                sO,
-                gO,
-                mO_cur,
-                gmem_tiled_copy_O,
-                tidx,
-                seqlen_q,
-                m_tile_idx,
-                is_print_thread_and_tile=(stage == 0 and is_print_thread_and_tile),
-            )
+
+            if const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+                # Per-row bulk S2G from linear sO (correction warp path)
+                row_bytes = self.tma1d_row_bytes
+                with cute.arch.elect_one():
+                    for row in cutlass.range(self.m_block_size, unroll_full=False):
+                        q_row = m_tile_idx * self.m_block_size + row
+                        if q_row < seqlen_q:
+                            smem_row_ptr = sO[row, None].iterator
+                            gmem_row_ptr = mO_cur[q_row, None].iterator
+                            cpasync_bulk_copy_s2g(smem_row_ptr, gmem_row_ptr, row_bytes)
+                    cute.arch.cp_async_bulk_commit_group()
+                    cute.arch.cp_async_bulk_wait_group(0, read=True)
+            else:
+                # S2G copy sO -> gO using non-TMA by:
+                #   1. S2R copy sO -> rO
+                #   2. R2G copy rO -> gO with predicate for OOB guard
+                assert gmem_tiled_copy_O is not None
+                self._store_O_to_gmem(
+                    sO,
+                    gO,
+                    mO_cur,
+                    gmem_tiled_copy_O,
+                    tidx,
+                    seqlen_q,
+                    m_tile_idx,
+                    is_print_thread_and_tile=(stage == 0 and is_print_thread_and_tile),
+                )
 
     @cute.jit
     def _store_O_to_gmem(
@@ -4796,7 +5174,9 @@ class FFAFwdSm100:
                         None, None, head_idx
                     ]
                 gO = None
-                if const_expr(self.use_tma_O or not self.pack_gqa):
+                if const_expr(
+                    self.outer_store_mode == OuterStoreMode.Tma or not self.pack_gqa
+                ):
                     # gO_2CTA: (tileQ*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
                     tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
                         (self.mma_tiler_pv[0] * self.q_stage),
@@ -4814,7 +5194,7 @@ class FFAFwdSm100:
 
                 # --- S2G copy O to gmem with or w/o TMA ---
 
-                if const_expr(self.use_tma_O):
+                if const_expr(self.outer_store_mode == OuterStoreMode.Tma):
                     # Define TMA store fn for O
                     store_O, _, _ = copy_utils.tma_get_copy_fn(
                         tma_atom_O, tma_cta_coord, tma_cta_layout, sO, gO
@@ -4842,16 +5222,43 @@ class FFAFwdSm100:
 
                         # Release sOi buffer to be empty for next tile
                         pipeline_o_epi.consumer_release_w_index(stage)
-                else:
+                elif const_expr(self.outer_store_mode == OuterStoreMode.Tma1d):
+                    # Per-row bulk S2G from linear SMEM
+                    row_bytes = self.tma1d_row_bytes
                     for stage in cutlass.range_constexpr(self.q_stage):
-                        # Wait for final corrected sOi to be full
                         pipeline_o_epi.consumer_wait_w_index_phase(
                             stage, epi_consumer_phase
                         )
 
-                        # S2G copy sO -> gO using non-TMA by:
-                        #   1. S2R copy sO -> rO
-                        #   2. R2G copy rO -> gO with predicate for OOB guard
+                        # Compute base SMEM pointer for this stage
+                        sO_stage = sO[None, None, stage]
+                        # Compute gO row base for this stage+tile
+                        m_tile_idx = (
+                            m_block * self.q_stage + stage
+                        ) * self.cta_group_size + mma_tile_coord_v
+
+                        with cute.arch.elect_one():
+                            for row in cutlass.range(
+                                self.m_block_size, unroll_full=False
+                            ):
+                                q_row = m_tile_idx * self.m_block_size + row
+                                if q_row < seqlen_info.seqlen_q:
+                                    smem_row_ptr = sO_stage[row, None].iterator
+                                    gmem_row_ptr = mO_cur[q_row, None].iterator
+                                    cpasync_bulk_copy_s2g(
+                                        smem_row_ptr, gmem_row_ptr, row_bytes
+                                    )
+                            cute.arch.cp_async_bulk_commit_group()
+                            cute.arch.cp_async_bulk_wait_group(0, read=True)
+
+                        pipeline_o_epi.consumer_release_w_index(stage)
+                else:
+                    # OuterStoreMode.Stg: S2R then R2G with predicate
+                    for stage in cutlass.range_constexpr(self.q_stage):
+                        pipeline_o_epi.consumer_wait_w_index_phase(
+                            stage, epi_consumer_phase
+                        )
+
                         m_tile_idx = (
                             m_block * self.q_stage + stage
                         ) * self.cta_group_size + mma_tile_coord_v
@@ -4873,7 +5280,6 @@ class FFAFwdSm100:
                             ),
                         )
 
-                        # Release sOi buffer to be empty for next tile
                         pipeline_o_epi.consumer_release_w_index(stage)
 
                 # Flip consumer phase after consuming all stages for this tile
@@ -4911,6 +5317,33 @@ class FFAFwdSm100:
         while work_tile.is_valid_tile:
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
+
+    @cute.jit
+    def _is_load_kv(
+        self,
+        is_loader,
+        sX: cute.Tensor,
+        pipeline_kv: pipeline.PipelineAsync,
+        producer_state: pipeline.PipelineState,
+        K_or_V: str,
+        n_block: Int32,
+    ):
+        """IndexSparse KV scatter load within TMA pipeline.
+
+        All threads do cp.async scatter loads, block until done, fence,
+        then ONE thread signals the full barrier with arrive_and_expect_tx(0).
+        """
+        stage, phase = producer_state.index, producer_state.phase
+        pipeline_kv.sync_object_empty.wait(stage, phase)
+        sX_cur = sX[None, None, None, stage]
+        is_loader.load_KV(n_block, sX_cur, K_or_V)
+        cute.arch.cp_async_commit_group()
+        cute.arch.cp_async_wait_group(0)
+        cute.arch.fence_view_async_shared()
+        cute.arch.sync_warp()
+        with cute.arch.elect_one():
+            bar_ptr = pipeline_kv.sync_object_full.get_barrier(stage)
+            cute.arch.mbarrier_arrive_and_expect_tx(bar_ptr, 0)
 
     def load_Q(
         self,

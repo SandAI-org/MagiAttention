@@ -713,7 +713,8 @@ class AttentionMask:
                             col_coord = tScS_t2r[i][COL]
                             global_q = row_coord + m_block * self.tile_m
                             global_kv = col_coord + n_block * self.tile_n
-                            q_out_of_bounds = global_q >= self.seqlen_q
+                            seqlen_q_eff = self.seqlen_q * self.qhead_per_kvhead_packgqa
+                            q_out_of_bounds = global_q >= seqlen_q_eff
                             kv_out_of_bounds = global_kv >= self.seqlen_k
                             out_of_bounds = q_out_of_bounds or kv_out_of_bounds
                             acc_S[i] = (
@@ -765,8 +766,9 @@ class AttentionMask:
 
                     if const_expr(mask_seqlen):
                         # check_m_boundary=False skips q check for non-boundary m_blocks
+                        seqlen_q_eff = self.seqlen_q * self.qhead_per_kvhead_packgqa
                         q_out_of_bounds = check_m_boundary and (
-                            global_q >= self.seqlen_q
+                            global_q >= seqlen_q_eff
                         )
                         kv_out_of_bounds = global_kv >= self.seqlen_k
                         out_of_bounds = q_out_of_bounds or kv_out_of_bounds
@@ -779,8 +781,20 @@ class AttentionMask:
                         acc_S[i] = -cutlass.Float32.inf
         else:  # Causal or local
             thr_row_offset = tScS_t2r[0][ROW]
-            seqlenq_row_limit = self.seqlen_q - m_block * self.tile_m - thr_row_offset
-            causal_offset = seqlenq_row_limit - seqlenk_col_limit
+            if const_expr(self.qhead_per_kvhead_packgqa != 1):
+                # PackGQA: packed M = head_offset + q_pos * qhpk (col-major).
+                # Extract actual q_pos = packed_row // qhpk for causal comparison,
+                # then scale back to packed coordinates for the row mask.
+                packed_row = m_block * self.tile_m + thr_row_offset
+                actual_q_pos = packed_row // self.qhead_per_kvhead_packgqa
+                seqlenq_row_limit_q = self.seqlen_q - actual_q_pos
+                causal_offset_q = seqlenq_row_limit_q - seqlenk_col_limit
+                causal_offset = causal_offset_q * self.qhead_per_kvhead_packgqa
+            else:
+                seqlenq_row_limit = (
+                    self.seqlen_q - m_block * self.tile_m - thr_row_offset
+                )
+                causal_offset = seqlenq_row_limit - seqlenk_col_limit
             if const_expr(mask_causal):
                 # tidx = cute.arch.thread_idx()[0] % 256
                 # if tidx < 32:

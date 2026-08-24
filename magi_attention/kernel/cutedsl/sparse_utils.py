@@ -26,6 +26,7 @@ This module hosts both:
 """
 
 import math
+from enum import IntEnum
 from functools import partial
 from typing import Callable, NamedTuple, Optional, Tuple
 
@@ -38,6 +39,73 @@ from quack import copy_utils
 from .cutedsl_utils import get_broadcast_dims, to_cute_tensor
 from .named_barrier import NamedBarrierBwd
 from .seqlen_info import SeqlenInfoQK
+
+# ---------------------------------------------------------------------------
+# Inner-loop load/store mode enums (mirrors csrc/flexible_flash_attention/inner_ldst_mode.hpp)
+# ---------------------------------------------------------------------------
+
+
+class InnerLoadMode(IntEnum):
+    """Inner-loop KV load strategy for sparse attention.
+
+    Tma:     2D TMA descriptor — used when tiles are physically contiguous (kbs >= n_block_size).
+    CpAsync: cp.async per-row scatter (per-token loads for arbitrary token indices).
+    """
+
+    Tma = 0
+    CpAsync = 2
+
+
+class InnerStoreMode(IntEnum):
+    """Inner-loop store strategy (BWD dK/dV accumulation).
+
+    Tma:        2D TMA reduce-add from swizzled SMEM.
+    Tma1d:      cp.reduce.async.bulk per-row from linear SMEM.
+    AtomicAdd:  scalar atomicAdd from SMEM.
+    BypassSmem: register atomicAdd to gmem (no SMEM buffer).
+    """
+
+    Tma = 0
+    Tma1d = 1
+    AtomicAdd = 2
+    BypassSmem = 3
+
+
+class OuterStoreMode(IntEnum):
+    """Outer-loop store strategy (epilogue O/dQ/dKV write).
+
+    Tma:  2D TMA store / reduce-add.
+    Stg:  per-thread STS + STG.128 with residual guard.
+    Tma1d: R2S to linear SMEM, then per-row cp.async.bulk S2G.
+    """
+
+    Tma = 0
+    Stg = 1
+    Tma1d = 2
+
+
+def derive_outer_store_mode(
+    cu_seqlens_q_present: bool = False,
+    seqused_q_present: bool = False,
+    pack_gqa: bool = False,
+    m_block_size: int = 128,
+    qhead_per_kvhead: int = 1,
+) -> OuterStoreMode:
+    """Derive OuterStoreMode from kernel configuration.
+
+    Tma:   2D tile store when output is fully contiguous in 2D.
+    Tma1d: Per-row bulk S2G when rows are contiguous but tile is not (varlen only,
+           without PackGQA which makes row→gmem mapping non-trivial).
+    Stg:   Fallback per-element store (varlen+PackGQA, or PackGQA misalignment).
+    """
+    if cu_seqlens_q_present or seqused_q_present:
+        if pack_gqa and qhead_per_kvhead > 1:
+            return OuterStoreMode.Stg
+        return OuterStoreMode.Tma1d
+    if pack_gqa and m_block_size % qhead_per_kvhead != 0:
+        return OuterStoreMode.Stg
+    return OuterStoreMode.Tma
+
 
 # ---------------------------------------------------------------------------
 # Block-sparse tensor data structures
@@ -53,6 +121,7 @@ class BlockSparseTensors(NamedTuple):
     cu_block_idx_offsets: cute.Tensor | None = None
     dq_write_order: cute.Tensor | None = None
     dq_write_order_full: cute.Tensor | None = None
+    is_valid_total: cute.Tensor | None = None
 
     def __new_from_mlir_values__(self, values):
         new_fields = []
@@ -76,6 +145,7 @@ class BlockSparseTensorsTorch(NamedTuple):
     block_size: tuple[int, int] | None = None
     dq_write_order: torch.Tensor | None = None
     dq_write_order_full: torch.Tensor | None = None
+    is_valid_total: torch.Tensor | None = None
     spt: bool | None = None
 
 
@@ -388,6 +458,7 @@ def normalize_block_sparse_tensors(
         block_size=tensors.block_size,
         dq_write_order=dq_write_order,
         dq_write_order_full=dq_write_order_full,
+        is_valid_total=tensors.is_valid_total,
         spt=spt,
     )
 
@@ -583,6 +654,17 @@ def to_cute_block_sparse_tensors(
         for t in (tensors.dq_write_order, tensors.dq_write_order_full)
     ]
 
+    is_valid_total_tensor = (
+        to_cute_tensor(
+            tensors.is_valid_total,
+            assumed_align=4,
+            leading_dim=-1,
+            enable_tvm_ffi=enable_tvm_ffi,
+        )
+        if tensors.is_valid_total is not None
+        else None
+    )
+
     return BlockSparseTensors(
         mask_block_cnt_tensor,
         mask_block_idx_tensor,
@@ -592,6 +674,7 @@ def to_cute_block_sparse_tensors(
         cu_block_idx_offsets_tensor,
         dq_write_order_tensor,
         dq_write_order_full_tensor,
+        is_valid_total_tensor,
     )
 
 
@@ -607,6 +690,7 @@ def prepare_block_sparse_fwd(
     tile_m: int,
     tile_n: int,
     q_stage: int,
+    qhead_per_kvhead: int = 1,
 ) -> tuple[BlockSparseTensorsTorch | None, object, int | None, bool]:
     """Host-side block-sparse preparation for the forward pass.
 
@@ -619,15 +703,18 @@ def prepare_block_sparse_fwd(
     if block_sparse_tensors is None:
         return None, None, None, pack_gqa
 
-    # NB: pack_gqa requires block sparse head dim == 1 (broadcasted)
     head_dim_idx = 0 if block_sparse_tensors.mask_block_cnt.ndim == 2 else 1
-    if pack_gqa and block_sparse_tensors.mask_block_cnt.shape[head_dim_idx] != 1:
+    packed_num_head = num_head // qhead_per_kvhead
+    sparse_num_head = block_sparse_tensors.mask_block_cnt.shape[head_dim_idx]
+    if pack_gqa and sparse_num_head not in (1, packed_num_head):
         pack_gqa = False
     if cu_seqlens_q is not None:
         assert (
             block_sparse_tensors.cu_total_m_blocks is not None
         ), "Varlen block sparsity requires block_sparse_tensors.cu_total_m_blocks."
 
+    seqlen_q_norm = seqlen_q * qhead_per_kvhead if pack_gqa else seqlen_q
+    num_head_norm = packed_num_head if pack_gqa else num_head
     (
         normalized_tensors,
         broadcast_pattern,
@@ -635,8 +722,8 @@ def prepare_block_sparse_fwd(
     ) = normalize_block_sparse_config(
         block_sparse_tensors,
         batch_size=batch_size,
-        num_head=num_head,
-        seqlen_q=seqlen_q,
+        num_head=num_head_norm,
+        seqlen_q=seqlen_q_norm,
         seqlen_k=seqlen_k,
         block_size=(tile_m, tile_n),
         q_stage=q_stage,
@@ -708,6 +795,219 @@ def prepare_block_sparse_bwd(
     return normalized_tensors, broadcast_pattern, spt
 
 
+def prepare_block_sparse_bwd_loopk(
+    block_sparse_tensors: BlockSparseTensorsTorch | None,
+    *,
+    causal: bool,
+    local: bool,
+    deterministic: bool,
+    batch_size: int,
+    num_head: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    m_block_size: int,
+    n_block_size: int,
+    pack_gqa: bool = False,
+    qhead_per_kvhead: int = 1,
+) -> tuple[BlockSparseTensorsTorch | None, object, bool]:
+    """Host-side block-sparse preparation for LoopK backward.
+
+    LoopK iterates over K-blocks per Q-tile, so it uses **forward-direction**
+    block-sparse tensors (indexed by M-blocks → N-block list), unlike LoopQ
+    which uses the transposed Q-direction tensors.
+
+    Returns ``(normalized_tensors, broadcast_pattern, spt)``.
+    """
+    normalized_tensors = None
+    broadcast_pattern = None
+    if block_sparse_tensors is not None:
+        seqlen_q_eff = seqlen_q * qhead_per_kvhead if pack_gqa else seqlen_q
+        expected_m_blocks = ceildiv(seqlen_q_eff, m_block_size)
+        expected_n_blocks = ceildiv(seqlen_k, n_block_size)
+        expected_count_shape = (batch_size, num_head, expected_m_blocks)
+        expected_index_shape = (
+            batch_size,
+            num_head,
+            expected_m_blocks,
+            expected_n_blocks,
+        )
+        normalized_tensors = normalize_block_sparse_tensors(
+            block_sparse_tensors,
+            expected_count_shape=expected_count_shape,
+            expected_index_shape=expected_index_shape,
+            context="_flash_attn_bwd_loopk",
+            hint=lambda: (
+                f"LoopK backward expects forward-direction block-sparse tensors "
+                f"(mask_block_cnt/mask_block_idx indexed by M-blocks). "
+                f"Expected count shape {expected_count_shape}, index shape {expected_index_shape}."
+            ),
+        )
+        broadcast_pattern = get_block_sparse_broadcast_pattern(normalized_tensors)
+
+    spt = (causal or local) and deterministic
+    return normalized_tensors, broadcast_pattern, spt
+
+
+def index_sparse_indices_to_block_sparse(
+    index_sparse_indices: torch.Tensor,
+    batch_size: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    num_kv_heads: int,
+    m_block_size: int,
+    n_block_size: int,
+) -> BlockSparseTensorsTorch:
+    """Convert token-level IndexSparse indices to block-level BlockSparseTensors.
+
+    Produces **forward-direction** tensors (per M-block -> N-block list) suitable
+    for BWD LoopK.
+
+    Args:
+        index_sparse_indices: (total_q, NHK, max_topk) int32 tensor.
+            Values are logical KV token positions ``batch * S_kv + token_idx``.
+            ``-1`` indicates padding.
+    """
+    device = index_sparse_indices.device
+    total_q, NHK, max_topk = index_sparse_indices.shape
+    assert NHK == num_kv_heads
+    assert total_q == batch_size * seqlen_q
+
+    M_blocks = ceildiv(seqlen_q, m_block_size)
+    N_blocks = ceildiv(seqlen_k, n_block_size)
+
+    valid = index_sparse_indices >= 0
+    k_local = index_sparse_indices % seqlen_k
+    k_block = (k_local // n_block_size).clamp(0, N_blocks - 1)
+
+    q_idx = torch.arange(total_q, device=device)
+    local_q = q_idx % seqlen_q
+    m_block_per_q = local_q // m_block_size
+    batch_per_q = q_idx // seqlen_q
+
+    b_expand = batch_per_q[:, None, None].expand_as(k_block)
+    m_expand = m_block_per_q[:, None, None].expand_as(k_block)
+    h_expand = torch.arange(NHK, device=device)[None, :, None].expand_as(k_block)
+
+    b_flat = b_expand[valid].long()
+    h_flat = h_expand[valid].long()
+    m_flat = m_expand[valid].long()
+    k_flat = k_block[valid].long()
+
+    presence = torch.zeros(
+        batch_size, NHK, M_blocks, N_blocks, dtype=torch.bool, device=device
+    )
+    linear_idx = (
+        b_flat * (NHK * M_blocks * N_blocks)
+        + h_flat * (M_blocks * N_blocks)
+        + m_flat * N_blocks
+        + k_flat
+    )
+    presence.view(-1).scatter_(0, linear_idx, True)
+
+    mask_block_cnt = presence.sum(dim=-1).int()
+    max_cnt = int(mask_block_cnt.max().item())
+    if max_cnt == 0:
+        max_cnt = 1
+
+    sorted_indices = presence.int().argsort(dim=-1, descending=True)
+    mask_block_idx = sorted_indices[..., :max_cnt].contiguous().to(torch.int32)
+
+    counts_expanded = mask_block_cnt.unsqueeze(-1)
+    positions = torch.arange(max_cnt, device=device)
+    mask_block_idx = mask_block_idx.where(
+        positions < counts_expanded, torch.zeros_like(mask_block_idx)
+    )
+
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=mask_block_cnt,
+        mask_block_idx=mask_block_idx,
+    )
+
+
+def transpose_block_sparse_tensors(
+    fwd_tensors: BlockSparseTensorsTorch,
+    batch_size: int,
+    num_kv_heads: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    m_block_size: int,
+    n_block_size: int,
+    subtile_factor: int = 2,
+) -> BlockSparseTensorsTorch:
+    """Transpose forward-direction (M→N) block-sparse tensors to backward-direction (N→M).
+
+    Forward: mask_block_cnt (B, NHK, M_blocks), mask_block_idx (B, NHK, M_blocks, max_n)
+    Backward: mask_block_cnt (B, NHK, N_blocks), mask_block_idx (B, NHK, N_blocks, max_m_coarse)
+
+    The backward path uses coarser Q blocks: sparse_q = subtile_factor * m_block_size.
+    If any fine M-block in a coarse group has a presence entry for a given N-block,
+    the coarse M-block is marked present.
+    """
+    import torch
+
+    device = fwd_tensors.mask_block_cnt.device
+    M_blocks_fine = ceildiv(seqlen_q, m_block_size)
+    N_blocks = ceildiv(seqlen_k, n_block_size)
+    sparse_q = subtile_factor * m_block_size
+    M_blocks_coarse = ceildiv(seqlen_q, sparse_q)
+
+    presence = torch.zeros(
+        batch_size,
+        num_kv_heads,
+        M_blocks_fine,
+        N_blocks,
+        dtype=torch.bool,
+        device=device,
+    )
+
+    # Include mask blocks in presence
+    cnt = fwd_tensors.mask_block_cnt
+    idx = fwd_tensors.mask_block_idx
+    if cnt.any():
+        max_n = idx.shape[-1]
+        n_positions = torch.arange(max_n, device=device)
+        valid = n_positions[None, None, None, :] < cnt.unsqueeze(-1)
+        valid_idx = idx.clamp(0, N_blocks - 1)
+        presence.scatter_(3, valid_idx.long() * valid.long(), valid)
+
+    # Include full blocks in presence (previously missing)
+    if fwd_tensors.full_block_cnt is not None and fwd_tensors.full_block_cnt.any():
+        full_cnt = fwd_tensors.full_block_cnt
+        full_idx = fwd_tensors.full_block_idx
+        max_n_full = full_idx.shape[-1]
+        n_pos_full = torch.arange(max_n_full, device=device)
+        valid_full = n_pos_full[None, None, None, :] < full_cnt.unsqueeze(-1)
+        valid_full_idx = full_idx.clamp(0, N_blocks - 1)
+        presence.scatter_(3, valid_full_idx.long() * valid_full.long(), valid_full)
+
+    if subtile_factor > 1 and M_blocks_fine > M_blocks_coarse:
+        pad = M_blocks_coarse * subtile_factor - M_blocks_fine
+        if pad > 0:
+            presence = torch.nn.functional.pad(presence, (0, 0, 0, pad))
+        presence = presence.view(
+            batch_size, num_kv_heads, M_blocks_coarse, subtile_factor, N_blocks
+        ).any(dim=3)
+    elif M_blocks_fine == M_blocks_coarse:
+        pass
+
+    presence_t = presence.permute(0, 1, 3, 2).contiguous()
+
+    bwd_cnt = presence_t.sum(dim=-1).int()
+    max_m = max(int(bwd_cnt.max().item()), 1)
+    sorted_m = presence_t.int().argsort(dim=-1, descending=True)
+    bwd_idx = sorted_m[..., :max_m].contiguous().to(torch.int32)
+
+    counts_expanded = bwd_cnt.unsqueeze(-1)
+    positions = torch.arange(max_m, device=device)
+    bwd_idx = bwd_idx.where(positions < counts_expanded, torch.zeros_like(bwd_idx))
+
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=bwd_cnt,
+        mask_block_idx=bwd_idx,
+        block_size=(sparse_q, n_block_size),
+    )
+
+
 def block_sparse_call_tuple(
     normalized_tensors: BlockSparseTensorsTorch | None,
 ) -> tuple | None:
@@ -727,6 +1027,7 @@ def block_sparse_call_tuple(
         normalized_tensors.cu_block_idx_offsets,
         normalized_tensors.dq_write_order,
         normalized_tensors.dq_write_order_full,
+        normalized_tensors.is_valid_total,
     )
 
 
@@ -1637,7 +1938,16 @@ def softmax_block_sparse_sm100(
         sm_stats_barrier.arrive_w_index(index=stage_idx * 4 + warp_idx)
     else:
         if curr_mask_block_cnt > 0:
-            mask_n_block = curr_mask_block_idx[curr_mask_block_cnt - 1]
+            # NOTE: softmax consumes S-tiles in ascending block order (step k -> the
+            # k-th block in curr_mask_block_idx), which is the REVERSE of the load
+            # order. The per-step mask label must therefore also be ascending so that
+            # mask_seqlen's col_limit (= seqlen_k - n_block*n_block_size) and mask_mod's
+            # global-column computation land on the correct physical block. We apply
+            # mask_seqlen=True on every mask step: full/interior blocks yield a col_limit
+            # >= n_block_size (no-op), while the partial tail block (e.g. IndexSparse
+            # padding, or the seqlen_k boundary) is masked correctly regardless of its
+            # processing position. This mirrors SM90's block-identity-driven padding mask.
+            mask_n_block = curr_mask_block_idx[0]
             (
                 mma_si_consumer_phase,
                 si_corr_producer_phase,
@@ -1653,7 +1963,7 @@ def softmax_block_sparse_sm100(
                 ),
             )
             for i in cutlass.range(1, curr_mask_block_cnt):
-                mask_n_block = curr_mask_block_idx[curr_mask_block_cnt - 1 - i]
+                mask_n_block = curr_mask_block_idx[i]
                 (
                     mma_si_consumer_phase,
                     si_corr_producer_phase,
@@ -1664,7 +1974,7 @@ def softmax_block_sparse_sm100(
                     s0_s1_sequence_phase,
                     mask_n_block,
                     mask_fn=partial(
-                        mask_fn, mask_seqlen=False, check_q_boundary=check_m_boundary
+                        mask_fn, mask_seqlen=True, check_q_boundary=check_m_boundary
                     ),
                 )
 
@@ -2304,3 +2614,198 @@ def dQacc_store_block_sparse_bwd_sm90(
                     num_threads_per_warp_group,
                     tma_copy_bytes_dQ,
                 )
+
+
+# ===========================================================================
+# IndexSparse token-level tile preparation
+# ===========================================================================
+
+
+class IndexSparseTilesTorch(NamedTuple):
+    """Token-level tile data for IndexSparse attention.
+
+    tile_token_indices: (B, NHK, M_blocks, max_tokens_per_tile) int32
+        Maps each (batch, kv_head, q_tile, local_row) to a global K token index.
+        When inner_load_mode=Tma, each 128-token chunk is a physically contiguous
+        block and the first element of each chunk encodes the block offset.
+    scheduling_bst: BlockSparseTensorsTorch
+        Block-sparse scheduling tensors derived from the token indices.
+    is_valid_total: torch.Tensor
+        (B, NHK, M_blocks) int32 — number of unique valid tokens per Q-tile.
+    inner_load_mode: InnerLoadMode
+        Load strategy: Tma (block-aligned) or CpAsync (per-token scatter).
+    inner_store_mode: InnerStoreMode
+        BWD dK/dV store strategy: Tma (TMA reduce-add), Tma1d (bulk scatter), etc.
+    """
+
+    tile_token_indices: torch.Tensor
+    scheduling_bst: "BlockSparseTensorsTorch"
+    is_valid_total: torch.Tensor
+    inner_load_mode: InnerLoadMode = InnerLoadMode.CpAsync
+    inner_store_mode: InnerStoreMode = InnerStoreMode.Tma1d
+
+
+def prepare_index_sparse_tiles(
+    index_sparse_indices: torch.Tensor,
+    *,
+    batch_size: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    num_kv_heads: int,
+    num_q_heads: int,
+    m_block_size: int = 128,
+    n_block_size: int = 128,
+    pack_gqa: bool = False,
+    sparse_k_block_size: int = 1,
+) -> IndexSparseTilesTorch:
+    """Convert raw index_sparse_indices to tile-based IndexSparse tensors.
+
+    Args:
+        index_sparse_indices: (B, NHQ, SQ, TOPK) int32 — per-query token indices into K.
+        Other args define the tiling geometry.
+
+    Returns:
+        IndexSparseTilesTorch with scheduling BST and tile_token_indices.
+    """
+    device = index_sparse_indices.device
+    B = batch_size
+    NHQ = num_q_heads
+    NHK = num_kv_heads
+    qhead_per_kvhead = NHQ // NHK
+    TOPK = index_sparse_indices.shape[-1]
+
+    # Determine M_blocks (Q tiles)
+    if pack_gqa:
+        M_blocks = ceildiv(seqlen_q * qhead_per_kvhead, m_block_size)
+    else:
+        M_blocks = ceildiv(seqlen_q, m_block_size)
+
+    # For each Q-tile, collect the union of all token indices across queries in that tile
+    # and pad to a multiple of n_block_size.
+    max_tokens_per_tile = ceildiv(TOPK, n_block_size) * n_block_size
+
+    # Fill with -1 sentinel (like SM90 CUTLASS): invalid positions load from
+    # token 0 safely, and the kernel masks them via is_valid_total / seqlen_k.
+    tile_token_indices = torch.full(
+        (B, NHK, M_blocks, max_tokens_per_tile), -1, dtype=torch.int32, device=device
+    )
+    is_valid_total = torch.zeros((B, NHK, M_blocks), dtype=torch.int32, device=device)
+
+    # Build tile_token_indices: for each Q-tile, take TOPK indices from the first query
+    # in that tile (all queries in same tile share same K set for token-level IS).
+    for b in range(B):
+        for h_kv in range(NHK):
+            for m_blk in range(M_blocks):
+                if pack_gqa:
+                    # PackGQA: m_block covers qhead_per_kvhead * m_block_size queries
+                    q_start = m_blk * m_block_size // qhead_per_kvhead
+                    h_q = (
+                        m_blk * m_block_size % qhead_per_kvhead
+                        + h_kv * qhead_per_kvhead
+                    )
+                    if q_start >= seqlen_q:
+                        continue
+                    h_q = min(h_q, NHQ - 1)
+                else:
+                    q_start = m_blk * m_block_size
+                    h_q = h_kv * qhead_per_kvhead  # Use first Q head in group
+                    if q_start >= seqlen_q:
+                        continue
+
+                # Take indices from the representative query
+                indices = index_sparse_indices[b, h_q, q_start, :TOPK]
+                valid_count = min(TOPK, seqlen_k)
+                tile_token_indices[b, h_kv, m_blk, :valid_count] = indices[:valid_count]
+                is_valid_total[b, h_kv, m_blk] = valid_count
+
+    # Build scheduling BST: K-iteration count per Q-tile
+    k_iter_count = ceildiv(TOPK, n_block_size)
+    mask_block_cnt = torch.full(
+        (B, NHK, M_blocks), k_iter_count, dtype=torch.int32, device=device
+    )
+    # Sequential block indices: 0, 1, 2, ...
+    mask_block_idx = (
+        torch.arange(k_iter_count, dtype=torch.int32, device=device)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .expand(B, NHK, M_blocks, k_iter_count)
+        .contiguous()
+    )
+
+    # For IS-TMA (kbs>=128), classify fully-valid blocks as 'full' to skip
+    # per-tile softmax masking. Only the tail block needs masking if TOPK is
+    # not a multiple of n_block_size (padding with -1 sentinels).
+    has_tail_mask = (TOPK % n_block_size) != 0
+    if sparse_k_block_size >= n_block_size and k_iter_count > 0:
+        # IS-TMA: most blocks are full, at most 1 mask block for the tail
+        n_full = k_iter_count - (1 if has_tail_mask else 0)
+        n_mask = k_iter_count - n_full
+        full_block_cnt = torch.full(
+            (B, NHK, M_blocks), n_full, dtype=torch.int32, device=device
+        )
+        full_block_idx = (
+            torch.arange(n_full, dtype=torch.int32, device=device)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .expand(B, NHK, M_blocks, n_full)
+            .contiguous()
+        )
+        mask_block_cnt = torch.full(
+            (B, NHK, M_blocks), n_mask, dtype=torch.int32, device=device
+        )
+        if n_mask > 0:
+            mask_block_idx = torch.full(
+                (B, NHK, M_blocks, 1),
+                k_iter_count - 1,
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            mask_block_idx = torch.zeros(
+                (B, NHK, M_blocks, 1),
+                dtype=torch.int32,
+                device=device,
+            )
+    else:
+        # IS-scatter or zero-block: all blocks are mask blocks (original behavior)
+        full_block_cnt = torch.zeros(
+            (B, NHK, M_blocks),
+            dtype=torch.int32,
+            device=device,
+        )
+        full_block_idx = torch.zeros(
+            (B, NHK, M_blocks, 1),
+            dtype=torch.int32,
+            device=device,
+        )
+    scheduling_bst = BlockSparseTensorsTorch(
+        mask_block_cnt=mask_block_cnt,
+        mask_block_idx=mask_block_idx,
+        full_block_cnt=full_block_cnt,
+        full_block_idx=full_block_idx,
+        block_size=(m_block_size, n_block_size),
+        is_valid_total=is_valid_total,
+    )
+
+    # Select inner load mode based on sparse_k_block_size:
+    # When kbs >= n_block_size (128), each tile_token_indices chunk is a physically
+    # contiguous block → TMA can be used instead of per-token scatter.
+    inner_load_mode = (
+        InnerLoadMode.Tma
+        if sparse_k_block_size >= n_block_size
+        else InnerLoadMode.CpAsync
+    )
+
+    return IndexSparseTilesTorch(
+        tile_token_indices=tile_token_indices,
+        scheduling_bst=scheduling_bst,
+        is_valid_total=is_valid_total,
+        inner_load_mode=inner_load_mode,
+        inner_store_mode=(
+            InnerStoreMode.Tma
+            if inner_load_mode == InnerLoadMode.Tma
+            else InnerStoreMode.Tma1d
+        ),
+    )
