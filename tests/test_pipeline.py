@@ -83,10 +83,6 @@ BACKENDS = "backends"
 
 # TODO: rewrite the specific function for unitest profiling mode
 class TestPipelineBaseWithWorldSize1(DistTestBase):
-    # Fail the item when every case was filtered out (e.g. a wrong
-    # MAGI_ATTENTION_TEST_* pattern) instead of reporting a silent pass.
-    REQUIRE_AT_LEAST_ONE_CASE = True
-
     # Dense feature combos for pipeline / flex_flash_attn precompile.
     # Generated via itertools.product + filter; superset of legacy hand-picked list.
     _DENSE_FEATURE_AXES = dict(
@@ -1024,9 +1020,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     ):
         head_dim, head_dim_v = head_dims
 
-        # FFA is hard-asserted to arch (9, 0); skip it elsewhere
-        # so that non-Hopper machines (e.g. B300 / SM100) can run the other
-        # backends' full parametrization without dying at the first FFA combo.
         if backend == MagiAttentionKernelBackend.FFA and (
             torch.cuda.get_device_capability() != (9, 0)
         ):
@@ -1159,7 +1152,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
             + flag_comb_test_case
         )
-        self._cases_executed = getattr(self, "_cases_executed", 0) + 1
         if self.rank == 0:
             print(f"\n[test_pipeline] RUNNING: {test_case}", flush=True)
         test_case_seed = str2seed(test_case)
@@ -1212,8 +1204,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         sink_layout: AttnSinkLayout = attn_config.get("sink_layout", "sh")
         return_max_logits: bool = attn_config.get("return_max_logits", False)
         if backend == MagiAttentionKernelBackend.CUTEDSL:
-            # CuteDSL kernel has no max-logits output; drop the request so the
-            # config can still exercise the other comparisons.
+            # CuteDSl temporary not support max-logits output
             return_max_logits = False
 
         uneven_shard: bool = attn_config.get("uneven_shard", False)

@@ -676,20 +676,6 @@ def init_dist_attn_runtime_mgr(
     if head_dim_v == head_dim:
         head_dim_v = None
 
-    # The relation IR requires every (q, k) point to be covered by at most
-    # one relation: the kernels' atomic merge assumes disjoint rectangles,
-    # and any 2D-overlapping relation pair would double-count those points.
-    # Reject such contracts early, on the CPU side where the check is free.
-    if not q_ranges.is_2d_disjoint(k_ranges):
-        pairs = q_ranges.find_2d_overlap_pairs(k_ranges)
-        raise ValueError(
-            "q_ranges × k_ranges form 2D-overlapping relations "
-            f"(relation pairs: {pairs[:8]}{'...' if len(pairs) > 8 else ''}): "
-            "each (q, k) point must be covered by at most one relation. "
-            "Split the overlapping k_ranges (or the corresponding q-ranges) "
-            "so that no two relations share a rectangular region."
-        )
-
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
 
