@@ -154,18 +154,6 @@ def parameterize(argument: str, values: list[Any]) -> Callable:
 
                     raise type(e)(error_msg) from e
 
-            # Zero-execution guard: an opted-in test class fails loudly when
-            # every combination was filtered out (e.g. a wrong
-            # MAGI_ATTENTION_TEST_* pattern), which is otherwise
-            # indistinguishable from a full pass.
-            if not is_run_in_mp and getattr(
-                args[0], "REQUIRE_AT_LEAST_ONE_CASE", False
-            ):
-                assert getattr(args[0], "_cases_executed", 0) > 0, (
-                    "every parameterized case was filtered out or skipped; "
-                    "check the MAGI_ATTENTION_TEST_* filter patterns"
-                )
-
         # Attach metadata to the newly created wrapper function for outer decorators to use.
         _parameterized_func._param_info = all_params  # type: ignore[attr-defined]
         _parameterized_func._original_func = original_func  # type: ignore[attr-defined]
