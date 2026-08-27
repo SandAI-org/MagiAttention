@@ -325,7 +325,7 @@ This is for now a temporary solution to reduce the redundant inter-node communic
 
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 
-- **Defaults to:** `1000`
+- **Defaults to:** `100`
 - **Used by:** `magi_attention.env.general.dist_attn_runtime_dict_size`
 
 Set the value of this env variable to control the maximum LRU cache size of `dist_attn_runtime_dict_mgr`.
