@@ -34,6 +34,14 @@ import torch
 
 from .ffa_utils import MT_MAP, materialize_mask_types
 
+is_magi_attn_ext_installed = False
+try:
+    from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
+
+    is_magi_attn_ext_installed = True
+except ImportError:
+    pass
+
 __all__ = [
     "merge_qk_ranges",
     "RangeMergePlan",
@@ -107,33 +115,16 @@ def merge_qk_ranges(
 
     Returns ``(merged_outer, sorted_outer, sorted_inner, sorted_mask, cu_batches)``.
     """
+    assert is_magi_attn_ext_installed, "magi_attn_ext must be installed for RangeMerge."
     assert q_ranges.shape == k_ranges.shape and q_ranges.shape[1] == 2
-    num_ranges = q_ranges.shape[0]
-    device = q_ranges.device
 
-    key = (q_ranges[:, 0].to(torch.int64) << 32) | q_ranges[:, 1].to(torch.int64)
-    order = torch.argsort(key, stable=True)
-    sorted_q = q_ranges[order].contiguous()
-    sorted_k = k_ranges[order].contiguous()
-    sorted_mask = mask_types[order].contiguous() if mask_types is not None else None
-
-    group_head = torch.ones(num_ranges, dtype=torch.bool, device=device)
-    if num_ranges > 1:
-        group_head[1:] = (sorted_q[1:] != sorted_q[:-1]).any(dim=1)
-    group_idx = torch.cumsum(group_head, dim=0) - 1
-
-    # Pad-to-R via index_copy (no host sync).
-    merged_q = torch.zeros_like(q_ranges)
-    merged_q.index_copy_(0, group_idx, sorted_q)
-
-    counts = torch.bincount(group_idx, minlength=num_ranges)
-    cu_batches = torch.zeros(num_ranges + 1, dtype=torch.int64, device=device)
-    torch.cumsum(counts, dim=0, out=cu_batches[1:])
-
-    return (
-        merged_q,
-        sorted_q,
-        sorted_k,
-        sorted_mask,
-        cu_batches.to(torch.int32),
+    sorted_idx, is_sorted = magi_attn_ext.argsort_ranges(q_ranges)
+    sorted_q, sorted_k, sorted_mask = magi_attn_ext.reorder_ranges_and_attn_type_maps(
+        q_ranges, k_ranges, mask_types, sorted_idx, is_sorted
     )
+    # unique_consecutive_pairs's second return is already the CSR row pointer:
+    # cu_batches[g]..cu_batches[g+1] spans merged group g in the sorted rows.
+    merged_q, cu_batches, _unique_count = magi_attn_ext.unique_consecutive_pairs(
+        sorted_q
+    )
+    return merged_q, sorted_q, sorted_k, sorted_mask, cu_batches
