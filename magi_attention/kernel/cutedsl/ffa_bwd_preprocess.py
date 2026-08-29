@@ -484,7 +484,14 @@ def _compile_bwd_preprocess(
         fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
     )
     mdLSE = (
-        fake_tensor(cutlass.Float32, mLSE.shape, divisibility=1) if has_dlse else None
+        fake_tensor(
+            cutlass.Float32,
+            mLSE.shape,
+            divisibility=1,
+            leading_dim=0 if varlen_q else -1,
+        )
+        if has_dlse
+        else None
     )
     mdQaccum = mdQaccum if has_dq_accum else None
     fa_bwd_pre = FFABwdPreProcess(
@@ -518,7 +525,7 @@ def bwd_preprocess(
     out: torch.Tensor,
     dout: torch.Tensor,
     dpsum: torch.Tensor,
-    lse: torch.Tensor,
+    lse: torch.Tensor,  # (b, nheads, seqlen) or (total_q, nheads) on varlen
     lse_log2: torch.Tensor,
     dq_accum: torch.Tensor,
     cu_seqlens_q: torch.Tensor | None,
@@ -550,6 +557,12 @@ def bwd_preprocess(
     assert (
         q_ranges is None or max_seqlen_q > 0
     ), "ranges preprocess requires max_seqlen_q (the per-range launch bound)"
+    # Varlen lse/dlse are (total_q, nheads); the kernel indexes them as
+    # (nheads, total_q) element-wise, and the fake tensor puts the unit
+    # stride on mode 0 to match this view.
+    if cu_seqlens_q is not None or q_ranges is not None:
+        lse = lse.mT
+        dlse = dlse.mT if dlse is not None else None
     if compile_key not in bwd_preprocess.compile_cache:
         bwd_preprocess.compile_cache[compile_key] = _compile_bwd_preprocess(
             *compile_key
