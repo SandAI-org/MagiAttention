@@ -185,7 +185,9 @@ def _flex_flash_attn_fwd(
         - output is the result of the attention operation, with shape (batch_size, seqlen_q, num_head, head_dim_v) or
           (total_q, num_head, head_dim_v) if q_ranges is provided.
         - lse is the log-sum-exp of the attention scores, with shape (batch_size, num_head, seqlen_q) or
-          (num_head, total_q) if q_ranges is provided.
+          (total_q, num_head) if q_ranges is provided: token-major with the heads
+          of one token contiguous, the same row order as ``output``. Kernels
+          consume it through the transposed (num_head, total_q) view.
     """
     arch, major_arch = get_device_arch()
     validate_arch(arch, major_arch)
@@ -334,7 +336,7 @@ def _flex_flash_attn_fwd(
     device = q.device
     q_batch_seqlen_shape = (batch_size, seqlen_q) if not has_ranges else (total_q,)
     lse_shape = (
-        (batch_size, num_head, seqlen_q) if not has_ranges else (num_head, total_q)
+        (batch_size, num_head, seqlen_q) if not has_ranges else (total_q, num_head)
     )
 
     if out is None:
@@ -364,6 +366,12 @@ def _flex_flash_attn_fwd(
             )
     else:
         validate_tensor(lse, "lse", lse_shape, torch.float32, device)
+        # The kernel view is lse.mT with a static unit stride on the seqlen
+        # mode, so a strided head mode cannot be accepted here.
+        assert lse.stride(-1) == 1, "lse must be contiguous along its last dim"
+    # Kernels take LSE as (num_head, total_q); on ranges that is a transposed
+    # view of the (total_q, num_head) tensor, consumed element-wise via strides.
+    lse_kernel = lse.mT if has_ranges else lse
 
     if seqlen_k == 0 or total_q == 0:
         out.zero_()
@@ -606,7 +614,9 @@ def _flex_flash_attn_fwd(
             to_cute_tensor(t) for t in (q, k, v, out)
         ]
         if lse is not None:
-            lse_tensor = to_cute_tensor(lse, assumed_align=4)
+            lse_tensor = to_cute_tensor(
+                lse_kernel, assumed_align=4, leading_dim=0 if has_ranges else -1
+            )
         else:
             lse_tensor = None
 
@@ -766,7 +776,7 @@ def _flex_flash_attn_fwd(
         k_call,
         v_call,
         out.detach(),
-        lse,
+        lse_kernel,
         softmax_scale,
         kernel_varlen_q_meta,
         kernel_varlen_k_meta,
@@ -1125,9 +1135,10 @@ def _flex_flash_attn_bwd(
         assert out.shape == (total_q, num_head, head_dim_v)
         assert dout.shape == (total_q, num_head, head_dim_v)
         assert lse.shape == (
-            num_head,
             total_q,
-        ), "lse must have shape (num_head, total_q)"
+            num_head,
+        ), "lse must have shape (total_q, num_head)"
+        assert lse.stride(-1) == 1, "lse must be contiguous along its last dim"
     else:
         assert out.shape == (batch_size, seqlen_q, num_head, head_dim_v)
         assert dout.shape == (batch_size, seqlen_q, num_head, head_dim_v)

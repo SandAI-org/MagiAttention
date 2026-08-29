@@ -75,7 +75,7 @@ class FFAFwdPostProcess:
         total_q = mO.shape[0]
 
         if row < total_q:
-            lse = Float32(mLSE[head_idx, row])
+            lse = Float32(mLSE[row, head_idx])
             is_empty = lse == -Float32.inf
 
             o_scale = Float32(0.0)
@@ -97,7 +97,7 @@ class FFAFwdPostProcess:
                         + cute.math.log2(Float32(1.0 + lse_ratio), fastmath=True) * LN2
                     )
                     o_scale = cute.math.exp2((lse - lse_final) * LOG2_E, fastmath=True)
-                mLSE[head_idx, row] = lse_final
+                mLSE[row, head_idx] = lse_final
 
             if is_empty or const_expr(self.has_sink):
                 gO_row = mO[row, head_idx, None]
@@ -130,7 +130,7 @@ def _compile_fwd_postprocess(
         total_q, num_head = sym(), sym()
         div = 128 // o_dtype.width
         mO = fake_tensor(o_dtype, (total_q, num_head, head_dim_v), divisibility=div)
-        mLSE = fake_tensor(Float32, (num_head, total_q), divisibility=1)
+        mLSE = fake_tensor(Float32, (total_q, num_head), divisibility=1)
         mSink = (
             fake_tensor(cutlass.BFloat16, (num_head,), divisibility=1)
             if has_sink
