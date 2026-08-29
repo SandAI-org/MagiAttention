@@ -175,7 +175,17 @@ class TileSchedulerArguments(ParamsBase):
     mCuSeqlensQ: Optional[cute.Tensor] = None
     mSeqUsedQ: Optional[cute.Tensor] = None
     mQRanges: Optional[cute.Tensor] = None
-    # Fixed m-block quota per batch for affine tile decoding with overlapping ranges
+    # Scheduler decode policy for ranges (mQRanges), selected by presence:
+    # - Some(width): quota affine decode. Every batch gets the same m-block
+    #   quota ceil(width * qhead_per_kvhead_packgqa / tile_m), so (block, head,
+    #   batch) is an affine function of the tile index (or of blockIdx on the
+    #   3D grid); tiles past a range's real length are invalid and exit. Works
+    #   for overlapping ranges because no per-batch prefix sum is needed.
+    #   `width` must bound the longest range on the scheduler's outer axis
+    #   (Q in forward, K in backward); the host passes max_seqlen_q / _k,
+    #   which is a launch bound, not a scheduler policy on its own.
+    # - None: warp prefix-sum decode over the real per-range block counts;
+    #   the grid is bounded by total_q + padding or by total_tile_hint.
     max_outer_range_width: Optional[Int32] = None
     # Exact total tile count across batches for prefix-sum grid bounds
     total_tile_hint: Optional[Int32] = None
@@ -838,6 +848,8 @@ class SingleTileVarlenScheduler:
         mCuSeqlensQ: Optional[cute.Tensor] = None
         mSeqUsedQ: Optional[cute.Tensor] = None
         mQRanges: Optional[cute.Tensor] = None
+        # See TileSchedulerArguments: Some -> quota affine decode, None ->
+        # prefix-sum decode.
         max_outer_range_width: Optional[Int32] = None
         total_tile_hint: Optional[Int32] = None
         qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1

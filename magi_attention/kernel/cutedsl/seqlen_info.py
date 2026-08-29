@@ -46,7 +46,7 @@ class SeqlenInfo:
         seqused: Optional[cute.Tensor] = None,
         tile: cutlass.Constexpr[int] = 128,
         ranges: Optional[cute.Tensor] = None,
-        range_workspace_padded: cutlass.Constexpr[bool] = False,
+        use_dense_dqacc_for_ranges: cutlass.Constexpr[bool] = False,
     ):
         assert cu_seqlens is None or ranges is None
         is_varlen = cu_seqlens is not None or ranges is not None
@@ -57,7 +57,7 @@ class SeqlenInfo:
         else:
             offset = 0
         if const_expr(ranges is not None):
-            if const_expr(range_workspace_padded):
+            if const_expr(use_dense_dqacc_for_ranges):
                 offset_padded = cute.assume(
                     (offset + batch_idx * tile) // tile * tile, divby=tile
                 )
@@ -137,7 +137,7 @@ class SeqlenInfoQK:
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
         k_batch_idx: Optional[Int32] = None,
-        range_workspace_padded_q: cutlass.Constexpr[bool] = False,
+        use_dense_dqacc_for_ranges: cutlass.Constexpr[bool] = False,
     ) -> "SeqlenInfoQK":
         assert mQRanges is None or mCuSeqlensQ is None
         assert mKRanges is None or mCuSeqlensK is None
@@ -163,7 +163,7 @@ class SeqlenInfoQK:
         else:
             offset_k = 0
         if const_expr(mQRanges is not None):
-            if const_expr(range_workspace_padded_q):
+            if const_expr(use_dense_dqacc_for_ranges):
                 padded_offset_q = cute.assume(
                     (offset_q + batch_idx * tile_m) // tile_m * tile_m,
                     divby=tile_m,

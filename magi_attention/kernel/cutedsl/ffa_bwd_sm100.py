@@ -2222,7 +2222,7 @@ class FFABwdSm100:
             mSeqUsedK=mSeqUsedK,
             tile_m=self.tile_m,
             tile_n=self.tile_n * self.cluster_shape_mnk[0],
-            range_workspace_padded_q=self.use_dense_dqacc_for_ranges,
+            use_dense_dqacc_for_ranges=self.use_dense_dqacc_for_ranges,
         )
         AttentionMaskCls = partial(
             AttentionMask,

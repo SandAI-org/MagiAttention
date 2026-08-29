@@ -35,6 +35,8 @@ level):
 
 from __future__ import annotations
 
+import weakref
+
 import torch
 
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
@@ -44,6 +46,38 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
 from magi_attention.meta.collection.calc_meta import AttnArg
 
 __all__ = ["cutedsl_fwd", "cutedsl_bwd"]
+
+# Coverage declarations for the bwd kernel, derived exactly on the host.
+# The two sides consume different contracts (do not infer one from the other):
+# - declared_q_full_coverage only skips dQ hole zeroing -> union coverage
+#   suffices, overlapping q rows are fine (is_full_coverage merges first).
+# - declared_k_full_coverage additionally feeds k_ranges_sorted_disjoint in
+#   the kernel host (scheduler grid bound Sum(len) <= total_k), so it may only
+#   be set for a sorted partition -> is_cu_seqlens, never is_full_coverage.
+#
+# DEVIATION: derived here instead of on AttnArg
+# Reason: AttnArg (calc_meta) owns the bwd ranges but is frozen for this work
+# Recovery: move both bools into AttnArg.__post_init__ and delete this cache
+#
+# Cached per AttnArg: the runtime manager reuses args across steps and the
+# derivation sorts all ranges. Keyed by id() because AttnArg is unhashable;
+# the finalizer evicts the entry before the id can be reused.
+_bwd_coverage_cache: dict[int, tuple[int, int, bool, bool]] = {}
+
+
+def _bwd_full_coverage(
+    attn_arg: AttnArg, total_q: int, total_k: int
+) -> tuple[bool, bool]:
+    key = id(attn_arg)
+    hit = _bwd_coverage_cache.get(key)
+    if hit is not None and hit[0] == total_q and hit[1] == total_k:
+        return hit[2], hit[3]
+    if hit is None:
+        weakref.finalize(attn_arg, _bwd_coverage_cache.pop, key, None)
+    q_cov = attn_arg.q_ranges_bwd.is_full_coverage(total_q)
+    k_cov = attn_arg.k_ranges_bwd.is_cu_seqlens(total_k)
+    _bwd_coverage_cache[key] = (total_q, total_k, q_cov, k_cov)
+    return q_cov, k_cov
 
 
 def cutedsl_fwd(
@@ -111,6 +145,10 @@ def cutedsl_bwd(
     if not ffa_args:
         raise RuntimeError("cutedsl_bwd called with skip_attn_bwd=True")
 
+    q_full_coverage, k_full_coverage = _bwd_full_coverage(
+        attn_arg, q.shape[0], k.shape[0]
+    )
+
     # If fwd went down the atomic path it returns fp32 out; the bwd kernel
     # consumes the input dtype, so cast back.
     if o.dtype != q.dtype:
@@ -138,6 +176,8 @@ def cutedsl_bwd(
         softmax_scale=softmax_scale,
         softcap=softcap,
         deterministic=False,  # the kernel raises NotImplementedError for ranges + deterministic
+        declared_q_full_coverage=q_full_coverage,
+        declared_k_full_coverage=k_full_coverage,
         disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
         disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
         range_merge=False,
