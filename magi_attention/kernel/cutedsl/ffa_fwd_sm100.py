@@ -73,7 +73,7 @@ from .tile_scheduler import (
 )
 
 # === TUNING KNOBS (agent-editable) ===
-# Keys: (use_2cta_instrs: bool, is_causal: bool, head_dim_padded: int, is_sm103: bool)
+# Keys: (use_2cta_instrs: bool, may_be_causal: bool, head_dim_padded: int, is_sm103: bool)
 # Values:
 #   ex2_emu_freq: int — how often to use emulated exp2 (0=all hardware exp2, higher=more emulation).
 #                        SM103 has fast native exp2, so set freq=0 there.
@@ -213,7 +213,9 @@ class FFAFwdSm100:
         head_dim: int,
         head_dim_v: Optional[int] = None,
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
-        mask_type: int = MT_MAP.full,
+        # MT_MAP int for one static mask type; None selects the runtime per-range
+        # kernel that reads mMaskTypes[batch].
+        mask_type: int | None = MT_MAP.full,
         is_local: bool = False,
         is_split_kv: bool = False,
         pack_gqa: bool = False,
@@ -229,7 +231,6 @@ class FFAFwdSm100:
         is_varlen_q: bool = False,
         use_2cta_instrs: bool = False,
         use_clc_scheduler: bool = False,
-        use_per_range_mask: bool = False,
         range_merge: bool = False,
         disable_fwd_atomic_reduction: bool = False,
         # GMEM O dtype on the atomic path (fp32 = lossless merge; fp16/bf16
@@ -314,11 +315,11 @@ class FFAFwdSm100:
 
         self.is_persistent = is_persistent
         self.mask_type = mask_type
-        self.use_per_range_mask = use_per_range_mask
+        self.use_per_range_mask = mask_type is None
         # RangeMerge groups relations with identical Q interval for unified softmax.
         self.range_merge = range_merge
         if range_merge:
-            assert use_per_range_mask, "RangeMerge rides the per-range entry"
+            assert self.use_per_range_mask, "RangeMerge rides the per-range entry"
             assert not use_2cta_instrs and not is_split_kv and not pack_gqa
             assert not is_persistent
             assert score_mod is None and mask_mod is None
@@ -372,7 +373,7 @@ class FFAFwdSm100:
             or (
                 self.head_dim_padded == 192
                 and self.use_2cta_instrs
-                and not self.is_causal
+                and not self.may_be_causal
                 and not self.is_local
             )
             # NOTE: B300 (sm103) has fast SFU, thus this approximation is only for B200 (sm100)
@@ -381,7 +382,7 @@ class FFAFwdSm100:
         self.enable_ex2_emu = _default_enable_ex2_emu
 
         # Does S1 need to wait for S0 to finish
-        # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.is_causal and not self.is_local)
+        # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.may_be_causal and not self.is_local)
         self.s0_s1_barrier = False
 
         self.overlap_sO_sQ = (
@@ -422,7 +423,7 @@ class FFAFwdSm100:
 
         if is_varlen_q:
             self.TileScheduler = SingleTileVarlenScheduler
-        elif self.is_causal or self.is_local or self.use_clc_scheduler:
+        elif self.may_be_causal or self.is_local or self.use_clc_scheduler:
             self.TileScheduler = SingleTileLPTScheduler
         elif self.is_persistent:
             self.TileScheduler = StaticPersistentTileScheduler
@@ -499,7 +500,7 @@ class FFAFwdSm100:
         # Look up tuning config for register counts and ex2_emu params
         _tune_key = (
             self.use_2cta_instrs,
-            self.is_causal,
+            self.may_be_causal,
             self.head_dim_padded,
             self.is_sm103,
         )
@@ -540,7 +541,7 @@ class FFAFwdSm100:
             print(f"{prefix}Initialized FFAFwdSm100 with: ")
             print(f"{prefix}{head_dim=} | {head_dim_v=} | {qhead_per_kvhead=}")
             print(
-                f"{prefix}{mask_type=} | {self.is_causal=} | {is_local=} | "
+                f"{prefix}{mask_type=} | {self.may_be_causal=} | {is_local=} | "
                 f"{is_split_kv=} | {pack_gqa=}"
             )
             print(
@@ -584,8 +585,19 @@ class FFAFwdSm100:
             print()
 
     @property
-    def is_causal(self) -> bool:
+    def is_static_causal(self) -> bool:
+        """Static causal geometry; only the static mask path reads this."""
         return self.mask_type == MT_MAP.causal
+
+    @property
+    def may_be_causal(self) -> bool:
+        """Whether the compile must carry the causal configuration.
+
+        True for the static causal kernel and for the per-range kernel, whose
+        ranges can be causal at runtime; selects tuning tables, scheduler and
+        pipeline settings sized for causal work.
+        """
+        return self.mask_type is None or self.mask_type == MT_MAP.causal
 
     def _setup_attributes(self):
         """Set up configurations and parameters for the FMHA kernel operation.
@@ -841,7 +853,7 @@ class FFAFwdSm100:
                 fp8_tune = _FP8_TUNING_CONFIG.get(
                     (
                         self.use_2cta_instrs,
-                        self.is_causal,
+                        self.may_be_causal,
                         self.head_dim_padded,
                         self.is_sm103,
                     ),
@@ -875,7 +887,7 @@ class FFAFwdSm100:
             if const_expr(
                 self.pack_gqa
                 and self.head_dim_padded > 64
-                and not self.is_causal
+                and not self.may_be_causal
                 and not self.is_local
             ):
                 self.ex2_emu_freq = (
@@ -1194,7 +1206,7 @@ class FFAFwdSm100:
             else 1,
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
-            lpt=self.is_causal or self.is_local,
+            lpt=self.may_be_causal or self.is_local,
             is_split_kv=self.is_split_kv,
             cluster_shape_mn=self.cluster_shape_mn,
             use_cluster_idx=not self.is_persistent and self.cta_group_size > 1,
@@ -1923,7 +1935,7 @@ class FFAFwdSm100:
             # This is cta_tiler, not mma_tiler_qk, since we move by block by (2 * mma_tiler[0], mma_tiler[1])
             self.cta_tiler[0],
             self.cta_tiler[1],
-            self.is_causal,
+            self.may_be_causal,
             self.is_local,
             self.is_split_kv,
             window_size_left,
@@ -3475,7 +3487,7 @@ class FFAFwdSm100:
                     m_block=mask_m_block,
                     thr_mma=thr_mma_qk,
                     thr_tmem_load=thr_tmem_load,
-                    mask_causal=self.is_causal,
+                    mask_causal=self.is_static_causal,
                     mask_local=self.is_local,
                     batch_idx=batch_idx,
                     head_idx=head_idx,
@@ -3854,7 +3866,7 @@ class FFAFwdSm100:
                         n_block_max = cutlass.min(
                             n_block_max, n_block_min_causal_local_mask
                         )
-                    elif const_expr(self.is_causal or self.is_local):
+                    elif const_expr(self.is_static_causal or self.is_local):
                         n_block_min_causal_local_mask = (
                             block_info.get_n_block_min_causal_local_mask(
                                 seqlen_info, m_block, n_block_min

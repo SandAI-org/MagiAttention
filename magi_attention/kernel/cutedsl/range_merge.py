@@ -32,6 +32,8 @@ from dataclasses import dataclass
 
 import torch
 
+from .ffa_utils import MT_MAP, materialize_mask_types
+
 __all__ = [
     "merge_qk_ranges",
     "RangeMergePlan",
@@ -53,27 +55,17 @@ class RangeMergePlan:
     bwd: "RangeMergePlan | None" = None  # K-merge; None => rebuild in bwd
 
 
-def _normalize_mask_types(
-    q_ranges: torch.Tensor,
-    mask_types: torch.Tensor | int | None,
-) -> torch.Tensor:
-    num_ranges = q_ranges.shape[0]
-    if mask_types is None:
-        return torch.zeros(num_ranges, dtype=torch.int32, device=q_ranges.device)
-    if isinstance(mask_types, int):
-        return torch.full(
-            (num_ranges,), mask_types, dtype=torch.int32, device=q_ranges.device
-        )
-    return mask_types
-
-
 def plan_range_merge(
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     mask_types: torch.Tensor | int | None = None,
 ) -> RangeMergePlan:
     """Q-merge plus paired K-merge on ``.bwd``."""
-    mask_types = _normalize_mask_types(q_ranges, mask_types)
+    mask_types = materialize_mask_types(
+        MT_MAP.full if mask_types is None else mask_types,
+        q_ranges.shape[0],
+        q_ranges.device,
+    )
     merged, sq, sk, sm, cu = merge_qk_ranges(q_ranges, k_ranges, mask_types)
     return RangeMergePlan(
         merged, sq, sk, sm, cu, bwd=plan_range_merge_bwd(q_ranges, k_ranges, mask_types)
@@ -86,7 +78,11 @@ def plan_range_merge_bwd(
     mask_types: torch.Tensor | int | None = None,
 ) -> RangeMergePlan:
     """K-merge (outer = K)."""
-    mask_types = _normalize_mask_types(q_ranges, mask_types)
+    mask_types = materialize_mask_types(
+        MT_MAP.full if mask_types is None else mask_types,
+        q_ranges.shape[0],
+        q_ranges.device,
+    )
     merged_k, sk, sq, sm, cu = merge_qk_ranges(k_ranges, q_ranges, mask_types)
     return RangeMergePlan(merged_k, sk, sq, sm, cu)
 
