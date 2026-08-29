@@ -541,7 +541,8 @@ class FA4AttnArg(AttnArg):
             self.n_func = 0
             return
 
-        # Compute upper bound of func count for buffer allocation
+        # magi_to_hstu allocation bound. Do not pass a tighter n_max_func:
+        # the kernel under-counts intervals when the first one starts at k>0.
         n_ub_func = 2 * len(self.k_ranges) + 1
 
         # Transfer representation of attn mask from AttnSlice to HSTU Functions
@@ -560,13 +561,8 @@ class FA4AttnArg(AttnArg):
                 n_max_func=n_ub_func,
             )
 
-            # Drop the over-allocated tail before FA4 sees it: FA4 unrolls
-            # over func_num at O(elements * func_num) bwd cost, so dead rows
-            # cost minutes of JIT per variant (257 -> 1: ~19 min -> ~18 s).
-            # Live rows vary per column, so keep the global max; an all-zero
-            # row 0 is legitimate (first interval not at k=0), hence floor 1.
-            # n_max_func above must stay at n_ub_func: the kernel's bound
-            # check (magi_to_hstu.cu:99) under-counts by one interval.
+            # FA4 compiles on n_func: drop unused tail rows. Floor 1 because
+            # all-zero row 0 is a valid empty first interval (first k starts > 0).
             live_rows = hstu_func.ne(0).any(dim=1)
             row_ordinal = torch.arange(
                 1, hstu_func.size(0) + 1, device=hstu_func.device
