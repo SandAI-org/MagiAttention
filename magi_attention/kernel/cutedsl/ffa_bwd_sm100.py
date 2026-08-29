@@ -72,7 +72,9 @@ class FFABwdSm100:
         self,
         head_dim: int,
         head_dim_v: Optional[int] = None,
-        mask_type: int = MT_MAP.full,
+        # MT_MAP int for one static mask type; None selects the runtime per-range
+        # kernel that reads mMaskTypes[batch].
+        mask_type: int | None = MT_MAP.full,
         is_local: bool = False,
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
         tile_m: int = 128,
@@ -87,7 +89,6 @@ class FFABwdSm100:
         mask_mod: cutlass.Constexpr | None = None,
         has_aux_tensors: cutlass.Constexpr = False,
         subtile_factor: cutlass.Constexpr[int] = 1,
-        use_per_range_mask: bool = False,
         disable_bwd_dkv_atomic_reduction: bool = False,
         range_merge: bool = False,
         use_dense_dqacc_for_ranges: bool = False,
@@ -151,8 +152,7 @@ class FFABwdSm100:
         self.cluster_shape_mn = (cluster_size, 1)
         self.is_persistent = is_persistent
         self.mask_type = mask_type
-        # When True, mMaskTypes[batch_idx] selects the mask type at runtime.
-        self.use_per_range_mask = use_per_range_mask
+        self.use_per_range_mask = mask_type is None
         self.is_local = is_local
         self.qhead_per_kvhead = qhead_per_kvhead
         self.pack_gqa = False
@@ -165,7 +165,7 @@ class FFABwdSm100:
             assert not deterministic
             assert not range_merge
         if range_merge:
-            assert use_per_range_mask, "bwd RangeMerge rides the per-range entry"
+            assert self.use_per_range_mask, "bwd RangeMerge rides the per-range entry"
             assert disable_bwd_dkv_atomic_reduction, (
                 "bwd RangeMerge exists to direct-store shared-K dKV; merged K "
                 "groups must be sorted pairwise disjoint"
@@ -256,7 +256,7 @@ class FFABwdSm100:
 
             self.tmem_dK_offset = self.tmem_dP_offset + self.tile_m
 
-        if (not self.is_causal and not is_local) or deterministic:
+        if (not self.may_be_causal and not is_local) or deterministic:
             self.num_regs_reduce = 136 if self.use_2cta_instrs else 152
             self.num_regs_compute = 136
             self.num_regs_load = 104 if self.use_2cta_instrs else 96 - 8
@@ -269,7 +269,7 @@ class FFABwdSm100:
         self.num_regs_empty = 24
 
         if const_expr(self.tile_hdim == 192):
-            if not self.is_causal and not is_local:
+            if not self.may_be_causal and not is_local:
                 self.num_regs_reduce = 128 + 8
                 self.num_regs_compute = 128 + 8
                 self.num_regs_load = 128 - 24
@@ -299,7 +299,7 @@ class FFABwdSm100:
                 f"{prefix}{self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}"
             )
             print(
-                f"{prefix}{self.mask_type=} | {self.is_causal=} | {self.is_local=} | "
+                f"{prefix}{self.mask_type=} | {self.may_be_causal=} | {self.is_local=} | "
                 f"{self.is_persistent=} | {self.deterministic=}"
             )
             print(
@@ -329,8 +329,19 @@ class FFABwdSm100:
             print()
 
     @property
-    def is_causal(self) -> bool:
+    def is_static_causal(self) -> bool:
+        """Static causal geometry; only the static mask path reads this."""
         return self.mask_type == MT_MAP.causal
+
+    @property
+    def may_be_causal(self) -> bool:
+        """Whether the compile must carry the causal configuration.
+
+        True for the static causal kernel and for the per-range kernel, whose
+        ranges can be causal at runtime; selects register budgets, dQ staging
+        and scheduler settings sized for causal work.
+        """
+        return self.mask_type is None or self.mask_type == MT_MAP.causal
 
     def _setup_attributes(self):
         self.Q_stage = 1 if self.use_2cta_instrs else 2
@@ -342,8 +353,8 @@ class FFABwdSm100:
         # TODO: try 32/1 or 48/2 for 2cta d=192 dv=128
         if self.use_2cta_instrs and self.tile_hdim == 192:
             self.dQ_reduce_ncol_t2r = 32
-            self.dQ_reduce_ncol = 24 if not self.is_causal else 32
-            self.sdQacc_stage = 2 if not self.is_causal else 1
+            self.dQ_reduce_ncol = 24 if not self.may_be_causal else 32
+            self.sdQacc_stage = 2 if not self.may_be_causal else 1
         else:
             if self.use_2cta_instrs:
                 self.dQ_reduce_ncol_t2r = 32
@@ -1209,7 +1220,7 @@ class FFABwdSm100:
         else:
             TileScheduler = SingleTileScheduler  # type: ignore[assignment]
         if const_expr(self.spt_override is None):
-            self.spt = (self.is_causal or self.is_local) and self.deterministic
+            self.spt = (self.may_be_causal or self.is_local) and self.deterministic
         else:
             assert self.spt_override is not None
             self.spt = self.spt_override and self.deterministic
@@ -2194,7 +2205,7 @@ class FFABwdSm100:
             # self.tile_n,
             self.tile_n
             * self.cluster_shape_mnk[0],  # careful, this case is not very well-tested
-            self.is_causal,
+            self.may_be_causal,
             self.is_local,
             False,  # is_split_kv
             window_size_left,
@@ -5090,7 +5101,7 @@ class FFABwdSm100:
                     n_block=n_block_for_cluster,
                     # TODO: condition mask_seqlen
                     mask_seqlen=True,
-                    mask_causal=self.is_causal,
+                    mask_causal=self.is_static_causal,
                     mask_local=self.is_local,
                     mask_mod=self.mask_mod,
                     batch_idx=batch_idx,

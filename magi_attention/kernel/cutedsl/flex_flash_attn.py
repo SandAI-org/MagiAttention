@@ -51,7 +51,6 @@ from .ffa_fwd_sm100 import FFAFwdSm100, fwd_atomic_can_borrow_kv_smem
 from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
-    MaskMode,
     TorchFlexAttnArgs,
     convert_from_dlpack_leading_static,
     create_softcap_scoremod,
@@ -59,8 +58,9 @@ from .ffa_utils import (
     get_device_arch,
     hash_callable,
     is_ffa_2cta_disabled,
+    materialize_mask_types,
     maybe_contiguous,
-    normalize_mask_type_spec,
+    normalize_mask_types,
     ranges_to_cu_seqlens,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
@@ -145,9 +145,7 @@ def _flex_flash_attn_fwd(
     lse: torch.Tensor | None = None,
     q_ranges: torch.Tensor | None = None,
     k_ranges: torch.Tensor | None = None,
-    mask_type: int = MT_MAP.full,
-    mask_mode: MaskMode = MaskMode.STATIC_FULL,
-    mask_types_tensor: torch.Tensor | None = None,
+    mask_types: int | torch.Tensor = MT_MAP.full,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     softmax_scale: float | None = None,
@@ -167,13 +165,10 @@ def _flex_flash_attn_fwd(
         ...
         q_ranges/k_ranges: ``[R, 2]`` int32 cuda tensors of [start, end) q/k
             ranges (relation IR). Validated by :func:`validate_true_ranges`.
-        mask_type: static ``MT_MAP`` int used by kernel constructors that still
-            specialize on a single mask type.
-        mask_mode: host-side :class:`MaskMode` used in the compile key. Static
-            Full/Causal keep today's specialized kernels; ``PER_RANGE``
-            selects the runtime per-range kernel.
-        mask_types_tensor: optional CUDA ``int32[R]`` tensor for per-range
-            mask selection. Must be ``None`` for static modes.
+        mask_types: ``MT_MAP.full`` / ``MT_MAP.causal`` shared by every range,
+            compiling the statically specialized kernel; or a CUDA ``int32[R]``
+            tensor with one ``MT_MAP`` entry per q/k range row, selecting the
+            runtime per-range kernel (SM100/SM110 only).
         flex_attn_args: optional torch FlexAttention-style / block-sparse args
             (``score_mod`` / ``mask_mod`` / ``aux_tensors`` /
             ``block_sparse_tensors``). See :class:`TorchFlexAttnArgs`.
@@ -195,12 +190,6 @@ def _flex_flash_attn_fwd(
     assert (
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
-    if mask_mode == MaskMode.PER_RANGE:
-        assert mask_types_tensor is not None, "PER_RANGE requires mask_types_tensor"
-    else:
-        assert (
-            mask_types_tensor is None
-        ), "static mask modes must not pass mask_types_tensor"
 
     # Unpack the torch FlexAttention-style / block-sparse args (fwd uses these).
     flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
@@ -213,7 +202,16 @@ def _flex_flash_attn_fwd(
     num_head, head_dim = q.shape[-2:]
     has_ranges = q_ranges is not None or k_ranges is not None
     if has_ranges:
-        validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types_tensor)
+        validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
+    validate_per_range_mask_feature_support(
+        mask_types,
+        major_arch=major_arch,
+        has_ranges=has_ranges,
+        has_mask_mod=mask_mod is not None,
+        has_block_sparse=block_sparse_tensors is not None,
+        has_score_mod=score_mod is not None,
+        has_softcap=softcap is not None and softcap != 0.0,
+    )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
     if range_merge_active:
@@ -233,26 +231,30 @@ def _flex_flash_attn_fwd(
             ), "RangeMergePlan row count disagrees with q_ranges"
             q_ranges = plan.merged_outer_ranges
             k_ranges = plan.sorted_inner_ranges
-            mask_types_tensor = plan.sorted_mask_types
+            mask_types = plan.sorted_mask_types
             cu_batches = plan.cu_batches
-            mask_mode = MaskMode.PER_RANGE
         else:
-            if mask_mode != MaskMode.PER_RANGE:
-                mask_types_tensor = torch.full(
-                    (q_ranges.shape[0],),  # type: ignore[union-attr] # has_ranges implies q_ranges
-                    mask_type,
-                    dtype=torch.int32,
-                    device=q_ranges.device,  # type: ignore[union-attr] # has_ranges implies q_ranges
-                )
-                mask_mode = MaskMode.PER_RANGE
             (
                 q_ranges,
                 _sorted_q_ranges,
                 k_ranges,
-                mask_types_tensor,
+                mask_types,
                 cu_batches,
-            ) = merge_qk_ranges(q_ranges, k_ranges, mask_types_tensor)
+            ) = merge_qk_ranges(
+                q_ranges,
+                k_ranges,
+                materialize_mask_types(
+                    mask_types,
+                    q_ranges.shape[0],  # type: ignore[union-attr] # has_ranges implies q_ranges
+                    q_ranges.device,  # type: ignore[union-attr] # has_ranges implies q_ranges
+                ),
+            )
         pack_gqa = False
+    # The per-range kernel reads the mask type of each range at runtime; the
+    # static kernels specialize on one full / causal type at compile time.
+    per_range = isinstance(mask_types, torch.Tensor)
+    kernel_mask_type: int | None = None if per_range else mask_types  # type: ignore[assignment] # int when not per_range
+    per_range_mask_types = mask_types if per_range else None
     # SM100/SM110 kernels consume mQRanges/mKRanges directly. Other arches
     # still read cu_seqlens.
     if has_ranges and (
@@ -383,24 +385,16 @@ def _flex_flash_attn_fwd(
     use_block_sparsity = block_sparse_tensors is not None
 
     local = False
-    # Static modes collapse to a causal boolean for host-side heuristics
-    # and for kernels that still take is_causal. Per-range mode is treated as
-    # may-be-causal for tiling / 2CTA / CLC decisions.
-    #
-    # DEVIATION: per-range forces causal-compatible host heuristics
-    # Reason: one mixed compile entry must reserve causal trip/register budget
-    # Recovery: static Full/Causal paths keep their original specialization
-    use_per_range_mask = mask_mode == MaskMode.PER_RANGE
-    causal = mask_type == MT_MAP.causal or use_per_range_mask
+    # The per-range kernel may see causal ranges, so the host reserves the
+    # causal tile / register budget for it as well.
+    causal = kernel_mask_type is None or kernel_mask_type == MT_MAP.causal
     if mask_mod is not None:
-        assert not use_per_range_mask, "per-range mask cannot combine with mask_mod"
         causal = False
-        mask_type = MT_MAP.full
-        mask_mode = MaskMode.STATIC_FULL
+        kernel_mask_type = MT_MAP.full
 
     requested_use_clc_scheduler = clc_scheduler
     requested_disable_2cta = is_ffa_2cta_disabled(is_fwd=True)
-    if use_per_range_mask:
+    if per_range:
         # DEVIATION: force-disable 2CTA/CLC for per-range masks
         # Reason: the per-range kernel supports only 1CTA + static scheduler
         # Recovery: none; static Full/Causal paths keep 2CTA/CLC
@@ -482,9 +476,7 @@ def _flex_flash_attn_fwd(
         and (tile_m % qhead_per_kvhead == 0 or not pack_gqa)
         and (
             not has_ranges
-            or (
-                disable_fwd_atomic_reduction and not use_per_range_mask and not pack_gqa
-            )
+            or (disable_fwd_atomic_reduction and not per_range and not pack_gqa)
         )
     )
 
@@ -555,7 +547,7 @@ def _flex_flash_attn_fwd(
         head_dim,
         head_dim_v,
         qhead_per_kvhead,
-        mask_mode,
+        kernel_mask_type,
         disable_fwd_atomic_reduction,
         out_torch_dtype,
         score_mod_hash,
@@ -604,8 +596,8 @@ def _flex_flash_attn_fwd(
             for t in (kernel_varlen_q_meta, kernel_varlen_k_meta, kernel_sink)
         ]
         mask_types_cute_tensor = (
-            to_cute_tensor(mask_types_tensor, assumed_align=4, leading_dim=0)
-            if mask_types_tensor is not None
+            to_cute_tensor(per_range_mask_types, assumed_align=4, leading_dim=0)
+            if per_range_mask_types is not None
             else None
         )
         seqused_q_tensor = seqused_k_tensor = None
@@ -633,12 +625,13 @@ def _flex_flash_attn_fwd(
 
         match major_arch:
             case 8:
+                assert kernel_mask_type is not None  # per-range is SM100/SM110 only
                 ffa_fwd_obj = FFAFwdSm80(
                     dtype,
                     head_dim,
                     head_dim_v,
                     qhead_per_kvhead,
-                    mask_type=mask_type,
+                    mask_type=kernel_mask_type,
                     is_local=local,
                     pack_gqa=pack_gqa,
                     tile_m=tile_m,
@@ -652,12 +645,13 @@ def _flex_flash_attn_fwd(
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 9:
+                assert kernel_mask_type is not None  # per-range is SM100/SM110 only
                 ffa_fwd_obj = FFAFwdSm90(
                     dtype,
                     head_dim,
                     head_dim_v,
                     qhead_per_kvhead,
-                    mask_type=mask_type,
+                    mask_type=kernel_mask_type,
                     is_local=local,
                     pack_gqa=pack_gqa,
                     tile_m=tile_m,
@@ -678,7 +672,7 @@ def _flex_flash_attn_fwd(
                     head_dim=head_dim,
                     head_dim_v=head_dim_v,
                     qhead_per_kvhead=qhead_per_kvhead,
-                    mask_type=mask_type,
+                    mask_type=kernel_mask_type,
                     is_local=local,
                     is_split_kv=False,
                     pack_gqa=pack_gqa,
@@ -696,7 +690,6 @@ def _flex_flash_attn_fwd(
                     q_subtile_factor=q_subtile_factor,
                     use_2cta_instrs=use_2cta_instrs,
                     use_clc_scheduler=use_clc_scheduler,
-                    use_per_range_mask=use_per_range_mask,
                     range_merge=range_merge_active,
                     disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
                     o_dtype=to_cute_dtype(out_torch_dtype),
@@ -710,7 +703,7 @@ def _flex_flash_attn_fwd(
                     head_dim,
                     head_dim_v,
                     qhead_per_kvhead,
-                    mask_type=mask_type,
+                    mask_type=kernel_mask_type,
                     is_local=local,
                     pack_gqa=pack_gqa,
                     tile_m=tile_m,
@@ -790,7 +783,7 @@ def _flex_flash_attn_fwd(
     if major_arch in [10, 11]:
         # FP8 descale tensors removed; SM100 kernel descale slot is always None.
         call_args.append(None)
-        call_args.append(mask_types_tensor)
+        call_args.append(per_range_mask_types)
         call_args.append(range_locks)
         call_args.append(max_seqlen_q)
         call_args.append(cu_batches)
@@ -824,9 +817,7 @@ def _flex_flash_attn_bwd(
     dv: torch.Tensor | None = None,
     q_ranges: torch.Tensor | None = None,
     k_ranges: torch.Tensor | None = None,
-    mask_type: int = MT_MAP.full,
-    mask_mode: MaskMode = MaskMode.STATIC_FULL,
-    mask_types_tensor: torch.Tensor | None = None,
+    mask_types: int | torch.Tensor = MT_MAP.full,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
     # Exact k-tile totals (cluster-1, cluster-2) for the undeclared ranges
@@ -869,16 +860,10 @@ def _flex_flash_attn_bwd(
     assert (
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
-    if mask_mode == MaskMode.PER_RANGE:
-        assert mask_types_tensor is not None, "PER_RANGE requires mask_types_tensor"
-    else:
-        assert (
-            mask_types_tensor is None
-        ), "static mask modes must not pass mask_types_tensor"
 
     has_ranges = q_ranges is not None or k_ranges is not None
     if has_ranges:
-        validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types_tensor)
+        validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
         if deterministic:
             raise NotImplementedError(
                 "deterministic backward with q/k ranges is unsupported"
@@ -913,25 +898,24 @@ def _flex_flash_attn_bwd(
             assert plan.merged_outer_ranges.shape[0] == k_ranges.shape[0]  # type: ignore[union-attr] # has_ranges
             k_ranges = plan.merged_outer_ranges
             q_ranges = plan.sorted_inner_ranges
-            mask_types_tensor = plan.sorted_mask_types
+            mask_types = plan.sorted_mask_types
             cu_batches = plan.cu_batches
-            mask_mode = MaskMode.PER_RANGE
         else:
-            if mask_mode != MaskMode.PER_RANGE:
-                mask_types_tensor = torch.full(
-                    (q_ranges.shape[0],),  # type: ignore[union-attr] # has_ranges implies q_ranges
-                    mask_type,
-                    dtype=torch.int32,
-                    device=q_ranges.device,  # type: ignore[union-attr] # has_ranges implies q_ranges
-                )
-                mask_mode = MaskMode.PER_RANGE
             (
                 k_ranges,
                 _sorted_k_ranges,
                 q_ranges,
-                mask_types_tensor,
+                mask_types,
                 cu_batches,
-            ) = merge_qk_ranges(k_ranges, q_ranges, mask_types_tensor)
+            ) = merge_qk_ranges(
+                k_ranges,
+                q_ranges,
+                materialize_mask_types(
+                    mask_types,
+                    q_ranges.shape[0],  # type: ignore[union-attr] # has_ranges implies q_ranges
+                    q_ranges.device,  # type: ignore[union-attr] # has_ranges implies q_ranges
+                ),
+            )
     if has_ranges and major_arch not in (10, 11):
         cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
         cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
@@ -948,11 +932,21 @@ def _flex_flash_attn_bwd(
     block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
 
     local = False
-    use_per_range_mask = mask_mode == MaskMode.PER_RANGE
-    # DEVIATION: per-range forces causal-compatible host heuristics
-    # Reason: one mixed compile entry must reserve causal trip/register budget
-    # Recovery: static Full/Causal paths keep their original specialization
-    causal = mask_type == MT_MAP.causal or use_per_range_mask
+    validate_per_range_mask_feature_support(
+        mask_types,
+        major_arch=major_arch,
+        has_ranges=has_ranges,
+        has_mask_mod=mask_mod is not None,
+        has_block_sparse=block_sparse_tensors is not None,
+        has_score_mod=score_mod is not None or score_mod_bwd is not None,
+        has_softcap=softcap != 0.0,
+    )
+    per_range = isinstance(mask_types, torch.Tensor)
+    kernel_mask_type: int | None = None if per_range else mask_types  # type: ignore[assignment] # int when not per_range
+    per_range_mask_types = mask_types if per_range else None
+    # The per-range kernel may see causal ranges, so the host reserves the
+    # causal tile / register budget for it as well.
+    causal = kernel_mask_type is None or kernel_mask_type == MT_MAP.causal
     sparse_q = None
     if block_sparse_tensors is not None and major_arch == 9:
         sparse_q = (
@@ -1068,7 +1062,7 @@ def _flex_flash_attn_bwd(
             requested_disable_2cta = is_ffa_2cta_disabled()
             # RangeMerge consumes per-pair mask constants (2-CTA-compatible);
             # genuine runtime per-range masks still need 1-CTA.
-            per_range_requires_1cta = use_per_range_mask and not range_merge_active
+            per_range_requires_1cta = per_range and not range_merge_active
             # 2-CTA hdim-192 fuses Q/Qt on one pipeline; the RangeMerge
             # per-pair Q walk needs them separate.
             merge_192_requires_1cta = range_merge_active and head_dim == 192
@@ -1492,7 +1486,7 @@ def _flex_flash_attn_bwd(
             head_dim,
             head_dim_v,
             qhead_per_kvhead,
-            mask_mode,
+            kernel_mask_type,
             m_block_size,
             n_block_size,
             num_threads,
@@ -1532,7 +1526,7 @@ def _flex_flash_attn_bwd(
             head_dim,
             head_dim_v,
             qhead_per_kvhead,
-            mask_mode,
+            kernel_mask_type,
             m_block_size,
             n_block_size,
             num_threads,
@@ -1599,6 +1593,7 @@ def _flex_flash_attn_bwd(
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
+                assert kernel_mask_type is not None  # per-range is SM100/SM110 only
                 ffa_bwd_obj = ffa_bwd_cls(
                     dtype,
                     head_dim,
@@ -1610,7 +1605,7 @@ def _flex_flash_attn_bwd(
                     num_stages_dO,
                     num_threads,
                     pack_gqa,
-                    mask_type,
+                    kernel_mask_type,
                     SdP_swapAB,
                     dKV_swapAB,
                     dQ_swapAB,
@@ -1620,12 +1615,13 @@ def _flex_flash_attn_bwd(
                     **ffa_bwd_kwargs,  # type: ignore[arg-type]
                 )
             case 9:
+                assert kernel_mask_type is not None  # per-range is SM100/SM110 only
                 ffa_bwd_obj = FFABwdSm90(
                     dtype,
                     head_dim,
                     head_dim_v,
                     qhead_per_kvhead,
-                    mask_type,
+                    kernel_mask_type,
                     is_local=local,
                     deterministic=deterministic,
                     tile_m=m_block_size,
@@ -1653,7 +1649,7 @@ def _flex_flash_attn_bwd(
                 ffa_bwd_obj = FFABwdSm100(
                     head_dim,
                     head_dim_v,
-                    mask_type=mask_type,
+                    mask_type=kernel_mask_type,
                     is_local=local,
                     qhead_per_kvhead=qhead_per_kvhead,
                     tile_m=m_block_size,
@@ -1667,7 +1663,6 @@ def _flex_flash_attn_bwd(
                     mask_mod=mask_mod,
                     has_aux_tensors=aux_tensors is not None,
                     subtile_factor=subtile_factor,
-                    use_per_range_mask=use_per_range_mask,
                     disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
                     range_merge=range_merge_active,
                     use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
@@ -1682,8 +1677,8 @@ def _flex_flash_attn_bwd(
             else None
         )
         mask_types_cute_tensor = (
-            to_cute_tensor(mask_types_tensor, assumed_align=4, leading_dim=0)
-            if mask_types_tensor is not None
+            to_cute_tensor(per_range_mask_types, assumed_align=4, leading_dim=0)
+            if per_range_mask_types is not None
             else None
         )
 
@@ -1759,7 +1754,7 @@ def _flex_flash_attn_bwd(
         dV_semaphore,
     ]
     if major_arch in [10, 11]:
-        bwd_call_args.append(mask_types_tensor)
+        bwd_call_args.append(per_range_mask_types)
         bwd_call_args.append(cu_batches)
         bwd_call_args.append(seqlen_k)
         bwd_call_args.append(k_total_blocks_hint)
@@ -1928,35 +1923,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 "bwd_q_full_coverage/bwd_k_full_coverage require " "q_ranges/k_ranges"
             )
         if is_varlen:
-            num_ranges = validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
-        else:
-            num_ranges = int(q.shape[0])
-
-        mask_spec = normalize_mask_type_spec(
-            mask_types,
-            num_ranges=num_ranges if is_varlen else None,
-            batch_size=None if is_varlen else num_ranges,
-            is_varlen=is_varlen,
-        )
+            validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
+        mask_types = normalize_mask_types(mask_types)
         flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
-        validate_per_range_mask_feature_support(
-            mask_spec,
-            major_arch=major_arch,
-            has_mask_mod=flex_attn_args.mask_mod is not None,
-            has_block_sparse=flex_attn_args.block_sparse_tensors is not None,
-            has_score_mod=flex_attn_args.score_mod is not None,
-            has_softcap=bool(softcap),
-        )
-        mask_mode = mask_spec.mode
-        mask_types_tensor = mask_spec.per_range_mask_types
-        if mask_spec.is_per_range:
-            # DEVIATION: report causal mask_type for may-be-causal mixed compile
-            # Reason: the kernel's is_causal specialization and host heuristics key off mask_type
-            # Recovery: runtime mMaskTypes[batch] selects Full vs Causal
-            mask_type = MT_MAP.causal
-        else:
-            assert mask_spec.static_mask_type is not None
-            mask_type = int(mask_spec.static_mask_type)
 
         out, lse = _flex_flash_attn_fwd(
             q=q,
@@ -1967,9 +1936,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=softmax_scale,
-            mask_type=mask_type,
-            mask_mode=mask_mode,
-            mask_types_tensor=mask_types_tensor,
+            mask_types=mask_types,
             sink=sink,
             sink_layout=sink_layout,
             softcap=softcap,
@@ -1982,9 +1949,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         aux_tensors = flex_attn_args.aux_tensors if flex_attn_args else None
         # mask_types needs no grad tracking; keep it on ctx directly.
-        ctx.mask_mode = mask_mode
-        ctx.mask_type = mask_type
-        ctx.mask_types_tensor = mask_types_tensor
+        ctx.mask_types = mask_types
         ctx.save_for_backward(
             q,
             k,
@@ -2088,9 +2053,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse=lse,
             dout=dout,
             softmax_scale=ctx.softmax_scale,
-            mask_type=ctx.mask_type,
-            mask_mode=ctx.mask_mode,
-            mask_types_tensor=ctx.mask_types_tensor,
+            mask_types=ctx.mask_types,
             sink=sink,
             sink_layout=ctx.sink_layout,
             softcap=ctx.softcap,
