@@ -61,7 +61,7 @@ class FFABwdPostProcess:
         dQ_swapAB: bool = False,
         use_2cta_instrs: bool = False,
         cluster_size: int = 1,  # for varlen offsets
-        range_workspace_padded: bool = False,
+        use_dense_dqacc_for_ranges: bool = False,
     ):
         """
         :param head_dim: head dimension
@@ -89,7 +89,7 @@ class FFABwdPostProcess:
         self.dQ_swapAB = dQ_swapAB
         self.use_2cta_instrs = use_2cta_instrs and arch // 10 == 10 and head_dim != 64
         self.cluster_size = cluster_size
-        self.range_workspace_padded = range_workspace_padded
+        self.use_dense_dqacc_for_ranges = use_dense_dqacc_for_ranges
 
     def _check_tile(self) -> None:
         """Validate the kernel config (dtype, head dim, threads)."""
@@ -391,7 +391,7 @@ class FFABwdPostProcess:
                 mSeqUsedK=None,
                 mQRanges=mQRanges,
                 tile_m=self.tile_m * self.cluster_size,
-                range_workspace_padded_q=self.range_workspace_padded,
+                use_dense_dqacc_for_ranges=self.use_dense_dqacc_for_ranges,
             )
             if const_expr(not seqlen.has_cu_seqlens_q):
                 mdQ_cur = mdQ[batch_idx, None, head_idx, None]
@@ -677,7 +677,7 @@ def _compile_bwd_postprocess(
     use_2cta_instrs,
     cluster_size,
     arch,
-    range_workspace_padded,
+    use_dense_dqacc_for_ranges,
 ):
     """Compile bwd postprocess kernel using cute fake tensors."""
     (
@@ -724,7 +724,7 @@ def _compile_bwd_postprocess(
         swap_ab,
         use_2cta_instrs=use_2cta_instrs,
         cluster_size=cluster_size,
-        range_workspace_padded=range_workspace_padded,
+        use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
     )
     return cute.compile(
         fa_bwd_post,
@@ -755,7 +755,7 @@ def bwd_postprocess(
     use_2cta_instrs=False,
     cluster_size=1,
     ranges=None,
-    range_workspace_padded=False,
+    use_dense_dqacc_for_ranges=False,
 ):
     """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
     compile_key = (
@@ -771,7 +771,7 @@ def bwd_postprocess(
         use_2cta_instrs,
         cluster_size,
         arch,
-        range_workspace_padded,
+        use_dense_dqacc_for_ranges,
     )
     if compile_key not in bwd_postprocess.compile_cache:
         bwd_postprocess.compile_cache[compile_key] = _compile_bwd_postprocess(

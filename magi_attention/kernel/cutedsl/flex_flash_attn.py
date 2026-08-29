@@ -507,7 +507,11 @@ def _flex_flash_attn_fwd(
         and not fwd_atomic_borrow_kv
     )
     persistent_launch = (
-        not causal and not local and not use_clc_scheduler and not fwd_atomic_borrow_kv
+        not causal
+        and not local
+        and not has_ranges
+        and not use_clc_scheduler
+        and not fwd_atomic_borrow_kv
     )
 
     # Prepare block sparse for forward
@@ -679,8 +683,6 @@ def _flex_flash_attn_fwd(
                     m_block_size=tile_m,
                     n_block_size=tile_n,
                     q_stage=q_stage,
-                    # Ranges keep persistence too: static grid-stride walks
-                    # tiles in the same order as a full launch.
                     is_persistent=persistent_launch,
                     score_mod=score_mod,
                     mask_mod=mask_mod,
@@ -844,11 +846,11 @@ def _flex_flash_attn_bwd(
             q_ranges covers the whole Q token space, so no dQ coverage holes
             exist and the dQ hole-zeroing sweep is skipped. Trust-based: never
             validated against the geometry (that would sync).
-        declared_k_full_coverage: same as above but for k_ranges / the dK/dV
-            hole-zeroing sweep. Declared independently of the Q flag because
-            the dQ and dK/dV sweeps read different ranges (q_ranges vs the
-            merged k_ranges), so one may be full-coverage while the other has
-            holes.
+        declared_k_full_coverage: caller declaration that k_ranges form a
+            sorted partition of the K token space. Stronger than the Q flag:
+            besides skipping the dK/dV hole-zeroing sweep it feeds
+            k_ranges_sorted_disjoint, whose scheduler grid bound assumes
+            sum(len) <= total_k — overlapping k ranges must not declare it.
         use_dense_dqacc_for_ranges: see :func:`flex_flash_attn_func`.
 
     Returns:
@@ -1441,7 +1443,8 @@ def _flex_flash_attn_bwd(
         use_padded_offsets=False,
         q_ranges=pre_post_q_ranges,
         max_seqlen_q=seqlen_q if pre_post_q_ranges is not None else 0,
-        range_workspace_padded=use_dense_dqacc_for_ranges,
+        use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
+        disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
     )
 
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
@@ -1812,7 +1815,7 @@ def _flex_flash_attn_bwd(
             use_2cta_instrs=use_2cta_instrs,
             cluster_size=1,
             ranges=pre_post_q_ranges,
-            range_workspace_padded=use_dense_dqacc_for_ranges,
+            use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
         )
 
     if direct_dq_init and dq_self_alloc and not declared_q_full_coverage:
@@ -2115,12 +2118,18 @@ def flex_flash_attn_func(
         kernels consume ranges natively; other arches collapse them via
         ``ranges_to_cu_seqlens``.
 
-    bwd_q_full_coverage / bwd_k_full_coverage: caller declarations (default
-        ``False``) that the union of q_ranges / k_ranges covers the whole
-        Q / K token space, letting backward skip the dQ / dK / dV hole-zeroing
-        sweeps. They apply to every ranges backward path, including
-        range-merge. Trust-based like the other contract flags: a wrong
-        ``True`` leaves uncovered gradient rows uninitialized.
+    bwd_q_full_coverage: caller declaration (default ``False``) that the
+        union of q_ranges covers the whole Q token space, letting backward
+        skip the dQ hole-zeroing sweep. Overlapping q ranges are fine.
+        Trust-based: a wrong ``True`` leaves uncovered dq rows uninitialized.
+
+    bwd_k_full_coverage: caller declaration (default ``False``) that
+        k_ranges form a sorted partition of the K token space (sorted,
+        pairwise-disjoint, covering) — strictly stronger than coverage. It
+        skips the dK/dV hole-zeroing sweep and lets the backward scheduler
+        bound its grid by total_k. Trust-based: declaring it for overlapping
+        or unsorted k ranges under-launches the grid and silently drops
+        work, not just stale holes.
 
     use_dense_dqacc_for_ranges: SM100/SM110 backward-only optimization for
         ranges-native calls. When ``True``, q/k ranges still drive the

@@ -67,7 +67,8 @@ class FFABwdPreProcess:
         num_threads: int = 256,
         use_padded_offsets: bool = True,
         dq_accum_hdim_multiple: int = 32,
-        range_workspace_padded: bool = False,
+        use_dense_dqacc_for_ranges: bool = False,
+        disable_fwd_atomic_reduction: bool = False,
     ):
         """
         All contiguous dimensions must be at least 16 bytes aligned which indicates the head dimension
@@ -99,7 +100,12 @@ class FFABwdPreProcess:
         self.check_hdim_v_oob = head_dim_v != self.head_dim_v_padded
         self.num_threads = num_threads
         self.use_padded_offsets = use_padded_offsets
-        self.range_workspace_padded = range_workspace_padded
+        self.use_dense_dqacc_for_ranges = use_dense_dqacc_for_ranges
+        # The flag certifies pairwise-disjoint q ranges, which keeps the
+        # prefix-sum decode (total_q bounds the tile count); the quota decode
+        # is only for possibly-overlapping ranges, whose tile count total_q
+        # cannot bound.
+        self.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction
 
     def _check_tile(self) -> None:
         """Validate the kernel config (dtype, head dim, threads)."""
@@ -234,7 +240,11 @@ class FFABwdPreProcess:
             mSeqUsedQ=mSeqUsedQ,
             mQRanges=mQRanges,
             max_outer_range_width=(
-                max_seqlen_q if const_expr(mQRanges is not None) else None
+                max_seqlen_q
+                if const_expr(
+                    mQRanges is not None and not self.disable_fwd_atomic_reduction
+                )
+                else None
             ),
         )
 
@@ -309,7 +319,7 @@ class FFABwdPreProcess:
                 mSeqUsedQ,
                 tile=self.tile_m,
                 ranges=mQRanges,
-                range_workspace_padded=self.range_workspace_padded,
+                use_dense_dqacc_for_ranges=self.use_dense_dqacc_for_ranges,
             )
             mO_cur = seqlen.offset_batch(mO, batch_idx, dim=0)[None, head_idx, None]
             mdO_cur = seqlen.offset_batch(mdO, batch_idx, dim=0)[None, head_idx, None]
@@ -446,7 +456,8 @@ def _compile_bwd_preprocess(
     has_dlse,
     has_dq_accum,
     use_padded_offsets,
-    range_workspace_padded,
+    use_dense_dqacc_for_ranges,
+    disable_fwd_atomic_reduction,
 ):
     """Compile bwd preprocess kernel using cute fake tensors (no real GPU tensors needed)."""
     (
@@ -500,8 +511,11 @@ def _compile_bwd_preprocess(
         head_dim_v,
         m_block_size,
         use_padded_offsets=use_padded_offsets,
-        dq_accum_hdim_multiple=(32 if range_workspace_padded or not has_ranges else 16),
-        range_workspace_padded=range_workspace_padded,
+        dq_accum_hdim_multiple=(
+            32 if use_dense_dqacc_for_ranges or not has_ranges else 16
+        ),
+        use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
+        disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
     )
     return cute.compile(
         fa_bwd_pre,
@@ -538,7 +552,8 @@ def bwd_preprocess(
     use_padded_offsets: bool = True,
     q_ranges: torch.Tensor | None = None,
     max_seqlen_q: int = 0,
-    range_workspace_padded: bool = False,
+    use_dense_dqacc_for_ranges: bool = False,
+    disable_fwd_atomic_reduction: bool = False,
 ):
     """Backward preprocess: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum."""
     compile_key = (
@@ -552,7 +567,8 @@ def bwd_preprocess(
         dlse is not None,
         dq_accum is not None,
         use_padded_offsets,
-        range_workspace_padded,
+        use_dense_dqacc_for_ranges,
+        disable_fwd_atomic_reduction,
     )
     assert (
         q_ranges is None or max_seqlen_q > 0
