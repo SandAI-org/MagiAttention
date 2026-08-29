@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import torch
 
-from magi_attention.kernel.cutedsl.ffa_utils import MaskMode
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -45,14 +44,6 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
 from magi_attention.meta.collection.calc_meta import AttnArg
 
 __all__ = ["cutedsl_fwd", "cutedsl_bwd"]
-
-
-def _per_range_mask_args(attn_type_map: torch.Tensor) -> dict:
-    """Translate an attn_type_map tensor to the kernel's per-range mask mode."""
-    return {
-        "mask_mode": MaskMode.PER_RANGE,
-        "mask_types_tensor": attn_type_map,
-    }
 
 
 def cutedsl_fwd(
@@ -93,7 +84,7 @@ def cutedsl_fwd(
         # input to AttnArg (merge happens in calc_meta), so the kernel sees the
         # plain per-range problem — no in-kernel merge needed.
         range_merge=False,
-        **_per_range_mask_args(ffa_args["attn_type_map"]),
+        mask_types=ffa_args["attn_type_map"],
     )
 
     return out, lse
@@ -150,7 +141,7 @@ def cutedsl_bwd(
         disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
         disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
         range_merge=False,
-        **_per_range_mask_args(ffa_args["attn_type_map"]),
+        mask_types=ffa_args["attn_type_map"],
     )
     # The dist bwd hp-reduce path (``bwd_hp_reduce`` flag) expects partial
     # dq/dk/dv in fp32; the kernel returns input dtype, so cast up here.

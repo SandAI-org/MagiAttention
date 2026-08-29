@@ -14,10 +14,8 @@
 
 from .ffa_utils import (
     MT_MAP,
-    MaskMode,
-    NormalizedMaskTypes,
     TorchFlexAttnArgs,
-    normalize_mask_type_spec,
+    normalize_mask_types,
     validate_per_range_mask_feature_support,
     validate_true_ranges,
 )
@@ -31,9 +29,7 @@ __all__ = [
     "plan_range_merge_bwd",
     "TorchFlexAttnArgs",
     "MT_MAP",
-    "MaskMode",
-    "NormalizedMaskTypes",
-    "normalize_mask_type_spec",
+    "normalize_mask_types",
     "validate_per_range_mask_feature_support",
     "validate_true_ranges",
 ]
