@@ -18,9 +18,10 @@ The dist runtime's ``DistAttnFunc`` manually interleaves per-stage partial
 attention and gradient merges, so it cannot reuse
 :func:`magi_attention.kernel.cutedsl.flex_flash_attn_func` (an autograd
 Function). These two functions call the raw
-``_flex_flash_attn_fwd`` / ``_flex_flash_attn_bwd`` kernels directly and adapt
-the LSE layout; all other contracts (q/k ranges tensors, mask type map) match
-``AttnArg.to_ffa_args()`` verbatim.
+``_flex_flash_attn_fwd`` / ``_flex_flash_attn_bwd`` kernels directly. Tensor
+contracts: q/k ranges and mask type map as produced by
+``AttnArg.to_ffa_args()``; ``lse`` is fp32 ``(total_q, nhq)`` on both the
+forward output and the backward input.
 
 Limitations (guarded by asserts and by flag filtering at the dist
 level):
@@ -72,7 +73,7 @@ def cutedsl_fwd(
     if not ffa_args:
         raise RuntimeError("cutedsl_fwd called with skip_attn_fwd=True")
 
-    out, lse_nhtq = _flex_flash_attn_fwd(
+    out, lse = _flex_flash_attn_fwd(
         q=q,
         k=k,
         v=v,
@@ -95,8 +96,7 @@ def cutedsl_fwd(
         **_per_range_mask_args(ffa_args["attn_type_map"]),
     )
 
-    # Kernel returns lse as (nh, tq); dist contract is (sq, nhq).
-    return out, lse_nhtq.mT.contiguous()
+    return out, lse
 
 
 def cutedsl_bwd(
@@ -131,8 +131,7 @@ def cutedsl_bwd(
         k=k,
         v=v,
         out=o,
-        # Dist contract stores lse as (sq, nhq); kernel expects (nh, tq).
-        lse=lse.mT.contiguous(),
+        lse=lse,
         dout=do,
         q_ranges=ffa_args["q_ranges"],
         k_ranges=ffa_args["k_ranges"],
