@@ -176,8 +176,9 @@ def load_precompiled_ffa_fa4():
 
                 cache_dict[key] = wrapped
 
-        logger.info(f"\t=> {compiled_cache_name}: {len(cache_dict)} kernels loaded")
-        has_kernel_loaded = has_kernel_loaded or len(cache_dict) > 0
+        num_loaded = len(getattr(cache_dict, "cache", cache_dict))
+        logger.info(f"\t=> {compiled_cache_name}: {num_loaded} kernels loaded")
+        has_kernel_loaded = has_kernel_loaded or num_loaded > 0
 
     if not has_kernel_loaded:
         logger.info("No pre-compiled FFA_FA4 kernels to load.")
@@ -291,7 +292,10 @@ def precompile_ffa_fa4(
 
     # 4. Export to keys, .o/.so files for each compiled kernel in each compiled cache
     for compiled_cache_name, compiled_meta in COMPILED_META_DICT.items():
+        # flash_attn's compile caches are JITCache wrappers around a plain
+        # dict; export walks the dict (the wrapper has no len/items).
         compiled_cache = compiled_meta["cache_dict"]
+        compiled_cache = getattr(compiled_cache, "cache", compiled_cache)
         logger.info(
             f"Export compiled FFA_FA4 kernels for {compiled_cache_name}: {len(compiled_cache)}"
         )
