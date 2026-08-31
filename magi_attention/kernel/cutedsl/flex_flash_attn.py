@@ -79,26 +79,62 @@ from .sparse_utils import (
     to_cute_block_sparse_tensors,
 )
 
-# Pool for the async k_ranges snapshot: a fresh pin_memory is a
+# Pool for the async k_ranges snapshots: a fresh pin_memory is a
 # cudaHostAlloc on the hot path.
 _pinned_ranges_pool: dict[int, list[tuple[torch.Tensor, torch.cuda.Event]]] = {}
 
 
-def _acquire_pinned_ranges_snapshot(
-    num_ranges: int,
-) -> tuple[torch.Tensor, torch.cuda.Event]:
-    cap = max(64, 1 << (num_ranges - 1).bit_length())
-    bucket = _pinned_ranges_pool.get(cap)
-    if bucket:
-        return bucket.pop()
-    return (
-        torch.empty((cap, 2), dtype=torch.int32, pin_memory=True),
-        torch.cuda.Event(),
-    )
+class _KTileHintSnapshot:
+    """Async host copy of k_ranges sizing the exact bwd grid without a sync.
 
+    Forward captures the copy and an event; backward resolves it with a host
+    wait and turns the range lengths into (cluster-1, cluster-2) tile totals.
+    A snapshot that is never resolved (backward never ran) hands its pinned
+    buffer back to the pool on garbage collection.
+    """
 
-def _release_pinned_ranges_snapshot(buf: torch.Tensor, event: torch.cuda.Event) -> None:
-    _pinned_ranges_pool.setdefault(buf.shape[0], []).append((buf, event))
+    __slots__ = ("_pinned", "_view", "_event")
+
+    def __init__(self, k_ranges: torch.Tensor):
+        cap = max(64, 1 << (k_ranges.shape[0] - 1).bit_length())
+        bucket = _pinned_ranges_pool.get(cap)
+        self._pinned, self._event = (
+            bucket.pop()
+            if bucket
+            else (
+                torch.empty((cap, 2), dtype=torch.int32, pin_memory=True),
+                torch.cuda.Event(),
+            )
+        )
+        self._view = self._pinned[: k_ranges.shape[0]]
+        self._view.copy_(k_ranges, non_blocking=True)
+        self._event.record()
+
+    @staticmethod
+    def capture(k_ranges: torch.Tensor | None) -> "_KTileHintSnapshot | None":
+        if k_ranges is None or torch.cuda.is_current_stream_capturing():
+            return None
+        return _KTileHintSnapshot(k_ranges)
+
+    def resolve(self) -> tuple[int, int]:
+        """Host-wait on the copy and return the exact k-tile totals."""
+        self._event.synchronize()
+        kblocks = (self._view[:, 1] - self._view[:, 0] + 127) // 128
+        hints = (int(kblocks.sum()), int(((kblocks + 1) // 2).sum()))
+        self._release()
+        return hints
+
+    def _release(self) -> None:
+        if self._pinned is not None:
+            _pinned_ranges_pool.setdefault(self._pinned.shape[0], []).append(
+                (self._pinned, self._event)
+            )
+            self._pinned = self._view = self._event = None
+
+    def __del__(self):
+        # Safe to reuse: the buffer only ever sees stream-ordered copies, and
+        # by the time an unresolved snapshot is collected its graph is gone.
+        self._release()
 
 
 def _validate_dense_dqacc_flag(
@@ -135,6 +171,51 @@ def _validate_dense_dqacc_flag(
                 f"{name} requires sorted, pairwise-disjoint q_ranges "
                 "(r[i+1].start >= r[i].end)"
             )
+
+
+def _apply_range_merge(
+    range_merge: bool | RangeMergePlan,
+    outer_ranges: torch.Tensor,
+    inner_ranges: torch.Tensor,
+    mask_types: int | torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Rewrite one pass's relation rows to merged (group, pair) CSR form.
+
+    Forward merges on the Q axis, backward on the K axis; the caller picks
+    which tensor is outer. Returns (outer, inner, mask_types, cu_batches)
+    with mask types materialized per row, since the merge reorders rows.
+    """
+    if isinstance(range_merge, RangeMergePlan):
+        plan = range_merge
+        assert (
+            plan.merged_outer_ranges.shape[0] == outer_ranges.shape[0]
+        ), "RangeMergePlan row count disagrees with the outer ranges"
+        return (
+            plan.merged_outer_ranges,
+            plan.sorted_inner_ranges,
+            plan.sorted_mask_types,
+            plan.cu_batches,
+        )
+    outer, _sorted_outer, inner, merged_mask_types, cu_batches = merge_qk_ranges(
+        outer_ranges,
+        inner_ranges,
+        materialize_mask_types(mask_types, outer_ranges.shape[0], outer_ranges.device),
+    )
+    return outer, inner, merged_mask_types, cu_batches
+
+
+def _split_mask_types(
+    mask_types: int | torch.Tensor,
+) -> tuple[bool, int | None, torch.Tensor | None]:
+    """Split the mask union into (per_range, static int, per-range tensor).
+
+    A tensor selects the runtime per-range kernel; an int compiles the
+    statically specialized full/causal kernel (mask_type None means per-range).
+    """
+    per_range = isinstance(mask_types, torch.Tensor)
+    mask_type = None if per_range else mask_types
+    mask_types_tensor = mask_types if per_range else None
+    return per_range, mask_type, mask_types_tensor  # type: ignore[return-value] # tagged by isinstance
 
 
 def _flex_flash_attn_fwd(
@@ -224,37 +305,12 @@ def _flex_flash_attn_fwd(
             score_mod is None and mask_mod is None
         ), "RangeMerge does not compose with score/mask mods"
         assert flex_attn_args.block_sparse_tensors is None
-        if isinstance(range_merge, RangeMergePlan):
-            plan = range_merge
-            assert (
-                plan.merged_outer_ranges.shape[0] == q_ranges.shape[0]  # type: ignore[union-attr] # has_ranges
-            ), "RangeMergePlan row count disagrees with q_ranges"
-            q_ranges = plan.merged_outer_ranges
-            k_ranges = plan.sorted_inner_ranges
-            mask_types = plan.sorted_mask_types
-            cu_batches = plan.cu_batches
-        else:
-            (
-                q_ranges,
-                _sorted_q_ranges,
-                k_ranges,
-                mask_types,
-                cu_batches,
-            ) = merge_qk_ranges(
-                q_ranges,
-                k_ranges,
-                materialize_mask_types(
-                    mask_types,
-                    q_ranges.shape[0],  # type: ignore[union-attr] # has_ranges implies q_ranges
-                    q_ranges.device,  # type: ignore[union-attr] # has_ranges implies q_ranges
-                ),
-            )
+        assert q_ranges is not None and k_ranges is not None  # has_ranges
+        q_ranges, k_ranges, mask_types, cu_batches = _apply_range_merge(
+            range_merge, q_ranges, k_ranges, mask_types
+        )
         pack_gqa = False
-    # The per-range kernel reads the mask type of each range at runtime; the
-    # static kernels specialize on one full / causal type at compile time.
-    per_range = isinstance(mask_types, torch.Tensor)
-    mask_type: int | None = None if per_range else mask_types  # type: ignore[assignment] # int when not per_range
-    mask_types_tensor = mask_types if per_range else None
+    per_range, mask_type, mask_types_tensor = _split_mask_types(mask_types)
     # SM100/SM110 kernels consume mQRanges/mKRanges directly. Other arches
     # still read cu_seqlens.
     if has_ranges and (
@@ -395,7 +451,8 @@ def _flex_flash_attn_fwd(
     requested_use_clc_scheduler = clc_scheduler
     requested_disable_2cta = is_ffa_2cta_disabled(is_fwd=True)
     if per_range:
-        # temporary disable 2CTA/CLC for per-range masks
+        # The per-range kernel is 1CTA with the static scheduler; 2CTA and
+        # CLC only specialize the static full/causal kernels.
         requested_disable_2cta = True
         requested_use_clc_scheduler = False
 
@@ -491,13 +548,11 @@ def _flex_flash_attn_fwd(
     score_mod_hash = hash_callable(score_mod) if score_mod is not None else False
     mask_mod_hash = hash_callable(mask_mod) if mask_mod is not None else False
 
-    is_varlen = has_ranges
-
     # CLC regressed for varlen MHA and dense noncausal. Imbalanced varlen shapes
     # keep more K/V blocks in flight and hurt L2; dense noncausal mostly just
     # pays work-stealing overhead.
-    is_varlen_mha = is_varlen and qhead_per_kvhead == 1
-    is_dense_noncausal = not is_varlen and not causal and not local
+    is_varlen_mha = has_ranges and qhead_per_kvhead == 1
+    is_dense_noncausal = not has_ranges and not causal and not local
     use_clc_scheduler = (
         requested_use_clc_scheduler
         and not is_varlen_mha
@@ -557,9 +612,7 @@ def _flex_flash_attn_fwd(
         use_block_sparsity,
         block_sparse_broadcast_pattern,
         aux_tensor_metadata,
-        lse is None,
-        q_ranges is None,
-        k_ranges is None,
+        has_ranges,
         kernel_sink is not None,
         block_sparse_tensors is None or block_sparse_tensors.cu_total_m_blocks is None,
         block_sparse_tensors is None
@@ -627,7 +680,7 @@ def _flex_flash_attn_fwd(
 
         match major_arch:
             case 8:
-                assert mask_type is not None  # per-range is SM100/SM110 only
+                assert mask_type is not None, "per-range masks are SM100/SM110-only"
                 ffa_fwd_obj = FFAFwdSm80(
                     dtype,
                     head_dim,
@@ -647,7 +700,7 @@ def _flex_flash_attn_fwd(
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 9:
-                assert mask_type is not None  # per-range is SM100/SM110 only
+                assert mask_type is not None, "per-range masks are SM100/SM110-only"
                 ffa_fwd_obj = FFAFwdSm90(
                     dtype,
                     head_dim,
@@ -805,6 +858,25 @@ def _flex_flash_attn_fwd(
 _flex_flash_attn_fwd.compile_cache = get_jit_cache("fwd")
 
 
+def _derive_k_total_blocks_hint(
+    k_tile_hints: tuple[int, int],
+    num_ranges: int,
+    seqlen_k: int,
+    n_block_size: int,
+    cluster_size: int,
+) -> int | None:
+    """Exact grid bound for overlapping k ranges, or None to keep the quota.
+
+    The per-CTA prefix-sum decode the hint enables only pays off above ~2x
+    quota waste.
+    """
+    exact_ctas = k_tile_hints[0] if cluster_size == 1 else 2 * k_tile_hints[1]
+    quota_blocks = (seqlen_k + n_block_size - 1) // n_block_size
+    quota_units = (quota_blocks + cluster_size - 1) // cluster_size
+    quota_ctas = quota_units * cluster_size * num_ranges
+    return exact_ctas if quota_ctas >= 2 * exact_ctas else None
+
+
 def _flex_flash_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -893,29 +965,10 @@ def _flex_flash_attn_bwd(
             and flex_attn_args.mask_mod is None
             and flex_attn_args.block_sparse_tensors_bwd is None
         )
-        if isinstance(range_merge, RangeMergePlan):
-            plan = range_merge
-            assert plan.merged_outer_ranges.shape[0] == k_ranges.shape[0]  # type: ignore[union-attr] # has_ranges
-            k_ranges = plan.merged_outer_ranges
-            q_ranges = plan.sorted_inner_ranges
-            mask_types = plan.sorted_mask_types
-            cu_batches = plan.cu_batches
-        else:
-            (
-                k_ranges,
-                _sorted_k_ranges,
-                q_ranges,
-                mask_types,
-                cu_batches,
-            ) = merge_qk_ranges(
-                k_ranges,
-                q_ranges,
-                materialize_mask_types(
-                    mask_types,
-                    q_ranges.shape[0],  # type: ignore[union-attr] # has_ranges implies q_ranges
-                    q_ranges.device,  # type: ignore[union-attr] # has_ranges implies q_ranges
-                ),
-            )
+        assert q_ranges is not None and k_ranges is not None  # has_ranges
+        k_ranges, q_ranges, mask_types, cu_batches = _apply_range_merge(
+            range_merge, k_ranges, q_ranges, mask_types
+        )
     if has_ranges and major_arch not in (10, 11):
         cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
         cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
@@ -941,9 +994,7 @@ def _flex_flash_attn_bwd(
         has_score_mod=score_mod is not None or score_mod_bwd is not None,
         has_softcap=softcap != 0.0,
     )
-    per_range = isinstance(mask_types, torch.Tensor)
-    mask_type: int | None = None if per_range else mask_types  # type: ignore[assignment] # int when not per_range
-    mask_types_tensor = mask_types if per_range else None
+    per_range, mask_type, mask_types_tensor = _split_mask_types(mask_types)
     # The per-range kernel may see causal ranges, so the host reserves the
     # causal tile / register budget for it as well.
     causal = mask_type is None or mask_type == MT_MAP.causal
@@ -1189,29 +1240,29 @@ def _flex_flash_attn_bwd(
     device = q.device
     out_torch_dtype = q.dtype
 
-    # Each flag certifies sorted, pairwise-disjoint k projections.
+    # Both producers certify sorted, pairwise-disjoint k rows: the partition
+    # declaration and the unique-writer contract.
     k_ranges_sorted_disjoint = has_ranges and (
         declared_k_full_coverage or disable_bwd_dkv_atomic_reduction
     )
     # Undeclared ranges: exact tile count (async snapshot from fwd) sizes the
     # prefix-sum grid; safe for overlapping k ranges.
-    k_total_blocks_hint: int | None = None
-    if (
-        k_tile_hints is not None
-        and has_ranges
-        and not k_ranges_sorted_disjoint
-        and cu_batches is None
-        and major_arch in (10, 11)
-        and n_block_size == 128
-        and cluster_size in (1, 2)
-    ):
-        exact_ctas = k_tile_hints[0] if cluster_size == 1 else 2 * k_tile_hints[1]
-        quota_blocks = (seqlen_k + n_block_size - 1) // n_block_size
-        quota_units = (quota_blocks + cluster_size - 1) // cluster_size
-        quota_ctas = quota_units * cluster_size * k_ranges.shape[0]  # type: ignore[union-attr] # has_ranges
-        # The per-CTA prefix-sum decode only pays off above ~2x quota waste.
-        if quota_ctas >= 2 * exact_ctas:
-            k_total_blocks_hint = exact_ctas
+    k_total_blocks_hint = (
+        _derive_k_total_blocks_hint(
+            k_tile_hints, k_ranges.shape[0], seqlen_k, n_block_size, cluster_size
+        )
+        if (
+            k_tile_hints is not None
+            and has_ranges
+            and k_ranges is not None  # mypy: has_ranges implies k_ranges
+            and not k_ranges_sorted_disjoint
+            and cu_batches is None
+            and major_arch in (10, 11)
+            and n_block_size == 128
+            and cluster_size in (1, 2)
+        )
+        else None
+    )
 
     # Buffer policy: empty_like where every row is provably written — dense,
     # the unique-writer contracts (coverage holes blanked on device below),
@@ -1502,8 +1553,7 @@ def _flex_flash_attn_bwd(
             V_in_regs,
             dQ_single_wg,
             deterministic,
-            q_ranges is None,
-            k_ranges is None,
+            has_ranges,
             score_mod_hash,
             score_mod_bwd_hash,
             mask_mod_hash,
@@ -1541,8 +1591,7 @@ def _flex_flash_attn_bwd(
             num_aux_tensors,
             use_block_sparsity,
             block_sparse_broadcast_pattern,
-            q_ranges is None,
-            k_ranges is None,
+            has_ranges,
             disable_bwd_dkv_atomic_reduction,
             range_merge_active,
             use_dense_dqacc_for_ranges,
@@ -1593,7 +1642,7 @@ def _flex_flash_attn_bwd(
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
-                assert mask_type is not None  # per-range is SM100/SM110 only
+                assert mask_type is not None, "per-range masks are SM100/SM110-only"
                 ffa_bwd_obj = ffa_bwd_cls(
                     dtype,
                     head_dim,
@@ -1615,7 +1664,7 @@ def _flex_flash_attn_bwd(
                     **ffa_bwd_kwargs,  # type: ignore[arg-type]
                 )
             case 9:
-                assert mask_type is not None  # per-range is SM100/SM110 only
+                assert mask_type is not None, "per-range masks are SM100/SM110-only"
                 ffa_bwd_obj = FFABwdSm90(
                     dtype,
                     head_dim,
@@ -1698,8 +1747,6 @@ def _flex_flash_attn_bwd(
             varlen_k_meta_tensor,
             seqused_q_tensor,
             seqused_k_tensor,
-        ]
-        bwd_compile_args += [
             None,  # window_size_left
             None,  # window_size_right
             dQ_semaphore_tensor,
@@ -1745,8 +1792,6 @@ def _flex_flash_attn_bwd(
         kernel_varlen_k_meta,
         None,  # seqlen_used_q
         None,  # seqlen_used_k
-    ]
-    bwd_call_args += [
         None,  # window_size_left
         None,  # window_size_right
         dQ_semaphore,
@@ -1975,21 +2020,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.use_dense_dqacc_for_ranges = use_dense_dqacc_for_ranges
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
-        # Async k_ranges snapshot so backward derives the exact tile count
-        # without a device sync (stream capture can't replay the event).
-        ctx.k_tile_hint_state = None
-        # torch.is_grad_enabled() is always off inside autograd.Function.forward.
-        if (
-            k_ranges is not None
-            and any(t.requires_grad for t in (q, k, v))
-            and not (ctx.bwd_k_full_coverage or disable_bwd_dkv_atomic_reduction)
-            and not torch.cuda.is_current_stream_capturing()
-        ):
-            pinned, done = _acquire_pinned_ranges_snapshot(k_ranges.shape[0])
-            view = pinned[: k_ranges.shape[0]]
-            view.copy_(k_ranges, non_blocking=True)
-            done.record()
-            ctx.k_tile_hint_state = (pinned, view, done)
+        # The exact-tile hint only matters when the scheduler cannot certify
+        # sorted-disjoint k; grad-enablement is invisible inside
+        # autograd.Function.forward, so an unused snapshot is reclaimed by
+        # _KTileHintSnapshot.__del__ when ctx is dropped.
+        ctx.k_tile_hints = None
+        ctx.k_tile_hint_snapshot = (
+            _KTileHintSnapshot.capture(k_ranges)
+            if any(t.requires_grad for t in (q, k, v))
+            and not (bwd_k_full_coverage or disable_bwd_dkv_atomic_reduction)
+            else None
+        )
         # Drop the direct aux_tensors reference on ctx; the real tensors are
         # tracked via save_for_backward and restored in backward. Keeping them
         # here too would bypass autograd's save_for_backward bookkeeping.
@@ -2026,24 +2067,12 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if flex_attn_args is not None:
             flex_attn_args = flex_attn_args.with_aux_tensors(aux)
 
-        # Resolve the async k_ranges snapshot from forward (host wait, not a
-        # device sync); cached on ctx for retain_graph repeated backwards.
-        k_tile_hints = getattr(ctx, "k_tile_hints_resolved", None)
-        if (
-            k_tile_hints is None
-            and ctx.k_tile_hint_state is not None
-            and not torch.cuda.is_current_stream_capturing()
-        ):
-            pinned, view, done = ctx.k_tile_hint_state
-            ctx.k_tile_hint_state = None
-            done.synchronize()
-            kblocks = (view[:, 1] - view[:, 0] + 127) // 128
-            k_tile_hints = (
-                int(kblocks.sum()),
-                int(((kblocks + 1) // 2).sum()),
-            )
-            ctx.k_tile_hints_resolved = k_tile_hints
-            _release_pinned_ranges_snapshot(pinned, done)
+        # Resolve the snapshot from forward (host wait, not a device sync);
+        # cache the totals on ctx for retain_graph repeated backwards.
+        k_tile_hints = ctx.k_tile_hints
+        if ctx.k_tile_hint_snapshot is not None:
+            k_tile_hints = ctx.k_tile_hints = ctx.k_tile_hint_snapshot.resolve()
+            ctx.k_tile_hint_snapshot = None
 
         dq, dk, dv = _flex_flash_attn_bwd(
             q=q,
@@ -2100,96 +2129,83 @@ def flex_flash_attn_func(
     use_dense_dqacc_for_ranges: bool = False,
     out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
-    """
-    Flex-flash-attention interface (dense / varlen / range).
+    """Flex-flash-attention interface (dense / ranges).
 
-    Explanation of some optional arguments:
+    Explanation of some optional arguments, in signature order:
 
-    q_ranges/k_ranges: ``[R, 2]`` int32 cuda tensors describing per-range
-        [start, end) intervals over the packed (total_seqlen, nheads, headdim)
-        q/k layout — the CuteDSL relation IR; under non-overlapping Q/K
-        (``disable_*_atomic_reduction=True``) each row has a unique writer.
-        When provided, both must be set, q/k/v must be packed, and the device
-        must be SM100/SM110. Leave as ``None`` for the dense
-        (batch, seqlen, nheads, headdim) path. On SM100/SM110 the pre/main/post
-        kernels consume ranges natively; other arches collapse them via
-        ``ranges_to_cu_seqlens``.
+    q_ranges/k_ranges: ``[R, 2]`` int32 cuda tensors of [start, end) intervals
+        over the packed (total_seqlen, nheads, headdim) q/k layout; row i of
+        the two tensors forms one attention relation. Both must be set
+        together, and q/k/v must be packed. Leave as ``None`` for the dense
+        (batch, seqlen, nheads, headdim) path. SM100/SM110 kernels consume the
+        ranges natively, including overlapping rows; other arches collapse
+        them via ``ranges_to_cu_seqlens`` and therefore only accept a sorted
+        partition.
 
-    bwd_q_full_coverage: caller declaration (default ``False``) that the
-        union of q_ranges covers the whole Q token space, letting backward
-        skip the dQ hole-zeroing sweep. Overlapping q ranges are fine.
-        Trust-based: a wrong ``True`` leaves uncovered dq rows uninitialized.
+    mask_types: mask type per relation, as ``MT_MAP`` ints
+        (0=full, 1=causal, 2=inv_causal, 3=bi_causal):
+        - ``None``: full attention everywhere (the default);
+        - ``int``: one type shared by all relations. Only 0/1 — the statically
+          specialized kernels;
+        - cuda ``int32[R]`` tensor: a distinct type per relation, read by the
+          runtime per-range kernel.
 
-    bwd_k_full_coverage: caller declaration (default ``False``) that
-        k_ranges form a sorted partition of the K token space (sorted,
-        pairwise-disjoint, covering) — strictly stronger than coverage. It
+    max_seqlen_q/max_seqlen_k: upper bound on the longest q/k range. Hard
+        contract: per-range launch bounds are sized from these, so an
+        underestimate silently drops work. Omitting falls back to
+        total_q/total_k — always safe, the loosest bound. Debug mode validates
+        against the ranges (a sync).
+
+    softcap: tanh logit soft-capping value, implemented via the score_mod
+        machinery but exposed as a plain scalar.
+
+    disable_fwd_atomic_reduction: caller contract that q_ranges are pairwise
+        disjoint (not necessarily sorted). Forward then direct-stores O
+        instead of merging through the fp32 atomic path, and the SM100/SM110
+        backward takes the unique-writer dQ path: dq/dq_accum start
+        uninitialized, preprocess clears the covered rows, and a final sweep
+        zeroes the holes of self-allocated dq.
+
+    disable_bwd_dkv_atomic_reduction: caller contract that k_ranges are sorted
+        and pairwise disjoint, giving every dK/dV row a unique CTA writer.
+        The SM100/SM110 backward then stores dK/dV directly from the main
+        kernel (native dtype, no fp32 accumulator, no postprocess) and only
+        zeroes coverage holes. MHA only.
+
+    range_merge: ``True`` or a precomputed :class:`RangeMergePlan`. Folds
+        relations sharing an outer interval into (group, pair) CSR form so
+        forward skips the atomic O merge; backward derives the dual K-merge.
+        SM100/SM110 only; requires both ``disable_*_atomic_reduction``
+        contracts.
+
+    bwd_q_full_coverage: caller declaration that the union of q_ranges covers
+        the whole Q token space, letting backward skip the dQ hole-zeroing
+        sweep. Overlapping q ranges are fine. Trust-based: a wrong ``True``
+        leaves uncovered dq rows uninitialized.
+
+    bwd_k_full_coverage: caller declaration that k_ranges form a sorted
+        partition of the K token space — strictly stronger than coverage. It
         skips the dK/dV hole-zeroing sweep and lets the backward scheduler
-        bound its grid by total_k. Trust-based: declaring it for overlapping
-        or unsorted k ranges under-launches the grid and silently drops
-        work, not just stale holes.
+        bound its grid by total_k, so declaring it for overlapping or unsorted
+        k ranges under-launches the grid and silently drops work.
 
-    use_dense_dqacc_for_ranges: SM100/SM110 backward-only optimization for
-        ranges-native calls. When ``True``, q/k ranges still drive the
-        scheduler, loads and masks, but dQ uses range-local tile-padded
-        accumulator slots and the dense 1D bulk-reduce protocol.
-        Requires ``deterministic=False``,
-        ``disable_fwd_atomic_reduction=True``, sorted pairwise-disjoint
-        q_ranges, head_dim divisible by 32, and no ``range_merge``. This
-        is a trust-based contract; debug mode validates the Q projection and
-        raises on overlap/order violations. There is no runtime fallback.
-        Prefer it for a small number of long ranges; many short ranges can
-        spend more memory on private padding than they recover in kernel time.
+    use_dense_dqacc_for_ranges: SM100/SM110 backward optimization: dQ
+        accumulates into range-local tile-padded slots with the dense 1D
+        bulk-reduce protocol instead of the row-major 2D TMA reduce. Requires
+        ``disable_fwd_atomic_reduction=True`` (sorted disjoint q in debug
+        mode), ``deterministic=False``, head_dim divisible by 32, and no
+        ``range_merge``. Prefer it for few long ranges; many short ranges can
+        spend more on padding than the reduce saves.
 
-    max_seqlen_q/max_seqlen_k: max sequence length over the ranges (varlen).
-        Hard contract: each must be >= its longest range; per-range launch
-        bounds are sized from these, so an underestimate silently truncates
-        work. Omitting falls back to total_q/total_k — always safe, but the
-        loosest bound. Debug mode validates against the ranges (a sync).
-
-    mask_types: the attention mask type applied to the q/k ranges, using the
-        int keys from ``MT_MAP`` (0=full, 1=causal, 2=inv_causal, 3=bi_causal).
-        It may be:
-        - ``None``: all ranges use full attention (the default).
-        - ``int``: all ranges share the same mask type. Only 0/1 are accepted
-          here; 2/3 exist solely on the per-range path below.
-        - ``torch.Tensor`` (cuda int32 ``[R]``): a distinct mask type per range
-          (SM100/SM110). Forward and backward both use a runtime per-range path
-          (1CTA, no CLC).
-
-    softcap: tanh logit soft-capping value. Implemented internally via the
-        score_mod machinery, but exposed here as a plain scalar.
-
-    disable_fwd_atomic_reduction: caller contract that ``q_ranges`` are
-        pairwise disjoint (not necessarily sorted), so forward can skip the
-        fp32 atomic out reduction. On SM100/SM110 ranges backward it also
-        selects the unique-writer dQ path: dq/dq_accum start uninitialized,
-        preprocess clears the covered rows, and a final cleanup zeroes the
-        holes of self-allocated dq. Defaults to False — pass True only when
-        q ranges are pairwise disjoint.
-
-    out_dtype: GMEM O dtype on the atomic path (``None`` = input dtype).
-        Pass ``torch.float32`` for the
-        lossless merge — K-1 cascading truncation applies otherwise when K
-        relations overlap a row.
-
-    disable_bwd_dkv_atomic_reduction: caller contract that
-        ``k_ranges`` are sorted and pairwise disjoint, so every
-        dK/dV row has a unique CTA writer. SM100/SM110 ranges backward then
-        stores dK/dV directly from the main kernel (native dtype, no fp32
-        accumulator, no dK/dV postprocess) and only zeroes coverage holes.
-        MHA only.
-
-    range_merge: ``True`` or a precomputed :class:`RangeMergePlan` to fold
-        relations into (group, pair) CSR form so the forward skips the
-        atomic fp32 out merge; backward derives the dual merge. SM100/SM110
-        only; requires ``disable_fwd_atomic_reduction=True`` and
-        ``disable_bwd_dkv_atomic_reduction=True``.
+    out_dtype: GMEM O dtype on the atomic fwd path (``None`` = input dtype).
+        ``torch.float32`` makes the K-way overlap merge lossless; narrower
+        dtypes trade K-1 cascading truncations for half the merge traffic.
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
         ``mask_mod`` / ``aux_tensors``) and block-sparse
-        (``block_sparse_tensors`` / ``block_sparse_tensors_bwd``) capabilities.
-        Leave as ``None`` for the plain dense / range path.
+        (``block_sparse_tensors`` / ``block_sparse_tensors_bwd``)
+        capabilities. Leave as ``None`` for the plain dense / ranges path.
     """
     out, lse = FlexFlashAttnFunc.apply(
         q,
