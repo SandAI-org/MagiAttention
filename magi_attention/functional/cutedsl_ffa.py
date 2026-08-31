@@ -55,9 +55,8 @@ __all__ = ["cutedsl_fwd", "cutedsl_bwd"]
 #   the kernel host (scheduler grid bound Sum(len) <= total_k), so it may only
 #   be set for a sorted partition -> is_cu_seqlens, never is_full_coverage.
 #
-# DEVIATION: derived here instead of on AttnArg
-# Reason: AttnArg (calc_meta) owns the bwd ranges but is frozen for this work
-# Recovery: move both bools into AttnArg.__post_init__ and delete this cache
+# The natural home for these two bools is AttnArg.__post_init__, next to the
+# bwd ranges they are derived from; until they move there, this cache stands in.
 #
 # Cached per AttnArg: the runtime manager reuses args across steps and the
 # derivation sorts all ranges. Keyed by id() because AttnArg is unhashable;

@@ -180,15 +180,15 @@ def validate_per_range_mask_feature_support(
 def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
     """Collapse q/k ranges down to a cu_seqlens tensor.
 
-    # DEVIATION: still collapse validated ranges to cu_seqlens for SM100
-    # Reason: SeqlenInfo / kernels consume the cu_seqlens layout, not true ranges
-    # Recovery: call validate_true_ranges first; drop this helper once kernels consume true ranges directly
+    Serves the arches whose kernels read cu_seqlens instead of ranges rows
+    (SM80/SM90/SM120, and the SM100 block-sparse path). A cu_seqlens tensor
+    can only express a sorted partition, so the caller must guarantee that
+    geometry; the values are not read back here (device sync), and a
+    non-partition input silently produces wrong offsets.
 
     Args:
         ranges: an ``[R, 2]`` int32 cuda tensor of [start, end) intervals, or
-            ``None`` for the dense path. Must already satisfy
-            :func:`validate_true_ranges` (including the cu-partition
-            requirement).
+            ``None`` for the dense path.
 
     Returns:
         An ``[R + 1]`` int32 cu_seqlens tensor, or ``None`` if ``ranges`` is None.

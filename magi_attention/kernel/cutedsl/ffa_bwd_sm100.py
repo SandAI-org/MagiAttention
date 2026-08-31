@@ -4020,11 +4020,11 @@ class FFABwdSm100:
             n_block_for_bounds = n_block // self.cluster_shape_mnk[0]
             if const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
-                # DEVIATION: MMA does not walk the pair CSR.
-                # Reason: SM100 prologue/mainloop split is once per K-tile,
-                # not per pair; splitting it would deadlock the pipeline.
-                # Mitigation: trip count only; load/compute/reduce/relay walk
-                # the pairs. See _bwd_merge_m_iters.
+                # The MMA warp does not walk the pair CSR: its prologue /
+                # mainloop split happens once per K-tile, and splitting it per
+                # pair would deadlock the pipeline. It only needs the total
+                # trip count (_bwd_merge_m_iters); load/compute/reduce/relay
+                # walk the pairs.
                 m_iters = self._bwd_merge_m_iters(
                     SeqlenInfoCls,
                     block_info,
