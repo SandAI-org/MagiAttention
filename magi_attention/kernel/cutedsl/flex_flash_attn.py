@@ -395,9 +395,7 @@ def _flex_flash_attn_fwd(
     requested_use_clc_scheduler = clc_scheduler
     requested_disable_2cta = is_ffa_2cta_disabled(is_fwd=True)
     if per_range:
-        # DEVIATION: force-disable 2CTA/CLC for per-range masks
-        # Reason: the per-range kernel supports only 1CTA + static scheduler
-        # Recovery: none; static Full/Causal paths keep 2CTA/CLC
+        # temporary disable 2CTA/CLC for per-range masks
         requested_disable_2cta = True
         requested_use_clc_scheduler = False
 
@@ -1229,10 +1227,9 @@ def _flex_flash_attn_bwd(
     dkv_alloc = torch.empty_like if dkv_empty else torch.zeros_like
     dq_alloc = torch.empty_like if dq_empty else torch.zeros_like
 
-    # DEVIATION: caller-provided dk/dv keep their own content in rows no
-    # range covers
-    # Reason: hole-zeroing only runs for self-allocated gradient buffers
-    # Recovery: callers passing their own buffers must pre-clear them or accept stale holes
+    # Hole zeroing only runs for self-allocated gradient buffers: a caller
+    # passing its own dq/dk/dv keeps whatever its buffer held in rows no range
+    # covers, and is expected to pre-clear them if that matters.
     dk_self_alloc = dk is None
     dv_self_alloc = dv is None
     dq_self_alloc = dq is None
@@ -2104,7 +2101,7 @@ def flex_flash_attn_func(
     out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
-    Flex-flash-attention interface (dense / range / varlen).
+    Flex-flash-attention interface (dense / varlen / range).
 
     Explanation of some optional arguments:
 
