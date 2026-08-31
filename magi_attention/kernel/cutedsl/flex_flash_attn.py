@@ -912,15 +912,15 @@ def _flex_flash_attn_bwd(
     """Backward pass for FlexFlashAttention.
 
     Args:
-        declared_q_full_coverage: caller declaration that the union of
-            q_ranges covers the whole Q token space, so no dQ coverage holes
-            exist and the dQ hole-zeroing sweep is skipped. Trust-based: never
-            validated against the geometry (that would sync).
-        declared_k_full_coverage: caller declaration that k_ranges form a
-            sorted partition of the K token space. Stronger than the Q flag:
-            besides skipping the dK/dV hole-zeroing sweep it feeds
-            k_ranges_sorted_disjoint, whose scheduler grid bound assumes
-            sum(len) <= total_k — overlapping k ranges must not declare it.
+        declared_q_full_coverage: the union of q_ranges covers the whole Q
+            token space, so no dQ coverage holes exist and the dQ hole-zeroing
+            sweep is skipped. Derived where ranges are host-visible (the dist
+            wrapper); False is always safe.
+        declared_k_full_coverage: k_ranges form a sorted partition of the K
+            token space. Stronger than the Q side: besides skipping the dK/dV
+            hole-zeroing sweep it feeds k_ranges_sorted_disjoint, whose
+            scheduler grid bound assumes sum(len) <= total_k — overlapping k
+            ranges must never declare it. Derived, never user-facing.
         use_dense_dqacc_for_ranges: see :func:`flex_flash_attn_func`.
 
     Returns:
@@ -1946,8 +1946,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_fwd_atomic_reduction: bool = False,
         disable_bwd_dkv_atomic_reduction: bool = False,
         range_merge: bool | RangeMergePlan = False,
-        bwd_q_full_coverage: bool = False,
-        bwd_k_full_coverage: bool = False,
         use_dense_dqacc_for_ranges: bool = False,
         out_dtype: torch.dtype | None = None,
     ):
@@ -1963,10 +1961,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bool(range_merge),
             disable_fwd_atomic_reduction,
         )
-        if (bwd_q_full_coverage or bwd_k_full_coverage) and not is_varlen:
-            raise ValueError(
-                "bwd_q_full_coverage/bwd_k_full_coverage require " "q_ranges/k_ranges"
-            )
         if is_varlen:
             validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
         mask_types = normalize_mask_types(mask_types)
@@ -2015,8 +2009,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         # Forward merges Q ranges; backward merges the dual K ranges.
         # Derived from the fwd flag, not a second user flag.
         ctx.bwd_range_merge = bwd_range_merge_arg(range_merge)
-        ctx.bwd_q_full_coverage = bwd_q_full_coverage
-        ctx.bwd_k_full_coverage = bwd_k_full_coverage
         ctx.use_dense_dqacc_for_ranges = use_dense_dqacc_for_ranges
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
@@ -2028,7 +2020,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.k_tile_hint_snapshot = (
             _KTileHintSnapshot.capture(k_ranges)
             if any(t.requires_grad for t in (q, k, v))
-            and not (bwd_k_full_coverage or disable_bwd_dkv_atomic_reduction)
+            and not disable_bwd_dkv_atomic_reduction
             else None
         )
         # Drop the direct aux_tensors reference on ctx; the real tensors are
@@ -2096,12 +2088,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             flex_attn_args=flex_attn_args,
             range_merge=ctx.bwd_range_merge,
-            declared_q_full_coverage=ctx.bwd_q_full_coverage,
-            declared_k_full_coverage=ctx.bwd_k_full_coverage,
             use_dense_dqacc_for_ranges=ctx.use_dense_dqacc_for_ranges,
         )
 
-        return dq, dk, dv, *((None,) * 33)  # Extra Nones is fine
+        return dq, dk, dv, *((None,) * 31)  # Extra Nones is fine
 
 
 def flex_flash_attn_func(
@@ -2124,8 +2114,6 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = False,
     disable_bwd_dkv_atomic_reduction: bool = False,
     range_merge: bool | RangeMergePlan = False,
-    bwd_q_full_coverage: bool = False,
-    bwd_k_full_coverage: bool = False,
     use_dense_dqacc_for_ranges: bool = False,
     out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
@@ -2178,17 +2166,6 @@ def flex_flash_attn_func(
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
         contracts.
 
-    bwd_q_full_coverage: caller declaration that the union of q_ranges covers
-        the whole Q token space, letting backward skip the dQ hole-zeroing
-        sweep. Overlapping q ranges are fine. Trust-based: a wrong ``True``
-        leaves uncovered dq rows uninitialized.
-
-    bwd_k_full_coverage: caller declaration that k_ranges form a sorted
-        partition of the K token space — strictly stronger than coverage. It
-        skips the dK/dV hole-zeroing sweep and lets the backward scheduler
-        bound its grid by total_k, so declaring it for overlapping or unsorted
-        k ranges under-launches the grid and silently drops work.
-
     use_dense_dqacc_for_ranges: SM100/SM110 backward optimization: dQ
         accumulates into range-local tile-padded slots with the dense 1D
         bulk-reduce protocol instead of the row-major 2D TMA reduce. Requires
@@ -2226,8 +2203,6 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         disable_bwd_dkv_atomic_reduction,
         range_merge,
-        bwd_q_full_coverage,
-        bwd_k_full_coverage,
         use_dense_dqacc_for_ranges,
         out_dtype,
     )

@@ -199,10 +199,6 @@ def _ffa_opt_kwargs(is_varlen_case: bool, is_mha: bool) -> dict:
         # direct-store disjoint dKV is MHA-only (unique-writer contract)
         if is_mha and "disable_bwd_dkv_atomic_reduction" in _ffa_sig:
             kw["disable_bwd_dkv_atomic_reduction"] = True
-        if "bwd_q_full_coverage" in _ffa_sig:
-            kw["bwd_q_full_coverage"] = True
-        if "bwd_k_full_coverage" in _ffa_sig:
-            kw["bwd_k_full_coverage"] = True
         if "use_dense_dqacc_for_ranges" in _ffa_sig:
             kw["use_dense_dqacc_for_ranges"] = True
     return kw
