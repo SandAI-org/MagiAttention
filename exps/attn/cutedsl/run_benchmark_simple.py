@@ -35,17 +35,11 @@ Run:
 
 import inspect
 import os
-
-# Deterministic RNG: every run must generate identical varlen doc splits and
-# tensors, otherwise cross-run comparisons are meaningless.
-import random as _random
+import random
 
 import torch
 
-_random.seed(20260818)
-torch.manual_seed(20260818)
-
-from magi_attention.benchmarking import (  # noqa: E402
+from magi_attention.benchmarking import (
     BENCH_CASE_NOT_SUPPORTED,
     BENCH_CASE_OOM,
     Benchmark,
@@ -53,11 +47,12 @@ from magi_attention.benchmarking import (  # noqa: E402
     gen_save_path,
     perf_report,
 )
-from magi_attention.common.enum import AttnMaskType  # noqa: E402
-from magi_attention.common.ranges import AttnRanges  # noqa: E402
-from magi_attention.kernel.cutedsl import MT_MAP  # noqa: E402
-from magi_attention.kernel.cutedsl import flex_flash_attn_func as ffa_func  # noqa: E402
-from magi_attention.utils.arch import (  # noqa: E402
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.ranges import AttnRanges
+from magi_attention.kernel.cutedsl import MT_MAP
+from magi_attention.kernel.cutedsl import flex_flash_attn_func as ffa_func
+from magi_attention.utils import set_random_seed
+from magi_attention.utils.arch import (
     get_dev_cap_str,
     is_ampere,
     is_blackwell,
@@ -65,12 +60,12 @@ from magi_attention.utils.arch import (  # noqa: E402
 )
 
 # isort: split
-from exps.attn.baselines.utils import (  # noqa: E402
+from exps.attn.baselines.utils import (
     calculate_attn_flops,
-    generate_seqlens,
     seqlens2cu_seqlens,
     seqlens2curanges,
 )
+from exps.dist_attn.benchmark.utils import generate_seqlens
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
@@ -235,14 +230,17 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
     is_varlen = "varlen" in mask_type
     window_size_tuple = (-1, -1)
 
+    # Per-case seed: the doc split and the tensors depend only on the case
+    # shape, not on the worker's RNG consumption order.
+    set_random_seed(20260818 + seqlen)
+
     # ── ranges / cu_seqlens / attn flops ──
     if is_varlen:
-        # Re-seed per case so the doc split depends only on seqlen (not on the
-        # worker's RNG consumption order) — required for cross-run comparisons.
-        _random.seed(20260818 + seqlen)
-        torch.manual_seed(20260818 + seqlen)
-        # split the total seqlen into a list of variable-length docs
-        seqlens = generate_seqlens(varlen_seqlen_distribution, seqlen)
+        seqlens = generate_seqlens(
+            varlen_seqlen_distribution,
+            seqlen,
+            rng=random.Random(20260818 + seqlen),
+        )
         cu_ranges = seqlens2curanges(seqlens)
         cu_seqlens = seqlens2cu_seqlens(seqlens)
 
