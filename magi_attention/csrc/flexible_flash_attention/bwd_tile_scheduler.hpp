@@ -41,7 +41,7 @@ struct TileSchedulerArguments {
   int2* const ranges = nullptr;
   int2* const merge_ranges = nullptr;
   int* const range_map = nullptr;
-  int* determin_conflict_state = nullptr;
+  int* outer_determin_conflict_state = nullptr;
   int* const unique_count = nullptr;
 };
 
@@ -72,7 +72,7 @@ class DynamicPersistentTileSchedulerBwd {
     int2* const ranges;
     int2* const merge_ranges;
     int* const range_map;
-    int* determin_conflict_state;
+    int* outer_determin_conflict_state;
     int* const unique_count = nullptr;
   };
 
@@ -93,7 +93,7 @@ class DynamicPersistentTileSchedulerBwd {
         ranges,
         args.merge_ranges,
         args.range_map,
-        args.determin_conflict_state,
+        args.outer_determin_conflict_state,
         args.unique_count};
   }
 
@@ -225,12 +225,17 @@ class DynamicPersistentTileSchedulerBwd {
         // params.ranges[2 * bidb] ~ params.ranges[2 * bidb + 1] is the range of bidb
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
-        int* conflict_state = params.determin_conflict_state;
+        int* conflict_state = params.outer_determin_conflict_state;
         // update missed batch's conflict state, loop for bidb_last ~ bidb_now
         while (bidb_last < bidb_now) {
           // bidb_last_l ~ bidb_last_r is the range of bidb_last
           int2 bidb_last_lr = get_batch_range(params.ranges, bidb_last);
           int bidb_last_l = bidb_last_lr.x, bidb_last_r = bidb_last_lr.y;
+          // LoopK + PackGQA: outer ranges are Q ranges packed into seqlen by seqlen_scale_factor.
+          if constexpr (PackGQA && BwdInnerLoopK) {
+            bidb_last_l *= params.seqlen_scale_factor;
+            bidb_last_r *= params.seqlen_scale_factor;
+          }
           int l = bidb_last_l / kBlock + lane; // bidb_last_l / kBlock is first block id
           int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlock); // calc total block num of bidb_last
           int r = (bidb_last_l + block_num * kBlock - 1) / kBlock; // calc last block id
@@ -260,6 +265,10 @@ class DynamicPersistentTileSchedulerBwd {
         int2 lr = get_batch_range(params.ranges, bidb_now);
         int l = lr.x;
         int r = lr.y;
+        if constexpr (PackGQA && BwdInnerLoopK) {
+          l *= params.seqlen_scale_factor;
+          r *= params.seqlen_scale_factor;
+        }
         bool l_arrive_twice = (l % kBlock != 0) && (block_now == 0);
         bool r_arrive_twice = (l % kBlock != 0) && (block_now == (r - l + kBlock - 1) / kBlock - 1);
         int left_conflict_index = l / kBlock + block_now;

@@ -335,7 +335,7 @@ CUTLASS_DEVICE void iterate_range(int& cursor, int lo, int hi, BodyFn body) {
 // and cause register spill (local_ld/st). BWD uses a direct mask_fn(tSrS, block) instead.
 // This function is retained for FWD use only.
 //
-// BlockMetaT must provide: outer_tile_idx, inner_block_min, inner_block_cnt,
+// InnerBlockMetaT must provide: outer_tile_idx, inner_block_min, inner_block_cnt,
 //   seqlen_info.seqlen_q, seqlen_info.seqlen_k, attn_type.
 // MaskT must provide: apply<Seqlenk_mask, PackGQA, PackGQAFactor>(tSrS, m_block, n_block, ...).
 template <
@@ -345,20 +345,20 @@ template <
     int PackGQAFactor,
     DispatchAxis Axis,
     DispatchDirection Direction,
-    typename BlockMetaT,
+    typename InnerBlockMetaT,
     typename MaskT,
     typename TensorS,
     typename StepFn>
-CUTLASS_DEVICE void mask_dispatch_unified(BlockMetaT const& block_meta, MaskT const& mask, TensorS& tSrS, int thread_idx, StepFn&& step_fn) {
+CUTLASS_DEVICE void mask_dispatch_unified(InnerBlockMetaT const& inner_block_meta, MaskT const& mask, TensorS& tSrS, int thread_idx, StepFn&& step_fn) {
   constexpr bool is_N = (Axis == DispatchAxis::N);
   constexpr int kBlockOuter = is_N ? kBlockN : kBlockM;
 
-  int const block_lo = block_meta.inner_block_min;
-  int const block_hi = block_meta.inner_block_cnt;
-  int const fixed_block = block_meta.outer_tile_idx;
-  int const seqlen_q = block_meta.seqlen_info.seqlen_q;
-  int const seqlen_k = block_meta.seqlen_info.seqlen_k;
-  auto const attn_type = block_meta.attn_type;
+  int const block_lo = inner_block_meta.inner_block_min;
+  int const block_hi = inner_block_meta.inner_block_cnt;
+  int const fixed_block = inner_block_meta.outer_tile_idx;
+  int const seqlen_q = inner_block_meta.seqlen_info.seqlen_q;
+  int const seqlen_k = inner_block_meta.seqlen_info.seqlen_k;
+  auto const attn_type = inner_block_meta.attn_type;
 
   int const pack_factor = (!is_N && PackGQA) ? PackGQAFactor : 1;
   int const seqlen_outer = is_N ? seqlen_k : seqlen_q * pack_factor;
@@ -414,7 +414,7 @@ CUTLASS_DEVICE void mask_dispatch_unified(BlockMetaT const& block_meta, MaskT co
   // FWD: mma_head already processed the first block and advanced inner_block_idx,
   //      so we must start from the advanced position, not from block_lo/block_hi.
   // BWD: no mma_head pre-processing, inner_block_idx == init_block_cur(block_lo, block_hi).
-  int block_cur = block_meta.inner_block_idx;
+  int block_cur = inner_block_meta.inner_block_idx;
   iterate_range<Direction>(block_cur, block_lo, block_hi, [&] { step_fn(block_cur, unified_mask_fn, cute::false_type{}); });
 }
 

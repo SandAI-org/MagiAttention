@@ -143,14 +143,6 @@ Override the number of pipeline stages for K (main pipeline), dS (double buffer)
 
 Set to `1` to un-union dK/dV SMEM (separate buffers for each). Requires `stages_v=1` to fit.
 
-**MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM**
-
-- **Defaults to:** `1` (use SMEM for inner dKV store)
-- **Used by:** `kInnerStoreMode` (`0` forces `InnerStoreMode::BypassSmem`)
-
-Set to `0` to bypass SMEM for dKV — consumer WGs atomicAdd directly to GMEM from registers.
-Experimental; may improve performance for bandwidth-bound configs.
-
 **MAGI_ATTENTION_FFA_INNER_LOAD_MODE**
 
 - **Defaults to:** auto (`tma` when tiles are contiguous, else `cpasync`)

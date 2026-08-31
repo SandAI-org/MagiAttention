@@ -460,14 +460,17 @@ def build_index_sparse_indices(
     max_topk: int,
     device: str | torch.device = "cuda",
     sparse_k_block_size: int = 1,
+    seed: int | None = None,
 ) -> torch.Tensor:
-    """Build random index_sparse_indices (total_q, NHK, max_topk) with logical KV token positions.
+    """Build index_sparse_indices (total_q, NHK, max_topk) with logical KV token positions.
 
     Values are logical token positions: ``b * S_kv + token_idx``.
     Head selection is handled by the kernel's intergroup mechanism (bidh_kv).
 
     Args:
         topk: int or list[int]. If list, per-batch topk (length must be B).
+        seed: optional RNG seed for deterministic generation. When None, uses
+            the current global RNG state (non-deterministic across calls).
 
     Returns:
         Tensor of shape (B * S_q, NHK, max_topk) with int32 logical positions (-1 = padding).
@@ -480,17 +483,14 @@ def build_index_sparse_indices(
         assert len(topk) == B
         topk_per_batch = topk
 
+    gen = torch.Generator(device=device).manual_seed(seed) if seed is not None else None
     indices = torch.full((total_q, NHK, max_topk), -1, dtype=torch.int32, device=device)
     for b_idx in range(B):
         tk = topk_per_batch[b_idx]
         n_rows = S_q * NHK
-        rand_keys = torch.rand(n_rows, num_kv_blocks, device=device)
+        rand_keys = torch.rand(n_rows, num_kv_blocks, device=device, generator=gen)
         _, perm_all = rand_keys.topk(tk, dim=1, largest=False, sorted=True)
         perm_all = perm_all.reshape(S_q, NHK, tk)
-        # Global block index: perm_all selects among num_kv_blocks blocks within
-        # the batch; offset by b_idx * num_kv_blocks to get the global block id
-        # across all batches.  When sparse_k_block_size == 1, num_kv_blocks == S_kv so
-        # this is equivalent to the token-level encoding.
         global_ids = b_idx * num_kv_blocks + perm_all
         row_start = b_idx * S_q
         indices[row_start : row_start + S_q, :, :tk] = global_ids.int()

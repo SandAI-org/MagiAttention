@@ -26,6 +26,7 @@ from magi_attention.testing.precision import (
     assert_close,
     extract_mismatch_threshold,
 )
+from magi_attention.utils.sparse_utils import build_index_sparse_indices
 
 from .dsa_ref_attn import dsa_ref_attn_func
 
@@ -65,7 +66,7 @@ class TestDSASparseInterface(TestCase):
         ],
     )
     @parameterize("dtype", [torch.float16, torch.bfloat16])
-    @parameterize("backend", ["flex", "ffa_block_sparse", "ffa_index_sparse", "sdpa"])
+    @parameterize("backend", ["flex", "ffa_index_sparse", "sdpa"])
     def test_sparse_flex_vs_ref(
         self,
         attn_config: dict[str, Any],
@@ -80,47 +81,45 @@ class TestDSASparseInterface(TestCase):
         k = torch.randn((skv, nhkv, hd), dtype=dtype, device=self.device)
         v = torch.randn((skv, nhkv, hd), dtype=dtype, device=self.device)
 
-        # construct random index_map: (nhkv, sq, topk)
-        # each Q token corresponds to topk K tokens for each KV head
-        index_map = torch.stack(
-            [
-                torch.stack(
-                    [torch.randperm(skv, device=self.device)[:topk] for _ in range(sq)]
-                )
-                for _ in range(nhkv)
-            ]
-        ).to(torch.int32)
+        # (sq, nhkv, topk) token indices via shared sparse utils helper
+        index_sparse_indices = build_index_sparse_indices(
+            B=1,
+            NHK=nhkv,
+            S_q=sq,
+            S_kv=skv,
+            topk=topk,
+            max_topk=topk,
+            device=self.device,
+            seed=self.seed,
+        )
 
         softmax_scale = hd**-0.5
 
         test_case = f"Sparse Attention [{dtype=}, {backend=} {attn_config=}]"
 
-        # run Torch reference implementation (as baseline)
         o_ref, lse_ref = dsa_ref_attn_func(
             q=q,
             k=k,
             v=v,
-            index_map=index_map,
+            index_sparse_indices=index_sparse_indices,
             softmax_scale=softmax_scale,
             high_precision=False,
         )
 
-        # run Torch reference implementation (high precision)
         o_ref_hp, lse_ref_hp = dsa_ref_attn_func(
             q=q,
             k=k,
             v=v,
-            index_map=index_map,
+            index_sparse_indices=index_sparse_indices,
             softmax_scale=softmax_scale,
             high_precision=True,
         )
 
-        # run Flex Attention backend
         o_flex, lse_flex = dsa_attn_func(
             q=q,
             k=k,
             v=v,
-            index_map=index_map,
+            index_sparse_indices=index_sparse_indices,
             softmax_scale=softmax_scale,
             backend=backend,
         )

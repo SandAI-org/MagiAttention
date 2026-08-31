@@ -680,13 +680,21 @@ def _flex_flash_attn_backward(
             )
         ]
 
-    # InnerLoopK + disable_bwd_dq_atomic_reduction: dQ is outer, epilogue uses per-element
-    # direct store (one CTA per Q block) → empty_like is safe, no zero-init needed.
-    # Otherwise dQ is inner → mainloop uses TMA_REDUCE_ADD → must be zeros.
+    # API keeps dx-specific disable_* flags; convert immediately to the unified
+    # OuterStoreNeedReduction used by C++/jinja (LoopK → dQ flag, LoopQ → dKV flag).
+    # Opposite-direction flag is ignored so LoopK/LoopQ cannot inherit a stale value.
+    outer_store_need_reduction = not (
+        disable_bwd_dq_atomic_reduction
+        if bwd_inner_loop_k
+        else disable_bwd_dkv_atomic_reduction
+    )
+
+    # Outer + no reduction → empty_like (one CTA owns each tile).
+    # Otherwise → zeros (atomic reduce-add).
     dq = (
         (
             torch.empty_like(q, dtype=dq_type or q.dtype)
-            if disable_bwd_dq_atomic_reduction and bwd_inner_loop_k
+            if bwd_inner_loop_k and not outer_store_need_reduction
             else torch.zeros_like(q, dtype=dq_type or torch.float32)
         )
         if dq is None
@@ -696,8 +704,7 @@ def _flex_flash_attn_backward(
     clear_dkv = dk is None and dv is None
     kv_covered_mask = None
     if clear_dkv:
-        # skip clear dk and dv if no reduction
-        if disable_bwd_dkv_atomic_reduction:
+        if (not bwd_inner_loop_k) and not outer_store_need_reduction:
             if index_sparse and index_sparse_indices is not None:
                 dk = torch.empty_like(k, dtype=dk_type or k.dtype)
                 dv = torch.empty_like(v, dtype=dv_type or v.dtype)
@@ -706,10 +713,13 @@ def _flex_flash_attn_backward(
                 total_k = k.size(0)
                 num_k_blocks = index_sparse_indices.size(0)
                 kbs_eff = total_k // num_k_blocks
-                per_block_covered = (
-                    index_sparse_indices.reshape(num_k_blocks, -1) >= 0
-                ).any(dim=1)
-                kv_covered_mask = per_block_covered.repeat_interleave(kbs_eff)
+                # Per-(block, kvhead): a (token, head) is covered only when THAT
+                # head has >= 1 valid Q entry. Flattening across heads would leave
+                # uncovered rows of empty_like dK/dV as garbage when nhk > 1.
+                per_block_covered = (index_sparse_indices >= 0).any(dim=2)
+                kv_covered_mask = per_block_covered.repeat_interleave(
+                    kbs_eff, dim=0
+                ).contiguous()  # (total_k, nhk)
             else:
                 dk = torch.empty_like(k, dtype=dk_type or k.dtype)
                 dv = torch.empty_like(v, dtype=dv_type or v.dtype)
@@ -752,8 +762,11 @@ def _flex_flash_attn_backward(
         dq_type=dq_type,
         dk_type=dk_type,
         dv_type=dv_type,
-        disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
-        disable_bwd_dq_atomic_reduction=disable_bwd_dq_atomic_reduction,
+        # Map back for JIT/jinja: only the outer-direction disable flag is True.
+        disable_bwd_dkv_atomic_reduction=(not bwd_inner_loop_k)
+        and not outer_store_need_reduction,
+        disable_bwd_dq_atomic_reduction=bwd_inner_loop_k
+        and not outer_store_need_reduction,
         deterministic=deterministic,
         sm_margin=sm_margin,
         range_merge=range_merge,
@@ -906,6 +919,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             global _ffa_sparse_k_block_size
             _ffa_sparse_k_block_size = sparse_k_block_size
 
+        # Sparse FWD: outer LoopK over Q — each (Q tile, head) is written by one CTA
+        # (disable_fwd_atomic_reduction / direct store). Output o is bitwise deterministic
+        # without in-kernel range-lock. User ctx.deterministic stays True for sparse
+        # BWD dual-pass; only the FWD kernel launch passes Deterministic=False.
+        _fwd_kernel_deterministic = (
+            False if (block_sparse or index_sparse) else deterministic
+        )
+
         out, meta = _flex_flash_attn_forward(
             q=q,
             k=k,
@@ -923,7 +944,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             if disable_fwd_atomic_reduction
             else torch.float32,  # out_type
             disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
-            deterministic=deterministic,
+            deterministic=_fwd_kernel_deterministic,
             sm_margin=sm_margin,
             # optional args below mainly for sparse attn
             ref_block_size=ref_block_size,
@@ -1068,6 +1089,28 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ctx.bwd_inner_loop_k if ctx.bwd_inner_loop_k is not None else False
         )
 
+        # Sparse deterministic (BlockSparse + IndexSparse): structural, not range-lock.
+        # FWD: single-writer outer o (see _fwd_kernel_deterministic above).
+        # BWD: dual-pass; both kernel launches use Deterministic=False below.
+        # - Pass1 LoopQ: dKV outer accumulation (inner dQ discarded)
+        # - Pass2 LoopK: dQ outer direct-store (dKV discarded)
+        # Dense deterministic: single-pass with kernel Deterministic=True (LoopQ or LoopK).
+        _sparse_deterministic_dual_pass = ctx.deterministic and (
+            ctx.block_sparse or ctx.index_sparse
+        )
+
+        # Dense deterministic still forces LoopQ (uses range-lock protocol for dQ).
+        if (
+            ctx.deterministic
+            and bwd_inner_loop_k
+            and not _sparse_deterministic_dual_pass
+        ):
+            bwd_inner_loop_k = False
+
+        # Dual-pass: first pass is always LoopQ, so merge_ranges below uses K-merge.
+        if _sparse_deterministic_dual_pass:
+            bwd_inner_loop_k = False
+
         if ctx.disable_bwd_dkv_atomic_reduction and bwd_inner_loop_k:
             raise RuntimeError(
                 "disable_bwd_dkv_atomic_reduction is incompatible with bwd_inner_loop_k=True (InnerLoopK)."
@@ -1077,6 +1120,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             assert (
                 q_ranges is None and k_ranges is None
             ), "IndexSparse BWD does not use q_ranges/k_ranges; they should be None"
+
+            _orig_inner_indices_cnt = ctx.inner_indices_cnt
 
             bwd_q_ranges = None
             bwd_k_ranges = None
@@ -1089,18 +1134,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             if not bwd_inner_loop_k:
                 # IndexSparse BWD InnerLoopQ: outer=K block, inner=Q from inner_indices
                 _loopq_kbs = ctx.sparse_k_block_size
-                nhk = k.size(1)
                 seqlen_k = v.size(0)
 
                 from magi_attention.utils.sparse_utils import (
                     invert_index_sparse_indices,
                 )
-
-                if _loopq_kbs > 1 and nhk != 1:
-                    raise NotImplementedError(
-                        f"IndexSparse BWD InnerLoopQ with sparse_k_block_size>1 requires nhk=1, "
-                        f"got nhk={nhk}. NHK>1 + kbs>1 has a flat-layout mismatch (P8-BUG-NHK)."
-                    )
 
                 # NOTE: invert_index_sparse_indices contains a GPU→CPU sync
                 # (counts.max().item()) to determine the padded inner_topk.
@@ -1172,44 +1210,156 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             global _ffa_sparse_k_block_size
             _ffa_sparse_k_block_size = ctx.sparse_k_block_size
 
-        dq, dk, dv, dsink = _flex_flash_attn_backward(
-            dout=dout,
-            q=q,
-            k=k,
-            v=v,
-            sink=sink,
-            sink_layout=ctx.sink_layout,
-            out=out,
-            lse=lse,
-            dq=None,
-            dk=None,
-            dv=None,
-            dsink=None,
-            q_ranges=bwd_q_ranges,
-            k_ranges=bwd_k_ranges,
-            attn_type_map=bwd_attn_type_map,
-            softmax_scale=ctx.softmax_scale,
-            softcap=ctx.softcap,
-            dq_type=q.dtype if ctx.disable_bwd_dq_atomic_reduction else torch.float32,
-            dk_type=k.dtype if ctx.disable_bwd_dkv_atomic_reduction else torch.float32,
-            dv_type=v.dtype if ctx.disable_bwd_dkv_atomic_reduction else torch.float32,
-            disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
-            disable_bwd_dq_atomic_reduction=ctx.disable_bwd_dq_atomic_reduction,
-            deterministic=ctx.deterministic,
-            sm_margin=ctx.sm_margin,
-            range_merge=bwd_range_merge,
-            merge_k_ranges=merge_k_ranges,
-            bwd_kq_map=bwd_kq_map,
-            bwd_unique_count=bwd_unique_count,
-            bwd_inner_loop_k=bwd_inner_loop_k,
-            pack_gqa=ctx.pack_gqa,
-            cat_gqa=ctx.cat_gqa,
-            block_sparse=ctx.block_sparse,
-            index_sparse=ctx.index_sparse,
-            index_sparse_indices=index_sparse_indices,
-            inner_indices_cnt=ctx.inner_indices_cnt,
-            sparse_k_block_size=ctx.sparse_k_block_size,
-        )
+        if _sparse_deterministic_dual_pass:
+            # Sparse dual-pass: both launches use kernel Deterministic=False.
+            _, dk, dv, dsink = _flex_flash_attn_backward(
+                dout=dout,
+                q=q,
+                k=k,
+                v=v,
+                sink=sink,
+                sink_layout=ctx.sink_layout,
+                out=out,
+                lse=lse,
+                dq=None,
+                dk=None,
+                dv=None,
+                dsink=None,
+                q_ranges=bwd_q_ranges,
+                k_ranges=bwd_k_ranges,
+                attn_type_map=bwd_attn_type_map,
+                softmax_scale=ctx.softmax_scale,
+                softcap=ctx.softcap,
+                dq_type=None,
+                dk_type=None,
+                dv_type=None,
+                disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
+                disable_bwd_dq_atomic_reduction=False,
+                deterministic=False,
+                sm_margin=ctx.sm_margin,
+                range_merge=bwd_range_merge,
+                merge_k_ranges=merge_k_ranges,
+                bwd_kq_map=bwd_kq_map,
+                bwd_unique_count=bwd_unique_count,
+                bwd_inner_loop_k=False,
+                pack_gqa=ctx.pack_gqa,
+                cat_gqa=ctx.cat_gqa,
+                block_sparse=ctx.block_sparse,
+                index_sparse=ctx.index_sparse,
+                index_sparse_indices=index_sparse_indices,
+                inner_indices_cnt=ctx.inner_indices_cnt,
+                sparse_k_block_size=ctx.sparse_k_block_size,
+            )
+
+            if ctx.index_sparse:
+                loopk_merge_k_ranges = None
+                loopk_bwd_kq_map = None
+                loopk_bwd_unique_count = None
+                loopk_bwd_range_merge = False
+                loopk_q_ranges = None
+                loopk_k_ranges = None
+                loopk_attn_type_map = None
+                loopk_index_sparse_indices = ctx.saved_tensors[-1]
+                loopk_inner_indices_cnt = _orig_inner_indices_cnt
+            else:
+                # LoopK outer=Q: reuse FWD Q-merge when available.
+                if merge_q_ranges is not None:
+                    loopk_q_ranges = q_ranges
+                    loopk_k_ranges = k_ranges
+                    loopk_attn_type_map = attn_type_map
+                    loopk_merge_k_ranges = merge_q_ranges
+                    loopk_bwd_kq_map = fwd_qk_map
+                    loopk_bwd_unique_count = fwd_unique_count
+                else:
+                    (
+                        loopk_merge_k_ranges,
+                        loopk_q_ranges,
+                        loopk_k_ranges,
+                        loopk_attn_type_map,
+                        loopk_bwd_kq_map,
+                        loopk_bwd_unique_count,
+                    ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
+                loopk_bwd_range_merge = True
+                loopk_index_sparse_indices = index_sparse_indices
+                loopk_inner_indices_cnt = ctx.inner_indices_cnt
+
+            dq, _, _, _ = _flex_flash_attn_backward(
+                dout=dout,
+                q=q,
+                k=k,
+                v=v,
+                sink=sink,
+                sink_layout=ctx.sink_layout,
+                out=out,
+                lse=lse,
+                dq=None,
+                dk=None,
+                dv=None,
+                dsink=None,
+                q_ranges=loopk_q_ranges,
+                k_ranges=loopk_k_ranges,
+                attn_type_map=loopk_attn_type_map,
+                softmax_scale=ctx.softmax_scale,
+                softcap=ctx.softcap,
+                dq_type=None,
+                dk_type=None,
+                dv_type=None,
+                disable_bwd_dkv_atomic_reduction=False,
+                disable_bwd_dq_atomic_reduction=True,
+                deterministic=False,
+                sm_margin=ctx.sm_margin,
+                range_merge=loopk_bwd_range_merge,
+                merge_k_ranges=loopk_merge_k_ranges,
+                bwd_kq_map=loopk_bwd_kq_map,
+                bwd_unique_count=loopk_bwd_unique_count,
+                bwd_inner_loop_k=True,
+                pack_gqa=ctx.pack_gqa,
+                cat_gqa=ctx.cat_gqa,
+                block_sparse=ctx.block_sparse,
+                index_sparse=ctx.index_sparse,
+                index_sparse_indices=loopk_index_sparse_indices,
+                inner_indices_cnt=loopk_inner_indices_cnt,
+                sparse_k_block_size=ctx.sparse_k_block_size,
+            )
+        else:
+            dq, dk, dv, dsink = _flex_flash_attn_backward(
+                dout=dout,
+                q=q,
+                k=k,
+                v=v,
+                sink=sink,
+                sink_layout=ctx.sink_layout,
+                out=out,
+                lse=lse,
+                dq=None,
+                dk=None,
+                dv=None,
+                dsink=None,
+                q_ranges=bwd_q_ranges,
+                k_ranges=bwd_k_ranges,
+                attn_type_map=bwd_attn_type_map,
+                softmax_scale=ctx.softmax_scale,
+                softcap=ctx.softcap,
+                dq_type=None,
+                dk_type=None,
+                dv_type=None,
+                disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
+                disable_bwd_dq_atomic_reduction=ctx.disable_bwd_dq_atomic_reduction,
+                deterministic=ctx.deterministic,
+                sm_margin=ctx.sm_margin,
+                range_merge=bwd_range_merge,
+                merge_k_ranges=merge_k_ranges,
+                bwd_kq_map=bwd_kq_map,
+                bwd_unique_count=bwd_unique_count,
+                bwd_inner_loop_k=bwd_inner_loop_k,
+                pack_gqa=ctx.pack_gqa,
+                cat_gqa=ctx.cat_gqa,
+                block_sparse=ctx.block_sparse,
+                index_sparse=ctx.index_sparse,
+                index_sparse_indices=index_sparse_indices,
+                inner_indices_cnt=ctx.inner_indices_cnt,
+                sparse_k_block_size=ctx.sparse_k_block_size,
+            )
 
         # Cast gradients to the same dtype as inputs
         with maybe_profile_ffa_ctx("bwd_cast"):
@@ -1304,11 +1454,16 @@ def flex_flash_attn_func(
             Shape: ``(total_q, num_kv_heads, max_topk)``, dtype=int32.
             Values are **logical** KV token positions: ``batch_idx * S_kv + token_idx``.
             The kernel internally converts to physical row via ``pos * NHK + kv_head``.
-            Use ``-1`` for padding (must be contiguous at the tail of each row).
+            Use ``-1`` for padding (must be contiguous at the tail of each row;
+            scattered -1 between valid indices is NOT supported and causes silent
+            corruption). If ``max_topk`` is not a multiple of tile_size, auto-padding
+            with trailing -1 is applied (a UserWarning is issued).
             Mutually exclusive with ``q_ranges``.
             The kernel scans trailing ``-1`` entries to determine loop count and
             invalid count internally — no Python-side preprocessing is needed.
-            ``max_topk`` (last dim) must be a multiple of tile_size (128, or 64 if swap_ab).
+            ``max_topk`` (last dim) is auto-padded to tile_size (128, or 64 if swap_ab).
+            Indices need NOT be sorted, but sorted (ascending) indices yield better
+            L2 cache utilization and are recommended for production workloads.
             The mask representation theoretically supports block-level KV (``sparse_k_block_size > 1``)
             but currently only ``sparse_k_block_size=1`` (token-level) is implemented.
         q_block_size (int, optional): Q block size. Defaults to ``1``.
@@ -1643,18 +1798,75 @@ def flex_flash_attn_func(
         total_q_idx, nhk_idx, max_topk_per_head = index_sparse_indices.shape
         if sparse_k_block_size > 1:
             effective_topk = max_topk_per_head * sparse_k_block_size
-            assert effective_topk % tile_size == 0, (
-                f"effective topk (max_topk_per_head={max_topk_per_head} * sparse_k_block_size={sparse_k_block_size} "
-                f"= {effective_topk}) must be a multiple of tile_size={tile_size}."
-            )
+            if effective_topk % tile_size != 0:
+                import warnings
+
+                pad_topk = (
+                    tile_size - (effective_topk % tile_size)
+                ) // sparse_k_block_size
+                warnings.warn(
+                    f"index_sparse_indices last dim ({max_topk_per_head}) with "
+                    f"sparse_k_block_size={sparse_k_block_size} gives effective_topk="
+                    f"{effective_topk} not aligned to tile_size={tile_size}. "
+                    f"Auto-padding with {pad_topk} extra slots (value=-1).",
+                    stacklevel=3,
+                )
+                index_sparse_indices = torch.nn.functional.pad(
+                    index_sparse_indices, (0, pad_topk), value=-1
+                )
+                max_topk_per_head = index_sparse_indices.shape[-1]
         else:
-            assert max_topk_per_head % tile_size == 0, (
-                f"index_sparse_indices last dim (max_topk_per_head={max_topk_per_head}) must be a multiple "
-                f"of tile_size={tile_size}. Pad with -1 if needed."
-            )
+            if max_topk_per_head % tile_size != 0:
+                import warnings
+
+                pad_size = tile_size - (max_topk_per_head % tile_size)
+                warnings.warn(
+                    f"index_sparse_indices last dim ({max_topk_per_head}) is not a "
+                    f"multiple of tile_size={tile_size}. Auto-padding with {pad_size} "
+                    f"extra slots (value=-1).",
+                    stacklevel=3,
+                )
+                index_sparse_indices = torch.nn.functional.pad(
+                    index_sparse_indices, (0, pad_size), value=-1
+                )
+                max_topk_per_head = index_sparse_indices.shape[-1]
         # Keep 3D: kernel uses nhk (from shape_K) and bidh_kv to index
         # directly into dim-1 — no flatten/unflatten needed.
         index_sparse_indices = index_sparse_indices.contiguous()
+
+        if is_sanity_check_enable():
+            # Kernel counts valid indices by scanning from the END backwards until
+            # it hits a non-negative value.  Scattered -1 in the middle would be
+            # silently treated as valid positions (loading token 0 without mask).
+            neg_mask = index_sparse_indices < 0
+            if neg_mask.any():
+                # For each (q, head) row, check that all -1 are trailing:
+                # after the last valid (>=0) index, everything must be -1.
+                cummax_valid = (~neg_mask).flip(-1).cummax(dim=-1).values.flip(-1)
+                has_scattered_neg = (neg_mask & cummax_valid).any()
+                assert not has_scattered_neg, (
+                    "index_sparse_indices contains -1 (invalid) entries before valid "
+                    "indices. The kernel only supports trailing -1 (padding at the end "
+                    "of the topk dimension). Please sort valid indices to the front."
+                )
+
+            # Unsorted indices are correct but cause significant BWD perf degradation
+            # (up to 56% slower at 131k kvseqlen) due to L2 cache thrashing.
+            valid_mask = index_sparse_indices >= 0
+            if valid_mask.any():
+                sorted_check = index_sparse_indices.clone()
+                sorted_check[~valid_mask] = torch.iinfo(torch.int32).max
+                is_sorted = (sorted_check[:, :, 1:] >= sorted_check[:, :, :-1]).all()
+                if not is_sorted:
+                    import warnings
+
+                    warnings.warn(
+                        "index_sparse_indices are not sorted in ascending order. "
+                        "This is correct but causes significant BWD performance "
+                        "degradation (up to 56% at large kvseqlen) due to L2 cache "
+                        "thrashing. Consider sorting indices for production workloads.",
+                        stacklevel=3,
+                    )
 
         # IndexSparse uses indices, not ranges — assert ranges are not provided
         assert q_ranges is None and k_ranges is None, (
@@ -1668,10 +1880,6 @@ def flex_flash_attn_func(
         # IndexSparse: fixed (128, tile_size) tile — q_block_size=1 means PackGQA fills M dim.
         # TODO: tune kBlockM for non-PackGQA or small-head scenarios
         ref_block_size = (128, tile_size)
-
-    assert not (
-        bwd_inner_loop_k is True and deterministic
-    ), "Deterministic mode is not supported when bwd_inner_loop_k is True."
 
     if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert is_fa4_installed, (
@@ -1735,14 +1943,16 @@ def flex_flash_attn_func(
         if index_sparse and bwd_inner_loop_k is None and sparse_k_block_size < 128:
             bwd_inner_loop_k = True
 
-        # IndexSparse + LoopK: each Q-tile (M=128) must cover exactly one
-        # original seq position's packed heads.  When pack_gqa_factor < 128,
-        # one Q-tile spans multiple seq positions with different index patterns
-        # → BWD dQ is incorrect.  Fall back to LoopQ.
-        if index_sparse and bwd_inner_loop_k is True and pack_gqa:
-            _pack_f = q.size(1) // k.size(1)
-            if _pack_f < 128:
-                bwd_inner_loop_k = None
+        # Deterministic mode requires LoopQ. The range-lock rendezvous publishes a
+        # boundary only once its counter reaches exactly 2, which holds because a
+        # writer syncs on the boundary before arriving on it: the writers of a block
+        # form a serial relay that contributes two arrivals per round. LoopK mirrors
+        # that encoding with Q and K swapped and works on simple shapes, but still
+        # deadlocks with range_merge + pack_gqa over merged batches, the counter
+        # observed past 2. The condition that breaks the relay is not pinned down,
+        # so gate the pairing off until it is.
+        if deterministic and bwd_inner_loop_k is True:
+            bwd_inner_loop_k = False
 
         # BWD InnerLoopQ (bwd_inner_loop_k != True): dKV is outer accumulation.
         # Safe only when GQA heads are packed (no cross-CTA dKV overlap).

@@ -23,19 +23,17 @@ FWD: Grid (total_q_positions,) — 1 thread block processes all nhq heads.
      Q[BLOCK_M, D] @ gathered_K[BLOCK_N, D]^T → S[BLOCK_M, BLOCK_N]  (tl.dot)
      P[BLOCK_M, BLOCK_N] @ gathered_V[BLOCK_N, D] → O[BLOCK_M, D]    (tl.dot)
 
-BWD: Two-pass architecture with selectable dKV strategy:
-     dQ kernel (LoopK): per query-position, inner-loop over topk KV positions.
-         Grid=(total_q,). dQ accumulated locally, no atomics. Uses tl.dot.
-     dKV kernel — two variants:
-       (a) "atomic" (default): LoopK + atomic scatter.
-           Grid=(total_q,). Uses tl.dot. Best for RANDOM indices.
-           ~36 TFLOPS. Bottleneck: atomic contention.
-       (b) "loopq": LoopQ with BLOCK_N KV tiling + PackGQA + block-level inner_indices.
-           Grid=(num_kv_blocks, num_splits). ALL ops use tl.dot (Tensor Core).
-           - Structured/local indices: ~150 TFLOPS (4x faster than atomic!)
-           - Random indices: ~15 TFLOPS (sparse mask wastes N dimension)
-           Tile: M=128 (PackGQA nhq heads), N=BLOCK_N (consecutive KV positions).
-           Preprocess: block inverse index + per-(block,Q) bitmask.
+BWD: Two modes controlled by bwd_mode (= inner loop direction):
+     (a) "loopk" (default): inner loop over K. Each CTA owns one Q position
+         and iterates over its topk KV positions.
+         dQ: local register accumulation, no write conflicts.
+         dK/dV: bf16 atomic scatter (multiple Q CTAs write the same KV).
+         Implemented as separate dQ kernel + head-chunked dKV kernel.
+     (b) "loopq": inner loop over Q. Each CTA owns one KV tile and iterates
+         over all Q positions that reference it (via inverted index).
+         dK/dV: local register accumulation, no write conflicts, no atomics.
+         dQ: computed by a separate LoopK-direction dQ kernel.
+         kbs=1: CSR + 64-bit bitmask; kbs=128: block-level inverse index.
 
 Input:
     q: (total_q, nhq, D)
@@ -206,7 +204,7 @@ def token_sparse_fwd(q, k, v, indices, return_lse=False):
 
 
 @triton.jit
-def _token_sparse_bwd_dq_kernel(
+def _bwd_dq_kernel(
     Q,
     K,
     V,
@@ -228,7 +226,9 @@ def _token_sparse_bwd_dq_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """Compute dQ for one query position (all heads)."""
+    """BWD dQ kernel (LoopK direction): inner loop over K positions.
+    Each CTA owns one Q position and loops over its topk KV tiles.
+    dQ accumulated locally in fp32, no write conflicts."""
     pid_q = tl.program_id(0).to(tl.int64)
 
     offs_m = tl.arange(0, BLOCK_M)
@@ -291,126 +291,94 @@ def _token_sparse_bwd_dq_kernel(
 
 
 @triton.jit
-def _token_sparse_bwd_dkv_loopq_kernel(
+def _bwd_dkv_loopk_kernel(
     Q,
     K,
     V,
+    Indices,
     dO,
     dK,
     dV,
     Lse,
     Delta,
-    BlockInvQ,
-    BlockInvMask,
-    BlockOffsets,
     sm_scale,
     stride_qt,
     stride_qh,
     stride_kt,
+    stride_it,
     stride_ot,
     stride_oh,
     stride_dkt,
     NHQ: tl.constexpr,
+    TOPK: tl.constexpr,
     D: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_MH: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    SPLIT_SIZE: tl.constexpr,
 ):
-    """dKV kernel — LoopQ with BLOCK_N KV tiling + PackGQA (tl.dot enabled).
-
-    Grid: (num_kv_blocks, num_splits).
-    Each TB owns BLOCK_N consecutive KV positions, iterates over Q refs from
-    the block-level inverse index.
-
-    Tile structure (enables ALL operations via tl.dot / Tensor Core):
-      M direction: 128 q-heads of one Q position (PackGQA fills BLOCK_M=128)
-      N direction: BLOCK_N consecutive KV positions
-
-      S = Q @ K^T:   (BLOCK_M, D) @ (D, BLOCK_N) → (BLOCK_M, BLOCK_N)  tl.dot ✓
-      dP = dO @ V^T: (BLOCK_M, D) @ (D, BLOCK_N) → (BLOCK_M, BLOCK_N)  tl.dot ✓
-      dK = dS^T @ Q: (BLOCK_N, BLOCK_M) @ (BLOCK_M, D) → (BLOCK_N, D)  tl.dot ✓
-      dV = P^T @ dO:  (BLOCK_N, BLOCK_M) @ (BLOCK_M, D) → (BLOCK_N, D)  tl.dot ✓
-
-    Sparse mask: per Q ref, a BLOCK_N-bit mask encodes which KVs in the block
-    are actually referenced. Non-referenced KVs get -inf in score → P=0 → zero gradient.
-    """
-    pid_block = tl.program_id(0).to(tl.int64)
-    pid_split = tl.program_id(1)
-
-    block_start = pid_block * BLOCK_N
-
-    offs_m = tl.arange(0, BLOCK_M)
+    """BWD dKV kernel (LoopK direction): inner loop over K positions.
+    Each CTA loops over Q positions that reference a given KV tile.
+    Heads are chunked in groups of BLOCK_MH to reduce register pressure.
+    dK/dV accumulated in fp32 across head groups, then bf16 atomic scatter."""
+    pid_q = tl.program_id(0).to(tl.int64)
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, D)
-    m_mask = offs_m < NHQ
+    num_chunks: tl.constexpr = (TOPK + BLOCK_N - 1) // BLOCK_N
+    num_hgroups: tl.constexpr = (NHQ + BLOCK_MH - 1) // BLOCK_MH
 
-    # Load K_tile, V_tile: (BLOCK_N, D) — stays in SRAM for all Q iterations
-    kv_base = (block_start + offs_n[:, None].to(tl.int64)) * stride_kt + offs_d[None, :]
-    k_tile = tl.load(K + kv_base)
-    v_tile = tl.load(V + kv_base)
+    idx_base = Indices + pid_q * stride_it
 
-    # dK, dV accumulators: (BLOCK_N, D) in float32
-    dk_acc = tl.zeros([BLOCK_N, D], dtype=tl.float32)
-    dv_acc = tl.zeros([BLOCK_N, D], dtype=tl.float32)
+    for chunk_id in range(num_chunks):
+        start = chunk_id * BLOCK_N
+        chunk_offs = start + offs_n
+        n_mask = chunk_offs < TOPK
+        kv_idx = tl.load(idx_base + chunk_offs, mask=n_mask, other=0)
 
-    # Block-level inverse index range
-    blk_start = tl.load(BlockOffsets + pid_block).to(tl.int64)
-    blk_end = tl.load(BlockOffsets + pid_block + 1).to(tl.int64)
-    num_q = blk_end - blk_start
+        k_tile = tl.load(
+            K + kv_idx[:, None] * stride_kt + offs_d[None, :],
+            mask=n_mask[:, None],
+            other=0.0,
+        )
+        v_tile = tl.load(
+            V + kv_idx[:, None] * stride_kt + offs_d[None, :],
+            mask=n_mask[:, None],
+            other=0.0,
+        )
 
-    my_start = pid_split * SPLIT_SIZE
+        dk_acc = tl.zeros([BLOCK_N, D], dtype=tl.float32)
+        dv_acc = tl.zeros([BLOCK_N, D], dtype=tl.float32)
 
-    for qi in tl.range(0, SPLIT_SIZE):
-        entry_idx = my_start + qi
-        if entry_idx < num_q:
-            qp = tl.load(BlockInvQ + blk_start + entry_idx).to(tl.int64)
-            mask_bits = tl.load(BlockInvMask + blk_start + entry_idx)
+        for hg in range(num_hgroups):
+            h_start = hg * BLOCK_MH
+            offs_m = h_start + tl.arange(0, BLOCK_MH)
+            m_mask = offs_m < NHQ
 
-            # Decode BLOCK_N-bit mask → (BLOCK_N,) boolean
-            n_mask = ((mask_bits >> offs_n.to(tl.int64)) & 1) == 1
-
-            # Load Q[qp]: (BLOCK_M, D) — M = 128 heads packed (PackGQA)
-            q_ptrs = Q + qp * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :]
-            q_tile = tl.load(q_ptrs, mask=m_mask[:, None], other=0.0)
-
-            # Load dO[qp]: (BLOCK_M, D)
-            do_ptrs = (
-                dO + qp * stride_ot + offs_m[:, None] * stride_oh + offs_d[None, :]
+            q_hg = tl.load(
+                Q + pid_q * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :],
+                mask=m_mask[:, None],
+                other=0.0,
             )
-            do_tile = tl.load(do_ptrs, mask=m_mask[:, None], other=0.0)
+            do_hg = tl.load(
+                dO + pid_q * stride_ot + offs_m[:, None] * stride_oh + offs_d[None, :],
+                mask=m_mask[:, None],
+                other=0.0,
+            )
+            lse_hg = tl.load(Lse + pid_q * NHQ + offs_m, mask=m_mask, other=0.0)
+            delta_hg = tl.load(Delta + pid_q * NHQ + offs_m, mask=m_mask, other=0.0)
 
-            # LSE, Delta: (BLOCK_M,)
-            lse = tl.load(Lse + qp * NHQ + offs_m, mask=m_mask, other=0.0)
-            delta = tl.load(Delta + qp * NHQ + offs_m, mask=m_mask, other=0.0)
-
-            # S = Q @ K^T: (BLOCK_M, BLOCK_N) — tl.dot!
-            s = tl.dot(q_tile, tl.trans(k_tile)) * sm_scale
-            # Apply sparse mask: only referenced KVs get valid scores
+            s = tl.dot(q_hg, tl.trans(k_tile)) * sm_scale
             s = tl.where(m_mask[:, None] & n_mask[None, :], s, -float("inf"))
+            p = tl.exp(s - lse_hg[:, None])
 
-            # P = exp(S - LSE): uses saved LSE from full topk FWD softmax
-            p = tl.exp(s - lse[:, None])
+            dp = tl.dot(do_hg, tl.trans(v_tile))
+            ds = (p * (dp - delta_hg[:, None]) * sm_scale).to(q_hg.dtype)
 
-            # dP = dO @ V^T: (BLOCK_M, BLOCK_N) — tl.dot!
-            dp = tl.dot(do_tile, tl.trans(v_tile))
+            dk_acc += tl.dot(tl.trans(ds), q_hg)
+            dv_acc += tl.dot(tl.trans(p.to(do_hg.dtype)), do_hg)
 
-            # dS = P * (dP - Delta) * sm_scale
-            ds = (p * (dp - delta[:, None]) * sm_scale).to(q_tile.dtype)
-
-            # dK += dS^T @ Q: (BLOCK_N, BLOCK_M) @ (BLOCK_M, D) → (BLOCK_N, D) tl.dot!
-            dk_acc += tl.dot(tl.trans(ds), q_tile).to(tl.float32)
-            # dV += P^T @ dO: (BLOCK_N, BLOCK_M) @ (BLOCK_M, D) → (BLOCK_N, D) tl.dot!
-            dv_acc += tl.dot(tl.trans(p.to(do_tile.dtype)), do_tile).to(tl.float32)
-
-    # Atomic write (only num_splits atomics per KV block, not per-Q-position)
-    dk_out = (
-        dK + (block_start + offs_n[:, None].to(tl.int64)) * stride_dkt + offs_d[None, :]
-    )
-    dv_out = (
-        dV + (block_start + offs_n[:, None].to(tl.int64)) * stride_dkt + offs_d[None, :]
-    )
-    tl.atomic_add(dk_out, dk_acc.to(dK.dtype.element_ty))
-    tl.atomic_add(dv_out, dv_acc.to(dV.dtype.element_ty))
+        dk_ptrs = dK + kv_idx[:, None] * stride_dkt + offs_d[None, :]
+        dv_ptrs = dV + kv_idx[:, None] * stride_dkt + offs_d[None, :]
+        tl.atomic_add(dk_ptrs, dk_acc.to(tl.bfloat16), mask=n_mask[:, None])
+        tl.atomic_add(dv_ptrs, dv_acc.to(tl.bfloat16), mask=n_mask[:, None])
 
 
 @triton.jit
@@ -444,88 +412,107 @@ def _preprocess_bwd_kernel(
 
 
 @triton.jit
-def _token_sparse_bwd_dkv_atomic_kernel(
+def _bwd_dkv_loopq_kernel(
     Q,
     K,
     V,
-    Indices,
     dO,
     dK,
     dV,
     Lse,
     Delta,
+    InnerIndices,
+    InnerMasks,
+    InnerOffsets,
+    InnerCounts,
     sm_scale,
     stride_qt,
     stride_qh,
     stride_kt,
-    stride_it,
     stride_ot,
     stride_oh,
     stride_dkt,
-    TOTAL_Q: tl.constexpr,
+    stride_inv_slot,
+    stride_inv_topk,
+    TOTAL_KV,
     NHQ: tl.constexpr,
-    TOPK: tl.constexpr,
     D: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
     BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
+    USE_CSR: tl.constexpr,
+    USE_MASK: tl.constexpr,
 ):
-    """dKV kernel — LoopK direction with atomic scatter (FA-2 standard pattern).
-
-    Grid: (total_q,). Each TB owns one Q position, iterates over its topk KV positions.
-    Uses tl.dot for score/dK/dV computation (tiles BLOCK_N KV positions → matmul).
-    Scatter dK/dV via atomic_add — topk atomics per KV position.
-
-    This is FASTER for MQA (nhk=1) because the inner-loop loads the LIGHT tensor (K/V=256B)
-    while keeping the HEAVY tensor (Q=32KB+dO=32KB) in registers.
+    """BWD dKV kernel (LoopQ direction): inner loop over Q positions.
+    Each CTA owns one KV tile exclusively and iterates over all Q positions
+    that reference it (via inverted index). dK/dV accumulated locally in fp32,
+    no atomics needed. kbs=1 uses CSR + 64-bit bitmask for token-level masking;
+    kbs=128 uses block-level inverse index without masks.
     """
-    pid_q = tl.program_id(0).to(tl.int64)
+    pid_slot = tl.program_id(0).to(tl.int64)
+    kv_start = pid_slot * BLOCK_KV
 
     offs_m = tl.arange(0, BLOCK_M)
+    offs_kv = tl.arange(0, BLOCK_KV)
     offs_d = tl.arange(0, D)
-    offs_n = tl.arange(0, BLOCK_N)
     m_mask = offs_m < NHQ
+    kv_mask = kv_start + offs_kv < TOTAL_KV
 
-    q_ptrs = Q + pid_q * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :]
-    q_tile = tl.load(q_ptrs, mask=m_mask[:, None], other=0.0)
+    kv_ptrs = (kv_start + offs_kv[:, None].to(tl.int64)) * stride_kt + offs_d[None, :]
+    k_tile = tl.load(K + kv_ptrs, mask=kv_mask[:, None], other=0.0)
+    v_tile = tl.load(V + kv_ptrs, mask=kv_mask[:, None], other=0.0)
 
-    do_ptrs = dO + pid_q * stride_ot + offs_m[:, None] * stride_oh + offs_d[None, :]
-    do_tile = tl.load(do_ptrs, mask=m_mask[:, None], other=0.0)
+    dk_acc = tl.zeros([BLOCK_KV, D], dtype=tl.float32)
+    dv_acc = tl.zeros([BLOCK_KV, D], dtype=tl.float32)
 
-    lse_ptrs = Lse + pid_q * NHQ + offs_m
-    lse = tl.load(lse_ptrs, mask=m_mask, other=0.0)
-    delta_ptrs = Delta + pid_q * NHQ + offs_m
-    delta = tl.load(delta_ptrs, mask=m_mask, other=0.0)
+    if USE_CSR:
+        ref_start = tl.load(InnerOffsets + pid_slot).to(tl.int64)
+        ref_end = tl.load(InnerOffsets + pid_slot + 1).to(tl.int64)
+        num_q_refs = ref_end - ref_start
+    else:
+        ref_start = pid_slot * stride_inv_slot
+        num_q_refs = tl.load(InnerCounts + pid_slot).to(tl.int32)
 
-    idx_base = Indices + pid_q * stride_it
+    for qi in tl.range(0, num_q_refs):
+        if USE_CSR:
+            ref_idx = ref_start + qi
+            qp = tl.load(InnerIndices + ref_idx).to(tl.int64)
+        else:
+            ref_idx = ref_start + qi * stride_inv_topk
+            qp = tl.load(InnerIndices + ref_idx).to(tl.int64)
 
-    num_chunks = tl.cdiv(TOPK, BLOCK_N)
-    for chunk_id in range(num_chunks):
-        start = chunk_id * BLOCK_N
-        chunk_offs = start + offs_n
-        n_mask = chunk_offs < TOPK
+        if USE_MASK:
+            mask_bits = tl.load(InnerMasks + ref_idx)
+            n_mask = (((mask_bits >> offs_kv.to(tl.int64)) & 1) == 1) & kv_mask
+        else:
+            n_mask = kv_mask
 
-        kv_idx = tl.load(idx_base + chunk_offs, mask=n_mask, other=0)
+        q_ptrs = Q + qp * stride_qt + offs_m[:, None] * stride_qh + offs_d[None, :]
+        q_tile = tl.load(q_ptrs, mask=m_mask[:, None], other=0.0)
 
-        k_ptrs = K + kv_idx[:, None] * stride_kt + offs_d[None, :]
-        k_tile = tl.load(k_ptrs, mask=n_mask[:, None], other=0.0)
+        do_ptrs = dO + qp * stride_ot + offs_m[:, None] * stride_oh + offs_d[None, :]
+        do_tile = tl.load(do_ptrs, mask=m_mask[:, None], other=0.0)
+
+        lse = tl.load(Lse + qp * NHQ + offs_m, mask=m_mask, other=0.0)
+        delta = tl.load(Delta + qp * NHQ + offs_m, mask=m_mask, other=0.0)
 
         s = tl.dot(q_tile, tl.trans(k_tile)) * sm_scale
         s = tl.where(m_mask[:, None] & n_mask[None, :], s, -float("inf"))
         p = tl.exp(s - lse[:, None])
 
-        v_ptrs = V + kv_idx[:, None] * stride_kt + offs_d[None, :]
-        v_tile = tl.load(v_ptrs, mask=n_mask[:, None], other=0.0)
-
         dp = tl.dot(do_tile, tl.trans(v_tile))
         ds = (p * (dp - delta[:, None]) * sm_scale).to(q_tile.dtype)
 
-        dk_chunk = tl.dot(tl.trans(ds), q_tile)
-        dv_chunk = tl.dot(tl.trans(p.to(do_tile.dtype)), do_tile)
+        dk_acc += tl.dot(tl.trans(ds), q_tile).to(tl.float32)
+        dv_acc += tl.dot(tl.trans(p.to(do_tile.dtype)), do_tile).to(tl.float32)
 
-        dk_scatter_ptrs = dK + kv_idx[:, None] * stride_dkt + offs_d[None, :]
-        dv_scatter_ptrs = dV + kv_idx[:, None] * stride_dkt + offs_d[None, :]
-        tl.atomic_add(dk_scatter_ptrs, dk_chunk, mask=n_mask[:, None])
-        tl.atomic_add(dv_scatter_ptrs, dv_chunk, mask=n_mask[:, None])
+    dk_out = (
+        dK + (kv_start + offs_kv[:, None].to(tl.int64)) * stride_dkt + offs_d[None, :]
+    )
+    dv_out = (
+        dV + (kv_start + offs_kv[:, None].to(tl.int64)) * stride_dkt + offs_d[None, :]
+    )
+    tl.store(dk_out, dk_acc.to(dK.dtype.element_ty), mask=kv_mask[:, None])
+    tl.store(dv_out, dv_acc.to(dV.dtype.element_ty), mask=kv_mask[:, None])
 
 
 def _build_block_inverse_indices(indices, total_kv, BLOCK_N):
@@ -577,13 +564,19 @@ def _build_block_inverse_indices(indices, total_kv, BLOCK_N):
     block_inv_q = (unique_keys % total_q).int()
     block_inv_block = (unique_keys // total_q).int()
 
-    # Build bitmask: for each unique (block, q), OR the local_id bits
+    # Build bitmask: for each unique (block, q), OR the local_id bits.
+    # Dedup (block, q, local) triples — scatter_add_ does ADD not OR,
+    # so duplicate local_ids within the same (block, q) pair corrupt the mask.
+    triple_key = pair_key * BLOCK_N + sorted_local
+    first_occ = torch.ones(len(triple_key), device=device, dtype=torch.bool)
+    first_occ[1:] = triple_key[1:] != triple_key[:-1]
+
     block_inv_mask = torch.zeros(num_entries, device=device, dtype=torch.int64)
     bit_values = (
         torch.ones(sorted_local.shape[0], device=device, dtype=torch.int64)
         << sorted_local
     )
-    block_inv_mask.scatter_add_(0, inverse, bit_values)
+    block_inv_mask.scatter_add_(0, inverse[first_occ], bit_values[first_occ])
 
     # CSR offsets per block
     block_counts = torch.bincount(block_inv_block, minlength=num_blocks)
@@ -593,15 +586,10 @@ def _build_block_inverse_indices(indices, total_kv, BLOCK_N):
     return block_inv_q, block_inv_mask, block_offsets
 
 
-def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
+def token_sparse_bwd(
+    q, k, v, indices, o, do, lse, bwd_mode="loopk", sparse_k_block_size=1
+):
     """Token-sparse attention backward (MQA-optimized).
-
-    dQ: LoopK direction (per Q, iterate topk K) — uses tl.dot, no atomics.
-    dKV: selectable strategy via `dkv_mode`:
-        - "atomic" (default): LoopK + atomic scatter. Uses tl.dot. Best for random indices.
-        - "loopq": LoopQ with BLOCK_N KV tiling + PackGQA + bitmask.
-          ALL operations use tl.dot. Best for structured/local indices (4x faster).
-          With random indices: ~2.4x slower due to sparse mask inefficiency.
 
     Args:
         q: (total_q, nhq, D)
@@ -611,7 +599,10 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
         o: (total_q, nhq, D) — FWD output
         do: (total_q, nhq, D) — gradient of output
         lse: (total_q, nhq) — log-sum-exp from FWD
-        dkv_mode: "atomic" | "loopq"
+        bwd_mode: "loopk" | "loopq" — controls BWD inner loop direction.
+            "loopk": dQ local, dKV via bf16 atomic scatter.
+            "loopq": dKV local (no atomics), needs inverted index.
+        sparse_k_block_size: int (default 1). For loopq: 1=token-level, 128=block-level.
 
     Returns:
         dq: (total_q, nhq, D)
@@ -624,7 +615,6 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
     sm_scale = 1.0 / math.sqrt(D)
 
     BLOCK_M = triton.next_power_of_2(nhq)
-    BLOCK_N = 64
 
     # Preprocess: Delta = rowsum(O * dO)
     delta = torch.empty(total_q, nhq, device=q.device, dtype=torch.float32)
@@ -639,50 +629,83 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
         BLOCK_M=BLOCK_M,
     )
 
-    # dQ kernel (LoopK direction: per Q position, iterate over topk K)
-    dq = torch.empty_like(q)
     k_flat = k.squeeze(1)
     v_flat = v.squeeze(1)
 
-    _token_sparse_bwd_dq_kernel[(total_q,)](
-        q,
-        k_flat,
-        v_flat,
-        indices,
-        do,
-        dq,
-        lse,
-        delta,
-        sm_scale,
-        q.stride(0),
-        q.stride(1),
-        k_flat.stride(0),
-        indices.stride(0),
-        do.stride(0),
-        do.stride(1),
-        NHQ=nhq,
-        TOPK=topk,
-        D=D,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-    )
+    if bwd_mode == "loopq":
+        # Standard-grid LoopQ: one CTA exclusively owns each physical KV tile.
+        # kbs=1 uses CSR inverse metadata plus a 64-bit token mask. The mask
+        # preserves sparse semantics but masked lanes still consume tl.dot work.
+        # kbs=128 uses block inverse metadata and runtime InnerCounts.
+        kbs = sparse_k_block_size
+        assert kbs in (1, 128), "loopq_token supports sparse_k_block_size 1 or 128"
+        BLOCK_KV = 64 if kbs == 1 else 128
+        if kbs == 128:
+            assert (
+                total_kv % BLOCK_KV == 0
+            ), f"total_kv ({total_kv}) must be divisible by {BLOCK_KV} for kbs=128"
 
-    dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
-    dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.float32)
-
-    if dkv_mode == "loopq":
-        # LoopQ with BLOCK_N KV tiling: per KV-BLOCK, iterate Q refs with tl.dot.
-        # Uses block-level inverse index + bitmask for sparse pattern.
-        LOOPQ_BLOCK_N = min(BLOCK_N, 64)  # must fit in int64 bitmask
-        block_inv_q, block_inv_mask, block_offsets = _build_block_inverse_indices(
-            indices, total_kv, LOOPQ_BLOCK_N
+        # dQ remains standard LoopK for both LoopQ metadata layouts.
+        BLOCK_N_DQ = 64
+        dq = torch.empty_like(q)
+        _bwd_dq_kernel[(total_q,)](
+            q,
+            k_flat,
+            v_flat,
+            indices,
+            do,
+            dq,
+            lse,
+            delta,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            indices.stride(0),
+            do.stride(0),
+            do.stride(1),
+            NHQ=nhq,
+            TOPK=topk,
+            D=D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N_DQ,
         )
-        num_kv_blocks = (total_kv + LOOPQ_BLOCK_N - 1) // LOOPQ_BLOCK_N
-        max_entries = int((block_offsets[1:] - block_offsets[:-1]).max().item())
-        SPLIT_SIZE = 64
-        num_splits = (max_entries + SPLIT_SIZE - 1) // SPLIT_SIZE
 
-        _token_sparse_bwd_dkv_loopq_kernel[(num_kv_blocks, num_splits)](
+        num_kv_slots = (total_kv + BLOCK_KV - 1) // BLOCK_KV
+        if kbs == 1:
+            inner_indices, inner_masks, inner_offsets = _build_block_inverse_indices(
+                indices, total_kv, BLOCK_KV
+            )
+            inner_counts = inner_offsets
+            stride_inv_slot = 0
+            stride_inv_topk = 1
+            use_csr = True
+            use_mask = True
+        else:
+            from magi_attention.utils.sparse_utils import invert_index_sparse_indices
+
+            block_indices = indices.unsqueeze(1) // BLOCK_KV
+            padded_indices, _ = invert_index_sparse_indices(
+                block_indices,
+                seqlen_k=total_kv,
+                sparse_k_block_size=BLOCK_KV,
+                pad_multiple=64,
+            )
+            inner_indices = padded_indices.contiguous()
+            inner_counts = (
+                (inner_indices[:, 0, :] >= 0).sum(dim=-1).to(torch.int32).contiguous()
+            )
+            # Compile-time-disabled pointer arguments share the same kernel ABI.
+            inner_masks = inner_counts
+            inner_offsets = inner_counts
+            stride_inv_slot = inner_indices.stride(0)
+            stride_inv_topk = inner_indices.stride(2)
+            use_csr = False
+            use_mask = False
+
+        dk = torch.empty(total_kv, D, device=q.device, dtype=torch.float32)
+        dv = torch.empty(total_kv, D, device=q.device, dtype=torch.float32)
+        _bwd_dkv_loopq_kernel[(num_kv_slots,)](
             q,
             k_flat,
             v_flat,
@@ -691,9 +714,10 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
             dv,
             lse,
             delta,
-            block_inv_q,
-            block_inv_mask,
-            block_offsets,
+            inner_indices,
+            inner_masks,
+            inner_offsets,
+            inner_counts,
             sm_scale,
             q.stride(0),
             q.stride(1),
@@ -701,16 +725,57 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
             do.stride(0),
             do.stride(1),
             dk.stride(0),
+            stride_inv_slot,
+            stride_inv_topk,
+            total_kv,
             NHQ=nhq,
             D=D,
+            BLOCK_KV=BLOCK_KV,
             BLOCK_M=BLOCK_M,
-            BLOCK_N=LOOPQ_BLOCK_N,
-            SPLIT_SIZE=SPLIT_SIZE,
+            USE_CSR=use_csr,
+            USE_MASK=use_mask,
+            num_warps=8,
         )
-    else:
-        # LoopK + atomic: per Q position, tiles BLOCK_N KVs for tl.dot.
-        # Faster for MQA (inner-loop loads light K/V, heavy Q stays in regs).
-        _token_sparse_bwd_dkv_atomic_kernel[(total_q,)](
+
+        dk = dk.unsqueeze(1).to(q.dtype)
+        dv = dv.unsqueeze(1).to(q.dtype)
+        return dq, dk, dv
+
+    if bwd_mode == "loopk":
+        # Split: separate dQ (fp32, no atomics) + head-chunked dKV (bf16 atomics).
+        # Head chunking (BLOCK_MH=32) reduces register pressure from 576+ to ~240,
+        # eliminating spilling. BLOCK_N=64 halves atomic write batches vs BN=32.
+        BLOCK_N_DQ = 64
+        BLOCK_MH = 32
+        BLOCK_N_DKV = 64
+
+        dq = torch.empty_like(q)
+        _bwd_dq_kernel[(total_q,)](
+            q,
+            k_flat,
+            v_flat,
+            indices,
+            do,
+            dq,
+            lse,
+            delta,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            k_flat.stride(0),
+            indices.stride(0),
+            do.stride(0),
+            do.stride(1),
+            NHQ=nhq,
+            TOPK=topk,
+            D=D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N_DQ,
+        )
+
+        dk = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
+        dv = torch.zeros(total_kv, D, device=q.device, dtype=torch.bfloat16)
+        _bwd_dkv_loopk_kernel[(total_q,)](
             q,
             k_flat,
             v_flat,
@@ -728,17 +793,17 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
             do.stride(0),
             do.stride(1),
             dk.stride(0),
-            TOTAL_Q=total_q,
             NHQ=nhq,
             TOPK=topk,
             D=D,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
+            BLOCK_MH=BLOCK_MH,
+            BLOCK_N=BLOCK_N_DKV,
         )
+        dk = dk.unsqueeze(1).to(q.dtype)
+        dv = dv.unsqueeze(1).to(q.dtype)
+        return dq, dk, dv
 
-    dk = dk.unsqueeze(1).to(q.dtype)
-    dv = dv.unsqueeze(1).to(q.dtype)
-    return dq, dk, dv
+    raise ValueError(f"Unknown bwd_mode: {bwd_mode!r}. Use 'split' or 'loopq_token'.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -748,19 +813,31 @@ def token_sparse_bwd(q, k, v, indices, o, do, lse, dkv_mode="atomic"):
 
 class TokenSparseAttnFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, indices):
+    def forward(ctx, q, k, v, indices, bwd_mode, sparse_k_block_size):
         o, lse = token_sparse_fwd(q, k, v, indices, return_lse=True)
         ctx.save_for_backward(q, k, v, indices, o, lse)
+        ctx.bwd_mode = bwd_mode
+        ctx.sparse_k_block_size = sparse_k_block_size
         return o
 
     @staticmethod
     def backward(ctx, do):
         q, k, v, indices, o, lse = ctx.saved_tensors
-        dq, dk, dv = token_sparse_bwd(q, k, v, indices, o, do.contiguous(), lse)
-        return dq, dk, dv, None
+        dq, dk, dv = token_sparse_bwd(
+            q,
+            k,
+            v,
+            indices,
+            o,
+            do.contiguous(),
+            lse,
+            bwd_mode=ctx.bwd_mode,
+            sparse_k_block_size=ctx.sparse_k_block_size,
+        )
+        return dq, dk, dv, None, None, None
 
 
-def token_sparse_attn(q, k, v, indices):
+def token_sparse_attn(q, k, v, indices, bwd_mode="loopk", sparse_k_block_size=1):
     """Token-sparse attention with autograd support.
 
     Args:
@@ -768,8 +845,10 @@ def token_sparse_attn(q, k, v, indices):
         k: (total_kv, 1, D) — requires_grad
         v: (total_kv, 1, D) — requires_grad
         indices: (total_q, topk) int32
+        bwd_mode: "loopk" | "loopq" — BWD inner loop direction.
+        sparse_k_block_size: sparsity granularity for LoopQ inverse index (1 or 128).
 
     Returns:
         o: (total_q, nhq, D)
     """
-    return TokenSparseAttnFunc.apply(q, k, v, indices)
+    return TokenSparseAttnFunc.apply(q, k, v, indices, bwd_mode, sparse_k_block_size)

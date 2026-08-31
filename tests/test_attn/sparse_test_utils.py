@@ -20,13 +20,19 @@ import os
 from collections.abc import Callable
 from contextlib import contextmanager
 from enum import Enum
-from typing import Iterator
+from typing import Any, Iterator
 
 import torch
 import torch.nn.functional as F
 from einops import rearrange
 
+from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing.precision import assert_close
+from magi_attention.utils.sparse_utils import (
+    build_index_sparse_indices,
+    generate_block_sparse_pattern,
+    generate_ranges_from_block_mask_triton,
+)
 
 SEED = 42
 DEFAULT_FWD_ATOL = 0.01
@@ -236,15 +242,177 @@ def check_ffa_deterministic_twice(
     run_once: Callable[[], tuple[torch.Tensor, ...]],
     *,
     test_case: str,
+    dq_atol: float | None = 2e-3,
 ) -> list[str]:
-    """Run FFA twice in deterministic mode and compare all returned tensors."""
+    """Run FFA twice in deterministic mode and compare all returned tensors.
+
+    *dq_atol*: tolerance for dQ comparison (sparse dQ may have tiny FP
+    differences from non-associative TMA reduce-add across CTAs).
+    """
     results1 = run_once()
     results2 = run_once()
 
     labels = ["fwd_out", "dq", "dk", "dv"]
     err_msgs: list[str] = []
     for i, (t1, t2) in enumerate(zip(results1, results2)):
-        if t1 is not None and t2 is not None and not torch.equal(t1, t2):
-            label = labels[i] if i < len(labels) else f"tensor_{i}"
+        if t1 is None or t2 is None:
+            continue
+        label = labels[i] if i < len(labels) else f"tensor_{i}"
+        tol = dq_atol if label == "dq" and dq_atol is not None else None
+        if tol is not None:
+            if not torch.allclose(t1, t2, atol=tol, rtol=0):
+                max_diff = (t1 - t2).abs().max().item()
+                err_msgs.append(
+                    f"For {test_case=}: {label} not deterministic "
+                    f"(max_diff={max_diff:.2e} > atol={tol})"
+                )
+        elif not torch.equal(t1, t2):
             err_msgs.append(f"For {test_case=}: {label} not deterministic")
     return err_msgs
+
+
+# ═══════════════════════════════════════════════════════════
+# Closure builders for assert_deterministic / assert_overlap_safe
+# ═══════════════════════════════════════════════════════════
+
+
+def build_block_sparse_ffa_fn(
+    device: Any,
+    *,
+    nhq: int = 128,
+    nhk: int = 1,
+    hd: int = 128,
+    kbs: int = 128,
+    sparsity: float = 0.2,
+    seqlen: int = 2048,
+    dtype: torch.dtype = torch.bfloat16,
+    deterministic: bool = False,
+    include_bwd: bool = False,
+    swap_bwd_qk_loop: bool | None = None,
+) -> Callable[[], tuple[torch.Tensor, ...]]:
+    """Build a zero-arg callable that runs block_sparse FFA once.
+
+    Returns a closure suitable for :func:`assert_deterministic` or
+    :func:`assert_overlap_safe`.
+    """
+    torch.manual_seed(SEED)
+    num_q_blocks = seqlen
+    num_kv_blocks = seqlen // kbs
+    block_mask, _ = generate_block_sparse_pattern(
+        num_q_heads=nhq,
+        num_kv_heads=nhk,
+        num_q_blocks=num_q_blocks,
+        num_kv_blocks=num_kv_blocks,
+        sparsity=sparsity,
+        mode="per_kv_head",
+        sparse_format="block_mask",
+        device=device,
+    )
+    q_ranges, k_ranges = generate_ranges_from_block_mask_triton(block_mask, 1, kbs)
+    attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device=device)
+
+    q0 = torch.randn(1, seqlen, nhq, hd, dtype=dtype, device=device)
+    k0 = torch.randn(1, seqlen, nhk, hd, dtype=dtype, device=device)
+    v0 = torch.randn(1, seqlen, nhk, hd, dtype=dtype, device=device)
+    do0 = (
+        torch.randn(1, seqlen, nhq, hd, dtype=dtype, device=device)
+        if include_bwd
+        else None
+    )
+
+    q_packed = pack_q_for_ffa(q0, nhk, SparsePackLayout.HEAD_MAJOR)
+    k_packed, v_packed = pack_kv_for_ffa(k0, v0, SparsePackLayout.HEAD_MAJOR)
+    do_packed = (
+        rearrange(do0, "b s (h1 h2) d -> (b h1 s) h2 d", h1=nhk)
+        if do0 is not None
+        else None
+    )
+
+    def fn() -> tuple[torch.Tensor, ...]:
+        q = q_packed.clone().requires_grad_(include_bwd)
+        k = k_packed.clone().requires_grad_(include_bwd)
+        v = v_packed.clone().requires_grad_(include_bwd)
+        o, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            max_seqlen_q=1,
+            attn_type_map=attn_type_map,
+            range_merge=True,
+            pack_gqa=True,
+            block_sparse=True,
+            deterministic=deterministic,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
+        )
+        if include_bwd:
+            o.backward(do_packed)
+            return o.detach(), q.grad.detach(), k.grad.detach(), v.grad.detach()
+        return (o.detach(),)
+
+    return fn
+
+
+def build_index_sparse_ffa_fn(
+    device: Any,
+    *,
+    nhq: int = 128,
+    nhk: int = 1,
+    hd: int = 128,
+    kbs: int = 1,
+    topk: int = 128,
+    seqlen: int = 256,
+    dtype: torch.dtype = torch.bfloat16,
+    deterministic: bool = False,
+    include_bwd: bool = False,
+    swap_bwd_qk_loop: bool | None = None,
+) -> Callable[[], tuple[torch.Tensor, ...]]:
+    """Build a zero-arg callable that runs index_sparse FFA once.
+
+    Returns a closure suitable for :func:`assert_deterministic` or
+    :func:`assert_overlap_safe`.
+    """
+    torch.manual_seed(SEED)
+    q0 = torch.randn(1, seqlen, nhq, hd, dtype=dtype, device=device)
+    k0 = torch.randn(1, seqlen, nhk, hd, dtype=dtype, device=device)
+    v0 = torch.randn(1, seqlen, nhk, hd, dtype=dtype, device=device)
+
+    index_sparse_indices = build_index_sparse_indices(
+        1,
+        nhk,
+        seqlen,
+        seqlen,
+        topk,
+        topk,
+        device,
+        sparse_k_block_size=kbs,
+    )
+
+    q_packed = pack_q_for_ffa(q0, nhk, SparsePackLayout.SEQ_MAJOR)
+    k_packed, v_packed = pack_kv_for_ffa(k0, v0, SparsePackLayout.SEQ_MAJOR)
+    do_packed = (
+        rearrange(q0, "b s (h1 h2) d -> (b s h1) h2 d", h1=nhk) if include_bwd else None
+    )
+
+    def fn() -> tuple[torch.Tensor, ...]:
+        q = q_packed.clone().requires_grad_(include_bwd)
+        k = k_packed.clone().requires_grad_(include_bwd)
+        v = v_packed.clone().requires_grad_(include_bwd)
+        o, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            index_sparse_indices=index_sparse_indices,
+            q_block_size=1,
+            sparse_k_block_size=kbs,
+            pack_gqa=True,
+            deterministic=deterministic,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
+        )
+        if include_bwd:
+            o.backward(do_packed)
+            return o.detach(), q.grad.detach(), k.grad.detach(), v.grad.detach()
+        return (o.detach(),)
+
+    return fn

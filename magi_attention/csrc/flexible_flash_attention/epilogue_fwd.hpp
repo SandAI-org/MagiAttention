@@ -207,7 +207,7 @@ struct CollectiveEpilogueFwd {
     int* range_locks = nullptr;
     int2 const* q_ranges = nullptr;
     int2 const* k_ranges = nullptr;
-    int* determin_range_locks = nullptr;
+    int* outer_determin_range_locks = nullptr;
     float* ptr_max_logits = nullptr;
     float softmax_scale = 1.0f;
   };
@@ -227,7 +227,7 @@ struct CollectiveEpilogueFwd {
     int* range_locks = nullptr;
     int2 const* q_ranges = nullptr;
     int2 const* k_ranges = nullptr;
-    int* determin_range_locks = nullptr;
+    int* outer_determin_range_locks = nullptr;
     float* ptr_max_logits = nullptr;
     float softmax_scale = 1.0f;
   };
@@ -270,7 +270,7 @@ struct CollectiveEpilogueFwd {
         args.range_locks,
         args.q_ranges,
         args.k_ranges,
-        args.determin_range_locks,
+        args.outer_determin_range_locks,
         args.ptr_max_logits,
         args.softmax_scale};
   }
@@ -284,13 +284,13 @@ struct CollectiveEpilogueFwd {
   }
 
   CUTLASS_DEVICE
-  void acquire_lock(int* range_lock, int bidh, int offset, int q_block_size, int num_heads) {
+  void acquire_lock(int* range_lock, int bidh, int offset, int range_block_size, int num_heads) {
     // Calculate lock index
-    int block_idx1 = offset / q_block_size;
+    int block_idx1 = offset / range_block_size;
     int index_1 = block_idx1 * num_heads + bidh;
 
     // Check if we need a second lock
-    int block_idx2 = (offset + q_block_size - 1) / q_block_size;
+    int block_idx2 = (offset + range_block_size - 1) / range_block_size;
     bool need_second_lock = (block_idx1 != block_idx2);
 
 // Acquire the first lock
@@ -318,7 +318,7 @@ struct CollectiveEpilogueFwd {
 
         // Try to reacquire the first lock
         // while (atomicCAS(&range_lock[index_1], 0, 1) != 0) {
-        //     printf("loop in first lock 2, bidh: %d, offset: %d, q_block_size: %d, num_heads: %d\n", bidh, offset, q_block_size, num_heads);
+        //     printf("loop in first lock 2, bidh: %d, offset: %d, range_block_size: %d, num_heads: %d\n", bidh, offset, range_block_size, num_heads);
         //     // #if __CUDA_ARCH__ >= 700
         //     //     __nanosleep(100);
         //     // #endif
@@ -328,13 +328,13 @@ struct CollectiveEpilogueFwd {
   }
 
   CUTLASS_DEVICE
-  void release_lock(int* range_lock, int bidh, int offset, int q_block_size, int num_heads) {
+  void release_lock(int* range_lock, int bidh, int offset, int range_block_size, int num_heads) {
     // Calculate lock indices
-    int block_idx1 = offset / q_block_size;
+    int block_idx1 = offset / range_block_size;
     int index_1 = block_idx1 * num_heads + bidh;
 
     // Check if we need to release a second lock
-    int block_idx2 = (offset + q_block_size - 1) / q_block_size;
+    int block_idx2 = (offset + range_block_size - 1) / range_block_size;
     bool has_second_lock = (block_idx1 != block_idx2);
 
     // Release the second lock
@@ -427,7 +427,7 @@ struct CollectiveEpilogueFwd {
           int right_range_conflict_msg = get<1>(det_msg);
 
           deterministic_sync(
-              params.determin_range_locks,
+              params.outer_determin_range_locks,
               bidh,
               offset_o + m_block * kBlockM,
               kBlockM,
@@ -680,7 +680,7 @@ struct CollectiveEpilogueFwd {
           int arrive_num = get<2>(det_msg) + 1;
 
           deterministic_arrive(
-              params.determin_range_locks,
+              params.outer_determin_range_locks,
               bidh,
               offset_o + m_block * kBlockM,
               kBlockM,
@@ -808,7 +808,7 @@ struct CollectiveEpilogueFwd {
           int left_range_conflict_msg = get<0>(det_msg);
           int right_range_conflict_msg = get<1>(det_msg);
           deterministic_sync(
-              params.determin_range_locks,
+              params.outer_determin_range_locks,
               bidh,
               offset_o + m_block * kBlockM,
               kBlockM,
@@ -827,7 +827,7 @@ struct CollectiveEpilogueFwd {
           int arrive_num = get<2>(det_msg) + 1;
 
           deterministic_arrive(
-              params.determin_range_locks,
+              params.outer_determin_range_locks,
               bidh,
               offset_o + m_block * kBlockM,
               kBlockM,

@@ -102,8 +102,10 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Deterministic params
   bool deterministic;
-  int* __restrict__ determin_range_locks;
-  int* __restrict__ determin_conflict_state;
+  // Role-based deterministic range locks (LoopQ: outer=K/dKV, inner=Q/dQ).
+  // LoopK will swap role mapping in a follow-up (outer=Q/dQ, inner=K/dKV).
+  int* __restrict__ outer_determin_range_locks;
+  int* __restrict__ outer_determin_conflict_state;
 
   // Kernel utility params
   int arch;
@@ -178,8 +180,8 @@ struct Flash_bwd_params : public Flash_fwd_params {
   bool disable_bwd_dkv_atomic_reduction;
 
   // Deterministic params
-  int* __restrict__ dq_determin_conflict_state;
-  int* __restrict__ dq_determin_range_locks;
+  int* __restrict__ inner_determin_conflict_state;
+  int* __restrict__ inner_determin_range_locks;
 
   // IndexSparse params (3D: batch × nhk × inner_indices_cnt)
   int* __restrict__ index_sparse_indices;

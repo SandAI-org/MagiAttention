@@ -19,13 +19,16 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.testing.template import assert_deterministic, assert_overlap_safe
 from magi_attention.utils.sparse_utils import (
+    build_index_sparse_indices,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask_triton,
     get_sdpa_mask_from_block_sparse_mask,
 )
 from tests.test_attn.sparse_test_utils import (
     SparsePackLayout,
+    build_block_sparse_ffa_fn,
     compare_sdpa_bwd_all,
     compare_sdpa_fwd,
     inner_loop_env,
@@ -39,6 +42,131 @@ from tests.test_attn.sparse_test_utils import (
 # ═══════════════════════════════════════════════════════════
 # TestBlockSparseSweep — Classic CI sweep
 # ═══════════════════════════════════════════════════════════
+
+
+def _run_dsa_block_sparse(
+    device, sq, skv, topk_blocks, kbs=128, nhq=128, nhkv=1, hd=128
+):
+    """Test dsa_attn_func(backend='ffa_block_sparse') FWD+BWD against SDPA."""
+    import torch.nn.functional as F
+    from magi_attn_extensions.dsa_interface import dsa_attn_func
+
+    from magi_attention.testing.precision import assert_close
+    from magi_attention.utils import set_random_seed
+    from tests.test_attn.sparse_test_utils import (
+        DEFAULT_BWD_DK_RTOL,
+        DEFAULT_BWD_DKV_ATOL,
+        DEFAULT_BWD_DQ_ATOL,
+        DEFAULT_BWD_DQ_RTOL,
+        DEFAULT_BWD_DV_RTOL,
+        DEFAULT_FWD_ATOL,
+        DEFAULT_FWD_RTOL,
+        DEFAULT_MISMATCH_THRES,
+        SEED,
+    )
+
+    set_random_seed(SEED)
+    dtype = torch.bfloat16
+    group_size = nhq // nhkv
+
+    q = torch.randn(sq, nhq, hd, dtype=dtype, device=device, requires_grad=True)
+    k = torch.randn(skv, nhkv, hd, dtype=dtype, device=device, requires_grad=True)
+    v = torch.randn(skv, nhkv, hd, dtype=dtype, device=device, requires_grad=True)
+
+    block_indices = build_index_sparse_indices(
+        B=1,
+        NHK=nhkv,
+        S_q=sq,
+        S_kv=skv,
+        topk=topk_blocks,
+        max_topk=topk_blocks,
+        device=device,
+        sparse_k_block_size=kbs,
+        seed=SEED,
+    )
+
+    out, _lse = dsa_attn_func(
+        q,
+        k,
+        v,
+        block_indices,
+        backend="ffa_block_sparse",
+        sparse_k_block_size=kbs,
+    )
+
+    # SDPA reference: expand block indices to token mask
+    mask_kv = torch.zeros(nhkv, sq, skv, device=device, dtype=torch.bool)
+    for h in range(nhkv):
+        for qi in range(sq):
+            for bi in range(topk_blocks):
+                b_idx = block_indices[qi, h, bi].item()
+                mask_kv[h, qi, b_idx * kbs : (b_idx + 1) * kbs] = True
+
+    o_parts = []
+    with torch.no_grad():
+        for h_kv in range(nhkv):
+            h_q_s, h_q_e = h_kv * group_size, (h_kv + 1) * group_size
+            q_h = q[:, h_q_s:h_q_e, :].unsqueeze(0).transpose(1, 2)
+            k_h = k[:, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+            v_h = v[:, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+            m_h = mask_kv[h_kv].unsqueeze(0).unsqueeze(0).expand(1, group_size, sq, skv)
+            o_h = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=m_h)
+            o_parts.append(o_h.squeeze(0).transpose(0, 1))
+    out_ref = torch.cat(o_parts, dim=1)
+
+    tc = f"dsa_block_sparse [sq={sq},skv={skv},topk={topk_blocks},kbs={kbs}]"
+    assert_close(
+        out,
+        out_ref,
+        atol=DEFAULT_FWD_ATOL,
+        rtol=DEFAULT_FWD_RTOL,
+        mismatch_threshold=DEFAULT_MISMATCH_THRES,
+        test_case=f"{tc} fwd",
+    )
+
+    # BWD
+    do = torch.randn_like(out)
+    out.backward(do)
+
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    o_parts2 = []
+    for h_kv in range(nhkv):
+        h_q_s, h_q_e = h_kv * group_size, (h_kv + 1) * group_size
+        q_h = q2[:, h_q_s:h_q_e, :].unsqueeze(0).transpose(1, 2)
+        k_h = k2[:, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+        v_h = v2[:, h_kv : h_kv + 1, :].unsqueeze(0).transpose(1, 2)
+        m_h = mask_kv[h_kv].unsqueeze(0).unsqueeze(0).expand(1, group_size, sq, skv)
+        o_h = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=m_h)
+        o_parts2.append(o_h.squeeze(0).transpose(0, 1))
+    out_ref2 = torch.cat(o_parts2, dim=1)
+    out_ref2.backward(do)
+
+    assert_close(
+        q.grad,
+        q2.grad,
+        atol=DEFAULT_BWD_DQ_ATOL,
+        rtol=DEFAULT_BWD_DQ_RTOL,
+        mismatch_threshold=DEFAULT_MISMATCH_THRES,
+        test_case=f"{tc} dq",
+    )
+    assert_close(
+        k.grad,
+        k2.grad,
+        atol=DEFAULT_BWD_DKV_ATOL,
+        rtol=DEFAULT_BWD_DK_RTOL,
+        mismatch_threshold=DEFAULT_MISMATCH_THRES,
+        test_case=f"{tc} dk",
+    )
+    assert_close(
+        v.grad,
+        v2.grad,
+        atol=DEFAULT_BWD_DKV_ATOL,
+        rtol=DEFAULT_BWD_DV_RTOL,
+        mismatch_threshold=DEFAULT_MISMATCH_THRES,
+        test_case=f"{tc} dv",
+    )
 
 
 class TestBlockSparseSweep(DistTestBase):
@@ -67,6 +195,9 @@ class TestBlockSparseSweep(DistTestBase):
         sparsity=[0.2],
         swap_bwd_qk_loop=[False, True],
     )
+
+    _DETERMINISTIC_REPEATS = 10
+    _OVERLAP_ITERS = 10
 
     @classmethod
     def precompile_kernel_specs(cls):
@@ -121,6 +252,29 @@ class TestBlockSparseSweep(DistTestBase):
                 sparse_k_block_size=128,
                 bwd_dq_bf16=swap,
             )
+        # deterministic FWD + BWD LoopQ (used by test_block_sparse_deterministic)
+        add_ffa_spec(
+            specs,
+            direction="fwd",
+            disable_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            block_sparse=True,
+            range_merge=True,
+            sparse_k_block_size=128,
+            deterministic=True,
+        )
+        add_ffa_spec(
+            specs,
+            direction="bwd",
+            disable_atomic=True,
+            pack_gqa=True,
+            pack_gqa_factor=128,
+            block_sparse=True,
+            range_merge=True,
+            sparse_k_block_size=128,
+            deterministic=True,
+        )
         return specs
 
     @with_run_in_mp
@@ -191,6 +345,53 @@ class TestBlockSparseSweep(DistTestBase):
             assert (
                 err < tol
             ), f"sweep[Sq={q_seqlen},Skv={kv_seqlen},sp={sparsity},{loop_name}] {name} max_rel_err={err:.3e} >= {tol}"
+
+    @with_run_in_mp
+    @parameterize("seqlen", [512, 1024])
+    @parameterize("topk_blocks", [2, 4])
+    def test_dsa_block_sparse_classic(self, seqlen, topk_blocks):
+        """DSA wrapper (ffa_block_sparse) FWD+BWD against SDPA reference."""
+        _run_dsa_block_sparse(
+            self.device, sq=seqlen, skv=seqlen, topk_blocks=topk_blocks
+        )
+
+    @with_run_in_mp
+    def test_block_sparse_deterministic(self):
+        fn = build_block_sparse_ffa_fn(
+            self.device, deterministic=True, include_bwd=True
+        )
+        assert_deterministic(
+            fn,
+            repeats=self._DETERMINISTIC_REPEATS,
+            output_names=["out", "dq", "dk", "dv"],
+            test_case="block_sparse_deterministic",
+        )
+
+    @with_run_in_mp
+    def test_block_sparse_deterministic_loopk(self):
+        fn = build_block_sparse_ffa_fn(
+            self.device, deterministic=True, include_bwd=True, swap_bwd_qk_loop=True
+        )
+        assert_deterministic(
+            fn,
+            repeats=self._DETERMINISTIC_REPEATS,
+            output_names=["out", "dq", "dk", "dv"],
+            test_case="block_sparse_deterministic_loopk",
+        )
+
+    @with_run_in_mp
+    def test_block_sparse_overlap_safe(self):
+        fn = build_block_sparse_ffa_fn(self.device)
+        assert_overlap_safe(
+            fn,
+            device=torch.device("cuda", torch.cuda.current_device()),
+            overlap_iters=self._OVERLAP_ITERS,
+            atol=1e-2,
+            rtol=1e-2,
+            mismatch_threshold=2e-2,
+            output_names=["out"],
+            test_case="block_sparse_overlap",
+        )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -281,11 +482,12 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
                                     "MAGI_ATTENTION_FFA_INNER_STORE_MODE": inner_store,
                                 }
                                 for swap in cls._PARAM_SPACE["swap_bwd_qk_loop"]:
-                                    if (
-                                        not swap
-                                        and inner_load == "tma"
-                                        and pack_f < kBlockM
-                                    ):
+                                    inner_contiguous = (
+                                        k_size >= kBlockN if swap else pack_f >= kBlockM
+                                    )
+                                    if inner_load == "tma" and not inner_contiguous:
+                                        continue
+                                    if inner_store == "tma" and not inner_contiguous:
                                         continue
                                     add_ffa_spec(
                                         specs,
@@ -319,11 +521,12 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         if inner_load_mode == "tma" and k_size < kBlockN:
             return
         pack_gqa_factor = nhq // nhk
-        if (
-            not swap_bwd_qk_loop
-            and inner_load_mode == "tma"
-            and pack_gqa_factor < kBlockM
-        ):
+        inner_contiguous = (
+            k_size >= kBlockN if swap_bwd_qk_loop else pack_gqa_factor >= kBlockM
+        )
+        if inner_load_mode == "tma" and not inner_contiguous:
+            return
+        if inner_store_mode == "tma" and not inner_contiguous:
             return
 
         loop_tag = "loopk" if swap_bwd_qk_loop else "loopq"

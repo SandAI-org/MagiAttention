@@ -57,7 +57,6 @@ _DEBUG_ENV_KEYS = [
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DK_STORE",
     "MAGI_ATTENTION_FFA_BWD_SKIP_DV_MMA",
-    "MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM",
     "MAGI_ATTENTION_FFA_BWD_UNION_DKV_SMEM",
     "MAGI_ATTENTION_FFA_BWD_TILE_M",
     "MAGI_ATTENTION_FFA_BWD_TILE_N",
@@ -273,12 +272,12 @@ _OPTIMIZATION_CONFIGS = [
         False,
         "LoopK: baseline+SVW",
     ),
-    # O2: bypass scalar atomicAdd (correct but slow for dense)
+    # O2: bypass SMEM, dKV atomicAdd directly to GMEM
     (
         "loopk_bypass",
-        {"MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM": "1"},
+        {"MAGI_ATTENTION_FFA_INNER_STORE_MODE": "bypass"},
         False,
-        "LoopK: bypass atomicAdd (O2)",
+        "LoopK: bypass SMEM (O2)",
     ),
 ]
 

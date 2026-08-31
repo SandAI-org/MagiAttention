@@ -84,7 +84,7 @@ def _ffa_register_quota(
     bwd_inner_loop_k: bool,
     block_sparse: bool,
     index_sparse: bool,
-    sparse_dx_tma_reduce: bool,
+    inner_store_uses_tma1d: bool,
     sparse_k_block_size: int = 1,
 ) -> tuple[int, int]:
     """Select the setmaxnreg quotas (producer/load WG, consumer/mma WG) for one variant.
@@ -102,15 +102,12 @@ def _ffa_register_quota(
 
     bwd (producer, consumer) by mode:
       - dense: (40, 232) at 2 MMA WGs, (40, 152) at 3 (kHeadDim=192).
-      - scatter + TMA inner (sparse_dx_tma_reduce=True): (40, 232). Inner Q/dO are
-        loaded via TMA (1 warp, minimal regs), so producer matches Dense quota.
-        cuobjdump verified: pr=56→STACK=32 (consumer spills), pr=40→STACK=0.
-      - scatter + cp.async inner (sparse_dx_tma_reduce=False, scalar-atomicAdd dX
-        store fallback): (104, ...). The store-warp code spills at 88 (STACK 3272B).
-      Historical note: the sweep that found pr=56 as sweet spot was done with cp.async
-      (BlockSparse LoopQ, S=64K/256K), not TMA. With TMA inner loads, the producer
-      needs far fewer live variables, and pr=40 gives consumer enough regs to avoid
-      MMA accumulator spills.
+      - scatter + Tma1d store (inner_store_uses_tma1d=True): (40, 232).
+        The per-row bulk-reduce path has a small producer live set.
+      - scatter + TMA2D/AtomicAdd/Bypass store
+        (inner_store_uses_tma1d=False): (104, ...).
+      Load and store modes are independent; register quota selection must not infer
+      InnerLoadMode from InnerStoreMode.
 
     Env override MAGI_ATTENTION_FFA_BWD_PRODUCER_REGS (bwd only): producer is forced to
     the given value and the consumer is rederived from the weighted budget.
@@ -139,12 +136,12 @@ def _ffa_register_quota(
         inner_use_scatter = block_sparse or index_sparse
         budget = 168 * (1 + num_mma_wgs)
         if inner_use_scatter:
-            if sparse_dx_tma_reduce:
-                # TMA path: inner Q/dO loaded via TMA (1 warp), producer needs
-                # minimal regs — match Dense quota so consumer gets 232 for MMA
-                # accumulators. cuobjdump: pr=56→STACK=32 (spills), pr=40→STACK=0.
+            if inner_store_uses_tma1d:
+                # Per-row bulk-reduce store has a small producer live set, leaving
+                # more registers for consumer MMA accumulators.
                 producer_regs = 40
             else:
+                # TMA2D/atomic/bypass variants retain a larger producer live set.
                 producer_regs = 104
             consumer_regs = ((budget - producer_regs) // num_mma_wgs) // 8 * 8
         else:
@@ -478,51 +475,118 @@ def get_ffa_jit_spec(
         ), f"MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER must be true/false, got {_dxp}"
         extra_template_args["inner_store_in_producer"] = _dxp_lower
         uri += f"_dxp{_dxp_lower}"
-    # ─── InnerLoadMode: tma=0, cpasync=2 ───
-    # C++ uses template param directly (no default). Always set explicitly.
-    if _inner_use_scatter:
-        _load_mode_map = {"tma": "0", "cpasync": "2"}
-        _load_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_LOAD_MODE")
-        if _load_env is not None:
-            _load_lower = _load_env.lower()
-            assert (
-                _load_lower in _load_mode_map
-            ), f"MAGI_ATTENTION_FFA_INNER_LOAD_MODE must be tma/cpasync, got {_load_env}"
-            extra_template_args["inner_load_mode"] = _load_mode_map[_load_lower]
-            uri += f"_sload{_load_mode_map[_load_lower]}"
-        else:
-            _kblock_n = 128
-            _contiguous = sparse_k_block_size >= _kblock_n
-            if direction == "bwd" and not bwd_inner_loop_k:
-                _contiguous = pack_gqa and pack_gqa_factor >= 128
-            _auto_mode = "0" if _contiguous else "2"
-            extra_template_args["inner_load_mode"] = _auto_mode
+    # Resolve the physical inner tile exactly as tile_size_bwd_sm90() does.
+    # This is the single Python-side contiguity predicate for both load and store.
+    if direction == "fwd":
+        assert kblock_n is not None
+        _inner_tile_size = kblock_n
     else:
-        extra_template_args["inner_load_mode"] = "0"
-    # ─── InnerStoreMode (BWD only): 0=tma(2D), 1=tma1d, 2=atomicadd, 3=bypass_smem ───
+        if index_sparse and not bwd_inner_loop_k:
+            _default_bwd_tile = (64, 64)
+        elif head_dim <= 64:
+            _default_bwd_tile = (64, 128) if bwd_inner_loop_k else (128, 128)
+        elif head_dim <= 128:
+            _default_bwd_tile = (128, 64) if bwd_inner_loop_k else (64, 128)
+        else:
+            _default_bwd_tile = (64, 64)
+        _bwd_tile_m = (
+            int(os.environ.get("MAGI_ATTENTION_FFA_BWD_TILE_M", "0"))
+            or _default_bwd_tile[0]
+        )
+        _bwd_tile_n = (
+            int(os.environ.get("MAGI_ATTENTION_FFA_BWD_TILE_N", "0"))
+            or _default_bwd_tile[1]
+        )
+        _inner_tile_size = _bwd_tile_n if bwd_inner_loop_k else _bwd_tile_m
+
+    if not _inner_use_scatter:
+        _inner_tiles_contiguous = True
+    elif direction == "fwd":
+        _inner_tiles_contiguous = sparse_k_block_size >= _inner_tile_size
+    elif not bwd_inner_loop_k:
+        _inner_tiles_contiguous = pack_gqa and pack_gqa_factor >= _inner_tile_size
+    else:
+        _inner_tiles_contiguous = (
+            block_sparse and sparse_k_block_size >= _inner_tile_size
+        ) or (
+            index_sparse
+            and pack_gqa
+            and pack_gqa_factor >= _bwd_tile_m
+            and sparse_k_block_size >= _inner_tile_size
+        )
+
+    # ─── InnerLoadMode: tma=0, cpasync=2 ───
+    _load_mode_map = {"tma": "0", "cpasync": "2"}
+    _load_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_LOAD_MODE")
+    if _load_env is not None:
+        _load_lower = _load_env.lower()
+        assert (
+            _load_lower in _load_mode_map
+        ), f"MAGI_ATTENTION_FFA_INNER_LOAD_MODE must be tma/cpasync, got {_load_env}"
+        _resolved_load_mode = _load_mode_map[_load_lower]
+    else:
+        _resolved_load_mode = "0" if _inner_tiles_contiguous else "2"
+    assert _resolved_load_mode != "0" or _inner_tiles_contiguous, (
+        "TMA inner load requires physically contiguous inner tiles; "
+        f"inner_tile_size={_inner_tile_size}, kbs={sparse_k_block_size}, "
+        f"pack_gqa_factor={pack_gqa_factor}, loopk={bwd_inner_loop_k}"
+    )
+    assert (
+        _inner_use_scatter or _resolved_load_mode == "0"
+    ), "CpAsync inner load is only valid for sparse scatter paths"
+    extra_template_args["inner_load_mode"] = _resolved_load_mode
+    uri += f"_sload{_resolved_load_mode}"
+
+    # ─── InnerStoreMode (BWD only): 0=tma2d, 1=tma1d, 2=atomicadd, 3=bypass ───
     if direction == "bwd":
         _store_env = os.environ.get("MAGI_ATTENTION_FFA_INNER_STORE_MODE")
-        _use_smem_env = os.environ.get("MAGI_ATTENTION_FFA_BWD_DKV_USE_SMEM")
-        if _use_smem_env is not None and _use_smem_env == "0":
-            extra_template_args["inner_store_mode"] = "3"
-            uri += "_sstore3"
-        elif _store_env is not None:
+        if _store_env is not None:
             _store_lower = _store_env.lower()
             _store_mode_map = {
                 "tma": "0",
                 "tma2d": "0",
                 "tma1d": "1",
                 "atomicadd": "2",
-                "cpasync": "2",
                 "bypass": "3",
             }
-            assert (
-                _store_lower in _store_mode_map
-            ), f"MAGI_ATTENTION_FFA_INNER_STORE_MODE must be tma/tma2d/tma1d/atomicadd/bypass, got {_store_env}"
-            extra_template_args["inner_store_mode"] = _store_mode_map[_store_lower]
-            uri += f"_sstore{_store_mode_map[_store_lower]}"
+            assert _store_lower in _store_mode_map, (
+                "MAGI_ATTENTION_FFA_INNER_STORE_MODE must be "
+                f"tma/tma2d/tma1d/atomicadd/bypass, got {_store_env}"
+            )
+            _resolved_store_mode = _store_mode_map[_store_lower]
+        elif head_dim >= 256:
+            _resolved_store_mode = "3"
         elif _inner_use_scatter:
-            extra_template_args["inner_store_mode"] = "1"
+            # Tma1d avoids L2 thrashing at large kvseqlen (>128K).
+            # Override with MAGI_ATTENTION_FFA_INNER_STORE_MODE=tma2d for peak small-seqlen perf.
+            _resolved_store_mode = "1"
+        else:
+            _resolved_store_mode = "0"
+
+        assert (_resolved_store_mode == "3") == (
+            head_dim >= 256
+        ), "Bypass inner store is required exactly when head_dim >= 256"
+        assert _inner_use_scatter or _resolved_store_mode in (
+            "0",
+            "3",
+        ), "Dense inner store supports only tma2d or bypass"
+        assert _resolved_store_mode != "0" or _inner_tiles_contiguous, (
+            "TMA2D inner store requires physically contiguous inner tiles; "
+            "use tma1d or atomicadd for scatter rows"
+        )
+        assert (
+            _resolved_store_mode != "1" or _inner_use_scatter
+        ), "Tma1d inner store is only valid for sparse scatter paths"
+        extra_template_args["inner_store_mode"] = _resolved_store_mode
+        uri += f"_sstore{_resolved_store_mode}"
+    logger.info(
+        "Resolved FFA inner modes: load=%s, store=%s, contiguous=%s, "
+        "inner_tile_size=%d",
+        extra_template_args["inner_load_mode"],
+        extra_template_args.get("inner_store_mode", "n/a"),
+        _inner_tiles_contiguous,
+        _inner_tile_size,
+    )
     # Tile/stage overrides for A/B benchmarking (BWD only).
     # Each distinct combo produces a separate JIT URI → separate .so cache.
     if direction == "bwd":
@@ -601,7 +665,7 @@ def get_ffa_jit_spec(
         bwd_inner_loop_k=bwd_inner_loop_k,
         block_sparse=block_sparse,
         index_sparse=index_sparse,
-        sparse_dx_tma_reduce=extra_template_args.get("inner_store_mode", "0") == "1",
+        inner_store_uses_tma1d=extra_template_args.get("inner_store_mode", "0") == "1",
         sparse_k_block_size=sparse_k_block_size,
     )
     extra_template_args[f"{direction}_producer_regs"] = str(_producer_regs)
@@ -630,12 +694,15 @@ def get_ffa_jit_spec(
         )
         extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"
     elif direction == "bwd":
-        # BWD: Tma when reduction is needed and tile is not partial (IndexSparse LoopQ)
-        _outer_needs_reduction = (
-            bwd_inner_loop_k and not disable_dq_atomic_reduction
-        ) or (not bwd_inner_loop_k and not disable_atomic_reduction)
+        # BWD: Tma when OuterStoreNeedReduction and tile is not partial (IndexSparse LoopQ).
+        # Mirrors C++ jinja: kOuterStoreNeedReduction = LoopK ? !dq_atomic : !dkv_atomic.
+        outer_store_need_reduction = not (
+            disable_dq_atomic_reduction
+            if bwd_inner_loop_k
+            else disable_atomic_reduction
+        )
         _is_partial_tile = index_sparse and not bwd_inner_loop_k
-        _can_tma = _outer_needs_reduction and not _is_partial_tile
+        _can_tma = outer_store_need_reduction and not _is_partial_tile
         extra_template_args["outer_store_mode"] = "0" if _can_tma else "1"
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri

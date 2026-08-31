@@ -35,8 +35,8 @@ void set_params_fprop(
     void* k_ranges_d,
     void* range_locks_d,
     bool deterministic,
-    void* determin_range_locks_d,
-    void* determin_conflict_state_d,
+    void* outer_determin_range_locks_d,
+    void* outer_determin_conflict_state_d,
     void* attn_type_map_d,
     int merge_batch_size,
     void* merge_q_ranges_d,
@@ -117,8 +117,8 @@ void set_params_fprop(
 
   // Set deterministic and it's pointers
   params.deterministic = deterministic;
-  params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
-  params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
+  params.outer_determin_range_locks = static_cast<int*>(outer_determin_range_locks_d);
+  params.outer_determin_conflict_state = static_cast<int*>(outer_determin_conflict_state_d);
 
   // Set softmax
   params.softmax_lse_ptr = softmax_lse_d;
@@ -182,10 +182,10 @@ void set_params_dgrad(
     void* tile_count_semaphore_d,
     const float softcap,
     bool const deterministic,
-    void* determin_range_locks_d,
-    void* determin_conflict_state_d,
-    void* dq_determin_conflict_state_d,
-    void* dq_determin_range_locks_d,
+    void* outer_determin_range_locks_d,
+    void* outer_determin_conflict_state_d,
+    void* inner_determin_conflict_state_d,
+    void* inner_determin_range_locks_d,
     flash::SinkLayout const sink_layout,
     int const sm_margin,
     bool const disable_bwd_dkv_atomic_reduction) {
@@ -208,8 +208,8 @@ void set_params_dgrad(
       /*k_ranges_d=*/k_ranges_d,
       /*range_locks_d=*/nullptr,
       /*deterministic=*/deterministic,
-      /*determin_range_locks_d=*/determin_range_locks_d,
-      /*determin_conflict_state_d=*/determin_conflict_state_d,
+      /*outer_determin_range_locks_d=*/outer_determin_range_locks_d,
+      /*outer_determin_conflict_state_d=*/outer_determin_conflict_state_d,
       /*attn_type_map_d=*/attn_type_map_d,
       /*merge_batch_size=*/merge_batch_size,
       /*merge_q_ranges_d=*/nullptr,
@@ -260,8 +260,8 @@ void set_params_dgrad(
   params.dsoftmax_sum = dsoftmax_sum_d;
 
   // Set the deterministic flag for dq path
-  params.dq_determin_conflict_state = static_cast<int*>(dq_determin_conflict_state_d);
-  params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
+  params.inner_determin_conflict_state = static_cast<int*>(inner_determin_conflict_state_d);
+  params.inner_determin_range_locks = static_cast<int*>(inner_determin_range_locks_d);
 }
 
 void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {

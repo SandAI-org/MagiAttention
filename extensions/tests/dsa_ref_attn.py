@@ -21,7 +21,7 @@ def dsa_ref_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    index_map: torch.Tensor,
+    index_sparse_indices: torch.Tensor,
     softmax_scale: float | None = None,
     high_precision: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -32,7 +32,7 @@ def dsa_ref_attn_func(
         q: (sq, nhq, hd)
         k: (skv, nhkv, hd)
         v: (skv, nhkv, hd)
-        index_map: (nhkv, sq, topk) - Stores the topk K-token indices for each KV-head.
+        index_sparse_indices: (sq, nhkv, topk) - top-K KV indices per Q-token per KV-head.
         softmax_scale: float, scaling factor.
 
     Returns:
@@ -45,7 +45,6 @@ def dsa_ref_attn_func(
 
     group_size = nhq // nhkv
 
-    # maybe cast input to high precision
     org_dtype = q.dtype
     lse_dtype = max_fp_dtype(org_dtype, torch.float32)
 
@@ -53,49 +52,31 @@ def dsa_ref_attn_func(
         q = q.to(torch.float64)
         k = k.to(torch.float64)
         v = v.to(torch.float64)
-    else:
-        q = q
-        k = k
-        v = v
 
     out = torch.zeros_like(q)
     lse = torch.zeros((sq, nhq), dtype=lse_dtype, device=q.device)
 
-    # loop over each KV head
     for h_kv in range(nhkv):
         curr_k = k[:, h_kv, :]
         curr_v = v[:, h_kv, :]
 
-        # extract Q heads for the current KV head
         h_q_start = h_kv * group_size
         h_q_end = (h_kv + 1) * group_size
         curr_q = q[:, h_q_start:h_q_end, :]
 
-        # extract topk K/V tokens for each Q token in the current KV head
-        # index_map[h_kv]: (sq, topk)
-        curr_indices = index_map[h_kv]  # (sq, topk)
+        # index_sparse_indices[:, h_kv, :] -> (sq, topk)
+        curr_indices = index_sparse_indices[:, h_kv, :]
 
-        # extract K/V tokens using advanced indexing
         k_selected = curr_k[curr_indices]  # (sq, topk, hd)
         v_selected = curr_v[curr_indices]  # (sq, topk, hd)
 
-        # compute attention scores
-        # curr_q: (sq, group_size, hd)
-        # k_selected: (sq, topk, hd)
-        # scores: (sq, group_size, topk)
         scores = (
             torch.einsum("sq d, s t d -> s q t", curr_q, k_selected) * softmax_scale
         )
 
-        # compute LSE and Softmax
-        # curr_lse: (sq, group_size)
         curr_lse = torch.logsumexp(scores, dim=-1)
-        # curr_probs: (sq, group_size, topk)
         curr_probs = torch.softmax(scores, dim=-1)
 
-        # curr_probs: (sq, group_size, topk)
-        # v_selected: (sq, topk, hd)
-        # curr_out: (sq, group_size, hd)
         curr_out = torch.einsum("s q t, s t d -> s q d", curr_probs, v_selected)
 
         out[:, h_q_start:h_q_end, :] = curr_out

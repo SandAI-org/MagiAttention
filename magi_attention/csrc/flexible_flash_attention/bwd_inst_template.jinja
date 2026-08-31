@@ -65,7 +65,6 @@ static constexpr bool kPerfDebugSkipDvStore = {{ bwd_skip_dv_store | default('fa
 static constexpr bool kPerfDebugSkipDkStore = {{ bwd_skip_dk_store | default('false') }};
 static constexpr bool kPerfDebugSkipDvMma   = {{ bwd_skip_dv_mma   | default('false') }};
 
-static_assert(!kBwdInnerLoopK || !kDeterministic, "Deterministic mode is not supported when BwdInnerLoopK is enabled.");
 static_assert(!(kBlockSparse && kIndexSparse), "BlockSparse and IndexSparse are mutually exclusive.");
 // Runtime contract checks to ensure consistency with compile-time constraints
 static inline void _check_runtime_contract_bwd(

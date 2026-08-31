@@ -374,7 +374,7 @@ class TestFlexFlashAttn(DistTestBase):
                 deterministic=det,
                 range_merge=rm,
             )
-            # BWD LoopK (only with range_merge)
+            # BWD LoopK (only with range_merge); include Deterministic×LoopK when det
             if rm:
                 for p in [1, pgf]:
                     add_ffa_spec(
@@ -387,6 +387,7 @@ class TestFlexFlashAttn(DistTestBase):
                         pack_gqa=p > 1,
                         pack_gqa_factor=p,
                         range_merge=True,
+                        deterministic=det,
                     )
                     if p == 1:
                         for dda in [True, False]:
@@ -400,6 +401,7 @@ class TestFlexFlashAttn(DistTestBase):
                                 pack_gqa=True,
                                 pack_gqa_factor=1,
                                 range_merge=True,
+                                deterministic=det,
                             )
 
         # ═══════════════════════════════════════════════════════════════════
@@ -711,6 +713,7 @@ class TestFlexFlashAttn(DistTestBase):
         ref_block_size: tuple[int, int] | None,
         pack_gqa: bool,
         cat_gqa: bool,
+        swap_bwd_qk_loop: bool,
         test_case: str,
     ) -> list[str]:
         """Check deterministic behavior
@@ -742,6 +745,7 @@ class TestFlexFlashAttn(DistTestBase):
             pack_gqa=pack_gqa,
             cat_gqa=cat_gqa,
             block_sparse=block_sparse,
+            swap_bwd_qk_loop=swap_bwd_qk_loop,
         )
         lse = meta.lse
         o.backward(do)
@@ -793,6 +797,12 @@ class TestFlexFlashAttn(DistTestBase):
         max_seqlen_q: int | None = None,
         swap_bwd_qk_loop: bool = False,
     ):
+        # Dense deterministic runs LoopQ only; flex_flash_attn_func re-gates this for
+        # its own callers, and this helper has to do the same before building the
+        # range-merge metadata, which differs between the two loop directions.
+        if deterministic and swap_bwd_qk_loop:
+            swap_bwd_qk_loop = False
+
         t, h, d = q.shape
         o_acc = torch.randn_like(q, dtype=torch.float32)
         lse_acc = torch.randn([t, h], device=q.device, dtype=torch.float32)
@@ -1701,6 +1711,7 @@ class TestFlexFlashAttn(DistTestBase):
                 ref_block_size=ref_block_size,
                 pack_gqa=pack_gqa,
                 cat_gqa=cat_gqa,
+                swap_bwd_qk_loop=swap_bwd_qk_loop,
                 test_case=test_case,
             )
 
@@ -2113,10 +2124,6 @@ class TestFlexFlashAttn(DistTestBase):
 
         # TODO: Avoid skipping many flag combinations; instead, regenerate combinations with
         #       constraints to exclude invalid cases while covering more valid ones.
-        if swap_bwd_qk_loop:
-            # TODO: support deterministic mode with swap_bwd_qk_loop
-            if deterministic:
-                return
 
         if cat_gqa:
             # NOTE: pack_gqa and cat_gqa cannot be both True
@@ -2327,11 +2334,6 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
         # -----    skip invalid flag combinations   ---- #
-
-        if swap_bwd_qk_loop:
-            # TODO: support deterministic mode with swap_bwd_qk_loop
-            if deterministic:
-                return
 
         if block_sparse:
             # Sparse kernel requires NHQ==NHK or view-trick (pack_gqa with

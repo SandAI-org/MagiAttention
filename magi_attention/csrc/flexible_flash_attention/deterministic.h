@@ -28,19 +28,23 @@ namespace flash {
 //   arrive_num is published and the counter is reset, unblocking the next sync.
 
 CUTLASS_DEVICE
-void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
-  if (left_range_sync_num == 0 && right_range_sync_num == 0)
-    return;
+void deterministic_sync(int* range_lock, int bidh, int offset, int range_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
+  int left_range_block_idx = offset / range_block_size;
+  int right_range_block_idx = (offset + range_block_size - 1) / range_block_size;
 
-  int left_range_block_idx = offset / q_block_size;
-  int left_range_index = left_range_block_idx * num_heads + bidh;
-  int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+  // sync_num == 0 means conflict_state found no predecessor batch for that range
+  // block, so there is nothing to wait for. The two sides must be tested
+  // separately: a tile straddling two range blocks can have a predecessor on one
+  // side only, and a lock never returns to 0 once any batch has published to it.
+  if (left_range_sync_num != 0) {
+    int left_range_index = left_range_block_idx * num_heads + bidh;
 
 #pragma unroll 1
-  while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
+    while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
+    }
   }
 
-  if (left_range_block_idx != right_range_block_idx) {
+  if (left_range_block_idx != right_range_block_idx && right_range_sync_num != 0) {
     int right_range_index = right_range_block_idx * num_heads + bidh;
 
 #pragma unroll 1
@@ -54,14 +58,14 @@ void deterministic_arrive(
     int* range_lock,
     int bidh,
     int offset,
-    int q_block_size,
+    int range_block_size,
     int num_heads,
     int arrive_num,
     bool left_range_arrive_twice,
     bool right_range_arrive_twice) {
-  int left_range_block_idx = offset / q_block_size;
+  int left_range_block_idx = offset / range_block_size;
   int left_range_index = left_range_block_idx * num_heads + bidh;
-  int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+  int right_range_block_idx = (offset + range_block_size - 1) / range_block_size;
   int right_range_index = right_range_block_idx * num_heads + bidh;
 
   int add_cnt = right_range_arrive_twice ? 2 : 1;
