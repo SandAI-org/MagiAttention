@@ -84,11 +84,14 @@ class FA4FuncWithSink(torch.autograd.Function):
         num_splits=1,
         pack_gqa=None,
         deterministic=False,
+        save_fp32_out_for_bwd=False,
+        return_fp32_out=False,
         return_softmax=False,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
+        fp32_out = save_fp32_out_for_bwd or return_fp32_out
         out, softmax_lse = _fa4_fwd_op(
             q,
             k,
@@ -100,9 +103,12 @@ class FA4FuncWithSink(torch.autograd.Function):
             softcap,
             num_splits,
             pack_gqa,
+            fp32_out,
         )
 
-        ctx.save_for_backward(q, k, v, sink, out, softmax_lse)
+        out_user = out if return_fp32_out else out.to(dtype=q.dtype)
+        out_for_bwd = out if save_fp32_out_for_bwd else out_user
+        ctx.save_for_backward(q, k, v, sink, out_for_bwd, softmax_lse)
         ctx.sink_layout = sink_layout
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
@@ -110,11 +116,14 @@ class FA4FuncWithSink(torch.autograd.Function):
         ctx.pack_gqa = pack_gqa
         ctx.deterministic = deterministic
 
-        return (out, softmax_lse) if return_softmax else out
+        return (out_user, softmax_lse) if return_softmax else out_user
 
     @staticmethod
     def backward(ctx, dout, *args):
         q, k, v, sink, out, softmax_lse = ctx.saved_tensors
+        # FA4 requires out.dtype == dout.dtype.
+        if dout.dtype != out.dtype:
+            dout = dout.to(dtype=out.dtype)
 
         dq, dk, dv, dsink = _fa4_bwd_op(
             q,
@@ -144,8 +153,9 @@ class FA4FuncWithSink(torch.autograd.Function):
             None,  # num_splits
             None,  # pack_gqa
             None,  # deterministic
+            None,  # save_fp32_out_for_bwd
+            None,  # return_fp32_out
             None,  # return_softmax
-            None,
         )
 
     @staticmethod
@@ -258,14 +268,15 @@ class FA4VarlenFuncWithSink(torch.autograd.Function):
         num_splits=1,
         pack_gqa=None,
         deterministic=False,
+        save_fp32_out_for_bwd=False,
+        return_fp32_out=False,
         return_softmax=False,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        # q/k/v: (total, nheads, headdim) — 3D varlen format
-        # max_seqlen_q/max_seqlen_k are accepted for API compatibility but unused
-        # by the underlying fa4 varlen kernel (it derives lengths from cu_seqlens).
+        # max_seqlen_q/k: API compat only; FA4 varlen uses cu_seqlens.
+        fp32_out = save_fp32_out_for_bwd or return_fp32_out
         out, softmax_lse = _fa4_varlen_fwd_op(
             q,
             k,
@@ -279,14 +290,17 @@ class FA4VarlenFuncWithSink(torch.autograd.Function):
             softcap,
             num_splits,
             pack_gqa,
+            fp32_out,
         )
 
+        out_user = out if return_fp32_out else out.to(dtype=q.dtype)
+        out_for_bwd = out if save_fp32_out_for_bwd else out_user
         ctx.save_for_backward(
             q,
             k,
             v,
             sink,
-            out,
+            out_for_bwd,
             softmax_lse,
             cu_seqlens_q,
             cu_seqlens_k,
@@ -298,7 +312,7 @@ class FA4VarlenFuncWithSink(torch.autograd.Function):
         ctx.pack_gqa = pack_gqa
         ctx.deterministic = deterministic
 
-        return (out, softmax_lse) if return_softmax else out
+        return (out_user, softmax_lse) if return_softmax else out_user
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -312,8 +326,10 @@ class FA4VarlenFuncWithSink(torch.autograd.Function):
             cu_seqlens_q,
             cu_seqlens_k,
         ) = ctx.saved_tensors
+        # FA4 requires out.dtype == dout.dtype.
+        if dout.dtype != out.dtype:
+            dout = dout.to(dtype=out.dtype)
 
-        # q/k/v: (total, nheads, headdim) — 3D varlen format
         dq, dk, dv, dsink = _fa4_varlen_bwd_op(
             q,
             k,
@@ -348,6 +364,8 @@ class FA4VarlenFuncWithSink(torch.autograd.Function):
             None,  # num_splits
             None,  # pack_gqa
             None,  # deterministic
+            None,  # save_fp32_out_for_bwd
+            None,  # return_fp32_out
             None,  # return_softmax
         )
 
@@ -438,8 +456,13 @@ def _fa4_fwd_op(
     softcap: float,
     num_splits: int,
     pack_gqa: bool | None,
+    fp32_out: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """torch.ops.magi_attn_ext.fa4_fwd"""
+    # Omit out_dtype unless needed (older flash-attn may lack the kwarg).
+    fwd_kwargs = {}
+    if fp32_out:
+        fwd_kwargs["out_dtype"] = torch.float32
     out, softmax_lse = _flash_attn_fwd(
         q,
         k,
@@ -451,6 +474,7 @@ def _fa4_fwd_op(
         learnable_sink=None,
         pack_gqa=pack_gqa,
         return_lse=True,
+        **fwd_kwargs,
     )
     out, softmax_lse = FA4FuncWithSink.correct_out_lse_with_sink(
         out=out,
@@ -473,10 +497,12 @@ def _fa4_fwd_fake(
     softcap,
     num_splits,
     pack_gqa,
+    fp32_out=False,
 ):
     # dense: q is (b, s, h, d); lse is (b, h, s)
     b, s, h, _ = q.shape
-    out = torch.empty_like(q)
+    out_dtype = torch.float32 if fp32_out else q.dtype
+    out = q.new_empty(q.shape, dtype=out_dtype)
     softmax_lse = q.new_empty((b, h, s), dtype=torch.float32)
     return out, softmax_lse
 
@@ -571,9 +597,13 @@ def _fa4_varlen_fwd_op(
     softcap: float,
     num_splits: int,
     pack_gqa: bool | None,
+    fp32_out: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """torch.ops.magi_attn_ext.fa4_varlen_fwd"""
-    # q/k/v: (total, nheads, headdim) — 3D varlen format
+    # Omit out_dtype unless needed (older flash-attn may lack the kwarg).
+    fwd_kwargs = {}
+    if fp32_out:
+        fwd_kwargs["out_dtype"] = torch.float32
     out, softmax_lse = _flash_attn_fwd(
         q,
         k,
@@ -587,6 +617,7 @@ def _fa4_varlen_fwd_op(
         learnable_sink=None,
         pack_gqa=pack_gqa,
         return_lse=True,
+        **fwd_kwargs,
     )
     # out: (total_q, nheads, headdim); softmax_lse: (nheads, total_q)
     out, softmax_lse = FA4VarlenFuncWithSink.correct_out_lse_with_sink(
@@ -612,10 +643,12 @@ def _fa4_varlen_fwd_fake(
     softcap,
     num_splits,
     pack_gqa,
+    fp32_out=False,
 ):
     # varlen: q is (total_q, nheads, headdim); lse is (nheads, total_q)
     total_q, nheads, _ = q.shape
-    out = torch.empty_like(q)
+    out_dtype = torch.float32 if fp32_out else q.dtype
+    out = q.new_empty(q.shape, dtype=out_dtype)
     softmax_lse = q.new_empty((nheads, total_q), dtype=torch.float32)
     return out, softmax_lse
 
@@ -714,8 +747,16 @@ def fa4_func_with_sink(
     num_splits=1,
     pack_gqa=None,
     deterministic=False,
+    save_fp32_out_for_bwd: bool = False,
+    return_fp32_out: bool = False,
     return_attn_probs=False,
 ):
+    """Dense FA4 attention with Magi sink correction.
+
+    Args:
+        save_fp32_out_for_bwd: Save FP32 O for bwd dpsum.
+        return_fp32_out: Return FP32 O; otherwise cast to ``q.dtype``.
+    """
     return FA4FuncWithSink.apply(
         q,
         k,
@@ -728,6 +769,8 @@ def fa4_func_with_sink(
         num_splits,
         pack_gqa,
         deterministic,
+        save_fp32_out_for_bwd,
+        return_fp32_out,
         return_attn_probs,
     )
 
@@ -748,8 +791,16 @@ def fa4_varlen_func_with_sink(
     num_splits=1,
     pack_gqa=None,
     deterministic=False,
+    save_fp32_out_for_bwd: bool = False,
+    return_fp32_out: bool = False,
     return_attn_probs=False,
 ):
+    """Varlen FA4 attention with Magi sink correction.
+
+    Args:
+        save_fp32_out_for_bwd: Save FP32 O for bwd dpsum.
+        return_fp32_out: Return FP32 O; otherwise cast to ``q.dtype``.
+    """
     return FA4VarlenFuncWithSink.apply(
         q,
         k,
@@ -766,5 +817,7 @@ def fa4_varlen_func_with_sink(
         num_splits,
         pack_gqa,
         deterministic,
+        save_fp32_out_for_bwd,
+        return_fp32_out,
         return_attn_probs,
     )
