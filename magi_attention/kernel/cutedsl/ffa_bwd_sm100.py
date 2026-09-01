@@ -14,7 +14,6 @@
 
 # Copyright (c) 2025, Ted Zadouri, Markus Hoehnerbach, Jay Shah, Tri Dao.
 
-# mypy: disable-error-code="union-attr,index,misc"
 # pyright: reportInvalidTypeForm=false
 
 import math
@@ -2657,6 +2656,7 @@ class FFABwdSm100:
                 pair_beg = Int32(mCuBatches[batch_idx])
                 pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
                 for pj in cutlass.range(pair_cnt, unroll=1):
+                    assert mMaskTypes is not None
                     seqlen_pair = SeqlenInfoCls(pair_beg + pj, k_batch_idx=batch_idx)
                     attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
                     lo_p, hi_p = block_info.get_m_block_min_max_per_range(
@@ -3218,6 +3218,7 @@ class FFABwdSm100:
                 process_tile = cutlass.Boolean(False)
                 kv_pending = cutlass.Boolean(True)
                 for pj in cutlass.range(pair_cnt, unroll=1):
+                    assert mMaskTypes is not None
                     seqlen_pair = SeqlenInfoCls(pair_beg + pj, k_batch_idx=batch_idx)
                     attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
                     lo_p, hi_p = block_info.get_m_block_min_max_per_range(
@@ -3383,6 +3384,7 @@ class FFABwdSm100:
                             if const_expr(
                                 self.use_2cta_instrs and tma_atom_dOt is not None
                             ):
+                                assert load_dOt_p is not None
                                 load_dOt_p(lo_p, producer_state=producer_state_dO_dPsum)
                             pipeline_dO.producer_commit(producer_state_dO_dPsum)
                             pipeline_dPsum.producer_acquire(producer_state_dO_dPsum)
@@ -3405,6 +3407,7 @@ class FFABwdSm100:
                                 if const_expr(
                                     self.use_2cta_instrs and tma_atom_Qt is not None
                                 ):
+                                    assert load_Qt_p is not None
                                     pipeline_Qt.producer_acquire(producer_state_Qt)
                                     load_Qt_p(
                                         m_block - 1,
@@ -3441,6 +3444,7 @@ class FFABwdSm100:
                                 if const_expr(
                                     self.use_2cta_instrs and tma_atom_dOt is not None
                                 ):
+                                    assert load_dOt_p is not None
                                     load_dOt_p(
                                         m_block,
                                         producer_state=producer_state_dO_dPsum,
@@ -3462,6 +3466,7 @@ class FFABwdSm100:
                             if const_expr(
                                 self.use_2cta_instrs and tma_atom_Qt is not None
                             ):
+                                assert load_Qt_p is not None
                                 pipeline_Qt.producer_acquire(producer_state_Qt)
                                 load_Qt_p(hi_p - 1, producer_state=producer_state_Qt)
                                 pipeline_Qt.producer_commit(producer_state_Qt)
@@ -5280,6 +5285,7 @@ class FFABwdSm100:
             # For dense: iterate m_block_min..m_block_max directly.
             if const_expr(self.range_merge):
                 for pj in cutlass.range(pair_cnt, unroll=1):
+                    assert mMaskTypes is not None
                     seqlen_pair = SeqlenInfoCls(pair_beg + pj, k_batch_idx=batch_idx)
                     attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
                     lo_p, hi_p = block_info.get_m_block_min_max_per_range(
@@ -6556,6 +6562,7 @@ class FFABwdSm100:
             tdQsdQ_tma = None
             tdQgdQ_tma = None
             if const_expr(self.dQ_rowmajor_accum):
+                assert mdQacc_tma is not None
                 padded_rows_q = mdQacc_tma.shape[0] // mdQacc.shape[1]
                 head_row_base = head_idx * padded_rows_q + seqlen_info.offset_q
                 mdQacc_head_2d = cute.domain_offset((head_row_base, 0), mdQacc_tma)
@@ -6683,11 +6690,13 @@ class FFABwdSm100:
                     cute.printf(prefix + "tdQrdQ.shape: {}", tdQrdQ_shape)
                     cute.printf(prefix + "tdQcdQ.layout: {}", tdQcdQ.layout)
                     if const_expr(self.dQ_rowmajor_accum):
+                        assert tdQsdQ_tma_r2s is not None
                         cute.printf(
                             prefix + "tdQsdQ_tma_r2s.layout: {}",
                             tdQsdQ_tma_r2s.layout,
                         )
                     else:
+                        assert tdQsdQ is not None
                         cute.printf(prefix + "tdQsdQ.layout: {}", tdQsdQ.layout)
                     cute.printf(prefix + "sdQacc.layout: {}", sdQacc.layout)
                     cute.printf("")
@@ -6706,6 +6715,7 @@ class FFABwdSm100:
                     )
                     cute.printf("")
                     if const_expr(not self.dQ_rowmajor_accum):
+                        assert thr_copy_dQacc_r2s is not None
                         cute.printf(
                             prefix + "thr_copy_dQacc_r2s: layout_src_tv={}",
                             thr_copy_dQacc_r2s.layout_src_tv,
@@ -6747,6 +6757,7 @@ class FFABwdSm100:
             # For dense: iterate m_block_min..m_block_max directly.
             if const_expr(self.range_merge):
                 for pj in cutlass.range(pair_cnt, unroll=1):
+                    assert mMaskTypes is not None
                     seqlen_pair = SeqlenInfoCls(pair_beg + pj, k_batch_idx=batch_idx)
                     attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
                     lo_p, hi_p = block_info.get_m_block_min_max_per_range(
@@ -6786,6 +6797,7 @@ class FFABwdSm100:
                         # 2D tensor-coordinate grid for the reduce descriptor: rows
                         # start at this head's flattened base plus the physical range
                         # offset — any (unaligned) start is a plain coordinate.
+                        assert mdQacc_tma is not None
                         padded_rows_q = mdQacc_tma.shape[0] // mdQacc.shape[1]
                         head_row_base = head_idx * padded_rows_q + seqlen_pair.offset_q
                         mdQacc_head_2d = cute.domain_offset(
@@ -6848,6 +6860,7 @@ class FFABwdSm100:
                                 # R2S copy dQacc (bulk path)
                                 smem_idx = dQ_tma_store_producer_state.index
                                 if const_expr(not self.dQ_rowmajor_accum):
+                                    assert tdQsdQ is not None
                                     tdQsdQ_r2s = tdQsdQ[None, None, smem_idx]
                                     tdQrdQ_r2s = cute.make_tensor(
                                         tdQrdQ[None, stage].iterator,
@@ -6883,6 +6896,8 @@ class FFABwdSm100:
                                         else:
                                             cute.autovec_copy(tdQ_zero_tma, tdQsdQ_fold)
                                     else:
+                                        assert tdQrdQ_t2r is not None
+                                        assert tdQsdQ_tma_r2s is not None
                                         tdQcdQ_stage = tdQcdQ_t2r[None, stage, 0, 0]
                                         tdQrdQ_stage = tdQrdQ_t2r[None, stage, 0, 0]
                                         tdQsdQ_stage = tdQsdQ_tma_r2s[
@@ -7133,6 +7148,7 @@ class FFABwdSm100:
                         # R2S copy dQacc (bulk path)
                         smem_idx = dQ_tma_store_producer_state.index
                         if const_expr(not self.dQ_rowmajor_accum):
+                            assert tdQsdQ is not None
                             tdQsdQ_r2s = tdQsdQ[None, None, smem_idx]
                             tdQrdQ_r2s = cute.make_tensor(
                                 tdQrdQ[None, stage].iterator,
@@ -7150,6 +7166,8 @@ class FFABwdSm100:
                         if const_expr(self.dQ_rowmajor_accum):
                             rows_valid = seqlen_info.seqlen_q - m_block * self.tile_m
                             if const_expr(not self.use_2cta_instrs):
+                                assert tdQrdQ_t2r is not None
+                                assert tdQsdQ_tma_r2s is not None
                                 tdQcdQ_stage = tdQcdQ_t2r[None, stage, 0, 0]
                                 tdQrdQ_stage = tdQrdQ_t2r[None, stage, 0, 0]
                                 tdQsdQ_stage = tdQsdQ_tma_r2s[None, 0, 0, 0, smem_idx]
@@ -7241,6 +7259,7 @@ class FFABwdSm100:
                         if const_expr(
                             self.dQ_rowmajor_accum and not self.use_2cta_instrs
                         ):
+                            assert tdQsdQ_tma is not None and tdQgdQ_tma is not None
                             if is_tma_warp and not m_block_oob_upper:
                                 cute.copy(
                                     tma_atom_dQacc,
@@ -7255,6 +7274,7 @@ class FFABwdSm100:
                                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
 
                         if const_expr(self.dQ_rowmajor_accum and self.use_2cta_instrs):
+                            assert tdQsdQ_tma is not None and tdQgdQ_tma is not None
                             if is_tma_warp and not m_block_oob_upper:
                                 for column_group in cutlass.range_constexpr(
                                     self.cta_group_size
@@ -7868,6 +7888,7 @@ class FFABwdSm100:
                     k_row = tdKVcdKV_t2r[0][0] - _cta_rank * self.tile_n
                 else:
                     k_row = tdKVcdKV_t2r[0][0]
+                assert sdKV_tma is not None
                 sdKV_row = sdKV_tma[k_row, None]
                 sdKV_row_fragment = cute.make_tensor(
                     sdKV_row.iterator, tdKVrdKV_t2r.layout
@@ -7886,6 +7907,7 @@ class FFABwdSm100:
             # R2S copy rdK/rdV to sdK/sdV for legacy bulk/store paths. The
             # row-major accum path staged fp32 values in its strip above.
             if const_expr(not self.dKV_postprocess or not self.rowmajor_accum):
+                assert tdKVsdKV_r2s is not None
                 tdKVrdKV_r2s = cute.make_tensor(tdKVrdKV.iterator, tdKVsdKV_r2s.shape)
                 cute.copy(thr_copy_r2s_dKV, tdKVrdKV_r2s, tdKVsdKV_r2s)
 
@@ -7900,6 +7922,7 @@ class FFABwdSm100:
                     # One SMEM strip per WG: synchronously drain every read
                     # before the next epilogue stage reuses the strip.
                     strip_idx = wg_idx * num_epi_stages + epi_stage
+                    assert tdKVsdKV_tma is not None and tdKVgdKV_tma is not None
                     cute.copy(
                         tma_atom_dKV,
                         tdKVsdKV_tma,
@@ -8009,6 +8032,7 @@ class FFABwdSm100:
                 cute.printf(prefix + "tdKVcdKV_t2r.layout: {}", tdKVcdKV_t2r.layout)
                 cute.printf(prefix + "tdKVrdKV_t2r.layout: {}", tdKVrdKV_t2r.layout)
                 cute.printf(prefix + "tdKVrdKV.layout: {}", tdKVrdKV.layout)
+                assert tdKVrdKV_r2s is not None and tdKVsdKV_r2s is not None
                 cute.printf(prefix + "tdKVrdKV_r2s.layout: {}", tdKVrdKV_r2s.layout)
                 cute.printf("")
                 cute.printf(prefix + "sdKV.layout: {}", sdKV.layout)
