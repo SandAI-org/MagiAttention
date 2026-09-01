@@ -60,10 +60,6 @@ from .tile_scheduler import (
     TileSchedulerProtocol,
 )
 
-# Named-barrier timing probe for CTA (0,0,0). Off: compiles out.
-DEBUG_BAR_PROBE = False
-
-
 class FFABwdSm100:
     arch = 100
 
@@ -255,7 +251,7 @@ class FFABwdSm100:
 
             self.tmem_dK_offset = self.tmem_dP_offset + self.tile_m
 
-        if (not self.may_be_causal and not is_local) or deterministic:
+        if (not self.maybe_causal and not is_local) or deterministic:
             self.num_regs_reduce = 136 if self.use_2cta_instrs else 152
             self.num_regs_compute = 136
             self.num_regs_load = 104 if self.use_2cta_instrs else 96 - 8
@@ -268,7 +264,7 @@ class FFABwdSm100:
         self.num_regs_empty = 24
 
         if const_expr(self.tile_hdim == 192):
-            if not self.may_be_causal and not is_local:
+            if not self.maybe_causal and not is_local:
                 self.num_regs_reduce = 128 + 8
                 self.num_regs_compute = 128 + 8
                 self.num_regs_load = 128 - 24
@@ -298,7 +294,7 @@ class FFABwdSm100:
                 f"{prefix}{self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=}"
             )
             print(
-                f"{prefix}{self.mask_type=} | {self.may_be_causal=} | {self.is_local=} | "
+                f"{prefix}{self.mask_type=} | {self.maybe_causal=} | {self.is_local=} | "
                 f"{self.is_persistent=} | {self.deterministic=}"
             )
             print(
@@ -333,7 +329,7 @@ class FFABwdSm100:
         return self.mask_type == MT_MAP.causal
 
     @property
-    def may_be_causal(self) -> bool:
+    def maybe_causal(self) -> bool:
         """Whether the compile must carry the causal configuration.
 
         True for the static causal kernel and for the per-range kernel, whose
@@ -352,8 +348,8 @@ class FFABwdSm100:
         # TODO: try 32/1 or 48/2 for 2cta d=192 dv=128
         if self.use_2cta_instrs and self.tile_hdim == 192:
             self.dQ_reduce_ncol_t2r = 32
-            self.dQ_reduce_ncol = 24 if not self.may_be_causal else 32
-            self.sdQacc_stage = 2 if not self.may_be_causal else 1
+            self.dQ_reduce_ncol = 24 if not self.maybe_causal else 32
+            self.sdQacc_stage = 2 if not self.maybe_causal else 1
         else:
             if self.use_2cta_instrs:
                 self.dQ_reduce_ncol_t2r = 32
@@ -808,7 +804,6 @@ class FFABwdSm100:
         self.dQ_rowmajor_accum = (
             self.rowmajor_accum and not self.use_dense_dqacc_for_ranges
         )
-        self.debug_bar_probe = DEBUG_BAR_PROBE
 
         self.dKV_postprocess = self.qhead_per_kvhead > 1 or (
             mKRanges is not None and not self.disable_bwd_dkv_atomic_reduction
@@ -952,6 +947,8 @@ class FFABwdSm100:
                 ),
             )
             sdQacc_tma_layout = cute.select(self.sdQacc_tma_layout, mode=[0, 1])
+            # global_dQacc[row:row+R, col:col+C]
+            # += shared_dQ[row:row+R, col:col+C]
             tma_atom_dQacc, mdQacc_tma = cpasync.make_tiled_tma_atom(
                 cpasync.CopyReduceBulkTensorTileS2GOp(),
                 mdQacc_2d,
@@ -1219,7 +1216,7 @@ class FFABwdSm100:
         else:
             TileScheduler = SingleTileScheduler  # type: ignore[assignment]
         if const_expr(self.spt_override is None):
-            self.spt = (self.may_be_causal or self.is_local) and self.deterministic
+            self.spt = (self.maybe_causal or self.is_local) and self.deterministic
         else:
             assert self.spt_override is not None
             self.spt = self.spt_override and self.deterministic
@@ -1593,10 +1590,7 @@ class FFABwdSm100:
 
         # --- Launch the kernel ---
 
-        assert self.shared_storage.size_in_bytes() <= 232448, (  # type: ignore[attr-defined]
-            f"bwd smem request {self.shared_storage.size_in_bytes()}B "  # type: ignore[attr-defined]
-            f"exceeds the SM100 227KB dynamic smem cap"
-        )
+
         self.kernel(
             tma_tensor_Q,
             tma_tensor_Qt,
@@ -2204,7 +2198,7 @@ class FFABwdSm100:
             # self.tile_n,
             self.tile_n
             * self.cluster_shape_mnk[0],  # careful, this case is not very well-tested
-            self.may_be_causal,
+            self.maybe_causal,
             self.is_local,
             False,  # is_split_kv
             window_size_left,
@@ -6794,6 +6788,8 @@ class FFABwdSm100:
                     tdQsdQ_tma = None
                     tdQgdQ_tma = None
                     if const_expr(self.dQ_rowmajor_accum):
+                        # row = physical_offset_q + local_row
+                        # col = head_dim_column
                         # 2D tensor-coordinate grid for the reduce descriptor: rows
                         # start at this head's flattened base plus the physical range
                         # offset — any (unaligned) start is a plain coordinate.
@@ -6939,21 +6935,6 @@ class FFABwdSm100:
                                         )
 
                                 # Sync before S2G copy
-                                if const_expr(self.debug_bar_probe):
-                                    if (
-                                        cute.arch.block_idx()[0] == 0
-                                        and cute.arch.block_idx()[1] == 0
-                                        and cute.arch.block_idx()[2] == 0
-                                        and cute.arch.lane_idx() == 0
-                                    ):
-                                        _bar_t = cutedsl_utils.read_globaltimer_u64()
-                                        cute.printf(
-                                            "BAR4 w=%d m=%d s=%d ph=0 t=%lld\n",
-                                            cute.arch.warp_idx(),
-                                            m_block,
-                                            stage,
-                                            _bar_t,
-                                        )
                                 self.reduce_sync_barrier.arrive_and_wait()
 
                                 # S2G copy dQacc (legacy bulk add-reduce path)
@@ -6981,6 +6962,8 @@ class FFABwdSm100:
                                 if const_expr(
                                     self.dQ_rowmajor_accum and not self.use_2cta_instrs
                                 ):
+                                    # dQacc[physical_q_row, hd_col]
+                                    # += partial_dQ[q_row, hd_col]
                                     if is_tma_warp and not m_block_oob_upper:
                                         cute.copy(
                                             tma_atom_dQacc,
@@ -7038,21 +7021,6 @@ class FFABwdSm100:
                                         )
 
                                 # Sync after S2G copy
-                                if const_expr(self.debug_bar_probe):
-                                    if (
-                                        cute.arch.block_idx()[0] == 0
-                                        and cute.arch.block_idx()[1] == 0
-                                        and cute.arch.block_idx()[2] == 0
-                                        and cute.arch.lane_idx() == 0
-                                    ):
-                                        _bar_t = cutedsl_utils.read_globaltimer_u64()
-                                        cute.printf(
-                                            "BAR4 w=%d m=%d s=%d ph=1 t=%lld\n",
-                                            cute.arch.warp_idx(),
-                                            m_block,
-                                            stage,
-                                            _bar_t,
-                                        )
                                 self.reduce_sync_barrier.arrive_and_wait()
                                 dQ_tma_store_producer_state.advance()
 
@@ -7219,21 +7187,6 @@ class FFABwdSm100:
                                 )
 
                         # Sync before S2G copy
-                        if const_expr(self.debug_bar_probe):
-                            if (
-                                cute.arch.block_idx()[0] == 0
-                                and cute.arch.block_idx()[1] == 0
-                                and cute.arch.block_idx()[2] == 0
-                                and cute.arch.lane_idx() == 0
-                            ):
-                                _bar_t = cutedsl_utils.read_globaltimer_u64()
-                                cute.printf(
-                                    "BAR4 w=%d m=%d s=%d ph=0 t=%lld\n",
-                                    cute.arch.warp_idx(),
-                                    m_block,
-                                    stage,
-                                    _bar_t,
-                                )
                         self.reduce_sync_barrier.arrive_and_wait()
 
                         # S2G copy dQacc (legacy bulk add-reduce path)
@@ -7308,21 +7261,6 @@ class FFABwdSm100:
                                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
 
                         # Sync after S2G copy
-                        if const_expr(self.debug_bar_probe):
-                            if (
-                                cute.arch.block_idx()[0] == 0
-                                and cute.arch.block_idx()[1] == 0
-                                and cute.arch.block_idx()[2] == 0
-                                and cute.arch.lane_idx() == 0
-                            ):
-                                _bar_t = cutedsl_utils.read_globaltimer_u64()
-                                cute.printf(
-                                    "BAR4 w=%d m=%d s=%d ph=1 t=%lld\n",
-                                    cute.arch.warp_idx(),
-                                    m_block,
-                                    stage,
-                                    _bar_t,
-                                )
                         self.reduce_sync_barrier.arrive_and_wait()
                         dQ_tma_store_producer_state.advance()
 
