@@ -100,11 +100,7 @@ elif IS_SM100:
         ffa_fa4_func,
     )
 
-    # NOTE: the raw flash-attn-cute "fa4" baseline asserts on this machine for
-    # the benchmark configs (flash_fwd_sm100 requires use_tma_O or
-    # use_correction_warps_for_epi); magi's ffa_fa4 wrapper avoids that path,
-    # so only ffa_fa4 is kept as the SM100 reference.
-    impls = ["ffa", "ffa_fa4"]
+    impls = ["ffa", "fa4", "ffa_fa4"]
 else:
     impls = ["ffa"]
 
@@ -174,11 +170,6 @@ attn_flops_configs = [
 # ffa (cutedsl) optimization flags
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# The benchmark's varlen ranges are sorted, pairwise-disjoint, full-coverage
-# cu-partitions, so every ranges-native optimization flag is legal. They are
-# passed only when the running ``flex_flash_attn_func`` signature
-# supports them.
-#
 #   BENCH_FFA_OPT=0   disable all optional flags (default: on)
 
 _FFA_OPT = os.environ.get("BENCH_FFA_OPT", "1") == "1"
@@ -187,8 +178,6 @@ _ffa_sig = inspect.signature(ffa_func).parameters
 
 def _ffa_opt_kwargs(is_varlen_case: bool, is_mha: bool) -> dict:
     kw: dict = {}
-    # Dense (no ranges) cannot take the atomic fwd path at all, so the direct
-    # store is mandatory regardless of the opt switch (correctness, not perf).
     if not is_varlen_case and "disable_fwd_atomic_reduction" in _ffa_sig:
         kw["disable_fwd_atomic_reduction"] = True
     if not _FFA_OPT:
@@ -196,7 +185,7 @@ def _ffa_opt_kwargs(is_varlen_case: bool, is_mha: bool) -> dict:
     if "disable_fwd_atomic_reduction" in _ffa_sig:
         kw["disable_fwd_atomic_reduction"] = True
     if is_varlen_case:
-        # direct-store disjoint dKV is MHA-only (unique-writer contract)
+        # direct-store disjoint dKV is MHA-only
         if is_mha and "disable_bwd_dkv_atomic_reduction" in _ffa_sig:
             kw["disable_bwd_dkv_atomic_reduction"] = True
         if "use_dense_dqacc_for_ranges" in _ffa_sig:
@@ -226,8 +215,6 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
     is_varlen = "varlen" in mask_type
     window_size_tuple = (-1, -1)
 
-    # Per-case seed: the doc split and the tensors depend only on the case
-    # shape, not on the worker's RNG consumption order.
     set_random_seed(20260818 + seqlen)
 
     # ── ranges / cu_seqlens / attn flops ──
