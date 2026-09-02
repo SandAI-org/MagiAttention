@@ -79,63 +79,6 @@ from .sparse_utils import (
     to_cute_block_sparse_tensors,
 )
 
-# Pool for the async k_ranges snapshots: a fresh pin_memory is a
-# cudaHostAlloc on the hot path.
-_pinned_ranges_pool: dict[int, list[tuple[torch.Tensor, torch.cuda.Event]]] = {}
-
-
-class _KTileHintSnapshot:
-    """Async host copy of k_ranges sizing the exact bwd grid without a sync.
-
-    Forward captures the copy and an event; backward resolves it with a host
-    wait and turns the range lengths into (cluster-1, cluster-2) tile totals.
-    A snapshot that is never resolved (backward never ran) hands its pinned
-    buffer back to the pool on garbage collection.
-    """
-
-    __slots__ = ("_pinned", "_view", "_event")
-
-    def __init__(self, k_ranges: torch.Tensor):
-        cap = max(64, 1 << (k_ranges.shape[0] - 1).bit_length())
-        bucket = _pinned_ranges_pool.get(cap)
-        self._pinned, self._event = (
-            bucket.pop()
-            if bucket
-            else (
-                torch.empty((cap, 2), dtype=torch.int32, pin_memory=True),
-                torch.cuda.Event(),
-            )
-        )
-        self._view = self._pinned[: k_ranges.shape[0]]
-        self._view.copy_(k_ranges, non_blocking=True)
-        self._event.record()
-
-    @staticmethod
-    def capture(k_ranges: torch.Tensor | None) -> "_KTileHintSnapshot | None":
-        if k_ranges is None or torch.cuda.is_current_stream_capturing():
-            return None
-        return _KTileHintSnapshot(k_ranges)
-
-    def resolve(self) -> tuple[int, int]:
-        """Host-wait on the copy and return the exact k-tile totals."""
-        self._event.synchronize()
-        kblocks = (self._view[:, 1] - self._view[:, 0] + 127) // 128
-        hints = (int(kblocks.sum()), int(((kblocks + 1) // 2).sum()))
-        self._release()
-        return hints
-
-    def _release(self) -> None:
-        if self._pinned is not None:
-            _pinned_ranges_pool.setdefault(self._pinned.shape[0], []).append(
-                (self._pinned, self._event)
-            )
-            self._pinned = self._view = self._event = None
-
-    def __del__(self):
-        # Safe to reuse: the buffer only ever sees stream-ordered copies, and
-        # by the time an unresolved snapshot is collected its graph is gone.
-        self._release()
-
 
 def _validate_dense_dqacc_flag(
     flag: bool,
@@ -858,25 +801,6 @@ def _flex_flash_attn_fwd(
 _flex_flash_attn_fwd.compile_cache = get_jit_cache("fwd")
 
 
-def _derive_k_total_blocks_hint(
-    k_tile_hints: tuple[int, int],
-    num_ranges: int,
-    seqlen_k: int,
-    n_block_size: int,
-    cluster_size: int,
-) -> int | None:
-    """Exact grid bound for overlapping k ranges, or None to keep the quota.
-
-    The per-CTA prefix-sum decode the hint enables only pays off above ~2x
-    quota waste.
-    """
-    exact_ctas = k_tile_hints[0] if cluster_size == 1 else 2 * k_tile_hints[1]
-    quota_blocks = (seqlen_k + n_block_size - 1) // n_block_size
-    quota_units = (quota_blocks + cluster_size - 1) // cluster_size
-    quota_ctas = quota_units * cluster_size * num_ranges
-    return exact_ctas if quota_ctas >= 2 * exact_ctas else None
-
-
 def _flex_flash_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -892,9 +816,6 @@ def _flex_flash_attn_bwd(
     mask_types: int | torch.Tensor = MT_MAP.full,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
-    # Exact k-tile totals (cluster-1, cluster-2) for the undeclared ranges
-    # bwd grid; None keeps the quota grid.
-    k_tile_hints: tuple[int, int] | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
     sink: torch.Tensor | None = None,
@@ -1245,25 +1166,6 @@ def _flex_flash_attn_bwd(
     k_ranges_sorted_disjoint = has_ranges and (
         declared_k_full_coverage or disable_bwd_dkv_atomic_reduction
     )
-    # Undeclared ranges: exact tile count (async snapshot from fwd) sizes the
-    # prefix-sum grid; safe for overlapping k ranges.
-    k_total_blocks_hint = (
-        _derive_k_total_blocks_hint(
-            k_tile_hints, k_ranges.shape[0], seqlen_k, n_block_size, cluster_size
-        )
-        if (
-            k_tile_hints is not None
-            and has_ranges
-            and k_ranges is not None  # mypy: has_ranges implies k_ranges
-            and not k_ranges_sorted_disjoint
-            and cu_batches is None
-            and major_arch in (10, 11)
-            and n_block_size == 128
-            and cluster_size in (1, 2)
-        )
-        else None
-    )
-
     # Buffer policy: empty_like where every row is provably written — dense,
     # the unique-writer contracts (coverage holes blanked on device below),
     # or a full-coverage declaration (no holes) — else zeros_like.
@@ -1596,7 +1498,6 @@ def _flex_flash_attn_bwd(
             range_merge_active,
             use_dense_dqacc_for_ranges,
             k_ranges_sorted_disjoint,
-            k_total_blocks_hint is not None,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
             get_broadcast_dims(v),
@@ -1762,10 +1663,6 @@ def _flex_flash_attn_bwd(
             )
             # Runtime scalar: the compiled variant stays max_seqlen_k-agnostic.
             bwd_compile_args.append(Int32(seqlen_k))
-            # Runtime scalar: presence is a compile-key bit, the value is not.
-            bwd_compile_args.append(
-                Int32(k_total_blocks_hint) if k_total_blocks_hint is not None else None
-            )
         bwd_compile_args.extend(
             [
                 cute_aux_tensors,
@@ -1802,7 +1699,6 @@ def _flex_flash_attn_bwd(
         bwd_call_args.append(mask_types_tensor)
         bwd_call_args.append(cu_batches)
         bwd_call_args.append(seqlen_k)
-        bwd_call_args.append(k_total_blocks_hint)
     bwd_call_args.extend(
         [
             aux_tensors,
@@ -2012,17 +1908,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.use_dense_dqacc_for_ranges = use_dense_dqacc_for_ranges
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
-        # The exact-tile hint only matters when the scheduler cannot certify
-        # sorted-disjoint k; grad-enablement is invisible inside
-        # autograd.Function.forward, so an unused snapshot is reclaimed by
-        # _KTileHintSnapshot.__del__ when ctx is dropped.
-        ctx.k_tile_hints = None
-        ctx.k_tile_hint_snapshot = (
-            _KTileHintSnapshot.capture(k_ranges)
-            if any(t.requires_grad for t in (q, k, v))
-            and not disable_bwd_dkv_atomic_reduction
-            else None
-        )
         # Drop the direct aux_tensors reference on ctx; the real tensors are
         # tracked via save_for_backward and restored in backward. Keeping them
         # here too would bypass autograd's save_for_backward bookkeeping.
@@ -2059,13 +1944,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if flex_attn_args is not None:
             flex_attn_args = flex_attn_args.with_aux_tensors(aux)
 
-        # Resolve the snapshot from forward (host wait, not a device sync);
-        # cache the totals on ctx for retain_graph repeated backwards.
-        k_tile_hints = ctx.k_tile_hints
-        if ctx.k_tile_hint_snapshot is not None:
-            k_tile_hints = ctx.k_tile_hints = ctx.k_tile_hint_snapshot.resolve()
-            ctx.k_tile_hint_snapshot = None
-
         dq, dk, dv = _flex_flash_attn_bwd(
             q=q,
             k=k,
@@ -2082,7 +1960,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             k_ranges=k_ranges,
             max_seqlen_q=ctx.max_seqlen_q,
             max_seqlen_k=ctx.max_seqlen_k,
-            k_tile_hints=k_tile_hints,
             deterministic=ctx.deterministic,
             disable_fwd_atomic_reduction=ctx.disable_fwd_atomic_reduction,
             disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
