@@ -165,13 +165,6 @@ def cutedsl_bwd(
         k_ranges=ffa_args["k_ranges"],
         max_seqlen_q=attn_arg.q_ranges.max_seqlen,
         max_seqlen_k=attn_arg.k_ranges.max_seqlen,
-        # Host-side ranges are available here, so the exact scheduler grid
-        # totals cost nothing. Rows must match ffa_args["k_ranges"],
-        # which comes from the bwd-transformed k_ranges_bwd.
-        k_tile_hints=(
-            sum((r.seqlen + 127) // 128 for r in attn_arg.k_ranges_bwd),
-            sum(((r.seqlen + 127) // 128 + 1) // 2 for r in attn_arg.k_ranges_bwd),
-        ),
         softmax_scale=softmax_scale,
         softcap=softcap,
         deterministic=False,  # the kernel raises NotImplementedError for ranges + deterministic

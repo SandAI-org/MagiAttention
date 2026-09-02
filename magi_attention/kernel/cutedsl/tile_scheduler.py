@@ -176,8 +176,6 @@ class TileSchedulerArguments(ParamsBase):
     mSeqUsedQ: Optional[cute.Tensor] = None
     mQRanges: Optional[cute.Tensor] = None
     max_outer_range_width: Optional[Int32] = None
-    # Exact total tile count across batches for prefix-sum grid bounds
-    total_tile_hint: Optional[Int32] = None
     qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
     element_size: cutlass.Constexpr[int] = 2
     is_persistent: cutlass.Constexpr[bool] = False
@@ -840,7 +838,6 @@ class SingleTileVarlenScheduler:
         # See TileSchedulerArguments: Some -> quota affine decode, None ->
         # prefix-sum decode.
         max_outer_range_width: Optional[Int32] = None
-        total_tile_hint: Optional[Int32] = None
         qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
         lpt: cutlass.Constexpr[bool] = False
         is_split_kv: cutlass.Constexpr[bool] = False
@@ -909,7 +906,6 @@ class SingleTileVarlenScheduler:
                 mSeqUsedQ=args.mSeqUsedQ,
                 mQRanges=args.mQRanges,
                 max_outer_range_width=args.max_outer_range_width,
-                total_tile_hint=args.total_tile_hint,
                 qhead_per_kvhead_packgqa=args.qhead_per_kvhead_packgqa,
                 lpt=args.lpt,
                 is_split_kv=args.is_split_kv,
@@ -997,30 +993,22 @@ class SingleTileVarlenScheduler:
             )
             total_blocks = num_m_blocks * params.cluster_shape_m * params.num_batch
             bound = total_blocks * params.num_head
-            if cutlass.const_expr(
-                not params.is_persistent
-                and not params.is_split_kv
-                and not params.lpt
-                and not params.head_swizzle
-            ):
+            if cutlass.const_expr(SingleTileVarlenScheduler.is_grid3d(params)):
                 return (
                     num_m_blocks * params.cluster_shape_m,
                     params.num_head,
                     params.num_batch,
                 )
         else:
-            if cutlass.const_expr(params.total_tile_hint is not None):
-                total_blocks_max = params.total_tile_hint
-            else:
-                total_blocks_max = (
-                    params.total_q
-                    + params.num_batch
-                    * (params.cluster_shape_m * params.tile_shape_mn[0] - 1)
-                ) // params.tile_shape_mn[0]
-                # Round down to nearest multiple of cluster since odd excess is always padding.
-                total_blocks_max = (
-                    total_blocks_max // params.cluster_shape_m * params.cluster_shape_m
-                )
+            total_blocks_max = (
+                params.total_q
+                + params.num_batch
+                * (params.cluster_shape_m * params.tile_shape_mn[0] - 1)
+            ) // params.tile_shape_mn[0]
+            # Round down to nearest multiple of cluster since odd excess is always padding.
+            total_blocks_max = (
+                total_blocks_max // params.cluster_shape_m * params.cluster_shape_m
+            )
             bound = total_blocks_max * params.num_head
         if cutlass.const_expr(params.is_persistent):
             hardware_info = cutlass.utils.HardwareInfo()
@@ -1029,6 +1017,35 @@ class SingleTileVarlenScheduler:
             grid_x = cutlass.min(max_ctas, bound)
             return (grid_x, params.num_splits, Int32(1))
         return (bound, params.num_splits, Int32(1))
+
+    @staticmethod
+    def is_grid3d(params: Params) -> bool:
+        """True if grid coordinates (bx, by, bz) directly map to (block, head, range)."""
+        return (
+            params.max_outer_range_width is not None
+            and not params.is_persistent
+            and not params.is_split_kv
+            and not params.lpt
+            and not params.head_swizzle
+        )
+
+    @staticmethod
+    @cute.jit
+    def quota_cluster_valid(
+        params: Params, block: Int32, batch_idx: Int32
+    ) -> cutlass.Boolean:
+        """True if the cluster contains valid blocks in the range.
+
+        Evaluated on the cluster base block so 2-CTA peers reach an identical
+        decision without communication, avoiding barrier deadlock on half-empty clusters.
+        """
+        assert params.mQRanges is not None
+        seqlen = (
+            params.mQRanges[batch_idx, 1] - params.mQRanges[batch_idx, 0]
+        ) * params.qhead_per_kvhead_packgqa
+        actual_blocks = cute.ceil_div(seqlen, params.tile_shape_mn[0])
+        cluster_first = (block // params.cluster_shape_m) * params.cluster_shape_m
+        return cluster_first < actual_blocks
 
     @cute.jit
     def _get_num_m_blocks(self, lane: Int32, bidb_start: Int32) -> Int32:
@@ -1134,13 +1151,7 @@ class SingleTileVarlenScheduler:
                 ),
                 params.cluster_shape_m,
             )
-            grid3d = cutlass.const_expr(
-                not params.is_persistent
-                and not params.is_split_kv
-                and not params.lpt
-                and not params.head_swizzle
-            )
-            if cutlass.const_expr(grid3d):
+            if cutlass.const_expr(SingleTileVarlenScheduler.is_grid3d(params)):
                 bx, by, bz = cute.arch.block_idx()
                 block, head_idx, batch_idx = Int32(bx), Int32(by), Int32(bz)
             else:
@@ -1153,15 +1164,12 @@ class SingleTileVarlenScheduler:
                     block, head_idx = self._decode_mh_block(num_m_blocks, mh_block)
             is_valid = False
             if batch_idx < params.num_batch:
-                seqlen_b = (
-                    params.mQRanges[batch_idx, 1] - params.mQRanges[batch_idx, 0]
-                ) * params.qhead_per_kvhead_packgqa
-                actual_blocks = cute.ceil_div(seqlen_b, params.tile_shape_mn[0])
-                # Validity must be cluster-uniform to avoid barrier deadlocks
-                cluster_first = (
-                    block // params.cluster_shape_m
-                ) * params.cluster_shape_m
-                is_valid = self._is_first_block and cluster_first < actual_blocks
+                is_valid = (
+                    self._is_first_block
+                    and SingleTileVarlenScheduler.quota_cluster_valid(
+                        params, block, batch_idx
+                    )
+                )
             else:
                 batch_idx = Int32(params.num_batch)
             split_idx = (

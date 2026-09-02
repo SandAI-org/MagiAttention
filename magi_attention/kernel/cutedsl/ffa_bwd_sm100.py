@@ -60,6 +60,7 @@ from .tile_scheduler import (
     TileSchedulerProtocol,
 )
 
+
 class FFABwdSm100:
     arch = 100
 
@@ -758,8 +759,6 @@ class FFABwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         max_seqlen_k: Int32 | None = None,
-        # Exact bwd grid bound for undeclared ranges; replaces the quota grid.
-        total_kblocks_hint: Int32 | None = None,
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -1245,11 +1244,9 @@ class FFABwdSm100:
                     mKRanges is not None
                     and mCuBatches is None
                     and not self.k_ranges_sorted_disjoint
-                    and total_kblocks_hint is None
                 )
                 else None
             ),
-            total_tile_hint=total_kblocks_hint,
             mSeqUsedQ=mSeqUsedK,
             qhead_per_kvhead_packgqa=1,  # pack_gqa disabled for bwd
             element_size=self.k_dtype.width // 8,
@@ -1265,7 +1262,6 @@ class FFABwdSm100:
             mKRanges is not None
             and mCuBatches is None
             and not self.k_ranges_sorted_disjoint
-            and total_kblocks_hint is None
         ):
             assert max_seqlen_k is not None, "quota ranges bwd needs max_seqlen_k"
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
@@ -1590,7 +1586,6 @@ class FFABwdSm100:
 
         # --- Launch the kernel ---
 
-
         self.kernel(
             tma_tensor_Q,
             tma_tensor_Qt,
@@ -1765,6 +1760,20 @@ class FFABwdSm100:
         is_print_thread = const_expr(self.debug_print) and (
             (tidx == 0) and is_print_block
         )
+
+        # The quota grid launches max_seqlen_k worth of blocks for every k
+        # range; clusters entirely past a range's end exit here, before the
+        # TMA prefetch / mbarrier init / pipeline setup below, so they cost
+        # only the launch. Half-empty clusters run the zero-iteration path
+        # instead, since their peer CTA still arrives on the cluster barriers.
+        if const_expr(
+            self.is_varlen_k and SingleTileVarlenScheduler.is_grid3d(tile_sched_params)
+        ):
+            bx, _, bz = cute.arch.block_idx()
+            if not SingleTileVarlenScheduler.quota_cluster_valid(
+                tile_sched_params, bx, bz
+            ):
+                cutedsl_utils.cta_exit()
 
         # --- Prefetch TMA descriptor ---
 
