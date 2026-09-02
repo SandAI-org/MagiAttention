@@ -109,7 +109,7 @@ Semantically, `roll` is equivalent to `undispatch` -> `torch.roll` -> `dispatch`
 
 ### Undispatch Function
 
-When you need to recover the global output tensor(s) from the local one(s), to compute the loss or some reason else, you can call `undispatch` function to undispatch the padded local ouput tensor(s) back to the unpadded global tensor along the seqlen dim.
+When you need to recover the global output tensor(s) from the local one(s), to compute the loss or some reason else, you can call `undispatch` function to undispatch the padded local output tensor(s) back to the unpadded global tensor along the seqlen dim.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface
