@@ -66,7 +66,7 @@ from .ffa_utils import (
     tile_size_fwd_sm90,
     validate_arch,
     validate_head_dims,
-    validate_per_range_mask_feature_support,
+    validate_range_feature_support,
     validate_tensor,
     validate_true_ranges,
 )
@@ -188,13 +188,13 @@ def _flex_flash_attn_fwd(
 
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
     num_head, head_dim = q.shape[-2:]
-    has_ranges = q_ranges is not None or k_ranges is not None
-    if has_ranges:
-        validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
-    validate_per_range_mask_feature_support(
-        mask_types,
+    has_ranges = validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
+    validate_range_feature_support(
         major_arch=major_arch,
         has_ranges=has_ranges,
+        mask_types=mask_types,
+        range_merge=bool(range_merge),
+        range_merge_unique_writer=disable_fwd_atomic_reduction,
         has_mask_mod=mask_mod is not None,
         has_block_sparse=block_sparse_tensors is not None,
         has_score_mod=score_mod is not None,
@@ -203,15 +203,6 @@ def _flex_flash_attn_fwd(
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
     if range_merge_active:
-        assert major_arch in (10, 11), "RangeMerge is SM100/SM110 only"
-        assert disable_fwd_atomic_reduction, (
-            "RangeMerge requires non-atomic forward "
-            "(merged Q intervals must be pairwise disjoint)"
-        )
-        assert (
-            score_mod is None and mask_mod is None
-        ), "RangeMerge does not compose with score/mask mods"
-        assert flex_attn_args.block_sparse_tensors is None
         assert q_ranges is not None and k_ranges is not None  # has_ranges
         q_ranges, k_ranges, mask_types, cu_batches = _apply_range_merge(
             range_merge, q_ranges, k_ranges, mask_types
@@ -284,9 +275,6 @@ def _flex_flash_attn_fwd(
         ), "out_dtype only applies to the atomic fwd path"
         assert out_dtype in (torch.float16, torch.bfloat16, torch.float32)
     if not disable_fwd_atomic_reduction:
-        assert has_ranges and major_arch in (
-            10,
-        ), "fwd atomic reduction is the SM100/SM103 true-range overlap path"
         # The atomic epilogue reads/writes prev-O by unpacked row.
         pack_gqa = False
     # Overlapping relations would re-add the sink per merge; fold it once in
@@ -806,27 +794,31 @@ def _flex_flash_attn_bwd(
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
 
-    has_ranges = q_ranges is not None or k_ranges is not None
-    if has_ranges:
-        validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
-        if deterministic:
-            raise NotImplementedError(
-                "deterministic backward with q/k ranges is unsupported"
-            )
+    # Unpack the torch FlexAttention-style / block-sparse args (bwd uses these;
+    # note block sparsity reads the bwd-specific tensors).
+    flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
+    score_mod = flex_attn_args.score_mod
+    score_mod_bwd = flex_attn_args.score_mod_bwd
+    mask_mod = flex_attn_args.mask_mod
+    aux_tensors = flex_attn_args.aux_tensors
+    block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
+
+    has_ranges = validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
+    validate_range_feature_support(
+        major_arch=major_arch,
+        has_ranges=has_ranges,
+        mask_types=mask_types,
+        range_merge=bool(range_merge),
+        range_merge_unique_writer=disable_bwd_dkv_atomic_reduction,
+        has_mask_mod=mask_mod is not None,
+        has_block_sparse=block_sparse_tensors is not None,
+        has_score_mod=score_mod is not None or score_mod_bwd is not None,
+        has_softcap=softcap != 0.0,
+        deterministic=deterministic,
+    )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
     if range_merge_active:
-        assert major_arch in (10, 11), "bwd RangeMerge is SM100/SM110 only"
-        assert disable_bwd_dkv_atomic_reduction, (
-            "bwd RangeMerge requires disable_bwd_dkv_atomic_reduction "
-            "(merged K intervals pairwise disjoint)"
-        )
-        assert flex_attn_args is None or (
-            flex_attn_args.score_mod is None
-            and flex_attn_args.score_mod_bwd is None
-            and flex_attn_args.mask_mod is None
-            and flex_attn_args.block_sparse_tensors_bwd is None
-        )
         assert q_ranges is not None and k_ranges is not None  # has_ranges
         k_ranges, q_ranges, mask_types, cu_batches = _apply_range_merge(
             range_merge, k_ranges, q_ranges, mask_types
@@ -837,25 +829,7 @@ def _flex_flash_attn_bwd(
     else:
         cu_seqlens_q = cu_seqlens_k = None
 
-    # Unpack the torch FlexAttention-style / block-sparse args (bwd uses these;
-    # note block sparsity reads the bwd-specific tensors).
-    flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
-    score_mod = flex_attn_args.score_mod
-    score_mod_bwd = flex_attn_args.score_mod_bwd
-    mask_mod = flex_attn_args.mask_mod
-    aux_tensors = flex_attn_args.aux_tensors
-    block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
-
     local = False
-    validate_per_range_mask_feature_support(
-        mask_types,
-        major_arch=major_arch,
-        has_ranges=has_ranges,
-        has_mask_mod=mask_mod is not None,
-        has_block_sparse=block_sparse_tensors is not None,
-        has_score_mod=score_mod is not None or score_mod_bwd is not None,
-        has_softcap=softcap != 0.0,
-    )
     per_range, mask_type, mask_types_tensor = _split_mask_types(mask_types)
     # The per-range kernel may see causal ranges, so the host reserves the
     # causal tile / register budget for it as well.
@@ -973,9 +947,6 @@ def _flex_flash_attn_bwd(
             AtomLayoutMdQ = 1
             AtomLayoutNdKV = 1
             requested_disable_2cta = is_ffa_2cta_disabled()
-            # RangeMerge consumes per-pair mask constants (2-CTA-compatible);
-            # genuine runtime per-range masks still need 1-CTA.
-            per_range_requires_1cta = per_range and not range_merge_active
             # 2-CTA hdim-192 fuses Q/Qt on one pipeline; the RangeMerge
             # per-pair Q walk needs them separate.
             merge_192_requires_1cta = range_merge_active and head_dim == 192
@@ -985,14 +956,9 @@ def _flex_flash_attn_bwd(
                 or score_mod_bwd is not None
                 or mask_mod is not None
                 or block_sparse_tensors is not None
-                or per_range_requires_1cta
                 or merge_192_requires_1cta
             )
-            cluster_size = (
-                1
-                if per_range_requires_1cta or merge_192_requires_1cta
-                else (2 if head_dim >= 128 and not disable_2cta else 1)
-            )
+            cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
             use_2cta_instrs = cluster_size == 2
 
     q, k, v, out, dout, lse, cu_seqlens_q, cu_seqlens_k = [

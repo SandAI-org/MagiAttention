@@ -613,8 +613,8 @@ class FFABwdSm90:
         self.is_varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
         # For GQA (qhead_per_kvhead > 1), multiple Q heads accumulate into the same dK/dV,
         # so we need the float32 accum path + postprocess.
-        # For varlen_k with qhead_per_kvhead == 1, we use ragged TMA tensors.
-        self.varlen_k = mCuSeqlensK is not None or mSeqUsedK is not None
+        # For varlen K with qhead_per_kvhead == 1, we use ragged TMA tensors.
+        self.is_varlen_k = mCuSeqlensK is not None or mSeqUsedK is not None
 
         # --- Set up attributes ---
 
@@ -733,14 +733,14 @@ class FFABwdSm90:
                 copy_utils.create_ragged_tensor_for_tma(
                     mdK, ragged_dim=0, ptr_shift=True
                 )
-                if self.varlen_k
+                if self.is_varlen_k
                 else mdK
             )
             mdV_tma = (
                 copy_utils.create_ragged_tensor_for_tma(
                     mdV, ragged_dim=0, ptr_shift=True
                 )
-                if self.varlen_k
+                if self.is_varlen_k
                 else mdV
             )
             # tma_atom_dK: layout_src_tv=(1,tileN*tileHD):(0,1), layout_dst_tv=(1,tileN*tileHD):(0,1)
@@ -844,10 +844,11 @@ class FFABwdSm90:
 
             cute.printf("")
             cute.printf(
-                prefix + "use_block_sparsity: {} | varlen_q: {} | varlen_k: {} | ",
+                prefix
+                + "use_block_sparsity: {} | is_varlen_q: {} | is_varlen_k: {} | ",
                 self.use_block_sparsity,
                 self.is_varlen_q,
-                self.varlen_k,
+                self.is_varlen_k,
             )
             cute.printf("")
             cute.printf(prefix + "mQ.layout: {}", mQ.layout)
@@ -2477,10 +2478,10 @@ class FFABwdSm90:
         if const_expr(self.qhead_per_kvhead == 1):  # store
             # mdK_cur/mdV_cur: (sK,HD):(1@1,1@0)
             mdK_cur = seqlen.offset_batch_K(
-                mdK, batch_idx, dim=3, ragged=self.varlen_k
+                mdK, batch_idx, dim=3, ragged=self.is_varlen_k
             )[None, None, head_idx]
             mdV_cur = seqlen.offset_batch_K(
-                mdV, batch_idx, dim=3, ragged=self.varlen_k
+                mdV, batch_idx, dim=3, ragged=self.is_varlen_k
             )[None, None, head_idx]
             # gdK: (tileK128,tileHD128):(1@1,1@0)
             # gdV: (tileK128,tileHD128):(1@1,1@0)

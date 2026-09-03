@@ -480,13 +480,14 @@ class TestFfaSimple(DistTestBase):
     @parameterize("mha_type", ["mha", "gqa"])
     @parameterize(
         "mask_types",
-        [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal],
+        [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal, "mixed"],
     )
     def test_varlen_opt_flags(self, mask_types, mha_type):
         """Ranges opt flags: direct store + coverage + dense dqacc/dkvacc.
 
         full / causal go in as the scalar (static kernel); inv_causal /
-        bi_causal go in as the int32[R] tensor (per-range kernel).
+        bi_causal and "mixed" (all four types cycling over the ranges) go in
+        as the int32[R] tensor (per-range kernel, 2-CTA at head_dim 128).
         """
         _, major_arch = get_device_arch()
         if major_arch not in (10, 11):
@@ -498,7 +499,13 @@ class TestFfaSimple(DistTestBase):
         # where P == 1 exactly and the reference dq vanishes.
         seqlen_q, seqlen_k, batch_size, nheads, d = 256, 512, 8, 6, 128
         nheads_kv = {"mha": nheads, "gqa": 3}[mha_type]
-        seed = self.seed + seqlen_k + d + mask_types * 7
+        attn_type_map: list[int] = (
+            [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal]
+            * (batch_size // 4)
+            if mask_types == "mixed"
+            else [mask_types] * batch_size
+        )
+        seed = self.seed + seqlen_k + d + sum(attn_type_map) * 7
         torch.random.manual_seed(seed)
         random.seed(seed)
 
@@ -523,7 +530,7 @@ class TestFfaSimple(DistTestBase):
         mask_types_arg: int | torch.Tensor = (
             mask_types
             if mask_types in (MT_MAP.full, MT_MAP.causal)
-            else torch.full((batch_size,), mask_types, device=device, dtype=torch.int32)
+            else torch.tensor(attn_type_map, device=device, dtype=torch.int32)
         )
 
         test_case = (
@@ -557,7 +564,7 @@ class TestFfaSimple(DistTestBase):
             dv_thd=dv_v,
             q_ranges=AttnRanges.from_ranges(q_ranges_t.tolist()),
             k_ranges=AttnRanges.from_ranges(k_ranges_t.tolist()),
-            attn_type_map=[mask_types] * batch_size,
+            attn_type_map=attn_type_map,
             total_seqlen_q=batch_size * seqlen_q,
             total_seqlen_k=batch_size * seqlen_k,
             dtype=dtype,

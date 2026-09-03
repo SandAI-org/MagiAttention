@@ -680,6 +680,7 @@ def _compile_bwd_postprocess(
     use_dense_dqacc_for_ranges,
 ):
     """Compile bwd postprocess kernel using cute fake tensors."""
+    is_varlen_q = has_cuseqlens_q or has_ranges
     (
         mQ,
         mK,
@@ -696,10 +697,9 @@ def _compile_bwd_postprocess(
         mdKaccum,
         mdVaccum,
     ) = make_fake_bwd_tensors(
-        dtype, has_gqa=True, varlen_q=has_cuseqlens_q or has_ranges, varlen_k=False
+        dtype, has_gqa=True, is_varlen_q=is_varlen_q, is_varlen_k=False
     )
-    varlen_q = has_cuseqlens_q or has_ranges
-    batch = mQ.shape[0] if not varlen_q else cute.sym_int()
+    batch = mQ.shape[0] if not is_varlen_q else cute.sym_int()
     batchp1 = cute.sym_int()
     mCuSeqlensQ = (
         fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
