@@ -188,12 +188,10 @@ def _ffa_opt_kwargs(is_varlen_case: bool, is_mha: bool) -> dict:
         # direct-store disjoint dKV is MHA-only
         if is_mha and "disable_bwd_dkv_atomic_reduction" in _ffa_sig:
             kw["disable_bwd_dkv_atomic_reduction"] = True
-        if "use_dense_dqacc_for_ranges" in _ffa_sig:
-            kw["use_dense_dqacc_for_ranges"] = True
     return kw
 
 
-_opt_applied = _FFA_OPT and "use_dense_dqacc_for_ranges" in _ffa_sig
+_opt_applied = _FFA_OPT and "disable_bwd_dkv_atomic_reduction" in _ffa_sig
 
 
 # ─────────────────────────────────────────────────────────────────────────────

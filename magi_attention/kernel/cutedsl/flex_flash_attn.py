@@ -80,42 +80,6 @@ from .sparse_utils import (
 )
 
 
-def _validate_dense_dqacc_flag(
-    flag: bool,
-    q: torch.Tensor,
-    q_ranges: torch.Tensor | None,
-    k_ranges: torch.Tensor | None,
-    major_arch: int,
-    deterministic: bool,
-    range_merge_active: bool,
-    disable_fwd_atomic_reduction: bool,
-) -> None:
-    if not flag:
-        return
-    name = "use_dense_dqacc_for_ranges"
-    if q_ranges is None or k_ranges is None:
-        raise ValueError(f"{name} requires q/k ranges")
-    if major_arch not in (10, 11):
-        raise NotImplementedError(f"{name} is supported only on SM100/SM110")
-    if deterministic:
-        raise ValueError(f"{name} requires deterministic=False")
-    if range_merge_active:
-        raise ValueError(f"{name} is incompatible with range_merge")
-    if not disable_fwd_atomic_reduction:
-        raise ValueError(f"{name} requires disable_fwd_atomic_reduction=True")
-    if q.shape[-1] % 32 != 0:
-        raise NotImplementedError(
-            f"{name} currently requires head_dim divisible by 32, " f"got {q.shape[-1]}"
-        )
-    if magiattn_cutedsl.is_ffa_debug_mode_enabled():
-        sorted_disjoint = bool((q_ranges[1:, 0] >= q_ranges[:-1, 1]).all().item())
-        if not sorted_disjoint:
-            raise ValueError(
-                f"{name} requires sorted, pairwise-disjoint q_ranges "
-                "(r[i+1].start >= r[i].end)"
-            )
-
-
 def _apply_range_merge(
     range_merge: bool | RangeMergePlan,
     outer_ranges: torch.Tensor,
@@ -818,7 +782,6 @@ def _flex_flash_attn_bwd(
     range_merge: bool | RangeMergePlan = False,
     declared_q_full_coverage: bool = False,
     declared_k_full_coverage: bool = False,
-    use_dense_dqacc_for_ranges: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
@@ -832,7 +795,6 @@ def _flex_flash_attn_bwd(
             hole-zeroing sweep it feeds k_ranges_sorted_disjoint, whose
             scheduler grid bound assumes sum(len) <= total_k — overlapping k
             ranges must never declare it. Derived, never user-facing.
-        use_dense_dqacc_for_ranges: see :func:`flex_flash_attn_func`.
 
     Returns:
         A tuple of (dQ, dK, dV) gradients with the same shapes and dtypes as the input q, k, v tensors.
@@ -1154,6 +1116,17 @@ def _flex_flash_attn_bwd(
     direct_dq_init = (
         disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
+    # Per-range dq_accum slots are decoded affinely from the range index, so
+    # they need sorted, disjoint q; range_merge rewrites the q intervals.
+    use_dense_dqacc_for_ranges = (
+        direct_dq_init and not range_merge_active and head_dim % 32 == 0
+    )
+    if use_dense_dqacc_for_ranges and magiattn_cutedsl.is_ffa_debug_mode_enabled():
+        assert q_ranges is not None
+        assert bool((q_ranges[1:, 0] >= q_ranges[:-1, 1]).all().item()), (
+            "disable_fwd_atomic_reduction requires sorted, pairwise-disjoint "
+            "q_ranges (r[i+1].start >= r[i].end)"
+        )
     dkv_empty = not has_ranges or direct_dkv or declared_k_full_coverage
     dq_empty = not has_ranges or direct_dq_init or declared_q_full_coverage
     dkv_alloc = torch.empty_like if dkv_empty else torch.zeros_like
@@ -1166,8 +1139,6 @@ def _flex_flash_attn_bwd(
     dv_self_alloc = dv is None
     dq_self_alloc = dq is None
 
-    # Q ranges covered by the direct contract may still arrive unsorted; the
-    # dQ cleanup therefore uses its ordering-agnostic metadata scan.
     if dq is None:
         dq = dq_alloc(q)
     else:
@@ -1729,7 +1700,7 @@ def _flex_flash_attn_bwd(
 
     if direct_dq_init and dq_self_alloc and not declared_q_full_coverage:
         assert q_ranges is not None
-        bwd_grad_zero_holes(dq, q_ranges, ranges_sorted=False)
+        bwd_grad_zero_holes(dq, q_ranges)
 
     if dKV_postprocess and rowmajor_post_dkv:
         bwd_postprocess_rowmajor(dk_accum, dk, k_ranges, seqlen_k, softmax_scale)
@@ -1811,20 +1782,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_fwd_atomic_reduction: bool = False,
         disable_bwd_dkv_atomic_reduction: bool = False,
         range_merge: bool | RangeMergePlan = False,
-        use_dense_dqacc_for_ranges: bool = False,
         out_dtype: torch.dtype | None = None,
     ):
-        arch, major_arch = get_device_arch()
-        _validate_dense_dqacc_flag(
-            use_dense_dqacc_for_ranges,
-            q,
-            q_ranges,
-            k_ranges,
-            major_arch,
-            deterministic,
-            bool(range_merge),
-            disable_fwd_atomic_reduction,
-        )
         mask_types = normalize_mask_types(mask_types)
         flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
 
@@ -1871,7 +1830,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         # Forward merges Q ranges; backward merges the dual K ranges.
         # Derived from the fwd flag, not a second user flag.
         ctx.bwd_range_merge = bwd_range_merge_arg(range_merge)
-        ctx.use_dense_dqacc_for_ranges = use_dense_dqacc_for_ranges
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         # Drop the direct aux_tensors reference on ctx; the real tensors are
@@ -1931,7 +1889,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             flex_attn_args=flex_attn_args,
             range_merge=ctx.bwd_range_merge,
-            use_dense_dqacc_for_ranges=ctx.use_dense_dqacc_for_ranges,
         )
 
         return dq, dk, dv, *((None,) * 31)  # Extra Nones is fine
@@ -1957,7 +1914,6 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = False,
     disable_bwd_dkv_atomic_reduction: bool = False,
     range_merge: bool | RangeMergePlan = False,
-    use_dense_dqacc_for_ranges: bool = False,
     out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """Flex-flash-attention interface (dense / ranges).
@@ -1990,12 +1946,12 @@ def flex_flash_attn_func(
     softcap: tanh logit soft-capping value, implemented via the score_mod
         machinery but exposed as a plain scalar.
 
-    disable_fwd_atomic_reduction: caller contract that q_ranges are pairwise
-        disjoint (not necessarily sorted). Forward then direct-stores O
-        instead of merging through the atomic path, and the SM100/SM110
-        backward takes the unique-writer dQ path: dq/dq_accum start
-        uninitialized, preprocess clears the covered rows, and a final sweep
-        zeroes the holes of self-allocated dq.
+    disable_fwd_atomic_reduction: caller contract that q_ranges are sorted
+        and pairwise disjoint, giving every O and dQ row a unique writer.
+        Forward then direct-stores O, and the SM100/SM110 backward
+        accumulates dQ in per-range slots (head_dim divisible by 32, no
+        ``range_merge``) instead of the row-major fp32 accumulator. Debug
+        mode validates the ordering.
 
     disable_bwd_dkv_atomic_reduction: caller contract that k_ranges are sorted
         and pairwise disjoint, giving every dK/dV row a unique CTA writer.
@@ -2008,14 +1964,6 @@ def flex_flash_attn_func(
         forward skips the atomic O merge; backward derives the dual K-merge.
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
         contracts.
-
-    use_dense_dqacc_for_ranges: SM100/SM110 backward optimization: dQ
-        accumulates into range-local tile-padded slots with the dense 1D
-        bulk-reduce protocol instead of the row-major 2D TMA reduce. Requires
-        ``disable_fwd_atomic_reduction=True`` (sorted disjoint q in debug
-        mode), ``deterministic=False``, head_dim divisible by 32, and no
-        ``range_merge``. Prefer it for few long ranges; many short ranges can
-        spend more on padding than the reduce saves.
 
     out_dtype: GMEM O dtype on the atomic fwd path (``None`` = input dtype).
         ``torch.float32`` makes the K-way overlap merge lossless; narrower
@@ -2046,7 +1994,6 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         disable_bwd_dkv_atomic_reduction,
         range_merge,
-        use_dense_dqacc_for_ranges,
         out_dtype,
     )
 

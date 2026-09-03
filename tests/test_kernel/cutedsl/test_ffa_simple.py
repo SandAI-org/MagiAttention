@@ -543,7 +543,6 @@ class TestFfaSimple(DistTestBase):
             disable_fwd_atomic_reduction=True,
             # direct-store disjoint dKV is MHA-only (unique-writer contract)
             disable_bwd_dkv_atomic_reduction=(mha_type == "mha"),
-            use_dense_dqacc_for_ranges=True,
         )
         g = torch.randn_like(out_v)
         dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
