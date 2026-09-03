@@ -135,7 +135,6 @@ def validate_per_range_mask_feature_support(
     *,
     major_arch: int,
     has_ranges: bool,
-    is_local: bool = False,
     has_mask_mod: bool = False,
     has_block_sparse: bool = False,
     has_score_mod: bool = False,
@@ -153,11 +152,6 @@ def validate_per_range_mask_feature_support(
     if major_arch not in (10, 11):
         raise NotImplementedError(
             "Per-range mask_types is only supported on SM100/SM110"
-        )
-    if is_local:
-        raise NotImplementedError(
-            "Per-range mask_types cannot be combined with local / "
-            "sliding-window masking"
         )
     if has_mask_mod:
         raise NotImplementedError(

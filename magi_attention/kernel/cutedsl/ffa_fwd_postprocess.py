@@ -16,6 +16,9 @@
 
 """Forward postprocess for the atomic-reduction path.
 
+The atomic path reduces partial O/LSE from every relation that covers a Q
+row; rows no relation covers keep LSE == -inf and must be zeroed, and the
+attention sink can only be folded in once the full LSE is known.
 """
 
 import math

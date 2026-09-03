@@ -409,7 +409,7 @@ class TestFfaSimple(DistTestBase):
         )
 
     # ─────────────────────────────────────────────────────────────────────
-    # Overlapping q_ranges: atomic merge with fp32-O (default) vs dtype RMW
+    # Overlapping q_ranges: atomic merge with dtype-O (default) vs fp32-O
     # ─────────────────────────────────────────────────────────────────────
 
     @with_run_in_mp

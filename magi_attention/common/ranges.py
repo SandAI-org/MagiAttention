@@ -436,13 +436,6 @@ class AttnRanges:
     def is_full_coverage(self, seqlen: int) -> bool:
         """Return True if the union of the ranges covers ``[0, seqlen)``.
 
-        Unlike :meth:`is_cu_seqlens` (which requires a sorted, gap-free,
-        non-overlapping partition), this first merges overlapping / tangent
-        ranges, so out-of-order and overlapping ranges that still tile the
-        whole token space count as full coverage. Used to certify that the
-        backward gradient buffers have no uncovered (hole) rows, so their
-        hole-zeroing sweep can be skipped.
-
         Args:
             seqlen: The total token-space length to check against
                 (``total_seqlen``, i.e. ``q/k.shape[0]`` for packed varlen).

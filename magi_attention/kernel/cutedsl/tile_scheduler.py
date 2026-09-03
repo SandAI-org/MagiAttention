@@ -845,7 +845,6 @@ class SingleTileVarlenScheduler:
         cluster_shape_m: cutlass.Constexpr[int] = 1
         use_cluster_idx: cutlass.Constexpr[bool] = False
         scheduling_mode: cutlass.Constexpr[SchedulingMode] = SchedulingMode.STATIC
-        is_persistent: cutlass.Constexpr[bool] = False
 
         @staticmethod
         @cute.jit
@@ -860,9 +859,7 @@ class SingleTileVarlenScheduler:
                 SchedulingMode.STATIC,
                 SchedulingMode.CLC,
             ), f"Only STATIC and CLC are supported, got {scheduling_mode!r}"
-            assert (
-                not args.is_persistent or scheduling_mode == SchedulingMode.STATIC
-            ), "persistent varlen scheduling is a STATIC-mode feature"
+            assert not args.is_persistent, "varlen scheduling is one tile per CTA"
             size_l2 = 50 * 1024 * 1024  # 50 MB for K & V
             # if backward, this is qdo block size
             kv_block_size = (
@@ -913,7 +910,6 @@ class SingleTileVarlenScheduler:
                 cluster_shape_m=args.cluster_shape_mn[0],
                 use_cluster_idx=args.use_cluster_idx,
                 scheduling_mode=scheduling_mode,
-                is_persistent=args.is_persistent,
             )
 
     def __init__(
@@ -1010,12 +1006,6 @@ class SingleTileVarlenScheduler:
                 total_blocks_max // params.cluster_shape_m * params.cluster_shape_m
             )
             bound = total_blocks_max * params.num_head
-        if cutlass.const_expr(params.is_persistent):
-            hardware_info = cutlass.utils.HardwareInfo()
-            sm_count = hardware_info.get_device_multiprocessor_count()
-            max_ctas = (sm_count // params.cluster_shape_m) * params.cluster_shape_m
-            grid_x = cutlass.min(max_ctas, bound)
-            return (grid_x, params.num_splits, Int32(1))
         return (bound, params.num_splits, Int32(1))
 
     @staticmethod
@@ -1023,7 +1013,6 @@ class SingleTileVarlenScheduler:
         """True if grid coordinates (bx, by, bz) directly map to (block, head, range)."""
         return (
             params.max_outer_range_width is not None
-            and not params.is_persistent
             and not params.is_split_kv
             and not params.lpt
             and not params.head_swizzle
@@ -1128,8 +1117,7 @@ class SingleTileVarlenScheduler:
             head_idx = mh_block // num_m_blocks
             block = mh_block - head_idx * num_m_blocks
         if cutlass.const_expr(
-            params.cluster_shape_m > 1
-            and not (params.use_cluster_idx or params.is_persistent)
+            params.cluster_shape_m > 1 and not params.use_cluster_idx
         ):
             # bwd 2-CTA: expand cluster-level block by the in-cluster rank
             bidx_in_cluster = cute.arch.block_in_cluster_idx()
@@ -1140,9 +1128,7 @@ class SingleTileVarlenScheduler:
     def _varlen_coord_map(self) -> WorkTileInfo:
         """Map self._tile_idx to (block, head, batch) via warp-level prefix sums."""
         params = self.params
-        if cutlass.const_expr(
-            params.max_outer_range_width is not None and not params.is_persistent
-        ):
+        if cutlass.const_expr(params.max_outer_range_width is not None):
             assert params.mQRanges is not None
             num_m_blocks = cute.ceil_div(
                 cute.ceil_div(
@@ -1233,11 +1219,7 @@ class SingleTileVarlenScheduler:
                 - num_m_blocks_prev_lane * params.num_head
             )
             block, head_idx = self._decode_mh_block(num_m_blocks, mh_block)
-            is_valid = (
-                batch_idx < params.num_batch
-                if cutlass.const_expr(params.is_persistent)
-                else self._is_first_block and batch_idx < params.num_batch
-            )
+            is_valid = self._is_first_block and batch_idx < params.num_batch
         # if cute.arch.thread_idx()[0] == 128: cute.printf("SingleTileVarlenScheduler: tile_idx=%d, batch_idx=%d, head_idx=%d, block=%d, is_valid = %d", self._tile_idx, batch_idx, head_idx, block, is_valid)  # noqa: E501
         split_idx = self._split_idx if const_expr(params.is_split_kv) else Int32(0)
         return WorkTileInfo(
@@ -1289,8 +1271,6 @@ class SingleTileVarlenScheduler:
             self.clc.consumer_release(loc=loc, ip=ip)
             return work
         self._is_first_block = False
-        if cutlass.const_expr(self.params.is_persistent):
-            self._tile_idx += cute.arch.grid_dim()[0]
         return self.get_current_work()
 
     def producer_tail(self, *, loc=None, ip=None):

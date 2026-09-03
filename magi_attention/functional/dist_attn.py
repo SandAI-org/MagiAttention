@@ -1311,11 +1311,9 @@ class DistAttnRuntime:
                     q=q,
                     k=k,
                     v=v,
-                    sink=None,
                     attn_arg=attn_arg,
                     softmax_scale=softmax_scale,
                     softcap=softcap,
-                    sink_layout="sh",
                 )
                 meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             else:
@@ -1436,19 +1434,18 @@ class DistAttnRuntime:
                 assert (
                     sink is None or not is_host_stage
                 ), "CUTEDSL backend does not support sink for now"
-                partial_dq, partial_dk, partial_dv, partial_dsink = cutedsl_bwd(
+                partial_dq, partial_dk, partial_dv = cutedsl_bwd(
                     do=do,
                     q=q,
                     k=k,
                     v=v,
-                    sink=None,
                     o=o,
                     lse=lse,
                     attn_arg=attn_arg,
                     softmax_scale=softmax_scale,
                     softcap=softcap,
-                    sink_layout="sh",
                 )
+                partial_dsink = None
                 partial_dkv = self._maybe_concat(
                     partial_dk, partial_dv, need_concat=self.concat_dkv
                 )

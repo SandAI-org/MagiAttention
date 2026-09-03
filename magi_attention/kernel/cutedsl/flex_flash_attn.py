@@ -139,7 +139,7 @@ def _apply_range_merge(
             plan.sorted_mask_types,
             plan.cu_batches,
         )
-    outer, _sorted_outer, inner, merged_mask_types, cu_batches = merge_qk_ranges(
+    outer, inner, merged_mask_types, cu_batches = merge_qk_ranges(
         outer_ranges,
         inner_ranges,
         materialize_mask_types(mask_types, outer_ranges.shape[0], outer_ranges.device),
@@ -202,7 +202,8 @@ def _flex_flash_attn_fwd(
     Returns:
         A tuple of (output, lse) where:
         - output is the result of the attention operation, with shape (batch_size, seqlen_q, num_head, head_dim_v) or
-          (total_q, num_head, head_dim_v) if q_ranges is provided.
+          (total_q, num_head, head_dim_v) if q_ranges is provided, in the input
+          dtype unless ``out_dtype`` overrides it on the atomic-reduction path.
         - lse is the log-sum-exp of the attention scores, with shape (batch_size, num_head, seqlen_q) or
           (total_q, num_head) if q_ranges is provided: token-major with the heads
           of one token contiguous, the same row order as ``output``. Kernels
@@ -329,11 +330,7 @@ def _flex_flash_attn_fwd(
     # the fwd postprocess instead.
     kernel_sink = sink if disable_fwd_atomic_reduction else None
 
-    out_torch_dtype = (
-        q.dtype
-        if disable_fwd_atomic_reduction
-        else (out_dtype if out_dtype is not None else q.dtype)
-    )
+    out_torch_dtype = out_dtype if out_dtype is not None else q.dtype
     device = q.device
     q_batch_seqlen_shape = (batch_size, seqlen_q) if not has_ranges else (total_q,)
     lse_shape = (
@@ -448,8 +445,7 @@ def _flex_flash_attn_fwd(
         # fp32 sO doubles smem at q_stage=2: borrow KV ring slots, else fall
         # back to single-stage Q. dtype-O has no smem premium.
         fwd_atomic_borrow_kv = (
-            major_arch in (10, 11)
-            and out_torch_dtype is torch.float32
+            out_torch_dtype is torch.float32
             and fwd_atomic_can_borrow_kv_smem(
                 int(math.ceil(head_dim / 16) * 16),
                 int(math.ceil(head_dim_v / 16) * 16),
@@ -862,16 +858,6 @@ def _flex_flash_attn_bwd(
                 "deterministic backward with q/k ranges is unsupported"
             )
     range_merge_active = bool(range_merge) and has_ranges
-    _validate_dense_dqacc_flag(
-        use_dense_dqacc_for_ranges,
-        q,
-        q_ranges,
-        k_ranges,
-        major_arch,
-        deterministic,
-        range_merge_active,
-        disable_fwd_atomic_reduction,
-    )
     cu_batches = None
     if range_merge_active:
         assert major_arch in (10, 11), "bwd RangeMerge is SM100/SM110 only"
@@ -879,7 +865,6 @@ def _flex_flash_attn_bwd(
             "bwd RangeMerge requires disable_bwd_dkv_atomic_reduction "
             "(merged K intervals pairwise disjoint)"
         )
-        assert not deterministic
         assert flex_attn_args is None or (
             flex_attn_args.score_mod is None
             and flex_attn_args.score_mod_bwd is None
@@ -1378,11 +1363,7 @@ def _flex_flash_attn_bwd(
         lse_log2,
         # Overlapping Q: skip per-range zero — PDL can race another
         # relation's main-kernel dQ reductions on the same physical row.
-        (
-            dq_accum
-            if direct_dq_init or pre_post_q_ranges is None or deterministic
-            else None
-        ),
+        dq_accum if direct_dq_init or pre_post_q_ranges is None else None,
         cu_seqlens_q,
         None,  # seqused_q
         None,  # dlse
@@ -1728,12 +1709,8 @@ def _flex_flash_attn_bwd(
 
     # True-range bwd stores row-major fp32 TMA reductions; the row-major
     # postprocess sweeps only in-range rows.
-    rowmajor_post_dq = (
-        pre_post_q_ranges is not None
-        and not deterministic
-        and not use_dense_dqacc_for_ranges
-    )
-    rowmajor_post_dkv = pre_post_k_ranges is not None and not deterministic
+    rowmajor_post_dq = pre_post_q_ranges is not None and not use_dense_dqacc_for_ranges
+    rowmajor_post_dkv = pre_post_k_ranges is not None
     if rowmajor_post_dq:
         bwd_postprocess_rowmajor(dq_accum, dq, q_ranges, seqlen_q, softmax_scale)
     else:
@@ -1778,7 +1755,6 @@ def _flex_flash_attn_bwd(
             AtomLayoutNdKV,
             dKV_swapAB,
             cluster_size=cluster_size,
-            ranges=pre_post_k_ranges,
         )
         bwd_postprocess(
             dv_accum,
@@ -1794,7 +1770,6 @@ def _flex_flash_attn_bwd(
             AtomLayoutNdKV,
             dKV_swapAB,
             cluster_size=cluster_size,
-            ranges=pre_post_k_ranges,
         )
 
     return dq, dk, dv
@@ -1846,7 +1821,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         out_dtype: torch.dtype | None = None,
     ):
         arch, major_arch = get_device_arch()
-        is_varlen = q_ranges is not None or k_ranges is not None
         _validate_dense_dqacc_flag(
             use_dense_dqacc_for_ranges,
             q,
@@ -1857,8 +1831,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bool(range_merge),
             disable_fwd_atomic_reduction,
         )
-        if is_varlen:
-            validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
         mask_types = normalize_mask_types(mask_types)
         flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
 
@@ -2026,7 +1998,7 @@ def flex_flash_attn_func(
 
     disable_fwd_atomic_reduction: caller contract that q_ranges are pairwise
         disjoint (not necessarily sorted). Forward then direct-stores O
-        instead of merging through the fp32 atomic path, and the SM100/SM110
+        instead of merging through the atomic path, and the SM100/SM110
         backward takes the unique-writer dQ path: dq/dq_accum start
         uninitialized, preprocess clears the covered rows, and a final sweep
         zeroes the holes of self-allocated dq.

@@ -73,7 +73,7 @@ from .tile_scheduler import (
 )
 
 # === TUNING KNOBS (agent-editable) ===
-# Keys: (use_2cta_instrs: bool, may_be_causal: bool, head_dim_padded: int, is_sm103: bool)
+# Keys: (use_2cta_instrs: bool, maybe_causal: bool, head_dim_padded: int, is_sm103: bool)
 # Values:
 #   ex2_emu_freq: int — how often to use emulated exp2 (0=all hardware exp2, higher=more emulation).
 #                        SM103 has fast native exp2, so set freq=0 there.
@@ -316,10 +316,11 @@ class FFAFwdSm100:
         self.is_persistent = is_persistent
         self.mask_type = mask_type
         self.use_per_range_mask = mask_type is None
-        # RangeMerge groups relations with identical Q interval for unified softmax.
         self.range_merge = range_merge
         if range_merge:
-            assert self.use_per_range_mask, "RangeMerge rides the per-range entry"
+            assert (
+                self.use_per_range_mask
+            ), "RangeMerge reads one mask type per relation pair from mMaskTypes"
             assert not use_2cta_instrs and not is_split_kv and not pack_gqa
             assert not is_persistent
             assert score_mod is None and mask_mod is None
@@ -336,7 +337,8 @@ class FFAFwdSm100:
             assert is_varlen_q and not is_split_kv and not pack_gqa
             # The prev-O gmem read is unpredicated along head_dim.
             assert not self.check_hdim_v_oob
-        # fp32-O atomic: borrow finished KV ring slots for sO (one work tile per CTA only).
+        # fp32 O doubles the sO footprint of the input-dtype path; borrow
+        # finished KV ring slots for it (one work tile per CTA only).
         self.sO_borrow_kv = (
             not disable_fwd_atomic_reduction
             and self.use_tma_KV
@@ -373,7 +375,7 @@ class FFAFwdSm100:
             or (
                 self.head_dim_padded == 192
                 and self.use_2cta_instrs
-                and not self.may_be_causal
+                and not self.maybe_causal
                 and not self.is_local
             )
             # NOTE: B300 (sm103) has fast SFU, thus this approximation is only for B200 (sm100)
@@ -382,7 +384,7 @@ class FFAFwdSm100:
         self.enable_ex2_emu = _default_enable_ex2_emu
 
         # Does S1 need to wait for S0 to finish
-        # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.may_be_causal and not self.is_local)
+        # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.maybe_causal and not self.is_local)
         self.s0_s1_barrier = False
 
         self.overlap_sO_sQ = (
@@ -423,7 +425,7 @@ class FFAFwdSm100:
 
         if is_varlen_q:
             self.TileScheduler = SingleTileVarlenScheduler
-        elif self.may_be_causal or self.is_local or self.use_clc_scheduler:
+        elif self.maybe_causal or self.is_local or self.use_clc_scheduler:
             self.TileScheduler = SingleTileLPTScheduler
         elif self.is_persistent:
             self.TileScheduler = StaticPersistentTileScheduler
@@ -500,7 +502,7 @@ class FFAFwdSm100:
         # Look up tuning config for register counts and ex2_emu params
         _tune_key = (
             self.use_2cta_instrs,
-            self.may_be_causal,
+            self.maybe_causal,
             self.head_dim_padded,
             self.is_sm103,
         )
@@ -541,7 +543,7 @@ class FFAFwdSm100:
             print(f"{prefix}Initialized FFAFwdSm100 with: ")
             print(f"{prefix}{head_dim=} | {head_dim_v=} | {qhead_per_kvhead=}")
             print(
-                f"{prefix}{mask_type=} | {self.may_be_causal=} | {is_local=} | "
+                f"{prefix}{mask_type=} | {self.maybe_causal=} | {is_local=} | "
                 f"{is_split_kv=} | {pack_gqa=}"
             )
             print(
@@ -590,7 +592,7 @@ class FFAFwdSm100:
         return self.mask_type == MT_MAP.causal
 
     @property
-    def may_be_causal(self) -> bool:
+    def maybe_causal(self) -> bool:
         """Whether the compile must carry the causal configuration.
 
         True for the static causal kernel and for the per-range kernel, whose
@@ -853,7 +855,7 @@ class FFAFwdSm100:
                 fp8_tune = _FP8_TUNING_CONFIG.get(
                     (
                         self.use_2cta_instrs,
-                        self.may_be_causal,
+                        self.maybe_causal,
                         self.head_dim_padded,
                         self.is_sm103,
                     ),
@@ -887,7 +889,7 @@ class FFAFwdSm100:
             if const_expr(
                 self.pack_gqa
                 and self.head_dim_padded > 64
-                and not self.may_be_causal
+                and not self.maybe_causal
                 and not self.is_local
             ):
                 self.ex2_emu_freq = (
@@ -1190,9 +1192,11 @@ class FFAFwdSm100:
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],
             mQRanges=mQRanges,
-            # Quota affine decode upper bound on per-range tiles; dropped when
-            # Q ranges are certified disjoint, so the prefix-sum decode sizes
-            # the grid near-exactly from total_q instead of max_seqlen_q.
+            # On the atomic path Q ranges may overlap, so every range owns
+            # ceil(max_seqlen_q / tile) tiles of the grid and an underestimate
+            # of max_seqlen_q drops the tail tiles of the longer ranges. On
+            # the direct-store path the ranges are disjoint, so the prefix
+            # sum over total_q bounds the grid exactly without this width.
             max_outer_range_width=(
                 max_seqlen_q
                 if const_expr(
@@ -1206,7 +1210,7 @@ class FFAFwdSm100:
             else 1,
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
-            lpt=self.may_be_causal or self.is_local,
+            lpt=self.maybe_causal or self.is_local,
             is_split_kv=self.is_split_kv,
             cluster_shape_mn=self.cluster_shape_mn,
             use_cluster_idx=not self.is_persistent and self.cta_group_size > 1,
@@ -1935,7 +1939,7 @@ class FFAFwdSm100:
             # This is cta_tiler, not mma_tiler_qk, since we move by block by (2 * mma_tiler[0], mma_tiler[1])
             self.cta_tiler[0],
             self.cta_tiler[1],
-            self.may_be_causal,
+            self.maybe_causal,
             self.is_local,
             self.is_split_kv,
             window_size_left,
@@ -2604,8 +2608,6 @@ class FFAFwdSm100:
             # //////////////////////////////////////////////
 
             if const_expr(self.range_merge and not self.use_block_sparsity):
-                assert mMaskTypes is not None and mCuBatches is not None
-                assert mPageTable is None, "RangeMerge does not support paged KV"
                 if issue_q_for_this_warp:
                     load_Q(block=0, stage=0)
                     if const_expr(self.q_stage == 2):
@@ -2680,7 +2682,6 @@ class FFAFwdSm100:
                             kv_producer_state.advance()
             elif const_expr(not self.use_block_sparsity):
                 if const_expr(self.use_per_range_mask):
-                    assert mMaskTypes is not None
                     attn_type = Int32(mMaskTypes[batch_idx])
                     n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
                         seqlen_info, m_block, attn_type, split_idx, num_splits
@@ -2958,8 +2959,6 @@ class FFAFwdSm100:
                 process_tile = block_iter_count > Int32(0)
             else:
                 if const_expr(self.range_merge):
-                    assert mMaskTypes is not None and mCuBatches is not None
-                    # Trip count only; load/softmax walk the pairs.
                     block_iter_count = self._fwd_merge_n_iters(
                         SeqlenInfoCls,
                         block_info,
@@ -2971,7 +2970,6 @@ class FFAFwdSm100:
                         num_splits,
                     )
                 elif const_expr(self.use_per_range_mask):
-                    assert mMaskTypes is not None
                     attn_type = Int32(mMaskTypes[batch_idx])
                     n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
                         seqlen_info, m_block, attn_type, split_idx, num_splits
@@ -3431,11 +3429,9 @@ class FFAFwdSm100:
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
             if const_expr(self.range_merge):
-                attn_type = Int32(MT_MAP.full)
                 n_block_min = Int32(0)
                 n_block_max = Int32(0)
             elif const_expr(self.use_per_range_mask):
-                assert mMaskTypes is not None
                 attn_type = Int32(mMaskTypes[batch_idx])
                 n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
                     seqlen_info, m_block, attn_type, split_idx, num_splits
@@ -3473,7 +3469,8 @@ class FFAFwdSm100:
 
             # --- Define attn mask apply fn ---
 
-            if const_expr(self.use_per_range_mask):
+            # RangeMerge builds one mask fn per relation pair inside its loop.
+            if const_expr(self.use_per_range_mask and not self.range_merge):
                 mask_fn = partial(
                     mask.apply_mask_sm100_per_range,
                     m_block=mask_m_block,
@@ -3482,7 +3479,7 @@ class FFAFwdSm100:
                     attn_type=attn_type,
                 )
                 mask_fn_none = None
-            else:
+            elif const_expr(not self.use_per_range_mask):
                 shared_mask_kwargs = dict(
                     m_block=mask_m_block,
                     thr_mma=thr_mma_qk,
@@ -3732,7 +3729,6 @@ class FFAFwdSm100:
                         ] = softmax.row_max[0]
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
             elif const_expr(self.range_merge):
-                assert mMaskTypes is not None and mCuBatches is not None
                 pair_beg = Int32(mCuBatches[batch_idx])
                 pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
                 for pj in cutlass.range(pair_cnt, unroll=1):
@@ -3807,7 +3803,6 @@ class FFAFwdSm100:
                             mask_fn=partial(mask_fn_p, mask_seqlen=False),
                         )
 
-                # Final row_sum/row_max once per merged tile
                 sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
                 if const_expr(mLSE is not None or learnable_sink is not None):
                     sScale[
@@ -4289,8 +4284,6 @@ class FFAFwdSm100:
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
             if const_expr(self.range_merge):
-                assert mMaskTypes is not None and mCuBatches is not None
-                # Trip count handshake with softmax/MMA.
                 n_block_min = Int32(0)
                 n_block_max = self._fwd_merge_n_iters(
                     SeqlenInfoCls,
@@ -4303,7 +4296,6 @@ class FFAFwdSm100:
                     num_splits,
                 )
             elif const_expr(self.use_per_range_mask):
-                assert mMaskTypes is not None
                 attn_type = Int32(mMaskTypes[batch_idx])
                 n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
                     seqlen_info, m_block, attn_type, split_idx, num_splits
@@ -4345,7 +4337,13 @@ class FFAFwdSm100:
             gO = None
             gO_tma = None
             if const_expr(self.corr_epi_tma_store):
-                # d2 = total_q - H0, d3 = off + len.
+                # The O descriptor's row mode spans total_q rows from a base
+                # shifted back by total_q rows, and its fourth mode re-adds
+                # rows at unit row stride. Placing the tile at row
+                # total_q - h0 (h0 = rows left in this range from the tile
+                # start) with fourth-mode offset offset_q + len_q addresses
+                # row offset_q + tile_start; tile rows past the range end
+                # exceed the row extent and are clipped by TMA.
                 len_q = seqlen_info.seqlen_q
                 h0 = len_q - m_block * (self.mma_tiler_pv[0] * self.q_stage)
                 blk = cute.domain_offset(
@@ -4357,8 +4355,8 @@ class FFAFwdSm100:
                     ),
                     mO,
                 )
-                # Fix the (nhq, pad) modes at the shifted origin, mirroring
-                # the dense path's 2D (rows, hd) coord tensor.
+                # The TMA partition below takes a 2D (rows, hd) tile, so the
+                # head and shift modes are fixed at the offset origin.
                 blk_2d = blk[(None, None, 0, 0)]
                 tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
                     (self.mma_tiler_pv[0] * self.q_stage),
@@ -4407,7 +4405,7 @@ class FFAFwdSm100:
                     else None,
                     True,
                 )
-            ] * self.q_stage  # ty:ignore[unsupported-operator]
+            ] * self.q_stage
 
             # --- Determine tile counts ---
 
@@ -4651,11 +4649,10 @@ class FFAFwdSm100:
                         else None
                     )
 
-                    # Atomic reduction: lock the physical blocks, merge LSE
-                    #
-                    # Thread t owns row t of this stage tile (the T2R layout below is
-                    # 1:1 thread-to-row), so the whole merge is thread-private and the
-                    # skip test is a per-row flag.
+                    # Atomic reduction: lock the physical blocks, merge LSE.
+                    # correction_epilogue partitions O so that thread t owns
+                    # row t of this stage tile, so the LSE merge and its
+                    # coefficients are thread-private per row.
                     o_scale = rowsum_norm_scale
                     coeff_prev = Float32(0.0)
                     has_prev = False
@@ -4679,8 +4676,6 @@ class FFAFwdSm100:
                         row_ok = (
                             tidx < seqlen_info.seqlen_q - m_tile_idx * self.m_block_size
                         )
-                        if not row_ok:
-                            lse_cur = -Float32.inf
 
                         lock_offset = (
                             seqlen_info.offset_q + m_tile_idx * self.m_block_size
@@ -4717,6 +4712,7 @@ class FFAFwdSm100:
                                 lse_ratio = cute.math.exp2(
                                     (lse_lo - lse_hi) * LOG2_E, fastmath=True
                                 )
+                                # log(exp(lse_prev) + exp(lse_cur))
                                 lse_final = (
                                     lse_hi
                                     + cute.math.log2(
@@ -5333,8 +5329,9 @@ class FFAFwdSm100:
                     (tOrO_i[j], tOrO_i[j + 1]), (scale, scale)
                 )
 
-            # Merge with previous writer's O under range lock
             if const_expr(not self.disable_fwd_atomic_reduction):
+                # O_final = coeff_cur * O_cur + coeff_prev * O_prev; coeff_cur
+                # is already folded into `scale`, so only the prev term is added.
                 if has_prev:
                     assert gO is not None
                     gO_chunk = cute.local_tile(gO[tidx, None], (corr_tile_hd,), (i,))
@@ -5506,11 +5503,9 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             seqlen_info = SeqlenInfoCls(batch_idx)
             if const_expr(self.range_merge):
-                # Q-side epi; n_block unused.
                 n_block_min = Int32(0)
                 n_block_max = Int32(0)
             elif const_expr(self.use_per_range_mask):
-                assert mMaskTypes is not None
                 attn_type = Int32(mMaskTypes[batch_idx])
                 n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
                     seqlen_info, m_block, attn_type, split_idx, num_splits
