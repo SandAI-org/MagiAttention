@@ -111,7 +111,6 @@ class TestFfaSimple(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        # 144 varlen combos jit-compile many kernel variants on a cold cache.
         return 3600
 
     @property

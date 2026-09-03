@@ -68,17 +68,14 @@ MT_MAP = _MaskTypeMap()
 def normalize_mask_types(
     mask_types: torch.Tensor | int | None,
 ) -> int | torch.Tensor:
-    """Validate the public ``mask_types`` argument and return its canonical form.
+    """Normalize ``mask_types`` to a scalar ``MT_MAP`` entry or a per-range tensor.
 
-    Returns ``MT_MAP.full`` / ``MT_MAP.causal`` when every range shares one
-    static mask type (``None`` means full), or the caller's CUDA ``int32[R]``
-    tensor when the mask type is chosen per range. Only the per-range tensor
-    can express inv_causal / bi_causal. Whether the tensor form is supported
-    on the target is decided by :func:`validate_per_range_mask_feature_support`
-    at the kernel boundary.
-
-    Tensor values are contractually restricted to ``MT_MAP`` entries; they are
-    not read back here because that would sync the device on the hot path.
+    ``None`` means full; a scalar int must be full or causal (inv_causal /
+    bi_causal require the per-range CUDA ``int32[R]`` tensor). Feature
+    support for the tensor form is checked by
+    :func:`validate_per_range_mask_feature_support` at the kernel boundary.
+    Tensor values are trusted to be ``MT_MAP`` entries: reading them back
+    would sync the device on the hot path.
     """
     if mask_types is None:
         return MT_MAP.full
@@ -89,9 +86,8 @@ def normalize_mask_types(
     if isinstance(mask_types, int):
         if mask_types not in (MT_MAP.full, MT_MAP.causal):
             raise ValueError(
-                f"Scalar mask_types must be MT_MAP.full or MT_MAP.causal, got "
-                f"{mask_types}; inv_causal / bi_causal are selected per range "
-                "through an int32[R] tensor"
+                f"Scalar mask_types must be MT_MAP.full or MT_MAP.causal, "
+                f"got {mask_types} (use an int32[R] tensor per range)"
             )
         return mask_types
 
@@ -652,6 +648,10 @@ _MIXER_ATTRS = ("__vec_size__",)
 def _is_cuda_12() -> bool:
     """Check if the CUDA toolkit version is 12.x."""
     return is_cuda_version_ge("12") and is_cuda_version_lt("13")
+
+
+def is_ffa_clc_enabled() -> bool:
+    return os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_CLC", "0") == "1"
 
 
 def is_ffa_2cta_disabled(is_fwd: bool = False) -> bool:
