@@ -807,8 +807,10 @@ class FFAFwdSm100:
             O_layout_transpose = (
                 [2, 4, 3, 1, 0] if const_expr(mQRanges is None) else [1, 3, 2, 0]
             )
+            # (splits, b, nhq, sq) -> (sq, nhq, b, splits)
+            # or (splits, total_q, nhq) -> (total_q, nhq, splits) on ranges
             LSE_layout_transpose = (
-                [3, 2, 1, 0] if const_expr(mQRanges is None) else [2, 1, 0]
+                [3, 2, 1, 0] if const_expr(mQRanges is None) else [1, 2, 0]
             )
             num_splits = mO.shape[0]
         else:
@@ -818,21 +820,17 @@ class FFAFwdSm100:
                 [1, 3, 2, 0] if const_expr(mQRanges is None) else [0, 2, 1]
             )
 
-            # (b, nhq, sq) -> (sq, nhq, b)
-            # or (nhq, sq) -> (sq, nhq) if there's cu_seqlens_q
-            LSE_layout_transpose = [2, 1, 0] if const_expr(mQRanges is None) else [1, 0]
+            # (b, nhq, sq) -> (sq, nhq, b); ranges LSE is consumed as (total_q, nhq)
+            LSE_layout_transpose = [2, 1, 0] if const_expr(mQRanges is None) else None
             num_splits = Int32(1)
 
         mO = cute.make_tensor(
             mO.iterator, cute.select(mO.layout, mode=O_layout_transpose)
         )
-        mLSE = (
-            cute.make_tensor(
+        if const_expr(mLSE is not None and LSE_layout_transpose is not None):
+            mLSE = cute.make_tensor(
                 mLSE.iterator, cute.select(mLSE.layout, mode=LSE_layout_transpose)
             )
-            if const_expr(mLSE is not None)
-            else None
-        )
 
         # ///////////////////////////////////////////////////////////////////////////////
         # Set up attributes

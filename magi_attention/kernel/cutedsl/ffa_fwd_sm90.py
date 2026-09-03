@@ -615,13 +615,9 @@ class FFAFwdSm90:
         )
         mK, mV = [layout_utils.select(t, KV_layout_transpose) for t in (mK, mV)]
 
-        # mLSE: (sQ,nhQ,batch):(1,sQ,sQ*nhQ)
-        LSE_layout_transpose = [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
-        mLSE = (
-            layout_utils.select(mLSE, LSE_layout_transpose)
-            if const_expr(mLSE is not None)
-            else None
-        )
+        # Dense LSE: (b, nhQ, sQ) -> (sQ, nhQ, b); varlen LSE is consumed as (total_q, nhQ).
+        if const_expr(mLSE is not None and mCuSeqlensQ is None):
+            mLSE = layout_utils.select(mLSE, [2, 1, 0])
 
         # mQ/mO_packgqa: ((nhG,sQ),HD,nhK,batch):((HD,nhQ*HD),1,nhG*HD,sQ*nhQ*HD)
         # mLSE_packgqa: ((nhG,sQ),nhK,batch):((sQ,1),sQ*nhG,sQ*nhQ)
