@@ -608,9 +608,7 @@ def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k):
         mPdPsum = fake_tensor(Float32, (b, h_q, seqlen_q_rounded), divisibility=4)
         dQaccum = fake_tensor(Float32, (b, h_q, seqlen_q_d_rounded), divisibility=4)
     else:
-        # Varlen LSE is the (total_q, h_q) contract viewed as .mT: unit stride
-        # sits on mode 0 (seqlen), head stride is h_q.
-        mLSE = fake_tensor(Float32, (h_q, total_q), divisibility=1, leading_dim=0)
+        mLSE = fake_tensor(Float32, (total_q, h_q), divisibility=1)
         mLSElog2 = fake_tensor(Float32, (h_q, total_q_rounded), divisibility=4)
         mPdPsum = fake_tensor(Float32, (h_q, total_q_rounded), divisibility=4)
         dQaccum = fake_tensor(Float32, (h_q, total_q_d_rounded), divisibility=4)

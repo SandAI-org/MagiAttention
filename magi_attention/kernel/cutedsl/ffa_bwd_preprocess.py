@@ -195,15 +195,18 @@ class FFABwdPreProcess:
         self._check_tile()
         self._setup_attributes()
 
-        # (batch, nheads, seqlen) -> (seqlen, nheads, batch) or (total_q, nheads) -> (nheads, total_q)
+        # Dense stats: (batch, nheads, seqlen) -> (seqlen, nheads, batch).
+        # Varlen padded stats: (nheads, total_q_rounded) -> (total_q_rounded, nheads);
+        # varlen LSE/dLSE are consumed as (total_q, nheads).
         is_varlen = mCuSeqlensQ is not None or mQRanges is not None
         transpose = [2, 1, 0] if const_expr(not is_varlen) else [1, 0]
         mPdPsum = layout_utils.select(mPdPsum, transpose)
         if const_expr(mLSE is not None):
-            mLSE = layout_utils.select(mLSE, transpose)
             mLSElog2 = layout_utils.select(mLSElog2, transpose)
-        if const_expr(mdLSE is not None):
-            mdLSE = layout_utils.select(mdLSE, transpose)
+            if const_expr(not is_varlen):
+                mLSE = layout_utils.select(mLSE, [2, 1, 0])
+        if const_expr(mdLSE is not None and not is_varlen):
+            mdLSE = layout_utils.select(mdLSE, [2, 1, 0])
         if const_expr(mdQaccum is not None):
             mdQaccum = layout_utils.select(mdQaccum, transpose)
 
@@ -491,14 +494,7 @@ def _compile_bwd_preprocess(
         fake_tensor(cutlass.Int32, (batch,), divisibility=1) if has_seqused_q else None
     )
     mdLSE = (
-        fake_tensor(
-            cutlass.Float32,
-            mLSE.shape,
-            divisibility=1,
-            leading_dim=0 if varlen_q else -1,
-        )
-        if has_dlse
-        else None
+        fake_tensor(cutlass.Float32, mLSE.shape, divisibility=1) if has_dlse else None
     )
     mdQaccum = mdQaccum if has_dq_accum else None
     fa_bwd_pre = FFABwdPreProcess(
@@ -570,9 +566,6 @@ def bwd_preprocess(
         q_ranges is None or max_seqlen_q > 0
     ), "ranges preprocess requires max_seqlen_q (the per-range launch bound)"
 
-    if cu_seqlens_q is not None or q_ranges is not None:
-        lse = lse.mT
-        dlse = dlse.mT if dlse is not None else None
     if compile_key not in bwd_preprocess.compile_cache:
         bwd_preprocess.compile_cache[compile_key] = _compile_bwd_preprocess(
             *compile_key

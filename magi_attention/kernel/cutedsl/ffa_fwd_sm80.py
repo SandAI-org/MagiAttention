@@ -613,16 +613,11 @@ class FFAFwdSm80:
             for t in (mK, mV)
         ]
 
-        # Layout permutation of LSE:
-        # 3D non-varlen: (b, nh, s) -> (s, nh, b)
-        # 2D varlen: (nh, t) -> (t, nh)
-        if const_expr(mLSE is not None):
+        # Dense LSE: (b, nh, s) -> (s, nh, b); varlen LSE is consumed as (t, nh).
+        if const_expr(mLSE is not None and mCuSeqlensQ is None):
             assert mLSE is not None  # mypy
-            LSE_layout_transpose = (
-                [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
-            )
             mLSE = cute.make_tensor(
-                mLSE.iterator, cute.select(mLSE.layout, mode=LSE_layout_transpose)
+                mLSE.iterator, cute.select(mLSE.layout, mode=[2, 1, 0])
             )
 
         # ///////////////////////////////////////////////////////////////////////////////
