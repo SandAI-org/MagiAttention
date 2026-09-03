@@ -16,7 +16,7 @@ from .ffa_utils import (
     MT_MAP,
     TorchFlexAttnArgs,
     normalize_mask_types,
-    validate_per_range_mask_feature_support,
+    validate_range_feature_support,
     validate_true_ranges,
 )
 from .flex_flash_attn import flex_flash_attn_func
@@ -30,7 +30,7 @@ __all__ = [
     "TorchFlexAttnArgs",
     "MT_MAP",
     "normalize_mask_types",
-    "validate_per_range_mask_feature_support",
+    "validate_range_feature_support",
     "validate_true_ranges",
 ]
 

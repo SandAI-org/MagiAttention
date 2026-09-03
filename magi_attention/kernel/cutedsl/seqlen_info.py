@@ -141,8 +141,8 @@ class SeqlenInfoQK:
     ) -> "SeqlenInfoQK":
         assert mQRanges is None or mCuSeqlensQ is None
         assert mKRanges is None or mCuSeqlensK is None
-        varlen_q = mCuSeqlensQ is not None or mQRanges is not None
-        varlen_k = mCuSeqlensK is not None or mKRanges is not None
+        is_varlen_q = mCuSeqlensQ is not None or mQRanges is not None
+        is_varlen_k = mCuSeqlensK is not None or mKRanges is not None
         # RangeMerge: the scheduler batch selects the merged Q group while the
         # K range comes from a different (pair) row.
         k_sel = batch_idx if const_expr(k_batch_idx is None) else k_batch_idx
@@ -170,7 +170,7 @@ class SeqlenInfoQK:
                 )
             else:
                 padded_offset_q = offset_q
-        elif const_expr(not varlen_q):
+        elif const_expr(not is_varlen_q):
             padded_offset_q = 0
         else:
             # Add divby so that the compiler knows the alignment when moving by offset_padded
@@ -179,7 +179,7 @@ class SeqlenInfoQK:
             )
         if const_expr(mKRanges is not None):
             padded_offset_k = offset_k
-        elif const_expr(not varlen_k):
+        elif const_expr(not is_varlen_k):
             padded_offset_k = 0
         else:
             padded_offset_k = cute.assume(
@@ -225,8 +225,8 @@ class SeqlenInfoQK:
             m_block_offset,
             block_idx_offset,
             num_n_blocks,
-            has_cu_seqlens_q=varlen_q,
-            has_cu_seqlens_k=varlen_k,
+            has_cu_seqlens_q=is_varlen_q,
+            has_cu_seqlens_k=is_varlen_k,
             has_seqused_q=mSeqUsedQ is not None,
             has_seqused_k=mSeqUsedK is not None,
         )

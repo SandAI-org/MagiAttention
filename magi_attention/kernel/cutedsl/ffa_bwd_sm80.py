@@ -476,7 +476,7 @@ class FFABwdSm80:
         # atom_async_copy_accum: G2S copy atom for LSE load with `cp.async`
         # layout_src_tv=(1,4):(0,1) => 4 float32 elements per thread
         # layout_dst_tv=(1,4):(0,1) => 4 float32 elements per thread
-        if cutlass.const_expr(not self.varlen_q):
+        if cutlass.const_expr(not self.is_varlen_q):
             atom_async_copy_accum = cute.make_copy_atom(
                 cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
                 cutlass.Float32,
@@ -697,7 +697,7 @@ class FFABwdSm80:
 
         # --- Set up attributes ---
 
-        self.varlen_q = mCuSeqlensQ is not None
+        self.is_varlen_q = mCuSeqlensQ is not None
         self._setup_attributes()
 
         # ///////////////////////////////////////////////////////////////////////////////

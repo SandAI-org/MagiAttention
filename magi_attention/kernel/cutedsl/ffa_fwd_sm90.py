@@ -587,7 +587,7 @@ class FFAFwdSm90:
             )
         )
 
-        self.varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
+        self.is_varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
         self.use_block_sparsity = cutlass.const_expr(blocksparse_tensors is not None)
 
         # --- Set up attributes ---
@@ -716,7 +716,7 @@ class FFAFwdSm90:
         if const_expr(self.use_tma_O):
             s2g_copy_op_O = cpasync.CopyBulkTensorTileS2GOp()
             mO_tma = mO_og if const_expr(self.pack_gqa) else mO
-            if const_expr(self.varlen_q):
+            if const_expr(self.is_varlen_q):
                 mO_tma = copy_utils.create_ragged_tensor_for_tma(
                     mO_tma, ragged_dim=0, ptr_shift=True
                 )
