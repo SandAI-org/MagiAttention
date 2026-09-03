@@ -43,33 +43,37 @@ from magi_attention.meta.collection.calc_meta import AttnArg
 
 __all__ = ["cutedsl_fwd", "cutedsl_bwd"]
 
-# Coverage declarations for the bwd kernel, derived exactly on the host.
-# The two sides consume different contracts (do not infer one from the other):
+# Range contracts for the bwd kernel, derived exactly on the host. Each
+# consumer has its own contract (do not infer one from another):
 # - declared_q_full_coverage only skips dQ hole zeroing -> union coverage
 #   suffices, overlapping q rows are fine (is_full_coverage merges first).
 # - declared_k_full_coverage additionally feeds k_ranges_sorted_disjoint in
 #   the kernel host (scheduler grid bound Sum(len) <= total_k), so it may only
 #   be set for a sorted partition -> is_cu_seqlens, never is_full_coverage.
+# - disable_fwd_atomic_reduction requires sorted, pairwise-disjoint q;
+#   AttnArg only certifies disjointness, so sortedness is checked here.
 #
 # Cached per AttnArg: the runtime manager reuses args across steps and the
-# derivation sorts all ranges. Keyed by id() because AttnArg is unhashable;
+# derivations sort all ranges. Keyed by id() because AttnArg is unhashable;
 # the finalizer evicts the entry before the id can be reused.
-_bwd_coverage_cache: dict[int, tuple[int, int, bool, bool]] = {}
+_bwd_contract_cache: dict[int, tuple[int, int, bool, bool, bool]] = {}
 
 
-def _bwd_full_coverage(
+def _bwd_range_contracts(
     attn_arg: AttnArg, total_q: int, total_k: int
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, bool]:
+    """Return (q_full_coverage, k_full_coverage, q_sorted) for attn_arg."""
     key = id(attn_arg)
-    hit = _bwd_coverage_cache.get(key)
+    hit = _bwd_contract_cache.get(key)
     if hit is not None and hit[0] == total_q and hit[1] == total_k:
-        return hit[2], hit[3]
+        return hit[2], hit[3], hit[4]
     if hit is None:
-        weakref.finalize(attn_arg, _bwd_coverage_cache.pop, key, None)
+        weakref.finalize(attn_arg, _bwd_contract_cache.pop, key, None)
     q_cov = attn_arg.q_ranges_bwd.is_full_coverage(total_q)
     k_cov = attn_arg.k_ranges_bwd.is_cu_seqlens(total_k)
-    _bwd_coverage_cache[key] = (total_q, total_k, q_cov, k_cov)
-    return q_cov, k_cov
+    q_sorted = attn_arg.q_ranges_bwd.is_sorted()
+    _bwd_contract_cache[key] = (total_q, total_k, q_cov, k_cov, q_sorted)
+    return q_cov, k_cov, q_sorted
 
 
 def cutedsl_fwd(
@@ -126,7 +130,7 @@ def cutedsl_bwd(
     if not ffa_args:
         raise RuntimeError("cutedsl_bwd called with skip_attn_bwd=True")
 
-    q_full_coverage, k_full_coverage = _bwd_full_coverage(
+    q_full_coverage, k_full_coverage, q_sorted = _bwd_range_contracts(
         attn_arg, q.shape[0], k.shape[0]
     )
 
@@ -152,7 +156,7 @@ def cutedsl_bwd(
         deterministic=False,  # the kernel raises NotImplementedError for ranges + deterministic
         declared_q_full_coverage=q_full_coverage,
         declared_k_full_coverage=k_full_coverage,
-        disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
+        disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction and q_sorted,
         disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
         range_merge=False,
         mask_types=ffa_args["attn_type_map"],
