@@ -198,14 +198,14 @@ class FFABwdPreProcess:
         # Dense stats: (batch, nheads, seqlen) -> (seqlen, nheads, batch).
         # Varlen padded stats: (nheads, total_q_rounded) -> (total_q_rounded, nheads);
         # varlen LSE/dLSE are consumed as (total_q, nheads).
-        is_varlen = mCuSeqlensQ is not None or mQRanges is not None
-        transpose = [2, 1, 0] if const_expr(not is_varlen) else [1, 0]
+        is_varlen_q = mCuSeqlensQ is not None or mQRanges is not None
+        transpose = [2, 1, 0] if const_expr(not is_varlen_q) else [1, 0]
         mPdPsum = layout_utils.select(mPdPsum, transpose)
         if const_expr(mLSE is not None):
             mLSElog2 = layout_utils.select(mLSElog2, transpose)
-            if const_expr(not is_varlen):
+            if const_expr(not is_varlen_q):
                 mLSE = layout_utils.select(mLSE, [2, 1, 0])
-        if const_expr(mdLSE is not None and not is_varlen):
+        if const_expr(mdLSE is not None and not is_varlen_q):
             mdLSE = layout_utils.select(mdLSE, [2, 1, 0])
         if const_expr(mdQaccum is not None):
             mdQaccum = layout_utils.select(mdQaccum, transpose)
@@ -459,6 +459,7 @@ def _compile_bwd_preprocess(
     disable_fwd_atomic_reduction,
 ):
     """Compile bwd preprocess kernel using cute fake tensors (no real GPU tensors needed)."""
+    is_varlen_q = has_cuseqlens_q or has_ranges
     (
         mQ,
         mK,
@@ -475,10 +476,9 @@ def _compile_bwd_preprocess(
         mdKaccum,
         mdVaccum,
     ) = make_fake_bwd_tensors(
-        dtype, has_gqa=True, varlen_q=has_cuseqlens_q or has_ranges, varlen_k=False
+        dtype, has_gqa=True, is_varlen_q=is_varlen_q, is_varlen_k=False
     )
-    varlen_q = has_cuseqlens_q or has_ranges
-    batch = mQ.shape[0] if not varlen_q else cute.sym_int()
+    batch = mQ.shape[0] if not is_varlen_q else cute.sym_int()
     batchp1 = cute.sym_int()
     mCuSeqlensQ = (
         fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
