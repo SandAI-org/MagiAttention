@@ -12,20 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Copyright (c) 2026 MagiAttention Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """Host-side RangeMerge."""
 
 from dataclasses import dataclass
@@ -56,7 +42,6 @@ class RangeMergePlan:
     """Precomputed merge tables for RangeMerge."""
 
     merged_outer_ranges: torch.Tensor  # [R, 2], pad [0, 0]
-    sorted_outer_ranges: torch.Tensor  # [R, 2], group-contiguous
     sorted_inner_ranges: torch.Tensor  # [R, 2], group-contiguous
     sorted_mask_types: torch.Tensor  # [R]
     cu_batches: torch.Tensor  # [R + 1] CSR
@@ -74,9 +59,9 @@ def plan_range_merge(
         q_ranges.shape[0],
         q_ranges.device,
     )
-    merged, sq, sk, sm, cu = merge_qk_ranges(q_ranges, k_ranges, mask_types)
+    merged, sk, sm, cu = merge_qk_ranges(q_ranges, k_ranges, mask_types)
     return RangeMergePlan(
-        merged, sq, sk, sm, cu, bwd=plan_range_merge_bwd(q_ranges, k_ranges, mask_types)
+        merged, sk, sm, cu, bwd=plan_range_merge_bwd(q_ranges, k_ranges, mask_types)
     )
 
 
@@ -91,8 +76,8 @@ def plan_range_merge_bwd(
         q_ranges.shape[0],
         q_ranges.device,
     )
-    merged_k, sk, sq, sm, cu = merge_qk_ranges(k_ranges, q_ranges, mask_types)
-    return RangeMergePlan(merged_k, sk, sq, sm, cu)
+    merged_k, sq, sm, cu = merge_qk_ranges(k_ranges, q_ranges, mask_types)
+    return RangeMergePlan(merged_k, sq, sm, cu)
 
 
 def bwd_range_merge_arg(
@@ -110,10 +95,10 @@ def merge_qk_ranges(
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     mask_types: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
     """Group relations by identical outer interval.
 
-    Returns ``(merged_outer, sorted_outer, sorted_inner, sorted_mask, cu_batches)``.
+    Returns ``(merged_outer, sorted_inner, sorted_mask, cu_batches)``.
     """
     assert is_magi_attn_ext_installed, "magi_attn_ext must be installed for RangeMerge."
     assert q_ranges.shape == k_ranges.shape and q_ranges.shape[1] == 2
@@ -127,4 +112,4 @@ def merge_qk_ranges(
     merged_q, cu_batches, _unique_count = magi_attn_ext.unique_consecutive_pairs(
         sorted_q
     )
-    return merged_q, sorted_q, sorted_k, sorted_mask, cu_batches
+    return merged_q, sorted_k, sorted_mask, cu_batches

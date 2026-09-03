@@ -23,14 +23,10 @@ contracts: q/k ranges and mask type map as produced by
 ``AttnArg.to_ffa_args()``; ``lse`` is fp32 ``(total_q, nhq)`` on both the
 forward output and the backward input.
 
-Limitations (guarded by asserts and by flag filtering at the dist
-level):
-
-- sink is not supported (CUTEDSL kernel requires per-head scalar bf16 sink,
-  while the dist contract is ``[n_sink, nhq]`` fp32);
-- ``deterministic=True`` with ranges is rejected by the kernel
-  (``NotImplementedError``);
-- head_dim > 128 is not supported on the kernel's fast path used here.
+Limitations, filtered at the dist level: attention sink is unsupported (the
+kernel takes a per-head scalar bf16 sink, the dist contract is
+``[n_sink, nhq]`` fp32), and ``deterministic=True`` with ranges is rejected
+by the kernel.
 """
 
 from __future__ import annotations
@@ -54,9 +50,6 @@ __all__ = ["cutedsl_fwd", "cutedsl_bwd"]
 # - declared_k_full_coverage additionally feeds k_ranges_sorted_disjoint in
 #   the kernel host (scheduler grid bound Sum(len) <= total_k), so it may only
 #   be set for a sorted partition -> is_cu_seqlens, never is_full_coverage.
-#
-# The natural home for these two bools is AttnArg.__post_init__, next to the
-# bwd ranges they are derived from; until they move there, this cache stands in.
 #
 # Cached per AttnArg: the runtime manager reuses args across steps and the
 # derivation sorts all ranges. Keyed by id() because AttnArg is unhashable;
@@ -83,15 +76,11 @@ def cutedsl_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    sink: torch.Tensor | None,
     attn_arg: AttnArg,
     softmax_scale: float | None,
     softcap: float,
-    sink_layout: str = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward wrapper: returns (out, lse) with lse in the dist contract's (sq, nhq) layout."""
-    assert sink is None, "CUTEDSL backend does not support attention sink"
-    assert sink_layout == "sh", f"unsupported sink layout: {sink_layout}"
 
     ffa_args = attn_arg.to_ffa_args(is_bwd=False)
     if not ffa_args:
@@ -107,8 +96,7 @@ def cutedsl_fwd(
         max_seqlen_k=attn_arg.k_ranges.max_seqlen,
         softmax_scale=softmax_scale,
         softcap=softcap if softcap and softcap > 0 else None,
-        # Force fp32 partial out for the dist multi-stage merge. The dist
-        # overlap path rescales partial (out, lse) pairs in fp32
+        # The dist overlap path rescales partial (out, lse) pairs in fp32
         # (correct_attn_out_lse); a bf16/fp16 partial underflows that merge.
         # The atomic path defaults O to the input dtype, so ask for fp32 here.
         disable_fwd_atomic_reduction=False,
@@ -128,18 +116,12 @@ def cutedsl_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    sink: torch.Tensor | None,
     o: torch.Tensor,
     lse: torch.Tensor,
     attn_arg: AttnArg,
     softmax_scale: float | None,
     softcap: float,
-    sink_layout: str = "sh",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
-    """Backward wrapper: partial_dsink is always None since sink is unsupported."""
-    assert sink is None, "CUTEDSL backend does not support attention sink"
-    assert sink_layout == "sh", f"unsupported sink layout: {sink_layout}"
-
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     ffa_args = attn_arg.to_ffa_args(is_bwd=True)
     if not ffa_args:
         raise RuntimeError("cutedsl_bwd called with skip_attn_bwd=True")
@@ -177,4 +159,4 @@ def cutedsl_bwd(
     )
     # The dist bwd hp-reduce path (``bwd_hp_reduce`` flag) expects partial
     # dq/dk/dv in fp32; the kernel returns input dtype, so cast up here.
-    return dq.float(), dk.float(), dv.float(), None
+    return dq.float(), dk.float(), dv.float()
