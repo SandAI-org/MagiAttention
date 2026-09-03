@@ -299,25 +299,3 @@ class BlockInfo:
                 n_idx_right += self.window_size_right
             n_block_max = min(n_block_max, cute.ceil_div(n_idx_right, self.tile_n))
         return n_block_max
-
-    @cute.jit
-    def get_n_block_max_for_m_block_per_range(
-        self,
-        seqlen_info: SeqlenInfoQK,
-        m_block: Int32,
-        attn_type: Int32,
-    ) -> Int32:
-        """Runtime n_block_max for a Q tile (bwd deterministic lock values).
-
-        The caller derives ``lock_value = n_block_max - 1 - n_block``, which is a
-        gap-free 0-based ordinal over any contiguous ``[n_block_min, n_block_max)``
-        -- so only the upper bound has to be exact here.
-        """
-        n_block_max = cute.ceil_div(seqlen_info.seqlen_k, self.tile_n)
-        if attn_type == MT_MAP.causal or attn_type == MT_MAP.bi_causal:
-            m_idx_max = (m_block + 1) * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa > 1):
-                m_idx_max = cute.ceil_div(m_idx_max, self.qhead_per_kvhead_packgqa)
-            n_idx_right = m_idx_max + seqlen_info.seqlen_k - seqlen_info.seqlen_q
-            n_block_max = min(n_block_max, cute.ceil_div(n_idx_right, self.tile_n))
-        return n_block_max

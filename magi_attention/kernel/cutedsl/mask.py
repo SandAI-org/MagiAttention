@@ -961,8 +961,8 @@ class AttentionMask:
         n_block: cutlass.Int32,
         mask_seqlen: cutlass.Constexpr,
         attn_type: Int32,
-        # Accepted for call-site parity with apply_mask_sm100_transposed;
-        # V1 per-range path does not use mask_mod / seqlen_q boundary opts.
+        # Accepted so the dense loop can call either mask variant through one
+        # mask_fn; per-range masks have no mask_mod and always bound seqlen_q.
         is_full_block: bool = False,
         check_m_boundary: bool = True,
     ) -> None:
