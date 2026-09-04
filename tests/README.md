@@ -22,9 +22,9 @@ You can use environment variables to precisely control which parameterized test 
 | `MAGI_ATTENTION_TEST_NUM_HEADS` | `num_heads` | Underscore-separated, e.g. `8_8` for `(8, 8)` |
 | `MAGI_ATTENTION_TEST_HEAD_DIM` | `head_dim` | String repr, e.g. `64` |
 | `MAGI_ATTENTION_TEST_DTYPE` | `dtype` | String repr, e.g. `torch.float16` |
-| `MAGI_ATTENTION_TEST_BACKEND` | `backend` | Enum value, e.g. `MagiAttentionKernelBackend.FFA` |
+| `MAGI_ATTENTION_TEST_BACKEND` | `backend` | Canonical `.value`, e.g. `ffa` / `sdpa` / `sdpa_ol` / `fa4` / `cutedsl` |
 
-For dict-typed parameters (e.g. `attn_config`), the filter matches against the `NAME` field value. For other types, the `str()` representation is used for matching.
+For dict-typed parameters (e.g. `attn_config`), the filter matches against the `NAME` field value. For `Enum` parameters (e.g. `backend`), it matches the canonical `.value` (`ffa`), the member `.name` (`FFA`), and `str()` (`MagiAttentionKernelBackend.FFA`). For other types, the `str()` representation is used.
 
 > **Note:** `overlap_config` and `random_type_mapping` have been moved from `@parameterize` dimensions into `FlagCombGenerator` flags and are selected automatically by the heuristic strategy. The env vars `MAGI_ATTENTION_TEST_OVERLAP_CONFIG` and `MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` no longer take effect.
 
@@ -55,7 +55,7 @@ MAGI_ATTENTION_TEST_NUM_HEADS=8_8 pytest tests/test_pipeline.py
 MAGI_ATTENTION_TEST_DTYPE="*float16*" pytest tests/test_pipeline.py
 
 # Run only sdpa_ol backend tests
-MAGI_ATTENTION_TEST_BACKEND="*SDPA_OL*" pytest tests/test_pipeline.py
+MAGI_ATTENTION_TEST_BACKEND=sdpa_ol pytest tests/test_pipeline.py
 
 # Combined filters: full_attn configs + head_dim=64
 MAGI_ATTENTION_TEST_ATTN_CONFIG="full_attn_*" \

@@ -433,6 +433,23 @@ class AttnRanges:
 
         return True
 
+    def is_full_coverage(self, seqlen: int) -> bool:
+        """Return True if the union of the ranges covers ``[0, seqlen)``.
+
+        Args:
+            seqlen: The total token-space length to check against
+                (``total_seqlen``, i.e. ``q/k.shape[0]`` for packed varlen).
+
+        Returns:
+            True iff every index in ``[0, seqlen)`` lies in some range.
+
+        Note: conservative. Ranges are expected to lie within ``[0, seqlen]``
+        (as ``validate_true_ranges`` enforces); an out-of-bound range makes the
+        strict ``end == seqlen`` check fail and yields ``False`` (the
+        hole-zeroing sweep is kept) — never a false "no-hole" positive.
+        """
+        return self.merge().is_cu_seqlens(seqlen)
+
     def to_cu_seqlens(self, seq_len: int) -> list[int]:
         """Convert ranges to a cumulative sequence length list.
 

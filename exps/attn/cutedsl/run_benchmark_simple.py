@@ -33,7 +33,9 @@ Run:
     BENCH_FORCE_SM80=1 PYTHONPATH=../../.. python run_benchmark_simple.py
 """
 
+import inspect
 import os
+import random
 
 import torch
 
@@ -49,6 +51,7 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.kernel.cutedsl import MT_MAP
 from magi_attention.kernel.cutedsl import flex_flash_attn_func as ffa_func
+from magi_attention.utils import set_random_seed
 from magi_attention.utils.arch import (
     get_dev_cap_str,
     is_ampere,
@@ -59,10 +62,10 @@ from magi_attention.utils.arch import (
 # isort: split
 from exps.attn.baselines.utils import (
     calculate_attn_flops,
-    generate_seqlens,
     seqlens2cu_seqlens,
     seqlens2curanges,
 )
+from exps.dist_attn.benchmark.utils import generate_seqlens
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
@@ -164,6 +167,34 @@ attn_flops_configs = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ffa (cutedsl) optimization flags
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   BENCH_FFA_OPT=0   disable all optional flags (default: on)
+
+_FFA_OPT = os.environ.get("BENCH_FFA_OPT", "1") == "1"
+_ffa_sig = inspect.signature(ffa_func).parameters
+
+
+def _ffa_opt_kwargs(is_varlen_case: bool, is_mha: bool) -> dict:
+    kw: dict = {}
+    if not is_varlen_case and "disable_fwd_atomic_reduction" in _ffa_sig:
+        kw["disable_fwd_atomic_reduction"] = True
+    if not _FFA_OPT:
+        return kw
+    if "disable_fwd_atomic_reduction" in _ffa_sig:
+        kw["disable_fwd_atomic_reduction"] = True
+    if is_varlen_case:
+        # direct-store disjoint dKV is MHA-only
+        if is_mha and "disable_bwd_dkv_atomic_reduction" in _ffa_sig:
+            kw["disable_bwd_dkv_atomic_reduction"] = True
+    return kw
+
+
+_opt_applied = _FFA_OPT and "disable_bwd_dkv_atomic_reduction" in _ffa_sig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Benchmark function
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -182,10 +213,15 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
     is_varlen = "varlen" in mask_type
     window_size_tuple = (-1, -1)
 
+    set_random_seed(20260818 + seqlen)
+
     # ── ranges / cu_seqlens / attn flops ──
     if is_varlen:
-        # split the total seqlen into a list of variable-length docs
-        seqlens = generate_seqlens(varlen_seqlen_distribution, seqlen)
+        seqlens = generate_seqlens(
+            varlen_seqlen_distribution,
+            seqlen,
+            rng=random.Random(20260818 + seqlen),
+        )
         cu_ranges = seqlens2curanges(seqlens)
         cu_seqlens = seqlens2cu_seqlens(seqlens)
 
@@ -248,6 +284,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
 
     # ── define fn ──
     if attn_impl == "ffa":
+        opt_kwargs = _ffa_opt_kwargs(is_varlen, is_mha=(nhk == nhq))
         if is_varlen:
 
             def fn():
@@ -260,12 +297,13 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
                     mask_types=ffa_mask_types,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_k=max_seqlen_k,
+                    **opt_kwargs,
                 )
 
         else:
 
             def fn():
-                return ffa_func(q, k, v, mask_types=ffa_mask_types)
+                return ffa_func(q, k, v, mask_types=ffa_mask_types, **opt_kwargs)
 
         if wd == "bwd":
             try:
@@ -488,7 +526,10 @@ def attn_benchmark(seqlen, hd, wd, mask_type, nhk, attn_impl):
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    out_root = gen_save_path(f"bench_simple_{arch}", add_timestamp_suffix=False)
+    out_root = gen_save_path(
+        f"bench_simple_{arch}{'_opt' if _opt_applied else ''}",
+        add_timestamp_suffix=False,
+    )
 
     attn_benchmark.run(
         print_data=True,

@@ -22,9 +22,9 @@ backend 通过 `MAGI_ATTENTION_KERNEL_BACKEND` 环境变量控制（见下文）
 | `MAGI_ATTENTION_TEST_NUM_HEADS` | `num_heads` | 下划线分隔，如 `8_8` 表示 `(8, 8)` |
 | `MAGI_ATTENTION_TEST_HEAD_DIM` | `head_dim` | 数值的字符串表示，如 `64` |
 | `MAGI_ATTENTION_TEST_DTYPE` | `dtype` | 字符串表示，如 `torch.float16` |
-| `MAGI_ATTENTION_TEST_BACKEND` | `backend` | 枚举值，如 `MagiAttentionKernelBackend.FFA` |
+| `MAGI_ATTENTION_TEST_BACKEND` | `backend` | 规范 `.value`，如 `ffa` / `sdpa` / `sdpa_ol` / `fa4` / `cutedsl` |
 
-对于 dict 类型的参数（如 `attn_config`），过滤器匹配其 `NAME` 字段的值。对于其他类型的参数，使用 `str()` 转换后的字符串进行匹配。
+对于 dict 类型的参数（如 `attn_config`），过滤器匹配其 `NAME` 字段的值。对于 `Enum` 类型的参数（如 `backend`），同时匹配规范 `.value`（`ffa`）、成员 `.name`（`FFA`）以及 `str()`（`MagiAttentionKernelBackend.FFA`）。对于其他类型的参数，使用 `str()` 转换后的字符串进行匹配。
 
 > **注意：** `overlap_config` 和 `random_type_mapping` 已经从 `@parameterize` 维度移入 `FlagCombGenerator` 的 flag 组合中，由 heuristic 策略自动选取。因此 `MAGI_ATTENTION_TEST_OVERLAP_CONFIG` 和 `MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` 环境变量不再生效。
 
@@ -55,7 +55,7 @@ MAGI_ATTENTION_TEST_NUM_HEADS=8_8 pytest tests/test_pipeline.py
 MAGI_ATTENTION_TEST_DTYPE="*float16*" pytest tests/test_pipeline.py
 
 # 只运行 sdpa_ol backend 的测试
-MAGI_ATTENTION_TEST_BACKEND="*SDPA_OL*" pytest tests/test_pipeline.py
+MAGI_ATTENTION_TEST_BACKEND=sdpa_ol pytest tests/test_pipeline.py
 
 # 组合过滤：full_attn 配置 + head_dim=64
 MAGI_ATTENTION_TEST_ATTN_CONFIG="full_attn_*" \

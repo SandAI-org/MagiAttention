@@ -334,6 +334,23 @@ def warp_reduce(
 
 
 @dsl_user_op
+def cta_exit(*, loc=None, ip=None) -> None:
+    """PTX `exit;`. Cluster-safe only if every CTA of the cluster takes it,
+    before any barrier a peer could wait on."""
+    llvm.inline_asm(
+        None,
+        [],
+        "exit;",
+        "",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
 def smid(*, loc=None, ip=None) -> Int32:
     return Int32(
         llvm.inline_asm(

@@ -587,7 +587,7 @@ class FFAFwdSm90:
             )
         )
 
-        self.varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
+        self.is_varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
         self.use_block_sparsity = cutlass.const_expr(blocksparse_tensors is not None)
 
         # --- Set up attributes ---
@@ -615,13 +615,9 @@ class FFAFwdSm90:
         )
         mK, mV = [layout_utils.select(t, KV_layout_transpose) for t in (mK, mV)]
 
-        # mLSE: (sQ,nhQ,batch):(1,sQ,sQ*nhQ)
-        LSE_layout_transpose = [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
-        mLSE = (
-            layout_utils.select(mLSE, LSE_layout_transpose)
-            if const_expr(mLSE is not None)
-            else None
-        )
+        # Dense LSE: (b, nhQ, sQ) -> (sQ, nhQ, b); varlen LSE is consumed as (total_q, nhQ).
+        if const_expr(mLSE is not None and mCuSeqlensQ is None):
+            mLSE = layout_utils.select(mLSE, [2, 1, 0])
 
         # mQ/mO_packgqa: ((nhG,sQ),HD,nhK,batch):((HD,nhQ*HD),1,nhG*HD,sQ*nhQ*HD)
         # mLSE_packgqa: ((nhG,sQ),nhK,batch):((sQ,1),sQ*nhG,sQ*nhQ)
@@ -720,7 +716,7 @@ class FFAFwdSm90:
         if const_expr(self.use_tma_O):
             s2g_copy_op_O = cpasync.CopyBulkTensorTileS2GOp()
             mO_tma = mO_og if const_expr(self.pack_gqa) else mO
-            if const_expr(self.varlen_q):
+            if const_expr(self.is_varlen_q):
                 mO_tma = copy_utils.create_ragged_tensor_for_tma(
                     mO_tma, ragged_dim=0, ptr_shift=True
                 )

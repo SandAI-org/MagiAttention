@@ -15,6 +15,7 @@
 import datetime
 import os
 import sys
+from enum import Enum
 from fnmatch import fnmatch
 from functools import wraps
 from typing import Any, Callable
@@ -61,6 +62,25 @@ def _match_patterns(value_str: str, raw_env: str) -> bool:
     """
     patterns = [p.strip() for p in raw_env.split(",") if p.strip()]
     return any(fnmatch(value_str, pat) for pat in patterns)
+
+
+def _filter_match_strings(value: object) -> tuple[str, ...]:
+    """Return the strings a ``MAGI_ATTENTION_TEST_*`` fnmatch pattern may hit.
+
+    Enum members are matched by canonical ``.value`` (``ffa``), member ``.name``
+    (``FFA``), and ``str()`` (``MagiAttentionKernelBackend.FFA``). Matching only
+    ``str()`` rejects lowercase values; matching only ``.value`` rejects patterns
+    such as ``*FFA``.
+    """
+    if isinstance(value, dict) and NAME in value:
+        return (str(value[NAME]),)
+    if isinstance(value, tuple):
+        return ("_".join(str(v) for v in value),)
+    if isinstance(value, Enum):
+        enum_value = value.value
+        value_str = enum_value if isinstance(enum_value, str) else str(enum_value)
+        return tuple(dict.fromkeys((value_str, value.name, str(value))))
+    return (str(value),)
 
 
 def should_run_world_size(world_size: int) -> bool:
@@ -144,8 +164,9 @@ def should_run_test_case(**parametrize_args: object) -> bool:
     the value currently being tested.  For dict-typed values that contain a
     ``NAME`` key (e.g. ``attn_config``, ``overlap_config``), the ``NAME``
     value is used for matching.  For tuple values, elements are joined with
-    underscores (e.g. ``(8, 8)`` becomes ``"8_8"``).  For other types the
-    ``str()`` representation is used.
+    underscores (e.g. ``(8, 8)`` becomes ``"8_8"``).  For ``Enum`` members,
+    the canonical ``.value``, the member ``.name``, and ``str()`` are all
+    accepted.  For other types the ``str()`` representation is used.
 
     The matching is controlled by environment variables following the pattern
     ``MAGI_ATTENTION_TEST_<DIMENSION_UPPER>``, where ``<DIMENSION_UPPER>`` is
@@ -173,6 +194,9 @@ def should_run_test_case(**parametrize_args: object) -> bool:
         # Filter by dtype
         MAGI_ATTENTION_TEST_DTYPE="*float16*" pytest tests/test_pipeline.py
 
+        # Filter by kernel backend (canonical lowercase .value)
+        MAGI_ATTENTION_TEST_BACKEND=ffa pytest tests/test_pipeline.py
+
         # Combine multiple filters (AND logic)
         MAGI_ATTENTION_TEST_ATTN_CONFIG="full_attn_*" \\
         MAGI_ATTENTION_TEST_OVERLAP_CONFIG=no_overlap \\
@@ -188,14 +212,10 @@ def should_run_test_case(**parametrize_args: object) -> bool:
         if not raw:
             continue
 
-        if isinstance(value, dict) and NAME in value:
-            value_str = str(value[NAME])
-        elif isinstance(value, tuple):
-            value_str = "_".join(str(v) for v in value)
-        else:
-            value_str = str(value)
-
-        if not _match_patterns(value_str, raw):
+        if not any(
+            _match_patterns(value_str, raw)
+            for value_str in _filter_match_strings(value)
+        ):
             return False
 
     return True

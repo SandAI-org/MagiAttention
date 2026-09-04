@@ -14,7 +14,6 @@
 
 """Utility helpers for flex_flash_attn: arch detection, tile configs, tensor helpers,
 and fake-tensor builders for bwd kernels."""
-
 import hashlib
 import inspect
 import os
@@ -55,71 +54,213 @@ class _MaskTypeMap:
     full: ClassVar[int] = 0
     causal: ClassVar[int] = 1
 
-    # TODO: support inv_causal and bi_causal
-    # inv_causal: ClassVar[int] = 2
-    # bi_causal: ClassVar[int] = 3
+    inv_causal: ClassVar[int] = 2
+    bi_causal: ClassVar[int] = 3
 
     def is_valid(self, mask_type: int) -> bool:
         """Check if the given mask type is valid."""
-        return mask_type in range(2)  # Update if more mask types are added
+        return mask_type in range(4)  # Update if more mask types are added
 
 
 MT_MAP = _MaskTypeMap()
 
 
-def normalize_mask_types(mask_types: torch.Tensor | int | None) -> int:
-    """Translate the public ``mask_types`` argument into a single mask-type int.
+def normalize_mask_types(
+    mask_types: torch.Tensor | int | None,
+) -> int | torch.Tensor:
+    """Normalize ``mask_types`` to a scalar ``MT_MAP`` entry or a per-range tensor.
 
-    The full q/k ranges semantics allow a distinct mask type per range, but the
-    current kernels only support a single mask type shared by all ranges. So this
-    helper collapses the supported cases down to one ``MT_MAP`` int:
-
-    - ``None``  -> all ranges use full attention (``MT_MAP.full``).
-    - ``int``   -> all ranges share the same mask type (validated against ``MT_MAP``).
-    - ``Tensor``-> per-range mask types (not yet supported by the kernel).
+    ``None`` means full; a scalar int must be full or causal (inv_causal /
+    bi_causal require the per-range CUDA ``int32[R]`` tensor). Feature
+    support for the tensor form is checked by
+    :func:`validate_range_feature_support` at the kernel boundary.
+    Tensor values are trusted to be ``MT_MAP`` entries: reading them back
+    would sync the device on the hot path.
     """
     if mask_types is None:
         return MT_MAP.full
+
+    if isinstance(mask_types, bool):
+        raise TypeError("mask_types must not be a bool")
+
     if isinstance(mask_types, int):
-        if not MT_MAP.is_valid(mask_types):
-            raise ValueError(f"Invalid mask type: {mask_types}")
+        if mask_types not in (MT_MAP.full, MT_MAP.causal):
+            raise ValueError(
+                f"Scalar mask_types must be MT_MAP.full or MT_MAP.causal, "
+                f"got {mask_types} (use an int32[R] tensor per range)"
+            )
         return mask_types
 
-    # TODO: support per-range mask_types (a cuda int32 tensor) once the kernel
-    # can read a distinct mask type for each q/k range.
-    raise NotImplementedError(
-        "Per-range mask_types (torch.Tensor) is not supported yet."
-    )
+    if not isinstance(mask_types, torch.Tensor):
+        raise TypeError(
+            "mask_types must be None, an int, or a torch.Tensor, "
+            f"got {type(mask_types)!r}"
+        )
+    if not mask_types.is_cuda:
+        raise ValueError("Per-range mask_types must be a CUDA tensor")
+    if mask_types.dtype != torch.int32:
+        raise TypeError(
+            "Per-range mask_types must have dtype torch.int32, "
+            f"got {mask_types.dtype}"
+        )
+    if mask_types.dim() != 1:
+        raise ValueError(
+            "Per-range mask_types must have shape [num_ranges], "
+            f"got {tuple(mask_types.shape)}"
+        )
+    if not mask_types.is_contiguous():
+        raise ValueError("Per-range mask_types must be contiguous")
+    return mask_types
+
+
+def materialize_mask_types(
+    mask_types: int | torch.Tensor, num_ranges: int, device: torch.device
+) -> torch.Tensor:
+    """Expand a scalar mask type into the per-range ``int32[R]`` tensor.
+
+    Range merging indexes mask types row by row, so a static scalar has to be
+    laid out per range before it can follow the sorted / merged rows.
+    """
+    if isinstance(mask_types, torch.Tensor):
+        return mask_types
+    return torch.full((num_ranges,), mask_types, dtype=torch.int32, device=device)
+
+
+def validate_range_feature_support(
+    *,
+    major_arch: int,
+    has_ranges: bool,
+    mask_types: int | torch.Tensor,
+    range_merge: bool,
+    range_merge_unique_writer: bool,
+    has_mask_mod: bool,
+    has_block_sparse: bool,
+    has_score_mod: bool,
+    has_softcap: bool,
+    deterministic: bool = False,
+    bwd_head_dim: int | None = None,
+) -> None:
+    """Reject q/k-range feature combinations the kernels do not implement.
+
+    Dense calls pass through. Per-range ``mask_types`` and ``range_merge``
+    both run the SM100/SM110 runtime-mask kernel (merging materializes the
+    mask types per row), so they share its restrictions.
+    ``range_merge_unique_writer`` is the direction's non-atomic flag (fwd O,
+    bwd dK/dV): merging rewrites the outer intervals and only holds for
+    unique writers. ``deterministic`` and ``bwd_head_dim`` are backward-only:
+    the bwd hd192 mainloop is 2-CTA with Q and Qt on one pipeline stage,
+    which the per-pair merge walk does not implement.
+    """
+    per_range = isinstance(mask_types, torch.Tensor)
+    if per_range and not has_ranges:
+        raise NotImplementedError("Per-range mask_types requires q/k ranges")
+    if not has_ranges:
+        return
+    if deterministic:
+        raise NotImplementedError(
+            "deterministic backward with q/k ranges is unsupported"
+        )
+    if range_merge and not range_merge_unique_writer:
+        raise ValueError(
+            "RangeMerge requires the non-atomic path "
+            "(disable_fwd_atomic_reduction in fwd, "
+            "disable_bwd_dkv_atomic_reduction in bwd)"
+        )
+    if not (per_range or range_merge):
+        return
+    feature = "Per-range mask_types" if per_range else "RangeMerge"
+    if major_arch not in (10, 11):
+        raise NotImplementedError(f"{feature} is only supported on SM100/SM110")
+    if has_mask_mod:
+        raise NotImplementedError(f"{feature} cannot be combined with mask_mod")
+    if has_block_sparse:
+        raise NotImplementedError(f"{feature} cannot be combined with block sparsity")
+    if has_score_mod:
+        raise NotImplementedError(f"{feature} cannot be combined with score_mod")
+    if has_softcap:
+        raise NotImplementedError(f"{feature} cannot be combined with softcap")
+    if range_merge and bwd_head_dim is not None and bwd_head_dim > 128:
+        raise NotImplementedError("bwd RangeMerge is not supported at head_dim 192")
 
 
 def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
-    """Collapse q/k ranges down to a cu_seqlens tensor (step-1 hack).
+    """Collapse q/k ranges down to a cu_seqlens tensor.
 
-    The full q/k ranges semantics allow arbitrary (possibly overlapping /
-    non-contiguous) per-range [start, end) intervals, but the current kernels
-    only understand the varlen cu_seqlens layout. So as a first step we only
-    accept ranges that are *equivalent* to a cu_seqlens partition, i.e.
-    contiguous, non-overlapping intervals starting at 0:
-    ``[[0, e0], [e0, e1], ...]`` -> ``[0, e0, e1, ...]``.
-
-    The caller is responsible for guaranteeing this equivalence (no validating
-    device sync is done here); a non-conforming input silently produces a
-    wrong cu_seqlens.
+    Serves the arches whose kernels read cu_seqlens instead of ranges rows
+    (SM80/SM90/SM120, and the SM100 block-sparse path). A cu_seqlens tensor
+    can only express a sorted partition, so the caller must guarantee that
+    geometry; the values are not read back here (device sync), and a
+    non-partition input silently produces wrong offsets.
 
     Args:
-        ranges: an ``[N, 2]`` int32 cuda tensor of [start, end) intervals, or
-            ``None`` for the dense (non-varlen) path.
+        ranges: an ``[R, 2]`` int32 cuda tensor of [start, end) intervals, or
+            ``None`` for the dense path.
 
     Returns:
-        An ``[N + 1]`` int32 cu_seqlens tensor, or ``None`` if ``ranges`` is None.
+        An ``[R + 1]`` int32 cu_seqlens tensor, or ``None`` if ``ranges`` is None.
     """
     if ranges is None:
         return None
     assert (
         ranges.dim() == 2 and ranges.shape[1] == 2
-    ), f"ranges must be an [N, 2] tensor, got shape {tuple(ranges.shape)}"
+    ), f"ranges must be an [R, 2] tensor, got shape {tuple(ranges.shape)}"
     cu_seqlens = torch.cat([ranges[:1, 0], ranges[:, 1]]).to(torch.int32)
     return cu_seqlens.contiguous()
+
+
+def _validate_ranges_tensor(ranges: torch.Tensor, *, name: str) -> int:
+    """Check one ``[R, 2]`` ranges tensor structurally and return ``R``."""
+    if not isinstance(ranges, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor, got {type(ranges)!r}")
+    if not ranges.is_cuda:
+        raise ValueError(f"{name} must be a CUDA tensor")
+    if ranges.dtype != torch.int32:
+        raise TypeError(f"{name} must have dtype torch.int32, got {ranges.dtype}")
+    if ranges.dim() != 2 or ranges.shape[1] != 2:
+        raise ValueError(
+            f"{name} must have shape [num_ranges, 2], got {tuple(ranges.shape)}"
+        )
+    if not ranges.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
+
+    num_ranges = int(ranges.shape[0])
+    if num_ranges == 0:
+        raise ValueError(f"{name} must contain at least one range")
+    return num_ranges
+
+
+def validate_true_ranges(
+    q_ranges: torch.Tensor | None,
+    k_ranges: torch.Tensor | None,
+    *,
+    mask_types: torch.Tensor | int | None = None,
+) -> bool:
+    """Check q/k ranges structurally; return whether ranges are present.
+
+    Both ``None`` is dense (returns ``False``); one ``None`` is an error.
+    Range geometry (bounds, overlap, cross-relation disjointness) is a caller
+    contract: reading the values back would sync the device on the hot path.
+    """
+    if q_ranges is None and k_ranges is None:
+        return False
+    if q_ranges is None or k_ranges is None:
+        raise ValueError("q_ranges and k_ranges must both be provided, or both be None")
+
+    num_q = _validate_ranges_tensor(q_ranges, name="q_ranges")
+    num_k = _validate_ranges_tensor(k_ranges, name="k_ranges")
+    if num_q != num_k:
+        raise ValueError(
+            f"q_ranges and k_ranges must have the same number of rows: "
+            f"{num_q} vs {num_k}"
+        )
+
+    if isinstance(mask_types, torch.Tensor) and mask_types.numel() != num_q:
+        raise ValueError(
+            "Per-range mask_types length must match num_ranges: "
+            f"got {mask_types.numel()} and {num_q}"
+        )
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +593,7 @@ def validate_tensor(t, name, expected_shape, expected_dtype, expected_device):
 # ---------------------------------------------------------------------------
 
 
-def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k):
+def make_fake_bwd_tensors(dtype, has_gqa, is_varlen_q, is_varlen_k):
     sym = cute.sym_int
     # divisibility in elements: assumed_align_bytes = divisibility * dtype.width // 8
     # For 16-byte align: fp16/bf16 → divisibility=8, float32 → divisibility=4
@@ -464,8 +605,8 @@ def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k):
     seqlen_q_d_rounded, seqlen_k_dv_rounded = sym(), sym()
     total_q, total_k, total_q_rounded, total_k_rounded = sym(), sym(), sym(), sym()
     total_q_d_rounded, total_k_dv_rounded = sym(), sym()
-    b_seqlenq = (b, seqlen_q) if not varlen_q else (total_q,)
-    b_seqlenk = (b, seqlen_k) if not varlen_k else (total_k,)
+    b_seqlenq = (b, seqlen_q) if not is_varlen_q else (total_q,)
+    b_seqlenk = (b, seqlen_k) if not is_varlen_k else (total_k,)
     mQ = fake_tensor(dtype, (*b_seqlenq, h_q, d), divisibility=div)
     mO = fake_tensor(dtype, (*b_seqlenq, h_q, d_v), divisibility=div)
     mdO = fake_tensor(dtype, (*b_seqlenq, h_q, d_v), divisibility=div)
@@ -474,20 +615,20 @@ def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k):
     mdQ = fake_tensor(dtype, (*b_seqlenq, h_q, d), divisibility=div)
     mdK = fake_tensor(dtype, (*b_seqlenk, h_kv, d), divisibility=div)
     mdV = fake_tensor(dtype, (*b_seqlenk, h_kv, d_v), divisibility=div)
-    if not varlen_q:
+    if not is_varlen_q:
         mLSE = fake_tensor(Float32, (b, h_q, seqlen_q), divisibility=1)
         mLSElog2 = fake_tensor(Float32, (b, h_q, seqlen_q_rounded), divisibility=4)
         mPdPsum = fake_tensor(Float32, (b, h_q, seqlen_q_rounded), divisibility=4)
         dQaccum = fake_tensor(Float32, (b, h_q, seqlen_q_d_rounded), divisibility=4)
     else:
-        mLSE = fake_tensor(Float32, (h_q, total_q), divisibility=1)
+        mLSE = fake_tensor(Float32, (total_q, h_q), divisibility=1)
         mLSElog2 = fake_tensor(Float32, (h_q, total_q_rounded), divisibility=4)
         mPdPsum = fake_tensor(Float32, (h_q, total_q_rounded), divisibility=4)
         dQaccum = fake_tensor(Float32, (h_q, total_q_d_rounded), divisibility=4)
     if not has_gqa:
         mdKaccum, mdVaccum = None, None
     else:
-        if not varlen_k:
+        if not is_varlen_k:
             mdKaccum = fake_tensor(Float32, (b, h_kv, seqlen_k_rounded), divisibility=4)
             mdVaccum = fake_tensor(
                 Float32, (b, h_kv, seqlen_k_dv_rounded), divisibility=4
@@ -520,6 +661,7 @@ def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k):
 _MIXER_ATTRS = ("__vec_size__",)
 
 
+@lru_cache(maxsize=1)
 def _is_cuda_12() -> bool:
     """Check if the CUDA toolkit version is 12.x."""
     return is_cuda_version_ge("12") and is_cuda_version_lt("13")

@@ -804,8 +804,8 @@ msgid "**MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**"
 msgstr "**MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**"
 
 #: ../../source/user_guide/env_variables.md:328
-msgid "**Defaults to:** `1000`"
-msgstr "**默认值：** `1000`"
+msgid "**Defaults to:** `100`"
+msgstr "**默认值：** `100`"
 
 #: ../../source/user_guide/env_variables.md:329
 msgid "**Used by:** `magi_attention.env.general.dist_attn_runtime_dict_size`"
