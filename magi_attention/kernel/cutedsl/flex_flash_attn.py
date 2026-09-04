@@ -774,15 +774,13 @@ def _flex_flash_attn_bwd(
     """Backward pass for FlexFlashAttention.
 
     Args:
-        declared_q_full_coverage: the union of q_ranges covers the whole Q
-            token space, so no dQ coverage holes exist and the dQ hole-zeroing
-            sweep is skipped. Derived where ranges are host-visible (the dist
-            wrapper); False is always safe.
-        declared_k_full_coverage: k_ranges form a sorted partition of the K
-            token space. Stronger than the Q side: besides skipping the dK/dV
-            hole-zeroing sweep it feeds k_ranges_sorted_disjoint, whose
-            scheduler grid bound assumes sum(len) <= total_k — overlapping k
-            ranges must never declare it. Derived, never user-facing.
+        declared_q_full_coverage: q_ranges cover every Q token, so the dQ
+            hole-zeroing sweep is skipped. Overlap is allowed. False is always
+            safe.
+        declared_k_full_coverage: k_ranges are a sorted partition of K. Skips
+            the dK/dV hole-zeroing sweep and bounds the scheduler by
+            ``total_k`` (``sum(len) <= total_k``). Overlapping k ranges must
+            not set this.
 
     Returns:
         A tuple of (dQ, dK, dV) gradients with the same shapes and dtypes as the input q, k, v tensors.
@@ -815,6 +813,7 @@ def _flex_flash_attn_bwd(
         has_score_mod=score_mod is not None or score_mod_bwd is not None,
         has_softcap=softcap != 0.0,
         deterministic=deterministic,
+        bwd_head_dim=q.shape[-1],
     )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
@@ -947,16 +946,12 @@ def _flex_flash_attn_bwd(
             AtomLayoutMdQ = 1
             AtomLayoutNdKV = 1
             requested_disable_2cta = is_ffa_2cta_disabled()
-            # 2-CTA hdim-192 fuses Q/Qt on one pipeline; the RangeMerge
-            # per-pair Q walk needs them separate.
-            merge_192_requires_1cta = range_merge_active and head_dim == 192
             disable_2cta = (
                 requested_disable_2cta
                 or score_mod is not None
                 or score_mod_bwd is not None
                 or mask_mod is not None
                 or block_sparse_tensors is not None
-                or merge_192_requires_1cta
             )
             cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
             use_2cta_instrs = cluster_size == 2
@@ -1068,22 +1063,17 @@ def _flex_flash_attn_bwd(
     device = q.device
     out_torch_dtype = q.dtype
 
-    # Both producers certify sorted, pairwise-disjoint k rows: the partition
-    # declaration and the unique-writer contract.
     k_ranges_sorted_disjoint = has_ranges and (
         declared_k_full_coverage or disable_bwd_dkv_atomic_reduction
     )
-    # Buffer policy: empty_like where every row is provably written — dense,
-    # the unique-writer contracts (coverage holes blanked on device below),
-    # or a full-coverage declaration (no holes) — else zeros_like.
+
     direct_dkv = (
         disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
     direct_dq_init = (
         disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
-    # Per-range dq_accum slots are decoded affinely from the range index, so
-    # they need sorted, disjoint q; range_merge rewrites the q intervals.
+
     use_dense_dqacc_for_ranges = (
         direct_dq_init and not range_merge_active and head_dim % 32 == 0
     )
@@ -1098,9 +1088,6 @@ def _flex_flash_attn_bwd(
     dkv_alloc = torch.empty_like if dkv_empty else torch.zeros_like
     dq_alloc = torch.empty_like if dq_empty else torch.zeros_like
 
-    # Hole zeroing only runs for self-allocated gradient buffers: a caller
-    # passing its own dq/dk/dv keeps whatever its buffer held in rows no range
-    # covers, and is expected to pre-clear them if that matters.
     dk_self_alloc = dk is None
     dv_self_alloc = dv is None
     dq_self_alloc = dq is None
