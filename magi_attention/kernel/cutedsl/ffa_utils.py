@@ -138,6 +138,7 @@ def validate_range_feature_support(
     has_score_mod: bool,
     has_softcap: bool,
     deterministic: bool = False,
+    bwd_head_dim: int | None = None,
 ) -> None:
     """Reject q/k-range feature combinations the kernels do not implement.
 
@@ -146,7 +147,9 @@ def validate_range_feature_support(
     mask types per row), so they share its restrictions.
     ``range_merge_unique_writer`` is the direction's non-atomic flag (fwd O,
     bwd dK/dV): merging rewrites the outer intervals and only holds for
-    unique writers.
+    unique writers. ``deterministic`` and ``bwd_head_dim`` are backward-only:
+    the bwd hd192 mainloop is 2-CTA with Q and Qt on one pipeline stage,
+    which the per-pair merge walk does not implement.
     """
     per_range = isinstance(mask_types, torch.Tensor)
     if per_range and not has_ranges:
@@ -176,6 +179,8 @@ def validate_range_feature_support(
         raise NotImplementedError(f"{feature} cannot be combined with score_mod")
     if has_softcap:
         raise NotImplementedError(f"{feature} cannot be combined with softcap")
+    if range_merge and bwd_head_dim is not None and bwd_head_dim > 128:
+        raise NotImplementedError("bwd RangeMerge is not supported at head_dim 192")
 
 
 def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
