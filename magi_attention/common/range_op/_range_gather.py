@@ -39,15 +39,25 @@ def range_gather_per_range_kernel(
     output_stride,
     N_PER_ROW: tl.constexpr,
     ROWS_PER_BLOCK: tl.constexpr,
+    NUM_TILE_CTAS: tl.constexpr,
     UNROLL_FACTOR: tl.constexpr = 4,
 ):
-    range_idx = tl.program_id(0)
+    # Same tile loop as the original kernel (tl.range + base+offset pointers).
+    # Extra 1D CTAs only stripe tiles: CTA (range, t) owns tiles t, t+K, ...
+    # A 2D one-tile-per-CTA kernel faulted on Muon byte-wise fat ranges.
+    pid = tl.program_id(0)
+    range_idx = pid // NUM_TILE_CTAS
+    tile_cta = pid % NUM_TILE_CTAS
+
     cu_range_size = tl.load(cu_range_sizes_ptr + range_idx)
     range_start = tl.load(ranges_ptr + range_idx * 2)
     range_end = tl.load(ranges_ptr + range_idx * 2 + 1)
     range_size = range_end - range_start
 
     num_row_blocks = (range_size + ROWS_PER_BLOCK - 1) // ROWS_PER_BLOCK
+    if tile_cta >= num_row_blocks:
+        return
+
     row_offs = tl.arange(0, ROWS_PER_BLOCK)[:, None]
     col_offs = tl.arange(0, N_PER_ROW)[None, :]
     input_offs = (row_offs * input_stride) + col_offs
@@ -59,7 +69,9 @@ def range_gather_per_range_kernel(
     curr_inp_ptr = input_ptr + inp_idx
     curr_out_ptr = output_ptr + out_idx
 
-    for row_block_idx in tl.range(num_row_blocks, loop_unroll_factor=UNROLL_FACTOR):
+    num_iters = (num_row_blocks - tile_cta + NUM_TILE_CTAS - 1) // NUM_TILE_CTAS
+    for i in tl.range(num_iters, loop_unroll_factor=UNROLL_FACTOR):
+        row_block_idx = tile_cta + i * NUM_TILE_CTAS
         row_start = row_block_idx * ROWS_PER_BLOCK
         inp_ptr_this_block = curr_inp_ptr + row_start * input_stride
         out_ptr_this_block = curr_out_ptr + row_start * output_stride
@@ -246,8 +258,6 @@ def range_gather(
             # ---   calculate grid size   --- #
 
             M = ranges.shape[0]
-            grid = (M,)  # type: ignore[assignment]
-
             N_PER_ROW = triton.next_power_of_2(
                 max(input_stride, output_stride)
             )  # heuristic
@@ -255,8 +265,16 @@ def range_gather(
             num_warps = 16 if is_blackwell() else 8
             MAX_ROWS_PER_BLOCK = 8192 if is_blackwell() else 4096
             ROWS_PER_BLOCK = max(
-                1, min(triton.next_power_of_2(avg_range_size // 2), MAX_ROWS_PER_BLOCK)
+                1,
+                min(
+                    triton.next_power_of_2(max(avg_range_size // 2, 1)),
+                    MAX_ROWS_PER_BLOCK,
+                ),
             )  # heuristic
+            # Stripe tiles across extra 1D CTAs. K=1 is the original kernel.
+            n_tiles_avg = max(1, triton.cdiv(max(avg_range_size, 1), ROWS_PER_BLOCK))
+            NUM_TILE_CTAS = max(1, min(256, n_tiles_avg))
+            grid = (M * NUM_TILE_CTAS,)  # type: ignore[assignment]
 
             # ---   launch kernel   --- #
             range_gather_per_range_kernel[grid](
@@ -268,6 +286,7 @@ def range_gather(
                 output_stride,
                 N_PER_ROW,
                 ROWS_PER_BLOCK,
+                NUM_TILE_CTAS,
                 num_warps=num_warps,  # block_size=512 for Blackwell, 256 for other architectures
             )
         case _:
