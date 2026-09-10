@@ -62,14 +62,20 @@ class FFABwdPostProcess:
         use_2cta_instrs: bool = False,
         cluster_size: int = 1,  # for varlen offsets
         use_dense_dqacc_for_ranges: bool = False,
+        accumulate: bool = False,
     ):
         """
         :param head_dim: head dimension
         :type head_dim: int
         :param tile_m: m block size
         :type tile_m: int
+        :param accumulate: add the scaled accumulator onto the existing output
+            instead of overwriting it, matching C++ FFA where a caller-provided
+            gradient buffer is the reduction target itself
+        :type accumulate: bool
         """
         self.dtype = dtype
+        self.accumulate = accumulate
         self.tile_m = tile_m
         assert arch // 10 in [
             8,
@@ -93,8 +99,10 @@ class FFABwdPostProcess:
 
     def _check_tile(self) -> None:
         """Validate the kernel config (dtype, head dim, threads)."""
-        if self.dtype not in [cutlass.Float16, cutlass.BFloat16]:
-            raise ValueError(f"Only Float16/BFloat16 is supported, got {self.dtype}")
+        if self.dtype not in [cutlass.Float16, cutlass.BFloat16, cutlass.Float32]:
+            raise ValueError(
+                f"Only Float16/BFloat16/Float32 is supported, got {self.dtype}"
+            )
         if self.head_dim % 8 != 0:
             raise ValueError(f"head_dim must be a multiple of 8, got {self.head_dim}")
         if self.num_threads % 32 != 0:
@@ -247,9 +255,10 @@ class FFABwdPostProcess:
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
-        # Get the data type and check if it is fp16 or bf16
-        if const_expr(mdQ.element_type not in [cutlass.Float16, cutlass.BFloat16]):
-            raise TypeError("Only Float16 or BFloat16 is supported")
+        if const_expr(
+            mdQ.element_type not in [cutlass.Float16, cutlass.BFloat16, cutlass.Float32]
+        ):
+            raise TypeError("Only Float16, BFloat16 or Float32 is supported")
         if const_expr(mdQaccum is not None):
             if const_expr(mdQaccum.element_type not in [cutlass.Float32]):
                 raise TypeError("dQaccum tensor must be Float32")
@@ -469,7 +478,6 @@ class FFABwdPostProcess:
                 tdQrdQ_r2s = cute.make_rmem_tensor(tdQsdQ_r2s.shape, self.dtype)
 
                 num_stages = cute.size(tdQrdQ_fp32, mode=[1])
-                stage_stride = self.dQ_reduce_ncol
                 row_groups = 2
                 assert num_stages % row_groups == 0
                 assert num_reduce_threads % row_groups == 0
@@ -535,17 +543,16 @@ class FFABwdPostProcess:
                             barrier_id=7, number_of_threads=num_reduce_threads
                         )
 
-                        # R -> S
-                        stage_lo = stage_idx % stage_stride
-                        stage_hi = stage_idx // stage_stride
+                        # R -> S. Mode 1 of the r2s fragment enumerates the
+                        # reduce stages; its nesting depends on the output
+                        # dtype's store op, so index it with the flat stage id.
+                        tdQrdQ_r2s_stage = tdQrdQ_r2s[((None, 0), stage_idx, 0, 0)]
                         tdQrdQ_r2s_cpy = cute.make_tensor(
                             cute.recast_ptr(tdQrdQ_r2s_cpy.iterator),
-                            tdQrdQ_r2s[((None, 0), (stage_lo, stage_hi), 0, 0)].shape,
+                            tdQrdQ_r2s_stage.shape,
                         )
                         dQ_vec = tdQrdQ_r2s_cpy.load() * scale
-                        tdQrdQ_r2s[((None, 0), (stage_lo, stage_hi), 0, 0)].store(
-                            dQ_vec.to(self.dtype)
-                        )
+                        tdQrdQ_r2s_stage.store(dQ_vec.to(self.dtype))
 
                 # R -> S
                 cute.copy(
@@ -656,6 +663,23 @@ class FFABwdPostProcess:
             tdQpdQ = cutedsl_utils.predicate_k(tdQcdQ, limit=head_dim)
             for rest_m in cutlass.range(cute.size(tdQrdQ.shape[1]), unroll_full=True):
                 if tdQcdQ[0, rest_m, 0][0] < seqlen_q - m_block * self.tile_m:
+                    if const_expr(self.accumulate):
+                        # Sum in fp32 so a bf16/fp16 output does not round twice.
+                        tdQrdQ_old = cute.make_fragment_like(
+                            tdQrdQ[None, rest_m, None], self.dtype
+                        )
+                        cute.copy(
+                            gmem_tiled_copy_dQ,
+                            tdQgdQ[None, rest_m, None],
+                            tdQrdQ_old,
+                            pred=tdQpdQ[None, rest_m, None],
+                        )
+                        tdQrdQ[None, rest_m, None].store(
+                            (
+                                tdQrdQ[None, rest_m, None].load().to(Float32)
+                                + tdQrdQ_old.load().to(Float32)
+                            ).to(self.dtype)
+                        )
                     cute.copy(
                         gmem_tiled_copy_dQ,
                         tdQrdQ[None, rest_m, None],
@@ -678,6 +702,7 @@ def _compile_bwd_postprocess(
     cluster_size,
     arch,
     use_dense_dqacc_for_ranges,
+    accumulate,
 ):
     """Compile bwd postprocess kernel using cute fake tensors."""
     is_varlen_q = has_cuseqlens_q or has_ranges
@@ -725,6 +750,7 @@ def _compile_bwd_postprocess(
         use_2cta_instrs=use_2cta_instrs,
         cluster_size=cluster_size,
         use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
+        accumulate=accumulate,
     )
     return cute.compile(
         fa_bwd_post,
@@ -756,8 +782,12 @@ def bwd_postprocess(
     cluster_size=1,
     ranges=None,
     use_dense_dqacc_for_ranges=False,
+    accumulate=False,
 ):
-    """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
+    """Backward postprocess: scale the fp32 accumulator and store it in the output dtype.
+
+    With ``accumulate`` the scaled accumulator is added onto ``output`` in place.
+    """
     compile_key = (
         dtype,
         hdim,
@@ -772,6 +802,7 @@ def bwd_postprocess(
         cluster_size,
         arch,
         use_dense_dqacc_for_ranges,
+        accumulate,
     )
     if compile_key not in bwd_postprocess.compile_cache:
         bwd_postprocess.compile_cache[compile_key] = _compile_bwd_postprocess(
@@ -793,9 +824,10 @@ bwd_postprocess.compile_cache = get_jit_cache("bwd_post")
 class FFABwdPostProcessRowMajor:
     """Cast a row-major fp32 accumulator to output dtype with 2D thread mapping."""
 
-    def __init__(self, out_dtype, head_dim: int):
+    def __init__(self, out_dtype, head_dim: int, accumulate: bool = False):
         self.out_dtype = out_dtype
         self.head_dim = head_dim
+        self.accumulate = accumulate
         self.accum_stride = (head_dim + 15) // 16 * 16
         self.vec_elems = 128 // cutlass.Float32.width  # 16B fp32 vectors
         assert self.head_dim % self.vec_elems == 0
@@ -862,21 +894,26 @@ class FFABwdPostProcessRowMajor:
                     cute.autovec_copy(gAcc, rAcc)
 
                     rOut = cute.make_rmem_tensor((self.vec_elems,), self.out_dtype)
-                    rOut.store((rAcc.load() * scale).to(self.out_dtype))
                     gOut = cute.local_tile(gOut_row, (self.vec_elems,), (vector,))
+                    acc_vec = rAcc.load() * scale
+                    if const_expr(self.accumulate):
+                        # Sum in fp32 so a bf16/fp16 output does not round twice.
+                        cute.autovec_copy(gOut, rOut)
+                        acc_vec = acc_vec + rOut.load().to(cutlass.Float32)
+                    rOut.store(acc_vec.to(self.out_dtype))
                     cute.autovec_copy(rOut, gOut)
 
 
-def _compile_bwd_postprocess_rowmajor(out_torch_dtype, head_dim: int):
+def _compile_bwd_postprocess_rowmajor(out_torch_dtype, head_dim: int, accumulate: bool):
     from magi_attention.utils.dtype import to_cute_dtype
 
-    cache_key = (out_torch_dtype, head_dim)
+    cache_key = (out_torch_dtype, head_dim, accumulate)
     # Module-level cache instance: the factory returns a fresh object per call,
     # so a local one only survives through the persistent disk layer.
     cache = bwd_postprocess_rowmajor.compile_cache
     if cache_key not in cache:
         out_dtype = to_cute_dtype(out_torch_dtype)
-        obj = FFABwdPostProcessRowMajor(out_dtype, head_dim)
+        obj = FFABwdPostProcessRowMajor(out_dtype, head_dim, accumulate)
         sym = cute.sym_int
         div = 128 // cutlass.Float32.width
         mAccum = fake_tensor(cutlass.Float32, (sym(), sym()), divisibility=div)
@@ -901,9 +938,15 @@ def bwd_postprocess_rowmajor(
     ranges: torch.Tensor,
     max_seqlen: int,
     scale: float,
+    accumulate: bool = False,
 ) -> None:
-    """Row-major accumulator -> output dtype (non-deterministic range path)."""
-    compiled = _compile_bwd_postprocess_rowmajor(output.dtype, output.shape[-1])
+    """Row-major accumulator -> output dtype (non-deterministic range path).
+
+    With ``accumulate`` the scaled accumulator is added onto ``output`` in place.
+    """
+    compiled = _compile_bwd_postprocess_rowmajor(
+        output.dtype, output.shape[-1], accumulate
+    )
     compiled(accum, output, ranges, max_seqlen, scale)
 
 
