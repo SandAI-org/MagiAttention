@@ -575,6 +575,40 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+OUTPUT_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
+
+
+def resolve_output_dtype(
+    name: str,
+    requested: torch.dtype | None,
+    provided: torch.Tensor | None,
+    default: torch.dtype,
+) -> torch.dtype:
+    """Pick the GMEM dtype of one kernel output (fwd O, bwd dQ/dK/dV).
+
+    Priority: explicit ``requested`` dtype, then the dtype of a caller-provided
+    ``provided`` buffer, then ``default``. A provided buffer whose dtype differs
+    from an explicit request is rejected here rather than silently cast, since
+    the kernel writes the buffer in place.
+    """
+    if requested is not None and requested not in OUTPUT_DTYPES:
+        raise ValueError(f"{name}_type must be one of {OUTPUT_DTYPES}, got {requested}")
+    if requested is not None:
+        if provided is not None and provided.dtype != requested:
+            raise ValueError(
+                f"{name} buffer dtype {provided.dtype} != {name}_type {requested}"
+            )
+        return requested
+    if provided is not None:
+        if provided.dtype not in OUTPUT_DTYPES:
+            raise ValueError(
+                f"{name} buffer dtype must be one of {OUTPUT_DTYPES}, "
+                f"got {provided.dtype}"
+            )
+        return provided.dtype
+    return default
+
+
 def validate_tensor(t, name, expected_shape, expected_dtype, expected_device):
     assert (
         t.shape == expected_shape

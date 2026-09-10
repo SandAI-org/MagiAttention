@@ -100,7 +100,6 @@ def cutedsl_fwd(
         softcap=softcap if softcap and softcap > 0 else None,
         # The dist overlap path rescales partial (out, lse) pairs in fp32
         # (correct_attn_out_lse); a bf16/fp16 partial underflows that merge.
-        # The atomic path defaults O to the input dtype, so ask for fp32 here.
         disable_fwd_atomic_reduction=False,
         out_dtype=torch.float32,
         # range_merge: the dist layer's pre-merged relation IR is already the
@@ -158,7 +157,10 @@ def cutedsl_bwd(
         disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
         range_merge=False,
         mask_types=ffa_args["attn_type_map"],
+        # Partial dq/dk/dv feed the fp32 dist reduce; requesting fp32 here keeps
+        # the direct-store dK/dV path from rounding through the input dtype.
+        dq_type=torch.float32,
+        dk_type=torch.float32,
+        dv_type=torch.float32,
     )
-    # The dist bwd hp-reduce path (``bwd_hp_reduce`` flag) expects partial
-    # dq/dk/dv in fp32; the kernel returns input dtype, so cast up here.
-    return dq.float(), dk.float(), dv.float()
+    return dq, dk, dv
