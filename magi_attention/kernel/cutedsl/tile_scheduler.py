@@ -110,7 +110,7 @@ class WorkTileInfo(cutlass.utils.WorkTileInfo):
     """Altered WorkTileInfo which includes four axes: (block, head, batch, split)"""
 
     @override
-    def __new_from_mlir_values__(self, values: list[ir.Value]) -> "WorkTileInfo":
+    def __new_from_mlir_values__(self, values: list[ir.Value]) -> "WorkTileInfo":  # type: ignore[misc]
         assert len(values) == 5
         new_tile_idx = cutlass.new_from_mlir_values(self._tile_idx, values[:-1])
         new_is_valid_tile = cutlass.new_from_mlir_values(
