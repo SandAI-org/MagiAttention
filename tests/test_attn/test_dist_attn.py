@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-import unittest
 from functools import partial
 
 import torch
@@ -139,10 +138,6 @@ class TestDistAttn(DistTestBase):
     def device(self) -> int:
         return torch.cuda.current_device()
 
-    @unittest.skipIf(
-        torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
-        "This test targets the C++ FFA, which supports only sm90.",
-    )
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize("num_heads", [(8, 8), (8, 4)])
@@ -167,7 +162,9 @@ class TestDistAttn(DistTestBase):
         use_native_grpcoll: bool,
         dtype: torch.dtype,
     ):
-        # FFA is SM90 only; CUTEDSL range kernels are SM100/SM110 only.
+        # FFA is SM90 only; the CUTEDSL range kernels with per-range mask types
+        # are SM100/SM110 only. Return rather than skipTest: a SkipTest inside
+        # one combination aborts every remaining combination of this method.
         major, minor = torch.cuda.get_device_capability()
         if backend == MagiAttentionKernelBackend.FFA and (major, minor) != (9, 0):
             return
@@ -178,9 +175,6 @@ class TestDistAttn(DistTestBase):
         seqlen_sink = flag_comb["seqlen_sink"]
         return_max_logits = flag_comb["return_max_logits"]
         use_native_grpcoll &= self.native_grpcoll_registered
-        # TODO: support return max logits for cutedsl backend
-        if backend == MagiAttentionKernelBackend.CUTEDSL:
-            return_max_logits = False
 
         is_sdpa_backend = backend == MagiAttentionKernelBackend.SDPA
 

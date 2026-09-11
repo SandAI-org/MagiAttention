@@ -196,6 +196,11 @@ class Softmax(ParamsBase):
 class SoftmaxSm100(Softmax):
     rescale_threshold: cutlass.Constexpr[float] = 0.0
     max_offset: cutlass.Constexpr[int] = 0
+    # The rescale threshold lets row_max lag behind the true row maximum
+    # (row_sum absorbs the difference, so O and LSE stay exact). Callers that
+    # need the exact maximum (max_logits) get it from this separate register.
+    row_max_exact: cute.Tensor | None = None
+    track_row_max_exact: cutlass.Constexpr[bool] = False
 
     @staticmethod
     def create(  # type: ignore[override]
@@ -203,11 +208,15 @@ class SoftmaxSm100(Softmax):
         rescale_threshold: cutlass.Constexpr[float] = 0.0,
         softmax_scale: Float32 | None = None,
         max_offset: cutlass.Constexpr[int] = 0,
+        track_row_max_exact: cutlass.Constexpr[bool] = False,
     ):
         num_rows = 1
         arch = 100
         row_max = cute.make_rmem_tensor(num_rows, Float32)
         row_sum = cute.make_rmem_tensor(num_rows, Float32)
+        # Always allocated (one register) so the dataclass keeps a fixed shape
+        # across dynamic control flow; the flag gates every use.
+        row_max_exact = cute.make_rmem_tensor(num_rows, Float32)
         return SoftmaxSm100(
             scale_log2,
             num_rows,
@@ -217,7 +226,24 @@ class SoftmaxSm100(Softmax):
             softmax_scale,
             rescale_threshold=rescale_threshold,
             max_offset=max_offset,
+            row_max_exact=row_max_exact,
+            track_row_max_exact=track_row_max_exact,
         )
+
+    def reset(self) -> None:
+        super().reset()
+        if cutlass.const_expr(self.track_row_max_exact):
+            assert self.row_max_exact is not None
+            self.row_max_exact.fill(-Float32.inf)
+
+    @cute.jit
+    def _update_row_max_exact(self, row_max_new: Float32) -> None:
+        if cutlass.const_expr(self.track_row_max_exact):
+            # Branch-free: a store under a dynamic `if` makes the DSL re-yield
+            # the whole dataclass and breaks dominance at the loop epilogue.
+            assert self.row_max_exact is not None
+            cur = self.row_max_exact[0]
+            self.row_max_exact[0] = row_max_new if row_max_new > cur else cur
 
     @cute.jit
     def compute_row_max_local(
@@ -239,11 +265,13 @@ class SoftmaxSm100(Softmax):
         if cutlass.const_expr(is_first):
             row_max_safe = row_max_new if row_max_new != -cutlass.Float32.inf else 0.0
             acc_scale = 0.0
+            self._update_row_max_exact(row_max_new)
         else:
             row_max_old = self.row_max[0]
             row_max_safe = row_max_new if row_max_new != -cutlass.Float32.inf else 0.0
             acc_scale_ = (row_max_old - row_max_safe) * self.scale_log2
             acc_scale = cute.math.exp2(acc_scale_)
+            self._update_row_max_exact(row_max_new)
             if cutlass.const_expr(self.rescale_threshold > 0.0):
                 if acc_scale_ >= -self.rescale_threshold:
                     row_max_new = row_max_old
@@ -260,12 +288,14 @@ class SoftmaxSm100(Softmax):
             row_max_new = self._compute_row_max(acc_S_row)
             row_max_safe = row_max_new if row_max_new != -cutlass.Float32.inf else 0.0
             acc_scale = 0.0
+            self._update_row_max_exact(row_max_new)
         else:
             row_max_old = self.row_max[0]
             row_max_new = self._compute_row_max(acc_S_row, init_val=row_max_old)
             row_max_safe = row_max_new if row_max_new != -cutlass.Float32.inf else 0.0
             acc_scale_ = (row_max_old - row_max_safe) * self.scale_log2
             acc_scale = cute.math.exp2(acc_scale_, fastmath=True)
+            self._update_row_max_exact(row_max_new)
             if cutlass.const_expr(self.rescale_threshold > 0.0):
                 if acc_scale_ >= -self.rescale_threshold:
                     row_max_new = row_max_old
