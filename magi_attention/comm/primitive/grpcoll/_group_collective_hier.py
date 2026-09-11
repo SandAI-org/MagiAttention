@@ -726,8 +726,7 @@ def hier_group_cast_impl_with_a2av(
 
     # ----    apply a2a for pre-intra     ---- #
 
-    # work_pre_intra = \
-    all2all_v(
+    work_pre_intra = all2all_v(
         input=a2a_input_pre_intra,
         output=a2a_output_pre_intra,
         input_split_size_list=meta_solver.a2a_input_split_size_pre_intra,
@@ -784,13 +783,11 @@ def hier_group_cast_impl_with_a2av(
         ],
     )
 
-    # NOTE: no need to wait for work_pre_intra explicitly here
-    # since side_stream will wait for work_post_intra,
-    # which is issued after work_pre_intra's completion
-    # thus we only need to wait for side_stream
+    # side_stream waits for pre and post to finish. Still must wait
+    # work_pre_intra: without Work.wait() PGNCCL will not unstash, so the
+    # comm buffer is not released in time (watchdog only defers it).
     work_with_post_process_fn = WorkWithPostProcessFn(
-        # work=GeneralWork([work_pre_intra, side_stream]),
-        work=GeneralWork(side_stream),
+        work=GeneralWork([work_pre_intra, side_stream]),
         post_process_fn=post_process_fn_hier,
         async_op=async_op,
     )
