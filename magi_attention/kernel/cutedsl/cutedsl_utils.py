@@ -530,6 +530,34 @@ def atomic_add_fp32(
 
 
 @dsl_user_op
+def _atomic_max_fp32_bits(
+    a: Float32, gmem_ptr: cute.Pointer, signed: bool, *, loc=None, ip=None
+) -> None:
+    bits = llvm.bitcast(T.i32(), Float32(a).ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    nvvm.atomicrmw(
+        res=T.i32(),
+        op=nvvm.AtomicOpKind.MAX if signed else nvvm.AtomicOpKind.UMIN,
+        ptr=gmem_ptr.llvm_ptr,
+        a=bits,
+    )
+
+
+@cute.jit
+def atomic_max_fp32(a: Float32, gmem_ptr: cute.Pointer) -> None:
+    """Atomic ``*gmem_ptr = max(*gmem_ptr, a)`` on an fp32 location.
+
+    PTX has no float atomic max. On the IEEE bit pattern a non-negative float
+    orders like a signed int and a negative one like a reversed unsigned int,
+    so a signed max / unsigned min pair covers both signs as long as the
+    location and ``a`` are not NaN (``-inf`` is fine as the initial value).
+    """
+    if a >= 0.0:
+        _atomic_max_fp32_bits(a, gmem_ptr, True)
+    else:
+        _atomic_max_fp32_bits(a, gmem_ptr, False)
+
+
+@dsl_user_op
 def elem_pointer(
     x: cute.Tensor, coord: cute.Coord, *, loc=None, ip=None
 ) -> cute.Pointer:

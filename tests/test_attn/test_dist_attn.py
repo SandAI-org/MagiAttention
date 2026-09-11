@@ -164,9 +164,6 @@ class TestDistAttn(DistTestBase):
         seqlen_sink = flag_comb["seqlen_sink"]
         return_max_logits = flag_comb["return_max_logits"]
         use_native_grpcoll &= self.native_grpcoll_registered
-        # TODO: support return max logits for cutedsl backend
-        if backend == MagiAttentionKernelBackend.CUTEDSL:
-            return_max_logits = False
 
         is_sdpa_backend = backend == MagiAttentionKernelBackend.SDPA
 
