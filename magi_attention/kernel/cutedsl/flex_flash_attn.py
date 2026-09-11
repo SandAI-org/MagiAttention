@@ -149,6 +149,7 @@ def _flex_flash_attn_fwd(
     clc_scheduler: bool = False,
     out_dtype: torch.dtype | None = None,
     sm_margin: int = 0,
+    max_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -174,6 +175,11 @@ def _flex_flash_attn_fwd(
             Currently supported for q/k ranges on SM100/SM110; the forward
             with head_dim 192 ignores it.
             Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
+        max_logits: optional fp32 ``[num_head]`` buffer that the per-q-head
+            maximum softmax logit (``softmax_scale * q.k``, after softcap,
+            sinks excluded) over every attended (q, k) pair is merged into with
+            an atomic max; the caller initializes it to ``-inf`` or a previous
+            result. SM100/SM110 only.
 
     Returns:
         A tuple of (output, lse) where:
@@ -190,6 +196,8 @@ def _flex_flash_attn_fwd(
     assert (
         sink_layout == "sh"
     ), f"only sink_layout='sh' is supported, got {sink_layout!r}"
+    if max_logits is not None and major_arch not in (10, 11):
+        raise NotImplementedError("max_logits requires SM100/SM110")
 
     # Unpack the torch FlexAttention-style / block-sparse args (fwd uses these).
     flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
@@ -340,6 +348,9 @@ def _flex_flash_attn_fwd(
         # The compiled kernel assumes a static unit stride on the last mode
         # (head on ranges, seqlen on dense); the leading strides stay dynamic.
         assert lse.stride(-1) == 1, "lse must be contiguous along its last dim"
+
+    if max_logits is not None:
+        validate_tensor(max_logits, "max_logits", (num_head,), torch.float32, device)
 
     if seqlen_k == 0 or total_q == 0:
         # Every row attends to no key: O is zero and the LSE holds only the sinks.
@@ -544,6 +555,7 @@ def _flex_flash_attn_fwd(
         use_clc_scheduler,
         persistent_launch,
         range_merge_active,
+        max_logits is not None,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
 
@@ -723,6 +735,11 @@ def _flex_flash_attn_fwd(
                 if tile_counter is not None
                 else None
             )
+            compile_args.append(
+                to_cute_tensor(max_logits, assumed_align=4, leading_dim=0)
+                if max_logits is not None
+                else None
+            )
         compile_args.extend(
             [
                 sparse_tensors,
@@ -761,6 +778,7 @@ def _flex_flash_attn_fwd(
         call_args.append(cu_batches)
         call_args.append(sm_margin if ranges_persistent else None)
         call_args.append(tile_counter)
+        call_args.append(max_logits)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
@@ -1879,9 +1897,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         range_merge: bool | RangeMergePlan = False,
         out_dtype: torch.dtype | None = None,
         sm_margin: int = 0,
+        return_max_logits: bool = False,
     ):
         mask_types = normalize_mask_types(mask_types)
         flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
+        max_logits = (
+            torch.full(
+                (q.shape[-2],), float("-inf"), dtype=torch.float32, device=q.device
+            )
+            if return_max_logits
+            else None
+        )
 
         out, lse = _flex_flash_attn_fwd(
             q=q,
@@ -1902,6 +1928,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             range_merge=range_merge,
             out_dtype=out_dtype,
             sm_margin=sm_margin,
+            max_logits=max_logits,
         )
         # The atomic path defaults O to fp32; hand the caller the input dtype
         # unless they asked for a specific one.
@@ -1942,7 +1969,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         )
         ctx.set_materialize_grads(False)
 
-        return out, lse
+        return out, lse, max_logits
 
     @staticmethod
     def backward(ctx, dout, *args):  # pragma: no cover
@@ -2002,7 +2029,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if dsink is not None:
             dsink = dsink.to(sink.dtype)
         # NOTES: `sink` is the 11th positional input of `forward`
-        return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 9)
+        return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 10)
 
 
 def flex_flash_attn_func(
@@ -2027,6 +2054,7 @@ def flex_flash_attn_func(
     range_merge: bool | RangeMergePlan = False,
     out_dtype: torch.dtype | None = None,
     sm_margin: int = 0,
+    return_max_logits: bool = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """Flex-flash-attention interface (dense / ranges).
 
@@ -2090,13 +2118,18 @@ def flex_flash_attn_func(
         head_dim 192 ignores it.
         Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
 
+    return_max_logits: fill ``meta.max_logits`` with the fp32 ``[nheads]``
+        per-q-head maximum softmax logit (after scale and softcap, sinks
+        excluded); ``-inf`` for a head without any attended pair. SM100/SM110
+        only.
+
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
         ``mask_mod`` / ``aux_tensors``) and block-sparse
         (``block_sparse_tensors`` / ``block_sparse_tensors_bwd``)
         capabilities. Leave as ``None`` for the plain dense / ranges path.
     """
-    out, lse = FlexFlashAttnFunc.apply(
+    out, lse, max_logits = FlexFlashAttnFunc.apply(
         q,
         k,
         v,
@@ -2117,6 +2150,7 @@ def flex_flash_attn_func(
         range_merge,
         out_dtype,
         sm_margin,
+        return_max_logits,
     )
 
-    return out, AttnForwardMeta(lse=lse, max_logits=None)
+    return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
