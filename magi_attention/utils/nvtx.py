@@ -38,8 +38,6 @@ from typing import (
 import torch
 import torch.distributed as dist
 
-from .general import wrap_to_list
-
 logger = logging.getLogger(__name__)
 
 __version__ = "1.1.0"
@@ -567,6 +565,10 @@ def switch_profile(
         capture has started before training resumes and that all reports have
         been generated before training continues after ``end``.
     """
+    # Import locally because general.py uses @nvtx.instrument_nvtx. Importing
+    # general.py while this module is still being initialized creates a cycle.
+    from .general import wrap_to_list
+
     # --- Checks and early returns / raises ---
 
     if not enable:
