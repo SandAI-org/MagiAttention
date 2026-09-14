@@ -89,7 +89,8 @@ Set this env variable to choose the attn kernel backend. Valid values are:
 - `ffa`: flex-flash-attention (default, high-performance persistent kernel).
 - `sdpa`: offline SDPA implementation (for testing / high precision like `fp32`/`fp64`).
 - `sdpa_ol`: online (block-wise) SDPA implementation (for testing, lower memory than `sdpa`).
-- `fa4`: Flash-Attention 4 monkey-patch (workaround for Blackwell GPUs).
+- `fa4`: Magi-specific FFA_FA4 kernels (`flash_attn_cute`).
+- `cudnn`: NVIDIA Flex Attention (`cudnn.flex_attention`).
 
 ```{note}
 This supersedes the legacy `MAGI_ATTENTION_SDPA_BACKEND=1` and `MAGI_ATTENTION_FA4_BACKEND=1`

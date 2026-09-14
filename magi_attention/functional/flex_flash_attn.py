@@ -22,10 +22,11 @@ from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout, MagiAttentionKernelBackend
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.env.general import is_profile_mode_enable, is_sanity_check_enable
-from magi_attention.meta.collection.calc_meta import FA4AttnArg
+from magi_attention.meta.collection.calc_meta import CudnnAttnArg, FA4AttnArg
 from magi_attention.utils import nvtx
 
 from ._flex_flash_attn_jit import _snapshot_env, get_ffa_jit_mod
+from .cudnn_flex_attn import cudnn_bwd, cudnn_fwd, validate_cudnn_inputs
 from .fa4 import fa4_bwd, fa4_fwd, is_fa4_installed
 
 is_magi_attn_ext_installed = False
@@ -837,8 +838,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 "When disable_bwd_dkv_atomic_reduction is true, bwd_inner_loop_k must not be True."
             )
 
-        # ---- FA4 backend fast path ---- #
-        if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
+        # ---- External attention backend fast path ---- #
+        backend = env.general.kernel_backend()
+        if backend in (
+            MagiAttentionKernelBackend.FA4,
+            MagiAttentionKernelBackend.CUDNN,
+        ):
+            use_cudnn = backend == MagiAttentionKernelBackend.CUDNN
             q_ranges_list = q_ranges.cpu().tolist()
             k_ranges_list = k_ranges.cpu().tolist()
             attn_type_map_list = (
@@ -847,22 +853,31 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 else attn_type_map.cpu().tolist()
             )
 
-            fa4_attn_arg = FA4AttnArg(
+            arg_type = CudnnAttnArg if use_cudnn else FA4AttnArg
+            head_args = (
+                {}
+                if use_cudnn
+                else dict(
+                    headdim=q.shape[-1],
+                    headdim_v=v.shape[-1],
+                    seqlen_q=q.shape[0],
+                    seqlen_k=k.shape[0],
+                )
+            )
+            backend_attn_arg = arg_type(
                 q_ranges=AttnRanges.from_ranges(q_ranges_list),
                 k_ranges=AttnRanges.from_ranges(k_ranges_list),
                 attn_type_map=attn_type_map_list,
-                seqlen_q=q.shape[0],
-                seqlen_k=k.shape[0],
-                headdim=q.shape[-1],
-                headdim_v=v.shape[-1],
+                **head_args,
             )
 
-            out, lse = fa4_fwd(
+            fwd = cudnn_fwd if use_cudnn else fa4_fwd
+            out, lse = fwd(
                 q=q,
                 k=k,
                 v=v,
                 sink=None,
-                attn_arg=fa4_attn_arg,
+                attn_arg=backend_attn_arg,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
             )
@@ -871,13 +886,15 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ctx.save_for_backward(q, k, v, out, lse, q_ranges, k_ranges, attn_type_map)
             ctx.softmax_scale = softmax_scale
             ctx.softcap = softcap
-            ctx.use_fa4_backend = True
-            ctx.fa4_attn_arg = fa4_attn_arg
+            ctx.use_external_backend = True
+            ctx.use_cudnn_backend = use_cudnn
+            ctx.deterministic = deterministic
+            ctx.backend_attn_arg = backend_attn_arg
 
             return out, lse, None
 
         # ---- FFA (native) backend ---- #
-        ctx.use_fa4_backend = False
+        ctx.use_external_backend = False
 
         if range_merge:
             with maybe_profile_ffa_ctx("fwd_range_merge"):
@@ -994,10 +1011,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout: torch.Tensor, *args):  # pragma: no cover
-        # ---- FA4 backend backward ---- #
-        if ctx.use_fa4_backend:
+        # ---- External attention backend backward ---- #
+        if ctx.use_external_backend:
             q, k, v, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
-            dq, dk, dv, _ = fa4_bwd(
+            bwd = cudnn_bwd if ctx.use_cudnn_backend else fa4_bwd
+            dq, dk, dv, _ = bwd(
                 do=dout,
                 q=q,
                 k=k,
@@ -1005,9 +1023,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 sink=None,
                 o=out,
                 lse=lse,
-                attn_arg=ctx.fa4_attn_arg,
+                attn_arg=ctx.backend_attn_arg,
                 softmax_scale=ctx.softmax_scale,
                 softcap=ctx.softcap,
+                deterministic=ctx.deterministic,
             )
             dq = dq.to(q.dtype)
             dk = dk.to(k.dtype)
@@ -1673,20 +1692,34 @@ def flex_flash_attn_func(
         bwd_inner_loop_k is True and deterministic
     ), "Deterministic mode is not supported when bwd_inner_loop_k is True."
 
-    if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
-        assert is_fa4_installed, (
+    backend = env.general.kernel_backend()
+    if backend in (MagiAttentionKernelBackend.FA4, MagiAttentionKernelBackend.CUDNN):
+        if backend == MagiAttentionKernelBackend.CUDNN:
+            validate_cudnn_inputs(
+                q,
+                k,
+                v,
+                sink=sink,
+                softcap=softcap,
+                return_max_logits=return_max_logits,
+                deterministic=deterministic,
+            )
+        assert backend == MagiAttentionKernelBackend.CUDNN or is_fa4_installed, (
             "FA4 backend is enabled (MAGI_ATTENTION_FA4_BACKEND=1), "
             "but FlashAttn4 is not installed."
         )
-        _FA4_UNSUPPORTED = {
+        _BACKEND_UNSUPPORTED = {
             "sink": sink is not None,
-            "deterministic": deterministic,
+            "deterministic": deterministic
+            and backend == MagiAttentionKernelBackend.FA4,
             "sm_margin": sm_margin != 0,
             "disable_fwd_atomic_reduction": disable_fwd_atomic_reduction,
             "disable_bwd_dkv_atomic_reduction": disable_bwd_dkv_atomic_reduction,
+            "disable_bwd_dq_atomic_reduction": disable_bwd_dq_atomic_reduction
+            and backend == MagiAttentionKernelBackend.CUDNN,
             "ref_block_size": ref_block_size is not None,
             "max_seqlen_q": max_outer_range_width is not None,
-            "range_merge": range_merge,
+            "range_merge": range_merge and backend == MagiAttentionKernelBackend.FA4,
             "swap_ab": swap_ab,
             "pack_gqa": pack_gqa,
             "cat_gqa": cat_gqa,
@@ -1695,11 +1728,10 @@ def flex_flash_attn_func(
             "bwd_inner_loop_k": bwd_inner_loop_k,
             "return_max_logits": return_max_logits,
         }
-        bad = [name for name, active in _FA4_UNSUPPORTED.items() if active]
+        bad = [name for name, active in _BACKEND_UNSUPPORTED.items() if active]
         assert not bad, (
-            f"FA4 backend does not support the following features: {bad}. "
-            f"Please disable them or switch off the FA4 backend "
-            f"(unset MAGI_ATTENTION_FA4_BACKEND)."
+            f"{backend.value} backend does not support the following features: {bad}. "
+            "Please disable these features or select a compatible kernel backend."
         )
 
     # Per-head topk width (dim-2 of the 3D tensor), NOT nhk * topk_per_head.
