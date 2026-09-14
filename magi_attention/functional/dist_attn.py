@@ -37,6 +37,7 @@ from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import is_same_process_group, nvtx
 from magi_attention.utils.dtype import max_fp_dtype
 
+from .cudnn_flex_attn import cudnn_bwd, cudnn_fwd, validate_cudnn_inputs
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
@@ -83,6 +84,7 @@ WorkWithBuffer: TypeAlias = (
 _BACKEND_SUPPORTED_PRECISIONS: dict[
     MagiAttentionKernelBackend, set[MagiAttentionPrecision]
 ] = {
+    MagiAttentionKernelBackend.CUDNN: {MagiAttentionPrecision.BF16},
     MagiAttentionKernelBackend.FFA: {
         MagiAttentionPrecision.BF16,
         MagiAttentionPrecision.FP16,
@@ -166,6 +168,7 @@ class DistAttnRuntime:
         cp_group_gc: dist.ProcessGroup,
         cp_group_gr: dist.ProcessGroup,
     ):
+        self._kernel_backend = env.general.kernel_backend()
         self.comm_meta = comm_meta
         self.calc_meta = calc_meta
         self.cp_group_gc = cp_group_gc
@@ -1064,7 +1067,7 @@ class DistAttnRuntime:
 
     @property
     def kernel_backend(self) -> MagiAttentionKernelBackend:
-        return env.general.kernel_backend()
+        return self._kernel_backend
 
     @property
     def use_native_grpcoll(self) -> bool:
@@ -1242,9 +1245,10 @@ class DistAttnRuntime:
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
         _backend = self.kernel_backend
         if return_max_logits:
-            assert (
-                _backend != MagiAttentionKernelBackend.FA4
-            ), "FA4 backend does not support return max logits"
+            assert _backend not in (
+                MagiAttentionKernelBackend.FA4,
+                MagiAttentionKernelBackend.CUDNN,
+            ), f"{_backend.value} backend does not support return max logits"
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
             f"{attn_arg.total_area=} | "
@@ -1283,8 +1287,16 @@ class DistAttnRuntime:
                     assert meta.max_logits is not None
                     torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
                     meta.max_logits = max_logits_acc
-            elif _backend == MagiAttentionKernelBackend.FA4:
-                partial_out, partial_lse = fa4_fwd(
+            elif _backend in (
+                MagiAttentionKernelBackend.FA4,
+                MagiAttentionKernelBackend.CUDNN,
+            ):
+                fwd = (
+                    cudnn_fwd
+                    if _backend == MagiAttentionKernelBackend.CUDNN
+                    else fa4_fwd
+                )
+                partial_out, partial_lse = fwd(
                     q=q,
                     k=k,
                     v=v,
@@ -1391,8 +1403,16 @@ class DistAttnRuntime:
                 partial_dkv = self._maybe_concat(
                     partial_dk, partial_dv, need_concat=self.concat_dkv
                 )
-            elif _backend == MagiAttentionKernelBackend.FA4:
-                partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
+            elif _backend in (
+                MagiAttentionKernelBackend.FA4,
+                MagiAttentionKernelBackend.CUDNN,
+            ):
+                bwd = (
+                    cudnn_bwd
+                    if _backend == MagiAttentionKernelBackend.CUDNN
+                    else fa4_bwd
+                )
+                partial_dq, partial_dk, partial_dv, partial_dsink = bwd(
                     do=do,
                     q=q,
                     k=k,
@@ -2197,9 +2217,13 @@ class DistAttnRuntime:
                 dtype=self._maybe_hp_dtype(
                     dtype,
                     # dkv always in high-precision if using native grpcoll
-                    # unless using fa4 backend which only supports fp16/bf16 for now
+                    # except external attention backends, which return low-precision gradients
                     need_hp_dtype=(
-                        self.kernel_backend != MagiAttentionKernelBackend.FA4
+                        self.kernel_backend
+                        not in (
+                            MagiAttentionKernelBackend.FA4,
+                            MagiAttentionKernelBackend.CUDNN,
+                        )
                     )
                     and (self.use_native_grpcoll or self.bwd_hp_reduce),
                 ),
@@ -2337,9 +2361,13 @@ class DistAttnRuntime:
                     dtype=self._maybe_hp_dtype(
                         ref_remote_dq.dtype,
                         # dq always in high-precision if using native grpcoll
-                        # unless using fa4 backend which only supports fp16/bf16 for now
+                        # except external attention backends, which return low-precision gradients
                         need_hp_dtype=(
-                            self.kernel_backend != MagiAttentionKernelBackend.FA4
+                            self.kernel_backend
+                            not in (
+                                MagiAttentionKernelBackend.FA4,
+                                MagiAttentionKernelBackend.CUDNN,
+                            )
                         )
                         and (self.use_native_grpcoll or self.bwd_hp_reduce),
                     ),
@@ -3165,6 +3193,15 @@ class DistAttnFunc(torch.autograd.Function):
             local_lse: [num_tokens_q_local, num_heads_q]
             local_max_logits: [num_heads_q] when return_max_logits is True
         """
+        if dist_attn_runtime.kernel_backend == MagiAttentionKernelBackend.CUDNN:
+            validate_cudnn_inputs(
+                local_q,
+                local_k,
+                local_v,
+                sink=global_sink,
+                softcap=softcap,
+                return_max_logits=return_max_logits,
+            )
         if dist_attn_runtime.no_overlap and not dist_attn_runtime.skip_comm:
             return DistAttnFunc._no_overlap_forward(
                 ctx,

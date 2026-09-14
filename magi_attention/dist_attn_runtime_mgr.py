@@ -468,6 +468,17 @@ def check_flag_comb() -> None:
             not env.general.is_deterministic_mode_enable()
         ), "Native grpcoll is not compatible with deterministic mode for now"
 
+    if env.general.kernel_backend() == MagiAttentionKernelBackend.CUDNN:
+        if (
+            env.comm.is_fwd_high_precision_reduce_enable()
+            or env.comm.is_bwd_high_precision_reduce_enable()
+        ):
+            raise ValueError(
+                "The pinned NVIDIA Flex Attention API requires partial O/dQ/dK/dV "
+                "to use the input dtype; Magi high-precision reduce requires "
+                "FP32 partial outputs and gradients"
+            )
+
     if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
         assert (  # TODO
             not env.general.is_deterministic_mode_enable()

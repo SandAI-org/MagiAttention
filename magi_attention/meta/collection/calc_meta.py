@@ -305,6 +305,38 @@ def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
 
 
 @dataclass(repr=False)
+class CudnnAttnArg(AttnArg):
+    """Own stage mask plans; attention compilation belongs to the backend."""
+
+    _mask_plans: dict = field(default_factory=dict, init=False, compare=False)
+
+    def __post_init__(self):
+        super().__post_init__()
+        # The existing converter has a fixed per-query interval array.
+        events = [(r.start, 1) for r in self.q_ranges]
+        events += [(r.end, -1) for r in self.q_ranges]
+        active = 0
+        for _, delta in sorted(events):
+            active += delta
+            if active > 16:
+                raise ValueError(
+                    "magi_to_hstu supports at most 16 overlapping Q slices"
+                )
+
+    @nvtx.instrument_nvtx
+    def to_cudnn_args(self, q, k, v):
+        """Lazily materialize topology for canonical BSHD backend inputs."""
+        key = (q.device, q.dtype, tuple(q.shape), tuple(k.shape), tuple(v.shape))
+        if key not in self._mask_plans:
+            from magi_attention.functional.cudnn_flex_attn import build_cudnn_mask_plan
+
+            self._mask_plans[key] = build_cudnn_mask_plan(self, q, k, v)
+        plan, ready = self._mask_plans[key]
+        torch.cuda.current_stream(q.device).wait_event(ready)
+        return plan
+
+
+@dataclass(repr=False)
 class FA4AttnArg(AttnArg):
     tile_m: int = -1
     tile_n: int = -1
@@ -790,6 +822,21 @@ class CalcMeta:
             self.overlap_degree >= 0
         ), f"Overlap degree must be >= 0, but got {self.overlap_degree=}"
 
+        if env.general.kernel_backend() == MagiAttentionKernelBackend.CUDNN:
+
+            def convert(arg):
+                return CudnnAttnArg(
+                    q_ranges=arg.q_ranges,
+                    k_ranges=arg.k_ranges,
+                    attn_type_map=arg.attn_type_map,
+                    total_area=arg.total_area,
+                )
+
+            self.local_attn_arg = convert(self.local_attn_arg)
+            self.remote_attn_args_list = [
+                convert(arg) for arg in self.remote_attn_args_list
+            ]
+
         if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
             assert len(self.seqlen_k_per_remote_stage) == self.overlap_degree, (
                 f"seqlen_k_per_remote_stage length must match overlap_degree, "
@@ -883,6 +930,14 @@ class CalcMeta:
                 merged_total_area += remote_arg.total_area
             else:
                 merged_total_area = -1
+
+        if isinstance(self.local_attn_arg, CudnnAttnArg):
+            return CudnnAttnArg(
+                q_ranges=merged_q_ranges,
+                k_ranges=merged_k_ranges,
+                attn_type_map=merged_attn_type_map,
+                total_area=merged_total_area,
+            )
 
         if isinstance(self.local_attn_arg, FA4AttnArg):
             merged_seqlen_k = local_kv_seqlen + sum(self.seqlen_k_per_remote_stage)
