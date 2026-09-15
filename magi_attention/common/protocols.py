@@ -21,8 +21,6 @@ They enable static type checkers (mypy/pyright) to verify interface
 alignment without requiring explicit inheritance.
 """
 
-from __future__ import annotations
-
 from typing import Any, Iterator, Protocol, Sequence, runtime_checkable
 
 import torch
@@ -33,7 +31,7 @@ class AttnMaskTypeProtocol(Protocol):
     """Protocol for AttnMaskType enum."""
 
     @classmethod
-    def from_int_type(cls, int_type: int) -> AttnMaskTypeProtocol:
+    def from_int_type(cls, int_type: int) -> "AttnMaskTypeProtocol":
         ...
 
     def to_int_type(self) -> int:
@@ -52,39 +50,39 @@ class AttnRangeProtocol(Protocol):
         ...
 
     @staticmethod
-    def from_range(attn_range: Any, check: bool = False) -> AttnRangeProtocol:
+    def from_range(attn_range: Any, check: bool = False) -> "AttnRangeProtocol":
         ...
 
-    def clone(self) -> AttnRangeProtocol:
+    def clone(self) -> "AttnRangeProtocol":
         ...
 
-    def offset(self, offset: int) -> AttnRangeProtocol:
+    def offset(self, offset: int) -> "AttnRangeProtocol":
         ...
 
     def truncate(
         self, start: int | None = None, end: int | None = None
-    ) -> AttnRangeProtocol:
+    ) -> "AttnRangeProtocol":
         ...
 
-    def intersect(self, other: AttnRangeProtocol) -> AttnRangeProtocol:
+    def intersect(self, other: "AttnRangeProtocol") -> "AttnRangeProtocol":
         ...
 
-    def intersect_size(self, other: AttnRangeProtocol) -> int:
+    def intersect_size(self, other: "AttnRangeProtocol") -> int:
         ...
 
-    def union(self, other: AttnRangeProtocol) -> list[AttnRangeProtocol]:
+    def union(self, other: "AttnRangeProtocol") -> list["AttnRangeProtocol"]:
         ...
 
-    def union_size(self, other: AttnRangeProtocol) -> int:
+    def union_size(self, other: "AttnRangeProtocol") -> int:
         ...
 
-    def diff_by(self, other: AttnRangeProtocol) -> list[AttnRangeProtocol]:
+    def diff_by(self, other: "AttnRangeProtocol") -> list["AttnRangeProtocol"]:
         ...
 
-    def is_subrange_of(self, other: AttnRangeProtocol) -> bool:
+    def is_subrange_of(self, other: "AttnRangeProtocol") -> bool:
         ...
 
-    def is_overlap_with(self, other: AttnRangeProtocol) -> bool:
+    def is_overlap_with(self, other: "AttnRangeProtocol") -> bool:
         ...
 
     def is_empty(self) -> bool:
@@ -120,11 +118,13 @@ class AttnRangesProtocol(Protocol):
     """Protocol for AttnRanges — a list of AttnRange objects."""
 
     @staticmethod
-    def from_ranges(ranges: Any, check: bool = False) -> AttnRangesProtocol:
+    def from_ranges(ranges: Any, check: bool = False) -> "AttnRangesProtocol":
         ...
 
     @staticmethod
-    def from_cu_seqlens(cu_seqlens: Sequence[int], seq_len: int) -> AttnRangesProtocol:
+    def from_cu_seqlens(
+        cu_seqlens: Sequence[int], seq_len: int
+    ) -> "AttnRangesProtocol":
         ...
 
     def append(self, attn_range: AttnRangeProtocol, check: bool = False) -> None:
@@ -135,35 +135,35 @@ class AttnRangesProtocol(Protocol):
     ) -> None:
         ...
 
-    def extend(self, attn_ranges: AttnRangesProtocol, check: bool = False) -> None:
+    def extend(self, attn_ranges: "AttnRangesProtocol", check: bool = False) -> None:
         ...
 
     def pop(self, idx: int = -1) -> AttnRangeProtocol:
         ...
 
-    def clear_empty(self) -> AttnRangesProtocol:
+    def clear_empty(self) -> "AttnRangesProtocol":
         ...
 
-    def clone(self) -> AttnRangesProtocol:
+    def clone(self) -> "AttnRangesProtocol":
         ...
 
-    def sort(self) -> AttnRangesProtocol:
+    def sort(self) -> "AttnRangesProtocol":
         ...
 
-    def merge(self) -> AttnRangesProtocol:
+    def merge(self) -> "AttnRangesProtocol":
         ...
 
     def merge_with_split_alignment(
         self, split_alignment: int = 1
-    ) -> AttnRangesProtocol:
+    ) -> "AttnRangesProtocol":
         ...
 
-    def chunk(self, chunk_size: int, check: bool = True) -> list[AttnRangesProtocol]:
+    def chunk(self, chunk_size: int, check: bool = True) -> list["AttnRangesProtocol"]:
         ...
 
     def truncate(
         self, start: int | None = None, end: int | None = None
-    ) -> AttnRangesProtocol:
+    ) -> "AttnRangesProtocol":
         ...
 
     def is_sorted(self) -> bool:
@@ -206,37 +206,37 @@ class AttnRangesProtocol(Protocol):
 
     def make_ranges_local(
         self,
-        other_attn_ranges: AttnRangesProtocol,
+        other_attn_ranges: "AttnRangesProtocol",
         is_self_merged: bool = False,
-    ) -> AttnRangesProtocol:
+    ) -> "AttnRangesProtocol":
         ...
 
     def find_hole_ranges(
         self,
-        other_attn_ranges: AttnRangesProtocol,
+        other_attn_ranges: "AttnRangesProtocol",
         is_self_merged: bool = False,
         is_other_merged: bool = False,
-    ) -> AttnRangesProtocol:
+    ) -> "AttnRangesProtocol":
         ...
 
     def find_overlap_ranges(
         self,
-        other_attn_ranges: AttnRangesProtocol,
+        other_attn_ranges: "AttnRangesProtocol",
         is_self_merged: bool = False,
         is_other_merged: bool = False,
-    ) -> AttnRangesProtocol:
+    ) -> "AttnRangesProtocol":
         ...
 
     def intersect_size(self) -> int:
         ...
 
-    def intersect_size_with(self, other: AttnRangesProtocol) -> int:
+    def intersect_size_with(self, other: "AttnRangesProtocol") -> int:
         ...
 
     def union_size(self) -> int:
         ...
 
-    def union_size_with(self, other: AttnRangesProtocol) -> int:
+    def union_size_with(self, other: "AttnRangesProtocol") -> int:
         ...
 
     @property
@@ -317,7 +317,7 @@ class AttnRectangleProtocol(Protocol):
     ) -> None:
         ...
 
-    def get_valid_or_none(self) -> AttnRectangleProtocol | None:
+    def get_valid_or_none(self) -> "AttnRectangleProtocol | None":
         ...
 
     def shrink_q_range(self) -> bool:
@@ -329,7 +329,7 @@ class AttnRectangleProtocol(Protocol):
     def shrink_d_range(self) -> bool:
         ...
 
-    def clone(self) -> AttnRectangleProtocol:
+    def clone(self) -> "AttnRectangleProtocol":
         ...
 
     def area(self) -> int:
@@ -337,22 +337,22 @@ class AttnRectangleProtocol(Protocol):
 
     def cut_q(
         self, cut_pos: int
-    ) -> tuple[AttnRectangleProtocol | None, AttnRectangleProtocol | None]:
+    ) -> tuple["AttnRectangleProtocol | None", "AttnRectangleProtocol | None"]:
         ...
 
     def cut_k(
         self, cut_pos: int
-    ) -> tuple[AttnRectangleProtocol | None, AttnRectangleProtocol | None]:
+    ) -> tuple["AttnRectangleProtocol | None", "AttnRectangleProtocol | None"]:
         ...
 
     def get_rect_within_q_segment(
         self, q_start: int, q_end: int
-    ) -> AttnRectangleProtocol | None:
+    ) -> "AttnRectangleProtocol | None":
         ...
 
     def get_rect_within_k_segment(
         self, k_start: int, k_end: int
-    ) -> AttnRectangleProtocol | None:
+    ) -> "AttnRectangleProtocol | None":
         ...
 
     def intersection_q_id_on_left_boundary(self) -> int:
@@ -399,13 +399,13 @@ class AttnRectanglesProtocol(Protocol):
         k_ranges: Any,
         mask_types: Any,
         check: bool = False,
-    ) -> AttnRectanglesProtocol:
+    ) -> "AttnRectanglesProtocol":
         ...
 
     def append(self, attn_rect: AttnRectangleProtocol, check: bool = False) -> None:
         ...
 
-    def extend(self, attn_rects: AttnRectanglesProtocol, check: bool = False) -> None:
+    def extend(self, attn_rects: "AttnRectanglesProtocol", check: bool = False) -> None:
         ...
 
     def is_valid(self) -> bool:
@@ -431,22 +431,22 @@ class AttnRectanglesProtocol(Protocol):
 
     def cut_q(
         self, cut_pos: int
-    ) -> tuple[AttnRectanglesProtocol, AttnRectanglesProtocol]:
+    ) -> tuple["AttnRectanglesProtocol", "AttnRectanglesProtocol"]:
         ...
 
     def cut_k(
         self, cut_pos: int
-    ) -> tuple[AttnRectanglesProtocol, AttnRectanglesProtocol]:
+    ) -> tuple["AttnRectanglesProtocol", "AttnRectanglesProtocol"]:
         ...
 
     def get_rects_within_q_segment(
         self, q_start: int, q_end: int
-    ) -> AttnRectanglesProtocol:
+    ) -> "AttnRectanglesProtocol":
         ...
 
     def get_rects_within_k_segment(
         self, k_start: int, k_end: int
-    ) -> AttnRectanglesProtocol:
+    ) -> "AttnRectanglesProtocol":
         ...
 
     def area(self) -> int:

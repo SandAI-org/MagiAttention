@@ -29,8 +29,6 @@ kernel takes a per-head scalar bf16 sink, the dist contract is
 by the kernel.
 """
 
-from __future__ import annotations
-
 import weakref
 
 import torch
