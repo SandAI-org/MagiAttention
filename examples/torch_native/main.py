@@ -275,7 +275,7 @@ def loss_func(
     output, label, device_mesh, magi_attention_runtime_key: DistAttnRuntimeKey | None
 ):
     # since input's dispatched but not label,
-    # we need to undispatch the ouput
+    # we need to undispatch the output
     # along seqlen among cp group using magi_attention undispatch
     if magi_attention_runtime_key is not None:
         output = undispatch(

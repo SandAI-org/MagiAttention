@@ -482,6 +482,15 @@ def check_flag_comb() -> None:
             not env.comm.is_qo_comm_enable()
         ), "FA4 backend is not compatible with qo comm for now"
 
+    if env.general.kernel_backend() == MagiAttentionKernelBackend.CUTEDSL:
+        assert (  # kernel raises NotImplementedError for ranges + deterministic
+            not env.general.is_deterministic_mode_enable()
+        ), "CUTEDSL backend is not compatible with deterministic mode for now"
+
+        assert (  # CuteDSL kernel has no sm_margin concept used by qo comm overlap
+            not env.comm.is_qo_comm_enable()
+        ), "CUTEDSL backend is not compatible with qo comm for now"
+
 
 def init_dist_attn_runtime_key(
     q_ranges: AttnRanges,

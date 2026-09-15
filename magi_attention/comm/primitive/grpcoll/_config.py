@@ -21,15 +21,14 @@ class Config:
     ...
 
 
-is_magi_attn_comm_installed = False
 try:
     from magi_attention.magi_attn_comm.grpcoll import (  # type: ignore[no-redef] # noqa
         Config,
     )
-
-    is_magi_attn_comm_installed = True
 except ImportError:
-    pass
+    is_magi_attn_comm_installed = False
+else:
+    is_magi_attn_comm_installed = True
 
 
 __all__ = ["GrpCollConfig"]

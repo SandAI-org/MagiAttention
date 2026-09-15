@@ -221,6 +221,57 @@ class TestRangeGather(TestCase):
                 test_case=f"Random data large-scale testing ({idx=})",
             )
 
+    def test_range_gather_per_range_multi_tile(self):
+        """Fat ranges + hidden=1 must split across gridDim.y, not one CTA."""
+        torch.manual_seed(self.seed)
+        # Uneven + empty ranges: extra row-blocks for short ranges early-return.
+        # 20k-row max exceeds ROWS_PER_BLOCK (4k/8k), so num_row_blocks > 1.
+        ranges = torch.tensor(
+            [
+                [0, 20000],
+                [20000, 20000],  # empty
+                [20000, 20005],  # 5 rows, shorter than one tile
+                [20005, 36000],
+                [36000, 36100],
+            ],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        n_src = 36100
+
+        for hidden, dtype in (
+            (1, torch.bfloat16),
+            (1, torch.uint8),
+            (3, torch.float32),
+        ):
+            input_tensor = torch.randn(n_src, hidden, device=self.device)
+            if dtype in (torch.bfloat16, torch.float32):
+                input_tensor = input_tensor.to(dtype)
+            else:
+                input_tensor = torch.randint(
+                    0, 256, (n_src, hidden), device=self.device, dtype=dtype
+                )
+            self.compare_implementations(
+                input_tensor,
+                ranges,
+                kernel_backend="per_range",
+                test_case=f"per_range multi-tile (hidden={hidden}, {dtype=})",
+            )
+
+        # One fat range + many tiny ones: extra tile CTAs early-return
+        # on short ranges and stripe the long one.
+        n_src = 50000
+        tiny = [[i, i + 1] for i in range(20)]
+        fat_and_tiny = torch.tensor(
+            [[20, n_src]] + tiny, dtype=torch.int64, device=self.device
+        )
+        self.compare_implementations(
+            torch.randn(n_src, 1, device=self.device, dtype=torch.bfloat16),
+            fat_and_tiny,
+            kernel_backend="per_range",
+            test_case="per_range grid-stride fat + tiny ranges",
+        )
+
     @staticmethod
     def compare_implementations(
         input_tensor,

@@ -30,26 +30,24 @@ from magi_attention.utils import (
 
 _DEFAULT_FA4_TILE_SIZE = (128, 128)
 
-is_magi_to_hstu_installed = False
 try:
     import create_block_mask_cuda
     import magi_to_hstu_cuda
-
-    is_magi_to_hstu_installed = True
 except ImportError:
-    pass
+    is_magi_to_hstu_installed = False
+else:
+    is_magi_to_hstu_installed = True
 
-is_fa4_installed = False
 try:
     from flash_attn_cute.block_sparsity import (
         BlockSparseTensorsTorch,
         LinearBlockSparseTensorsTorch,
         bhqk_to_linear_sparse_tensors,
     )
-
-    is_fa4_installed = True
 except ImportError:
-    pass
+    is_fa4_installed = False
+else:
+    is_fa4_installed = True
 
 # Optional: only needed for FA4AttnArg.compute_mask with arbitrary masks
 try:
@@ -541,7 +539,8 @@ class FA4AttnArg(AttnArg):
             self.n_func = 0
             return
 
-        # Compute upper bound of func count for buffer allocation
+        # magi_to_hstu allocation bound. Do not pass a tighter n_max_func:
+        # the kernel under-counts intervals when the first one starts at k>0.
         n_ub_func = 2 * len(self.k_ranges) + 1
 
         # Transfer representation of attn mask from AttnSlice to HSTU Functions
@@ -560,7 +559,14 @@ class FA4AttnArg(AttnArg):
                 n_max_func=n_ub_func,
             )
 
-            # Get actual func count from sliced output
+            # FA4 compiles on n_func: drop unused tail rows. Floor 1 because
+            # all-zero row 0 is a valid empty first interval (first k starts > 0).
+            live_rows = hstu_func.ne(0).any(dim=1)
+            row_ordinal = torch.arange(
+                1, hstu_func.size(0) + 1, device=hstu_func.device
+            )
+            n_keep = max(int((live_rows * row_ordinal).max().item()), 1)
+            hstu_func = hstu_func[:n_keep]
             self.n_func = hstu_func.size(0)
 
             hstu_func = hstu_func.unsqueeze(0).unsqueeze(0)

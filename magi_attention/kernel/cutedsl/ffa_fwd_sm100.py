@@ -23,7 +23,7 @@
 
 import math
 from functools import partial
-from typing import Callable, Literal, NamedTuple, Optional, Tuple
+from typing import Callable, Literal, NamedTuple, Optional, Tuple, Type
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -73,7 +73,7 @@ from .tile_scheduler import (
 )
 
 # === TUNING KNOBS (agent-editable) ===
-# Keys: (use_2cta_instrs: bool, is_causal: bool, head_dim_padded: int, is_sm103: bool)
+# Keys: (use_2cta_instrs: bool, maybe_causal: bool, head_dim_padded: int, is_sm103: bool)
 # Values:
 #   ex2_emu_freq: int — how often to use emulated exp2 (0=all hardware exp2, higher=more emulation).
 #                        SM103 has fast native exp2, so set freq=0 there.
@@ -162,6 +162,42 @@ _FP8_SMALL_HDIM_REGS = {
 # === END TUNING KNOBS ===
 
 
+def fwd_atomic_can_borrow_kv_smem(
+    head_dim_padded: int,
+    head_dim_v_padded: int,
+    m_block_size: int,
+    n_block_size: int,
+    cta_group_size: int,
+    q_stage: int,
+) -> bool:
+    """Whether fp32-O sO can stage in finished KV ring slots."""
+    if head_dim_padded == 192 and head_dim_v_padded == 128:
+        return False
+    bytes_per_kv_stage = (
+        n_block_size
+        * max(head_dim_padded, head_dim_v_padded)
+        * 2  # bf16/fp16 K/V
+        // cta_group_size
+    )
+    fp32_width = 32
+    cols_per_chunk = bytes_per_kv_stage * 8 // (fp32_width * m_block_size)
+    swizzle_atom_cols = (
+        128 * 8 // fp32_width
+    )  # TMA swizzle atom width (128B) in fp32 elems
+    if cols_per_chunk < swizzle_atom_cols:
+        return False
+    if cols_per_chunk % swizzle_atom_cols != 0:
+        return False
+    if cols_per_chunk >= head_dim_v_padded:
+        return False
+    if head_dim_v_padded % cols_per_chunk != 0:
+        return False
+    n_chunks = head_dim_v_padded // cols_per_chunk
+    bytes_for_sQ = q_stage * m_block_size * head_dim_padded * 2
+    estimated_kv_stages = (224 * 1024 - bytes_for_sQ) // bytes_per_kv_stage
+    return estimated_kv_stages >= q_stage * n_chunks + 1
+
+
 class DescaleTensors(NamedTuple):
     q_descale: Optional[cute.Tensor] = None
     k_descale: Optional[cute.Tensor] = None
@@ -177,7 +213,9 @@ class FFAFwdSm100:
         head_dim: int,
         head_dim_v: Optional[int] = None,
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
-        mask_type: int = MT_MAP.full,
+        # MT_MAP int for one static mask type; None selects the runtime per-range
+        # kernel that reads mMaskTypes[batch].
+        mask_type: int | None = MT_MAP.full,
         is_local: bool = False,
         is_split_kv: bool = False,
         pack_gqa: bool = False,
@@ -193,8 +231,14 @@ class FFAFwdSm100:
         is_varlen_q: bool = False,
         use_2cta_instrs: bool = False,
         use_clc_scheduler: bool = False,
+        range_merge: bool = False,
+        disable_fwd_atomic_reduction: bool = False,
+        # GMEM O dtype on the atomic path (fp32 = lossless merge; fp16/bf16
+        # trades K-1 cascading truncation for half the merge traffic/smem).
+        o_dtype: Type[cutlass.Numeric] = Float32,
         debug_print: bool = False,
     ):
+        self.o_dtype = o_dtype
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -271,12 +315,45 @@ class FFAFwdSm100:
 
         self.is_persistent = is_persistent
         self.mask_type = mask_type
+        self.use_per_range_mask = mask_type is None
+        self.range_merge = range_merge
+        if range_merge:
+            assert (
+                self.use_per_range_mask
+            ), "RangeMerge reads one mask type per relation pair from mMaskTypes"
+            assert not use_2cta_instrs and not is_split_kv and not pack_gqa
+            assert not is_persistent
+            assert score_mod is None and mask_mod is None
         self.is_local = is_local
         self.is_varlen_q = is_varlen_q
         self.use_correction_warps_for_epi = is_varlen_q
         self.qhead_per_kvhead = qhead_per_kvhead
         self.is_split_kv = is_split_kv
         self.pack_gqa = pack_gqa
+        self.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction
+        if not disable_fwd_atomic_reduction:
+            # Overlapping Q ranges merge under range locks in the correction
+            # epilogue; that path only exists on the varlen/STG store route.
+            assert is_varlen_q and not is_split_kv and not pack_gqa
+            # The prev-O gmem read is unpredicated along head_dim.
+            assert not self.check_hdim_v_oob
+        # fp32 O doubles the sO footprint of the input-dtype path; borrow
+        # finished KV ring slots for it (one work tile per CTA only).
+        self.sO_borrow_kv = (
+            not disable_fwd_atomic_reduction
+            and self.use_tma_KV
+            and o_dtype == Float32
+            and fwd_atomic_can_borrow_kv_smem(
+                self.head_dim_padded,
+                self.head_dim_v_padded,
+                self.m_block_size,
+                self.n_block_size,
+                self.cta_group_size,
+                self.q_stage,
+            )
+        )
+        if self.sO_borrow_kv:
+            self.is_persistent = False
         self.q_subtile_factor = q_subtile_factor
 
         assert not (
@@ -298,7 +375,7 @@ class FFAFwdSm100:
             or (
                 self.head_dim_padded == 192
                 and self.use_2cta_instrs
-                and not self.is_causal
+                and not self.maybe_causal
                 and not self.is_local
             )
             # NOTE: B300 (sm103) has fast SFU, thus this approximation is only for B200 (sm100)
@@ -307,7 +384,7 @@ class FFAFwdSm100:
         self.enable_ex2_emu = _default_enable_ex2_emu
 
         # Does S1 need to wait for S0 to finish
-        # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.is_causal and not self.is_local)
+        # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.maybe_causal and not self.is_local)
         self.s0_s1_barrier = False
 
         self.overlap_sO_sQ = (
@@ -315,6 +392,7 @@ class FFAFwdSm100:
         ) or (self.head_dim_v_padded >= 128 and self.is_split_kv)
         if self.overlap_sO_sQ:
             self.is_persistent = False
+        assert not (self.sO_borrow_kv and self.overlap_sO_sQ)
 
         assert self.use_tma_KV or not (
             self.check_hdim_oob or self.check_hdim_v_oob
@@ -322,7 +400,11 @@ class FFAFwdSm100:
 
         # ClC does not compose with these other features, so disable even if requested
         self.use_clc_scheduler = (
-            use_clc_scheduler and self.use_tma_KV and not self.overlap_sO_sQ
+            use_clc_scheduler
+            and self.use_tma_KV
+            and not self.overlap_sO_sQ
+            # CLC reloads KV slots the previous epilogue still reads.
+            and not self.sO_borrow_kv
         )
         if self.use_clc_scheduler:
             assert (
@@ -343,7 +425,7 @@ class FFAFwdSm100:
 
         if is_varlen_q:
             self.TileScheduler = SingleTileVarlenScheduler
-        elif self.is_causal or self.is_local or self.use_clc_scheduler:
+        elif self.maybe_causal or self.is_local or self.use_clc_scheduler:
             self.TileScheduler = SingleTileLPTScheduler
         elif self.is_persistent:
             self.TileScheduler = StaticPersistentTileScheduler
@@ -420,7 +502,7 @@ class FFAFwdSm100:
         # Look up tuning config for register counts and ex2_emu params
         _tune_key = (
             self.use_2cta_instrs,
-            self.is_causal,
+            self.maybe_causal,
             self.head_dim_padded,
             self.is_sm103,
         )
@@ -461,7 +543,7 @@ class FFAFwdSm100:
             print(f"{prefix}Initialized FFAFwdSm100 with: ")
             print(f"{prefix}{head_dim=} | {head_dim_v=} | {qhead_per_kvhead=}")
             print(
-                f"{prefix}{mask_type=} | {self.is_causal=} | {is_local=} | "
+                f"{prefix}{mask_type=} | {self.maybe_causal=} | {is_local=} | "
                 f"{is_split_kv=} | {pack_gqa=}"
             )
             print(
@@ -505,8 +587,19 @@ class FFAFwdSm100:
             print()
 
     @property
-    def is_causal(self) -> bool:
+    def is_static_causal(self) -> bool:
+        """Static causal geometry; only the static mask path reads this."""
         return self.mask_type == MT_MAP.causal
+
+    @property
+    def maybe_causal(self) -> bool:
+        """Whether the compile must carry the causal configuration.
+
+        True for the static causal kernel and for the per-range kernel, whose
+        ranges can be causal at runtime; selects tuning tables, scheduler and
+        pipeline settings sized for causal work.
+        """
+        return self.mask_type is None or self.mask_type == MT_MAP.causal
 
     def _setup_attributes(self):
         """Set up configurations and parameters for the FMHA kernel operation.
@@ -537,6 +630,8 @@ class FFAFwdSm100:
             if not self.overlap_sO_sQ
             else max(smem_size_q, smem_size_o)
         )
+        if self.sO_borrow_kv:
+            smem_size_q_o = smem_size_q
         smem_size_k_per_stage = (
             self.n_block_size * self.head_dim_padded * self.k_dtype.width // 8
         )
@@ -554,6 +649,18 @@ class FFAFwdSm100:
         ):
             # For hdim 192,128, we can fit 3 stages if we use uneven_kv_smem
             kv_stage = 3
+        if self.sO_borrow_kv:
+            cols_per_slot = smem_size_kv_per_stage * 8 // (32 * self.m_block_size)
+            n_chunks = self.head_dim_v_padded // cols_per_slot
+            assert kv_stage >= self.q_stage * n_chunks + 1, (
+                f"sO borrow needs kv_stage >= {self.q_stage * n_chunks + 1} "
+                f"(q_stage={self.q_stage} x n_chunks={n_chunks} + 1 free), "
+                f"got {kv_stage}"
+            )
+        assert kv_stage >= 2, (
+            f"smem budget leaves kv_stage={kv_stage} < 2 "
+            f"(q_stage={self.q_stage}, o_dtype={self.o_dtype})"
+        )
         self.kv_stage = kv_stage
         # print("kv_stage", self.kv_stage)
         self.s_stage = 2
@@ -594,8 +701,8 @@ class FFAFwdSm100:
         mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
         softmax_scale: Float32,
-        mCuSeqlensQ: Optional[cute.Tensor] = None,
-        mCuSeqlensK: Optional[cute.Tensor] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
         mSeqUsedQ: Optional[cute.Tensor] = None,
         mSeqUsedK: Optional[cute.Tensor] = None,
         mPageTable: Optional[cute.Tensor] = None,
@@ -603,6 +710,10 @@ class FFAFwdSm100:
         window_size_right: Int32 | int | None = None,
         learnable_sink: Optional[cute.Tensor] = None,
         descale_tensors: Optional[DescaleTensors] = None,
+        mMaskTypes: Optional[cute.Tensor] = None,
+        mRangeLocks: Optional[cute.Tensor] = None,
+        max_seqlen_q: Int32 | None = None,
+        mCuBatches: Optional[cute.Tensor] = None,  # [R + 1] CSR offsets for RangeMerge
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -622,6 +733,31 @@ class FFAFwdSm100:
         6. Kernel launch with appropriate parameters
         """
 
+        if const_expr(self.use_per_range_mask):
+            assert (
+                mMaskTypes is not None
+            ), "use_per_range_mask requires mMaskTypes[batch]"
+        else:
+            assert (
+                mMaskTypes is None
+            ), "static mask specialization must not receive mMaskTypes"
+        assert (mQRanges is None) == (
+            mKRanges is None
+        ), "mQRanges and mKRanges must be passed together"
+        assert (
+            mQRanges is not None
+        ) == self.is_varlen_q, (
+            "is_varlen_q compile flag disagrees with mQRanges argument"
+        )
+        assert (mRangeLocks is not None) == (
+            not self.disable_fwd_atomic_reduction
+        ), "range locks required iff fwd atomic reduction is enabled"
+        assert (
+            mCuBatches is not None
+        ) == self.range_merge, "RangeMerge requires the cu_batches CSR (and only then)"
+        if const_expr(not self.disable_fwd_atomic_reduction):
+            assert mLSE is not None, "atomic reduction merges through LSE"
+            assert mO.element_type == self.o_dtype
         # ///////////////////////////////////////////////////////////////////////////////
         # Make mQ/mK/mV/mO/mLSE tensors
         # with layout transformations for specific memory access patterns
@@ -639,9 +775,7 @@ class FFAFwdSm100:
 
         # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
         # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
-        Q_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
-        )
+        Q_layout_transpose = [1, 3, 2, 0] if const_expr(mQRanges is None) else [0, 2, 1]
         mQ = cute.make_tensor(
             mQ.iterator, cute.select(mQ.layout, mode=Q_layout_transpose)
         )
@@ -651,7 +785,7 @@ class FFAFwdSm100:
         # (b, sk, nhk, hd) -> (sk, hd, nhk, b)
         # or (sk, nhk, hd) -> (sk, hd, nhk) if there's cu_seqlens_k
         KV_layout_transpose = (
-            [1, 3, 2, 0] if const_expr(mCuSeqlensK is None) else [0, 2, 1]
+            [1, 3, 2, 0] if const_expr(mKRanges is None) else [0, 2, 1]
         )
         mK, mV = [
             cute.make_tensor(
@@ -662,9 +796,7 @@ class FFAFwdSm100:
 
         # (sk, hd, nhk, b) -> (hd, sk, nhk, b)
         # or (sk, nhk, hd) -> (hd, sk, nhk) if there's cu_seqlens_k
-        V_layout_transpose = (
-            [1, 0, 2, 3] if const_expr(mCuSeqlensK is None) else [1, 0, 2]
-        )
+        V_layout_transpose = [1, 0, 2, 3] if const_expr(mKRanges is None) else [1, 0, 2]
         mV = cute.make_tensor(  # actually => actually V.T
             mV.iterator, cute.select(mV.layout, mode=V_layout_transpose)
         )
@@ -673,36 +805,32 @@ class FFAFwdSm100:
 
         if const_expr(self.is_split_kv):
             O_layout_transpose = (
-                [2, 4, 3, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 3, 2, 0]
+                [2, 4, 3, 1, 0] if const_expr(mQRanges is None) else [1, 3, 2, 0]
             )
+            # (splits, b, nhq, sq) -> (sq, nhq, b, splits)
+            # or (splits, total_q, nhq) -> (total_q, nhq, splits) on ranges
             LSE_layout_transpose = (
-                [3, 2, 1, 0] if const_expr(mCuSeqlensQ is None) else [2, 1, 0]
+                [3, 2, 1, 0] if const_expr(mQRanges is None) else [1, 2, 0]
             )
             num_splits = mO.shape[0]
         else:
             # (b, sq, nhq, hd) -> (sq, hd, nhq, b)
             # or (sq, nhq, hd) -> (sq, hd, nhq) if there's cu_seqlens_q
             O_layout_transpose = (
-                [1, 3, 2, 0] if const_expr(mCuSeqlensQ is None) else [0, 2, 1]
+                [1, 3, 2, 0] if const_expr(mQRanges is None) else [0, 2, 1]
             )
 
-            # (b, nhq, sq) -> (sq, nhq, b)
-            # or (nhq, sq) -> (sq, nhq) if there's cu_seqlens_q
-            LSE_layout_transpose = (
-                [2, 1, 0] if const_expr(mCuSeqlensQ is None) else [1, 0]
-            )
+            # (b, nhq, sq) -> (sq, nhq, b); ranges LSE is consumed as (total_q, nhq)
+            LSE_layout_transpose = [2, 1, 0] if const_expr(mQRanges is None) else None
             num_splits = Int32(1)
 
         mO = cute.make_tensor(
             mO.iterator, cute.select(mO.layout, mode=O_layout_transpose)
         )
-        mLSE = (
-            cute.make_tensor(
+        if const_expr(mLSE is not None and LSE_layout_transpose is not None):
+            mLSE = cute.make_tensor(
                 mLSE.iterator, cute.select(mLSE.layout, mode=LSE_layout_transpose)
             )
-            if const_expr(mLSE is not None)
-            else None
-        )
 
         # ///////////////////////////////////////////////////////////////////////////////
         # Set up attributes
@@ -725,7 +853,7 @@ class FFAFwdSm100:
                 fp8_tune = _FP8_TUNING_CONFIG.get(
                     (
                         self.use_2cta_instrs,
-                        self.is_causal,
+                        self.maybe_causal,
                         self.head_dim_padded,
                         self.is_sm103,
                     ),
@@ -747,7 +875,7 @@ class FFAFwdSm100:
 
         self.use_tma_O = (
             self.arch >= Arch.sm_90
-            and mCuSeqlensQ is None
+            and mQRanges is None
             and mSeqUsedQ is None
             and not (self.pack_gqa and self.m_block_size % self.qhead_per_kvhead != 0)
             and not (self.pack_gqa and self.is_split_kv)
@@ -759,12 +887,12 @@ class FFAFwdSm100:
             if const_expr(
                 self.pack_gqa
                 and self.head_dim_padded > 64
-                and not self.is_causal
+                and not self.maybe_causal
                 and not self.is_local
             ):
                 self.ex2_emu_freq = (
                     32
-                    if mCuSeqlensQ is not None or mSeqUsedQ is not None
+                    if mQRanges is not None or mSeqUsedQ is not None
                     else self._tune.get("ex2_emu_freq", 10)
                 )
 
@@ -970,6 +1098,15 @@ class FFAFwdSm100:
         tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
         self.num_epilogue_threads = cute.arch.WARP_SIZE * len(self.epilogue_warp_ids)
 
+        # TMA store for unique-writer Q-ranges
+        self.corr_epi_tma_store = const_expr(
+            mQRanges is not None
+            and not self.use_tma_O
+            and self.disable_fwd_atomic_reduction
+            and not self.is_split_kv
+            and not self.pack_gqa
+        )
+
         tma_atom_O = None
         if const_expr(self.use_tma_O):
             # TMA store atom for O
@@ -977,6 +1114,29 @@ class FFAFwdSm100:
             # layout_dst_tv=(1,8192):(0,1)
             tma_atom_O, mO = cpasync.make_tiled_tma_atom(
                 tma_store_op, mO, cute.select(sO_layout, mode=[0, 1]), self.epi_tile
+            )
+            gmem_tiled_copy_O = None
+        elif const_expr(self.corr_epi_tma_store):
+            # 4D descriptor with base shifted by total_q rows for offset-based indexing
+            total_q_o = mO.shape[0]
+            row_stride_o = mO.layout.stride[0]
+            mO_desc = cute.make_tensor(
+                (mO.iterator - cutlass.Int64(total_q_o) * row_stride_o).align(16),
+                cute.make_layout(
+                    (total_q_o, mO.shape[1], mO.shape[2], 1 << 26),
+                    stride=(
+                        row_stride_o,
+                        mO.layout.stride[1],
+                        mO.layout.stride[2],
+                        row_stride_o,
+                    ),
+                ),
+            )
+            tma_atom_O, mO = cpasync.make_tiled_tma_atom(
+                tma_store_op,
+                mO_desc,
+                cute.select(sO_layout, mode=[0, 1]),
+                self.epi_tile,
             )
             gmem_tiled_copy_O = None
         else:
@@ -1015,8 +1175,8 @@ class FFAFwdSm100:
             num_block=cute.ceil_div(cute.size(mQ.shape[0]), _num_block_divisor),
             num_head=cute.size(mQ.shape[2]),
             num_batch=cute.size(mQ.shape[3])
-            if const_expr(mCuSeqlensQ is None)
-            else cute.size(mCuSeqlensQ.shape[0] - 1),
+            if const_expr(mQRanges is None)
+            else cute.size(mQRanges.shape[0]),
             num_splits=num_splits,
             seqlen_k=cute.size(mK.shape[0])
             if const_expr(mPageTable is None)
@@ -1026,17 +1186,29 @@ class FFAFwdSm100:
                 0
             ],  # Note that this is different from Sm90 since we transpose mV in Sm100
             total_q=cute.size(mQ.shape[0])
-            if const_expr(mCuSeqlensQ is not None)
+            if const_expr(mQRanges is not None)
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],
-            mCuSeqlensQ=mCuSeqlensQ,
+            mQRanges=mQRanges,
+            # On the atomic path Q ranges may overlap, so every range owns
+            # ceil(max_seqlen_q / tile) tiles of the grid and an underestimate
+            # of max_seqlen_q drops the tail tiles of the longer ranges. On
+            # the direct-store path the ranges are disjoint, so the prefix
+            # sum over total_q bounds the grid exactly without this width.
+            max_outer_range_width=(
+                max_seqlen_q
+                if const_expr(
+                    mQRanges is not None and not self.disable_fwd_atomic_reduction
+                )
+                else None
+            ),
             mSeqUsedQ=mSeqUsedQ,
             qhead_per_kvhead_packgqa=self.qhead_per_kvhead
             if const_expr(self.pack_gqa)
             else 1,
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
-            lpt=self.is_causal or self.is_local,
+            lpt=self.maybe_causal or self.is_local,
             is_split_kv=self.is_split_kv,
             cluster_shape_mn=self.cluster_shape_mn,
             use_cluster_idx=not self.is_persistent and self.cta_group_size > 1,
@@ -1047,11 +1219,17 @@ class FFAFwdSm100:
         self.tile_scheduler_cls = TileScheduler
 
         # (max_ctas, 1, 1), where max_ctas = sm_counts // cluster_size
+        if const_expr(mQRanges is not None):
+            assert max_seqlen_q is not None, "ranges fwd needs max_seqlen_q"
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
 
         # --- Make smem storage ---
 
-        sO_size = cute.cosize(sO_layout) if const_expr(not self.overlap_sO_sQ) else 0
+        sO_size = (
+            0
+            if const_expr(self.sO_borrow_kv or self.overlap_sO_sQ)
+            else cute.cosize(sO_layout)
+        )
         sQ_size = (
             cute.cosize(sQ_layout)
             if const_expr(not self.overlap_sO_sQ)
@@ -1228,8 +1406,8 @@ class FFAFwdSm100:
             mV,
             mO,
             mLSE,
-            mCuSeqlensQ,
-            mCuSeqlensK,
+            mQRanges,
+            mKRanges,
             mSeqUsedQ,
             mSeqUsedK,
             mPageTable,
@@ -1243,6 +1421,9 @@ class FFAFwdSm100:
             window_size_right,
             learnable_sink,
             descale_tensors,
+            mMaskTypes,
+            mRangeLocks,
+            mCuBatches,
             blocksparse_tensors,
             sQ_layout,
             sK_layout,
@@ -1277,8 +1458,8 @@ class FFAFwdSm100:
         mV: cute.Tensor,
         mO: cute.Tensor,
         mLSE: Optional[cute.Tensor],
-        mCuSeqlensQ: Optional[cute.Tensor],
-        mCuSeqlensK: Optional[cute.Tensor],
+        mQRanges: Optional[cute.Tensor],
+        mKRanges: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
         mSeqUsedK: Optional[cute.Tensor],
         mPageTable: Optional[cute.Tensor],
@@ -1292,6 +1473,9 @@ class FFAFwdSm100:
         window_size_right: Optional[Int32],
         learnable_sink: Optional[cute.Tensor],
         descale_tensors: Optional[DescaleTensors],
+        mMaskTypes: Optional[cute.Tensor],
+        mRangeLocks: Optional[cute.Tensor],
+        mCuBatches: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
         sQ_layout: cute.ComposedLayout,
         sK_layout: cute.ComposedLayout,
@@ -1684,7 +1868,13 @@ class FFAFwdSm100:
             sV_layout.outer,
         )
         # sO: S<3,4,3> o 0 o (EPI_Q=(8,16),EPI_HD=(64,2),EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
-        if const_expr(not self.overlap_sO_sQ):
+        if const_expr(self.sO_borrow_kv):
+            # Overlay sO onto drained KV ring storage in non-persistent mode
+            sO = cute.make_tensor(
+                cute.recast_ptr(sK.iterator, sO_layout.inner, self.o_dtype),
+                sO_layout.outer,
+            )
+        elif const_expr(not self.overlap_sO_sQ):
             sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
         else:
             sO = cute.make_tensor(
@@ -1747,7 +1937,7 @@ class FFAFwdSm100:
             # This is cta_tiler, not mma_tiler_qk, since we move by block by (2 * mma_tiler[0], mma_tiler[1])
             self.cta_tiler[0],
             self.cta_tiler[1],
-            self.is_causal,
+            self.maybe_causal,
             self.is_local,
             self.is_split_kv,
             window_size_left,
@@ -1764,8 +1954,8 @@ class FFAFwdSm100:
             seqlen_k_static=mK.shape[0]
             if const_expr(mPageTable is None)
             else mK.shape[0] * mPageTable.shape[1],
-            mCuSeqlensQ=mCuSeqlensQ,
-            mCuSeqlensK=mCuSeqlensK,
+            mQRanges=mQRanges,
+            mKRanges=mKRanges,
             mSeqUsedQ=mSeqUsedQ,
             mSeqUsedK=mSeqUsedK,
             mCuTotalMBlocks=(
@@ -1922,6 +2112,8 @@ class FFAFwdSm100:
                 SeqlenInfoCls,
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                mMaskTypes=mMaskTypes,
+                mCuBatches=mCuBatches,
                 is_print_block=is_print_block,
             )
 
@@ -1963,6 +2155,8 @@ class FFAFwdSm100:
                 SeqlenInfoCls,
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                mMaskTypes=mMaskTypes,
+                mCuBatches=mCuBatches,
                 is_print_block=is_print_block,
             )
 
@@ -1998,6 +2192,8 @@ class FFAFwdSm100:
                     num_splits,
                     SeqlenInfoCls,
                     tile_scheduler=tile_scheduler,
+                    mMaskTypes=mMaskTypes,
+                    mCuBatches=mCuBatches,
                     mma_tile_coord_v=mma_tile_coord_v,
                     is_print_block=is_print_block,
                 )
@@ -2042,6 +2238,8 @@ class FFAFwdSm100:
                 fastdiv_mods=fastdiv_mods,
                 head_divmod=head_divmod,
                 blocksparse_tensors=blocksparse_tensors,
+                mMaskTypes=mMaskTypes,
+                mCuBatches=mCuBatches,
                 is_print_block=is_print_block,
             )
 
@@ -2107,12 +2305,40 @@ class FFAFwdSm100:
                 SeqlenInfoCls,
                 tile_scheduler=tile_scheduler,
                 blocksparse_tensors=blocksparse_tensors,
+                mMaskTypes=mMaskTypes,
+                mCuBatches=mCuBatches,
+                mRangeLocks=mRangeLocks,
                 is_print_block=is_print_block,
             )
 
             # --- Arrive mma warp's tmem dealloc ---
 
             tmem_alloc_barrier.arrive()
+
+    @cute.jit
+    def _fwd_merge_n_iters(
+        self,
+        SeqlenInfoCls: Callable[..., SeqlenInfoQK],
+        block_info: BlockInfo,
+        mMaskTypes: cute.Tensor,
+        mCuBatches: cute.Tensor,
+        batch_idx: Int32,
+        m_block: Int32,
+        split_idx: Int32,
+        num_splits: Int32,
+    ) -> Int32:
+        """K-tile trip count across one merged Q-group."""
+        pair_beg = Int32(mCuBatches[batch_idx])
+        pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
+        n_iters = Int32(0)
+        for pj in cutlass.range(pair_cnt, unroll=1):
+            seqlen_pair = SeqlenInfoCls(batch_idx, k_batch_idx=pair_beg + pj)
+            attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
+            lo_p, hi_p = block_info.get_n_block_min_max_per_range(
+                seqlen_pair, m_block, attn_type_pair, split_idx, num_splits
+            )
+            n_iters += cutlass.max(hi_p - lo_p, Int32(1))
+        return n_iters
 
     @cute.jit
     def load(
@@ -2137,6 +2363,8 @@ class FFAFwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
+        mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         num_load_threads = len(self.load_warp_ids) * cute.arch.WARP_SIZE
@@ -2377,10 +2605,89 @@ class FFAFwdSm100:
             #  G2S-load sQ/sK/sV
             # //////////////////////////////////////////////
 
-            if const_expr(not self.use_block_sparsity):
-                n_block_min, n_block_max = block_info.get_n_block_min_max(
-                    seqlen_info, m_block, split_idx, num_splits
-                )
+            if const_expr(self.range_merge and not self.use_block_sparsity):
+                if issue_q_for_this_warp:
+                    load_Q(block=0, stage=0)
+                    if const_expr(self.q_stage == 2):
+                        load_Q(block=1, stage=1)
+                q_producer_phase ^= 1
+                pair_beg = Int32(mCuBatches[batch_idx])
+                pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
+                for pj in cutlass.range(pair_cnt, unroll=1):
+                    seqlen_pair = SeqlenInfoCls(batch_idx, k_batch_idx=pair_beg + pj)
+                    attn_type_pair = Int32(mMaskTypes[pair_beg + pj])
+                    lo_p, hi_p = block_info.get_n_block_min_max_per_range(
+                        seqlen_pair, m_block, attn_type_pair, split_idx, num_splits
+                    )
+                    mK_p = cute.domain_offset(
+                        (seqlen_pair.offset_k, 0), mK[None, None, head_idx_kv]
+                    )
+                    mV_p = cute.domain_offset(
+                        (0, seqlen_pair.offset_k), mV[None, None, head_idx_kv]
+                    )
+                    gK_p = cute.local_tile(
+                        mK_p, cute.select(self.mma_tiler_qk, mode=[1, 2]), (None, 0)
+                    )
+                    gV_p = cute.local_tile(
+                        mV_p, cute.select(self.mma_tiler_pv, mode=[1, 2]), (0, None)
+                    )
+                    tKsK_p, tKgK_p = cpasync.tma_partition(
+                        tma_atom_K,
+                        tma_cta_coord,
+                        tma_cta_layout,
+                        cute.group_modes(sK, 0, 3),
+                        cute.group_modes(thr_mma_qk.partition_B(gK_p), 0, 3),
+                    )
+                    tVsV_p, tVgV_p = cpasync.tma_partition(
+                        tma_atom_V,
+                        tma_cta_coord,
+                        tma_cta_layout,
+                        cute.group_modes(sV, 0, 3),
+                        cute.group_modes(thr_mma_pv.partition_B(gV_p), 0, 3),
+                    )
+                    load_K_p = partial(
+                        self.load_KV,
+                        tma_atom_K,
+                        tKgK_p,
+                        tKsK_p,
+                        None,
+                        sK,
+                        pipeline_kv=pipeline_kv,
+                        K_or_V="K",
+                    )
+                    load_V_p = partial(
+                        self.load_KV,
+                        tma_atom_V,
+                        tVgV_p,
+                        tVsV_p,
+                        None,
+                        sV,
+                        pipeline_kv=pipeline_kv,
+                        K_or_V="V",
+                    )
+                    first_blk = hi_p - 1 if hi_p > 0 else Int32(0)
+                    if issue_kv_for_this_warp:
+                        load_K_p(block=first_blk, producer_state=kv_producer_state)
+                        kv_producer_state.advance()
+                        load_V_p(block=first_blk, producer_state=kv_producer_state)
+                        kv_producer_state.advance()
+                    for i in cutlass.range(hi_p - 1 - lo_p, unroll=1):
+                        n_block = hi_p - 2 - i
+                        if issue_kv_for_this_warp:
+                            load_K_p(block=n_block, producer_state=kv_producer_state)
+                            kv_producer_state.advance()
+                            load_V_p(block=n_block, producer_state=kv_producer_state)
+                            kv_producer_state.advance()
+            elif const_expr(not self.use_block_sparsity):
+                if const_expr(self.use_per_range_mask):
+                    attn_type = Int32(mMaskTypes[batch_idx])
+                    n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                        seqlen_info, m_block, attn_type, split_idx, num_splits
+                    )
+                else:
+                    n_block_min, n_block_max = block_info.get_n_block_min_max(
+                        seqlen_info, m_block, split_idx, num_splits
+                    )
                 if const_expr(not self.is_split_kv) or n_block_min < n_block_max:
                     n_block_first = n_block_max - 1 if n_block_max > 0 else 0
 
@@ -2505,6 +2812,8 @@ class FFAFwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler: TileSchedulerProtocol,
+        mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         # /////////////////////////////////////////////////////////////////////////////
@@ -2647,10 +2956,28 @@ class FFAFwdSm100:
                 )
                 process_tile = block_iter_count > Int32(0)
             else:
-                n_block_min, n_block_max = block_info.get_n_block_min_max(
-                    seqlen_info, m_block, split_idx, num_splits
-                )
-                block_iter_count = n_block_max - n_block_min
+                if const_expr(self.range_merge):
+                    block_iter_count = self._fwd_merge_n_iters(
+                        SeqlenInfoCls,
+                        block_info,
+                        mMaskTypes,
+                        mCuBatches,
+                        batch_idx,
+                        m_block,
+                        split_idx,
+                        num_splits,
+                    )
+                elif const_expr(self.use_per_range_mask):
+                    attn_type = Int32(mMaskTypes[batch_idx])
+                    n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                        seqlen_info, m_block, attn_type, split_idx, num_splits
+                    )
+                    block_iter_count = n_block_max - n_block_min
+                else:
+                    n_block_min, n_block_max = block_info.get_n_block_min_max(
+                        seqlen_info, m_block, split_idx, num_splits
+                    )
+                    block_iter_count = n_block_max - n_block_min
                 if const_expr(not self.is_split_kv):
                     process_tile = True
                 else:
@@ -2683,7 +3010,7 @@ class FFAFwdSm100:
                         block_iter_count,
                         process_tile,
                     )
-                    if const_expr(not self.use_block_sparsity):
+                    if const_expr(not self.use_block_sparsity and not self.range_merge):
                         cute.printf(
                             prefix + "n_block_min={} n_block_max={}",
                             n_block_min,
@@ -2977,6 +3304,8 @@ class FFAFwdSm100:
         fastdiv_mods=(None, None),
         head_divmod=None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         """Compute softmax on attention scores from QK matrix multiplication.
@@ -3097,21 +3426,22 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen_info, m_block, split_idx, num_splits
-            )
+            if const_expr(self.range_merge):
+                n_block_min = Int32(0)
+                n_block_max = Int32(0)
+            elif const_expr(self.use_per_range_mask):
+                attn_type = Int32(mMaskTypes[batch_idx])
+                n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                    seqlen_info, m_block, attn_type, split_idx, num_splits
+                )
+            else:
+                attn_type = Int32(MT_MAP.full)
+                n_block_min, n_block_max = block_info.get_n_block_min_max(
+                    seqlen_info, m_block, split_idx, num_splits
+                )
 
             mask = AttentionMaskCls(seqlen_info)
-            shared_mask_kwargs = dict(
-                m_block=(self.q_stage * m_block + stage) * self.cta_group_size,
-                thr_mma=thr_mma_qk,
-                thr_tmem_load=thr_tmem_load,
-                mask_causal=self.is_causal,
-                mask_local=self.is_local,
-                batch_idx=batch_idx,
-                head_idx=head_idx,
-                aux_tensors=aux_tensors,
-            )
+            mask_m_block = (self.q_stage * m_block + stage) * self.cta_group_size
 
             # --- Recompute fastdiv_mods if necessary ---
 
@@ -3137,25 +3467,48 @@ class FFAFwdSm100:
 
             # --- Define attn mask apply fn ---
 
-            mask_mod = self.mask_mod if const_expr(self.mask_mod is not None) else None
-            mask_fn = partial(
-                mask.apply_mask_sm100,
-                mask_mod=mask_mod,
-                fastdiv_mods=fastdiv_mods,
-                head_divmod=head_divmod,
-                **shared_mask_kwargs,
-            )
-            if const_expr(self.use_block_sparsity):
-                #  Full blocks dont need mask_mod
-                mask_fn_none = partial(
+            # RangeMerge builds one mask fn per relation pair inside its loop.
+            if const_expr(self.use_per_range_mask and not self.range_merge):
+                mask_fn = partial(
+                    mask.apply_mask_sm100_per_range,
+                    m_block=mask_m_block,
+                    thr_mma=thr_mma_qk,
+                    thr_tmem_load=thr_tmem_load,
+                    attn_type=attn_type,
+                )
+                mask_fn_none = None
+            elif const_expr(not self.use_per_range_mask):
+                shared_mask_kwargs = dict(
+                    m_block=mask_m_block,
+                    thr_mma=thr_mma_qk,
+                    thr_tmem_load=thr_tmem_load,
+                    mask_causal=self.is_static_causal,
+                    mask_local=self.is_local,
+                    batch_idx=batch_idx,
+                    head_idx=head_idx,
+                    aux_tensors=aux_tensors,
+                )
+                mask_mod = (
+                    self.mask_mod if const_expr(self.mask_mod is not None) else None
+                )
+                mask_fn = partial(
                     mask.apply_mask_sm100,
-                    mask_mod=None,
+                    mask_mod=mask_mod,
                     fastdiv_mods=fastdiv_mods,
                     head_divmod=head_divmod,
                     **shared_mask_kwargs,
                 )
-            else:
-                mask_fn_none = None
+                if const_expr(self.use_block_sparsity):
+                    #  Full blocks dont need mask_mod
+                    mask_fn_none = partial(
+                        mask.apply_mask_sm100,
+                        mask_mod=None,
+                        fastdiv_mods=fastdiv_mods,
+                        head_divmod=head_divmod,
+                        **shared_mask_kwargs,
+                    )
+                else:
+                    mask_fn_none = None
 
             # --- Compute sm_scale factor ---
 
@@ -3373,6 +3726,91 @@ class FFAFwdSm100:
                             + self.q_stage * self.m_block_size
                         ] = softmax.row_max[0]
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
+            elif const_expr(self.range_merge):
+                pair_beg = Int32(mCuBatches[batch_idx])
+                pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
+                for pj in cutlass.range(pair_cnt, unroll=1):
+                    pair_row = pair_beg + pj
+                    seqlen_pair = SeqlenInfoCls(batch_idx, k_batch_idx=pair_row)
+                    attn_type_p = Int32(mMaskTypes[pair_row])
+                    lo_p, hi_p = block_info.get_n_block_min_max_per_range(
+                        seqlen_pair, m_block, attn_type_p, split_idx, num_splits
+                    )
+                    mask_p = AttentionMaskCls(seqlen_pair)
+                    mask_fn_p = partial(
+                        mask_p.apply_mask_sm100_per_range,
+                        m_block=mask_m_block,
+                        thr_mma=thr_mma_qk,
+                        thr_tmem_load=thr_tmem_load,
+                        attn_type=attn_type_p,
+                    )
+                    (
+                        mma_si_consumer_phase,
+                        sm_stats_producer_phase,
+                        s0_s1_sequence_phase,
+                    ) = softmax_step(
+                        mma_si_consumer_phase,
+                        sm_stats_producer_phase,
+                        s0_s1_sequence_phase,
+                        n_block=hi_p - 1,
+                        is_first=False,
+                        mask_fn=partial(mask_fn_p, mask_seqlen=True),
+                    )
+                    nb = hi_p - 1
+                    nmin_c = block_info.get_n_block_min_causal_local_mask_per_range(
+                        seqlen_pair, m_block, lo_p, nb, attn_type_p
+                    )
+                    for n_tile in cutlass.range(nb - nmin_c, unroll=1):
+                        (
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                        ) = softmax_step(
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                            n_block=nb - 1 - n_tile,
+                            mask_fn=partial(mask_fn_p, mask_seqlen=False),
+                        )
+                    nb = cutlass.min(nb, nmin_c)
+                    nmin_b = block_info.get_n_block_min_before_local_mask_per_range(
+                        seqlen_pair, m_block, lo_p, nb, attn_type_p
+                    )
+                    for n_tile in cutlass.range(nb - nmin_b, unroll=1):
+                        (
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                        ) = softmax_step(
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                            n_block=nb - n_tile - 1,
+                        )
+                    nb = cutlass.min(nb, nmin_b)
+                    for n_tile in cutlass.range(0, nb - lo_p, unroll=1):
+                        (
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                        ) = softmax_step(
+                            mma_si_consumer_phase,
+                            sm_stats_producer_phase,
+                            s0_s1_sequence_phase,
+                            n_block=nb - 1 - n_tile,
+                            mask_fn=partial(mask_fn_p, mask_seqlen=False),
+                        )
+
+                sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
+                if const_expr(mLSE is not None or learnable_sink is not None):
+                    sScale[
+                        tidx
+                        + stage * self.m_block_size
+                        + self.q_stage * self.m_block_size
+                    ] = softmax.row_max[0]
+                sm_stats_barrier.arrive_w_index(
+                    index=stage * num_softmax_warps + warp_idx
+                )
             else:
                 if const_expr(not self.is_split_kv) or tile_block_count > Int32(0):
                     # --- Prologue: S0/S1(0) ---
@@ -3393,7 +3831,35 @@ class FFAFwdSm100:
                     n_block_max -= 1
 
                     # --- Mainloop-1: S0/S1 with causal masking ---
-                    if const_expr(self.is_causal or self.is_local):
+                    if const_expr(self.use_per_range_mask):
+                        n_block_min_causal_local_mask = (
+                            block_info.get_n_block_min_causal_local_mask_per_range(
+                                seqlen_info,
+                                m_block,
+                                n_block_min,
+                                n_block_max,
+                                attn_type,
+                            )
+                        )
+                        for n_tile in cutlass.range(
+                            n_block_max - n_block_min_causal_local_mask, unroll=1
+                        ):
+                            n_block = n_block_max - 1 - n_tile
+                            (
+                                mma_si_consumer_phase,
+                                sm_stats_producer_phase,
+                                s0_s1_sequence_phase,
+                            ) = softmax_step(
+                                mma_si_consumer_phase,
+                                sm_stats_producer_phase,
+                                s0_s1_sequence_phase,
+                                n_block,
+                                mask_fn=partial(mask_fn, mask_seqlen=False),
+                            )
+                        n_block_max = cutlass.min(
+                            n_block_max, n_block_min_causal_local_mask
+                        )
+                    elif const_expr(self.is_static_causal or self.is_local):
                         n_block_min_causal_local_mask = (
                             block_info.get_n_block_min_causal_local_mask(
                                 seqlen_info, m_block, n_block_min
@@ -3420,11 +3886,22 @@ class FFAFwdSm100:
 
                     # --- Mainloop-2: S0/S1 w/o masking ---
                     # NOTE: The remaining iterations have no masking, but may still need mask_mod
-                    n_block_min_before_local_mask = (
-                        block_info.get_n_block_min_before_local_mask(
-                            seqlen_info, m_block, n_block_min
+                    if const_expr(self.use_per_range_mask):
+                        n_block_min_before_local_mask = (
+                            block_info.get_n_block_min_before_local_mask_per_range(
+                                seqlen_info,
+                                m_block,
+                                n_block_min,
+                                n_block_max,
+                                attn_type,
+                            )
                         )
-                    )
+                    else:
+                        n_block_min_before_local_mask = (
+                            block_info.get_n_block_min_before_local_mask(
+                                seqlen_info, m_block, n_block_min
+                            )
+                        )
                     for n_tile in cutlass.range(
                         n_block_max - n_block_min_before_local_mask, unroll=1
                     ):
@@ -3455,9 +3932,10 @@ class FFAFwdSm100:
                                 n_block=n_block,
                             )
 
-                    # --- Mainloop-3: S0/S1 with local masking on the left ---
+                    # --- Mainloop-3: S0/S1 with masking on the left ---
                     if const_expr(  # TODO: review the logics
-                        self.is_local and block_info.window_size_left is not None
+                        self.use_per_range_mask
+                        or (self.is_local and block_info.window_size_left is not None)
                     ):
                         n_block_max = cutlass.min(
                             n_block_max, n_block_min_before_local_mask
@@ -3763,6 +4241,9 @@ class FFAFwdSm100:
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
+        mRangeLocks: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         num_corr_warps = len(self.correction_warp_ids)
@@ -3800,9 +4281,27 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen_info, m_block, split_idx, num_splits
-            )
+            if const_expr(self.range_merge):
+                n_block_min = Int32(0)
+                n_block_max = self._fwd_merge_n_iters(
+                    SeqlenInfoCls,
+                    block_info,
+                    mMaskTypes,
+                    mCuBatches,
+                    batch_idx,
+                    m_block,
+                    split_idx,
+                    num_splits,
+                )
+            elif const_expr(self.use_per_range_mask):
+                attn_type = Int32(mMaskTypes[batch_idx])
+                n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                    seqlen_info, m_block, attn_type, split_idx, num_splits
+                )
+            else:
+                n_block_min, n_block_max = block_info.get_n_block_min_max(
+                    seqlen_info, m_block, split_idx, num_splits
+                )
 
             # --- Compute sm_scale factor ---
 
@@ -3823,17 +4322,54 @@ class FFAFwdSm100:
 
             # --- Make gO of current tile ---
 
-            if const_expr(self.is_split_kv):
-                mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
-                    None, None, head_idx, split_idx
-                ]
-            else:
-                mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
-                    None, None, head_idx
-                ]
+            mO_cur = None
+            if const_expr(not self.corr_epi_tma_store):
+                if const_expr(self.is_split_kv):
+                    mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
+                        None, None, head_idx, split_idx
+                    ]
+                else:
+                    mO_cur = seqlen_info.offset_batch_Q(mO, batch_idx, dim=3)[
+                        None, None, head_idx
+                    ]
             gO = None
-            if const_expr(self.use_tma_O or not self.pack_gqa):
-                # gO_2CTA: (tileQ128*CTA2,tileHD128,stageQ):(1@1,1@0,256@1)
+            gO_tma = None
+            if const_expr(self.corr_epi_tma_store):
+                # The O descriptor's row mode spans total_q rows from a base
+                # shifted back by total_q rows, and its fourth mode re-adds
+                # rows at unit row stride. Placing the tile at row
+                # total_q - h0 (h0 = rows left in this range from the tile
+                # start) with fourth-mode offset offset_q + len_q addresses
+                # row offset_q + tile_start; tile rows past the range end
+                # exceed the row extent and are clipped by TMA.
+                len_q = seqlen_info.seqlen_q
+                h0 = len_q - m_block * (self.mma_tiler_pv[0] * self.q_stage)
+                blk = cute.domain_offset(
+                    (
+                        mO.shape[0] - h0,
+                        0,
+                        head_idx,
+                        seqlen_info.offset_q + len_q,
+                    ),
+                    mO,
+                )
+                # The TMA partition below takes a 2D (rows, hd) tile, so the
+                # head and shift modes are fixed at the offset origin.
+                blk_2d = blk[(None, None, 0, 0)]
+                tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
+                    (self.mma_tiler_pv[0] * self.q_stage),
+                    self.head_dim_v_padded,
+                )
+                gO_tma = cute.local_tile(blk_2d, tiler_gO, (0, 0))
+                gO_tma = layout_utils.select(
+                    cute.flat_divide(gO_tma, (self.mma_tiler_pv[0],)), mode=[0, 2, 1]
+                )
+                # Slice current CTA of gO: (tileQ128,tileHD128,stageQ)
+                gO_tma = cute.flat_divide(
+                    gO_tma, (self.mma_tiler_pv[0] // self.cta_group_size,)
+                )[None, mma_tile_coord_v, None, None]
+            elif const_expr(self.use_tma_O or not self.pack_gqa):
+                # gO_2CTA: (tileQ128*CTA2*stageQ,tileHD128,stageQ):(1@1,1@0,256@1)
                 tiler_gO = (  # (tileQ128*CTA2*stageQ,tileHD128)
                     (self.mma_tiler_pv[0] * self.q_stage),
                     self.head_dim_v_padded,
@@ -3847,6 +4383,14 @@ class FFAFwdSm100:
                 gO = cute.flat_divide(
                     gO, (self.mma_tiler_pv[0] // self.cta_group_size,)
                 )[None, mma_tile_coord_v, None, None]
+
+            # Make gLSE view for the atomic merge
+            mLSE_cur_atomic = None
+            if const_expr(not self.disable_fwd_atomic_reduction):
+                assert mLSE is not None
+                mLSE_cur_atomic = cute.domain_offset(
+                    (seqlen_info.offset_q,), mLSE[None, head_idx]
+                )
 
             # --- Init softmax stats ---
 
@@ -4097,6 +4641,96 @@ class FFAFwdSm100:
                     gO_stage = (
                         gO[None, None, stage] if const_expr(gO is not None) else None
                     )
+                    gO_tma_stage = (
+                        gO_tma[None, None, stage]
+                        if const_expr(gO_tma is not None)
+                        else None
+                    )
+
+                    # Atomic reduction: lock the physical blocks, merge LSE.
+                    # correction_epilogue partitions O so that thread t owns
+                    # row t of this stage tile, so the LSE merge and its
+                    # coefficients are thread-private per row.
+                    o_scale = rowsum_norm_scale
+                    coeff_prev = Float32(0.0)
+                    has_prev = False
+                    lock_offset = Int32(0)
+                    if const_expr(not self.disable_fwd_atomic_reduction):
+                        assert mRangeLocks is not None
+                        m_tile_idx = (
+                            m_block * self.q_stage + stage
+                        ) * self.cta_group_size + mma_tile_coord_v
+                        LN2 = math.log(2.0)
+                        LOG2_E = math.log2(math.e)
+                        lse_cur = (
+                            (
+                                row_max * softmax_scale_log2_eff
+                                + (cute.math.log2(row_sum, fastmath=True) - max_offset)
+                            )
+                            * LN2
+                            if not acc_O_mn_row_is_zero_or_nan
+                            else -Float32.inf
+                        )
+                        row_ok = (
+                            tidx < seqlen_info.seqlen_q - m_tile_idx * self.m_block_size
+                        )
+
+                        lock_offset = (
+                            seqlen_info.offset_q + m_tile_idx * self.m_block_size
+                        )
+                        # Skip lock/release for phantom stages (no valid rows).
+                        tile_has_rows = (
+                            seqlen_info.seqlen_q > m_tile_idx * self.m_block_size
+                        )
+                        if tile_has_rows:
+                            if tidx == 0:
+                                self._acquire_range_locks(
+                                    mRangeLocks, head_idx, lock_offset
+                                )
+                            cute.arch.barrier(
+                                barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                                number_of_threads=len(self.correction_warp_ids)
+                                * cute.arch.WARP_SIZE,
+                            )
+
+                        gLSE_stage = cute.local_tile(
+                            mLSE_cur_atomic, (self.m_block_size,), (m_tile_idx,)
+                        )
+                        lse_prev = -Float32.inf
+                        if row_ok:
+                            lse_prev = Float32(gLSE_stage[tidx])
+                        has_prev = lse_prev != -Float32.inf
+
+                        lse_final = lse_cur
+                        if has_prev:
+                            lse_final = lse_prev
+                            if lse_cur != -Float32.inf:
+                                lse_hi = cutlass.max(lse_prev, lse_cur)
+                                lse_lo = cutlass.min(lse_prev, lse_cur)
+                                lse_ratio = cute.math.exp2(
+                                    (lse_lo - lse_hi) * LOG2_E, fastmath=True
+                                )
+                                # log(exp(lse_prev) + exp(lse_cur))
+                                lse_final = (
+                                    lse_hi
+                                    + cute.math.log2(
+                                        Float32(1.0 + lse_ratio), fastmath=True
+                                    )
+                                    * LN2
+                                )
+                        if row_ok:
+                            gLSE_stage[tidx] = lse_final
+                        if has_prev:
+                            coeff_prev = cute.math.exp2(
+                                (lse_prev - lse_final) * LOG2_E, fastmath=True
+                            )
+                        coeff_cur = Float32(0.0)
+                        if lse_cur != -Float32.inf:
+                            coeff_cur = cute.math.exp2(
+                                (lse_cur - lse_final) * LOG2_E, fastmath=True
+                            )
+                        o_scale = rowsum_norm_scale * coeff_cur
+
                     self.correction_epilogue(
                         thr_mma_pv,
                         tOtO[None, None, None, stage],
@@ -4104,13 +4738,31 @@ class FFAFwdSm100:
                         stage,
                         m_block,
                         seqlen_info.seqlen_q,
-                        rowsum_norm_scale,
+                        o_scale,
                         sO[None, None, stage],
                         mO_cur,
                         gO_stage,
                         gmem_tiled_copy_O,
+                        coeff_prev=coeff_prev,
+                        has_prev=has_prev,
+                        gO_tma=gO_tma_stage,
+                        tma_atom_O=tma_atom_O,
                         is_print_thread_and_tile=is_print_thread_and_tile,
                     )
+
+                    if const_expr(not self.disable_fwd_atomic_reduction):
+                        # Ensure O/LSE stores are GPU-visible before releasing lock.
+                        if tile_has_rows:
+                            cute.arch.fence_acq_rel_gpu()
+                            cute.arch.barrier(
+                                barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                                number_of_threads=len(self.correction_warp_ids)
+                                * cute.arch.WARP_SIZE,
+                            )
+                            if tidx == 0:
+                                self._release_range_locks(
+                                    mRangeLocks, head_idx, lock_offset
+                                )
 
                     # Signal for the next work tile that tO are already read,
                     # so mma warp can write to them
@@ -4171,8 +4823,9 @@ class FFAFwdSm100:
                     )
 
             # --- Compute LSE and write to gmem ---
+            # (atomic mode already wrote the merged LSE under the range lock)
 
-            if const_expr(mLSE is not None):
+            if const_expr(mLSE is not None and self.disable_fwd_atomic_reduction):
                 if const_expr(not seqlen_info.has_cu_seqlens_q):
                     if const_expr(self.is_split_kv):
                         mLSE_cur = mLSE[None, head_idx, batch_idx, split_idx]
@@ -4240,12 +4893,65 @@ class FFAFwdSm100:
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
 
+        if const_expr(self.corr_epi_tma_store):
+            # Drain leftover TMA smem reads before the CTA retires.
+            cute.arch.cp_async_bulk_wait_group(0, read=True)
+
         # This is equivalent to pipeline_o_epi.consumer_tail
         if const_expr(not self.use_correction_warps_for_epi):
             assert pipeline_o_epi is not None  # mypy
             pipeline_o_epi.producer_acquire_w_index_phase(
                 self.q_stage - 1, corr_epi_producer_phase
             )
+
+    @cute.jit
+    def _range_lock_ptrs(
+        self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32
+    ):
+        """Lock pointers for the one or two physical blocks the row range straddles.
+
+        Lower block first so all writers share one acquire order.
+        """
+        block_1 = row_offset // self.m_block_size
+        block_2 = (row_offset + self.m_block_size - 1) // self.m_block_size
+        ptr_1 = cutedsl_utils.elem_pointer(mRangeLocks, (block_1, head_idx))
+        ptr_2 = cutedsl_utils.elem_pointer(mRangeLocks, (block_2, head_idx))
+        return ptr_1, ptr_2, block_1 != block_2
+
+    @cute.jit
+    def _acquire_range_locks(
+        self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32
+    ):
+        ptr_1, ptr_2, two_locks = self._range_lock_ptrs(
+            mRangeLocks, head_idx, row_offset
+        )
+        # Loop-carried spin state: the CAS must re-execute every iteration.
+        acquired = cute.arch.atomic_cas(
+            ptr_1, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+        )
+        while acquired != 0:
+            acquired = cute.arch.atomic_cas(
+                ptr_1, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+            )
+        if two_locks:
+            acquired_2 = cute.arch.atomic_cas(
+                ptr_2, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+            )
+            while acquired_2 != 0:
+                acquired_2 = cute.arch.atomic_cas(
+                    ptr_2, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+                )
+
+    @cute.jit
+    def _release_range_locks(
+        self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32
+    ):
+        ptr_1, ptr_2, two_locks = self._range_lock_ptrs(
+            mRangeLocks, head_idx, row_offset
+        )
+        if two_locks:
+            cute.arch.atomic_exch(ptr_2, Int32(0), sem="release", scope="gpu")
+        cute.arch.atomic_exch(ptr_1, Int32(0), sem="release", scope="gpu")
 
     @cute.jit
     def correction_rescale(
@@ -4414,6 +5120,10 @@ class FFAFwdSm100:
         mO_cur: Optional[cute.Tensor] = None,
         gO: Optional[cute.Tensor] = None,
         gmem_tiled_copy_O: Optional[cute.TiledCopy] = None,
+        coeff_prev: Float32 = 0.0,
+        has_prev: bool = False,
+        gO_tma: Optional[cute.Tensor] = None,
+        tma_atom_O: Optional[cute.CopyAtom] = None,
         is_print_thread_and_tile: bool = False,
     ):
         """Apply final scaling and transformation to attention output before writing to global memory.
@@ -4438,6 +5148,14 @@ class FFAFwdSm100:
         :param sO: Shared memory tensor for the final output
         :type sO: cute.Tensor
         """
+
+        if const_expr(self.corr_epi_tma_store):
+            # Drain previous tile's same-stage TMA smem read.
+            cute.arch.cp_async_bulk_wait_group(self.q_stage - 1, read=True)
+            cute.arch.barrier(
+                barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                number_of_threads=len(self.epilogue_warp_ids) * cute.arch.WARP_SIZE,
+            )
 
         corr_tile_hd = 8 * 32 // self.o_dtype.width  # 32B per tile => corrHD=16
         num_corr_tiles_hd = (
@@ -4609,6 +5327,23 @@ class FFAFwdSm100:
                     (tOrO_i[j], tOrO_i[j + 1]), (scale, scale)
                 )
 
+            if const_expr(not self.disable_fwd_atomic_reduction):
+                # O_final = coeff_cur * O_cur + coeff_prev * O_prev; coeff_cur
+                # is already folded into `scale`, so only the prev term is added.
+                if has_prev:
+                    assert gO is not None
+                    gO_chunk = cute.local_tile(gO[tidx, None], (corr_tile_hd,), (i,))
+                    tOrPrevO_i = cute.make_rmem_tensor(
+                        (corr_tile_hd,), self.pv_acc_dtype
+                    )
+                    if const_expr(self.o_dtype == Float32):
+                        cute.autovec_copy(gO_chunk, tOrPrevO_i)
+                    else:
+                        for j in cutlass.range(corr_tile_hd, unroll_full=True):
+                            tOrPrevO_i[j] = Float32(gO_chunk[j])
+                    for j in cutlass.range(cute.size(tOrO_i), unroll_full=True):
+                        tOrO_i[j] = tOrO_i[j] + coeff_prev * tOrPrevO_i[j]
+
             # R2S copy rO(i) -> sO(i) with dtype downcast
             copy_utils.cvt_copy(tiled_smem_store, tOrO_i, tOsO_r2s_i)
 
@@ -4619,8 +5354,11 @@ class FFAFwdSm100:
         # --- S2G copy O to gemm (if needed) ---
 
         if const_expr(self.use_correction_warps_for_epi):
-            assert not self.use_tma_O
-            assert gmem_tiled_copy_O is not None
+            if const_expr(self.corr_epi_tma_store):
+                assert tma_atom_O is not None and gO_tma is not None
+            else:
+                assert not self.use_tma_O
+                assert gmem_tiled_copy_O is not None
 
             # Sync this correction warp group to ensure all R2S stores done
             cute.arch.barrier(
@@ -4628,23 +5366,32 @@ class FFAFwdSm100:
                 number_of_threads=len(self.epilogue_warp_ids) * cute.arch.WARP_SIZE,
             )
 
-            # S2G copy sO -> gO using non-TMA by:
-            #   1. S2R copy sO -> rO
-            #   2. R2G copy rO -> gO with predicate for OOB guard
-            mma_tile_coord_v = thr_mma.thr_idx
-            m_tile_idx = (
-                m_block * self.q_stage + stage
-            ) * self.cta_group_size + mma_tile_coord_v
-            self._store_O_to_gmem(
-                sO,
-                gO,
-                mO_cur,
-                gmem_tiled_copy_O,
-                tidx,
-                seqlen_q,
-                m_tile_idx,
-                is_print_thread_and_tile=(stage == 0 and is_print_thread_and_tile),
-            )
+            if const_expr(self.corr_epi_tma_store):
+                tdOsO_tma, tdOgO_tma = cpasync.tma_partition(
+                    tma_atom_O,
+                    0,  # no multicast
+                    cute.make_layout(1),
+                    cute.group_modes(sO, 0, 2),
+                    cute.group_modes(gO_tma, 0, 2),
+                )
+                if tidx < cute.arch.WARP_SIZE:
+                    cute.copy(tma_atom_O, tdOsO_tma, tdOgO_tma)
+                    cute.arch.cp_async_bulk_commit_group()
+            else:
+                mma_tile_coord_v = thr_mma.thr_idx
+                m_tile_idx = (
+                    m_block * self.q_stage + stage
+                ) * self.cta_group_size + mma_tile_coord_v
+                self._store_O_to_gmem(
+                    sO,
+                    gO,
+                    mO_cur,
+                    gmem_tiled_copy_O,
+                    tidx,
+                    seqlen_q,
+                    m_tile_idx,
+                    is_print_thread_and_tile=(stage == 0 and is_print_thread_and_tile),
+                )
 
     @cute.jit
     def _store_O_to_gmem(
@@ -4728,6 +5475,8 @@ class FFAFwdSm100:
         num_splits: int,
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         tile_scheduler: TileSchedulerProtocol,
+        mMaskTypes: Optional[cute.Tensor] = None,
+        mCuBatches: Optional[cute.Tensor] = None,
         mma_tile_coord_v: Int32 = 0,
         is_print_block: bool = False,
     ):
@@ -4751,9 +5500,18 @@ class FFAFwdSm100:
 
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             seqlen_info = SeqlenInfoCls(batch_idx)
-            n_block_min, n_block_max = block_info.get_n_block_min_max(
-                seqlen_info, m_block, split_idx, num_splits
-            )
+            if const_expr(self.range_merge):
+                n_block_min = Int32(0)
+                n_block_max = Int32(0)
+            elif const_expr(self.use_per_range_mask):
+                attn_type = Int32(mMaskTypes[batch_idx])
+                n_block_min, n_block_max = block_info.get_n_block_min_max_per_range(
+                    seqlen_info, m_block, attn_type, split_idx, num_splits
+                )
+            else:
+                n_block_min, n_block_max = block_info.get_n_block_min_max(
+                    seqlen_info, m_block, split_idx, num_splits
+                )
 
             # --- Debug print ---
 

@@ -111,7 +111,7 @@ class TestFfaSimple(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600
+        return 3600
 
     @property
     def world_size(self) -> int:
@@ -378,7 +378,11 @@ class TestFfaSimple(DistTestBase):
                 mask_types=mask_types,
                 max_seqlen_q=seqlen,
                 max_seqlen_k=seqlen,
+                # The atomic fwd merge is SM100/SM110-only; the SM80 varlen
+                # path collapses ranges to cu_seqlens with direct store.
+                disable_fwd_atomic_reduction=force_sm80,
             )
+            out_v = out_v.to(dtype)
             g = torch.randn_like(out_v)
             dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
 
@@ -399,6 +403,170 @@ class TestFfaSimple(DistTestBase):
             attn_type_map=[mask_types] * batch_size,
             total_seqlen_q=batch_size * seqlen,
             total_seqlen_k=batch_size * seqlen,
+            dtype=dtype,
+            test_case=test_case,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Overlapping q_ranges: atomic merge with dtype-O (default) vs fp32-O
+    # ─────────────────────────────────────────────────────────────────────
+
+    @with_run_in_mp
+    @parameterize("out_dtype", [None, torch.float32])
+    def test_overlap_atomic_out_dtype(self, out_dtype):
+        """Overlapping q_ranges atomic merge: dtype-O default vs fp32 lossless."""
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            return
+
+        device = self.device
+        dtype = torch.bfloat16
+        d, nheads, total = 128, 4, 768
+        seed = self.seed + d + (0 if out_dtype is None else 1)
+        torch.random.manual_seed(seed)
+
+        q = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+        k = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+        v = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+
+        # q[256:512] is covered by both relations -> exercised by the atomic
+        # merge. k ranges are disjoint across relations (2D-disjoint contract:
+        # the merge would otherwise double-count the shared k rows).
+        q_ranges_t = torch.tensor(
+            [[0, 512], [256, 768]], device=device, dtype=torch.int32
+        )
+        k_ranges_t = torch.tensor(
+            [[0, 512], [512, 768]], device=device, dtype=torch.int32
+        )
+        test_case = f"[RANK {self.rank}][test_overlap_atomic_out_dtype][{out_dtype=}]"
+
+        out, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_types=MT_MAP.full,
+            max_seqlen_q=total,
+            max_seqlen_k=total,
+            out_dtype=out_dtype,
+        )
+        g = torch.randn_like(out)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), g)
+
+        self.assert_close_to_torch_ref(
+            q_thd=q.detach(),
+            k_thd=k.detach(),
+            v_thd=v.detach(),
+            do_thd=g,
+            out_thd=out.to(dtype),
+            dq_thd=dq,
+            dk_thd=dk,
+            dv_thd=dv,
+            q_ranges=AttnRanges.from_ranges([[0, 512], [256, 768]]),
+            k_ranges=AttnRanges.from_ranges([[0, 512], [512, 768]]),
+            attn_type_map=[MT_MAP.full, MT_MAP.full],
+            total_seqlen_q=total,
+            total_seqlen_k=total,
+            dtype=dtype,
+            test_case=test_case,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Varlen opt-flag contract
+    # ─────────────────────────────────────────────────────────────────────
+
+    @with_run_in_mp
+    @parameterize("mha_type", ["mha", "gqa"])
+    @parameterize(
+        "mask_types",
+        [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal, "mixed"],
+    )
+    def test_varlen_opt_flags(self, mask_types, mha_type):
+        """Ranges opt flags: direct store + coverage + dense dqacc/dkvacc.
+
+        full / causal go in as the scalar (static kernel); inv_causal /
+        bi_causal and "mixed" (all four types cycling over the ranges) go in
+        as the int32[R] tensor (per-range kernel, 2-CTA at head_dim 128).
+        """
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            return
+
+        device = self.device
+        dtype = torch.bfloat16
+        # seqlen_q < seqlen_k keeps bi_causal a band instead of the diagonal,
+        # where P == 1 exactly and the reference dq vanishes.
+        seqlen_q, seqlen_k, batch_size, nheads, d = 256, 512, 8, 6, 128
+        nheads_kv = {"mha": nheads, "gqa": 3}[mha_type]
+        attn_type_map: list[int] = (
+            [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal]
+            * (batch_size // 4)
+            if mask_types == "mixed"
+            else [mask_types] * batch_size
+        )
+        seed = self.seed + seqlen_k + d + sum(attn_type_map) * 7
+        torch.random.manual_seed(seed)
+        random.seed(seed)
+
+        q_v = torch.randn(
+            batch_size * seqlen_q, nheads, d, device=device, dtype=dtype
+        ).requires_grad_()
+        k_v = torch.randn(
+            batch_size * seqlen_k, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+        v_v = torch.randn(
+            batch_size * seqlen_k, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+
+        def partition(seqlen: int) -> torch.Tensor:
+            cu = torch.arange(
+                0, (batch_size + 1) * seqlen, seqlen, device=device, dtype=torch.int32
+            )
+            return torch.stack([cu[:-1], cu[1:]], dim=1)
+
+        q_ranges_t = partition(seqlen_q)
+        k_ranges_t = partition(seqlen_k)
+        mask_types_arg: int | torch.Tensor = (
+            mask_types
+            if mask_types in (MT_MAP.full, MT_MAP.causal)
+            else torch.tensor(attn_type_map, device=device, dtype=torch.int32)
+        )
+
+        test_case = (
+            f"[RANK {self.rank}][test_varlen_opt_flags][{mask_types=}][{mha_type=}]"
+        )
+
+        out_v, _ = flex_flash_attn_func(
+            q_v,
+            k_v,
+            v_v,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_types=mask_types_arg,
+            max_seqlen_q=seqlen_q,
+            max_seqlen_k=seqlen_k,
+            disable_fwd_atomic_reduction=True,
+            # direct-store disjoint dKV is MHA-only (unique-writer contract)
+            disable_bwd_dkv_atomic_reduction=(mha_type == "mha"),
+        )
+        g = torch.randn_like(out_v)
+        dq_v, dk_v, dv_v = torch.autograd.grad(out_v, (q_v, k_v, v_v), g)
+
+        self.assert_close_to_torch_ref(
+            q_thd=q_v.detach(),
+            k_thd=k_v.detach(),
+            v_thd=v_v.detach(),
+            do_thd=g,
+            out_thd=out_v,
+            dq_thd=dq_v,
+            dk_thd=dk_v,
+            dv_thd=dv_v,
+            q_ranges=AttnRanges.from_ranges(q_ranges_t.tolist()),
+            k_ranges=AttnRanges.from_ranges(k_ranges_t.tolist()),
+            attn_type_map=attn_type_map,
+            total_seqlen_q=batch_size * seqlen_q,
+            total_seqlen_k=batch_size * seqlen_k,
             dtype=dtype,
             test_case=test_case,
         )

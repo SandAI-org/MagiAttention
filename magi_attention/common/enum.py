@@ -144,6 +144,7 @@ class MagiAttentionKernelBackend(Enum):
     SDPA = "sdpa"
     SDPA_OL = "sdpa_ol"
     FA4 = "fa4"
+    CUTEDSL = "cutedsl"
 
 
 class MagiAttentionPrecision(Enum):

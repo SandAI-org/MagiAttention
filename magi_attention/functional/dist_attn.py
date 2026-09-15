@@ -37,18 +37,17 @@ from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import is_same_process_group, nvtx
 from magi_attention.utils.dtype import max_fp_dtype
 
+from .cutedsl_ffa import cutedsl_bwd, cutedsl_fwd
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
 from .sdpa_online import sdpa_online_bwd, sdpa_online_fwd
 from .utils import calc_lse_sink_compiled, correct_attn_out_lse, sink_bwd_compiled
 
-is_magi_attn_ext_installed = False
 try:
     from magi_attention.magi_attn_ext import KernelBarrier
-
-    is_magi_attn_ext_installed = True
 except ImportError:
+    is_magi_attn_ext_installed = False
 
     class KernelBarrier:  # type: ignore[no-redef]
         def __init__(self, target: SupportsInt) -> None:
@@ -67,6 +66,9 @@ except ImportError:
 
         def synchronize(self) -> None:
             ...
+
+else:
+    is_magi_attn_ext_installed = True
 
 
 logger = getLogger(__name__)
@@ -102,6 +104,10 @@ _BACKEND_SUPPORTED_PRECISIONS: dict[
         MagiAttentionPrecision.FP16,
         MagiAttentionPrecision.FP32,
         MagiAttentionPrecision.FP64,
+    },
+    MagiAttentionKernelBackend.CUTEDSL: {
+        MagiAttentionPrecision.BF16,
+        MagiAttentionPrecision.FP16,
     },
 }
 
@@ -1242,9 +1248,10 @@ class DistAttnRuntime:
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
         _backend = self.kernel_backend
         if return_max_logits:
-            assert (
-                _backend != MagiAttentionKernelBackend.FA4
-            ), "FA4 backend does not support return max logits"
+            assert _backend not in (
+                MagiAttentionKernelBackend.FA4,
+                MagiAttentionKernelBackend.CUTEDSL,
+            ), "FA4/CUTEDSL backends do not support return max logits"
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
             f"{attn_arg.total_area=} | "
@@ -1295,6 +1302,19 @@ class DistAttnRuntime:
                     softmax_scale=softmax_scale,
                     softcap=softcap,
                     sink_layout="sh",
+                )
+                meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
+            elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+                assert (
+                    sink is None or not is_host_stage
+                ), "CUTEDSL backend does not support sink for now"
+                partial_out, partial_lse = cutedsl_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
                 )
                 meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             else:
@@ -1408,6 +1428,25 @@ class DistAttnRuntime:
                     sink_layout="sh",
                     deterministic=self.deterministic,
                 )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+                assert (
+                    sink is None or not is_host_stage
+                ), "CUTEDSL backend does not support sink for now"
+                partial_dq, partial_dk, partial_dv = cutedsl_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                )
+                partial_dsink = None
                 partial_dkv = self._maybe_concat(
                     partial_dk, partial_dv, need_concat=self.concat_dkv
                 )

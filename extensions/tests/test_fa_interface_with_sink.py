@@ -39,7 +39,6 @@ from magi_attention.testing.precision import (
 from magi_attention.utils import make_attn_mask_from_ffa_args
 
 # isort: split
-is_fa2_installed = False
 try:
     from magi_attn_extensions.fa2_interface_with_sink import (
         fa2_func_with_sink,
@@ -49,33 +48,31 @@ try:
         fa2_varlen_kvpacked_func_with_sink,
         fa2_varlen_qkvpacked_func_with_sink,
     )
-
-    is_fa2_installed = True
 except ImportError:
-    pass
+    is_fa2_installed = False
+else:
+    is_fa2_installed = True
 
-is_fa3_installed = False
 try:
     from magi_attn_extensions.fa3_interface_with_sink import (
         fa3_func_with_sink,
         fa3_qkvpacked_func_with_sink,
         fa3_varlen_func_with_sink,
     )
-
-    is_fa3_installed = True
 except ImportError:
-    pass
+    is_fa3_installed = False
+else:
+    is_fa3_installed = True
 
-is_fa4_installed = False
 try:
     from magi_attn_extensions.fa4_interface_with_sink import (
         fa4_func_with_sink,
         fa4_varlen_func_with_sink,
     )
-
-    is_fa4_installed = True
 except ImportError:
-    pass
+    is_fa4_installed = False
+else:
+    is_fa4_installed = True
 
 
 DEVICE_CAPABILITY = torch.cuda.get_device_capability()[0]

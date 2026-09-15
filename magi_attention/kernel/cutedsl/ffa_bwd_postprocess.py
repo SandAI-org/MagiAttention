@@ -28,6 +28,7 @@ import cutlass.cute as cute
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
 import cutlass.utils.hopper_helpers as sm90_utils_basic
+import torch
 from cutlass import Float32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp, warpgroup
 from cutlass.utils import LayoutEnum
@@ -60,6 +61,7 @@ class FFABwdPostProcess:
         dQ_swapAB: bool = False,
         use_2cta_instrs: bool = False,
         cluster_size: int = 1,  # for varlen offsets
+        use_dense_dqacc_for_ranges: bool = False,
     ):
         """
         :param head_dim: head dimension
@@ -87,6 +89,7 @@ class FFABwdPostProcess:
         self.dQ_swapAB = dQ_swapAB
         self.use_2cta_instrs = use_2cta_instrs and arch // 10 == 10 and head_dim != 64
         self.cluster_size = cluster_size
+        self.use_dense_dqacc_for_ranges = use_dense_dqacc_for_ranges
 
     def _check_tile(self) -> None:
         """Validate the kernel config (dtype, head dim, threads)."""
@@ -240,6 +243,7 @@ class FFABwdPostProcess:
         scale: cutlass.Float32,
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
+        mQRanges: Optional[cute.Tensor],
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -263,7 +267,13 @@ class FFABwdPostProcess:
             cute.size_in_bytes(self.dtype, self.sdQ_layout),
         )
 
-        if const_expr(mCuSeqlensQ is not None):
+        if const_expr(mQRanges is not None):
+            assert mQRanges is not None  # mypy
+            TileScheduler = SingleTileVarlenScheduler
+            num_head = mdQ.shape[1]
+            num_batch = mQRanges.shape[0]
+            num_block = cute.ceil_div(mdQ.shape[0], self.tile_m)
+        elif const_expr(mCuSeqlensQ is not None):
             assert mCuSeqlensQ is not None  # mypy
             TileScheduler = SingleTileVarlenScheduler
             num_head = mdQ.shape[1]
@@ -287,6 +297,7 @@ class FFABwdPostProcess:
             tile_shape_mn=(self.tile_m, 1),
             mCuSeqlensQ=mCuSeqlensQ,
             mSeqUsedQ=mSeqUsedQ,
+            mQRanges=mQRanges,
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
@@ -298,6 +309,7 @@ class FFABwdPostProcess:
             mdQ,
             mCuSeqlensQ,
             mSeqUsedQ,
+            mQRanges,
             scale,
             self.tiled_mma,
             self.dQ_swapAB,
@@ -322,6 +334,7 @@ class FFABwdPostProcess:
         mdQ: cute.Tensor,
         mCuSeqlensQ: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
+        mQRanges: Optional[cute.Tensor],
         scale: cutlass.Float32,
         tiled_mma: cute.TiledMma,
         dQ_swapAB: cutlass.Constexpr,
@@ -376,7 +389,9 @@ class FFABwdPostProcess:
                 mCuSeqlensK=None,
                 mSeqUsedQ=mSeqUsedQ,
                 mSeqUsedK=None,
+                mQRanges=mQRanges,
                 tile_m=self.tile_m * self.cluster_size,
+                use_dense_dqacc_for_ranges=self.use_dense_dqacc_for_ranges,
             )
             if const_expr(not seqlen.has_cu_seqlens_q):
                 mdQ_cur = mdQ[batch_idx, None, head_idx, None]
@@ -451,7 +466,7 @@ class FFABwdPostProcess:
                     tiler_mn=tiled_tmem_ld.tiler_mn,
                 )
                 tdQsdQ_r2s = thr_tmem_ld.partition_D(thr_mma_dsk.partition_C(sdQ))
-                tdQrdQ_r2s = cute.make_fragment(tdQsdQ_r2s.shape, self.dtype)
+                tdQrdQ_r2s = cute.make_rmem_tensor(tdQsdQ_r2s.shape, self.dtype)
 
                 num_stages = cute.size(tdQrdQ_fp32, mode=[1])
                 stage_stride = self.dQ_reduce_ncol
@@ -560,7 +575,7 @@ class FFABwdPostProcess:
                     acc_shape = tiled_mma.partition_shape_C(
                         tile_shape if const_expr(not dQ_swapAB) else tile_shape[::-1]
                     )
-                    acc = cute.make_fragment(acc_shape, cutlass.Float32)
+                    acc = cute.make_rmem_tensor(acc_shape, cutlass.Float32)
                     assert cute.size(acc) == cute.size(tdQsdQaccum)
                 else:
                     thr_mma = tiled_mma.get_slice(0)  # 1-CTA
@@ -580,7 +595,7 @@ class FFABwdPostProcess:
                     tiled_copy_t2r = tcgen05.make_tmem_copy(tmem_load_atom, tdQtdQ)
                     thr_copy_t2r = tiled_copy_t2r.get_slice(tidx)
                     tdQrdQ_t2r_shape = thr_copy_t2r.partition_D(tdQcdQ).shape
-                    acc = cute.make_fragment(tdQrdQ_t2r_shape, Float32)
+                    acc = cute.make_rmem_tensor(tdQrdQ_t2r_shape, Float32)
                 tdQrdQaccum = cute.make_tensor(
                     acc.iterator, cute.make_layout(tdQsdQaccum.shape)
                 )
@@ -657,12 +672,15 @@ def _compile_bwd_postprocess(
     atom_layout,
     swap_ab,
     has_cuseqlens_q,
+    has_ranges,
     has_seqused_q,
     use_2cta_instrs,
     cluster_size,
     arch,
+    use_dense_dqacc_for_ranges,
 ):
     """Compile bwd postprocess kernel using cute fake tensors."""
+    is_varlen_q = has_cuseqlens_q or has_ranges
     (
         mQ,
         mK,
@@ -679,13 +697,18 @@ def _compile_bwd_postprocess(
         mdKaccum,
         mdVaccum,
     ) = make_fake_bwd_tensors(
-        dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False
+        dtype, has_gqa=True, is_varlen_q=is_varlen_q, is_varlen_k=False
     )
-    batch = mQ.shape[0] if not has_cuseqlens_q else cute.sym_int()
+    batch = mQ.shape[0] if not is_varlen_q else cute.sym_int()
     batchp1 = cute.sym_int()
     mCuSeqlensQ = (
         fake_tensor(cutlass.Int32, (batchp1,), divisibility=1)
         if has_cuseqlens_q
+        else None
+    )
+    mQRanges = (
+        fake_tensor(cutlass.Int32, (cute.sym_int(), 2), divisibility=1)
+        if has_ranges
         else None
     )
     mSeqUsedQ = (
@@ -701,6 +724,7 @@ def _compile_bwd_postprocess(
         swap_ab,
         use_2cta_instrs=use_2cta_instrs,
         cluster_size=cluster_size,
+        use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
     )
     return cute.compile(
         fa_bwd_post,
@@ -709,6 +733,7 @@ def _compile_bwd_postprocess(
         cutlass.Float32(0.0),
         mCuSeqlensQ,
         mSeqUsedQ,
+        mQRanges,
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--enable-tvm-ffi",
     )
@@ -729,6 +754,8 @@ def bwd_postprocess(
     swap_ab,
     use_2cta_instrs=False,
     cluster_size=1,
+    ranges=None,
+    use_dense_dqacc_for_ranges=False,
 ):
     """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
     compile_key = (
@@ -739,10 +766,12 @@ def bwd_postprocess(
         atom_layout,
         swap_ab,
         cu_seqlens is not None,
+        ranges is not None,
         seqused is not None,
         use_2cta_instrs,
         cluster_size,
         arch,
+        use_dense_dqacc_for_ranges,
     )
     if compile_key not in bwd_postprocess.compile_cache:
         bwd_postprocess.compile_cache[compile_key] = _compile_bwd_postprocess(
@@ -754,7 +783,235 @@ def bwd_postprocess(
         scale,
         cu_seqlens,
         seqused,
+        ranges,
     )
 
 
 bwd_postprocess.compile_cache = get_jit_cache("bwd_post")
+
+
+class FFABwdPostProcessRowMajor:
+    """Cast a row-major fp32 accumulator to output dtype with 2D thread mapping."""
+
+    def __init__(self, out_dtype, head_dim: int):
+        self.out_dtype = out_dtype
+        self.head_dim = head_dim
+        self.accum_stride = (head_dim + 15) // 16 * 16
+        self.vec_elems = 128 // cutlass.Float32.width  # 16B fp32 vectors
+        assert self.head_dim % self.vec_elems == 0
+        self.vectors_per_row = self.head_dim // self.vec_elems
+
+        self.threads_per_row = min(8, 1 << (self.vectors_per_row - 1).bit_length())
+        self.num_threads = 256
+        assert self.num_threads % self.threads_per_row == 0
+        self.rows_per_cta = self.num_threads // self.threads_per_row
+        self.vector_groups = (
+            self.vectors_per_row + self.threads_per_row - 1
+        ) // self.threads_per_row
+
+    @cute.jit
+    def __call__(
+        self,
+        mAccum: cute.Tensor,  # (num_head, total_padded * head_dim) fp32
+        mOut: cute.Tensor,  # (total, num_head, head_dim) out dtype
+        mRanges: cute.Tensor,  # (num_ranges, 2) int32
+        max_seqlen: cutlass.Int32,  # upper bound on any range length
+        scale: cutlass.Float32,
+        stream: cuda.CUstream = None,
+    ):
+        num_head = mOut.shape[1]
+        num_ranges = mRanges.shape[0]
+        grid = (
+            cute.ceil_div(max_seqlen, self.rows_per_cta),
+            num_ranges,
+            num_head,
+        )
+        self.kernel(mAccum, mOut, mRanges, scale).launch(
+            grid=grid, block=[self.num_threads, 1, 1], stream=stream
+        )
+
+    @cute.kernel
+    def kernel(
+        self,
+        mAccum: cute.Tensor,
+        mOut: cute.Tensor,
+        mRanges: cute.Tensor,
+        scale: cutlass.Float32,
+    ):
+        tidx = cute.arch.thread_idx()[0]
+        block, range_idx, head_idx = (
+            cute.arch.block_idx()[0],
+            cute.arch.block_idx()[1],
+            cute.arch.block_idx()[2],
+        )
+        row_start = cutlass.Int32(mRanges[range_idx, 0])
+        lane_in_row = tidx % self.threads_per_row
+        row_in_cta = tidx // self.threads_per_row
+        row_in_range = block * self.rows_per_cta + row_in_cta
+        if row_in_range < cutlass.Int32(mRanges[range_idx, 1]) - row_start:
+            row = row_start + row_in_range
+            gAcc_row = cute.local_tile(
+                mAccum[head_idx, None], (self.accum_stride,), (row,)
+            )
+            gOut_row = mOut[row, head_idx, None]
+            for group in cutlass.range_constexpr(self.vector_groups):
+                vector = group * self.threads_per_row + lane_in_row
+                if vector < self.vectors_per_row:
+                    gAcc = cute.local_tile(gAcc_row, (self.vec_elems,), (vector,))
+                    rAcc = cute.make_rmem_tensor((self.vec_elems,), cutlass.Float32)
+                    cute.autovec_copy(gAcc, rAcc)
+
+                    rOut = cute.make_rmem_tensor((self.vec_elems,), self.out_dtype)
+                    rOut.store((rAcc.load() * scale).to(self.out_dtype))
+                    gOut = cute.local_tile(gOut_row, (self.vec_elems,), (vector,))
+                    cute.autovec_copy(rOut, gOut)
+
+
+def _compile_bwd_postprocess_rowmajor(out_torch_dtype, head_dim: int):
+    from magi_attention.utils.dtype import to_cute_dtype
+
+    cache_key = (out_torch_dtype, head_dim)
+    # Module-level cache instance: the factory returns a fresh object per call,
+    # so a local one only survives through the persistent disk layer.
+    cache = bwd_postprocess_rowmajor.compile_cache
+    if cache_key not in cache:
+        out_dtype = to_cute_dtype(out_torch_dtype)
+        obj = FFABwdPostProcessRowMajor(out_dtype, head_dim)
+        sym = cute.sym_int
+        div = 128 // cutlass.Float32.width
+        mAccum = fake_tensor(cutlass.Float32, (sym(), sym()), divisibility=div)
+        mOut = fake_tensor(out_dtype, (sym(), sym(), head_dim), divisibility=div)
+        mRanges = fake_tensor(cutlass.Int32, (sym(), 2), divisibility=1)
+        cache[cache_key] = cute.compile(
+            obj,
+            mAccum,
+            mOut,
+            mRanges,
+            cutlass.Int32(0),
+            cutlass.Float32(0.0),
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options="--enable-tvm-ffi",
+        )
+    return cache[cache_key]
+
+
+def bwd_postprocess_rowmajor(
+    accum: torch.Tensor,
+    output: torch.Tensor,
+    ranges: torch.Tensor,
+    max_seqlen: int,
+    scale: float,
+) -> None:
+    """Row-major accumulator -> output dtype (non-deterministic range path)."""
+    compiled = _compile_bwd_postprocess_rowmajor(output.dtype, output.shape[-1])
+    compiled(accum, output, ranges, max_seqlen, scale)
+
+
+bwd_postprocess_rowmajor.compile_cache = get_jit_cache("bwd_post_rowmajor")
+
+
+class FFABwdGradHoleCleanup:
+    """Zero gradient rows not covered by any range."""
+
+    def __init__(self, dtype, row_elems: int, ranges_sorted: bool):
+        self.dtype = dtype
+        self.row_elems = row_elems
+        self.ranges_sorted = ranges_sorted
+        self.vec_elems = 128 // dtype.width
+        assert (
+            row_elems % self.vec_elems == 0
+        ), "flattened (heads * head_dim) row must be 16B-divisible"
+        self.vectors_per_row = row_elems // self.vec_elems
+        self.num_threads = 128
+
+    @cute.jit
+    def __call__(
+        self,
+        mGrad: cute.Tensor,  # (total_rows, row_elems) grad dtype, row-major
+        mRanges: cute.Tensor,  # (num_ranges, 2) int32, sorted + disjoint
+        stream: cuda.CUstream = None,
+    ):
+        self.kernel(mGrad, mRanges).launch(
+            grid=(cute.ceil_div(mGrad.shape[0], self.num_threads), 1, 1),
+            block=[self.num_threads, 1, 1],
+            stream=stream,
+        )
+
+    @cute.kernel
+    def kernel(self, mGrad: cute.Tensor, mRanges: cute.Tensor):
+        tidx = cute.arch.thread_idx()[0]
+        row = cutlass.Int32(cute.arch.block_idx()[0]) * self.num_threads + tidx
+        num_ranges = cutlass.Int32(mRanges.shape[0])
+        in_bounds = row < cutlass.Int32(mGrad.shape[0])
+
+        if const_expr(self.ranges_sorted):
+            # Fixed 32-step binary search over range starts
+            lo = cutlass.Int32(0)
+            hi = num_ranges if in_bounds else cutlass.Int32(0)
+            for _ in cutlass.range_constexpr(32):
+                active = lo < hi
+                mid = (lo + hi) >> 1
+                start_mid = cutlass.Int32(0)
+                if active:
+                    start_mid = cutlass.Int32(mRanges[mid, 0])
+                go_right = start_mid <= row
+                lo_next = mid + 1 if go_right else lo
+                hi_next = hi if go_right else mid
+                lo = lo_next if active else lo
+                hi = hi_next if active else hi
+
+            prev_end = cutlass.Int32(mRanges[cutlass.max(lo - 1, 0), 1])
+            outside_prev = row >= prev_end
+            is_hole = cutlass.Boolean(True) if lo == 0 else outside_prev
+            is_hole = is_hole if in_bounds else cutlass.Boolean(False)
+        else:
+            # Linear scan for unsorted disjoint ranges
+            covered = cutlass.Boolean(False)
+            for range_idx in cutlass.range(num_ranges, unroll=1):
+                start = cutlass.Int32(mRanges[range_idx, 0])
+                end = cutlass.Int32(mRanges[range_idx, 1])
+                in_range = row >= start and row < end
+                covered = cutlass.Boolean(True) if in_range else covered
+            is_hole = cutlass.Boolean(False) if covered else in_bounds
+
+        if is_hole:
+            zero_vec = cute.make_rmem_tensor((self.vec_elems,), self.dtype)
+            zero_vec.fill(0.0)
+            gRow = mGrad[row, None]
+            for vector in cutlass.range_constexpr(self.vectors_per_row):
+                gVec = cute.local_tile(gRow, (self.vec_elems,), (vector,))
+                cute.autovec_copy(zero_vec, gVec)
+
+
+def _compile_grad_hole_cleanup(torch_dtype, row_elems: int, ranges_sorted: bool):
+    from magi_attention.utils.dtype import to_cute_dtype
+
+    cache_key = (torch_dtype, row_elems, ranges_sorted)
+    cache = bwd_grad_zero_holes.compile_cache
+    if cache_key not in cache:
+        dtype = to_cute_dtype(torch_dtype)
+        obj = FFABwdGradHoleCleanup(dtype, row_elems, ranges_sorted)
+        sym = cute.sym_int
+        div = 128 // dtype.width
+        mGrad = fake_tensor(dtype, (sym(), row_elems), divisibility=div)
+        mRanges = fake_tensor(cutlass.Int32, (sym(), 2), divisibility=1)
+        cache[cache_key] = cute.compile(
+            obj,
+            mGrad,
+            mRanges,
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options="--enable-tvm-ffi",
+        )
+    return cache[cache_key]
+
+
+def bwd_grad_zero_holes(
+    grad: torch.Tensor, ranges: torch.Tensor, *, ranges_sorted: bool = True
+) -> None:
+    """Zero rows of a packed (total, heads, head_dim) grad outside all ranges."""
+    g2d = grad.view(grad.shape[0], -1)
+    compiled = _compile_grad_hole_cleanup(grad.dtype, g2d.shape[1], ranges_sorted)
+    compiled(g2d, ranges)
+
+
+bwd_grad_zero_holes.compile_cache = get_jit_cache("bwd_hole_cleanup")
