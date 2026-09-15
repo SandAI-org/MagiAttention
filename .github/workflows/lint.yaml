@@ -2,7 +2,8 @@ name: lint
 
 on:
   push:
-    branches: '**'
+    branches-ignore:
+      - codex/test-ci-public-h100-20260915
   pull_request:
 
 jobs:
