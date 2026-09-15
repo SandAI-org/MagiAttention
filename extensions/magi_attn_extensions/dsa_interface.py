@@ -19,6 +19,7 @@ from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 from magi_attention.functional.flex_flash_attn import flex_flash_attn_func
 from magi_attention.testing.ref_attn import _calc_attn_lse
 from magi_attention.utils import nvtx
+from magi_attention.utils.version import is_torch_version_ge
 
 flex_attn_func = torch.compile(flex_attention)
 
@@ -135,7 +136,6 @@ def ffa_index_sparse_fwd(
     return out, meta.lse
 
 
-@torch.compile
 def flex_attn_sparse_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -196,6 +196,12 @@ def flex_attn_sparse_fwd(
     lse = lse_flex.squeeze(0).transpose(0, 1)
 
     return o, lse
+
+
+# FIXME: torch>=2.12 has regressions/issues when compiling `flex_attn_sparse_fwd`.
+# Keep eager mode on 2.12+ until upstream behavior is fixed.
+if not is_torch_version_ge("2.12"):
+    flex_attn_sparse_fwd = torch.compile(flex_attn_sparse_fwd)
 
 
 @torch.compile

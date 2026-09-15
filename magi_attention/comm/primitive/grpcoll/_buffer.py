@@ -50,13 +50,12 @@ from ._event import EventHandle, EventOverlap
 from ._handle import GrpCollHandle, GrpCollInterHandle, GrpCollIntraHandle
 from .utils import check_nvlink_connections
 
-is_magi_attn_comm_installed = False
 try:
     from magi_attention.magi_attn_comm import grpcoll
-
-    is_magi_attn_comm_installed = True
 except ImportError:
-    pass
+    is_magi_attn_comm_installed = False
+else:
+    is_magi_attn_comm_installed = True
 
 __all__ = ["GrpCollBuffer"]
 

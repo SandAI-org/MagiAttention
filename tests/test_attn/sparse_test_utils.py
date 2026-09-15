@@ -14,8 +14,6 @@
 
 """Shared helpers for block_sparse and index_sparse attention tests."""
 
-from __future__ import annotations
-
 import os
 from collections.abc import Callable
 from contextlib import contextmanager

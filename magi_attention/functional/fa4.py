@@ -19,8 +19,6 @@ from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.collection.calc_meta import AttnArg, FA4AttnArg
 
-_has_cutlass_backend = False
-_has_cute_backend = False
 try:
     # CUTLASS package layout (ffa_fa3).
     from flash_attn_cute.ffa_fa3.flash_attn_interface import (
@@ -29,18 +27,18 @@ try:
     from flash_attn_cute.ffa_fa3.flash_attn_interface import (
         _flash_attn_forward as _flash_attn_forward_cutlass,
     )
-
-    _has_cutlass_backend = True
 except ImportError:
-    pass
+    _has_cutlass_backend = False
+else:
+    _has_cutlass_backend = True
 
 try:
     # FFA_FA4 DSL interface.
     from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
-
-    _has_cute_backend = True
 except ImportError:
-    pass
+    _has_cute_backend = False
+else:
+    _has_cute_backend = True
 
 is_fa4_installed = _has_cutlass_backend or _has_cute_backend
 

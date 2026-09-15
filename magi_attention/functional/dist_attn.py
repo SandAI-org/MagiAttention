@@ -44,12 +44,10 @@ from .sdpa import sdpa_bwd, sdpa_fwd
 from .sdpa_online import sdpa_online_bwd, sdpa_online_fwd
 from .utils import calc_lse_sink_compiled, correct_attn_out_lse, sink_bwd_compiled
 
-is_magi_attn_ext_installed = False
 try:
     from magi_attention.magi_attn_ext import KernelBarrier
-
-    is_magi_attn_ext_installed = True
 except ImportError:
+    is_magi_attn_ext_installed = False
 
     class KernelBarrier:  # type: ignore[no-redef]
         def __init__(self, target: SupportsInt) -> None:
@@ -68,6 +66,9 @@ except ImportError:
 
         def synchronize(self) -> None:
             ...
+
+else:
+    is_magi_attn_ext_installed = True
 
 
 logger = getLogger(__name__)
