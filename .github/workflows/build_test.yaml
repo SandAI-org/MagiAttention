@@ -7,8 +7,18 @@ on:
     branches: [main]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request_target' && github.head_ref || github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CI_WORKSPACE_ROOT: /home/niubility2/ci_workspace
+  TASK_CI_PLATFORM: h100
+  TASK_CI_BASE_IMAGE: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2
+  NCCL_NVLS_ENABLE: '0'
+  VALIDATION_CACHE_TRUSTED: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
 
 jobs:
   detect_changes:
@@ -18,148 +28,170 @@ jobs:
       contents: read
     outputs:
       MagiAttention: ${{ steps.filter.outputs.MagiAttention }}
+      MagiAttnExtensions: ${{ steps.filter.outputs.MagiAttnExtensions }}
+      ci_protocol: ${{ steps.filter.outputs.ci_protocol }}
+      trusted: ${{ steps.trust.outputs.trusted }}
     steps:
-      - name: Print Event Context
-        run: |
-          echo "Event Name: ${{ github.event_name }}"
-          echo "Action: ${{ github.action }}"
-          echo "Actor: ${{ github.actor }}"
-          echo "Ref: ${{ github.ref }}"
-          if [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "pull_request_target" ]]; then
-            echo "PR Title: ${{ github.event.pull_request.title }}"
-            echo "PR Number: ${{ github.event.number }}"
-            echo "PR Head SHA: ${{ github.event.pull_request.head.sha }}"
-          fi
-      # ==========================================================
-      # Check if PR title starts with some specific prefixes
-      # and fail the job if it does.
-      # ==========================================================
-      - name: Fail if PR title is [WIP] or [DO NOT MERGE]
-        # Ensure this check only runs for 'pull_request' events
-        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
-        run: |
-          # Get the PR title
-          PR_TITLE="${{ github.event.pull_request.title }}"
-
-          # Check if the title starts with "[WIP]" OR "[DO NOT MERGE]" (case-sensitive)
-          if [[ "$PR_TITLE" == "[WIP]"* ]] || [[ "$PR_TITLE" == "[DO NOT MERGE]"* ]]; then
-            # Use ::error:: to provide clear feedback
-            echo "::error::Pull Request title starts with [WIP] or [DO NOT MERGE]. Please remove the tag to run the workflow."
-            exit 1  # Fail the job immediately
-          else
-            echo "PR title is clean: $PR_TITLE"
-          fi
-      # ==========================================================
-      # End of check
-      # ==========================================================
       - uses: actions/checkout@v4
         with:
-          allow-unsafe-pr-checkout: true
-          submodules: 'recursive'
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          submodules: recursive
           fetch-depth: 0
+      - name: Fail if PR title is [WIP] or [DO NOT MERGE]
+        if: github.event_name == 'pull_request_target'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: bash .github/scripts/check_pr_title.sh
       - uses: dorny/paths-filter@v2
         id: filter
         with:
-          base: ${{ github.event.pull_request.base.ref || github.base_ref }}
           filters: |
             MagiAttention:
-              - 'magi_attention/**'
-      - name: print filter results
-        run: |
-          echo "is MagiAttention modified: ${{ steps.filter.outputs.MagiAttention }}"
+              - '**'
+              - '!extensions/**'
+              - '!.github/**'
+              - '!docs/**'
+            MagiAttnExtensions:
+              - 'extensions/**'
+            ci_protocol:
+              - '.github/workflows/build_test.yaml'
+              - '.github/workflows/base_image_tag.txt'
+              - '.github/scripts/check_pr_title.sh'
+              - '.github/scripts/install_requirements.sh'
+              - '.github/scripts/build_v2_wheel.sh'
+              - '.github/scripts/portable_validation.sh'
+              - '.github/scripts/run_build_tests.sh'
+              - '.github/scripts/test_portable_validation.sh'
+              - '.github/scripts/verify_task_runner.sh'
+      - name: Determine trust
+        id: trust
+        run: echo "trusted=${{ env.VALIDATION_CACHE_TRUSTED }}" >> "$GITHUB_OUTPUT"
 
-  test_MagiAttention_ngc2510_cuda13:
+  test_MagiAttention:
     needs: [detect_changes]
     if: |
-      always() &&
+      !cancelled() &&
+      needs.detect_changes.outputs.trusted == 'true' &&
       (
-        needs.detect_changes.outputs.MagiAttention == 'true'
+        needs.detect_changes.outputs.MagiAttention == 'true' ||
+        needs.detect_changes.outputs.MagiAttnExtensions == 'true' ||
+        needs.detect_changes.outputs.ci_protocol == 'true'
       )
-    environment: ${{ (github.event_name == 'pull_request_target') && 'ci-internal' || '' }}
-    runs-on: [self-hosted]
+    environment: ${{ github.event_name == 'pull_request_target' && 'ci-internal' || '' }}
+    runs-on: [ci-spot-job, h100]
     container:
-      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.10
+      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2
       options: --gpus all --ipc host
       credentials:
         username: ${{ secrets.DOCKER_USER_NAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
-      env:
-        http_proxy: ${{ secrets.HTTP_PROXY }}
-        https_proxy: ${{ secrets.HTTP_PROXY }}
-        no_proxy: pypi.tuna.tsinghua.edu.cn
-        GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       volumes:
-        - /mnt/afs/littsk/ci_workspace_magi_attention/:/workspace
+        - /mnt/afs/ci_workspace:/home/niubility2/ci_workspace
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: 'safe.directory'
+      GIT_CONFIG_VALUE_0: '*'
+      http_proxy: ${{ secrets.HTTP_PROXY }}
+      https_proxy: ${{ secrets.HTTP_PROXY }}
+      no_proxy: pypi.tuna.tsinghua.edu.cn
+      GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - name: echo proxy
-        run: |
-          echo "http_proxy: $http_proxy"
-          echo "https_proxy: $https_proxy"
-          echo "no_proxy: $no_proxy"
-          echo "secret.HTTP_PROXY: ${{ secrets.HTTP_PROXY }}"
-          echo "secret.HTTPS_PROXY: ${{ secrets.HTTP_PROXY }}"
-      - name: curl google
-        run: |
-          curl www.google.com
       - uses: actions/checkout@v4
         with:
-          allow-unsafe-pr-checkout: true
-          submodules: 'recursive'
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: recursive
           fetch-depth: 0
-      - name: manually merge latest main
+      - name: Merge latest target branch
         if: github.event_name == 'pull_request_target'
-        run: |
-          git config --global --add safe.directory $GITHUB_WORKSPACE
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-
-          echo "Fetching latest main from base repository..."
-          git fetch https://github.com/${{ github.repository }}.git ${{ github.event.pull_request.base.ref }}
-
-          echo "Merging latest ${{ github.event.pull_request.base.ref }} into PR branch..."
-          git merge FETCH_HEAD
-      - name: install requirements
-        run: |
-          bash -x .github/scripts/install_requirements.sh
-      - name: clear MagiAttention cache
-        run: |
-          rm -rf /github/home/.cache/magi_attention/
-      - name: install MagiAttention
-        run: |
-          MAGI_ATTENTION_PREBUILD_LEVEL=ci pip install -e . --no-build-isolation -vvv
-      - name: verify MagiAttention import
-        run: |
-          cd /github/home
-          python -c "import magi_attention; print('Pip Installation and Import Success')"
-      # ONLY clean the dist folder to ensure we install the correct newly-built wheel.
-      # We KEEP the 'build/' directory to reuse the compilation cache from the previous 'pip install -e' step.
-      - name: build MagiAttention wheel
-        run: |
-          rm -rf dist/
-          python -m build --wheel --no-isolation -v
-      - name: install MagiAttention wheel
-        run: |
-          pip uninstall -y magi_attention
-          pip install dist/*.whl
-      - name: verify MagiAttention wheel
-        run: |
-          cd /github/home
-          python -c "import magi_attention; print('Wheel Installation and Import Success')"
-      - name: Test and Generate coverage report
-        run: |
-          MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 MAGI_ATTENTION_TEST_BACKEND="sdpa,ffa" coverage run --source magi_attention -m pytest --skip-slow --import-mode=append -qsv ./tests
-          coverage combine
-          coverage xml -i
         env:
-          COVERAGE_RUN: True
-          MAGI_ATTENTION_JIT_COMPILE_DISABLED: "1"
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git fetch https://github.com/${{ github.repository }}.git "$BASE_REF"
+          git merge FETCH_HEAD
+      - name: Build and test
+        run: bash .github/scripts/run_build_tests.sh "$MAIN_CHANGED" "$CI_CHANGED" true
+        env:
+          MAIN_CHANGED: ${{ needs.detect_changes.outputs.MagiAttention }}
+          CI_CHANGED: ${{ needs.detect_changes.outputs.ci_protocol }}
       - name: Upload coverage reports to Codecov
+        if: needs.detect_changes.outputs.MagiAttention == 'true' || needs.detect_changes.outputs.ci_protocol == 'true'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: SandAI-org/MagiAttention
           files: coverage.xml
+
+  test_MagiAttention_untrusted:
+    needs: [detect_changes]
+    if: |
+      !cancelled() &&
+      needs.detect_changes.outputs.trusted != 'true' &&
+      (
+        needs.detect_changes.outputs.MagiAttention == 'true' ||
+        needs.detect_changes.outputs.MagiAttnExtensions == 'true' ||
+        needs.detect_changes.outputs.ci_protocol == 'true'
+      )
+    environment: ci-internal
+    runs-on: [ci-spot-job, h100]
+    container:
+      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2
+      options: --gpus all --ipc host
+      credentials:
+        username: ${{ secrets.DOCKER_USER_NAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: 'safe.directory'
+      GIT_CONFIG_VALUE_0: '*'
+      http_proxy: ${{ secrets.HTTP_PROXY }}
+      https_proxy: ${{ secrets.HTTP_PROXY }}
+      no_proxy: pypi.tuna.tsinghua.edu.cn
+      GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: recursive
+          fetch-depth: 0
+      - name: Configure runner-local workspace
+        run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
+      - name: Merge latest target branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git fetch https://github.com/${{ github.repository }}.git "$BASE_REF"
+          git merge FETCH_HEAD
+      - name: Build and test without shared storage
+        run: bash .github/scripts/run_build_tests.sh "$MAIN_CHANGED" "$CI_CHANGED" false
+        env:
+          MAIN_CHANGED: ${{ needs.detect_changes.outputs.MagiAttention }}
+          CI_CHANGED: ${{ needs.detect_changes.outputs.ci_protocol }}
+
+  ci_gate:
+    needs: [detect_changes, test_MagiAttention, test_MagiAttention_untrusted]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify test result
+        env:
+          TEST_RESULT: ${{ needs.test_MagiAttention.result }}
+          UNTRUSTED_TEST_RESULT: ${{ needs.test_MagiAttention_untrusted.result }}
+          TRUSTED: ${{ needs.detect_changes.outputs.trusted }}
+          MAIN_CHANGED: ${{ needs.detect_changes.outputs.MagiAttention }}
+          EXT_CHANGED: ${{ needs.detect_changes.outputs.MagiAttnExtensions }}
+          CI_CHANGED: ${{ needs.detect_changes.outputs.ci_protocol }}
+        run: |
+          if [[ "$MAIN_CHANGED" == true || "$EXT_CHANGED" == true || "$CI_CHANGED" == true ]]; then
+            if [[ "$TRUSTED" == true ]]; then
+              [[ "$TEST_RESULT" == success && "$UNTRUSTED_TEST_RESULT" == skipped ]] || exit 1
+            else
+              [[ "$TEST_RESULT" == skipped && "$UNTRUSTED_TEST_RESULT" == success ]] || exit 1
+            fi
+          else
+            [[ "$TEST_RESULT" == skipped && "$UNTRUSTED_TEST_RESULT" == skipped ]] || exit 1
+          fi

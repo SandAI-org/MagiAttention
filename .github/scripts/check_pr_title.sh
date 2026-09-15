@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from setuptools import setup
+set -euo pipefail
 
-setup()
+pr_title=${PR_TITLE:?PR_TITLE is required}
+if [[ "$pr_title" == "[WIP]"* || "$pr_title" == "[DO NOT MERGE]"* ]]; then
+    echo "::error::Remove the PR title guard before running CI"
+    exit 1
+fi

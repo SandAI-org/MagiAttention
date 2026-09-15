@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Copyright (c) 2025-2026 SandAI. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+
+main_changed=${1:?main change flag is required}
+ci_changed=${2:?CI protocol change flag is required}
+trusted=${3:?trust flag is required}
+
+bash .github/scripts/verify_task_runner.sh
+bash .github/scripts/test_portable_validation.sh
+bash -x .github/scripts/install_requirements.sh
+rm -rf /github/home/.cache/magi_attention/
+bash .github/scripts/build_v2_wheel.sh . MagiAttention magi_attention
+(
+    cd /github/home
+    python -c "import magi_attention; print('MagiAttention wheel import succeeded')"
+)
+
+if [[ "$main_changed" == true || "$ci_changed" == true ]]; then
+    COVERAGE_RUN=True \
+        PORTABLE_VALIDATION_COVERAGE=true \
+        MAGI_ATTENTION_JIT_COMPILE_DISABLED=1 \
+        bash .github/scripts/portable_validation.sh run-test magi_attention
+    if [[ "$trusted" == true ]]; then
+        bash .github/scripts/portable_validation.sh write-success magi_attention
+    fi
+fi
+
+pip install -r extensions/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+bash .github/scripts/build_v2_wheel.sh \
+    extensions MagiAttnExtensions magi_attn_extensions
+(
+    cd /github/home
+    python -c "import magi_attn_extensions; print('MagiAttnExtensions wheel import succeeded')"
+)
+bash .github/scripts/portable_validation.sh run-test magi_attn_extensions
+if [[ "$trusted" == true ]]; then
+    bash .github/scripts/portable_validation.sh write-success magi_attn_extensions
+fi
