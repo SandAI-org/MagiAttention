@@ -166,14 +166,11 @@ We would like to thank everyone who contributed to the development of MagiAttent
 | :------------ | :-------------------------- | :------------------------------ | :------------------------------------------- |
 | Zewei Tao     | SandAI                      | <zeweitao@sand.ai>              | [littsk](https://github.com/littsk)          |
 | Yunpeng Huang | SandAI                      | <yunpenghuang@sand.ai>          | [Strivin0311](https://github.com/Strivin0311)|
-| Qiangang Wang | SandAI, Nanjing University  | <522024330081@smail.nju.edu.cn> | [WT1W](https://github.com/WT1W)              |
-| Hanwen Sun    | Peking University           | <sunhanwen@stu.pku.edu.cn>      | [hanwen-sun](https://github.com/hanwen-sun)  |
 | Jin Li        | SandAI, Tsinghua University | <2609835176@qq.com>             | [lijinnn](https://github.com/lijinnn)        |
-| Tao Bu        | SandAI, Nanjing University  | <502024330002@smail.nju.edu.cn> | [Big-TRex](https://github.com/Big-TRex)      |
+| Hao Chen      | SandAI, Xiamen University   | <haoc80996@gmail.com>           | [cherhh](https://github.com/cherhh)          |
+| Zhiyao Cen    | SandAI, Tsinghua University | <2523403608@qq.com>             | [cennn](https://github.com/cennn)            |
 | Bowen Zeng    | Zhejiang University         | <zbw.cs@zju.edu.cn>             | [KevinZeng08](https://github.com/KevinZeng08)|
 | Yufeng Yang   | Minimax                     | <793626853@qq.com>              | [demonatic](https://github.com/demonatic)    |
-| Zhiyao Cen    | SandAI, Tsinghua University | <2523403608@qq.com>             | [cennn](https://github.com/cennn)            |
-| Hao Chen      | SandAI, Xiamen University   | <haoc80996@gmail.com>           | [cherhh](https://github.com/cherhh)          |
 
 
 ### Early-Stage Contributors
@@ -182,12 +179,16 @@ We would like to thank everyone who contributed to the development of MagiAttent
 
 | Member        | Affiliations                | Email                           | GitHub Account                                    |
 | :------------ | :-------------------------- | :------------------------------ | :------------------------------------------------ |
+| Qiangang Wang | Nanjing University          | <522024330081@smail.nju.edu.cn> | [WT1W](https://github.com/WT1W)                   |
+| Tao Bu        | Nanjing University          | <502024330002@smail.nju.edu.cn> | [Big-TRex](https://github.com/Big-TRex)           |
+| Hanwen Sun    | Peking University           | <sunhanwen@stu.pku.edu.cn>      | [hanwen-sun](https://github.com/hanwen-sun)       |
 | WenYang Fang  | Nanjing University          | <fwy@smail.nju.edu.cn>          | [kagami4243](https://github.com/kagami4243)       |
 | Siyuang Yan   | Nanjing University          | <siyuanyan@smail.nju.edu.cn>    | [FibonaccciYan](https://github.com/FibonaccciYan) |
 | Zixu Jiang    | Nanjing University          | <522023330040@smail.nju.edu.cn> | [191220042](https://github.com/191220042)         |
 | Dingkun Xu    | Nanjing University          | <211220090@smail.nju.edu.cn>    | [PureDimension](https://github.com/PureDimension) |
 | Mingyu Liang  | Nanjing University          | <mingyuliang518@gmail.com>      | [gaomusiki](https://github.com/gaomusiki)         |
 | Jingwei Xu    | Nanjing University          | <jingweix@nju.edu.cn>           | [paragonlight](https://github.com/paragonlight)   |
+
 
 ### Special Thanks
 
