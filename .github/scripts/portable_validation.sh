@@ -242,14 +242,14 @@ run_test() {
         magi_attention)
             if [[ "${PORTABLE_VALIDATION_COVERAGE:-false}" == true ]]; then
                 MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
-                    MAGI_ATTENTION_TEST_BACKEND="*SDPA,*FFA" \
+                    MAGI_ATTENTION_TEST_BACKEND="sdpa,ffa" \
                     coverage run --source magi_attention -m pytest \
                         -q -s --skip-slow --import-mode=append "$source_root/tests"
                 coverage combine
                 coverage xml -i
             else
                 MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
-                    MAGI_ATTENTION_TEST_BACKEND="*SDPA,*FFA" \
+                    MAGI_ATTENTION_TEST_BACKEND="sdpa,ffa" \
                     pytest -q -s --skip-slow --import-mode=append "$source_root/tests"
             fi
             ;;
