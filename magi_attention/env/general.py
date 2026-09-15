@@ -14,8 +14,6 @@
 
 """General runtime environment variables for magi_attention."""
 
-from __future__ import annotations
-
 import logging
 import os
 from typing import TYPE_CHECKING

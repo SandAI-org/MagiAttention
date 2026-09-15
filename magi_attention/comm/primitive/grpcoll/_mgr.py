@@ -52,14 +52,14 @@ class GrpCollBufferMgr(metaclass=SingletonMeta):
         Initialize the manager with the default ProcessGroup and Configuration
         that will be used for all lazily created buffers.
         """
-        is_magi_attn_comm_installed = False
         try:
             # Import for side effects (e.g. registering custom ops) and to ensure
             # the optional extension is actually available.
             importlib.import_module("magi_attention.magi_attn_comm.grpcoll")
-            is_magi_attn_comm_installed = True
         except ImportError:
-            pass
+            is_magi_attn_comm_installed = False
+        else:
+            is_magi_attn_comm_installed = True
         assert (
             is_magi_attn_comm_installed
         ), "The `magi_attn_comm` extension module is not installed."

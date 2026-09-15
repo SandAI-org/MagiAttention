@@ -20,13 +20,12 @@ import torch
 
 from .ffa_utils import MT_MAP, materialize_mask_types
 
-is_magi_attn_ext_installed = False
 try:
     from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
-
-    is_magi_attn_ext_installed = True
 except ImportError:
-    pass
+    is_magi_attn_ext_installed = False
+else:
+    is_magi_attn_ext_installed = True
 
 __all__ = [
     "merge_qk_ranges",

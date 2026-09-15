@@ -25,8 +25,6 @@ elsewhere will cause an ``ImportError`` or ``AttributeError`` instead of
 a silent mismatch.
 """
 
-from __future__ import annotations
-
 import os
 
 # ------------------------------------------------------------------ #

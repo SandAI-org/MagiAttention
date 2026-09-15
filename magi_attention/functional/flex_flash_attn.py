@@ -28,13 +28,12 @@ from magi_attention.utils import nvtx
 from ._flex_flash_attn_jit import _snapshot_env, get_ffa_jit_mod
 from .fa4 import fa4_bwd, fa4_fwd, is_fa4_installed
 
-is_magi_attn_ext_installed = False
 try:
     from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
-
-    is_magi_attn_ext_installed = True
 except ImportError:
-    pass
+    is_magi_attn_ext_installed = False
+else:
+    is_magi_attn_ext_installed = True
 
 
 # copied from https://github.com/Dao-AILab/flash-attention/blob/v2.8.2/flash_attn/flash_attn_interface.py#L56-73
