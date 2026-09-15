@@ -1,0 +1,25 @@
+/* control the size of the logo in the top left of the navigation bar */
+.navbar-brand img {
+    height: 32px !important;
+    width: auto !important;
+}
+
+/* diff add line */
+.highlight .gi { 
+    color: #22863a; 
+    background-color: #f0fff4;
+    display: block;
+}
+
+/* diff delete line */
+.highlight .gd { 
+    color: #d73a49; 
+    background-color: #ffeef0;
+    display: block;
+}
+
+/* diff line start +/- symbol */
+.highlight .gp { 
+    color: #6a737d;
+    font-weight: bold;
+}

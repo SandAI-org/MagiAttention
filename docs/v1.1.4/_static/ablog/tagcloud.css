@@ -1,0 +1,36 @@
+ul.ablog-cloud {
+  list-style: none;
+  overflow: auto;
+}
+
+ul.ablog-cloud li {
+  float: left;
+  height: 20pt;
+  line-height: 18pt;
+  margin-right: 5px;
+}
+
+ul.ablog-cloud a {
+  text-decoration: none;
+  vertical-align: middle;
+}
+
+li.ablog-cloud-1 {
+  font-size: 80%;
+}
+
+li.ablog-cloud-2 {
+  font-size: 95%;
+}
+
+li.ablog-cloud-3 {
+  font-size: 110%;
+}
+
+li.ablog-cloud-4 {
+  font-size: 125%;
+}
+
+li.ablog-cloud-5 {
+  font-size: 140%;
+}
