@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.util
-import warnings
-
 from .fa2_interface_with_sink import (
     fa2_func_with_sink,
     fa2_kvpacked_func_with_sink,
@@ -40,19 +37,6 @@ except ImportError:
 
 from .dsa_interface import dsa_attn_func
 
-if importlib.util.find_spec("magi_attn_extensions._version") is None:
-    warnings.warn(
-        "You are using magi_attn_extensions without installing it. "
-        "This may cause some unexpected errors."
-    )
-    version = None
-else:
-    from ._version import __version__ as git_version
-
-    version = git_version
-
-__version__: str | None = version
-
 __all__ = [
     "fa2_func_with_sink",
     "fa2_qkvpacked_func_with_sink",
@@ -67,3 +51,5 @@ __all__ = [
     "fa4_varlen_func_with_sink",
     "dsa_attn_func",
 ]
+
+__version__ = "1.1.0"
