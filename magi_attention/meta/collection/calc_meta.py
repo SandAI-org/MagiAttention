@@ -30,26 +30,24 @@ from magi_attention.utils import (
 
 _DEFAULT_FA4_TILE_SIZE = (128, 128)
 
-is_magi_to_hstu_installed = False
 try:
     import create_block_mask_cuda
     import magi_to_hstu_cuda
-
-    is_magi_to_hstu_installed = True
 except ImportError:
-    pass
+    is_magi_to_hstu_installed = False
+else:
+    is_magi_to_hstu_installed = True
 
-is_fa4_installed = False
 try:
     from flash_attn_cute.block_sparsity import (
         BlockSparseTensorsTorch,
         LinearBlockSparseTensorsTorch,
         bhqk_to_linear_sparse_tensors,
     )
-
-    is_fa4_installed = True
 except ImportError:
-    pass
+    is_fa4_installed = False
+else:
+    is_fa4_installed = True
 
 # Optional: only needed for FA4AttnArg.compute_mask with arbitrary masks
 try:

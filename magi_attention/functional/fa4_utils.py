@@ -31,7 +31,6 @@ from magi_attention.meta.collection.calc_meta import FA4AttnArg
 
 logger = logging.getLogger(__name__)
 
-is_fa4_installed = False
 try:
     from flash_attn_cute.interface import (
         _bwd_postprocess_convert,
@@ -39,10 +38,10 @@ try:
         _flash_attn_bwd,
         _flash_attn_fwd,
     )
-
-    is_fa4_installed = True
 except ImportError:
-    pass
+    is_fa4_installed = False
+else:
+    is_fa4_installed = True
 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))

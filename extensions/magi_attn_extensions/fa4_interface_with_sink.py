@@ -26,13 +26,12 @@ from magi_attention.functional.utils import (
     sink_bwd_compiled,
 )
 
-is_fa4_installed = False
 try:
     from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
-
-    is_fa4_installed = True
 except ImportError:
-    pass
+    is_fa4_installed = False
+else:
+    is_fa4_installed = True
 
 
 # Copied from https://github.com/Dao-AILab/flash-attention/blob/v2.8.2/flash_attn/flash_attn_interface.py#L56-73

@@ -52,51 +52,49 @@ from magi_attention.meta.solver.dispatch_solver import DispatchConfig
 from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOverlapAlg
 from magi_attention.testing.utils import switch_envvars
 
-is_hybrid_dcp_installed = False
-is_ulysess_installed = False
-is_ring_p2p_installed = False
-is_ring_allgather_installed = False
-is_usp_installed = False
-is_loongtrain_installed = False
 try:
     from exps.dist_attn.baselines.hybrid_dcp import (
         HybridMegatronDCP,  # type: ignore[attr-defined]
     )
-
-    is_hybrid_dcp_installed = True
 except ImportError:
-    pass
+    is_hybrid_dcp_installed = False
+else:
+    is_hybrid_dcp_installed = True
 
 try:
     from exps.dist_attn.baselines.loongtrain import LoongTrain
-
-    is_loongtrain_installed = True
 except ImportError:
-    pass
+    is_loongtrain_installed = False
+else:
+    is_loongtrain_installed = True
+
 try:
     from exps.dist_attn.baselines.ring_attn import RingAttnAllGather
-
-    is_ring_allgather_installed = True
 except ImportError:
-    pass
+    is_ring_allgather_installed = False
+else:
+    is_ring_allgather_installed = True
+
 try:
     from exps.dist_attn.baselines.ring_attn import RingAttnP2P
-
-    is_ring_p2p_installed = True
 except ImportError:
-    pass
+    is_ring_p2p_installed = False
+else:
+    is_ring_p2p_installed = True
+
 try:
     from exps.dist_attn.baselines.ulysess import Ulysess
-
-    is_ulysess_installed = True
 except ImportError:
-    pass
+    is_ulysess_installed = False
+else:
+    is_ulysess_installed = True
+
 try:
     from exps.dist_attn.baselines.usp import USP
-
-    is_usp_installed = True
 except ImportError:
-    pass
+    is_usp_installed = False
+else:
+    is_usp_installed = True
 
 # benchmark config to be loaded
 BENCH_MODE: Any = None
