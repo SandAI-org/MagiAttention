@@ -71,7 +71,7 @@ jobs:
           echo "is MagiAttention modified: ${{ steps.filter.outputs.MagiAttention }}"
 
   test_MagiAttention_ngc2510_cuda13:
-    name: MagiAttention on ci-public-h100 (Runner 26.05.2)
+    name: MagiAttention on ci-spot-job / h100 (Runner 26.05.2)
     needs: [detect_changes]
     if: |
       always() &&
@@ -84,7 +84,7 @@ jobs:
         )
       )
     environment: ${{ (github.event_name == 'pull_request_target') && 'ci-internal' || '' }}
-    runs-on: [ci-public-h100, h100]
+    runs-on: [ci-spot-job, h100]
     defaults:
       run:
         shell: bash
