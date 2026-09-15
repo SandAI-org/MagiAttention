@@ -7,7 +7,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Posts tagged AF Disaggregation &#8212; MagiAttention main documentation</title>
+    <title>Posts tagged Just-In-Time Compilation &#8212; MagiAttention main documentation</title>
   
   
   
@@ -44,7 +44,7 @@
     <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="../../_static/copybutton.js?v=fd10adb8"></script>
-    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/tag/af-disaggregation';</script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'blog/tag/just-in-time-compilation';</script>
     <script>
         DOCUMENTATION_OPTIONS.theme_version = '0.21.0';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
@@ -53,7 +53,7 @@
             true;
         </script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
-    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/tag/af-disaggregation.html" />
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/blog/tag/just-in-time-compilation.html" />
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -69,7 +69,7 @@
   rel="alternate"
   type="application/atom+xml"
   href="../../blog/atom.xml"
-  title="Posts tagged AF Disaggregation"
+  title="Posts tagged Just-In-Time Compilation"
 />
   
   </head>
@@ -228,7 +228,7 @@
 <div
   class="dropdown"
   id="doc-language-switcher-root"
-  data-pagename="blog/tag/af-disaggregation"
+  data-pagename="blog/tag/just-in-time-compilation"
   data-is-chinese="false"
   data-zh-segment="zh_CN"
 >
@@ -437,7 +437,7 @@
 <div
   class="dropdown"
   id="doc-language-switcher-root"
-  data-pagename="blog/tag/af-disaggregation"
+  data-pagename="blog/tag/just-in-time-compilation"
   data-is-chinese="false"
   data-zh-segment="zh_CN"
 >
@@ -614,7 +614,7 @@
   <ul class="ablog-cloud">
      
     <li class="ablog-cloud ablog-cloud-1">
-      <a href="#">AF Disaggregation</a>
+      <a href="af-disaggregation.html">AF Disaggregation</a>
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
@@ -686,7 +686,7 @@
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
-      <a href="just-in-time-compilation.html">Just-In-Time Compilation</a>
+      <a href="#">Just-In-Time Compilation</a>
     </li>
       
     <li class="ablog-cloud ablog-cloud-1">
@@ -853,7 +853,7 @@
         <i class="fa-solid fa-home"></i>
       </a>
     </li>
-    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Posts tagged AF Disaggregation</span></li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Posts tagged Just-In-Time Compilation</span></li>
   </ul>
 </nav>
 </div>
@@ -874,20 +874,20 @@
   <h1>
     
     <span
-      >Posts tagged  AF Disaggregation 
+      >Posts tagged  Just-In-Time Compilation 
     </span>
   </h1>
    
   <div class="section ablog-post">
     <h2 class="ablog-post-title">
-      <a href="../attn_engine.html">Attention Engine for Inference (Coming Soon)</a>
+      <a href="../jit_compile.html">Support JIT Compilation in FFA</a>
     </h2>
     <ul class="ablog-archive">
       <li>
          
         <i class="fa fa-calendar"></i>
         
-        <span>08 February 2026</span>
+        <span>11 September 2026</span>
         
       </li>
       <div class="ablog-sidebar-item ablog__postcard2">
@@ -932,21 +932,19 @@
        
     </span>
      
-    <a href="#">AF Disaggregation</a>
+    <a href="#">Just-In-Time Compilation</a>
         
-    <a href="distributed-attention.html">Distributed Attention</a>
-        
-    <a href="context-parallelism.html">Context Parallelism</a>
+    <a href="flex-flash-attention.html">Flex-Flash-Attention</a>
       
   </li>
    
 </div>
     </ul>
-    <p class="ablog-post-excerpt"><p>The upcoming blog post will be released in the near future. Stay tuned!</p>
+    <p class="ablog-post-excerpt"><p>In the development of large-scale deep learning frameworks and high-performance kernel libraries, developers face a long-standing challenge: balancing the support for <strong>diverse kernel input configurations</strong> (such as data types, head dimensions, sparse/dense characteristics) against <strong>the exponential explosion of compilation time and binary size</strong>. Since operators are usually written using C++ templates and CUDA, Ahead-of-Time (AOT) compilation of all possible parameter combinations causes the resulting library sizes to skyrocket and the build process to become painfully slow.</p>
 </p>
 
     <p class="ablog-post-expand">
-      <a href="../attn_engine.html"><em>Read more ...</em></a>
+      <a href="../jit_compile.html"><em>Read more ...</em></a>
     </p>
     <hr />
   </div>

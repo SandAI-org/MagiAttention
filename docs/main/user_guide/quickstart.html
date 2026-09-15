@@ -30,7 +30,7 @@
   <link href="../_static/styles/theme.css?digest=cb8930eaaf36d9849b67" rel="stylesheet" />
 <link href="../_static/styles/pydata-sphinx-theme.css?digest=cb8930eaaf36d9849b67" rel="stylesheet" />
 
-    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=82a976d7" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
@@ -665,8 +665,8 @@
 <p class="admonition-title">Note</p>
 <p>The following snippet shows how to call <code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func</span></code> for the non-distributed (i.e., single-GPU) scenario with a minimal workflow: configuration, tensor initialization, and calculate attention for both forward and backward passes.</p>
 </div>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">flex_flash_attn_func</span>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">torch</span>
+<span class="kn">from</span> <span class="nn">magi_attention.api</span> <span class="kn">import</span> <span class="n">flex_flash_attn_func</span>
 
 <span class="c1"># --- Define attention config --- #</span>
 
@@ -738,18 +738,18 @@
 </div>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># run this python script with the command like:</span>
 <span class="c1"># torchrun --standalone --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=&quot;127.0.0.1&quot; --master_port=1234 ${SCRIPT_PATH}</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+<span class="kn">import</span> <span class="nn">torch</span>
+<span class="kn">import</span> <span class="nn">torch.nn</span> <span class="k">as</span> <span class="nn">nn</span>
+<span class="kn">import</span> <span class="nn">torch.distributed</span> <span class="k">as</span> <span class="nn">dist</span>
 
-<span class="kn">import</span><span class="w"> </span><span class="nn">magi_attention</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<span class="kn">import</span> <span class="nn">magi_attention</span>
+<span class="kn">from</span> <span class="nn">magi_attention.api</span> <span class="kn">import</span> <span class="p">(</span>
     <span class="n">magi_attn_flex_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">calc_attn</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">roll</span><span class="p">,</span> <span class="c1"># interface functions</span>
     <span class="n">compute_pad_size</span><span class="p">,</span> <span class="c1"># helper functions</span>
 <span class="p">)</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnRanges</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnMaskType</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">setup_dist_env</span><span class="p">,</span> <span class="n">clearup_dist_env</span>
+<span class="kn">from</span> <span class="nn">magi_attention.common</span> <span class="kn">import</span> <span class="n">AttnRanges</span>
+<span class="kn">from</span> <span class="nn">magi_attention.common.enum</span> <span class="kn">import</span> <span class="n">AttnMaskType</span>
+<span class="kn">from</span> <span class="nn">magi_attention.utils</span> <span class="kn">import</span> <span class="n">setup_dist_env</span><span class="p">,</span> <span class="n">clearup_dist_env</span>
 
 <span class="c1"># --- Set up distributed environment --- #</span>
 

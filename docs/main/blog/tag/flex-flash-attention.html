@@ -29,7 +29,7 @@
   <link href="../../_static/styles/theme.css?digest=cb8930eaaf36d9849b67" rel="stylesheet" />
 <link href="../../_static/styles/pydata-sphinx-theme.css?digest=cb8930eaaf36d9849b67" rel="stylesheet" />
 
-    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=82a976d7" />
     <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=53070b4a" />
   
@@ -571,6 +571,12 @@
   <ul>
      
     <li>
+      <a href="../jit_compile.html">
+        11 September - Support JIT Compilation in FFA
+      </a>
+    </li>
+    
+    <li>
       <a href="../kernel_overlap.html">
         15 February - How to Ensure Kernels Actually Overlap
       </a>
@@ -591,12 +597,6 @@
     <li>
       <a href="../blackwell_ffa_fa4.html">
         07 February - Support Blackwell with FFA_FA4 Backend
-      </a>
-    </li>
-    
-    <li>
-      <a href="../muon_qk_clip.html">
-        04 February - Support Muon QK-Clip
       </a>
     </li>
     
@@ -684,7 +684,11 @@
     <li class="ablog-cloud ablog-cloud-1">
       <a href="hybrid-attention.html">Hybrid Attention</a>
     </li>
-        
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="just-in-time-compilation.html">Just-In-Time Compilation</a>
+    </li>
+      
     <li class="ablog-cloud ablog-cloud-1">
       <a href="multi-stage-overlap.html">Multi-Stage Overlap</a>
     </li>
@@ -720,7 +724,7 @@
   <ul>
      
     <li>
-      <a href="../category/magiattention.html">MagiAttention (12)</a>
+      <a href="../category/magiattention.html">MagiAttention (13)</a>
     </li>
      
   </ul>
@@ -734,7 +738,7 @@
   <ul>
      
     <li>
-      <a href="../2026.html">2026 (8)</a>
+      <a href="../2026.html">2026 (9)</a>
     </li>
       
     <li>
@@ -792,7 +796,7 @@
     </li>
       
     <li>
-      <a href="../author/zewei-tao.html">Zewei Tao (8)</a>
+      <a href="../author/zewei-tao.html">Zewei Tao (9)</a>
     </li>
      
   </ul>
@@ -806,7 +810,7 @@
   <ul>
      
     <li>
-      <a href="../location/china.html">China (12)</a>
+      <a href="../location/china.html">China (13)</a>
     </li>
      
   </ul>
@@ -874,6 +878,77 @@
     </span>
   </h1>
    
+  <div class="section ablog-post">
+    <h2 class="ablog-post-title">
+      <a href="../jit_compile.html">Support JIT Compilation in FFA</a>
+    </h2>
+    <ul class="ablog-archive">
+      <li>
+         
+        <i class="fa fa-calendar"></i>
+        
+        <span>11 September 2026</span>
+        
+      </li>
+      <div class="ablog-sidebar-item ablog__postcard2">
+   
+  <li id="ablog-sidebar-item author ablog__author">
+    <span>
+      
+      <i class="fa-fw fa fa-user"></i>
+      
+    </span>
+     
+    <a href="../author/zewei-tao.html">Zewei Tao</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item location ablog__location">
+    <span>
+      
+      <i class="fa-fw fa fa-location-arrow"></i>
+      
+    </span>
+     
+    <a href="../location/china.html">China</a>
+      
+  </li>
+    
+  <li id="ablog-sidebar-item category ablog__category">
+    <span>
+      
+      <i class="fa-fw fa fa-folder-open"></i>
+      
+    </span>
+     
+    <a href="../category/magiattention.html">MagiAttention</a>
+      
+  </li>
+   
+  <li id="ablog-sidebar-item tags ablog__tags">
+    <span>
+       
+      <i class="fa-fw fa fa-tags"></i>
+       
+    </span>
+     
+    <a href="just-in-time-compilation.html">Just-In-Time Compilation</a>
+        
+    <a href="#">Flex-Flash-Attention</a>
+      
+  </li>
+   
+</div>
+    </ul>
+    <p class="ablog-post-excerpt"><p>In the development of large-scale deep learning frameworks and high-performance kernel libraries, developers face a long-standing challenge: balancing the support for <strong>diverse kernel input configurations</strong> (such as data types, head dimensions, sparse/dense characteristics) against <strong>the exponential explosion of compilation time and binary size</strong>. Since operators are usually written using C++ templates and CUDA, Ahead-of-Time (AOT) compilation of all possible parameter combinations causes the resulting library sizes to skyrocket and the build process to become painfully slow.</p>
+</p>
+
+    <p class="ablog-post-expand">
+      <a href="../jit_compile.html"><em>Read more ...</em></a>
+    </p>
+    <hr />
+  </div>
+  
   <div class="section ablog-post">
     <h2 class="ablog-post-title">
       <a href="../dist_native.html">Distributed-Native FFA (Coming Soon)</a>

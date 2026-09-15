@@ -30,7 +30,7 @@
   <link href="../_static/styles/theme.css?digest=cb8930eaaf36d9849b67" rel="stylesheet" />
 <link href="../_static/styles/pydata-sphinx-theme.css?digest=cb8930eaaf36d9849b67" rel="stylesheet" />
 
-    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=82a976d7" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
@@ -567,10 +567,10 @@
    
   <h2>
      
-    <i class="fa fa-pencil"></i>
-     
+    <i class="fa fa-calendar"></i>
+    
     <span>11 September 2026</span>
-     
+    
   </h2>
   <ul>
     <div class="ablog-sidebar-item ablog__postcard2">
@@ -614,7 +614,9 @@
       <i class="fa-fw fa fa-tags"></i>
        
     </span>
-      Just-In-Time Compilation     
+     
+    <a href="tag/just-in-time-compilation.html">Just-In-Time Compilation</a>
+        
     <a href="tag/flex-flash-attention.html">Flex-Flash-Attention</a>
       
   </li>
@@ -744,7 +746,11 @@
     <li class="ablog-cloud ablog-cloud-1">
       <a href="tag/hybrid-attention.html">Hybrid Attention</a>
     </li>
-        
+      
+    <li class="ablog-cloud ablog-cloud-1">
+      <a href="tag/just-in-time-compilation.html">Just-In-Time Compilation</a>
+    </li>
+      
     <li class="ablog-cloud ablog-cloud-1">
       <a href="tag/multi-stage-overlap.html">Multi-Stage Overlap</a>
     </li>
@@ -780,7 +786,7 @@
   <ul>
      
     <li>
-      <a href="category/magiattention.html">MagiAttention (12)</a>
+      <a href="category/magiattention.html">MagiAttention (13)</a>
     </li>
      
   </ul>
@@ -794,7 +800,7 @@
   <ul>
      
     <li>
-      <a href="2026.html">2026 (8)</a>
+      <a href="2026.html">2026 (9)</a>
     </li>
       
     <li>
@@ -852,7 +858,7 @@
     </li>
       
     <li>
-      <a href="author/zewei-tao.html">Zewei Tao (8)</a>
+      <a href="author/zewei-tao.html">Zewei Tao (9)</a>
     </li>
      
   </ul>
@@ -866,7 +872,7 @@
   <ul>
      
     <li>
-      <a href="location/china.html">China (12)</a>
+      <a href="location/china.html">China (13)</a>
     </li>
      
   </ul>
@@ -955,7 +961,7 @@
 <h3>1. Signature Generation and Unique Identifiers (URI)<a class="headerlink" href="#signature-generation-and-unique-identifiers-uri" title="链接到此标题。">#</a></h3>
 <p>当 Python 算子（如 <code class="docutils literal notranslate"><span class="pre">flex_flash_attn</span></code>）被调用时，系统首先检查用户提供的参数，生成一个基于字符串的唯一签名，称为 <code class="docutils literal notranslate"><span class="pre">URI</span></code>。</p>
 <p>在 <code class="docutils literal notranslate"><span class="pre">_flex_flash_attn_jit.py</span></code> 中，<code class="docutils literal notranslate"><span class="pre">get_ffa_uri</span></code> 函数构造此标签：</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">get_ffa_uri</span><span class="p">(</span><span class="n">arch_sm_num</span><span class="p">,</span> <span class="n">direction</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">compute_dtype</span><span class="p">,</span> <span class="n">output_dtype</span><span class="p">,</span> <span class="n">softcap</span><span class="p">,</span> <span class="o">...</span><span class="p">):</span>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">get_ffa_uri</span><span class="p">(</span><span class="n">arch_sm_num</span><span class="p">,</span> <span class="n">direction</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">compute_dtype</span><span class="p">,</span> <span class="n">output_dtype</span><span class="p">,</span> <span class="n">softcap</span><span class="p">,</span> <span class="o">...</span><span class="p">):</span>
     <span class="k">return</span> <span class="p">(</span>
         <span class="sa">f</span><span class="s2">&quot;flex_flash_attn_sm_</span><span class="si">{</span><span class="n">arch_sm_num</span><span class="si">}</span><span class="s2">_&quot;</span>
         <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">direction</span><span class="si">}</span><span class="s2">_&quot;</span>
@@ -1059,7 +1065,24 @@
 </section>
 
 <div class="section ablog__blog_comments">
-       
+     
+<div class="section ablog__prev-next">
+  <span class="ablog__prev">
+     
+    <a href="kernel_overlap.html">
+      
+      <i class="fa fa-arrow-circle-left"></i>
+      
+      <span>如何确保 Kernel 真正实现 Overlap</span>
+    </a>
+    
+  </span>
+  <span class="ablog__spacer">&nbsp;</span>
+  <span class="ablog__next">
+    
+  </span>
+</div>
+  
 </div>
 
                 </article>

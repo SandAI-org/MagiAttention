@@ -30,7 +30,7 @@
   <link href="../_static/styles/theme.css?digest=cb8930eaaf36d9849b67" rel="stylesheet" />
 <link href="../_static/styles/pydata-sphinx-theme.css?digest=cb8930eaaf36d9849b67" rel="stylesheet" />
 
-    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=82a976d7" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
     <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
   
@@ -948,17 +948,17 @@ not met, falls back to LoopQ automatically.</p></li>
 </dd>
 </dl>
 <p class="rubric">示例</p>
-<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_varlen_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">torch.distributed</span> <span class="k">as</span> <span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.api</span> <span class="kn">import</span> <span class="n">magi_attn_varlen_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.config</span> <span class="kn">import</span> <span class="p">(</span>
 <span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
 <span class="gp">... </span><span class="p">)</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.common.enum</span> <span class="kn">import</span> <span class="n">AttnOverlapMode</span>
 <span class="gp">&gt;&gt;&gt;</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="c1"># Step1. generate a dist_attn_runtime_key to store and indicate the inner meta info</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="n">dist_attn_runtime_key</span> <span class="o">=</span> <span class="n">magi_attn_varlen_key</span><span class="p">(</span>
@@ -1033,18 +1033,18 @@ not met, falls back to LoopQ automatically.</p></li>
 </dd>
 </dl>
 <p class="rubric">示例</p>
-<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_varlen_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">make_varlen_key_for_new_mask_after_dispatch</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">torch.distributed</span> <span class="k">as</span> <span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.api</span> <span class="kn">import</span> <span class="n">magi_attn_varlen_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.api</span> <span class="kn">import</span> <span class="n">make_varlen_key_for_new_mask_after_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.config</span> <span class="kn">import</span> <span class="p">(</span>
 <span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
 <span class="gp">... </span><span class="p">)</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.common.enum</span> <span class="kn">import</span> <span class="n">AttnOverlapMode</span>
 <span class="gp">&gt;&gt;&gt;</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="c1"># Step1. generate a dist_attn_runtime_key to dispatch for flash-attn-varlen style mask</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="c1"># in the following case, we use a causal mask as the key for dispatch, thus it will consider</span>
@@ -1182,18 +1182,18 @@ not met, falls back to LoopQ automatically.</p></li>
 </ol>
 </div>
 <p class="rubric">示例</p>
-<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_flex_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">torch.distributed</span> <span class="k">as</span> <span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.api</span> <span class="kn">import</span> <span class="n">magi_attn_flex_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.config</span> <span class="kn">import</span> <span class="p">(</span>
 <span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
 <span class="gp">... </span><span class="p">)</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnRanges</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.common.enum</span> <span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.common</span> <span class="kn">import</span> <span class="n">AttnRanges</span>
 <span class="gp">&gt;&gt;&gt;</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="c1"># Step1. generate a dist_attn_runtime_key to store and indicate the inner meta info</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="n">dist_attn_runtime_key</span> <span class="o">=</span> <span class="n">magi_attn_flex_key</span><span class="p">(</span>
@@ -1267,19 +1267,19 @@ not met, falls back to LoopQ automatically.</p></li>
 </dd>
 </dl>
 <p class="rubric">示例</p>
-<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_flex_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">make_flex_key_for_new_mask_after_dispatch</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">torch.distributed</span> <span class="k">as</span> <span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.api</span> <span class="kn">import</span> <span class="n">magi_attn_flex_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.api</span> <span class="kn">import</span> <span class="n">make_flex_key_for_new_mask_after_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.config</span> <span class="kn">import</span> <span class="p">(</span>
 <span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
 <span class="gp">... </span><span class="p">)</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
-<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnRanges</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.common.enum</span> <span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">magi_attention.common</span> <span class="kn">import</span> <span class="n">AttnRanges</span>
 <span class="gp">&gt;&gt;&gt;</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="c1"># Step1. generate a dist_attn_runtime_key to dispatch for arbitrary mask represented by attn slices</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="c1"># in the following case, we use a causal mask as the key for dispatch, thus it will consider</span>
