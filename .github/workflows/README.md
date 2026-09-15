@@ -2,11 +2,13 @@
 
 ## Runtime and runner
 
-GPU CI uses the task-based runner labels `[ci-spot-job, h100]` and runs the job in `registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2`, matching `.github/workflows/base_image_tag.txt`. This image provides the complete environment required by both MagiAttention and MagiAttnExtensions; a plain NGC PyTorch image is insufficient. The host shared storage `/mnt/afs/ci_workspace` is mounted in the job container at `/home/niubility2/ci_workspace`.
+GPU CI uses the task-based runner labels `[ci-spot-job, h100]`. The platform Dispatcher creates the runner task directly from `registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2`, matching `.github/workflows/base_image_tag.txt`; the workflow must not declare a nested GitHub Actions `container`, because these task runners intentionally do not provide a Docker daemon or CLI. This image provides the complete environment required by both MagiAttention and MagiAttnExtensions; a plain NGC PyTorch image is insufficient. For trusted jobs, the Dispatcher mounts host shared storage `/mnt/afs` at runner path `/home/niubility2`, making the CI cache available at `/home/niubility2/ci_workspace`.
 
 PR CI uses `pull_request_target`, so the workflow definition always comes from the base repository. The GPU job references the protected `ci-internal` environment and starts only after its required reviewer approves it. After approval, the trusted base workflow explicitly checks out the PR head and merges the latest target branch before testing. This permits contributions from forks without allowing a fork to replace the workflow that grants runner access.
 
-The approval is a security boundary: reviewers must inspect untrusted changes before allowing arbitrary PR code to execute on an internal runner. Fork runs use a separate job without the shared-storage volume, never publish validation markers or shared wheel artifacts, and keep temporary artifacts under `${RUNNER_TEMP}/magi-attention-ci`. Same-repository PRs and `main` pushes use the shared v2 cache. Every GPU job runs `.github/scripts/verify_task_runner.sh` before accessing its selected storage.
+The approval is the current security boundary: reviewers must inspect changes before allowing PR code to execute on an internal runner. Approved fork PRs run the same GPU job but set `CI_WORKSPACE_ROOT` to `${RUNNER_TEMP}/magi-attention-ci`; they do not publish portable markers or intentionally write normal CI artifacts to the shared cache. The current Dispatcher pool still exposes the shared mount to the task, so reviewer approval is mandatory and must be treated as authorization for the fork code to access internal runner resources.
+
+TODO: provision a dedicated fork runner label whose task specification does not mount shared storage, then route fork PRs to that pool. Path selection inside a shared task is not a security boundary. Same-repository PRs and `main` pushes continue to use the shared v2 cache. Every GPU job runs `.github/scripts/verify_task_runner.sh` before accessing storage.
 
 ## v2 wheel artifacts
 
