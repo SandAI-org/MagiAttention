@@ -64,7 +64,7 @@ jobs:
             ci_protocol:
               - '.github/ci_input_policy.json'
               - '.github/ci_dependencies.json'
-              - '.github/workflows/build_test.yaml'
+              - '.github/workflows/ci.yaml'
               - '.github/workflows/base_image_tag.txt'
               - '.github/scripts/**'
       - name: Determine trust

@@ -1131,7 +1131,7 @@ msgstr ""
 
 #: ../../source/user_guide/env_variables.md:477
 msgid ""
-"The CI workflow (`build_test.yaml`) explicitly sets "
+"The CI workflow (`ci.yaml`) explicitly sets "
 "`MAGI_ATTENTION_PREBUILD_LEVEL=ci` in the build step. For local builds, "
 "the default `lite` level is used unless overridden."
 msgstr ""
