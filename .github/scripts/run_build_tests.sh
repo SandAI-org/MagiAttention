@@ -20,14 +20,16 @@ prepare_runtime_lock() {
     export CI_DEPENDENCY_RUNTIME_LOCK="${RUNNER_TEMP:-/tmp}/ci-source-dependencies/resolved.json"
 }
 
-build() {
-    bash .github/scripts/verify_task_runner.sh
+install_dependencies() {
     bash -x .github/scripts/install_requirements.sh
     prepare_runtime_lock
     python .github/scripts/install_source_dependencies.py
+    pip install -r extensions/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+}
+
+build() {
     rm -rf "${HOME:?HOME is required}/.cache/magi_attention/"
     bash .github/scripts/build_v2_wheel.sh . MagiAttention magi_attention
-    pip install -r extensions/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
     bash .github/scripts/build_v2_wheel.sh \
         extensions MagiAttnExtensions magi_attn_extensions
 
@@ -84,7 +86,8 @@ test_packages() {
 command=${1:-}
 shift || true
 case "$command" in
+    install) install_dependencies "$@" ;;
     build) build "$@" ;;
     test) test_packages "$@" ;;
-    *) echo "Usage: $0 {build|test [main_changed ci_changed trusted]}" >&2; exit 2 ;;
+    *) echo "Usage: $0 {install|build|test [main_changed ci_changed trusted]}" >&2; exit 2 ;;
 esac

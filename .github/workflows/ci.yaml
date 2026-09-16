@@ -112,6 +112,10 @@ jobs:
           git config user.email github-actions@github.com
           git fetch https://github.com/${{ github.repository }}.git "$BASE_REF"
           git merge FETCH_HEAD
+      - name: Verify task runner
+        run: bash .github/scripts/verify_task_runner.sh
+      - name: Install dependencies
+        run: bash .github/scripts/run_build_tests.sh install
       - name: Build wheels
         run: bash .github/scripts/run_build_tests.sh build
       - name: Test packages
