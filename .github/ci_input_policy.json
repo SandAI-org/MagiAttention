@@ -4,17 +4,17 @@
     "magi_attention": {
       "root": ".",
       "exclusions": {
-        "trigger": [".github/**", "docs/**", "exps/**", "extensions/**"],
-        "wheel": [".github/**", "docs/**", "exps/**", "extensions/**", "tests/**"],
-        "portable": [".github/**", "docs/**", "exps/**", "extensions/**"]
+        "trigger": [".github/**", ".cursor/**", "docs/**", "exps/**", "extensions/**", "assets/**", "examples/**"],
+        "wheel": [".github/**", ".cursor/**", "docs/**", "exps/**", "extensions/**", "tests/**", "assets/**", "examples/**"],
+        "portable": [".github/**", ".cursor/**", "docs/**", "exps/**", "extensions/**", "assets/**", "examples/**"]
       }
     },
     "magi_attn_extensions": {
       "root": "extensions",
       "exclusions": {
-        "trigger": [".github/**", "docs/**", "exps/**"],
-        "wheel": [".github/**", "docs/**", "exps/**", "tests/**"],
-        "portable": [".github/**", "docs/**", "exps/**"]
+        "trigger": [".github/**", ".cursor/**", "docs/**", "exps/**", "assets/**", "examples/**"],
+        "wheel": [".github/**", ".cursor/**", "docs/**", "exps/**", "tests/**", "assets/**", "examples/**"],
+        "portable": [".github/**", ".cursor/**", "docs/**", "exps/**", "assets/**", "examples/**"]
       }
     }
   }
