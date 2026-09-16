@@ -49,6 +49,8 @@ The standalone layout uses the defaults `PORTABLE_SOURCE_ROOT=.` and `PORTABLE_B
 
 Only trusted runs of `SandAI-org/MagiAttention` may publish portable markers. Failure and cancellation never produce markers. A downstream consumer must recompute the fingerprint from its vendored MagiAttention content. Different source, tests, submodule gitlinks, runtime, platform, or protocol produce a miss.
 
+Trusted standalone runs also verify these markers after building and checking their wheels. A hit skips the corresponding test suite; a miss runs the tests and publishes the marker. Coverage is uploaded only when the MagiAttention test suite actually ran. Fork runs do not consume or publish shared markers.
+
 A portable marker certifies tests, not wheel bytes, and must never replace wheel manifest verification or a downstream project's own publication policy.
 
 ## Required check

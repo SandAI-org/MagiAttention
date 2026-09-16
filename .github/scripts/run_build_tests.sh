@@ -35,13 +35,20 @@ trap 'rm -rf "$import_probe_dir"' EXIT
     python -c "import magi_attention; print('MagiAttention wheel import succeeded')"
 )
 
+coverage_generated=false
 if [[ "$main_changed" == true || "$ci_changed" == true ]]; then
-    COVERAGE_RUN=True \
-        PORTABLE_VALIDATION_COVERAGE=true \
-        MAGI_ATTENTION_JIT_COMPILE_DISABLED=1 \
-        bash .github/scripts/portable_validation.sh run-test magi_attention
-    if [[ "$trusted" == true ]]; then
-        bash .github/scripts/portable_validation.sh write-success magi_attention
+    if [[ "$trusted" == true ]] && \
+        bash .github/scripts/portable_validation.sh verify magi_attention; then
+        echo "Reused portable MagiAttention validation"
+    else
+        COVERAGE_RUN=True \
+            PORTABLE_VALIDATION_COVERAGE=true \
+            MAGI_ATTENTION_JIT_COMPILE_DISABLED=1 \
+            bash .github/scripts/portable_validation.sh run-test magi_attention
+        coverage_generated=true
+        if [[ "$trusted" == true ]]; then
+            bash .github/scripts/portable_validation.sh write-success magi_attention
+        fi
     fi
 fi
 
@@ -52,7 +59,16 @@ bash .github/scripts/build_v2_wheel.sh \
     cd "$import_probe_dir"
     python -c "import magi_attn_extensions; print('MagiAttnExtensions wheel import succeeded')"
 )
-bash .github/scripts/portable_validation.sh run-test magi_attn_extensions
-if [[ "$trusted" == true ]]; then
-    bash .github/scripts/portable_validation.sh write-success magi_attn_extensions
+if [[ "$trusted" == true ]] && \
+    bash .github/scripts/portable_validation.sh verify magi_attn_extensions; then
+    echo "Reused portable MagiAttnExtensions validation"
+else
+    bash .github/scripts/portable_validation.sh run-test magi_attn_extensions
+    if [[ "$trusted" == true ]]; then
+        bash .github/scripts/portable_validation.sh write-success magi_attn_extensions
+    fi
+fi
+
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "coverage_generated=$coverage_generated" >> "$GITHUB_OUTPUT"
 fi

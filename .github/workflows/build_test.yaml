@@ -104,13 +104,14 @@ jobs:
           git fetch https://github.com/${{ github.repository }}.git "$BASE_REF"
           git merge FETCH_HEAD
       - name: Build and test
+        id: build_and_test
         run: bash .github/scripts/run_build_tests.sh "$MAIN_CHANGED" "$CI_CHANGED" "$TRUSTED"
         env:
           MAIN_CHANGED: ${{ needs.detect_changes.outputs.MagiAttention }}
           CI_CHANGED: ${{ needs.detect_changes.outputs.ci_protocol }}
           TRUSTED: ${{ needs.detect_changes.outputs.trusted }}
       - name: Upload coverage reports to Codecov
-        if: needs.detect_changes.outputs.MagiAttention == 'true' || needs.detect_changes.outputs.ci_protocol == 'true'
+        if: steps.build_and_test.outputs.coverage_generated == 'true'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
