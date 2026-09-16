@@ -17,7 +17,7 @@
 set -euo pipefail
 
 PORTABLE_SCHEMA=1
-PORTABLE_RECIPE_VERSION=2
+PORTABLE_RECIPE_VERSION=3
 PORTABLE_ROOT="${CI_WORKSPACE_ROOT:-/workspace}/v2/portable-validations/magi-attention"
 PORTABLE_PRODUCER=SandAI-org/MagiAttention
 
@@ -53,11 +53,7 @@ source_digest() {
         return 3
     }
     policy="$repo_root/$source_root/.github/ci_input_policy.json"
-    if [[ -f "$repo_root/tools/ci_input_policy.py" ]]; then
-        helper="$repo_root/tools/ci_input_policy.py"
-    else
-        helper="$repo_root/$source_root/.github/scripts/ci_input_policy.py"
-    fi
+    helper="$repo_root/$source_root/.github/scripts/ci_input_policy.py"
     python "$helper" --repo-root "$repo_root" --policy "$policy" \
         digest --layer portable --node "$node"
 }
@@ -229,27 +225,53 @@ PY
 }
 
 run_test() {
+    local test_cwd package_root clean_pythonpath
+    package_root=$(cd "$repo_root/$source_root" && pwd)
+    test_cwd=$(mktemp -d "${RUNNER_TEMP:-/tmp}/magi-attention-wheel-tests.XXXXXX")
+    trap 'rm -rf "$test_cwd"' RETURN
+    clean_pythonpath=$(python - "$repo_root" "$package_root" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+excluded = {Path(path).resolve() for path in sys.argv[1:]}
+print(os.pathsep.join(
+    entry for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+    if entry and Path(entry).resolve() not in excluded
+))
+PY
+    )
     case "${1:?node is required}" in
         magi_attention)
             if [[ "${PORTABLE_VALIDATION_COVERAGE:-false}" == true ]]; then
-                MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
+                (cd "$test_cwd" && \
+                    PYTHONPATH="$clean_pythonpath" \
+                    COVERAGE_FILE="$repo_root/.coverage" \
+                    MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
                     MAGI_ATTENTION_TEST_BACKEND="sdpa,ffa" \
                     coverage run --source magi_attention -m pytest \
-                        -q -s --skip-slow --import-mode=append "$source_root/tests"
-                coverage combine
-                coverage xml -i
+                        -q -s --skip-slow --import-mode=append "$package_root/tests")
+                (cd "$repo_root" && coverage combine && coverage xml -i)
             else
-                MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
+                (cd "$test_cwd" && \
+                    PYTHONPATH="$clean_pythonpath" \
+                    MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
                     MAGI_ATTENTION_TEST_BACKEND="sdpa,ffa" \
-                    pytest -q -s --skip-slow --import-mode=append "$source_root/tests"
+                    python -m pytest -q -s --skip-slow --import-mode=append \
+                        "$package_root/tests")
             fi
             ;;
         magi_attn_extensions)
-            MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
-                pytest -q -s --skip-slow --import-mode=append "$source_root/extensions/tests"
+            (cd "$test_cwd" && \
+                PYTHONPATH="$clean_pythonpath" \
+                MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
+                python -m pytest -q -s --skip-slow --import-mode=append \
+                    "$package_root/extensions/tests")
             ;;
         *) check_node "$1" ;;
     esac
+    rm -rf "$test_cwd"
+    trap - RETURN
 }
 
 case "${1:-}" in
