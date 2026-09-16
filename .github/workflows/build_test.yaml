@@ -17,6 +17,7 @@ env:
   CI_WORKSPACE_ROOT: /home/niubility2/ci_workspace
   TASK_CI_PLATFORM: h100
   TASK_CI_BASE_IMAGE: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2
+  STANDALONE_ARTIFACT_NAMESPACE: magi-attention
   NCCL_NVLS_ENABLE: '0'
   VALIDATION_CACHE_TRUSTED: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
 
@@ -56,14 +57,7 @@ jobs:
               - '.github/ci_dependencies.json'
               - '.github/workflows/build_test.yaml'
               - '.github/workflows/base_image_tag.txt'
-              - '.github/scripts/check_pr_title.sh'
-              - '.github/scripts/install_requirements.sh'
-              - '.github/scripts/install_source_dependencies.py'
-              - '.github/scripts/build_v2_wheel.sh'
-              - '.github/scripts/portable_validation.sh'
-              - '.github/scripts/run_build_tests.sh'
-              - '.github/scripts/test_portable_validation.sh'
-              - '.github/scripts/verify_task_runner.sh'
+              - '.github/scripts/**'
       - name: Determine trust
         id: trust
         run: echo "trusted=${{ env.VALIDATION_CACHE_TRUSTED }}" >> "$GITHUB_OUTPUT"
@@ -88,6 +82,7 @@ jobs:
       no_proxy: pypi.tuna.tsinghua.edu.cn
       GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       DEPENDENCY_REPO_TOKEN: ${{ secrets.DEPENDENCY_REPO_TOKEN }}
+      CI_DEPENDENCY_USE_TOKEN: 'true'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,9 +90,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
           fetch-depth: 0
-      - name: Use runner-local artifacts for fork PR
-        if: needs.detect_changes.outputs.trusted != 'true'
-        run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
+          persist-credentials: false
       - name: Merge latest target branch
         if: github.event_name == 'pull_request_target'
         env:
@@ -120,6 +113,49 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: SandAI-org/MagiAttention
           files: coverage.xml
+
+  test_MagiAttention_untrusted:
+    needs: [detect_changes]
+    if: |
+      !cancelled() &&
+      needs.detect_changes.outputs.trusted != 'true' &&
+      (
+        needs.detect_changes.outputs.MagiAttention == 'true' ||
+        needs.detect_changes.outputs.MagiAttnExtensions == 'true' ||
+        needs.detect_changes.outputs.ci_protocol == 'true'
+      )
+    environment: ci-internal
+    runs-on: [ci-spot-job, h100]
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: 'safe.directory'
+      GIT_CONFIG_VALUE_0: '*'
+      http_proxy: ${{ secrets.HTTP_PROXY }}
+      https_proxy: ${{ secrets.HTTP_PROXY }}
+      no_proxy: pypi.tuna.tsinghua.edu.cn
+      GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: recursive
+          fetch-depth: 0
+      - name: Configure runner-local workspace
+        run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
+      - name: Merge latest target branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git fetch https://github.com/${{ github.repository }}.git "$BASE_REF"
+          git merge FETCH_HEAD
+      - name: Build and test without shared storage
+        run: bash .github/scripts/run_build_tests.sh "$MAIN_CHANGED" "$CI_CHANGED" false
+        env:
+          MAIN_CHANGED: ${{ needs.detect_changes.outputs.MagiAttention }}
+          CI_CHANGED: ${{ needs.detect_changes.outputs.ci_protocol }}
 
   ci_gate:
     needs: [detect_changes, test_MagiAttention]

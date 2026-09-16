@@ -22,6 +22,7 @@ trusted=${3:?trust flag is required}
 
 bash .github/scripts/verify_task_runner.sh
 bash .github/scripts/test_portable_validation.sh
+python .github/scripts/test_source_dependency_cache.py
 bash -x .github/scripts/install_requirements.sh
 export CI_DEPENDENCY_RUNTIME_LOCK="${RUNNER_TEMP:-/tmp}/ci-source-dependencies/resolved.json"
 python .github/scripts/install_source_dependencies.py

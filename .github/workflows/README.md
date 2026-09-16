@@ -2,7 +2,7 @@
 
 ## Runtime and runner
 
-GPU CI uses the task-based runner labels `[ci-spot-job, h100]`. The platform Dispatcher creates the runner task directly from `registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2`, matching `.github/workflows/base_image_tag.txt`; the workflow must not declare a nested GitHub Actions `container`, because these task runners intentionally do not provide a Docker daemon or CLI. This image provides the complete environment required by both MagiAttention and MagiAttnExtensions; a plain NGC PyTorch image is insufficient. For trusted jobs, the Dispatcher mounts host shared storage `/mnt/afs` at runner path `/home/niubility2`, making the CI cache available at `/home/niubility2/ci_workspace`.
+GPU CI uses the task-based runner labels `[ci-spot-job, h100]`. The Dispatcher creates each task directly from `registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2`, matching `.github/workflows/base_image_tag.txt`; the workflow must not declare a nested GitHub Actions container because task runners do not provide Docker. This image provides the complete environment required by both MagiAttention and MagiAttnExtensions; a plain NGC PyTorch image is insufficient. Shared storage is available at `/home/niubility2/ci_workspace`.
 
 PR CI uses `pull_request_target`, so the workflow definition always comes from the base repository. The GPU job references the protected `ci-internal` environment and starts only after its required reviewer approves it. After approval, the trusted base workflow explicitly checks out the PR head and merges the latest target branch before testing. This permits contributions from forks without allowing a fork to replace the workflow that grants runner access.
 
@@ -12,7 +12,9 @@ TODO: provision a dedicated fork runner label whose task specification does not 
 
 ## v2 wheel artifacts
 
-`.github/ci_dependencies.json` is the common source-dependency lock interface. MagiAttention currently has no repository dependencies, so its list is empty; CI still runs the resolver and records an empty runtime lock. Future dependencies must be declared by repository plus branch, tag, or full commit, and are resolved to an immutable commit before installation.
+`.github/ci_dependencies.json` is the common source-dependency protocol. MagiAttention currently has no repository dependencies, so its list is empty; CI still runs the same resolver and records an empty runtime lock. Future dependency wheels use `v2/dependency-artifacts/magi-attention`, keyed by consumer namespace, dependency repository and ID, install path, exact tracked source content, base image, platform, and resolver recipe. Branches and tags are resolved once to immutable commits. Reuse fails closed on any manifest, identity, layout, or wheel digest mismatch, and publication uses private staging followed by atomic rename.
+
+The trusted build job is prepared for authenticated cross-repository checkout with the `DEPENDENCY_REPO_TOKEN` Actions secret and `CI_DEPENDENCY_USE_TOKEN=true`. The resolver clears the credential and Authorization header persisted by `actions/checkout` before adding this single explicit credential. The token needs read-only Contents permission for any repository later added to the dependency manifest; it is never exposed to the untrusted fork job.
 
 `.github/scripts/build_v2_wheel.sh` publishes immutable standalone artifacts under:
 
