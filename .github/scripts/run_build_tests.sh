@@ -28,6 +28,7 @@ install_dependencies() {
 }
 
 build() {
+    export MAGI_ATTENTION_PREBUILD_LEVEL=ci
     rm -rf "${HOME:?HOME is required}/.cache/magi_attention/"
     bash .github/scripts/build_v2_wheel.sh . MagiAttention magi_attention
     bash .github/scripts/build_v2_wheel.sh \

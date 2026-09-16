@@ -30,12 +30,13 @@ base_family=${BASH_REMATCH[1]}
 source_digest=$(python "$repo_root/.github/scripts/ci_input_policy.py" digest --layer wheel --node "$node") || exit
 recipe_digest=$(sha256sum "$repo_root/.github/scripts/build_v2_wheel.sh" "$repo_root/.github/scripts/ci_input_policy.py" | sha256sum | awk '{print $1}')
 package_version=$(cd "$repo_root/$package_dir" && python -m versioningit) || exit
+prebuild_level=${MAGI_ATTENTION_PREBUILD_LEVEL:-lite}
 dependency=none
 if [[ "$node" == magi_attn_extensions ]]; then
     dependency=$(bash "$repo_root/.github/scripts/portable_validation.sh" fingerprint magi_attention) || exit
 fi
-input_digest=$(printf 'schema=1\ncache=%s\nbase_family=%s\nsource=%s\ndependency=%s\nrecipe=%s\nversion=%s\n' \
-    "$cache_name" "$base_family" "$source_digest" "$dependency" "$recipe_digest" "$package_version" |
+input_digest=$(printf 'schema=1\ncache=%s\nbase_family=%s\nsource=%s\ndependency=%s\nrecipe=%s\nversion=%s\nprebuild_level=%s\n' \
+    "$cache_name" "$base_family" "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" |
     sha256sum | awk '{print $1}')
 fingerprint="v1-$base_family-$input_digest"
 target="$cache_root/$cache_name/$fingerprint"
@@ -52,12 +53,12 @@ verify() {
         [[ -f "$wheel" && ! -L "$wheel" ]] || return 1
     done
     python - "$directory/manifest.json" "$cache_name" "$base_family" \
-        "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$fingerprint" <<'PY'
+        "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" "$fingerprint" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-path, cache, family, source, dependency, recipe, version, fingerprint = sys.argv[1:]
+path, cache, family, source, dependency, recipe, version, prebuild_level, fingerprint = sys.argv[1:]
 data = json.loads(Path(path).read_text())
 expected = {
     "schema_version": 1,
@@ -67,6 +68,7 @@ expected = {
     "dependency_fingerprint": dependency,
     "recipe_digest": recipe,
     "package_version": version,
+    "prebuild_level": prebuild_level,
     "fingerprint": fingerprint,
     "status": "built",
 }
@@ -88,13 +90,13 @@ staging=$(mktemp -d "$parent/.build.XXXXXX")
 trap 'rm -rf "${staging:-}"' EXIT
 python -m build --wheel --no-isolation --outdir "$staging" "$repo_root/$package_dir"
 python - "$staging/manifest.json" "$cache_name" "$base_tag" "$base_family" \
-    "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$fingerprint" <<'PY'
+    "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" "$fingerprint" <<'PY'
 import json
 import os
 import sys
 from pathlib import Path
 
-path, cache, tag, family, source, dependency, recipe, version, fingerprint = sys.argv[1:]
+path, cache, tag, family, source, dependency, recipe, version, prebuild_level, fingerprint = sys.argv[1:]
 data = {
     "base_image_family": family,
     "base_image_tag": tag,
@@ -102,6 +104,7 @@ data = {
     "dependency_fingerprint": dependency,
     "fingerprint": fingerprint,
     "package_version": version,
+    "prebuild_level": prebuild_level,
     "producer_run_id": os.environ.get("GITHUB_RUN_ID", "local"),
     "producer_sha": os.environ.get("GITHUB_SHA", "local"),
     "recipe_digest": recipe,
