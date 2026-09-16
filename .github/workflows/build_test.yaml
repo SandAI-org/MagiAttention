@@ -91,6 +91,9 @@ jobs:
           submodules: recursive
           fetch-depth: 0
           persist-credentials: false
+      - name: Use runner-local artifacts for fork PR
+        if: needs.detect_changes.outputs.trusted != 'true'
+        run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
       - name: Merge latest target branch
         if: github.event_name == 'pull_request_target'
         env:
@@ -113,49 +116,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: SandAI-org/MagiAttention
           files: coverage.xml
-
-  test_MagiAttention_untrusted:
-    needs: [detect_changes]
-    if: |
-      !cancelled() &&
-      needs.detect_changes.outputs.trusted != 'true' &&
-      (
-        needs.detect_changes.outputs.MagiAttention == 'true' ||
-        needs.detect_changes.outputs.MagiAttnExtensions == 'true' ||
-        needs.detect_changes.outputs.ci_protocol == 'true'
-      )
-    environment: ci-internal
-    runs-on: [ci-spot-job, h100]
-    env:
-      GIT_CONFIG_COUNT: '1'
-      GIT_CONFIG_KEY_0: 'safe.directory'
-      GIT_CONFIG_VALUE_0: '*'
-      http_proxy: ${{ secrets.HTTP_PROXY }}
-      https_proxy: ${{ secrets.HTTP_PROXY }}
-      no_proxy: pypi.tuna.tsinghua.edu.cn
-      GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.sha }}
-          submodules: recursive
-          fetch-depth: 0
-      - name: Configure runner-local workspace
-        run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
-      - name: Merge latest target branch
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git fetch https://github.com/${{ github.repository }}.git "$BASE_REF"
-          git merge FETCH_HEAD
-      - name: Build and test without shared storage
-        run: bash .github/scripts/run_build_tests.sh "$MAIN_CHANGED" "$CI_CHANGED" false
-        env:
-          MAIN_CHANGED: ${{ needs.detect_changes.outputs.MagiAttention }}
-          CI_CHANGED: ${{ needs.detect_changes.outputs.ci_protocol }}
 
   ci_gate:
     needs: [detect_changes, test_MagiAttention]

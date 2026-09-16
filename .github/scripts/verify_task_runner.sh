@@ -16,10 +16,18 @@
 
 set -euo pipefail
 
-expected_mount=/home/niubility2
-mounted_target=$(findmnt -T "$expected_mount" -n -o TARGET 2>/dev/null || true)
+shared_root=/home/niubility2/ci_workspace
 if [[ "${VALIDATION_CACHE_TRUSTED:-false}" == true ]]; then
-    expected_root=$expected_mount/ci_workspace
+    expected_root=$shared_root
+    mounted_target=$(findmnt -T "$shared_root" -n -o TARGET 2>/dev/null || true)
+    if [[ "${CI_WORKSPACE_ROOT:-}" != "$expected_root" ]]; then
+        echo "::error::Unexpected trusted CI_WORKSPACE_ROOT: ${CI_WORKSPACE_ROOT:-<unset>}" >&2
+        exit 1
+    fi
+    if [[ "$mounted_target" != "$expected_root" ]]; then
+        echo "::error::Shared CI storage is not mounted at $expected_root" >&2
+        exit 1
+    fi
 else
     # TODO: Route fork PRs to a dedicated task-runner label whose task spec
     # does not mount shared storage. Until then, ci-internal reviewer approval
@@ -54,7 +62,9 @@ if [[ -n "${MAGI_BASE_IMAGE_TAG:-}" && "$MAGI_BASE_IMAGE_TAG" != "$declared_base
     echo "::error::Task runner base tag $MAGI_BASE_IMAGE_TAG does not match declared $declared_base_tag" >&2
     exit 1
 fi
-findmnt -T "$expected_mount" -n -o TARGET,SOURCE,FSTYPE
+if [[ "${VALIDATION_CACHE_TRUSTED:-false}" == true ]]; then
+    findmnt -T "$shared_root" -n -o TARGET,SOURCE,FSTYPE
+fi
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 python - <<'PY'
 import sys
