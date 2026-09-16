@@ -16,7 +16,8 @@
 
 set -euo pipefail
 
-shared_root=/home/niubility2/ci_workspace
+expected_mount=/home/niubility2
+shared_root=$expected_mount/ci_workspace
 if [[ "${VALIDATION_CACHE_TRUSTED:-false}" == true ]]; then
     expected_root=$shared_root
     mounted_target=$(findmnt -T "$shared_root" -n -o TARGET 2>/dev/null || true)
@@ -24,10 +25,13 @@ if [[ "${VALIDATION_CACHE_TRUSTED:-false}" == true ]]; then
         echo "::error::Unexpected trusted CI_WORKSPACE_ROOT: ${CI_WORKSPACE_ROOT:-<unset>}" >&2
         exit 1
     fi
-    if [[ "$mounted_target" != "$expected_root" ]]; then
-        echo "::error::Shared CI storage is not mounted at $expected_root" >&2
-        exit 1
-    fi
+    case "$mounted_target" in
+        "$expected_mount"|"$shared_root") ;;
+        *)
+            echo "::error::Shared CI storage mount for $shared_root is invalid: ${mounted_target:-<none>}" >&2
+            exit 1
+            ;;
+    esac
 else
     # TODO: Route fork PRs to a dedicated task-runner label whose task spec
     # does not mount shared storage. Until then, ci-internal reviewer approval
