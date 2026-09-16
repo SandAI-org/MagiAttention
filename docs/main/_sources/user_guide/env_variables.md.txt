@@ -474,7 +474,7 @@ Controls the breadth of FFA kernel configurations pre-built during `pip install`
 - `ci`: Additionally pre-builds all kernel variants declared by test classes via `precompile_kernel_specs()`. Eliminates JIT compilation during test runs.
 
 ```{note}
-The CI workflow (`build_test.yaml`) explicitly sets `MAGI_ATTENTION_PREBUILD_LEVEL=ci`
+The CI workflow (`ci.yaml`) explicitly sets `MAGI_ATTENTION_PREBUILD_LEVEL=ci`
 in the build step. For local builds, the default `lite` level is used unless overridden.
 ```
 
