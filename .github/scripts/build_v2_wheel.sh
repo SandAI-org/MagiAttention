@@ -27,8 +27,8 @@ base_tag=$(tr -d '[:space:]' < "$repo_root/.github/workflows/base_image_tag.txt"
     exit 2
 }
 base_family=${BASH_REMATCH[1]}
-source_digest=$(bash "$repo_root/.github/scripts/portable_validation.sh" source-digest "$node") || exit
-recipe_digest=$(sha256sum "$repo_root/.github/scripts/build_v2_wheel.sh" | awk '{print $1}')
+source_digest=$(python "$repo_root/.github/scripts/ci_input_policy.py" digest --layer wheel --node "$node") || exit
+recipe_digest=$(sha256sum "$repo_root/.github/scripts/build_v2_wheel.sh" "$repo_root/.github/scripts/ci_input_policy.py" | sha256sum | awk '{print $1}')
 package_version=$(cd "$repo_root/$package_dir" && python -m versioningit) || exit
 dependency=none
 if [[ "$node" == magi_attn_extensions ]]; then

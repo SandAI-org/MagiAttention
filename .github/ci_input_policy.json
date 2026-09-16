@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "nodes": {
+    "magi_attention": {
+      "root": ".",
+      "exclusions": {
+        "trigger": [".github/**", "docs/**", "exps/**", "extensions/**"],
+        "wheel": [".github/**", "docs/**", "exps/**", "extensions/**", "tests/**"],
+        "portable": [".github/**", "docs/**", "exps/**", "extensions/**"]
+      }
+    },
+    "magi_attn_extensions": {
+      "root": "extensions",
+      "exclusions": {
+        "trigger": [".github/**", "docs/**", "exps/**"],
+        "wheel": [".github/**", "docs/**", "exps/**", "tests/**"],
+        "portable": [".github/**", "docs/**", "exps/**"]
+      }
+    }
+  }
+}

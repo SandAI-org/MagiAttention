@@ -18,6 +18,8 @@ set -euo pipefail
 
 repo_root=$(git rev-parse --show-toplevel)
 protocol="$repo_root/.github/scripts/portable_validation.sh"
+policy="$repo_root/.github/ci_input_policy.json"
+policy_helper="$repo_root/.github/scripts/ci_input_policy.py"
 workspace=$(mktemp -d)
 trap 'rm -rf "$workspace"' EXIT
 
@@ -32,6 +34,10 @@ mkdir -p "$consumer/vendor/MagiAttention/extensions/tests" "$consumer/vendor/Mag
 
 cp "$protocol" "$standalone/.github/scripts/portable_validation.sh"
 cp "$protocol" "$consumer/vendor/MagiAttention/.github/scripts/portable_validation.sh"
+cp "$policy" "$standalone/.github/ci_input_policy.json"
+cp "$policy" "$consumer/vendor/MagiAttention/.github/ci_input_policy.json"
+cp "$policy_helper" "$standalone/.github/scripts/ci_input_policy.py"
+cp "$policy_helper" "$consumer/vendor/MagiAttention/.github/scripts/ci_input_policy.py"
 printf '26.05.2\n' > "$standalone/.github/workflows/base_image_tag.txt"
 printf '26.05.2\n' > "$consumer/runtime_tag.txt"
 printf 'main source\n' > "$standalone/magi_attention/package.py"

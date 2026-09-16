@@ -1,5 +1,16 @@
 # MagiAttention CI
 
+## Declarative CI inputs
+
+`.github/ci_input_policy.json` is the single source of truth for package input
+selection. Each node declares a repository-layout-independent `root` and
+separate `trigger`, `wheel`, and `portable` exclusions, all relative to that
+root. To exclude a path from CI, edit only those exclusion lists; do not add a
+second path list to the workflow or digest scripts. Validation fails closed if
+a wheel or portable input is not covered by the trigger layer. The canonical
+policy projection participates in source identity, while policy/helper changes
+also invalidate the CI protocol.
+
 ## Runtime and runner
 
 GPU CI uses the task-based runner labels `[ci-spot-job, h100]`. The Dispatcher creates each task directly from `registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2`, matching `.github/workflows/base_image_tag.txt`; the workflow must not declare a nested GitHub Actions container because task runners do not provide Docker. This image provides the complete environment required by both MagiAttention and MagiAttnExtensions; a plain NGC PyTorch image is insufficient. Shared storage is available at `/home/niubility2/ci_workspace`.
@@ -41,7 +52,7 @@ ${CI_WORKSPACE_ROOT}/v2/portable-validations/magi-attention/
   v<schema>/<node>/<fingerprint>/success.json
 ```
 
-The portable fingerprint includes normalized tracked source content, exact base image tag, platform, and the byte identity of `.github/scripts/portable_validation.sh`, which is also the canonical test entrypoint. Repository-specific `.github` files are excluded from source identity; the protocol script is hashed separately.
+The portable fingerprint includes policy-selected normalized tracked source content, exact base image tag, platform, a stable protocol identifier, the recipe version, and the canonical portable policy projection. Repository-specific `.github` files may be excluded as source files without removing policy semantics from the identity.
 
 The standalone layout uses the defaults `PORTABLE_SOURCE_ROOT=.` and `PORTABLE_BASE_TAG_FILE=.github/workflows/base_image_tag.txt`. A downstream vendored layout may set those two generic variables to its own paths; the protocol contains no downstream-specific names or path detection.
 

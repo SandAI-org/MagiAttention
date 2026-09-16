@@ -28,8 +28,8 @@ jobs:
       pull-requests: read
       contents: read
     outputs:
-      MagiAttention: ${{ steps.filter.outputs.MagiAttention }}
-      MagiAttnExtensions: ${{ steps.filter.outputs.MagiAttnExtensions }}
+      MagiAttention: ${{ steps.package_changes.outputs.MagiAttention }}
+      MagiAttnExtensions: ${{ steps.package_changes.outputs.MagiAttnExtensions }}
       ci_protocol: ${{ steps.filter.outputs.ci_protocol }}
       trusted: ${{ steps.trust.outputs.trusted }}
     steps:
@@ -42,18 +42,27 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: bash .github/scripts/check_pr_title.sh
+      - name: Fetch pull request head for change detection
+        if: github.event_name == 'pull_request_target'
+        env:
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch --no-tags "https://github.com/$HEAD_REPOSITORY.git" "$HEAD_SHA"
+      - name: Detect package changes from policy
+        id: package_changes
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python .github/scripts/ci_input_policy.py validate
+          echo "MagiAttention=$(python .github/scripts/ci_input_policy.py changed --layer trigger --node magi_attention --base "$BASE_SHA" --head "$HEAD_SHA")" >> "$GITHUB_OUTPUT"
+          echo "MagiAttnExtensions=$(python .github/scripts/ci_input_policy.py changed --layer trigger --node magi_attn_extensions --base "$BASE_SHA" --head "$HEAD_SHA")" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v2
         id: filter
         with:
           filters: |
-            MagiAttention:
-              - '**'
-              - '!extensions/**'
-              - '!.github/**'
-              - '!docs/**'
-            MagiAttnExtensions:
-              - 'extensions/**'
             ci_protocol:
+              - '.github/ci_input_policy.json'
               - '.github/ci_dependencies.json'
               - '.github/workflows/build_test.yaml'
               - '.github/workflows/base_image_tag.txt'
