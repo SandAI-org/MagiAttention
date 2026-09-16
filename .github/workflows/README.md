@@ -12,6 +12,8 @@ TODO: provision a dedicated fork runner label whose task specification does not 
 
 ## v2 wheel artifacts
 
+`.github/ci_dependencies.json` is the common source-dependency lock interface. MagiAttention currently has no repository dependencies, so its list is empty; CI still runs the resolver and records an empty runtime lock. Future dependencies must be declared by repository plus branch, tag, or full commit, and are resolved to an immutable commit before installation.
+
 `.github/scripts/build_v2_wheel.sh` publishes immutable standalone artifacts under:
 
 ```text

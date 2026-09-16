@@ -23,10 +23,14 @@ trusted=${3:?trust flag is required}
 bash .github/scripts/verify_task_runner.sh
 bash .github/scripts/test_portable_validation.sh
 bash -x .github/scripts/install_requirements.sh
-rm -rf /github/home/.cache/magi_attention/
+export CI_DEPENDENCY_RUNTIME_LOCK="${RUNNER_TEMP:-/tmp}/ci-source-dependencies/resolved.json"
+python .github/scripts/install_source_dependencies.py
+rm -rf "${HOME:?HOME is required}/.cache/magi_attention/"
 bash .github/scripts/build_v2_wheel.sh . MagiAttention magi_attention
+import_probe_dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/magi-attention-wheel-import.XXXXXX")
+trap 'rm -rf "$import_probe_dir"' EXIT
 (
-    cd /github/home
+    cd "$import_probe_dir"
     python -c "import magi_attention; print('MagiAttention wheel import succeeded')"
 )
 
@@ -44,7 +48,7 @@ pip install -r extensions/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/
 bash .github/scripts/build_v2_wheel.sh \
     extensions MagiAttnExtensions magi_attn_extensions
 (
-    cd /github/home
+    cd "$import_probe_dir"
     python -c "import magi_attn_extensions; print('MagiAttnExtensions wheel import succeeded')"
 )
 bash .github/scripts/portable_validation.sh run-test magi_attn_extensions

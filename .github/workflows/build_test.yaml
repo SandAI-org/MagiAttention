@@ -53,10 +53,12 @@ jobs:
             MagiAttnExtensions:
               - 'extensions/**'
             ci_protocol:
+              - '.github/ci_dependencies.json'
               - '.github/workflows/build_test.yaml'
               - '.github/workflows/base_image_tag.txt'
               - '.github/scripts/check_pr_title.sh'
               - '.github/scripts/install_requirements.sh'
+              - '.github/scripts/install_source_dependencies.py'
               - '.github/scripts/build_v2_wheel.sh'
               - '.github/scripts/portable_validation.sh'
               - '.github/scripts/run_build_tests.sh'
@@ -85,6 +87,7 @@ jobs:
       https_proxy: ${{ secrets.HTTP_PROXY }}
       no_proxy: pypi.tuna.tsinghua.edu.cn
       GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      DEPENDENCY_REPO_TOKEN: ${{ secrets.DEPENDENCY_REPO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
