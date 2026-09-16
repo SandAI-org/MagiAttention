@@ -50,9 +50,11 @@ from .ffa_utils import (
     create_softcap_scoremod,
     create_softcap_scoremod_bwd,
     get_device_arch,
+    get_ffa_mask_mode,
     hash_callable,
     is_ffa_2cta_disabled,
     is_ffa_clc_enabled,
+    is_ffa_inner_dir_max_to_min,
     maybe_contiguous,
     normalize_mask_types,
     ranges_to_cu_seqlens,
@@ -63,12 +65,41 @@ from .ffa_utils import (
     validate_tensor,
 )
 from .sparse_utils import (
+    BlockSparseTensorsTorch,
+    InnerLoadMode,
+    InnerStoreMode,
+    OuterStoreMode,
     block_sparse_call_tuple,
+    derive_outer_store_mode,
     get_sparse_q_block_size,
+    index_sparse_indices_to_block_sparse,
     prepare_block_sparse_bwd,
+    prepare_block_sparse_bwd_loopk,
     prepare_block_sparse_fwd,
     to_cute_block_sparse_tensors,
 )
+from .sparse_utils import (
+    transpose_block_sparse_tensors as _transpose_block_sparse_tensors,
+)
+
+
+def _expand_bst_heads(bst, target_num_heads: int):
+    """Expand BlockSparseTensorsTorch head dim from NHK to NHQ via repeat_interleave."""
+    nhk_bst = bst.mask_block_cnt.shape[1]
+    if nhk_bst in (target_num_heads, 1):
+        return bst
+    qhpk = target_num_heads // nhk_bst
+    updates = {}
+    for fld in type(bst)._fields:
+        _val = getattr(bst, fld)
+        if (
+            _val is not None
+            and hasattr(_val, "repeat_interleave")
+            and _val.ndim >= 2
+            and _val.shape[1] == nhk_bst
+        ):
+            updates[fld] = _val.repeat_interleave(qhpk, dim=1)
+    return bst._replace(**updates)
 
 
 def _flex_flash_attn_fwd(
@@ -228,6 +259,15 @@ def _flex_flash_attn_fwd(
         return out, lse
 
     dtype = to_cute_dtype(q.dtype)
+
+    # IndexSparse token-level tiles
+    index_sparse_tiles = flex_attn_args.index_sparse_tiles if flex_attn_args else None
+    is_index_sparse = index_sparse_tiles is not None
+    if is_index_sparse:
+        bst = index_sparse_tiles.scheduling_bst
+        if not pack_gqa:
+            bst = _expand_bst_heads(bst, num_head)
+        block_sparse_tensors = bst
     use_block_sparsity = block_sparse_tensors is not None
 
     local = False
@@ -272,7 +312,7 @@ def _flex_flash_attn_fwd(
         max_seqlen_q = seqlen_q if cu_seqlens_q is None else total_q
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
-    seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
+    seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead if pack_gqa else max_seqlen_q
     if major_arch == 10:
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
@@ -332,12 +372,25 @@ def _flex_flash_attn_fwd(
         tile_m=tile_m,
         tile_n=tile_n,
         q_stage=q_stage,
+        qhead_per_kvhead=qhead_per_kvhead,
     )
 
     if aux_tensors is not None:
         aux_tensor_metadata = get_aux_tensor_metadata(aux_tensors)
     else:
         aux_tensor_metadata = None
+
+    # Derive FWD outer store mode
+    _fwd_outer_store_mode = (
+        derive_outer_store_mode(
+            cu_seqlens_q_present=cu_seqlens_q is not None,
+            pack_gqa=pack_gqa,
+            m_block_size=tile_m,
+            qhead_per_kvhead=qhead_per_kvhead,
+        )
+        if arch // 10 >= 10
+        else OuterStoreMode.Tma
+    )
 
     compile_key = (
         dtype,
@@ -368,6 +421,11 @@ def _flex_flash_attn_fwd(
         intra_wg_overlap,
         use_clc_scheduler,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+        is_index_sparse,
+        index_sparse_tiles.inner_load_mode
+        if is_index_sparse and index_sparse_tiles is not None
+        else None,
+        _fwd_outer_store_mode if arch // 10 >= 10 else None,
     )
 
     if compile_key not in _flex_flash_attn_fwd.compile_cache:
@@ -464,6 +522,13 @@ def _flex_flash_attn_fwd(
                     use_2cta_instrs=use_2cta_instrs,
                     use_clc_scheduler=use_clc_scheduler,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                    index_sparse=is_index_sparse,
+                    inner_load_mode=(
+                        index_sparse_tiles.inner_load_mode
+                        if is_index_sparse and index_sparse_tiles is not None
+                        else InnerLoadMode.CpAsync
+                    ),
+                    outer_store_mode=_fwd_outer_store_mode,
                 )
             case 12:
                 # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
@@ -508,14 +573,21 @@ def _flex_flash_attn_fwd(
             sink_tensor,
         ]
         if major_arch in [10, 11]:
-            # FP8 descale tensors removed; SM100 kernel descale slot is always None.
-            compile_args.append(None)
-        compile_args.extend(
-            [
-                sparse_tensors,
-                cute_aux_tensors,
-            ]
-        )
+            # SM100/SM110 kernel signature includes descale_tensors + mTileTokenIndices.
+            compile_args.append(None)  # descale_tensors (always None for SM100)
+        compile_args.append(sparse_tensors)
+        if major_arch in [10, 11]:
+            tile_token_indices_tensor = (
+                to_cute_tensor(
+                    index_sparse_tiles.tile_token_indices,
+                    assumed_align=4,
+                    leading_dim=-1,
+                )
+                if is_index_sparse
+                else None
+            )
+            compile_args.append(tile_token_indices_tensor)
+        compile_args.append(cute_aux_tensors)
         compile_args.append(current_stream)
 
         _flex_flash_attn_fwd.compile_cache[compile_key] = cute.compile(
@@ -540,14 +612,13 @@ def _flex_flash_attn_fwd(
         sink,
     ]
     if major_arch in [10, 11]:
-        # FP8 descale tensors removed; SM100 kernel descale slot is always None.
-        call_args.append(None)
-    call_args.extend(
-        [
-            block_sparse_call_tuple(normalized_block_sparse_tensors),
-            aux_tensors,
-        ]
-    )
+        call_args.append(None)  # descale_tensors
+    call_args.append(block_sparse_call_tuple(normalized_block_sparse_tensors))
+    if major_arch in [10, 11]:
+        call_args.append(
+            index_sparse_tiles.tile_token_indices if is_index_sparse else None
+        )
+    call_args.append(aux_tensors)
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
 
@@ -555,6 +626,141 @@ def _flex_flash_attn_fwd(
 
 
 _flex_flash_attn_fwd.compile_cache = get_jit_cache("fwd")
+
+
+def _build_is_tma_bwd_loopq_bst(
+    index_sparse_tiles,
+    seqlen_q: int,
+    seqlen_k: int,
+    num_kv_heads: int,
+    num_q_heads: int,
+    m_block_size: int,
+    n_block_size: int,
+    pack_gqa: bool,
+    subtile_factor: int = 2,
+) -> "BlockSparseTensorsTorch":
+    """Build InnerLoopQ (N->M) BST for IS-TMA using proper index inversion.
+
+    Uses invert_index_sparse_indices to correctly invert per-Q-tile K-block
+    selections into per-K-block Q-tile lists, supporting the general case where
+    different Q-tiles may select different K-blocks.
+
+    For PackGQA, uses packed seqlen_q (seqlen_q * qhpk) since the kernel
+    iterates over packed Q-tiles in InnerLoopQ.
+    """
+    from math import ceil as _ceil
+
+    import torch
+
+    from magi_attention.utils.sparse_utils import invert_index_sparse_indices
+
+    bst_fwd = index_sparse_tiles.scheduling_bst
+    tile_indices = index_sparse_tiles.tile_token_indices
+    B, NHK, M_blocks, TOPK_padded = tile_indices.shape
+    qhpk = num_q_heads // num_kv_heads
+    N_blocks = seqlen_k // n_block_size
+    n_block_shift = (n_block_size - 1).bit_length()  # log2(n_block_size)
+    sparse_q = subtile_factor * m_block_size
+    device = tile_indices.device
+
+    sq_packed = seqlen_q * qhpk if pack_gqa else seqlen_q
+    M_coarse = _ceil(sq_packed / sparse_q)
+
+    # K-iteration count per Q-tile (from forward BST)
+    k_iter_count = int(bst_fwd.full_block_cnt[0, 0, 0].item()) + int(
+        bst_fwd.mask_block_cnt[0, 0, 0].item()
+    )
+    if k_iter_count == 0:
+        bwd_cnt = torch.zeros(B, NHK, N_blocks, dtype=torch.int32, device=device)
+        bwd_idx = torch.zeros(B, NHK, N_blocks, 1, dtype=torch.int32, device=device)
+        return BlockSparseTensorsTorch(
+            mask_block_cnt=bwd_cnt,
+            mask_block_idx=bwd_idx,
+            block_size=(sparse_q, n_block_size),
+        )
+
+    # Extract K-block indices per fine Q-tile from tile_token_indices.
+    # Values are K-token addresses; >>n_block_shift gives K-block index.
+    k_blocks_per_qtile = (
+        tile_indices[:, :, :, ::n_block_size][:, :, :, :k_iter_count] >> n_block_shift
+    ).int()
+    # Shape: (B, NHK, M_blocks, k_iter_count)
+    k_blocks_per_qtile = k_blocks_per_qtile.clamp(-1, N_blocks - 1)
+
+    # Invert per batch: for each K-block, which fine Q-tiles attend to it?
+    all_bwd_cnt = []
+    all_bwd_idx = []
+    max_coarse_cnt = 0
+
+    for b in range(B):
+        # invert_index_sparse_indices expects (seqlen_q, nhk, topk)
+        # Here seqlen_q = M_blocks (fine Q-tiles), topk = k_iter_count
+        fwd_b = k_blocks_per_qtile[b].permute(1, 0, 2).contiguous()
+        # fwd_b: (M_blocks, NHK, k_iter_count), values = K-block indices
+
+        inner_b, _ = invert_index_sparse_indices(
+            fwd_b,
+            seqlen_k=N_blocks,
+            sparse_k_block_size=1,
+            pad_multiple=1,
+        )
+        # inner_b: (N_blocks, NHK, inner_topk_fine) — fine Q-tile indices per K-block
+
+        # Convert fine Q-tile index -> coarse Q-block index
+        valid = inner_b >= 0
+        coarse_b = torch.where(valid, inner_b // subtile_factor, M_coarse)
+
+        # Deduplicate coarse indices per (K-block, head) via sort + unique
+        coarse_sorted, _ = coarse_b.sort(dim=-1)
+        # Mark first occurrence: differs from predecessor
+        shifted = torch.cat(
+            [torch.full_like(coarse_sorted[:, :, :1], -1), coarse_sorted[:, :, :-1]],
+            dim=-1,
+        )
+        unique_mask = (coarse_sorted != shifted) & (coarse_sorted < M_coarse)
+
+        # Count unique coarse blocks per (K-block, head)
+        counts_b = unique_mask.sum(dim=-1).int()  # (N_blocks, NHK)
+        max_cnt_b = int(counts_b.max().item())
+        max_cnt_b = max(max_cnt_b, 1)
+        max_coarse_cnt = max(max_coarse_cnt, max_cnt_b)
+
+        # Compact unique coarse indices into dense output
+        idx_b = torch.zeros(N_blocks, NHK, max_cnt_b, dtype=torch.int32, device=device)
+        for n in range(N_blocks):
+            for h in range(NHK):
+                vals = coarse_sorted[n, h][unique_mask[n, h]]
+                if vals.numel() > 0:
+                    idx_b[n, h, : vals.numel()] = vals.int()
+
+        all_bwd_cnt.append(counts_b.permute(1, 0))  # (NHK, N_blocks)
+        all_bwd_idx.append(idx_b.permute(1, 0, 2))  # (NHK, N_blocks, max_cnt_b)
+
+    # Stack batch dimension and pad to uniform last dim
+    bwd_cnt = torch.stack(all_bwd_cnt, dim=0)  # (B, NHK, N_blocks)
+    if B == 1:
+        bwd_idx = torch.stack(all_bwd_idx, dim=0)  # (B, NHK, N_blocks, max_cnt)
+    else:
+        # Pad per-batch idx tensors to the same last dim
+        padded = []
+        for idx_b in all_bwd_idx:
+            if idx_b.shape[-1] < max_coarse_cnt:
+                pad = torch.zeros(
+                    NHK,
+                    N_blocks,
+                    max_coarse_cnt - idx_b.shape[-1],
+                    dtype=torch.int32,
+                    device=device,
+                )
+                idx_b = torch.cat([idx_b, pad], dim=-1)
+            padded.append(idx_b)
+        bwd_idx = torch.stack(padded, dim=0)
+
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=bwd_cnt,
+        mask_block_idx=bwd_idx,
+        block_size=(sparse_q, n_block_size),
+    )
 
 
 def _flex_flash_attn_bwd(
@@ -579,6 +785,8 @@ def _flex_flash_attn_bwd(
     pack_gqa: bool = False,
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    swap_bwd_qk_loop: bool = False,
+    index_sparse_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for FlexFlashAttention.
 
@@ -605,7 +813,45 @@ def _flex_flash_attn_bwd(
     score_mod_bwd = flex_attn_args.score_mod_bwd
     mask_mod = flex_attn_args.mask_mod
     aux_tensors = flex_attn_args.aux_tensors
-    block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
+    # IndexSparse token-level tiles for BWD
+    index_sparse_tiles = flex_attn_args.index_sparse_tiles if flex_attn_args else None
+    is_index_sparse = index_sparse_tiles is not None
+
+    # LoopK uses forward-direction block_sparse_tensors (per-Q-tile K-block list);
+    # LoopQ uses backward-direction tensors (per-K-tile Q-block list).
+    if is_index_sparse and swap_bwd_qk_loop:
+        bst = index_sparse_tiles.scheduling_bst
+        if not pack_gqa:
+            bst = _expand_bst_heads(bst, q.shape[-2])
+        block_sparse_tensors = bst
+    elif is_index_sparse and not swap_bwd_qk_loop:
+        # IS-TMA InnerLoopQ: build transposed BST (per-K-block -> Q-block list).
+        # The kernel runs as pure BlockSparse InnerLoopQ — no mTileTokenIndices
+        # needed since the outer n_block IS the physical K-block.
+        _qhpk_loopq = q.shape[-2] // k.shape[-2]
+        block_sparse_tensors = _build_is_tma_bwd_loopq_bst(
+            index_sparse_tiles,
+            seqlen_q=q.shape[1],
+            seqlen_k=k.shape[1],
+            num_kv_heads=k.shape[-2],
+            num_q_heads=q.shape[-2],
+            m_block_size=128,
+            n_block_size=128,
+            pack_gqa=pack_gqa,
+        )
+        is_index_sparse = False
+        index_sparse_tiles = None
+
+    elif swap_bwd_qk_loop and flex_attn_args.block_sparse_tensors is not None:
+        block_sparse_tensors = flex_attn_args.block_sparse_tensors
+    else:
+        block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
+
+    # IndexSparse: convert token-level indices to block-level BlockSparseTensors.
+    if index_sparse_indices is not None:
+        assert (
+            q_ranges is None and k_ranges is None
+        ), "IndexSparse does not use q/k ranges"
 
     local = False
     # NOTE: only a single mask type shared by all q/k ranges is supported for now,
@@ -731,6 +977,9 @@ def _flex_flash_attn_bwd(
                 or score_mod_bwd is not None
                 or mask_mod is not None
                 or block_sparse_tensors is not None
+                or index_sparse_indices is not None
+                or swap_bwd_qk_loop
+                or pack_gqa
             )
             cluster_size = 2 if head_dim >= 128 and not disable_2cta else 1
             use_2cta_instrs = cluster_size == 2
@@ -768,6 +1017,34 @@ def _flex_flash_attn_bwd(
 
     use_block_sparsity = block_sparse_tensors is not None
     subtile_factor = sparse_q // m_block_size if sparse_q is not None else 2
+
+    # IndexSparse: convert token-level indices to block-level sparse after block sizes are known.
+    # index_sparse_indices_to_block_sparse produces forward-direction tensors (M→N).
+    # LoopK uses forward-direction directly; LoopQ needs backward-direction (N→M),
+    # so we transpose the presence matrix when swap_bwd_qk_loop is False.
+    if index_sparse_indices is not None and block_sparse_tensors is None:
+        block_sparse_tensors = index_sparse_indices_to_block_sparse(
+            index_sparse_indices,
+            batch_size=batch_size,
+            seqlen_q=seqlen_q,
+            seqlen_k=seqlen_k,
+            num_kv_heads=num_head_kv,
+            m_block_size=m_block_size,
+            n_block_size=n_block_size,
+        )
+        if not swap_bwd_qk_loop:
+            block_sparse_tensors = _transpose_block_sparse_tensors(
+                block_sparse_tensors,
+                batch_size=batch_size,
+                num_kv_heads=num_head_kv,
+                seqlen_q=seqlen_q,
+                seqlen_k=seqlen_k,
+                m_block_size=m_block_size,
+                n_block_size=n_block_size,
+                subtile_factor=subtile_factor,
+            )
+        use_block_sparsity = True
+
     seqlen_q_rounded = (seqlen_q + m_block_size - 1) // m_block_size * m_block_size
     seqlen_k_rounded = (seqlen_k + n_block_size - 1) // n_block_size * n_block_size
     num_n_blocks = seqlen_k_rounded // n_block_size
@@ -824,8 +1101,15 @@ def _flex_flash_attn_bwd(
     qhead_per_kvhead = num_head // num_head_kv
     if pack_gqa is None:
         pack_gqa = qhead_per_kvhead > 1  # type: ignore[unreachable]
-    # pack_gqa backward not yet supported in bwd
-    pack_gqa = False
+    # SM80/SM90 BWD kernels do not support PackGQA yet; SM100+ does.
+    if major_arch in (8, 9, 12):
+        pack_gqa = False
+
+    # Match CUTLASS SM90 C++: Deterministic + BwdInnerLoopK is not supported yet.
+    # (flash_bwd_kernel_sm90.h / mainloop store_dkv static_assert)
+    assert not (
+        deterministic and swap_bwd_qk_loop
+    ), "Deterministic mode is not supported yet when BwdInnerLoopK is true."
 
     if softcap != 0.0:
         assert (
@@ -899,9 +1183,9 @@ def _flex_flash_attn_bwd(
         )
 
     # GQA (qhead_per_kvhead > 1) needs dK/dV accum+postprocess since multiple Q heads
-    # accumulate into the same dK/dV. SM90 varlen_k with qhead_per_kvhead==1 now uses
-    # ragged TMA tensors for direct store, so no longer needs accum+postprocess.
-    dKV_postprocess = qhead_per_kvhead > 1
+    # accumulate into the same dK/dV. LoopK also needs it since multiple Q tiles
+    # contribute to the same dK/dV via atomic reduce.
+    dKV_postprocess = qhead_per_kvhead > 1 or swap_bwd_qk_loop
     if dKV_postprocess:
         head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
         if cu_seqlens_k is None:
@@ -993,10 +1277,44 @@ def _flex_flash_attn_bwd(
         use_padded_offsets=False,
     )
 
+    # PackGQA: reorder lse_log2/dpsum/dq_accum from (B, NHQ, *) head-major
+    # to (B, NHK, *×qhpk) column-major so packed M iterates h_offset fastest.
+    # CuTe packed layout: linear_idx = h_offset + q_pos * qhpk (column-major).
+    if pack_gqa and qhead_per_kvhead > 1 and cu_seqlens_q is None:
+        lse_log2 = (
+            lse_log2.view(batch_size, num_head_kv, qhead_per_kvhead, seqlen_q_rounded)
+            .permute(0, 1, 3, 2)
+            .contiguous()
+            .view(batch_size, num_head_kv, seqlen_q_rounded * qhead_per_kvhead)
+        )
+        dpsum = (
+            dpsum.view(batch_size, num_head_kv, qhead_per_kvhead, seqlen_q_rounded)
+            .permute(0, 1, 3, 2)
+            .contiguous()
+            .view(batch_size, num_head_kv, seqlen_q_rounded * qhead_per_kvhead)
+        )
+        dq_accum = dq_accum.view(
+            batch_size,
+            num_head_kv,
+            seqlen_q_rounded * qhead_per_kvhead * head_dim_rounded,
+        )
+
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
     # BwdConfig.num_wg, SM100/SM110 uses default from function signature (384).
     if major_arch not in [8, 9, 12]:
         num_threads = 384
+
+    # GQA: expand block sparse tensors from NHK → NHQ when needed.
+    # The kernel indexes block sparse tensors by head_idx.
+    # - pack_gqa=True: head_idx is in KV head space, use num_head_kv
+    # - pack_gqa=False: head_idx is in Q head space, expand to NHQ
+    bst_num_head = num_head
+    if block_sparse_tensors is not None and num_head != num_head_kv:
+        bst_h = block_sparse_tensors.mask_block_cnt.shape[1]
+        if bst_h == num_head_kv and not pack_gqa:
+            block_sparse_tensors = _expand_bst_heads(block_sparse_tensors, num_head)
+        elif pack_gqa:
+            bst_num_head = num_head_kv
 
     # Prepare block sparse for backward.
     score_mod_hash = hash_callable(score_mod) if score_mod else False
@@ -1009,23 +1327,46 @@ def _flex_flash_attn_bwd(
             to_cute_tensor(buf, assumed_align=None, fully_dynamic=True)
             for buf in aux_tensors
         ]
-    (
-        normalized_block_sparse_tensors,
-        block_sparse_broadcast_pattern,
-        spt,
-    ) = prepare_block_sparse_bwd(
-        block_sparse_tensors,
-        deterministic=deterministic,
-        causal=causal,
-        local=local,
-        batch_size=batch_size,
-        num_head=num_head,
-        seqlen_q=seqlen_q,
-        seqlen_k=seqlen_k,
-        m_block_size=m_block_size,
-        n_block_size=n_block_size,
-        subtile_factor=subtile_factor,
-    )
+    if swap_bwd_qk_loop:
+        (
+            normalized_block_sparse_tensors,
+            block_sparse_broadcast_pattern,
+            spt,
+        ) = prepare_block_sparse_bwd_loopk(
+            block_sparse_tensors,
+            causal=causal,
+            local=local,
+            deterministic=deterministic,
+            batch_size=batch_size,
+            num_head=bst_num_head,
+            seqlen_q=seqlen_q,
+            seqlen_k=seqlen_k,
+            m_block_size=m_block_size,
+            n_block_size=n_block_size,
+            pack_gqa=pack_gqa,
+            qhead_per_kvhead=qhead_per_kvhead,
+        )
+    else:
+        _bwd_seqlen_q = seqlen_q
+        if not swap_bwd_qk_loop and pack_gqa and qhead_per_kvhead > 1:
+            _bwd_seqlen_q = seqlen_q * qhead_per_kvhead
+        (
+            normalized_block_sparse_tensors,
+            block_sparse_broadcast_pattern,
+            spt,
+        ) = prepare_block_sparse_bwd(
+            block_sparse_tensors,
+            deterministic=deterministic,
+            causal=causal,
+            local=local,
+            batch_size=batch_size,
+            num_head=bst_num_head,
+            seqlen_q=_bwd_seqlen_q,
+            seqlen_k=seqlen_k,
+            m_block_size=m_block_size,
+            n_block_size=n_block_size,
+            subtile_factor=subtile_factor,
+        )
 
     # Backward kernel: compute dk, dv, dq_accum.
     if major_arch in [8, 9, 12]:
@@ -1100,6 +1441,19 @@ def _flex_flash_attn_bwd(
             (seqlen_q_rounded // m_block_size == 1),
             (seqlen_k_rounded // n_block_size == 1),
             magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+            swap_bwd_qk_loop,
+            is_index_sparse,
+            index_sparse_tiles.inner_load_mode
+            if is_index_sparse and index_sparse_tiles is not None
+            else -1,
+            index_sparse_tiles.inner_store_mode
+            if is_index_sparse and index_sparse_tiles is not None
+            else -1,
+            OuterStoreMode.Stg
+            if (qhead_per_kvhead == 1 and cu_seqlens_k is not None)
+            else OuterStoreMode.Tma,
+            is_ffa_inner_dir_max_to_min(),
+            get_ffa_mask_mode(),
         )
 
     if compile_key not in _flex_flash_attn_bwd.compile_cache:
@@ -1203,8 +1557,37 @@ def _flex_flash_attn_bwd(
                     mask_mod=mask_mod,
                     has_aux_tensors=aux_tensors is not None,
                     subtile_factor=subtile_factor,
+                    swap_bwd_qk_loop=swap_bwd_qk_loop,
+                    pack_gqa=pack_gqa,
+                    inner_dir_max_to_min=is_ffa_inner_dir_max_to_min(),
+                    mask_mode=get_ffa_mask_mode(),
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+                    index_sparse=is_index_sparse,
+                    inner_load_mode=(
+                        index_sparse_tiles.inner_load_mode
+                        if is_index_sparse and index_sparse_tiles is not None
+                        else InnerLoadMode.CpAsync
+                    ),
+                    inner_store_mode=(
+                        index_sparse_tiles.inner_store_mode
+                        if is_index_sparse and index_sparse_tiles is not None
+                        else InnerStoreMode.Tma
+                    ),
+                    outer_store_mode=(
+                        OuterStoreMode.Stg
+                        if (qhead_per_kvhead == 1 and cu_seqlens_k is not None)
+                        else OuterStoreMode.Tma
+                    ),
                 )
+
+        # IS tile_token_indices for BWD
+        tile_token_indices_bwd_tensor = (
+            to_cute_tensor(
+                index_sparse_tiles.tile_token_indices, assumed_align=4, leading_dim=-1
+            )
+            if is_index_sparse
+            else None
+        )
 
         # Block sparse tensors for backward use Q-direction indexing (transposed from forward).
         sparse_tensors_compile = (
@@ -1236,6 +1619,7 @@ def _flex_flash_attn_bwd(
             dV_semaphore_tensor,
             cute_aux_tensors,
             sparse_tensors_compile,
+            *([tile_token_indices_bwd_tensor] if major_arch in [10, 11] else []),
             current_stream,
             options="--enable-tvm-ffi",
         )
@@ -1261,6 +1645,11 @@ def _flex_flash_attn_bwd(
         dV_semaphore,
         aux_tensors,
         block_sparse_call_tuple(normalized_block_sparse_tensors),
+        *(
+            [index_sparse_tiles.tile_token_indices if is_index_sparse else None]
+            if major_arch in [10, 11]
+            else []
+        ),
     )
 
     # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
@@ -1282,56 +1671,127 @@ def _flex_flash_attn_bwd(
             num_threads_post_dQ = 128
             num_threads_post_dKV = 128
 
-    bwd_postprocess(
-        dq_accum,
-        dq,
-        softmax_scale,
-        cu_seqlens_q,
-        None,
-        arch,
-        dtype,
-        head_dim,
-        m_block_size,
-        num_threads_post_dQ,
-        AtomLayoutMdQ,
-        dQ_swapAB,
-        use_2cta_instrs=use_2cta_instrs,
-        cluster_size=1,
-    )
-
-    if dKV_postprocess:
-        # Postprocess: convert dk_accum from float32 to dk in bf16/fp16
+    if pack_gqa and qhead_per_kvhead > 1 and cu_seqlens_q is None:
+        # dq_accum is still in the tiled-MMA accumulator serialization. Run the
+        # standard postprocess over packed M first, then unfold packed rows into
+        # query heads. Unpacking fp32 accumulators before postprocess scrambles
+        # the architecture-specific accumulator permutation.
+        dq_packed = torch.empty(
+            batch_size,
+            seqlen_q_rounded * qhead_per_kvhead,
+            num_head_kv,
+            head_dim,
+            dtype=dq.dtype,
+            device=dq.device,
+        )
         bwd_postprocess(
-            dk_accum,
-            dk,
+            dq_accum,
+            dq_packed,
             softmax_scale,
-            cu_seqlens_k,
+            None,
             None,
             arch,
             dtype,
             head_dim,
-            n_block_size,
-            num_threads_post_dKV,
-            AtomLayoutNdKV,
-            dKV_swapAB,
-            cluster_size=cluster_size,
+            m_block_size,
+            num_threads_post_dQ,
+            AtomLayoutMdQ,
+            dQ_swapAB,
+            use_2cta_instrs=use_2cta_instrs,
+            cluster_size=1,
         )
-        # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
+        dq.copy_(
+            dq_packed.view(
+                batch_size,
+                seqlen_q_rounded,
+                qhead_per_kvhead,
+                num_head_kv,
+                head_dim,
+            )[:, :seqlen_q]
+            .permute(0, 1, 3, 2, 4)
+            .reshape(batch_size, seqlen_q, num_head, head_dim)
+        )
+    else:
         bwd_postprocess(
-            dv_accum,
-            dv,
-            1.0,
-            cu_seqlens_k,
+            dq_accum,
+            dq,
+            softmax_scale,
+            cu_seqlens_q,
             None,
             arch,
             dtype,
-            head_dim_v,
-            n_block_size,
-            num_threads_post_dKV,
-            AtomLayoutNdKV,
-            dKV_swapAB,
-            cluster_size=cluster_size,
+            head_dim,
+            m_block_size,
+            num_threads_post_dQ,
+            AtomLayoutMdQ,
+            dQ_swapAB,
+            use_2cta_instrs=use_2cta_instrs,
+            cluster_size=1,
         )
+
+    _is_scatter_store = (
+        is_index_sparse
+        and index_sparse_tiles is not None
+        and index_sparse_tiles.inner_load_mode != InnerLoadMode.Tma
+    )
+    if dKV_postprocess:
+        if _is_scatter_store:
+            # IS-scatter uses row-major dk_accum/dv_accum: simple scale + type convert
+            head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
+            head_dim_rounded_pp = (head_dim + 32 - 1) // 32 * 32
+            if cu_seqlens_k is None:
+                dk_2d = dk_accum.view(
+                    batch_size, num_head_kv, seqlen_k_rounded, head_dim_rounded_pp
+                )
+                dk.copy_(
+                    (
+                        dk_2d[:, :, :seqlen_k, :head_dim].transpose(1, 2)
+                        * softmax_scale
+                    ).to(dk.dtype)
+                )
+                dv_2d = dv_accum.view(
+                    batch_size, num_head_kv, seqlen_k_rounded, head_dim_v_rounded
+                )
+                dv.copy_(
+                    (dv_2d[:, :, :seqlen_k, :head_dim_v].transpose(1, 2)).to(dv.dtype)
+                )
+            else:
+                raise NotImplementedError(
+                    "IS row-major postprocess not implemented for varlen"
+                )
+        else:
+            # Postprocess: convert dk_accum from float32 to dk in bf16/fp16
+            bwd_postprocess(
+                dk_accum,
+                dk,
+                softmax_scale,
+                cu_seqlens_k,
+                None,
+                arch,
+                dtype,
+                head_dim,
+                n_block_size,
+                num_threads_post_dKV,
+                AtomLayoutNdKV,
+                dKV_swapAB,
+                cluster_size=cluster_size,
+            )
+            # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
+            bwd_postprocess(
+                dv_accum,
+                dv,
+                1.0,
+                cu_seqlens_k,
+                None,
+                arch,
+                dtype,
+                head_dim_v,
+                n_block_size,
+                num_threads_post_dKV,
+                AtomLayoutNdKV,
+                dKV_swapAB,
+                cluster_size=cluster_size,
+            )
 
     return dq, dk, dv
 
@@ -1413,11 +1873,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
+        ctx.pack_gqa = pack_gqa
         # Drop the direct aux_tensors reference on ctx; the real tensors are
         # tracked via save_for_backward and restored in backward. Keeping them
         # here too would bypass autograd's save_for_backward bookkeeping.
         ctx.flex_attn_args = (
             flex_attn_args.drop_aux_tensors() if flex_attn_args is not None else None
+        )
+        ctx.index_sparse_tiles_bwd = (
+            getattr(flex_attn_args, "index_sparse_tiles_bwd", None)
+            if flex_attn_args is not None
+            else None
         )
         ctx.set_materialize_grads(False)
 
@@ -1443,6 +1909,19 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         flex_attn_args: TorchFlexAttnArgs | None = ctx.flex_attn_args
         if flex_attn_args is not None:
             flex_attn_args = flex_attn_args.with_aux_tensors(aux)
+            # BWD needs different m_block_size tiles than FWD.
+            if ctx.index_sparse_tiles_bwd is not None:
+                from dataclasses import replace
+
+                flex_attn_args = replace(
+                    flex_attn_args,
+                    index_sparse_tiles=ctx.index_sparse_tiles_bwd,
+                )
+
+        # IndexSparse BWD requires LoopK (swap_bwd_qk_loop=True).
+        _is_index_sparse = (
+            flex_attn_args is not None and flex_attn_args.index_sparse_tiles is not None
+        )
 
         dq, dk, dv = _flex_flash_attn_bwd(
             q=q,
@@ -1462,6 +1941,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_k=ctx.max_seqlen_k,
             deterministic=ctx.deterministic,
             flex_attn_args=flex_attn_args,
+            pack_gqa=ctx.pack_gqa,
+            swap_bwd_qk_loop=_is_index_sparse,
         )
 
         return dq, dk, dv, *((None,) * 30)  # Extra Nones is fine
@@ -1484,6 +1965,8 @@ def flex_flash_attn_func(
     pack_gqa: bool | None = None,
     deterministic: bool = False,
     flex_attn_args: TorchFlexAttnArgs | None = None,
+    index_sparse_indices: torch.Tensor | None = None,
+    sparse_k_block_size: int = 1,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """
     Flex-flash-attention interface (dense / varlen).
@@ -1516,6 +1999,61 @@ def flex_flash_attn_func(
         (``block_sparse_tensors`` / ``block_sparse_tensors_bwd``) capabilities.
         Leave as ``None`` for the plain dense / varlen path.
     """
+    if index_sparse_indices is not None:
+        from magi_attention.kernel.cutedsl.sparse_utils import (
+            prepare_index_sparse_tiles,
+        )
+
+        B, SQ, NHQ, HD = q.shape
+        _, SK, NHK, _ = k.shape
+        qhpk = NHQ // NHK
+        _pack_gqa = pack_gqa if pack_gqa is not None else (qhpk > 1)
+        _sq_packed = SQ * qhpk if _pack_gqa else SQ
+        fwd_m = 256 if _sq_packed > 128 else 128
+        bwd_m = 128
+        n_block = 128
+
+        fwd_tiles = prepare_index_sparse_tiles(
+            index_sparse_indices,
+            batch_size=B,
+            seqlen_q=SQ,
+            seqlen_k=SK,
+            num_kv_heads=NHK,
+            num_q_heads=NHQ,
+            m_block_size=fwd_m,
+            n_block_size=n_block,
+            pack_gqa=_pack_gqa,
+            sparse_k_block_size=sparse_k_block_size,
+        )
+        bwd_tiles = prepare_index_sparse_tiles(
+            index_sparse_indices,
+            batch_size=B,
+            seqlen_q=SQ,
+            seqlen_k=SK,
+            num_kv_heads=NHK,
+            num_q_heads=NHQ,
+            m_block_size=bwd_m,
+            n_block_size=n_block,
+            pack_gqa=_pack_gqa,
+            sparse_k_block_size=sparse_k_block_size,
+        )
+        if flex_attn_args is None:
+            flex_attn_args = TorchFlexAttnArgs(
+                index_sparse_tiles=fwd_tiles,
+                index_sparse_tiles_bwd=bwd_tiles,
+            )
+        else:
+            flex_attn_args = TorchFlexAttnArgs(
+                score_mod=flex_attn_args.score_mod,
+                score_mod_bwd=flex_attn_args.score_mod_bwd,
+                mask_mod=flex_attn_args.mask_mod,
+                aux_tensors=flex_attn_args.aux_tensors,
+                block_sparse_tensors=flex_attn_args.block_sparse_tensors,
+                block_sparse_tensors_bwd=flex_attn_args.block_sparse_tensors_bwd,
+                index_sparse_tiles=fwd_tiles,
+                index_sparse_tiles_bwd=bwd_tiles,
+            )
+
     out, lse = FlexFlashAttnFunc.apply(
         q,
         k,
