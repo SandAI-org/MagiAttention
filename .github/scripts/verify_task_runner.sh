@@ -33,14 +33,10 @@ else
     # does not mount shared storage. Until then, ci-internal reviewer approval
     # is the security boundary and normal CI artifacts remain runner-local.
     expected_root=${RUNNER_TEMP:?RUNNER_TEMP is required}/magi-attention-ci
-fi
-if [[ "${CI_WORKSPACE_ROOT:-}" != "$expected_root" ]]; then
-    echo "::error::Unexpected CI_WORKSPACE_ROOT: ${CI_WORKSPACE_ROOT:-<unset>}" >&2
-    exit 1
-fi
-if [[ "$mounted_target" != "$expected_mount" ]]; then
-    echo "::error::Shared CI storage is not mounted at $expected_mount" >&2
-    exit 1
+    if [[ "${CI_WORKSPACE_ROOT:-}" != "$expected_root" ]]; then
+        echo "::error::Untrusted CI must use runner-local storage: ${CI_WORKSPACE_ROOT:-<unset>}" >&2
+        exit 1
+    fi
 fi
 mkdir -p "$CI_WORKSPACE_ROOT"
 probe=$(mktemp "$CI_WORKSPACE_ROOT/.magi-attention-write-probe.XXXXXX")
