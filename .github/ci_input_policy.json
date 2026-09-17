@@ -13,7 +13,7 @@
       "root": "extensions",
       "exclusions": {
         "trigger": [".github/**", ".cursor/**", "docs/**", "exps/**", "assets/**", "examples/**"],
-        "wheel": [".github/**", ".cursor/**", "docs/**", "exps/**", "tests/**", "assets/**", "examples/**"],
+        "wheel": [".github/**", ".cursor/**", "docs/**", "exps/**", "tests/**", "conftest.py", "assets/**", "examples/**"],
         "portable": [".github/**", ".cursor/**", "docs/**", "exps/**", "assets/**", "examples/**"]
       }
     }

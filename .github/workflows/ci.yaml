@@ -67,6 +67,7 @@ jobs:
               - '.github/workflows/ci.yaml'
               - '.github/workflows/base_image_tag.txt'
               - '.github/scripts/**'
+              - '.github/tests/**'
       - name: Determine trust
         id: trust
         run: echo "trusted=${{ env.VALIDATION_CACHE_TRUSTED }}" >> "$GITHUB_OUTPUT"

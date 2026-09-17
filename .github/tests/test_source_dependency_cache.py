@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-SCRIPT = Path(__file__).with_name("install_source_dependencies.py")
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts/install_source_dependencies.py"
 spec = importlib.util.spec_from_file_location("source_dependencies", SCRIPT)
 assert spec and spec.loader
 source_dependencies = importlib.util.module_from_spec(spec)

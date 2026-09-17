@@ -51,9 +51,9 @@ test_packages() {
     local coverage_generated=false
 
     prepare_runtime_lock
-    bash .github/scripts/test_portable_validation.sh
-    python .github/scripts/test_source_dependency_cache.py
-    python .github/scripts/test_compiled_artifact_cache.py
+    bash .github/tests/test_portable_validation.sh
+    python .github/tests/test_source_dependency_cache.py
+    python .github/tests/test_compiled_artifact_cache.py
     if [[ "$main_changed" == true || "$ci_changed" == true ]]; then
         if [[ "$trusted" == true ]] && \
             bash .github/scripts/portable_validation.sh verify magi_attention; then

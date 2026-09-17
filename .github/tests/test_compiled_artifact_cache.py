@@ -25,7 +25,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-SCRIPT = Path(__file__).with_name("compiled_artifact_cache.py")
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts/compiled_artifact_cache.py"
 SPEC = importlib.util.spec_from_file_location("compiled_artifact_cache", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 cache = importlib.util.module_from_spec(SPEC)

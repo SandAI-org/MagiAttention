@@ -272,7 +272,7 @@ PY
             (cd "$test_cwd" && \
                 PYTHONPATH="$clean_pythonpath" \
                 MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
-                python -m pytest -q -s -m "not slow" --import-mode=append \
+                python -m pytest -q -s --skip-slow --import-mode=append \
                     "$package_root/extensions/tests")
             ;;
         *) check_node "$1" ;;
