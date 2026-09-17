@@ -37,6 +37,7 @@ SCHEMA_VERSION = 1
 LAYERS = ("trigger", "wheel", "portable")
 PROTOCOL_ID = "ci-input-policy-v1"
 POLICY_NAME = "ci_input_policy.json"
+POLICY_RELATIVE_PATH = Path(".github/configs") / POLICY_NAME
 
 
 class PolicyError(ValueError):
@@ -160,9 +161,16 @@ def load_policy(policy_path: Path) -> dict[str, Any]:
 
 def package_root_for_policy(policy_path: Path) -> Path:
     policy_path = policy_path.resolve()
-    if policy_path.name != POLICY_NAME or policy_path.parent.name != ".github":
-        raise PolicyError(f"policy must be named .github/{POLICY_NAME}: {policy_path}")
-    return policy_path.parent.parent
+    if policy_path.name != POLICY_NAME:
+        raise PolicyError(f"policy must be named {POLICY_NAME}: {policy_path}")
+    if (
+        policy_path.parent.name == "configs"
+        and policy_path.parent.parent.name == ".github"
+    ):
+        return policy_path.parent.parent.parent
+    raise PolicyError(
+        f"policy must be named .github/configs/{POLICY_NAME}: {policy_path}"
+    )
 
 
 def _glob_regex(pattern: str) -> re.Pattern[str]:
@@ -470,7 +478,7 @@ def changed(
 
 
 def _default_policy(repo_root: Path) -> Path:
-    return repo_root / ".github" / POLICY_NAME
+    return repo_root / POLICY_RELATIVE_PATH
 
 
 def make_parser() -> argparse.ArgumentParser:

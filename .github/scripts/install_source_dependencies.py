@@ -292,7 +292,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     config_path = Path(
         os.environ.get(
-            "CI_DEPENDENCY_CONFIG", repo_root / ".github/ci_dependencies.json"
+            "CI_DEPENDENCY_CONFIG", repo_root / ".github/configs/ci_dependencies.json"
         )
     )
     checkout_root = Path(
@@ -313,7 +313,7 @@ def main() -> None:
         / "v2/dependency-artifacts"
         / consumer
     )
-    base_tag = (repo_root / ".github/workflows/base_image_tag.txt").read_text().strip()
+    base_tag = (repo_root / ".github/configs/base_image_tag.txt").read_text().strip()
     platform = checked_name(os.environ.get("TASK_CI_PLATFORM", "h100"), "platform")
     recipe = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     config = json.loads(config_path.read_text())

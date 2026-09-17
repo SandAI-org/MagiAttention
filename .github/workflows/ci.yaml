@@ -62,10 +62,10 @@ jobs:
         with:
           filters: |
             ci_protocol:
-              - '.github/ci_input_policy.json'
-              - '.github/ci_dependencies.json'
+              - '.github/configs/ci_input_policy.json'
+              - '.github/configs/ci_dependencies.json'
               - '.github/workflows/ci.yaml'
-              - '.github/workflows/base_image_tag.txt'
+              - '.github/configs/base_image_tag.txt'
               - '.github/scripts/**'
               - '.github/tests/**'
       - name: Determine trust

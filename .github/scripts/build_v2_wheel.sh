@@ -21,7 +21,7 @@ cache_name=${2:?usage: build_v2_wheel.sh <package-dir> <cache-name> <validation-
 node=${3:?usage: build_v2_wheel.sh <package-dir> <cache-name> <validation-node>}
 repo_root=$(git rev-parse --show-toplevel)
 cache_root="${CI_WORKSPACE_ROOT:-/workspace}/v2/standalone-artifacts/magi-attention"
-base_tag=$(tr -d '[:space:]' < "$repo_root/.github/workflows/base_image_tag.txt")
+base_tag=$(tr -d '[:space:]' < "$repo_root/.github/configs/base_image_tag.txt")
 [[ "$base_tag" =~ ^([0-9]+\.[0-9]+)\.[0-9]+$ ]] || {
     echo "Invalid base image tag: $base_tag" >&2
     exit 2

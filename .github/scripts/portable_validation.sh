@@ -24,7 +24,7 @@ PORTABLE_PRODUCER=SandAI-org/MagiAttention
 
 repo_root=$(git rev-parse --show-toplevel)
 source_root=${PORTABLE_SOURCE_ROOT:-.}
-base_tag_file=${PORTABLE_BASE_TAG_FILE:-.github/workflows/base_image_tag.txt}
+base_tag_file=${PORTABLE_BASE_TAG_FILE:-.github/configs/base_image_tag.txt}
 [[ "$base_tag_file" == /* ]] || base_tag_file=$repo_root/$base_tag_file
 
 check_node() {
@@ -53,7 +53,7 @@ source_digest() {
         echo "Refusing to certify a dirty MagiAttention worktree" >&2
         return 3
     }
-    policy="$repo_root/$source_root/.github/ci_input_policy.json"
+    policy="$repo_root/$source_root/.github/configs/ci_input_policy.json"
     helper="$repo_root/$source_root/.github/scripts/ci_input_policy.py"
     python "$helper" --repo-root "$repo_root" --policy "$policy" \
         digest --layer portable --node "$node"
@@ -67,7 +67,7 @@ recipe_digest() {
         magi_attn_extensions) recipe=$PORTABLE_EXTENSIONS_RECIPE_VERSION ;;
         *) check_node "$node"; return ;;
     esac
-    python - "$repo_root/$source_root/.github/ci_input_policy.json" "$node" "$recipe" <<'PY'
+    python - "$repo_root/$source_root/.github/configs/ci_input_policy.json" "$node" "$recipe" <<'PY'
 import hashlib
 import json
 import sys

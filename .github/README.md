@@ -1,8 +1,12 @@
 # MagiAttention CI
 
+Repository-level CI resources are grouped by role: workflows in `.github/workflows/`,
+executable helpers in `.github/scripts/`, helper tests in `.github/tests/`, and
+versioned protocol inputs in `.github/configs/`.
+
 ## Declarative CI inputs
 
-`.github/ci_input_policy.json` is the single source of truth for package input
+`.github/configs/ci_input_policy.json` is the single source of truth for package input
 selection. Each node declares a repository-layout-independent `root` and
 separate `trigger`, `wheel`, and `portable` exclusions, all relative to that
 root. To exclude a path from CI, edit only those exclusion lists; do not add a
@@ -13,7 +17,7 @@ also invalidate the CI protocol.
 
 ## Runtime and runner
 
-GPU CI uses the task-based runner labels `[ci-spot-job, h100]`. The Dispatcher creates each task directly from `registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2`, matching `.github/workflows/base_image_tag.txt`; the workflow must not declare a nested GitHub Actions container because task runners do not provide Docker. This image provides the complete environment required by both MagiAttention and MagiAttnExtensions; a plain NGC PyTorch image is insufficient. Shared storage is available at `/home/niubility2/ci_workspace`.
+GPU CI uses the task-based runner labels `[ci-spot-job, h100]`. The Dispatcher creates each task directly from `registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2`, matching `.github/configs/base_image_tag.txt`; the workflow must not declare a nested GitHub Actions container because task runners do not provide Docker. This image provides the complete environment required by both MagiAttention and MagiAttnExtensions; a plain NGC PyTorch image is insufficient. Shared storage is available at `/home/niubility2/ci_workspace`.
 
 PR CI uses `pull_request_target`, so the workflow definition always comes from the base repository. The GPU job references the protected `ci-internal` environment and starts only after its required reviewer approves it. After approval, the trusted base workflow explicitly checks out the PR head and merges the latest target branch before testing. This permits contributions from forks without allowing a fork to replace the workflow that grants runner access.
 
@@ -23,7 +27,7 @@ TODO: provision a dedicated fork runner label whose task specification does not 
 
 ## v2 wheel artifacts
 
-`.github/ci_dependencies.json` is the common source-dependency protocol. MagiAttention currently has no repository dependencies, so its list is empty; CI still runs the same resolver and records an empty runtime lock. Future dependency wheels use `v2/dependency-artifacts/magi-attention`, keyed by consumer namespace, dependency repository and ID, install path, exact tracked source content, base image, platform, and resolver recipe. Branches and tags are resolved once to immutable commits. Reuse fails closed on any manifest, identity, layout, or wheel digest mismatch, and publication uses private staging followed by atomic rename.
+`.github/configs/ci_dependencies.json` is the common source-dependency protocol. MagiAttention currently has no repository dependencies, so its list is empty; CI still runs the same resolver and records an empty runtime lock. Future dependency wheels use `v2/dependency-artifacts/magi-attention`, keyed by consumer namespace, dependency repository and ID, install path, exact tracked source content, base image, platform, and resolver recipe. Branches and tags are resolved once to immutable commits. Reuse fails closed on any manifest, identity, layout, or wheel digest mismatch, and publication uses private staging followed by atomic rename.
 
 The build job is prepared for authenticated cross-repository checkout with the `DEPENDENCY_REPO_TOKEN` Actions secret and `CI_DEPENDENCY_USE_TOKEN=true`. The resolver clears the credential and Authorization header persisted by `actions/checkout` before adding this single explicit credential. The token needs read-only Contents permission for any repository later added to the dependency manifest. For fork PRs, access to this protected environment and its secrets occurs only after `ci-internal` reviewer approval.
 
@@ -54,7 +58,7 @@ ${CI_WORKSPACE_ROOT}/v2/portable-validations/magi-attention/
 
 The portable fingerprint includes policy-selected normalized tracked source content, exact base image tag, platform, a stable protocol identifier, the recipe version, and the canonical portable policy projection. Repository-specific `.github` files may be excluded as source files without removing policy semantics from the identity.
 
-The standalone layout uses the defaults `PORTABLE_SOURCE_ROOT=.` and `PORTABLE_BASE_TAG_FILE=.github/workflows/base_image_tag.txt`. A downstream vendored layout may set those two generic variables to its own paths; the protocol contains no downstream-specific names or path detection.
+The standalone layout uses the defaults `PORTABLE_SOURCE_ROOT=.` and `PORTABLE_BASE_TAG_FILE=.github/configs/base_image_tag.txt`. A downstream vendored layout may set those two generic variables to its own paths; the protocol contains no downstream-specific names or path detection.
 
 `.github/tests/test_portable_validation.sh` constructs equivalent standalone and generic vendored layouts. It verifies that both layouts produce identical fingerprints, that a downstream layout accepts a marker written by the standalone layout, and that malformed markers fail closed.
 
