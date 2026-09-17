@@ -88,7 +88,7 @@ This step needs to be performed on the **BARE-METAL HOST OPERATING SYSTEM**, **N
 ### Install flash_attn_cute (optional)
 
 :::{note}
-If you would like to try MagiAttention on Ampere or Blackwell, for now you're required to install `flash_attn_cute` package to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html) as a temporary workaround.
+Install `flash_attn_cute` to use the [FFA_FA4 backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html).
 :::
 
 * bash script:
@@ -116,6 +116,14 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
 
     ```bash
     pip install --no-build-isolation .
+    ```
+
+* NVIDIA Flex Attention backend:
+
+    ```bash
+    bash scripts/install_cudnn_flex_attn.sh
+    unset MAGI_ATTENTION_FA4_BACKEND MAGI_ATTENTION_SDPA_BACKEND
+    export MAGI_ATTENTION_KERNEL_BACKEND=cudnn
     ```
 
 * pip install command for Blackwell:
