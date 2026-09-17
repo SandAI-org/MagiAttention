@@ -251,7 +251,7 @@ PY
                     MAGI_ATTENTION_TEST_BACKEND="sdpa,ffa" \
                     coverage run --source magi_attention -m pytest \
                         -q -s --skip-slow --import-mode=append "$package_root/tests")
-                (cd "$repo_root" && coverage combine && coverage xml -i)
+                (cd "$repo_root" && coverage xml -i)
             else
                 (cd "$test_cwd" && \
                     PYTHONPATH="$clean_pythonpath" \
