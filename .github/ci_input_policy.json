@@ -5,7 +5,7 @@
       "root": ".",
       "exclusions": {
         "trigger": [".github/**", ".cursor/**", "docs/**", "exps/**", "extensions/**", "assets/**", "examples/**"],
-        "wheel": [".github/**", ".cursor/**", "docs/**", "exps/**", "extensions/**", "tests/**", "assets/**", "examples/**"],
+        "wheel": [".github/**", ".cursor/**", "docs/**", "exps/**", "extensions/**", "assets/**", "examples/**"],
         "portable": [".github/**", ".cursor/**", "docs/**", "exps/**", "extensions/**", "assets/**", "examples/**"]
       }
     },
