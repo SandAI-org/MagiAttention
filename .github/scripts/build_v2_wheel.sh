@@ -19,6 +19,14 @@ set -euo pipefail
 package_dir=${1:?usage: build_v2_wheel.sh <package-dir> <cache-name> <validation-node>}
 cache_name=${2:?usage: build_v2_wheel.sh <package-dir> <cache-name> <validation-node>}
 node=${3:?usage: build_v2_wheel.sh <package-dir> <cache-name> <validation-node>}
+operation=${4:-build}
+case "$operation" in
+    build|install|fingerprint) ;;
+    *)
+        echo "usage: build_v2_wheel.sh <package-dir> <cache-name> <validation-node> [build|install|fingerprint]" >&2
+        exit 2
+        ;;
+esac
 repo_root=$(git rev-parse --show-toplevel)
 cache_root="${CI_WORKSPACE_ROOT:-/workspace}/v2/standalone-artifacts/magi-attention"
 base_tag=$(tr -d '[:space:]' < "$repo_root/.github/configs/base_image_tag.txt")
@@ -31,15 +39,23 @@ source_digest=$(python "$repo_root/.github/scripts/ci_input_policy.py" digest --
 recipe_digest=$(sha256sum "$repo_root/.github/scripts/build_v2_wheel.sh" "$repo_root/.github/scripts/compiled_artifact_cache.py" "$repo_root/.github/scripts/ci_input_policy.py" | sha256sum | awk '{print $1}')
 package_version=$(cd "$repo_root/$package_dir" && python -m versioningit) || exit
 prebuild_level=${MAGI_ATTENTION_PREBUILD_LEVEL:-lite}
+prebuild_ffa=${MAGI_ATTENTION_PREBUILD_FFA:-1}
+build_compute_capability=${MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY:?MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY is required}
 dependency=none
 if [[ "$node" == magi_attn_extensions ]]; then
-    dependency=$(bash "$repo_root/.github/scripts/portable_validation.sh" fingerprint magi_attention) || exit
+    dependency=$(bash "$repo_root/.github/scripts/build_v2_wheel.sh" \
+        . MagiAttention magi_attention fingerprint) || exit
 fi
-input_digest=$(printf 'schema=1\ncache=%s\nbase_family=%s\nsource=%s\ndependency=%s\nrecipe=%s\nversion=%s\nprebuild_level=%s\n' \
-    "$cache_name" "$base_family" "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" |
+input_digest=$(printf 'schema=1\ncache=%s\nbase_family=%s\nsource=%s\ndependency=%s\nrecipe=%s\nversion=%s\nprebuild_level=%s\nprebuild_ffa=%s\nbuild_compute_capability=%s\n' \
+    "$cache_name" "$base_family" "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" "$prebuild_ffa" "$build_compute_capability" |
     sha256sum | awk '{print $1}')
 fingerprint="v1-$base_family-$input_digest"
 target="$cache_root/$cache_name/$fingerprint"
+
+if [[ "$operation" == fingerprint ]]; then
+    echo "$fingerprint"
+    exit
+fi
 
 verify() {
     local directory=${1:?directory is required}
@@ -53,12 +69,13 @@ verify() {
         [[ -f "$wheel" && ! -L "$wheel" ]] || return 1
     done
     python - "$directory/manifest.json" "$cache_name" "$base_family" \
-        "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" "$fingerprint" <<'PY'
+        "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" \
+        "$prebuild_ffa" "$build_compute_capability" "$fingerprint" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-path, cache, family, source, dependency, recipe, version, prebuild_level, fingerprint = sys.argv[1:]
+    path, cache, family, source, dependency, recipe, version, prebuild_level, prebuild_ffa, build_compute_capability, fingerprint = sys.argv[1:]
 data = json.loads(Path(path).read_text())
 expected = {
     "schema_version": 1,
@@ -69,6 +86,8 @@ expected = {
     "recipe_digest": recipe,
     "package_version": version,
     "prebuild_level": prebuild_level,
+    "prebuild_ffa": prebuild_ffa,
+    "build_compute_capability": build_compute_capability,
     "fingerprint": fingerprint,
     "status": "built",
 }
@@ -87,6 +106,11 @@ if verify "$target" 2>/dev/null; then
     pip install --no-deps --force-reinstall "$target"/*.whl
     echo "Reused standalone wheel artifact: $target"
     exit
+fi
+
+if [[ "$operation" == install ]]; then
+    echo "Required standalone wheel artifact is unavailable or invalid: $target" >&2
+    exit 1
 fi
 
 parent=$(dirname "$target")
@@ -111,13 +135,14 @@ if [[ "$node" == magi_attention && "$compiled_cache_hit" != true ]]; then
         --source-root "$repo_root" --wheel "${built_wheels[0]}"
 fi
 python - "$staging/manifest.json" "$cache_name" "$base_tag" "$base_family" \
-    "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" "$fingerprint" <<'PY'
+    "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" \
+    "$prebuild_ffa" "$build_compute_capability" "$fingerprint" <<'PY'
 import json
 import os
 import sys
 from pathlib import Path
 
-path, cache, tag, family, source, dependency, recipe, version, prebuild_level, fingerprint = sys.argv[1:]
+path, cache, tag, family, source, dependency, recipe, version, prebuild_level, prebuild_ffa, build_compute_capability, fingerprint = sys.argv[1:]
 data = {
     "base_image_family": family,
     "base_image_tag": tag,
@@ -126,6 +151,8 @@ data = {
     "fingerprint": fingerprint,
     "package_version": version,
     "prebuild_level": prebuild_level,
+    "prebuild_ffa": prebuild_ffa,
+    "build_compute_capability": build_compute_capability,
     "producer_run_id": os.environ.get("GITHUB_RUN_ID", "local"),
     "producer_sha": os.environ.get("GITHUB_SHA", "local"),
     "recipe_digest": recipe,

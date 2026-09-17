@@ -26,6 +26,24 @@ repo_root=$(git rev-parse --show-toplevel)
 source_root=${PORTABLE_SOURCE_ROOT:-.}
 base_tag_file=${PORTABLE_BASE_TAG_FILE:-.github/configs/base_image_tag.txt}
 [[ "$base_tag_file" == /* ]] || base_tag_file=$repo_root/$base_tag_file
+platform_helper="$repo_root/$source_root/.github/scripts/ci_platforms.py"
+
+task_platform() {
+    local platform=${TASK_CI_PLATFORM:?TASK_CI_PLATFORM is required}
+    python "$platform_helper" profile "$platform" >/dev/null || return
+    echo "$platform"
+}
+
+platform_profile() {
+    python "$platform_helper" profile "$(task_platform)"
+}
+
+apply_test_environment() {
+    local assignment
+    while IFS= read -r assignment; do
+        export "$assignment"
+    done < <(python "$platform_helper" environment "$(task_platform)")
+}
 
 check_node() {
     case "${1:-}" in
@@ -61,24 +79,26 @@ source_digest() {
 
 recipe_digest() {
     local node=${1:?node is required}
-    local recipe
+    local recipe profile
     case "$node" in
         magi_attention) recipe=$PORTABLE_MAIN_RECIPE_VERSION ;;
         magi_attn_extensions) recipe=$PORTABLE_EXTENSIONS_RECIPE_VERSION ;;
         *) check_node "$node"; return ;;
     esac
-    python - "$repo_root/$source_root/.github/configs/ci_input_policy.json" "$node" "$recipe" <<'PY'
+    profile=$(platform_profile) || return
+    python - "$repo_root/$source_root/.github/configs/ci_input_policy.json" "$node" "$recipe" "$profile" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-path, node, recipe = sys.argv[1:]
+path, node, recipe, profile = sys.argv[1:]
 policy = json.loads(Path(path).read_text())
 projection = {
     "exclusions": sorted(policy["nodes"][node]["exclusions"]["portable"]),
     "layer": "portable",
     "node": node,
+    "platform_profile": json.loads(profile),
     "protocol": "magi-attention-portable-v1",
     "recipe_version": int(recipe),
     "root": policy["nodes"][node]["root"],
@@ -91,7 +111,7 @@ PY
 
 inputs_json() {
     local node=${1:?node is required}
-    local tag source dependency=none recipe
+    local tag source dependency=none recipe platform
     check_node "$node"
     if [[ "$node" == magi_attn_extensions ]]; then
         dependency=$(fingerprint magi_attention) || return
@@ -99,8 +119,9 @@ inputs_json() {
     tag=$(base_tag) || return
     source=$(source_digest "$node") || return
     recipe=$(recipe_digest "$node") || return
+    platform=$(task_platform) || return
     python - "$PORTABLE_SCHEMA" "$node" "$tag" \
-        "${TASK_CI_PLATFORM:-h100}" "$source" "$dependency" "$recipe" <<'PY'
+        "$platform" "$source" "$dependency" "$recipe" <<'PY'
 import json
 import sys
 
@@ -126,10 +147,11 @@ fingerprint() {
 
 marker_dir() {
     local node=${1:?node is required}
-    local fingerprint
+    local fingerprint platform
     fingerprint=$(fingerprint "$node") || return
-    printf '%s/v%s/%s/%s\n' "$PORTABLE_ROOT" "$PORTABLE_SCHEMA" \
-        "$node" "$fingerprint"
+    platform=$(task_platform) || return
+    printf '%s/%s/v%s/%s/%s\n' "$PORTABLE_ROOT" "$platform" \
+        "$PORTABLE_SCHEMA" "$node" "$fingerprint"
 }
 
 verify() {
@@ -248,22 +270,19 @@ print(os.pathsep.join(
 ))
 PY
     )
+    apply_test_environment
     case "${1:?node is required}" in
         magi_attention)
             if [[ "${PORTABLE_VALIDATION_COVERAGE:-false}" == true ]]; then
                 (cd "$test_cwd" && \
                     PYTHONPATH="$clean_pythonpath" \
                     COVERAGE_FILE="$repo_root/.coverage" \
-                    MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
-                    MAGI_ATTENTION_TEST_BACKEND="sdpa,ffa" \
                     coverage run --source magi_attention -m pytest \
                         -q -s --skip-slow --import-mode=append "$package_root/tests")
                 (cd "$repo_root" && coverage xml -i)
             else
                 (cd "$test_cwd" && \
                     PYTHONPATH="$clean_pythonpath" \
-                    MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
-                    MAGI_ATTENTION_TEST_BACKEND="sdpa,ffa" \
                     python -m pytest -q -s --skip-slow --import-mode=append \
                         "$package_root/tests")
             fi
@@ -271,7 +290,6 @@ PY
         magi_attn_extensions)
             (cd "$test_cwd" && \
                 PYTHONPATH="$clean_pythonpath" \
-                MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
                 python -m pytest -q -s --skip-slow --import-mode=append \
                     "$package_root/extensions/tests")
             ;;

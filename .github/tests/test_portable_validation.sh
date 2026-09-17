@@ -35,6 +35,10 @@ mkdir -p "$consumer/vendor/MagiAttention/extensions/tests" "$consumer/vendor/Mag
 cp "$protocol" "$standalone/.github/scripts/portable_validation.sh"
 cp "$protocol" "$consumer/vendor/MagiAttention/.github/scripts/portable_validation.sh"
 mkdir -p "$standalone/.github/configs" "$consumer/vendor/MagiAttention/.github/configs"
+cp "$repo_root/.github/scripts/ci_platforms.py" "$standalone/.github/scripts/ci_platforms.py"
+cp "$repo_root/.github/scripts/ci_platforms.py" "$consumer/vendor/MagiAttention/.github/scripts/ci_platforms.py"
+cp "$repo_root/.github/configs/ci_platforms.json" "$standalone/.github/configs/ci_platforms.json"
+cp "$repo_root/.github/configs/ci_platforms.json" "$consumer/vendor/MagiAttention/.github/configs/ci_platforms.json"
 cp "$policy" "$standalone/.github/configs/ci_input_policy.json"
 cp "$policy" "$consumer/vendor/MagiAttention/.github/configs/ci_input_policy.json"
 cp "$policy_helper" "$standalone/.github/scripts/ci_input_policy.py"
@@ -65,6 +69,9 @@ standalone_main=$(cd "$standalone" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFO
 consumer_main=$(cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt bash vendor/MagiAttention/.github/scripts/portable_validation.sh fingerprint magi_attention)
 [[ "$standalone_main" == "$consumer_main" ]]
 
+standalone_main_b300=$(cd "$standalone" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=b300 bash .github/scripts/portable_validation.sh fingerprint magi_attention)
+[[ "$standalone_main" != "$standalone_main_b300" ]]
+
 standalone_ext=$(cd "$standalone" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 bash .github/scripts/portable_validation.sh fingerprint magi_attn_extensions)
 consumer_ext=$(cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt bash vendor/MagiAttention/.github/scripts/portable_validation.sh fingerprint magi_attn_extensions)
 [[ "$standalone_ext" == "$consumer_ext" ]]
@@ -75,6 +82,7 @@ consumer_ext=$(cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h1
     bash vendor/MagiAttention/.github/scripts/portable_validation.sh verify magi_attention)
 
 marker_dir=$(cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt bash vendor/MagiAttention/.github/scripts/portable_validation.sh marker-dir magi_attention)
+[[ "$marker_dir" == *"/magi-attention/h100/"* ]]
 printf '{bad json\n' > "$marker_dir/success.json"
 set +e
 (cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt \

@@ -30,10 +30,23 @@ install_dependencies() {
 build() {
     export MAGI_ATTENTION_PREBUILD_LEVEL=ci
     rm -rf "${HOME:?HOME is required}/.cache/magi_attention/"
-    bash .github/scripts/build_v2_wheel.sh . MagiAttention magi_attention
+    bash .github/scripts/build_v2_wheel.sh . MagiAttention magi_attention build
     bash .github/scripts/build_v2_wheel.sh \
-        extensions MagiAttnExtensions magi_attn_extensions
+        extensions MagiAttnExtensions magi_attn_extensions build
 
+    probe_wheel_imports
+}
+
+install_wheels() {
+    export MAGI_ATTENTION_PREBUILD_LEVEL=ci
+    bash .github/scripts/build_v2_wheel.sh . MagiAttention magi_attention install
+    bash .github/scripts/build_v2_wheel.sh \
+        extensions MagiAttnExtensions magi_attn_extensions install
+
+    probe_wheel_imports
+}
+
+probe_wheel_imports() {
     local import_probe_dir
     import_probe_dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/magi-attention-wheel-import.XXXXXX")
     trap 'rm -rf "$import_probe_dir"' RETURN
@@ -59,11 +72,14 @@ test_packages() {
             bash .github/scripts/portable_validation.sh verify magi_attention; then
             echo "Reused portable MagiAttention validation"
         else
-            COVERAGE_RUN=True \
-                PORTABLE_VALIDATION_COVERAGE=true \
-                MAGI_ATTENTION_JIT_COMPILE_DISABLED=1 \
+            if [[ "${TASK_CI_PLATFORM:?TASK_CI_PLATFORM is required}" == h100 ]]; then
+                COVERAGE_RUN=True \
+                    PORTABLE_VALIDATION_COVERAGE=true \
+                    bash .github/scripts/portable_validation.sh run-test magi_attention
+                coverage_generated=true
+            else
                 bash .github/scripts/portable_validation.sh run-test magi_attention
-            coverage_generated=true
+            fi
             if [[ "$trusted" == true ]]; then
                 bash .github/scripts/portable_validation.sh write-success magi_attention
             fi
@@ -90,6 +106,7 @@ shift || true
 case "$command" in
     install) install_dependencies "$@" ;;
     build) build "$@" ;;
+    install-wheel) install_wheels "$@" ;;
     test) test_packages "$@" ;;
-    *) echo "Usage: $0 {install|build|test [main_changed ci_changed trusted]}" >&2; exit 2 ;;
+    *) echo "Usage: $0 {install|build|install-wheel|test [main_changed ci_changed trusted]}" >&2; exit 2 ;;
 esac

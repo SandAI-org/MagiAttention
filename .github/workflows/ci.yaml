@@ -15,10 +15,11 @@ permissions:
 
 env:
   CI_WORKSPACE_ROOT: /home/niubility2/ci_workspace
-  TASK_CI_PLATFORM: h100
   TASK_CI_BASE_IMAGE: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2
   STANDALONE_ARTIFACT_NAMESPACE: magi-attention
-  NCCL_NVLS_ENABLE: '0'
+  # One H100-built wheel carries native code for both Hopper and Blackwell.
+  MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY: '90,100'
+  MAGI_ATTENTION_PREBUILD_LEVEL: ci
   VALIDATION_CACHE_TRUSTED: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
 
 jobs:
@@ -62,6 +63,7 @@ jobs:
         with:
           filters: |
             ci_protocol:
+              - '.github/configs/ci_platforms.json'
               - '.github/configs/ci_input_policy.json'
               - '.github/configs/ci_dependencies.json'
               - '.github/workflows/ci.yaml'
@@ -72,10 +74,33 @@ jobs:
         id: trust
         run: echo "trusted=${{ env.VALIDATION_CACHE_TRUSTED }}" >> "$GITHUB_OUTPUT"
 
-  test_MagiAttention:
-    needs: [detect_changes]
+  plan_platforms:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Plan enabled test platforms
+        id: plan
+        env:
+          # GitHub cannot auto-skip a queued job when no matching runner exists.
+          B300_CI_ENABLED: ${{ vars.B300_CI_ENABLED == 'true' && 'true' || 'false' }}
+        run: |
+          python .github/scripts/ci_platforms.py validate
+          python .github/tests/test_ci_platforms.py
+          echo "matrix=$(python .github/scripts/ci_platforms.py matrix)" >> "$GITHUB_OUTPUT"
+
+  build_wheels:
+    needs: [detect_changes, plan_platforms]
     if: |
       !cancelled() &&
+      needs.plan_platforms.result == 'success' &&
       (
         needs.detect_changes.outputs.MagiAttention == 'true' ||
         needs.detect_changes.outputs.MagiAttnExtensions == 'true' ||
@@ -84,6 +109,7 @@ jobs:
     environment: ${{ github.event_name == 'pull_request_target' && 'ci-internal' || '' }}
     runs-on: [ci-spot-job, h100]
     env:
+      TASK_CI_PLATFORM: h100
       GIT_CONFIG_COUNT: '1'
       GIT_CONFIG_KEY_0: 'safe.directory'
       GIT_CONFIG_VALUE_0: '*'
@@ -96,29 +122,78 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
           submodules: recursive
           fetch-depth: 0
           persist-credentials: false
       - name: Use runner-local artifacts for fork PR
         if: needs.detect_changes.outputs.trusted != 'true'
         run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
-      - name: Merge latest target branch
-        if: github.event_name == 'pull_request_target'
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git fetch https://github.com/${{ github.repository }}.git "$BASE_REF"
-          git merge FETCH_HEAD
       - name: Verify task runner
         run: bash .github/scripts/verify_task_runner.sh
       - name: Install dependencies
         run: bash .github/scripts/run_build_tests.sh install
       - name: Build wheels
         run: bash .github/scripts/run_build_tests.sh build
+      - name: Transfer untrusted PR wheels
+        if: needs.detect_changes.outputs.trusted != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: magi-attention-wheels-${{ github.run_id }}
+          path: ${{ runner.temp }}/magi-attention-ci/v2/standalone-artifacts/magi-attention
+          compression-level: 0
+          retention-days: 1
+
+  test_MagiAttention:
+    needs: [detect_changes, plan_platforms, build_wheels]
+    if: |
+      !cancelled() &&
+      needs.build_wheels.result == 'success' &&
+      (
+        needs.detect_changes.outputs.MagiAttention == 'true' ||
+        needs.detect_changes.outputs.MagiAttnExtensions == 'true' ||
+        needs.detect_changes.outputs.ci_protocol == 'true'
+      )
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan_platforms.outputs.matrix) }}
+    environment: ${{ github.event_name == 'pull_request_target' && 'ci-internal' || '' }}
+    runs-on: [ci-spot-job, "${{ matrix.platform }}"]
+    env:
+      TASK_CI_PLATFORM: ${{ matrix.platform }}
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: 'safe.directory'
+      GIT_CONFIG_VALUE_0: '*'
+      http_proxy: ${{ secrets.HTTP_PROXY }}
+      https_proxy: ${{ secrets.HTTP_PROXY }}
+      no_proxy: pypi.tuna.tsinghua.edu.cn
+      GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      DEPENDENCY_REPO_TOKEN: ${{ secrets.DEPENDENCY_REPO_TOKEN }}
+      CI_DEPENDENCY_USE_TOKEN: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Use runner-local artifacts for fork PR
+        if: needs.detect_changes.outputs.trusted != 'true'
+        run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
+      - name: Restore untrusted PR wheels
+        if: needs.detect_changes.outputs.trusted != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: magi-attention-wheels-${{ github.run_id }}
+          path: ${{ runner.temp }}/magi-attention-ci/v2/standalone-artifacts/magi-attention
+      - name: Verify task runner
+        run: bash .github/scripts/verify_task_runner.sh
+      - name: Install dependencies
+        run: bash .github/scripts/run_build_tests.sh install
+      - name: Install shared wheels
+        run: bash .github/scripts/run_build_tests.sh install-wheel
       - name: Test packages
         id: test
         run: bash .github/scripts/run_build_tests.sh test "$MAIN_CHANGED" "$CI_CHANGED" "$TRUSTED"
@@ -127,7 +202,7 @@ jobs:
           CI_CHANGED: ${{ needs.detect_changes.outputs.ci_protocol }}
           TRUSTED: ${{ needs.detect_changes.outputs.trusted }}
       - name: Upload coverage reports to Codecov
-        if: steps.test.outputs.coverage_generated == 'true'
+        if: matrix.platform == 'h100' && steps.test.outputs.coverage_generated == 'true'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -135,19 +210,26 @@ jobs:
           files: coverage.xml
 
   ci_gate:
-    needs: [detect_changes, test_MagiAttention]
+    needs: [detect_changes, plan_platforms, build_wheels, test_MagiAttention]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Verify test result
         env:
+          DETECT_RESULT: ${{ needs.detect_changes.result }}
+          PLAN_RESULT: ${{ needs.plan_platforms.result }}
+          BUILD_RESULT: ${{ needs.build_wheels.result }}
           TEST_RESULT: ${{ needs.test_MagiAttention.result }}
           MAIN_CHANGED: ${{ needs.detect_changes.outputs.MagiAttention }}
           EXT_CHANGED: ${{ needs.detect_changes.outputs.MagiAttnExtensions }}
           CI_CHANGED: ${{ needs.detect_changes.outputs.ci_protocol }}
         run: |
+          [[ "$DETECT_RESULT" == success ]]
+          [[ "$PLAN_RESULT" == success ]]
           if [[ "$MAIN_CHANGED" == true || "$EXT_CHANGED" == true || "$CI_CHANGED" == true ]]; then
+            [[ "$BUILD_RESULT" == success ]] || exit 1
             [[ "$TEST_RESULT" == success ]] || exit 1
           else
+            [[ "$BUILD_RESULT" == skipped ]] || exit 1
             [[ "$TEST_RESULT" == skipped ]] || exit 1
           fi

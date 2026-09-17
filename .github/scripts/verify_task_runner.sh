@@ -51,6 +51,7 @@ printf 'runner=%s platform=%s job=%s sha=%s utc=%s\n' \
     "${GITHUB_JOB:-unknown}" "${GITHUB_SHA:-unknown}" "$(date -u +%FT%TZ)"
 printf 'shared_cache=%s\n' "$CI_WORKSPACE_ROOT"
 declared_base_tag=$(tr -d '[:space:]' < .github/configs/base_image_tag.txt)
+python .github/scripts/ci_platforms.py profile "${TASK_CI_PLATFORM:?TASK_CI_PLATFORM is required}" >/dev/null
 printf 'workflow_declared_base_tag=%s\n' "$declared_base_tag"
 expected_image="registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:$declared_base_tag"
 if [[ "${TASK_CI_BASE_IMAGE:-}" != "$expected_image" ]]; then
