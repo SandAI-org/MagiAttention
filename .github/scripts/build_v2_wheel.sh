@@ -75,7 +75,7 @@ import json
 import sys
 from pathlib import Path
 
-    path, cache, family, source, dependency, recipe, version, prebuild_level, prebuild_ffa, build_compute_capability, fingerprint = sys.argv[1:]
+path, cache, family, source, dependency, recipe, version, prebuild_level, prebuild_ffa, build_compute_capability, fingerprint = sys.argv[1:]
 data = json.loads(Path(path).read_text())
 expected = {
     "schema_version": 1,
