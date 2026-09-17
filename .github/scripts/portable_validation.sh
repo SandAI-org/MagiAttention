@@ -17,7 +17,8 @@
 set -euo pipefail
 
 PORTABLE_SCHEMA=1
-PORTABLE_RECIPE_VERSION=3
+PORTABLE_MAIN_RECIPE_VERSION=3
+PORTABLE_EXTENSIONS_RECIPE_VERSION=4
 PORTABLE_ROOT="${CI_WORKSPACE_ROOT:-/workspace}/v2/portable-validations/magi-attention"
 PORTABLE_PRODUCER=SandAI-org/MagiAttention
 
@@ -60,7 +61,13 @@ source_digest() {
 
 recipe_digest() {
     local node=${1:?node is required}
-    python - "$repo_root/$source_root/.github/ci_input_policy.json" "$node" "$PORTABLE_RECIPE_VERSION" <<'PY'
+    local recipe
+    case "$node" in
+        magi_attention) recipe=$PORTABLE_MAIN_RECIPE_VERSION ;;
+        magi_attn_extensions) recipe=$PORTABLE_EXTENSIONS_RECIPE_VERSION ;;
+        *) check_node "$node"; return ;;
+    esac
+    python - "$repo_root/$source_root/.github/ci_input_policy.json" "$node" "$recipe" <<'PY'
 import hashlib
 import json
 import sys
@@ -265,7 +272,7 @@ PY
             (cd "$test_cwd" && \
                 PYTHONPATH="$clean_pythonpath" \
                 MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH=0 \
-                python -m pytest -q -s --skip-slow --import-mode=append \
+                python -m pytest -q -s -m "not slow" --import-mode=append \
                     "$package_root/extensions/tests")
             ;;
         *) check_node "$1" ;;

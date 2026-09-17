@@ -28,7 +28,7 @@ base_tag=$(tr -d '[:space:]' < "$repo_root/.github/workflows/base_image_tag.txt"
 }
 base_family=${BASH_REMATCH[1]}
 source_digest=$(python "$repo_root/.github/scripts/ci_input_policy.py" digest --layer wheel --node "$node") || exit
-recipe_digest=$(sha256sum "$repo_root/.github/scripts/build_v2_wheel.sh" "$repo_root/.github/scripts/ci_input_policy.py" | sha256sum | awk '{print $1}')
+recipe_digest=$(sha256sum "$repo_root/.github/scripts/build_v2_wheel.sh" "$repo_root/.github/scripts/compiled_artifact_cache.py" "$repo_root/.github/scripts/ci_input_policy.py" | sha256sum | awk '{print $1}')
 package_version=$(cd "$repo_root/$package_dir" && python -m versioningit) || exit
 prebuild_level=${MAGI_ATTENTION_PREBUILD_LEVEL:-lite}
 dependency=none
@@ -79,6 +79,11 @@ PY
 }
 
 if verify "$target" 2>/dev/null; then
+    if [[ "$node" == magi_attention ]]; then
+        cached_wheels=("$target"/*.whl)
+        python "$repo_root/.github/scripts/compiled_artifact_cache.py" publish-wheel \
+            --source-root "$repo_root" --wheel "${cached_wheels[0]}"
+    fi
     pip install --no-deps --force-reinstall "$target"/*.whl
     echo "Reused standalone wheel artifact: $target"
     exit
@@ -88,7 +93,23 @@ parent=$(dirname "$target")
 mkdir -p "$parent"
 staging=$(mktemp -d "$parent/.build.XXXXXX")
 trap 'rm -rf "${staging:-}"' EXIT
-python -m build --wheel --no-isolation --outdir "$staging" "$repo_root/$package_dir"
+compiled_cache_hit=false
+if [[ "$node" == magi_attention ]] && \
+    python "$repo_root/.github/scripts/compiled_artifact_cache.py" restore \
+        --source-root "$repo_root"; then
+    compiled_cache_hit=true
+fi
+if [[ "$compiled_cache_hit" == true ]]; then
+    MAGI_ATTENTION_SKIP_CUDA_BUILD=1 \
+        python -m build --wheel --no-isolation --outdir "$staging" "$repo_root/$package_dir"
+else
+    python -m build --wheel --no-isolation --outdir "$staging" "$repo_root/$package_dir"
+fi
+if [[ "$node" == magi_attention && "$compiled_cache_hit" != true ]]; then
+    built_wheels=("$staging"/*.whl)
+    python "$repo_root/.github/scripts/compiled_artifact_cache.py" publish-wheel \
+        --source-root "$repo_root" --wheel "${built_wheels[0]}"
+fi
 python - "$staging/manifest.json" "$cache_name" "$base_tag" "$base_family" \
     "$source_digest" "$dependency" "$recipe_digest" "$package_version" "$prebuild_level" "$fingerprint" <<'PY'
 import json
