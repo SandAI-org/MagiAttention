@@ -48,13 +48,15 @@ install_wheels() {
 
 probe_wheel_imports() {
     local import_probe_dir
+    local status=0
     import_probe_dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/magi-attention-wheel-import.XXXXXX")
-    trap 'rm -rf "$import_probe_dir"' RETURN
     (
         cd "$import_probe_dir"
         python -c "import magi_attention; print('MagiAttention wheel import succeeded')"
         python -c "import magi_attn_extensions; print('MagiAttnExtensions wheel import succeeded')"
-    )
+    ) || status=$?
+    rm -rf -- "$import_probe_dir"
+    return "$status"
 }
 
 test_packages() {
