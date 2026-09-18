@@ -31,6 +31,48 @@ from .dsa_ref_attn import dsa_ref_attn_func
 
 
 class TestDSASparseInterface(TestCase):
+    _ATTN_CONFIGS = [
+        {
+            "sq": 128,
+            "skv": 128,
+            "nhq": 8,
+            "nhkv": 2,
+            "hd": 64,
+            "topk": 16,
+        },
+        {
+            "sq": 256,
+            "skv": 512,
+            "nhq": 16,
+            "nhkv": 4,
+            "hd": 128,
+            "topk": 32,
+        },
+    ]
+    _DTYPES = [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def precompile_kernel_specs(cls):
+        """Declare the FFA kernels exercised by the DSA sparse backends."""
+        from magi_attention.testing.precompile import add_ffa_spec
+
+        specs: dict = {}
+        for config in cls._ATTN_CONFIGS:
+            pack_gqa_factor = config["nhq"] // config["nhkv"]
+            for dtype in cls._DTYPES:
+                common = {
+                    "direction": "fwd",
+                    "head_dim": config["hd"],
+                    "compute_dtype": dtype,
+                    "disable_atomic": True,
+                    "pack_gqa": pack_gqa_factor > 1,
+                    "pack_gqa_factor": pack_gqa_factor,
+                    "sparse_k_block_size": 1,
+                }
+                add_ffa_spec(specs, **common, block_sparse=True)
+                add_ffa_spec(specs, **common, index_sparse=True)
+        return specs
+
     def setUp(self):
         torch.manual_seed(self.seed)
         torch.cuda.manual_seed(self.seed)
@@ -45,26 +87,9 @@ class TestDSASparseInterface(TestCase):
 
     @parameterize(
         "attn_config",
-        [
-            {
-                "sq": 128,
-                "skv": 128,
-                "nhq": 8,
-                "nhkv": 2,
-                "hd": 64,
-                "topk": 16,
-            },
-            {
-                "sq": 256,
-                "skv": 512,
-                "nhq": 16,
-                "nhkv": 4,
-                "hd": 128,
-                "topk": 32,
-            },
-        ],
+        _ATTN_CONFIGS,
     )
-    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("dtype", _DTYPES)
     @parameterize("backend", ["flex", "ffa_block_sparse", "ffa_index_sparse", "sdpa"])
     def test_sparse_flex_vs_ref(
         self,

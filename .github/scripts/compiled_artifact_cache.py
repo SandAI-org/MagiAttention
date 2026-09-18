@@ -49,6 +49,7 @@ BINARY_INPUTS = (
 CI_BINARY_INPUTS = (
     "magi_attention/testing/precompile.py",
     "tests",
+    "extensions/tests",
 )
 BUILD_ENV = (
     "MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12",

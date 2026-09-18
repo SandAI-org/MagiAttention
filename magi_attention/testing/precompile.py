@@ -73,6 +73,7 @@ TEST_MODULES_WITH_KERNEL_SPECS = [
     "tests.test_attn.test_block_sparse",
     "tests.test_attn.test_index_sparse",
     "tests.test_pipeline",
+    "extensions.tests.test_dsa_interface",
 ]
 
 _DEFAULT_ARCH = (9, 0)
@@ -193,6 +194,9 @@ def collect_test_kernel_specs(
     repo_root = str(repo_root)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
+    extensions_root = str(Path(repo_root) / "extensions")
+    if extensions_root not in sys.path:
+        sys.path.append(extensions_root)
 
     all_specs: dict[str, "JitSpec"] = {}
     for mod_name in module_names:
