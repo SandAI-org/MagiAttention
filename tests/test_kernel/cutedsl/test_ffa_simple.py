@@ -34,6 +34,10 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
+from magi_attention.kernel.cutedsl.flex_flash_attn import (
+    _flex_flash_attn_bwd,
+    _flex_flash_attn_fwd,
+)
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import (
@@ -471,6 +475,61 @@ class TestFfaSimple(DistTestBase):
             dtype=dtype,
             test_case=test_case,
         )
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Caller-provided dq/dk/dv buffers accumulate gradients from overlapping ranges
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    @with_run_in_mp
+    @parameterize("overlap_side", ["q", "k"])
+    def test_bwd_accumulates_caller_buffers_with_overlapping_q_or_k_ranges(
+        self, overlap_side
+    ):
+        """Accumulate caller buffers once for overlapping q or k ranges.
+
+        The self-allocated backward result is used only as the accumulation
+        reference, not as an independent numerical reference.
+        """
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            return
+
+        device = self.device
+        dtype = torch.bfloat16
+        d, nheads, num_ranges, seg = 128, 4, 8, 256
+        total = num_ranges * seg
+        torch.random.manual_seed(self.seed + d + (overlap_side == "k"))
+
+        q, k, v, do = (
+            torch.randn(total, nheads, d, device=device, dtype=dtype) for _ in range(4)
+        )
+        wide = [[i * seg, min((i + 2) * seg, total)] for i in range(num_ranges)]
+        narrow = [[i * seg, (i + 1) * seg] for i in range(num_ranges)]
+        q_ranges, k_ranges = (wide, narrow) if overlap_side == "q" else (narrow, wide)
+        ranges = dict(
+            q_ranges=torch.tensor(q_ranges, device=device, dtype=torch.int32),
+            k_ranges=torch.tensor(k_ranges, device=device, dtype=torch.int32),
+            max_seqlen_q=2 * seg,
+            max_seqlen_k=2 * seg,
+        )
+        out, lse = _flex_flash_attn_fwd(q, k, v, out_dtype=dtype, **ranges)
+
+        fp32 = dict(dq_type=torch.float32, dk_type=torch.float32, dv_type=torch.float32)
+        ref_grads = _flex_flash_attn_bwd(q, k, v, out, lse, do, **ranges, **fp32)
+
+        init = [torch.randn_like(x, dtype=torch.float32) for x in (q, k, v)]
+        dq, dk, dv = (x.clone() for x in init)
+        grads = _flex_flash_attn_bwd(
+            q, k, v, out, lse, do, dq=dq, dk=dk, dv=dv, **ranges, **fp32
+        )
+
+        for name, grad, buf, x0, ref in zip(
+            ("dq", "dk", "dv"), grads, (dq, dk, dv), init, ref_grads
+        ):
+            assert grad is buf, f"{name} must be the caller buffer"
+            torch.testing.assert_close(
+                buf, x0 + ref, rtol=1e-4, atol=1e-4, msg=lambda m: f"{name}: {m}"
+            )
 
     # ─────────────────────────────────────────────────────────────────────
     # Varlen opt-flag contract

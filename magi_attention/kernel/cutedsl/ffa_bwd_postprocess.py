@@ -70,8 +70,8 @@ class FFABwdPostProcess:
         :param tile_m: m block size
         :type tile_m: int
         :param accumulate: add the scaled accumulator onto the existing output
-            instead of overwriting it, matching C++ FFA where a caller-provided
-            gradient buffer is the reduction target itself
+            instead of overwriting it: a caller-provided gradient buffer is
+            the reduction target itself
         :type accumulate: bool
         """
         self.dtype = dtype
@@ -852,12 +852,14 @@ class FFABwdPostProcessRowMajor:
         stream: cuda.CUstream = None,
     ):
         num_head = mOut.shape[1]
-        num_ranges = mRanges.shape[0]
-        grid = (
-            cute.ceil_div(max_seqlen, self.rows_per_cta),
-            num_ranges,
-            num_head,
-        )
+        if const_expr(self.accumulate):
+            grid = (cute.ceil_div(mOut.shape[0], self.rows_per_cta), 1, num_head)
+        else:
+            grid = (
+                cute.ceil_div(max_seqlen, self.rows_per_cta),
+                mRanges.shape[0],
+                num_head,
+            )
         self.kernel(mAccum, mOut, mRanges, scale).launch(
             grid=grid, block=[self.num_threads, 1, 1], stream=stream
         )
@@ -876,12 +878,16 @@ class FFABwdPostProcessRowMajor:
             cute.arch.block_idx()[1],
             cute.arch.block_idx()[2],
         )
-        row_start = cutlass.Int32(mRanges[range_idx, 0])
         lane_in_row = tidx % self.threads_per_row
         row_in_cta = tidx // self.threads_per_row
-        row_in_range = block * self.rows_per_cta + row_in_cta
-        if row_in_range < cutlass.Int32(mRanges[range_idx, 1]) - row_start:
-            row = row_start + row_in_range
+        row_offset = block * self.rows_per_cta + row_in_cta
+        row_start = cutlass.Int32(0)
+        row_count = cutlass.Int32(mOut.shape[0])
+        if const_expr(not self.accumulate):
+            row_start = cutlass.Int32(mRanges[range_idx, 0])
+            row_count = cutlass.Int32(mRanges[range_idx, 1]) - row_start
+        if row_offset < row_count:
+            row = row_start + row_offset
             gAcc_row = cute.local_tile(
                 mAccum[head_idx, None], (self.accum_stride,), (row,)
             )
@@ -942,7 +948,8 @@ def bwd_postprocess_rowmajor(
 ) -> None:
     """Row-major accumulator -> output dtype (non-deterministic range path).
 
-    With ``accumulate`` the scaled accumulator is added onto ``output`` in place.
+    With ``accumulate`` the scaled accumulator is added onto ``output`` in place
+    for every row in ``[0, total)``; ``accum`` must be zero outside ``ranges``.
     """
     compiled = _compile_bwd_postprocess_rowmajor(
         output.dtype, output.shape[-1], accumulate

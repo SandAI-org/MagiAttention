@@ -1207,7 +1207,11 @@ def _flex_flash_attn_bwd(
                 // m_block_size
                 * m_block_size
             )
-        dq_accum_alloc = torch.empty if direct_dq_init else torch.zeros
+        # The accumulating row-major postprocess adds every row of dq_accum
+        # onto the caller's dq, so rows outside q_ranges must be zero.
+        dq_accum_alloc = (
+            torch.empty if direct_dq_init and dq_self_alloc else torch.zeros
+        )
         dq_accum = dq_accum_alloc(
             num_head,
             total_q_rounded_padded * dq_head_dim_rounded,
