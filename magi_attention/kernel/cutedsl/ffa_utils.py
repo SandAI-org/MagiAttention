@@ -587,26 +587,13 @@ def resolve_output_dtype(
     """Pick the GMEM dtype of one kernel output (fwd O, bwd dQ/dK/dV).
 
     Priority: explicit ``requested`` dtype, then the dtype of a caller-provided
-    ``provided`` buffer, then ``default``. A provided buffer whose dtype differs
-    from an explicit request is rejected here rather than silently cast, since
-    the kernel writes the buffer in place.
+    ``provided`` buffer, then ``default``. ``validate_tensor`` rejects a provided
+    buffer whose dtype differs from the resolved one.
     """
-    if requested is not None and requested not in OUTPUT_DTYPES:
-        raise ValueError(f"{name}_type must be one of {OUTPUT_DTYPES}, got {requested}")
-    if requested is not None:
-        if provided is not None and provided.dtype != requested:
-            raise ValueError(
-                f"{name} buffer dtype {provided.dtype} != {name}_type {requested}"
-            )
-        return requested
-    if provided is not None:
-        if provided.dtype not in OUTPUT_DTYPES:
-            raise ValueError(
-                f"{name} buffer dtype must be one of {OUTPUT_DTYPES}, "
-                f"got {provided.dtype}"
-            )
-        return provided.dtype
-    return default
+    dtype = requested or (provided.dtype if provided is not None else default)
+    if dtype not in OUTPUT_DTYPES:
+        raise ValueError(f"{name} dtype must be one of {OUTPUT_DTYPES}, got {dtype}")
+    return dtype
 
 
 def validate_tensor(t, name, expected_shape, expected_dtype, expected_device):

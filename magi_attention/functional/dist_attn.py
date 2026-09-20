@@ -239,11 +239,11 @@ class DistAttnRuntime:
             and (not self.use_native_grpcoll)
         )
 
-        # NOTE: only the FFA backend supports accumulative buffer for dq
+        # NOTE: only the FFA and CUTEDSL backends support accumulative buffer for dq
         # to avoid an additional explicit `add_`
-        self.bwd_dq_use_acc = (
-            not self.enable_qo_comm
-            and self.kernel_backend == MagiAttentionKernelBackend.FFA
+        self.bwd_dq_use_acc = not self.enable_qo_comm and self.kernel_backend in (
+            MagiAttentionKernelBackend.FFA,
+            MagiAttentionKernelBackend.CUTEDSL,
         )
 
         # NOTE: when neither using native grpcoll nor enabling bwd high precision reduce
@@ -1445,6 +1445,7 @@ class DistAttnRuntime:
                     attn_arg=attn_arg,
                     softmax_scale=softmax_scale,
                     softcap=softcap,
+                    dq_acc=dq_acc,  # directly reduce to dq_acc
                 )
                 partial_dsink = None
                 partial_dkv = self._maybe_concat(
