@@ -521,11 +521,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 return False
 
         if backend == MagiAttentionKernelBackend.CUTEDSL:
-            # CuteDSL kernel: sink is per-head scalar bf16 (dist contract is
-            # [n_sink, nhq] fp32) — exclude sink configs; deterministic+ranges
-            # is NotImplementedError; qo comm relies on sm_margin which the
-            # kernel does not expose.
-            if has_sink or deterministic or qo_comm:
+            # CuteDSL kernel: deterministic+ranges is NotImplementedError;
+            # qo comm relies on sm_margin which the kernel does not expose.
+            if deterministic or qo_comm:
                 return False
 
         if backend in (
@@ -551,6 +549,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges([[0, 14336]]),
                 "k_ranges": AttnRanges.from_ranges([[0, 14336]]),
@@ -598,6 +597,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -665,6 +665,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -869,6 +870,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges([[0, 1024]]),
                 "k_ranges": AttnRanges.from_ranges([[0, 1024]]),
@@ -947,6 +949,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -985,6 +988,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges(
                     [[0, 1024], [128, 256], [256, 512], [512, 1024]]
@@ -1342,13 +1346,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         total_seqlen_sink: int = (
             0
-            if backend
-            in (
-                MagiAttentionKernelBackend.FA4,
-                # CuteDSL kernel only supports per-head scalar bf16 sink,
-                # while dist contract is [n_sink, nhq] fp32; skip sink.
-                MagiAttentionKernelBackend.CUTEDSL,
-            )
+            if backend == MagiAttentionKernelBackend.FA4
             else attn_config.get("total_seqlen_sink", 0)
         )
         chunk_size: int = attn_config["chunk_size"]
