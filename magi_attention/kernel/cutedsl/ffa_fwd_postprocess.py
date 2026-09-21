@@ -84,7 +84,7 @@ class FFAFwdPostProcess:
             o_scale = Float32(0.0)
             if const_expr(self.has_sink):
                 assert mSink is not None
-                # One sink logit per head: lse_sink = log(exp(sink)) = sink.
+                # mSink already holds each head's log-sum-exp over its sink logits.
                 lse_sink = Float32(mSink[head_idx])
                 LOG2_E = math.log2(math.e)
                 LN2 = math.log(2.0)
@@ -134,11 +134,7 @@ def _compile_fwd_postprocess(
         div = 128 // o_dtype.width
         mO = fake_tensor(o_dtype, (total_q, num_head, head_dim_v), divisibility=div)
         mLSE = fake_tensor(Float32, (total_q, num_head), divisibility=1)
-        mSink = (
-            fake_tensor(cutlass.BFloat16, (num_head,), divisibility=1)
-            if has_sink
-            else None
-        )
+        mSink = fake_tensor(Float32, (num_head,), divisibility=1) if has_sink else None
         cache[cache_key] = cute.compile(
             obj,
             mO,
@@ -153,11 +149,16 @@ def _compile_fwd_postprocess(
 def fwd_postprocess(
     out: torch.Tensor,
     lse: torch.Tensor,
-    sink: torch.Tensor | None,
+    lse_sink: torch.Tensor | None,
 ) -> None:
-    """In-place: zero O rows whose LSE is -inf, fold the sink into O/LSE."""
-    compiled = _compile_fwd_postprocess(out.dtype, out.shape[-1], sink is not None)
-    compiled(out, lse, sink)
+    """In-place: zero O rows whose LSE is -inf, fold the sink into O/LSE.
+
+    ``lse_sink`` is fp32 ``[num_head]``: each head's log-sum-exp over its sink
+    logits, so ``out``'s row gets rescaled by ``exp(lse - lse_new)``.
+    """
+    assert lse_sink is None or lse_sink.dtype == torch.float32
+    compiled = _compile_fwd_postprocess(out.dtype, out.shape[-1], lse_sink is not None)
+    compiled(out, lse, lse_sink)
 
 
 fwd_postprocess.compile_cache = get_jit_cache("ffa_fwd_postprocess")
