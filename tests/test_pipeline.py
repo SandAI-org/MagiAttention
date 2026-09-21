@@ -1029,6 +1029,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if head_dim > 128 and backend != MagiAttentionKernelBackend.FA4:
             return
 
+        # SM120 cute FA4 cannot launch hd=256: kernel SMEM 131072 > 101376 cap.
+        if (
+            backend == MagiAttentionKernelBackend.FA4
+            and max(head_dim, head_dim_v) >= 256
+            and torch.cuda.get_device_capability()[0] == 12
+        ):
+            return
+
         # CUTEDSL True-range kernels are SM100/SM110 only.
         if backend == MagiAttentionKernelBackend.CUTEDSL and (
             torch.cuda.get_device_capability()[0] not in (10, 11)

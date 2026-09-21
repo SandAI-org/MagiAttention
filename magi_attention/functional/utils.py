@@ -531,8 +531,14 @@ def correct_attn_out_lse(
     # both the input and output tiles in shared memory as fp32, and
     # 128 * 256 * 4 (out) + 128 * 256 * 4 (inp) ~= 256 KiB which overflows even
     # Blackwell's per-SM SMEM.
+    # SM120/SM121 report CC major 12 so they would take the Hopper+ branch, but
+    # opt-in SMEM is only ~99 KiB. Triton pipelines two fp32 [M,N] tiles, so
+    # M_BLOCK=128 needs 128 KiB even at head_dim=64 and exceeds that cap.
     sm_major, _ = torch.cuda.get_device_capability(out1.device)
-    M_BLOCK = 64 if (sm_major < 9 or N_BLOCK >= 256) else 128
+    max_smem = torch.cuda.get_device_properties(
+        out1.device
+    ).shared_memory_per_block_optin
+    M_BLOCK = 64 if (sm_major < 9 or N_BLOCK >= 256 or max_smem < 131072) else 128
     NUM_M_BLOCKS = triton.cdiv(M, M_BLOCK)  # number of M blocks along seqlen_q
 
     grid = (NUM_M_BLOCKS, H)
