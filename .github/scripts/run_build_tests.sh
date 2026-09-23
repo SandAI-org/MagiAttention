@@ -24,7 +24,8 @@ install_dependencies() {
     bash -x .github/scripts/install_requirements.sh
     prepare_runtime_lock
     python .github/scripts/install_source_dependencies.py
-    pip install -r extensions/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+    pip install -r extensions/requirements.txt \
+        --index-url "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple/}"
 }
 
 build() {

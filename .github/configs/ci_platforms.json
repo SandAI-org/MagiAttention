@@ -7,7 +7,8 @@
         "MAGI_ATTENTION_JIT_COMPILE_DISABLED": "1",
         "MAGI_ATTENTION_TEST_BACKEND": "ffa,sdpa",
         "MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH": "0",
-        "NCCL_NVLS_ENABLE": "0"
+        "NCCL_NVLS_ENABLE": "0",
+        "PIP_INDEX_URL": "https://pypi.tuna.tsinghua.edu.cn/simple/"
       }
     },
     "b300": {
@@ -15,7 +16,8 @@
       "test_environment": {
         "MAGI_ATTENTION_JIT_COMPILE_DISABLED": "1",
         "MAGI_ATTENTION_TEST_BACKEND": "fa4,cutedsl,sdpa",
-        "MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH": "0"
+        "MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH": "0",
+        "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/"
       }
     }
   }
