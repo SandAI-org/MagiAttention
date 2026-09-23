@@ -137,15 +137,18 @@ jobs:
       - name: Install dependencies
         run: bash .github/scripts/run_build_tests.sh install
       - name: Build wheels
+        env:
+          STANDALONE_ARTIFACT_TRANSFER_DIR: ${{ runner.temp }}/magi-attention-wheel-transfer
         run: bash .github/scripts/run_build_tests.sh build
-      - name: Transfer untrusted PR wheels
-        if: needs.detect_changes.outputs.trusted != 'true'
+      - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: magi-attention-wheels-${{ github.run_id }}
-          path: ${{ runner.temp }}/magi-attention-ci/v2/standalone-artifacts/magi-attention
+          path: ${{ runner.temp }}/magi-attention-wheel-transfer
+          if-no-files-found: error
           compression-level: 0
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
 
   test_MagiAttention:
     needs: [detect_changes, plan_platforms, build_wheels]
@@ -184,12 +187,11 @@ jobs:
       - name: Use runner-local artifacts for fork PR
         if: needs.detect_changes.outputs.trusted != 'true'
         run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
-      - name: Restore untrusted PR wheels
-        if: needs.detect_changes.outputs.trusted != 'true'
+      - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
           name: magi-attention-wheels-${{ github.run_id }}
-          path: ${{ runner.temp }}/magi-attention-ci/v2/standalone-artifacts/magi-attention
+          path: ${{ runner.temp }}/magi-attention-wheel-transfer
       - name: Verify task runner
         run: bash .github/scripts/verify_task_runner.sh
       - name: Apply platform environment
@@ -197,6 +199,8 @@ jobs:
       - name: Install dependencies
         run: bash .github/scripts/run_build_tests.sh install
       - name: Install shared wheels
+        env:
+          STANDALONE_ARTIFACT_TRANSFER_DIR: ${{ runner.temp }}/magi-attention-wheel-transfer
         run: bash .github/scripts/run_build_tests.sh install-wheel
       - name: Test packages
         id: test

@@ -51,6 +51,11 @@ input_digest=$(printf 'schema=1\ncache=%s\nbase_family=%s\nsource=%s\ndependency
     sha256sum | awk '{print $1}')
 fingerprint="v1-$base_family-$input_digest"
 target="$cache_root/$cache_name/$fingerprint"
+transfer_root=${STANDALONE_ARTIFACT_TRANSFER_DIR:-}
+transfer_dir=${transfer_root:+$transfer_root/$cache_name}
+staging=
+transfer_staging=
+trap 'rm -rf "${staging:-}" "${transfer_staging:-}"' EXIT
 
 if [[ "$operation" == fingerprint ]]; then
     echo "$fingerprint"
@@ -97,13 +102,54 @@ if errors:
 PY
 }
 
+install_wheel() {
+    local directory=${1:?directory is required}
+    pip install --no-deps --force-reinstall "$directory"/*.whl
+}
+
+export_wheel() {
+    local source=${1:?source is required}
+    [[ -n "$transfer_dir" ]] || return 0
+
+    if [[ -e "$transfer_dir" || -L "$transfer_dir" ]]; then
+        verify "$transfer_dir" || {
+            echo "Standalone wheel transfer directory already exists but is invalid: $transfer_dir" >&2
+            return 1
+        }
+        echo "Reused standalone wheel transfer artifact: $transfer_dir"
+        return 0
+    fi
+
+    mkdir -p "$transfer_root"
+    transfer_staging=$(mktemp -d "$transfer_root/.transfer.XXXXXX")
+    cp -- "$source/manifest.json" "$source"/*.whl "$transfer_staging/"
+    verify "$transfer_staging"
+    if ! mv -T "$transfer_staging" "$transfer_dir" 2>/dev/null; then
+        verify "$transfer_dir"
+        rm -rf "$transfer_staging"
+    fi
+    transfer_staging=
+    echo "Exported standalone wheel transfer artifact: $transfer_dir"
+}
+
+if [[ "$operation" == install && -n "$transfer_dir" ]]; then
+    verify "$transfer_dir" || {
+        echo "Downloaded standalone wheel artifact is unavailable or invalid: $transfer_dir" >&2
+        exit 1
+    }
+    install_wheel "$transfer_dir"
+    echo "Installed downloaded standalone wheel artifact: $transfer_dir"
+    exit
+fi
+
 if verify "$target" 2>/dev/null; then
     if [[ "$node" == magi_attention ]]; then
         cached_wheels=("$target"/*.whl)
         python "$repo_root/.github/scripts/compiled_artifact_cache.py" publish-wheel \
             --source-root "$repo_root" --wheel "${cached_wheels[0]}"
     fi
-    pip install --no-deps --force-reinstall "$target"/*.whl
+    export_wheel "$target"
+    install_wheel "$target"
     echo "Reused standalone wheel artifact: $target"
     exit
 fi
@@ -116,7 +162,6 @@ fi
 parent=$(dirname "$target")
 mkdir -p "$parent"
 staging=$(mktemp -d "$parent/.build.XXXXXX")
-trap 'rm -rf "${staging:-}"' EXIT
 compiled_cache_hit=false
 if [[ "$node" == magi_attention ]] && \
     python "$repo_root/.github/scripts/compiled_artifact_cache.py" restore \
@@ -167,5 +212,6 @@ if ! mv -T "$staging" "$target" 2>/dev/null; then
     verify "$target"
 fi
 staging=
-pip install --no-deps --force-reinstall "$target"/*.whl
+export_wheel "$target"
+install_wheel "$target"
 echo "Published standalone wheel artifact: $target"
