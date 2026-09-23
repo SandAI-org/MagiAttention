@@ -17,8 +17,8 @@
 set -euo pipefail
 
 PORTABLE_SCHEMA=1
-PORTABLE_MAIN_RECIPE_VERSION=3
-PORTABLE_EXTENSIONS_RECIPE_VERSION=4
+PORTABLE_MAIN_RECIPE_VERSION=4
+PORTABLE_EXTENSIONS_RECIPE_VERSION=5
 PORTABLE_ROOT="${CI_WORKSPACE_ROOT:-/workspace}/v2/portable-validations/magi-attention"
 PORTABLE_PRODUCER=SandAI-org/MagiAttention
 
@@ -43,6 +43,36 @@ apply_test_environment() {
     while IFS= read -r assignment; do
         export "$assignment"
     done < <(python "$platform_helper" environment "$(task_platform)")
+}
+
+ensure_platform_test_dependencies() {
+    local archs=${MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS:-}
+    local compute_capability dependency_key source stamp_dir stamp
+    [[ -n "$archs" ]] || return 0
+    [[ "$archs" =~ ^sm[0-9]+(,sm[0-9]+)*$ ]] || {
+        echo "Invalid MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS: $archs" >&2
+        return 2
+    }
+
+    source=$(source_digest magi_attention) || return
+    dependency_key=$(printf '%s\n%s\n' "$source" "$archs" | sha256sum | awk '{print $1}')
+    stamp_dir="${RUNNER_TEMP:-/tmp}/magi-attention-test-dependencies"
+    stamp="$stamp_dir/flash-attn-cute-$dependency_key"
+    if [[ -f "$stamp" ]] && python -c 'import flash_attn_cute'; then
+        echo "Reusing flash_attn_cute test dependency for $archs"
+        return 0
+    fi
+
+    compute_capability=${archs//sm/}
+    mkdir -p "$stamp_dir"
+    rm -f "$stamp"
+    echo "Installing flash_attn_cute test dependency for $archs"
+    (cd "$repo_root/$source_root" && \
+        MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY="$compute_capability" \
+        bash scripts/install_flash_attn_cute.sh "$archs")
+    python -c 'import flash_attn_cute'
+    : > "$stamp.tmp"
+    mv -f "$stamp.tmp" "$stamp"
 }
 
 check_node() {
@@ -271,6 +301,7 @@ print(os.pathsep.join(
 PY
     )
     apply_test_environment
+    ensure_platform_test_dependencies
     case "${1:?node is required}" in
         magi_attention)
             if [[ "${PORTABLE_VALIDATION_COVERAGE:-false}" == true ]]; then
