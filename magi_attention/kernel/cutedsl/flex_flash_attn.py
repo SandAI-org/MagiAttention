@@ -47,7 +47,7 @@ from .ffa_bwd_sm120 import FFABwdSm120
 from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_fwd_sm80 import FFAFwdSm80
 from .ffa_fwd_sm90 import FFAFwdSm90
-from .ffa_fwd_sm100 import FFAFwdSm100, fwd_atomic_can_borrow_kv_smem
+from .ffa_fwd_sm100 import FFAFwdSm100, fwd_fp32_o_can_borrow_kv_smem
 from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
@@ -62,6 +62,7 @@ from .ffa_utils import (
     maybe_contiguous,
     normalize_mask_types,
     ranges_to_cu_seqlens,
+    resolve_output_dtype,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
@@ -162,12 +163,16 @@ def _flex_flash_attn_fwd(
             ``block_sparse_tensors``). See :class:`TorchFlexAttnArgs`.
         out: Optional pre-allocated output tensor. If None, will be allocated internally.
         lse: Optional pre-allocated log-sum-exp tensor. If None, will be allocated when needed.
+        out_dtype: GMEM O dtype, one of fp32/fp16/bf16. ``None`` takes the dtype
+            of a caller-provided ``out``, else fp32 on the atomic-merge path
+            (the GMEM buffer is the merge accumulator) and the input dtype on
+            the direct-store path. Non-default dtypes require SM100/SM110.
 
     Returns:
         A tuple of (output, lse) where:
         - output is the result of the attention operation, with shape (batch_size, seqlen_q, num_head, head_dim_v) or
-          (total_q, num_head, head_dim_v) if q_ranges is provided, in the input
-          dtype unless ``out_dtype`` overrides it on the atomic-reduction path.
+          (total_q, num_head, head_dim_v) if q_ranges is provided, in the
+          resolved ``out_dtype``.
         - lse is the log-sum-exp of the attention scores, with shape (batch_size, num_head, seqlen_q) or
           (total_q, num_head) if q_ranges is provided: token-major with the heads
           of one token contiguous, the same row order as ``output``.
@@ -269,11 +274,18 @@ def _flex_flash_attn_fwd(
     # unsupported outside SM100/SM110 — fall back to the direct store there.
     if not has_ranges or major_arch not in (10, 11):
         disable_fwd_atomic_reduction = True
-    if out_dtype is not None:
-        assert (
-            not disable_fwd_atomic_reduction
-        ), "out_dtype only applies to the atomic fwd path"
-        assert out_dtype in (torch.float16, torch.bfloat16, torch.float32)
+    # Under the atomic merge the GMEM O buffer is the accumulator, so its dtype
+    # is the merge precision; the direct store converts once from fp32 registers.
+    out_torch_dtype = resolve_output_dtype(
+        "out",
+        out_dtype,
+        out,
+        q.dtype if disable_fwd_atomic_reduction else torch.float32,
+    )
+    if major_arch not in (10, 11) and out_torch_dtype != q.dtype:
+        raise NotImplementedError(
+            "out_dtype other than the input dtype requires SM100/SM110"
+        )
     if not disable_fwd_atomic_reduction:
         # The atomic epilogue reads/writes prev-O by unpacked row.
         pack_gqa = False
@@ -281,7 +293,6 @@ def _flex_flash_attn_fwd(
     # the fwd postprocess instead.
     kernel_sink = sink if disable_fwd_atomic_reduction else None
 
-    out_torch_dtype = out_dtype if out_dtype is not None else q.dtype
     device = q.device
     q_batch_seqlen_shape = (batch_size, seqlen_q) if not has_ranges else (total_q,)
     lse_shape = (
@@ -388,23 +399,20 @@ def _flex_flash_attn_fwd(
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
         q_stage = 1
-    fwd_atomic_borrow_kv = False
-    if not disable_fwd_atomic_reduction:
-        # fp32 sO doubles smem at q_stage=2: borrow KV ring slots, else fall
-        # back to single-stage Q. dtype-O has no smem premium.
-        fwd_atomic_borrow_kv = (
-            out_torch_dtype is torch.float32
-            and fwd_atomic_can_borrow_kv_smem(
-                int(math.ceil(head_dim / 16) * 16),
-                int(math.ceil(head_dim_v / 16) * 16),
-                tile_m,
-                tile_n,
-                1,
-                q_stage,
-            )
+    # fp32 sO doubles smem at q_stage=2: borrow KV ring slots, else fall
+    # back to single-stage Q. dtype-O has no smem premium.
+    fwd_fp32_o_borrow_kv = out_torch_dtype is torch.float32 and (
+        fwd_fp32_o_can_borrow_kv_smem(
+            int(math.ceil(head_dim / 16) * 16),
+            int(math.ceil(head_dim_v / 16) * 16),
+            tile_m,
+            tile_n,
+            1,
+            q_stage,
         )
-        if not fwd_atomic_borrow_kv and out_torch_dtype is torch.float32:
-            q_stage = 1
+    )
+    if out_torch_dtype is torch.float32 and not fwd_fp32_o_borrow_kv:
+        q_stage = 1
 
     use_2cta_instrs = (
         major_arch in [10, 11]
@@ -444,14 +452,14 @@ def _flex_flash_attn_fwd(
         requested_use_clc_scheduler
         and not is_varlen_mha
         and not is_dense_noncausal
-        and not fwd_atomic_borrow_kv
+        and not fwd_fp32_o_borrow_kv
     )
     persistent_launch = (
         not causal
         and not local
         and not has_ranges
         and not use_clc_scheduler
-        and not fwd_atomic_borrow_kv
+        and not fwd_fp32_o_borrow_kv
     )
 
     # Prepare block sparse for forward
@@ -753,6 +761,9 @@ def _flex_flash_attn_bwd(
     dq: torch.Tensor | None = None,
     dk: torch.Tensor | None = None,
     dv: torch.Tensor | None = None,
+    dq_type: torch.dtype | None = None,
+    dk_type: torch.dtype | None = None,
+    dv_type: torch.dtype | None = None,
     q_ranges: torch.Tensor | None = None,
     k_ranges: torch.Tensor | None = None,
     mask_types: int | torch.Tensor = MT_MAP.full,
@@ -774,6 +785,22 @@ def _flex_flash_attn_bwd(
     """Backward pass for FlexFlashAttention.
 
     Args:
+        dq_type, dk_type, dv_type: GMEM dtype of each gradient output, one of
+            fp32/fp16/bf16. ``None`` takes the dtype of the caller-provided
+            buffer, else fp32 for dQ and for dK/dV on the reducing paths
+            (dense GQA, ranges with atomic dK/dV), and the input dtype for
+            dK/dV on the single-writer paths (dense MHA, ranges with
+            ``disable_bwd_dkv_atomic_reduction``). ``dk_type`` and ``dv_type``
+            must agree because the kernel sizes the dK/dV epilogue tiles from
+            one dtype. SM80/SM90 support the input dtype only.
+            dQ and the reducing dK/dV paths accumulate in fp32 regardless and
+            convert once in the postprocess; the single-writer dK/dV paths
+            write the requested dtype from the epilogue.
+        dq, dk, dv: optional caller-provided output buffers. On the reducing
+            paths (dQ always; dK/dV on dense GQA and ranges with atomic dK/dV)
+            the buffer is the reduction accumulator, so the gradient is added
+            onto its existing contents. The single-writer dK/dV paths
+            overwrite the buffer.
         declared_q_full_coverage: q_ranges cover every Q token, so the dQ
             hole-zeroing sweep is skipped. Overlap is allowed. False is always
             safe.
@@ -783,7 +810,8 @@ def _flex_flash_attn_bwd(
             not set this.
 
     Returns:
-        A tuple of (dQ, dK, dV) gradients with the same shapes and dtypes as the input q, k, v tensors.
+        A tuple of (dQ, dK, dV) gradients with the shapes of q, k, v and the
+        resolved ``dq_type``/``dk_type``/``dv_type`` dtypes.
     """
     arch, major_arch = get_device_arch()
     validate_arch(arch, major_arch)
@@ -1061,7 +1089,6 @@ def _flex_flash_attn_bwd(
             )
 
     device = q.device
-    out_torch_dtype = q.dtype
 
     k_ranges_sorted_disjoint = has_ranges and (
         declared_k_full_coverage or disable_bwd_dkv_atomic_reduction
@@ -1073,6 +1100,26 @@ def _flex_flash_attn_bwd(
     direct_dq_init = (
         disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
+
+    # The GMEM gradient is the reduction accumulator, so the default dtype is
+    # fp32 wherever the output is reduced and the input dtype where a single
+    # writer stores it once. dQ is always reduced; dK/dV are stored once
+    # on the dense-MHA and direct_dkv paths.
+    if major_arch in (10, 11):
+        dq_default = torch.float32
+        dkv_stored_once = direct_dkv or (not has_ranges and qhead_per_kvhead == 1)
+        dkv_default = k.dtype if dkv_stored_once else torch.float32
+    else:
+        dq_default = dkv_default = q.dtype
+    dq_dtype = resolve_output_dtype("dq", dq_type, dq, dq_default)
+    dk_dtype = resolve_output_dtype("dk", dk_type, dk, dkv_default)
+    dv_dtype = resolve_output_dtype("dv", dv_type, dv, dkv_default)
+    if dk_dtype != dv_dtype:
+        raise ValueError(f"dk_type {dk_dtype} must equal dv_type {dv_dtype}")
+    if major_arch not in (10, 11) and (dq_dtype, dk_dtype) != (q.dtype, q.dtype):
+        raise NotImplementedError(
+            "dq_type/dk_type/dv_type other than the input dtype require SM100/SM110"
+        )
 
     use_dense_dqacc_for_ranges = (
         direct_dq_init and not range_merge_active and head_dim % 32 == 0
@@ -1093,19 +1140,19 @@ def _flex_flash_attn_bwd(
     dq_self_alloc = dq is None
 
     if dq is None:
-        dq = dq_alloc(q)
+        dq = dq_alloc(q, dtype=dq_dtype)
     else:
-        validate_tensor(dq, "dq", q.shape, out_torch_dtype, device)
+        validate_tensor(dq, "dq", q.shape, dq_dtype, device)
 
     if dk is None:
-        dk = dkv_alloc(k)
+        dk = dkv_alloc(k, dtype=dk_dtype)
     else:
-        validate_tensor(dk, "dk", k.shape, out_torch_dtype, device)
+        validate_tensor(dk, "dk", k.shape, dk_dtype, device)
 
     if dv is None:
-        dv = dkv_alloc(v)
+        dv = dkv_alloc(v, dtype=dv_dtype)
     else:
-        validate_tensor(dv, "dv", v.shape, out_torch_dtype, device)
+        validate_tensor(dv, "dv", v.shape, dv_dtype, device)
 
     if direct_dkv and not declared_k_full_coverage:
         if dk_self_alloc:
@@ -1160,7 +1207,11 @@ def _flex_flash_attn_bwd(
                 // m_block_size
                 * m_block_size
             )
-        dq_accum_alloc = torch.empty if direct_dq_init else torch.zeros
+        # The accumulating row-major postprocess adds every row of dq_accum
+        # onto the caller's dq, so rows outside q_ranges must be zero.
+        dq_accum_alloc = (
+            torch.empty if direct_dq_init and dq_self_alloc else torch.zeros
+        )
         dq_accum = dq_accum_alloc(
             num_head,
             total_q_rounded_padded * dq_head_dim_rounded,
@@ -1394,6 +1445,7 @@ def _flex_flash_attn_bwd(
             block_sparse_broadcast_pattern,
             has_ranges,
             disable_bwd_dkv_atomic_reduction,
+            dk_dtype,
             range_merge_active,
             use_dense_dqacc_for_ranges,
             k_ranges_sorted_disjoint,
@@ -1606,7 +1658,7 @@ def _flex_flash_attn_bwd(
     )
     _flex_flash_attn_bwd.compile_cache[compile_key](*bwd_call_args)
 
-    # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
+    # Postprocess: scale the fp32 accumulators and convert to the output dtype
     match major_arch:
         case 9:
             # dQ postprocess: match main kernel's MMA WG count, unless dQ_single_wg
@@ -1629,8 +1681,16 @@ def _flex_flash_attn_bwd(
     # postprocess sweeps only in-range rows.
     rowmajor_post_dq = pre_post_q_ranges is not None and not use_dense_dqacc_for_ranges
     rowmajor_post_dkv = pre_post_k_ranges is not None
+    # A caller-provided buffer on a reducing path is the reduction target the
+    # kernel atomically adds into; the single-writer paths overwrite the
+    # buffer like a fresh allocation.
+    accumulate_dq = not dq_self_alloc
+    accumulate_dk = not dk_self_alloc
+    accumulate_dv = not dv_self_alloc
     if rowmajor_post_dq:
-        bwd_postprocess_rowmajor(dq_accum, dq, q_ranges, seqlen_q, softmax_scale)
+        bwd_postprocess_rowmajor(
+            dq_accum, dq, q_ranges, seqlen_q, softmax_scale, accumulate=accumulate_dq
+        )
     else:
         bwd_postprocess(
             dq_accum,
@@ -1639,7 +1699,7 @@ def _flex_flash_attn_bwd(
             cu_seqlens_q,
             None,
             arch,
-            dtype,
+            to_cute_dtype(dq_dtype),
             head_dim,
             m_block_size,
             num_threads_post_dQ,
@@ -1649,6 +1709,7 @@ def _flex_flash_attn_bwd(
             cluster_size=1,
             ranges=pre_post_q_ranges,
             use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
+            accumulate=accumulate_dq,
         )
 
     if direct_dq_init and dq_self_alloc and not declared_q_full_coverage:
@@ -1656,8 +1717,12 @@ def _flex_flash_attn_bwd(
         bwd_grad_zero_holes(dq, q_ranges)
 
     if dKV_postprocess and rowmajor_post_dkv:
-        bwd_postprocess_rowmajor(dk_accum, dk, k_ranges, seqlen_k, softmax_scale)
-        bwd_postprocess_rowmajor(dv_accum, dv, k_ranges, seqlen_k, 1.0)
+        bwd_postprocess_rowmajor(
+            dk_accum, dk, k_ranges, seqlen_k, softmax_scale, accumulate=accumulate_dk
+        )
+        bwd_postprocess_rowmajor(
+            dv_accum, dv, k_ranges, seqlen_k, 1.0, accumulate=accumulate_dv
+        )
     elif dKV_postprocess:
         bwd_postprocess(
             dk_accum,
@@ -1666,13 +1731,14 @@ def _flex_flash_attn_bwd(
             cu_seqlens_k,
             None,
             arch,
-            dtype,
+            to_cute_dtype(dk_dtype),
             head_dim,
             n_block_size,
             num_threads_post_dKV,
             AtomLayoutNdKV,
             dKV_swapAB,
             cluster_size=cluster_size,
+            accumulate=accumulate_dk,
         )
         bwd_postprocess(
             dv_accum,
@@ -1681,13 +1747,14 @@ def _flex_flash_attn_bwd(
             cu_seqlens_k,
             None,
             arch,
-            dtype,
+            to_cute_dtype(dv_dtype),
             head_dim_v,
             n_block_size,
             num_threads_post_dKV,
             AtomLayoutNdKV,
             dKV_swapAB,
             cluster_size=cluster_size,
+            accumulate=accumulate_dv,
         )
 
     return dq, dk, dv
@@ -1759,6 +1826,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             range_merge=range_merge,
             out_dtype=out_dtype,
         )
+        # The atomic path defaults O to fp32; hand the caller the input dtype
+        # unless they asked for a specific one.
+        if out_dtype is None and out.dtype != q.dtype:
+            out = out.to(q.dtype)
 
         aux_tensors = flex_attn_args.aux_tensors if flex_attn_args else None
         # mask_types needs no grad tracking; keep it on ctx directly.
@@ -1842,6 +1913,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             flex_attn_args=flex_attn_args,
             range_merge=ctx.bwd_range_merge,
+            # Reduction happens in fp32 accumulators, so the postprocess can
+            # write the input dtype directly with no separate cast kernel.
+            dq_type=q.dtype,
+            dk_type=k.dtype,
+            dv_type=v.dtype,
         )
 
         return dq, dk, dv, *((None,) * 31)  # Extra Nones is fine
@@ -1918,9 +1994,11 @@ def flex_flash_attn_func(
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
         contracts.
 
-    out_dtype: GMEM O dtype on the atomic fwd path (``None`` = input dtype).
-        ``torch.float32`` makes the K-way overlap merge lossless; narrower
-        dtypes trade K-1 cascading truncations for half the merge traffic.
+    out_dtype: GMEM O dtype, one of fp32/fp16/bf16 (SM100/SM110). ``None``
+        returns the input dtype; on the atomic-merge path the kernel then
+        merges in fp32 and casts once at the end. A narrower explicit dtype
+        trades K-1 cascading truncations in a K-way overlap merge for half
+        the merge traffic.
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
