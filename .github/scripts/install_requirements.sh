@@ -19,9 +19,12 @@ echo "=== Requirements Installation ==="
 unset http_proxy
 unset https_proxy
 
+pip_index_url=${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple/}
+echo "Using Python package index: $pip_index_url"
+
 if [ -f requirements.txt ]; then
     echo "📦 Installing requirements.txt..."
-    pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+    pip install -r requirements.txt --index-url "$pip_index_url"
     echo "✅ Base requirements installed successfully!"
 else
     echo "⚠️  No requirements.txt found. Skipping."
@@ -29,7 +32,7 @@ fi
 
 if [ -f requirements_dev.txt ]; then
     echo "🛠️  Installing development requirements..."
-    pip install -r requirements_dev.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+    pip install -r requirements_dev.txt --index-url "$pip_index_url"
     echo "✅ Development requirements installed successfully!"
 else
     echo "⚠️  No requirements_dev.txt found. Skipping."

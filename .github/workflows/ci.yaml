@@ -115,7 +115,7 @@ jobs:
       GIT_CONFIG_VALUE_0: '*'
       http_proxy: ${{ secrets.HTTP_PROXY }}
       https_proxy: ${{ secrets.HTTP_PROXY }}
-      no_proxy: pypi.tuna.tsinghua.edu.cn
+      no_proxy: pypi.tuna.tsinghua.edu.cn,mirrors.aliyun.com
       GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       DEPENDENCY_REPO_TOKEN: ${{ secrets.DEPENDENCY_REPO_TOKEN }}
       CI_DEPENDENCY_USE_TOKEN: 'true'
@@ -132,6 +132,8 @@ jobs:
         run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
       - name: Verify task runner
         run: bash .github/scripts/verify_task_runner.sh
+      - name: Apply platform environment
+        run: python .github/scripts/ci_platforms.py environment "$TASK_CI_PLATFORM" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: bash .github/scripts/run_build_tests.sh install
       - name: Build wheels
@@ -167,7 +169,7 @@ jobs:
       GIT_CONFIG_VALUE_0: '*'
       http_proxy: ${{ secrets.HTTP_PROXY }}
       https_proxy: ${{ secrets.HTTP_PROXY }}
-      no_proxy: pypi.tuna.tsinghua.edu.cn
+      no_proxy: pypi.tuna.tsinghua.edu.cn,mirrors.aliyun.com
       GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       DEPENDENCY_REPO_TOKEN: ${{ secrets.DEPENDENCY_REPO_TOKEN }}
       CI_DEPENDENCY_USE_TOKEN: 'true'
@@ -190,6 +192,8 @@ jobs:
           path: ${{ runner.temp }}/magi-attention-ci/v2/standalone-artifacts/magi-attention
       - name: Verify task runner
         run: bash .github/scripts/verify_task_runner.sh
+      - name: Apply platform environment
+        run: python .github/scripts/ci_platforms.py environment "$TASK_CI_PLATFORM" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: bash .github/scripts/run_build_tests.sh install
       - name: Install shared wheels

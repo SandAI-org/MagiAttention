@@ -29,6 +29,14 @@ def main() -> None:
         config["platforms"]["b300"]["test_environment"]["MAGI_ATTENTION_TEST_BACKEND"]
         == "fa4,cutedsl,sdpa"
     )
+    assert (
+        config["platforms"]["h100"]["test_environment"]["PIP_INDEX_URL"]
+        == "https://pypi.tuna.tsinghua.edu.cn/simple/"
+    )
+    assert (
+        config["platforms"]["b300"]["test_environment"]["PIP_INDEX_URL"]
+        == "https://mirrors.aliyun.com/pypi/simple/"
+    )
 
     original = os.environ.get("B300_CI_ENABLED")
     try:
