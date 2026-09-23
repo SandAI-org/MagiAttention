@@ -88,6 +88,18 @@ _RTOL = {
     "dq": {torch.bfloat16: 0.3, torch.float16: 0.2},
     "dk": {torch.bfloat16: 0.15, torch.float16: 0.08},
     "dv": {torch.bfloat16: 0.05, torch.float16: 0.05},
+    "dsink": {torch.bfloat16: 0.15, torch.float16: 0.15},
+}
+
+# per-tensor fa-style Linf-norm ratio against the low-precision reference.
+# NOTES: dsink reduces bf16/fp16 out*dout over every query row, so its rounding
+# error is a global sum rather than per-element and needs twice the headroom
+_NORM_RTOL_RATIO = {
+    "o": NORM_RTOL_RATIO,
+    "dq": NORM_RTOL_RATIO,
+    "dk": NORM_RTOL_RATIO,
+    "dv": NORM_RTOL_RATIO,
+    "dsink": NORM_RTOL_RATIO * 2,
 }
 
 # per-tensor lower bound on the allowed mismatch ratio. The kernel writes tiny
@@ -101,6 +113,7 @@ _MIN_MISMATCH_THRES = {
     "dq": 1e-2,
     "dk": 1e-2,
     "dv": 5e-3,
+    "dsink": 5e-3,
 }
 
 
@@ -141,10 +154,10 @@ class TestFfaSimple(DistTestBase):
         try:
             self.assertLessEqual(
                 norm,
-                NORM_RTOL_RATIO * ref_norm,
+                _NORM_RTOL_RATIO[name] * ref_norm,
                 msg=(
                     f"For {test_case=}: {name} {norm=} should be no greater than "
-                    f"{NORM_RTOL_RATIO} x {ref_norm=}"
+                    f"{_NORM_RTOL_RATIO[name]} x {ref_norm=}"
                 ),
             )
         except Exception as e:
@@ -191,8 +204,10 @@ class TestFfaSimple(DistTestBase):
         total_seqlen_k: int,
         dtype: torch.dtype,
         test_case: str,
+        sink: torch.Tensor | None = None,
+        dsink_thd: torch.Tensor | None = None,
     ) -> None:
-        """Compare the kernel out/dq/dk/dv against a torch reference (thd layout).
+        """Compare the kernel out/dq/dk/dv[/dsink] against a torch reference (thd layout).
 
         The reference is run twice (fp64 high precision + fp16/bf16 low
         precision) so we can derive fa-style norm bounds and torch-style
@@ -211,30 +226,31 @@ class TestFfaSimple(DistTestBase):
             q_ref = q_thd.clone().detach().requires_grad_()
             k_ref = k_thd.clone().detach().requires_grad_()
             v_ref = v_thd.clone().detach().requires_grad_()
+            sink_ref = None if sink is None else sink.clone().detach().requires_grad_()
+            inputs = [t for t in (q_ref, k_ref, v_ref, sink_ref) if t is not None]
             out_ref, _ = ref_attn_func(
                 q=q_ref,
                 k=k_ref,
                 v=v_ref,
                 mask=mask,
+                sink=sink_ref,
+                sink_layout="sh",
                 layout="thd",
-                backend="sdpa",
+                backend="sdpa" if sink is None else "torch",
                 high_precision=high_precision,
             )
-            dq_ref, dk_ref, dv_ref = torch.autograd.grad(
-                out_ref, (q_ref, k_ref, v_ref), do_thd
-            )
-            return out_ref, dq_ref, dk_ref, dv_ref
+            return out_ref, *torch.autograd.grad(out_ref, inputs, do_thd)
 
-        out_hi, dq_hi, dk_hi, dv_hi = _ref(high_precision=True)
-        out_lo, dq_lo, dk_lo, dv_lo = _ref(high_precision=False)
+        names = ["o", "dq", "dk", "dv"]
+        actuals = [out_thd, dq_thd, dk_thd, dv_thd]
+        if sink is not None:
+            names.append("dsink")
+            actuals.append(dsink_thd)
+        refs_hi = _ref(high_precision=True)
+        refs_lo = _ref(high_precision=False)
 
         err_msg_list: list[str] = []
-        for name, actual, ref_hi, ref_lo in [
-            ("o", out_thd, out_hi, out_lo),
-            ("dq", dq_thd, dq_hi, dq_lo),
-            ("dk", dk_thd, dk_hi, dk_lo),
-            ("dv", dv_thd, dv_hi, dv_lo),
-        ]:
+        for name, actual, ref_hi, ref_lo in zip(names, actuals, refs_hi, refs_lo):
             self._compare(
                 name=name,
                 actual=actual,
@@ -530,6 +546,89 @@ class TestFfaSimple(DistTestBase):
             torch.testing.assert_close(
                 buf, x0 + ref, rtol=1e-4, atol=1e-4, msg=lambda m: f"{name}: {m}"
             )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Learnable sink: fwd fold (direct store / atomic merge) + bwd dsink
+    # ─────────────────────────────────────────────────────────────────────
+
+    @with_run_in_mp
+    @parameterize("mha_type", ["mha", "gqa"])
+    @parameterize("d", [64, 128])
+    @parameterize("overlap", [False, True])
+    @parameterize("n_sink", [1, 4])
+    def test_sink_fwd_bwd(self, n_sink, overlap, d, mha_type):
+        """``[n_sink, nhq]`` fp32 sink: out/lse fold on both fwd paths, dsink in bwd."""
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            return
+
+        device = self.device
+        dtype = torch.bfloat16
+        nheads, total = 4, 768
+        nheads_kv = {"mha": nheads, "gqa": 2}[mha_type]
+        torch.random.manual_seed(self.seed + n_sink * 3 + d + int(overlap))
+
+        q = torch.randn(total, nheads, d, device=device, dtype=dtype).requires_grad_()
+        k = torch.randn(
+            total, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+        v = torch.randn(
+            total, nheads_kv, d, device=device, dtype=dtype
+        ).requires_grad_()
+        sink = torch.randn(
+            n_sink, nheads, device=device, dtype=torch.float32
+        ).requires_grad_()
+
+        # NOTES: the atomic-merge path folds the sink in the postprocess and may
+        # leave q[512:768] attending to the sinks only; the direct-store path
+        # folds it in-kernel and requires every q row to be covered
+        if overlap:
+            q_ranges = [[0, 512], [256, 512]]
+            k_ranges = [[0, 512], [512, 768]]
+        else:
+            q_ranges = [[0, 256], [256, 768]]
+            k_ranges = [[0, 512], [512, 768]]
+        q_ranges_t = torch.tensor(q_ranges, device=device, dtype=torch.int32)
+        k_ranges_t = torch.tensor(k_ranges, device=device, dtype=torch.int32)
+        test_case = (
+            f"[RANK {self.rank}][test_sink_fwd_bwd]"
+            f"[{n_sink=}][{overlap=}][{d=}][{mha_type=}]"
+        )
+
+        out, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_types=MT_MAP.full,
+            max_seqlen_q=total,
+            max_seqlen_k=total,
+            sink=sink,
+            disable_fwd_atomic_reduction=not overlap,
+        )
+        g = torch.randn_like(out)
+        dq, dk, dv, dsink = torch.autograd.grad(out, (q, k, v, sink), g)
+
+        self.assert_close_to_torch_ref(
+            q_thd=q.detach(),
+            k_thd=k.detach(),
+            v_thd=v.detach(),
+            do_thd=g,
+            out_thd=out.to(dtype),
+            dq_thd=dq,
+            dk_thd=dk,
+            dv_thd=dv,
+            q_ranges=AttnRanges.from_ranges(q_ranges),
+            k_ranges=AttnRanges.from_ranges(k_ranges),
+            attn_type_map=[MT_MAP.full, MT_MAP.full],
+            total_seqlen_q=total,
+            total_seqlen_k=total,
+            dtype=dtype,
+            test_case=test_case,
+            sink=sink.detach(),
+            dsink_thd=dsink,
+        )
 
     # ─────────────────────────────────────────────────────────────────────
     # Varlen opt-flag contract

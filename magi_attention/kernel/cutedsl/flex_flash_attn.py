@@ -34,6 +34,7 @@ from .cutedsl_utils import (
     to_cute_aux_tensor,
     to_cute_tensor,
 )
+from .ffa_bwd_dsink import bwd_dsink
 from .ffa_bwd_postprocess import (
     bwd_grad_zero_holes,
     bwd_postprocess,
@@ -163,6 +164,7 @@ def _flex_flash_attn_fwd(
             ``block_sparse_tensors``). See :class:`TorchFlexAttnArgs`.
         out: Optional pre-allocated output tensor. If None, will be allocated internally.
         lse: Optional pre-allocated log-sum-exp tensor. If None, will be allocated when needed.
+        sink: optional ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
         out_dtype: GMEM O dtype, one of fp32/fp16/bf16. ``None`` takes the dtype
             of a caller-provided ``out``, else fp32 on the atomic-merge path
             (the GMEM buffer is the merge accumulator) and the input dtype on
@@ -249,9 +251,12 @@ def _flex_flash_attn_fwd(
         if t is not None:
             assert t.dtype == torch.int32, "cu_seqlens_q, cu_seqlens_k must be int32"
             assert t.stride(0) == 1, "cu_seqlens_q, cu_seqlens_k must be contiguous"
+    lse_sink = None
     if sink is not None:
-        assert sink.shape == (num_head,)
-        assert sink.dtype == torch.bfloat16, "sink must be bfloat16"
+        assert sink.shape[1:] == (
+            num_head,
+        ), f"sink must be [n_sink, num_head], got {tuple(sink.shape)}"
+        lse_sink = torch.logsumexp(sink.float(), dim=0)
 
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
@@ -291,7 +296,7 @@ def _flex_flash_attn_fwd(
         pack_gqa = False
     # Overlapping relations would re-add the sink per merge; fold it once in
     # the fwd postprocess instead.
-    kernel_sink = sink if disable_fwd_atomic_reduction else None
+    kernel_sink = lse_sink if disable_fwd_atomic_reduction else None
 
     device = q.device
     q_batch_seqlen_shape = (batch_size, seqlen_q) if not has_ranges else (total_q,)
@@ -317,8 +322,8 @@ def _flex_flash_attn_fwd(
         )
 
     if lse is None:
-        # Atomic merge detects never-written rows via LSE=-inf.
-        if disable_fwd_atomic_reduction:
+        # NOTES: the atomic merge and the dsink reduction skip rows with LSE == -inf
+        if disable_fwd_atomic_reduction and sink is None:
             lse = torch.empty(lse_shape, dtype=torch.float32, device=device)
         else:
             lse = torch.full(
@@ -743,7 +748,7 @@ def _flex_flash_attn_fwd(
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
 
     if not disable_fwd_atomic_reduction:
-        fwd_postprocess(out, lse, sink)
+        fwd_postprocess(out, lse, lse_sink)
 
     return out, lse
 
@@ -781,10 +786,13 @@ def _flex_flash_attn_bwd(
     range_merge: bool | RangeMergePlan = False,
     declared_q_full_coverage: bool = False,
     declared_k_full_coverage: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    dsink: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Backward pass for FlexFlashAttention.
 
     Args:
+        sink: the forward's ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
+        dsink: optional fp32 ``[n_sink, num_head]`` buffer, overwritten.
         dq_type, dk_type, dv_type: GMEM dtype of each gradient output, one of
             fp32/fp16/bf16. ``None`` takes the dtype of the caller-provided
             buffer, else fp32 for dQ and for dK/dV on the reducing paths
@@ -810,8 +818,9 @@ def _flex_flash_attn_bwd(
             not set this.
 
     Returns:
-        A tuple of (dQ, dK, dV) gradients with the shapes of q, k, v and the
-        resolved ``dq_type``/``dk_type``/``dv_type`` dtypes.
+        A tuple of (dQ, dK, dV, dsink): the gradients with the shapes of q, k, v
+        and the resolved ``dq_type``/``dk_type``/``dv_type`` dtypes, and the fp32
+        sink gradient (``None`` without ``sink``).
     """
     arch, major_arch = get_device_arch()
     validate_arch(arch, major_arch)
@@ -1347,6 +1356,18 @@ def _flex_flash_attn_bwd(
         disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
     )
 
+    if sink is None:
+        dsink = None
+    else:
+        lse_rows = lse if has_ranges else lse.transpose(1, 2).reshape(-1, num_head)
+        dsink = bwd_dsink(
+            out.reshape(-1, num_head, head_dim_v),
+            dout.reshape(-1, num_head, head_dim_v),
+            lse_rows,
+            sink.float(),
+            dsink=dsink,
+        )
+
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
     # BwdConfig.num_wg, SM100/SM110 uses default from function signature (384).
     if major_arch not in [8, 9, 12]:
@@ -1757,7 +1778,7 @@ def _flex_flash_attn_bwd(
             accumulate=accumulate_dv,
         )
 
-    return dq, dk, dv
+    return dq, dk, dv, dsink
 
 
 _flex_flash_attn_bwd.compile_cache = get_jit_cache("bwd")
@@ -1892,7 +1913,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if flex_attn_args is not None:
             flex_attn_args = flex_attn_args.with_aux_tensors(aux)
 
-        dq, dk, dv = _flex_flash_attn_bwd(
+        dq, dk, dv, dsink = _flex_flash_attn_bwd(
             q=q,
             k=k,
             v=v,
@@ -1920,7 +1941,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dv_type=v.dtype,
         )
 
-        return dq, dk, dv, *((None,) * 31)  # Extra Nones is fine
+        if dsink is not None:
+            dsink = dsink.to(sink.dtype)
+        # NOTES: `sink` is the 11th positional input of `forward`
+        return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 8)
 
 
 def flex_flash_attn_func(
