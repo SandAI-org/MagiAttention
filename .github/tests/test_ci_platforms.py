@@ -30,6 +30,16 @@ def main() -> None:
         == "fa4,cutedsl,sdpa"
     )
     assert (
+        config["platforms"]["b300"]["test_environment"][
+            "MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS"
+        ]
+        == "sm100"
+    )
+    assert (
+        "MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS"
+        not in config["platforms"]["h100"]["test_environment"]
+    )
+    assert (
         config["platforms"]["h100"]["test_environment"]["PIP_INDEX_URL"]
         == "https://pypi.tuna.tsinghua.edu.cn/simple/"
     )
