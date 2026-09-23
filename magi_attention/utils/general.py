@@ -1039,10 +1039,13 @@ def make_attn_mask_from_ffa_args(
             device=device,
         )
 
+        # Magi overlapping q/k-ranges union: a later slice must not clear
+        # tokens already allowed by an earlier slice. ``magi_to_hstu`` and
+        # FA4 ``cute_arbitrary_mask`` encode the same OR of intervals.
         mask[
             q_range.start : q_range.end,
             k_range.start : k_range.end,
-        ] = slice_mask
+        ] |= slice_mask
 
     return mask
 

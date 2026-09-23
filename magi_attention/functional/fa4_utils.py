@@ -165,7 +165,17 @@ def load_precompiled_ffa_fa4():
                 else:
                     func_name = KERNEL_SYMBOL_NAME
 
-                mod = cute.runtime.load_module(so_path, enable_tvm_ffi=True)
+                try:
+                    mod = cute.runtime.load_module(so_path, enable_tvm_ffi=True)
+                except Exception as exc:
+                    # Cache currently ships SM100 cubins; loading them on other
+                    # arches (e.g. SM120) must not fail Magi import.
+                    logger.info(
+                        "Skipping unloadable precompiled FFA_FA4 kernel %s: %s",
+                        folder,
+                        exc,
+                    )
+                    continue
                 raw_func = getattr(mod, func_name)
 
                 # Wrap the raw function with kwargs wrapper to match the expected signature

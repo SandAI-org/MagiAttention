@@ -284,9 +284,19 @@ def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
     the 128/128 and 192/128 2CTA paths use 128x256, while the dedicated
     256/256 path uses 256x128.
 
+    On SM120 the cute SM80-MMA kernels use smaller tiles to fit 99 KB SMEM:
+    forward D<=64 uses 128x128, forward D>64 uses 128x64, backward uses 64x64.
+    CSR block sizes must match these kernel tiles.
+
     On SM80/SM90, the tile sizes depend on ``headdim`` and are queried
     from the C++ (hopper) backend via ``get_tile_sizes_by_backend``.
     """
+    if COMPUTE_CAPABILITY == 12:
+        if pass_type == "forward":
+            return (128, 128) if headdim <= 64 else (128, 64)
+        if pass_type == "backward":
+            return (64, 64)
+        raise ValueError(f"Unknown FA4 pass_type={pass_type!r}")
     if COMPUTE_CAPABILITY >= 10:
         return _DEFAULT_FA4_TILE_SIZE
 
@@ -341,7 +351,7 @@ class FA4AttnArg(AttnArg):
             if self.tile_n_bwd == -1:
                 self.tile_n_bwd = bwd_tile_n
 
-        if COMPUTE_CAPABILITY >= 10 and (
+        if COMPUTE_CAPABILITY in (10, 11) and (
             (self.tile_m, self.tile_n) != _DEFAULT_FA4_TILE_SIZE
             or (self.tile_m_bwd, self.tile_n_bwd) != _DEFAULT_FA4_TILE_SIZE
         ):
