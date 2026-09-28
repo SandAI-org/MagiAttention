@@ -56,9 +56,9 @@ python3_add_library(magi_attn_ext MODULE ${SOURCES} WITH_SOABI)
 
 # Set Language Standards
 set_target_properties(magi_attn_ext PROPERTIES
-    CXX_STANDARD 17
+    CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
-    CUDA_STANDARD 17
+    CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
 )
 
