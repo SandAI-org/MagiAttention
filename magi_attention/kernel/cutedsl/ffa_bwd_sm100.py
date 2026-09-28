@@ -53,6 +53,8 @@ from .sparse_utils import (
     produce_block_sparse_q_loads_bwd_sm100,
 )
 from .tile_scheduler import (
+    DynamicState,
+    SchedulingMode,
     SingleTileLPTBwdScheduler,
     SingleTileScheduler,
     SingleTileVarlenScheduler,
@@ -151,6 +153,12 @@ class FFABwdSm100:
         self.qhead_per_kvhead = qhead_per_kvhead
         self.pack_gqa = False
         self.deterministic = deterministic
+        self.scheduling_mode = (
+            SchedulingMode.DYNAMIC if is_persistent else SchedulingMode.STATIC
+        )
+        if is_persistent:
+            assert not deterministic, "Persistent backward does not support determinism"
+        self.sched_stages = 1
 
         self.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
         self.range_merge = range_merge
@@ -760,6 +768,9 @@ class FFABwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         max_seqlen_k: Int32 | None = None,
+        sm_margin: Int32 | None = None,
+        # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
+        mTileCounter: Optional[cute.Tensor] = None,
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -1201,6 +1212,10 @@ class FFABwdSm100:
 
         if const_expr(self.is_varlen_k):
             TileScheduler = SingleTileVarlenScheduler
+        elif const_expr(self.is_persistent):
+            raise NotImplementedError(
+                "persistent bwd needs the range prefix scheduler; dense has none"
+            )
         elif const_expr(self.deterministic):
             TileScheduler = SingleTileLPTBwdScheduler  # type: ignore[assignment]
         else:
@@ -1215,6 +1230,7 @@ class FFABwdSm100:
             mKRanges is not None
             and mCuBatches is None
             and not self.k_ranges_sorted_disjoint
+            and not self.is_persistent
         )
         if const_expr(needs_range_quota):
             assert max_seqlen_k is not None, "quota ranges bwd needs max_seqlen_k"
@@ -1242,11 +1258,15 @@ class FFABwdSm100:
             mSeqUsedQ=mSeqUsedK,
             qhead_per_kvhead_packgqa=1,  # pack_gqa disabled for bwd
             element_size=self.k_dtype.width // 8,
-            is_persistent=self.is_persistent,  # persistent mode not tested
+            is_persistent=self.is_persistent,
+            sm_margin=sm_margin,
             lpt=self.spt,
             head_swizzle=self.deterministic,
+            mTileCounter=mTileCounter,
         )
-        tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
+        tile_sched_params = TileScheduler.to_underlying_arguments(
+            tile_sched_args, scheduling_mode=self.scheduling_mode
+        )
 
         self.tile_scheduler_cls = TileScheduler
 
@@ -1264,6 +1284,10 @@ class FFABwdSm100:
             cute.size_in_bytes(self.dv_dtype, self.sdV_layout),
             cute.size_in_bytes(self.do_dtype, self.sdO_layout),
         )
+
+        dynamic_schedule = self.scheduling_mode == SchedulingMode.DYNAMIC
+        sched_mbar_size = 2 * self.sched_stages if dynamic_schedule else 0
+        sched_response_size = self.sched_stages if dynamic_schedule else 0
 
         sdK_bytes = cute.size_in_bytes(self.dk_dtype, self.sdK_layout)
         sdV_bytes = cute.size_in_bytes(self.dv_dtype, self.sdV_layout)
@@ -1320,6 +1344,10 @@ class FFABwdSm100:
 
                 # Tmem dealloc cluster mbarrier
                 tmem_dealloc_mbar_ptr: Int64
+                tile_done_mbar_ptr: Int64
+                # DYNAMIC schedule: full/empty mbarriers and the response slot
+                sched_mbar_ptr: cute.struct.MemRange[cutlass.Int64, sched_mbar_size]
+                sched_response: cute.struct.MemRange[Int32, sched_response_size]
                 # Tmem holding buffer ptr
                 tmem_holding_buf_ptr: Int32
 
@@ -1415,6 +1443,10 @@ class FFABwdSm100:
 
                 # Tmem dealloc cluster mbarrier
                 tmem_dealloc_mbar_ptr: Int64
+                tile_done_mbar_ptr: Int64
+                # DYNAMIC schedule: full/empty mbarriers and the response slot
+                sched_mbar_ptr: cute.struct.MemRange[cutlass.Int64, sched_mbar_size]
+                sched_response: cute.struct.MemRange[Int32, sched_response_size]
                 # Tmem holding buffer ptr
                 tmem_holding_buf_ptr: Int32
 
@@ -1645,8 +1677,11 @@ class FFABwdSm100:
         ).launch(
             grid=grid_dim,
             block=[self.threads_per_cta, 1, 1],
+            # DYNAMIC publishes tiles with st.async.shared::cluster, which needs
+            # a cluster launch even for one CTA.
             cluster=self.cluster_shape_mnk
             if cute.size(self.cluster_shape_mnk) > 1
+            or self.scheduling_mode == SchedulingMode.DYNAMIC
             else None,
             smem=self.shared_storage.size_in_bytes(),  # type: ignore[attr-defined]
             stream=stream,
@@ -1816,8 +1851,17 @@ class FFABwdSm100:
         # tmem buf/dealloc ptrs
         tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
         tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+        tile_done_mbar_ptr = storage.tile_done_mbar_ptr
 
         # --- Cluster mbarrier initialization ---
+
+        if const_expr(self.is_persistent):
+            if warp_idx == 4:
+                # Wait for one MMA completion and one dK/dV completion per warpgroup
+                # before reusing shared memory. Skipped tiles take no phase.
+                cute.arch.mbarrier_init(
+                    tile_done_mbar_ptr, 1 + len(self.compute_warp_ids) // 4
+                )
 
         if const_expr(self.use_2cta_instrs):
             if const_expr(self.tile_hdim == 192):
@@ -2227,7 +2271,36 @@ class FFABwdSm100:
 
         # --- Make tile scheduler ---
 
-        tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
+        if const_expr(self.scheduling_mode == SchedulingMode.DYNAMIC):
+            # The leader's scheduler warp publishes tile indices to all cluster warps.
+            sched_consumer_warps = (
+                self.threads_per_cta // cute.arch.WARP_SIZE
+            ) * self.cta_group_size
+            assert self.tile_scheduler_cls is SingleTileVarlenScheduler
+            dynamic_state = DynamicState.create(
+                pipeline=pipeline.PipelineClcFetchAsync.create(
+                    barrier_storage=storage.sched_mbar_ptr.data_ptr(),
+                    num_stages=self.sched_stages,
+                    producer_group=ThreadCooperativeGroup(1),
+                    consumer_group=ThreadCooperativeGroup(
+                        cute.arch.WARP_SIZE * sched_consumer_warps
+                    ),
+                    tx_count=4,
+                    cta_layout_vmnk=cta_layout_vmnk,
+                ),
+                consumer_state=pipeline.make_pipeline_state(
+                    pipeline.PipelineUserType.Consumer, self.sched_stages
+                ),
+                producer_state=pipeline.make_pipeline_state(
+                    pipeline.PipelineUserType.Producer, self.sched_stages
+                ),
+                response_ptr=storage.sched_response.data_ptr(),
+            )
+            tile_scheduler = SingleTileVarlenScheduler.create(
+                tile_sched_params, dynamic=dynamic_state
+            )
+        else:
+            tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
         assert isinstance(
             tile_scheduler, TileSchedulerProtocol
         ), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
@@ -2278,6 +2351,14 @@ class FFABwdSm100:
 
             cute.arch.setmaxregister_decrease(self.num_regs_empty)
 
+            # --- DYNAMIC: the leader's empty warp claims and publishes tiles ---
+
+            if const_expr(self.scheduling_mode == SchedulingMode.DYNAMIC):
+                if is_leader_cta:
+                    self.scheduler_warp(tile_scheduler)
+                else:
+                    self.consume_schedule_only(tile_scheduler)
+
         # ///////////////////////////////////////////////////////////////////////////////
         #  Relay Warp
         # ///////////////////////////////////////////////////////////////////////////////
@@ -2302,6 +2383,9 @@ class FFABwdSm100:
                     mMaskTypes=mMaskTypes,
                     mCuBatches=mCuBatches,
                 )
+            elif const_expr(self.scheduling_mode == SchedulingMode.DYNAMIC):
+                # Idle in 1-CTA mode, but still one of the schedule's consumers.
+                self.consume_schedule_only(tile_scheduler)
 
         # ///////////////////////////////////////////////////////////////////////////////
         #  Load Warp
@@ -2359,6 +2443,7 @@ class FFABwdSm100:
                 should_load_dO=True,
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
+                tile_done_mbar_ptr=tile_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
 
@@ -2419,6 +2504,7 @@ class FFABwdSm100:
                 blocksparse_tensors,
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
+                tile_done_mbar_ptr=tile_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
 
@@ -2491,6 +2577,7 @@ class FFABwdSm100:
                 blocksparse_tensors,
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
+                tile_done_mbar_ptr=tile_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
 
@@ -2697,9 +2784,24 @@ class FFABwdSm100:
 
                         dS_cluster_phase ^= 1
 
-            tile_scheduler.prefetch_next_work()
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
+
+    @cute.jit
+    def scheduler_warp(self, tile_scheduler: SingleTileVarlenScheduler):
+        """DYNAMIC producer: publish each tile ahead of the one being processed."""
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            tile_scheduler.prefetch_next_work()
+            work_tile = tile_scheduler.advance_to_next_work()
+        tile_scheduler.producer_tail()
+
+    @cute.jit
+    def consume_schedule_only(self, tile_scheduler: TileSchedulerProtocol):
+        """Consume every published tile for a warp with no per-tile work."""
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
     def _copy_stats(self, pipe, state, gBlk, sBlk, lane, bulk_ok):
@@ -2725,7 +2827,13 @@ class FFABwdSm100:
                 for i in cutlass.range_constexpr(self.tile_m // cute.arch.WARP_SIZE):
                     row = lane + i * cute.arch.WARP_SIZE
                     sBlk[row] = gBlk[row]
-            cute.arch.sync_warp()
+            # Use bar.sync to order all lanes' stores before one lane's release arrive.
+            # Keep arrive single-lane to preserve uniform smem addressing and avoid
+            # elect/R2UR loops on subsequent TMA issues.
+            cute.arch.barrier(
+                barrier_id=int(NamedBarrierBwdSm100.StatsLoad),
+                number_of_threads=cute.arch.WARP_SIZE,
+            )
             with cute.arch.elect_one():
                 pipe.producer_commit(state)
         else:
@@ -2786,6 +2894,7 @@ class FFABwdSm100:
         should_load_dO: bool = True,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        tile_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
         tidx = cute.arch.thread_idx()[0] % cute.arch.WARP_SIZE
@@ -2842,6 +2951,10 @@ class FFABwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
+        # Only processed tiles advance tile_done, keeping arrivals bounded by loads.
+        # Phase 1 lets the first tile pass without waiting for a predecessor.
+        tile_done_phase = Int32(1)
+        any_tile_processed = cutlass.Boolean(False)
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             # --- Get current tile info ---
@@ -3300,6 +3413,13 @@ class FFABwdSm100:
 
                     cnt_p = hi_p - lo_p
                     if cnt_p > 0:
+                        # The first valid pair makes this a processed tile.
+                        if const_expr(self.is_persistent):
+                            if not process_tile:
+                                cute.arch.mbarrier_wait(
+                                    tile_done_mbar_ptr, tile_done_phase
+                                )
+                                tile_done_phase ^= 1
                         # First valid pair: load the 2-CTA Kt once.
                         if const_expr(self.use_2cta_instrs):
                             if kv_pending:
@@ -3476,6 +3596,9 @@ class FFABwdSm100:
                     )
 
                 if process_tile:
+                    if const_expr(self.is_persistent):
+                        cute.arch.mbarrier_wait(tile_done_mbar_ptr, tile_done_phase)
+                        tile_done_phase ^= 1
                     if const_expr(self.use_block_sparsity):  # TODO: review the logics
                         (
                             producer_state_Q_LSE,
@@ -3800,28 +3923,29 @@ class FFABwdSm100:
                                     pipeline_Qt.producer_commit(producer_state_Qt)
                                     producer_state_Qt.advance()
 
-            if process_tile:
-                # --- Producer tail ---
-                # Empty groups skip tail: the consumer never acquired those stages.
-                if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
-                    pipeline_Q.producer_tail(producer_state_Q_Qt)
-                    pipeline_LSE.producer_tail(producer_state_LSE)
-                    pipeline_dO.producer_tail(producer_state_O_Ot)
-                    pipeline_dPsum.producer_tail(producer_state_dPsum)
-                else:
-                    if const_expr(should_load_Q):
-                        pipeline_Q.producer_tail(producer_state_Q_LSE.clone())
-                        pipeline_LSE.producer_tail(producer_state_Q_LSE)
-                        if const_expr(tma_atom_Qt is not None):
-                            pipeline_Qt.producer_tail(producer_state_Qt)
-                    if const_expr(should_load_dO):
-                        pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
-                        pipeline_dPsum.producer_tail(producer_state_dO_dPsum)
+            any_tile_processed = any_tile_processed or process_tile
 
             # Advance to next KV tile
-            tile_scheduler.prefetch_next_work()
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
+
+        # --- Producer tail ---
+        # Drain used pipelines once at exit; TMA tails leave pending transactions.
+        if any_tile_processed:
+            if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
+                pipeline_Q.producer_tail(producer_state_Q_Qt.clone())
+                pipeline_LSE.producer_tail(producer_state_LSE.clone())
+                pipeline_dO.producer_tail(producer_state_O_Ot.clone())
+                pipeline_dPsum.producer_tail(producer_state_dPsum.clone())
+            else:
+                if const_expr(should_load_Q):
+                    pipeline_Q.producer_tail(producer_state_Q_LSE.clone())
+                    pipeline_LSE.producer_tail(producer_state_Q_LSE.clone())
+                    if const_expr(tma_atom_Qt is not None):
+                        pipeline_Qt.producer_tail(producer_state_Qt.clone())
+                if const_expr(should_load_dO):
+                    pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
+                    pipeline_dPsum.producer_tail(producer_state_dO_dPsum.clone())
 
     @cute.jit
     def mma(
@@ -3864,6 +3988,7 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        tile_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
         cta_group = pipeline_S_P.cta_group
@@ -3985,8 +4110,10 @@ class FFABwdSm100:
         consumer_state_dO = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.dO_stage
         )
-        producer_phase_acc = Int32(1)  # For S & P, dP, dQ
-        producer_phase_dQ = Int32(1)  # 2-CTA: separate phase for dQ pipeline
+        # Preserve barrier phases across tiles; toggle once per corresponding wait.
+        # tS/tP and 2-CTA tdP share producer_phase_acc because their counts match.
+        producer_phase_acc = Int32(1)
+        producer_phase_dQ = Int32(1)
         consumer_state_dS = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, 1
         )
@@ -4357,11 +4484,7 @@ class FFABwdSm100:
                     # //////////////////////////////////////////////
 
                     # --- Commit dV is ready ---
-
-                    # Release tP(-1) to be empty
-                    pipeline_S_P.sync_object_full.arrive(
-                        0, pipeline_S_P.producer_mask, cta_group
-                    )
+                    # An extra S/P signal would let the next tile read S too early.
 
                     # Acquire dV buffer to be empty
                     pipeline_dKV.sync_object_empty.wait(0, producer_phase_dKV)
@@ -4429,7 +4552,6 @@ class FFABwdSm100:
 
                     dS_cluster_phase ^= 1
                     producer_phase_dQ ^= 1
-                    producer_phase_acc ^= 1
             else:
                 if is_leader_cta and process_tile:
                     # //////////////////////////////////////////////
@@ -4462,12 +4584,14 @@ class FFABwdSm100:
                     # Wait for V/sdO(0) to be full
                     pipeline_dO.consumer_wait(consumer_state_dO)
 
-                    # Acquire tdP(0) to be empty
-                    pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
+                    # tdP needs no empty wait here: in 1-CTA mode compute never
+                    # releases tdP; tdP(i) reuse is ordered by the tdS(i-1) full
+                    # wait, and at a tile boundary by the epilogue tdS(-1) wait.
 
                     # Acquire tdQ(0) to be empty
                     # prepared for dQ(0) GEMM in the mainloop
-                    pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
+                    pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+                    producer_phase_dQ ^= 1
 
                     # Issue UMMA for tdP(0)
                     mma_dp_vdo_fn(B_idx=consumer_state_dO.index)
@@ -4562,7 +4686,8 @@ class FFABwdSm100:
                         # NOTE: in 1-CTA mode, tdQ is overlapped with tdP
                         # so when tdQ(i-1) is consumed by dQacc warp,
                         # its tmem buffer is empty for tdP(i)
-                        pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
+                        pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+                        producer_phase_dQ ^= 1
 
                         # Issue UMMA for tdP(i)
                         mma_dp_vdo_fn(B_idx=consumer_state_dO.index)
@@ -4591,11 +4716,7 @@ class FFABwdSm100:
                     # //////////////////////////////////////////////
 
                     # --- Commit dV is ready ---
-
-                    # Release tP(-1) to be empty
-                    pipeline_S_P.sync_object_full.arrive(
-                        0, pipeline_S_P.producer_mask, cta_group
-                    )
+                    # An extra S/P signal would let the next tile read S too early.
 
                     # Acquire dV buffer to be empty
                     pipeline_dKV.sync_object_empty.wait(0, producer_phase_dKV)
@@ -4639,7 +4760,19 @@ class FFABwdSm100:
                     # Release tdS(-1) to be empty
                     pipeline_dS.consumer_release(consumer_state_dS)
                     consumer_state_dS.advance()
-                    producer_phase_acc ^= 1
+
+            if const_expr(self.is_persistent):
+                # Notify all cluster CTAs when this processed tile's MMAs finish.
+                if is_leader_cta and process_tile:
+                    with cute.arch.elect_one():
+                        if const_expr(pipeline_dKV.producer_mask is None):
+                            cute.nvgpu.tcgen05.commit(tile_done_mbar_ptr)
+                        else:
+                            cute.nvgpu.tcgen05.commit(
+                                tile_done_mbar_ptr,
+                                pipeline_dKV.producer_mask,
+                                cta_group,
+                            )
 
             # Advance to next KV tile
             tile_scheduler.advance_to_next_work()
@@ -4817,6 +4950,7 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        tile_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
         # --- Set up thread info ---
@@ -5024,11 +5158,6 @@ class FFABwdSm100:
             pipeline.PipelineUserType.Consumer, self.dO_stage
         )
 
-        # Deferred tdS-commit counter for the range-merge pair loop. The merge
-        # branch iterates (pair, it) rather than a single `iter_idx`, so keep a
-        # dedicated counter persisting across the whole persistent-tile loop.
-        merge_iter_idx = Int32(0)
-
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
@@ -5040,6 +5169,8 @@ class FFABwdSm100:
             seqlen_info = SeqlenInfoCls(batch_idx)
             n_block_for_bounds = n_block // self.cluster_shape_mnk[0]
             if const_expr(self.range_merge):
+                # Track deferred dS commits across pairs; reset for each tile.
+                merge_iter_idx = Int32(0)
                 assert mMaskTypes is not None and mCuBatches is not None
                 # pair CSR is walked in the softmax loop.
                 pair_beg = Int32(mCuBatches[batch_idx])
@@ -6238,6 +6369,11 @@ class FFABwdSm100:
                                         tdVgdV[None, i, j],
                                     )
 
+            if const_expr(self.is_persistent):
+                # One arrival per warpgroup after sdK/sdV reads finish; skip empty tiles.
+                if process_tile and dp_idx == 0:
+                    cute.arch.mbarrier_arrive(tile_done_mbar_ptr)
+
             # Advance to next KV tile
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
@@ -7397,6 +7533,12 @@ class FFABwdSm100:
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
             cutedsl_utils.arrive_inc(mdKV_semaphore_cur.iterator, tidx, wg_idx, 1)
+        elif const_expr(self.is_persistent):
+            # Wait for TMA reads before the next tile reuses shared memory.
+            if leader_warp:
+                cute.arch.cp_async_bulk_commit_group()
+                cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
+            cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
 
         cute.arch.sync_warp()
         with cute.arch.elect_one():
