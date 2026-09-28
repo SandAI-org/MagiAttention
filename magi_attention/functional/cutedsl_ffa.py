@@ -82,6 +82,7 @@ def cutedsl_fwd(
     softmax_scale: float | None,
     softcap: float,
     sink: torch.Tensor | None = None,
+    sm_margin: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward wrapper: returns (out, lse) with lse in the dist contract's (sq, nhq) layout."""
 
@@ -110,6 +111,7 @@ def cutedsl_fwd(
         # plain per-range problem — no in-kernel merge needed.
         range_merge=False,
         mask_types=ffa_args["attn_type_map"],
+        sm_margin=sm_margin,
     )
 
     return out, lse
@@ -127,6 +129,7 @@ def cutedsl_bwd(
     softcap: float,
     dq_acc: torch.Tensor | None = None,
     sink: torch.Tensor | None = None,
+    sm_margin: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Partial dq/dk/dv in fp32 for one dist-attn stage, plus dsink if ``sink`` is given.
 
@@ -175,5 +178,6 @@ def cutedsl_bwd(
         dq_type=torch.float32,
         dk_type=torch.float32,
         dv_type=torch.float32,
+        sm_margin=sm_margin,
     )
     return dq, dk, dv, dsink

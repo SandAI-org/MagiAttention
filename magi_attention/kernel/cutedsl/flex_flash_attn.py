@@ -48,7 +48,7 @@ from .ffa_bwd_sm120 import FFABwdSm120
 from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_fwd_sm80 import FFAFwdSm80
 from .ffa_fwd_sm90 import FFAFwdSm90
-from .ffa_fwd_sm100 import FFAFwdSm100, fwd_fp32_o_can_borrow_kv_smem
+from .ffa_fwd_sm100 import FFAFwdSm100, fwd_fp32_o_borrows_kv_smem
 from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
@@ -148,6 +148,7 @@ def _flex_flash_attn_fwd(
     range_merge: bool | RangeMergePlan = False,
     clc_scheduler: bool = False,
     out_dtype: torch.dtype | None = None,
+    sm_margin: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -169,6 +170,9 @@ def _flex_flash_attn_fwd(
             of a caller-provided ``out``, else fp32 on the atomic-merge path
             (the GMEM buffer is the merge accumulator) and the input dtype on
             the direct-store path. Non-default dtypes require SM100/SM110.
+        sm_margin: number of SMs to reserve for concurrent kernels such as communication.
+            Currently supported for q/k ranges on SM100/SM110.
+            Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
 
     Returns:
         A tuple of (output, lse) where:
@@ -206,6 +210,7 @@ def _flex_flash_attn_fwd(
         has_block_sparse=block_sparse_tensors is not None,
         has_score_mod=score_mod is not None,
         has_softcap=softcap is not None and softcap != 0.0,
+        sm_margin=sm_margin,
     )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
@@ -409,20 +414,6 @@ def _flex_flash_attn_fwd(
         q_stage = 2 if seqlen_q_packgqa > tile_m else 1
     else:
         q_stage = 1
-    # fp32 sO doubles smem at q_stage=2: borrow KV ring slots, else fall
-    # back to single-stage Q. dtype-O has no smem premium.
-    fwd_fp32_o_borrow_kv = out_torch_dtype is torch.float32 and (
-        fwd_fp32_o_can_borrow_kv_smem(
-            int(math.ceil(head_dim / 16) * 16),
-            int(math.ceil(head_dim_v / 16) * 16),
-            tile_m,
-            tile_n,
-            1,
-            q_stage,
-        )
-    )
-    if out_torch_dtype is torch.float32 and not fwd_fp32_o_borrow_kv:
-        q_stage = 1
 
     use_2cta_instrs = (
         major_arch in [10, 11]
@@ -439,6 +430,21 @@ def _flex_flash_attn_fwd(
             or (disable_fwd_atomic_reduction and not per_range and not pack_gqa)
         )
     )
+
+    # The 1-CTA range kernels stage fp32 O in finished K/V slots to retain
+    # two Q stages; dense and 2-CTA launches fall back to one Q stage.
+    fwd_fp32_o_borrow_kv = fwd_fp32_o_borrows_kv_smem(
+        o_is_fp32=out_torch_dtype is torch.float32,
+        is_varlen_q=has_ranges,
+        use_2cta_instrs=use_2cta_instrs,
+        head_dim_padded=int(math.ceil(head_dim / 16) * 16),
+        head_dim_v_padded=int(math.ceil(head_dim_v / 16) * 16),
+        m_block_size=tile_m,
+        n_block_size=tile_n,
+        q_stage=q_stage,
+    )
+    if out_torch_dtype is torch.float32 and not fwd_fp32_o_borrow_kv:
+        q_stage = 1
 
     if softcap is not None:
         assert score_mod is None, "softcap and score_mod cannot be used together"
@@ -458,19 +464,18 @@ def _flex_flash_attn_fwd(
     # pays work-stealing overhead.
     is_varlen_mha = has_ranges and qhead_per_kvhead == 1
     is_dense_noncausal = not has_ranges and not causal and not local
+
+    # K/V borrowing uses persistent execution even without an SM reservation.
+    ranges_persistent = has_ranges and (sm_margin > 0 or fwd_fp32_o_borrow_kv)
     use_clc_scheduler = (
         requested_use_clc_scheduler
         and not is_varlen_mha
         and not is_dense_noncausal
-        and not fwd_fp32_o_borrow_kv
+        and not ranges_persistent
     )
     persistent_launch = (
-        not causal
-        and not local
-        and not has_ranges
-        and not use_clc_scheduler
-        and not fwd_fp32_o_borrow_kv
-    )
+        not causal and not local and not has_ranges and not use_clc_scheduler
+    ) or ranges_persistent
 
     # Prepare block sparse for forward
     (
@@ -503,6 +508,10 @@ def _flex_flash_attn_fwd(
         range_locks = torch.zeros(
             num_lock_blocks, num_head, dtype=torch.int32, device=device
         )
+    # The DYNAMIC schedule's tile counter.
+    tile_counter = (
+        torch.zeros(1, dtype=torch.int32, device=device) if ranges_persistent else None
+    )
 
     compile_key = (
         dtype,
@@ -707,6 +716,12 @@ def _flex_flash_attn_fwd(
                 if cu_batches is not None
                 else None
             )
+            compile_args.append(Int32(sm_margin) if ranges_persistent else None)
+            compile_args.append(
+                to_cute_tensor(tile_counter, assumed_align=4, leading_dim=0)
+                if tile_counter is not None
+                else None
+            )
         compile_args.extend(
             [
                 sparse_tensors,
@@ -743,6 +758,8 @@ def _flex_flash_attn_fwd(
         call_args.append(range_locks)
         call_args.append(max_seqlen_q)
         call_args.append(cu_batches)
+        call_args.append(sm_margin if ranges_persistent else None)
+        call_args.append(tile_counter)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
@@ -792,6 +809,7 @@ def _flex_flash_attn_bwd(
     declared_q_full_coverage: bool = False,
     declared_k_full_coverage: bool = False,
     dsink: torch.Tensor | None = None,
+    sm_margin: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Backward pass for FlexFlashAttention.
 
@@ -856,6 +874,7 @@ def _flex_flash_attn_bwd(
         has_softcap=softcap != 0.0,
         deterministic=deterministic,
         bwd_head_dim=q.shape[-1],
+        sm_margin=sm_margin,
     )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
@@ -1338,6 +1357,11 @@ def _flex_flash_attn_bwd(
     else:
         dQ_semaphore = None
 
+    # The DYNAMIC schedule's tile counter.
+    tile_counter = (
+        torch.zeros(1, dtype=torch.int32, device=device) if sm_margin > 0 else None
+    )
+
     if deterministic and qhead_per_kvhead > 1:
         dK_semaphore = torch.zeros(
             batch_size,
@@ -1492,6 +1516,7 @@ def _flex_flash_attn_bwd(
             range_merge_active,
             use_dense_dqacc_for_ranges,
             k_ranges_sorted_disjoint,
+            sm_margin > 0,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
             get_broadcast_dims(v),
@@ -1611,6 +1636,7 @@ def _flex_flash_attn_bwd(
                     range_merge=range_merge_active,
                     use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
                     k_ranges_sorted_disjoint=k_ranges_sorted_disjoint,
+                    is_persistent=sm_margin > 0,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
@@ -1657,6 +1683,12 @@ def _flex_flash_attn_bwd(
             )
             # Runtime scalar: the compiled variant stays max_seqlen_k-agnostic.
             bwd_compile_args.append(Int32(seqlen_k))
+            bwd_compile_args.append(Int32(sm_margin) if sm_margin > 0 else None)
+            bwd_compile_args.append(
+                to_cute_tensor(tile_counter, assumed_align=4, leading_dim=0)
+                if tile_counter is not None
+                else None
+            )
         bwd_compile_args.extend(
             [
                 cute_aux_tensors,
@@ -1693,6 +1725,8 @@ def _flex_flash_attn_bwd(
         bwd_call_args.append(mask_types_tensor)
         bwd_call_args.append(cu_batches)
         bwd_call_args.append(seqlen_k)
+        bwd_call_args.append(sm_margin if sm_margin > 0 else None)
+        bwd_call_args.append(tile_counter)
     bwd_call_args.extend(
         [
             aux_tensors,
@@ -1754,7 +1788,7 @@ def _flex_flash_attn_bwd(
 
     if direct_dq_init and dq_self_alloc and not declared_q_full_coverage:
         assert q_ranges is not None
-        bwd_grad_zero_holes(dq, q_ranges)
+        bwd_grad_zero_holes(dq, q_ranges, ranges_sorted=not range_merge_active)
 
     if dKV_postprocess and rowmajor_post_dkv:
         bwd_postprocess_rowmajor(
@@ -1843,6 +1877,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_bwd_dkv_atomic_reduction: bool = False,
         range_merge: bool | RangeMergePlan = False,
         out_dtype: torch.dtype | None = None,
+        sm_margin: int = 0,
     ):
         mask_types = normalize_mask_types(mask_types)
         flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
@@ -1865,6 +1900,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
             range_merge=range_merge,
             out_dtype=out_dtype,
+            sm_margin=sm_margin,
         )
         # The atomic path defaults O to fp32; hand the caller the input dtype
         # unless they asked for a specific one.
@@ -1894,6 +1930,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         # Forward merges Q ranges; backward merges the dual K ranges.
         # Derived from the fwd flag, not a second user flag.
         ctx.bwd_range_merge = bwd_range_merge_arg(range_merge)
+        ctx.sm_margin = sm_margin
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         # Drop the direct aux_tensors reference on ctx; the real tensors are
@@ -1953,6 +1990,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             flex_attn_args=flex_attn_args,
             range_merge=ctx.bwd_range_merge,
+            sm_margin=ctx.sm_margin,
             # Reduction happens in fp32 accumulators, so the postprocess can
             # write the input dtype directly with no separate cast kernel.
             dq_type=q.dtype,
@@ -1963,7 +2001,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if dsink is not None:
             dsink = dsink.to(sink.dtype)
         # NOTES: `sink` is the 11th positional input of `forward`
-        return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 8)
+        return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 9)
 
 
 def flex_flash_attn_func(
@@ -1987,6 +2025,7 @@ def flex_flash_attn_func(
     disable_bwd_dkv_atomic_reduction: bool = False,
     range_merge: bool | RangeMergePlan = False,
     out_dtype: torch.dtype | None = None,
+    sm_margin: int = 0,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """Flex-flash-attention interface (dense / ranges).
 
@@ -2045,6 +2084,10 @@ def flex_flash_attn_func(
         trades K-1 cascading truncations in a K-way overlap merge for half
         the merge traffic.
 
+    sm_margin: number of SMs to reserve for concurrent kernels such as communication.
+        Currently supported for q/k ranges on SM100/SM110.
+        Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
+
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
         ``mask_mod`` / ``aux_tensors``) and block-sparse
@@ -2071,6 +2114,7 @@ def flex_flash_attn_func(
         disable_bwd_dkv_atomic_reduction,
         range_merge,
         out_dtype,
+        sm_margin,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=None)
