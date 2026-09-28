@@ -263,10 +263,10 @@ def gen_jit_spec(
         needs_device_linking,
     )
 
-    cflags = ["-O3", "-std=c++17", "-Wno-switch-bool"]
+    cflags = ["-O3", "-std=c++20", "-Wno-switch-bool"]
     cuda_cflags = [
         "-O3",
-        "-std=c++17",
+        "-std=c++20",
         "-use_fast_math",
         "-DCUTLASS_ENABLE_GDC_FOR_SM90",  # For PDL
         "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED",  # Necessary for the WGMMA shapes that we use
