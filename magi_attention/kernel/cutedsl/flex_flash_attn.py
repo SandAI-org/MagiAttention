@@ -336,9 +336,14 @@ def _flex_flash_attn_fwd(
         assert lse.stride(-1) == 1, "lse must be contiguous along its last dim"
 
     if seqlen_k == 0 or total_q == 0:
+        # Every row attends to no key: O is zero and the LSE holds only the sinks.
         out.zero_()
-        if lse is not None:
+        if lse_sink is None:
             lse.fill_(float("-inf"))
+        elif has_ranges:
+            lse.copy_(lse_sink.expand_as(lse))
+        else:
+            lse.copy_(lse_sink[None, :, None].expand_as(lse))
         return out, lse
 
     dtype = to_cute_dtype(q.dtype)
@@ -1114,9 +1119,9 @@ def _flex_flash_attn_bwd(
     # fp32 wherever the output is reduced and the input dtype where a single
     # writer stores it once. dQ is always reduced; dK/dV are stored once
     # on the dense-MHA and direct_dkv paths.
+    dkv_stored_once = direct_dkv or (not has_ranges and qhead_per_kvhead == 1)
     if major_arch in (10, 11):
         dq_default = torch.float32
-        dkv_stored_once = direct_dkv or (not has_ranges and qhead_per_kvhead == 1)
         dkv_default = k.dtype if dkv_stored_once else torch.float32
     else:
         dq_default = dkv_default = q.dtype
@@ -1162,6 +1167,30 @@ def _flex_flash_attn_bwd(
         dv = dkv_alloc(v, dtype=dv_dtype)
     else:
         validate_tensor(dv, "dv", v.shape, dv_dtype, device)
+
+    if sink is None:
+        dsink = None
+    else:
+        lse_rows = lse if has_ranges else lse.transpose(1, 2).reshape(-1, num_head)
+        dsink = bwd_dsink(
+            out.reshape(-1, num_head, head_dim_v),
+            dout.reshape(-1, num_head, head_dim_v),
+            lse_rows,
+            sink.float(),
+            dsink=dsink,
+        )
+
+    if total_q == 0 or total_k == 0:
+        # No (q, k) pair: every gradient is zero. Reducing caller buffers keep
+        # their contents; self-allocated and single-writer dK/dV outputs are
+        # zeroed. The kernels below cannot launch an empty grid.
+        if dq_self_alloc:
+            dq.zero_()
+        if dk_self_alloc or dkv_stored_once:
+            dk.zero_()
+        if dv_self_alloc or dkv_stored_once:
+            dv.zero_()
+        return dq, dk, dv, dsink
 
     if direct_dkv and not declared_k_full_coverage:
         if dk_self_alloc:
@@ -1360,18 +1389,6 @@ def _flex_flash_attn_bwd(
         use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
         disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
     )
-
-    if sink is None:
-        dsink = None
-    else:
-        lse_rows = lse if has_ranges else lse.transpose(1, 2).reshape(-1, num_head)
-        dsink = bwd_dsink(
-            out.reshape(-1, num_head, head_dim_v),
-            dout.reshape(-1, num_head, head_dim_v),
-            lse_rows,
-            sink.float(),
-            dsink=dsink,
-        )
 
     # num_threads: SM80 (256) and SM120 (128) are set above, SM90 derives from
     # BwdConfig.num_wg, SM100/SM110 uses default from function signature (384).

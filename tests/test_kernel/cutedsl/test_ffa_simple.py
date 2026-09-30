@@ -24,6 +24,7 @@ Run:
     pytest tests/test_kernel/cutedsl/test_ffa_simple.py -v
 """
 
+import math
 import random
 from contextlib import contextmanager
 from typing import Iterator
@@ -35,7 +36,9 @@ from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
+from magi_attention.functional.utils import sink_bwd
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
+from magi_attention.kernel.cutedsl.ffa_bwd_dsink import bwd_dsink
 from magi_attention.kernel.cutedsl.ffa_bwd_postprocess import (
     FFABwdPostProcess,
     bwd_postprocess,
@@ -805,12 +808,12 @@ class TestFfaSimple(DistTestBase):
     @parameterize("mha_type", ["mha", "gqa"])
     @parameterize("d", [64, 128])
     @parameterize("overlap", [False, True])
-    @parameterize("n_sink", [1, 4])
+    @parameterize("n_sink", [1, 4, 129])
     def test_sink_fwd_bwd(self, n_sink, overlap, d, mha_type):
         """``[n_sink, nhq]`` fp32 sink: out/lse fold on both fwd paths, dsink in bwd."""
         _, major_arch = get_device_arch()
         if major_arch not in (10, 11):
-            return
+            self.skipTest("sink on the ranges path requires SM100/SM110")
 
         device = self.device
         dtype = torch.bfloat16
@@ -879,6 +882,76 @@ class TestFfaSimple(DistTestBase):
             sink=sink.detach(),
             dsink_thd=dsink,
         )
+
+    @with_run_in_mp
+    @parameterize("total_q", [0, 1, 127, 128, 129])
+    @parameterize("n_sink", [1, 129])
+    def test_bwd_dsink_matches_reference(self, total_q, n_sink):
+        """dsink for any sink count and partial query tiles, against fp64 torch.
+
+        Row 1 has LSE -inf (a row no relation covers on the direct path, which
+        contributes nothing), row 2 attends only to the sinks, and head 2's
+        sinks are all -inf (zero gradient).
+        """
+        device, num_head, head_dim_v = self.device, 3, 128
+        torch.random.manual_seed(self.seed + total_q + n_sink)
+        sink = torch.randn(n_sink, num_head, device=device) * 3
+        sink[:, 2] = float("-inf")
+        out, dout = (
+            torch.randn(
+                total_q, num_head, head_dim_v, device=device, dtype=torch.bfloat16
+            )
+            for _ in range(2)
+        )
+        lse_sink = torch.logsumexp(sink, dim=0)
+        lse = torch.logaddexp(
+            torch.randn(total_q, num_head, device=device) * 3, lse_sink
+        )
+        if total_q > 2:
+            lse[1] = float("-inf")
+            lse[2] = lse_sink
+
+        dsink = bwd_dsink(out, dout, lse, sink)
+
+        # The reference folds a -inf row into exp(sink - inf) = 0.
+        lse_ref = torch.where(torch.isneginf(lse), torch.inf, lse).double()
+        dsink_ref = sink_bwd(sink.double(), lse_ref, out.double(), dout.double())
+        assert dsink.shape == sink.shape and torch.isfinite(dsink).all()
+        assert torch.all(dsink[:, 2] == 0)
+        torch.testing.assert_close(dsink.double(), dsink_ref, rtol=1e-5, atol=1e-5)
+
+    @with_run_in_mp
+    @parameterize("disable_fwd_atomic_reduction", [False, True])
+    def test_sink_with_empty_k(self, disable_fwd_atomic_reduction):
+        """With no keys every row attends only to the sinks: O = 0, LSE = lse_sink."""
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            self.skipTest("sink on the ranges path requires SM100/SM110")
+        device, dtype, nheads, d, total_q = self.device, torch.bfloat16, 4, 128, 64
+        q = torch.randn(total_q, nheads, d, device=device, dtype=dtype)
+        k = torch.empty(0, nheads, d, device=device, dtype=dtype)
+        v = torch.empty_like(k)
+        sink = torch.zeros(4, nheads, device=device)
+        ranges = dict(
+            q_ranges=torch.tensor([[0, total_q]], device=device, dtype=torch.int32),
+            k_ranges=torch.tensor([[0, 0]], device=device, dtype=torch.int32),
+            max_seqlen_q=total_q,
+            max_seqlen_k=0,
+            sink=sink,
+            sink_layout="sh",
+            disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
+        )
+        out, lse = _flex_flash_attn_fwd(q, k, v, **ranges)
+        assert torch.all(out == 0)
+        torch.testing.assert_close(
+            lse, torch.full_like(lse, math.log(4)), rtol=0, atol=1e-6
+        )
+
+        dq, dk, dv, dsink = _flex_flash_attn_bwd(
+            q, k, v, out.to(dtype), lse, torch.randn_like(q), **ranges
+        )
+        assert torch.all(dq == 0) and dk.shape == k.shape and dv.shape == v.shape
+        assert dsink is not None and torch.all(dsink == 0)
 
     # ─────────────────────────────────────────────────────────────────────
     # Varlen opt-flag contract
