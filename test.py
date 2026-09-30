@@ -188,7 +188,6 @@ def _run_case(
         softmax_scale=softmax_scale,
         tile_m=128,
         tile_n=64,
-        head_dim=head_dim,
     )
 
     mask = make_attn_mask_from_ffa_args(
@@ -248,11 +247,7 @@ def _time_ms(fn: Callable[[], object], warmup: int, iters: int) -> float:
 
 
 def bench() -> None:
-    """Time backward only and print TFLOPS.
-
-    Numbers come from the HACK_NON_SWAP_LOOP delegate (existing K-outer
-    FFABwdSm100), not from the inner-loop-K kernel.
-    """
+    """Time backward only (preprocess + inner-loop-K kernel + dK/dV postprocess) and print TFLOPS."""
     # Local import: baselines.utils pulls flex_attention, which smoke/correct do not need.
     from exps.attn.baselines.utils import calculate_attn_flops
 
@@ -263,8 +258,8 @@ def bench() -> None:
     warmup = 5
     iters = 10
     print(
-        "HACK_NON_SWAP_LOOP is active: TFLOPS are existing K-outer FFABwdSm100, "
-        f"not inner-loop-K. heads_q={NUM_HEADS_Q} heads_kv={NUM_HEADS_KV} "
+        "ffa_bwd_sm100_inner_loop_k: "
+        f"heads_q={NUM_HEADS_Q} heads_kv={NUM_HEADS_KV} "
         f"head_dim={head_dim} dtype={dtype}"
     )
     print(f"{'seqlen':>8} {'ms':>10} {'TFLOPS':>10}")
@@ -302,7 +297,6 @@ def bench() -> None:
             softmax_scale=softmax_scale,
             tile_m=128,
             tile_n=64,
-            head_dim=head_dim,
         )
         ms = _time_ms(run_bwd, warmup=warmup, iters=iters)
         flops = calculate_attn_flops(
