@@ -13,7 +13,17 @@
 # limitations under the License.
 
 
-"""Backward reduction for shared sink logits (``sh`` layout)."""
+"""Backward reduction for shared sink logits (``sh`` layout).
+
+With ``L_q`` the forward LSE including the sinks and ``lse_sink_h`` the
+log-sum-exp of head ``h``'s sink logits, the sink gradient factors as
+
+    G_h = -sum_q delta_q * exp(lse_sink_h - L_q),  delta_q = sum_d O_qd * dO_qd
+    dsink_jh = exp(sink_jh - lse_sink_h) * G_h
+
+so the kernel reduces one scalar per (query tile, head) whatever the sink
+count, and the host distributes ``G`` over the sinks by their softmax weight.
+"""
 
 import math
 from typing import Optional, Type
@@ -30,28 +40,23 @@ from magi_attention.utils.dtype import to_cute_dtype
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import warp_reduce
 
+# Query rows per CTA: the kernel's block size and the partial buffer's
+# m-block count both derive from it.
+DSINK_TILE_M = 128
+
 
 class FFABwdDSink:
-    """Reduce one query tile per head, with one query row per thread."""
+    """Reduce ``G`` over one query tile per head, with one query row per thread."""
 
-    def __init__(
-        self,
-        o_dtype: Type[cutlass.Numeric],
-        head_dim_v: int,
-        n_sink: int,
-        tile_m: int = 128,
-    ):
+    def __init__(self, o_dtype: Type[cutlass.Numeric], head_dim_v: int):
         self.o_dtype = o_dtype
         self.head_dim_v = head_dim_v
-        self.n_sink = n_sink
-        self.tile_m = tile_m
-        self.num_warps = tile_m // cute.arch.WARP_SIZE
+        self.tile_m = DSINK_TILE_M
+        self.num_warps = self.tile_m // cute.arch.WARP_SIZE
         # Vectorized O/dO loads (16 bytes)
         self.vec_elems = 128 // o_dtype.width
         assert head_dim_v % self.vec_elems == 0
-        assert tile_m % cute.arch.WARP_SIZE == 0
-        # One writer per sink in the block reduction
-        assert n_sink <= tile_m
+        assert self.tile_m % cute.arch.WARP_SIZE == 0
 
     @cute.jit
     def __call__(
@@ -59,15 +64,15 @@ class FFABwdDSink:
         mO: cute.Tensor,  # (total_q, num_head, head_dim_v)
         mdO: cute.Tensor,  # same shape as mO
         mLSE: cute.Tensor,  # (total_q, num_head) fp32
-        mSink: cute.Tensor,  # (n_sink, num_head) fp32
-        mdSinkPartial: cute.Tensor,  # (n_sink, num_head, num_m_blocks) fp32
+        mLSESink: cute.Tensor,  # (num_head,) fp32
+        mPartial: cute.Tensor,  # (num_head, num_m_blocks) fp32
         stream: cuda.CUstream = None,
     ):
         total_q = mO.shape[0]
         num_head = mO.shape[1]
         # Cover every query row once, independent of attention ranges
         grid = (cute.ceil_div(total_q, self.tile_m), num_head, 1)
-        self.kernel(mO, mdO, mLSE, mSink, mdSinkPartial).launch(
+        self.kernel(mO, mdO, mLSE, mLSESink, mPartial).launch(
             grid=grid, block=[self.tile_m, 1, 1], stream=stream
         )
 
@@ -77,8 +82,8 @@ class FFABwdDSink:
         mO: cute.Tensor,
         mdO: cute.Tensor,
         mLSE: cute.Tensor,
-        mSink: cute.Tensor,
-        mdSinkPartial: cute.Tensor,
+        mLSESink: cute.Tensor,
+        mPartial: cute.Tensor,
     ):
         tidx = cute.arch.thread_idx()[0]
         m_block, head_idx = cute.arch.block_idx()[0], cute.arch.block_idx()[1]
@@ -88,14 +93,12 @@ class FFABwdDSink:
         total_q = mO.shape[0]
 
         smem = cutlass.utils.SmemAllocator()
-        sWarpDSink = smem.allocate_tensor(
-            Float32, cute.make_layout((self.n_sink, self.num_warps)), byte_alignment=16
+        sWarpSum = smem.allocate_tensor(
+            Float32, cute.make_layout(self.num_warps), byte_alignment=16
         )
 
-        # Compute row gradients
         # NOTES: tail rows and rows with LSE == -inf contribute zero
-        rdSink = cute.make_rmem_tensor((self.n_sink,), Float32)
-        rdSink.fill(0.0)
+        row_g = Float32(0.0)
         if row < total_q:
             lse = Float32(mLSE[row, head_idx])
             if lse != -Float32.inf:
@@ -114,40 +117,34 @@ class FFABwdDSink:
                     for elem_idx in cutlass.range(self.vec_elems, unroll_full=True):
                         delta += Float32(rO[elem_idx]) * Float32(rdO[elem_idx])
 
-                # Compute row-wise dsink = -exp(sink - lse) * delta
+                # lse >= lse_sink, so the exponent is <= 0
                 LOG2_E = math.log2(math.e)
-                for sink_idx in cutlass.range_constexpr(self.n_sink):
-                    p_sink = cute.math.exp2(
-                        (Float32(mSink[sink_idx, head_idx]) - lse) * LOG2_E,
-                        fastmath=False,
-                    )
-                    rdSink[sink_idx] = -delta * p_sink
+                p_sink = cute.math.exp2(
+                    (Float32(mLSESink[head_idx]) - lse) * LOG2_E, fastmath=False
+                )
+                row_g = -delta * p_sink
 
-        # Reduce dsink (warp-level)
-        for sink_idx in cutlass.range_constexpr(self.n_sink):
-            rdSink[sink_idx] = warp_reduce(rdSink[sink_idx], lambda a, b: a + b)
+        # Reduce G (warp-level, then block-level in a fixed order)
+        row_g = warp_reduce(row_g, lambda a, b: a + b)
         if lane_idx == 0:
-            for sink_idx in cutlass.range_constexpr(self.n_sink):
-                sWarpDSink[sink_idx, warp_idx] = rdSink[sink_idx]
-
-        # Reduce dsink (block-level)
+            sWarpSum[warp_idx] = row_g
         cute.arch.barrier()
-        if tidx < self.n_sink:
-            dsink_sum = Float32(0.0)
+        if tidx == 0:
+            block_g = Float32(0.0)
             for warp in cutlass.range_constexpr(self.num_warps):
-                dsink_sum += sWarpDSink[tidx, warp]
-            mdSinkPartial[tidx, head_idx, m_block] = dsink_sum
+                block_g += sWarpSum[warp]
+            mPartial[head_idx, m_block] = block_g
 
 
 _COMPILE_CACHE = get_jit_cache("bwd_dsink")
 
 
-def _compile_bwd_dsink(o_torch_dtype: torch.dtype, head_dim_v: int, n_sink: int):
-    cache_key = (o_torch_dtype, head_dim_v, n_sink)
+def _compile_bwd_dsink(o_torch_dtype: torch.dtype, head_dim_v: int):
+    cache_key = (o_torch_dtype, head_dim_v)
     cache = _COMPILE_CACHE
     if cache_key not in cache:
         o_dtype = to_cute_dtype(o_torch_dtype)
-        kernel = FFABwdDSink(o_dtype, head_dim_v, n_sink)
+        kernel = FFABwdDSink(o_dtype, head_dim_v)
         sym = cute.sym_int
         total_q, num_head, num_m_blocks = sym(), sym(), sym()
         vec_elems = 128 // o_dtype.width
@@ -158,17 +155,15 @@ def _compile_bwd_dsink(o_torch_dtype: torch.dtype, head_dim_v: int, n_sink: int)
             o_dtype, (total_q, num_head, head_dim_v), divisibility=vec_elems
         )
         mLSE = fake_tensor(Float32, (total_q, num_head), divisibility=1)
-        mSink = fake_tensor(Float32, (n_sink, num_head), divisibility=1)
-        mdSinkPartial = fake_tensor(
-            Float32, (n_sink, num_head, num_m_blocks), divisibility=1
-        )
+        mLSESink = fake_tensor(Float32, (num_head,), divisibility=1)
+        mPartial = fake_tensor(Float32, (num_head, num_m_blocks), divisibility=1)
         cache[cache_key] = cute.compile(
             kernel,
             mO,
             mdO,
             mLSE,
-            mSink,
-            mdSinkPartial,
+            mLSESink,
+            mPartial,
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi",
         )
@@ -181,13 +176,14 @@ def bwd_dsink(
     lse: torch.Tensor,
     sink: torch.Tensor,
     dsink: Optional[torch.Tensor] = None,
-    tile_m: int = 128,
 ) -> torch.Tensor:
     """Compute FP32 sink gradients of shape ``[n_sink, num_head]``.
 
     ``out`` and ``dout`` have shape ``[total_q, num_head, head_dim_v]`` and
     share a dtype. ``lse`` is FP32 ``[total_q, num_head]`` including sinks;
-    ``sink`` is FP32 ``[n_sink, num_head]``. A supplied ``dsink`` is overwritten.
+    ``sink`` is FP32 ``[n_sink, num_head]`` with any ``n_sink``. A head whose
+    sink logits are all ``-inf`` gets a zero gradient. A supplied ``dsink`` is
+    overwritten.
     """
     total_q, num_head, head_dim_v = out.shape
     n_sink = sink.shape[0]
@@ -196,17 +192,23 @@ def bwd_dsink(
     assert lse.shape == (total_q, num_head) and sink.shape == (n_sink, num_head)
     out, dout, lse, sink = [t.contiguous() for t in (out, dout, lse, sink)]
 
-    num_m_blocks = (total_q + tile_m - 1) // tile_m
+    lse_sink = torch.logsumexp(sink, dim=0)
+    num_m_blocks = (total_q + DSINK_TILE_M - 1) // DSINK_TILE_M
     partial = torch.empty(
-        n_sink, num_head, num_m_blocks, dtype=torch.float32, device=out.device
+        num_head, num_m_blocks, dtype=torch.float32, device=out.device
     )
-    compiled = _compile_bwd_dsink(out.dtype, head_dim_v, n_sink)
-    compiled(out, dout, lse, sink, partial)
+    if num_m_blocks > 0:
+        compiled = _compile_bwd_dsink(out.dtype, head_dim_v)
+        compiled(out, dout, lse, lse_sink, partial)
 
-    # Reduce dsink (grid-level)
+    # Reduce G (grid-level)
     # NOTES: partials are indexed by query block, not CTA completion order
+    grad_lse_sink = partial.sum(dim=-1)
+    # exp(sink - lse_sink) is NaN for a head whose sinks are all -inf; its
+    # sinks carry no probability, so their gradient is zero.
+    weight = torch.where(torch.isneginf(lse_sink), 0.0, torch.exp(sink - lse_sink))
     if dsink is None:
-        return partial.sum(dim=-1)
+        return weight * grad_lse_sink
     assert dsink.dtype == torch.float32 and dsink.shape == sink.shape
-    torch.sum(partial, dim=-1, out=dsink)
+    torch.mul(weight, grad_lse_sink, out=dsink)
     return dsink
