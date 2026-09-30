@@ -385,6 +385,191 @@ class TestDistAttn(DistTestBase):
                 test_case="dsink",
             )
 
+    @skip_if_lt_x_gpu(4)
+    @with_comms
+    @parameterize("no_overlap", [True, False])
+    @parameterize("seqlen_sink", [0, 4])
+    def test_skipped_host_stage_asymmetric_kv(self, no_overlap: bool, seqlen_sink: int):
+        """Skipped host stages allocate O with V's head dim and dK/dV like K/V.
+
+        No rank attends to its local KV, so every overlap host stage is
+        skipped; rank 0 attends to nothing at all, so its merged no-overlap
+        argument is skipped too. Q/K head dim 192 and V head dim 128.
+        """
+        nhq, nhk, head_dim, head_dim_v, dtype = 8, 4, 192, 128, torch.bfloat16
+        use_sdpa = env.general.kernel_backend() == MagiAttentionKernelBackend.SDPA
+        mismatch_threshold = 0.1 if use_sdpa else 0.08
+        seqlen, ws = 128, self.world_size
+        empty_arg = AttnArg(
+            q_ranges=AttnRanges.from_ranges([]),
+            k_ranges=AttnRanges.from_ranges([]),
+            attn_type_map=[],
+            total_area=0,
+        )
+        remote_arg = (
+            empty_arg
+            if self.rank == 0
+            else AttnArg(
+                q_ranges=AttnRanges.from_ranges([[0, seqlen]]),
+                k_ranges=AttnRanges.from_ranges([[0, seqlen * (ws - 1)]]),
+                attn_type_map=[0],
+                total_area=seqlen * seqlen * (ws - 1),
+            )
+        )
+        calc_meta = CalcMeta(
+            local_attn_arg=empty_arg,
+            remote_attn_args_list=[remote_arg],
+            no_overlap=no_overlap,
+            headdim=head_dim,
+            headdim_v=head_dim_v,
+            seqlen_q_shard=seqlen,
+            seqlen_k_local=seqlen,
+            seqlen_k_per_remote_stage=[seqlen * (ws - 1)],
+        )
+        others = [rank for rank in range(ws) if rank != self.rank]
+        comm_meta = CommMeta(
+            num_remote_kv_tokens_per_stage=[seqlen * (ws - 1)],
+            kv_group_collective_args_list=[
+                GroupCollectiveArg(
+                    input_split_size_list=[seqlen],
+                    output_split_size_list=[seqlen] * (ws - 1),
+                    dst_indices_list=[others],
+                    src_index_list=others,
+                    rank=self.rank,
+                    world_size=ws,
+                    group=self.nccl_group,
+                )
+            ],
+            num_remote_qo_tokens_per_stage=[0],
+            qo_group_collective_args_list=[None],  # type: ignore[list-item]
+            num_heads_q=nhq,
+            num_heads_kv=nhk,
+            head_dim=head_dim,
+            head_dim_v=head_dim_v,
+        )
+        dist_attn_runtime = DistAttnRuntime(
+            comm_meta=comm_meta,
+            calc_meta=calc_meta,
+            cp_group_gc=self.nccl_groups[0],
+            cp_group_gr=self.nccl_groups[1],
+        )
+
+        def rand(nh: int, hd: int) -> torch.Tensor:
+            return torch.randn(
+                seqlen, nh, hd, device=self.device, dtype=dtype, requires_grad=True
+            )
+
+        local_q, local_k, local_v = (
+            rand(nhq, head_dim),
+            rand(nhk, head_dim),
+            rand(nhk, head_dim_v),
+        )
+        if seqlen_sink > 0:
+            total_sink = torch.randn(
+                seqlen_sink, nhq, device=self.device, requires_grad=True
+            )
+            dist.all_reduce(total_sink.data, group=self.nccl_group)
+        else:
+            total_sink = None
+
+        local_out, meta = dist_attn_func(
+            q=local_q,
+            k=local_k,
+            v=local_v,
+            dist_attn_runtime=dist_attn_runtime,
+            sink=total_sink,
+        )
+        assert local_out.shape == (seqlen, nhq, head_dim_v)
+        total_out = torch.cat(all_gather(local_out, group=self.nccl_group), dim=0)
+        total_lse = torch.cat(all_gather(meta.lse, group=self.nccl_group), dim=0)
+        grad_total_out = torch.randn_like(total_out)
+        total_out.backward(grad_total_out)
+        grads = [x.grad for x in (local_q, local_k, local_v)]
+        for x in (local_q, local_k, local_v):
+            x.grad = None
+        total_dsink = None
+        if total_sink is not None:
+            total_dsink, total_sink.grad = total_sink.grad, None
+        assert grads[2].shape == local_v.shape
+
+        # Rank 0's rows attend only to the sinks: O = 0, LSE = lse_sink (or -inf)
+        # and they contribute nothing to dK/dV/dsink, so the reference covers
+        # the attending rows only.
+        rank0_lse = (
+            torch.logsumexp(total_sink.detach(), dim=0).expand(seqlen, nhq)
+            if total_sink is not None
+            else torch.full((seqlen, nhq), float("-inf"), device=self.device)
+        )
+        assert torch.all(total_out[:seqlen] == 0)
+        torch.testing.assert_close(total_lse[:seqlen], rank0_lse)
+
+        total_q, total_k, total_v = (
+            torch.cat(all_gather(x, group=self.nccl_group), dim=0)
+            for x in (local_q, local_k, local_v)
+        )
+        # Q block r attends to every K block except its own.
+        mask = torch.ones(seqlen * ws, seqlen * ws, device=self.device).bool()
+        for rank in range(ws):
+            mask[
+                rank * seqlen : (rank + 1) * seqlen, rank * seqlen : (rank + 1) * seqlen
+            ] = False
+        out_ref, meta_ref = ref_attn_func(
+            q=total_q[seqlen:],
+            k=total_k,
+            v=total_v,
+            mask=mask[seqlen:],
+            sink=total_sink,
+            layout="thd",
+            sink_layout="sh",
+            backend="torch" if total_sink is not None else "sdpa",
+            high_precision=True,
+            return_lse=True,
+        )
+        out_ref.backward(grad_total_out[seqlen:])
+        grads_ref = [x.grad for x in (local_q, local_k, local_v)]
+        if self.rank == 0:
+            grads_ref[0] = torch.zeros_like(local_q)
+        total_dsink_ref = None
+        if total_sink is not None:
+            total_dsink_ref = total_sink.grad
+            dist.all_reduce(total_dsink_ref.data, group=self.nccl_group)
+
+        assert_close(
+            total_out[seqlen:],
+            out_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=mismatch_threshold,
+            test_case="out",
+        )
+        assert_close(
+            total_lse[seqlen:],
+            meta_ref.lse,
+            atol=EPSILON,
+            rtol=5e-3,
+            mismatch_threshold=0.01,
+            test_case="lse",
+        )
+        for name, grad, grad_ref in zip(("dq", "dk", "dv"), grads, grads_ref):
+            assert grad.shape == grad_ref.shape, name
+            assert_close(
+                grad,
+                grad_ref,
+                atol=EPSILON,
+                rtol=5e-2,
+                mismatch_threshold=mismatch_threshold,
+                test_case=name,
+            )
+        if total_sink is not None:
+            assert_close(
+                total_dsink,
+                total_dsink_ref,
+                atol=5e-3,
+                rtol=0.1,
+                mismatch_threshold=max(1 / (seqlen_sink * nhq), 5e-2),
+                test_case="dsink",
+            )
+
 
 if __name__ == "__main__":
     run_tests()

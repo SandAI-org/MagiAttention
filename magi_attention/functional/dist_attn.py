@@ -332,6 +332,7 @@ class DistAttnRuntime:
             if is_host_stage:
                 partial_out, partial_lse = self._init_out_lse_skipped_host_stage(
                     q=q,
+                    head_dim_v=self._maybe_chunk(kv, num_chunks=2)[1].shape[-1],
                     sink=sink,
                 )
                 partial_max_logits = self._init_max_logits_skipped_host_stage(
@@ -2519,13 +2520,15 @@ class DistAttnRuntime:
     def _init_out_lse_skipped_host_stage(
         self,
         q: torch.Tensor,
+        head_dim_v: int,
         sink: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # NOTE: we can NOT use empty initialization here,
         # since we have nowhere to zero-fill it
         # when all attn computations are skipped for certain q range
-        out = torch.zeros_like(
-            q,
+        # NOTE: out takes V's head dim, which differs from Q's for asymmetric K/V
+        out = torch.zeros(
+            (*q.shape[:-1], head_dim_v),
             dtype=self._maybe_hp_dtype(q.dtype, not self.fwd_local_out_lp_init),
             device=q.device,
         )
@@ -2572,11 +2575,6 @@ class DistAttnRuntime:
         sink: torch.Tensor | None,
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
         q, o, do = self._maybe_chunk(qo_do, num_chunks=3)
-        k, _ = self._maybe_chunk(kv, num_chunks=2)
-        if self.concat_kv:  # kv is a fused tensor
-            dkv_shape = kv.shape
-        else:  # kv are tupled tensors
-            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
 
         # NOTE: if local_dq and local_dkv calculation are skipped,
         # we need to zero-initialize them since they might be reduced later
@@ -2589,18 +2587,7 @@ class DistAttnRuntime:
                 and not self.bwd_local_dq_lp_init,
             ),
         )
-        dkv = torch.zeros(
-            dkv_shape,
-            dtype=self._maybe_hp_dtype(
-                k.dtype,
-                # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
-                need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
-                and not self.bwd_local_dkv_lp_init,
-            ),
-            device=k.device,
-        )
-        if not self.concat_dkv:  # make partial_dkv tupled tensors
-            dkv = self._maybe_chunk(dkv, num_chunks=2)
+        dkv = self._init_dkv_skipped_host_stage(kv)
 
         # in skipped host stage,
         # we directly calculate dsink here
@@ -2641,26 +2628,25 @@ class DistAttnRuntime:
         self,
         kv: FusedOrTupleTensor,
     ) -> FusedOrTupleTensor:
-        k, _ = self._maybe_chunk(kv, num_chunks=2)
-        if self.concat_kv:  # kv is a fused tensor
-            dkv_shape = kv.shape
-        else:  # kv are tupled tensors
-            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
-
-        dkv = torch.zeros(
-            dkv_shape,
-            dtype=self._maybe_hp_dtype(
-                k.dtype,
-                # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
-                need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
-                and not self.bwd_local_dkv_lp_init,
-            ),
-            device=k.device,
+        k, v = self._maybe_chunk(kv, num_chunks=2)
+        dkv_dtype = self._maybe_hp_dtype(
+            k.dtype,
+            # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
+            need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
+            and not self.bwd_local_dkv_lp_init,
         )
-        if not self.concat_dkv:  # make partial_dkv tupled tensors
-            dkv = self._maybe_chunk(dkv, num_chunks=2)
-
-        return dkv
+        if self.concat_dkv:  # fused dkv exists only for symmetric K/V
+            return torch.zeros(
+                (k.shape[0] + v.shape[0], *k.shape[1:]),
+                dtype=dkv_dtype,
+                device=k.device,
+            )
+        # NOTE: dk/dv take the shapes of k/v, whose head dims differ for
+        # asymmetric K/V
+        return (
+            torch.zeros_like(k, dtype=dkv_dtype),
+            torch.zeros_like(v, dtype=dkv_dtype),
+        )
 
     # TODO: unify this specific scheduling with the original one
     def _hide_tail_stage_reduce_backward(
@@ -3419,6 +3405,7 @@ class DistAttnFunc(torch.autograd.Function):
             # as a skipped host stage in the overlap path.
             local_out, local_lse = dist_attn_runtime._init_out_lse_skipped_host_stage(
                 q=local_q,
+                head_dim_v=full_v.shape[-1],
                 sink=global_sink,
             )
             meta = AttnForwardMeta(
