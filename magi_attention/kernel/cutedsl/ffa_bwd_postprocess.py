@@ -76,6 +76,11 @@ class FFABwdPostProcess:
         """
         self.dtype = dtype
         self.accumulate = accumulate
+        # On SM100/SM110 the accumulating path stages the scaled tile in fp32
+        # and adds the old output in fp32, so each update rounds to ``dtype``
+        # once. Staging in ``dtype`` would round the partial before the add:
+        # a bf16 partial of 1 + 2**-10 onto -1 would give 0 instead of 2**-10.
+        self.stage_dtype = Float32 if accumulate and arch // 10 in [10, 11] else dtype
         self.tile_m = tile_m
         assert arch // 10 in [
             8,
@@ -212,8 +217,14 @@ class FFABwdPostProcess:
                 )
             )
 
-        num_copy_elems = 128 // self.dtype.width
+        # smem -> rmem reads the staged tile and rmem <-> gmem moves the output
+        # dtype; both copies share one thread-value layout so a register
+        # fragment pairs with the same logical coordinates on both sides.
+        num_copy_elems = 128 // self.stage_dtype.width
         threads_per_row = math.gcd(128, self.tile_hdim) // num_copy_elems
+        self.s2r_tiled_copy_dQ = copy_utils.tiled_copy_2d(
+            self.stage_dtype, threads_per_row, self.num_threads, num_copy_elems
+        )
         self.gmem_tiled_copy_dQ = copy_utils.tiled_copy_2d(
             self.dtype, threads_per_row, self.num_threads, num_copy_elems
         )
@@ -225,14 +236,16 @@ class FFABwdPostProcess:
         # We want to treat it as 64 x 48, so kBlockKSmem should be 16.
         mma_shape_n = self.tiled_mma.get_tile_size(1)
         if const_expr(self.arch // 10 in [8, 12]):
-            sdQ_layout_atom = sm80_utils.get_smem_layout_atom(self.dtype, mma_shape_n)
+            sdQ_layout_atom = sm80_utils.get_smem_layout_atom(
+                self.stage_dtype, mma_shape_n
+            )
             self.sdQ_layout = cute.tile_to_shape(
                 sdQ_layout_atom, (self.tile_m, self.tile_hdim), (0, 1)
             )
         elif const_expr(self.arch // 10 == 9):
             wg_d_dQ = num_wg_mma // self.AtomLayoutMdQ
             self.sdQ_layout = sm90_utils.make_smem_layout(
-                self.dtype,
+                self.stage_dtype,
                 LayoutEnum.ROW_MAJOR,
                 (self.tile_m, self.tile_hdim),
                 major_mode_size=self.tile_hdim // wg_d_dQ,
@@ -240,7 +253,7 @@ class FFABwdPostProcess:
         else:
             # TODO: this is hard-coded for hdim 128
             self.sdQ_layout = sm100_utils_basic.make_smem_layout_epi(
-                self.dtype, LayoutEnum.ROW_MAJOR, (self.tile_m, self.tile_hdim), 1
+                self.stage_dtype, LayoutEnum.ROW_MAJOR, (self.tile_m, self.tile_hdim), 1
             )
 
     @cute.jit
@@ -273,7 +286,7 @@ class FFABwdPostProcess:
 
         smem_size = max(
             cute.size_in_bytes(cutlass.Float32, self.sdQaccum_layout),
-            cute.size_in_bytes(self.dtype, self.sdQ_layout),
+            cute.size_in_bytes(self.stage_dtype, self.sdQ_layout),
         )
 
         if const_expr(mQRanges is not None):
@@ -326,6 +339,7 @@ class FFABwdPostProcess:
             self.sdQ_layout,
             self.g2s_tiled_copy_dQaccum,
             self.s2r_tiled_copy_dQaccum,
+            self.s2r_tiled_copy_dQ,
             self.gmem_tiled_copy_dQ,
             tile_sched_params,
             TileScheduler,
@@ -351,6 +365,7 @@ class FFABwdPostProcess:
         sdQ_layout: cute.ComposedLayout,
         g2s_tiled_copy_dQaccum: cute.TiledCopy,
         s2r_tiled_copy_dQaccum: cute.TiledCopy,
+        s2r_tiled_copy_dQ: cute.TiledCopy,
         gmem_tiled_copy_dQ: cute.TiledCopy,
         tile_sched_params: ParamsBase,
         TileScheduler: cutlass.Constexpr[Callable],
@@ -367,12 +382,15 @@ class FFABwdPostProcess:
         )
         if const_expr(self.arch // 10 in [8, 9, 12]):
             sdQ = cute.make_tensor(
-                cute.recast_ptr(sdQaccum.iterator, dtype=self.dtype), sdQ_layout
+                cute.recast_ptr(sdQaccum.iterator, dtype=self.stage_dtype),
+                sdQ_layout,
             )
         else:
             # extra stage dimension
             sdQ = cute.make_tensor(
-                cute.recast_ptr(sdQaccum.iterator, sdQ_layout.inner, dtype=self.dtype),
+                cute.recast_ptr(
+                    sdQaccum.iterator, sdQ_layout.inner, dtype=self.stage_dtype
+                ),
                 sdQ_layout.outer,
             )[None, None, 0]
         sdQt = layout_utils.transpose_view(sdQ)
@@ -467,7 +485,10 @@ class FFABwdPostProcess:
                 tdQrdQ_s2r = cute.make_tensor(tdQrdQ_fp32.iterator, tdQrdQ_fp32.shape)
 
                 smem_copy_atom = sm100_utils_basic.get_smem_store_op(
-                    LayoutEnum.ROW_MAJOR, self.dtype, cutlass.Float32, tiled_tmem_ld
+                    LayoutEnum.ROW_MAJOR,
+                    self.stage_dtype,
+                    cutlass.Float32,
+                    tiled_tmem_ld,
                 )
                 r2s_tiled_copy = cute.make_tiled_copy(
                     smem_copy_atom,
@@ -475,7 +496,7 @@ class FFABwdPostProcess:
                     tiler_mn=tiled_tmem_ld.tiler_mn,
                 )
                 tdQsdQ_r2s = thr_tmem_ld.partition_D(thr_mma_dsk.partition_C(sdQ))
-                tdQrdQ_r2s = cute.make_rmem_tensor(tdQsdQ_r2s.shape, self.dtype)
+                tdQrdQ_r2s = cute.make_rmem_tensor(tdQsdQ_r2s.shape, self.stage_dtype)
 
                 num_stages = cute.size(tdQrdQ_fp32, mode=[1])
                 row_groups = 2
@@ -552,7 +573,7 @@ class FFABwdPostProcess:
                             tdQrdQ_r2s_stage.shape,
                         )
                         dQ_vec = tdQrdQ_r2s_cpy.load() * scale
-                        tdQrdQ_r2s_stage.store(dQ_vec.to(self.dtype))
+                        tdQrdQ_r2s_stage.store(dQ_vec.to(self.stage_dtype))
 
                 # R -> S
                 cute.copy(
@@ -607,15 +628,14 @@ class FFABwdPostProcess:
                     acc.iterator, cute.make_layout(tdQsdQaccum.shape)
                 )
                 cute.autovec_copy(tdQsdQaccum, tdQrdQaccum)
-                # Convert tdQrdQaccum from fp32 to fp16/bf16
-                rdQ = cute.make_fragment_like(acc, self.dtype)
-                rdQ.store((acc.load() * scale).to(self.dtype))
+                rdQ = cute.make_fragment_like(acc, self.stage_dtype)
+                rdQ.store((acc.load() * scale).to(self.stage_dtype))
 
                 # Step 3: Copy dQ from register to smem
                 cute.arch.barrier()  # make sure all threads have finished loading dQaccum
                 if const_expr(self.arch // 10 in [8, 9, 12]):
                     copy_atom_r2s_dQ = cutedsl_utils.get_smem_store_atom(
-                        self.arch, self.dtype, transpose=self.dQ_swapAB
+                        self.arch, self.stage_dtype, transpose=self.dQ_swapAB
                     )
                     tiled_copy_r2s_dQ = cute.make_tiled_copy_C(
                         copy_atom_r2s_dQ, tiled_mma
@@ -628,10 +648,12 @@ class FFABwdPostProcess:
                     thr_layout_r2s_dQ = cute.make_layout(
                         (self.num_threads, 1)
                     )  # 128 threads
-                    val_layout_r2s_dQ = cute.make_layout((1, 128 // self.dtype.width))
+                    val_layout_r2s_dQ = cute.make_layout(
+                        (1, 128 // self.stage_dtype.width)
+                    )
                     copy_atom_r2s_dQ = cute.make_copy_atom(
                         cute.nvgpu.CopyUniversalOp(),
-                        self.dtype,
+                        self.stage_dtype,
                         num_bits_per_copy=128,
                     )
                     tiled_copy_r2s_dQ = cute.make_tiled_copy_tv(
@@ -652,9 +674,10 @@ class FFABwdPostProcess:
             # Step 4: Copy dQ from smem to register to prepare for coalesced write to gmem
             cute.arch.barrier()  # make sure all smem stores are done
             gmem_thr_copy_dQ = gmem_tiled_copy_dQ.get_slice(tidx)
+            s2r_thr_copy_dQ = s2r_tiled_copy_dQ.get_slice(tidx)
             tdQgdQ = gmem_thr_copy_dQ.partition_S(gdQ)
-            tdQsdQ = gmem_thr_copy_dQ.partition_D(sdQ)
-            tdQrdQ = cute.make_fragment_like(tdQsdQ, self.dtype)
+            tdQsdQ = s2r_thr_copy_dQ.partition_D(sdQ)
+            tdQrdQ = cute.make_fragment_like(tdQsdQ, self.stage_dtype)
             # TODO: check OOB when reading from smem if kBlockM isn't evenly tiled
             cute.autovec_copy(tdQsdQ, tdQrdQ)
 
@@ -664,7 +687,6 @@ class FFABwdPostProcess:
             for rest_m in cutlass.range(cute.size(tdQrdQ.shape[1]), unroll_full=True):
                 if tdQcdQ[0, rest_m, 0][0] < seqlen_q - m_block * self.tile_m:
                     if const_expr(self.accumulate):
-                        # Sum in fp32 so a bf16/fp16 output does not round twice.
                         tdQrdQ_old = cute.make_fragment_like(
                             tdQrdQ[None, rest_m, None], self.dtype
                         )
@@ -674,18 +696,26 @@ class FFABwdPostProcess:
                             tdQrdQ_old,
                             pred=tdQpdQ[None, rest_m, None],
                         )
-                        tdQrdQ[None, rest_m, None].store(
+                        tdQrdQ_out = cute.make_fragment_like(tdQrdQ_old, self.dtype)
+                        tdQrdQ_out.store(
                             (
                                 tdQrdQ[None, rest_m, None].load().to(Float32)
                                 + tdQrdQ_old.load().to(Float32)
                             ).to(self.dtype)
                         )
-                    cute.copy(
-                        gmem_tiled_copy_dQ,
-                        tdQrdQ[None, rest_m, None],
-                        tdQgdQ[None, rest_m, None],
-                        pred=tdQpdQ[None, rest_m, None],
-                    )
+                        cute.copy(
+                            gmem_tiled_copy_dQ,
+                            tdQrdQ_out,
+                            tdQgdQ[None, rest_m, None],
+                            pred=tdQpdQ[None, rest_m, None],
+                        )
+                    else:
+                        cute.copy(
+                            gmem_tiled_copy_dQ,
+                            tdQrdQ[None, rest_m, None],
+                            tdQgdQ[None, rest_m, None],
+                            pred=tdQpdQ[None, rest_m, None],
+                        )
 
 
 def _compile_bwd_postprocess(

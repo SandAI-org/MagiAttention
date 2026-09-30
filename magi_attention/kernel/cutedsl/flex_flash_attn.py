@@ -1161,9 +1161,10 @@ def _flex_flash_attn_bwd(
             bwd_grad_zero_holes(dv, k_ranges)
 
     rowmajor_accum = has_ranges and major_arch in (10, 11)
-    dq_accum_hdim_multiple = (
-        16 if rowmajor_accum and not use_dense_dqacc_for_ranges else 32
-    )
+    # True-range bwd stores row-major fp32 TMA reductions; the row-major
+    # postprocess sweeps only in-range rows.
+    rowmajor_post_dq = rowmajor_accum and not use_dense_dqacc_for_ranges
+    dq_accum_hdim_multiple = 16 if rowmajor_post_dq else 32
     dq_head_dim_rounded = (
         (head_dim + dq_accum_hdim_multiple - 1)
         // dq_accum_hdim_multiple
@@ -1207,10 +1208,14 @@ def _flex_flash_attn_bwd(
                 // m_block_size
                 * m_block_size
             )
-        # The accumulating row-major postprocess adds every row of dq_accum
-        # onto the caller's dq, so rows outside q_ranges must be zero.
+        # Atomic dQ reduces into dq_accum, so it starts at zero. On the direct
+        # path the preprocess clears every tile the postprocess reads, except
+        # that the accumulating row-major postprocess adds every physical row
+        # onto the caller's dq, so rows outside q_ranges must be zero too.
         dq_accum_alloc = (
-            torch.empty if direct_dq_init and dq_self_alloc else torch.zeros
+            torch.zeros
+            if not direct_dq_init or (rowmajor_post_dq and not dq_self_alloc)
+            else torch.empty
         )
         dq_accum = dq_accum_alloc(
             num_head,
@@ -1677,9 +1682,6 @@ def _flex_flash_attn_bwd(
             num_threads_post_dQ = 128
             num_threads_post_dKV = 128
 
-    # True-range bwd stores row-major fp32 TMA reductions; the row-major
-    # postprocess sweeps only in-range rows.
-    rowmajor_post_dq = pre_post_q_ranges is not None and not use_dense_dqacc_for_ranges
     rowmajor_post_dkv = pre_post_k_ranges is not None
     # A caller-provided buffer on a reducing path is the reduction target the
     # kernel atomically adds into; the single-writer paths overwrite the
