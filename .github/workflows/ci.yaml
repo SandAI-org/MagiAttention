@@ -82,7 +82,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
-          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          # Plan runner selection from trusted code before fork PR approval.
+          ref: ${{ github.sha }}
           submodules: recursive
           fetch-depth: 0
           persist-credentials: false
@@ -127,6 +128,8 @@ jobs:
           submodules: recursive
           fetch-depth: 0
           persist-credentials: false
+          # Fork PR code runs only after ci-internal environment approval.
+          allow-unsafe-pr-checkout: true
       - name: Use runner-local artifacts for fork PR
         if: needs.detect_changes.outputs.trusted != 'true'
         run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
@@ -184,6 +187,8 @@ jobs:
           submodules: recursive
           fetch-depth: 0
           persist-credentials: false
+          # Fork PR code runs only after ci-internal environment approval.
+          allow-unsafe-pr-checkout: true
       - name: Use runner-local artifacts for fork PR
         if: needs.detect_changes.outputs.trusted != 'true'
         run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
