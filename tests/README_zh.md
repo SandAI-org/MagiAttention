@@ -124,7 +124,7 @@ MAGI_ATTENTION_TEST_ATTN_CONFIG=full_attn_14k \
 - `no_overlap` 模式下不允许 `qo_comm=True`
 - `qo_comm=True` 时只允许 `disable_mso` 或 `no_overlap` 的 overlap 配置
 - `qo_comm=True` 时不允许 `hier_comm=True` 或 `bwd_hide_tail_reduce=True`
-- `native_grpcoll=True` 时不允许 `hier_comm=True`
+- `native_grpcoll=True` 时不允许 `hier_comm=True`；`head_dim != head_dim_v` 时还要求 `num_heads_kv * (head_dim + head_dim_v)` 是 hidden size 对齐值（fp16/bf16 为 256）的整数倍
 - `flatten_head_groups=True` 必须配合 `qo_comm=True`，且不兼容 sink 和 `return_max_logits`
 - `fa4` backend 不允许 `deterministic`、`fwd_hp_reduce`、`bwd_hp_reduce`、`qo_comm`、`sink`、`bwd_hide_tail_reduce`
 - `sdpa` / `sdpa_ol` backend 不允许 `native_grpcoll`
