@@ -473,9 +473,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 return False
 
         if backend == MagiAttentionKernelBackend.CUTEDSL:
-            # CuteDSL kernel: deterministic+ranges is NotImplementedError;
-            # qo comm relies on sm_margin which the kernel does not expose.
-            if deterministic or qo_comm:
+            # CuteDSL backend: deterministic+ranges is NotImplementedError.
+            if deterministic:
                 return False
 
         if backend in (
