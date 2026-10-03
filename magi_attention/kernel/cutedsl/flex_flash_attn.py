@@ -2020,9 +2020,11 @@ def flex_flash_attn_func(
 
     disable_fwd_atomic_reduction: caller contract that q_ranges are sorted
         and pairwise disjoint, giving every O and dQ row a unique writer.
-        Forward then direct-stores O, and the SM100/SM110 backward
-        accumulates dQ in per-range slots (head_dim divisible by 32, no
-        ``range_merge``) instead of the row-major fp32 accumulator. Debug
+        Forward then direct-stores O and leaves rows outside every q range
+        unwritten (O and LSE undefined there, even with ``sink``), whereas the
+        atomic path zeroes them and stores the sink-only LSE. The SM100/SM110
+        backward accumulates dQ in per-range slots (head_dim divisible by 32,
+        no ``range_merge``) instead of the row-major fp32 accumulator. Debug
         mode validates the ordering.
 
     disable_bwd_dkv_atomic_reduction: caller contract that k_ranges are sorted

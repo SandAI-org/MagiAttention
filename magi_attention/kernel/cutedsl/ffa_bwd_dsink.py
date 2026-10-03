@@ -22,7 +22,8 @@ log-sum-exp of head ``h``'s sink logits, the sink gradient factors as
     dsink_jh = exp(sink_jh - lse_sink_h) * G_h
 
 so the kernel reduces one scalar per (query tile, head) whatever the sink
-count, and the host distributes ``G`` over the sinks by their softmax weight.
+count, and torch ops then spread ``G`` over the sinks by their softmax
+weight.
 """
 
 import math
