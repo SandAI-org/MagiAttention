@@ -124,7 +124,7 @@ These flags are combined using a `heuristic` strategy instead of full Cartesian 
 - `no_overlap` mode disallows `qo_comm=True`
 - `qo_comm=True` only allows `disable_mso` or `no_overlap` overlap configs
 - `qo_comm=True` disallows `hier_comm=True` or `bwd_hide_tail_reduce=True`
-- `native_grpcoll=True` disallows `hier_comm=True`
+- `native_grpcoll=True` disallows `hier_comm=True`; with `head_dim != head_dim_v` it also requires `num_heads_kv * (head_dim + head_dim_v)` to be a multiple of the hidden-size alignment (256 for fp16/bf16)
 - `flatten_head_groups=True` requires `qo_comm=True`, and is incompatible with sink and `return_max_logits`
 - `fa4` backend disallows `deterministic`, `fwd_hp_reduce`, `bwd_hp_reduce`, `qo_comm`, `sink`, `bwd_hide_tail_reduce`
 - `sdpa` / `sdpa_ol` backends disallow `native_grpcoll`

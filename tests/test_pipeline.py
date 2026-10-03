@@ -24,6 +24,7 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention import env, init_dist_attn_runtime_mgr
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import (
     AttnMaskType,
@@ -458,6 +459,19 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 hidden_size_kv = num_heads_kv * head_dim_cfg
                 if hidden_size_kv < 256:
                     return False
+                # Asymmetric K/V is group-reduced as one tensor with K and V concatenated
+                # on the last dim, but the split alignment is solved from head_dim alone,
+                # so the concatenated width itself must meet the hidden-size alignment.
+                head_dim_v_cfg = test_config.get("head_dim_v", head_dim_cfg)
+                if head_dim_v_cfg != head_dim_cfg:
+                    packed_hidden_size_kv = num_heads_kv * (
+                        head_dim_cfg + head_dim_v_cfg
+                    )
+                    alignment = GrpCollBuffer.get_hidden_size_alignment(
+                        test_config["dtype"]
+                    )
+                    if packed_hidden_size_kv % alignment != 0:
+                        return False
 
         if flatten_hg:
             if not qo_comm:
@@ -1104,6 +1118,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "num_heads": num_heads,
                 "head_dim": head_dim,
                 "head_dim_v": head_dim_v,
+                "dtype": dtype,
             }
             flag_comb = self.flag_generator.get_next_valid_comb(
                 test_config=test_config,
