@@ -4335,6 +4335,10 @@ class FFABwdSm100:
                     # Acquire for tS(0) to be empty
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
 
+                    # Acquire the previous tile's tdQ(-1) to be empty: tdQ is
+                    # embedded in right-half of tS. S(1) re-waits this phase.
+                    pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+
                     # Issue UMMA for tS(0)
                     mma_s_qk_fn(B_idx=consumer_state_Q.index)
 
