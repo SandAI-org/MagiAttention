@@ -655,6 +655,8 @@ class TestFfaSimple(DistTestBase):
             self.skipTest("fp32 staging of the accumulating postprocess is SM100/SM110")
         out_dtype, partial, old = case
         head_dim, use_2cta = hd_2cta
+        if use_2cta and major_arch != 10:
+            self.skipTest("the 2-CTA postprocess is SM100 only")
         device, num_head, tile_m = self.device, 2, 128
         hdim_rounded = (head_dim + 31) // 32 * 32
 
@@ -760,10 +762,10 @@ class TestFfaSimple(DistTestBase):
                 **{f"{n}_type": dtype for n in ("dq", "dk", "dv")},
             )
         # dQ builds first (later calls may hit its compile key); it takes the
-        # 2-CTA postprocess at head_dim 128.
+        # 2-CTA postprocess at head_dim 128 on SM100.
         assert built and all(obj.accumulate for obj in built)
         assert all(obj.stage_dtype is cutlass.Float32 for obj in built)
-        assert built[0].use_2cta_instrs == (head_dim == 128)
+        assert built[0].use_2cta_instrs == (head_dim == 128 and major_arch == 10)
         for name, grad, ref in zip(("dq", "dk", "dv"), grads, ref_grads):
             if name not in names:
                 continue
