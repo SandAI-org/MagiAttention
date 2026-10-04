@@ -171,7 +171,8 @@ def _flex_flash_attn_fwd(
             (the GMEM buffer is the merge accumulator) and the input dtype on
             the direct-store path. Non-default dtypes require SM100/SM110.
         sm_margin: number of SMs to reserve for concurrent kernels such as communication.
-            Currently supported for q/k ranges on SM100/SM110.
+            Currently supported for q/k ranges on SM100/SM110; the forward
+            with head_dim 192 ignores it.
             Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
 
     Returns:
@@ -2085,7 +2086,8 @@ def flex_flash_attn_func(
         the merge traffic.
 
     sm_margin: number of SMs to reserve for concurrent kernels such as communication.
-        Currently supported for q/k ranges on SM100/SM110.
+        Currently supported for q/k ranges on SM100/SM110; the forward with
+        head_dim 192 ignores it.
         Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
