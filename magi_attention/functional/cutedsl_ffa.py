@@ -33,6 +33,7 @@ import weakref
 
 import torch
 
+from magi_attention import env
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -191,5 +192,8 @@ def cutedsl_bwd(
         dk_type=torch.float32,
         dv_type=torch.float32,
         sm_margin=sm_margin,
+        # AttnArg grants the dK/dV direct-store contract to GQA only with
+        # CatGQA, so the kernel must take the same flag.
+        cat_gqa=env.general.is_cat_gqa_enable(),
     )
     return dq, dk, dv, dsink
