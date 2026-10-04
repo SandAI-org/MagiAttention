@@ -846,10 +846,11 @@ def _flex_flash_attn_bwd(
         cat_gqa: one CTA per (K tile, kv head) walks the q heads of its group
             back to back, so dK/dV of the group accumulate in one CTA and are
             stored once: dense GQA skips the fp32 dK/dV reduction, and ranges
-            with ``disable_bwd_dkv_atomic_reduction`` accept GQA. The grid has
-            ``qhead_per_kvhead`` times fewer, longer CTAs, so it only pays off
-            for grids well above the SM count. Ignored for MHA. SM100/SM110
-            only; no block sparsity.
+            with ``disable_bwd_dkv_atomic_reduction`` accept GQA. There are
+            ``qhead_per_kvhead`` times fewer, longer tiles (a persistent launch
+            still caps its grid at ``num_sm - sm_margin``), so it only pays off
+            when the tile count is well above the SM count. Ignored for MHA.
+            SM100/SM110 only; no block sparsity.
         dq_type, dk_type, dv_type: GMEM dtype of each gradient output, one of
             fp32/fp16/bf16. ``None`` takes the dtype of the caller-provided
             buffer, else fp32 for dQ and for dK/dV on the reducing paths
@@ -863,10 +864,11 @@ def _flex_flash_attn_bwd(
             convert once in the postprocess; the single-writer dK/dV paths
             write the requested dtype from the epilogue.
         dq, dk, dv: optional caller-provided output buffers. On the reducing
-            paths (dQ always; dK/dV on dense GQA and ranges with atomic dK/dV)
-            the buffer is the reduction accumulator, so the gradient is added
-            onto its existing contents. The single-writer dK/dV paths
-            overwrite the buffer.
+            paths (dQ always; dK/dV on dense GQA without ``cat_gqa`` and on
+            ranges with atomic dK/dV) the buffer is the reduction accumulator,
+            so the gradient is added onto its existing contents. The
+            single-writer dK/dV paths (dense MHA, dense ``cat_gqa``, ranges
+            with ``disable_bwd_dkv_atomic_reduction``) overwrite the buffer.
         declared_q_full_coverage: q_ranges cover every Q token, so the dQ
             hole-zeroing sweep is skipped. Overlap is allowed. False is always
             safe.
@@ -2155,10 +2157,11 @@ def flex_flash_attn_func(
     cat_gqa: backward with one CTA per (K tile, kv head) that walks the q
         heads of the group back to back, so dK/dV accumulate in one CTA and are
         stored once. Dense GQA skips the fp32 dK/dV reduction, and ranges with
-        ``disable_bwd_dkv_atomic_reduction`` accept GQA. The grid has
-        ``qhead_per_kvhead`` times fewer, longer CTAs, so it only pays off for
-        grids well above the SM count. Ignored for MHA. SM100/SM110 only; no
-        block sparsity. The forward is unaffected.
+        ``disable_bwd_dkv_atomic_reduction`` accept GQA. There are
+        ``qhead_per_kvhead`` times fewer, longer tiles (a persistent launch still
+        caps its grid at ``num_sm - sm_margin``), so it only pays off when the
+        tile count is well above the SM count. Ignored for MHA. SM100/SM110
+        only; no block sparsity. The forward is unaffected.
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
