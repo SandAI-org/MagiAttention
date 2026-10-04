@@ -836,12 +836,20 @@ def _flex_flash_attn_bwd(
     declared_k_full_coverage: bool = False,
     dsink: torch.Tensor | None = None,
     sm_margin: int = 0,
+    cat_gqa: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Backward pass for FlexFlashAttention.
 
     Args:
         sink: the forward's ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
         dsink: optional fp32 ``[n_sink, num_head]`` buffer, overwritten.
+        cat_gqa: one CTA per (K tile, kv head) walks the q heads of its group
+            back to back, so dK/dV of the group accumulate in one CTA and are
+            stored once: dense GQA skips the fp32 dK/dV reduction, and ranges
+            with ``disable_bwd_dkv_atomic_reduction`` accept GQA. The grid has
+            ``qhead_per_kvhead`` times fewer, longer CTAs, so it only pays off
+            for grids well above the SM count. Ignored for MHA. SM100/SM110
+            only; no block sparsity.
         dq_type, dk_type, dv_type: dtype of each gradient, one of fp32/fp16/bf16.
             ``None`` takes the dtype of the caller-provided buffer, else on
             SM100/SM110 fp32 for dQ and for reduced dK/dV and the input dtype
@@ -1118,10 +1126,15 @@ def _flex_flash_attn_bwd(
         pack_gqa = qhead_per_kvhead > 1  # type: ignore[unreachable]
     # pack_gqa backward not yet supported in bwd
     pack_gqa = False
+    # MHA already has one dK/dV writer per kv head.
+    cat_gqa = cat_gqa and qhead_per_kvhead > 1
+    if cat_gqa:
+        assert major_arch in (10, 11), "cat_gqa is only implemented on SM100/SM110"
+        assert block_sparse_tensors is None, "cat_gqa does not support block sparsity"
     if disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11):
-        assert qhead_per_kvhead == 1, (
-            "disable_bwd_dkv_atomic_reduction requires MHA "
-            "(unique dK/dV writer per KV head)"
+        assert qhead_per_kvhead == 1 or cat_gqa, (
+            "disable_bwd_dkv_atomic_reduction requires a unique dK/dV writer "
+            "per KV head: MHA, or GQA with cat_gqa"
         )
 
     if softcap != 0.0:
@@ -1155,7 +1168,7 @@ def _flex_flash_attn_bwd(
 
     # Ranges force accum+postprocess even for MHA: overlapping K ranges
     # would clobber direct stores from multiple CTAs.
-    dKV_postprocess = qhead_per_kvhead > 1 or (
+    dKV_postprocess = (qhead_per_kvhead > 1 and not cat_gqa) or (
         has_ranges and major_arch in (10, 11) and not disable_bwd_dkv_atomic_reduction
     )
 
@@ -1378,7 +1391,7 @@ def _flex_flash_attn_bwd(
         torch.zeros(1, dtype=torch.int32, device=device) if sm_margin > 0 else None
     )
 
-    if deterministic and qhead_per_kvhead > 1:
+    if deterministic and qhead_per_kvhead > 1 and not cat_gqa:
         dK_semaphore = torch.zeros(
             batch_size,
             num_head_kv,
@@ -1533,6 +1546,7 @@ def _flex_flash_attn_bwd(
             use_dense_dqacc_for_ranges,
             k_ranges_sorted_disjoint,
             sm_margin > 0,
+            cat_gqa,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
             get_broadcast_dims(v),
@@ -1653,6 +1667,7 @@ def _flex_flash_attn_bwd(
                     use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
                     k_ranges_sorted_disjoint=k_ranges_sorted_disjoint,
                     is_persistent=sm_margin > 0,
+                    cat_gqa=cat_gqa,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
@@ -1894,6 +1909,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         out_dtype: torch.dtype | None = None,
         sm_margin: int = 0,
         return_max_logits: bool = False,
+        cat_gqa: bool = False,
     ):
         mask_types = normalize_mask_types(mask_types)
         flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
@@ -1955,6 +1971,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         # Derived from the fwd flag, not a second user flag.
         ctx.bwd_range_merge = bwd_range_merge_arg(range_merge)
         ctx.sm_margin = sm_margin
+        ctx.cat_gqa = cat_gqa
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         # Drop the direct aux_tensors reference on ctx; the real tensors are
@@ -2015,6 +2032,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             flex_attn_args=flex_attn_args,
             range_merge=ctx.bwd_range_merge,
             sm_margin=ctx.sm_margin,
+            cat_gqa=ctx.cat_gqa,
             # Autograd returns gradients in the input dtype.
             dq_type=q.dtype,
             dk_type=k.dtype,
@@ -2024,7 +2042,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if dsink is not None:
             dsink = dsink.to(sink.dtype)
         # NOTES: `sink` is the 11th positional input of `forward`
-        return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 10)
+        return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 11)
 
 
 def flex_flash_attn_func(
@@ -2050,6 +2068,7 @@ def flex_flash_attn_func(
     out_dtype: torch.dtype | None = None,
     sm_margin: int = 0,
     return_max_logits: bool = False,
+    cat_gqa: bool = False,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """Flex-flash-attention interface (dense / ranges).
 
@@ -2117,6 +2136,14 @@ def flex_flash_attn_func(
         excluded); ``-inf`` for a head without any attended pair. SM100/SM110
         only.
 
+    cat_gqa: backward with one CTA per (K tile, kv head) that walks the q
+        heads of the group back to back, so dK/dV accumulate in one CTA and are
+        stored once. Dense GQA skips the fp32 dK/dV reduction, and ranges with
+        ``disable_bwd_dkv_atomic_reduction`` accept GQA. The grid has
+        ``qhead_per_kvhead`` times fewer, longer CTAs, so it only pays off for
+        grids well above the SM count. Ignored for MHA. SM100/SM110 only; no
+        block sparsity. The forward is unaffected.
+
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
         ``mask_mod`` / ``aux_tensors``) and block-sparse
@@ -2145,6 +2172,7 @@ def flex_flash_attn_func(
         out_dtype,
         sm_margin,
         return_max_logits,
+        cat_gqa,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
