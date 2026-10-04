@@ -335,7 +335,10 @@ class FFAFwdSm100:
         if not disable_fwd_atomic_reduction:
             # Overlapping Q ranges merge under range locks in the correction
             # epilogue; that path only exists on the varlen/STG store route.
-            assert is_varlen_q and not is_split_kv and not pack_gqa
+            assert is_varlen_q and not is_split_kv
+            # A packed stage tile must start on a token boundary: the range
+            # locks and the per-thread LSE merge index the packed rows by tile.
+            assert not pack_gqa or m_block_size % qhead_per_kvhead == 0
             # The prev-O gmem read is unpredicated along head_dim.
             assert not self.check_hdim_v_oob
         self.sO_borrow_kv = self.use_tma_KV and fwd_fp32_o_borrows_kv_smem(
@@ -4562,8 +4565,14 @@ class FFAFwdSm100:
             mLSE_cur_atomic = None
             if const_expr(not self.disable_fwd_atomic_reduction):
                 assert mLSE is not None
+                # Packed mode 0 is (q head in group, token).
+                lse_offset = (
+                    seqlen_info.offset_q
+                    if const_expr(not self.pack_gqa)
+                    else (0, seqlen_info.offset_q)
+                )
                 mLSE_cur_atomic = cute.domain_offset(
-                    (seqlen_info.offset_q,), mLSE[None, head_idx]
+                    (lse_offset,), mLSE[None, head_idx]
                 )
 
             # --- Init softmax stats ---
@@ -4856,17 +4865,27 @@ class FFAFwdSm100:
                             if not acc_O_mn_row_is_zero_or_nan
                             else -Float32.inf
                         )
-                        row_ok = (
-                            tidx < seqlen_info.seqlen_q - m_tile_idx * self.m_block_size
-                        )
+                        # Under PackGQA the rows are packed (token, q head)
+                        # pairs, G * token + g, of the kv head head_idx.
+                        num_rows = seqlen_info.seqlen_q
+                        row_offset = seqlen_info.offset_q
+                        if const_expr(self.pack_gqa):
+                            num_rows = num_rows * self.qhead_per_kvhead
+                            row_offset = row_offset * self.qhead_per_kvhead
+                            # Prev-O view of this stage tile, read by row tidx.
+                            gO_stage = cute.local_tile(
+                                mO_cur,
+                                (self.m_block_size, self.head_dim_v_padded),
+                                (m_tile_idx, 0),
+                            )
+                        row_ok = tidx < num_rows - m_tile_idx * self.m_block_size
 
-                        lock_offset = (
-                            seqlen_info.offset_q + m_tile_idx * self.m_block_size
-                        )
+                        # The lock identity is the global (packed) row block,
+                        # so writers of one physical O row share a lock
+                        # whatever their range offsets.
+                        lock_offset = row_offset + m_tile_idx * self.m_block_size
                         # Skip lock/release for phantom stages (no valid rows).
-                        tile_has_rows = (
-                            seqlen_info.seqlen_q > m_tile_idx * self.m_block_size
-                        )
+                        tile_has_rows = num_rows > m_tile_idx * self.m_block_size
                         if tile_has_rows:
                             if tidx == 0:
                                 self._acquire_range_locks(
