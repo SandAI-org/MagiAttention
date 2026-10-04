@@ -214,6 +214,65 @@ class TestMergeRange(TestCase):
         self.assertTrue(torch.equal(sorted_inner_ranges, sorted_inner_ranges_ref))
         self.assertTrue(torch.equal(range_map, range_map_ref))
 
+    def _assert_unique_pairs_contract(
+        self, sorted_pairs: torch.Tensor, pairs, cu, count
+    ) -> None:
+        """Valid groups match torch.unique_consecutive; the padded tail holds
+        empty [0, 0] pairs and CSR pointers equal to n, i.e. empty groups."""
+        n = sorted_pairs.shape[0]
+        ref, counts = torch.unique_consecutive(sorted_pairs, dim=0, return_counts=True)
+        u = ref.shape[0]
+        self.assertEqual(int(count), u)
+        self.assertEqual(tuple(pairs.shape), (n, 2))
+        self.assertEqual(tuple(cu.shape), (n + 1,))
+        self.assertTrue(torch.equal(pairs[:u], ref))
+        ref_cu = torch.zeros(u + 1, dtype=torch.int32, device=cu.device)
+        ref_cu[1:] = torch.cumsum(counts, dim=0)
+        self.assertTrue(torch.equal(cu[: u + 1], ref_cu))
+        self.assertTrue(bool((pairs[u:] == 0).all()))
+        self.assertTrue(bool((cu[u:] == n).all()))
+
+    def test_unique_consecutive_pairs_pads_tail(self):
+        """Callers walk all n output slots, so the tail must be well defined
+        even when the caching allocator hands back dirty memory."""
+        device = torch.cuda.current_device()
+        sorted_pairs = torch.tensor(
+            [[0, 4], [0, 4], [0, 4], [4, 9], [4, 9], [9, 12], [9, 12], [9, 12]],
+            dtype=torch.int32,
+            device=device,
+        )
+        n = sorted_pairs.shape[0]
+        for _ in range(4):
+            # Freed blocks of the output sizes, filled with garbage, are what
+            # the allocator reuses for the outputs below.
+            dirty = [
+                torch.full((n, 2), 0x7A5A5A5A, dtype=torch.int32, device=device),
+                torch.full((n + 1,), -7, dtype=torch.int32, device=device),
+            ]
+            del dirty
+            pairs, cu, count = magi_attn_ext.unique_consecutive_pairs(sorted_pairs)
+            self._assert_unique_pairs_contract(sorted_pairs, pairs, cu, count)
+
+    def test_unique_consecutive_pairs_in_cuda_graph(self):
+        """Every launch goes to the caller's current stream: a launch on the
+        legacy default stream would break stream capture."""
+        device = torch.cuda.current_device()
+        n = 1 << 12
+        starts = torch.arange(n, dtype=torch.int32, device=device) // 3 * 8
+        sorted_pairs = torch.stack([starts, starts + 8], dim=1)
+        # Warm up on a side stream, as torch.cuda.graph requires.
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            magi_attn_ext.unique_consecutive_pairs(sorted_pairs)
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            pairs, cu, count = magi_attn_ext.unique_consecutive_pairs(sorted_pairs)
+        graph.replay()
+        torch.cuda.synchronize()
+        self._assert_unique_pairs_contract(sorted_pairs, pairs, cu, count)
+
 
 def _make_mask(q_ranges, k_ranges, attn_type_map, total_q, total_k):
     """Build a full attention mask from ranges + attn_type_map for reference computation."""
