@@ -102,19 +102,25 @@ class FFAFwdPostProcess:
                     o_scale = cute.math.exp2((lse - lse_final) * LOG2_E, fastmath=True)
                 mLSE[row, head_idx] = lse_final
 
-            if is_empty or const_expr(self.has_sink):
-                gO_row = mO[row, head_idx, None]
-                num_vecs = self.head_dim_v // self.vec_elems
+            gO_row = mO[row, head_idx, None]
+            num_vecs = self.head_dim_v // self.vec_elems
+            if is_empty:
+                # Store zeros without reading O: an uncovered row's O is
+                # uninitialized and may hold NaN/Inf, which a 0 scale keeps.
                 for i in cutlass.range(num_vecs, unroll_full=True):
                     gO_vec = cute.local_tile(gO_row, (self.vec_elems,), (i,))
                     rO = cute.make_rmem_tensor((self.vec_elems,), self.o_dtype)
-                    if const_expr(self.has_sink):
+                    rO.fill(0)
+                    cute.autovec_copy(rO, gO_vec)
+            if const_expr(self.has_sink):
+                if not is_empty:
+                    for i in cutlass.range(num_vecs, unroll_full=True):
+                        gO_vec = cute.local_tile(gO_row, (self.vec_elems,), (i,))
+                        rO = cute.make_rmem_tensor((self.vec_elems,), self.o_dtype)
                         cute.autovec_copy(gO_vec, rO)
                         for j in cutlass.range(self.vec_elems, unroll_full=True):
                             rO[j] = self.o_dtype(Float32(rO[j]) * o_scale)
-                    else:
-                        rO.fill(0)
-                    cute.autovec_copy(rO, gO_vec)
+                        cute.autovec_copy(rO, gO_vec)
 
 
 def _compile_fwd_postprocess(
