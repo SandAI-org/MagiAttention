@@ -418,8 +418,9 @@ class FFAFwdSm100:
             ), f"CLC cluster M != cta_group_size: {self.cluster_shape_mn}, {self.cta_group_size}"
 
         self.sched_stages = 1
-        if is_varlen_q and is_persistent:
-            assert self.is_persistent and not self.use_clc_scheduler
+        # overlap_sO_sQ demotes to one tile per CTA, which ignores sm_margin.
+        if is_varlen_q and self.is_persistent:
+            assert not self.use_clc_scheduler
             self.scheduling_mode = SchedulingMode.DYNAMIC
         elif self.use_clc_scheduler:
             self.scheduling_mode = SchedulingMode.CLC
@@ -1228,7 +1229,11 @@ class FFAFwdSm100:
             # 2-CTA range forward uses cluster indices even when persistent.
             use_cluster_idx=(not self.is_persistent or self.is_varlen_q)
             and self.cta_group_size > 1,
-            mTileCounter=mTileCounter,
+            mTileCounter=(
+                mTileCounter
+                if const_expr(self.scheduling_mode == SchedulingMode.DYNAMIC)
+                else None
+            ),
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(
             tile_sched_args, scheduling_mode=self.scheduling_mode
