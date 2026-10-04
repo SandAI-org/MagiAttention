@@ -421,9 +421,19 @@ def _flex_flash_attn_fwd(
         ), f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
-    seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
+    # Q rows per relation as the MMA sees them, which sizes q_stage and the
+    # configs derived from it. The range atomic path counts them by the
+    # effective pack state; the other paths keep the G-scaled count.
+    q_rows_for_config = max_seqlen_q * qhead_per_kvhead
+    if (
+        major_arch in (10, 11)
+        and has_ranges
+        and not use_block_sparsity
+        and not disable_fwd_atomic_reduction
+    ):
+        q_rows_for_config = max_seqlen_q * (qhead_per_kvhead if pack_gqa else 1)
     if major_arch == 10:
-        q_stage = 2 if seqlen_q_packgqa > tile_m else 1
+        q_stage = 2 if q_rows_for_config > tile_m else 1
     else:
         q_stage = 1
 
@@ -435,7 +445,7 @@ def _flex_flash_attn_fwd(
         and not use_block_sparsity
         and int(math.ceil(head_dim / 16) * 16) in [128, 192]
         and int(math.ceil(head_dim_v / 16) * 16) == 128
-        and seqlen_q_packgqa > 2 * tile_m
+        and q_rows_for_config > 2 * tile_m
         and (tile_m % qhead_per_kvhead == 0 or not pack_gqa)
         and (
             not has_ranges
