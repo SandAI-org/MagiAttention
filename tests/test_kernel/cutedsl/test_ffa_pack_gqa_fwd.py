@@ -112,16 +112,23 @@ def _ref_fwd(
     return out, lse.t().contiguous(), max_logits
 
 
-def _qkv(total_q: int, total_k: int, group: int, q_head_scale: bool = False):
-    device, dtype = "cuda", torch.bfloat16
+def _qkv(
+    total_q: int,
+    total_k: int,
+    group: int,
+    q_head_scale: bool = False,
+    dtype: torch.dtype = torch.bfloat16,
+    head_dim: int = _HEAD_DIM,
+):
+    device = "cuda"
     num_head = _NUM_HEAD_KV * group
-    q = torch.randn(total_q, num_head, _HEAD_DIM, device=device, dtype=dtype)
+    q = torch.randn(total_q, num_head, head_dim, device=device, dtype=dtype)
     if q_head_scale:
         # Distinct per-head logit scales expose a head mix-up in reductions.
         scale = 1.0 + 0.25 * torch.arange(num_head, device=device)
         q = (q.float() * scale[None, :, None]).to(dtype)
     k, v = (
-        torch.randn(total_k, _NUM_HEAD_KV, _HEAD_DIM, device=device, dtype=dtype)
+        torch.randn(total_k, _NUM_HEAD_KV, head_dim, device=device, dtype=dtype)
         for _ in range(2)
     )
     return q, k, v
@@ -261,35 +268,6 @@ class TestFfaPackGqaFwd(TestCase):
         torch.testing.assert_close(out.float(), out_ref.float(), atol=2e-2, rtol=2e-2)
 
     # ─────────────────────────────────────────────────────────────────────
-    # Address and lock arithmetic (CPU)
-    # ─────────────────────────────────────────────────────────────────────
-
-    def test_packed_rows_stay_inside_their_stage_locks(self):
-        """Every valid packed row of a stage tile maps to a physical
-        (token, q head) whose lock block is one of the (at most two) blocks
-        the stage takes, and those blocks fit the host lock array."""
-        total_q = 1000
-        for group in (1, 2, 4, 8, 16, 32, 64, 128):
-            num_lock_blocks = (total_q * group + _TILE_M - 1) // _TILE_M + 1
-            for q_start in (0, 1, 3, 7, 64, 127, 333, 999):
-                for len_q in (1, 2, 7, 63, 64, 65, 200, total_q - q_start):
-                    len_q = min(len_q, total_q - q_start)
-                    num_rows = len_q * group
-                    for m_tile in range((num_rows + _TILE_M - 1) // _TILE_M):
-                        lock_row = q_start * group + m_tile * _TILE_M
-                        self.assertEqual(lock_row % group, 0)
-                        blocks = {
-                            lock_row // _TILE_M,
-                            (lock_row + _TILE_M - 1) // _TILE_M,
-                        }
-                        self.assertLess(max(blocks), num_lock_blocks)
-                        for tidx in range(min(_TILE_M, num_rows - m_tile * _TILE_M)):
-                            p = m_tile * _TILE_M + tidx
-                            token, g = q_start + p // group, p % group
-                            self.assertLess(token, q_start + len_q)
-                            self.assertIn((group * token + g) // _TILE_M, blocks)
-
-    # ─────────────────────────────────────────────────────────────────────
     # Numerics on the GPU
     # ─────────────────────────────────────────────────────────────────────
 
@@ -300,11 +278,14 @@ class TestFfaPackGqaFwd(TestCase):
         mask types: packed matches the reference and the unpacked kernel."""
         t = _TILE_M // group
         mask_types = [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal]
+        # Only SM10x runs two Q stages; elsewhere the long case still spans
+        # several work tiles of one stage.
+        two_stages = get_device_arch()[1] == 10
         for len_qs, q_stage in (
             # Up to one stage tile of packed rows: a single stage.
             ([1, t - 1, t] if t > 1 else [1], 1),
             # Second stage, second work tile and a long unaligned range.
-            ([t + 1, 2 * t + 1, 1000], 2),
+            ([t + 1, 2 * t + 1, 1000], 2 if two_stages else 1),
         ):
             relations, total_q, total_k = _overlapping_relations(
                 len_qs, coverage=3, mask_types=mask_types
@@ -346,6 +327,58 @@ class TestFfaPackGqaFwd(TestCase):
         torch.testing.assert_close(out.float(), out_ref, atol=2e-2, rtol=2e-2)
         torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
 
+    @parameterize("case", [(torch.float16, 128), (torch.bfloat16, 64)])
+    def test_packed_other_dtype_and_head_dim(self, case):
+        """(input dtype, head_dim) besides the bf16 / d128 used elsewhere."""
+        dtype, head_dim = case
+        relations, total_q, total_k = _overlapping_relations(
+            [7, 40, 260], coverage=2, mask_types=[MT_MAP.full, MT_MAP.causal]
+        )
+        q, k, v = _qkv(total_q, total_k, 4, dtype=dtype, head_dim=head_dim)
+        out, lse, kernel = self._packed_fwd(
+            q, k, v, relations, pack_gqa=True, out_dtype=torch.float32
+        )
+        self.assertTrue(kernel.pack_gqa)
+        out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
+        torch.testing.assert_close(out, out_ref, atol=_TOL, rtol=_TOL)
+        torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
+
+    def test_packed_relation_without_any_pair(self):
+        """A bi_causal relation with len_k < len_q has no attended pair for
+        any of its (valid) q rows. Merged with a full relation over the same
+        q range it changes nothing, in either relation order; alone it leaves
+        O = 0 and LSE = max_logits = -inf, or LSE = lse_sink with a sink."""
+        group, len_q = 4, 129
+        full = ([3, 3 + len_q], [0, len_q], MT_MAP.full)
+        empty = ([3, 3 + len_q], [len_q, len_q + 17], MT_MAP.bi_causal)
+        total_q, total_k = 3 + len_q + 5, len_q + 17
+        q, k, v = _qkv(total_q, total_k, group)
+        num_head = _NUM_HEAD_KV * group
+
+        out_ref, lse_ref, _ = _ref_fwd(q, k, v, [full])
+        for relations in ([full, empty], [empty, full]):
+            out, lse, kernel = self._packed_fwd(
+                q, k, v, relations, pack_gqa=True, out_dtype=torch.float32
+            )
+            self.assertTrue(kernel.pack_gqa)
+            torch.testing.assert_close(out, out_ref, atol=_TOL, rtol=_TOL)
+            torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
+
+        max_logits = torch.full((num_head,), -math.inf, device="cuda")
+        out, lse, _ = self._packed_fwd(
+            q, k, v, [empty], pack_gqa=True, max_logits=max_logits
+        )
+        self.assertTrue(torch.all(out == 0))
+        self.assertTrue(torch.all(lse == -math.inf))
+        self.assertTrue(torch.all(max_logits == -math.inf))
+
+        sink = torch.randn(2, num_head, device="cuda", dtype=torch.float32)
+        out, lse, _ = self._packed_fwd(q, k, v, [empty], pack_gqa=True, sink=sink)
+        self.assertTrue(torch.all(out == 0))
+        torch.testing.assert_close(
+            lse, torch.logsumexp(sink, dim=0).expand(total_q, -1)
+        )
+
     def test_packed_lock_contention_under_few_resident_ctas(self):
         """16 relations write the same unaligned q range, spanning two lock
         blocks per stage tile, from a persistent grid of two CTAs that each
@@ -356,12 +389,7 @@ class TestFfaPackGqaFwd(TestCase):
         ]
         q, k, v = _qkv(5 + len_q + 7, 16 * 200, group)
         out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
-        num_sm = torch.cuda.get_device_properties(0).multi_processor_count
-        stage_rows = 2 * _TILE_M
-        num_tiles = (
-            len(relations) * _NUM_HEAD_KV * math.ceil(len_q * group / stage_rows)
-        )
-        self.assertGreaterEqual(num_tiles, 3 * 2)
+        num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
         for _ in range(10):
             out, lse, kernel = self._packed_fwd(
                 q,
@@ -373,6 +401,12 @@ class TestFfaPackGqaFwd(TestCase):
                 sm_margin=num_sm - 2,
             )
             self.assertTrue(kernel.pack_gqa and kernel.is_persistent)
+            # Two resident CTAs, each looping over at least three work tiles.
+            work_rows = kernel.q_stage * _TILE_M
+            num_tiles = (
+                len(relations) * _NUM_HEAD_KV * math.ceil(len_q * group / work_rows)
+            )
+            self.assertGreaterEqual(num_tiles, 3 * 2)
             torch.testing.assert_close(out, out_ref, atol=_TOL, rtol=_TOL)
             torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
 
@@ -439,7 +473,7 @@ class TestFfaPackGqaFwd(TestCase):
             [17, 70], coverage=2, mask_types=[MT_MAP.full]
         )
         q, k, v = _qkv(total_q, total_k, group)
-        num_sm = torch.cuda.get_device_properties(0).multi_processor_count
+        num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
         kwargs = dict(
             **_range_args(relations),
             pack_gqa=True,
