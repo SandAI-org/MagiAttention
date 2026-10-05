@@ -25,9 +25,11 @@ forward output and the backward input; ``sink`` is the dist contract's
 ``[n_sink, nhq]`` fp32 with layout "sh", and ``cutedsl_bwd`` returns the fp32
 partial ``dsink`` of the same shape (``None`` without ``sink``).
 
-Limitation: deterministic mode is rejected by ``dist_attn_runtime_mgr`` for
-the CUTEDSL backend, because ``validate_range_feature_support`` rejects
-deterministic backward with ranges.
+``deterministic`` is forwarded to both kernels, which then merge every
+overlapping O, dQ and dK/dV row of this call in a fixed order. This covers
+the local attention of one stage; the communication reductions of the dist
+runtime are outside it. The range kernels support it at head_dim 128 on
+SM100/SM110 and raise ``NotImplementedError`` otherwise.
 """
 
 import torch
@@ -54,6 +56,7 @@ def cutedsl_fwd(
     return_max_logits: bool = False,
     max_logits: torch.Tensor | None = None,
     pack_gqa: bool | None = None,
+    deterministic: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Forward wrapper: returns (out, lse, max_logits) with lse in the dist
     contract's (sq, nhq) layout. With ``return_max_logits`` the fp32 ``[nhq]``
@@ -105,6 +108,7 @@ def cutedsl_fwd(
         sm_margin=sm_margin,
         max_logits=max_logits,
         pack_gqa=pack_gqa,
+        deterministic=deterministic,
     )
 
     return out, lse, max_logits
@@ -123,6 +127,7 @@ def cutedsl_bwd(
     dq_acc: torch.Tensor | None = None,
     sink: torch.Tensor | None = None,
     sm_margin: int = 0,
+    deterministic: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Partial dq/dk/dv in fp32 for one dist-attn stage, plus dsink if ``sink`` is given.
 
@@ -159,7 +164,7 @@ def cutedsl_bwd(
         max_seqlen_k=attn_arg.k_ranges.max_seqlen,
         softmax_scale=softmax_scale,
         softcap=softcap,
-        deterministic=False,  # the kernel raises NotImplementedError for ranges + deterministic
+        deterministic=deterministic,
         declared_q_full_coverage=q_full_coverage,
         declared_k_full_coverage=k_full_coverage,
         disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction

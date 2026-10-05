@@ -1230,6 +1230,7 @@ class DistAttnRuntime:
                     sm_margin=self.fwd_sm_margin,
                     return_max_logits=return_max_logits,
                     max_logits=max_logits_acc,  # directly reduce to max_logits_acc
+                    deterministic=self.deterministic,
                 )
                 meta = AttnForwardMeta(lse=partial_lse, max_logits=partial_max_logits)
             case MagiAttentionKernelBackend.FFA:
@@ -1361,6 +1362,7 @@ class DistAttnRuntime:
                     # thus we only compute it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
                     sm_margin=self.bwd_sm_margin,
+                    deterministic=self.deterministic,
                 )
                 partial_dkv = self._maybe_concat(
                     partial_dk, partial_dv, need_concat=self.concat_dkv
