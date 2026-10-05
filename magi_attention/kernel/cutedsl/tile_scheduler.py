@@ -111,9 +111,10 @@ class ClcState(ParamsBase):
 class DynamicState(ParamsBase):
     """Runtime state of the DYNAMIC persistent schedule.
 
-    Each cluster starts with its grid-assigned tile. Its leader's scheduler
-    warp claims subsequent tiles from a global counter and publishes a 4-byte
-    index to every CTA. All warps consume each index before the slot is reused.
+    Each cluster starts with its grid-assigned tile, or with a claimed one
+    under ``claim_first_tile``. Its leader's scheduler warp claims the other
+    tiles from a global counter and publishes a 4-byte index to every CTA.
+    All warps consume each index before the slot is reused.
     """
 
     _pipeline: PipelineClcFetchAsync
@@ -138,13 +139,15 @@ class DynamicState(ParamsBase):
         self._pipeline.producer_acquire(self._producer_state, loc=loc, ip=ip)
 
     def publish(self, unit: Int32, cluster_size: int):
-        """Store ``unit`` into every CTA's current response slot and advance."""
+        """Store ``unit`` into every CTA's current response slot."""
         full_mbar_ptr = self._pipeline.producer_get_barrier(self._producer_state)
         slot_ptr = self._response_ptr + self._producer_state.index
         with cute.arch.elect_one():
             for cta_rank in range(cluster_size):
                 store_shared_remote(unit, slot_ptr, full_mbar_ptr, Int32(cta_rank))
-        self._producer_state.advance()
+
+    def producer_advance(self, *, loc=None, ip=None):
+        self._producer_state.advance(loc=loc, ip=ip)
 
     def read_published(self) -> Int32:
         """Read the current slot; call between consumer_wait and consumer_release."""
@@ -159,6 +162,8 @@ class DynamicState(ParamsBase):
 
     def consumer_release(self, *, loc=None, ip=None):
         self._pipeline.consumer_release(self._consumer_state, loc=loc, ip=ip)
+
+    def consumer_advance(self, *, loc=None, ip=None):
         self._consumer_state.advance(loc=loc, ip=ip)
 
     def producer_tail(self, *, loc=None, ip=None):
@@ -189,7 +194,9 @@ class TileSchedulerProtocol(Protocol):
 
     One scheduler object is shared by every warp-role region of a kernel, so
     ``initial_work_tile_info`` must derive the first tile from the CTA's own
-    coordinates and never read state that another role's walk advanced.
+    coordinates, or from the first published slot under DYNAMIC
+    ``claim_first_tile``, and never read state that another role's walk
+    advanced.
     """
 
     def get_current_work(self) -> WorkTileInfo:
@@ -254,6 +261,13 @@ class TileSchedulerArguments(ParamsBase):
     use_cluster_idx: cutlass.Constexpr[bool] = False
     # DYNAMIC schedule only: [1] int32 tile counter, zero before the launch.
     mTileCounter: Optional[cute.Tensor] = None
+    # DYNAMIC schedule only: every cluster also claims its first tile from
+    # mTileCounter, so the t-th claim is cluster unit t. A unit is then only
+    # held once every smaller unit is held by a running cluster, which the
+    # deterministic range-lock chain needs: a tile waits on smaller units
+    # only. With False, units below the grid's cluster count go to the
+    # clusters by index, and a cluster that has not started yet holds one.
+    claim_first_tile: cutlass.Constexpr[bool] = False
 
 
 class SingleTileScheduler:
@@ -921,6 +935,7 @@ class SingleTileVarlenScheduler:
         scheduling_mode: cutlass.Constexpr[SchedulingMode] = SchedulingMode.STATIC
         sm_margin: Optional[Int32] = None
         mTileCounter: Optional[cute.Tensor] = None
+        claim_first_tile: cutlass.Constexpr[bool] = False
 
         @staticmethod
         @cute.jit
@@ -945,6 +960,9 @@ class SingleTileVarlenScheduler:
             assert (
                 not args.is_persistent or args.sm_margin is not None
             ), "a persistent varlen grid is sized by its SM reservation"
+            assert (
+                not args.claim_first_tile or scheduling_mode == SchedulingMode.DYNAMIC
+            ), "only the DYNAMIC schedule claims tiles from a counter"
             size_l2 = 50 * 1024 * 1024  # 50 MB for K & V
             # if backward, this is qdo block size
             kv_block_size = (
@@ -996,6 +1014,7 @@ class SingleTileVarlenScheduler:
                 scheduling_mode=scheduling_mode,
                 sm_margin=args.sm_margin,
                 mTileCounter=args.mTileCounter,
+                claim_first_tile=args.claim_first_tile,
             )
 
     def __init__(
@@ -1064,7 +1083,9 @@ class SingleTileVarlenScheduler:
         assert (params.scheduling_mode == SchedulingMode.DYNAMIC) == (
             dynamic is not None
         ), "the DYNAMIC schedule and its DynamicState come together"
-        # The first tile comes from the CTA's grid coordinates.
+        # The first tile comes from the CTA's grid coordinates; under
+        # claim_first_tile, initial_work_tile_info replaces it with the
+        # first published claim.
         tile_idx, split_idx, _ = cute.arch.block_idx()
         return SingleTileVarlenScheduler(
             params, tile_idx, split_idx, dynamic=dynamic, loc=loc, ip=ip
@@ -1355,8 +1376,9 @@ class SingleTileVarlenScheduler:
     def _claim_unit(self) -> Int32:
         """Claim the next cluster-unit tile index (DYNAMIC; whole scheduler warp).
 
-        Units below the grid's cluster count are the clusters' first tiles
-        (their own cluster indices), so claimed units start right after them.
+        Without claim_first_tile, units below the grid's cluster count are the
+        clusters' first tiles (their own cluster indices), so claimed units
+        start right after them. With it, the claim is the unit itself.
         """
         params = self.params
         assert params.mTileCounter is not None
@@ -1366,10 +1388,33 @@ class SingleTileVarlenScheduler:
                 cute.arch.atomic_add(params.mTileCounter.iterator, Int32(1))
             )
         claimed = cute.arch.shuffle_sync(claimed, 0)
+        if const_expr(params.claim_first_tile):
+            return claimed
         return claimed + cute.arch.grid_dim()[0] // params.cluster_shape_m
+
+    def _consume_published_unit(self, *, loc=None, ip=None) -> WorkTileInfo:
+        """Read the unit in the current response slot and map it (DYNAMIC).
+
+        Leaves the consumer state on the slot; the caller advances it.
+        """
+        assert self.dynamic is not None  # mypy
+        self.dynamic.consumer_wait(loc=loc, ip=ip)
+        unit = self.dynamic.read_published()
+        self.dynamic.consumer_release(loc=loc, ip=ip)
+        cluster_size = self.params.cluster_shape_m
+        self._tile_idx = unit * cluster_size + cute.arch.block_idx()[0] % cluster_size
+        return self._varlen_coord_map()
 
     @cute.jit
     def initial_work_tile_info(self, *, loc=None, ip=None):
+        if const_expr(
+            self.params.scheduling_mode == SchedulingMode.DYNAMIC
+            and self.params.claim_first_tile
+        ):
+            # The leader's scheduler warp publishes the first claim before it
+            # consumes; the consumer state stays on this slot, see
+            # claim_first_work.
+            return self._consume_published_unit(loc=loc, ip=ip)
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             clc_work = self.clc.initial_work_tile_info()
             # See get_current_work for why grid_dim and local-then-assign.
@@ -1388,10 +1433,36 @@ class SingleTileVarlenScheduler:
             self.clc.prefetch_next_work(loc=loc, ip=ip)
         elif const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
             assert self.dynamic is not None  # mypy
-            # Acquiring the slot before claiming keeps a cluster at most one
-            # claimed tile ahead of the tile its slowest warp is processing.
-            self.dynamic.producer_acquire(loc=loc, ip=ip)
-            self.dynamic.publish(self._claim_unit(), self.params.cluster_shape_m)
+            if const_expr(self.params.claim_first_tile):
+                # Step off the slot claim_first_work or the last call filled.
+                self.dynamic.producer_advance(loc=loc, ip=ip)
+            self._claim_and_publish(loc=loc, ip=ip)
+            if const_expr(not self.params.claim_first_tile):
+                self.dynamic.producer_advance(loc=loc, ip=ip)
+
+    def _claim_and_publish(self, *, loc=None, ip=None):
+        assert self.dynamic is not None  # mypy
+        # Acquiring the slot before claiming keeps a cluster at most one
+        # claimed tile ahead of the tile its slowest warp is processing.
+        self.dynamic.producer_acquire(loc=loc, ip=ip)
+        self.dynamic.publish(self._claim_unit(), self.params.cluster_shape_m)
+
+    def claim_first_work(self, *, loc=None, ip=None):
+        """Producer side of claim_first_tile: claim and publish the first unit.
+
+        Called once by the leader's scheduler warp before its own
+        initial_work_tile_info; every warp of the cluster, the scheduler warp
+        included, then reads it there. No-op without claim_first_tile.
+
+        Under claim_first_tile the producer and consumer states stay on the
+        slot last filled or read and are advanced at the start of the next
+        prefetch / advance, so neither this call nor initial_work_tile_info
+        advances them. Every warp-role region shares this object, and an
+        in-place advance outside the role's tile loop would hand that
+        region's SSA value to the regions traced after it.
+        """
+        if const_expr(self.params.claim_first_tile):
+            self._claim_and_publish(loc=loc, ip=ip)
 
     def advance_to_next_work(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
@@ -1401,14 +1472,13 @@ class SingleTileVarlenScheduler:
             return work
         if const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
             assert self.dynamic is not None  # mypy
-            self.dynamic.consumer_wait(loc=loc, ip=ip)
-            unit = self.dynamic.read_published()
-            self.dynamic.consumer_release(loc=loc, ip=ip)
-            cluster_size = self.params.cluster_shape_m
-            self._tile_idx = (
-                unit * cluster_size + cute.arch.block_idx()[0] % cluster_size
-            )
-            return self._varlen_coord_map()
+            if const_expr(self.params.claim_first_tile):
+                # Step off the slot the previous call read, see claim_first_work.
+                self.dynamic.consumer_advance(loc=loc, ip=ip)
+                return self._consume_published_unit(loc=loc, ip=ip)
+            work = self._consume_published_unit(loc=loc, ip=ip)
+            self.dynamic.consumer_advance(loc=loc, ip=ip)
+            return work
         self._is_first_block = False
         return self.get_current_work()
 
@@ -1417,6 +1487,9 @@ class SingleTileVarlenScheduler:
             self.clc.producer_tail(loc=loc, ip=ip)
         elif const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
             assert self.dynamic is not None  # mypy
+            if const_expr(self.params.claim_first_tile):
+                # producer_tail expects the state on the next unused slot.
+                self.dynamic.producer_advance(loc=loc, ip=ip)
             self.dynamic.producer_tail(loc=loc, ip=ip)
 
     def _mlir_objs(self) -> list:
