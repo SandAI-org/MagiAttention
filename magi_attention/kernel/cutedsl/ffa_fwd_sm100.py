@@ -4993,6 +4993,7 @@ class FFAFwdSm100:
                                         chain_scanned,
                                         batch_idx,
                                         self.m_block_size,
+                                        last_writer=lambda r: r + 1,
                                     )
                                 chain_scanned = batch_idx
                                 if tidx == 0:
