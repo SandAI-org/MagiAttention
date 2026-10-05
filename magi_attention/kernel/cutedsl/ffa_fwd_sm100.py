@@ -241,6 +241,10 @@ class FFAFwdSm100:
         disable_fwd_atomic_reduction: bool = False,
         # GMEM O dtype on the atomic path.
         o_dtype: Type[cutlass.Numeric] = Float32,
+        # Deterministic range atomic forward: clusters claim every tile, the
+        # first included, in ticket order from the tile counter, the order in
+        # which the range-lock chain merges overlapping partials.
+        deterministic: bool = False,
         debug_print: bool = False,
     ):
         self.o_dtype = o_dtype
@@ -442,6 +446,20 @@ class FFAFwdSm100:
             SchedulingMode.CLC,
             SchedulingMode.DYNAMIC,
         )
+        self.deterministic = deterministic
+        if deterministic:
+            # The chain's progress argument needs every tile handed out by
+            # one zero-based counter, which only the DYNAMIC schedule has.
+            assert (
+                self.scheduling_mode == SchedulingMode.DYNAMIC
+            ), "deterministic forward needs persistent range scheduling"
+            assert not disable_fwd_atomic_reduction and not is_split_kv
+            # A packed stage mixes rows of several q heads; the lock chain
+            # keys its rows on (q head, token).
+            assert not pack_gqa, "deterministic forward does not pack GQA"
+            assert (
+                head_dim == 128 and head_dim_v == 128
+            ), "deterministic forward is defined at head_dim 128 only"
 
         if is_varlen_q:
             self.TileScheduler = SingleTileVarlenScheduler
@@ -1249,6 +1267,7 @@ class FFAFwdSm100:
                 if const_expr(self.scheduling_mode == SchedulingMode.DYNAMIC)
                 else None
             ),
+            claim_first_tile=self.deterministic,
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(
             tile_sched_args, scheduling_mode=self.scheduling_mode
@@ -5896,6 +5915,9 @@ class FFAFwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
+        if const_expr(self.deterministic):
+            assert isinstance(tile_scheduler, SingleTileVarlenScheduler)
+            tile_scheduler.claim_first_work()
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             tile_scheduler.prefetch_next_work()
