@@ -961,6 +961,14 @@ def _flex_flash_attn_bwd(
             the dK/dV hole-zeroing sweep and bounds the scheduler by
             ``total_k`` (``sum(len) <= total_k``). Overlapping k ranges must
             not set this.
+        deterministic: on q/k ranges, merge the dQ partials of every
+            (relation, K tile) into dQ in that order, so the gradients are
+            bitwise identical across runs and independent of ``sm_margin``.
+            The launch is persistent whatever ``sm_margin``. SM100/SM110,
+            head_dim 128 only, without RangeMerge or block sparsity, and for
+            now with one dK/dV writer per K row
+            (``disable_bwd_dkv_atomic_reduction`` with MHA or ``cat_gqa``).
+            Dense inputs keep the semaphore-ordered dense path.
 
     Returns:
         A tuple of (dQ, dK, dV, dsink): the gradients with the shapes of q, k, v
@@ -1000,7 +1008,6 @@ def _flex_flash_attn_bwd(
         has_block_sparse=block_sparse_tensors is not None,
         has_user_score_mod=flex_attn_args.score_mod is not None
         or flex_attn_args.score_mod_bwd is not None,
-        deterministic=deterministic,
         bwd_head_dim=q.shape[-1],
         sm_margin=sm_margin,
     )
@@ -1237,6 +1244,45 @@ def _flex_flash_attn_bwd(
             "disable_bwd_dkv_atomic_reduction requires a unique dK/dV writer "
             "per KV head: MHA, or GQA with cat_gqa"
         )
+    # On q/k ranges the dQ rows of every relation and K tile are merged in
+    # (relation, K tile) order by the dQ range chain.
+    range_deterministic = deterministic and has_ranges
+    dq_writer_stride: int | None = None
+    if range_deterministic:
+        if major_arch not in (10, 11):
+            raise NotImplementedError("deterministic q/k ranges require SM100/SM110")
+        if range_merge_active or block_sparse_tensors is not None:
+            raise NotImplementedError(
+                "deterministic q/k ranges support neither RangeMerge nor block "
+                "sparsity"
+            )
+        if not (
+            disable_bwd_dkv_atomic_reduction and (qhead_per_kvhead == 1 or cat_gqa)
+        ):
+            raise NotImplementedError(
+                "deterministic q/k ranges need one dK/dV writer per K row: "
+                "disable_bwd_dkv_atomic_reduction with MHA or cat_gqa"
+            )
+        cluster_tile_k = n_block_size * cluster_size
+        num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
+        validate_range_deterministic(
+            head_dim=head_dim,
+            head_dim_v=head_dim_v,
+            num_sm=num_sm,
+            sm_margin=sm_margin,
+            cluster_size=cluster_size,
+            # A cluster unit is one cluster K tile of one range and head.
+            max_tickets=(total_k + batch_size * (cluster_tile_k - 1))
+            // cluster_tile_k
+            * (num_head_kv if cat_gqa else num_head),
+        )
+        # Writer numbers r * dq_writer_stride + n + 1 of the dQ chain.
+        dq_writer_stride = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
+        if batch_size * dq_writer_stride + 1 > 2**31 - 1:
+            raise ValueError(
+                f"deterministic q/k ranges: {batch_size} ranges of up to "
+                f"{dq_writer_stride} K tiles overflow the int32 dQ writer number"
+            )
 
     if has_softcap and major_arch not in (10, 11):
         # Only the SM100/SM110 kernel caps scores natively; the other
@@ -1288,8 +1334,12 @@ def _flex_flash_attn_bwd(
             "dq_type/dk_type/dv_type other than the input dtype require SM100/SM110"
         )
 
+    # The dQ chain orders reductions into the row-major token-space dQacc.
     use_dense_dqacc_for_ranges = (
-        direct_dq_init and not range_merge_active and head_dim % 32 == 0
+        direct_dq_init
+        and not range_merge_active
+        and head_dim % 32 == 0
+        and not range_deterministic
     )
     if use_dense_dqacc_for_ranges and magiattn_cutedsl.is_ffa_debug_mode_enabled():
         assert q_ranges is not None
@@ -1479,7 +1529,8 @@ def _flex_flash_attn_bwd(
     dtype = to_cute_dtype(q.dtype)
     current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
 
-    if deterministic:
+    dense_deterministic = deterministic and not has_ranges
+    if dense_deterministic:
         dQ_semaphore = torch.zeros(
             batch_size,
             num_head,
@@ -1490,13 +1541,28 @@ def _flex_flash_attn_bwd(
         )
     else:
         dQ_semaphore = None
+    dq_chain_state = dq_conflict = None
+    if range_deterministic:
+        # See range_chain: (published writer, arrival count) per (Q block,
+        # q head), +1 guard block, and one conflict-state row per CTA of the
+        # persistent grid, which has at most num_sm - sm_margin CTAs.
+        num_q_blocks = (total_q + m_block_size - 1) // m_block_size + 1
+        dq_chain_state = torch.zeros(
+            num_q_blocks, num_head, 2, dtype=torch.int32, device=device
+        )
+        dq_conflict = torch.zeros(
+            num_sm - sm_margin, num_q_blocks, dtype=torch.int32, device=device
+        )
 
+    # The deterministic range chains need the DYNAMIC schedule's ticket order
+    # even without an SM reservation.
+    bwd_persistent = sm_margin > 0 or range_deterministic
     # The DYNAMIC schedule's tile counter.
     tile_counter = (
-        torch.zeros(1, dtype=torch.int32, device=device) if sm_margin > 0 else None
+        torch.zeros(1, dtype=torch.int32, device=device) if bwd_persistent else None
     )
 
-    if deterministic and qhead_per_kvhead > 1 and not cat_gqa:
+    if dense_deterministic and qhead_per_kvhead > 1 and not cat_gqa:
         dK_semaphore = torch.zeros(
             batch_size,
             num_head_kv,
@@ -1651,7 +1717,7 @@ def _flex_flash_attn_bwd(
             range_merge_active,
             use_dense_dqacc_for_ranges,
             k_ranges_sorted_disjoint,
-            sm_margin > 0,
+            bwd_persistent,
             cat_gqa,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
@@ -1773,7 +1839,7 @@ def _flex_flash_attn_bwd(
                     range_merge=range_merge_active,
                     use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
                     k_ranges_sorted_disjoint=k_ranges_sorted_disjoint,
-                    is_persistent=sm_margin > 0,
+                    is_persistent=bwd_persistent,
                     cat_gqa=cat_gqa,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
@@ -1821,13 +1887,22 @@ def _flex_flash_attn_bwd(
             )
             # Runtime scalar: the compiled variant stays max_seqlen_k-agnostic.
             bwd_compile_args.append(Int32(seqlen_k))
-            bwd_compile_args.append(Int32(sm_margin) if sm_margin > 0 else None)
+            bwd_compile_args.append(Int32(sm_margin) if bwd_persistent else None)
             bwd_compile_args.append(
                 to_cute_tensor(tile_counter, assumed_align=4, leading_dim=0)
                 if tile_counter is not None
                 else None
             )
             bwd_compile_args.append(Float32(softcap_value) if has_softcap else None)
+            bwd_compile_args.extend(
+                [
+                    (to_cute_tensor(t, assumed_align=4) if t is not None else None)
+                    for t in (dq_chain_state, dq_conflict)
+                ]
+            )
+            bwd_compile_args.append(
+                Int32(dq_writer_stride) if dq_writer_stride is not None else None
+            )
         bwd_compile_args.extend(
             [
                 cute_aux_tensors,
@@ -1864,9 +1939,12 @@ def _flex_flash_attn_bwd(
         bwd_call_args.append(mask_types_tensor)
         bwd_call_args.append(cu_batches)
         bwd_call_args.append(seqlen_k)
-        bwd_call_args.append(sm_margin if sm_margin > 0 else None)
+        bwd_call_args.append(sm_margin if bwd_persistent else None)
         bwd_call_args.append(tile_counter)
         bwd_call_args.append(softcap_value)
+        bwd_call_args.append(dq_chain_state)
+        bwd_call_args.append(dq_conflict)
+        bwd_call_args.append(dq_writer_stride)
     bwd_call_args.extend(
         [
             aux_tensors,

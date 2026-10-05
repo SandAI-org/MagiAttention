@@ -37,7 +37,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import sm100_utils
+from . import range_chain, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .ffa_utils import MT_MAP
@@ -166,8 +166,6 @@ class FFABwdSm100:
         self.scheduling_mode = (
             SchedulingMode.DYNAMIC if is_persistent else SchedulingMode.STATIC
         )
-        if is_persistent:
-            assert not deterministic, "Persistent backward does not support determinism"
         self.sched_stages = 1
 
         self.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
@@ -787,6 +785,13 @@ class FFABwdSm100:
         mTileCounter: Optional[cute.Tensor] = None,
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
+        # Deterministic q/k ranges only, see range_chain: the dQ chain state
+        # (num_q_blocks, num_head, 2) and conflict state (num_slots,
+        # num_q_blocks), zero before the launch; cluster K tile n of relation r
+        # is dQ writer r * dq_writer_stride + n + 1.
+        mdQChain: Optional[cute.Tensor] = None,
+        mdQConflict: Optional[cute.Tensor] = None,
+        dq_writer_stride: Int32 | None = None,
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -822,16 +827,30 @@ class FFABwdSm100:
         assert (mQRanges is None) == (
             mKRanges is None
         ), "mQRanges and mKRanges must be passed together"
-        assert not (
-            self.deterministic and mQRanges is not None
-        ), "deterministic dQ ordering is defined on batched sequences only"
+        # Batched sequences order the dQ writers of a Q block on semaphores
+        # indexed by (batch, m_block); q/k ranges, whose writers of one row
+        # can come from any relation, chain them per physical row block.
+        self.dense_deterministic = self.deterministic and mQRanges is None
+        self.range_deterministic = self.deterministic and mQRanges is not None
+        assert (
+            mdQChain is not None
+            and mdQConflict is not None
+            and dq_writer_stride is not None
+        ) == self.range_deterministic, "the dQ chain comes with deterministic ranges"
+        if const_expr(self.range_deterministic):
+            # The chain's progress argument needs every tile claimed in ticket
+            # order from one zero-based counter (DYNAMIC + claim_first_tile).
+            assert self.scheduling_mode == SchedulingMode.DYNAMIC
+            assert self.tile_hdim == 128 and self.tile_hdimv == 128
+            assert not self.range_merge and not self.use_dense_dqacc_for_ranges
+            assert blocksparse_tensors is None
         self.is_varlen_k = mKRanges is not None or mSeqUsedK is not None
         self.is_varlen_q = mQRanges is not None or mSeqUsedQ is not None
         # Batched GQA reduces the q heads of a kv head from separate CTAs and
         # orders them on per-(K block, kv head) semaphores; cat_gqa reduces
         # them inside one CTA and needs no order.
         self.deterministic_dkv = (
-            self.deterministic and self.qhead_per_kvhead > 1 and not self.cat_gqa
+            self.dense_deterministic and self.qhead_per_kvhead > 1 and not self.cat_gqa
         )
         # Ranges accumulate dQ/dK/dV in token-space row-major fp32 buffers
         # (LSE/dPsum are then only 4B aligned and are staged per lane); the
@@ -909,7 +928,7 @@ class FFABwdSm100:
 
         # (b, n, block, stage) -> (block, stage, n, b)
         semaphore_transpose = [2, 3, 1, 0]
-        if const_expr(self.deterministic):
+        if const_expr(self.dense_deterministic):
             assert mdQ_semaphore is not None
             mdQ_semaphore = layout_utils.select(mdQ_semaphore, mode=semaphore_transpose)
 
@@ -1238,15 +1257,15 @@ class FFABwdSm100:
             raise NotImplementedError(
                 "persistent bwd needs the range prefix scheduler; dense has none"
             )
-        elif const_expr(self.deterministic):
+        elif const_expr(self.dense_deterministic):
             TileScheduler = SingleTileLPTBwdScheduler  # type: ignore[assignment]
         else:
             TileScheduler = SingleTileScheduler  # type: ignore[assignment]
         if const_expr(self.spt_override is None):
-            self.spt = (self.maybe_causal or self.is_local) and self.deterministic
+            self.spt = (self.maybe_causal or self.is_local) and self.dense_deterministic
         else:
             assert self.spt_override is not None
-            self.spt = self.spt_override and self.deterministic
+            self.spt = self.spt_override and self.dense_deterministic
 
         needs_range_quota = (
             mKRanges is not None
@@ -1287,9 +1306,14 @@ class FFABwdSm100:
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
             sm_margin=sm_margin,
+            # The range chains need every work tile of a writer to come before
+            # every work tile of the next writer: relation, then head, then K
+            # tile ascending. Head swizzle and SPT would interleave them, so
+            # spt and head_swizzle stay dense-only.
             lpt=self.spt,
-            head_swizzle=self.deterministic,
+            head_swizzle=self.dense_deterministic,
             mTileCounter=mTileCounter,
+            claim_first_tile=self.range_deterministic,
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(
             tile_sched_args, scheduling_mode=self.scheduling_mode
@@ -1666,6 +1690,11 @@ class FFABwdSm100:
             mdQ_semaphore,
             mdK_semaphore,
             mdV_semaphore,
+            (
+                range_chain.ChainTensors(mdQChain, mdQConflict, dq_writer_stride)
+                if const_expr(self.range_deterministic)
+                else None
+            ),
             mQRanges,
             mKRanges,
             mSeqUsedQ,
@@ -1750,6 +1779,7 @@ class FFABwdSm100:
         mdQ_semaphore: Optional[cute.Tensor],
         mdK_semaphore: Optional[cute.Tensor],
         mdV_semaphore: Optional[cute.Tensor],
+        dq_chain: Optional[range_chain.ChainTensors],
         mQRanges: Optional[cute.Tensor],
         mKRanges: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
@@ -2658,6 +2688,9 @@ class FFABwdSm100:
                 blocksparse_tensors,
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
+                dq_chain=dq_chain,
+                mQRanges=mQRanges,
+                mKRanges=mKRanges,
                 is_print_block=is_print_block,
             )
 
@@ -6613,6 +6646,83 @@ class FFABwdSm100:
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 
+    # dQ range chain (see range_chain). Cluster K tile n of relation r is one
+    # writer of the Q rows of r; its work tile walks the relation's Q tiles in
+    # order, so it arrives once per Q block, with weight 2, after the last of
+    # its Q tiles with rows there. Its predecessor on a block is tile n - 1 of
+    # the same relation, or for n == 0 the last K tile of the closest lower
+    # relation with Q rows there, read from the conflict state.
+
+    @cute.jit
+    def _dq_last_writer(
+        self, mKRanges: cute.Tensor, writer_stride: Int32, r: Int32
+    ) -> Int32:
+        """Number of the last dQ writer of relation ``r``; 0 without K tiles."""
+        num_n_tiles = cute.ceil_div(
+            mKRanges[r, 1] - mKRanges[r, 0], self.tile_n * self.cta_group_size
+        )
+        writer = Int32(0)
+        if num_n_tiles > 0:
+            writer = r * writer_stride + num_n_tiles
+        return writer
+
+    @cute.jit
+    def _dq_chain_wait(
+        self,
+        dq_chain: range_chain.ChainTensors,
+        dq_writer: Int32,
+        n_block_cta_group: Int32,
+        seqlen_info: SeqlenInfoQK,
+        m_block: Int32,
+        q_head: Int32,
+    ) -> None:
+        """Wait until both Q blocks of ``m_block`` publish the predecessor."""
+        q_start = seqlen_info.offset_q
+        left, right = range_chain.tile_blocks(
+            q_start, q_start + seqlen_info.seqlen_q, m_block, self.tile_m
+        )
+        slot = cute.arch.block_idx()[0]
+        pred_left = dq_writer - 1
+        pred_right = dq_writer - 1
+        if n_block_cta_group == 0:
+            pred_left = Int32(dq_chain.mConflict[slot, left])
+            pred_right = Int32(dq_chain.mConflict[slot, right])
+        range_chain.wait_published(dq_chain.mChain, left, q_head, pred_left)
+        if right != left:
+            range_chain.wait_published(dq_chain.mChain, right, q_head, pred_right)
+
+    @cute.jit
+    def _dq_chain_arrive(
+        self,
+        dq_chain: range_chain.ChainTensors,
+        dq_writer: Int32,
+        seqlen_info: SeqlenInfoQK,
+        m_block: Int32,
+        num_m_tiles: Int32,
+        q_head: Int32,
+    ) -> None:
+        """Arrive after ``m_block``'s dQ is complete in dQacc: it is the last
+        tile with rows in its first block, and in its last block too when it
+        is the relation's last tile. Each CTA of a 2-CTA cluster arrives for
+        its row half."""
+        q_start = seqlen_info.offset_q
+        left, right = range_chain.tile_blocks(
+            q_start, q_start + seqlen_info.seqlen_q, m_block, self.tile_m
+        )
+        cute.arch.fence_acq_rel_gpu()
+        range_chain.arrive(
+            dq_chain.mChain, left, q_head, dq_writer, Int32(2), self.cta_group_size
+        )
+        if right != left and m_block == num_m_tiles - 1:
+            range_chain.arrive(
+                dq_chain.mChain,
+                right,
+                q_head,
+                dq_writer,
+                Int32(2),
+                self.cta_group_size,
+            )
+
     @cute.jit
     def _dq_semaphore_lock_value(
         self,
@@ -6662,6 +6772,9 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        dq_chain: Optional[range_chain.ChainTensors] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         # --- Set up thread info ---
@@ -6781,6 +6894,9 @@ class FFABwdSm100:
             pipeline.PipelineUserType.Producer, self.sdQacc_stage
         )
         read_flag = const_expr(not self.deterministic)
+        # dQ chain: the conflict-state scan has recorded the relations below
+        # chain_scanned for this CTA's slot.
+        chain_scanned = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -6792,6 +6908,24 @@ class FFABwdSm100:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
             n_block_cta_group = n_block // self.cta_group_size  # for 2CTA
             seqlen_info = SeqlenInfoCls(batch_idx)
+            if const_expr(self.range_deterministic):
+                assert dq_chain is not None and mQRanges is not None
+                assert mKRanges is not None
+                if warp_idx == 0:
+                    range_chain.scan_conflicts(
+                        mQRanges,
+                        dq_chain.mConflict,
+                        cute.arch.block_idx()[0],
+                        chain_scanned,
+                        batch_idx,
+                        self.tile_m,
+                        last_writer=lambda r: self._dq_last_writer(
+                            mKRanges, dq_chain.writer_stride, r
+                        ),
+                    )
+                chain_scanned = batch_idx
+                dq_writer = batch_idx * dq_chain.writer_stride + n_block_cta_group + 1
+                num_m_tiles = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
             if const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
                 # pair CSR is walked in the dQ dump loop.
@@ -6849,7 +6983,7 @@ class FFABwdSm100:
                     m_block_max=m_block_max,
                 )
                 process_tile = loop_count > Int32(0)
-            if const_expr(self.deterministic and self.use_block_sparsity):
+            if const_expr(self.dense_deterministic and self.use_block_sparsity):
                 assert blocksparse_tensors is not None
                 if const_expr(blocksparse_tensors.dq_write_order is not None):
                     assert blocksparse_tensors.dq_write_order is not None
@@ -6913,7 +7047,7 @@ class FFABwdSm100:
                         cute.group_modes(gdQacc_grid, 0, 2),
                     )
 
-                if const_expr(self.deterministic):
+                if const_expr(self.dense_deterministic):
                     assert mdQ_semaphore is not None
                     mdQ_semaphore_cur = mdQ_semaphore[None, None, q_head, batch_idx]
 
@@ -7183,6 +7317,31 @@ class FFABwdSm100:
                                 dQ_tma_store_producer_state.advance()
 
                 else:
+                    if const_expr(self.range_deterministic):
+                        # Q tiles the mask leaves without work on this K tile
+                        # are events of the writer all the same: they wait and
+                        # arrive, those below m_block_min here and those from
+                        # m_block_max on after the computed ones.
+                        if tidx == 0:
+                            for m_skip in cutlass.range(
+                                cutlass.min(m_block_min, num_m_tiles), unroll=1
+                            ):
+                                self._dq_chain_wait(
+                                    dq_chain,
+                                    dq_writer,
+                                    n_block_cta_group,
+                                    seqlen_info,
+                                    m_skip,
+                                    q_head,
+                                )
+                                self._dq_chain_arrive(
+                                    dq_chain,
+                                    dq_writer,
+                                    seqlen_info,
+                                    m_skip,
+                                    num_m_tiles,
+                                    q_head,
+                                )
                     for iter_idx in cutlass.range(loop_count, unroll=1):
                         m_block = m_block_min + iter_idx
                         m_block_oob_upper = False
@@ -7275,7 +7434,7 @@ class FFABwdSm100:
 
                             # Semaphore acquire
                             # TODO: review the logics
-                            if const_expr(self.deterministic and stage == 0):
+                            if const_expr(self.dense_deterministic and stage == 0):
                                 if not m_block_oob_upper:
                                     lock_value = self._dq_semaphore_lock_value(
                                         iter_idx,
@@ -7293,6 +7452,16 @@ class FFABwdSm100:
                                         tidx,
                                         cta_rank_in_cluster,
                                         lock_value,
+                                    )
+                            if const_expr(self.range_deterministic and stage == 0):
+                                if tidx == 0:
+                                    self._dq_chain_wait(
+                                        dq_chain,
+                                        dq_writer,
+                                        n_block_cta_group,
+                                        seqlen_info,
+                                        m_block,
+                                        q_head,
                                     )
 
                             # Sync before S2G copy
@@ -7385,7 +7554,7 @@ class FFABwdSm100:
 
                             # TODO: review the logics
                             if const_expr(
-                                self.deterministic
+                                self.dense_deterministic
                                 and stage == 0
                                 and delay_semaphore_release
                             ):
@@ -7412,7 +7581,7 @@ class FFABwdSm100:
                         # NOTE: arrive_inc calls red_release which issues membar
                         # TODO: review the logics
                         if const_expr(
-                            self.deterministic and not delay_semaphore_release
+                            self.dense_deterministic and not delay_semaphore_release
                         ):
                             if const_expr(
                                 self.sdQacc_stage > 1 and not self.tile_hdim == 192
@@ -7430,12 +7599,53 @@ class FFABwdSm100:
                                     1,
                                 )
 
+                        if const_expr(self.range_deterministic):
+                            # Arrive once this tile's reductions have landed in
+                            # dQacc (read=False waits for the destination
+                            # writes, not just the smem reads).
+                            if is_tma_warp:
+                                cute.arch.cp_async_bulk_wait_group(0, read=False)
+                            self.reduce_sync_barrier.arrive_and_wait()
+                            if tidx == 0:
+                                self._dq_chain_arrive(
+                                    dq_chain,
+                                    dq_writer,
+                                    seqlen_info,
+                                    m_block,
+                                    num_m_tiles,
+                                    q_head,
+                                )
+
+                    if const_expr(self.range_deterministic):
+                        if tidx == 0:
+                            for m_skip in cutlass.range(
+                                cutlass.max(m_block_max, m_block_min),
+                                num_m_tiles,
+                                unroll=1,
+                            ):
+                                self._dq_chain_wait(
+                                    dq_chain,
+                                    dq_writer,
+                                    n_block_cta_group,
+                                    seqlen_info,
+                                    m_skip,
+                                    q_head,
+                                )
+                                self._dq_chain_arrive(
+                                    dq_chain,
+                                    dq_writer,
+                                    seqlen_info,
+                                    m_skip,
+                                    num_m_tiles,
+                                    q_head,
+                                )
+
                 if process_tile:
                     if is_tma_warp:
                         cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
                     self.reduce_sync_barrier.arrive_and_wait()
                     # final semaphore release
-                    if const_expr(self.deterministic and delay_semaphore_release):
+                    if const_expr(self.dense_deterministic and delay_semaphore_release):
                         cutedsl_utils.arrive_inc(
                             mdQ_semaphore_cur[(m_block_max - 1, None)].iterator,
                             tidx,
@@ -7444,7 +7654,7 @@ class FFABwdSm100:
                         )
 
                 if const_expr(
-                    self.deterministic
+                    self.dense_deterministic
                     and not self.spt
                     and not self.use_block_sparsity
                     and block_info.window_size_left is not None

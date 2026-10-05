@@ -152,7 +152,6 @@ def validate_range_feature_support(
     has_mask_mod: bool,
     has_block_sparse: bool,
     has_user_score_mod: bool,
-    deterministic: bool = False,
     bwd_head_dim: int | None = None,
     sm_margin: int = 0,
 ) -> None:
@@ -168,10 +167,10 @@ def validate_range_feature_support(
     ``has_user_score_mod`` is a caller-provided score_mod; softcap is native
     to the SM100/SM110 kernels and does not count.
 
-    ``deterministic`` and ``bwd_head_dim`` apply only to backward. Q/k ranges
-    do not support deterministic backward. RangeMerge does not support the
-    mainloop for head dimension 192, which uses two CTAs and a single pipeline
-    stage for Q and Qt.
+    ``bwd_head_dim`` applies only to backward. RangeMerge does not support
+    the mainloop for head dimension 192, which uses two CTAs and a single
+    pipeline stage for Q and Qt. Deterministic ranges are checked by
+    :func:`validate_range_deterministic`.
     """
     per_range = isinstance(mask_types, torch.Tensor)
     if per_range and not has_ranges:
@@ -182,10 +181,6 @@ def validate_range_feature_support(
         )
     if not has_ranges:
         return
-    if deterministic:
-        raise NotImplementedError(
-            "deterministic backward with q/k ranges is unsupported"
-        )
     if range_merge and not range_merge_unique_writer:
         raise ValueError(
             "RangeMerge requires the non-atomic path "
