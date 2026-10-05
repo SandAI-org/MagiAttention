@@ -740,8 +740,8 @@ def apply_softcap(acc_S: cute.Tensor, softcap_scale: Float32):
         s0, s1 = cute.arch.mul_packed_f32x2(
             (acc_S[i], acc_S[i + 1]), (softcap_scale, softcap_scale)
         )
-        acc_S[i] = cute.math.tanh(s0, fastmath=True)
-        acc_S[i + 1] = cute.math.tanh(s1, fastmath=True)
+        acc_S[i] = cutedsl_utils.tanh_approx(s0)
+        acc_S[i + 1] = cutedsl_utils.tanh_approx(s1)
 
 
 @cute.jit
@@ -757,8 +757,8 @@ def apply_softcap_bwd(acc_S: cute.Tensor, dtanh: cute.Tensor, softcap_scale: Flo
         s0, s1 = cute.arch.mul_packed_f32x2(
             (acc_S[i], acc_S[i + 1]), (softcap_scale, softcap_scale)
         )
-        t0 = cute.math.tanh(s0, fastmath=True)
-        t1 = cute.math.tanh(s1, fastmath=True)
+        t0 = cutedsl_utils.tanh_approx(s0)
+        t1 = cutedsl_utils.tanh_approx(s1)
         acc_S[i] = t0
         acc_S[i + 1] = t1
         dtanh[i] = 1.0 - t0 * t0
