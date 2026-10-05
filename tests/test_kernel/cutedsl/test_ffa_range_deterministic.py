@@ -16,10 +16,11 @@
 
 With ``deterministic=True`` the range atomic forward merges the O/LSE
 partials of overlapping relations in relation order, and the backward merges
-the dQ partials of every (relation, cluster K tile) in that order
-(``range_chain``), on a persistent grid whose clusters claim every tile from
-one zero-based counter. The results are then bitwise identical across runs
-and across ``sm_margin``. The protocol itself is checked on the CPU in
+the dQ partials of every (relation, cluster K tile) and the reduced dK/dV
+partials of every (relation, q head) in that order (``range_chain``), on a
+persistent grid whose clusters claim every tile from one zero-based counter.
+The results are then bitwise identical across runs and across ``sm_margin``.
+The protocol itself is checked on the CPU in
 ``test_ffa_range_deterministic_protocol.py``.
 """
 
@@ -31,6 +32,7 @@ from unittest import TestCase, mock
 import torch
 from torch.testing._internal.common_utils import run_tests
 
+from magi_attention.kernel.cutedsl import flex_flash_attn_func
 from magi_attention.kernel.cutedsl.cache_utils import JITCache
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
 from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
@@ -470,9 +472,29 @@ class TestFfaRangeDeterministicFwd(TestCase):
         self.assertFalse(kernel.deterministic)
 
 
+def _shared_k_relations() -> tuple[Relations, int, int]:
+    """Relations sharing unaligned K rows (reduced dK/dV) and overlapping Q
+    rows (merged O, dQ), without a repeated (q, k) pair: the A relations have
+    disjoint Q over overlapping K, and every B relation overlaps two A
+    relations in Q over K rows no A relation touches."""
+    relations: Relations = []
+    for i in range(4):
+        relations.append(
+            ([5 + 300 * i, 265 + 300 * i], [7 + 30 * i, 407 + 30 * i], MT_MAP.full)
+        )
+        relations.append(
+            (
+                [105 + 300 * i, 355 + 300 * i],
+                [600 + 13 * i, 900 + 13 * i],
+                MT_MAP.causal if i % 2 else MT_MAP.full,
+            )
+        )
+    return relations, 1260, 944
+
+
 class TestFfaRangeDeterministicBwd(TestCase):
-    """dQ of every (relation, cluster K tile) is chained per Q row block; the
-    dK/dV writers are unique here (MHA or cat_gqa with the direct store)."""
+    """dQ of every (relation, cluster K tile) is chained per Q row block, and
+    reduced dK/dV of every (relation, q head) per K row block."""
 
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
@@ -495,7 +517,7 @@ class TestFfaRangeDeterministicBwd(TestCase):
         )
         return q, k, v, out.to(q.dtype), lse, torch.randn_like(q)
 
-    def _det_bwd(self, q, k, v, out, lse, do, relations, **kwargs):
+    def _det_bwd(self, q, k, v, out, lse, do, relations, direct_dkv=True, **kwargs):
         return _flex_flash_attn_bwd(
             q,
             k,
@@ -504,10 +526,49 @@ class TestFfaRangeDeterministicBwd(TestCase):
             lse,
             do,
             **_range_args(relations),
-            disable_bwd_dkv_atomic_reduction=True,
+            disable_bwd_dkv_atomic_reduction=direct_dkv,
             deterministic=True,
             **kwargs,
         )[:3]
+
+    def _assert_grads_bitwise_across_sm_margin(
+        self, q, k, v, out, lse, do, relations, two_cta, **kwargs
+    ):
+        """Gradients on every legal budget of the cluster size are equal bit
+        for bit; returns them after checking the reference."""
+        cluster = 2 if two_cta else 1
+        env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0" if two_cta else "1"}
+        first = None
+        with mock.patch.dict("os.environ", env):
+            for sm_margin in (
+                0,
+                1,
+                self.num_sm - 4 * cluster,
+                self.num_sm - cluster,
+                0,
+            ):
+                with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as (built, _):
+                    grads = self._det_bwd(
+                        q, k, v, out, lse, do, relations, sm_margin=sm_margin, **kwargs
+                    )
+                (kernel,) = built
+                self.assertEqual(kernel.use_2cta_instrs, two_cta)
+                self.assertTrue(kernel.is_persistent)
+                if first is None:
+                    first = [g.clone() for g in grads]
+                    continue
+                for name, got, want in zip("qkv", grads, first):
+                    self.assertTrue(
+                        torch.equal(got, want),
+                        f"d{name} differs at sm_margin={sm_margin}",
+                    )
+        assert first is not None
+        refs = self._ref_grads(q, k, v, do, relations)
+        for name, got, want in zip("qkv", first, refs):
+            torch.testing.assert_close(
+                got.float(), want, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
+            )
+        return first
 
     def _ref_grads(self, q, k, v, do, relations):
         qkv = [t.detach().float().requires_grad_() for t in (q, k, v)]
@@ -528,54 +589,46 @@ class TestFfaRangeDeterministicBwd(TestCase):
     def test_bwd_dq_bitwise_across_sm_margin(self, case):
         """Three relations cover every row of each unaligned q range, half of
         them causal, so some Q tiles of a K tile are masked out and only
-        chain; dQ/dK/dV are bitwise equal on every legal budget."""
+        chain; the dK/dV store is direct, one writer per K row."""
         group, cat_gqa, two_cta = case
         relations, total_q, total_k = _overlapping_relations(
             [129, 300, 1000, 77], coverage=3, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
         q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, group)
-        cluster = 2 if two_cta else 1
-        env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0" if two_cta else "1"}
-        first = None
-        with mock.patch.dict("os.environ", env):
-            for sm_margin in (
-                0,
-                1,
-                self.num_sm - 4 * cluster,
-                self.num_sm - cluster,
-                0,
-            ):
-                with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as (built, _):
-                    grads = self._det_bwd(
-                        q,
-                        k,
-                        v,
-                        out,
-                        lse,
-                        do,
-                        relations,
-                        cat_gqa=cat_gqa,
-                        sm_margin=sm_margin,
-                    )
-                (kernel,) = built
-                self.assertEqual(kernel.use_2cta_instrs, two_cta)
-                self.assertTrue(kernel.is_persistent)
-                if first is None:
-                    first = [g.clone() for g in grads]
-                    continue
-                for name, got, want in zip("qkv", grads, first):
-                    self.assertTrue(
-                        torch.equal(got, want),
-                        f"d{name} differs at sm_margin={sm_margin}",
-                    )
-        assert first is not None
-        for name, got, want in zip(
-            "qkv", first, self._ref_grads(q, k, v, do, relations)
-        ):
-            torch.testing.assert_close(
-                got.float(), want, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
-            )
-        self._log_ran(f"bwd bitwise {case}")
+        self._assert_grads_bitwise_across_sm_margin(
+            q, k, v, out, lse, do, relations, two_cta, cat_gqa=cat_gqa
+        )
+        self._log_ran(f"bwd dq bitwise {case}")
+
+    @parameterize(
+        "case",
+        [
+            # (q heads per kv head, cat_gqa, 2-CTA)
+            (1, False, True),
+            (2, False, True),
+            (2, False, False),
+            (2, True, True),
+        ],
+    )
+    def test_bwd_reduced_dkv_bitwise_across_sm_margin(self, case):
+        """Relations share unaligned K rows, so dK/dV are reduced: per
+        (relation, q head) without cat_gqa, per relation with it or MHA."""
+        group, cat_gqa, two_cta = case
+        relations, total_q, total_k = _shared_k_relations()
+        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, group)
+        self._assert_grads_bitwise_across_sm_margin(
+            q,
+            k,
+            v,
+            out,
+            lse,
+            do,
+            relations,
+            two_cta,
+            direct_dkv=False,
+            cat_gqa=cat_gqa,
+        )
+        self._log_ran(f"bwd dkv bitwise {case}")
 
     def test_bwd_empty_and_keyless_relations(self):
         """A relation without keys has no K tile and so no dQ writer; an empty
@@ -633,11 +686,9 @@ class TestFfaRangeDeterministicBwd(TestCase):
             [40], coverage=2, mask_types=[MT_MAP.full]
         )
         q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, 1)
-        # Atomic dK/dV has no chain yet.
+        q64, k64, v64 = _qkv(total_q, total_k, group=1, head_dim=64)
         with self.assertRaises(NotImplementedError):
-            _flex_flash_attn_bwd(
-                q, k, v, out, lse, do, **_range_args(relations), deterministic=True
-            )
+            self._det_bwd(q64, k64, v64, out[..., :64], lse, do[..., :64], relations)
         # A 2-CTA cluster does not fit one SM, and the cluster size is kept.
         with mock.patch.dict(
             "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
@@ -645,6 +696,42 @@ class TestFfaRangeDeterministicBwd(TestCase):
             self._det_bwd(q, k, v, out, lse, do, relations, sm_margin=self.num_sm - 1)
         with self.assertRaises(NotImplementedError):
             self._det_bwd(q, k, v, out, lse, do, relations, range_merge=True)
+
+    def test_public_api_fwd_bwd_bitwise_with_sink_and_softcap(self):
+        """flex_flash_attn_func(deterministic=True) on GQA with reduced dK/dV,
+        a sink and a softcap: O, LSE and every gradient, dsink included, are
+        bitwise equal across sm_margin."""
+        relations, total_q, total_k = _shared_k_relations()
+        q, k, v = _qkv(total_q, total_k, group=2)
+        sink = torch.randn(2, q.shape[1], device="cuda", dtype=torch.float32)
+        do = torch.randn_like(q)
+
+        def run(sm_margin):
+            leaves = [t.detach().clone().requires_grad_() for t in (q, k, v, sink)]
+            out, meta = flex_flash_attn_func(
+                *leaves[:3],
+                **_range_args(relations),
+                sink=leaves[3],
+                softcap=8.0,
+                deterministic=True,
+                sm_margin=sm_margin,
+            )
+            out.backward(do)
+            return [out.detach(), meta.lse, *(t.grad for t in leaves)]
+
+        with mock.patch.dict(
+            "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
+        ):
+            first = run(0)
+            for sm_margin in (1, self.num_sm - 2, 0):
+                for name, got, want in zip(
+                    ("out", "lse", "dq", "dk", "dv", "dsink"), run(sm_margin), first
+                ):
+                    self.assertTrue(
+                        torch.equal(got, want),
+                        f"{name} differs at sm_margin={sm_margin}",
+                    )
+        self._log_ran("public api")
 
 
 if __name__ == "__main__":

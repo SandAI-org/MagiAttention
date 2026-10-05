@@ -792,6 +792,12 @@ class FFABwdSm100:
         mdQChain: Optional[cute.Tensor] = None,
         mdQConflict: Optional[cute.Tensor] = None,
         dq_writer_stride: Int32 | None = None,
+        # Deterministic q/k ranges with reduced dK/dV only: the dK/dV chain
+        # state (num_k_blocks, num_head_kv, 2) and conflict state (num_slots,
+        # num_k_blocks), zero before the launch, with cluster K tile rows per
+        # block.
+        mdKVChain: Optional[cute.Tensor] = None,
+        mdKVConflict: Optional[cute.Tensor] = None,
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -864,6 +870,12 @@ class FFABwdSm100:
         )
 
         self.ranges_dkv_tma = mKRanges is not None and not self.dKV_postprocess
+        # Reduced dK/dV of q/k ranges have several writers per K row; the
+        # direct store has one.
+        self.range_dkv_chain = self.range_deterministic and self.dKV_postprocess
+        assert (
+            mdKVChain is not None and mdKVConflict is not None
+        ) == self.range_dkv_chain, "the dK/dV chain comes with reduced dK/dV"
 
         mdQacc, mdK, mdV = [
             cutedsl_utils.assume_tensor_aligned(t) for t in (mdQacc, mdK, mdV)
@@ -1695,6 +1707,17 @@ class FFABwdSm100:
                 if const_expr(self.range_deterministic)
                 else None
             ),
+            (
+                # Writer q head g of relation r is r * G + g + 1; the group's
+                # single writer under cat_gqa (or MHA) is r + 1.
+                range_chain.ChainTensors(
+                    mdKVChain,
+                    mdKVConflict,
+                    Int32(1 if self.cat_gqa else self.qhead_per_kvhead),
+                )
+                if const_expr(self.range_dkv_chain)
+                else None
+            ),
             mQRanges,
             mKRanges,
             mSeqUsedQ,
@@ -1780,6 +1803,7 @@ class FFABwdSm100:
         mdK_semaphore: Optional[cute.Tensor],
         mdV_semaphore: Optional[cute.Tensor],
         dq_chain: Optional[range_chain.ChainTensors],
+        dkv_chain: Optional[range_chain.ChainTensors],
         mQRanges: Optional[cute.Tensor],
         mKRanges: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
@@ -2650,6 +2674,8 @@ class FFABwdSm100:
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
                 tile_done_mbar_ptr=tile_done_mbar_ptr,
+                dkv_chain=dkv_chain,
+                mKRanges=mKRanges,
                 is_print_block=is_print_block,
             )
 
@@ -5133,6 +5159,8 @@ class FFABwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         tile_done_mbar_ptr: Optional[cute.Pointer] = None,
+        dkv_chain: Optional[range_chain.ChainTensors] = None,
+        mKRanges: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         # --- Set up thread info ---
@@ -5339,6 +5367,9 @@ class FFABwdSm100:
         consumer_state_dPsum = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.dO_stage
         )
+        # dK/dV chain: the conflict-state scan has recorded the relations
+        # below chain_scanned for this CTA's slot.
+        chain_scanned = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -6506,6 +6537,31 @@ class FFABwdSm100:
                         pipeline_dS.producer_commit(producer_state_dS)
                     producer_state_dS.advance()
 
+            # --- dK/dV chain: wait for the predecessor ---
+
+            if const_expr(self.range_dkv_chain):
+                assert dkv_chain is not None and mKRanges is not None
+                (
+                    dkv_left,
+                    dkv_right,
+                    dkv_left_weight,
+                    dkv_right_weight,
+                    dkv_writer,
+                    head_kv,
+                ) = self._dkv_chain_wait(
+                    dkv_chain,
+                    mKRanges,
+                    seqlen_info,
+                    n_block,
+                    head_idx,
+                    batch_idx,
+                    chain_scanned,
+                    tidx < cute.arch.WARP_SIZE,
+                    tidx == 0,
+                )
+                chain_scanned = batch_idx
+                self.compute_sync_barrier.arrive_and_wait()
+
             # --- Epilogue for dKV store ---
 
             if process_tile:
@@ -6555,6 +6611,36 @@ class FFABwdSm100:
                     "K",
                     is_print_block=is_print_block,
                 )
+
+            # --- dK/dV chain: arrive once both reductions landed ---
+
+            if const_expr(self.range_dkv_chain):
+                if process_tile:
+                    # The leader warp of each compute WG issued its strips;
+                    # read=False waits for the writes at the destination.
+                    if warp_idx % 4 == 0:
+                        cute.arch.cp_async_bulk_wait_group(0, read=False)
+                self.compute_sync_barrier.arrive_and_wait()
+                if tidx == 0:
+                    assert dkv_chain is not None
+                    cute.arch.fence_acq_rel_gpu()
+                    range_chain.arrive(
+                        dkv_chain.mChain,
+                        dkv_left,
+                        head_kv,
+                        dkv_writer,
+                        dkv_left_weight,
+                        self.cta_group_size,
+                    )
+                    if dkv_right != dkv_left:
+                        range_chain.arrive(
+                            dkv_chain.mChain,
+                            dkv_right,
+                            head_kv,
+                            dkv_writer,
+                            dkv_right_weight,
+                            self.cta_group_size,
+                        )
 
             # Zero dK/dV when no Q tile contributes to this KV tile; the
             # accumulating postprocess path leaves untouched rows at zero.
@@ -6645,6 +6731,68 @@ class FFABwdSm100:
             # Advance to next KV tile
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
+
+    @cute.jit
+    def _dkv_chain_wait(
+        self,
+        dkv_chain: range_chain.ChainTensors,
+        mKRanges: cute.Tensor,
+        seqlen_info: SeqlenInfoQK,
+        n_block: Int32,
+        head_idx: Int32,
+        batch_idx: Int32,
+        chain_scanned: Int32,
+        is_scan_warp: cutlass.Boolean,
+        is_waiter: cutlass.Boolean,
+    ):
+        """dK/dV range chain (see range_chain): wait for this tile's predecessor.
+
+        The dK/dV writer of a K row is q head g of relation r (its group's
+        only writer under cat_gqa or MHA, g = 0), number r * G + g + 1 with
+        writer_stride G; its work tiles are the relation's cluster K tiles.
+        The predecessor is q head g - 1 of the same relation, or for g == 0
+        the last writer of the closest lower relation with K rows there,
+        which the scan warp records in the conflict state first.
+
+        Returns ``(left, right, left_weight, right_weight, writer, head_kv)``
+        of the tile's events, see range_chain.tile_events.
+        """
+        k_start = seqlen_info.offset_k
+        block_rows = self.tile_n * self.cta_group_size
+        left, right, left_weight, right_weight = range_chain.tile_events(
+            k_start,
+            k_start + seqlen_info.seqlen_k,
+            n_block // self.cta_group_size,
+            block_rows,
+        )
+        if const_expr(self.cat_gqa or self.qhead_per_kvhead == 1):
+            head_kv = head_idx
+            group_rank = Int32(0)
+        else:
+            head_kv = head_idx // self.qhead_per_kvhead
+            group_rank = head_idx % self.qhead_per_kvhead
+        writer = batch_idx * dkv_chain.writer_stride + group_rank + 1
+        slot = cute.arch.block_idx()[0]
+        if is_scan_warp:
+            range_chain.scan_conflicts(
+                mKRanges,
+                dkv_chain.mConflict,
+                slot,
+                chain_scanned,
+                batch_idx,
+                block_rows,
+                last_writer=lambda r: (r + 1) * dkv_chain.writer_stride,
+            )
+        if is_waiter:
+            pred_left = writer - 1
+            pred_right = writer - 1
+            if group_rank == 0:
+                pred_left = Int32(dkv_chain.mConflict[slot, left])
+                pred_right = Int32(dkv_chain.mConflict[slot, right])
+            range_chain.wait_published(dkv_chain.mChain, left, head_kv, pred_left)
+            if right != left:
+                range_chain.wait_published(dkv_chain.mChain, right, head_kv, pred_right)
+        return left, right, left_weight, right_weight, writer, head_kv
 
     # dQ range chain (see range_chain). Cluster K tile n of relation r is one
     # writer of the Q rows of r; its work tile walks the relation's Q tiles in
