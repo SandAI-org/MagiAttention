@@ -135,8 +135,7 @@ def validate_range_feature_support(
     range_merge_unique_writer: bool,
     has_mask_mod: bool,
     has_block_sparse: bool,
-    has_score_mod: bool,
-    has_softcap: bool,
+    has_user_score_mod: bool,
     deterministic: bool = False,
     bwd_head_dim: int | None = None,
     sm_margin: int = 0,
@@ -150,6 +149,8 @@ def validate_range_feature_support(
     runtime-mask restrictions because merging produces per-row mask types.
     Merging also requires unique writers for O in forward or dK/dV in
     backward, as declared by ``range_merge_unique_writer``.
+    ``has_user_score_mod`` is a caller-provided score_mod; softcap is native
+    to the SM100/SM110 kernels and does not count.
 
     ``deterministic`` and ``bwd_head_dim`` apply only to backward. Q/k ranges
     do not support deterministic backward. RangeMerge does not support the
@@ -184,10 +185,10 @@ def validate_range_feature_support(
         raise NotImplementedError(f"{feature} cannot be combined with mask_mod")
     if has_block_sparse:
         raise NotImplementedError(f"{feature} cannot be combined with block sparsity")
-    if has_score_mod:
-        raise NotImplementedError(f"{feature} cannot be combined with score_mod")
-    if has_softcap:
-        raise NotImplementedError(f"{feature} cannot be combined with softcap")
+    if has_user_score_mod:
+        raise NotImplementedError(
+            f"{feature} cannot be combined with a user-provided score_mod"
+        )
     if range_merge and bwd_head_dim is not None and bwd_head_dim > 128:
         raise NotImplementedError("bwd RangeMerge is not supported at head_dim 192")
 
