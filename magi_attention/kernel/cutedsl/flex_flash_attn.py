@@ -962,13 +962,13 @@ def _flex_flash_attn_bwd(
             ``total_k`` (``sum(len) <= total_k``). Overlapping k ranges must
             not set this.
         deterministic: on q/k ranges, merge the dQ partials of every
-            (relation, K tile) into dQ in that order, so the gradients are
-            bitwise identical across runs and independent of ``sm_margin``.
-            The launch is persistent whatever ``sm_margin``. SM100/SM110,
-            head_dim 128 only, without RangeMerge or block sparsity, and for
-            now with one dK/dV writer per K row
-            (``disable_bwd_dkv_atomic_reduction`` with MHA or ``cat_gqa``).
-            Dense inputs keep the semaphore-ordered dense path.
+            (relation, K tile) into dQ in that order, and the reduced dK/dV
+            partials of every (relation, q head) in that order (one writer per
+            relation under ``cat_gqa`` or MHA), so the gradients are bitwise
+            identical across runs and independent of ``sm_margin``. The
+            launch is persistent whatever ``sm_margin``. SM100/SM110,
+            head_dim 128 only, without RangeMerge or block sparsity. Dense
+            inputs keep the semaphore-ordered dense path.
 
     Returns:
         A tuple of (dQ, dK, dV, dsink): the gradients with the shapes of q, k, v
@@ -1245,7 +1245,8 @@ def _flex_flash_attn_bwd(
             "per KV head: MHA, or GQA with cat_gqa"
         )
     # On q/k ranges the dQ rows of every relation and K tile are merged in
-    # (relation, K tile) order by the dQ range chain.
+    # (relation, K tile) order by the dQ range chain, and reduced dK/dV rows
+    # in (relation, q head) order by the dK/dV range chain.
     range_deterministic = deterministic and has_ranges
     dq_writer_stride: int | None = None
     if range_deterministic:
@@ -1256,12 +1257,11 @@ def _flex_flash_attn_bwd(
                 "deterministic q/k ranges support neither RangeMerge nor block "
                 "sparsity"
             )
-        if not (
-            disable_bwd_dkv_atomic_reduction and (qhead_per_kvhead == 1 or cat_gqa)
-        ):
-            raise NotImplementedError(
-                "deterministic q/k ranges need one dK/dV writer per K row: "
-                "disable_bwd_dkv_atomic_reduction with MHA or cat_gqa"
+        dkv_writer_stride = 1 if cat_gqa else qhead_per_kvhead
+        if (batch_size + 1) * dkv_writer_stride > 2**31 - 1:
+            raise ValueError(
+                f"deterministic q/k ranges: {batch_size} ranges of "
+                f"{dkv_writer_stride} q heads overflow the int32 dK/dV writer number"
             )
         cluster_tile_k = n_block_size * cluster_size
         num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
@@ -1552,6 +1552,16 @@ def _flex_flash_attn_bwd(
         )
         dq_conflict = torch.zeros(
             num_sm - sm_margin, num_q_blocks, dtype=torch.int32, device=device
+        )
+    dkv_chain_state = dkv_conflict = None
+    if range_deterministic and not direct_dkv:
+        # The same per (K block of one cluster K tile, kv head).
+        num_k_blocks = (total_k + cluster_tile_k - 1) // cluster_tile_k + 1
+        dkv_chain_state = torch.zeros(
+            num_k_blocks, num_head_kv, 2, dtype=torch.int32, device=device
+        )
+        dkv_conflict = torch.zeros(
+            num_sm - sm_margin, num_k_blocks, dtype=torch.int32, device=device
         )
 
     # The deterministic range chains need the DYNAMIC schedule's ticket order
@@ -1903,6 +1913,12 @@ def _flex_flash_attn_bwd(
             bwd_compile_args.append(
                 Int32(dq_writer_stride) if dq_writer_stride is not None else None
             )
+            bwd_compile_args.extend(
+                [
+                    (to_cute_tensor(t, assumed_align=4) if t is not None else None)
+                    for t in (dkv_chain_state, dkv_conflict)
+                ]
+            )
         bwd_compile_args.extend(
             [
                 cute_aux_tensors,
@@ -1945,6 +1961,8 @@ def _flex_flash_attn_bwd(
         bwd_call_args.append(dq_chain_state)
         bwd_call_args.append(dq_conflict)
         bwd_call_args.append(dq_writer_stride)
+        bwd_call_args.append(dkv_chain_state)
+        bwd_call_args.append(dkv_conflict)
     bwd_call_args.extend(
         [
             aux_tensors,
@@ -2129,6 +2147,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             out_dtype=out_dtype,
             sm_margin=sm_margin,
             max_logits=max_logits,
+            deterministic=deterministic,
         )
         # The atomic path defaults O to fp32; hand the caller the input dtype
         # unless they asked for a specific one.
@@ -2343,6 +2362,14 @@ def flex_flash_attn_func(
         caps its grid at ``num_sm - sm_margin``), so it only pays off when the
         tile count is well above the SM count. Ignored for MHA. SM100/SM110
         only; no block sparsity. The forward is unaffected.
+
+    deterministic: bitwise-reproducible outputs and gradients, independent
+        of ``sm_margin``. Dense inputs order the dQ (and GQA dK/dV) reductions
+        on semaphores. Q/k ranges merge every overlapping row in a fixed
+        order: O/LSE by relation, dQ by (relation, K tile), reduced dK/dV by
+        (relation, q head); the kernels then launch persistent whatever
+        ``sm_margin``. Ranges need SM100/SM110 and head_dim 128, without
+        ``pack_gqa``, RangeMerge or block sparsity.
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
