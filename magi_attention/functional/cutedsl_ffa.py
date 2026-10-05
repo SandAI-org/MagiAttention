@@ -86,10 +86,13 @@ def cutedsl_fwd(
     sm_margin: int = 0,
     return_max_logits: bool = False,
     max_logits: torch.Tensor | None = None,
+    pack_gqa: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Forward wrapper: returns (out, lse, max_logits) with lse in the dist
     contract's (sq, nhq) layout. With ``return_max_logits`` the fp32 ``[nhq]``
-    max logits are merged into ``max_logits``, or into a new ``-inf`` buffer."""
+    max logits are merged into ``max_logits``, or into a new ``-inf`` buffer.
+    ``pack_gqa`` is forwarded to the kernel; the dist runtime leaves it
+    ``None``, which keeps the atomic-merge forward unpacked."""
 
     ffa_args = attn_arg.to_ffa_args(is_bwd=False)
     if not ffa_args:
@@ -125,6 +128,7 @@ def cutedsl_fwd(
         mask_types=ffa_args["attn_type_map"],
         sm_margin=sm_margin,
         max_logits=max_logits,
+        pack_gqa=pack_gqa,
     )
 
     return out, lse, max_logits
