@@ -16,6 +16,7 @@
 and fake-tensor builders for bwd kernels."""
 import hashlib
 import inspect
+import math
 import os
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -124,6 +125,21 @@ def materialize_mask_types(
     if isinstance(mask_types, torch.Tensor):
         return mask_types
     return torch.full((num_ranges,), mask_types, dtype=torch.int32, device=device)
+
+
+def normalize_softcap(softcap: float | None) -> float | None:
+    """``None`` / ``0`` disable softcap; an enabled cap must be finite and
+    positive.
+
+    The SM100/SM110 kernels store ``tanh(s * softmax_scale / softcap)`` and
+    fold ``softcap`` into the exp2 scale after masking, so a negative cap
+    would turn the mask's ``-inf`` into ``+inf``.
+    """
+    if softcap is None or softcap == 0.0:
+        return None
+    if not (math.isfinite(softcap) and softcap > 0.0):
+        raise ValueError(f"softcap must be 0 (off) or finite and > 0, got {softcap}")
+    return float(softcap)
 
 
 def validate_range_feature_support(
