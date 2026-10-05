@@ -209,6 +209,41 @@ def validate_range_feature_support(
         raise NotImplementedError("bwd RangeMerge is not supported at head_dim 192")
 
 
+def validate_range_deterministic(
+    *,
+    head_dim: int,
+    head_dim_v: int,
+    num_sm: int,
+    sm_margin: int,
+    cluster_size: int,
+    max_tickets: int,
+) -> None:
+    """Reject a deterministic q/k-range launch outside what the chain covers.
+
+    The range-lock chain is implemented at head_dim 128 only. It needs a
+    persistent grid of at least one cluster, so ``num_sm - sm_margin`` must
+    hold ``cluster_size`` SMs; the cluster size is not changed to fit the
+    budget, as that changes the arithmetic tiling. ``max_tickets`` bounds the
+    tile counter, which ends at the ticket count plus the cluster count and
+    must stay within int32.
+    """
+    if head_dim != 128 or head_dim_v != 128:
+        raise NotImplementedError(
+            "deterministic q/k ranges support head_dim 128 only, got "
+            f"head_dim={head_dim}, head_dim_v={head_dim_v}"
+        )
+    if num_sm - sm_margin < cluster_size:
+        raise ValueError(
+            f"deterministic q/k ranges need num_sm - sm_margin ({num_sm} - "
+            f"{sm_margin}) to hold one {cluster_size}-CTA cluster"
+        )
+    if max_tickets + num_sm // cluster_size > 2**31 - 1:
+        raise ValueError(
+            f"deterministic q/k ranges: {max_tickets} tiles overflow the int32 "
+            "tile counter"
+        )
+
+
 def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
     """Collapse q/k ranges down to a cu_seqlens tensor.
 
