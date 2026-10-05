@@ -62,6 +62,7 @@ from .ffa_utils import (
     materialize_mask_types,
     maybe_contiguous,
     normalize_mask_types,
+    normalize_softcap,
     ranges_to_cu_seqlens,
     resolve_output_dtype,
     tile_size_bwd_sm90,
@@ -209,19 +210,9 @@ def _flex_flash_attn_fwd(
     mask_mod = flex_attn_args.mask_mod
     aux_tensors = flex_attn_args.aux_tensors
     block_sparse_tensors = flex_attn_args.block_sparse_tensors
-    if softcap == 0.0:
-        softcap = None
+    softcap = normalize_softcap(softcap)
     if softcap is not None:
         assert score_mod is None, "softcap and score_mod cannot be used together"
-        if major_arch not in (10, 11):
-            # Only the SM100 kernel caps scores natively; the other
-            # architectures route the cap through the score_mod slot.
-            score_mod = create_softcap_scoremod(softcap)
-    elif score_mod is not None:
-        if major_arch == 8:
-            raise NotImplementedError(
-                "Custom user-provided score_mod is not supported on SM8x architectures."
-            )
 
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
     num_head, head_dim = q.shape[-2:]
@@ -494,6 +485,17 @@ def _flex_flash_attn_fwd(
     )
     if out_torch_dtype is torch.float32 and not fwd_fp32_o_borrow_kv:
         q_stage = 1
+
+    if softcap is not None:
+        if major_arch not in (10, 11):
+            # Only the SM100/SM110 kernel caps scores natively; the other
+            # architectures route the cap through the score_mod slot.
+            score_mod = create_softcap_scoremod(softcap)
+    elif score_mod is not None:
+        if major_arch == 8:
+            raise NotImplementedError(
+                "Custom user-provided score_mod is not supported on SM8x architectures."
+            )
 
     # hash score and mask mods for compile cache
     score_mod_hash = hash_callable(score_mod) if score_mod is not None else False
@@ -928,16 +930,12 @@ def _flex_flash_attn_bwd(
     mask_mod = flex_attn_args.mask_mod
     aux_tensors = flex_attn_args.aux_tensors
     block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
-    has_softcap = softcap != 0.0
+    softcap_value = normalize_softcap(softcap)
+    has_softcap = softcap_value is not None
     if has_softcap:
         assert (
             score_mod is None and score_mod_bwd is None
         ), "softcap and score_mod/score_mod_bwd cannot be used together"
-        if major_arch not in (10, 11):
-            # Only the SM100 kernel caps scores natively; the other
-            # architectures route the cap through the score_mod slot.
-            score_mod = create_softcap_scoremod(softcap)
-            score_mod_bwd = create_softcap_scoremod_bwd(softcap)
 
     has_ranges = validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
     validate_range_feature_support(
@@ -1188,6 +1186,11 @@ def _flex_flash_attn_bwd(
             "per KV head: MHA, or GQA with cat_gqa"
         )
 
+    if has_softcap and major_arch not in (10, 11):
+        # Only the SM100/SM110 kernel caps scores natively; the other
+        # architectures route the cap through the score_mod slot.
+        score_mod = create_softcap_scoremod(softcap_value)
+        score_mod_bwd = create_softcap_scoremod_bwd(softcap_value)
     if score_mod is not None:
         assert (
             score_mod_bwd is not None
@@ -1772,7 +1775,7 @@ def _flex_flash_attn_bwd(
                 if tile_counter is not None
                 else None
             )
-            bwd_compile_args.append(Float32(softcap) if has_softcap else None)
+            bwd_compile_args.append(Float32(softcap_value) if has_softcap else None)
         bwd_compile_args.extend(
             [
                 cute_aux_tensors,
@@ -1811,7 +1814,7 @@ def _flex_flash_attn_bwd(
         bwd_call_args.append(seqlen_k)
         bwd_call_args.append(sm_margin if sm_margin > 0 else None)
         bwd_call_args.append(tile_counter)
-        bwd_call_args.append(softcap if has_softcap else None)
+        bwd_call_args.append(softcap_value)
     bwd_call_args.extend(
         [
             aux_tensors,
