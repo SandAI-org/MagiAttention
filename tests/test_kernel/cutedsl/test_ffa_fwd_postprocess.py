@@ -175,6 +175,46 @@ class TestFfaFwdPostprocess(TestCase):
         torch.testing.assert_close(out, out_ref, atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
 
+    @parameterize("with_sink", [False, True])
+    def test_empty_k_call_keeps_the_accumulated_state(self, with_sink):
+        """An atomic call with no K adds no pair to the caller's O/LSE: rows
+        with a finite LSE keep their state (the sink, if passed, is folded in
+        once), and rows still at LSE = -inf end at O = 0."""
+        device, num_head, head_dim, total_q = "cuda", 4, 128, 256
+        q = torch.randn(
+            total_q, num_head, head_dim, device=device, dtype=torch.bfloat16
+        )
+        k = v = torch.empty(0, num_head, head_dim, device=device, dtype=q.dtype)
+        sink = (
+            torch.randn(2, num_head, device=device, dtype=torch.float32)
+            if with_sink
+            else None
+        )
+        # Rows [0, 128) carry a previous result; rows [128, 256) are empty.
+        out = torch.randn(total_q, num_head, head_dim, device=device)
+        out[128:] = math.nan
+        lse = torch.randn(total_q, num_head, device=device)
+        lse[128:] = -math.inf
+        out_prev, lse_prev = out.clone(), lse.clone()
+
+        self._fwd(q, k, v, out, lse, [[0, total_q]], [[0, 0]], sink)
+
+        self.assertTrue(torch.all(out[128:] == 0), "empty-row O is not zero")
+        if sink is None:
+            torch.testing.assert_close(out[:128], out_prev[:128], atol=0, rtol=0)
+            torch.testing.assert_close(lse, lse_prev, atol=0, rtol=0)
+            return
+        lse_sink = torch.logsumexp(sink, dim=0)
+        lse_ref = torch.logaddexp(lse_prev[:128], lse_sink)
+        torch.testing.assert_close(lse[:128], lse_ref, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(
+            out[:128],
+            out_prev[:128] * torch.exp(lse_prev[:128] - lse_ref)[..., None],
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        torch.testing.assert_close(lse[128:], lse_sink.expand(128, -1))
+
 
 if __name__ == "__main__":
     run_tests()

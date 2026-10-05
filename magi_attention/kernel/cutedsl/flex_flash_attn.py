@@ -336,6 +336,13 @@ def _flex_flash_attn_fwd(
         assert lse.stride(-1) == 1, "lse must be contiguous along its last dim"
 
     if seqlen_k == 0 or total_q == 0:
+        if not disable_fwd_atomic_reduction:
+            # O/LSE may carry an accumulated state, and this call adds no
+            # pair: the postprocess alone keeps finite rows, folds the sink
+            # once and zeroes the rows still at LSE == -inf.
+            if total_q > 0:
+                fwd_postprocess(out, lse, lse_sink)
+            return out, lse
         # Every row attends to no key: O is zero and the LSE holds only the sinks.
         out.zero_()
         if lse_sink is None:
