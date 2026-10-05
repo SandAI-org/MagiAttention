@@ -184,7 +184,7 @@ class FFABwdSm100:
             )
             assert not deterministic
             assert not use_dense_dqacc_for_ranges
-            assert mask_mod is None
+            assert score_mod is None and score_mod_bwd is None and mask_mod is None
             # The 2-CTA hdim-192 mainloop fuses the Q and Qt loads into one
             # stage; the merge mainloop walks Q and LSE as separate stages.
             assert self.tile_hdim != 192, "bwd RangeMerge is not defined at hdim 192"
