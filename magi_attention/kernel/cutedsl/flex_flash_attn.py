@@ -69,6 +69,7 @@ from .ffa_utils import (
     tile_size_fwd_sm90,
     validate_arch,
     validate_head_dims,
+    validate_range_deterministic,
     validate_range_feature_support,
     validate_tensor,
     validate_true_ranges,
@@ -151,6 +152,7 @@ def _flex_flash_attn_fwd(
     out_dtype: torch.dtype | None = None,
     sm_margin: int = 0,
     max_logits: torch.Tensor | None = None,
+    deterministic: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -185,6 +187,12 @@ def _flex_flash_attn_fwd(
             sinks excluded) over every attended (q, k) pair is merged into with
             an atomic max; the caller initializes it to ``-inf`` or a previous
             result. SM100/SM110 only.
+        deterministic: merge the O/LSE partials of overlapping q ranges in
+            relation order on the range atomic path, so O and LSE are bitwise
+            identical across runs and independent of ``sm_margin``. The launch
+            is persistent whatever ``sm_margin``; head_dim 128 only, without
+            ``pack_gqa``. The dense and direct-store paths have one writer per
+            O row and are unaffected.
 
     Returns:
         A tuple of (output, lse) where:
@@ -295,6 +303,25 @@ def _flex_flash_attn_fwd(
         # The packed atomic merge is opt-in until its end-to-end cost is
         # characterized; the direct-store paths pack GQA by default.
         pack_gqa = qhead_per_kvhead > 1 and disable_fwd_atomic_reduction
+    # Only the range atomic merge has several writers per O row to order.
+    fwd_deterministic = deterministic and not disable_fwd_atomic_reduction
+    if fwd_deterministic:
+        if pack_gqa:
+            raise NotImplementedError("deterministic q/k ranges do not pack GQA")
+        if block_sparse_tensors is not None:
+            raise NotImplementedError(
+                "deterministic q/k ranges cannot be combined with block sparsity"
+            )
+        # Atomic ranges launch 1-CTA clusters; a tile spans at least 128 rows
+        # of one range and q head, which bounds the ticket count.
+        validate_range_deterministic(
+            head_dim=head_dim,
+            head_dim_v=head_dim_v,
+            num_sm=torch.cuda.get_device_properties(q.device).multi_processor_count,
+            sm_margin=sm_margin,
+            cluster_size=1,
+            max_tickets=(total_q + batch_size * 127) // 128 * num_head,
+        )
 
     # The SM80 fwd kernel indexes mQ by query head directly; the packed-GQA
     # epilogue path is unsupported, so force unpacked store.
@@ -507,8 +534,12 @@ def _flex_flash_attn_fwd(
     is_varlen_mha = has_ranges and qhead_per_kvhead == 1
     is_dense_noncausal = not has_ranges and not causal and not local
 
-    # K/V borrowing uses persistent execution even without an SM reservation.
-    ranges_persistent = has_ranges and (sm_margin > 0 or fwd_fp32_o_borrow_kv)
+    # K/V borrowing uses persistent execution even without an SM reservation,
+    # and so does the deterministic chain, whose progress needs every tile
+    # claimed in ticket order (DYNAMIC).
+    ranges_persistent = has_ranges and (
+        sm_margin > 0 or fwd_fp32_o_borrow_kv or fwd_deterministic
+    )
     use_clc_scheduler = (
         requested_use_clc_scheduler
         and not is_varlen_mha
@@ -544,18 +575,31 @@ def _flex_flash_attn_fwd(
         aux_tensor_metadata = None
 
     range_locks = None
+    conflict_state = None
     if not disable_fwd_atomic_reduction:
         # One int32 lock per (tile_m physical rows, head); +1 guard tile. Packed
         # rows are G * token + g, so a lock covers tile_m / G tokens of all the
-        # q heads of one kv head.
+        # q heads of one kv head. The deterministic chain keeps (published
+        # writer, arrival count) per lock instead, see range_chain.
         lock_rows = total_q * (qhead_per_kvhead if pack_gqa else 1)
         num_lock_blocks = (lock_rows + tile_m - 1) // tile_m + 1
         range_locks = torch.zeros(
             num_lock_blocks,
             num_head_kv if pack_gqa else num_head,
+            *((2,) if fwd_deterministic else ()),
             dtype=torch.int32,
             device=device,
         )
+        if fwd_deterministic:
+            # One row per execution slot; the 1-CTA persistent grid has at
+            # most num_sm - sm_margin CTAs.
+            num_slots = (
+                torch.cuda.get_device_properties(device).multi_processor_count
+                - sm_margin
+            )
+            conflict_state = torch.zeros(
+                num_slots, num_lock_blocks, dtype=torch.int32, device=device
+            )
     # The DYNAMIC schedule's tile counter.
     tile_counter = (
         torch.zeros(1, dtype=torch.int32, device=device) if ranges_persistent else None
@@ -593,6 +637,7 @@ def _flex_flash_attn_fwd(
         persistent_launch,
         range_merge_active,
         max_logits is not None,
+        fwd_deterministic,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
 
@@ -709,6 +754,7 @@ def _flex_flash_attn_fwd(
                     range_merge=range_merge_active,
                     disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
                     o_dtype=to_cute_dtype(out_torch_dtype),
+                    deterministic=fwd_deterministic,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 12:
@@ -779,6 +825,11 @@ def _flex_flash_attn_fwd(
                 else None
             )
             compile_args.append(Float32(softcap) if softcap is not None else None)
+            compile_args.append(
+                to_cute_tensor(conflict_state, assumed_align=4)
+                if conflict_state is not None
+                else None
+            )
         compile_args.extend(
             [
                 sparse_tensors,
@@ -819,6 +870,7 @@ def _flex_flash_attn_fwd(
         call_args.append(tile_counter)
         call_args.append(max_logits)
         call_args.append(softcap)
+        call_args.append(conflict_state)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
