@@ -327,7 +327,7 @@ class FFAFwdSm100:
                 self.use_per_range_mask
             ), "RangeMerge reads one mask type per relation pair from mMaskTypes"
             assert not use_2cta_instrs and not is_split_kv and not pack_gqa
-            assert mask_mod is None
+            assert score_mod is None and mask_mod is None
         self.is_local = is_local
         self.is_varlen_q = is_varlen_q
         self.use_correction_warps_for_epi = is_varlen_q
