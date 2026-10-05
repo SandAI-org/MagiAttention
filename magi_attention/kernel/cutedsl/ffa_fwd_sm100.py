@@ -44,7 +44,7 @@ from magi_attention.utils.version import is_cutedsl_version_ge
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import sm100_utils
+from . import range_chain, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
@@ -788,6 +788,11 @@ class FFAFwdSm100:
         mMaxLogits: Optional[cute.Tensor] = None,
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
+        # Deterministic only, see range_chain: int32 (num_slots, num_lock_blocks)
+        # conflict state, zero before the launch, with num_slots at least the
+        # grid size. mRangeLocks is then the (num_lock_blocks, num_head, 2)
+        # chain state instead of the mutex.
+        mConflictState: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -826,6 +831,11 @@ class FFAFwdSm100:
         assert (mRangeLocks is not None) == (
             not self.disable_fwd_atomic_reduction
         ), "range locks required iff fwd atomic reduction is enabled"
+        assert (
+            mConflictState is not None
+        ) == self.deterministic, "the conflict state comes with deterministic"
+        if const_expr(self.deterministic):
+            assert mRangeLocks is not None and cute.rank(mRangeLocks) == 3
         assert (
             mCuBatches is not None
         ) == self.range_merge, "RangeMerge requires the cu_batches CSR (and only then)"
@@ -1527,6 +1537,7 @@ class FFAFwdSm100:
             descale_tensors,
             mMaskTypes,
             mRangeLocks,
+            mConflictState,
             mCuBatches,
             mMaxLogits,
             blocksparse_tensors,
@@ -1584,6 +1595,7 @@ class FFAFwdSm100:
         descale_tensors: Optional[DescaleTensors],
         mMaskTypes: Optional[cute.Tensor],
         mRangeLocks: Optional[cute.Tensor],
+        mConflictState: Optional[cute.Tensor],
         mCuBatches: Optional[cute.Tensor],
         mMaxLogits: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
@@ -2449,6 +2461,8 @@ class FFAFwdSm100:
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
                 mRangeLocks=mRangeLocks,
+                mQRanges=mQRanges,
+                mConflictState=mConflictState,
                 borrow_done_mbar_ptr=borrow_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
@@ -4510,6 +4524,8 @@ class FFAFwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mConflictState: Optional[cute.Tensor] = None,
         borrow_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
@@ -4537,6 +4553,11 @@ class FFAFwdSm100:
         sm_stats_consumer_phase = Int32(0)
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
+        # Deterministic chain: this CTA is execution slot chain_slot of the
+        # conflict state, whose scan has recorded the relations below
+        # chain_scanned.
+        chain_slot = cute.arch.block_idx()[0]
+        chain_scanned = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -4976,8 +4997,52 @@ class FFAFwdSm100:
                         lock_offset = row_offset + m_tile_idx * self.m_block_size
                         # Skip lock/release for phantom stages (no valid rows).
                         tile_has_rows = num_rows > m_tile_idx * self.m_block_size
+                        if const_expr(self.deterministic):
+                            # Relation batch_idx is writer batch_idx + 1; its
+                            # tile merges after the predecessor of each block
+                            # it has rows in, in place of the mutex.
+                            (
+                                chain_left,
+                                chain_right,
+                                chain_left_weight,
+                                chain_right_weight,
+                            ) = range_chain.tile_events(
+                                row_offset,
+                                row_offset + num_rows,
+                                m_tile_idx,
+                                self.m_block_size,
+                            )
                         if tile_has_rows:
-                            if tidx == 0:
+                            if const_expr(self.deterministic):
+                                assert mQRanges is not None
+                                assert mConflictState is not None
+                                if warp_idx == 0:
+                                    range_chain.scan_conflicts(
+                                        mQRanges,
+                                        mConflictState,
+                                        chain_slot,
+                                        chain_scanned,
+                                        batch_idx,
+                                        self.m_block_size,
+                                    )
+                                chain_scanned = batch_idx
+                                if tidx == 0:
+                                    range_chain.wait_published(
+                                        mRangeLocks,
+                                        chain_left,
+                                        head_idx,
+                                        Int32(mConflictState[chain_slot, chain_left]),
+                                    )
+                                    if chain_right != chain_left:
+                                        range_chain.wait_published(
+                                            mRangeLocks,
+                                            chain_right,
+                                            head_idx,
+                                            Int32(
+                                                mConflictState[chain_slot, chain_right]
+                                            ),
+                                        )
+                            elif tidx == 0:
                                 self._acquire_range_locks(
                                     mRangeLocks, head_idx, lock_offset
                                 )
@@ -5054,9 +5119,26 @@ class FFAFwdSm100:
                                 * cute.arch.WARP_SIZE,
                             )
                             if tidx == 0:
-                                self._release_range_locks(
-                                    mRangeLocks, head_idx, lock_offset
-                                )
+                                if const_expr(self.deterministic):
+                                    range_chain.arrive(
+                                        mRangeLocks,
+                                        chain_left,
+                                        head_idx,
+                                        batch_idx + 1,
+                                        chain_left_weight,
+                                    )
+                                    if chain_right != chain_left:
+                                        range_chain.arrive(
+                                            mRangeLocks,
+                                            chain_right,
+                                            head_idx,
+                                            batch_idx + 1,
+                                            chain_right_weight,
+                                        )
+                                else:
+                                    self._release_range_locks(
+                                        mRangeLocks, head_idx, lock_offset
+                                    )
 
                     # Signal for the next work tile that tO are already read,
                     # so mma warp can write to them
