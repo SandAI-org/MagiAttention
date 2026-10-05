@@ -53,7 +53,7 @@ from .named_barrier import NamedBarrierFwdSm100
 from .pack_gqa import PackGQA, pack_gqa_layout
 from .paged_kv import PagedKVManager
 from .seqlen_info import SeqlenInfoQK
-from .softmax import SoftmaxSm100, apply_score_mod_inner
+from .softmax import SoftmaxSm100, apply_score_mod_inner, apply_softcap
 from .sparse_utils import (
     BlockSparseTensors,
     get_total_block_count,
@@ -229,6 +229,9 @@ class FFAFwdSm100:
         is_persistent: bool = True,
         score_mod: cutlass.Constexpr | None = None,
         mask_mod: cutlass.Constexpr | None = None,
+        # tanh-cap the scaled scores before masking. The cap value is a
+        # runtime scalar of __call__; this flag only selects the variant.
+        has_softcap: bool = False,
         has_aux_tensors: cutlass.Constexpr = False,
         paged_kv_non_tma: bool = False,
         is_varlen_q: bool = False,
@@ -324,7 +327,7 @@ class FFAFwdSm100:
                 self.use_per_range_mask
             ), "RangeMerge reads one mask type per relation pair from mMaskTypes"
             assert not use_2cta_instrs and not is_split_kv and not pack_gqa
-            assert score_mod is None and mask_mod is None
+            assert mask_mod is None
         self.is_local = is_local
         self.is_varlen_q = is_varlen_q
         self.use_correction_warps_for_epi = is_varlen_q
@@ -362,6 +365,10 @@ class FFAFwdSm100:
 
         self.score_mod = score_mod
         self.mask_mod = mask_mod
+        assert not (
+            has_softcap and score_mod is not None
+        ), "softcap and score_mod both rewrite the scores; their order is undefined"
+        self.has_softcap = has_softcap
         self.vec_size: cutlass.Constexpr = getattr(
             score_mod, "__vec_size__", 1 if const_expr(has_aux_tensors) else 2
         )
@@ -736,6 +743,8 @@ class FFAFwdSm100:
         # [num_head_q] fp32, max softmax logit per q head, merged in with an
         # atomic max; the caller initializes it (to -inf or a previous result).
         mMaxLogits: Optional[cute.Tensor] = None,
+        # tanh cap magnitude; required iff has_softcap.
+        softcap: Float32 | None = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -1324,9 +1333,19 @@ class FFAFwdSm100:
 
         # --- Make others ---
 
+        # The mainloop computes tanh(s * softmax_scale / softcap); the cap
+        # magnitude re-enters as the exp2 scale, so softcap_scale is the only
+        # per-element multiply the cap adds.
+        softcap_scale = None
+        if const_expr(self.has_softcap):
+            assert softcap is not None
+            softcap_scale = softmax_scale / softcap
         softmax_scale_log2, softmax_scale = cutedsl_utils.compute_softmax_scale_log2(
             softmax_scale, self.score_mod
         )
+        if const_expr(self.has_softcap):
+            assert softcap is not None
+            softmax_scale_log2 = softcap * math.log2(math.e)
         window_size_left = (
             Int32(window_size_left) if window_size_left is not None else None
         )
@@ -1449,6 +1468,7 @@ class FFAFwdSm100:
             tma_atom_O,
             softmax_scale_log2,
             softmax_scale,
+            softcap_scale,
             window_size_left,
             window_size_right,
             learnable_sink,
@@ -1505,6 +1525,7 @@ class FFAFwdSm100:
         tma_atom_O: Optional[cute.CopyAtom],
         softmax_scale_log2: Float32,
         softmax_scale: Float32 | None,
+        softcap_scale: Float32 | None,
         window_size_left: Optional[Int32],
         window_size_right: Optional[Int32],
         learnable_sink: Optional[cute.Tensor],
@@ -2285,6 +2306,7 @@ class FFAFwdSm100:
                 self.softmax_loop,
                 softmax_scale_log2=softmax_scale_log2,
                 softmax_scale=softmax_scale,
+                softcap_scale=softcap_scale,
                 descale_tensors=descale_tensors,
                 thr_mma_qk=thr_mma_qk,
                 sScale=sScale,
@@ -3392,6 +3414,7 @@ class FFAFwdSm100:
         stage: int | Int32,
         softmax_scale_log2: Float32,
         softmax_scale: Float32 | None,
+        softcap_scale: Float32 | None,
         descale_tensors: Optional[DescaleTensors],
         thr_mma_qk: cute.ThrMma,
         tStS: cute.Tensor,  # ((TILE_M, TILE_N), 1, 1, q_stage)
@@ -3626,12 +3649,20 @@ class FFAFwdSm100:
             )
 
             max_offset = 8 if const_expr(self.q_dtype.width == 8) else 0
-            if const_expr(self.score_mod is None):
-                softmax_scale_log2_eff = softmax_scale_log2 * qk_descale
-                softmax_scale_eff = None
-            else:
+            softcap_scale_eff = None
+            if const_expr(self.has_softcap):
+                # The descale belongs on the raw score, inside the tanh; the
+                # exp2 scale is the cap magnitude and stays as is.
                 softmax_scale_log2_eff = softmax_scale_log2
-                softmax_scale_eff = softmax_scale * qk_descale
+                softmax_scale_eff = None
+                softcap_scale_eff = softcap_scale * qk_descale
+            else:
+                if const_expr(self.score_mod is None):
+                    softmax_scale_log2_eff = softmax_scale_log2 * qk_descale
+                    softmax_scale_eff = None
+                else:
+                    softmax_scale_log2_eff = softmax_scale_log2
+                    softmax_scale_eff = softmax_scale * qk_descale
 
             rescale_threshold = (
                 8.0
@@ -3706,6 +3737,7 @@ class FFAFwdSm100:
                 head_idx=head_idx,
                 m_block=(self.q_stage * m_block + stage) * self.cta_group_size,
                 seqlen=seqlen_info,
+                softcap_scale=softcap_scale_eff,
                 aux_tensors=aux_tensors,
                 fastdiv_mods=fastdiv_mods,
                 head_divmod=head_divmod,
@@ -4190,6 +4222,7 @@ class FFAFwdSm100:
         head_idx: Int32,
         m_block: Int32,
         seqlen,
+        softcap_scale: Float32 | None = None,
         aux_tensors: Optional[list] = None,
         fastdiv_mods=(None, None),
         head_divmod=None,
@@ -4287,6 +4320,11 @@ class FFAFwdSm100:
         cute.copy(thr_tmem_load, tStS_t2r, tSrS_t2r)
 
         # --- Update row_max/corr_scale ---
+
+        # Cap before the mask: masking writes -inf, which must not pass
+        # through tanh.
+        if const_expr(self.has_softcap):
+            apply_softcap(tSrS_t2r, softcap_scale)
 
         # Apply score_mod on rSi if needed
         if const_expr(self.score_mod is not None):  # TODO: review the logics
@@ -4485,7 +4523,9 @@ class FFAFwdSm100:
             qk_descale, v_descale = self._load_effective_descales(
                 descale_tensors, batch_idx, kv_head_idx
             )
-            if const_expr(self.score_mod is None):
+            # With softcap the descale sits inside the tanh (softmax warps),
+            # so the exp2 scale seen here is the cap magnitude unchanged.
+            if const_expr(self.score_mod is None and not self.has_softcap):
                 softmax_scale_log2_eff = softmax_scale_log2 * qk_descale
             else:
                 softmax_scale_log2_eff = softmax_scale_log2
