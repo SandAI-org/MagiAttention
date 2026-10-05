@@ -370,6 +370,8 @@ This is only supposed to be used for testing or debugging, since the performance
 
 Toggle this env variable to `1` to enable deterministic mode to use deterministic algorithms for all magi_attention kernels.
 
+With the `cutedsl` kernel backend, deterministic q/k ranges require SM100/SM110 and `head_dim == head_dim_v == 128`; other configurations raise `NotImplementedError`. The kernels then launch persistent whatever `sm_margin`.
+
 
 **MAGI_ATTENTION_PROFILE_MODE**
 
