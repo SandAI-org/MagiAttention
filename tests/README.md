@@ -127,6 +127,7 @@ These flags are combined using a `heuristic` strategy instead of full Cartesian 
 - `native_grpcoll=True` disallows `hier_comm=True`; with `head_dim != head_dim_v` it also requires `num_heads_kv * (head_dim + head_dim_v)` to be a multiple of the hidden-size alignment (256 for fp16/bf16)
 - `flatten_head_groups=True` requires `qo_comm=True`, and is incompatible with sink and `return_max_logits`
 - `fa4` backend disallows `deterministic`, `fwd_hp_reduce`, `bwd_hp_reduce`, `qo_comm`, `sink`, `bwd_hide_tail_reduce`
+- `cutedsl` backend allows `deterministic` only with `head_dim == head_dim_v == 128`
 - `sdpa` / `sdpa_ol` backends disallow `native_grpcoll`
 - etc.
 

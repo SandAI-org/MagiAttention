@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from functools import partial
+from unittest import mock
 
 import torch
 import torch.distributed as dist
@@ -27,6 +28,13 @@ from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import MagiAttentionKernelBackend
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
+from magi_attention.kernel.cutedsl.cache_utils import JITCache
+from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
+from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
+from magi_attention.kernel.cutedsl.flex_flash_attn import (
+    _flex_flash_attn_bwd,
+    _flex_flash_attn_fwd,
+)
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.testing import parameterize, ref_attn_func
@@ -509,6 +517,107 @@ class TestDistAttn(DistTestBase):
                 rtol=0.1,
                 mismatch_threshold=max(1 / (seqlen_sink * nhq), 5e-2),
                 test_case="dsink",
+            )
+
+    @skip_if_lt_x_gpu(4)
+    @with_comms
+    def test_cutedsl_deterministic_mode_reaches_range_kernels(self):
+        """MAGI_ATTENTION_DETERMINISTIC_MODE on the cutedsl backend builds the
+        deterministic range kernels for both stages; the results match the
+        reference, and O, LSE and dQ, which no communication reduces here,
+        repeat bit for bit."""
+        if torch.cuda.get_device_capability()[0] not in (10, 11):
+            return
+        nhq, nhk, head_dim, dtype = 8, 4, 128, torch.bfloat16
+        switch_back = switch_envvars(
+            envvar_name_list=[
+                self.kernel_backend_envvar,
+                "MAGI_ATTENTION_DETERMINISTIC_MODE",
+            ],
+            enable_dict={
+                self.kernel_backend_envvar: True,
+                "MAGI_ATTENTION_DETERMINISTIC_MODE": True,
+            },
+            enable_value_dict={
+                self.kernel_backend_envvar: MagiAttentionKernelBackend.CUTEDSL.value
+            },
+        )
+        dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, False)
+        local_q, local_k, local_v = (
+            torch.randn(128, nh, head_dim, device=self.device, dtype=dtype)
+            for nh in (nhq, nhk, nhk)
+        )
+        grad_total_out = torch.randn(
+            512, nhq, head_dim, device=self.device, dtype=dtype
+        )
+        dist.broadcast(grad_total_out, src=0, group=self.nccl_group)
+
+        built: list = []
+
+        def recording(cls):
+            init = cls.__init__
+
+            def record(obj, *args, **kwargs):
+                init(obj, *args, **kwargs)
+                built.append(obj)
+
+            return mock.patch.object(cls, "__init__", record)
+
+        def run():
+            leaves = [
+                t.detach().clone().requires_grad_() for t in (local_q, local_k, local_v)
+            ]
+            local_out, meta = dist_attn_func(
+                *leaves, dist_attn_runtime=dist_attn_runtime
+            )
+            total_out = torch.cat(all_gather(local_out, group=self.nccl_group), dim=0)
+            total_out.backward(grad_total_out)
+            return local_out.detach(), meta.lse, *(t.grad for t in leaves)
+
+        with recording(FFAFwdSm100), recording(FFABwdSm100), mock.patch.object(
+            _flex_flash_attn_fwd, "compile_cache", JITCache()
+        ), mock.patch.object(_flex_flash_attn_bwd, "compile_cache", JITCache()):
+            first = run()
+            second = run()
+        switch_back()
+        self.assertTrue(built and all(kernel.deterministic for kernel in built))
+        for name, got, want in zip(("out", "lse", "dq"), second, first):
+            self.assertTrue(torch.equal(got, want), f"{name} differs between runs")
+
+        leaves = [
+            t.detach().clone().requires_grad_() for t in (local_q, local_k, local_v)
+        ]
+        total_q, total_k, total_v = (
+            torch.cat(all_gather(t, group=self.nccl_group), dim=0) for t in leaves
+        )
+        total_out_ref, _ = ref_attn_func(
+            q=total_q,
+            k=total_k,
+            v=total_v,
+            mask=torch.ones(512, 512, device=self.device).bool(),
+            layout="thd",
+            backend="sdpa",
+            high_precision=True,
+            return_lse=True,
+        )
+        total_out_ref.backward(grad_total_out)
+        total_out = torch.cat(all_gather(first[0], group=self.nccl_group), dim=0)
+        assert_close(
+            total_out,
+            total_out_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="out",
+        )
+        for name, grad, leaf in zip(("dq", "dk", "dv"), first[2:], leaves):
+            assert_close(
+                grad,
+                leaf.grad,
+                atol=EPSILON,
+                rtol=5e-2,
+                mismatch_threshold=0.08,
+                test_case=name,
             )
 
     @skip_if_lt_x_gpu(4)
