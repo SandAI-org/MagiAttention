@@ -313,15 +313,17 @@ def _flex_flash_attn_fwd(
             raise NotImplementedError(
                 "deterministic q/k ranges cannot be combined with block sparsity"
             )
-        # Atomic ranges launch 1-CTA clusters; a tile spans at least 128 rows
-        # of one range and q head, which bounds the ticket count.
+        # Atomic ranges launch 1-CTA clusters, one tile per at least 128 rows
+        # of one range and q head. Ranges may overlap, so the ticket count is
+        # bounded per range by the longest one (max_seqlen_q, else total_q).
+        longest_q = max_seqlen_q if max_seqlen_q is not None else total_q
         validate_range_deterministic(
             head_dim=head_dim,
             head_dim_v=head_dim_v,
             num_sm=torch.cuda.get_device_properties(q.device).multi_processor_count,
             sm_margin=sm_margin,
             cluster_size=1,
-            max_tickets=(total_q + batch_size * 127) // 128 * num_head,
+            max_tickets=batch_size * num_head * ((longest_q + 127) // 128),
             max_writer=batch_size,
         )
 
@@ -1273,9 +1275,10 @@ def _flex_flash_attn_bwd(
             num_sm=num_sm,
             sm_margin=sm_margin,
             cluster_size=cluster_size,
-            # A cluster unit is one cluster K tile of one range and head.
-            max_tickets=(total_k + batch_size * (cluster_tile_k - 1))
-            // cluster_tile_k
+            # A cluster unit is one cluster K tile of one range and scheduler
+            # head; ranges may overlap, so bound each by the longest one.
+            max_tickets=batch_size
+            * max_k_tiles
             * (num_head_kv if cat_gqa else num_head),
             # The last writers: r * stride + j + 1 with r < R and j < stride.
             max_writer=batch_size * max(max_k_tiles, dkv_writer_stride),
