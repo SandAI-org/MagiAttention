@@ -258,8 +258,13 @@ def _watch(
         threading.Thread(target=pump, daemon=True).start()
         deadline = time.monotonic() + compile_budget_s * budget_scale
         while True:
+            # Checked before every line: a child printing free-form logs
+            # never lets the queue run empty.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _WatchResult("timeout", case, "".join(log), proc.pid)
             try:
-                line = lines.get(timeout=max(deadline - time.monotonic(), 0.0))
+                line = lines.get(timeout=remaining)
             except queue.Empty:
                 return _WatchResult("timeout", case, "".join(log), proc.pid)
             if line is None:
@@ -283,7 +288,13 @@ def _watch(
             else:
                 continue
             deadline = time.monotonic() + budget * budget_scale
-        proc.wait()
+        # EOF on the output pipe does not mean the child exited (it may close
+        # stdout / stderr and keep running), so its exit is awaited within the
+        # current budget too.
+        try:
+            proc.wait(timeout=max(deadline - time.monotonic(), 0.0))
+        except subprocess.TimeoutExpired:
+            return _WatchResult("timeout", case, "".join(log), proc.pid)
         passed = proc.returncode == 0 and bool(log) and log[-1] == "DONE\n"
         return _WatchResult("pass" if passed else "error", case, "".join(log), proc.pid)
     finally:
@@ -333,7 +344,9 @@ def _run_job(direction: str, delay: str | None, gpus: "queue.Queue[str]") -> _Jo
         status = (
             "first_timeout_rerun_passed"
             if rerun.status == "pass"
-            else "repeated_timeout" if rerun.status == "timeout" else "error"
+            else "repeated_timeout"
+            if rerun.status == "timeout"
+            else "error"
         )
         return _JobResult(
             name,
@@ -415,6 +428,41 @@ class TestWatchdogParent(TestCase):
             )
         (pid,) = pids
         self._assert_reaped(pid)
+
+    def test_child_closing_its_pipes_still_times_out(self):
+        """EOF on the output pipe while the child keeps running ends at the
+        budget as a timeout, and the child is reaped."""
+        started = time.monotonic()
+        result = _watch(
+            self._fake_child(
+                "import os, time\nprint('INFO closing pipes', flush=True)\n"
+                "os.close(1)\nos.close(2)\ntime.sleep(600)\n"
+            ),
+            dict(os.environ),
+            iters=1,
+            budget_scale=1.0,
+            compile_budget_s=2.0,
+        )
+        self.assertEqual(result.status, "timeout")
+        self.assertLess(time.monotonic() - started, 30.0)
+        self._assert_reaped(result.pid)
+
+    def test_free_form_logs_do_not_extend_the_budget(self):
+        """A child printing logs without protocol lines still times out."""
+        started = time.monotonic()
+        result = _watch(
+            self._fake_child(
+                "import time\nwhile True:\n"
+                "    print('INFO still compiling', flush=True)\n    time.sleep(0.05)\n"
+            ),
+            dict(os.environ),
+            iters=1,
+            budget_scale=1.0,
+            compile_budget_s=2.0,
+        )
+        self.assertEqual(result.status, "timeout")
+        self.assertLess(time.monotonic() - started, 30.0)
+        self._assert_reaped(result.pid)
 
     def test_clean_exit_after_done_passes(self):
         result = _watch(
