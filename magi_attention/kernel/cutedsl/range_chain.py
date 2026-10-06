@@ -181,17 +181,40 @@ def arrive(
     cluster_size: cutlass.Constexpr[int] = 1,
 ) -> None:
     """Arrive with ``weight`` on ``block`` of ``head``; completing
-    ``2 * cluster_size`` publishes ``writer``. The caller's stores must
-    already be gpu-visible."""
+    ``2 * cluster_size`` publishes ``writer``.
+
+    One thread arrives per event. Before it, every thread of the CTA that
+    wrote rows of the event must have completed them at the destination
+    (bulk reductions: ``cp_async_bulk_wait_group(0, read=False)`` by the
+    issuing thread) and reached a CTA barrier with the arriving thread; the
+    arriving thread then fences (``fence_acq_rel_gpu``) so the acq_rel
+    arrival carries those writes."""
     count_ptr = elem_pointer(mChain, (block, head, 1))
     prev = cute.arch.atomic_add(count_ptr, weight, sem="acq_rel", scope="gpu")
+    # Exact match: weights are those of the logical tile, so the arrival that
+    # completes the writer's sum is unique, and a sum stepping past the
+    # threshold never publishes (the successor then waits forever, which the
+    # tests detect, instead of starting early).
     if prev + weight == 2 * cluster_size:
         # The next writer of this block starts only after the publish below,
-        # so resetting the count before it cannot race with its arrivals.
+        # so resetting the count before it cannot race with its arrivals; the
+        # release of the publish orders the reset before it.
         cute.arch.atomic_exch(count_ptr, Int32(0), sem="relaxed", scope="gpu")
-        cute.arch.atomic_exch(
-            elem_pointer(mChain, (block, head, 0)),
-            writer,
-            sem="release",
-            scope="gpu",
-        )
+        publish(mChain, block, head, writer)
+
+
+@cute.jit
+def publish(mChain: cute.Tensor, block: Int32, head: Int32, writer: Int32) -> None:
+    """Publish ``writer`` on ``block`` of ``head`` (release, gpu scope).
+
+    Called once per (writer, block), by the arrival completing the writer's
+    weight, after it reset the count. The acq_rel arrivals before it carry
+    every participant's destination writes, so a successor that reads
+    ``writer`` with ``wait_published`` (acquire) sees them.
+    """
+    cute.arch.atomic_exch(
+        elem_pointer(mChain, (block, head, 0)),
+        writer,
+        sem="release",
+        scope="gpu",
+    )
