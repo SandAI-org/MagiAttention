@@ -2373,22 +2373,10 @@ class FFABwdSm100:
             ) * self.cta_group_size
             assert self.tile_scheduler_cls is SingleTileVarlenScheduler
             dynamic_state = DynamicState.create(
-                pipeline=pipeline.PipelineClcFetchAsync.create(
-                    barrier_storage=storage.sched_mbar_ptr.data_ptr(),
-                    num_stages=self.sched_stages,
-                    producer_group=ThreadCooperativeGroup(1),
-                    consumer_group=ThreadCooperativeGroup(
-                        cute.arch.WARP_SIZE * sched_consumer_warps
-                    ),
-                    tx_count=4,
-                    cta_layout_vmnk=cta_layout_vmnk,
-                ),
-                consumer_state=pipeline.make_pipeline_state(
-                    pipeline.PipelineUserType.Consumer, self.sched_stages
-                ),
-                producer_state=pipeline.make_pipeline_state(
-                    pipeline.PipelineUserType.Producer, self.sched_stages
-                ),
+                barrier_storage=storage.sched_mbar_ptr.data_ptr(),
+                num_stages=self.sched_stages,
+                num_consumer_threads=cute.arch.WARP_SIZE * sched_consumer_warps,
+                cta_layout_vmnk=cta_layout_vmnk,
                 response_ptr=storage.sched_response.data_ptr(),
             )
             tile_scheduler = SingleTileVarlenScheduler.create(

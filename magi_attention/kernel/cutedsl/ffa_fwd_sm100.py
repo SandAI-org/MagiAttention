@@ -2089,32 +2089,30 @@ class FFAFwdSm100:
             clc_response_ptr = storage.clc_response.data_ptr()
             clc_mbar_ptr = storage.clc_mbar_ptr.data_ptr()
 
-            clc_pipeline_producer_group = ThreadCooperativeGroup(1)
             num_clc_consumer_warps_per_cta = self.threads_per_cta // cute.arch.WARP_SIZE
             # NB on CTA0 warp15 == scheduler on CTA1 == empty but still both consume
             num_clc_consumer_warps = (
                 num_clc_consumer_warps_per_cta * self.cta_group_size
             )
-            clc_pipeline_consumer_group = ThreadCooperativeGroup(
-                cute.arch.WARP_SIZE * num_clc_consumer_warps
-            )
-            # CLC writes a 16-byte response; DYNAMIC publishes a 4-byte tile index.
-            sched_pipeline = pipeline.PipelineClcFetchAsync.create(
-                barrier_storage=clc_mbar_ptr,
-                num_stages=self.sched_stages,
-                producer_group=clc_pipeline_producer_group,
-                consumer_group=clc_pipeline_consumer_group,
-                tx_count=16 if const_expr(self.use_clc_scheduler) else 4,
-                cta_layout_vmnk=cta_layout_vmnk,
-            )
-            consumer_state = pipeline.make_pipeline_state(
-                pipeline.PipelineUserType.Consumer, self.sched_stages
-            )
-            producer_state = pipeline.make_pipeline_state(
-                pipeline.PipelineUserType.Producer, self.sched_stages
-            )
 
             if const_expr(self.use_clc_scheduler):
+                # CLC writes a 16-byte response.
+                sched_pipeline = pipeline.PipelineClcFetchAsync.create(
+                    barrier_storage=clc_mbar_ptr,
+                    num_stages=self.sched_stages,
+                    producer_group=ThreadCooperativeGroup(1),
+                    consumer_group=ThreadCooperativeGroup(
+                        cute.arch.WARP_SIZE * num_clc_consumer_warps
+                    ),
+                    tx_count=16,
+                    cta_layout_vmnk=cta_layout_vmnk,
+                )
+                consumer_state = pipeline.make_pipeline_state(
+                    pipeline.PipelineUserType.Consumer, self.sched_stages
+                )
+                producer_state = pipeline.make_pipeline_state(
+                    pipeline.PipelineUserType.Producer, self.sched_stages
+                )
                 block_idx = cute.arch.block_idx()
                 clc = ClcState.create(
                     hw_scheduler=ClcDynamicPersistentTileScheduler.create(
@@ -2132,12 +2130,15 @@ class FFAFwdSm100:
                 )
             else:
                 assert self.tile_scheduler_cls is SingleTileVarlenScheduler
+                # DYNAMIC publishes a 4-byte tile index.
                 tile_scheduler = SingleTileVarlenScheduler.create(
                     tile_sched_params,
                     dynamic=DynamicState.create(
-                        pipeline=sched_pipeline,
-                        consumer_state=consumer_state,
-                        producer_state=producer_state,
+                        barrier_storage=clc_mbar_ptr,
+                        num_stages=self.sched_stages,
+                        num_consumer_threads=cute.arch.WARP_SIZE
+                        * num_clc_consumer_warps,
+                        cta_layout_vmnk=cta_layout_vmnk,
                         response_ptr=clc_response_ptr,
                     ),
                 )

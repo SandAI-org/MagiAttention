@@ -30,7 +30,13 @@ from cutlass.cute.typing import Boolean
 from cutlass.cutlass_dsl import extract_mlir_values
 from cutlass.cutlass_dsl import min as dsl_min
 from cutlass.cutlass_dsl import new_from_mlir_values
-from cutlass.pipeline import PipelineClcFetchAsync, PipelineState
+from cutlass.pipeline import (
+    PipelineAsync,
+    PipelineClcFetchAsync,
+    PipelineState,
+    PipelineUserType,
+    make_pipeline_state,
+)
 from cutlass.utils import (
     ClcDynamicPersistentTileScheduler,
     ClcDynamicPersistentTileSchedulerParams,
@@ -115,9 +121,17 @@ class DynamicState(ParamsBase):
     under ``claim_first_tile``. Its leader's scheduler warp claims the other
     tiles from a global counter and publishes a 4-byte index to every CTA.
     All warps consume each index before the slot is reused.
+
+    The publish depends on the cluster size. A multi-CTA cluster writes
+    every CTA's slot with ``st.async.shared::cluster``, whose 4-byte
+    complete-tx completes the slot's full transaction mbarrier. That
+    instruction is undefined for a cluster of one CTA (PTX ISA), so a 1-CTA
+    cluster uses a plain ``PipelineAsync``: an ``st.shared`` of the index,
+    then the producer's release arrive on the full mbarrier, which the
+    consumers' acquire wait pairs with.
     """
 
-    _pipeline: PipelineClcFetchAsync
+    _pipeline: PipelineClcFetchAsync | PipelineAsync
     _consumer_state: PipelineState
     _producer_state: PipelineState
     # smem Int32, one slot per scheduler stage
@@ -126,25 +140,62 @@ class DynamicState(ParamsBase):
     @staticmethod
     def create(
         *,
-        pipeline: PipelineClcFetchAsync,
-        consumer_state: PipelineState,
-        producer_state: PipelineState,
+        barrier_storage: cute.Pointer,
+        num_stages: int,
+        num_consumer_threads: int,
+        cta_layout_vmnk: cute.Layout,
         response_ptr: cute.Pointer,
     ) -> "DynamicState":
-        return DynamicState(pipeline, consumer_state, producer_state, response_ptr)
+        """Build the slot pipeline, ``2 * num_stages`` mbarriers at
+        ``barrier_storage``, for one producer thread (the leader's scheduler
+        warp) and ``num_consumer_threads`` consumer threads over the cluster."""
+        producer_group = cutedsl_utils.ThreadCooperativeGroup(1)
+        consumer_group = cutedsl_utils.ThreadCooperativeGroup(num_consumer_threads)
+        if const_expr(cute.size(cta_layout_vmnk) == 1):
+            pipeline: PipelineClcFetchAsync | PipelineAsync = PipelineAsync.create(
+                barrier_storage=barrier_storage,
+                num_stages=num_stages,
+                producer_group=producer_group,
+                consumer_group=consumer_group,
+            )
+        else:
+            pipeline = PipelineClcFetchAsync.create(
+                barrier_storage=barrier_storage,
+                num_stages=num_stages,
+                producer_group=producer_group,
+                consumer_group=consumer_group,
+                tx_count=4,
+                cta_layout_vmnk=cta_layout_vmnk,
+            )
+        return DynamicState(
+            pipeline,
+            make_pipeline_state(PipelineUserType.Consumer, num_stages),
+            make_pipeline_state(PipelineUserType.Producer, num_stages),
+            response_ptr,
+        )
 
     def producer_acquire(self, *, loc=None, ip=None):
-        """Wait until every consumer released the slot, then arm its full
-        mbarrier on every CTA of the cluster for the 4-byte publish."""
+        """Wait until every consumer released the slot; a multi-CTA cluster
+        also arms the slot's full mbarrier on every CTA for the 4-byte
+        publish."""
         self._pipeline.producer_acquire(self._producer_state, loc=loc, ip=ip)
 
     def publish(self, unit: Int32, cluster_size: int):
-        """Store ``unit`` into every CTA's current response slot."""
-        full_mbar_ptr = self._pipeline.producer_get_barrier(self._producer_state)
+        """Store ``unit`` into every CTA's current response slot and signal
+        its full mbarrier (see the class docstring)."""
         slot_ptr = self._response_ptr + self._producer_state.index
-        with cute.arch.elect_one():
-            for cta_rank in range(cluster_size):
-                store_shared_remote(unit, slot_ptr, full_mbar_ptr, Int32(cta_rank))
+        if const_expr(isinstance(self._pipeline, PipelineAsync)):
+            assert cluster_size == 1
+            with cute.arch.elect_one():
+                cute.make_tensor(slot_ptr, cute.make_layout(1))[0] = unit
+                self._pipeline.producer_commit(self._producer_state)
+        else:
+            full_mbar_ptr = self._pipeline.producer_get_barrier(self._producer_state)
+            with cute.arch.elect_one():
+                for cta_rank in range(cluster_size):
+                    store_shared_remote(
+                        unit, slot_ptr, full_mbar_ptr, Int32(cta_rank)
+                    )
 
     def producer_advance(self, *, loc=None, ip=None):
         self._producer_state.advance(loc=loc, ip=ip)
@@ -153,8 +204,11 @@ class DynamicState(ParamsBase):
         """Read the current slot; call between consumer_wait and consumer_release."""
         slot_ptr = self._response_ptr + self._consumer_state.index
         unit = Int32(cute.make_tensor(slot_ptr, cute.make_layout(1))[0])
-        # Order this generic-proxy read before the next st.async into the slot.
-        cute.arch.fence_proxy("async.shared", space="cta")
+        if const_expr(not isinstance(self._pipeline, PipelineAsync)):
+            # Order this generic-proxy read before the next st.async into the
+            # slot; the 1-CTA publish is a generic store, ordered by the
+            # release / acquire of the empty mbarrier.
+            cute.arch.fence_proxy("async.shared", space="cta")
         return unit
 
     def consumer_wait(self, *, loc=None, ip=None):
