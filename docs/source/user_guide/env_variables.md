@@ -372,6 +372,10 @@ Toggle this env variable to `1` to enable deterministic mode to use deterministi
 
 With the `cutedsl` kernel backend, deterministic q/k ranges require SM100/SM110 and `head_dim == head_dim_v == 128`; other configurations raise `NotImplementedError`. The kernels then launch persistent whatever `sm_margin`.
 
+```{note}
+The ordered merges cost time, mostly in the backward, which merges the dQ of the K tiles of a Q block one after another. On B300 the measured backward was 2.5-2.9x the non-deterministic one for square relations, about 10x for relations with few Q tiles and many K tiles, and up to about 11x with heavily overlapping K ranges without `cat_gqa`; the forward was 1.04-1.11x.
+```
+
 
 **MAGI_ATTENTION_PROFILE_MODE**
 
