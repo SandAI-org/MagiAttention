@@ -2369,7 +2369,10 @@ def flex_flash_attn_func(
         order: O/LSE by relation, dQ by (relation, K tile), reduced dK/dV by
         (relation, q head); the kernels then launch persistent whatever
         ``sm_margin``. Ranges need SM100/SM110 and head_dim 128, without
-        ``pack_gqa``, RangeMerge or block sparsity.
+        ``pack_gqa``, RangeMerge or block sparsity. Opt-in: the ordered dQ
+        merge makes the range backward several times slower, more so with
+        many K tiles per Q tile (see MAGI_ATTENTION_DETERMINISTIC_MODE in
+        env_variables.md).
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
