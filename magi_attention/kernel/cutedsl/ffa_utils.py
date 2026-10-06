@@ -154,8 +154,15 @@ def validate_range_feature_support(
     has_user_score_mod: bool,
     bwd_head_dim: int | None = None,
     sm_margin: int = 0,
+    deterministic: bool = False,
 ) -> None:
     """Reject q/k-range feature combinations the kernels do not implement.
+
+    ``deterministic`` q/k ranges exclude RangeMerge in both directions: the
+    backward of a merged group reduces the dQ of pairs with overlapping Q
+    rows in no fixed order. Rejecting it in forward too makes the autograd
+    entry fail before the forward runs; the check precedes the RangeMerge
+    preprocessing.
 
     ``sm_margin > 0`` requires SM100/SM110 q/k-range kernels, which cap the
     grid to reserve SMs for communication.
@@ -181,6 +188,8 @@ def validate_range_feature_support(
         )
     if not has_ranges:
         return
+    if range_merge and deterministic:
+        raise NotImplementedError("deterministic q/k ranges do not support RangeMerge")
     if range_merge and not range_merge_unique_writer:
         raise ValueError(
             "RangeMerge requires the non-atomic path "
@@ -212,6 +221,7 @@ def validate_range_deterministic(
     sm_margin: int,
     cluster_size: int,
     max_tickets: int,
+    max_writer: int,
 ) -> None:
     """Reject a deterministic q/k-range launch outside what the chain covers.
 
@@ -219,8 +229,10 @@ def validate_range_deterministic(
     persistent grid of at least one cluster, so ``num_sm - sm_margin`` must
     hold ``cluster_size`` SMs; the cluster size is not changed to fit the
     budget, as that changes the arithmetic tiling. ``max_tickets`` bounds the
-    tile counter, which ends at the ticket count plus the cluster count and
-    must stay within int32.
+    tile counter, which ends at the ticket count plus the final claim of
+    every cluster and must stay within int32. ``max_writer`` bounds the
+    largest writer number of the launch's chains (fwd ``R``, bwd dQ
+    ``R * num_k_tiles``, bwd dK/dV ``R * G``), which must stay within int32.
     """
     if head_dim != 128 or head_dim_v != 128:
         raise NotImplementedError(
@@ -236,6 +248,10 @@ def validate_range_deterministic(
         raise ValueError(
             f"deterministic q/k ranges: {max_tickets} tiles overflow the int32 "
             "tile counter"
+        )
+    if max_writer > 2**31 - 1:
+        raise ValueError(
+            f"deterministic q/k ranges: writer number {max_writer} overflows int32"
         )
 
 

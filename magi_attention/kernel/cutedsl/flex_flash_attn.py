@@ -235,6 +235,7 @@ def _flex_flash_attn_fwd(
         has_block_sparse=block_sparse_tensors is not None,
         has_user_score_mod=flex_attn_args.score_mod is not None,
         sm_margin=sm_margin,
+        deterministic=deterministic,
     )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
@@ -321,6 +322,7 @@ def _flex_flash_attn_fwd(
             sm_margin=sm_margin,
             cluster_size=1,
             max_tickets=(total_q + batch_size * 127) // 128 * num_head,
+            max_writer=batch_size,
         )
 
     # The SM80 fwd kernel indexes mQ by query head directly; the packed-GQA
@@ -1010,6 +1012,7 @@ def _flex_flash_attn_bwd(
         or flex_attn_args.score_mod_bwd is not None,
         bwd_head_dim=q.shape[-1],
         sm_margin=sm_margin,
+        deterministic=deterministic,
     )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
@@ -1252,18 +1255,17 @@ def _flex_flash_attn_bwd(
     if range_deterministic:
         if major_arch not in (10, 11):
             raise NotImplementedError("deterministic q/k ranges require SM100/SM110")
-        if range_merge_active or block_sparse_tensors is not None:
+        if block_sparse_tensors is not None:
             raise NotImplementedError(
-                "deterministic q/k ranges support neither RangeMerge nor block "
-                "sparsity"
+                "deterministic q/k ranges cannot be combined with block sparsity"
             )
         dkv_writer_stride = 1 if cat_gqa else qhead_per_kvhead
-        if (batch_size + 1) * dkv_writer_stride > 2**31 - 1:
-            raise ValueError(
-                f"deterministic q/k ranges: {batch_size} ranges of "
-                f"{dkv_writer_stride} q heads overflow the int32 dK/dV writer number"
-            )
         cluster_tile_k = n_block_size * cluster_size
+        # Writer numbers r * dq_writer_stride + n + 1 of the dQ chain, with
+        # n below the cluster K tiles of max_seqlen_k; unique under the
+        # max_seqlen_k contract (no K range is longer).
+        max_k_tiles = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
+        dq_writer_stride = max_k_tiles
         num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
         validate_range_deterministic(
             head_dim=head_dim,
@@ -1275,14 +1277,9 @@ def _flex_flash_attn_bwd(
             max_tickets=(total_k + batch_size * (cluster_tile_k - 1))
             // cluster_tile_k
             * (num_head_kv if cat_gqa else num_head),
+            # The last writers: r * stride + j + 1 with r < R and j < stride.
+            max_writer=batch_size * max(max_k_tiles, dkv_writer_stride),
         )
-        # Writer numbers r * dq_writer_stride + n + 1 of the dQ chain.
-        dq_writer_stride = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
-        if batch_size * dq_writer_stride + 1 > 2**31 - 1:
-            raise ValueError(
-                f"deterministic q/k ranges: {batch_size} ranges of up to "
-                f"{dq_writer_stride} K tiles overflow the int32 dQ writer number"
-            )
 
     if has_softcap and major_arch not in (10, 11):
         # Only the SM100/SM110 kernel caps scores natively; the other
