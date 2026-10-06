@@ -334,6 +334,46 @@ class TestFfaRangeDeterministicHost(TestCase):
         with self.assertRaises(ValueError):
             validate_range_deterministic(max_writer=2**31, **kwargs)
 
+    def test_tile_counter_bound_counts_overlapping_ranges(self):
+        """2^22 ranges all covering the same 4096 rows: the units are bounded
+        per range by the longest range, not by the token count, and overflow
+        the int32 tile counter in both directions (fwd: 16 q heads, 32 tiles
+        of 128 rows; bwd: 32 q heads, 16 cluster K tiles of 256 rows)."""
+        if get_device_arch()[1] not in (10, 11):
+            self.skipTest("deterministic q/k ranges require SM100/SM110")
+        num_ranges, rows = 2**22, 4096
+        ranges = torch.tensor([0, rows], dtype=torch.int32, device="cuda").expand(
+            num_ranges, 2
+        )
+        args = dict(
+            q_ranges=ranges.contiguous(),
+            k_ranges=ranges.contiguous(),
+            mask_types=0,
+            max_seqlen_q=rows,
+            max_seqlen_k=rows,
+        )
+        q, k, v = _qkv(rows, rows, group=1, num_head_kv=16)
+        with self.assertRaisesRegex(ValueError, "tile counter"):
+            _flex_flash_attn_fwd(
+                q, k, v, **args, disable_fwd_atomic_reduction=False, deterministic=True
+            )
+        q, k, v = _qkv(rows, rows, group=1, num_head_kv=32)
+        lse = torch.zeros(rows, q.shape[1], device="cuda")
+        with mock.patch.dict(
+            "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
+        ), self.assertRaisesRegex(ValueError, "tile counter"):
+            _flex_flash_attn_bwd(
+                q,
+                k,
+                v,
+                q,
+                lse,
+                q,
+                **args,
+                disable_bwd_dkv_atomic_reduction=False,
+                deterministic=True,
+            )
+
     def test_range_merge_is_rejected_before_its_preprocessing(self):
         """deterministic + RangeMerge raises at the entry of the autograd
         function and of the raw backward, before the merge plan is built,
