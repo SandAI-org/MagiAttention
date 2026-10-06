@@ -31,8 +31,10 @@ Child protocol, one line each:
   ``DONE``.
 Budgets: compile phases ``_COMPILE_BUDGET_S``; a timed loop twice its
 measured duration plus ``_SLACK_S``. A job exceeding a budget is killed and
-its case rerun alone with 4x budgets, which separates a slow case (rerun
-passes) from a hung one.
+its case rerun alone with 4x budgets; the result records the outcome
+("first_timeout_rerun_passed" or "repeated_timeout") and fails the test
+either way. Neither outcome alone tells a slow case from a timing-dependent
+hang; the cause is analysed separately.
 """
 
 import json
@@ -46,7 +48,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from unittest import TestCase
+from unittest import TestCase, mock
 
 import pytest
 from torch.testing._internal.common_utils import run_tests
@@ -204,21 +206,37 @@ def _child(config: dict) -> None:
 @dataclass
 class _JobResult:
     job: str
-    status: str  # "pass", "slow", "hang" or "error"
+    # "pass", "error", "first_timeout_rerun_passed" or "repeated_timeout";
+    # the timeouts say only how the budgets were exceeded, not why.
+    status: str
     detail: str
 
 
-def _watch(config: dict, gpu: str, budget_scale: float) -> tuple[str, str, str]:
-    """Run one child; returns (status, case, log). Status "timeout" names
-    the case whose budget ran out."""
-    env = dict(
-        os.environ,
-        CUDA_VISIBLE_DEVICES=gpu,
-        PYTHONPATH=os.pathsep.join([str(_REPO), os.environ.get("PYTHONPATH", "")]),
-        MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA="0",
-    )
+@dataclass
+class _WatchResult:
+    # "pass", "error" or "timeout" (``case`` names the case whose budget
+    # ran out)
+    status: str
+    case: str
+    log: str
+    pid: int
+
+
+def _watch(
+    cmd: list[str],
+    env: dict[str, str],
+    iters: int,
+    budget_scale: float,
+    compile_budget_s: float = _COMPILE_BUDGET_S,
+) -> _WatchResult:
+    """Run one child under the budgets of the module docstring.
+
+    Whatever ends the watch (the child exits, a budget runs out, a malformed
+    protocol line, or an exception in the parent), the child's process group
+    is killed if still running and the child is reaped before returning.
+    """
     proc = subprocess.Popen(
-        [sys.executable, "-u", __file__, "--child", json.dumps(config)],
+        cmd,
         cwd=_REPO,
         env=env,
         stdout=subprocess.PIPE,
@@ -234,35 +252,57 @@ def _watch(config: dict, gpu: str, budget_scale: float) -> tuple[str, str, str]:
             lines.put(line)
         lines.put(None)
 
-    threading.Thread(target=pump, daemon=True).start()
     log: list[str] = []
     case = "startup"
-    budget = _COMPILE_BUDGET_S * budget_scale
-    deadline = time.monotonic() + budget
-    while True:
-        try:
-            line = lines.get(timeout=max(deadline - time.monotonic(), 0.0))
-        except queue.Empty:
+    try:
+        threading.Thread(target=pump, daemon=True).start()
+        deadline = time.monotonic() + compile_budget_s * budget_scale
+        while True:
+            try:
+                line = lines.get(timeout=max(deadline - time.monotonic(), 0.0))
+            except queue.Empty:
+                return _WatchResult("timeout", case, "".join(log), proc.pid)
+            if line is None:
+                break
+            log.append(line)
+            parts = line.split()
+            if not parts:
+                continue
+            word, *rest = parts
+            if word == "WARM":
+                try:
+                    case, seconds = rest[0], float(rest[1])
+                except (IndexError, ValueError):
+                    log.append(f"[watchdog] malformed protocol line: {line!r}\n")
+                    return _WatchResult("error", case, "".join(log), proc.pid)
+                budget = 2 * iters * seconds + _SLACK_S
+            elif word == "PASS":
+                budget = compile_budget_s
+            elif word == "DONE":
+                budget = _SLACK_S
+            else:
+                continue
+            deadline = time.monotonic() + budget * budget_scale
+        proc.wait()
+        passed = proc.returncode == 0 and bool(log) and log[-1] == "DONE\n"
+        return _WatchResult("pass" if passed else "error", case, "".join(log), proc.pid)
+    finally:
+        if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            return "timeout", case, "".join(log)
-        if line is None:
-            break
-        log.append(line)
-        word, *rest = line.split()
-        if word == "WARM":
-            case, seconds = rest[0], float(rest[1])
-            budget = (2 * config["iters"] * seconds + _SLACK_S) * budget_scale
-        elif word == "PASS":
-            budget = _COMPILE_BUDGET_S * budget_scale
-        elif word == "DONE":
-            budget = _SLACK_S * budget_scale
-        else:
-            continue
-        deadline = time.monotonic() + budget
-    proc.wait()
-    status = "pass" if proc.returncode == 0 and log and log[-1] == "DONE\n" else "error"
-    return status, case, "".join(log)
+        proc.wait()
+
+
+def _child_cmd(config: dict) -> list[str]:
+    return [sys.executable, "-u", __file__, "--child", json.dumps(config)]
+
+
+def _child_env(gpu: str) -> dict[str, str]:
+    return dict(
+        os.environ,
+        CUDA_VISIBLE_DEVICES=gpu,
+        PYTHONPATH=os.pathsep.join([str(_REPO), os.environ.get("PYTHONPATH", "")]),
+        MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA="0",
+    )
 
 
 def _run_job(direction: str, delay: str | None, gpus: "queue.Queue[str]") -> _JobResult:
@@ -281,20 +321,112 @@ def _run_job(direction: str, delay: str | None, gpus: "queue.Queue[str]") -> _Jo
     name = f"{direction}/{delay or 'none'}"
     gpu = gpus.get()
     try:
-        status, case, log = _watch(config, gpu, budget_scale=1.0)
-        if status != "timeout":
-            return _JobResult(name, status, log[-4000:])
-        rerun_status, _, rerun_log = _watch(dict(config, only=case), gpu, 4.0)
-        verdict = "slow" if rerun_status == "pass" else "hang"
+        first = _watch(_child_cmd(config), _child_env(gpu), _ITERS, budget_scale=1.0)
+        if first.status != "timeout":
+            return _JobResult(name, first.status, first.log[-4000:])
+        rerun = _watch(
+            _child_cmd(dict(config, only=first.case)),
+            _child_env(gpu),
+            _ITERS,
+            budget_scale=4.0,
+        )
+        status = (
+            "first_timeout_rerun_passed"
+            if rerun.status == "pass"
+            else "repeated_timeout" if rerun.status == "timeout" else "error"
+        )
         return _JobResult(
             name,
-            verdict,
-            f"case {case} exceeded its budget; rerun alone with 4x budgets: "
-            f"{rerun_status}\n--- first run ---\n{log[-3000:]}"
-            f"\n--- rerun ---\n{rerun_log[-3000:]}",
+            status,
+            f"case {first.case} exceeded its budget; rerun alone with 4x budgets: "
+            f"{rerun.status}\n--- first run ---\n{first.log[-3000:]}"
+            f"\n--- rerun ---\n{rerun.log[-3000:]}",
         )
     finally:
         gpus.put(gpu)
+
+
+class TestWatchdogParent(TestCase):
+    """The parent side alone, on fake children; no GPU."""
+
+    def _fake_child(self, script: str) -> list[str]:
+        return [sys.executable, "-u", "-c", script]
+
+    def _assert_reaped(self, pid: int) -> None:
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_blank_and_free_form_lines_do_not_stop_the_timeout(self):
+        """Blank lines and logs without the protocol keywords are skipped; a
+        child that then hangs is killed at the budget and reaped."""
+        result = _watch(
+            self._fake_child(
+                "import time\n"
+                "print()\nprint('   ')\nprint('INFO some log')\n"
+                "print('Traceback-like text: WARMish')\n"
+                "time.sleep(600)\n"
+            ),
+            dict(os.environ),
+            iters=1,
+            budget_scale=1.0,
+            compile_budget_s=3.0,
+        )
+        self.assertEqual(result.status, "timeout")
+        self.assertIn("INFO some log", result.log)
+        self._assert_reaped(result.pid)
+
+    def test_malformed_protocol_line_is_an_error_and_kills_the_child(self):
+        result = _watch(
+            self._fake_child(
+                "import time\nprint('WARM one_cluster not-a-number')\n"
+                "time.sleep(600)\n"
+            ),
+            dict(os.environ),
+            iters=1,
+            budget_scale=1.0,
+            compile_budget_s=60.0,
+        )
+        self.assertEqual(result.status, "error")
+        self.assertIn("malformed protocol line", result.log)
+        self._assert_reaped(result.pid)
+
+    def test_parent_exception_still_kills_the_child(self):
+        """An exception raised while the parent waits on the child's output
+        propagates after the child is killed and reaped."""
+        pids: list[int] = []
+        popen = subprocess.Popen
+
+        def recording_popen(*args, **kwargs):
+            proc = popen(*args, **kwargs)
+            pids.append(proc.pid)
+            return proc
+
+        def failing_get(self, *args, **kwargs):
+            raise RuntimeError("parent failure")
+
+        with mock.patch.object(subprocess, "Popen", recording_popen), mock.patch.object(
+            queue.Queue, "get", failing_get
+        ), self.assertRaisesRegex(RuntimeError, "parent failure"):
+            _watch(
+                self._fake_child("import time\ntime.sleep(600)\n"),
+                dict(os.environ),
+                iters=1,
+                budget_scale=1.0,
+            )
+        (pid,) = pids
+        self._assert_reaped(pid)
+
+    def test_clean_exit_after_done_passes(self):
+        result = _watch(
+            self._fake_child(
+                "print('MANIFEST {}')\nprint('WARM a 0.001')\nprint('PASS a')\n"
+                "print('DONE')\n"
+            ),
+            dict(os.environ),
+            iters=1,
+            budget_scale=1.0,
+        )
+        self.assertEqual(result.status, "pass")
 
 
 @pytest.mark.slow
