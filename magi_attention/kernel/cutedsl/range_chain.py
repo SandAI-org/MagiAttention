@@ -141,8 +141,14 @@ def scan_conflicts(
     Block ``b`` of range ``r`` gets ``last_writer(r)``, the highest writer of
     ``r`` with events on its blocks; 0 means ``r`` has no work tile, which
     records nothing, as does an empty range. The whole warp calls; its lanes
-    write in parallel and the warp is synchronized on return, so any lane may
-    read ``mConflict[slot, ...]`` afterwards.
+    write the blocks of one range in parallel, and any lane may read
+    ``mConflict[slot, ...]`` after the return.
+
+    A block shared by consecutive ranges is stored by different lanes (its
+    lane follows the range's first block), so the warp synchronizes after
+    every range, empty ones included: without it a lane's store of range
+    ``r`` may land after another lane's store of range ``r + 1`` and leave
+    a stale predecessor.
     """
     lane = cute.arch.lane_idx()
     r = range_from
@@ -154,10 +160,18 @@ def scan_conflicts(
             block = start // block_size + lane
             last_block = (end - 1) // block_size
             while block <= last_block:
-                mConflict[slot, block] = writer
+                record_conflict(mConflict, slot, block, writer)
                 block += cute.arch.WARP_SIZE
+        cute.arch.sync_warp()
         r += 1
-    cute.arch.sync_warp()
+
+
+@cute.jit
+def record_conflict(
+    mConflict: cute.Tensor, slot: Int32, block: Int32, writer: Int32
+) -> None:
+    """Record ``writer`` as the last writer of ``block`` in ``slot``'s row."""
+    mConflict[slot, block] = writer
 
 
 @cute.jit

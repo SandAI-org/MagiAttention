@@ -30,10 +30,14 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterator
 from unittest import TestCase, mock
 
+import cuda.bindings.driver as cuda
+import cutlass.cute as cute
 import torch
+from cutlass import Int32
+from cutlass.cute.runtime import from_dlpack
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.kernel.cutedsl import flex_flash_attn_func
+from magi_attention.kernel.cutedsl import flex_flash_attn_func, range_chain
 from magi_attention.kernel.cutedsl.cache_utils import JITCache
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
 from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
@@ -47,7 +51,10 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_fwd,
 )
 from magi_attention.testing import parameterize
-from tests.test_kernel.cutedsl.range_deterministic_probes import record_visits
+from tests.test_kernel.cutedsl.range_deterministic_probes import (
+    odd_lane_conflict_records,
+    record_visits,
+)
 
 _HEAD_DIM = 128
 _NUM_HEAD_KV = 2
@@ -944,6 +951,88 @@ class TestFfaRangeDeterministicBwd(TestCase):
                         f"{name} differs at sm_margin={sm_margin}",
                     )
         self._log_ran("public api")
+
+
+class _ScanConflictsLauncher:
+    """One warp running ``range_chain.scan_conflicts`` over every range into
+    conflict-table row 0, with writer ``r + 1`` for range ``r``."""
+
+    def __init__(self, block_size: int):
+        self.block_size = block_size
+
+    @cute.jit
+    def __call__(
+        self,
+        mRanges: cute.Tensor,
+        mConflict: cute.Tensor,
+        num_ranges: Int32,
+        stream: cuda.CUstream,
+    ):
+        self.kernel(mRanges, mConflict, num_ranges).launch(
+            grid=(1, 1, 1), block=(cute.arch.WARP_SIZE, 1, 1), stream=stream
+        )
+
+    @cute.kernel
+    def kernel(self, mRanges: cute.Tensor, mConflict: cute.Tensor, num_ranges: Int32):
+        range_chain.scan_conflicts(
+            mRanges,
+            mConflict,
+            Int32(0),
+            Int32(0),
+            num_ranges,
+            self.block_size,
+            last_writer=lambda r: r + 1,
+        )
+
+
+class TestFfaRangeChainScan(TestCase):
+    """The conflict scan records, per block, the last range with a row there,
+    also when consecutive ranges share a block through different lanes and
+    the stores of one range are delayed past those of the next."""
+
+    def setUp(self) -> None:
+        if get_device_arch()[1] not in (10, 11):
+            self.skipTest("the range chain runs on SM100/SM110")
+
+    def _scan(self, ranges: list[list[int]], block_size: int) -> torch.Tensor:
+        num_blocks = max(e for _, e in ranges) // block_size + 2
+        mranges = torch.tensor(ranges, dtype=torch.int32, device="cuda")
+        conflict = torch.zeros(1, num_blocks, dtype=torch.int32, device="cuda")
+        args = (
+            from_dlpack(mranges),
+            from_dlpack(conflict),
+            Int32(len(ranges)),
+            cuda.CUstream(torch.cuda.current_stream().cuda_stream),
+        )
+        cute.compile(_ScanConflictsLauncher(block_size), *args)(*args)
+        torch.cuda.synchronize()
+        return conflict[0].cpu()
+
+    @parameterize(
+        "ranges",
+        [
+            # the shared block is lane 1's for r0 and lane 0's for r1
+            [[0, 256], [128, 256]],
+            # unaligned starts, three ranges over block 1
+            [[5, 300], [130, 140], [0, 129]],
+            # more than 32 blocks: block 33 is lane 1's second store for r0
+            [[0, 40 * 128], [33 * 128 + 7, 35 * 128]],
+            # an empty range between two that share blocks
+            [[0, 384], [200, 200], [129, 384]],
+        ],
+    )
+    def test_scan_keeps_the_last_range_per_block_under_delayed_lanes(self, ranges):
+        block_size = 128
+        want = torch.zeros(
+            max(e for _, e in ranges) // block_size + 2, dtype=torch.int32
+        )
+        for r, (start, end) in enumerate(ranges):
+            if end > start:
+                want[start // block_size : (end - 1) // block_size + 1] = r + 1
+        self.assertTrue(torch.equal(self._scan(ranges, block_size), want))
+        with odd_lane_conflict_records(50_000):
+            got = self._scan(ranges, block_size)
+        self.assertTrue(torch.equal(got, want), f"{got.tolist()} != {want.tolist()}")
 
 
 # Relations of one head with T cluster units around a grid of C clusters,
