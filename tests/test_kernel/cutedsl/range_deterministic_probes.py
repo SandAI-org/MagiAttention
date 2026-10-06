@@ -23,6 +23,8 @@ normal launch.
 
 - :func:`delay_injection` sleeps at one protocol step, to reorder the
   claims, arrivals, publications and conflict scans of the clusters.
+- :func:`odd_lane_conflict_records` delays the conflict-table stores of odd
+  lanes, to reorder the stores of consecutive ranges in one scan.
 - :func:`record_visits` counts, per CTA tile index, the warps that consume
   a valid DYNAMIC claim, to check that every claimed unit runs once on
   every CTA of one cluster.
@@ -64,7 +66,7 @@ class DelayPoint(enum.Enum):
     # After the count completed and was reset, before the writer number is
     # published.
     PUBLISH = "publish"
-    # Before a conflict-scan step, per lane.
+    # Before each conflict-table store of the conflict scan, per lane.
     SCAN = "scan"
 
 
@@ -126,6 +128,22 @@ def odd_block_sleep(seed: int, max_ns: int, *, loc=None, ip=None) -> None:
         "xor.b32 h, h, t;\n\t"
         f"rem.u32 ns, h, {max_ns};\n\t"
         "@p nanosleep.u32 ns;\n\t}",
+        "",
+        [],
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def odd_lane_sleep(ns: int, *, loc=None, ip=None) -> None:
+    """Sleep ``ns`` nanoseconds on odd lanes only."""
+    _asm(
+        "{\n\t.reg .u32 t;\n\t.reg .pred p;\n\t"
+        "mov.u32 t, %laneid;\n\t"
+        "and.b32 t, t, 1;\n\t"
+        "setp.ne.u32 p, t, 0;\n\t"
+        f"@p nanosleep.u32 {ns};\n\t}}",
         "",
         [],
         loc=loc,
@@ -259,20 +277,33 @@ def delay_injection(
         stack.enter_context(mock.patch.object(range_chain, "publish", delayed_publish))
     else:
         assert point is DelayPoint.SCAN
-        scan = range_chain.scan_conflicts
+        record = range_chain.record_conflict
 
-        def delayed_scan(
-            mRanges, mConflict, slot, range_from, range_to, block_size, last_writer
-        ):
-            random_sleep(range_from, seed, max_ns)
-            scan(
-                mRanges, mConflict, slot, range_from, range_to, block_size, last_writer
-            )
+        def delayed_record(mConflict, slot, block, writer):
+            random_sleep(block, seed, max_ns)
+            record(mConflict, slot, block, writer)
 
         stack.enter_context(
-            mock.patch.object(range_chain, "scan_conflicts", delayed_scan)
+            mock.patch.object(range_chain, "record_conflict", delayed_record)
         )
     with stack:
+        yield
+
+
+@contextmanager
+def odd_lane_conflict_records(ns: int) -> Iterator[None]:
+    """Kernels traced within the context delay every conflict-table store of
+    an odd lane by ``ns``, so that a range's stores land after the next
+    range's stores of even lanes unless the scan orders the ranges."""
+    record = range_chain.record_conflict
+
+    def delayed_record(mConflict, slot, block, writer):
+        odd_lane_sleep(ns)
+        record(mConflict, slot, block, writer)
+
+    with fresh_compile_caches(), mock.patch.object(
+        range_chain, "record_conflict", delayed_record
+    ):
         yield
 
 
