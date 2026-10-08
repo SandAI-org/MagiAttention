@@ -137,10 +137,6 @@ class FFABwdSm100InnerLoopK:
         )
 
         # NamedBarrier
-        self.compute_sync_barrier = pipeline.NamedBarrier(
-            barrier_id=int(NamedBarrierBwdSm100InnerLoopK.Compute),
-            num_threads=len(self.compute_warp_ids) * cute.arch.WARP_SIZE,
-        )
         self.dQ_epi_barrier = pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100InnerLoopK.dQEpilogue),
             num_threads=len(self.compute_warp_ids) * cute.arch.WARP_SIZE,
