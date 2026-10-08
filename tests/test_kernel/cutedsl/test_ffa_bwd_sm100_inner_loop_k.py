@@ -14,34 +14,32 @@
 
 """Agile harness for ``ffa_bwd_sm100_inner_loop_k``.
 
-# DEVIATION: this harness lives at the repo root instead of tests/
-# Reason: prompt.md asks for MagiAttention/test.py during kernel bring-up
-# Tracking: move under tests/test_attn once the inner-loop-K kernel replaces the hack
-
 Forward always uses the existing cutedsl ``flex_flash_attn_func``. Backward
 always uses ``ffa_bwd_sm100_inner_loop_k``, so commenting out the hack in that
 module switches this script onto the new kernel.
 
-Usage:
-    python test.py smoke
-    python test.py correct
-    python test.py bench
+Usage (from the repo root):
+    python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_inner_loop_k.py smoke
+    python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_inner_loop_k.py correct
+    python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_inner_loop_k.py bench
 """
 
 import sys
 from collections.abc import Callable
 from functools import partial
 
-import torch
+import torch  # noqa: E402
 
-from magi_attention.common import AttnRanges
-from magi_attention.common.enum import AttnMaskType
-from magi_attention.kernel.cutedsl.ffa_bwd_sm100_inner_loop_k import (
+from magi_attention.common import AttnRanges  # noqa: E402
+from magi_attention.common.enum import AttnMaskType  # noqa: E402
+from magi_attention.kernel.cutedsl.ffa_bwd_sm100_inner_loop_k import (  # noqa: E402
     ffa_bwd_sm100_inner_loop_k,
 )
-from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
-from magi_attention.kernel.cutedsl.flex_flash_attn import flex_flash_attn_func
-from magi_attention.testing.precision import (
+from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP  # noqa: E402
+from magi_attention.kernel.cutedsl.flex_flash_attn import (  # noqa: E402
+    flex_flash_attn_func,
+)
+from magi_attention.testing.precision import (  # noqa: E402
     EPSILON,
     MAX_MISMATCH_THRES,
     MISMATCH_THRES_RATIO,
@@ -50,8 +48,8 @@ from magi_attention.testing.precision import (
     calc_inf_norm,
     extract_mismatch_threshold,
 )
-from magi_attention.testing.ref_attn import ref_attn_func
-from magi_attention.utils.general import make_attn_mask_from_ffa_args
+from magi_attention.testing.ref_attn import ref_attn_func  # noqa: E402
+from magi_attention.utils.general import make_attn_mask_from_ffa_args  # noqa: E402
 
 NUM_HEADS_Q = 64
 NUM_HEADS_KV = 8
@@ -311,6 +309,7 @@ def bench() -> None:
         print(f"{seqlen:8d} {ms:10.3f} {tflops:10.2f}")
 
 
+_SCRIPT = "tests/test_kernel/cutedsl/test_ffa_bwd_sm100_inner_loop_k.py"
 _MODES = {
     "smoke": smoke,
     "correct": correct,
@@ -320,7 +319,7 @@ _MODES = {
 
 def main() -> None:
     if len(sys.argv) != 2 or sys.argv[1] not in _MODES:
-        print("usage: python test.py smoke|correct|bench", file=sys.stderr)
+        print(f"usage: python {_SCRIPT} smoke|correct|bench", file=sys.stderr)
         raise SystemExit(2)
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required")
