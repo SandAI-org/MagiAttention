@@ -366,6 +366,23 @@ def smid(*, loc=None, ip=None) -> Int32:
 
 
 @dsl_user_op
+def tanh_approx(a: float | Float32, *, loc=None, ip=None) -> Float32:
+    """PTX `tanh.approx.f32`, one MUFU op; the tanh of the C++ FFA softcap
+    (``cutlass::fast_tanh``)."""
+    return Float32(
+        llvm.inline_asm(
+            T.f32(),
+            [Float32(a).ir_value(loc=loc, ip=ip)],
+            "tanh.approx.f32 $0, $1;",
+            "=f,f",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    )
+
+
+@dsl_user_op
 def fmax(
     a: float | Float32,
     b: float | Float32,

@@ -20,7 +20,7 @@ import math
 
 import cutlass.cute as cute
 import torch
-from cutlass import Int32
+from cutlass import Float32, Int32
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.common import AttnForwardMeta
@@ -62,6 +62,7 @@ from .ffa_utils import (
     materialize_mask_types,
     maybe_contiguous,
     normalize_mask_types,
+    normalize_softcap,
     ranges_to_cu_seqlens,
     resolve_output_dtype,
     tile_size_bwd_sm90,
@@ -209,6 +210,9 @@ def _flex_flash_attn_fwd(
     mask_mod = flex_attn_args.mask_mod
     aux_tensors = flex_attn_args.aux_tensors
     block_sparse_tensors = flex_attn_args.block_sparse_tensors
+    softcap = normalize_softcap(softcap)
+    if softcap is not None:
+        assert score_mod is None, "softcap and score_mod cannot be used together"
 
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
     num_head, head_dim = q.shape[-2:]
@@ -221,8 +225,7 @@ def _flex_flash_attn_fwd(
         range_merge_unique_writer=disable_fwd_atomic_reduction,
         has_mask_mod=mask_mod is not None,
         has_block_sparse=block_sparse_tensors is not None,
-        has_score_mod=score_mod is not None,
-        has_softcap=softcap is not None and softcap != 0.0,
+        has_user_score_mod=flex_attn_args.score_mod is not None,
         sm_margin=sm_margin,
     )
     range_merge_active = bool(range_merge) and has_ranges
@@ -282,8 +285,6 @@ def _flex_flash_attn_fwd(
         validate_head_dims(head_dim, head_dim_v, major_arch, alignment)
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
-    if softcap == 0.0:
-        softcap = None
     qhead_per_kvhead = num_head // num_head_kv
 
     # The atomic merge is a ranges-overlap path; a no-op for dense, and
@@ -486,8 +487,10 @@ def _flex_flash_attn_fwd(
         q_stage = 1
 
     if softcap is not None:
-        assert score_mod is None, "softcap and score_mod cannot be used together"
-        score_mod = create_softcap_scoremod(softcap)
+        if major_arch not in (10, 11):
+            # Only the SM100/SM110 kernel caps scores natively; the other
+            # architectures route the cap through the score_mod slot.
+            score_mod = create_softcap_scoremod(softcap)
     elif score_mod is not None:
         if major_arch == 8:
             raise NotImplementedError(
@@ -566,6 +569,7 @@ def _flex_flash_attn_fwd(
         mask_type,
         disable_fwd_atomic_reduction,
         out_torch_dtype,
+        softcap is not None,
         score_mod_hash,
         mask_mod_hash,
         use_block_sparsity,
@@ -695,6 +699,7 @@ def _flex_flash_attn_fwd(
                     is_persistent=persistent_launch,
                     score_mod=score_mod,
                     mask_mod=mask_mod,
+                    has_softcap=softcap is not None,
                     has_aux_tensors=aux_tensors is not None,
                     paged_kv_non_tma=False,
                     is_varlen_q=has_ranges,
@@ -773,6 +778,7 @@ def _flex_flash_attn_fwd(
                 if max_logits is not None
                 else None
             )
+            compile_args.append(Float32(softcap) if softcap is not None else None)
         compile_args.extend(
             [
                 sparse_tensors,
@@ -812,6 +818,7 @@ def _flex_flash_attn_fwd(
         call_args.append(sm_margin if ranges_persistent else None)
         call_args.append(tile_counter)
         call_args.append(max_logits)
+        call_args.append(softcap)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
@@ -923,6 +930,12 @@ def _flex_flash_attn_bwd(
     mask_mod = flex_attn_args.mask_mod
     aux_tensors = flex_attn_args.aux_tensors
     block_sparse_tensors = flex_attn_args.block_sparse_tensors_bwd
+    softcap_value = normalize_softcap(softcap)
+    has_softcap = softcap_value is not None
+    if has_softcap:
+        assert (
+            score_mod is None and score_mod_bwd is None
+        ), "softcap and score_mod/score_mod_bwd cannot be used together"
 
     has_ranges = validate_true_ranges(q_ranges, k_ranges, mask_types=mask_types)
     validate_range_feature_support(
@@ -933,8 +946,8 @@ def _flex_flash_attn_bwd(
         range_merge_unique_writer=disable_bwd_dkv_atomic_reduction,
         has_mask_mod=mask_mod is not None,
         has_block_sparse=block_sparse_tensors is not None,
-        has_score_mod=score_mod is not None or score_mod_bwd is not None,
-        has_softcap=softcap != 0.0,
+        has_user_score_mod=flex_attn_args.score_mod is not None
+        or flex_attn_args.score_mod_bwd is not None,
         deterministic=deterministic,
         bwd_head_dim=q.shape[-1],
         sm_margin=sm_margin,
@@ -1173,12 +1186,11 @@ def _flex_flash_attn_bwd(
             "per KV head: MHA, or GQA with cat_gqa"
         )
 
-    if softcap != 0.0:
-        assert (
-            score_mod is None and score_mod_bwd is None
-        ), "softcap and score_mod/score_mod_bwd cannot be used together"
-        score_mod = create_softcap_scoremod(softcap)
-        score_mod_bwd = create_softcap_scoremod_bwd(softcap)
+    if has_softcap and major_arch not in (10, 11):
+        # Only the SM100/SM110 kernel caps scores natively; the other
+        # architectures route the cap through the score_mod slot.
+        score_mod = create_softcap_scoremod(softcap_value)
+        score_mod_bwd = create_softcap_scoremod_bwd(softcap_value)
     if score_mod is not None:
         assert (
             score_mod_bwd is not None
@@ -1574,6 +1586,7 @@ def _flex_flash_attn_bwd(
             use_2cta_instrs,
             deterministic,
             spt,
+            has_softcap,
             score_mod_hash,
             score_mod_bwd_hash,
             mask_mod_hash,
@@ -1701,6 +1714,7 @@ def _flex_flash_attn_bwd(
                     score_mod=score_mod,
                     score_mod_bwd=score_mod_bwd,
                     mask_mod=mask_mod,
+                    has_softcap=has_softcap,
                     has_aux_tensors=aux_tensors is not None,
                     subtile_factor=subtile_factor,
                     disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
@@ -1761,6 +1775,7 @@ def _flex_flash_attn_bwd(
                 if tile_counter is not None
                 else None
             )
+            bwd_compile_args.append(Float32(softcap_value) if has_softcap else None)
         bwd_compile_args.extend(
             [
                 cute_aux_tensors,
@@ -1799,6 +1814,7 @@ def _flex_flash_attn_bwd(
         bwd_call_args.append(seqlen_k)
         bwd_call_args.append(sm_margin if sm_margin > 0 else None)
         bwd_call_args.append(tile_counter)
+        bwd_call_args.append(softcap_value)
     bwd_call_args.extend(
         [
             aux_tensors,
@@ -1923,8 +1939,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
     :class:`TorchFlexAttnArgs` (``flex_attn_args``) to keep the common
     signature clean.
 
-    NOTE: ``softcap`` is implemented internally via the score_mod machinery
-    (see ``_flex_flash_attn_fwd``), and is exposed here as a plain scalar.
+    ``softcap`` is a native kernel feature on SM100/SM110 and is routed
+    through the score_mod slot on the other architectures.
     """
 
     @staticmethod
@@ -2140,8 +2156,12 @@ def flex_flash_attn_func(
         total_q/total_k — always safe, the loosest bound. Debug mode validates
         against the ranges (a sync).
 
-    softcap: tanh logit soft-capping value, implemented via the score_mod
-        machinery but exposed as a plain scalar.
+    softcap: tanh logit soft-capping value, ``softcap * tanh(s / softcap)``
+        on the scaled scores before masking. Native on SM100/SM110 for the
+        dense, per-range ``mask_types`` and RangeMerge paths, with the same
+        2-CTA and head_dim coverage as the uncapped kernels; the other
+        architectures route it through ``score_mod``. Mutually exclusive
+        with a user ``score_mod``.
 
     pack_gqa: fold the q heads of one kv head into the M dimension of the
         forward (the backward never packs). ``None`` packs GQA except on the

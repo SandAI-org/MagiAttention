@@ -129,6 +129,64 @@ class TestDistAttn(DistTestBase):
     def device(self) -> int:
         return torch.cuda.current_device()
 
+    def _full_attn_runtime(
+        self, nhq: int, nhk: int, head_dim: int, use_hier_comm: bool
+    ) -> DistAttnRuntime:
+        """Full attention over 4 x 128 tokens: a host stage on the local KV and
+        one remote stage on the other three ranks' KV."""
+        # TODO: add more attn masks for dist attn
+        calc_meta = CalcMeta(
+            local_attn_arg=AttnArg(
+                q_ranges=AttnRanges.from_ranges([[0, 128]]),
+                k_ranges=AttnRanges.from_ranges([[0, 128]]),
+                attn_type_map=[0],
+                total_area=128 * 128,
+            ),
+            remote_attn_args_list=[
+                AttnArg(
+                    q_ranges=AttnRanges.from_ranges([[0, 128]]),
+                    k_ranges=AttnRanges.from_ranges([[0, 128 * 3]]),
+                    attn_type_map=[0],
+                    total_area=128 * 128 * 3,
+                ),
+            ],
+            seqlen_q_shard=128,
+            seqlen_k_local=128,
+            seqlen_k_per_remote_stage=[128 * 3],
+        )
+        comm_meta = CommMeta(
+            num_remote_kv_tokens_per_stage=[128 * 3],
+            kv_group_collective_args_list=[
+                GroupCollectiveArg(
+                    input_split_size_list=[128],
+                    output_split_size_list=[128, 128, 128],
+                    dst_indices_list=[
+                        [rank for rank in range(self.world_size) if rank != self.rank]
+                    ],
+                    src_index_list=[
+                        rank for rank in range(self.world_size) if rank != self.rank
+                    ],
+                    rank=self.rank,
+                    world_size=self.world_size,
+                    group=self.nccl_group,
+                    device_mesh=self.device_mesh if use_hier_comm else None,
+                )
+            ],
+            # TODO: support qo comm meta calculation
+            num_remote_qo_tokens_per_stage=[0],
+            qo_group_collective_args_list=[None],  # type: ignore[list-item]
+            num_heads_q=nhq,
+            num_heads_kv=nhk,
+            head_dim=head_dim,
+        )
+        dist_attn_runtime = DistAttnRuntime(
+            comm_meta=comm_meta,
+            calc_meta=calc_meta,
+            cp_group_gc=self.nccl_groups[0],
+            cp_group_gr=self.nccl_groups[1],
+        )
+        return dist_attn_runtime
+
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize("num_heads", [(8, 8), (8, 4)])
@@ -189,58 +247,8 @@ class TestDistAttn(DistTestBase):
         )
 
         # prepare meta and runtime
-        # TODO: add more attn masks for dist attn
         nhq, nhk = num_heads
-        calc_meta = CalcMeta(
-            local_attn_arg=AttnArg(
-                q_ranges=AttnRanges.from_ranges([[0, 128]]),
-                k_ranges=AttnRanges.from_ranges([[0, 128]]),
-                attn_type_map=[0],
-                total_area=128 * 128,
-            ),
-            remote_attn_args_list=[
-                AttnArg(
-                    q_ranges=AttnRanges.from_ranges([[0, 128]]),
-                    k_ranges=AttnRanges.from_ranges([[0, 128 * 3]]),
-                    attn_type_map=[0],
-                    total_area=128 * 128 * 3,
-                ),
-            ],
-            seqlen_q_shard=128,
-            seqlen_k_local=128,
-            seqlen_k_per_remote_stage=[128 * 3],
-        )
-        comm_meta = CommMeta(
-            num_remote_kv_tokens_per_stage=[128 * 3],
-            kv_group_collective_args_list=[
-                GroupCollectiveArg(
-                    input_split_size_list=[128],
-                    output_split_size_list=[128, 128, 128],
-                    dst_indices_list=[
-                        [rank for rank in range(self.world_size) if rank != self.rank]
-                    ],
-                    src_index_list=[
-                        rank for rank in range(self.world_size) if rank != self.rank
-                    ],
-                    rank=self.rank,
-                    world_size=self.world_size,
-                    group=self.nccl_group,
-                    device_mesh=self.device_mesh if use_hier_comm else None,
-                )
-            ],
-            # TODO: support qo comm meta calculation
-            num_remote_qo_tokens_per_stage=[0],
-            qo_group_collective_args_list=[None],  # type: ignore[list-item]
-            num_heads_q=nhq,
-            num_heads_kv=nhk,
-            head_dim=head_dim,
-        )
-        dist_attn_runtime = DistAttnRuntime(
-            comm_meta=comm_meta,
-            calc_meta=calc_meta,
-            cp_group_gc=self.nccl_groups[0],
-            cp_group_gr=self.nccl_groups[1],
-        )
+        dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, use_hier_comm)
 
         # prepare data
         local_q = torch.randn(
@@ -380,6 +388,120 @@ class TestDistAttn(DistTestBase):
             test_case="dv",
         )
         if total_sink is not None:
+            assert_close(
+                total_dsink,
+                total_dsink_ref,
+                atol=5e-3,
+                rtol=0.1,
+                mismatch_threshold=max(1 / (seqlen_sink * nhq), 5e-2),
+                test_case="dsink",
+            )
+
+    @skip_if_lt_x_gpu(4)
+    @with_comms
+    @parameterize("seqlen_sink", [0, 4])
+    def test_cutedsl_softcap(self, seqlen_sink: int):
+        """Non-zero softcap on the cutedsl backend with GQA: the host stage and
+        the remote stage both compute, merge with the same capped LSE, and a
+        sink is counted once (on the host stage)."""
+        if torch.cuda.get_device_capability()[0] not in (10, 11):
+            return
+        softcap, nhq, nhk, head_dim, dtype = 30.0, 8, 4, 128, torch.bfloat16
+        switch_back = switch_envvars(
+            envvar_name_list=[self.kernel_backend_envvar],
+            enable_dict={self.kernel_backend_envvar: True},
+            enable_value_dict={
+                self.kernel_backend_envvar: MagiAttentionKernelBackend.CUTEDSL.value
+            },
+        )
+        dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, False)
+
+        # Scale q so the scores reach the cap.
+        local_q = (
+            4.0 * torch.randn(128, nhq, head_dim, device=self.device, dtype=dtype)
+        ).requires_grad_()
+        local_k, local_v = (
+            torch.randn(
+                128, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
+            )
+            for _ in range(2)
+        )
+        total_sink = None
+        if seqlen_sink > 0:
+            total_sink = torch.randn(
+                seqlen_sink, nhq, device=self.device, dtype=torch.float32
+            )
+            dist.all_reduce(total_sink, group=self.nccl_group)
+            total_sink.requires_grad_()
+
+        local_out, meta = dist_attn_func(
+            q=local_q,
+            k=local_k,
+            v=local_v,
+            dist_attn_runtime=dist_attn_runtime,
+            sink=total_sink,
+            softcap=softcap,
+        )
+        total_out = torch.cat(all_gather(local_out, group=self.nccl_group), dim=0)
+        total_lse = torch.cat(all_gather(meta.lse, group=self.nccl_group), dim=0)
+        grad_total_out = torch.randn_like(total_out)
+        total_out.backward(grad_total_out)
+        grads = [t.grad for t in (local_q, local_k, local_v)]
+        for t in (local_q, local_k, local_v):
+            t.grad = None
+        total_dsink = None
+        if total_sink is not None:
+            total_dsink, total_sink.grad = total_sink.grad, None
+        total_q, total_k, total_v = (
+            torch.cat(all_gather(t, group=self.nccl_group), dim=0)
+            for t in (local_q, local_k, local_v)
+        )
+        switch_back()
+
+        total_out_ref, meta_ref = ref_attn_func(
+            q=total_q,
+            k=total_k,
+            v=total_v,
+            mask=torch.ones(512, 512, device=self.device).bool(),
+            sink=total_sink,
+            softcap=softcap,
+            layout="thd",
+            sink_layout="sh",
+            backend="torch",
+            high_precision=True,
+            return_lse=True,
+        )
+        total_out_ref.backward(grad_total_out)
+        grads_ref = [t.grad for t in (local_q, local_k, local_v)]
+
+        assert_close(
+            total_out,
+            total_out_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="out",
+        )
+        assert_close(
+            total_lse,
+            meta_ref.lse,
+            atol=EPSILON,
+            rtol=5e-3,
+            mismatch_threshold=0.01,
+            test_case="lse",
+        )
+        for name, grad, grad_ref in zip(("dq", "dk", "dv"), grads, grads_ref):
+            assert_close(
+                grad,
+                grad_ref,
+                atol=EPSILON,
+                rtol=5e-2,
+                mismatch_threshold=0.08,
+                test_case=name,
+            )
+        if total_sink is not None:
+            total_dsink_ref = total_sink.grad
+            dist.all_reduce(total_dsink_ref, group=self.nccl_group)
             assert_close(
                 total_dsink,
                 total_dsink_ref,

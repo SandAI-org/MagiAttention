@@ -724,3 +724,42 @@ def apply_score_mod_bwd_inner(
         grad_vec.store(grad_out_ssa)
         for j in cutlass.range(vec_size, unroll_full=True):
             grad_tensor[i + j] = grad_vec[j]
+
+
+@cute.jit
+def apply_softcap(acc_S: cute.Tensor, softcap_scale: Float32):
+    """Cap the raw scores in place: s <- tanh(s * softcap_scale).
+
+    ``softcap_scale`` is ``softmax_scale / softcap``. The cap magnitude is not
+    applied here; it is folded into the exp2 scale (``softcap * log2(e)``), so
+    the softmax sees ``softcap * tanh(s * softmax_scale / softcap)`` at one
+    multiply per element. Must run before masking: a masked -inf must not pass
+    through tanh.
+    """
+    for i in cutlass.range(0, cute.size(acc_S.shape), 2, unroll_full=True):
+        s0, s1 = cute.arch.mul_packed_f32x2(
+            (acc_S[i], acc_S[i + 1]), (softcap_scale, softcap_scale)
+        )
+        acc_S[i] = cutedsl_utils.tanh_approx(s0)
+        acc_S[i + 1] = cutedsl_utils.tanh_approx(s1)
+
+
+@cute.jit
+def apply_softcap_bwd(acc_S: cute.Tensor, dtanh: cute.Tensor, softcap_scale: Float32):
+    """Cap the raw scores in place as in the forward and keep ``1 - tanh^2``.
+
+    d(capped)/d(raw) = softmax_scale * (1 - tanh^2). The epilogue already
+    multiplies dS by softmax_scale, so the mainloop multiplies dS by ``dtanh``
+    only. The scores are overwritten by P before dS is formed, so the
+    derivative has to be captured here.
+    """
+    for i in cutlass.range(0, cute.size(acc_S.shape), 2, unroll_full=True):
+        s0, s1 = cute.arch.mul_packed_f32x2(
+            (acc_S[i], acc_S[i + 1]), (softcap_scale, softcap_scale)
+        )
+        t0 = cutedsl_utils.tanh_approx(s0)
+        t1 = cutedsl_utils.tanh_approx(s1)
+        acc_S[i] = t0
+        acc_S[i + 1] = t1
+        dtanh[i] = 1.0 - t0 * t0
+        dtanh[i + 1] = 1.0 - t1 * t1

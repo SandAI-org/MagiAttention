@@ -44,7 +44,7 @@ from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwdSm100
 from .seqlen_info import SeqlenInfoQK
-from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
+from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner, apply_softcap_bwd
 from .sparse_utils import (
     BlockSparseTensors,
     get_block_sparse_iteration_info_bwd,
@@ -88,6 +88,9 @@ class FFABwdSm100:
         score_mod: cutlass.Constexpr | None = None,
         score_mod_bwd: cutlass.Constexpr | None = None,
         mask_mod: cutlass.Constexpr | None = None,
+        # tanh-cap the scaled scores before masking. The cap value is a
+        # runtime scalar of __call__; this flag only selects the variant.
+        has_softcap: bool = False,
         has_aux_tensors: cutlass.Constexpr = False,
         subtile_factor: cutlass.Constexpr[int] = 1,
         disable_bwd_dkv_atomic_reduction: bool = False,
@@ -191,6 +194,10 @@ class FFABwdSm100:
         self.score_mod = score_mod
         self.score_mod_bwd = score_mod_bwd
         self.mask_mod = mask_mod
+        assert not (
+            has_softcap and (score_mod is not None or score_mod_bwd is not None)
+        ), "softcap and score_mod both rewrite the scores; their order is undefined"
+        self.has_softcap = has_softcap
         self.has_aux_tensors = has_aux_tensors
         self.subtile_factor = subtile_factor
         # For score_mod, use vec_size=1 (like forward) to handle per-element indices
@@ -778,6 +785,8 @@ class FFABwdSm100:
         sm_margin: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
+        # tanh cap magnitude; required iff has_softcap.
+        softcap: Float32 | None = None,
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -1512,12 +1521,20 @@ class FFABwdSm100:
         # --- Make others ---
 
         LOG2_E = math.log2(math.e)
-        if const_expr(self.score_mod is None):
-            # Without score_mod: bake scale into log2
-            softmax_scale_log2 = softmax_scale * LOG2_E
+        softcap_scale = None
+        if const_expr(self.has_softcap):
+            # The mainloop computes tanh(s * softmax_scale / softcap); the cap
+            # magnitude re-enters as the exp2 scale.
+            assert softcap is not None
+            softcap_scale = softmax_scale / softcap
+            softmax_scale_log2 = softcap * LOG2_E
         else:
-            # With score_mod: score_mod applied to S * softmax_scale, then use LOG2_E only
-            softmax_scale_log2 = LOG2_E
+            if const_expr(self.score_mod is None):
+                # Without score_mod: bake scale into log2
+                softmax_scale_log2 = softmax_scale * LOG2_E
+            else:
+                # With score_mod: score_mod applied to S * softmax_scale, then use LOG2_E only
+                softmax_scale_log2 = LOG2_E
 
         if const_expr(window_size_left is not None):
             window_size_left = Int32(window_size_left)
@@ -1688,6 +1705,7 @@ class FFABwdSm100:
             tiled_copy_r2s_dKV,
             softmax_scale,
             softmax_scale_log2,
+            softcap_scale,
             window_size_left,
             window_size_right,
             tile_sched_params,
@@ -1771,6 +1789,7 @@ class FFABwdSm100:
         tiled_copy_r2s_dKV: cute.TiledCopy,
         softmax_scale: cutlass.Float32,
         softmax_scale_log2: cutlass.Float32,
+        softcap_scale: Optional[cutlass.Float32],
         window_size_left: Optional[Int32],
         window_size_right: Optional[Int32],
         tile_sched_params: ParamsBase,
@@ -2581,6 +2600,7 @@ class FFABwdSm100:
                 dQacc_empty_mbar_ptr,
                 softmax_scale,
                 softmax_scale_log2,
+                softcap_scale,
                 block_info,
                 SeqlenInfoCls,
                 AttentionMaskCls,
@@ -5059,6 +5079,7 @@ class FFABwdSm100:
         dQacc_empty_mbar_ptr: cute.Pointer,
         softmax_scale: cutlass.Float32,
         softmax_scale_log2: cutlass.Float32,
+        softcap_scale: Optional[cutlass.Float32],
         block_info: BlockInfo,
         SeqlenInfoCls: Callable[..., SeqlenInfoQK],
         AttentionMaskCls: Callable[..., AttentionMask],
@@ -5584,6 +5605,12 @@ class FFABwdSm100:
                                         pipeline_dS.producer_commit(producer_state_dS)
                                     producer_state_dS.advance()
 
+                            # Cap before the mask (-inf must not pass through tanh)
+                            # and keep 1 - tanh^2 for dS: rS is overwritten by P
+                            # before dS is formed.
+                            if const_expr(self.has_softcap):
+                                tSrS_dtanh = cute.make_fragment_like(tSrS_t2r)
+                                apply_softcap_bwd(tSrS_t2r, tSrS_dtanh, softcap_scale)
                             # TODO: review the logics
                             if const_expr(self.score_mod_bwd is not None):
                                 tSrS_pre = cute.make_fragment_like(tSrS_t2r)
@@ -5744,6 +5771,8 @@ class FFABwdSm100:
                                 # NOTE: tSrS_t2r stores rP for now
                                 tdPrdP_cur = tdPrdP_t2r[None, 0, 0]
                                 tSrS_cur = tSrS_t2r[None, stage, 0, 0]
+                                if const_expr(self.has_softcap):
+                                    tSrS_dtanh_cur = tSrS_dtanh[None, stage, 0, 0]
 
                                 # S2R copy sdPsum to rdPsum
                                 tSsdPsum_cur = tSsdPsum[
@@ -5789,6 +5818,20 @@ class FFABwdSm100:
                                         (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]),
                                         (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                                     )
+                                    # dS is in capped-score units; the epilogue's
+                                    # softmax_scale supplies the rest of
+                                    # d(capped)/d(raw).
+                                    if const_expr(self.has_softcap):
+                                        (
+                                            tdPrdP_cur[2 * v],
+                                            tdPrdP_cur[2 * v + 1],
+                                        ) = cute.arch.mul_packed_f32x2(
+                                            (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
+                                            (
+                                                tSrS_dtanh_cur[2 * v],
+                                                tSrS_dtanh_cur[2 * v + 1],
+                                            ),
+                                        )
 
                                 # TODO: review the logics
                                 if const_expr(self.score_mod_bwd is not None):
@@ -6031,6 +6074,11 @@ class FFABwdSm100:
                                     pipeline_dS.producer_commit(producer_state_dS)
                                 producer_state_dS.advance()
 
+                        # Cap before the mask (-inf must not pass through tanh) and keep
+                        # 1 - tanh^2 for dS: rS is overwritten by P before dS is formed.
+                        if const_expr(self.has_softcap):
+                            tSrS_dtanh = cute.make_fragment_like(tSrS_t2r)
+                            apply_softcap_bwd(tSrS_t2r, tSrS_dtanh, softcap_scale)
                         # TODO: review the logics
                         if const_expr(self.score_mod_bwd is not None):
                             tSrS_pre = cute.make_fragment_like(tSrS_t2r)
@@ -6191,6 +6239,8 @@ class FFABwdSm100:
                             # NOTE: tSrS_t2r stores rP for now
                             tdPrdP_cur = tdPrdP_t2r[None, 0, 0]
                             tSrS_cur = tSrS_t2r[None, stage, 0, 0]
+                            if const_expr(self.has_softcap):
+                                tSrS_dtanh_cur = tSrS_dtanh[None, stage, 0, 0]
 
                             # S2R copy sdPsum to rdPsum
                             tSsdPsum_cur = tSsdPsum[
@@ -6233,6 +6283,19 @@ class FFABwdSm100:
                                     (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]),
                                     (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                                 )
+                                # dS is in capped-score units; the epilogue's softmax_scale
+                                # supplies the rest of d(capped)/d(raw).
+                                if const_expr(self.has_softcap):
+                                    (
+                                        tdPrdP_cur[2 * v],
+                                        tdPrdP_cur[2 * v + 1],
+                                    ) = cute.arch.mul_packed_f32x2(
+                                        (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
+                                        (
+                                            tSrS_dtanh_cur[2 * v],
+                                            tSrS_dtanh_cur[2 * v + 1],
+                                        ),
+                                    )
 
                             # TODO: review the logics
                             if const_expr(self.score_mod_bwd is not None):
