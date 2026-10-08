@@ -14,6 +14,8 @@
 
 import itertools
 import logging
+import os
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
@@ -454,6 +456,25 @@ class DistAttnRuntimeDict(OrderedDict):
 def check_flag_comb() -> None:
     """Check some invalid flag combinations"""
 
+    # NCCL CTA clusters require co-scheduling within one GPC; scattered SMs
+    # reserved by sm_margin may not suffice, preventing comm/compute overlap.
+    reserves_sms_for_comm = not env.comm.is_native_grpcoll_enable() and (
+        env.comm.ffa_fwd_sm_margin_save_for_comm() > 0
+        or env.comm.ffa_bwd_sm_margin_save_for_comm() > 0
+    )
+    if (
+        reserves_sms_for_comm
+        and env.general.kernel_backend()
+        in (MagiAttentionKernelBackend.FFA, MagiAttentionKernelBackend.CUTEDSL)
+        and os.environ.get("NCCL_CGA_CLUSTER_SIZE") not in ("0", "1")
+    ):
+        warnings.warn(
+            "NCCL CTA clusters may prevent comm/compute overlap despite "
+            "sm_margin > 0. Set NCCL_CGA_CLUSTER_SIZE=1 before creating NCCL "
+            "process groups, or set cgaClusterSize=1 in their NCCL config.",
+            stacklevel=2,
+        )
+
     if env.comm.is_hierarchical_comm_enable():
         assert (  # TODO
             not env.comm.is_qo_comm_enable()
@@ -486,10 +507,6 @@ def check_flag_comb() -> None:
         assert (  # kernel raises NotImplementedError for ranges + deterministic
             not env.general.is_deterministic_mode_enable()
         ), "CUTEDSL backend is not compatible with deterministic mode for now"
-
-        assert (  # CuteDSL kernel has no sm_margin concept used by qo comm overlap
-            not env.comm.is_qo_comm_enable()
-        ), "CUTEDSL backend is not compatible with qo comm for now"
 
 
 def init_dist_attn_runtime_key(

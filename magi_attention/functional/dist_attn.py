@@ -1316,6 +1316,7 @@ class DistAttnRuntime:
                     # NOTE: sink token needs to be applied only once
                     # thus we only apply it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
+                    sm_margin=self.fwd_sm_margin,
                 )
                 meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             else:
@@ -1447,6 +1448,7 @@ class DistAttnRuntime:
                     # NOTE: dsink should be computed only once
                     # thus we only compute it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
+                    sm_margin=self.bwd_sm_margin,
                 )
                 partial_dkv = self._maybe_concat(
                     partial_dk, partial_dv, need_concat=self.concat_dkv

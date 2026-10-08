@@ -40,7 +40,7 @@ class TestDistAttn(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
-        self.sdpa_backend_envvar = "MAGI_ATTENTION_SDPA_BACKEND"
+        self.kernel_backend_envvar = "MAGI_ATTENTION_KERNEL_BACKEND"
 
         # init several pgs with all ranks
         self.nccl_groups = [
@@ -133,7 +133,14 @@ class TestDistAttn(DistTestBase):
     @with_comms
     @parameterize("num_heads", [(8, 8), (8, 4)])
     @parameterize("head_dim", [128, 64])
-    @parameterize("use_sdpa_backend", [False, True])
+    @parameterize(
+        "backend",
+        [
+            MagiAttentionKernelBackend.FFA,
+            MagiAttentionKernelBackend.SDPA,
+            MagiAttentionKernelBackend.CUTEDSL,
+        ],
+    )
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
     @parameterize("dtype", [torch.float16, torch.bfloat16])
@@ -141,28 +148,27 @@ class TestDistAttn(DistTestBase):
         self,
         num_heads: tuple[int, int],
         head_dim: int,
-        use_sdpa_backend: bool,
+        backend: MagiAttentionKernelBackend,
         use_hier_comm: bool,
         use_native_grpcoll: bool,
         dtype: torch.dtype,
     ):
+        # FFA is SM90 only; CUTEDSL range kernels are SM100/SM110 only.
+        major, minor = torch.cuda.get_device_capability()
+        if backend == MagiAttentionKernelBackend.FFA and (major, minor) != (9, 0):
+            return
+        if backend == MagiAttentionKernelBackend.CUTEDSL and major not in (10, 11):
+            return
+
         flag_comb = next(self.flag_iterator)
         seqlen_sink = flag_comb["seqlen_sink"]
         return_max_logits = flag_comb["return_max_logits"]
         use_native_grpcoll &= self.native_grpcoll_registered
-        # TODO: support attn sink for fa4 backend
-        seqlen_sink = (
-            0
-            if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4
-            else seqlen_sink
-        )
+        # TODO: support return max logits for cutedsl backend
+        if backend == MagiAttentionKernelBackend.CUTEDSL:
+            return_max_logits = False
 
-        # TODO: support return max logits for fa4 backend
-        return_max_logits = (
-            False
-            if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4
-            else return_max_logits
-        )
+        is_sdpa_backend = backend == MagiAttentionKernelBackend.SDPA
 
         # skip when enabling hier comm
         if use_hier_comm:
@@ -173,15 +179,16 @@ class TestDistAttn(DistTestBase):
         # switch the env flags
         switch_back = switch_envvars(
             envvar_name_list=[
-                self.sdpa_backend_envvar,
+                self.kernel_backend_envvar,
                 self.hier_comm_envvar,
                 self.native_grpcoll_envvar,
             ],
             enable_dict={
-                self.sdpa_backend_envvar: use_sdpa_backend,
+                self.kernel_backend_envvar: True,
                 self.hier_comm_envvar: use_hier_comm,
                 self.native_grpcoll_envvar: use_native_grpcoll,
             },
+            enable_value_dict={self.kernel_backend_envvar: backend.value},
         )
 
         # prepare meta and runtime
@@ -331,7 +338,7 @@ class TestDistAttn(DistTestBase):
             total_out_ref,
             atol=EPSILON,
             rtol=5e-2,
-            mismatch_threshold=0.1 if use_sdpa_backend else 0.08,
+            mismatch_threshold=0.1 if is_sdpa_backend else 0.08,
             test_case="out",
         )
         assert_close(
@@ -347,7 +354,7 @@ class TestDistAttn(DistTestBase):
                 local_max_logits,
                 total_max_logits_ref,
                 atol=EPSILON,
-                rtol=1e-2 if use_sdpa_backend else 1e-3,
+                rtol=1e-2 if is_sdpa_backend else 1e-3,
                 mismatch_threshold=0.01,
                 test_case="max_logits",
             )
@@ -356,7 +363,7 @@ class TestDistAttn(DistTestBase):
             local_grad_q_ref,
             atol=EPSILON,
             rtol=5e-2,
-            mismatch_threshold=0.1 if use_sdpa_backend else 0.08,
+            mismatch_threshold=0.1 if is_sdpa_backend else 0.08,
             test_case="dq",
         )
         assert_close(
@@ -364,7 +371,7 @@ class TestDistAttn(DistTestBase):
             local_grad_k_ref,
             atol=EPSILON,
             rtol=5e-2,
-            mismatch_threshold=0.1 if use_sdpa_backend else 0.08,
+            mismatch_threshold=0.1 if is_sdpa_backend else 0.08,
             test_case="dk",
         )
         assert_close(
@@ -372,7 +379,7 @@ class TestDistAttn(DistTestBase):
             local_grad_v_ref,
             atol=EPSILON,
             rtol=5e-2,
-            mismatch_threshold=0.1 if use_sdpa_backend else 0.08,
+            mismatch_threshold=0.1 if is_sdpa_backend else 0.08,
             test_case="dv",
         )
         if total_sink is not None:

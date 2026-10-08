@@ -63,6 +63,7 @@ from .sparse_utils import (
 )
 from .tile_scheduler import (
     ClcState,
+    DynamicState,
     SchedulingMode,
     SingleTileLPTScheduler,
     SingleTileScheduler,
@@ -162,22 +163,24 @@ _FP8_SMALL_HDIM_REGS = {
 # === END TUNING KNOBS ===
 
 
-def fwd_fp32_o_can_borrow_kv_smem(
+def fwd_fp32_o_borrows_kv_smem(
+    *,
+    o_is_fp32: bool,
+    is_varlen_q: bool,
+    use_2cta_instrs: bool,
     head_dim_padded: int,
     head_dim_v_padded: int,
     m_block_size: int,
     n_block_size: int,
-    cta_group_size: int,
     q_stage: int,
 ) -> bool:
-    """Whether fp32-O sO can stage in finished KV ring slots."""
+    """Whether FP32 O can borrow K/V shared memory in a 1-CTA range kernel."""
+    if not (o_is_fp32 and is_varlen_q and not use_2cta_instrs):
+        return False
     if head_dim_padded == 192 and head_dim_v_padded == 128:
         return False
     bytes_per_kv_stage = (
-        n_block_size
-        * max(head_dim_padded, head_dim_v_padded)
-        * 2  # bf16/fp16 K/V
-        // cta_group_size
+        n_block_size * max(head_dim_padded, head_dim_v_padded) * 2  # bf16/fp16 K/V
     )
     fp32_width = 32
     cols_per_chunk = bytes_per_kv_stage * 8 // (fp32_width * m_block_size)
@@ -233,8 +236,7 @@ class FFAFwdSm100:
         use_clc_scheduler: bool = False,
         range_merge: bool = False,
         disable_fwd_atomic_reduction: bool = False,
-        # GMEM O dtype on the atomic path (fp32 = lossless merge; fp16/bf16
-        # trades K-1 cascading truncation for half the merge traffic/smem).
+        # GMEM O dtype on the atomic path.
         o_dtype: Type[cutlass.Numeric] = Float32,
         debug_print: bool = False,
     ):
@@ -322,7 +324,6 @@ class FFAFwdSm100:
                 self.use_per_range_mask
             ), "RangeMerge reads one mask type per relation pair from mMaskTypes"
             assert not use_2cta_instrs and not is_split_kv and not pack_gqa
-            assert not is_persistent
             assert score_mod is None and mask_mod is None
         self.is_local = is_local
         self.is_varlen_q = is_varlen_q
@@ -337,22 +338,19 @@ class FFAFwdSm100:
             assert is_varlen_q and not is_split_kv and not pack_gqa
             # The prev-O gmem read is unpredicated along head_dim.
             assert not self.check_hdim_v_oob
-        # fp32 O doubles the sO footprint of the input-dtype path; borrow
-        # finished KV ring slots for it (one work tile per CTA only).
-        self.sO_borrow_kv = (
-            self.use_tma_KV
-            and o_dtype == Float32
-            and fwd_fp32_o_can_borrow_kv_smem(
-                self.head_dim_padded,
-                self.head_dim_v_padded,
-                self.m_block_size,
-                self.n_block_size,
-                self.cta_group_size,
-                self.q_stage,
-            )
+        self.sO_borrow_kv = self.use_tma_KV and fwd_fp32_o_borrows_kv_smem(
+            o_is_fp32=o_dtype == Float32,
+            is_varlen_q=is_varlen_q,
+            use_2cta_instrs=use_2cta_instrs,
+            head_dim_padded=self.head_dim_padded,
+            head_dim_v_padded=self.head_dim_v_padded,
+            m_block_size=self.m_block_size,
+            n_block_size=self.n_block_size,
+            q_stage=self.q_stage,
         )
-        if self.sO_borrow_kv:
-            self.is_persistent = False
+        assert (
+            not self.sO_borrow_kv or self.is_persistent
+        ), "K/V borrowing requires persistent execution"
         self.q_subtile_factor = q_subtile_factor
 
         assert not (
@@ -392,6 +390,8 @@ class FFAFwdSm100:
         if self.overlap_sO_sQ:
             self.is_persistent = False
         assert not (self.sO_borrow_kv and self.overlap_sO_sQ)
+        # K/V borrowing currently does not support Split-KV.
+        assert not (self.sO_borrow_kv and self.is_split_kv)
 
         assert self.use_tma_KV or not (
             self.check_hdim_oob or self.check_hdim_v_oob
@@ -418,8 +418,19 @@ class FFAFwdSm100:
             ), f"CLC cluster M != cta_group_size: {self.cluster_shape_mn}, {self.cta_group_size}"
 
         self.sched_stages = 1
-        self.scheduling_mode = (
-            SchedulingMode.CLC if self.use_clc_scheduler else SchedulingMode.STATIC
+        # overlap_sO_sQ demotes to one tile per CTA, which ignores sm_margin.
+        if is_varlen_q and self.is_persistent:
+            assert not self.use_clc_scheduler
+            self.scheduling_mode = SchedulingMode.DYNAMIC
+        elif self.use_clc_scheduler:
+            self.scheduling_mode = SchedulingMode.CLC
+        else:
+            self.scheduling_mode = SchedulingMode.STATIC
+        # CLC and DYNAMIC both hand tiles out through a scheduler warp and a
+        # response slot that every warp consumes once per tile.
+        self.use_scheduler_warp = self.scheduling_mode in (
+            SchedulingMode.CLC,
+            SchedulingMode.DYNAMIC,
         )
 
         if is_varlen_q:
@@ -474,8 +485,11 @@ class FFAFwdSm100:
             self.epilogue_warp_ids = (13, 14)
 
         self.clc_scheduler_warp_id = (
-            self.empty_warp_ids[0] if self.use_clc_scheduler else None
+            self.empty_warp_ids[0] if self.use_scheduler_warp else None
         )
+        assert (
+            not self.use_scheduler_warp or self.empty_warp_ids
+        ), "the scheduler warp needs an empty warp"
 
         self.tmem_s_offset = [0, self.n_block_size]  # [0, tileK) = [0, 128)
         self.tmem_o_offset = [
@@ -713,6 +727,9 @@ class FFAFwdSm100:
         mRangeLocks: Optional[cute.Tensor] = None,
         max_seqlen_q: Int32 | None = None,
         mCuBatches: Optional[cute.Tensor] = None,  # [R + 1] CSR offsets for RangeMerge
+        sm_margin: Int32 | None = None,
+        # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
+        mTileCounter: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -1189,15 +1206,13 @@ class FFAFwdSm100:
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],
             mQRanges=mQRanges,
-            # On the atomic path Q ranges may overlap, so every range owns
-            # ceil(max_seqlen_q / tile) tiles of the grid and an underestimate
-            # of max_seqlen_q drops the tail tiles of the longer ranges. On
-            # the direct-store path the ranges are disjoint, so the prefix
-            # sum over total_q bounds the grid exactly without this width.
+            # Overlapping Q ranges need per-range grid bounds without persistence.
             max_outer_range_width=(
                 max_seqlen_q
                 if const_expr(
-                    mQRanges is not None and not self.disable_fwd_atomic_reduction
+                    mQRanges is not None
+                    and not self.disable_fwd_atomic_reduction
+                    and not self.is_persistent
                 )
                 else None
             ),
@@ -1207,10 +1222,18 @@ class FFAFwdSm100:
             else 1,
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
+            sm_margin=sm_margin,
             lpt=self.maybe_causal or self.is_local,
             is_split_kv=self.is_split_kv,
             cluster_shape_mn=self.cluster_shape_mn,
-            use_cluster_idx=not self.is_persistent and self.cta_group_size > 1,
+            # 2-CTA range forward uses cluster indices even when persistent.
+            use_cluster_idx=(not self.is_persistent or self.is_varlen_q)
+            and self.cta_group_size > 1,
+            mTileCounter=(
+                mTileCounter
+                if const_expr(self.scheduling_mode == SchedulingMode.DYNAMIC)
+                else None
+            ),
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(
             tile_sched_args, scheduling_mode=self.scheduling_mode
@@ -1238,8 +1261,10 @@ class FFAFwdSm100:
             )
         )
 
-        clc_response_size = self.sched_stages * 4 if self.use_clc_scheduler else 0
-        clc_mbar_size = self.sched_stages * 2 if self.use_clc_scheduler else 0
+        clc_response_size = self.sched_stages * 4 if self.use_scheduler_warp else 0
+        clc_mbar_size = self.sched_stages * 2 if self.use_scheduler_warp else 0
+        # borrow_done
+        borrow_mbar_size = 1 if self.sO_borrow_kv else 0
 
         @cute.struct
         class SharedStorage:
@@ -1263,6 +1288,8 @@ class FFAFwdSm100:
             clc_mbar_ptr: cute.struct.MemRange[cutlass.Int64, clc_mbar_size]
             # CLC response storage (16 bytes per stage, stored as 4 Int32s).
             clc_response: cute.struct.MemRange[Int32, clc_response_size]
+            # Borrowed-KV-slot handoff between persistent tiles.
+            borrow_mbar_ptr: cute.struct.MemRange[cutlass.Int64, borrow_mbar_size]
 
             # --- tmem ptr ---
 
@@ -1442,8 +1469,11 @@ class FFAFwdSm100:
         ).launch(
             grid=grid_dim,
             block=[self.threads_per_cta, 1, 1],
+            # DYNAMIC publishes tiles with st.async.shared::cluster, which needs
+            # a cluster launch even for one CTA.
             cluster=self.cluster_shape_mnk
             if cute.size(self.cluster_shape_mnk) > 1
+            or self.scheduling_mode == SchedulingMode.DYNAMIC
             else None,
             stream=stream,
             min_blocks_per_mp=1,
@@ -1556,6 +1586,10 @@ class FFAFwdSm100:
         # tmem buf/dealloc ptrs
         tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
         tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+
+        borrow_done_mbar_ptr = None
+        if const_expr(self.sO_borrow_kv):
+            borrow_done_mbar_ptr = storage.borrow_mbar_ptr.data_ptr()
 
         # --- Alloc tmem alloc/dealloc barrier ---
 
@@ -1850,6 +1884,12 @@ class FFAFwdSm100:
                 defer_sync=True,
             )
 
+        # K/V load dependencies bound borrow_done to one phase of lead.
+        if const_expr(self.sO_borrow_kv):
+            if warp_idx == self.load_warp_ids[0]:
+                with cute.arch.elect_one():
+                    cute.arch.mbarrier_init(borrow_done_mbar_ptr, 1)
+
         # --- Cluster arrive after mbarrier init ---
 
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
@@ -1868,7 +1908,7 @@ class FFAFwdSm100:
         )
         # sO: S<3,4,3> o 0 o (EPI_Q=(8,16),EPI_HD=(64,2),EPI_STAGE=(1,2)):((64,512),(1,8192),(0,16384))
         if const_expr(self.sO_borrow_kv):
-            # Overlay sO onto drained KV ring storage in non-persistent mode
+            # Overlay sO onto drained KV ring storage
             sO = cute.make_tensor(
                 cute.recast_ptr(sK.iterator, sO_layout.inner, self.o_dtype),
                 sO_layout.outer,
@@ -1985,7 +2025,7 @@ class FFAFwdSm100:
 
         # --- Make tile scheduler ---
 
-        if const_expr(self.use_clc_scheduler):
+        if const_expr(self.use_scheduler_warp):
             clc_response_ptr = storage.clc_response.data_ptr()
             clc_mbar_ptr = storage.clc_mbar_ptr.data_ptr()
 
@@ -1998,31 +2038,49 @@ class FFAFwdSm100:
             clc_pipeline_consumer_group = ThreadCooperativeGroup(
                 cute.arch.WARP_SIZE * num_clc_consumer_warps
             )
-
-            block_idx = cute.arch.block_idx()
-            clc = ClcState.create(
-                hw_scheduler=ClcDynamicPersistentTileScheduler.create(
-                    self.tile_scheduler_cls.clc_problem_shape(tile_sched_params),
-                    block_idx,
-                    cute.arch.grid_dim(),
-                    clc_response_ptr,
-                ),
-                pipeline=pipeline.PipelineClcFetchAsync.create(
-                    barrier_storage=clc_mbar_ptr,
-                    num_stages=self.sched_stages,
-                    producer_group=clc_pipeline_producer_group,
-                    consumer_group=clc_pipeline_consumer_group,
-                    tx_count=16,
-                    cta_layout_vmnk=cta_layout_vmnk,
-                ),
-                consumer_state=pipeline.make_pipeline_state(
-                    pipeline.PipelineUserType.Consumer, self.sched_stages
-                ),
-                producer_state=pipeline.make_pipeline_state(
-                    pipeline.PipelineUserType.Producer, self.sched_stages
-                ),
+            # CLC writes a 16-byte response; DYNAMIC publishes a 4-byte tile index.
+            sched_pipeline = pipeline.PipelineClcFetchAsync.create(
+                barrier_storage=clc_mbar_ptr,
+                num_stages=self.sched_stages,
+                producer_group=clc_pipeline_producer_group,
+                consumer_group=clc_pipeline_consumer_group,
+                tx_count=16 if const_expr(self.use_clc_scheduler) else 4,
+                cta_layout_vmnk=cta_layout_vmnk,
             )
-            tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params, clc=clc)
+            consumer_state = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Consumer, self.sched_stages
+            )
+            producer_state = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Producer, self.sched_stages
+            )
+
+            if const_expr(self.use_clc_scheduler):
+                block_idx = cute.arch.block_idx()
+                clc = ClcState.create(
+                    hw_scheduler=ClcDynamicPersistentTileScheduler.create(
+                        self.tile_scheduler_cls.clc_problem_shape(tile_sched_params),
+                        block_idx,
+                        cute.arch.grid_dim(),
+                        clc_response_ptr,
+                    ),
+                    pipeline=sched_pipeline,
+                    consumer_state=consumer_state,
+                    producer_state=producer_state,
+                )
+                tile_scheduler = self.tile_scheduler_cls.create(
+                    tile_sched_params, clc=clc
+                )
+            else:
+                assert self.tile_scheduler_cls is SingleTileVarlenScheduler
+                tile_scheduler = SingleTileVarlenScheduler.create(
+                    tile_sched_params,
+                    dynamic=DynamicState.create(
+                        pipeline=sched_pipeline,
+                        consumer_state=consumer_state,
+                        producer_state=producer_state,
+                        response_ptr=clc_response_ptr,
+                    ),
+                )
         else:
             tile_scheduler = self.tile_scheduler_cls.create(tile_sched_params)
         assert isinstance(
@@ -2061,7 +2119,7 @@ class FFAFwdSm100:
         # ///////////////////////////////////////////////////////////////////////////////
         #  Empty / CLC Scheduler Warp
         # ///////////////////////////////////////////////////////////////////////////////
-        if const_expr(self.use_clc_scheduler):
+        if const_expr(self.use_scheduler_warp):
             if warp_idx == self.clc_scheduler_warp_id:
                 cute.arch.setmaxregister_decrease(self.num_regs_other)
                 if is_leader_cta:
@@ -2113,6 +2171,7 @@ class FFAFwdSm100:
                 tile_scheduler=tile_scheduler,
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
+                borrow_done_mbar_ptr=borrow_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
 
@@ -2307,6 +2366,7 @@ class FFAFwdSm100:
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
                 mRangeLocks=mRangeLocks,
+                borrow_done_mbar_ptr=borrow_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
 
@@ -2364,6 +2424,7 @@ class FFAFwdSm100:
         tile_scheduler: TileSchedulerProtocol,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        borrow_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
         num_load_threads = len(self.load_warp_ids) * cute.arch.WARP_SIZE
@@ -2387,6 +2448,9 @@ class FFAFwdSm100:
         kv_producer_state = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Producer, self.kv_stage
         )
+        # Starts at 1 so the first tile's wait passes on the fresh barrier.
+        borrow_done_phase = Int32(1)
+        merged_group_loads = self.range_merge and not self.use_block_sparsity
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -2604,12 +2668,25 @@ class FFAFwdSm100:
             #  G2S-load sQ/sK/sV
             # //////////////////////////////////////////////
 
-            if const_expr(self.range_merge and not self.use_block_sparsity):
+            if const_expr(self.sO_borrow_kv and not merged_group_loads):
+                # Take the KV ring slots back from the previous tile's sO
+                # before any K/V load of this tile.
+                if issue_kv_for_this_warp:
+                    cute.arch.mbarrier_wait(borrow_done_mbar_ptr, borrow_done_phase)
+                borrow_done_phase ^= 1
+
+            if const_expr(merged_group_loads):
                 if issue_q_for_this_warp:
                     load_Q(block=0, stage=0)
                     if const_expr(self.q_stage == 2):
                         load_Q(block=1, stage=1)
                 q_producer_phase ^= 1
+                # Q uses separate storage and can load before the handoff.
+                # All pairs share sO, so wait once for the entire merged group.
+                if const_expr(self.sO_borrow_kv):
+                    if issue_kv_for_this_warp:
+                        cute.arch.mbarrier_wait(borrow_done_mbar_ptr, borrow_done_phase)
+                    borrow_done_phase ^= 1
                 pair_beg = Int32(mCuBatches[batch_idx])
                 pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
                 for pj in cutlass.range(pair_cnt, unroll=1):
@@ -2788,6 +2865,29 @@ class FFAFwdSm100:
             pipeline_q.producer_acquire_w_index_phase(
                 self.q_stage - 1, q_producer_phase
             )
+
+    @cute.jit
+    def _release_borrowed_kv_slots(
+        self,
+        tidx: Int32,
+        borrow_done_mbar_ptr: cute.Pointer,
+    ):
+        """Hand this tile's sO slots back to the next tile's K/V loads.
+
+        Called by every correction thread once per tile, after the tile's
+        last sO access. The pipeline_kv empty signal only covers the MMA's
+        K/V reads, so it cannot stand in for this handoff.
+        """
+        if const_expr(self.corr_epi_tma_store):
+            # A committed TMA store may still be reading sO. Only the issuing
+            # threads can wait for it, hence the barrier after.
+            cute.arch.cp_async_bulk_wait_group(0, read=True)
+        cute.arch.barrier(
+            barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+            number_of_threads=len(self.correction_warp_ids) * cute.arch.WARP_SIZE,
+        )
+        if tidx == 0:
+            cute.arch.mbarrier_arrive(borrow_done_mbar_ptr)
 
     @cute.jit
     def mma(
@@ -4243,6 +4343,7 @@ class FFAFwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
+        borrow_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
         num_corr_warps = len(self.correction_warp_ids)
@@ -4899,6 +5000,10 @@ class FFAFwdSm100:
                                 assumed_align=4,
                             )
                             cute.make_tensor(lse_gmem_ptr, (1,))[0] = lse
+
+            # One handoff phase per tile, matching the load warp's per-tile wait.
+            if const_expr(self.sO_borrow_kv):
+                self._release_borrowed_kv_slots(tidx, borrow_done_mbar_ptr)
 
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()

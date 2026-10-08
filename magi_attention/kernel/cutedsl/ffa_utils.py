@@ -139,21 +139,30 @@ def validate_range_feature_support(
     has_softcap: bool,
     deterministic: bool = False,
     bwd_head_dim: int | None = None,
+    sm_margin: int = 0,
 ) -> None:
     """Reject q/k-range feature combinations the kernels do not implement.
 
-    Dense calls pass through. Per-range ``mask_types`` and ``range_merge``
-    both run the SM100/SM110 runtime-mask kernel (merging materializes the
-    mask types per row), so they share its restrictions.
-    ``range_merge_unique_writer`` is the direction's non-atomic flag (fwd O,
-    bwd dK/dV): merging rewrites the outer intervals and only holds for
-    unique writers. ``deterministic`` and ``bwd_head_dim`` are backward-only:
-    the bwd hd192 mainloop is 2-CTA with Q and Qt on one pipeline stage,
-    which the per-pair merge walk does not implement.
+    ``sm_margin > 0`` requires SM100/SM110 q/k-range kernels, which cap the
+    grid to reserve SMs for communication.
+
+    Per-range ``mask_types`` and ``range_merge`` share the SM100/SM110
+    runtime-mask restrictions because merging produces per-row mask types.
+    Merging also requires unique writers for O in forward or dK/dV in
+    backward, as declared by ``range_merge_unique_writer``.
+
+    ``deterministic`` and ``bwd_head_dim`` apply only to backward. Q/k ranges
+    do not support deterministic backward. RangeMerge does not support the
+    mainloop for head dimension 192, which uses two CTAs and a single pipeline
+    stage for Q and Qt.
     """
     per_range = isinstance(mask_types, torch.Tensor)
     if per_range and not has_ranges:
         raise NotImplementedError("Per-range mask_types requires q/k ranges")
+    if sm_margin > 0 and not (has_ranges and major_arch in (10, 11)):
+        raise NotImplementedError(
+            "sm_margin > 0 is only supported by the SM100/SM110 q/k-range kernels"
+        )
     if not has_ranges:
         return
     if deterministic:
