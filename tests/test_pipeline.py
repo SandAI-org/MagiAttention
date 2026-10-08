@@ -1215,9 +1215,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         softcap = 0.0  # not supported for test
         sink_layout: AttnSinkLayout = attn_config.get("sink_layout", "sh")
         return_max_logits: bool = attn_config.get("return_max_logits", False)
-        if backend == MagiAttentionKernelBackend.CUTEDSL:
-            # CuteDSl temporary not support max-logits output
-            return_max_logits = False
 
         uneven_shard: bool = attn_config.get("uneven_shard", False)
 

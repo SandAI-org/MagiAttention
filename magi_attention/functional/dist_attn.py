@@ -1249,10 +1249,9 @@ class DistAttnRuntime:
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
         _backend = self.kernel_backend
         if return_max_logits:
-            assert _backend not in (
-                MagiAttentionKernelBackend.FA4,
-                MagiAttentionKernelBackend.CUTEDSL,
-            ), "FA4/CUTEDSL backends do not support return max logits"
+            assert (
+                _backend != MagiAttentionKernelBackend.FA4
+            ), "FA4 backend does not support return max logits"
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
             f"{attn_arg.total_area=} | "
@@ -1306,7 +1305,7 @@ class DistAttnRuntime:
                 )
                 meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             elif _backend == MagiAttentionKernelBackend.CUTEDSL:
-                partial_out, partial_lse = cutedsl_fwd(
+                partial_out, partial_lse, partial_max_logits = cutedsl_fwd(
                     q=q,
                     k=k,
                     v=v,
@@ -1317,8 +1316,10 @@ class DistAttnRuntime:
                     # thus we only apply it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
                     sm_margin=self.fwd_sm_margin,
+                    return_max_logits=return_max_logits,
+                    max_logits=max_logits_acc,  # directly reduce to max_logits_acc
                 )
-                meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
+                meta = AttnForwardMeta(lse=partial_lse, max_logits=partial_max_logits)
             else:
                 partial_out, meta = _flex_flash_attn_forward(
                     q=q,
