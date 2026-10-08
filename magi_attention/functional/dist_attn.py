@@ -332,6 +332,7 @@ class DistAttnRuntime:
             if is_host_stage:
                 partial_out, partial_lse = self._init_out_lse_skipped_host_stage(
                     q=q,
+                    head_dim_v=self._maybe_chunk(kv, num_chunks=2)[1].shape[-1],
                     sink=sink,
                 )
                 partial_max_logits = self._init_max_logits_skipped_host_stage(
@@ -1305,9 +1306,6 @@ class DistAttnRuntime:
                 )
                 meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             elif _backend == MagiAttentionKernelBackend.CUTEDSL:
-                assert (
-                    sink is None or not is_host_stage
-                ), "CUTEDSL backend does not support sink for now"
                 partial_out, partial_lse = cutedsl_fwd(
                     q=q,
                     k=k,
@@ -1315,6 +1313,9 @@ class DistAttnRuntime:
                     attn_arg=attn_arg,
                     softmax_scale=softmax_scale,
                     softcap=softcap,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
                 )
                 meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
             else:
@@ -1432,10 +1433,7 @@ class DistAttnRuntime:
                     partial_dk, partial_dv, need_concat=self.concat_dkv
                 )
             elif _backend == MagiAttentionKernelBackend.CUTEDSL:
-                assert (
-                    sink is None or not is_host_stage
-                ), "CUTEDSL backend does not support sink for now"
-                partial_dq, partial_dk, partial_dv = cutedsl_bwd(
+                partial_dq, partial_dk, partial_dv, partial_dsink = cutedsl_bwd(
                     do=do,
                     q=q,
                     k=k,
@@ -1446,8 +1444,10 @@ class DistAttnRuntime:
                     softmax_scale=softmax_scale,
                     softcap=softcap,
                     dq_acc=dq_acc,  # directly reduce to dq_acc
+                    # NOTE: dsink should be computed only once
+                    # thus we only compute it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
                 )
-                partial_dsink = None
                 partial_dkv = self._maybe_concat(
                     partial_dk, partial_dv, need_concat=self.concat_dkv
                 )
@@ -2520,13 +2520,15 @@ class DistAttnRuntime:
     def _init_out_lse_skipped_host_stage(
         self,
         q: torch.Tensor,
+        head_dim_v: int,
         sink: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # NOTE: we can NOT use empty initialization here,
         # since we have nowhere to zero-fill it
         # when all attn computations are skipped for certain q range
-        out = torch.zeros_like(
-            q,
+        # NOTE: out takes V's head dim, which differs from Q's for asymmetric K/V
+        out = torch.zeros(
+            (*q.shape[:-1], head_dim_v),
             dtype=self._maybe_hp_dtype(q.dtype, not self.fwd_local_out_lp_init),
             device=q.device,
         )
@@ -2573,11 +2575,6 @@ class DistAttnRuntime:
         sink: torch.Tensor | None,
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
         q, o, do = self._maybe_chunk(qo_do, num_chunks=3)
-        k, _ = self._maybe_chunk(kv, num_chunks=2)
-        if self.concat_kv:  # kv is a fused tensor
-            dkv_shape = kv.shape
-        else:  # kv are tupled tensors
-            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
 
         # NOTE: if local_dq and local_dkv calculation are skipped,
         # we need to zero-initialize them since they might be reduced later
@@ -2590,18 +2587,7 @@ class DistAttnRuntime:
                 and not self.bwd_local_dq_lp_init,
             ),
         )
-        dkv = torch.zeros(
-            dkv_shape,
-            dtype=self._maybe_hp_dtype(
-                k.dtype,
-                # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
-                need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
-                and not self.bwd_local_dkv_lp_init,
-            ),
-            device=k.device,
-        )
-        if not self.concat_dkv:  # make partial_dkv tupled tensors
-            dkv = self._maybe_chunk(dkv, num_chunks=2)
+        dkv = self._init_dkv_skipped_host_stage(kv)
 
         # in skipped host stage,
         # we directly calculate dsink here
@@ -2642,26 +2628,25 @@ class DistAttnRuntime:
         self,
         kv: FusedOrTupleTensor,
     ) -> FusedOrTupleTensor:
-        k, _ = self._maybe_chunk(kv, num_chunks=2)
-        if self.concat_kv:  # kv is a fused tensor
-            dkv_shape = kv.shape
-        else:  # kv are tupled tensors
-            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
-
-        dkv = torch.zeros(
-            dkv_shape,
-            dtype=self._maybe_hp_dtype(
-                k.dtype,
-                # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
-                need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
-                and not self.bwd_local_dkv_lp_init,
-            ),
-            device=k.device,
+        k, v = self._maybe_chunk(kv, num_chunks=2)
+        dkv_dtype = self._maybe_hp_dtype(
+            k.dtype,
+            # FA4 bwd only emits fp16/bf16; keep buffer dtype in sync
+            need_hp_dtype=(self.kernel_backend != MagiAttentionKernelBackend.FA4)
+            and not self.bwd_local_dkv_lp_init,
         )
-        if not self.concat_dkv:  # make partial_dkv tupled tensors
-            dkv = self._maybe_chunk(dkv, num_chunks=2)
-
-        return dkv
+        if self.concat_dkv:  # fused dkv exists only for symmetric K/V
+            return torch.zeros(
+                (k.shape[0] + v.shape[0], *k.shape[1:]),
+                dtype=dkv_dtype,
+                device=k.device,
+            )
+        # NOTE: dk/dv take the shapes of k/v, whose head dims differ for
+        # asymmetric K/V
+        return (
+            torch.zeros_like(k, dtype=dkv_dtype),
+            torch.zeros_like(v, dtype=dkv_dtype),
+        )
 
     # TODO: unify this specific scheduling with the original one
     def _hide_tail_stage_reduce_backward(
@@ -3414,20 +3399,37 @@ class DistAttnFunc(torch.autograd.Function):
         _softmax_scale: float = (
             local_q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
-        local_out, meta = dist_attn_runtime._launch_attn_fwd_kernel(
-            q=local_q,
-            k=full_k,
-            v=full_v,
-            sink=global_sink,
-            out_acc=None,
-            lse_acc=None,
-            max_logits_acc=None,
-            attn_arg=merged_attn_arg,
-            softmax_scale=_softmax_scale,
-            softcap=softcap,
-            is_host_stage=True,
-            return_max_logits=return_max_logits,
-        )
+        if merged_attn_arg.can_skip(is_bwd=False):
+            # No q row attends to any key and the kernel wrappers refuse empty
+            # ranges; only the sink contributes, so build out/lse the same way
+            # as a skipped host stage in the overlap path.
+            local_out, local_lse = dist_attn_runtime._init_out_lse_skipped_host_stage(
+                q=local_q,
+                head_dim_v=full_v.shape[-1],
+                sink=global_sink,
+            )
+            meta = AttnForwardMeta(
+                lse=local_lse,
+                max_logits=dist_attn_runtime._init_max_logits_skipped_host_stage(
+                    q=local_q,
+                    return_max_logits=return_max_logits,
+                ),
+            )
+        else:
+            local_out, meta = dist_attn_runtime._launch_attn_fwd_kernel(
+                q=local_q,
+                k=full_k,
+                v=full_v,
+                sink=global_sink,
+                out_acc=None,
+                lse_acc=None,
+                max_logits_acc=None,
+                attn_arg=merged_attn_arg,
+                softmax_scale=_softmax_scale,
+                softcap=softcap,
+                is_host_stage=True,
+                return_max_logits=return_max_logits,
+            )
 
         # -- Step 6: finalize output --
         local_out = local_out.to(local_q.dtype)
@@ -3520,24 +3522,41 @@ class DistAttnFunc(torch.autograd.Function):
         )
 
         # -- Step 6: single backward call with merged arg --
-        (
-            partial_dq,
-            partial_dkv,
-            partial_dsink,
-        ) = dist_attn_runtime._launch_attn_bwd_kernel(
-            do=do,
-            q=q,
-            k=full_k,
-            v=full_v,
-            o=o,
-            lse=local_lse,
-            sink=global_sink,
-            dq_acc=None,
-            attn_arg=merged_attn_arg,
-            softmax_scale=_softmax_scale,
-            softcap=softcap,
-            is_host_stage=True,
-        )
+        if merged_attn_arg.can_skip(is_bwd=True):
+            # Same empty-arg case as forward: zero dq/dkv over the full
+            # local+remote KV to keep the split/reduce below uniform, and take
+            # dsink from the saved out/lse.
+            (
+                partial_dq,
+                partial_dkv,
+                partial_dsink,
+            ) = dist_attn_runtime._init_dq_dkv_dsink_skipped_host_stage(
+                qo_do=local_qo_do,
+                kv=dist_attn_runtime._maybe_concat(
+                    full_k, full_v, need_concat=dist_attn_runtime.concat_kv
+                ),
+                lse=local_lse,
+                sink=global_sink,
+            )
+        else:
+            (
+                partial_dq,
+                partial_dkv,
+                partial_dsink,
+            ) = dist_attn_runtime._launch_attn_bwd_kernel(
+                do=do,
+                q=q,
+                k=full_k,
+                v=full_v,
+                o=o,
+                lse=local_lse,
+                sink=global_sink,
+                dq_acc=None,
+                attn_arg=merged_attn_arg,
+                softmax_scale=_softmax_scale,
+                softcap=softcap,
+                is_host_stage=True,
+            )
 
         # -- Step 7: split dkv into local and remote parts --
         partial_dk, partial_dv = dist_attn_runtime._maybe_chunk(
@@ -3790,10 +3809,8 @@ def dist_attn_func(
 
         dist_attn_runtime (DistAttnRuntime): distributed attention runtime
 
-        sink (torch.Tensor, optional): global sink tensor (replicated among cp ranks).
-            Defaults to ``None`` to not apply attention sink.
-
-        NOTE: for now, we only support sink tensor with dtype=torch.float32
+        sink (torch.Tensor, optional): global sink tensor in fp32 (replicated
+            among cp ranks). Defaults to ``None`` to not apply attention sink.
 
         softmax_scale (float, optional): softmax scale.
             Defaults to ``None`` to use default value: ``1/sqrt(head_dim)``
@@ -3819,6 +3836,11 @@ def dist_attn_func(
     _backend = dist_attn_runtime.kernel_backend
     _precision = env.general.precision()
     _validate_backend_precision(_backend, _precision, q.dtype)
+
+    # All backends fold the sink into an fp32 lse and emit an fp32 dsink for
+    # the cross-rank reduction.
+    if sink is not None:
+        assert sink.dtype == torch.float32, f"sink must be fp32, but got {sink.dtype}"
 
     orig_dtype = q.dtype
     if _precision is not None:
