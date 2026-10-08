@@ -62,6 +62,13 @@ class NamedBarrierBwdSm100(enum.IntEnum):
 
 
 class NamedBarrierBwdSm100InnerLoopK(enum.IntEnum):
+    dQEpilogue = (
+        enum.auto()
+    )  # starts from 1 as barrier 0 is reserved for sync_threads()
+    TmemPtr = enum.auto()
+
+
+class NamedBarrierBwdSm100Index(enum.IntEnum):
     Compute = enum.auto()  # starts from 1 as barrier 0 is reserved for sync_threads()
     dQEpilogue = enum.auto()
     TmemPtr = enum.auto()
