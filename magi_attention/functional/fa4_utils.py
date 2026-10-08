@@ -23,7 +23,6 @@ import subprocess
 import cutlass.cute as cute
 import torch
 from tqdm import tqdm
-from tvm_ffi.utils import kwargs_wrapper
 
 from magi_attention.common import AttnRanges
 from magi_attention.env import ffa as ffa_env
@@ -55,80 +54,10 @@ _KERNEL_FUNC_NAME_FILE = "func_name.txt"
 
 
 COMPILED_META_DICT = {
-    "fwd": {
-        "cache_dict": _flash_attn_fwd.compile_cache,
-        "arg_names": [
-            "q",
-            "k",
-            "v",
-            "out",
-            "lse",
-            "softmax_scale",
-            "current_stream",
-            "cu_seqlens_q",
-            "cu_seqlens_k",
-            "seqused_q",
-            "seqused_k",
-            "page_table",
-            "window_size_left",
-            "window_size_right",
-            "learnable_sink",
-            "blocksparse_tensors",
-            "aux_tensors",
-        ],
-    },
-    "bwd": {
-        "cache_dict": _flash_attn_bwd.compile_cache,
-        "arg_names": [
-            "q",
-            "k",
-            "v",
-            "dout",
-            "lse_log2",
-            "dpsum",
-            "dq_accum",
-            "dk_or_accum",
-            "dv_or_accum",
-            "softmax_scale",
-            "current_stream",
-            "cu_seqlens_q",
-            "cu_seqlens_k",
-            "seqused_q",
-            "seqused_k",
-            "blocksparse_tensors",
-            "aux_tensors",
-            "mdQ_semaphore",
-            "mdK_semaphore",
-            "mdV_semaphore",
-            "dQ_lock_values_mask",
-            "dQ_lock_values_full",
-        ],
-    },
-    "bwd_pre": {
-        "cache_dict": _bwd_preprocess.compile_cache,
-        "arg_names": [
-            "out",
-            "dout",
-            "dpsum",
-            "lse",
-            "lse_log2",
-            "dq_accum",
-            "cu_seqlens_q",
-            "seqused_q",
-            "current_stream",
-        ],
-    },
-    "bwd_post": {
-        "cache_dict": _bwd_postprocess_convert.compile_cache,
-        "arg_names": [
-            "accum",
-            "out",
-            "softmax_scale",
-            "cu_seqlens",
-            "seqused",
-            "current_stream",
-        ],
-    },
+    "fwd": {"cache_dict": _flash_attn_fwd.compile_cache},
+    "bwd": {"cache_dict": _flash_attn_bwd.compile_cache},
+    "bwd_pre": {"cache_dict": _bwd_preprocess.compile_cache},
+    "bwd_post": {"cache_dict": _bwd_postprocess_convert.compile_cache},
 }
 
 
@@ -147,7 +76,6 @@ def load_precompiled_ffa_fa4():
             continue
 
         cache_dict = compiled_meta["cache_dict"]
-        arg_names = compiled_meta["arg_names"]
 
         for kernel_folder in os.listdir(dir_path):
             folder = os.path.join(dir_path, kernel_folder)
@@ -166,14 +94,11 @@ def load_precompiled_ffa_fa4():
                     func_name = KERNEL_SYMBOL_NAME
 
                 mod = cute.runtime.load_module(so_path, enable_tvm_ffi=True)
-                raw_func = getattr(mod, func_name)
-
-                # Wrap the raw function with kwargs wrapper to match the expected signature
-                wrapped = kwargs_wrapper.make_kwargs_wrapper(
-                    raw_func, arg_names=arg_names
-                )
-
-                cache_dict[key] = wrapped
+                # flash_attn's interface calls cached kernels positionally and
+                # the stream is an implicit TVM FFI env argument, so the raw
+                # exported function is stored as-is, the same way flash_attn's
+                # own JITPersistentCache does.
+                cache_dict[key] = getattr(mod, func_name)
 
         num_loaded = len(getattr(cache_dict, "cache", cache_dict))
         logger.info(f"\t=> {compiled_cache_name}: {num_loaded} kernels loaded")

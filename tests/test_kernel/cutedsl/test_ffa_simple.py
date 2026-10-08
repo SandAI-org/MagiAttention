@@ -26,14 +26,26 @@ Run:
 
 import random
 from contextlib import contextmanager
+from typing import Iterator
+from unittest import mock
 
+import cutlass
 import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
+from magi_attention.kernel.cutedsl.ffa_bwd_postprocess import (
+    FFABwdPostProcess,
+    bwd_postprocess,
+    bwd_postprocess_rowmajor,
+)
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
+from magi_attention.kernel.cutedsl.flex_flash_attn import (
+    _flex_flash_attn_bwd,
+    _flex_flash_attn_fwd,
+)
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import (
@@ -48,6 +60,7 @@ from magi_attention.testing.precision import (
 from magi_attention.testing.utils import switch_envvars
 from magi_attention.utils import make_attn_mask_from_ffa_args
 from magi_attention.utils.arch import is_ampere
+from magi_attention.utils.dtype import to_cute_dtype
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SM80 kernel selection
@@ -57,6 +70,22 @@ from magi_attention.utils.arch import is_ampere
 # rather than the real device capability, so it can be exercised on newer GPUs
 # (the compiled SM80 SASS runs fine on sm90/sm100). get_device_arch() is
 # lru_cached, so we must clear the cache whenever we toggle the override.
+
+
+@contextmanager
+def _record_bwd_postprocess() -> Iterator[list[FFABwdPostProcess]]:
+    """Record every :class:`FFABwdPostProcess` built, bypassing the JIT cache."""
+    built: list[FFABwdPostProcess] = []
+    init = FFABwdPostProcess.__init__
+
+    def record(obj, *args, **kwargs):
+        init(obj, *args, **kwargs)
+        built.append(obj)
+
+    with mock.patch.object(bwd_postprocess, "compile_cache", {}), mock.patch.object(
+        FFABwdPostProcess, "__init__", record
+    ):
+        yield built
 
 
 @contextmanager
@@ -471,6 +500,286 @@ class TestFfaSimple(DistTestBase):
             dtype=dtype,
             test_case=test_case,
         )
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Caller-provided dq/dk/dv buffers accumulate gradients from overlapping ranges
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    @with_run_in_mp
+    @parameterize("overlap_side", ["q", "k"])
+    def test_bwd_accumulates_caller_buffers_with_overlapping_q_or_k_ranges(
+        self, overlap_side
+    ):
+        """Accumulate caller buffers once for overlapping q or k ranges.
+
+        The self-allocated backward result is used only as the accumulation
+        reference, not as an independent numerical reference.
+        """
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            self.skipTest("caller-buffer accumulation requires SM100/SM110")
+
+        device = self.device
+        dtype = torch.bfloat16
+        d, nheads, num_ranges, seg = 128, 4, 8, 256
+        total = num_ranges * seg
+        torch.random.manual_seed(self.seed + d + (overlap_side == "k"))
+
+        q, k, v, do = (
+            torch.randn(total, nheads, d, device=device, dtype=dtype) for _ in range(4)
+        )
+        wide = [[i * seg, min((i + 2) * seg, total)] for i in range(num_ranges)]
+        narrow = [[i * seg, (i + 1) * seg] for i in range(num_ranges)]
+        q_ranges, k_ranges = (wide, narrow) if overlap_side == "q" else (narrow, wide)
+        ranges = dict(
+            q_ranges=torch.tensor(q_ranges, device=device, dtype=torch.int32),
+            k_ranges=torch.tensor(k_ranges, device=device, dtype=torch.int32),
+            max_seqlen_q=2 * seg,
+            max_seqlen_k=2 * seg,
+        )
+        out, lse = _flex_flash_attn_fwd(q, k, v, out_dtype=dtype, **ranges)
+
+        fp32 = dict(dq_type=torch.float32, dk_type=torch.float32, dv_type=torch.float32)
+        ref_grads = _flex_flash_attn_bwd(q, k, v, out, lse, do, **ranges, **fp32)
+
+        init = [torch.randn_like(x, dtype=torch.float32) for x in (q, k, v)]
+        dq, dk, dv = (x.clone() for x in init)
+        grads = _flex_flash_attn_bwd(
+            q, k, v, out, lse, do, dq=dq, dk=dk, dv=dv, **ranges, **fp32
+        )
+
+        for name, grad, buf, x0, ref in zip(
+            ("dq", "dk", "dv"), grads, (dq, dk, dv), init, ref_grads
+        ):
+            assert grad is buf, f"{name} must be the caller buffer"
+            torch.testing.assert_close(
+                buf, x0 + ref, rtol=1e-4, atol=1e-4, msg=lambda m: f"{name}: {m}"
+            )
+
+    @with_run_in_mp
+    @parameterize("range_merge", [False, True])
+    def test_bwd_direct_dq_caller_buffer_keeps_hole_rows(self, range_merge):
+        """Direct-path dQ adds onto a caller buffer and leaves hole rows unchanged.
+
+        Without RangeMerge the dense-slot postprocess reads only tiles the
+        preprocess clears, so ``dq_accum`` may start uninitialized; with it the
+        row-major postprocess adds every physical row, so ``dq_accum`` must be
+        zero outside q_ranges. ``torch.empty`` returns NaN-filled float tensors
+        during the call, so a missing zero-fill shows up in the result.
+        """
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            self.skipTest("caller-buffer accumulation requires SM100/SM110")
+        device, dtype = self.device, torch.bfloat16
+        total, nheads, d = 1024, 4, 128
+        torch.random.manual_seed(self.seed + int(range_merge))
+
+        q, k, v, do = (
+            torch.randn(total, nheads, d, device=device, dtype=dtype) for _ in range(4)
+        )
+        # q rows [200, 300), [700, 800) and [900, 1024) are holes.
+        ranges = dict(
+            q_ranges=torch.tensor(
+                [[0, 200], [300, 700], [800, 900]], device=device, dtype=torch.int32
+            ),
+            k_ranges=torch.tensor(
+                [[0, 300], [300, 800], [800, 1024]], device=device, dtype=torch.int32
+            ),
+            max_seqlen_q=400,
+            max_seqlen_k=500,
+        )
+        direct = dict(
+            disable_fwd_atomic_reduction=True, disable_bwd_dkv_atomic_reduction=True
+        )
+        out, lse = _flex_flash_attn_fwd(
+            q, k, v, out_dtype=dtype, disable_fwd_atomic_reduction=True, **ranges
+        )
+        fp32 = dict(dq_type=torch.float32, dk_type=torch.float32, dv_type=torch.float32)
+        ref_dq = _flex_flash_attn_bwd(
+            q, k, v, out, lse, do, range_merge=range_merge, **direct, **ranges, **fp32
+        )[0]
+
+        init = torch.randn(total, nheads, d, device=device)
+        dq = init.clone()
+        empty = torch.empty
+
+        def nan_empty(*args, **kwargs):
+            t = empty(*args, **kwargs)
+            return t.fill_(float("nan")) if t.is_floating_point() else t
+
+        with mock.patch("torch.empty", nan_empty), mock.patch(
+            "magi_attention.kernel.cutedsl.flex_flash_attn.bwd_postprocess_rowmajor",
+            wraps=bwd_postprocess_rowmajor,
+        ) as rowmajor:
+            grad = _flex_flash_attn_bwd(
+                q,
+                k,
+                v,
+                out,
+                lse,
+                do,
+                dq=dq,
+                range_merge=range_merge,
+                **direct,
+                **ranges,
+                **fp32,
+            )[0]
+        dq_rowmajor = any(call.args[1] is dq for call in rowmajor.call_args_list)
+        assert dq_rowmajor == range_merge
+
+        assert grad is dq, "dq must be the caller buffer"
+        assert ref_dq[200:300].abs().max() == 0, "hole rows must have zero gradient"
+        torch.testing.assert_close(dq, init + ref_dq, rtol=1e-5, atol=1e-5)
+
+    @with_run_in_mp
+    @parameterize(
+        "case",
+        [
+            # (out dtype, fp32 partial, old buffer value): rounding the partial
+            # to the out dtype before the add gives 0 and inf respectively.
+            (torch.bfloat16, 1 + 2**-10, -1.0),
+            (torch.float16, 65536.0, -65504.0),
+            (torch.float32, 1 + 2**-20, -1.0),
+        ],
+    )
+    @parameterize("hd_2cta", [(64, False), (128, False), (128, True)])
+    @parameterize("layout", ["dense", "ranges"])
+    def test_bwd_postprocess_accumulate_rounds_once(self, case, hd_2cta, layout):
+        """An accumulating postprocess adds the fp32 partial before rounding.
+
+        A uniform accumulator makes the expected output independent of the
+        accumulator's tile layout, so the result is compared exactly.
+        """
+        arch, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            self.skipTest("fp32 staging of the accumulating postprocess is SM100/SM110")
+        out_dtype, partial, old = case
+        head_dim, use_2cta = hd_2cta
+        if use_2cta and major_arch != 10:
+            self.skipTest("the 2-CTA postprocess is SM100 only")
+        device, num_head, tile_m = self.device, 2, 128
+        hdim_rounded = (head_dim + 31) // 32 * 32
+
+        if layout == "dense":
+            batch, seqlen = 2, 200  # partial last tile
+            seqlen_rounded = (seqlen + tile_m - 1) // tile_m * tile_m
+            accum = torch.full(
+                (batch, num_head, seqlen_rounded * hdim_rounded), partial, device=device
+            )
+            out = torch.full(
+                (batch, seqlen, num_head, head_dim), old, device=device, dtype=out_dtype
+            )
+            in_range = torch.ones(batch, seqlen, dtype=torch.bool, device=device)
+            ranges = None
+        else:
+            total, range_list = 512, [[0, 200], [300, 450]]
+            ranges = torch.tensor(range_list, dtype=torch.int32, device=device)
+            slots = (total + tile_m - 1) // tile_m + len(range_list)
+            accum = torch.full(
+                (num_head, slots * tile_m * hdim_rounded), partial, device=device
+            )
+            out = torch.full(
+                (total, num_head, head_dim), old, device=device, dtype=out_dtype
+            )
+            in_range = torch.zeros(total, dtype=torch.bool, device=device)
+            for start, end in range_list:
+                in_range[start:end] = True
+
+        with _record_bwd_postprocess() as built:
+            bwd_postprocess(
+                accum,
+                out,
+                1.0,
+                None,
+                None,
+                arch,
+                to_cute_dtype(out_dtype),
+                head_dim,
+                tile_m,
+                128,
+                1,
+                False,
+                use_2cta_instrs=use_2cta,
+                ranges=ranges,
+                use_dense_dqacc_for_ranges=ranges is not None,
+                accumulate=True,
+            )
+        assert len(built) == 1 and built[0].use_2cta_instrs == use_2cta
+        assert built[0].stage_dtype is cutlass.Float32
+
+        expected = (
+            torch.tensor(partial) + torch.tensor(old, dtype=out_dtype).float()
+        ).to(out_dtype)
+        assert torch.all(out[in_range] == expected.to(device)), (
+            f"{out_dtype=} {hd_2cta=} {layout=}: got "
+            f"{out[in_range].float().unique().tolist()}, expected {expected.item()}"
+        )
+        assert torch.all(out[~in_range] == old), "rows outside ranges must keep old"
+
+    @with_run_in_mp
+    @parameterize("head_dim", [64, 128])
+    @parameterize("mha_type", ["mha", "gqa"])
+    def test_bwd_accumulates_low_precision_caller_buffers(self, head_dim, mha_type):
+        """bf16 caller buffers get ``round(g + old)``, not ``round(round(g) + old)``.
+
+        Each buffer starts at ``-round(g)``, so rounding the partial first
+        would leave exactly zero. The atomic reduction order differs between
+        the two backward runs, so the residual is compared with a tolerance
+        relative to ``|g|``. MHA exercises dQ; GQA also exercises the reducing
+        dK/dV postprocess.
+        """
+        _, major_arch = get_device_arch()
+        if major_arch not in (10, 11):
+            self.skipTest("caller-buffer accumulation requires SM100/SM110")
+        device, dtype = self.device, torch.bfloat16
+        batch, seqlen, nheads = 1, 1000, 4  # partial last tile
+        nheads_kv = nheads if mha_type == "mha" else 1
+        torch.random.manual_seed(self.seed + head_dim + (mha_type == "gqa"))
+
+        q, do = (
+            torch.randn(batch, seqlen, nheads, head_dim, device=device, dtype=dtype)
+            for _ in range(2)
+        )
+        k, v = (
+            torch.randn(batch, seqlen, nheads_kv, head_dim, device=device, dtype=dtype)
+            for _ in range(2)
+        )
+        out, lse = _flex_flash_attn_fwd(q, k, v)
+
+        fp32 = dict(dq_type=torch.float32, dk_type=torch.float32, dv_type=torch.float32)
+        ref_grads = _flex_flash_attn_bwd(q, k, v, out, lse, do, **fp32)
+        names = ("dq", "dk", "dv") if mha_type == "gqa" else ("dq",)
+        bufs = {n: -g.to(dtype) for n, g in zip(("dq", "dk", "dv"), ref_grads)}
+        with _record_bwd_postprocess() as built:
+            grads = _flex_flash_attn_bwd(
+                q,
+                k,
+                v,
+                out,
+                lse,
+                do,
+                **{n: bufs[n] for n in names},
+                **{f"{n}_type": dtype for n in ("dq", "dk", "dv")},
+            )
+        # dQ builds first (later calls may hit its compile key); it takes the
+        # 2-CTA postprocess at head_dim 128 on SM100.
+        assert built and all(obj.accumulate for obj in built)
+        assert all(obj.stage_dtype is cutlass.Float32 for obj in built)
+        assert built[0].use_2cta_instrs == (head_dim == 128 and major_arch == 10)
+        for name, grad, ref in zip(("dq", "dk", "dv"), grads, ref_grads):
+            if name not in names:
+                continue
+            buf = bufs[name]
+            assert grad is buf, f"{name} must be the caller buffer"
+            expected = ref - ref.to(dtype).float()
+            assert buf.count_nonzero() > buf.numel() // 2, f"{name}: residual lost"
+            torch.testing.assert_close(
+                buf.float(),
+                expected,
+                rtol=0,
+                atol=5e-5 * ref.abs().max().item(),
+                msg=lambda m: f"{name}: {m}",
+            )
 
     # ─────────────────────────────────────────────────────────────────────
     # Varlen opt-flag contract
