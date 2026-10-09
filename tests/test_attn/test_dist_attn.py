@@ -30,10 +30,18 @@ from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.testing import parameterize, ref_attn_func
-from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.testing.dist_common import (
+    DistTestBase,
+    should_run_test_case,
+    with_comms,
+)
 from magi_attention.testing.flag_generator import FlagCombGenerator
 from magi_attention.testing.precision import EPSILON, assert_close
-from magi_attention.testing.utils import switch_envvar_context, switch_envvars
+from magi_attention.testing.utils import (
+    switch_envvar_context,
+    switch_envvars,
+    switch_kernel_backend_context,
+)
 
 
 class TestDistAttn(DistTestBase):
@@ -384,6 +392,99 @@ class TestDistAttn(DistTestBase):
                 mismatch_threshold=max(1 / (seqlen_sink * nhq), 5e-2),
                 test_case="dsink",
             )
+
+
+class TestDistAttnSkippedHostStage(DistTestBase):
+    """Check that skipped and computed host stages use the same max_logits dtype."""
+
+    @property
+    def world_size(self) -> int:
+        return 1
+
+    @skip_if_lt_x_gpu(1)
+    @with_comms
+    @parameterize(
+        "backend",
+        [
+            MagiAttentionKernelBackend.FFA,
+            MagiAttentionKernelBackend.SDPA,
+            MagiAttentionKernelBackend.SDPA_OL,
+        ],
+    )
+    @parameterize(
+        "dtype", [torch.float64, torch.float32, torch.bfloat16, torch.float16]
+    )
+    def test_skipped_host_stage_max_logits_dtype_matches_computed_host_stage(
+        self,
+        backend: MagiAttentionKernelBackend,
+        dtype: torch.dtype,
+    ):
+        if backend == MagiAttentionKernelBackend.FFA and (
+            torch.cuda.get_device_capability() != (9, 0)
+            or dtype not in (torch.float16, torch.bfloat16)
+        ):
+            return
+        if not should_run_test_case(backend=backend, dtype=dtype):
+            return
+
+        seqlen, nhq, nhk, head_dim = 128, 8, 2, 64
+        device = torch.cuda.current_device()
+        q = torch.randn(seqlen, nhq, head_dim, device=device, dtype=dtype)
+        k = torch.randn(seqlen, nhk, head_dim, device=device, dtype=dtype)
+        v = torch.randn(seqlen, nhk, head_dim, device=device, dtype=dtype)
+
+        host_attn_args = {
+            "computed": AttnArg(
+                q_ranges=AttnRanges.from_ranges([[0, seqlen]]),
+                k_ranges=AttnRanges.from_ranges([[0, seqlen]]),
+                attn_type_map=[0],
+                total_area=seqlen * seqlen,
+            ),
+            "skipped": AttnArg(
+                q_ranges=AttnRanges(),
+                k_ranges=AttnRanges(),
+                attn_type_map=[],
+                total_area=0,
+            ),
+        }
+        max_logits_dtypes: dict[str, torch.dtype] = {}
+        with switch_kernel_backend_context(enable_value=backend.value):
+            for name, host_attn_arg in host_attn_args.items():
+                dist_attn_runtime = DistAttnRuntime(
+                    comm_meta=CommMeta(
+                        num_remote_kv_tokens_per_stage=[],
+                        kv_group_collective_args_list=[],
+                        num_remote_qo_tokens_per_stage=[],
+                        qo_group_collective_args_list=[],
+                        num_heads_q=nhq,
+                        num_heads_kv=nhk,
+                        head_dim=head_dim,
+                    ),
+                    calc_meta=CalcMeta(
+                        local_attn_arg=host_attn_arg,
+                        remote_attn_args_list=[],
+                        headdim=head_dim,
+                        seqlen_q_shard=seqlen,
+                        seqlen_k_local=seqlen,
+                    ),
+                    cp_group_gc=dist.group.WORLD,
+                    cp_group_gr=dist.group.WORLD,
+                )
+                assert host_attn_arg.can_skip() == (name == "skipped")
+                _, meta = dist_attn_runtime.apply_fwd_partial_attn(
+                    q=q,
+                    kv=(k, v),
+                    overlap_stage=None,
+                    return_max_logits=True,
+                )
+                assert meta is not None and meta.max_logits is not None
+                max_logits_dtypes[name] = meta.max_logits.dtype
+
+        assert max_logits_dtypes["skipped"] == max_logits_dtypes["computed"], (
+            f"{backend=}, {dtype=}: skipped host stage max_logits is "
+            f"{max_logits_dtypes['skipped']}, computed host stage max_logits is "
+            f"{max_logits_dtypes['computed']}"
+        )
 
 
 if __name__ == "__main__":
