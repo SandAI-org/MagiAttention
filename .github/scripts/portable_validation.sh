@@ -75,6 +75,23 @@ ensure_platform_test_dependencies() {
     mv -f "$stamp.tmp" "$stamp"
 }
 
+# Compile FFA_FA4 kernels once per test run with the installed package.
+# Test processes share the cache in the temporary test directory.
+# Missing kernels still trigger JIT compilation:
+# MAGI_ATTENTION_JIT_COMPILE_DISABLED applies only to native FFA.
+precompile_platform_test_kernels() {
+    local test_cwd=${1:?test cwd is required}
+    local package_root=${2:?package root is required}
+    local test_pythonpath=${3?test PYTHONPATH is required}
+    [[ -n "${MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS:-}" ]] || return 0
+
+    export MAGI_ATTENTION_FFA_FA4_CACHE_DIR="$test_cwd/ffa_fa4_cache"
+    echo "Precompiling FFA_FA4 kernels into $MAGI_ATTENTION_FFA_FA4_CACHE_DIR"
+    (cd "$test_cwd" && \
+        PYTHONPATH="$test_pythonpath" \
+        python "$package_root/tools/precompile_ffa_fa4.py")
+}
+
 check_node() {
     case "${1:-}" in
         magi_attention|magi_attn_extensions) ;;
@@ -304,6 +321,8 @@ PY
     ensure_platform_test_dependencies
     case "${1:?node is required}" in
         magi_attention)
+            precompile_platform_test_kernels \
+                "$test_cwd" "$package_root" "$clean_pythonpath"
             if [[ "${PORTABLE_VALIDATION_COVERAGE:-false}" == true ]]; then
                 (cd "$test_cwd" && \
                     PYTHONPATH="$clean_pythonpath" \
