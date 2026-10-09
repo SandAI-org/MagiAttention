@@ -31,7 +31,6 @@ from functools import partial
 import torch  # noqa: E402
 
 from magi_attention.common import AttnRanges  # noqa: E402
-from magi_attention.common.enum import AttnMaskType  # noqa: E402
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100_inner_loop_k import (  # noqa: E402
     ffa_bwd_sm100_inner_loop_k,
 )
@@ -246,9 +245,6 @@ def _time_ms(fn: Callable[[], object], warmup: int, iters: int) -> float:
 
 def bench() -> None:
     """Time backward only (preprocess + inner-loop-K kernel + dK/dV postprocess) and print TFLOPS."""
-    # Local import: baselines.utils pulls flex_attention, which smoke/correct do not need.
-    from exps.attn.baselines.utils import calculate_attn_flops
-
     device = "cuda"
     head_dim = 128
     dtype = torch.bfloat16
@@ -297,14 +293,9 @@ def bench() -> None:
             tile_n=64,
         )
         ms = _time_ms(run_bwd, warmup=warmup, iters=iters)
-        flops = calculate_attn_flops(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_mask_type=[AttnMaskType.FULL],
-            total_seqlen_q=seqlen,
-            num_heads_q=NUM_HEADS_Q,
-            head_dim=head_dim,
-        )["bwd"]
+        # Full mask on [[0, seqlen]] x [[0, seqlen]]: area = seqlen^2.
+        # 4 * area * heads * head_dim for fwd, x2.5 for bwd (with recompute).
+        flops = 2.5 * 4 * seqlen * seqlen * NUM_HEADS_Q * head_dim
         tflops = flops / ms * 1e-9
         print(f"{seqlen:8d} {ms:10.3f} {tflops:10.2f}")
 
