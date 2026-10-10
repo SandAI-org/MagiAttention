@@ -328,19 +328,19 @@ PY
                     PYTHONPATH="$clean_pythonpath" \
                     COVERAGE_FILE="$repo_root/.coverage" \
                     coverage run --source magi_attention -m pytest \
-                        -q -s --skip-slow --import-mode=append "$package_root/tests")
+                        -q -s --skip-slow --durations=0 --import-mode=append "$package_root/tests")
                 (cd "$repo_root" && coverage xml -i)
             else
                 (cd "$test_cwd" && \
                     PYTHONPATH="$clean_pythonpath" \
-                    python -m pytest -q -s --skip-slow --import-mode=append \
+                    python -m pytest -q -s --skip-slow --durations=0 --import-mode=append \
                         "$package_root/tests")
             fi
             ;;
         magi_attn_extensions)
             (cd "$test_cwd" && \
                 PYTHONPATH="$clean_pythonpath" \
-                python -m pytest -q -s --skip-slow --import-mode=append \
+                python -m pytest -q -s --skip-slow --durations=0 --import-mode=append \
                     "$package_root/extensions/tests")
             ;;
         *) check_node "$1" ;;
