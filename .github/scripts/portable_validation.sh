@@ -86,6 +86,8 @@ precompile_platform_test_kernels() {
     [[ -n "${MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS:-}" ]] || return 0
 
     export MAGI_ATTENTION_FFA_FA4_CACHE_DIR="$test_cwd/ffa_fa4_cache"
+    export MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED=1
+    export MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR="$test_cwd/ffa_cutedsl_cache"
     echo "Precompiling FFA_FA4 kernels into $MAGI_ATTENTION_FFA_FA4_CACHE_DIR"
     (cd "$test_cwd" && \
         PYTHONPATH="$test_pythonpath" \
