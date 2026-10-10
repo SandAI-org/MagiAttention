@@ -399,6 +399,10 @@ def _run_view_trick(
 # ═══════════════════════════════════════════════════════════
 
 
+@unittest.skipIf(
+    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    "This test targets the C++ FFA, which supports only sm90.",
+)
 class TestIndexSparseViewTrick(unittest.TestCase):
     """Standalone IndexSparse view-trick tests.
 
@@ -504,6 +508,10 @@ class TestIndexSparseViewTrick(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
+@unittest.skipIf(
+    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    "This test targets the C++ FFA, which supports only sm90.",
+)
 class TestIndexSparseSweep(DistTestBase):
     """IndexSparse Classic sweep — CI gate.
 
@@ -591,6 +599,10 @@ class TestIndexSparseSweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
+@unittest.skipIf(
+    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    "This test targets the C++ FFA, which supports only sm90.",
+)
 class TestIndexSparseComprehensiveSweep(DistTestBase):
     """IndexSparse Comprehensive sweep — CI.
 
