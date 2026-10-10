@@ -24,6 +24,7 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention import env, init_dist_attn_runtime_mgr
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import (
     AttnMaskType,
@@ -458,6 +459,19 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 hidden_size_kv = num_heads_kv * head_dim_cfg
                 if hidden_size_kv < 256:
                     return False
+                # Asymmetric K/V is group-reduced as one tensor with K and V concatenated
+                # on the last dim, but the split alignment is solved from head_dim alone,
+                # so the concatenated width itself must meet the hidden-size alignment.
+                head_dim_v_cfg = test_config.get("head_dim_v", head_dim_cfg)
+                if head_dim_v_cfg != head_dim_cfg:
+                    packed_hidden_size_kv = num_heads_kv * (
+                        head_dim_cfg + head_dim_v_cfg
+                    )
+                    alignment = GrpCollBuffer.get_hidden_size_alignment(
+                        test_config["dtype"]
+                    )
+                    if packed_hidden_size_kv % alignment != 0:
+                        return False
 
         if flatten_hg:
             if not qo_comm:
@@ -976,27 +990,130 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             },
         ],
     )
+    # The 16 (num_heads, head_dims, dtype) triples are split by world-size
+    # parity. Odd world sizes run group A and even world sizes run group B,
+    # so each triple runs on 4 world sizes. World size does not change the
+    # kernel instantiation, so the kernel coverage is unchanged. Within each
+    # group, each (num_heads, head_dims) pair appears once and the dtypes
+    # form a Latin square: each (num_heads, dtype) pair and each
+    # (head_dims, dtype) pair appears in both groups.
     @parameterize(
-        "num_heads",
+        "shape_cfg",
         [
-            (8, 8),  # mha
-            (8, 2),  # gqa
-        ],
-    )
-    @parameterize(
-        "head_dims",
-        [
-            (64, 64),
-            (128, 128),
-            (192, 128),
-            (256, 256),
-        ],
-    )
-    @parameterize(
-        "dtype",
-        [
-            torch.float16,
-            torch.bfloat16,
+            # ========  group A: odd world sizes (1, 3, 5, 7)  ========
+            {
+                NAME: "mha_hd64_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (64, 64),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd64_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (64, 64),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd128_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (128, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "mha_hd128_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (128, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "mha_hd192x128_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (192, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd192x128_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (192, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd256_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (256, 256),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "mha_hd256_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (256, 256),
+                "dtype": torch.bfloat16,
+            },
+            # ========  group B: even world sizes (2, 4, 6, 8)  ========
+            {
+                NAME: "mha_hd64_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (64, 64),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd64_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (64, 64),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd128_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (128, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "mha_hd128_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (128, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "mha_hd192x128_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (192, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd192x128_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (192, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd256_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (256, 256),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "mha_hd256_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (256, 256),
+                "dtype": torch.float16,
+            },
         ],
     )
     @parameterize(
@@ -1012,12 +1129,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     def test_pipeline(
         self,
         attn_config: dict[str, Any],
-        num_heads: tuple[int, int],  # (nhq, nhkv)
-        head_dims: tuple[int, int],  # (Q/K dim, V dim)
-        dtype: torch.dtype,
+        shape_cfg: dict[str, Any],
         backend: MagiAttentionKernelBackend,
         run_bwd: bool = True,
     ):
+        num_heads: tuple[int, int] = shape_cfg["num_heads"]  # (nhq, nhkv)
+        head_dims: tuple[int, int] = shape_cfg["head_dims"]  # (Q/K dim, V dim)
+        dtype: torch.dtype = shape_cfg["dtype"]
         head_dim, head_dim_v = head_dims
 
         if backend == MagiAttentionKernelBackend.FFA and (
@@ -1083,6 +1201,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ):
             return
 
+        if self.world_size in shape_cfg[SKIP_WORLD_SIZE]:
+            return
+
         # -----    skip for test case filter   ---- #
 
         if not should_run_test_case(
@@ -1104,6 +1225,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "num_heads": num_heads,
                 "head_dim": head_dim,
                 "head_dim_v": head_dim_v,
+                "dtype": dtype,
             }
             flag_comb = self.flag_generator.get_next_valid_comb(
                 test_config=test_config,

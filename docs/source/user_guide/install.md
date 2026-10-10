@@ -151,5 +151,7 @@ And the cache directory for pre-compiled kernels is `/path/to/magi_attention/lib
     # You can change the cases to pre-compile in the script according to your needs,
     # and the whole pre-compilation progress will be richly logged
     # in the terminal by tqdm, for you to track the progress and results.
+    # Parallel worker processes compile the kernels. Compilation uses mostly the CPU.
+    # Use `--num-workers` to set the number of workers (default: min(#CPUs, 64)).
     python tools/precompile_ffa_fa4.py
     ```

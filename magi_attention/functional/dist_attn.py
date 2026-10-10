@@ -2559,7 +2559,8 @@ class DistAttnRuntime:
             return torch.full(
                 (q.size(1),),  # [nhq]
                 fill_value=float("-inf"),
-                dtype=torch.float32,
+                # Use the same dtype on all ranks for MAX all-reduce.
+                dtype=self._maybe_hp_dtype(q.dtype, need_hp_dtype=True),
                 device=q.device,
             )
         return None

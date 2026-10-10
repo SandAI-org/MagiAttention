@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
 from typing import Any
 from unittest import TestCase
 
@@ -289,6 +290,10 @@ _RM_BWD_LOOPK_CASES = [
 ]
 
 
+@unittest.skipIf(
+    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    "This test targets the C++ FFA, which supports only sm90.",
+)
 class TestRangeMergeBwdLoopK(DistTestBase):
     """End-to-end correctness test for BWD LoopK path with range_merge=True."""
 

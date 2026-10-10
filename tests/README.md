@@ -28,6 +28,8 @@ For dict-typed parameters (e.g. `attn_config`), the filter matches against the `
 
 > **Note:** `overlap_config` and `random_type_mapping` have been moved from `@parameterize` dimensions into `FlagCombGenerator` flags and are selected automatically by the heuristic strategy. The env vars `MAGI_ATTENTION_TEST_OVERLAP_CONFIG` and `MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` no longer take effect.
 
+> **Note:** `num_heads`, `head_dims` and `dtype` are one `@parameterize` dimension (`shape_cfg`, 16 triples). The list is split by world-size parity: odd world sizes run 8 triples and even world sizes run the other 8, so every triple runs on four world sizes. The `MAGI_ATTENTION_TEST_NUM_HEADS` / `MAGI_ATTENTION_TEST_HEAD_DIM` / `MAGI_ATTENTION_TEST_DTYPE` filters match the unpacked values and are unaffected.
+
 Values are **comma-separated fnmatch pattern lists**, supporting `*`, `?` and other glob wildcards.
 
 ### Usage Examples
@@ -124,7 +126,7 @@ These flags are combined using a `heuristic` strategy instead of full Cartesian 
 - `no_overlap` mode disallows `qo_comm=True`
 - `qo_comm=True` only allows `disable_mso` or `no_overlap` overlap configs
 - `qo_comm=True` disallows `hier_comm=True` or `bwd_hide_tail_reduce=True`
-- `native_grpcoll=True` disallows `hier_comm=True`
+- `native_grpcoll=True` disallows `hier_comm=True`; with `head_dim != head_dim_v` it also requires `num_heads_kv * (head_dim + head_dim_v)` to be a multiple of the hidden-size alignment (256 for fp16/bf16)
 - `flatten_head_groups=True` requires `qo_comm=True`, and is incompatible with sink and `return_max_logits`
 - `fa4` backend disallows `deterministic`, `fwd_hp_reduce`, `bwd_hp_reduce`, `qo_comm`, `sink`, `bwd_hide_tail_reduce`
 - `sdpa` / `sdpa_ol` backends disallow `native_grpcoll`

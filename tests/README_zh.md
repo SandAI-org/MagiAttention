@@ -28,6 +28,8 @@ backend 通过 `MAGI_ATTENTION_KERNEL_BACKEND` 环境变量控制（见下文）
 
 > **注意：** `overlap_config` 和 `random_type_mapping` 已经从 `@parameterize` 维度移入 `FlagCombGenerator` 的 flag 组合中，由 heuristic 策略自动选取。因此 `MAGI_ATTENTION_TEST_OVERLAP_CONFIG` 和 `MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` 环境变量不再生效。
 
+> **注意：** `num_heads`、`head_dims` 和 `dtype` 已合并为一个 `@parameterize` 维度（`shape_cfg`，16 个三元组）。该列表按 world size 的奇偶拆分：奇数 world size 运行其中 8 个三元组，偶数 world size 运行另外 8 个，因此每个三元组都会在 4 个 world size 上运行。`MAGI_ATTENTION_TEST_NUM_HEADS` / `MAGI_ATTENTION_TEST_HEAD_DIM` / `MAGI_ATTENTION_TEST_DTYPE` 过滤器匹配解包后的值，用法不变。
+
 环境变量的值是**逗号分隔的 fnmatch 模式列表**，支持 `*`、`?` 等通配符。
 
 ### 使用示例
@@ -124,7 +126,7 @@ MAGI_ATTENTION_TEST_ATTN_CONFIG=full_attn_14k \
 - `no_overlap` 模式下不允许 `qo_comm=True`
 - `qo_comm=True` 时只允许 `disable_mso` 或 `no_overlap` 的 overlap 配置
 - `qo_comm=True` 时不允许 `hier_comm=True` 或 `bwd_hide_tail_reduce=True`
-- `native_grpcoll=True` 时不允许 `hier_comm=True`
+- `native_grpcoll=True` 时不允许 `hier_comm=True`；`head_dim != head_dim_v` 时还要求 `num_heads_kv * (head_dim + head_dim_v)` 是 hidden size 对齐值（fp16/bf16 为 256）的整数倍
 - `flatten_head_groups=True` 必须配合 `qo_comm=True`，且不兼容 sink 和 `return_max_logits`
 - `fa4` backend 不允许 `deterministic`、`fwd_hp_reduce`、`bwd_hp_reduce`、`qo_comm`、`sink`、`bwd_hide_tail_reduce`
 - `sdpa` / `sdpa_ol` backend 不允许 `native_grpcoll`

@@ -18,7 +18,7 @@ env:
   TASK_CI_BASE_IMAGE: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2
   STANDALONE_ARTIFACT_NAMESPACE: magi-attention
   # One H100-built wheel carries native code for both Hopper and Blackwell.
-  MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY: '90,100'
+  MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY: '90,100,103'
   MAGI_ATTENTION_PREBUILD_LEVEL: ci
   VALIDATION_CACHE_TRUSTED: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
 
