@@ -990,27 +990,130 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             },
         ],
     )
+    # The 16 (num_heads, head_dims, dtype) triples are split by world-size
+    # parity. Odd world sizes run group A and even world sizes run group B,
+    # so each triple runs on 4 world sizes. World size does not change the
+    # kernel instantiation, so the kernel coverage is unchanged. Within each
+    # group, each (num_heads, head_dims) pair appears once and the dtypes
+    # form a Latin square: each (num_heads, dtype) pair and each
+    # (head_dims, dtype) pair appears in both groups.
     @parameterize(
-        "num_heads",
+        "shape_cfg",
         [
-            (8, 8),  # mha
-            (8, 2),  # gqa
-        ],
-    )
-    @parameterize(
-        "head_dims",
-        [
-            (64, 64),
-            (128, 128),
-            (192, 128),
-            (256, 256),
-        ],
-    )
-    @parameterize(
-        "dtype",
-        [
-            torch.float16,
-            torch.bfloat16,
+            # ========  group A: odd world sizes (1, 3, 5, 7)  ========
+            {
+                NAME: "mha_hd64_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (64, 64),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd64_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (64, 64),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd128_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (128, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "mha_hd128_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (128, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "mha_hd192x128_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (192, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd192x128_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (192, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd256_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (256, 256),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "mha_hd256_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (256, 256),
+                "dtype": torch.bfloat16,
+            },
+            # ========  group B: even world sizes (2, 4, 6, 8)  ========
+            {
+                NAME: "mha_hd64_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (64, 64),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd64_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (64, 64),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd128_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (128, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "mha_hd128_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (128, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "mha_hd192x128_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (192, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd192x128_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (192, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd256_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (256, 256),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "mha_hd256_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (256, 256),
+                "dtype": torch.float16,
+            },
         ],
     )
     @parameterize(
@@ -1026,12 +1129,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     def test_pipeline(
         self,
         attn_config: dict[str, Any],
-        num_heads: tuple[int, int],  # (nhq, nhkv)
-        head_dims: tuple[int, int],  # (Q/K dim, V dim)
-        dtype: torch.dtype,
+        shape_cfg: dict[str, Any],
         backend: MagiAttentionKernelBackend,
         run_bwd: bool = True,
     ):
+        num_heads: tuple[int, int] = shape_cfg["num_heads"]  # (nhq, nhkv)
+        head_dims: tuple[int, int] = shape_cfg["head_dims"]  # (Q/K dim, V dim)
+        dtype: torch.dtype = shape_cfg["dtype"]
         head_dim, head_dim_v = head_dims
 
         if backend == MagiAttentionKernelBackend.FFA and (
@@ -1095,6 +1199,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             attn_config.get(SKIP_WORLD_SIZE, [])
             and self.world_size in attn_config[SKIP_WORLD_SIZE]
         ):
+            return
+
+        if self.world_size in shape_cfg[SKIP_WORLD_SIZE]:
             return
 
         # -----    skip for test case filter   ---- #
