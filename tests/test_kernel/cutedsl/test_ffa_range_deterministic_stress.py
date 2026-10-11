@@ -17,7 +17,8 @@
 Each job runs in a child process on its own GPU; the parent only reads the
 child's stdout and enforces wall-clock budgets, so a hung kernel cannot hang
 the parent (it never touches the child's GPU state). A job is one direction
-(fwd: 1-CTA O/LSE chain; bwd: 2-CTA dQ and reduced GQA dK/dV chains) and one
+(fwd: 1-CTA O/LSE chain; bwd: 2-CTA dQ and reduced GQA dK/dV chains;
+bwd_merge: 1-CTA dQ chain of RangeMerge K groups under cat_gqa) and one
 :class:`DelayPoint` (or none); it runs, in order, a single cluster, two
 clusters and the full grid, the first and last also under a concurrent
 matmul load on another stream. Every result must equal, bit for bit, the
@@ -86,6 +87,7 @@ def _child(config: dict) -> None:
         fresh_compile_caches,
     )
     from tests.test_kernel.cutedsl.test_ffa_range_deterministic import (
+        _merged_k_relations,
         _overlapping_relations,
         _qkv,
         _range_args,
@@ -96,9 +98,25 @@ def _child(config: dict) -> None:
     torch.manual_seed(config["seed"])
     num_sm = torch.cuda.get_device_properties(0).multi_processor_count
     fwd = config["direction"] == "fwd"
-    cluster = 1 if fwd else 2
+    merge = config["direction"] == "bwd_merge"
+    cluster = 1 if fwd or merge else 2
 
-    if fwd:
+    if merge:
+        # Four shifted copies of the merged-K relations: Q rows overlap
+        # across copies, K groups stay disjoint; the keyless group is dropped.
+        base, base_q, base_k = _merged_k_relations()
+        relations = [
+            (
+                [qs + 350 * c, qe + 350 * c],
+                [ks + base_k * c, ke + base_k * c],
+                mask_type,
+            )
+            for c in range(4)
+            for (qs, qe), (ks, ke), mask_type in base
+            if ke > ks
+        ]
+        total_q, total_k = base_q + 350 * 3, base_k * 4
+    elif fwd:
         relations, total_q, total_k = _overlapping_relations(
             [700, 1500, 300], coverage=4, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
@@ -145,7 +163,9 @@ def _child(config: dict) -> None:
             lse,
             do,
             **args,
-            disable_bwd_dkv_atomic_reduction=False,
+            disable_bwd_dkv_atomic_reduction=merge,
+            range_merge=merge,
+            cat_gqa=merge,
             deterministic=deterministic,
             sm_margin=sm_margin,
         )[:3]
@@ -307,12 +327,15 @@ def _child_cmd(config: dict) -> list[str]:
     return [sys.executable, "-u", __file__, "--child", json.dumps(config)]
 
 
-def _child_env(gpu: str) -> dict[str, str]:
+def _child_env(gpu: str, direction: str) -> dict[str, str]:
+    # The deterministic RangeMerge backward runs 1-CTA clusters only.
     return dict(
         os.environ,
         CUDA_VISIBLE_DEVICES=gpu,
         PYTHONPATH=os.pathsep.join([str(_REPO), os.environ.get("PYTHONPATH", "")]),
-        MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA="0",
+        MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA=(
+            "1" if direction == "bwd_merge" else "0"
+        ),
     )
 
 
@@ -332,12 +355,14 @@ def _run_job(direction: str, delay: str | None, gpus: "queue.Queue[str]") -> _Jo
     name = f"{direction}/{delay or 'none'}"
     gpu = gpus.get()
     try:
-        first = _watch(_child_cmd(config), _child_env(gpu), _ITERS, budget_scale=1.0)
+        first = _watch(
+            _child_cmd(config), _child_env(gpu, direction), _ITERS, budget_scale=1.0
+        )
         if first.status != "timeout":
             return _JobResult(name, first.status, first.log[-4000:])
         rerun = _watch(
             _child_cmd(dict(config, only=first.case)),
-            _child_env(gpu),
+            _child_env(gpu, direction),
             _ITERS,
             budget_scale=4.0,
         )
@@ -495,7 +520,7 @@ class TestFfaRangeDeterministicStress(TestCase):
         gpus: queue.Queue[str] = queue.Queue()
         for gpu in gpu_ids:
             gpus.put(gpu)
-        jobs = [(d, p) for d in ("fwd", "bwd") for p in _DELAYS]
+        jobs = [(d, p) for d in ("fwd", "bwd", "bwd_merge") for p in _DELAYS]
         with ThreadPoolExecutor(max_workers=len(gpu_ids)) as pool:
             results = list(pool.map(lambda job: _run_job(*job, gpus), jobs))
         for result in results:

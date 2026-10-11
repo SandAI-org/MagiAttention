@@ -243,7 +243,6 @@ def _flex_flash_attn_fwd(
         has_block_sparse=block_sparse_tensors is not None,
         has_user_score_mod=flex_attn_args.score_mod is not None,
         sm_margin=sm_margin,
-        deterministic=deterministic,
     )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
@@ -993,9 +992,12 @@ def _flex_flash_attn_bwd(
             relation under ``cat_gqa`` or MHA), so the gradients are bitwise
             identical across runs and independent of ``sm_margin``. The
             launch is persistent whatever ``sm_margin``. SM100/SM110,
-            ``head_dim == head_dim_v`` in {64, 128} only, without RangeMerge
-            or block sparsity. Dense inputs keep the semaphore-ordered dense
-            path.
+            ``head_dim == head_dim_v`` in {64, 128} only, without block
+            sparsity. Under RangeMerge the dQ writers are the (merged K group,
+            K tile) units, which needs 1-CTA clusters: head_dim 64, or 128
+            with ``MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA=1``; the merged
+            dK/dV are stored once. Dense inputs keep the semaphore-ordered
+            dense path.
 
     Returns:
         A tuple of (dQ, dK, dV, dsink): the gradients with the shapes of q, k, v
@@ -1037,7 +1039,6 @@ def _flex_flash_attn_bwd(
         or flex_attn_args.score_mod_bwd is not None,
         bwd_head_dim=q.shape[-1],
         sm_margin=sm_margin,
-        deterministic=deterministic,
     )
     if (
         has_ranges
@@ -1288,9 +1289,10 @@ def _flex_flash_attn_bwd(
             "disable_bwd_dkv_atomic_reduction requires a unique dK/dV writer "
             "per KV head: MHA, or GQA with cat_gqa"
         )
-    # On q/k ranges the dQ rows of every relation and K tile are merged in
-    # (relation, K tile) order by the dQ range chain, and reduced dK/dV rows
-    # in (relation, q head) order by the dK/dV range chain.
+    # On q/k ranges the dQ rows of every relation (merged K group under
+    # RangeMerge) and K tile are merged in that order by the dQ range chain,
+    # and reduced dK/dV rows in (relation, q head) order by the dK/dV range
+    # chain.
     range_deterministic = deterministic and has_ranges
     dq_writer_stride: int | None = None
     if range_deterministic:
@@ -1299,6 +1301,14 @@ def _flex_flash_attn_bwd(
         if block_sparse_tensors is not None:
             raise NotImplementedError(
                 "deterministic q/k ranges cannot be combined with block sparsity"
+            )
+        if range_merge_active and cluster_size == 2:
+            # Pairs of one merged K group may share Q rows that the two CTAs
+            # of a cluster reduce in different row halves, with no order
+            # between the CTAs inside one dQ writer.
+            raise NotImplementedError(
+                "deterministic RangeMerge backward needs 1-CTA clusters "
+                "(head_dim 64, or MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA=1)"
             )
         dkv_writer_stride = 1 if cat_gqa else qhead_per_kvhead
         cluster_tile_k = n_block_size * cluster_size
@@ -2411,11 +2421,12 @@ def flex_flash_attn_func(
         order: O/LSE by relation, dQ by (relation, K tile), reduced dK/dV by
         (relation, q head); the kernels then launch persistent whatever
         ``sm_margin``. Ranges need SM100/SM110 and ``head_dim == head_dim_v``
-        in {64, 128}, without block sparsity, and without RangeMerge in the
-        backward; other architectures raise ``NotImplementedError``, except
-        that the forward alone runs under ``disable_fwd_atomic_reduction``,
-        whose O rows have one writer each. The RangeMerge forward is such a
-        forward: one writer per merged Q group walks its pairs in plan order.
+        in {64, 128}, without block sparsity; the RangeMerge backward orders
+        dQ by (merged K group, K tile) and needs 1-CTA clusters (head_dim 64,
+        or 128 with ``MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA=1``). Other
+        architectures raise ``NotImplementedError``, except that the forward
+        alone runs under ``disable_fwd_atomic_reduction``, whose O rows have
+        one writer each, the RangeMerge forward included.
         Opt-in: the ordered dQ merge makes the range backward several times
         slower, more so with many K tiles per Q tile (see
         MAGI_ATTENTION_DETERMINISTIC_MODE in env_variables.md).

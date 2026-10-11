@@ -180,7 +180,6 @@ class FFABwdSm100:
                 "bwd RangeMerge exists to direct-store shared-K dKV; merged K "
                 "groups must be sorted pairwise disjoint"
             )
-            assert not deterministic
             assert not use_dense_dqacc_for_ranges
             assert score_mod is None and score_mod_bwd is None and mask_mod is None
             # The 2-CTA hdim-192 mainloop fuses the Q and Qt loads into one
@@ -848,8 +847,12 @@ class FFABwdSm100:
             # order from one zero-based counter (DYNAMIC + claim_first_tile).
             assert self.scheduling_mode == SchedulingMode.DYNAMIC
             assert self.same_hdim_kv and self.tile_hdim in (64, 128)
-            assert not self.range_merge and not self.use_dense_dqacc_for_ranges
+            assert not self.use_dense_dqacc_for_ranges
             assert blocksparse_tensors is None
+            # Two pairs of one merged writer may put one Q row in the row half
+            # of CTA 0 for one pair and of CTA 1 for the other; the chain
+            # orders writers, not the two CTAs inside one.
+            assert not (self.range_merge and self.use_2cta_instrs)
         self.is_varlen_k = mKRanges is not None or mSeqUsedK is not None
         self.is_varlen_q = mQRanges is not None or mSeqUsedQ is not None
         # Batched GQA reduces the q heads of a kv head from separate CTAs and
@@ -6788,6 +6791,12 @@ class FFABwdSm100:
     # its Q tiles with rows there. Its predecessor on a block is tile n - 1 of
     # the same relation, or for n == 0 the last K tile of the closest lower
     # relation with Q rows there, read from the conflict state.
+    # Under RangeMerge r is the merged K group: its work tile walks the Q
+    # tiles of every pair in pair order, each Q tile an event of the writer
+    # whether or not the mask leaves it work, and the last tile with rows in
+    # a block is found among the later pairs too. Q rows shared by two pairs
+    # are reduced by the same reduce warps one tile after the other, each
+    # tile's reductions complete before the next is issued.
 
     @cute.jit
     def _dq_last_writer(
@@ -6836,20 +6845,48 @@ class FFABwdSm100:
         m_block: Int32,
         num_m_tiles: Int32,
         q_head: Int32,
+        mQRanges: Optional[cute.Tensor] = None,
+        later_pairs: Optional[tuple[Int32, Int32]] = None,
     ) -> None:
         """Arrive after ``m_block``'s dQ is complete in dQacc: it is the last
         tile with rows in its first block, and in its last block too when it
-        is the relation's last tile. Each CTA of a 2-CTA cluster arrives for
-        its row half."""
+        is the range's last tile. Each CTA of a 2-CTA cluster arrives for
+        its row half.
+
+        Under RangeMerge ``later_pairs`` are the rows of ``mQRanges`` of the
+        pairs the writer walks after this one; a block one of them has rows
+        in is arrived on from that pair instead."""
         q_start = seqlen_info.offset_q
         left, right = range_chain.tile_blocks(
             q_start, q_start + seqlen_info.seqlen_q, m_block, self.tile_m
         )
-        cute.arch.fence_acq_rel_gpu()
-        range_chain.arrive(
-            dq_chain.mChain, left, q_head, dq_writer, Int32(2), self.cta_group_size
-        )
+        arrive_left = cutlass.Boolean(True)
+        arrive_right = cutlass.Boolean(False)
         if right != left and m_block == num_m_tiles - 1:
+            arrive_right = cutlass.Boolean(True)
+        if const_expr(self.range_merge):
+            assert mQRanges is not None and later_pairs is not None
+            pair_from, pair_to = later_pairs
+            if range_chain.rows_have_block(
+                mQRanges, pair_from, pair_to, left, self.tile_m
+            ):
+                arrive_left = cutlass.Boolean(False)
+            if arrive_right:
+                if range_chain.rows_have_block(
+                    mQRanges, pair_from, pair_to, right, self.tile_m
+                ):
+                    arrive_right = cutlass.Boolean(False)
+        cute.arch.fence_acq_rel_gpu()
+        if arrive_left:
+            range_chain.arrive(
+                dq_chain.mChain,
+                left,
+                q_head,
+                dq_writer,
+                Int32(2),
+                self.cta_group_size,
+            )
+        if arrive_right:
             range_chain.arrive(
                 dq_chain.mChain,
                 right,
@@ -7058,6 +7095,7 @@ class FFABwdSm100:
                         last_writer=lambda r: self._dq_last_writer(
                             mKRanges, dq_chain.writer_stride, r
                         ),
+                        mCuBatches=mCuBatches,
                     )
                 chain_scanned = batch_idx
                 dq_writer = batch_idx * dq_chain.writer_stride + n_block_cta_group + 1
@@ -7345,6 +7383,38 @@ class FFABwdSm100:
                             cute.group_modes(gdQacc_grid, 0, 2),
                         )
 
+                        if const_expr(self.range_deterministic):
+                            # Every Q tile of the pair is an event of the
+                            # writer; the ones the mask leaves without work on
+                            # this K tile only wait and arrive, those below
+                            # lo_p here and those from hi_p on after the loop.
+                            num_m_tiles_pair = cute.ceil_div(
+                                seqlen_pair.seqlen_q, self.tile_m
+                            )
+                            later_pairs = (pair_beg + pj + 1, pair_beg + pair_cnt)
+                            if tidx == 0:
+                                for m_skip in cutlass.range(
+                                    cutlass.min(lo_p, num_m_tiles_pair), unroll=1
+                                ):
+                                    self._dq_chain_wait(
+                                        dq_chain,
+                                        dq_writer,
+                                        n_block_cta_group,
+                                        seqlen_pair,
+                                        m_skip,
+                                        q_head,
+                                    )
+                                    self._dq_chain_arrive(
+                                        dq_chain,
+                                        dq_writer,
+                                        seqlen_pair,
+                                        m_skip,
+                                        num_m_tiles_pair,
+                                        q_head,
+                                        mQRanges,
+                                        later_pairs,
+                                    )
+
                         for it in cutlass.range(hi_p - lo_p, unroll=1):
                             m_block = lo_p + it
 
@@ -7401,6 +7471,17 @@ class FFABwdSm100:
 
                                 cute.arch.fence_view_async_shared()
 
+                                if const_expr(self.range_deterministic and stage == 0):
+                                    if tidx == 0:
+                                        self._dq_chain_wait(
+                                            dq_chain,
+                                            dq_writer,
+                                            n_block_cta_group,
+                                            seqlen_pair,
+                                            m_block,
+                                            q_head,
+                                        )
+
                                 # Sync before S2G copy
                                 self.reduce_sync_barrier.arrive_and_wait()
 
@@ -7451,6 +7532,51 @@ class FFABwdSm100:
                                 # Sync after S2G copy
                                 self.reduce_sync_barrier.arrive_and_wait()
                                 dQ_tma_store_producer_state.advance()
+
+                            if const_expr(self.range_deterministic):
+                                # Every tile waits for its reductions to land
+                                # (read=False), whether or not it arrives: a
+                                # later pair's tile may add to the same rows.
+                                if is_tma_warp:
+                                    cute.arch.cp_async_bulk_wait_group(0, read=False)
+                                self.reduce_sync_barrier.arrive_and_wait()
+                                if tidx == 0:
+                                    self._dq_chain_arrive(
+                                        dq_chain,
+                                        dq_writer,
+                                        seqlen_pair,
+                                        m_block,
+                                        num_m_tiles_pair,
+                                        q_head,
+                                        mQRanges,
+                                        later_pairs,
+                                    )
+
+                        if const_expr(self.range_deterministic):
+                            if tidx == 0:
+                                for m_skip in cutlass.range(
+                                    cutlass.max(hi_p, lo_p),
+                                    num_m_tiles_pair,
+                                    unroll=1,
+                                ):
+                                    self._dq_chain_wait(
+                                        dq_chain,
+                                        dq_writer,
+                                        n_block_cta_group,
+                                        seqlen_pair,
+                                        m_skip,
+                                        q_head,
+                                    )
+                                    self._dq_chain_arrive(
+                                        dq_chain,
+                                        dq_writer,
+                                        seqlen_pair,
+                                        m_skip,
+                                        num_m_tiles_pair,
+                                        q_head,
+                                        mQRanges,
+                                        later_pairs,
+                                    )
 
                 else:
                     if const_expr(self.range_deterministic):

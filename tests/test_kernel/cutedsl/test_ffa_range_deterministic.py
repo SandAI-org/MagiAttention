@@ -51,7 +51,10 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
 )
-from magi_attention.kernel.cutedsl.range_merge import plan_range_merge
+from magi_attention.kernel.cutedsl.range_merge import (
+    plan_range_merge,
+    plan_range_merge_bwd,
+)
 from magi_attention.testing import parameterize
 from tests.test_kernel.cutedsl.range_deterministic_probes import (
     odd_lane_conflict_records,
@@ -507,37 +510,6 @@ class TestFfaRangeDeterministicHost(TestCase):
                 bwd(299)
             with self.assertRaises(KernelReached):
                 bwd(300)
-
-    def test_bwd_range_merge_is_rejected_before_its_preprocessing(self):
-        """deterministic + RangeMerge raises at the entry of the raw backward,
-        before the merge plan is built, and does not fall back to
-        range_merge=False or deterministic=False."""
-        if not torch.cuda.is_available():
-            self.skipTest("needs a CUDA device for the input tensors")
-        relations: Relations = [
-            ([0, 100], [0, 100], MT_MAP.full),
-            ([100, 200], [100, 200], MT_MAP.full),
-        ]
-        q, k, v = _qkv(200, 200, group=1)
-        lse = torch.zeros(200, q.shape[1], device="cuda")
-        with mock.patch(
-            "magi_attention.kernel.cutedsl.flex_flash_attn._apply_range_merge",
-            side_effect=AssertionError("RangeMerge preprocessing ran"),
-        ) as apply_range_merge:
-            with self.assertRaisesRegex(NotImplementedError, "RangeMerge"):
-                _flex_flash_attn_bwd(
-                    q,
-                    k,
-                    v,
-                    q,
-                    lse,
-                    q,
-                    **_range_args(relations),
-                    range_merge=True,
-                    deterministic=True,
-                    disable_bwd_dkv_atomic_reduction=True,
-                )
-        apply_range_merge.assert_not_called()
 
     def test_fwd_rejects_deterministic_atomic_ranges_off_sm100(self):
         """Off SM100/SM110, deterministic q/k ranges without the caller's
@@ -1067,6 +1039,60 @@ def _assert_bwd_chains_settled(
         )
 
 
+def _merged_k_relations() -> tuple[Relations, int, int]:
+    """Relations over sorted, pairwise disjoint K ranges, several sharing
+    each K range (RangeMerge K groups), listed out of K order. Two groups
+    hold pairs whose Q ranges overlap but start one row apart, with causal
+    and inverse-causal masks splitting every shared Q row's keys between
+    them, so both pairs add a nonzero dQ to the same rows; one group is
+    keyless, one has an empty Q range and a pair the mask empties on some
+    K tiles. No (q, k) pair repeats. Returns (relations, total_q, total_k)."""
+    relations: Relations = [
+        ([600, 700], [300, 557], MT_MAP.causal),
+        ([5, 305], [0, 300], MT_MAP.causal),
+        ([0, 143], [557, 700], MT_MAP.full),
+        ([1, 301], [700, 1000], MT_MAP.causal),
+        ([4, 304], [0, 300], MT_MAP.inv_causal),
+        ([0, 200], [1000, 1000], MT_MAP.full),
+        ([100, 357], [300, 557], MT_MAP.full),
+        ([50, 50], [557, 700], MT_MAP.full),
+        ([0, 300], [700, 1000], MT_MAP.inv_causal),
+        ([400, 450], [0, 300], MT_MAP.full),
+        ([250, 600], [557, 700], MT_MAP.inv_causal),
+    ]
+    return relations, 700, 1000
+
+
+def _merged_k_groups(relations: Relations) -> list[tuple[list[int], list[list[int]]]]:
+    """(K range, Q ranges of its pairs) per merged K group, in the group
+    order of RangeMerge: K start ascending, pairs in input order."""
+    groups: dict[tuple[int, int], list[list[int]]] = {}
+    for q_range, (k_start, k_end), _ in sorted(relations, key=lambda r: r[1][0]):
+        groups.setdefault((k_start, k_end), []).append(q_range)
+    return [(list(k), qs) for k, qs in groups.items()]
+
+
+def _assert_merged_dq_chain_settled(launch: _Launch, relations: Relations) -> None:
+    """Merged dQ: writer g * S + n + 1 for cluster K tile n of merged K group
+    g, on the tile_m-row Q blocks of every pair of g; S as unmerged."""
+    (kernel,) = launch.built
+    cluster_tile_k = kernel.tile_n * kernel.cta_group_size
+    groups = _merged_k_groups(relations)
+    stride = max(
+        math.ceil(max(ke - ks for _, (ks, ke), _ in relations) / cluster_tile_k), 1
+    )
+    pair_ranges, pair_writers = [], []
+    for g, ((ks, ke), q_ranges) in enumerate(groups):
+        k_tiles = math.ceil((ke - ks) / cluster_tile_k)
+        for q_range in q_ranges:
+            pair_ranges.append(q_range)
+            pair_writers.append(g * stride + k_tiles if k_tiles else 0)
+    (dq_chain,) = launch.chains
+    _assert_chain_settled(
+        dq_chain, pair_ranges, kernel.tile_m, lambda r: pair_writers[r]
+    )
+
+
 class TestFfaRangeDeterministicBwd(TestCase):
     """dQ of every (relation, cluster K tile) is chained per Q row block, and
     reduced dK/dV of every (relation, q head) per K row block."""
@@ -1330,7 +1356,146 @@ class TestFfaRangeDeterministicBwd(TestCase):
             "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
         ), self.assertRaises(ValueError):
             self._det_bwd(q, k, v, out, lse, do, relations, sm_margin=self.num_sm - 1)
-        with self.assertRaisesRegex(NotImplementedError, "RangeMerge"):
+
+    @parameterize(
+        "case",
+        [
+            # (q heads per kv head, cat_gqa, head_dim); 1-CTA clusters only
+            (1, False, 64),
+            (2, True, 64),
+            (1, False, 128),
+            (2, True, 128),
+        ],
+    )
+    def test_bwd_range_merge_bitwise_across_sm_margin(self, case):
+        """RangeMerge K groups as dQ writers (group, K tile): pairs of one
+        group overlapping in Q add to the same rows, a keyless group has no
+        writer, an empty pair no event. dQ/dK/dV are bitwise equal across
+        sm_margin and between a rebuilt and a precomputed plan, the dQ chain
+        settles on the merged writers, and the gradients match the chained
+        unmerged backward with reduced dK/dV and the reference."""
+        group, cat_gqa, head_dim = case
+        relations, total_q, total_k = _merged_k_relations()
+        q, k, v, out, lse, do = self._fwd_bwd_inputs(
+            relations, total_q, total_k, group, head_dim
+        )
+        args = _range_args(relations)
+        plan = plan_range_merge_bwd(
+            args["q_ranges"], args["k_ranges"], args["mask_types"]
+        )
+
+        def merge_bwd(sm_margin, range_merge=True):
+            return self._det_bwd(
+                q,
+                k,
+                v,
+                out,
+                lse,
+                do,
+                relations,
+                range_merge=range_merge,
+                cat_gqa=cat_gqa,
+                sm_margin=sm_margin,
+            )
+
+        env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "1"}
+        first = None
+        with mock.patch.dict("os.environ", env):
+            with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
+                merge_bwd(0)
+            (kernel,) = launch.built
+            self.assertTrue(kernel.range_merge and kernel.deterministic)
+            self.assertTrue(kernel.is_persistent)
+            self.assertFalse(kernel.use_2cta_instrs)
+            self.assertFalse(kernel.dKV_postprocess)
+            _assert_merged_dq_chain_settled(launch, relations)
+            for sm_margin in (0, 1, self.num_sm - 4, self.num_sm - 1, 0):
+                grads = [g.clone() for g in merge_bwd(sm_margin)]
+                if first is None:
+                    first = grads
+                    continue
+                for name, got, want in zip("qkv", grads, first):
+                    self.assertTrue(
+                        torch.equal(got, want),
+                        f"d{name} differs at sm_margin={sm_margin}",
+                    )
+            assert first is not None
+            for name, got, want in zip("qkv", merge_bwd(self.num_sm - 4, plan), first):
+                self.assertTrue(torch.equal(got, want), f"d{name}: plan differs")
+            unmerged = self._det_bwd(
+                q, k, v, out, lse, do, relations, direct_dkv=False, cat_gqa=cat_gqa
+            )
+        refs = self._ref_grads(q, k, v, do, relations)
+        for name, got, chained, ref in zip("qkv", first, unmerged, refs):
+            torch.testing.assert_close(
+                got.float(),
+                chained.float(),
+                atol=3e-2,
+                rtol=3e-2,
+                msg=lambda m: f"d{name} vs unmerged: {m}",
+            )
+            torch.testing.assert_close(
+                got.float(), ref, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
+            )
+        self._log_ran(f"bwd range merge {case}")
+
+    def test_bwd_range_merge_cuda_graph_replay_matches_eager_bitwise(self):
+        """The merged dQ chain re-zeroes its state inside a captured graph:
+        replays on new data equal eager runs bit for bit, with the K-merge
+        plan built before the capture."""
+        relations, total_q, total_k = _merged_k_relations()
+        args = _range_args(relations)
+        plan = plan_range_merge_bwd(
+            args["q_ranges"], args["k_ranges"], args["mask_types"]
+        )
+
+        def bwd(q, k, v, out, lse, do):
+            return _flex_flash_attn_bwd(
+                q,
+                k,
+                v,
+                out,
+                lse,
+                do,
+                **args,
+                range_merge=plan,
+                disable_bwd_dkv_atomic_reduction=True,
+                cat_gqa=True,
+                deterministic=True,
+            )[:3]
+
+        data = [
+            self._fwd_bwd_inputs(relations, total_q, total_k, 2, head_dim=64)
+            for _ in range(2)
+        ]
+        eager = [[g.clone() for g in bwd(*d)] for d in data]
+        static = [t.clone() for t in data[0]]
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            bwd(*static)
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_grads = bwd(*static)
+        for i in (1, 0, 1):
+            for dst, src in zip(static, data[i]):
+                dst.copy_(src)
+            graph.replay()
+            torch.cuda.synchronize()
+            for name, got, want in zip("qkv", static_grads, eager[i]):
+                self.assertTrue(torch.equal(got, want), f"d{name} of replay on {i}")
+        self._log_ran("bwd range merge cuda graph replay")
+
+    def test_bwd_range_merge_rejects_two_cta_clusters(self):
+        """Pairs of one merged writer may share Q rows across the row halves
+        of a 2-CTA cluster, which the chain does not order: rejected, not
+        run unordered or moved to 1-CTA."""
+        relations, total_q, total_k = _merged_k_relations()
+        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, 1)
+        with mock.patch.dict(
+            "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
+        ), self.assertRaisesRegex(NotImplementedError, "1-CTA"):
             self._det_bwd(q, k, v, out, lse, do, relations, range_merge=True)
 
     def test_public_api_fwd_bwd_bitwise_with_sink_and_softcap(self):
