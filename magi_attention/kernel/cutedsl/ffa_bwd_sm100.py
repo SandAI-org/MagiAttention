@@ -847,7 +847,7 @@ class FFABwdSm100:
             # The chain's progress argument needs every tile claimed in ticket
             # order from one zero-based counter (DYNAMIC + claim_first_tile).
             assert self.scheduling_mode == SchedulingMode.DYNAMIC
-            assert self.tile_hdim == 128 and self.tile_hdimv == 128
+            assert self.same_hdim_kv and self.tile_hdim in (64, 128)
             assert not self.range_merge and not self.use_dense_dqacc_for_ranges
             assert blocksparse_tensors is None
         self.is_varlen_k = mKRanges is not None or mSeqUsedK is not None

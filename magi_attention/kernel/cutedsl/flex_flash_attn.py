@@ -190,10 +190,11 @@ def _flex_flash_attn_fwd(
         deterministic: merge the O/LSE partials of overlapping q ranges in
             relation order on the range atomic path, so O and LSE are bitwise
             identical across runs and independent of ``sm_margin``. The launch
-            is persistent whatever ``sm_margin``; head_dim 128 only, without
-            ``pack_gqa``. The range atomic path exists on SM100/SM110 only;
-            q/k ranges without ``disable_fwd_atomic_reduction`` raise
-            ``NotImplementedError`` on other architectures. The dense and
+            is persistent whatever ``sm_margin``; ``head_dim == head_dim_v``
+            in {64, 128} only, without ``pack_gqa``. The range atomic path
+            exists on SM100/SM110 only; q/k ranges without
+            ``disable_fwd_atomic_reduction`` raise ``NotImplementedError`` on
+            other architectures. The dense and
             direct-store paths have one writer per O row and are unaffected.
 
     Returns:
@@ -327,19 +328,6 @@ def _flex_flash_attn_fwd(
             raise NotImplementedError(
                 "deterministic q/k ranges cannot be combined with block sparsity"
             )
-        # Atomic ranges launch 1-CTA clusters, one tile per at least 128 rows
-        # of one range and q head. Ranges may overlap, so the ticket count is
-        # bounded per range by the longest one (max_seqlen_q, else total_q).
-        longest_q = max_seqlen_q if max_seqlen_q is not None else total_q
-        validate_range_deterministic(
-            head_dim=head_dim,
-            head_dim_v=head_dim_v,
-            num_sm=torch.cuda.get_device_properties(q.device).multi_processor_count,
-            sm_margin=sm_margin,
-            cluster_size=1,
-            max_tickets=batch_size * num_head * ((longest_q + 127) // 128),
-            max_writer=batch_size,
-        )
 
     # The SM80 fwd kernel indexes mQ by query head directly; the packed-GQA
     # epilogue path is unsupported, so force unpacked store.
@@ -475,6 +463,19 @@ def _flex_flash_attn_fwd(
         assert (
             max_seqlen_q >= _q_max
         ), f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
+    if fwd_deterministic:
+        # Atomic ranges launch 1-CTA clusters, one tile per at least tile_m
+        # rows of one range and q head. Ranges may overlap, so the ticket
+        # count is bounded per range by the longest one.
+        validate_range_deterministic(
+            head_dim=head_dim,
+            head_dim_v=head_dim_v,
+            num_sm=torch.cuda.get_device_properties(q.device).multi_processor_count,
+            sm_margin=sm_margin,
+            cluster_size=1,
+            max_tickets=batch_size * num_head * ((max_seqlen_q + tile_m - 1) // tile_m),
+            max_writer=batch_size,
+        )
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
     if pack_gqa and not disable_fwd_atomic_reduction and tile_m % qhead_per_kvhead != 0:
@@ -977,8 +978,9 @@ def _flex_flash_attn_bwd(
             relation under ``cat_gqa`` or MHA), so the gradients are bitwise
             identical across runs and independent of ``sm_margin``. The
             launch is persistent whatever ``sm_margin``. SM100/SM110,
-            head_dim 128 only, without RangeMerge or block sparsity. Dense
-            inputs keep the semaphore-ordered dense path.
+            ``head_dim == head_dim_v`` in {64, 128} only, without RangeMerge
+            or block sparsity. Dense inputs keep the semaphore-ordered dense
+            path.
 
     Returns:
         A tuple of (dQ, dK, dV, dsink): the gradients with the shapes of q, k, v
@@ -2366,10 +2368,11 @@ def flex_flash_attn_func(
         on semaphores. Q/k ranges merge every overlapping row in a fixed
         order: O/LSE by relation, dQ by (relation, K tile), reduced dK/dV by
         (relation, q head); the kernels then launch persistent whatever
-        ``sm_margin``. Ranges need SM100/SM110 and head_dim 128, without
-        ``pack_gqa``, RangeMerge or block sparsity; other architectures raise
-        ``NotImplementedError``, except that the forward alone runs under
-        ``disable_fwd_atomic_reduction``, whose O rows have one writer each.
+        ``sm_margin``. Ranges need SM100/SM110 and ``head_dim == head_dim_v``
+        in {64, 128}, without ``pack_gqa``, RangeMerge or block sparsity;
+        other architectures raise ``NotImplementedError``, except that the
+        forward alone runs under ``disable_fwd_atomic_reduction``, whose O
+        rows have one writer each.
         Opt-in: the ordered dQ merge makes the range backward several times
         slower, more so with many K tiles per Q tile (see
         MAGI_ATTENTION_DETERMINISTIC_MODE in env_variables.md).

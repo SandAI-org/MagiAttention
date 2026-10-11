@@ -225,8 +225,8 @@ def validate_range_deterministic(
 ) -> None:
     """Reject a deterministic q/k-range launch outside what the chain covers.
 
-    The range-lock chain is implemented at head_dim 128 only. It needs a
-    persistent grid of at least one cluster, so ``num_sm - sm_margin`` must
+    The range-lock chain is implemented at ``head_dim == head_dim_v`` in
+    {64, 128}. It needs a persistent grid of at least one cluster, so ``num_sm - sm_margin`` must
     hold ``cluster_size`` SMs; the cluster size is not changed to fit the
     budget, as that changes the arithmetic tiling. ``max_tickets`` bounds the
     tile counter, which ends at the ticket count plus the final claim of
@@ -234,10 +234,10 @@ def validate_range_deterministic(
     largest writer number of the launch's chains (fwd ``R``, bwd dQ
     ``R * num_k_tiles``, bwd dK/dV ``R * G``), which must stay within int32.
     """
-    if head_dim != 128 or head_dim_v != 128:
+    if head_dim != head_dim_v or head_dim not in (64, 128):
         raise NotImplementedError(
-            "deterministic q/k ranges support head_dim 128 only, got "
-            f"head_dim={head_dim}, head_dim_v={head_dim_v}"
+            "deterministic q/k ranges support head_dim == head_dim_v in "
+            f"(64, 128), got head_dim={head_dim}, head_dim_v={head_dim_v}"
         )
     if num_sm - sm_margin < cluster_size:
         raise ValueError(

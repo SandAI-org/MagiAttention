@@ -28,8 +28,9 @@ partial ``dsink`` of the same shape (``None`` without ``sink``).
 ``deterministic`` is forwarded to both kernels, which then merge every
 overlapping O, dQ and dK/dV row of this call in a fixed order. This covers
 the local attention of one stage; the communication reductions of the dist
-runtime are outside it. The range kernels support it at head_dim 128 on
-SM100/SM110 and raise ``NotImplementedError`` otherwise.
+runtime are outside it. The range kernels support it at
+``head_dim == head_dim_v`` in {64, 128} on SM100/SM110 and raise
+``NotImplementedError`` otherwise.
 """
 
 import weakref

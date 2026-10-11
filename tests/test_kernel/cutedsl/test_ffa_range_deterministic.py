@@ -57,8 +57,9 @@ from tests.test_kernel.cutedsl.range_deterministic_probes import (
 )
 
 _HEAD_DIM = 128
+# Head dims the deterministic range kernels support (head_dim == head_dim_v).
+_DET_HEAD_DIMS = [64, 128]
 _NUM_HEAD_KV = 2
-_TILE_M = 128
 # fp32 O of bf16 inputs against the fp32 reference of the same bf16 inputs.
 _TOL = 1e-2
 
@@ -291,19 +292,27 @@ def _range_args(relations: Relations, device="cuda") -> dict:
 class TestFfaRangeDeterministicHost(TestCase):
     """Host validation; launches no kernel."""
 
-    def test_validate_accepts_head_dim_128_within_budget(self):
-        validate_range_deterministic(
-            head_dim=128,
-            head_dim_v=128,
-            num_sm=148,
-            sm_margin=146,
-            cluster_size=2,
-            max_tickets=1000,
-            max_writer=2**31 - 1,
-        )
+    def test_validate_accepts_head_dims_64_and_128_within_budget(self):
+        for head_dim in _DET_HEAD_DIMS:
+            validate_range_deterministic(
+                head_dim=head_dim,
+                head_dim_v=head_dim,
+                num_sm=148,
+                sm_margin=146,
+                cluster_size=2,
+                max_tickets=1000,
+                max_writer=2**31 - 1,
+            )
 
     def test_validate_rejects_other_head_dims(self):
-        for head_dim, head_dim_v in ((64, 64), (192, 128), (128, 64), (192, 192)):
+        for head_dim, head_dim_v in (
+            (96, 96),
+            (192, 128),
+            (128, 64),
+            (64, 128),
+            (192, 192),
+            (256, 256),
+        ):
             with self.assertRaises(NotImplementedError):
                 validate_range_deterministic(
                     head_dim=head_dim,
@@ -496,13 +505,14 @@ class TestFfaRangeDeterministicFwd(TestCase):
         return first
 
     def _assert_fwd_chain_settled(self, q, k, v, relations: Relations, **kwargs):
-        """Relation r is writer r + 1 of every 128-row block its q range has
-        a row in, empty and keyless relations included."""
+        """Relation r is writer r + 1 of every m_block_size-row block its q
+        range has a row in, empty and keyless relations included."""
         with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
             self._det_fwd(q, k, v, relations, **kwargs)
+        (kernel,) = launch.built
         (chain,) = launch.chains
         _assert_chain_settled(
-            chain, [r[0] for r in relations], _TILE_M, lambda r: r + 1
+            chain, [r[0] for r in relations], kernel.m_block_size, lambda r: r + 1
         )
 
     @parameterize(
@@ -514,14 +524,15 @@ class TestFfaRangeDeterministicFwd(TestCase):
             (torch.bfloat16, 2),
         ],
     )
-    def test_fwd_bitwise_across_runs_and_sm_margin(self, case):
+    @parameterize("head_dim", _DET_HEAD_DIMS)
+    def test_fwd_bitwise_across_runs_and_sm_margin(self, case, head_dim):
         """Four relations cover every row of each unaligned q range; O/LSE do
         not depend on the grid and match the reference."""
         out_dtype, group = case
         relations, total_q, total_k = _overlapping_relations(
             [129, 300, 1000, 77], coverage=4, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
-        q, k, v = _qkv(total_q, total_k, group)
+        q, k, v = _qkv(total_q, total_k, group, head_dim=head_dim)
         out, lse = self._assert_bitwise_across_sm_margin(
             lambda m: self._det_fwd(
                 q, k, v, relations, out_dtype=out_dtype, sm_margin=m
@@ -531,9 +542,10 @@ class TestFfaRangeDeterministicFwd(TestCase):
         out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
         torch.testing.assert_close(out.float(), out_ref, atol=_TOL, rtol=_TOL)
         torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
-        self._log_ran(f"bitwise {case}")
+        self._log_ran(f"bitwise {case} hd{head_dim}")
 
-    def test_fwd_empty_keyless_and_protection_block_relations(self):
+    @parameterize("head_dim", _DET_HEAD_DIMS)
+    def test_fwd_empty_keyless_and_protection_block_relations(self, head_dim):
         """An empty q range, a relation without keys (its tiles arrive with
         no contribution), a one-row range, and [1, 130) whose last tile only
         has a row in block 1 while its lock span reaches block 2, which a
@@ -546,7 +558,7 @@ class TestFfaRangeDeterministicFwd(TestCase):
             ([129, 130], [500, 520], MT_MAP.full),
             ([0, 257], [520, 900], MT_MAP.full),
         ]
-        q, k, v = _qkv(420, 900, group=2)
+        q, k, v = _qkv(420, 900, group=2, head_dim=head_dim)
         out, lse = self._assert_bitwise_across_sm_margin(
             lambda m: self._det_fwd(q, k, v, relations, sm_margin=m)
         )
@@ -556,7 +568,7 @@ class TestFfaRangeDeterministicFwd(TestCase):
         finite = torch.isfinite(lse_ref)
         self.assertTrue(torch.equal(finite, torch.isfinite(lse)))
         torch.testing.assert_close(lse[finite], lse_ref[finite], atol=1e-3, rtol=1e-3)
-        self._log_ran("empty/keyless/protection")
+        self._log_ran(f"empty/keyless/protection hd{head_dim}")
 
     def test_fwd_caller_buffer_accumulation_with_sink(self):
         """Two calls merge into one caller-provided fp32 state, the second
@@ -659,9 +671,9 @@ class TestFfaRangeDeterministicFwd(TestCase):
         relations, total_q, total_k = _overlapping_relations(
             [40], coverage=2, mask_types=[MT_MAP.full]
         )
-        q64, k64, v64 = _qkv(total_q, total_k, group=2, head_dim=64)
+        q96, k96, v96 = _qkv(total_q, total_k, group=2, head_dim=96)
         with self.assertRaises(NotImplementedError):
-            self._det_fwd(q64, k64, v64, relations)
+            self._det_fwd(q96, k96, v96, relations)
         q, k, v = _qkv(total_q, total_k, group=2)
         with self.assertRaises(NotImplementedError):
             self._det_fwd(q, k, v, relations, pack_gqa=True)
@@ -776,8 +788,10 @@ class TestFfaRangeDeterministicBwd(TestCase):
     def _log_ran(self, test_case: str) -> None:
         print(f"ran {test_case}", flush=True)
 
-    def _fwd_bwd_inputs(self, relations: Relations, total_q, total_k, group):
-        q, k, v = _qkv(total_q, total_k, group)
+    def _fwd_bwd_inputs(
+        self, relations: Relations, total_q, total_k, group, head_dim=_HEAD_DIM
+    ):
+        q, k, v = _qkv(total_q, total_k, group, head_dim=head_dim)
         out, lse = _flex_flash_attn_fwd(
             q,
             k,
@@ -856,22 +870,27 @@ class TestFfaRangeDeterministicBwd(TestCase):
     @parameterize(
         "case",
         [
-            # (q heads per kv head, cat_gqa, 2-CTA)
-            (1, False, True),
-            (1, False, False),
-            (2, True, True),
-            (2, True, False),
+            # (q heads per kv head, cat_gqa, 2-CTA, head_dim); head_dim 64
+            # launches 1-CTA clusters only.
+            (1, False, True, 128),
+            (1, False, False, 128),
+            (2, True, True, 128),
+            (2, True, False, 128),
+            (1, False, False, 64),
+            (2, True, False, 64),
         ],
     )
     def test_bwd_dq_bitwise_across_sm_margin(self, case):
         """Three relations cover every row of each unaligned q range, half of
         them causal, so some Q tiles of a K tile are masked out and only
         chain; the dK/dV store is direct, one writer per K row."""
-        group, cat_gqa, two_cta = case
+        group, cat_gqa, two_cta, head_dim = case
         relations, total_q, total_k = _overlapping_relations(
             [129, 300, 1000, 77], coverage=3, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
-        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, group)
+        q, k, v, out, lse, do = self._fwd_bwd_inputs(
+            relations, total_q, total_k, group, head_dim
+        )
         self._assert_grads_bitwise_across_sm_margin(
             q, k, v, out, lse, do, relations, two_cta, cat_gqa=cat_gqa
         )
@@ -880,19 +899,25 @@ class TestFfaRangeDeterministicBwd(TestCase):
     @parameterize(
         "case",
         [
-            # (q heads per kv head, cat_gqa, 2-CTA)
-            (1, False, True),
-            (2, False, True),
-            (2, False, False),
-            (2, True, True),
+            # (q heads per kv head, cat_gqa, 2-CTA, head_dim); head_dim 64
+            # launches 1-CTA clusters only.
+            (1, False, True, 128),
+            (2, False, True, 128),
+            (2, False, False, 128),
+            (2, True, True, 128),
+            (1, False, False, 64),
+            (2, False, False, 64),
+            (2, True, False, 64),
         ],
     )
     def test_bwd_reduced_dkv_bitwise_across_sm_margin(self, case):
         """Relations share unaligned K rows, so dK/dV are reduced: per
         (relation, q head) without cat_gqa, per relation with it or MHA."""
-        group, cat_gqa, two_cta = case
+        group, cat_gqa, two_cta, head_dim = case
         relations, total_q, total_k = _shared_k_relations()
-        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, group)
+        q, k, v, out, lse, do = self._fwd_bwd_inputs(
+            relations, total_q, total_k, group, head_dim
+        )
         self._assert_grads_bitwise_across_sm_margin(
             q,
             k,
@@ -907,7 +932,8 @@ class TestFfaRangeDeterministicBwd(TestCase):
         )
         self._log_ran(f"bwd dkv bitwise {case}")
 
-    def test_bwd_empty_and_keyless_relations(self):
+    @parameterize("head_dim", _DET_HEAD_DIMS)
+    def test_bwd_empty_and_keyless_relations(self, head_dim):
         """A relation without keys has no K tile and so no dQ writer; an empty
         q range has no Q block; a one-row range and a range starting at a
         block's last row still chain."""
@@ -919,7 +945,9 @@ class TestFfaRangeDeterministicBwd(TestCase):
             ([129, 130], [500, 520], MT_MAP.full),
             ([0, 257], [520, 900], MT_MAP.full),
         ]
-        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, 420, 900, group=1)
+        q, k, v, out, lse, do = self._fwd_bwd_inputs(
+            relations, 420, 900, group=1, head_dim=head_dim
+        )
         first = None
         for sm_margin in (0, self.num_sm - 2, 0):
             grads = self._det_bwd(q, k, v, out, lse, do, relations, sm_margin=sm_margin)
@@ -935,7 +963,7 @@ class TestFfaRangeDeterministicBwd(TestCase):
             torch.testing.assert_close(
                 got.float(), want, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
             )
-        self._log_ran("bwd empty/keyless")
+        self._log_ran(f"bwd empty/keyless hd{head_dim}")
 
     def test_bwd_tile_counter_claims_every_tile_from_zero(self):
         relations, total_q, total_k = _overlapping_relations(
@@ -963,9 +991,9 @@ class TestFfaRangeDeterministicBwd(TestCase):
             [40], coverage=2, mask_types=[MT_MAP.full]
         )
         q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, 1)
-        q64, k64, v64 = _qkv(total_q, total_k, group=1, head_dim=64)
+        q96, k96, v96 = _qkv(total_q, total_k, group=1, head_dim=96)
         with self.assertRaises(NotImplementedError):
-            self._det_bwd(q64, k64, v64, out[..., :64], lse, do[..., :64], relations)
+            self._det_bwd(q96, k96, v96, out[..., :96], lse, do[..., :96], relations)
         # A 2-CTA cluster does not fit one SM, and the cluster size is kept.
         with mock.patch.dict(
             "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
@@ -1179,7 +1207,7 @@ class TestFfaRangeDeterministicClaims(TestCase):
         self._assert_each_unit_visited_once(visits, clusters, num_units, 1)
         (chain,) = launch.chains
         _assert_chain_settled(
-            chain, [r[0] for r in relations], _TILE_M, lambda r: r + 1
+            chain, [r[0] for r in relations], kernel.m_block_size, lambda r: r + 1
         )
         out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
         torch.testing.assert_close(out, out_ref, atol=_TOL, rtol=_TOL)
@@ -1245,10 +1273,12 @@ class TestFfaRangeDeterministicClaims(TestCase):
             )
         print(f"ran bwd claims T={num_units}", flush=True)
 
-    def test_cuda_graph_replay_matches_eager_bitwise(self):
+    @parameterize("head_dim", _DET_HEAD_DIMS)
+    def test_cuda_graph_replay_matches_eager_bitwise(self, head_dim):
         """The chain, conflict and tile-counter states are re-zeroed inside
         the captured graph, so replays on new data equal eager runs bit for
-        bit, forward and backward (2-CTA, GQA, reduced dK/dV)."""
+        bit, forward and backward (GQA, reduced dK/dV; 2-CTA at head_dim
+        128, 1-CTA at 64)."""
         relations, total_q, total_k = _shared_k_relations()
         args = _range_args(relations)
 
@@ -1271,7 +1301,7 @@ class TestFfaRangeDeterministicClaims(TestCase):
             )[:3]
 
         def inputs():
-            q, k, v = _qkv(total_q, total_k, group=2)
+            q, k, v = _qkv(total_q, total_k, group=2, head_dim=head_dim)
             out, lse = fwd(q, k, v)
             return q, k, v, out.to(q.dtype), lse, torch.randn_like(q)
 
@@ -1308,7 +1338,7 @@ class TestFfaRangeDeterministicClaims(TestCase):
                     self.assertTrue(
                         torch.equal(got, want), f"{name} of replay on data {i}"
                     )
-        print("ran cuda graph replay", flush=True)
+        print(f"ran cuda graph replay hd{head_dim}", flush=True)
 
 
 if __name__ == "__main__":

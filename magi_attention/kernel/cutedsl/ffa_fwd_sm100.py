@@ -457,9 +457,10 @@ class FFAFwdSm100:
             # A packed stage mixes rows of several q heads; the lock chain
             # keys its rows on (q head, token).
             assert not pack_gqa, "deterministic forward does not pack GQA"
-            assert (
-                head_dim == 128 and head_dim_v == 128
-            ), "deterministic forward is defined at head_dim 128 only"
+            assert head_dim == head_dim_v and head_dim in (
+                64,
+                128,
+            ), "deterministic forward is defined at head_dim == head_dim_v in (64, 128)"
 
         if is_varlen_q:
             self.TileScheduler = SingleTileVarlenScheduler
