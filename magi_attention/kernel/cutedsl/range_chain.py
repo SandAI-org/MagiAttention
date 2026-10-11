@@ -271,11 +271,23 @@ def record_conflict(
 def wait_published(
     mChain: cute.Tensor, block: Int32, head: Int32, writer: Int32
 ) -> None:
-    """Spin until ``block`` of ``head`` publishes ``writer`` (acquire)."""
+    """Spin until ``block`` of ``head`` publishes ``writer`` (acquire), then
+    order the acquired view before this thread's later async-proxy accesses.
+
+    The predecessor merged its rows with bulk reductions or stores (async
+    proxy) from another thread block, and the waiter's merge may be bulk
+    too. The acquire is in the generic proxy, and the PTX memory model
+    (8.9.5, proxy-preserved base causality) orders two async-proxy accesses
+    to one address only within one thread block; cross-proxy ordering needs
+    a proxy fence (9.7.9.26.2), so ``fence.proxy.async.global`` follows the
+    acquire. Without it a bulk reduction may read a row before the
+    predecessor's merge. The release side needs none: a completed bulk
+    operation is followed by an implicit async-to-generic proxy fence."""
     ptr = elem_pointer(mChain, (block, head, 0))
     published = ld_acquire(ptr)
     while published != writer:
         published = ld_acquire(ptr)
+    cute.arch.fence_proxy("async.global")
 
 
 @cute.jit
