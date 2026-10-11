@@ -308,6 +308,112 @@ class ConflictScanner:
         return tuple(self.column.get(b, 0) for b in blocks)
 
 
+def merged_dq_writers(
+    groups: list[list[tuple[int, int]]], k_tiles: list[int], stride: int, tile: int
+) -> list[Writer]:
+    """bwd dQ writers of RangeMerge: merged K group g holds the Q ranges of
+    its pairs; cluster K tile n < k_tiles[g] is writer g * stride + n + 1, one
+    SINGLE_WORK_TILE writer whose work tile walks every Q tile of every pair
+    in pair order (mask-skipped tiles included)."""
+    writers = []
+    for g, pairs in enumerate(groups):
+        tiles = tuple(t for a, b in pairs for t in logical_tiles(a, b, tile))
+        for n in range(k_tiles[g]):
+            writers.append(
+                Writer(g * stride + n + 1, WriterKind.SINGLE_WORK_TILE, (tiles,))
+            )
+    return writers
+
+
+def merged_tile_arrivals(
+    pairs: list[tuple[int, int]], tile: int
+) -> list[tuple[tuple[int, int], ...]]:
+    """The kernel's local arrival rule, per logical tile of the pair walk:
+    tile m of pair j arrives with weight 2 on its first block, and on its
+    last block when m is the pair's last tile, unless a later pair's Q range
+    has a row in that block."""
+
+    def covered_later(j: int, b: int) -> bool:
+        return any(
+            a < e and a // tile <= b <= (e - 1) // tile for a, e in pairs[j + 1 :]
+        )
+
+    out = []
+    for j, (a, e) in enumerate(pairs):
+        tiles = logical_tiles(a, e, tile)
+        for m, rows in enumerate(tiles):
+            left, right = blocks_of(rows, tile)[0], blocks_of(rows, tile)[-1]
+            arrivals = []
+            if not covered_later(j, left):
+                arrivals.append((left, 2))
+            if right != left and m == len(tiles) - 1 and not covered_later(j, right):
+                arrivals.append((right, 2))
+            out.append(tuple(arrivals))
+    return out
+
+
+def merged_predecessor(
+    groups: list[list[tuple[int, int]]],
+    k_tiles: list[int],
+    stride: int,
+    tile: int,
+    g: int,
+    n: int,
+    block: int,
+) -> int:
+    """The kernel's predecessor of writer (g, n) on ``block``: writer - 1 for
+    n > 0; for n == 0 the conflict column after scanning groups [0, g), each
+    group recording its last writer on the blocks of every pair."""
+    if n > 0:
+        return g * stride + n
+    column: dict[int, int] = {}
+    for h in range(g):
+        if not k_tiles[h]:
+            continue
+        for a, e in groups[h]:
+            for b in blocks_of((a, e), tile):
+                column[b] = h * stride + k_tiles[h]
+    return column.get(block, 0)
+
+
+def random_groups(rng: random.Random, tile: int, max_groups: int, max_pairs: int):
+    groups = []
+    for _ in range(rng.randint(1, max_groups)):
+        pairs = []
+        for _ in range(rng.randint(1, max_pairs)):
+            start = rng.randint(0, 3 * tile)
+            pairs.append((start, start + rng.randint(0, 2 * tile + 3)))
+        groups.append(pairs)
+    return groups
+
+
+def compile_merged_tickets(
+    groups: list[list[tuple[int, int]]],
+    k_tiles: list[int],
+    stride: int,
+    tile: int,
+) -> list[tuple[Step, ...]]:
+    """Tickets of the merged dQ writers in (group, K tile) order, built from
+    the kernel's local rules alone: merged_predecessor for the waits and
+    merged_tile_arrivals for the arrivals."""
+    tickets = []
+    for g, pairs in enumerate(groups):
+        tiles = [t for a, b in pairs for t in logical_tiles(a, b, tile)]
+        arrivals = merged_tile_arrivals(pairs, tile)
+        for n in range(k_tiles[g]):
+            number = g * stride + n + 1
+            steps = []
+            for rows, tile_arrivals in zip(tiles, arrivals):
+                blocks = blocks_of(rows, tile)
+                waits = tuple(
+                    (b, merged_predecessor(groups, k_tiles, stride, tile, g, n, b))
+                    for b in blocks
+                )
+                steps.append(Step(number, waits, tile_arrivals, blocks))
+            tickets.append(tuple(steps))
+    return tickets
+
+
 class TestRangeDeterministicProtocol(unittest.TestCase):
     _M = 8  # block height = logical tile height, small to keep states few
 
@@ -524,6 +630,97 @@ class TestRangeDeterministicProtocol(unittest.TestCase):
                         ClaimMode.ATOMIC,
                     )
                 )
+
+    def test_range_merge_local_arrivals_match_the_global_rule(self):
+        """bwd RangeMerge: the kernel decides an arrival from the pair walk
+        alone (the tile's own blocks, its pair's last tile, the Q ranges of
+        the later pairs). On random groups of overlapping, unaligned and
+        empty pairs this is the SINGLE_WORK_TILE rule: one weight-2 arrival
+        per block, from the last tile with rows there."""
+        rng = random.Random(2)
+        for _ in range(300):
+            (pairs,) = random_groups(rng, self._M, max_groups=1, max_pairs=5)
+            (writer,) = merged_dq_writers([pairs], [1], 1, self._M)
+            (global_rule,) = arrival_weights(writer, self._M)
+            self.assertEqual(merged_tile_arrivals(pairs, self._M), global_rule)
+
+    def test_range_merge_predecessors_match_the_global_definition(self):
+        """The merged dQ writer (g, n) waits for writer - 1 when n > 0, and
+        for n == 0 on the conflict column of the groups below g, each
+        recording its last writer on the blocks of all its pairs. This equals
+        the global predecessor, which is always a lower writer: a unit only
+        waits for units claimed before it."""
+        rng = random.Random(3)
+        for _ in range(200):
+            groups = random_groups(rng, self._M, max_groups=4, max_pairs=4)
+            k_tiles = [rng.randint(0, 3) for _ in groups]
+            stride = max(max(k_tiles), 1)
+            writers = merged_dq_writers(groups, k_tiles, stride, self._M)
+            pred = predecessors(writers, self._M)
+            for (number, block), p in pred.items():
+                g, n = divmod(number - 1, stride)
+                self.assertLess(p, number)
+                self.assertEqual(
+                    merged_predecessor(groups, k_tiles, stride, self._M, g, n, block),
+                    p,
+                )
+
+    def test_range_merge_random_overlapping_pairs_complete_in_order(self):
+        """Tickets built from the kernel's local wait and arrival rules, on
+        random merged groups with overlapping pairs and several K tiles,
+        complete in every interleaving of 1-3 workers, merging every block
+        in writer order."""
+        rng = random.Random(4)
+        for _ in range(40):
+            groups = random_groups(rng, self._M, max_groups=3, max_pairs=3)
+            k_tiles = [rng.randint(0, 2) for _ in groups]
+            stride = max(max(k_tiles), 1)
+            tickets = compile_merged_tickets(groups, k_tiles, stride, self._M)
+            workers = rng.randint(1, 3)
+            resident = rng.randint(1, workers)
+            self.assertCompletes(explore(tickets, workers, resident, ClaimMode.ATOMIC))
+
+    def test_range_merge_without_the_later_pair_check_merges_out_of_order(self):
+        """Control: the unmerged arrival rule (first block always, last block
+        on the pair's last tile) ignores the later pairs, so a block shared by
+        two pairs publishes after the first and the next writer merges before
+        the second; the later-pair check is what keeps the order."""
+        pairs = [(1, 2 * self._M + 1), (3, self._M + 3)]
+        tickets = compile_merged_tickets(
+            [pairs, [(0, 3 * self._M)]], [1, 1], 1, self._M
+        )
+        self.assertCompletes(explore(tickets, 2, 2, ClaimMode.ATOMIC))
+        unmerged_rule = []
+        for a, b in pairs:
+            tiles = logical_tiles(a, b, self._M)
+            for m, rows in enumerate(tiles):
+                blocks = blocks_of(rows, self._M)
+                last = blocks[-1] != blocks[0] and m == len(tiles) - 1
+                unmerged_rule.append(
+                    ((blocks[0], 2),) + (((blocks[-1], 2),) if last else ())
+                )
+        group_steps = tuple(
+            Step(s.writer, s.waits, arrivals, s.blocks)
+            for s, arrivals in zip(tickets[0], unmerged_rule)
+        )
+        outcome = explore([group_steps, tickets[1]], 2, 2, ClaimMode.ATOMIC)
+        self.assertTrue(outcome.out_of_order or outcome.stuck)
+
+    def test_range_merge_two_cta_halves_of_one_writer_share_rows(self):
+        """Under 2-CTA each CTA reduces one half of a logical Q tile. Two
+        pairs of one merged writer whose Q ranges start in different rows of
+        a tile put one physical row in the half of CTA 0 for one pair and of
+        CTA 1 for the other, so the chain, which orders writers and not the
+        two CTAs inside one, leaves that row's two additions unordered."""
+        half = self._M // 2
+        pairs = [(0, 2 * self._M), (half, 2 * self._M + half)]
+        owners: dict[int, set[int]] = {}
+        for a, b in pairs:
+            for t in logical_tiles(a, b, self._M):
+                for rank, (ha, hb) in enumerate(logical_tiles(*t, half)):
+                    for row in range(ha, hb):
+                        owners.setdefault(row, set()).add(rank)
+        self.assertTrue(any(len(ranks) == 2 for ranks in owners.values()))
 
 
 if __name__ == "__main__":
