@@ -1257,8 +1257,9 @@ class _ScanConflictsLauncher:
     """One warp running ``range_chain.scan_conflicts`` over every range into
     conflict-table row 0, with writer ``r + 1`` for range ``r``."""
 
-    def __init__(self, block_size: int):
+    def __init__(self, block_size: int, rows_per_token: int):
         self.block_size = block_size
+        self.rows_per_token = rows_per_token
 
     @cute.jit
     def __call__(
@@ -1282,6 +1283,7 @@ class _ScanConflictsLauncher:
             num_ranges,
             self.block_size,
             last_writer=lambda r: r + 1,
+            rows_per_token=self.rows_per_token,
         )
 
 
@@ -1294,8 +1296,10 @@ class TestFfaRangeChainScan(TestCase):
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("the range chain runs on SM100/SM110")
 
-    def _scan(self, ranges: list[list[int]], block_size: int) -> torch.Tensor:
-        num_blocks = max(e for _, e in ranges) // block_size + 2
+    def _scan(
+        self, ranges: list[list[int]], block_size: int, rows_per_token: int = 1
+    ) -> torch.Tensor:
+        num_blocks = max(e for _, e in ranges) * rows_per_token // block_size + 2
         mranges = torch.tensor(ranges, dtype=torch.int32, device="cuda")
         conflict = torch.zeros(1, num_blocks, dtype=torch.int32, device="cuda")
         args = (
@@ -1304,7 +1308,8 @@ class TestFfaRangeChainScan(TestCase):
             Int32(len(ranges)),
             cuda.CUstream(torch.cuda.current_stream().cuda_stream),
         )
-        cute.compile(_ScanConflictsLauncher(block_size), *args)(*args)
+        launcher = _ScanConflictsLauncher(block_size, rows_per_token)
+        cute.compile(launcher, *args)(*args)
         torch.cuda.synchronize()
         return conflict[0].cpu()
 
@@ -1332,6 +1337,21 @@ class TestFfaRangeChainScan(TestCase):
         self.assertTrue(torch.equal(self._scan(ranges, block_size), want))
         with odd_lane_conflict_records(50_000):
             got = self._scan(ranges, block_size)
+        self.assertTrue(torch.equal(got, want), f"{got.tolist()} != {want.tolist()}")
+
+    @parameterize("rows_per_token", [2, 4])
+    def test_scan_scales_token_ranges_to_packed_row_blocks(self, rows_per_token):
+        """Under PackGQA a token range [s, e) owns the packed rows
+        [s * G, e * G); the scan records the blocks of those rows. Token 61
+        with G = 4 starts at packed row 244 of block 1, and [32, 64) with
+        G = 4 is exactly block 1."""
+        block_size, g = 128, rows_per_token
+        ranges = [[61, 100], [32, 64], [0, 33], [70, 70], [90, 130]]
+        want = torch.zeros(130 * g // block_size + 2, dtype=torch.int32)
+        for r, (start, end) in enumerate(ranges):
+            if end > start:
+                want[start * g // block_size : (end * g - 1) // block_size + 1] = r + 1
+        got = self._scan(ranges, block_size, rows_per_token=g)
         self.assertTrue(torch.equal(got, want), f"{got.tolist()} != {want.tolist()}")
 
 
