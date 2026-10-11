@@ -244,8 +244,10 @@ def validate_range_deterministic(
     {64, 128}, on a persistent grid whose SM budget is checked by
     :func:`validate_persistent_grid`. ``max_tickets`` bounds the tile counter,
     which ends at the ticket count plus the final claim of every cluster and
-    must stay within int32. ``max_writer`` bounds the largest writer number
-    of the launch's chains (fwd ``R``, bwd dQ ``R * num_k_tiles``, bwd dK/dV
+    must stay within int32; a fwd ticket is ``tile_m`` rows of one range and
+    q head, or under PackGQA ``tile_m`` packed rows (``G`` per token) of one
+    range and kv head. ``max_writer`` bounds the largest writer number of the
+    launch's chains (fwd ``R``, bwd dQ ``R * num_k_tiles``, bwd dK/dV
     ``R * G``), which must stay within int32.
 
     The bwd dQ writer of cluster K tile ``n`` of relation ``r`` is
