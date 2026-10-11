@@ -62,14 +62,21 @@ range ``[s, e)`` is the row range ``[s * G, e * G)``, the head axis of the
 chain state is the kv head, and ``num_blocks`` counts blocks of packed rows.
 Its tiles are cut from ``s * G``; ``G`` divides ``block_size``, so a tile
 starts on a token boundary and still has events on at most two blocks.
+
+A range is the scheduling unit the writer numbers count: a relation, or
+under RangeMerge a merged group, whose rows are the row ranges of its pairs,
+rows ``cu_batches[r]`` to ``cu_batches[r + 1]`` of the pair table. Pairs of
+one group may overlap, so a writer walking them can have rows in a block
+from several pairs; it arrives on the block after the last of them
+(``rows_have_block`` over the later pairs).
 """
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 import cutlass
 import cutlass.cute as cute
-from cutlass import Int32
+from cutlass import Int32, const_expr
 
 # isort: split
 from quack.cute_dsl_utils import ParamsBase
@@ -144,6 +151,7 @@ def scan_conflicts(
     block_size: cutlass.Constexpr[int],
     last_writer: Callable[[Int32], Int32],
     rows_per_token: cutlass.Constexpr[int] = 1,
+    mCuBatches: Optional[cute.Tensor] = None,
 ) -> None:
     """Record the blocks of the ranges in ``[range_from, range_to)`` for ``slot``.
 
@@ -151,30 +159,92 @@ def scan_conflicts(
     ``r`` with events on its blocks; 0 means ``r`` has no work tile, which
     records nothing, as does an empty range. ``mRanges`` holds token ranges;
     range ``[s, e)`` covers the rows ``[s, e) * rows_per_token``, the blocks
-    ``tile_events`` gives for its tiles. The whole warp calls; its lanes
-    write the blocks of one range in parallel, and any lane may read
-    ``mConflict[slot, ...]`` after the return.
+    ``tile_events`` gives for its tiles. Without ``mCuBatches`` range ``r``
+    is row ``r`` of ``mRanges``; with it, a merged group whose rows are
+    ``mCuBatches[r]`` to ``mCuBatches[r + 1]``, all recorded with the group's
+    writer. The whole warp calls; its lanes write the blocks of one row in
+    parallel, and any lane may read ``mConflict[slot, ...]`` after the
+    return.
 
-    A block shared by consecutive ranges is stored by different lanes (its
-    lane follows the range's first block), so the warp synchronizes after
-    every range, empty ones included: without it a lane's store of range
+    A block shared by consecutive rows is stored by different lanes (its
+    lane follows the row's first block), so the warp synchronizes after
+    every row, empty ones included: without it a lane's store of range
     ``r`` may land after another lane's store of range ``r + 1`` and leave
     a stale predecessor.
     """
     lane = cute.arch.lane_idx()
     r = range_from
     while r < range_to:
-        start = mRanges[r, 0] * rows_per_token
-        end = mRanges[r, 1] * rows_per_token
         writer = last_writer(r)
-        if end > start and writer != 0:
-            block = start // block_size + lane
-            last_block = (end - 1) // block_size
-            while block <= last_block:
-                record_conflict(mConflict, slot, block, writer)
-                block += cute.arch.WARP_SIZE
-        cute.arch.sync_warp()
+        if const_expr(mCuBatches is None):
+            _record_row_blocks(
+                mRanges, mConflict, slot, r, writer, block_size, rows_per_token, lane
+            )
+            cute.arch.sync_warp()
+        else:
+            assert mCuBatches is not None
+            row = Int32(mCuBatches[r])
+            row_end = Int32(mCuBatches[r + 1])
+            while row < row_end:
+                _record_row_blocks(
+                    mRanges,
+                    mConflict,
+                    slot,
+                    row,
+                    writer,
+                    block_size,
+                    rows_per_token,
+                    lane,
+                )
+                cute.arch.sync_warp()
+                row += 1
         r += 1
+
+
+@cute.jit
+def _record_row_blocks(
+    mRanges: cute.Tensor,
+    mConflict: cute.Tensor,
+    slot: Int32,
+    row: Int32,
+    writer: Int32,
+    block_size: cutlass.Constexpr[int],
+    rows_per_token: cutlass.Constexpr[int],
+    lane: Int32,
+) -> None:
+    """This lane's share of recording ``writer`` on the blocks of row ``row``
+    of ``mRanges``, a token range of ``rows_per_token`` rows per token;
+    nothing for an empty row or writer 0."""
+    start = mRanges[row, 0] * rows_per_token
+    end = mRanges[row, 1] * rows_per_token
+    if end > start and writer != 0:
+        block = start // block_size + lane
+        last_block = (end - 1) // block_size
+        while block <= last_block:
+            record_conflict(mConflict, slot, block, writer)
+            block += cute.arch.WARP_SIZE
+
+
+@cute.jit
+def rows_have_block(
+    mRanges: cute.Tensor,
+    row_from: Int32,
+    row_to: Int32,
+    block: Int32,
+    block_size: cutlass.Constexpr[int],
+) -> cutlass.Boolean:
+    """Whether a row in ``[row_from, row_to)`` of ``mRanges`` has a valid row
+    in ``block``; empty rows have none."""
+    found = cutlass.Boolean(False)
+    row = row_from
+    while row < row_to:
+        start = mRanges[row, 0]
+        end = mRanges[row, 1]
+        if end > start and start // block_size <= block:
+            if (end - 1) // block_size >= block:
+                found = cutlass.Boolean(True)
+        row += 1
+    return found
 
 
 @cute.jit
