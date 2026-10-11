@@ -48,7 +48,7 @@ from .ffa_bwd_sm120 import FFABwdSm120
 from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_fwd_sm80 import FFAFwdSm80
 from .ffa_fwd_sm90 import FFAFwdSm90
-from .ffa_fwd_sm100 import FFAFwdSm100, fwd_fp32_o_borrows_kv_smem
+from .ffa_fwd_sm100 import FFAFwdSm100, fwd_fp32_o_borrows_kv_smem, fwd_overlaps_sO_sQ
 from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
@@ -69,6 +69,7 @@ from .ffa_utils import (
     tile_size_fwd_sm90,
     validate_arch,
     validate_head_dims,
+    validate_persistent_grid,
     validate_range_deterministic,
     validate_range_feature_support,
     validate_tensor,
@@ -180,7 +181,9 @@ def _flex_flash_attn_fwd(
             accept only the input dtype.
         sm_margin: number of SMs to reserve for concurrent kernels such as communication.
             Currently supported for q/k ranges on SM100/SM110; the forward
-            with head_dim 192 ignores it.
+            with head_dim 192 ignores it. ``num_sm - sm_margin`` must hold
+            one cluster of the launched kernel (two SMs for a 2-CTA kernel),
+            otherwise ``ValueError`` is raised.
             Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
         max_logits: optional fp32 ``[num_head]`` buffer that the per-q-head
             maximum softmax logit (``softmax_scale * q.k``, after softcap,
@@ -471,7 +474,6 @@ def _flex_flash_attn_fwd(
             head_dim=head_dim,
             head_dim_v=head_dim_v,
             num_sm=torch.cuda.get_device_properties(q.device).multi_processor_count,
-            sm_margin=sm_margin,
             cluster_size=1,
             max_tickets=batch_size * num_head * ((max_seqlen_q + tile_m - 1) // tile_m),
             max_writer=batch_size,
@@ -559,6 +561,16 @@ def _flex_flash_attn_fwd(
     ranges_persistent = has_ranges and (
         sm_margin > 0 or fwd_fp32_o_borrow_kv or fwd_deterministic
     )
+    if ranges_persistent and not fwd_overlaps_sO_sQ(
+        head_dim_padded=int(math.ceil(head_dim / 16) * 16),
+        head_dim_v_padded=int(math.ceil(head_dim_v / 16) * 16),
+        is_split_kv=False,
+    ):
+        validate_persistent_grid(
+            num_sm=torch.cuda.get_device_properties(device).multi_processor_count,
+            sm_margin=sm_margin,
+            cluster_size=2 if use_2cta_instrs else 1,
+        )
     use_clc_scheduler = (
         requested_use_clc_scheduler
         and not is_varlen_mha
@@ -1298,7 +1310,6 @@ def _flex_flash_attn_bwd(
             head_dim=head_dim,
             head_dim_v=head_dim_v,
             num_sm=num_sm,
-            sm_margin=sm_margin,
             cluster_size=cluster_size,
             # A cluster unit is one cluster K tile of one range and scheduler
             # head; ranges may overlap, so bound each by the longest one.
@@ -1307,6 +1318,15 @@ def _flex_flash_attn_bwd(
             * (num_head_kv if cat_gqa else num_head),
             # The last writers: r * stride + j + 1 with r < R and j < stride.
             max_writer=batch_size * max(max_k_tiles, dkv_writer_stride),
+        )
+    # The deterministic range chains need the DYNAMIC schedule's ticket order
+    # even without an SM reservation.
+    bwd_persistent = sm_margin > 0 or range_deterministic
+    if bwd_persistent:
+        validate_persistent_grid(
+            num_sm=torch.cuda.get_device_properties(q.device).multi_processor_count,
+            sm_margin=sm_margin,
+            cluster_size=cluster_size,
         )
 
     if has_softcap and major_arch not in (10, 11):
@@ -1584,9 +1604,6 @@ def _flex_flash_attn_bwd(
             num_sm - sm_margin, num_k_blocks, dtype=torch.int32, device=device
         )
 
-    # The deterministic range chains need the DYNAMIC schedule's ticket order
-    # even without an SM reservation.
-    bwd_persistent = sm_margin > 0 or range_deterministic
     # The DYNAMIC schedule's tile counter.
     tile_counter = (
         torch.zeros(1, dtype=torch.int32, device=device) if bwd_persistent else None
@@ -2366,7 +2383,9 @@ def flex_flash_attn_func(
 
     sm_margin: number of SMs to reserve for concurrent kernels such as communication.
         Currently supported for q/k ranges on SM100/SM110; the forward with
-        head_dim 192 ignores it.
+        head_dim 192 ignores it. ``num_sm - sm_margin`` must hold one cluster
+        of the launched kernel (two SMs for a 2-CTA kernel, such as the
+        backward at head_dim >= 128), otherwise ``ValueError`` is raised.
         Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
 
     return_max_logits: fill ``meta.max_logits`` with the fp32 ``[nheads]``

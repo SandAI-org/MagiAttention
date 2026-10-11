@@ -213,12 +213,27 @@ def validate_range_feature_support(
         raise NotImplementedError("bwd RangeMerge is not supported at head_dim 192")
 
 
+def validate_persistent_grid(*, num_sm: int, sm_margin: int, cluster_size: int) -> None:
+    """Reject a persistent q/k-range launch whose SM budget holds no cluster.
+
+    A persistent launch caps its grid at ``num_sm - sm_margin`` CTAs rounded
+    down to whole clusters of ``cluster_size`` CTAs. A budget below one
+    cluster leaves an empty grid, which fails at launch with
+    ``cudaErrorInvalidConfiguration``. The cluster size is not reduced to fit
+    the budget, as it fixes the arithmetic tiling.
+    """
+    if num_sm - sm_margin < cluster_size:
+        raise ValueError(
+            f"a persistent q/k-range launch needs num_sm - sm_margin ({num_sm} - "
+            f"{sm_margin}) to hold one cluster of cluster_size={cluster_size} CTAs"
+        )
+
+
 def validate_range_deterministic(
     *,
     head_dim: int,
     head_dim_v: int,
     num_sm: int,
-    sm_margin: int,
     cluster_size: int,
     max_tickets: int,
     max_writer: int,
@@ -226,13 +241,12 @@ def validate_range_deterministic(
     """Reject a deterministic q/k-range launch outside what the chain covers.
 
     The range-lock chain is implemented at ``head_dim == head_dim_v`` in
-    {64, 128}. It needs a persistent grid of at least one cluster, so ``num_sm - sm_margin`` must
-    hold ``cluster_size`` SMs; the cluster size is not changed to fit the
-    budget, as that changes the arithmetic tiling. ``max_tickets`` bounds the
-    tile counter, which ends at the ticket count plus the final claim of
-    every cluster and must stay within int32. ``max_writer`` bounds the
-    largest writer number of the launch's chains (fwd ``R``, bwd dQ
-    ``R * num_k_tiles``, bwd dK/dV ``R * G``), which must stay within int32.
+    {64, 128}, on a persistent grid whose SM budget is checked by
+    :func:`validate_persistent_grid`. ``max_tickets`` bounds the tile counter,
+    which ends at the ticket count plus the final claim of every cluster and
+    must stay within int32. ``max_writer`` bounds the largest writer number
+    of the launch's chains (fwd ``R``, bwd dQ ``R * num_k_tiles``, bwd dK/dV
+    ``R * G``), which must stay within int32.
 
     The bwd dQ writer of cluster K tile ``n`` of relation ``r`` is
     ``r * num_k_tiles + n + 1``, with ``num_k_tiles`` the cluster K tiles of
@@ -244,11 +258,6 @@ def validate_range_deterministic(
         raise NotImplementedError(
             "deterministic q/k ranges support head_dim == head_dim_v in "
             f"(64, 128), got head_dim={head_dim}, head_dim_v={head_dim_v}"
-        )
-    if num_sm - sm_margin < cluster_size:
-        raise ValueError(
-            f"deterministic q/k ranges need num_sm - sm_margin ({num_sm} - "
-            f"{sm_margin}) to hold one {cluster_size}-CTA cluster"
         )
     if max_tickets + num_sm // cluster_size > 2**31 - 1:
         raise ValueError(

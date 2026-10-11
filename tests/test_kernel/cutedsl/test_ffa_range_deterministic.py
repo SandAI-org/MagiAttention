@@ -44,6 +44,7 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
 from magi_attention.kernel.cutedsl.ffa_utils import (
     MT_MAP,
     get_device_arch,
+    validate_persistent_grid,
     validate_range_deterministic,
 )
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
@@ -292,13 +293,12 @@ def _range_args(relations: Relations, device="cuda") -> dict:
 class TestFfaRangeDeterministicHost(TestCase):
     """Host validation; builds no attention kernel."""
 
-    def test_validate_accepts_head_dims_64_and_128_within_budget(self):
+    def test_validate_accepts_head_dims_64_and_128(self):
         for head_dim in _DET_HEAD_DIMS:
             validate_range_deterministic(
                 head_dim=head_dim,
                 head_dim_v=head_dim,
                 num_sm=148,
-                sm_margin=146,
                 cluster_size=2,
                 max_tickets=1000,
                 max_writer=2**31 - 1,
@@ -318,30 +318,26 @@ class TestFfaRangeDeterministicHost(TestCase):
                     head_dim=head_dim,
                     head_dim_v=head_dim_v,
                     num_sm=148,
-                    sm_margin=0,
                     cluster_size=1,
                     max_tickets=1,
                     max_writer=1,
                 )
 
-    def test_validate_rejects_a_budget_below_one_cluster(self):
-        with self.assertRaises(ValueError):
-            validate_range_deterministic(
-                head_dim=128,
-                head_dim_v=128,
-                num_sm=148,
-                sm_margin=147,
-                cluster_size=2,
-                max_tickets=1,
-                max_writer=1,
-            )
+    def test_persistent_grid_rejects_a_budget_below_one_cluster(self):
+        validate_persistent_grid(num_sm=148, sm_margin=146, cluster_size=2)
+        validate_persistent_grid(num_sm=148, sm_margin=147, cluster_size=1)
+        for sm_margin, cluster_size in ((147, 2), (148, 2), (148, 1)):
+            with self.assertRaisesRegex(
+                ValueError, rf"\(148 - {sm_margin}\).*cluster_size={cluster_size}"
+            ):
+                validate_persistent_grid(
+                    num_sm=148, sm_margin=sm_margin, cluster_size=cluster_size
+                )
 
     def test_validate_counts_the_final_claims_in_the_tile_counter_bound(self):
         """The counter ends at the tickets plus one final claim per cluster:
         74 2-CTA clusters on 148 SMs."""
-        kwargs = dict(
-            head_dim=128, head_dim_v=128, num_sm=148, sm_margin=0, max_writer=1
-        )
+        kwargs = dict(head_dim=128, head_dim_v=128, num_sm=148, max_writer=1)
         validate_range_deterministic(
             cluster_size=2, max_tickets=2**31 - 1 - 74, **kwargs
         )
@@ -355,7 +351,6 @@ class TestFfaRangeDeterministicHost(TestCase):
             head_dim=128,
             head_dim_v=128,
             num_sm=148,
-            sm_margin=0,
             cluster_size=1,
             max_tickets=1,
         )
@@ -1122,6 +1117,140 @@ class TestFfaRangeDeterministicBwd(TestCase):
                         f"{name} differs at sm_margin={sm_margin}",
                     )
         self._log_ran("public api")
+
+
+class TestFfaRangePersistentGrid(TestCase):
+    """A persistent q/k-range launch (``sm_margin > 0`` or deterministic)
+    caps its grid at ``num_sm - sm_margin`` CTAs in whole clusters. The host
+    rejects a budget below one cluster before a kernel is built, whatever
+    ``deterministic``; an empty grid would fail at launch."""
+
+    def setUp(self) -> None:
+        if get_device_arch()[1] not in (10, 11):
+            self.skipTest("sm_margin requires SM100/SM110 q/k ranges")
+        torch.manual_seed(42)
+        self.num_sm = torch.cuda.get_device_properties(0).multi_processor_count
+
+    def _budget_error(self, sm_margin: int, cluster_size: int):
+        return self.assertRaisesRegex(
+            ValueError,
+            rf"\({self.num_sm} - {sm_margin}\).*cluster_size={cluster_size}",
+        )
+
+    def _bwd_inputs(self):
+        relations, total_q, total_k = _shared_k_relations()
+        q, k, v = _qkv(total_q, total_k, group=2)
+        out, lse = _flex_flash_attn_fwd(
+            q, k, v, **_range_args(relations), disable_fwd_atomic_reduction=False
+        )
+        return relations, q, k, v, out.to(q.dtype), lse, torch.randn_like(q)
+
+    def _bwd(self, relations, q, k, v, out, lse, do, sm_margin: int):
+        with mock.patch.dict(
+            "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
+        ):
+            return _flex_flash_attn_bwd(
+                q,
+                k,
+                v,
+                out,
+                lse,
+                do,
+                **_range_args(relations),
+                disable_bwd_dkv_atomic_reduction=False,
+                sm_margin=sm_margin,
+            )[:3]
+
+    def test_bwd_2cta_rejects_a_budget_below_one_cluster(self):
+        """head_dim 128 launches 2-CTA clusters: one SM, or none, holds no
+        cluster."""
+        inputs = self._bwd_inputs()
+        for sm_margin in (self.num_sm - 1, self.num_sm):
+            with _record_launch(
+                FFABwdSm100, _flex_flash_attn_bwd
+            ) as launch, self._budget_error(sm_margin, 2):
+                self._bwd(*inputs, sm_margin=sm_margin)
+            self.assertEqual(launch.built, [])
+
+    def test_bwd_2cta_runs_on_one_cluster(self):
+        relations, q, k, v, out, lse, do = self._bwd_inputs()
+        with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
+            grads = self._bwd(relations, q, k, v, out, lse, do, self.num_sm - 2)
+        (kernel,) = launch.built
+        self.assertTrue(kernel.use_2cta_instrs)
+        self.assertTrue(kernel.is_persistent)
+        qkv = [t.detach().float().requires_grad_() for t in (q, k, v)]
+        out_ref, _, _ = _ref_fwd(*qkv, relations)
+        out_ref.backward(do.float())
+        for name, got, ref in zip("qkv", grads, qkv):
+            torch.testing.assert_close(
+                got.float(),
+                ref.grad,
+                atol=3e-2,
+                rtol=3e-2,
+                msg=lambda m: f"d{name}: {m}",
+            )
+
+    def test_fwd_rejects_a_budget_below_one_cluster(self):
+        """The atomic forward launches 1-CTA clusters and rejects a budget of
+        no SM; the 2-CTA direct-store forward also rejects one SM."""
+        relations, total_q, total_k = _shared_k_relations()
+        q, k, v = _qkv(total_q, total_k, group=2)
+        with _record_launch(
+            FFAFwdSm100, _flex_flash_attn_fwd
+        ) as launch, self._budget_error(self.num_sm, 1):
+            _flex_flash_attn_fwd(
+                q,
+                k,
+                v,
+                **_range_args(relations),
+                disable_fwd_atomic_reduction=False,
+                sm_margin=self.num_sm,
+            )
+        self.assertEqual(launch.built, [])
+        # Disjoint q ranges of more than two Q tiles under one full mask.
+        q, k, v = _qkv(1024, 1024, group=1)
+        ranges = torch.tensor([[0, 512], [512, 1024]], dtype=torch.int32, device="cuda")
+        with mock.patch.dict(
+            "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
+        ), _record_launch(
+            FFAFwdSm100, _flex_flash_attn_fwd
+        ) as launch, self._budget_error(
+            self.num_sm - 1, 2
+        ):
+            _flex_flash_attn_fwd(
+                q,
+                k,
+                v,
+                q_ranges=ranges,
+                k_ranges=ranges,
+                mask_types=MT_MAP.full,
+                max_seqlen_q=512,
+                max_seqlen_k=512,
+                disable_fwd_atomic_reduction=True,
+                sm_margin=self.num_sm - 1,
+            )
+        self.assertEqual(launch.built, [])
+
+    def test_fwd_head_dim_192_ignores_the_budget(self):
+        """head_dim 192 stages O in the Q shared memory, one tile per CTA, so
+        the grid is not persistent and no budget is checked."""
+        relations, total_q, total_k = _shared_k_relations()
+        q, k, _ = _qkv(total_q, total_k, group=2, head_dim=192)
+        v = torch.randn(total_k, _NUM_HEAD_KV, 128, device="cuda", dtype=torch.bfloat16)
+        with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
+            out, _ = _flex_flash_attn_fwd(
+                q,
+                k,
+                v,
+                **_range_args(relations),
+                disable_fwd_atomic_reduction=False,
+                sm_margin=self.num_sm,
+            )
+        (kernel,) = launch.built
+        self.assertFalse(kernel.is_persistent)
+        out_ref, _, _ = _ref_fwd(q.float(), k.float(), v.float(), relations)
+        torch.testing.assert_close(out.float(), out_ref, atol=_TOL, rtol=_TOL)
 
 
 class _ScanConflictsLauncher:

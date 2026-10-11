@@ -201,6 +201,19 @@ def fwd_fp32_o_borrows_kv_smem(
     return estimated_kv_stages >= q_stage * n_chunks + 1
 
 
+def fwd_overlaps_sO_sQ(
+    *, head_dim_padded: int, head_dim_v_padded: int, is_split_kv: bool
+) -> bool:
+    """Whether O is staged in the Q shared memory.
+
+    Such a kernel runs one tile per CTA and is never persistent, so its grid
+    is not bounded by ``sm_margin``.
+    """
+    return (head_dim_padded == 192 and head_dim_v_padded >= 64) or (
+        head_dim_v_padded >= 128 and is_split_kv
+    )
+
+
 class DescaleTensors(NamedTuple):
     q_descale: Optional[cute.Tensor] = None
     k_descale: Optional[cute.Tensor] = None
@@ -398,9 +411,11 @@ class FFAFwdSm100:
         # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.maybe_causal and not self.is_local)
         self.s0_s1_barrier = False
 
-        self.overlap_sO_sQ = (
-            self.head_dim_padded == 192 and self.head_dim_v_padded >= 64
-        ) or (self.head_dim_v_padded >= 128 and self.is_split_kv)
+        self.overlap_sO_sQ = fwd_overlaps_sO_sQ(
+            head_dim_padded=self.head_dim_padded,
+            head_dim_v_padded=self.head_dim_v_padded,
+            is_split_kv=self.is_split_kv,
+        )
         if self.overlap_sO_sQ:
             self.is_persistent = False
         assert not (self.sO_borrow_kv and self.overlap_sO_sQ)
