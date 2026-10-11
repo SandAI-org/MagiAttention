@@ -18,8 +18,11 @@ Each job runs in a child process on its own GPU; the parent only reads the
 child's stdout and enforces wall-clock budgets, so a hung kernel cannot hang
 the parent (it never touches the child's GPU state). A job is one direction
 (fwd: 1-CTA O/LSE chain; bwd: 2-CTA dQ and reduced GQA dK/dV chains;
-bwd_merge: 1-CTA dQ chain of RangeMerge K groups under cat_gqa) and one
-:class:`DelayPoint` (or none); it runs, in order, a single cluster, two
+bwd_merge: 1-CTA dQ chain of RangeMerge K groups under cat_gqa;
+bwd_merge_2cta: the same on 2-CTA clusters, with groups whose consecutive
+pairs share Q rows across the two CTAs, ordered by the pair handoff) and
+one :class:`DelayPoint` (or none; ``pair_arrive`` for bwd_merge_2cta only);
+it runs, in order, a single cluster, two
 clusters and the full grid, the first and last also under a concurrent
 matmul load on another stream. Every result must equal, bit for bit, the
 undelayed deterministic result on the full grid.
@@ -67,7 +70,11 @@ _CASES: list[tuple[str, int | None, bool]] = [
     ("full_grid", None, False),
     ("full_grid_loaded", None, True),
 ]
-_DELAYS = [None, "start", "claim", "peer_arrive", "publish", "scan"]
+_DELAYS = [None, "start", "claim", "peer_arrive", "publish", "scan", "chain_wait"]
+# Delay points of the 2-CTA RangeMerge pair handoff, which the other
+# directions do not run.
+_PAIR_DELAYS = ["pair_arrive"]
+_DIRECTIONS = ("fwd", "bwd", "bwd_merge", "bwd_merge_2cta")
 
 
 # ---------------------------------------------------------------- child side
@@ -76,6 +83,8 @@ _DELAYS = [None, "start", "claim", "peer_arrive", "publish", "scan"]
 def _child(config: dict) -> None:
     import torch
 
+    from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
+    from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
     from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
     from magi_attention.kernel.cutedsl.flex_flash_attn import (
         _flex_flash_attn_bwd,
@@ -88,9 +97,11 @@ def _child(config: dict) -> None:
     )
     from tests.test_kernel.cutedsl.test_ffa_range_deterministic import (
         _merged_k_relations,
+        _merged_k_relations_2cta_adjacent,
         _overlapping_relations,
         _qkv,
         _range_args,
+        _record_launch,
     )
 
     manifest = dict(config, device=torch.cuda.get_device_name(0))
@@ -98,8 +109,8 @@ def _child(config: dict) -> None:
     torch.manual_seed(config["seed"])
     num_sm = torch.cuda.get_device_properties(0).multi_processor_count
     fwd = config["direction"] == "fwd"
-    merge = config["direction"] == "bwd_merge"
-    cluster = 1 if fwd or merge else 2
+    merge = config["direction"] in ("bwd_merge", "bwd_merge_2cta")
+    cluster = 1 if fwd or config["direction"] == "bwd_merge" else 2
 
     if merge:
         # Four shifted copies of the merged-K relations: Q rows overlap
@@ -116,6 +127,15 @@ def _child(config: dict) -> None:
             if ke > ks
         ]
         total_q, total_k = base_q + 350 * 3, base_k * 4
+        if cluster == 2:
+            # Groups of pairs sharing Q rows across the two CTAs in adjacent
+            # compute tiles, against K ranges after the copies.
+            adjacent, adjacent_q, adjacent_k = _merged_k_relations_2cta_adjacent()
+            relations += [
+                (q_range, [ks + total_k, ke + total_k], mask_type)
+                for q_range, (ks, ke), mask_type in adjacent
+            ]
+            total_q, total_k = max(total_q, adjacent_q), total_k + adjacent_k
     elif fwd:
         relations, total_q, total_k = _overlapping_relations(
             [700, 1500, 300], coverage=4, mask_types=[MT_MAP.full, MT_MAP.causal]
@@ -177,7 +197,14 @@ def _child(config: dict) -> None:
         torch.cuda.synchronize()
         return time.perf_counter() - start
 
-    reference = [t.clone() for t in run(0)]
+    with _record_launch(
+        FFAFwdSm100 if fwd else FFABwdSm100,
+        _flex_flash_attn_fwd if fwd else _flex_flash_attn_bwd,
+    ) as recorded:
+        reference = [t.clone() for t in run(0)]
+    (kernel,) = recorded.built
+    assert kernel.use_2cta_instrs == (cluster == 2), "unexpected cluster size"
+    assert fwd or kernel.range_merge == merge, "unexpected RangeMerge"
     run(0, deterministic=False)
     nondet_s = timed(lambda: run(0, deterministic=False))
     print(f"INFO nondeterministic full grid {nondet_s:.6f}s", flush=True)
@@ -328,7 +355,8 @@ def _child_cmd(config: dict) -> list[str]:
 
 
 def _child_env(gpu: str, direction: str) -> dict[str, str]:
-    # The deterministic RangeMerge backward runs 1-CTA clusters only.
+    # bwd_merge pins 1-CTA clusters; the other backward directions run
+    # 2-CTA clusters at head_dim 128.
     return dict(
         os.environ,
         CUDA_VISIBLE_DEVICES=gpu,
@@ -520,7 +548,8 @@ class TestFfaRangeDeterministicStress(TestCase):
         gpus: queue.Queue[str] = queue.Queue()
         for gpu in gpu_ids:
             gpus.put(gpu)
-        jobs = [(d, p) for d in ("fwd", "bwd", "bwd_merge") for p in _DELAYS]
+        jobs = [(d, p) for d in _DIRECTIONS for p in _DELAYS]
+        jobs += [("bwd_merge_2cta", p) for p in _PAIR_DELAYS]
         with ThreadPoolExecutor(max_workers=len(gpu_ids)) as pool:
             results = list(pool.map(lambda job: _run_job(*job, gpus), jobs))
         for result in results:

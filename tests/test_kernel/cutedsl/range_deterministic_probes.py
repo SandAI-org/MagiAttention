@@ -72,6 +72,9 @@ class DelayPoint(enum.Enum):
     # tile's chain wait precedes its reductions, so the second CTA of a
     # 2-CTA cluster issues each tile's reductions late.
     CHAIN_WAIT = "chain_wait"
+    # Before each pair handoff arrival of a 2-CTA RangeMerge dQ writer, on
+    # odd block indices: the second CTA arrives late and the first waits.
+    PAIR_ARRIVE = "pair_arrive"
 
 
 def _asm(asm: str, constraints: str, operands: list, *, loc=None, ip=None) -> None:
@@ -231,6 +234,7 @@ _DEFAULT_MAX_NS = {
     DelayPoint.PUBLISH: 20_000,
     DelayPoint.SCAN: 20_000,
     DelayPoint.CHAIN_WAIT: 40_000,
+    DelayPoint.PAIR_ARRIVE: 20_000,
 }
 
 
@@ -280,6 +284,18 @@ def delay_injection(
             publish(mChain, block, head, writer)
 
         stack.enter_context(mock.patch.object(range_chain, "publish", delayed_publish))
+    elif point is DelayPoint.PAIR_ARRIVE:
+        pair_handoff_arrive = range_chain.pair_handoff_arrive
+
+        def delayed_pair_handoff_arrive(mbar, handoff, peer):
+            odd_block_sleep(seed, max_ns)
+            pair_handoff_arrive(mbar, handoff, peer)
+
+        stack.enter_context(
+            mock.patch.object(
+                range_chain, "pair_handoff_arrive", delayed_pair_handoff_arrive
+            )
+        )
     elif point is DelayPoint.CHAIN_WAIT:
         wait_published = range_chain.wait_published
 

@@ -57,6 +57,8 @@ from magi_attention.kernel.cutedsl.range_merge import (
 )
 from magi_attention.testing import parameterize
 from tests.test_kernel.cutedsl.range_deterministic_probes import (
+    DelayPoint,
+    delay_injection,
     odd_lane_conflict_records,
     record_visits,
 )
@@ -1397,11 +1399,14 @@ class TestFfaRangeDeterministicBwd(TestCase):
     @parameterize(
         "case",
         [
-            # (q heads per kv head, cat_gqa, head_dim); 1-CTA clusters only
-            (1, False, 64),
-            (2, True, 64),
-            (1, False, 128),
-            (2, True, 128),
+            # (q heads per kv head, cat_gqa, head_dim, 2-CTA); head_dim 64
+            # launches 1-CTA clusters only.
+            (1, False, 64, False),
+            (2, True, 64, False),
+            (1, False, 128, False),
+            (2, True, 128, False),
+            (1, False, 128, True),
+            (2, True, 128, True),
         ],
     )
     def test_bwd_range_merge_bitwise_across_sm_margin(self, case):
@@ -1410,8 +1415,10 @@ class TestFfaRangeDeterministicBwd(TestCase):
         writer, an empty pair no event. dQ/dK/dV are bitwise equal across
         sm_margin and between a rebuilt and a precomputed plan, the dQ chain
         settles on the merged writers, and the gradients match the chained
-        unmerged backward with reduced dK/dV and the reference."""
-        group, cat_gqa, head_dim = case
+        unmerged backward with reduced dK/dV and the reference. Under 2-CTA
+        clusters the two CTAs of a writer hand off at every pair boundary."""
+        group, cat_gqa, head_dim, two_cta = case
+        cluster = 2 if two_cta else 1
         relations, total_q, total_k = _merged_k_relations()
         q, k, v, out, lse, do = self._fwd_bwd_inputs(
             relations, total_q, total_k, group, head_dim
@@ -1435,7 +1442,7 @@ class TestFfaRangeDeterministicBwd(TestCase):
                 sm_margin=sm_margin,
             )
 
-        env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "1"}
+        env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0" if two_cta else "1"}
         first = None
         with mock.patch.dict("os.environ", env):
             with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
@@ -1443,10 +1450,17 @@ class TestFfaRangeDeterministicBwd(TestCase):
             (kernel,) = launch.built
             self.assertTrue(kernel.range_merge and kernel.deterministic)
             self.assertTrue(kernel.is_persistent)
-            self.assertFalse(kernel.use_2cta_instrs)
+            self.assertEqual(kernel.use_2cta_instrs, two_cta)
+            self.assertEqual(kernel.dq_pair_handoff, two_cta)
             self.assertFalse(kernel.dKV_postprocess)
             _assert_merged_dq_chain_settled(launch, relations)
-            for sm_margin in (0, 1, self.num_sm - 4, self.num_sm - 1, 0):
+            for sm_margin in (
+                0,
+                1,
+                self.num_sm - 4 * cluster,
+                self.num_sm - cluster,
+                0,
+            ):
                 grads = [g.clone() for g in merge_bwd(sm_margin)]
                 if first is None:
                     first = grads
@@ -1457,7 +1471,9 @@ class TestFfaRangeDeterministicBwd(TestCase):
                         f"d{name} differs at sm_margin={sm_margin}",
                     )
             assert first is not None
-            for name, got, want in zip("qkv", merge_bwd(self.num_sm - 4, plan), first):
+            for name, got, want in zip(
+                "qkv", merge_bwd(self.num_sm - 4 * cluster, plan), first
+            ):
                 self.assertTrue(torch.equal(got, want), f"d{name}: plan differs")
             unmerged = self._det_bwd(
                 q, k, v, out, lse, do, relations, direct_dkv=False, cat_gqa=cat_gqa
@@ -1476,10 +1492,71 @@ class TestFfaRangeDeterministicBwd(TestCase):
             )
         self._log_ran(f"bwd range merge {case}")
 
-    def test_bwd_range_merge_cuda_graph_replay_matches_eager_bitwise(self):
+    @parameterize("cat_gqa", [False, True])
+    def test_bwd_range_merge_2cta_adjacent_pair_conflicts_bitwise(self, cat_gqa):
+        """2-CTA RangeMerge whose consecutive pairs share Q rows that change
+        CTA in adjacent compute tiles: with the second CTA of every cluster
+        delayed before each tile's reductions, dQ/dK/dV equal the undelayed
+        result bit for bit on the full grid and on one cluster. Without the
+        pair handoff the delay reorders the shared rows' additions and dQ
+        differs from run to run."""
+        relations, total_q, total_k = _merged_k_relations_2cta_adjacent()
+        group = 2 if cat_gqa else 1
+        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, group)
+
+        def merge_bwd(sm_margin):
+            return [
+                g.clone()
+                for g in self._det_bwd(
+                    q,
+                    k,
+                    v,
+                    out,
+                    lse,
+                    do,
+                    relations,
+                    range_merge=True,
+                    cat_gqa=cat_gqa,
+                    sm_margin=sm_margin,
+                )
+            ]
+
+        env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
+        with mock.patch.dict("os.environ", env):
+            with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
+                first = merge_bwd(0)
+            (kernel,) = launch.built
+            self.assertTrue(kernel.use_2cta_instrs and kernel.dq_pair_handoff)
+            _assert_merged_dq_chain_settled(launch, relations)
+            with delay_injection(DelayPoint.CHAIN_WAIT, seed=7, max_ns=20_000):
+                for sm_margin in (0, self.num_sm - 2):
+                    for _ in range(5):
+                        for name, got, want in zip("qkv", merge_bwd(sm_margin), first):
+                            self.assertTrue(
+                                torch.equal(got, want),
+                                f"d{name} differs under delay at {sm_margin=}",
+                            )
+        refs = self._ref_grads(q, k, v, do, relations)
+        for name, got, ref in zip("qkv", first, refs):
+            torch.testing.assert_close(
+                got.float(), ref, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
+            )
+        self._log_ran(f"bwd range merge 2-CTA adjacent conflicts {cat_gqa=}")
+
+    @parameterize(
+        "case",
+        [
+            # (head_dim, 2-CTA)
+            (64, False),
+            (128, True),
+        ],
+    )
+    def test_bwd_range_merge_cuda_graph_replay_matches_eager_bitwise(self, case):
         """The merged dQ chain re-zeroes its state inside a captured graph:
         replays on new data equal eager runs bit for bit, with the K-merge
-        plan built before the capture."""
+        plan built before the capture; under 2-CTA the pair handoff barriers
+        start every replay from their initial phase."""
+        head_dim, two_cta = case
         relations, total_q, total_k = _merged_k_relations()
         args = _range_args(relations)
         plan = plan_range_merge_bwd(
@@ -1502,38 +1579,36 @@ class TestFfaRangeDeterministicBwd(TestCase):
             )[:3]
 
         data = [
-            self._fwd_bwd_inputs(relations, total_q, total_k, 2, head_dim=64)
+            self._fwd_bwd_inputs(relations, total_q, total_k, 2, head_dim=head_dim)
             for _ in range(2)
         ]
-        eager = [[g.clone() for g in bwd(*d)] for d in data]
-        static = [t.clone() for t in data[0]]
-        side = torch.cuda.Stream()
-        side.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(side):
-            bwd(*static)
-        torch.cuda.current_stream().wait_stream(side)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            static_grads = bwd(*static)
-        for i in (1, 0, 1):
-            for dst, src in zip(static, data[i]):
-                dst.copy_(src)
-            graph.replay()
-            torch.cuda.synchronize()
-            for name, got, want in zip("qkv", static_grads, eager[i]):
-                self.assertTrue(torch.equal(got, want), f"d{name} of replay on {i}")
-        self._log_ran("bwd range merge cuda graph replay")
-
-    def test_bwd_range_merge_rejects_two_cta_clusters(self):
-        """Pairs of one merged writer may share Q rows across the row halves
-        of a 2-CTA cluster, which the chain does not order: rejected, not
-        run unordered or moved to 1-CTA."""
-        relations, total_q, total_k = _merged_k_relations()
-        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, 1)
-        with mock.patch.dict(
-            "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
-        ), self.assertRaisesRegex(NotImplementedError, "1-CTA"):
-            self._det_bwd(q, k, v, out, lse, do, relations, range_merge=True)
+        env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0" if two_cta else "1"}
+        with mock.patch.dict("os.environ", env), _record_launch(
+            FFABwdSm100, _flex_flash_attn_bwd
+        ) as launch:
+            eager = [[g.clone() for g in bwd(*d)] for d in data]
+            static = [t.clone() for t in data[0]]
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                bwd(*static)
+            torch.cuda.current_stream().wait_stream(side)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                static_grads = bwd(*static)
+            # The swapped-in compile cache owns the captured kernel's module,
+            # so every replay runs before the context restores the old cache.
+            (kernel,) = launch.built
+            self.assertEqual(kernel.use_2cta_instrs, two_cta)
+            self.assertTrue(kernel.range_merge and kernel.deterministic)
+            for i in (1, 0, 1):
+                for dst, src in zip(static, data[i]):
+                    dst.copy_(src)
+                graph.replay()
+                torch.cuda.synchronize()
+                for name, got, want in zip("qkv", static_grads, eager[i]):
+                    self.assertTrue(torch.equal(got, want), f"d{name} of replay on {i}")
+        self._log_ran(f"bwd range merge cuda graph replay {case}")
 
     def test_public_api_fwd_bwd_bitwise_with_sink_and_softcap(self):
         """flex_flash_attn_func(deterministic=True) on GQA with reduced dK/dV,
