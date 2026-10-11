@@ -487,6 +487,44 @@ class TestRangeDeterministicProtocol(unittest.TestCase):
             self.assertFalse(outcome.out_of_order, f"{order=}")
             self.assertEqual(outcome.stuck, not r1_holds, f"{order=}")
 
+    def test_packed_rows_scan_span_and_chain_complete(self):
+        """PackGQA (G dividing the tile height): token range [s, e) is the
+        packed row range [s * G, e * G) of one kv head, cut into tiles from
+        its start. The blocks of its tiles are exactly the span the conflict
+        scan records from the token range, s * G // M to (e * G - 1) // M,
+        and the chain over packed rows completes in writer order."""
+        rng = random.Random(2)
+        for group in (2, 4):
+            for _ in range(20):
+                ranges = []
+                for _ in range(rng.randint(2, 3)):
+                    start = rng.randint(0, 2 * self._M // group)
+                    ranges.append((start, start + rng.randint(0, 2 * self._M // group)))
+                packed = [(s * group, e * group) for s, e in ranges]
+                for (s, e), (ps, pe) in zip(ranges, packed):
+                    tile_blocks = {
+                        b
+                        for rows in logical_tiles(ps, pe, self._M)
+                        for b in blocks_of(rows, self._M)
+                    }
+                    scan_span = (
+                        set(range(s * group // self._M, (e * group - 1) // self._M + 1))
+                        if e > s
+                        else set()
+                    )
+                    self.assertEqual(tile_blocks, scan_span, f"{group=} {(s, e)=}")
+                writers = range_writers(packed, self._M)
+                workers = rng.randint(1, 2)
+                self.assertCompletes(
+                    self._run(
+                        writers,
+                        head_major_order(writers),
+                        workers,
+                        rng.randint(1, workers),
+                        ClaimMode.ATOMIC,
+                    )
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

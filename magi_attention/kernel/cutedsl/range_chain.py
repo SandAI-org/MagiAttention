@@ -54,6 +54,14 @@ writers whose blocks the slot's incremental scan already recorded, each
 block holding the highest such writer with an event there. A slot walks its
 tiles in non-decreasing range order, so before a tile of range ``r`` it
 records the ranges in ``[r_last, r)`` and reads its predecessors back.
+
+Rows are buffer rows, ``rows_per_token`` per token of the ranges. A
+PackGQA buffer (fwd O/LSE with ``G`` q heads per kv head) has ``G`` rows
+per token, row ``G * token + g`` for q head ``g`` of a kv head, so token
+range ``[s, e)`` is the row range ``[s * G, e * G)``, the head axis of the
+chain state is the kv head, and ``num_blocks`` counts blocks of packed rows.
+Its tiles are cut from ``s * G``; ``G`` divides ``block_size``, so a tile
+starts on a token boundary and still has events on at most two blocks.
 """
 
 from dataclasses import dataclass
@@ -135,12 +143,15 @@ def scan_conflicts(
     range_to: Int32,
     block_size: cutlass.Constexpr[int],
     last_writer: Callable[[Int32], Int32],
+    rows_per_token: cutlass.Constexpr[int] = 1,
 ) -> None:
     """Record the blocks of the ranges in ``[range_from, range_to)`` for ``slot``.
 
     Block ``b`` of range ``r`` gets ``last_writer(r)``, the highest writer of
     ``r`` with events on its blocks; 0 means ``r`` has no work tile, which
-    records nothing, as does an empty range. The whole warp calls; its lanes
+    records nothing, as does an empty range. ``mRanges`` holds token ranges;
+    range ``[s, e)`` covers the rows ``[s, e) * rows_per_token``, the blocks
+    ``tile_events`` gives for its tiles. The whole warp calls; its lanes
     write the blocks of one range in parallel, and any lane may read
     ``mConflict[slot, ...]`` after the return.
 
@@ -153,8 +164,8 @@ def scan_conflicts(
     lane = cute.arch.lane_idx()
     r = range_from
     while r < range_to:
-        start = mRanges[r, 0]
-        end = mRanges[r, 1]
+        start = mRanges[r, 0] * rows_per_token
+        end = mRanges[r, 1] * rows_per_token
         writer = last_writer(r)
         if end > start and writer != 0:
             block = start // block_size + lane
