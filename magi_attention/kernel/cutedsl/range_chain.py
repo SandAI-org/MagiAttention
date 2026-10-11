@@ -46,6 +46,13 @@ arrives the logical tile's weight on the logical tile's blocks after its own
 part is complete, and a block publishes once the sum reaches 2 times the
 cluster size, so the publish covers the parts of every CTA.
 
+The chain orders writers, not the two CTAs inside one. Under RangeMerge a
+writer's pairs may overlap in Q, and a row in the half of CTA 1 for one
+pair can be in the half of CTA 0 for the next, so the bwd dQ of a 2-CTA
+merged writer also hands off between its CTAs at every pair boundary
+(``pair_handoff_arrive`` / ``pair_handoff_wait``): pair ``j`` adds only
+after both CTAs' additions of the pairs before it landed.
+
 Chain state, int32 ``(num_blocks, num_heads, 2)``: per (block, head), the
 last published writer and the arrival count of the writer in flight.
 
@@ -81,7 +88,12 @@ from cutlass import Int32, const_expr
 # isort: split
 from quack.cute_dsl_utils import ParamsBase
 
-from .cutedsl_utils import elem_pointer, ld_acquire
+from .cutedsl_utils import (
+    elem_pointer,
+    ld_acquire,
+    mbarrier_arrive_peer_release_cluster,
+    mbarrier_wait_acquire_cluster,
+)
 
 
 @dataclass
@@ -313,3 +325,44 @@ def publish(mChain: cute.Tensor, block: Int32, head: Int32, writer: Int32) -> No
         sem="release",
         scope="gpu",
     )
+
+
+@cute.jit
+def pair_handoff_arrive(mbar: cute.Pointer, handoff: Int32, peer: Int32) -> None:
+    """Arrive on handoff ``handoff`` of a 2-CTA RangeMerge dQ writer, on the
+    barrier ``mbar[handoff & 1]`` of the peer CTA of rank ``peer``.
+
+    One thread per CTA arrives, at the start of every pair after the first,
+    after every bulk reduction of the earlier pairs completed
+    (``cp_async_bulk_wait_group(0, read=False)`` by the issuing thread) and
+    the issuing and arriving threads met at a CTA barrier. A completed bulk
+    reduction is followed by an implicit async-to-generic proxy fence (PTX
+    ISA 9.7.9.26.2), and the cluster-scope release carries the reduced rows
+    to the peer's wait. Handoffs alternate between two barriers of arrival
+    count 1: a CTA arrives on handoff ``k + 2`` only after its wait of
+    ``k + 1``, which needs the peer's arrival of ``k + 1``, issued after the
+    peer's wait of ``k``, so a barrier is at most one phase ahead of its
+    waiter; with one barrier the peer's arrivals of ``k`` and ``k + 1``
+    could both land before the wait of ``k``, and a parity wait reads two
+    completions as none."""
+    mbarrier_arrive_peer_release_cluster(mbar + (handoff & 1), peer)
+
+
+@cute.jit
+def pair_handoff_wait(mbar: cute.Pointer, handoff: Int32) -> None:
+    """Wait for the peer's arrival of handoff ``handoff`` on this CTA's
+    ``mbar[handoff & 1]`` (parity ``(handoff >> 1) & 1``), then order the
+    acquired view before this CTA's bulk reductions.
+
+    The thread that arrived waits, before the CTA barrier that precedes the
+    pair's first bulk reduction. Both CTAs must hand off at the same pairs,
+    or one waits forever. The acquire is in the generic proxy, the bulk
+    reductions that follow are in the async proxy, and the peer's reductions
+    of the same rows were made by another thread block: the PTX memory
+    model (8.9.5, proxy-preserved base causality) orders two async-proxy
+    accesses to one address only within one thread block, and cross-proxy
+    ordering needs a proxy fence (9.7.9.26.2), so ``fence.proxy.async.global``
+    follows the acquire; without it the reduction may read the row before
+    the peer's addition."""
+    mbarrier_wait_acquire_cluster(mbar + (handoff & 1), (handoff >> 1) & 1)
+    cute.arch.fence_proxy("async.global")
