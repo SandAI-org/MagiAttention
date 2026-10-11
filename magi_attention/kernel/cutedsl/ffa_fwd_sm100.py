@@ -469,9 +469,6 @@ class FFAFwdSm100:
                 self.scheduling_mode == SchedulingMode.DYNAMIC
             ), "deterministic forward needs persistent range scheduling"
             assert not disable_fwd_atomic_reduction and not is_split_kv
-            # A packed stage mixes rows of several q heads; the lock chain
-            # keys its rows on (q head, token).
-            assert not pack_gqa, "deterministic forward does not pack GQA"
             assert head_dim == head_dim_v and head_dim in (
                 64,
                 128,
@@ -782,7 +779,8 @@ class FFAFwdSm100:
         # Deterministic only, see range_chain: int32 (num_slots, num_lock_blocks)
         # conflict state, zero before the launch, with num_slots at least the
         # grid size. mRangeLocks is then the (num_lock_blocks, num_head, 2)
-        # chain state instead of the mutex.
+        # chain state instead of the mutex. Under PackGQA both count blocks of
+        # packed rows (G * token + g) and the chain state's heads are kv heads.
         mConflictState: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
@@ -5011,6 +5009,11 @@ class FFAFwdSm100:
                                         batch_idx,
                                         self.m_block_size,
                                         last_writer=lambda r: r + 1,
+                                        rows_per_token=(
+                                            self.qhead_per_kvhead
+                                            if const_expr(self.pack_gqa)
+                                            else 1
+                                        ),
                                     )
                                 chain_scanned = batch_idx
                                 if tidx == 0:

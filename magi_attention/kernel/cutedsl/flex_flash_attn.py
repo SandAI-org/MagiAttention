@@ -194,7 +194,8 @@ def _flex_flash_attn_fwd(
             relation order on the range atomic path, so O and LSE are bitwise
             identical across runs and independent of ``sm_margin``. The launch
             is persistent whatever ``sm_margin``; ``head_dim == head_dim_v``
-            in {64, 128} only, without ``pack_gqa``. The range atomic path
+            in {64, 128} only. Under ``pack_gqa`` each (token, q head) row
+            also merges in relation order. The range atomic path
             exists on SM100/SM110 only; q/k ranges without
             ``disable_fwd_atomic_reduction`` raise ``NotImplementedError`` on
             other architectures. The dense and
@@ -325,8 +326,6 @@ def _flex_flash_attn_fwd(
     # Only the range atomic merge has several writers per O row to order.
     fwd_deterministic = deterministic and not disable_fwd_atomic_reduction
     if fwd_deterministic:
-        if pack_gqa:
-            raise NotImplementedError("deterministic q/k ranges do not pack GQA")
         if block_sparse_tensors is not None:
             raise NotImplementedError(
                 "deterministic q/k ranges cannot be combined with block sparsity"
@@ -468,14 +467,17 @@ def _flex_flash_attn_fwd(
         ), f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
     if fwd_deterministic:
         # Atomic ranges launch 1-CTA clusters, one tile per at least tile_m
-        # rows of one range and q head. Ranges may overlap, so the ticket
-        # count is bounded per range by the longest one.
+        # rows of one range and head: q rows of a q head, or packed rows
+        # (G per token) of a kv head under PackGQA. Ranges may overlap, so the
+        # ticket count is bounded per range by the longest one.
+        tile_heads = num_head_kv if pack_gqa else num_head
+        tile_rows = max_seqlen_q * (qhead_per_kvhead if pack_gqa else 1)
         validate_range_deterministic(
             head_dim=head_dim,
             head_dim_v=head_dim_v,
             num_sm=torch.cuda.get_device_properties(q.device).multi_processor_count,
             cluster_size=1,
-            max_tickets=batch_size * num_head * ((max_seqlen_q + tile_m - 1) // tile_m),
+            max_tickets=batch_size * tile_heads * ((tile_rows + tile_m - 1) // tile_m),
             max_writer=batch_size,
         )
     if max_seqlen_k is None:
@@ -2408,7 +2410,7 @@ def flex_flash_attn_func(
         order: O/LSE by relation, dQ by (relation, K tile), reduced dK/dV by
         (relation, q head); the kernels then launch persistent whatever
         ``sm_margin``. Ranges need SM100/SM110 and ``head_dim == head_dim_v``
-        in {64, 128}, without ``pack_gqa``, RangeMerge or block sparsity;
+        in {64, 128}, without RangeMerge or block sparsity;
         other architectures raise ``NotImplementedError``, except that the
         forward alone runs under ``disable_fwd_atomic_reduction``, whose O
         rows have one writer each.

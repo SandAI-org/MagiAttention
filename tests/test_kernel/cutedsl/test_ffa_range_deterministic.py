@@ -398,6 +398,51 @@ class TestFfaRangeDeterministicHost(TestCase):
                 deterministic=True,
             )
 
+    def test_fwd_tile_counter_bound_counts_packed_units(self):
+        """Under PackGQA the fwd bound counts units of 128 packed rows per kv
+        head: with q ranges of 4097 rows, 8 kv heads and G = 2 a range has
+        8 * ceil(8194 / 128) = 520 units, below the unpacked 16 * 33 = 528.
+        The largest range count within the int32 counter under the packed
+        bound reaches the kernel; one more range raises."""
+        if get_device_arch()[1] not in (10, 11):
+            self.skipTest("deterministic q/k ranges require SM100/SM110")
+        rows, num_head_kv, group = 4097, 8, 2
+        num_sm = torch.cuda.get_device_properties(0).multi_processor_count
+        packed_units = num_head_kv * math.ceil(rows * group / 128)
+        num_ranges = (2**31 - 1 - num_sm) // packed_units
+        self.assertGreater(
+            num_ranges * num_head_kv * group * math.ceil(rows / 128) + num_sm,
+            2**31 - 1,
+        )
+        q, k, v = _qkv(rows, rows, group=group, num_head_kv=num_head_kv)
+
+        class KernelReached(Exception):
+            pass
+
+        def fwd(n: int) -> None:
+            ranges = torch.tensor([0, rows], dtype=torch.int32, device="cuda")
+            _flex_flash_attn_fwd(
+                q,
+                k,
+                v,
+                q_ranges=ranges.expand(n, 2).contiguous(),
+                k_ranges=ranges.expand(n, 2).contiguous(),
+                mask_types=0,
+                max_seqlen_q=rows,
+                max_seqlen_k=rows,
+                disable_fwd_atomic_reduction=False,
+                deterministic=True,
+                pack_gqa=True,
+            )
+
+        with mock.patch.object(
+            _flex_flash_attn_fwd, "compile_cache", JITCache()
+        ), mock.patch.object(FFAFwdSm100, "__init__", side_effect=KernelReached):
+            with self.assertRaises(KernelReached):
+                fwd(num_ranges)
+            with self.assertRaisesRegex(ValueError, "tile counter"):
+                fwd(num_ranges + 1)
+
     def test_debug_mode_rejects_max_seqlen_k_below_the_longest_k_range(self):
         """max_seqlen_k is trusted to bound every K range; deterministic
         ranges number the dQ writers of the K tiles of a relation by it. FFA
@@ -716,10 +761,153 @@ class TestFfaRangeDeterministicFwd(TestCase):
         with self.assertRaises(NotImplementedError):
             self._det_fwd(q96, k96, v96, relations)
         q, k, v = _qkv(total_q, total_k, group=2)
-        with self.assertRaises(NotImplementedError):
-            self._det_fwd(q, k, v, relations, pack_gqa=True)
         with self.assertRaises(ValueError):
             self._det_fwd(q, k, v, relations, sm_margin=self.num_sm)
+        # A packed stage tile must start on a token boundary.
+        q3, k3, v3 = _qkv(total_q, total_k, group=3)
+        with self.assertRaisesRegex(
+            NotImplementedError, "multiple of qhead_per_kvhead"
+        ):
+            self._det_fwd(q3, k3, v3, relations, pack_gqa=True)
+
+    def _assert_bitwise_packed(self, q, k, v, relations: Relations) -> tuple:
+        """:meth:`_assert_bitwise_across_sm_margin` of the packed fwd. Every
+        kernel built is the deterministic packed one, and every chain state
+        is ``(packed blocks + 1, num_head_kv, 2)`` and settles on the packed
+        rows ``[s * G, e * G)`` of the q ranges."""
+        group = q.shape[1] // k.shape[1]
+        with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
+            result = self._assert_bitwise_across_sm_margin(
+                lambda m: self._det_fwd(q, k, v, relations, pack_gqa=True, sm_margin=m)
+            )
+        self.assertTrue(launch.built)
+        for kernel in launch.built:
+            self.assertTrue(kernel.deterministic and kernel.pack_gqa)
+            self.assertEqual(kernel.qhead_per_kvhead, group)
+        block = launch.built[0].m_block_size
+        packed = [[s * group, e * group] for (s, e), _, _ in relations]
+        self.assertEqual(len(launch.chains), 5)
+        for chain in launch.chains:
+            self.assertEqual(
+                tuple(chain.shape),
+                (math.ceil(q.shape[0] * group / block) + 1, k.shape[1], 2),
+            )
+            _assert_chain_settled(chain, packed, block, lambda r: r + 1)
+        return result
+
+    @parameterize("group", [2, 4])
+    @parameterize("head_dim", _DET_HEAD_DIMS)
+    def test_packed_fwd_bitwise_across_runs_and_sm_margin(self, group, head_dim):
+        """PackGQA: four relations cover every row of each q range, whose
+        packed starts 2 * (3 + c) and 4 * (3 + c) are off the 128-row block
+        grid. O/LSE do not depend on the grid, match the reference, and stay
+        close to the unpacked deterministic result."""
+        relations, total_q, total_k = _overlapping_relations(
+            [129, 300, 1000, 77], coverage=4, mask_types=[MT_MAP.full, MT_MAP.causal]
+        )
+        q, k, v = _qkv(total_q, total_k, group, head_dim=head_dim)
+        out, lse = self._assert_bitwise_packed(q, k, v, relations)
+        out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
+        torch.testing.assert_close(out, out_ref, atol=_TOL, rtol=_TOL)
+        torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
+        out_unpacked, lse_unpacked = self._det_fwd(q, k, v, relations, pack_gqa=False)
+        torch.testing.assert_close(out, out_unpacked, atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(lse, lse_unpacked, atol=1e-4, rtol=1e-4)
+        self._log_ran(f"packed bitwise G{group} hd{head_dim}")
+
+    @parameterize("group", [2, 4])
+    def test_packed_fwd_empty_keyless_and_block_boundary_relations(self, group):
+        """PackGQA block geometry: [61, 200) starts at packed row 122 (G = 2)
+        or 244 (G = 4), so its first tile spans two blocks; [64, 128) is
+        exactly packed blocks 1 (G = 2) or 2-3 (G = 4); an empty q range, a
+        relation without keys and a one-row range still arrive on their
+        blocks."""
+        relations: Relations = [
+            ([61, 200], [0, 200], MT_MAP.full),
+            ([50, 50], [200, 260], MT_MAP.full),
+            ([100, 300], [260, 260], MT_MAP.full),
+            ([64, 128], [260, 500], MT_MAP.causal),
+            ([129, 130], [500, 520], MT_MAP.full),
+            ([0, 257], [520, 900], MT_MAP.full),
+        ]
+        q, k, v = _qkv(420, 900, group=group)
+        out, lse = self._assert_bitwise_packed(q, k, v, relations)
+        out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
+        torch.testing.assert_close(out, out_ref, atol=_TOL, rtol=_TOL)
+        finite = torch.isfinite(lse_ref)
+        self.assertTrue(torch.equal(finite, torch.isfinite(lse)))
+        torch.testing.assert_close(lse[finite], lse_ref[finite], atol=1e-3, rtol=1e-3)
+        self._log_ran(f"packed empty/keyless/boundary G{group}")
+
+    @parameterize("sm_margin_from_end", [None, 3])
+    def test_packed_fwd_tile_counter_counts_packed_units(self, sm_margin_from_end):
+        """Under PackGQA a unit is 128 packed rows of one range and kv head:
+        the counter ends at ``num_head_kv * sum(ceil(len * G / 128))`` plus
+        one final claim per CTA of a grid sized by the packed rows."""
+        group = 4
+        relations, total_q, total_k = _overlapping_relations(
+            [129, 600], coverage=3, mask_types=[MT_MAP.full]
+        )
+        q, k, v = _qkv(total_q, total_k, group=group)
+        sm_margin = (
+            0 if sm_margin_from_end is None else self.num_sm - sm_margin_from_end
+        )
+        with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
+            self._det_fwd(q, k, v, relations, pack_gqa=True, sm_margin=sm_margin)
+        torch.cuda.synchronize()
+        (kernel,) = launch.built
+        self.assertTrue(kernel.deterministic and kernel.pack_gqa)
+        (counter,) = launch.counters
+        expected = _expected_tile_counter(
+            [(e - s) * group for (s, e), _, _ in relations],
+            num_head=k.shape[1],
+            total_rows=total_q * group,
+            tile=kernel.cta_tiler[0],
+            cluster=1,
+            sm_budget=self.num_sm - sm_margin,
+        )
+        self.assertEqual(int(counter.item()), expected)
+        self._log_ran(f"packed counter sm_margin={sm_margin}")
+
+    def test_packed_fwd_cuda_graph_replay_matches_eager_bitwise(self):
+        """The packed chain, conflict and tile-counter states are re-zeroed
+        inside the captured graph, so replays on new data equal eager runs
+        bit for bit."""
+        relations, total_q, total_k = _overlapping_relations(
+            [129, 300], coverage=3, mask_types=[MT_MAP.full, MT_MAP.causal]
+        )
+        args = _range_args(relations)
+
+        def fwd(q, k, v):
+            return _flex_flash_attn_fwd(
+                q,
+                k,
+                v,
+                **args,
+                disable_fwd_atomic_reduction=False,
+                deterministic=True,
+                pack_gqa=True,
+            )
+
+        data = [_qkv(total_q, total_k, group=4) for _ in range(2)]
+        eager = [[t.clone() for t in fwd(*d)] for d in data]
+        static = [t.clone() for t in data[0]]
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            fwd(*static)
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_out = fwd(*static)
+        for i in (1, 0, 1):
+            for dst, src in zip(static, data[i]):
+                dst.copy_(src)
+            graph.replay()
+            torch.cuda.synchronize()
+            for name, got, want in zip(("out", "lse"), static_out, eager[i]):
+                self.assertTrue(torch.equal(got, want), f"{name} of replay on data {i}")
+        self._log_ran("packed cuda graph replay")
 
     def test_direct_store_fwd_ignores_deterministic(self):
         """The direct store has one writer per O row: no chain, no forced
