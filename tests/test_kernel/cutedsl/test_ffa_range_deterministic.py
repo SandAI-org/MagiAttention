@@ -290,7 +290,7 @@ def _range_args(relations: Relations, device="cuda") -> dict:
 
 
 class TestFfaRangeDeterministicHost(TestCase):
-    """Host validation; launches no kernel."""
+    """Host validation; builds no attention kernel."""
 
     def test_validate_accepts_head_dims_64_and_128_within_budget(self):
         for head_dim in _DET_HEAD_DIMS:
@@ -402,6 +402,52 @@ class TestFfaRangeDeterministicHost(TestCase):
                 disable_bwd_dkv_atomic_reduction=False,
                 deterministic=True,
             )
+
+    def test_debug_mode_rejects_max_seqlen_k_below_the_longest_k_range(self):
+        """max_seqlen_k is trusted to bound every K range; deterministic
+        ranges number the dQ writers of the K tiles of a relation by it. FFA
+        debug mode reads the ranges back and raises with both numbers before
+        a kernel is built; a bound equal to the longest range passes."""
+        if get_device_arch()[1] not in (10, 11):
+            self.skipTest("deterministic q/k ranges require SM100/SM110")
+        relations: Relations = [
+            ([0, 100], [0, 300], MT_MAP.full),
+            ([50, 200], [300, 400], MT_MAP.causal),
+        ]
+        q, k, v = _qkv(200, 400, group=1)
+        lse = torch.zeros(200, q.shape[1], device="cuda")
+        args = _range_args(relations)
+        self.assertEqual(args["max_seqlen_k"], 300)
+
+        class KernelReached(Exception):
+            pass
+
+        def bwd(max_seqlen_k: int) -> None:
+            _flex_flash_attn_bwd(
+                q,
+                k,
+                v,
+                q,
+                lse,
+                q,
+                **{**args, "max_seqlen_k": max_seqlen_k},
+                disable_bwd_dkv_atomic_reduction=False,
+                deterministic=True,
+            )
+
+        with mock.patch.dict(
+            "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE": "1"}
+        ), mock.patch.object(
+            _flex_flash_attn_bwd, "compile_cache", JITCache()
+        ), mock.patch.object(
+            FFABwdSm100, "__init__", side_effect=KernelReached
+        ):
+            with self.assertRaisesRegex(
+                ValueError, r"max_seqlen_k=299 < longest k range 300"
+            ):
+                bwd(299)
+            with self.assertRaises(KernelReached):
+                bwd(300)
 
     def test_range_merge_is_rejected_before_its_preprocessing(self):
         """deterministic + RangeMerge raises at the entry of the autograd
@@ -985,6 +1031,45 @@ class TestFfaRangeDeterministicBwd(TestCase):
             sm_budget=self.num_sm - sm_margin,
         )
         self.assertEqual(int(counter.item()), expected)
+
+    def test_bwd_reads_no_range_back_outside_debug_mode(self):
+        """Outside FFA debug mode the max_seqlen_k contract is trusted: a
+        warm deterministic range bwd issues no synchronizing torch op, which
+        ``torch.cuda.set_sync_debug_mode("error")`` turns into an error. The
+        debug-mode range read-back is such an op."""
+        relations, total_q, total_k = _overlapping_relations(
+            [129, 300], coverage=2, mask_types=[MT_MAP.full]
+        )
+        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, 1)
+        # Built up front: copying the host range lists to the device syncs.
+        args = _range_args(relations)
+
+        def bwd(debug_mode: str) -> None:
+            with mock.patch.dict(
+                "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE": debug_mode}
+            ):
+                _flex_flash_attn_bwd(
+                    q,
+                    k,
+                    v,
+                    out,
+                    lse,
+                    do,
+                    **args,
+                    disable_bwd_dkv_atomic_reduction=True,
+                    deterministic=True,
+                )
+
+        bwd("0")  # compile outside the sync check
+        torch.cuda.synchronize()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            bwd("0")
+            with self.assertRaisesRegex(RuntimeError, "synchronizing"):
+                bwd("1")
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+        self._log_ran("bwd no sync outside debug mode")
 
     def test_bwd_rejects_unsupported_combinations(self):
         relations, total_q, total_k = _overlapping_relations(

@@ -233,6 +233,12 @@ def validate_range_deterministic(
     every cluster and must stay within int32. ``max_writer`` bounds the
     largest writer number of the launch's chains (fwd ``R``, bwd dQ
     ``R * num_k_tiles``, bwd dK/dV ``R * G``), which must stay within int32.
+
+    The bwd dQ writer of cluster K tile ``n`` of relation ``r`` is
+    ``r * num_k_tiles + n + 1``, with ``num_k_tiles`` the cluster K tiles of
+    ``max_seqlen_k``. The numbers are unique only if no K range is longer
+    than ``max_seqlen_k``; the caller guarantees it, and FFA debug mode
+    checks it against the ranges, as reading them back syncs.
     """
     if head_dim != head_dim_v or head_dim not in (64, 128):
         raise NotImplementedError(

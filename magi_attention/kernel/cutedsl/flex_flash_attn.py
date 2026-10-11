@@ -1024,6 +1024,22 @@ def _flex_flash_attn_bwd(
         sm_margin=sm_margin,
         deterministic=deterministic,
     )
+    if (
+        has_ranges
+        and max_seqlen_k is not None
+        and magiattn_cutedsl.is_ffa_debug_mode_enabled()
+        and k_ranges is not None
+        and k_ranges.shape[0] > 0
+    ):
+        # max_seqlen_k must bound every K range: the quota scheduler takes it
+        # as the widest range, and deterministic ranges number the dQ writers
+        # by it, which collide on a longer range (out-of-order merge or hang).
+        # Reading the ranges back syncs, so only debug mode checks it.
+        longest_k = int((k_ranges[:, 1] - k_ranges[:, 0]).max().item())
+        if longest_k > max_seqlen_k:
+            raise ValueError(
+                f"max_seqlen_k={max_seqlen_k} < longest k range {longest_k}"
+            )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
     if range_merge_active:
@@ -1273,7 +1289,8 @@ def _flex_flash_attn_bwd(
         cluster_tile_k = n_block_size * cluster_size
         # Writer numbers r * dq_writer_stride + n + 1 of the dQ chain, with
         # n below the cluster K tiles of max_seqlen_k; unique under the
-        # max_seqlen_k contract (no K range is longer).
+        # max_seqlen_k contract (no K range is longer), which is trusted and
+        # checked only in FFA debug mode.
         max_k_tiles = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
         dq_writer_stride = max_k_tiles
         num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
@@ -2302,7 +2319,10 @@ def flex_flash_attn_func(
 
     max_seqlen_q/max_seqlen_k: upper bound on the longest q/k range. Hard
         contract: per-range launch bounds are sized from these, so an
-        underestimate silently drops work. Omitting falls back to
+        underestimate silently drops work; under ``deterministic`` the dQ
+        writers of the K tiles of a relation are numbered by
+        ``max_seqlen_k``, so an underestimate gives two K tiles one number
+        and the dQ merge runs out of order or hangs. Omitting falls back to
         total_q/total_k — always safe, the loosest bound. Debug mode validates
         against the ranges (a sync).
 
