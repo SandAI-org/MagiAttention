@@ -68,6 +68,10 @@ class DelayPoint(enum.Enum):
     PUBLISH = "publish"
     # Before each conflict-table store of the conflict scan, per lane.
     SCAN = "scan"
+    # Before each wait for a predecessor's publish, on odd block indices: a
+    # tile's chain wait precedes its reductions, so the second CTA of a
+    # 2-CTA cluster issues each tile's reductions late.
+    CHAIN_WAIT = "chain_wait"
 
 
 def _asm(asm: str, constraints: str, operands: list, *, loc=None, ip=None) -> None:
@@ -226,6 +230,7 @@ _DEFAULT_MAX_NS = {
     DelayPoint.PEER_ARRIVE: 20_000,
     DelayPoint.PUBLISH: 20_000,
     DelayPoint.SCAN: 20_000,
+    DelayPoint.CHAIN_WAIT: 40_000,
 }
 
 
@@ -275,6 +280,16 @@ def delay_injection(
             publish(mChain, block, head, writer)
 
         stack.enter_context(mock.patch.object(range_chain, "publish", delayed_publish))
+    elif point is DelayPoint.CHAIN_WAIT:
+        wait_published = range_chain.wait_published
+
+        def delayed_wait_published(mChain, block, head, writer):
+            odd_block_sleep(seed, max_ns)
+            wait_published(mChain, block, head, writer)
+
+        stack.enter_context(
+            mock.patch.object(range_chain, "wait_published", delayed_wait_published)
+        )
     else:
         assert point is DelayPoint.SCAN
         record = range_chain.record_conflict
