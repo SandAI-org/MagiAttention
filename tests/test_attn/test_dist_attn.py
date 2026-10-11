@@ -540,7 +540,7 @@ class TestDistAttn(DistTestBase):
         reference, and O, LSE and dQ, which no communication reduces here,
         repeat bit for bit."""
         if torch.cuda.get_device_capability()[0] not in (10, 11):
-            return
+            self.skipTest("deterministic q/k ranges require SM100/SM110")
         nhq, nhk, head_dim, dtype = 8, 4, 128, torch.bfloat16
         switch_back = switch_envvars(
             envvar_name_list=[
@@ -555,44 +555,49 @@ class TestDistAttn(DistTestBase):
                 self.kernel_backend_envvar: MagiAttentionKernelBackend.CUTEDSL.value
             },
         )
-        dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, False)
-        local_q, local_k, local_v = (
-            torch.randn(128, nh, head_dim, device=self.device, dtype=dtype)
-            for nh in (nhq, nhk, nhk)
-        )
-        grad_total_out = torch.randn(
-            512, nhq, head_dim, device=self.device, dtype=dtype
-        )
-        dist.broadcast(grad_total_out, src=0, group=self.nccl_group)
-
-        built: list = []
-
-        def recording(cls):
-            init = cls.__init__
-
-            def record(obj, *args, **kwargs):
-                init(obj, *args, **kwargs)
-                built.append(obj)
-
-            return mock.patch.object(cls, "__init__", record)
-
-        def run():
-            leaves = [
-                t.detach().clone().requires_grad_() for t in (local_q, local_k, local_v)
-            ]
-            local_out, meta = dist_attn_func(
-                *leaves, dist_attn_runtime=dist_attn_runtime
+        try:
+            dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, False)
+            local_q, local_k, local_v = (
+                torch.randn(128, nh, head_dim, device=self.device, dtype=dtype)
+                for nh in (nhq, nhk, nhk)
             )
-            total_out = torch.cat(all_gather(local_out, group=self.nccl_group), dim=0)
-            total_out.backward(grad_total_out)
-            return local_out.detach(), meta.lse, *(t.grad for t in leaves)
+            grad_total_out = torch.randn(
+                512, nhq, head_dim, device=self.device, dtype=dtype
+            )
+            dist.broadcast(grad_total_out, src=0, group=self.nccl_group)
 
-        with recording(FFAFwdSm100), recording(FFABwdSm100), mock.patch.object(
-            _flex_flash_attn_fwd, "compile_cache", JITCache()
-        ), mock.patch.object(_flex_flash_attn_bwd, "compile_cache", JITCache()):
-            first = run()
-            second = run()
-        switch_back()
+            built: list = []
+
+            def recording(cls):
+                init = cls.__init__
+
+                def record(obj, *args, **kwargs):
+                    init(obj, *args, **kwargs)
+                    built.append(obj)
+
+                return mock.patch.object(cls, "__init__", record)
+
+            def run():
+                leaves = [
+                    t.detach().clone().requires_grad_()
+                    for t in (local_q, local_k, local_v)
+                ]
+                local_out, meta = dist_attn_func(
+                    *leaves, dist_attn_runtime=dist_attn_runtime
+                )
+                total_out = torch.cat(
+                    all_gather(local_out, group=self.nccl_group), dim=0
+                )
+                total_out.backward(grad_total_out)
+                return local_out.detach(), meta.lse, *(t.grad for t in leaves)
+
+            with recording(FFAFwdSm100), recording(FFABwdSm100), mock.patch.object(
+                _flex_flash_attn_fwd, "compile_cache", JITCache()
+            ), mock.patch.object(_flex_flash_attn_bwd, "compile_cache", JITCache()):
+                first = run()
+                second = run()
+        finally:
+            switch_back()
         self.assertTrue(built and all(kernel.deterministic for kernel in built))
         for name, got, want in zip(("out", "lse", "dq"), second, first):
             self.assertTrue(torch.equal(got, want), f"{name} differs between runs")
