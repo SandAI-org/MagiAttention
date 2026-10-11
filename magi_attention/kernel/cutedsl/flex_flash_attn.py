@@ -191,8 +191,10 @@ def _flex_flash_attn_fwd(
             relation order on the range atomic path, so O and LSE are bitwise
             identical across runs and independent of ``sm_margin``. The launch
             is persistent whatever ``sm_margin``; head_dim 128 only, without
-            ``pack_gqa``. The dense and direct-store paths have one writer per
-            O row and are unaffected.
+            ``pack_gqa``. The range atomic path exists on SM100/SM110 only;
+            q/k ranges without ``disable_fwd_atomic_reduction`` raise
+            ``NotImplementedError`` on other architectures. The dense and
+            direct-store paths have one writer per O row and are unaffected.
 
     Returns:
         A tuple of (output, lse) where:
@@ -296,8 +298,20 @@ def _flex_flash_attn_fwd(
         softmax_scale = 1.0 / math.sqrt(head_dim)
     qhead_per_kvhead = num_head // num_head_kv
 
+    # Only the SM100/SM110 range atomic path orders the O/LSE merge of
+    # overlapping q ranges. Other arches direct-store q/k ranges, which gives
+    # one writer per O row only under the caller's disable_fwd_atomic_reduction
+    # declaration, so deterministic without it is rejected rather than run
+    # unordered. This check reads the caller's value, before it is forced below.
+    if (
+        deterministic
+        and has_ranges
+        and not disable_fwd_atomic_reduction
+        and major_arch not in (10, 11)
+    ):
+        raise NotImplementedError("deterministic q/k ranges require SM100/SM110")
     # The atomic merge is a ranges-overlap path; a no-op for dense, and
-    # unsupported outside SM100/SM110 — fall back to the direct store there.
+    # unsupported outside SM100/SM110, which take the direct store.
     if not has_ranges or major_arch not in (10, 11):
         disable_fwd_atomic_reduction = True
     if pack_gqa is None:
@@ -2353,10 +2367,12 @@ def flex_flash_attn_func(
         order: O/LSE by relation, dQ by (relation, K tile), reduced dK/dV by
         (relation, q head); the kernels then launch persistent whatever
         ``sm_margin``. Ranges need SM100/SM110 and head_dim 128, without
-        ``pack_gqa``, RangeMerge or block sparsity. Opt-in: the ordered dQ
-        merge makes the range backward several times slower, more so with
-        many K tiles per Q tile (see MAGI_ATTENTION_DETERMINISTIC_MODE in
-        env_variables.md).
+        ``pack_gqa``, RangeMerge or block sparsity; other architectures raise
+        ``NotImplementedError``, except that the forward alone runs under
+        ``disable_fwd_atomic_reduction``, whose O rows have one writer each.
+        Opt-in: the ordered dQ merge makes the range backward several times
+        slower, more so with many K tiles per Q tile (see
+        MAGI_ATTENTION_DETERMINISTIC_MODE in env_variables.md).
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /

@@ -111,6 +111,19 @@ def _record_launch(
         yield launch
 
 
+@contextmanager
+def _force_arch(arch: str) -> Iterator[None]:
+    """Select the ``arch`` kernel path with MAGI_ATTENTION_FFA_CUTEDSL_ARCH.
+    get_device_arch is cached, so the cache is cleared on entry and before
+    the variable is restored."""
+    with mock.patch.dict("os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_ARCH": arch}):
+        get_device_arch.cache_clear()
+        try:
+            yield
+        finally:
+            get_device_arch.cache_clear()
+
+
 def _grid_clusters(
     num_ranges: int,
     num_head: int,
@@ -425,6 +438,25 @@ class TestFfaRangeDeterministicHost(TestCase):
                 )
         apply_range_merge.assert_not_called()
 
+    def test_fwd_rejects_deterministic_atomic_ranges_off_sm100(self):
+        """Off SM100/SM110, deterministic q/k ranges without the caller's
+        disable_fwd_atomic_reduction declaration raise in forward, at the raw
+        entry and at the autograd entry, instead of running the direct store."""
+        if not torch.cuda.is_available():
+            self.skipTest("needs a CUDA device for the input tensors")
+        relations: Relations = [
+            ([0, 100], [0, 100], MT_MAP.full),
+            ([100, 200], [100, 200], MT_MAP.full),
+        ]
+        args = dict(_range_args(relations), mask_types=MT_MAP.full)
+        q, k, v = _qkv(200, 200, group=1)
+        for arch in ("sm_80", "sm_90", "sm_120"):
+            with self.subTest(arch=arch), _force_arch(arch):
+                with self.assertRaisesRegex(NotImplementedError, "SM100/SM110"):
+                    _flex_flash_attn_fwd(q, k, v, **args, deterministic=True)
+                with self.assertRaisesRegex(NotImplementedError, "SM100/SM110"):
+                    flex_flash_attn_func(q, k, v, **args, deterministic=True)
+
 
 class TestFfaRangeDeterministicFwd(TestCase):
     def setUp(self) -> None:
@@ -652,6 +684,32 @@ class TestFfaRangeDeterministicFwd(TestCase):
             )
         (kernel,) = launch.built
         self.assertFalse(kernel.deterministic)
+
+    def test_fwd_off_sm100_keeps_deterministic_with_one_writer_per_row(self):
+        """The SM80 path, which runs on this device, accepts deterministic
+        when every O row has one writer: q/k ranges declared with
+        disable_fwd_atomic_reduction, and dense inputs."""
+        relations: Relations = [
+            ([0, 100], [0, 100], MT_MAP.full),
+            ([100, 200], [100, 200], MT_MAP.full),
+        ]
+        q, k, v = _qkv(200, 200, group=2)
+        out_ref = _ref_fwd(q, k, v, relations)[0]
+        with _force_arch("sm_80"):
+            out_ranges, _ = _flex_flash_attn_fwd(
+                q,
+                k,
+                v,
+                **dict(_range_args(relations), mask_types=MT_MAP.full),
+                disable_fwd_atomic_reduction=True,
+                deterministic=True,
+            )
+            out_dense, _ = _flex_flash_attn_fwd(
+                *(t.view(2, 100, *t.shape[1:]) for t in (q, k, v)),
+                deterministic=True,
+            )
+        for out in (out_ranges, out_dense.view_as(out_ranges)):
+            torch.testing.assert_close(out.float(), out_ref, atol=_TOL, rtol=_TOL)
 
 
 def _shared_k_relations() -> tuple[Relations, int, int]:
