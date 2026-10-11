@@ -1044,3 +1044,62 @@ def arrive_inc(
     flag_ptr = lock_ptr + flag_offset
     if thread_idx == 0:
         red_release(flag_ptr, val)
+
+
+# ---------------------------------------------------------------------------
+# Cluster mbarrier helpers with cluster-scope memory ordering
+# ---------------------------------------------------------------------------
+
+
+@dsl_user_op
+def mbarrier_arrive_peer_release_cluster(
+    mbar_ptr: cute.Pointer, peer_cta_rank_in_cluster: Int32, *, loc=None, ip=None
+) -> None:
+    """Arrive once on the mbarrier at ``mbar_ptr``'s offset in the shared
+    memory of cluster CTA ``peer_cta_rank_in_cluster``, with release
+    semantics at cluster scope.
+
+    ``cute.arch.mbarrier_arrive(..., peer_cta_rank_in_cluster=...)`` emits
+    ``mbarrier.arrive.release.cta.shared::cluster``: its release is at CTA
+    scope, which does not synchronize with a waiter in another CTA, so it
+    orders no memory access of the arriving CTA before the peer's wait."""
+    llvm.inline_asm(
+        None,
+        [
+            mbar_ptr.toint(loc=loc, ip=ip).ir_value(),
+            Int32(peer_cta_rank_in_cluster).ir_value(loc=loc, ip=ip),
+        ],
+        "{\n\t.reg .b32 remote_mbar;\n\t"
+        "mapa.shared::cluster.u32 remote_mbar, $0, $1;\n\t"
+        "mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remote_mbar];\n\t}",
+        "r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )
+
+
+@dsl_user_op
+def mbarrier_wait_acquire_cluster(
+    mbar_ptr: cute.Pointer, phase: Int32, *, loc=None, ip=None
+) -> None:
+    """Spin until the phase of parity ``phase`` of the CTA-local mbarrier at
+    ``mbar_ptr`` completes, with acquire semantics at cluster scope, so the
+    accesses a peer CTA released with its arrival are visible after it.
+    ``cute.arch.mbarrier_wait`` acquires at CTA scope only."""
+    llvm.inline_asm(
+        None,
+        [
+            mbar_ptr.toint(loc=loc, ip=ip).ir_value(),
+            Int32(phase).ir_value(loc=loc, ip=ip),
+        ],
+        "{\n\t.reg .pred phase_done;\n\t"
+        "wait_phase:\n\t"
+        "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 "
+        "phase_done, [$0], $1;\n\t"
+        "@!phase_done bra wait_phase;\n\t}",
+        "r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )

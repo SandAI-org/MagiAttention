@@ -994,10 +994,10 @@ def _flex_flash_attn_bwd(
             launch is persistent whatever ``sm_margin``. SM100/SM110,
             ``head_dim == head_dim_v`` in {64, 128} only, without block
             sparsity. Under RangeMerge the dQ writers are the (merged K group,
-            K tile) units, which needs 1-CTA clusters: head_dim 64, or 128
-            with ``MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA=1``; the merged
-            dK/dV are stored once. Dense inputs keep the semaphore-ordered
-            dense path.
+            K tile) units, each adding its pairs in pair order (on 2-CTA
+            clusters the two CTAs hand off at every pair boundary); the
+            merged dK/dV are stored once. Dense inputs keep the
+            semaphore-ordered dense path.
 
     Returns:
         A tuple of (dQ, dK, dV, dsink): the gradients with the shapes of q, k, v
@@ -1301,14 +1301,6 @@ def _flex_flash_attn_bwd(
         if block_sparse_tensors is not None:
             raise NotImplementedError(
                 "deterministic q/k ranges cannot be combined with block sparsity"
-            )
-        if range_merge_active and cluster_size == 2:
-            # Pairs of one merged K group may share Q rows that the two CTAs
-            # of a cluster reduce in different row halves, with no order
-            # between the CTAs inside one dQ writer.
-            raise NotImplementedError(
-                "deterministic RangeMerge backward needs 1-CTA clusters "
-                "(head_dim 64, or MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA=1)"
             )
         dkv_writer_stride = 1 if cat_gqa else qhead_per_kvhead
         cluster_tile_k = n_block_size * cluster_size
@@ -2422,8 +2414,7 @@ def flex_flash_attn_func(
         (relation, q head); the kernels then launch persistent whatever
         ``sm_margin``. Ranges need SM100/SM110 and ``head_dim == head_dim_v``
         in {64, 128}, without block sparsity; the RangeMerge backward orders
-        dQ by (merged K group, K tile) and needs 1-CTA clusters (head_dim 64,
-        or 128 with ``MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA=1``). Other
+        dQ by (merged K group, K tile), and within one by pair. Other
         architectures raise ``NotImplementedError``, except that the forward
         alone runs under ``disable_fwd_atomic_reduction``, whose O rows have
         one writer each, the RangeMerge forward included.

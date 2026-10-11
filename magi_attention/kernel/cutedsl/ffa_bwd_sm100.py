@@ -849,10 +849,13 @@ class FFABwdSm100:
             assert self.same_hdim_kv and self.tile_hdim in (64, 128)
             assert not self.use_dense_dqacc_for_ranges
             assert blocksparse_tensors is None
-            # Two pairs of one merged writer may put one Q row in the row half
-            # of CTA 0 for one pair and of CTA 1 for the other; the chain
-            # orders writers, not the two CTAs inside one.
-            assert not (self.range_merge and self.use_2cta_instrs)
+        # Two pairs of one merged dQ writer may put one Q row in the row half
+        # of CTA 0 for one pair and of CTA 1 for the other; the chain orders
+        # writers, not the two CTAs inside one, so the reduce warps of the
+        # two CTAs hand off at every pair boundary (range_chain.pair_handoff_*).
+        self.dq_pair_handoff = (
+            self.range_deterministic and self.range_merge and self.use_2cta_instrs
+        )
         self.is_varlen_k = mKRanges is not None or mSeqUsedK is not None
         self.is_varlen_q = mQRanges is not None or mSeqUsedQ is not None
         # Batched GQA reduces the q heads of a kv head from separate CTAs and
@@ -1354,6 +1357,8 @@ class FFABwdSm100:
         dynamic_schedule = self.scheduling_mode == SchedulingMode.DYNAMIC
         sched_mbar_size = 2 * self.sched_stages if dynamic_schedule else 0
         sched_response_size = self.sched_stages if dynamic_schedule else 0
+        # Two barriers alternate between consecutive pair handoffs.
+        dq_pair_mbar_size = 2 if self.dq_pair_handoff else 0
 
         sdK_bytes = cute.size_in_bytes(self.dk_dtype, self.sdK_layout)
         sdV_bytes = cute.size_in_bytes(self.dv_dtype, self.sdV_layout)
@@ -1425,6 +1430,8 @@ class FFABwdSm100:
                 dS_cluster_full_mbar_ptr: cutlass.Int64
                 dS_cluster_leader_mbar_ptr: cutlass.Int64
                 dQacc_empty_mbar_ptr: cutlass.Int64
+                # Pair handoffs of a deterministic RangeMerge dQ writer
+                dq_pair_mbar_ptr: cute.struct.MemRange[cutlass.Int64, dq_pair_mbar_size]
 
                 # --- smem tensors ---
 
@@ -1515,6 +1522,8 @@ class FFABwdSm100:
                 sched_response: cute.struct.MemRange[Int32, sched_response_size]
                 # Tmem holding buffer ptr
                 tmem_holding_buf_ptr: Int32
+                # Pair handoffs of a deterministic RangeMerge dQ writer
+                dq_pair_mbar_ptr: cute.struct.MemRange[cutlass.Int64, dq_pair_mbar_size]
 
                 # --- smem tensors ---
 
@@ -1931,6 +1940,9 @@ class FFABwdSm100:
             dS_cluster_empty_mbar_ptr = None
             dS_cluster_leader_mbar_ptr = None
             dQacc_empty_mbar_ptr = None
+        dq_pair_mbar_ptr = (
+            storage.dq_pair_mbar_ptr.data_ptr() if self.dq_pair_handoff else None
+        )
 
         # Pipeline mbarrier ptrs
         S_mbar_ptr = storage.S_mbar_ptr.data_ptr()
@@ -1972,6 +1984,13 @@ class FFABwdSm100:
                 cute.arch.mbarrier_init(dS_cluster_full_mbar_ptr, 1)
                 cute.arch.mbarrier_init(dS_cluster_empty_mbar_ptr, 1)
                 cute.arch.mbarrier_init(dS_cluster_leader_mbar_ptr, 2)
+
+        if const_expr(self.dq_pair_handoff):
+            assert dq_pair_mbar_ptr is not None
+            if warp_idx == 4:
+                # One arrival per handoff: the peer CTA's reduce thread 0.
+                for i in range(2):
+                    cute.arch.mbarrier_init(dq_pair_mbar_ptr + i, 1)
 
         if const_expr(self.cluster_reduce_dQ):
             if warp_idx == 4:
@@ -2706,6 +2725,7 @@ class FFABwdSm100:
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
                 dq_chain=dq_chain,
+                dq_pair_mbar_ptr=dq_pair_mbar_ptr,
                 mQRanges=mQRanges,
                 mKRanges=mKRanges,
                 is_print_block=is_print_block,
@@ -6794,9 +6814,13 @@ class FFABwdSm100:
     # Under RangeMerge r is the merged K group: its work tile walks the Q
     # tiles of every pair in pair order, each Q tile an event of the writer
     # whether or not the mask leaves it work, and the last tile with rows in
-    # a block is found among the later pairs too. Q rows shared by two pairs
-    # are reduced by the same reduce warps one tile after the other, each
-    # tile's reductions complete before the next is issued.
+    # a block is found among the later pairs too. Each tile's reductions
+    # complete before the next is issued, so Q rows shared by two pairs are
+    # added in pair order when one CTA reduces both. Under 2-CTA the row
+    # halves of a Q tile follow the pair's start, so a shared row can move
+    # between the CTAs; the CTAs then hand off at every pair boundary
+    # (range_chain.pair_handoff_arrive / pair_handoff_wait), and a pair adds
+    # only after both CTAs' additions of the earlier pairs landed.
 
     @cute.jit
     def _dq_last_writer(
@@ -6946,6 +6970,7 @@ class FFABwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         dq_chain: Optional[range_chain.ChainTensors] = None,
+        dq_pair_mbar_ptr: Optional[cute.Pointer] = None,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
@@ -7070,6 +7095,9 @@ class FFABwdSm100:
         # dQ chain: the conflict-state scan has recorded the relations below
         # chain_scanned for this CTA's slot.
         chain_scanned = Int32(0)
+        # Pair handoffs this CTA took part in, across q heads and work tiles;
+        # equal on both CTAs, which walk the same tiles and pairs.
+        pair_handoff = Int32(0) if const_expr(self.dq_pair_handoff) else None
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -7357,6 +7385,27 @@ class FFABwdSm100:
                         lo_p, hi_p = block_info.get_m_block_min_max_per_range(
                             seqlen_pair, n_block_cta_group, attn_type_pair
                         )
+                        if const_expr(self.dq_pair_handoff):
+                            # Every pair after the first hands off, work or
+                            # not, so both CTAs count the same handoffs (hi_p
+                            # and lo_p are cluster-uniform). This CTA's earlier
+                            # reductions landed at the end of their Q tiles.
+                            # A pair without work waits here; otherwise the
+                            # wait comes after its first Q tile's TMEM release,
+                            # so a slower peer delays only this CTA's reduction
+                            # issue and not the dQ MMA, which needs the release
+                            # of both CTAs.
+                            assert dq_pair_mbar_ptr is not None
+                            if pj > 0 and tidx == 0:
+                                range_chain.pair_handoff_arrive(
+                                    dq_pair_mbar_ptr,
+                                    pair_handoff,
+                                    cta_rank_in_cluster ^ 1,
+                                )
+                                if hi_p <= lo_p:
+                                    range_chain.pair_handoff_wait(
+                                        dq_pair_mbar_ptr, pair_handoff
+                                    )
                         if hi_p > lo_p:
                             process_tile = cutlass.Boolean(True)
                         # row = physical_offset_q + local_row
@@ -7481,6 +7530,13 @@ class FFABwdSm100:
                                             m_block,
                                             q_head,
                                         )
+                                if const_expr(self.dq_pair_handoff and stage == 0):
+                                    # Before the barrier preceding this pair's
+                                    # first reductions.
+                                    if pj > 0 and it == 0 and tidx == 0:
+                                        range_chain.pair_handoff_wait(
+                                            dq_pair_mbar_ptr, pair_handoff
+                                        )
 
                                 # Sync before S2G copy
                                 self.reduce_sync_barrier.arrive_and_wait()
@@ -7577,6 +7633,10 @@ class FFABwdSm100:
                                         mQRanges,
                                         later_pairs,
                                     )
+                        if const_expr(self.dq_pair_handoff):
+                            assert pair_handoff is not None
+                            if pj > 0:
+                                pair_handoff += 1
 
                 else:
                     if const_expr(self.range_deterministic):
