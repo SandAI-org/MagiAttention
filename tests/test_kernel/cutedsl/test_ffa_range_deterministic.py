@@ -1063,6 +1063,43 @@ def _merged_k_relations() -> tuple[Relations, int, int]:
     return relations, 700, 1000
 
 
+def _merged_k_relations_2cta_adjacent(
+    num_groups: int = 8, pairs_per_group: int = 4
+) -> tuple[Relations, int, int]:
+    """RangeMerge K groups whose consecutive pairs share Q rows that change
+    CTA under 2-CTA clusters, in adjacent compute tiles of the pair walk.
+
+    Pair ``p`` of a group is one 128-row Q tile starting 64 rows after pair
+    ``p - 1``, against the group's 160-key K range (one cluster K tile, so
+    every pair has work): its upper row half, reduced by CTA 1, is the lower
+    row half of pair ``p + 1``, reduced by CTA 0, and the two tiles are the
+    last of one pair and the first of the next. Masks split those rows'
+    keys between the pairs (the first inverse-causal, the last causal, the
+    others bi-causal), so no (q, k) pair repeats and both add a nonzero dQ.
+    A full relation in the lowest K group covers every Q row first, so the
+    shared rows already hold a nonzero dQ and the order of the two later
+    additions shows in the fp32 sum. Returns (relations, total_q, total_k).
+    """
+    len_k, base_k = 160, 256
+    span = 64 * pairs_per_group + 128
+    total_q = span * num_groups
+    relations: Relations = [([0, total_q], [0, base_k], MT_MAP.full)]
+    for g in range(num_groups):
+        k_range = [base_k + len_k * g, base_k + len_k * (g + 1)]
+        for p in range(pairs_per_group):
+            q_start = span * g + 64 * p
+            if pairs_per_group == 1:
+                mask_type = MT_MAP.full
+            elif p == 0:
+                mask_type = MT_MAP.inv_causal
+            elif p == pairs_per_group - 1:
+                mask_type = MT_MAP.causal
+            else:
+                mask_type = MT_MAP.bi_causal
+            relations.append(([q_start, q_start + 128], list(k_range), mask_type))
+    return relations, total_q, base_k + len_k * num_groups
+
+
 def _merged_k_groups(relations: Relations) -> list[tuple[list[int], list[list[int]]]]:
     """(K range, Q ranges of its pairs) per merged K group, in the group
     order of RangeMerge: K start ascending, pairs in input order."""
