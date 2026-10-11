@@ -51,6 +51,7 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
 )
+from magi_attention.kernel.cutedsl.range_merge import plan_range_merge
 from magi_attention.testing import parameterize
 from tests.test_kernel.cutedsl.range_deterministic_probes import (
     odd_lane_conflict_records,
@@ -276,6 +277,24 @@ def _overlapping_relations(
     return relations, q_cursor + 5, k_cursor
 
 
+def _merged_q_relations() -> tuple[Relations, int, int]:
+    """Relations over a sorted partition of the q rows into unaligned groups
+    (one of a single row), each group against one to three K ranges, one of
+    them keyless; listed out of q order, so RangeMerge reorders the rows.
+    Returns (relations, total_q, total_k)."""
+    relations: Relations = [
+        ([131, 600], [100, 400], MT_MAP.full),
+        ([0, 131], [0, 300], MT_MAP.full),
+        ([601, 1000], [900, 1200], MT_MAP.causal),
+        ([0, 131], [300, 500], MT_MAP.causal),
+        ([600, 601], [0, 50], MT_MAP.full),
+        ([131, 600], [600, 900], MT_MAP.inv_causal),
+        ([0, 131], [530, 530], MT_MAP.full),
+        ([0, 131], [500, 530], MT_MAP.full),
+    ]
+    return relations, 1000, 1200
+
+
 def _range_args(relations: Relations, device="cuda") -> dict:
     q_ranges = [r[0] for r in relations]
     k_ranges = [r[1] for r in relations]
@@ -489,10 +508,10 @@ class TestFfaRangeDeterministicHost(TestCase):
             with self.assertRaises(KernelReached):
                 bwd(300)
 
-    def test_range_merge_is_rejected_before_its_preprocessing(self):
-        """deterministic + RangeMerge raises at the entry of the autograd
-        function and of the raw backward, before the merge plan is built,
-        and does not fall back to range_merge=False or deterministic=False."""
+    def test_bwd_range_merge_is_rejected_before_its_preprocessing(self):
+        """deterministic + RangeMerge raises at the entry of the raw backward,
+        before the merge plan is built, and does not fall back to
+        range_merge=False or deterministic=False."""
         if not torch.cuda.is_available():
             self.skipTest("needs a CUDA device for the input tensors")
         relations: Relations = [
@@ -501,23 +520,10 @@ class TestFfaRangeDeterministicHost(TestCase):
         ]
         q, k, v = _qkv(200, 200, group=1)
         lse = torch.zeros(200, q.shape[1], device="cuda")
-        contracts = dict(
-            disable_fwd_atomic_reduction=True, disable_bwd_dkv_atomic_reduction=True
-        )
         with mock.patch(
             "magi_attention.kernel.cutedsl.flex_flash_attn._apply_range_merge",
             side_effect=AssertionError("RangeMerge preprocessing ran"),
         ) as apply_range_merge:
-            with self.assertRaisesRegex(NotImplementedError, "RangeMerge"):
-                flex_flash_attn_func(
-                    q,
-                    k,
-                    v,
-                    **_range_args(relations),
-                    range_merge=True,
-                    deterministic=True,
-                    **contracts,
-                )
             with self.assertRaisesRegex(NotImplementedError, "RangeMerge"):
                 _flex_flash_attn_bwd(
                     q,
@@ -752,6 +758,63 @@ class TestFfaRangeDeterministicFwd(TestCase):
         )
         self.assertEqual(int(counter.item()), expected)
         self._log_ran(f"counter sm_margin={sm_margin}")
+
+    @parameterize(
+        "case",
+        [
+            # (out dtype, q heads per kv head)
+            (torch.float32, 1),
+            (torch.float32, 2),
+            (torch.bfloat16, 2),
+        ],
+    )
+    @parameterize("head_dim", _DET_HEAD_DIMS)
+    def test_fwd_range_merge_bitwise_across_runs_and_sm_margin(self, case, head_dim):
+        """The RangeMerge forward stores O once per merged Q group, summing the
+        group's pairs in plan order, so deterministic needs no chain there:
+        O/LSE are bitwise equal across sm_margin, between a rebuilt and a
+        precomputed plan, and close to the chained atomic-path forward of the
+        unmerged relations."""
+        out_dtype, group = case
+        relations, total_q, total_k = _merged_q_relations()
+        q, k, v = _qkv(total_q, total_k, group, head_dim=head_dim)
+        args = _range_args(relations)
+        plan = plan_range_merge(args["q_ranges"], args["k_ranges"], args["mask_types"])
+
+        def merge_fwd(sm_margin, range_merge=True):
+            return _flex_flash_attn_fwd(
+                q,
+                k,
+                v,
+                **args,
+                disable_fwd_atomic_reduction=True,
+                range_merge=range_merge,
+                deterministic=True,
+                out_dtype=out_dtype,
+                sm_margin=sm_margin,
+            )
+
+        for sm_margin in (0, self.num_sm - 7):
+            with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
+                merge_fwd(sm_margin)
+            (kernel,) = launch.built
+            self.assertTrue(kernel.range_merge)
+            self.assertFalse(kernel.deterministic)
+            self.assertEqual(launch.chains, [])
+            if sm_margin > 0:
+                self.assertTrue(kernel.is_persistent)
+        out, lse = self._assert_bitwise_across_sm_margin(merge_fwd)
+        for got, want in zip(merge_fwd(self.num_sm - 7, plan), (out, lse)):
+            self.assertTrue(torch.equal(got, want), "precomputed plan differs")
+        self.assertEqual(out.dtype, out_dtype)
+        out_atomic, lse_atomic = self._det_fwd(q, k, v, relations)
+        tol = _TOL if out_dtype == torch.float32 else 2 * _TOL
+        torch.testing.assert_close(out.float(), out_atomic, atol=tol, rtol=tol)
+        torch.testing.assert_close(lse, lse_atomic, atol=1e-3, rtol=1e-3)
+        out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
+        torch.testing.assert_close(out.float(), out_ref, atol=tol, rtol=tol)
+        torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
+        self._log_ran(f"range merge fwd {case} hd{head_dim}")
 
     def test_fwd_rejects_unsupported_combinations(self):
         relations, total_q, total_k = _overlapping_relations(

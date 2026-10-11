@@ -158,11 +158,11 @@ def validate_range_feature_support(
 ) -> None:
     """Reject q/k-range feature combinations the kernels do not implement.
 
-    ``deterministic`` q/k ranges exclude RangeMerge in both directions: the
-    backward of a merged group reduces the dQ of pairs with overlapping Q
-    rows in no fixed order. Rejecting it in forward too makes the autograd
-    entry fail before the forward runs; the check precedes the RangeMerge
-    preprocessing.
+    ``deterministic`` q/k ranges exclude RangeMerge in backward, where the dQ
+    of pairs with overlapping Q rows is reduced in no fixed order; the check
+    precedes the RangeMerge preprocessing. The forward of a merged Q group
+    has one O writer that walks the group's pairs in plan order, so it is
+    deterministic without a chain and accepted.
 
     ``sm_margin > 0`` requires SM100/SM110 q/k-range kernels, which cap the
     grid to reserve SMs for communication.
@@ -174,9 +174,10 @@ def validate_range_feature_support(
     ``has_user_score_mod`` is a caller-provided score_mod; softcap is native
     to the SM100/SM110 kernels and does not count.
 
-    ``bwd_head_dim`` applies only to backward. RangeMerge does not support
-    the mainloop for head dimension 192, which uses two CTAs and a single
-    pipeline stage for Q and Qt. Deterministic ranges are checked by
+    ``bwd_head_dim`` is passed by the backward only, so ``None`` marks the
+    forward. RangeMerge does not support the backward mainloop for head
+    dimension 192, which uses two CTAs and a single pipeline stage for Q and
+    Qt. Deterministic ranges are checked by
     :func:`validate_range_deterministic`.
     """
     per_range = isinstance(mask_types, torch.Tensor)
@@ -188,8 +189,10 @@ def validate_range_feature_support(
         )
     if not has_ranges:
         return
-    if range_merge and deterministic:
-        raise NotImplementedError("deterministic q/k ranges do not support RangeMerge")
+    if range_merge and deterministic and bwd_head_dim is not None:
+        raise NotImplementedError(
+            "deterministic q/k ranges do not support RangeMerge in backward"
+        )
     if range_merge and not range_merge_unique_writer:
         raise ValueError(
             "RangeMerge requires the non-atomic path "

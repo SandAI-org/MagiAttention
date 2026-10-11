@@ -199,7 +199,8 @@ def _flex_flash_attn_fwd(
             exists on SM100/SM110 only; q/k ranges without
             ``disable_fwd_atomic_reduction`` raise ``NotImplementedError`` on
             other architectures. The dense and
-            direct-store paths have one writer per O row and are unaffected.
+            direct-store paths, RangeMerge included, have one writer per O row
+            that sums its K tiles in a fixed order, and are unaffected.
 
     Returns:
         A tuple of (output, lse) where:
@@ -2410,10 +2411,11 @@ def flex_flash_attn_func(
         order: O/LSE by relation, dQ by (relation, K tile), reduced dK/dV by
         (relation, q head); the kernels then launch persistent whatever
         ``sm_margin``. Ranges need SM100/SM110 and ``head_dim == head_dim_v``
-        in {64, 128}, without RangeMerge or block sparsity;
-        other architectures raise ``NotImplementedError``, except that the
-        forward alone runs under ``disable_fwd_atomic_reduction``, whose O
-        rows have one writer each.
+        in {64, 128}, without block sparsity, and without RangeMerge in the
+        backward; other architectures raise ``NotImplementedError``, except
+        that the forward alone runs under ``disable_fwd_atomic_reduction``,
+        whose O rows have one writer each. The RangeMerge forward is such a
+        forward: one writer per merged Q group walks its pairs in plan order.
         Opt-in: the ordered dQ merge makes the range backward several times
         slower, more so with many K tiles per Q tile (see
         MAGI_ATTENTION_DETERMINISTIC_MODE in env_variables.md).
