@@ -23,6 +23,13 @@ valid rows in carries its predecessor's number, then writes and arrives; a
 The worker simulator enumerates every interleaving of a few workers (clusters)
 with at most ``resident`` of them running at once, and reports whether some
 interleaving can no longer progress, or a block merges writers out of order.
+
+A second simulator models the two CTAs of a 2-CTA cluster inside one
+RangeMerge dQ writer: their asynchronous row-half additions, the per-tile
+drains, and the pair handoff on two mbarriers per CTA with exact parity
+semantics, and reports whether some interleaving deadlocks or adds a shared
+row out of pair order.
+
 Imports neither torch nor a kernel module, so it runs without a GPU.
 """
 
@@ -721,6 +728,316 @@ class TestRangeDeterministicProtocol(unittest.TestCase):
                     for row in range(ha, hb):
                         owners.setdefault(row, set()).add(rank)
         self.assertTrue(any(len(ranks) == 2 for ranks in owners.values()))
+
+
+# ------------------------------------------------- 2-CTA pair handoff model
+
+
+class HandoffMode(enum.Enum):
+    # No cross-CTA order inside one writer.
+    NONE = enum.auto()
+    # Handshake k on bar[k & 1], waiting for parity (k >> 1) & 1.
+    TWO_BARRIERS = enum.auto()
+    # Handshake k on bar[0], waiting for parity k & 1.
+    ONE_BARRIER = enum.auto()
+
+
+@dataclass(frozen=True)
+class MergedPair:
+    """One pair of a merged K group seen from one cluster K tile: Q rows
+    ``[q_start, q_end)`` cut into ``tile``-row Q tiles from ``q_start``; the
+    mask leaves work on Q tiles ``[lo, hi)`` (none when ``hi <= lo``)."""
+
+    q_start: int
+    q_end: int
+    lo: int
+    hi: int
+
+
+@dataclass(frozen=True)
+class PairWalk:
+    """The pair walk of one work tile (one dQ writer): every q head of the
+    kv head walks every pair in order."""
+
+    pairs: tuple[MergedPair, ...]
+    q_heads: int = 1
+
+
+def two_cta_half_rows(
+    pair: MergedPair, m_block: int, rank: int, tile: int
+) -> tuple[int, ...]:
+    """Valid rows of Q tile ``m_block`` of ``pair`` that the CTA of ``rank``
+    adds: the rank's half of the tile, clipped to the pair's end."""
+    half = tile // 2
+    start = pair.q_start + m_block * tile + rank * half
+    return tuple(range(start, min(start + half, pair.q_end)))
+
+
+def compile_pair_handoff(
+    walks: list[PairWalk],
+    rank: int,
+    tile: int,
+    mode: HandoffMode,
+    skip_handoff_without_work: bool = False,
+) -> tuple[tuple, ...]:
+    """The reduce-role program of the CTA of ``rank`` over ``walks``.
+
+    Ops: ``("arrive", bar)`` on the peer's barrier ``bar``; ``("wait", bar,
+    parity)`` on the own one; ``("issue", adds)`` starts the asynchronous
+    additions ``adds``, each ``((walk, q head, row), pair index)``;
+    ``("drain",)`` waits for every addition of this CTA to land. Every pair
+    from the second on arrives at its start and waits before issuing its
+    first addition, or at once when the mask leaves it no work; the
+    handshake counter ``k`` runs across q heads and walks.
+    ``skip_handoff_without_work`` drops the handshake of pairs without work
+    (the miscounted control)."""
+    ops: list[tuple] = []
+    k = 0
+    for w, walk in enumerate(walks):
+        for qh in range(walk.q_heads):
+            for pj, pair in enumerate(walk.pairs):
+                has_work = pair.hi > pair.lo
+                wait = None
+                if (
+                    mode is not HandoffMode.NONE
+                    and pj >= 1
+                    and not (skip_handoff_without_work and not has_work)
+                ):
+                    if mode is HandoffMode.TWO_BARRIERS:
+                        bar, parity = k & 1, (k >> 1) & 1
+                    else:
+                        bar, parity = 0, k & 1
+                    ops.append(("arrive", bar))
+                    wait = ("wait", bar, parity)
+                    k += 1
+                    if not has_work:
+                        ops.append(wait)
+                for it in range(max(pair.hi - pair.lo, 0)):
+                    if it == 0 and wait is not None:
+                        ops.append(wait)
+                    rows = two_cta_half_rows(pair, pair.lo + it, rank, tile)
+                    ops.append(("issue", tuple(((w, qh, r), pj) for r in rows)))
+                    # Every Q tile waits for its additions to land.
+                    ops.append(("drain",))
+        # The work tile's closing drain.
+        ops.append(("drain",))
+    return tuple(ops)
+
+
+def explore_pair_handoff(
+    programs: tuple[tuple[tuple, ...], tuple[tuple, ...]],
+    max_states: int = 2_000_000,
+) -> Outcome:
+    """Every interleaving of the two CTAs of a cluster running ``programs``.
+
+    Each CTA owns two mbarriers of arrival count 1, as the kernel's: an
+    arrival completes the current phase and flips its parity, and
+    ``wait(parity)`` passes once the phase of that parity has completed,
+    i.e. while the current parity differs. Issued additions complete one
+    at a time in any order and at any later point. ``out_of_order``: some
+    row's additions completed out of pair order; ``stuck``: some
+    interleaving reaches a state where neither CTA nor any addition can
+    move before both programs end."""
+    # state: (pcs, barriers[cta][bar] = (parity, pending), in flight
+    # additions (cta, row, pair), last completed pair per row)
+    State = tuple[
+        tuple[int, ...],
+        tuple[tuple[tuple[int, int], ...], ...],
+        frozenset[tuple[int, tuple[int, int, int], int]],
+        frozenset[tuple[tuple[int, int, int], int]],
+    ]
+    init: State = (
+        (0, 0),
+        (((0, 1), (0, 1)), ((0, 1), (0, 1))),
+        frozenset(),
+        frozenset(),
+    )
+    seen: set[State] = set()
+    stack: list[State] = [init]
+    stuck = out_of_order = False
+    while stack:
+        state = stack.pop()
+        if state in seen:
+            continue
+        seen.add(state)
+        assert len(seen) <= max_states, "state budget exhausted; shrink the case"
+        pcs, bars, flight, done = state
+        successors: list[State] = []
+        for c in (0, 1):
+            if pcs[c] == len(programs[c]):
+                continue
+            op = programs[c][pcs[c]]
+            new_pcs = tuple(p + 1 if i == c else p for i, p in enumerate(pcs))
+            if op[0] == "arrive":
+                peer, bar = 1 - c, op[1]
+                parity, pending = bars[peer][bar]
+                pending -= 1
+                if pending == 0:
+                    parity, pending = parity ^ 1, 1
+                peer_bars = tuple(
+                    (parity, pending) if i == bar else b
+                    for i, b in enumerate(bars[peer])
+                )
+                new_bars = tuple(
+                    peer_bars if i == peer else b for i, b in enumerate(bars)
+                )
+                successors.append((new_pcs, new_bars, flight, done))
+            elif op[0] == "wait":
+                _, bar, parity = op
+                if bars[c][bar][0] != parity:
+                    successors.append((new_pcs, bars, flight, done))
+            elif op[0] == "issue":
+                adds = frozenset((c, row, pj) for row, pj in op[1])
+                successors.append((new_pcs, bars, flight | adds, done))
+            else:
+                assert op[0] == "drain"
+                if not any(a[0] == c for a in flight):
+                    successors.append((new_pcs, bars, flight, done))
+        last = dict(done)
+        for add in flight:
+            _, row, pj = add
+            if last.get(row, -1) > pj:
+                out_of_order = True
+            new_last = dict(last)
+            new_last[row] = max(last.get(row, -1), pj)
+            successors.append((pcs, bars, flight - {add}, frozenset(new_last.items())))
+        finished = all(pcs[c] == len(programs[c]) for c in (0, 1)) and not flight
+        if not successors and not finished:
+            stuck = True
+        stack.extend(successors)
+    return Outcome(stuck=stuck, out_of_order=out_of_order)
+
+
+def run_pair_handoff(
+    walks: list[PairWalk],
+    tile: int,
+    mode: HandoffMode,
+    rank1_skips_handoff_without_work: bool = False,
+) -> Outcome:
+    programs = (
+        compile_pair_handoff(walks, 0, tile, mode),
+        compile_pair_handoff(walks, 1, tile, mode, rank1_skips_handoff_without_work),
+    )
+    return explore_pair_handoff(programs)
+
+
+def rows_shared_across_ranks(walks: list[PairWalk], tile: int) -> bool:
+    """Whether some row of one walk and q head gets additions from two pairs
+    issued by different CTAs."""
+    for walk in walks:
+        owners: dict[int, set[int]] = {}
+        for pair in walk.pairs:
+            for m in range(pair.lo, pair.hi):
+                for rank in (0, 1):
+                    for row in two_cta_half_rows(pair, m, rank, tile):
+                        owners.setdefault(row, set()).add(rank)
+        if any(len(ranks) == 2 for ranks in owners.values()):
+            return True
+    return False
+
+
+def random_pair_walks(rng: random.Random, tile: int) -> list[PairWalk]:
+    walks = []
+    for _ in range(rng.randint(1, 3)):
+        pairs = []
+        for _ in range(rng.randint(1, 4)):
+            start = rng.randint(0, tile)
+            end = start + rng.randint(1, 2 * tile)
+            num_tiles = -(-(end - start) // tile)
+            lo = rng.randint(0, num_tiles - 1)
+            hi = rng.randint(lo + 1, num_tiles) if rng.random() < 0.8 else lo
+            pairs.append(MergedPair(start, end, lo, hi))
+        walks.append(PairWalk(tuple(pairs), q_heads=rng.choice((1, 1, 2))))
+    return walks
+
+
+class TestRangeMergeTwoCtaPairHandoff(unittest.TestCase):
+    """bwd RangeMerge under 2-CTA: the CTAs of a cluster add the two row
+    halves of every Q tile, so two pairs of one writer can add to one row
+    from different CTAs. Every pair from the second on hands off between
+    the CTAs: each arrives on the peer's barrier at the pair's start, after
+    its earlier additions landed, and waits on its own before its first
+    addition of the pair."""
+
+    _M = 4  # Q tile rows; each CTA adds two rows of a tile
+
+    def _walks(self) -> list[PairWalk]:
+        # Pair counts 3, 1, 2 (the last walk over two q heads): handshakes
+        # k = 0..3 cover both barriers in both parities, and k carries
+        # across walks and q heads. The second pair of the first walk has no
+        # work and waits at its start. Pairs starting 2 rows apart give a
+        # row to CTA 1 in one pair and to CTA 0 in the next.
+        return [
+            PairWalk(
+                (
+                    MergedPair(0, 8, 0, 2),
+                    MergedPair(1, 5, 1, 1),
+                    MergedPair(2, 10, 0, 2),
+                )
+            ),
+            PairWalk((MergedPair(0, 4, 0, 1),)),
+            PairWalk((MergedPair(1, 9, 0, 2), MergedPair(3, 7, 0, 1)), q_heads=2),
+        ]
+
+    def test_range_merge_two_cta_pair_handoff_orders_shared_rows(self):
+        """With the two-barrier handshake every interleaving and every
+        completion order of the additions ends, and every row's additions
+        complete in pair order, on walks whose shared rows change CTA
+        between pairs."""
+        walks = self._walks()
+        self.assertTrue(rows_shared_across_ranks(walks, self._M))
+        self.assertEqual(
+            run_pair_handoff(walks, self._M, HandoffMode.TWO_BARRIERS),
+            Outcome(stuck=False, out_of_order=False),
+        )
+
+    def test_range_merge_two_cta_pair_handoff_random_walks(self):
+        """Random walks of unaligned, overlapping and work-free pairs: the
+        handshake orders every row in every interleaving; without it, the
+        walks whose rows change CTA between pairs merge some row out of
+        order."""
+        rng = random.Random(5)
+        shared = 0
+        for _ in range(100):
+            walks = random_pair_walks(rng, self._M)
+            self.assertEqual(
+                run_pair_handoff(walks, self._M, HandoffMode.TWO_BARRIERS),
+                Outcome(stuck=False, out_of_order=False),
+                f"{walks=}",
+            )
+            if rows_shared_across_ranks(walks, self._M):
+                shared += 1
+                self.assertTrue(
+                    run_pair_handoff(walks, self._M, HandoffMode.NONE).out_of_order,
+                    f"{walks=}",
+                )
+        self.assertGreater(shared, 30)
+
+    def test_range_merge_two_cta_without_handoff_merges_out_of_order(self):
+        """Control: without the handshake the two CTAs add a shared row in
+        either order."""
+        outcome = run_pair_handoff(self._walks(), self._M, HandoffMode.NONE)
+        self.assertTrue(outcome.out_of_order)
+        self.assertFalse(outcome.stuck)
+
+    def test_range_merge_two_cta_one_handoff_barrier_deadlocks(self):
+        """Control: with one barrier the peer can complete handshake k + 1
+        on it before this CTA waits for k; two completions read as none and
+        the wait never ends."""
+        outcome = run_pair_handoff(self._walks(), self._M, HandoffMode.ONE_BARRIER)
+        self.assertTrue(outcome.stuck)
+
+    def test_range_merge_two_cta_unequal_handoff_counts_deadlock(self):
+        """Control: a CTA that skips the handshake of pairs without work
+        leaves its peer waiting for an arrival that never comes; both CTAs
+        must hand off at the same pairs."""
+        outcome = run_pair_handoff(
+            self._walks(),
+            self._M,
+            HandoffMode.TWO_BARRIERS,
+            rank1_skips_handoff_without_work=True,
+        )
+        self.assertTrue(outcome.stuck)
 
 
 if __name__ == "__main__":
