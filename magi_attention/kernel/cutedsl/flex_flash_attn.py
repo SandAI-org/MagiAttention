@@ -327,10 +327,6 @@ def _flex_flash_attn_fwd(
     # unsupported outside SM100/SM110, which take the direct store.
     if not has_ranges or major_arch not in (10, 11):
         disable_fwd_atomic_reduction = True
-    if pack_gqa is None:
-        # The packed atomic merge is opt-in until its end-to-end cost is
-        # characterized; the direct-store paths pack GQA by default.
-        pack_gqa = qhead_per_kvhead > 1 and disable_fwd_atomic_reduction
     # Only the range atomic merge has several writers per O row to order.
     fwd_deterministic = deterministic and not disable_fwd_atomic_reduction
     if fwd_deterministic:
@@ -461,6 +457,17 @@ def _flex_flash_attn_fwd(
             tile_m, tile_n = fwd_cfg.m_block_size, fwd_cfg.n_block_size
             mma_pv_is_rs = fwd_cfg.mma_pv_is_rs
             intra_wg_overlap = fwd_cfg.intra_wg_overlap
+
+    if pack_gqa is None:
+        # The direct-store paths pack GQA only when every q tile starts on a
+        # token boundary: a tile_m not divisible by the group makes the
+        # kernel load Q and store O without TMA, which is slower than the
+        # unpacked kernel. The packed atomic merge stays opt-in.
+        pack_gqa = (
+            qhead_per_kvhead > 1
+            and disable_fwd_atomic_reduction
+            and tile_m % qhead_per_kvhead == 0
+        )
 
     if max_seqlen_q is None:
         max_seqlen_q = seqlen_q if not has_ranges else total_q
@@ -2372,9 +2379,13 @@ def flex_flash_attn_func(
         with a user ``score_mod``.
 
     pack_gqa: fold the q heads of one kv head into the M dimension of the
-        forward (the backward never packs). ``None`` packs GQA except on the
-        SM100/SM110 range atomic-merge path, where packing is opt-in and needs
-        the q-tile size (128) to be a multiple of ``nheads_q // nheads_kv``.
+        forward (the backward never packs). ``None`` packs GQA on the
+        direct-store paths when the q-tile size (128) is a multiple of
+        ``nheads_q // nheads_kv``; a tile that starts inside a token loses the
+        TMA Q load and O store and runs slower than unpacked, so ``None``
+        leaves such groups unpacked and ``True`` still packs them. The
+        SM100/SM110 range atomic-merge path packs only on request and requires
+        that multiple.
 
     disable_fwd_atomic_reduction: caller contract that q_ranges are sorted
         and pairwise disjoint, giving every O and dQ row a unique writer.

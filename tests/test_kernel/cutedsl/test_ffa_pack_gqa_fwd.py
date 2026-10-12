@@ -533,6 +533,51 @@ class TestFfaPackGqaFwd(TestCase):
         _, _, kernel = self._packed_fwd(q, k, v, relations)
         self.assertFalse(kernel.pack_gqa)
 
+    @parameterize("group", [4, 3, 6])
+    def test_direct_store_default_packs_only_when_group_divides_tile_m(self, group):
+        """``pack_gqa=None`` packs the direct-store fwd (ranges and dense)
+        only when the q tile is a multiple of the group; ``True`` still packs
+        a non-dividing group. Both give the reference output."""
+        expected = _TILE_M % group == 0
+        relations, total_q, total_k = _overlapping_relations(
+            [20, 150], coverage=1, mask_types=[MT_MAP.full, MT_MAP.causal]
+        )
+        q, k, v = _qkv(total_q, total_k, group)
+        out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
+        covered = torch.cat(
+            [torch.arange(s, e, device=q.device) for (s, e), _, _ in relations]
+        )
+        for pack, pack_expected in ((None, expected), (True, True)):
+            with _record_fwd_kernels() as built:
+                out, lse = _flex_flash_attn_fwd(
+                    q,
+                    k,
+                    v,
+                    **_range_args(relations),
+                    pack_gqa=pack,
+                    disable_fwd_atomic_reduction=True,
+                    out_dtype=torch.float32,
+                )
+            (kernel,) = built
+            self.assertEqual(kernel.pack_gqa, pack_expected, (group, pack))
+            torch.testing.assert_close(
+                out[covered], out_ref[covered], atol=_TOL, rtol=_TOL
+            )
+            torch.testing.assert_close(
+                lse[covered], lse_ref[covered], atol=1e-3, rtol=1e-3
+            )
+
+        dense = ([0, total_q], [0, total_k], MT_MAP.full)
+        out_ref, _, _ = _ref_fwd(q, k, v, [dense])
+        with _record_fwd_kernels() as built:
+            out, _ = flex_flash_attn_func(
+                q[None], k[None], v[None], mask_types=MT_MAP.full
+            )
+        (kernel,) = built
+        self.assertEqual(kernel.pack_gqa, expected, group)
+        torch.testing.assert_close(out[0].float(), out_ref, atol=2e-2, rtol=2e-2)
+        self._log_ran(f"direct-store default G={group} packed={expected}")
+
     def test_packed_atomic_fwd_rejects_group_not_dividing_tile_m(self):
         relations, total_q, total_k = _overlapping_relations(
             [20], coverage=2, mask_types=[MT_MAP.full]
