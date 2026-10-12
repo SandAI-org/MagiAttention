@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import os
 import random
 from itertools import product
@@ -24,6 +25,7 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention import env, init_dist_attn_runtime_mgr
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import (
     AttnMaskType,
@@ -75,10 +77,41 @@ from magi_attention.utils import (
     sync_rng,
 )
 from magi_attention.utils.dtype import max_fp_dtype
+from magi_attention.utils.general import find_factors_in_range, get_factors
 
 # tag used in attn_config to mark which backends an attn_config is applicable to
 # (omitted or empty means all backends)
 BACKENDS = "backends"
+
+
+def _is_native_grpcoll_hidden_size_aligned(
+    comm_hidden_size: int,
+    solver_hidden_size: int,
+    chunk_size: int,
+    dtype: torch.dtype,
+) -> bool:
+    """Mirror of ``BaseDistAttnSolver.calc_split_alignment`` (strategy ``"min"``).
+
+    Native grpcoll views a tensor as ``(seqlen // split_alignment,
+    comm_hidden_size * split_alignment)`` and requires that width to be a
+    multiple of ``GrpCollBuffer.get_hidden_size_alignment(dtype)``. The solver
+    takes the smallest factor of ``chunk_size`` that widens ``solver_hidden_size``
+    into the high-bandwidth window and falls back to 1 without checking the
+    alignment, so the filter has to apply the same choice.
+    """
+    max_split_alignment = (
+        GrpCollBuffer.get_max_supported_hidden_size(dtype) // solver_hidden_size
+    )
+    min_split_alignment = math.ceil(
+        GrpCollBuffer.get_min_high_bw_hidden_size(dtype) / solver_hidden_size
+    )
+    high_bw_split_alignments = find_factors_in_range(
+        get_factors(chunk_size), min_split_alignment, max_split_alignment
+    )
+    split_alignment = high_bw_split_alignments[0] if high_bw_split_alignments else 1
+    return (
+        comm_hidden_size * split_alignment
+    ) % GrpCollBuffer.get_hidden_size_alignment(dtype) == 0
 
 
 # TODO: rewrite the specific function for unitest profiling mode
@@ -447,17 +480,32 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # by split_alignment, violating _check_split_alignment.
             if test_config.get("uneven_shard", False):
                 return False
-            # native grpcoll kernel requires hidden_size * split_alignment
-            # to be aligned to get_hidden_size_alignment (256 for fp16/bf16).
-            # When num_heads_kv is small (e.g. GQA with 2 kv heads),
-            # hidden_size_kv < 256 and no split_alignment can satisfy it.
-            num_heads_cfg = test_config.get("num_heads")
-            head_dim_cfg = test_config.get("head_dim")
-            if num_heads_cfg is not None and head_dim_cfg is not None:
-                num_heads_kv = num_heads_cfg[1]
-                hidden_size_kv = num_heads_kv * head_dim_cfg
-                if hidden_size_kv < 256:
-                    return False
+            # Per-token hidden sizes as the solver and the comm kernels see them:
+            # flatten_head_groups leaves (num_heads_q // num_heads_kv, 1) heads,
+            # asymmetric K/V travels as one tensor with K and V concatenated.
+            num_heads_q, num_heads_kv = test_config["num_heads"]
+            if flatten_hg:
+                num_heads_q, num_heads_kv = num_heads_q // num_heads_kv, 1
+            head_dim = test_config["head_dim"]
+            head_dim_v = test_config["head_dim_v"]
+            chunk_size = test_config["chunk_size"]
+            dtype = test_config["dtype"]
+            kv_hidden_size = num_heads_kv * (
+                head_dim if head_dim_v == head_dim else head_dim + head_dim_v
+            )
+            if not _is_native_grpcoll_hidden_size_aligned(
+                kv_hidden_size, num_heads_kv * head_dim, chunk_size, dtype
+            ):
+                return False
+            # Q uses head_dim, O / dO use head_dim_v, both with the split chosen
+            # for num_heads_q * head_dim.
+            if qo_comm and not all(
+                _is_native_grpcoll_hidden_size_aligned(
+                    num_heads_q * dim, num_heads_q * head_dim, chunk_size, dtype
+                )
+                for dim in (head_dim, head_dim_v)
+            ):
+                return False
 
         if flatten_hg:
             if not qo_comm:
@@ -976,27 +1024,130 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             },
         ],
     )
+    # The 16 (num_heads, head_dims, dtype) triples are split by world-size
+    # parity. Odd world sizes run group A and even world sizes run group B,
+    # so each triple runs on 4 world sizes. World size does not change the
+    # kernel instantiation, so the kernel coverage is unchanged. Within each
+    # group, each (num_heads, head_dims) pair appears once and the dtypes
+    # form a Latin square: each (num_heads, dtype) pair and each
+    # (head_dims, dtype) pair appears in both groups.
     @parameterize(
-        "num_heads",
+        "shape_cfg",
         [
-            (8, 8),  # mha
-            (8, 2),  # gqa
-        ],
-    )
-    @parameterize(
-        "head_dims",
-        [
-            (64, 64),
-            (128, 128),
-            (192, 128),
-            (256, 256),
-        ],
-    )
-    @parameterize(
-        "dtype",
-        [
-            torch.float16,
-            torch.bfloat16,
+            # ========  group A: odd world sizes (1, 3, 5, 7)  ========
+            {
+                NAME: "mha_hd64_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (64, 64),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd64_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (64, 64),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd128_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (128, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "mha_hd128_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (128, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "mha_hd192x128_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (192, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd192x128_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (192, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd256_fp16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 2),
+                "head_dims": (256, 256),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "mha_hd256_bf16",
+                SKIP_WORLD_SIZE: [2, 4, 6, 8],
+                "num_heads": (8, 8),
+                "head_dims": (256, 256),
+                "dtype": torch.bfloat16,
+            },
+            # ========  group B: even world sizes (2, 4, 6, 8)  ========
+            {
+                NAME: "mha_hd64_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (64, 64),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd64_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (64, 64),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd128_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (128, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "mha_hd128_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (128, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "mha_hd192x128_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (192, 128),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "gqa_hd192x128_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (192, 128),
+                "dtype": torch.float16,
+            },
+            {
+                NAME: "gqa_hd256_bf16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 2),
+                "head_dims": (256, 256),
+                "dtype": torch.bfloat16,
+            },
+            {
+                NAME: "mha_hd256_fp16",
+                SKIP_WORLD_SIZE: [1, 3, 5, 7],
+                "num_heads": (8, 8),
+                "head_dims": (256, 256),
+                "dtype": torch.float16,
+            },
         ],
     )
     @parameterize(
@@ -1012,12 +1163,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     def test_pipeline(
         self,
         attn_config: dict[str, Any],
-        num_heads: tuple[int, int],  # (nhq, nhkv)
-        head_dims: tuple[int, int],  # (Q/K dim, V dim)
-        dtype: torch.dtype,
+        shape_cfg: dict[str, Any],
         backend: MagiAttentionKernelBackend,
         run_bwd: bool = True,
     ):
+        num_heads: tuple[int, int] = shape_cfg["num_heads"]  # (nhq, nhkv)
+        head_dims: tuple[int, int] = shape_cfg["head_dims"]  # (Q/K dim, V dim)
+        dtype: torch.dtype = shape_cfg["dtype"]
         head_dim, head_dim_v = head_dims
 
         if backend == MagiAttentionKernelBackend.FFA and (
@@ -1083,6 +1235,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ):
             return
 
+        if self.world_size in shape_cfg[SKIP_WORLD_SIZE]:
+            return
+
         # -----    skip for test case filter   ---- #
 
         if not should_run_test_case(
@@ -1104,6 +1259,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "num_heads": num_heads,
                 "head_dim": head_dim,
                 "head_dim_v": head_dim_v,
+                "dtype": dtype,
             }
             flag_comb = self.flag_generator.get_next_valid_comb(
                 test_config=test_config,

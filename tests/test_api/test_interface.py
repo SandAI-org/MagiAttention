@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
 from typing import Any
 
 import pytest
@@ -810,6 +811,10 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
     def test_interface(self, *args, **kwargs):
         super().test_interface(*args, **kwargs)
 
+    @unittest.skipIf(
+        torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+        "This test targets the C++ FFA, which supports only sm90.",
+    )
     @skip_if_lt_x_gpu(8)
     @with_comms
     @switch_deterministic_mode_decorator(enable=True)

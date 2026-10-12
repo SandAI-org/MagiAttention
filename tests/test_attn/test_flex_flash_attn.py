@@ -46,6 +46,10 @@ from magi_attention.testing.precision import (
 from magi_attention.utils import is_list_value_any, make_attn_mask_from_ffa_args
 
 
+@unittest.skipIf(
+    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    "This test targets the C++ FFA, which supports only sm90.",
+)
 class TestFlexFlashAttn(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()

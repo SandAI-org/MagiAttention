@@ -90,13 +90,39 @@ class TestDSASparseInterface(TestCase):
         _ATTN_CONFIGS,
     )
     @parameterize("dtype", _DTYPES)
-    @parameterize("backend", ["flex", "ffa_block_sparse", "ffa_index_sparse", "sdpa"])
+    @parameterize("backend", ["flex", "sdpa"])
     def test_sparse_flex_vs_ref(
         self,
         attn_config: dict[str, Any],
         dtype: torch.dtype,
         backend: str,
     ):
+        self._assert_sparse_backend_matches_ref(attn_config, dtype, backend)
+
+    @unittest.skipIf(
+        torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+        "This test targets the C++ FFA, which supports only sm90.",
+    )
+    @parameterize(
+        "attn_config",
+        _ATTN_CONFIGS,
+    )
+    @parameterize("dtype", _DTYPES)
+    @parameterize("backend", ["ffa_block_sparse", "ffa_index_sparse"])
+    def test_sparse_ffa_vs_ref(
+        self,
+        attn_config: dict[str, Any],
+        dtype: torch.dtype,
+        backend: str,
+    ):
+        self._assert_sparse_backend_matches_ref(attn_config, dtype, backend)
+
+    def _assert_sparse_backend_matches_ref(
+        self,
+        attn_config: dict[str, Any],
+        dtype: torch.dtype,
+        backend: str,
+    ) -> None:
         sq, skv = attn_config["sq"], attn_config["skv"]
         nhq, nhkv, hd = attn_config["nhq"], attn_config["nhkv"], attn_config["hd"]
         topk = attn_config["topk"]
