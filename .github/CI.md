@@ -21,11 +21,24 @@ GPU CI uses task runners labeled `ci-spot-job` plus the platform label declared 
 
 The package-owned H100 profile tests the canonical backend names `ffa` and `sdpa`, preserving the existing Hopper coverage. The B300 profile instead tests `fa4`, `cutedsl`, and `sdpa`; `fa4` is the test enum value for the FFA_FA4 implementation. Before a B300 portable test actually runs, the package-owned test recipe installs `flash_attn_cute` and its native utilities from the exact checked-out MagiAttention source for SM100. A runner-local content-addressed stamp shares that installation between the main and extensions test invocations in the same job. On each platform that installs `flash_attn_cute`, the main-package test recipe then runs `tools/precompile_ffa_fa4.py` with the installed package. The script writes the FFA_FA4 kernels to `MAGI_ATTENTION_FFA_FA4_CACHE_DIR`, which is a new cache dir in the temporary test directory of each run. Pytest loads the FFA_FA4 kernels from this cache dir. If the precompile fails, the job fails. `MAGI_ATTENTION_JIT_COMPILE_DISABLED` applies only to native FFA kernels. Thus the tests JIT-compile each FFA_FA4 kernel that is not in the precompiled grid. Portable hits skip both the tests and this setup. The H100 build performs the normal FFA AOT prebuild once. Unsupported parameter combinations are filtered by the test suite. The H100 profile alone retains `NCCL_NVLS_ENABLE=0`; B300 does not inherit that Hopper-specific workaround. The Dispatcher creates each task directly from `registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2`, matching `.github/configs/base_image_tag.txt`; the workflow must not declare a nested GitHub Actions container because task runners do not provide Docker. This image provides the remaining environment required by both MagiAttention and MagiAttnExtensions; a plain NGC PyTorch image is insufficient. Shared storage is available at `/home/niubility2/ci_workspace`.
 
-PR CI uses `pull_request_target`, so the workflow definition always comes from the base repository. The GPU job references the protected `ci-internal` environment and starts only after its required reviewer approves it. After approval, the trusted base workflow explicitly checks out the PR head and merges the latest target branch before testing. This permits contributions from forks without allowing a fork to replace the workflow that grants runner access.
+PR CI uses `pull_request_target`, so the workflow definition always comes from the base repository. Change detection and platform planning run from base-repository code before any approval. The GPU jobs reference the protected `ci-internal` environment and cannot start until one of its required reviewers approves the workflow run. After approval, `actions/checkout` opts into fork checkout and checks out the immutable `merge_commit_sha` recorded in that event. A later PR update creates a different workflow run and must be reviewed separately.
 
-The approval is the current security boundary: reviewers must inspect untrusted changes before allowing arbitrary PR code to execute on an internal runner. Approved fork PRs set `CI_WORKSPACE_ROOT` to `${RUNNER_TEMP}/magi-attention-ci`; they do not publish portable markers or intentionally write normal CI artifacts to the shared cache. For every event, the H100 build job transfers its two wheels and manifests to platform test jobs through a run-scoped GitHub Actions artifact, preserving the single-wheel contract without assuming shared storage across platforms. The current Dispatcher pool still exposes the shared mount to the task, so reviewer approval must be treated as authorization for the fork code to access internal runner resources.
+### Fork PR approval and trust
 
-TODO: provision a dedicated fork runner label whose task specification does not mount shared storage, then route fork PRs to that pool. Path selection inside a shared task is not a security boundary. Same-repository PRs and `main` pushes continue to use the shared v2 cache. Every GPU job runs `.github/scripts/verify_task_runner.sh` before accessing storage.
+`ci-internal` approval is the security boundary for fork PRs. It is a code-trust decision, not merely an authorization to consume GPU capacity. An approved fork runs arbitrary repository code on an internal task runner with the job's secrets, network access, and the shared `/home/niubility2/ci_workspace` mount. It may consume and publish standalone wheels, compiled artifacts, dependency artifacts, and portable validation results in the shared v2 cache. `allow-unsafe-pr-checkout: true` is therefore intentional and is safe only under this review policy.
+
+Before approving a fork workflow run, the reviewer must:
+
+- verify that the workflow run and its `merge_commit_sha` correspond to the exact PR revision being reviewed;
+- review the complete diff against the target branch, including generated or unusually large files;
+- inspect all code that can execute during checkout, installation, build, import, test collection, and tests, especially `setup.py`, `pyproject.toml`, `.github/scripts/`, `.github/tests/`, and shell scripts;
+- inspect every submodule URL and gitlink update, because recursive checkout fetches and later executes submodule content;
+- look for credential access, unexpected network requests, writes outside the workspace, direct access to `/home/niubility2`, background processes, and changes intended to influence future cache hits;
+- reject the approval if the code cannot be confidently reviewed, and require the contributor to simplify or explain the change instead of using CI as a sandbox.
+
+Approval treats the reviewed fork revision as fully trusted. Restricting normal scripts to a runner-local cache would not isolate malicious code while the shared mount remains accessible, so approved forks use the same content-addressed shared cache as same-repository PRs and `main` pushes. Manifest and digest verification detects corruption but does not establish artifact provenance; the human review is what authorizes fork code to write reusable cache entries. Every GPU job runs `.github/scripts/verify_task_runner.sh` before accessing storage.
+
+For every event, the H100 build job also transfers its two wheels and manifests to platform test jobs through a run-scoped GitHub Actions artifact. This preserves the single-wheel contract and guarantees that all platform jobs test the exact wheel produced by that run, including when the shared cache misses.
 
 ## v2 wheel artifacts
 
@@ -40,7 +53,7 @@ ${CI_WORKSPACE_ROOT}/v2/standalone-artifacts/magi-attention/
   <cache-name>/<fingerprint>/{*.whl,manifest.json}
 ```
 
-The fingerprint includes schema, base image family, tracked source digest, package version, build recipe, the fixed SM90+SM100 build target, and—for extensions—the exact main-package wheel fingerprint. Publication uses private staging followed by atomic rename. Existing directories are verified before reuse. Test jobs use install-only mode and fail rather than rebuilding a missing wheel on another GPU architecture.
+The fingerprint includes schema, base image family, tracked source digest, package version, build recipe, the fixed SM90+SM100+SM103 build target, and—for extensions—the exact main-package wheel fingerprint. Publication uses private staging followed by atomic rename. Existing directories are verified before reuse. Test jobs use install-only mode and fail rather than rebuilding a missing wheel on another GPU architecture.
 
 Standalone wheel artifacts are local CI build outputs. Downstream consumers must independently build or verify the wheel they intend to publish.
 
@@ -64,9 +77,9 @@ The standalone layout uses the defaults `PORTABLE_SOURCE_ROOT=.` and `PORTABLE_B
 
 `.github/tests/test_portable_validation.sh` constructs equivalent standalone and generic vendored layouts. It verifies that both layouts produce identical fingerprints, that a downstream layout accepts a marker written by the standalone layout, and that malformed markers fail closed.
 
-Only trusted runs of `SandAI-org/MagiAttention` may publish portable markers. Failure and cancellation never produce markers. A downstream consumer must recompute the fingerprint from its vendored MagiAttention content. Different source, tests, submodule gitlinks, runtime, platform, or protocol produce a miss.
+Only trusted runs of `SandAI-org/MagiAttention` may publish portable markers. GPU jobs from a pull request become trusted only after `ci-internal` approval; `main` pushes are trusted directly. Failure and cancellation never produce markers. A downstream consumer must recompute the fingerprint from its vendored MagiAttention content. Different source, tests, submodule gitlinks, runtime, platform, or protocol produce a miss.
 
-Trusted standalone runs also verify these markers after building and checking their wheels. A hit skips the corresponding test suite; a miss runs the tests and publishes the marker. Coverage is uploaded only when the MagiAttention test suite actually ran. Fork runs do not consume or publish shared markers.
+Trusted standalone runs also verify these markers after building and checking their wheels. A hit skips the corresponding test suite; a miss runs the tests and publishes the marker. Coverage is uploaded only when the MagiAttention test suite actually ran. Approved fork runs consume and publish markers under the same rules as other trusted runs.
 
 A portable marker certifies tests, not wheel bytes, and must never replace wheel manifest verification or a downstream project's own publication policy.
 
