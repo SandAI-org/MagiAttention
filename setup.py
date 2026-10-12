@@ -500,6 +500,7 @@ def build_magi_attn_comm_module(
     # Flags for the standard C++ compiler (gcc/g++)
     cxx_flags = [
         "-O3",  # Maximize optimization
+        "-std=c++20",  # Match the standard required by recent PyTorch headers
         "-Wno-deprecated-declarations",  # Suppress warnings about deprecated code
         "-Wno-unused-variable",  # Suppress warnings about unused variables
         "-Wno-sign-compare",  # Suppress signed/unsigned comparison warnings
@@ -513,8 +514,7 @@ def build_magi_attn_comm_module(
         "-O3",
         "-Xptxas",  # Pass arguments to ptxas (PTX assembler)
         "-v",  # Verbose output
-        "-Xcompiler",  # Pass arguments to the host compiler
-        "-std=c++17",  # Use C++17 standard
+        "-std=c++20",  # Set the standard for both CUDA and host compilation
         "-lineinfo",  # Generate line-number information for profiling
         # "-Xcompiler",  # Uncomment for profiling compilation time
         # "-ftime-report",  # Uncomment for profiling compilation time
