@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import os
 import random
 from itertools import product
@@ -76,10 +77,41 @@ from magi_attention.utils import (
     sync_rng,
 )
 from magi_attention.utils.dtype import max_fp_dtype
+from magi_attention.utils.general import find_factors_in_range, get_factors
 
 # tag used in attn_config to mark which backends an attn_config is applicable to
 # (omitted or empty means all backends)
 BACKENDS = "backends"
+
+
+def _is_native_grpcoll_hidden_size_aligned(
+    comm_hidden_size: int,
+    solver_hidden_size: int,
+    chunk_size: int,
+    dtype: torch.dtype,
+) -> bool:
+    """Mirror of ``BaseDistAttnSolver.calc_split_alignment`` (strategy ``"min"``).
+
+    Native grpcoll views a tensor as ``(seqlen // split_alignment,
+    comm_hidden_size * split_alignment)`` and requires that width to be a
+    multiple of ``GrpCollBuffer.get_hidden_size_alignment(dtype)``. The solver
+    takes the smallest factor of ``chunk_size`` that widens ``solver_hidden_size``
+    into the high-bandwidth window and falls back to 1 without checking the
+    alignment, so the filter has to apply the same choice.
+    """
+    max_split_alignment = (
+        GrpCollBuffer.get_max_supported_hidden_size(dtype) // solver_hidden_size
+    )
+    min_split_alignment = math.ceil(
+        GrpCollBuffer.get_min_high_bw_hidden_size(dtype) / solver_hidden_size
+    )
+    high_bw_split_alignments = find_factors_in_range(
+        get_factors(chunk_size), min_split_alignment, max_split_alignment
+    )
+    split_alignment = high_bw_split_alignments[0] if high_bw_split_alignments else 1
+    return (
+        comm_hidden_size * split_alignment
+    ) % GrpCollBuffer.get_hidden_size_alignment(dtype) == 0
 
 
 # TODO: rewrite the specific function for unitest profiling mode
@@ -448,30 +480,32 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # by split_alignment, violating _check_split_alignment.
             if test_config.get("uneven_shard", False):
                 return False
-            # native grpcoll kernel requires hidden_size * split_alignment
-            # to be aligned to get_hidden_size_alignment (256 for fp16/bf16).
-            # When num_heads_kv is small (e.g. GQA with 2 kv heads),
-            # hidden_size_kv < 256 and no split_alignment can satisfy it.
-            num_heads_cfg = test_config.get("num_heads")
-            head_dim_cfg = test_config.get("head_dim")
-            if num_heads_cfg is not None and head_dim_cfg is not None:
-                num_heads_kv = num_heads_cfg[1]
-                hidden_size_kv = num_heads_kv * head_dim_cfg
-                if hidden_size_kv < 256:
-                    return False
-                # Asymmetric K/V is group-reduced as one tensor with K and V concatenated
-                # on the last dim, but the split alignment is solved from head_dim alone,
-                # so the concatenated width itself must meet the hidden-size alignment.
-                head_dim_v_cfg = test_config.get("head_dim_v", head_dim_cfg)
-                if head_dim_v_cfg != head_dim_cfg:
-                    packed_hidden_size_kv = num_heads_kv * (
-                        head_dim_cfg + head_dim_v_cfg
-                    )
-                    alignment = GrpCollBuffer.get_hidden_size_alignment(
-                        test_config["dtype"]
-                    )
-                    if packed_hidden_size_kv % alignment != 0:
-                        return False
+            # Per-token hidden sizes as the solver and the comm kernels see them:
+            # flatten_head_groups leaves (num_heads_q // num_heads_kv, 1) heads,
+            # asymmetric K/V travels as one tensor with K and V concatenated.
+            num_heads_q, num_heads_kv = test_config["num_heads"]
+            if flatten_hg:
+                num_heads_q, num_heads_kv = num_heads_q // num_heads_kv, 1
+            head_dim = test_config["head_dim"]
+            head_dim_v = test_config["head_dim_v"]
+            chunk_size = test_config["chunk_size"]
+            dtype = test_config["dtype"]
+            kv_hidden_size = num_heads_kv * (
+                head_dim if head_dim_v == head_dim else head_dim + head_dim_v
+            )
+            if not _is_native_grpcoll_hidden_size_aligned(
+                kv_hidden_size, num_heads_kv * head_dim, chunk_size, dtype
+            ):
+                return False
+            # Q uses head_dim, O / dO use head_dim_v, both with the split chosen
+            # for num_heads_q * head_dim.
+            if qo_comm and not all(
+                _is_native_grpcoll_hidden_size_aligned(
+                    num_heads_q * dim, num_heads_q * head_dim, chunk_size, dtype
+                )
+                for dim in (head_dim, head_dim_v)
+            ):
+                return False
 
         if flatten_hg:
             if not qo_comm:
