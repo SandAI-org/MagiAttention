@@ -178,7 +178,7 @@ class FFABwdSm100:
             assert self.use_per_range_mask, "bwd RangeMerge rides the per-range entry"
             assert disable_bwd_dkv_atomic_reduction, (
                 "bwd RangeMerge exists to direct-store shared-K dKV; merged K "
-                "groups must be sorted pairwise disjoint"
+                "groups must be pairwise disjoint"
             )
             assert not use_dense_dqacc_for_ranges
             assert score_mod is None and score_mod_bwd is None and mask_mod is None

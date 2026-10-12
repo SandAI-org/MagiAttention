@@ -90,14 +90,14 @@ def _apply_range_merge(
     outer_ranges: torch.Tensor,
     inner_ranges: torch.Tensor,
     mask_types: int | torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Rewrite one pass's relation rows to merged (group, pair) CSR form.
+) -> RangeMergePlan:
+    """The merged (group, pair) CSR form of one pass's relation rows.
 
     Forward merges on the Q axis, backward on the K axis; the caller picks
-    which tensor is outer. Returns (outer, inner, mask_types, cu_batches)
-    with mask types materialized per row, since the merge reorders rows:
-    ``[G, 2]`` outer groups, ``[R, 2]`` inner rows and ``[R]`` mask types
-    for the caller's ``R`` relations, and the ``[G + 1]`` CSR between them.
+    which tensor is outer. The plan holds ``[G, 2]`` outer groups, ``[R, 2]``
+    inner rows and ``[R]`` mask types for the caller's ``R`` relations
+    (materialized per row, since the merge reorders rows), and the
+    ``[G + 1]`` CSR between them.
     """
     if isinstance(range_merge, RangeMergePlan):
         plan = range_merge
@@ -111,18 +111,15 @@ def _apply_range_merge(
         assert (
             plan.cu_batches.shape[0] == plan.merged_outer_ranges.shape[0] + 1
         ), "RangeMergePlan cu_batches must have one entry per group plus one"
-        return (
-            plan.merged_outer_ranges,
-            plan.sorted_inner_ranges,
-            plan.sorted_mask_types,
-            plan.cu_batches,
-        )
-    outer, inner, merged_mask_types, cu_batches = merge_qk_ranges(
+        assert (
+            plan.merged_outer_ranges_by_start.shape == plan.merged_outer_ranges.shape
+        ), "RangeMergePlan start-ordered groups disagree with the groups"
+        return plan
+    return merge_qk_ranges(
         outer_ranges,
         inner_ranges,
         materialize_mask_types(mask_types, outer_ranges.shape[0], outer_ranges.device),
     )
-    return outer, inner, merged_mask_types, cu_batches
 
 
 def _split_mask_types(
@@ -257,9 +254,11 @@ def _flex_flash_attn_fwd(
     cu_batches = None
     if range_merge_active:
         assert q_ranges is not None and k_ranges is not None  # has_ranges
-        q_ranges, k_ranges, mask_types, cu_batches = _apply_range_merge(
-            range_merge, q_ranges, k_ranges, mask_types
-        )
+        q_merge = _apply_range_merge(range_merge, q_ranges, k_ranges, mask_types)
+        q_ranges = q_merge.merged_outer_ranges
+        k_ranges = q_merge.sorted_inner_ranges
+        mask_types = q_merge.sorted_mask_types
+        cu_batches = q_merge.cu_batches
         pack_gqa = False
     per_range, mask_type, mask_types_tensor = _split_mask_types(mask_types)
     # SM100/SM110 kernels consume mQRanges/mKRanges directly. Other arches
@@ -1067,11 +1066,14 @@ def _flex_flash_attn_bwd(
             )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
+    k_merge = None
     if range_merge_active:
         assert q_ranges is not None and k_ranges is not None  # has_ranges
-        k_ranges, q_ranges, mask_types, cu_batches = _apply_range_merge(
-            range_merge, k_ranges, q_ranges, mask_types
-        )
+        k_merge = _apply_range_merge(range_merge, k_ranges, q_ranges, mask_types)
+        k_ranges = k_merge.merged_outer_ranges
+        q_ranges = k_merge.sorted_inner_ranges
+        mask_types = k_merge.sorted_mask_types
+        cu_batches = k_merge.cu_batches
     if has_ranges and major_arch not in (10, 11):
         cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
         cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
@@ -1457,10 +1459,15 @@ def _flex_flash_attn_bwd(
         return dq, dk, dv, dsink
 
     if direct_dkv and not declared_k_full_coverage:
+        # The sweep binary-searches range starts; merged K groups are listed
+        # in launch order, so it reads the plan's start-ordered copy.
+        hole_k_ranges = (
+            k_ranges if k_merge is None else k_merge.merged_outer_ranges_by_start
+        )
         if dk_self_alloc:
-            bwd_grad_zero_holes(dk, k_ranges)
+            bwd_grad_zero_holes(dk, hole_k_ranges)
         if dv_self_alloc:
-            bwd_grad_zero_holes(dv, k_ranges)
+            bwd_grad_zero_holes(dv, hole_k_ranges)
 
     rowmajor_accum = has_ranges and major_arch in (10, 11)
     # Row-major postprocess sweeps in-range rows; with accumulate it sweeps every

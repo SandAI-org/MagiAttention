@@ -14,7 +14,7 @@
 
 """Host-side RangeMerge."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -40,14 +40,17 @@ __all__ = [
 class RangeMergePlan:
     """Precomputed merge tables for RangeMerge.
 
-    ``R`` relations fold into ``G`` groups of identical outer interval. The
-    kernels schedule one batch per group, so the grid is sized from ``G``.
+    ``R`` relations fold into ``G`` groups of identical outer interval, one
+    kernel batch per group, in the launch order of :func:`merge_qk_ranges`.
+    ``merged_outer_ranges_by_start`` holds the same groups by outer start for
+    the dK/dV hole sweep, which binary-searches range starts.
     """
 
-    merged_outer_ranges: torch.Tensor  # [G, 2], sorted by start
+    merged_outer_ranges: torch.Tensor  # [G, 2], launch order
     sorted_inner_ranges: torch.Tensor  # [R, 2], group-contiguous
     sorted_mask_types: torch.Tensor  # [R]
     cu_batches: torch.Tensor  # [G + 1] CSR into the R sorted rows
+    merged_outer_ranges_by_start: torch.Tensor  # [G, 2], start ascending
     bwd: "RangeMergePlan | None" = None  # K-merge; None => rebuild in bwd
 
 
@@ -62,9 +65,9 @@ def plan_range_merge(
         q_ranges.shape[0],
         q_ranges.device,
     )
-    merged, sk, sm, cu = merge_qk_ranges(q_ranges, k_ranges, mask_types)
-    return RangeMergePlan(
-        merged, sk, sm, cu, bwd=plan_range_merge_bwd(q_ranges, k_ranges, mask_types)
+    return replace(
+        merge_qk_ranges(q_ranges, k_ranges, mask_types),
+        bwd=plan_range_merge_bwd(q_ranges, k_ranges, mask_types),
     )
 
 
@@ -79,8 +82,7 @@ def plan_range_merge_bwd(
         q_ranges.shape[0],
         q_ranges.device,
     )
-    merged_k, sq, sm, cu = merge_qk_ranges(k_ranges, q_ranges, mask_types)
-    return RangeMergePlan(merged_k, sq, sm, cu)
+    return merge_qk_ranges(k_ranges, q_ranges, mask_types)
 
 
 def bwd_range_merge_arg(
@@ -97,19 +99,19 @@ def bwd_range_merge_arg(
 def merge_qk_ranges(
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    mask_types: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
-    """Group relations by identical outer interval.
+    mask_types: torch.Tensor,
+) -> RangeMergePlan:
+    """Group relations by identical outer interval, heaviest group first.
 
-    Returns ``(merged_outer, sorted_inner, sorted_mask, cu_batches)``:
-    ``[G, 2]``, ``[R, 2]``, ``[R]`` and ``[G + 1]`` for ``R`` relations in
-    ``G`` groups, where group ``g`` owns sorted rows ``cu_batches[g]`` to
-    ``cu_batches[g + 1]`` and ``cu_batches[G] == R``.
-
-    Reading ``G`` synchronizes the device once per call. A precomputed
-    :class:`RangeMergePlan` pays it once at construction; ``range_merge=True``
-    pays it in every forward and backward call, and cannot be captured in a
-    CUDA graph.
+    Returns the plan without ``bwd``: ``merged_outer_ranges`` ``[G, 2]``,
+    ``sorted_inner_ranges`` ``[R, 2]``, ``sorted_mask_types`` ``[R]`` and
+    ``cu_batches`` ``[G + 1]`` for ``R`` relations in exactly ``G`` groups;
+    group ``g`` owns rows ``cu_batches[g]`` to ``cu_batches[g + 1]``, in
+    input order. Groups are in :func:`_group_launch_order`: the kernels
+    launch group ``g`` before group ``g + 1``, and the deterministic chains
+    number writers by ``g``. Reading ``G`` synchronizes the device once per
+    call, so ``range_merge=True`` cannot be captured in a CUDA graph; a
+    precomputed :class:`RangeMergePlan` can.
     """
     assert is_magi_attn_ext_installed, "magi_attn_ext must be installed for RangeMerge."
     assert q_ranges.shape == k_ranges.shape and q_ranges.shape[1] == 2
@@ -125,5 +127,58 @@ def merge_qk_ranges(
     merged_q, cu_batches, unique_count = magi_attn_ext.unique_consecutive_pairs(
         sorted_q
     )
-    num_groups = int(unique_count.item())
-    return merged_q[:num_groups], sorted_k, sorted_mask, cu_batches[: num_groups + 1]
+    num_groups, num_rows = int(unique_count.item()), sorted_k.shape[0]
+    # Before the launch-order gather the groups are in outer-start order.
+    merged_q, cu_batches = merged_q[:num_groups], cu_batches[: num_groups + 1]
+    if num_rows == 0:
+        return RangeMergePlan(merged_q, sorted_k, sorted_mask, cu_batches, merged_q)
+
+    cu = cu_batches.to(torch.int64)
+    row_count = cu[1:] - cu[:-1]
+    order = _group_launch_order(sorted_k, row_count)
+    new_row_count = row_count[order]
+    new_cu_batches = torch.cat([cu.new_zeros(1), new_row_count.cumsum(0)])
+    # Every row belongs to exactly one group, so the counts sum to num_rows
+    # and output_size keeps repeat_interleave free of a host sync.
+    group = torch.arange(num_groups, dtype=torch.int64, device=cu.device)
+    row_group = torch.repeat_interleave(group, new_row_count, output_size=num_rows)
+    row = torch.arange(num_rows, dtype=torch.int64, device=cu.device)
+    src_row = cu[:-1][order][row_group] + (row - new_cu_batches[row_group])
+    return RangeMergePlan(
+        merged_outer_ranges=merged_q[order],
+        sorted_inner_ranges=sorted_k[src_row],
+        sorted_mask_types=sorted_mask[src_row],
+        cu_batches=new_cu_batches.to(cu_batches.dtype),
+        merged_outer_ranges_by_start=merged_q,
+    )
+
+
+# Ordering estimate of the inner-axis tile (fwd K, bwd Q); the kernel tile
+# may differ by config.
+_COST_TILE = 128
+
+
+def _group_launch_order(
+    sorted_inner: torch.Tensor, row_count: torch.Tensor
+) -> torch.Tensor:
+    """Permutation of the merged groups by the bit length of their work-tile
+    length (the sum over pairs of ``ceil(inner width / _COST_TILE)``),
+    descending. Groups of one class keep outer-start order, so neighboring
+    groups still share inner ranges in L2. Masks are not counted. No host
+    sync.
+    """
+    pair_tiles = torch.div(
+        sorted_inner[:, 1] - sorted_inner[:, 0] + (_COST_TILE - 1),
+        _COST_TILE,
+        rounding_mode="floor",
+    ).to(torch.int64)
+    group_of_row = torch.repeat_interleave(
+        torch.arange(row_count.shape[0], device=row_count.device),
+        row_count,
+        output_size=sorted_inner.shape[0],
+    )
+    tile_length = torch.zeros_like(row_count).index_add_(0, group_of_row, pair_tiles)
+    # frexp's exponent of a non-negative integer is its bit length, exact in
+    # float64 for every tile count an int32 range table can produce.
+    _, length_class = torch.frexp(tile_length.to(torch.float64))
+    return torch.argsort(length_class, descending=True, stable=True)

@@ -1065,6 +1065,24 @@ def _merged_k_relations() -> tuple[Relations, int, int]:
     return relations, 700, 1000
 
 
+def _merged_k_relations_heavy_middle() -> tuple[Relations, int, int]:
+    """:func:`_merged_k_relations` with four more one-tile Q pairs on K range
+    [300, 557], disjoint in Q from its other pairs, so that group walks eight
+    Q tiles, the most of any group, while its K range is second lowest. K
+    range [557, 700] shrinks to [580, 700] and total_k grows to 1100, leaving
+    K rows [557, 580) and [1000, 1100) in no group, which the dK/dV hole
+    sweep must zero. Returns (relations, total_q, total_k)."""
+    relations, total_q, _ = _merged_k_relations()
+    relations = [
+        (q_range, [580, 700] if k_range == [557, 700] else k_range, mask_type)
+        for q_range, k_range, mask_type in relations
+    ] + [
+        ([q_start, q_end], [300, 557], MT_MAP.full)
+        for q_start, q_end in ((0, 50), (50, 100), (357, 480), (480, 600))
+    ]
+    return relations, total_q, 1100
+
+
 def _merged_k_relations_2cta_adjacent(
     num_groups: int = 8, pairs_per_group: int = 4
 ) -> tuple[Relations, int, int]:
@@ -1103,12 +1121,18 @@ def _merged_k_relations_2cta_adjacent(
 
 
 def _merged_k_groups(relations: Relations) -> list[tuple[list[int], list[list[int]]]]:
-    """(K range, Q ranges of its pairs) per merged K group, in the group
-    order of RangeMerge: K start ascending, pairs in input order."""
-    groups: dict[tuple[int, int], list[list[int]]] = {}
-    for q_range, (k_start, k_end), _ in sorted(relations, key=lambda r: r[1][0]):
-        groups.setdefault((k_start, k_end), []).append(q_range)
-    return [(list(k), qs) for k, qs in groups.items()]
+    """(K range, Q ranges of its pairs) per merged K group, in the launch
+    order of the K-merge plan the kernel receives; its order is checked
+    against a reference in ``tests/test_attn/test_merge_range.py``."""
+    args = _range_args(relations)
+    plan = plan_range_merge_bwd(args["q_ranges"], args["k_ranges"], args["mask_types"])
+    cu = plan.cu_batches.tolist()
+    q_ranges = plan.sorted_inner_ranges.tolist()
+    return [
+        (plan.merged_outer_ranges[g].tolist(), q_ranges[cu[g] : cu[g + 1]])
+        for g in range(len(cu) - 1)
+        if cu[g + 1] > cu[g]
+    ]
 
 
 def _assert_merged_dq_chain_settled(launch: _Launch, relations: Relations) -> None:
@@ -1417,9 +1441,38 @@ class TestFfaRangeDeterministicBwd(TestCase):
         settles on the merged writers, and the gradients match the chained
         unmerged backward with reduced dK/dV and the reference. Under 2-CTA
         clusters the two CTAs of a writer hand off at every pair boundary."""
+        self._check_bwd_range_merge(case, *_merged_k_relations())
+
+    @parameterize("case", [(1, False, 128, False), (2, True, 128, True)])
+    def test_bwd_range_merge_heavy_group_launches_first(self, case):
+        """The K group with the longest Q walk is not the lowest K range, so
+        RangeMerge launches it first and the dQ writer numbers follow the
+        launch order rather than K order; the merged backward still settles
+        on them and stays bitwise equal across sm_margin and plans. K rows in
+        no group (one gap between groups, one tail) come out zero, with the
+        self-allocated dK/dV buffers starting as NaN."""
+        relations, total_q, total_k = _merged_k_relations_heavy_middle()
+        groups = _merged_k_groups(relations)
+        self.assertEqual(groups[0][0], [300, 557])
+        self.assertNotEqual([k for k, _ in groups], sorted(k for k, _ in groups))
+        dq, dk, dv = self._check_bwd_range_merge(
+            case, relations, total_q, total_k, nan_empty=True
+        )
+        for name, grad in (("dk", dk), ("dv", dv)):
+            for start, end in ((557, 580), (1000, 1100)):
+                self.assertTrue(
+                    bool((grad[start:end] == 0).all()),
+                    f"{name} rows [{start}, {end}) in no K group are not zero",
+                )
+
+    def _check_bwd_range_merge(
+        self, case, relations, total_q, total_k, nan_empty=False
+    ):
+        """Runs the merged deterministic backward checks; returns its dQ/dK/dV.
+        ``nan_empty`` fills every ``torch.empty_like`` buffer of the merged
+        backward with NaN, so a row the kernels or the hole sweep skip shows."""
         group, cat_gqa, head_dim, two_cta = case
         cluster = 2 if two_cta else 1
-        relations, total_q, total_k = _merged_k_relations()
         q, k, v, out, lse, do = self._fwd_bwd_inputs(
             relations, total_q, total_k, group, head_dim
         )
@@ -1428,19 +1481,28 @@ class TestFfaRangeDeterministicBwd(TestCase):
             args["q_ranges"], args["k_ranges"], args["mask_types"]
         )
 
+        empty_like = torch.empty_like
+
+        def nan_empty_like(*args, **kwargs):
+            t = empty_like(*args, **kwargs)
+            return t.fill_(float("nan")) if t.is_floating_point() else t
+
         def merge_bwd(sm_margin, range_merge=True):
-            return self._det_bwd(
-                q,
-                k,
-                v,
-                out,
-                lse,
-                do,
-                relations,
-                range_merge=range_merge,
-                cat_gqa=cat_gqa,
-                sm_margin=sm_margin,
-            )
+            with mock.patch(
+                "torch.empty_like", nan_empty_like if nan_empty else empty_like
+            ):
+                return self._det_bwd(
+                    q,
+                    k,
+                    v,
+                    out,
+                    lse,
+                    do,
+                    relations,
+                    range_merge=range_merge,
+                    cat_gqa=cat_gqa,
+                    sm_margin=sm_margin,
+                )
 
         env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0" if two_cta else "1"}
         first = None
@@ -1491,6 +1553,7 @@ class TestFfaRangeDeterministicBwd(TestCase):
                 got.float(), ref, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
             )
         self._log_ran(f"bwd range merge {case}")
+        return first
 
     @parameterize("cat_gqa", [False, True])
     def test_bwd_range_merge_2cta_adjacent_pair_conflicts_bitwise(self, cat_gqa):
