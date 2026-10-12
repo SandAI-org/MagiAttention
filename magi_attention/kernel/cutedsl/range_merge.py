@@ -38,12 +38,16 @@ __all__ = [
 
 @dataclass(frozen=True)
 class RangeMergePlan:
-    """Precomputed merge tables for RangeMerge."""
+    """Precomputed merge tables for RangeMerge.
 
-    merged_outer_ranges: torch.Tensor  # [R, 2], pad [0, 0]
+    ``R`` relations fold into ``G`` groups of identical outer interval. The
+    kernels schedule one batch per group, so the grid is sized from ``G``.
+    """
+
+    merged_outer_ranges: torch.Tensor  # [G, 2], sorted by start
     sorted_inner_ranges: torch.Tensor  # [R, 2], group-contiguous
     sorted_mask_types: torch.Tensor  # [R]
-    cu_batches: torch.Tensor  # [R + 1] CSR
+    cu_batches: torch.Tensor  # [G + 1] CSR into the R sorted rows
     bwd: "RangeMergePlan | None" = None  # K-merge; None => rebuild in bwd
 
 
@@ -97,7 +101,15 @@ def merge_qk_ranges(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
     """Group relations by identical outer interval.
 
-    Returns ``(merged_outer, sorted_inner, sorted_mask, cu_batches)``.
+    Returns ``(merged_outer, sorted_inner, sorted_mask, cu_batches)``:
+    ``[G, 2]``, ``[R, 2]``, ``[R]`` and ``[G + 1]`` for ``R`` relations in
+    ``G`` groups, where group ``g`` owns sorted rows ``cu_batches[g]`` to
+    ``cu_batches[g + 1]`` and ``cu_batches[G] == R``.
+
+    Reading ``G`` synchronizes the device once per call. A precomputed
+    :class:`RangeMergePlan` pays it once at construction; ``range_merge=True``
+    pays it in every forward and backward call, and cannot be captured in a
+    CUDA graph.
     """
     assert is_magi_attn_ext_installed, "magi_attn_ext must be installed for RangeMerge."
     assert q_ranges.shape == k_ranges.shape and q_ranges.shape[1] == 2
@@ -106,9 +118,12 @@ def merge_qk_ranges(
     sorted_q, sorted_k, sorted_mask = magi_attn_ext.reorder_ranges_and_attn_type_maps(
         q_ranges, k_ranges, mask_types, sorted_idx, is_sorted
     )
-    # unique_consecutive_pairs's second return is already the CSR row pointer:
-    # cu_batches[g]..cu_batches[g+1] spans merged group g in the sorted rows.
-    merged_q, cu_batches, _unique_count = magi_attn_ext.unique_consecutive_pairs(
+    # unique_consecutive_pairs returns R rows of unique pairs and R + 1 row
+    # offsets, of which only the first G and G + 1 are written; the kernels
+    # take num_batch from the row count, so the tail would launch CTAs that
+    # read unwritten rows.
+    merged_q, cu_batches, unique_count = magi_attn_ext.unique_consecutive_pairs(
         sorted_q
     )
-    return merged_q, sorted_k, sorted_mask, cu_batches
+    num_groups = int(unique_count.item())
+    return merged_q[:num_groups], sorted_k, sorted_mask, cu_batches[: num_groups + 1]

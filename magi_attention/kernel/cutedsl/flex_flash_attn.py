@@ -95,13 +95,22 @@ def _apply_range_merge(
 
     Forward merges on the Q axis, backward on the K axis; the caller picks
     which tensor is outer. Returns (outer, inner, mask_types, cu_batches)
-    with mask types materialized per row, since the merge reorders rows.
+    with mask types materialized per row, since the merge reorders rows:
+    ``[G, 2]`` outer groups, ``[R, 2]`` inner rows and ``[R]`` mask types
+    for the caller's ``R`` relations, and the ``[G + 1]`` CSR between them.
     """
     if isinstance(range_merge, RangeMergePlan):
         plan = range_merge
+        # Shapes only: cu_batches[G] == R holds by construction, and reading
+        # it back would synchronize the device.
         assert (
-            plan.merged_outer_ranges.shape[0] == outer_ranges.shape[0]
-        ), "RangeMergePlan row count disagrees with the outer ranges"
+            plan.sorted_inner_ranges.shape[0]
+            == plan.sorted_mask_types.shape[0]
+            == outer_ranges.shape[0]
+        ), "RangeMergePlan relation count disagrees with the ranges"
+        assert (
+            plan.cu_batches.shape[0] == plan.merged_outer_ranges.shape[0] + 1
+        ), "RangeMergePlan cu_batches must have one entry per group plus one"
         return (
             plan.merged_outer_ranges,
             plan.sorted_inner_ranges,
@@ -2379,7 +2388,8 @@ def flex_flash_attn_func(
         relations sharing an outer interval into (group, pair) CSR form so
         forward skips the atomic O merge; backward derives the dual K-merge.
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
-        contracts.
+        contracts. ``True`` builds the merge tables in every call, which
+        synchronizes the device; pass a plan to capture a CUDA graph.
 
     out_dtype: dtype of the returned O, fp32/fp16/bf16. None returns the input
         dtype. A dtype other than the input dtype requires SM100/SM110. With

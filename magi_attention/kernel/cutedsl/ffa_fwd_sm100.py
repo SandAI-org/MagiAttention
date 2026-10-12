@@ -767,7 +767,7 @@ class FFAFwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
         max_seqlen_q: Int32 | None = None,
-        mCuBatches: Optional[cute.Tensor] = None,  # [R + 1] CSR offsets for RangeMerge
+        mCuBatches: Optional[cute.Tensor] = None,  # [G + 1] CSR offsets for RangeMerge
         sm_margin: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
