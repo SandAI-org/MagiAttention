@@ -20,7 +20,6 @@ env:
   # One H100-built wheel carries native code for both Hopper and Blackwell.
   MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY: '90,100,103'
   MAGI_ATTENTION_PREBUILD_LEVEL: ci
-  VALIDATION_CACHE_TRUSTED: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
 
 jobs:
   detect_changes:
@@ -32,7 +31,7 @@ jobs:
       MagiAttention: ${{ steps.package_changes.outputs.MagiAttention }}
       MagiAttnExtensions: ${{ steps.package_changes.outputs.MagiAttnExtensions }}
       ci_protocol: ${{ steps.filter.outputs.ci_protocol }}
-      trusted: ${{ steps.trust.outputs.trusted }}
+      checkout_ref: ${{ steps.checkout_ref.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,6 +42,23 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: bash .github/scripts/check_pr_title.sh
+      - name: Resolve immutable tested revision
+        id: checkout_ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          if [[ "$EVENT_NAME" == pull_request_target ]]; then
+            ref=$PR_MERGE_SHA
+          else
+            ref=$EVENT_SHA
+          fi
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Cannot resolve an immutable revision for $EVENT_NAME" >&2
+            exit 1
+          }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
       - name: Fetch pull request head for change detection
         if: github.event_name == 'pull_request_target'
         env:
@@ -70,10 +86,6 @@ jobs:
               - '.github/configs/base_image_tag.txt'
               - '.github/scripts/**'
               - '.github/tests/**'
-      - name: Determine trust
-        id: trust
-        run: echo "trusted=${{ env.VALIDATION_CACHE_TRUSTED }}" >> "$GITHUB_OUTPUT"
-
   plan_platforms:
     runs-on: ubuntu-latest
     outputs:
@@ -107,6 +119,7 @@ jobs:
         needs.detect_changes.outputs.MagiAttnExtensions == 'true' ||
         needs.detect_changes.outputs.ci_protocol == 'true'
       )
+    # Approval trusts the reviewed PR code with job secrets and shared-cache access.
     environment: ${{ github.event_name == 'pull_request_target' && 'ci-internal' || '' }}
     runs-on: [ci-spot-job, h100]
     env:
@@ -120,19 +133,18 @@ jobs:
       GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       DEPENDENCY_REPO_TOKEN: ${{ secrets.DEPENDENCY_REPO_TOKEN }}
       CI_DEPENDENCY_USE_TOKEN: 'true'
+      # pull_request_target jobs cannot start until ci-internal approval.
+      VALIDATION_CACHE_TRUSTED: 'true'
     steps:
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
-          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          ref: ${{ needs.detect_changes.outputs.checkout_ref }}
           submodules: recursive
           fetch-depth: 0
           persist-credentials: false
           # Fork PR code runs only after ci-internal environment approval.
           allow-unsafe-pr-checkout: true
-      - name: Use runner-local artifacts for fork PR
-        if: needs.detect_changes.outputs.trusted != 'true'
-        run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
       - name: Verify task runner
         run: bash .github/scripts/verify_task_runner.sh
       - name: Apply platform environment
@@ -166,6 +178,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan_platforms.outputs.matrix) }}
+    # Approval trusts the reviewed PR code with job secrets and shared-cache access.
     environment: ${{ github.event_name == 'pull_request_target' && 'ci-internal' || '' }}
     runs-on: [ci-spot-job, "${{ matrix.platform }}"]
     env:
@@ -179,19 +192,18 @@ jobs:
       GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       DEPENDENCY_REPO_TOKEN: ${{ secrets.DEPENDENCY_REPO_TOKEN }}
       CI_DEPENDENCY_USE_TOKEN: 'true'
+      # pull_request_target jobs cannot start until ci-internal approval.
+      VALIDATION_CACHE_TRUSTED: 'true'
     steps:
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
-          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          ref: ${{ needs.detect_changes.outputs.checkout_ref }}
           submodules: recursive
           fetch-depth: 0
           persist-credentials: false
           # Fork PR code runs only after ci-internal environment approval.
           allow-unsafe-pr-checkout: true
-      - name: Use runner-local artifacts for fork PR
-        if: needs.detect_changes.outputs.trusted != 'true'
-        run: echo "CI_WORKSPACE_ROOT=$RUNNER_TEMP/magi-attention-ci" >> "$GITHUB_ENV"
       - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
@@ -213,7 +225,7 @@ jobs:
         env:
           MAIN_CHANGED: ${{ needs.detect_changes.outputs.MagiAttention }}
           CI_CHANGED: ${{ needs.detect_changes.outputs.ci_protocol }}
-          TRUSTED: ${{ needs.detect_changes.outputs.trusted }}
+          TRUSTED: ${{ env.VALIDATION_CACHE_TRUSTED }}
       - name: Upload coverage reports to Codecov
         if: matrix.platform == 'h100' && steps.test.outputs.coverage_generated == 'true'
         uses: codecov/codecov-action@v5
