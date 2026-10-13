@@ -527,6 +527,7 @@ def _ref_attn_torch_impl_mainprocess_offline(
     bias: torch.Tensor,
     softmax_scale: float,
     return_max_logits: bool = False,
+    softcap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     # apply `S = Q x K.T * scale + bias`
     # where S.shape = [nhq, sq, sk]
@@ -534,6 +535,10 @@ def _ref_attn_torch_impl_mainprocess_offline(
         q @ kt * softmax_scale,
         lowest_precision=torch.float32,
     )
+    # softcap bounds the scaled score before masking so masked positions
+    # stay -inf and the max logit is the capped value
+    if softcap != 0.0:
+        s = softcap * torch.tanh(s / softcap)
     s += bias
     # per-head max over score matrix (only when needed; only mask==True positions)
     if return_max_logits:
@@ -596,6 +601,7 @@ def _ref_attn_torch_impl(
     return_max_logits: bool = False,
     sink_layout: AttnSinkLayout = "sh",
     online_softmax: bool = False,
+    softcap: float = 0.0,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     (q, kt, v, sink, bias, softmax_scale) = _ref_attn_torch_impl_preprocess(
         q=q,
@@ -607,21 +613,28 @@ def _ref_attn_torch_impl(
         sink_layout=sink_layout,
     )
 
-    mainprocess_func = (
-        _ref_attn_torch_impl_mainprocess_online
-        if online_softmax
-        else _ref_attn_torch_impl_mainprocess_offline
-    )
-
-    out, lse, max_logits = mainprocess_func(
-        q=q,
-        kt=kt,
-        v=v,
-        sink=sink,
-        bias=bias,
-        softmax_scale=softmax_scale,
-        return_max_logits=return_max_logits,
-    )
+    if online_softmax:
+        assert softcap == 0.0, "softcap is not supported with online softmax"
+        out, lse, max_logits = _ref_attn_torch_impl_mainprocess_online(
+            q=q,
+            kt=kt,
+            v=v,
+            sink=sink,
+            bias=bias,
+            softmax_scale=softmax_scale,
+            return_max_logits=return_max_logits,
+        )
+    else:
+        out, lse, max_logits = _ref_attn_torch_impl_mainprocess_offline(
+            q=q,
+            kt=kt,
+            v=v,
+            sink=sink,
+            bias=bias,
+            softmax_scale=softmax_scale,
+            return_max_logits=return_max_logits,
+            softcap=softcap,
+        )
 
     out, lse = _ref_attn_torch_impl_postprocess(
         out=out,
@@ -695,7 +708,9 @@ def ref_attn_func(
             and the per-head max logits [num_heads_q] if ``return_max_logits`` is ``True``, otherwise ``None``.
     """
     assert layout in ("thd",), f"Unsupported layout: {layout}"
-    assert softcap == 0.0, "non-zero softcap is not supported by now"
+    assert (
+        softcap == 0.0 or backend == "torch"
+    ), "non-zero softcap is only supported by the torch backend"
 
     # maybe cast input to high precision
     org_dtype = q.dtype
@@ -731,6 +746,7 @@ def ref_attn_func(
                 return_max_logits=return_max_logits,
                 sink_layout=sink_layout,
                 online_softmax=online_softmax,
+                softcap=softcap,
             )
         case _:
             raise NotImplementedError(f"Unsupported backend: {backend}")
