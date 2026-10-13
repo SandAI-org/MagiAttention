@@ -69,17 +69,14 @@ class FFABwdPostProcess:
         :type head_dim: int
         :param tile_m: m block size
         :type tile_m: int
-        :param accumulate: add the scaled accumulator onto the existing output
-            instead of overwriting it: a caller-provided gradient buffer is
-            the reduction target itself
+        :param accumulate: add the scaled accumulator onto the output instead of
+            overwriting it.
         :type accumulate: bool
         """
         self.dtype = dtype
         self.accumulate = accumulate
-        # On SM100/SM110 the accumulating path stages the scaled tile in fp32
-        # and adds the old output in fp32, so each update rounds to ``dtype``
-        # once. Staging in ``dtype`` would round the partial before the add:
-        # a bf16 partial of 1 + 2**-10 onto -1 would give 0 instead of 2**-10.
+        # Accumulate stages in fp32 so each update rounds once; SM80/SM90/SM120
+        # stage in dtype and round twice.
         self.stage_dtype = Float32 if accumulate and arch // 10 in [10, 11] else dtype
         self.tile_m = tile_m
         assert arch // 10 in [
@@ -217,9 +214,8 @@ class FFABwdPostProcess:
                 )
             )
 
-        # smem -> rmem reads the staged tile and rmem <-> gmem moves the output
-        # dtype; both copies share one thread-value layout so a register
-        # fragment pairs with the same logical coordinates on both sides.
+        # s2r (stage dtype) and gmem (output dtype) copies share one thread-value
+        # layout so each register keeps its coordinate.
         num_copy_elems = 128 // self.stage_dtype.width
         threads_per_row = math.gcd(128, self.tile_hdim) // num_copy_elems
         self.s2r_tiled_copy_dQ = copy_utils.tiled_copy_2d(
@@ -565,7 +561,7 @@ class FFABwdPostProcess:
                         )
 
                         # R -> S. Mode 1 of the r2s fragment enumerates the
-                        # reduce stages; its nesting depends on the output
+                        # reduce stages; its nesting depends on the stage
                         # dtype's store op, so index it with the flat stage id.
                         tdQrdQ_r2s_stage = tdQrdQ_r2s[((None, 0), stage_idx, 0, 0)]
                         tdQrdQ_r2s_cpy = cute.make_tensor(

@@ -584,12 +584,7 @@ def resolve_output_dtype(
     provided: torch.Tensor | None,
     default: torch.dtype,
 ) -> torch.dtype:
-    """Pick the GMEM dtype of one kernel output (fwd O, bwd dQ/dK/dV).
-
-    Priority: explicit ``requested`` dtype, then the dtype of a caller-provided
-    ``provided`` buffer, then ``default``. ``validate_tensor`` rejects a provided
-    buffer whose dtype differs from the resolved one.
-    """
+    """GMEM dtype of one kernel output: requested, else the provided buffer's dtype, else default."""
     dtype = requested or (provided.dtype if provided is not None else default)
     if dtype not in OUTPUT_DTYPES:
         raise ValueError(f"{name} dtype must be one of {OUTPUT_DTYPES}, got {dtype}")

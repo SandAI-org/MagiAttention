@@ -165,8 +165,8 @@ def _flex_flash_attn_fwd(
         lse: Optional pre-allocated log-sum-exp tensor. If None, will be allocated when needed.
         out_dtype: GMEM O dtype, one of fp32/fp16/bf16. ``None`` takes the dtype
             of a caller-provided ``out``, else fp32 on the atomic-merge path
-            (the GMEM buffer is the merge accumulator) and the input dtype on
-            the direct-store path. Non-default dtypes require SM100/SM110.
+            and the input dtype on the direct-store path. SM80/SM90/SM120
+            accept only the input dtype.
 
     Returns:
         A tuple of (output, lse) where:
@@ -400,7 +400,7 @@ def _flex_flash_attn_fwd(
     else:
         q_stage = 1
     # fp32 sO doubles smem at q_stage=2: borrow KV ring slots, else fall
-    # back to single-stage Q. dtype-O has no smem premium.
+    # back to single-stage Q. bf16/fp16 O needs no extra smem.
     fwd_fp32_o_borrow_kv = out_torch_dtype is torch.float32 and (
         fwd_fp32_o_can_borrow_kv_smem(
             int(math.ceil(head_dim / 16) * 16),
@@ -790,11 +790,10 @@ def _flex_flash_attn_bwd(
             SM100/SM110 fp32 for dQ and for reduced dK/dV and the input dtype
             for single-writer dK/dV. SM80/SM90/SM120 default to and accept only
             the input dtype. ``dk_type`` must equal ``dv_type``.
-        dq, dk, dv: optional caller-provided output buffers. On the reducing
-            paths (dQ always; dK/dV on dense GQA and ranges with atomic dK/dV)
-            the buffer is the reduction accumulator, so the gradient is added
-            onto its existing contents. The single-writer dK/dV paths
-            overwrite the buffer.
+        dq, dk, dv: optional caller buffers. On reducing paths (dQ always;
+            dK/dV on dense GQA and ranges with atomic dK/dV) the postprocess
+            adds the gradient onto the buffer; single-writer dK/dV paths
+            overwrite it.
         declared_q_full_coverage: q_ranges cover every Q token, so the dQ
             hole-zeroing sweep is skipped. Overlap is allowed. False is always
             safe.
@@ -1159,8 +1158,8 @@ def _flex_flash_attn_bwd(
             bwd_grad_zero_holes(dv, k_ranges)
 
     rowmajor_accum = has_ranges and major_arch in (10, 11)
-    # True-range bwd stores row-major fp32 TMA reductions; the row-major
-    # postprocess sweeps only in-range rows.
+    # Row-major postprocess sweeps in-range rows; with accumulate it sweeps every
+    # row and needs zeroed accum outside q_ranges.
     rowmajor_post_dq = rowmajor_accum and not use_dense_dqacc_for_ranges
     dq_accum_hdim_multiple = 16 if rowmajor_post_dq else 32
     dq_head_dim_rounded = (
@@ -1206,10 +1205,8 @@ def _flex_flash_attn_bwd(
                 // m_block_size
                 * m_block_size
             )
-        # Atomic dQ reduces into dq_accum, so it starts at zero. On the direct
-        # path the preprocess clears every tile the postprocess reads, except
-        # that the accumulating row-major postprocess adds every physical row
-        # onto the caller's dq, so rows outside q_ranges must be zero too.
+        # zeros: atomic dQ reduces into it, and the accumulating row-major
+        # postprocess reads rows outside q_ranges.
         dq_accum_alloc = (
             torch.zeros
             if not direct_dq_init or (rowmajor_post_dq and not dq_self_alloc)
@@ -1676,9 +1673,8 @@ def _flex_flash_attn_bwd(
             num_threads_post_dKV = 128
 
     rowmajor_post_dkv = pre_post_k_ranges is not None
-    # A caller-provided buffer on a reducing path is the reduction target the
-    # kernel atomically adds into; the single-writer paths overwrite the
-    # buffer like a fresh allocation.
+    # A caller buffer on a reducing path is added onto by the postprocess;
+    # single-writer dK/dV paths overwrite it.
     accumulate_dq = not dq_self_alloc
     accumulate_dk = not dk_self_alloc
     accumulate_dv = not dv_self_alloc
@@ -1877,8 +1873,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if dout is None:
             dout = torch.zeros_like(out)
         if out.dtype != q.dtype:
-            # Atomic-reduction fwd returns fp32 O; the bwd kernels consume the
-            # target dtype.
+            # An explicit out_dtype other than the input dtype saves O in that
+            # dtype; the bwd kernels read the input dtype.
             out = out.to(q.dtype)
             dout = dout.to(q.dtype)
 
@@ -1988,11 +1984,10 @@ def flex_flash_attn_func(
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
         contracts.
 
-    out_dtype: GMEM O dtype, one of fp32/fp16/bf16 (SM100/SM110). ``None``
-        returns the input dtype; on the atomic-merge path the kernel then
-        merges in fp32 and casts once at the end. A narrower explicit dtype
-        trades K-1 cascading truncations in a K-way overlap merge for half
-        the merge traffic.
+    out_dtype: dtype of the returned O, fp32/fp16/bf16. None returns the input
+        dtype. A dtype other than the input dtype requires SM100/SM110. With
+        overlapping q_ranges, an explicit bf16/fp16 merges in that dtype and
+        rounds once per extra range.
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /

@@ -164,8 +164,8 @@ def cutedsl_bwd(
         disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
         range_merge=False,
         mask_types=ffa_args["attn_type_map"],
-        # Partial dq/dk/dv feed the fp32 dist reduce; requesting fp32 here keeps
-        # the direct-store dK/dV path from rounding through the input dtype.
+        # Partial dq/dk/dv feed the fp32 dist reduce, so they must not round
+        # through the input dtype.
         dq_type=torch.float32,
         dk_type=torch.float32,
         dv_type=torch.float32,
