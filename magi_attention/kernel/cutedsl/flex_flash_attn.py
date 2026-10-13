@@ -785,17 +785,11 @@ def _flex_flash_attn_bwd(
     """Backward pass for FlexFlashAttention.
 
     Args:
-        dq_type, dk_type, dv_type: GMEM dtype of each gradient output, one of
-            fp32/fp16/bf16. ``None`` takes the dtype of the caller-provided
-            buffer, else fp32 for dQ and for dK/dV on the reducing paths
-            (dense GQA, ranges with atomic dK/dV), and the input dtype for
-            dK/dV on the single-writer paths (dense MHA, ranges with
-            ``disable_bwd_dkv_atomic_reduction``). ``dk_type`` and ``dv_type``
-            must agree because the kernel sizes the dK/dV epilogue tiles from
-            one dtype. SM80/SM90 support the input dtype only.
-            dQ and the reducing dK/dV paths accumulate in fp32 regardless and
-            convert once in the postprocess; the single-writer dK/dV paths
-            write the requested dtype from the epilogue.
+        dq_type, dk_type, dv_type: dtype of each gradient, one of fp32/fp16/bf16.
+            ``None`` takes the dtype of the caller-provided buffer, else on
+            SM100/SM110 fp32 for dQ and for reduced dK/dV and the input dtype
+            for single-writer dK/dV. SM80/SM90/SM120 default to and accept only
+            the input dtype. ``dk_type`` must equal ``dv_type``.
         dq, dk, dv: optional caller-provided output buffers. On the reducing
             paths (dQ always; dK/dV on dense GQA and ranges with atomic dK/dV)
             the buffer is the reduction accumulator, so the gradient is added
@@ -1101,14 +1095,18 @@ def _flex_flash_attn_bwd(
         disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
 
-    # The GMEM gradient is the reduction accumulator, so the default dtype is
-    # fp32 wherever the output is reduced and the input dtype where a single
-    # writer stores it once. dQ is always reduced; dK/dV are stored once
-    # on the dense-MHA and direct_dkv paths.
+    # Ranges force accum+postprocess even for MHA: overlapping K ranges
+    # would clobber direct stores from multiple CTAs.
+    dKV_postprocess = qhead_per_kvhead > 1 or (
+        has_ranges and major_arch in (10, 11) and not disable_bwd_dkv_atomic_reduction
+    )
+
+    # A reduced gradient defaults to fp32 so a caller that sums partial
+    # gradients keeps accumulator precision; a single-writer dK/dV output
+    # defaults to the input dtype.
     if major_arch in (10, 11):
         dq_default = torch.float32
-        dkv_stored_once = direct_dkv or (not has_ranges and qhead_per_kvhead == 1)
-        dkv_default = k.dtype if dkv_stored_once else torch.float32
+        dkv_default = torch.float32 if dKV_postprocess else k.dtype
     else:
         dq_default = dkv_default = q.dtype
     dq_dtype = resolve_output_dtype("dq", dq_type, dq, dq_default)
@@ -1232,11 +1230,6 @@ def _flex_flash_attn_bwd(
             num_head, total_q_rounded_padded, dtype=torch.float32, device=device
         )
 
-    # Ranges force accum+postprocess even for MHA: overlapping K ranges
-    # would clobber direct stores from multiple CTAs.
-    dKV_postprocess = qhead_per_kvhead > 1 or (
-        has_ranges and major_arch in (10, 11) and not disable_bwd_dkv_atomic_reduction
-    )
     if dKV_postprocess:
         head_dim_v_rounded = (
             (head_dim_v + dkv_accum_hdim_multiple - 1)
@@ -1915,8 +1908,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_bwd_dkv_atomic_reduction=ctx.disable_bwd_dkv_atomic_reduction,
             flex_attn_args=flex_attn_args,
             range_merge=ctx.bwd_range_merge,
-            # Reduction happens in fp32 accumulators, so the postprocess can
-            # write the input dtype directly with no separate cast kernel.
+            # Autograd returns gradients in the input dtype.
             dq_type=q.dtype,
             dk_type=k.dtype,
             dv_type=v.dtype,
