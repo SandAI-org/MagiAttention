@@ -162,7 +162,7 @@ _FP8_SMALL_HDIM_REGS = {
 # === END TUNING KNOBS ===
 
 
-def fwd_atomic_can_borrow_kv_smem(
+def fwd_fp32_o_can_borrow_kv_smem(
     head_dim_padded: int,
     head_dim_v_padded: int,
     m_block_size: int,
@@ -340,10 +340,9 @@ class FFAFwdSm100:
         # fp32 O doubles the sO footprint of the input-dtype path; borrow
         # finished KV ring slots for it (one work tile per CTA only).
         self.sO_borrow_kv = (
-            not disable_fwd_atomic_reduction
-            and self.use_tma_KV
+            self.use_tma_KV
             and o_dtype == Float32
-            and fwd_atomic_can_borrow_kv_smem(
+            and fwd_fp32_o_can_borrow_kv_smem(
                 self.head_dim_padded,
                 self.head_dim_v_padded,
                 self.m_block_size,
@@ -4627,6 +4626,17 @@ class FFAFwdSm100:
                     pipeline_o_acc.consumer_wait_w_index_phase(
                         stage, o_corr_consumer_phase
                     )
+                    # sO overlays the KV ring, and the later q-stages' last PV
+                    # MMA may still be reading V from the slots this stage is
+                    # about to overwrite; their O-full commit is the only signal
+                    # that every V read has retired.
+                    if const_expr(self.sO_borrow_kv):
+                        for later_stage in cutlass.range_constexpr(
+                            stage + 1, self.q_stage
+                        ):
+                            pipeline_o_acc.consumer_wait_w_index_phase(
+                                later_stage, o_corr_consumer_phase
+                            )
 
                     # Acquire sO to be empty by the specified epilogue warp
                     # in non-corr-epi mode

@@ -575,6 +575,22 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+OUTPUT_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
+
+
+def resolve_output_dtype(
+    name: str,
+    requested: torch.dtype | None,
+    provided: torch.Tensor | None,
+    default: torch.dtype,
+) -> torch.dtype:
+    """GMEM dtype of one kernel output: requested, else the provided buffer's dtype, else default."""
+    dtype = requested or (provided.dtype if provided is not None else default)
+    if dtype not in OUTPUT_DTYPES:
+        raise ValueError(f"{name} dtype must be one of {OUTPUT_DTYPES}, got {dtype}")
+    return dtype
+
+
 def validate_tensor(t, name, expected_shape, expected_dtype, expected_device):
     assert (
         t.shape == expected_shape
