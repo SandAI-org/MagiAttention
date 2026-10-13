@@ -162,8 +162,27 @@ def _flex_flash_attn_fwd(
         flex_attn_args: optional torch FlexAttention-style / block-sparse args
             (``score_mod`` / ``mask_mod`` / ``aux_tensors`` /
             ``block_sparse_tensors``). See :class:`TorchFlexAttnArgs`.
-        out: Optional pre-allocated output tensor. If None, will be allocated internally.
-        lse: Optional pre-allocated log-sum-exp tensor. If None, will be allocated when needed.
+        out: optional output buffer, allocated when None. On the direct-store
+            path (``disable_fwd_atomic_reduction=True``, forced for dense
+            inputs and outside SM100/SM110) every q range writes its rows, and
+            a row outside every q range stays unwritten; an empty ``k``
+            (``k.shape[-3] == 0``) zeroes every row instead. On the
+            atomic-merge path a caller-provided ``out``/``lse`` pair is an
+            accumulation state that this call merges into. A row with
+            ``lse == -inf`` is empty: its ``out`` row is never read and needs
+            no initialization. A row with a finite ``lse`` holds a previous
+            result: the kernel reads it back and rescales it where a q range
+            of this call covers the row, and the postprocess rescales every
+            finite row when ``sink`` is passed. After every atomic-merge call
+            the postprocess zeroes the rows still at ``lse == -inf`` and folds
+            ``sink`` once into every row, so at most one call into one state
+            may pass ``sink``. An empty ``k`` adds no (q, k) pair and runs the
+            postprocess alone.
+        lse: optional fp32 log-sum-exp buffer. When None the host allocates it
+            filled with ``-inf``, except on the direct-store path without a
+            sink, where it is uninitialized. A caller-provided ``lse`` is not
+            filled: on the atomic-merge path every row must hold ``-inf`` or a
+            previous result.
         sink: optional ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
         out_dtype: GMEM O dtype, one of fp32/fp16/bf16. ``None`` takes the dtype
             of a caller-provided ``out``, else fp32 on the atomic-merge path
