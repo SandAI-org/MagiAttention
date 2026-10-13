@@ -33,6 +33,7 @@ import weakref
 
 import torch
 
+from magi_attention import env
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -85,10 +86,13 @@ def cutedsl_fwd(
     sm_margin: int = 0,
     return_max_logits: bool = False,
     max_logits: torch.Tensor | None = None,
+    pack_gqa: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Forward wrapper: returns (out, lse, max_logits) with lse in the dist
     contract's (sq, nhq) layout. With ``return_max_logits`` the fp32 ``[nhq]``
-    max logits are merged into ``max_logits``, or into a new ``-inf`` buffer."""
+    max logits are merged into ``max_logits``, or into a new ``-inf`` buffer.
+    ``pack_gqa`` is forwarded to the kernel; the dist runtime leaves it
+    ``None``, which keeps the atomic-merge forward unpacked."""
 
     ffa_args = attn_arg.to_ffa_args(is_bwd=False)
     if not ffa_args:
@@ -124,6 +128,7 @@ def cutedsl_fwd(
         mask_types=ffa_args["attn_type_map"],
         sm_margin=sm_margin,
         max_logits=max_logits,
+        pack_gqa=pack_gqa,
     )
 
     return out, lse, max_logits
@@ -191,5 +196,8 @@ def cutedsl_bwd(
         dk_type=torch.float32,
         dv_type=torch.float32,
         sm_margin=sm_margin,
+        # AttnArg grants the dK/dV direct-store contract to GQA only with
+        # CatGQA, so the kernel must take the same flag.
+        cat_gqa=env.general.is_cat_gqa_enable(),
     )
     return dq, dk, dv, dsink
