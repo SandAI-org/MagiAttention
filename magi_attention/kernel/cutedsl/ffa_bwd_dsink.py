@@ -105,7 +105,6 @@ class FFABwdDSink:
             if lse != -Float32.inf:
                 gO_row = mO[row, head_idx, None]
                 gdO_row = mdO[row, head_idx, None]
-                # Compute delta = sum(O * dO)
                 delta = Float32(0.0)
                 num_vecs = self.head_dim_v // self.vec_elems
                 for vec_idx in cutlass.range(num_vecs, unroll_full=True):

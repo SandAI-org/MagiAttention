@@ -3401,9 +3401,8 @@ class DistAttnFunc(torch.autograd.Function):
             local_q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
         if merged_attn_arg.can_skip(is_bwd=False):
-            # No q row attends to any key and the kernel wrappers refuse empty
-            # ranges; only the sink contributes, so build out/lse the same way
-            # as a skipped host stage in the overlap path.
+            # No q row attends to any key, and cutedsl_fwd raises on a skipped
+            # arg: build the sink-only out/lse like a skipped overlap host stage.
             local_out, local_lse = dist_attn_runtime._init_out_lse_skipped_host_stage(
                 q=local_q,
                 head_dim_v=full_v.shape[-1],
