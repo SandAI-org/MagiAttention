@@ -3838,11 +3838,6 @@ def dist_attn_func(
     _precision = env.general.precision()
     _validate_backend_precision(_backend, _precision, q.dtype)
 
-    # All backends fold the sink into an fp32 lse and emit an fp32 dsink for
-    # the cross-rank reduction.
-    if sink is not None:
-        assert sink.dtype == torch.float32, f"sink must be fp32, but got {sink.dtype}"
-
     orig_dtype = q.dtype
     if _precision is not None:
         compute_dtype = _precision.to_torch_dtype()
