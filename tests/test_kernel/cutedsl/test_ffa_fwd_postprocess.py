@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Empty rows and the sink fold of the atomic-merge forward postprocess.
-
-Rows no relation covers keep whatever the O buffer held; with a sink the
-postprocess must still leave them at O = 0, LSE = lse_sink, since a later
-call merging into the same O/LSE reads O back for every covered row with a
-finite LSE, and its postprocess for every finite row when it passes a sink.
-"""
+"""Regression tests for empty rows, sink folding, and atomic O/LSE accumulation."""
 
 import math
 from unittest import TestCase
@@ -89,8 +83,7 @@ class TestFfaFwdPostprocess(TestCase):
 
     @parameterize("out_dtype", [torch.float32, torch.bfloat16])
     def test_sink_zeroes_uncovered_rows_without_reading_o(self, out_dtype):
-        """Uncovered rows whose O holds NaN end at exactly O = 0 and
-        LSE = lse_sink; covered rows match the reference."""
+        """Uncovered rows with NaN O become O = 0, LSE = lse_sink."""
         device, num_head, head_dim = "cuda", 4, 128
         total_q = total_k = 512
         # Rows [64, 96) merge two relations; [160, 288) and [352, 512) are holes.
@@ -122,16 +115,10 @@ class TestFfaFwdPostprocess(TestCase):
 
     @parameterize("sink_call", [0, 2])
     def test_sink_once_in_any_call_of_an_accumulation(self, sink_call):
-        """Three calls merge into one fp32 O/LSE state, the sink passed to only
-        one of them: the result matches the relation union plus one sink.
-
-        With ``sink_call=0`` the rows the first call leaves empty go through
-        the sink fold first (O = 0, LSE = lse_sink) and get their real keys
-        from later calls, which read that O back."""
+        """Adding the sink first or last gives the same accumulated O/LSE."""
         device, num_head, head_dim = "cuda", 4, 128
         total_q, total_k = 384, 512
-        # Disjoint K ranges, so no (q, k) pair is counted twice; [320, 384) is
-        # never covered.
+        # Disjoint K ranges prevent duplicate pairs; Q rows [320, 384) stay empty.
         calls = [
             ([[0, 128]], [[0, 256]]),
             ([[64, 256]], [[256, 384]]),
@@ -177,9 +164,7 @@ class TestFfaFwdPostprocess(TestCase):
 
     @parameterize("with_sink", [False, True])
     def test_empty_k_call_keeps_the_accumulated_state(self, with_sink):
-        """An atomic call with no K adds no pair to the caller's O/LSE: rows
-        with a finite LSE keep their state (the sink, if passed, is folded in
-        once), and rows still at LSE = -inf end at O = 0."""
+        """Empty K preserves prior results, folds any sink, and zeroes empty rows."""
         device, num_head, head_dim, total_q = "cuda", 4, 128, 256
         q = torch.randn(
             total_q, num_head, head_dim, device=device, dtype=torch.bfloat16
