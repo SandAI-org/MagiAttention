@@ -437,6 +437,11 @@ class TestDistAttn(DistTestBase):
             use_sdpa = env.general.kernel_backend() == MagiAttentionKernelBackend.SDPA
             mismatch_threshold = 0.1 if use_sdpa else 0.08
             seqlen, ws = 128, self.world_size
+            # comm meta must match the attn args: a rank that fetched KV
+            # without attending would send back an uncomputed dK/dV buffer.
+            sources = [] if self.rank == 0 else [r for r in range(ws) if r != self.rank]
+            consumers = [r for r in range(1, ws) if r != self.rank]
+            num_remote_kv_tokens = seqlen * len(sources)
             empty_arg = AttnArg(
                 q_ranges=AttnRanges.from_ranges([]),
                 k_ranges=AttnRanges.from_ranges([]),
@@ -448,9 +453,9 @@ class TestDistAttn(DistTestBase):
                 if self.rank == 0
                 else AttnArg(
                     q_ranges=AttnRanges.from_ranges([[0, seqlen]]),
-                    k_ranges=AttnRanges.from_ranges([[0, seqlen * (ws - 1)]]),
+                    k_ranges=AttnRanges.from_ranges([[0, num_remote_kv_tokens]]),
                     attn_type_map=[0],
-                    total_area=seqlen * seqlen * (ws - 1),
+                    total_area=seqlen * num_remote_kv_tokens,
                 )
             )
             calc_meta = CalcMeta(
@@ -461,17 +466,16 @@ class TestDistAttn(DistTestBase):
                 headdim_v=head_dim_v,
                 seqlen_q_shard=seqlen,
                 seqlen_k_local=seqlen,
-                seqlen_k_per_remote_stage=[seqlen * (ws - 1)],
+                seqlen_k_per_remote_stage=[num_remote_kv_tokens],
             )
-            others = [rank for rank in range(ws) if rank != self.rank]
             comm_meta = CommMeta(
-                num_remote_kv_tokens_per_stage=[seqlen * (ws - 1)],
+                num_remote_kv_tokens_per_stage=[num_remote_kv_tokens],
                 kv_group_collective_args_list=[
                     GroupCollectiveArg(
                         input_split_size_list=[seqlen],
-                        output_split_size_list=[seqlen] * (ws - 1),
-                        dst_indices_list=[others],
-                        src_index_list=others,
+                        output_split_size_list=[seqlen] * len(sources),
+                        dst_indices_list=[consumers],
+                        src_index_list=sources,
                         rank=self.rank,
                         world_size=ws,
                         group=self.nccl_group,
