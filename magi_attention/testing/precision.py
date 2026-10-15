@@ -38,6 +38,9 @@ PRINT_NO_MISMATCH = "MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH"
 MISMATCH_THRES_RATIO: float = 2.0
 MAX_MISMATCH_THRES: float = 0.75
 NORM_RTOL_RATIO: float = 2.0
+# multiple of the reference's rounding noise added to a Linf gate,
+# the same as the FlashAttention tests (see `calc_rounding_noise_norm`)
+NORM_ROUNDING_NOISE_RATIO: float = 2.0
 
 # IB spec: https://nvdam.widen.net/s/dps8txlsrf/infiniband-ndr-400g-architecture-datasheet-1620877-r4
 IB_BANDWIDTH = 50e9  # 500 GB/s, single-end
@@ -307,3 +310,11 @@ def calc_inf_norm(
 ) -> float:
     dtype = max_fp_dtype(a.dtype, b.dtype, torch.float32)
     return safe_subtract(a.to(dtype), b.to(dtype)).norm(p=float("inf")).item()
+
+
+@torch.no_grad
+def calc_rounding_noise_norm(ref: torch.Tensor) -> float:
+    """Linf of the rounding noise of ``ref`` in its own dtype."""
+    if ref.numel() == 0:
+        return 0.0
+    return (ref + 0.3 - 0.3 - ref).abs().max().item()
