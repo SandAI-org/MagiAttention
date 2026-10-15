@@ -38,6 +38,8 @@ PRINT_NO_MISMATCH = "MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH"
 MISMATCH_THRES_RATIO: float = 2.0
 MAX_MISMATCH_THRES: float = 0.75
 NORM_RTOL_RATIO: float = 2.0
+# multiple of calc_rounding_noise_norm(ref) added to each Linf gate
+NORM_ROUNDING_NOISE_RATIO: float = 2.0
 
 # IB spec: https://nvdam.widen.net/s/dps8txlsrf/infiniband-ndr-400g-architecture-datasheet-1620877-r4
 IB_BANDWIDTH = 50e9  # 500 GB/s, single-end
@@ -307,3 +309,11 @@ def calc_inf_norm(
 ) -> float:
     dtype = max_fp_dtype(a.dtype, b.dtype, torch.float32)
     return safe_subtract(a.to(dtype), b.to(dtype)).norm(p=float("inf")).item()
+
+
+@torch.no_grad
+def calc_rounding_noise_norm(ref: torch.Tensor) -> float:
+    """Max of ``|ref + 0.3 - 0.3 - ref|`` in ``ref``'s dtype: about one ulp at ``|ref| + 0.3``."""
+    if ref.numel() == 0:
+        return 0.0
+    return (ref + 0.3 - 0.3 - ref).abs().max().item()
