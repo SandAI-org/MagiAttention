@@ -13,7 +13,8 @@
 # limitations under the License.
 
 
-"""Reduce shared sink gradients over physical query rows, independent of ranges.
+"""Reduce sink gradients over every physical query row, so rows outside the q
+ranges also contribute.
 
 Each CTA computes per-sink partials from ``-sum(O * dO) * exp(sink - LSE)``.
 The last CTA per head reduces the partials in a fixed order and writes dsink.
@@ -39,7 +40,7 @@ DSINK_TILE_M = 128
 
 
 class FFABwdDSink:
-    """Compute delta once per row and reduce each sink using constant shared memory."""
+    """Compute delta once per row and reduce each sink with shared memory independent of n_sink."""
 
     def __init__(self, o_dtype: Type[cutlass.Numeric], head_dim_v: int):
         self.o_dtype = o_dtype
@@ -145,8 +146,9 @@ class FFABwdDSink:
 
         if num_m_blocks > 1:
             if tidx == 0:
-                # This thread writes every partial. Ordered RMWs publish them
-                # and transitively acquire all earlier CTAs' partials.
+                # This thread writes every partial. The acq_rel add releases
+                # this CTA's partials and acquires those of every CTA that
+                # added before it.
                 completed = cute.arch.atomic_add(
                     mCounter.iterator + head_idx,
                     Int32(1),
@@ -220,9 +222,10 @@ def bwd_dsink(
 
     ``out`` and ``dout`` have shape ``[total_q, num_head, head_dim_v]`` and
     share a dtype. ``lse`` is FP32 ``[total_q, num_head]`` including sinks;
-    ``sink`` is FP32 ``[n_sink, num_head]`` with any ``n_sink``. A head whose
-    sink logits are all ``-inf`` gets a zero gradient. A supplied ``dsink`` is
-    overwritten.
+    ``sink`` is FP32 ``[n_sink, num_head]`` with any ``n_sink``. Rows with
+    ``lse == -inf`` contribute zero and their ``out``/``dout`` are not read.
+    A head whose sink logits are all ``-inf`` gets a zero gradient. A supplied
+    ``dsink`` is overwritten.
     """
     total_q, num_head, head_dim_v = out.shape
     n_sink = sink.shape[0]
