@@ -730,6 +730,9 @@ class FFAFwdSm100:
         sm_margin: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
+        # [num_head_q] fp32, max softmax logit per q head, merged in with an
+        # atomic max; the caller initializes it (to -inf or a previous result).
+        mMaxLogits: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -1450,6 +1453,7 @@ class FFAFwdSm100:
             mMaskTypes,
             mRangeLocks,
             mCuBatches,
+            mMaxLogits,
             blocksparse_tensors,
             sQ_layout,
             sK_layout,
@@ -1505,6 +1509,7 @@ class FFAFwdSm100:
         mMaskTypes: Optional[cute.Tensor],
         mRangeLocks: Optional[cute.Tensor],
         mCuBatches: Optional[cute.Tensor],
+        mMaxLogits: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
         sQ_layout: cute.ComposedLayout,
         sK_layout: cute.ComposedLayout,
@@ -2298,6 +2303,7 @@ class FFAFwdSm100:
                 blocksparse_tensors=blocksparse_tensors,
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
+                mMaxLogits=mMaxLogits,
                 is_print_block=is_print_block,
             )
 
@@ -3405,6 +3411,7 @@ class FFAFwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        mMaxLogits: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         """Compute softmax on attention scores from QK matrix multiplication.
@@ -3638,8 +3645,21 @@ class FFAFwdSm100:
                 rescale_threshold=rescale_threshold,
                 softmax_scale=softmax_scale_eff,
                 max_offset=max_offset,
+                track_row_max_exact=mMaxLogits is not None,
             )
             softmax.reset()
+            max_logits_fn = partial(
+                self.atomic_max_logits,
+                mMaxLogits=mMaxLogits,
+                softmax=softmax,
+                tidx=tidx,
+                head_idx=head_idx,
+                m_block=m_block,
+                stage=stage,
+                mma_tile_coord_v=thr_mma_qk.thr_idx,
+                seqlen_info=seqlen_info,
+                softmax_scale_log2_eff=softmax_scale_log2_eff,
+            )
 
             # --- Determine tile counts ---
 
@@ -3825,6 +3845,8 @@ class FFAFwdSm100:
                             + self.q_stage * self.m_block_size
                         ] = softmax.row_max[0]
                     sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
+                    if const_expr(mMaxLogits is not None):
+                        max_logits_fn()
             elif const_expr(self.range_merge):
                 pair_beg = Int32(mCuBatches[batch_idx])
                 pair_cnt = Int32(mCuBatches[batch_idx + 1]) - pair_beg
@@ -3910,6 +3932,8 @@ class FFAFwdSm100:
                 sm_stats_barrier.arrive_w_index(
                     index=stage * num_softmax_warps + warp_idx
                 )
+                if const_expr(mMaxLogits is not None):
+                    max_logits_fn()
             else:
                 if const_expr(not self.is_split_kv) or tile_block_count > Int32(0):
                     # --- Prologue: S0/S1(0) ---
@@ -4072,6 +4096,8 @@ class FFAFwdSm100:
                     sm_stats_barrier.arrive_w_index(
                         index=stage * num_softmax_warps + warp_idx
                     )
+                    if const_expr(mMaxLogits is not None):
+                        max_logits_fn()
 
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
@@ -4085,6 +4111,54 @@ class FFAFwdSm100:
                 # NOTE: This is equivalent to pipeline_s0_s1.producer_tail
                 pipeline_s0_s1_sequence.sync_object_full.wait(
                     stage, s0_s1_sequence_phase
+                )
+
+    @cute.jit
+    def atomic_max_logits(
+        self,
+        mMaxLogits: cute.Tensor,
+        softmax: SoftmaxSm100,
+        tidx: Int32,
+        head_idx: Int32,
+        m_block: Int32,
+        stage: Int32,
+        mma_tile_coord_v: Int32,
+        seqlen_info: SeqlenInfoQK,
+        softmax_scale_log2_eff: Float32,
+    ) -> None:
+        """Merge this thread's exact row maximum into the per-q-head max logit.
+
+        The contract is the max over attended keys of the scaled score, in
+        natural-log units; rows with no attended key and rows past seqlen_q
+        contribute nothing, and the learnable sink is excluded.
+        """
+        m_tile_idx = (m_block * self.q_stage + stage) * self.cta_group_size
+        m_tile_idx += mma_tile_coord_v
+        row_idx = m_tile_idx * self.m_block_size + tidx
+        num_rows = (
+            seqlen_info.seqlen_q
+            if const_expr(not self.pack_gqa)
+            else seqlen_info.seqlen_q * self.qhead_per_kvhead
+        )
+        row_sum = softmax.row_sum[0]
+        row_max = softmax.row_max_exact[0] * (softmax_scale_log2_eff * math.log(2.0))
+        if row_idx >= num_rows or row_sum == 0.0 or row_sum != row_sum:
+            row_max = -Float32.inf
+        if const_expr(not self.pack_gqa):
+            warp_max = cutedsl_utils.warp_reduce(row_max, cutlass.max)
+            if cute.arch.lane_idx() == 0:
+                if warp_max != -Float32.inf:
+                    cutedsl_utils.atomic_max_fp32(
+                        warp_max, cutedsl_utils.elem_pointer(mMaxLogits, (head_idx,))
+                    )
+        else:
+            # Rows of one tile belong to different q heads.
+            if row_max != -Float32.inf:
+                q_head = (
+                    head_idx * self.qhead_per_kvhead + row_idx % self.qhead_per_kvhead
+                )
+                cutedsl_utils.atomic_max_fp32(
+                    row_max, cutedsl_utils.elem_pointer(mMaxLogits, (q_head,))
                 )
 
     @cute.jit

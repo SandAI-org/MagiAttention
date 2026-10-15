@@ -83,12 +83,23 @@ def cutedsl_fwd(
     softcap: float,
     sink: torch.Tensor | None = None,
     sm_margin: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Forward wrapper: returns (out, lse) with lse in the dist contract's (sq, nhq) layout."""
+    return_max_logits: bool = False,
+    max_logits: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Forward wrapper: returns (out, lse, max_logits) with lse in the dist
+    contract's (sq, nhq) layout. With ``return_max_logits`` the fp32 ``[nhq]``
+    max logits are merged into ``max_logits``, or into a new ``-inf`` buffer."""
 
     ffa_args = attn_arg.to_ffa_args(is_bwd=False)
     if not ffa_args:
         raise RuntimeError("cutedsl_fwd called with skip_attn_fwd=True")
+
+    if not return_max_logits:
+        max_logits = None
+    elif max_logits is None:
+        max_logits = torch.full(
+            (q.shape[-2],), float("-inf"), dtype=torch.float32, device=q.device
+        )
 
     out, lse = _flex_flash_attn_fwd(
         q=q,
@@ -112,9 +123,10 @@ def cutedsl_fwd(
         range_merge=False,
         mask_types=ffa_args["attn_type_map"],
         sm_margin=sm_margin,
+        max_logits=max_logits,
     )
 
-    return out, lse
+    return out, lse, max_logits
 
 
 def cutedsl_bwd(
