@@ -25,8 +25,9 @@ forward output and the backward input; ``sink`` is the dist contract's
 ``[n_sink, nhq]`` fp32 with layout "sh", and ``cutedsl_bwd`` returns the fp32
 partial ``dsink`` of the same shape (``None`` without ``sink``).
 
-Limitation, filtered at the dist level: ``deterministic=True`` with ranges is
-rejected by the kernel.
+Limitation: deterministic mode is rejected by ``dist_attn_runtime_mgr`` for
+the CUTEDSL backend, because ``validate_range_feature_support`` rejects
+deterministic backward with ranges.
 """
 
 import weakref

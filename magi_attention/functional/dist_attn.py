@@ -3401,8 +3401,8 @@ class DistAttnFunc(torch.autograd.Function):
             local_q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
         if merged_attn_arg.can_skip(is_bwd=False):
-            # No q row attends to any key, and cutedsl_fwd raises on a skipped
-            # arg: build the sink-only out/lse like a skipped overlap host stage.
+            # An empty merged arg has no range to launch: return zero O and the
+            # sink-only LSE.
             local_out, local_lse = dist_attn_runtime._init_out_lse_skipped_host_stage(
                 q=local_q,
                 head_dim_v=full_v.shape[-1],
@@ -3523,8 +3523,7 @@ class DistAttnFunc(torch.autograd.Function):
 
         # -- Step 6: single backward call with merged arg --
         if merged_attn_arg.can_skip(is_bwd=True):
-            # Same empty-arg case as forward: zero dq/dkv over the full
-            # local+remote KV to keep the split/reduce below uniform, and take
+            # Empty merged arg: zero dq/dkv over local+remote KV and compute
             # dsink from the saved out/lse.
             (
                 partial_dq,
@@ -3532,9 +3531,7 @@ class DistAttnFunc(torch.autograd.Function):
                 partial_dsink,
             ) = dist_attn_runtime._init_dq_dkv_dsink_skipped_host_stage(
                 qo_do=local_qo_do,
-                kv=dist_attn_runtime._maybe_concat(
-                    full_k, full_v, need_concat=dist_attn_runtime.concat_kv
-                ),
+                kv=(full_k, full_v),
                 lse=local_lse,
                 sink=global_sink,
             )
@@ -3809,8 +3806,9 @@ def dist_attn_func(
 
         dist_attn_runtime (DistAttnRuntime): distributed attention runtime
 
-        sink (torch.Tensor, optional): global sink tensor in fp32 (replicated
-            among cp ranks). Defaults to ``None`` to not apply attention sink.
+        sink (torch.Tensor, optional): global sink tensor, fp32 (fp64 with
+            fp64 inputs), replicated among cp ranks. Defaults to ``None`` to
+            not apply attention sink.
 
         softmax_scale (float, optional): softmax scale.
             Defaults to ``None`` to use default value: ``1/sqrt(head_dim)``

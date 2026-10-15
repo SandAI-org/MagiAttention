@@ -163,7 +163,7 @@ def _flex_flash_attn_fwd(
             (``score_mod`` / ``mask_mod`` / ``aux_tensors`` /
             ``block_sparse_tensors``). See :class:`TorchFlexAttnArgs`.
         out: optional output buffer, allocated when None.
-            Direct store (``disable_fwd_atomic_reduction=True``, required for
+            Direct store (``disable_fwd_atomic_reduction=True``, forced for
             dense inputs and outside SM100/SM110) leaves uncovered Q rows
             untouched; empty K zeroes all rows.
             Atomic merge accumulates into ``out``/``lse``. Rows with
@@ -334,7 +334,8 @@ def _flex_flash_attn_fwd(
         )
 
     if lse is None:
-        # NOTES: the atomic merge and the dsink reduction skip rows with LSE == -inf
+        # NOTE: LSE == -inf marks a row no relation wrote: the atomic merge
+        # starts from it and bwd_dsink skips it.
         if disable_fwd_atomic_reduction and sink is None:
             lse = torch.empty(lse_shape, dtype=torch.float32, device=device)
         else:
@@ -1969,7 +1970,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if dsink is not None:
             dsink = dsink.to(sink.dtype)
-        # NOTES: `sink` is the 11th positional input of `forward`
+        # NOTE: `sink` is the 11th positional input of `forward`
         return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 8)
 
 
@@ -2028,8 +2029,9 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: caller contract that q_ranges are sorted
         and pairwise disjoint, giving every O and dQ row a unique writer.
         Forward then direct-stores O and leaves rows outside every q range
-        unwritten (O and LSE undefined there, even with ``sink``), whereas the
-        atomic path zeroes them and stores the sink-only LSE. The SM100/SM110
+        unwritten: O is undefined there, and LSE is ``-inf`` with ``sink``
+        (undefined without), whereas the atomic path zeroes O and stores the
+        sink-only LSE. The SM100/SM110
         backward accumulates dQ in per-range slots (head_dim divisible by 32,
         no ``range_merge``) instead of the row-major fp32 accumulator. Debug
         mode validates the ordering.

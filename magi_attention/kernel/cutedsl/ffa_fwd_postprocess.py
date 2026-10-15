@@ -54,14 +54,14 @@ class FFAFwdPostProcess:
         self,
         mO: cute.Tensor,
         mLSE: cute.Tensor,
-        mSink: Optional[cute.Tensor] = None,
+        mLSESink: Optional[cute.Tensor] = None,
         stream: cuda.CUstream = None,
     ):
-        assert (mSink is not None) == self.has_sink
+        assert (mLSESink is not None) == self.has_sink
         total_q = mO.shape[0]
         num_head = mO.shape[1]
         grid = (cute.ceil_div(total_q, self.tile_m), num_head, 1)
-        self.kernel(mO, mLSE, mSink).launch(
+        self.kernel(mO, mLSE, mLSESink).launch(
             grid=grid, block=[self.tile_m, 1, 1], stream=stream
         )
 
@@ -70,7 +70,7 @@ class FFAFwdPostProcess:
         self,
         mO: cute.Tensor,
         mLSE: cute.Tensor,
-        mSink: Optional[cute.Tensor],
+        mLSESink: Optional[cute.Tensor],
     ):
         tidx = cute.arch.thread_idx()[0]
         block, head_idx = cute.arch.block_idx()[0], cute.arch.block_idx()[1]
@@ -83,9 +83,8 @@ class FFAFwdPostProcess:
 
             o_scale = Float32(0.0)
             if const_expr(self.has_sink):
-                assert mSink is not None
-                # mSink already holds each head's log-sum-exp over its sink logits.
-                lse_sink = Float32(mSink[head_idx])
+                assert mLSESink is not None
+                lse_sink = Float32(mLSESink[head_idx])
                 LOG2_E = math.log2(math.e)
                 LN2 = math.log(2.0)
                 lse_final = lse_sink
@@ -140,12 +139,14 @@ def _compile_fwd_postprocess(
         div = 128 // o_dtype.width
         mO = fake_tensor(o_dtype, (total_q, num_head, head_dim_v), divisibility=div)
         mLSE = fake_tensor(Float32, (total_q, num_head), divisibility=1)
-        mSink = fake_tensor(Float32, (num_head,), divisibility=1) if has_sink else None
+        mLSESink = (
+            fake_tensor(Float32, (num_head,), divisibility=1) if has_sink else None
+        )
         cache[cache_key] = cute.compile(
             obj,
             mO,
             mLSE,
-            mSink,
+            mLSESink,
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi",
         )
@@ -160,7 +161,7 @@ def fwd_postprocess(
     """In-place: zero O rows whose LSE is -inf, fold the sink into O/LSE.
 
     ``lse_sink`` is fp32 ``[num_head]``: each head's log-sum-exp over its sink
-    logits, so ``out``'s row gets rescaled by ``exp(lse - lse_new)``.
+    logits.
     """
     assert lse_sink is None or lse_sink.dtype == torch.float32
     compiled = _compile_fwd_postprocess(out.dtype, out.shape[-1], lse_sink is not None)
