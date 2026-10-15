@@ -39,6 +39,7 @@ from cutlass.utils.hardware_info import HardwareInfo
 
 # isort: split
 from quack.cute_dsl_utils import ParamsBase
+from quack.utils import store_shared_remote
 
 from . import cutedsl_utils
 
@@ -106,6 +107,64 @@ class ClcState(ParamsBase):
         self._pipeline.producer_tail(self._producer_state, loc=loc, ip=ip)
 
 
+@dataclass
+class DynamicState(ParamsBase):
+    """Runtime state of the DYNAMIC persistent schedule.
+
+    Each cluster starts with its grid-assigned tile. Its leader's scheduler
+    warp claims subsequent tiles from a global counter and publishes a 4-byte
+    index to every CTA. All warps consume each index before the slot is reused.
+    """
+
+    _pipeline: PipelineClcFetchAsync
+    _consumer_state: PipelineState
+    _producer_state: PipelineState
+    # smem Int32, one slot per scheduler stage
+    _response_ptr: cute.Pointer
+
+    @staticmethod
+    def create(
+        *,
+        pipeline: PipelineClcFetchAsync,
+        consumer_state: PipelineState,
+        producer_state: PipelineState,
+        response_ptr: cute.Pointer,
+    ) -> "DynamicState":
+        return DynamicState(pipeline, consumer_state, producer_state, response_ptr)
+
+    def producer_acquire(self, *, loc=None, ip=None):
+        """Wait until every consumer released the slot, then arm its full
+        mbarrier on every CTA of the cluster for the 4-byte publish."""
+        self._pipeline.producer_acquire(self._producer_state, loc=loc, ip=ip)
+
+    def publish(self, unit: Int32, cluster_size: int):
+        """Store ``unit`` into every CTA's current response slot and advance."""
+        full_mbar_ptr = self._pipeline.producer_get_barrier(self._producer_state)
+        slot_ptr = self._response_ptr + self._producer_state.index
+        with cute.arch.elect_one():
+            for cta_rank in range(cluster_size):
+                store_shared_remote(unit, slot_ptr, full_mbar_ptr, Int32(cta_rank))
+        self._producer_state.advance()
+
+    def read_published(self) -> Int32:
+        """Read the current slot; call between consumer_wait and consumer_release."""
+        slot_ptr = self._response_ptr + self._consumer_state.index
+        unit = Int32(cute.make_tensor(slot_ptr, cute.make_layout(1))[0])
+        # Order this generic-proxy read before the next st.async into the slot.
+        cute.arch.fence_proxy("async.shared", space="cta")
+        return unit
+
+    def consumer_wait(self, *, loc=None, ip=None):
+        self._pipeline.consumer_wait(self._consumer_state, loc=loc, ip=ip)
+
+    def consumer_release(self, *, loc=None, ip=None):
+        self._pipeline.consumer_release(self._consumer_state, loc=loc, ip=ip)
+        self._consumer_state.advance(loc=loc, ip=ip)
+
+    def producer_tail(self, *, loc=None, ip=None):
+        self._pipeline.producer_tail(self._producer_state, loc=loc, ip=ip)
+
+
 class WorkTileInfo(cutlass.utils.WorkTileInfo):
     """Altered WorkTileInfo which includes four axes: (block, head, batch, split)"""
 
@@ -125,7 +184,12 @@ class TileSchedulerProtocol(Protocol):
 
     Schedulers are responsible for:
     1. Coordinate mapping: linear tile index -> (m_block, head, batch, split)
-    2. Work distribution: how to get the next tile (static grid-stride vs CLC dynamic)
+    2. Work distribution: how to get the next tile (static grid-stride, or a
+       tile published by the scheduler warp under CLC / DYNAMIC)
+
+    One scheduler object is shared by every warp-role region of a kernel, so
+    ``initial_work_tile_info`` must derive the first tile from the CTA's own
+    coordinates and never read state that another role's walk advanced.
     """
 
     def get_current_work(self) -> WorkTileInfo:
@@ -140,7 +204,8 @@ class TileSchedulerProtocol(Protocol):
         """Consumer-side advance: move to next tile and return it.
 
         For static schedulers: grid-stride increment + get_current_work.
-        For CLC schedulers: consumer wait + get_current_work + consumer release + state advance.
+        For CLC / DYNAMIC schedulers: consumer wait + read the published tile +
+        consumer release + state advance.
         """
         ...
 
@@ -148,6 +213,8 @@ class TileSchedulerProtocol(Protocol):
         """Producer-side prefetch of next work tile (no-op for static schedulers).
 
         For CLC schedulers: producer acquire + issue CLC query + producer state advance.
+        For DYNAMIC schedulers: producer acquire + claim from the tile counter +
+        publish to every CTA of the cluster.
         Only called by the scheduler warp.
         """
         ...
@@ -155,7 +222,7 @@ class TileSchedulerProtocol(Protocol):
     def producer_tail(self, *, loc=None, ip=None) -> None:
         """Producer-side cleanup after the last tile.
 
-        No-op for static schedulers. For CLC schedulers: pipeline producer_tail.
+        No-op for static schedulers. For CLC / DYNAMIC schedulers: pipeline producer_tail.
         """
         ...
 
@@ -179,10 +246,14 @@ class TileSchedulerArguments(ParamsBase):
     qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
     element_size: cutlass.Constexpr[int] = 2
     is_persistent: cutlass.Constexpr[bool] = False
+    # Runtime SM reservation for persistent varlen scheduling.
+    sm_margin: Optional[Int32] = None
     lpt: cutlass.Constexpr[bool] = False
     is_split_kv: cutlass.Constexpr[bool] = False
     head_swizzle: cutlass.Constexpr[bool] = False
     use_cluster_idx: cutlass.Constexpr[bool] = False
+    # DYNAMIC schedule only: [1] int32 tile counter, zero before the launch.
+    mTileCounter: Optional[cute.Tensor] = None
 
 
 class SingleTileScheduler:
@@ -845,6 +916,8 @@ class SingleTileVarlenScheduler:
         cluster_shape_m: cutlass.Constexpr[int] = 1
         use_cluster_idx: cutlass.Constexpr[bool] = False
         scheduling_mode: cutlass.Constexpr[SchedulingMode] = SchedulingMode.STATIC
+        sm_margin: Optional[Int32] = None
+        mTileCounter: Optional[cute.Tensor] = None
 
         @staticmethod
         @cute.jit
@@ -857,9 +930,18 @@ class SingleTileVarlenScheduler:
         ) -> "SingleTileVarlenScheduler.Params":
             assert scheduling_mode in (
                 SchedulingMode.STATIC,
+                SchedulingMode.DYNAMIC,
                 SchedulingMode.CLC,
-            ), f"Only STATIC and CLC are supported, got {scheduling_mode!r}"
-            assert not args.is_persistent, "varlen scheduling is one tile per CTA"
+            ), f"Only STATIC, DYNAMIC and CLC are supported, got {scheduling_mode!r}"
+            assert args.is_persistent == (
+                scheduling_mode == SchedulingMode.DYNAMIC
+            ), "Persistent ranges require DYNAMIC scheduling"
+            assert (scheduling_mode == SchedulingMode.DYNAMIC) == (
+                args.mTileCounter is not None
+            ), "the DYNAMIC schedule and its tile counter come together"
+            assert (
+                not args.is_persistent or args.sm_margin is not None
+            ), "a persistent varlen grid is sized by its SM reservation"
             size_l2 = 50 * 1024 * 1024  # 50 MB for K & V
             # if backward, this is qdo block size
             kv_block_size = (
@@ -880,10 +962,9 @@ class SingleTileVarlenScheduler:
                 assert (
                     args.mQRanges is not None
                 ), "max_outer_range_width quota decode needs ranges rows"
-                assert scheduling_mode == SchedulingMode.STATIC, (
-                    "quota decode emits invalid mid-stream tiles; the CLC "
-                    "work loop would stop at them"
-                )
+                assert (
+                    scheduling_mode == SchedulingMode.STATIC
+                ), "Quota decoding requires STATIC scheduling"
             assert (
                 args.cluster_shape_mn[1] == 1
             ), "Only cluster_shape_mn[1] == 1 is supported"
@@ -910,6 +991,8 @@ class SingleTileVarlenScheduler:
                 cluster_shape_m=args.cluster_shape_mn[0],
                 use_cluster_idx=args.use_cluster_idx,
                 scheduling_mode=scheduling_mode,
+                sm_margin=args.sm_margin,
+                mTileCounter=args.mTileCounter,
             )
 
     def __init__(
@@ -919,6 +1002,7 @@ class SingleTileVarlenScheduler:
         split_idx: Int32,
         clc: ClcState | None = None,
         *,
+        dynamic: DynamicState | None = None,
         loc=None,
         ip=None,
     ):
@@ -927,6 +1011,7 @@ class SingleTileVarlenScheduler:
         self._split_idx = split_idx
         self._is_first_block = True
         self.clc = clc
+        self.dynamic = dynamic
         self._loc = loc
         self._ip = ip
 
@@ -953,7 +1038,12 @@ class SingleTileVarlenScheduler:
     @staticmethod
     @cute.jit
     def create(
-        params: Params, clc: ClcState | None = None, *, loc=None, ip=None
+        params: Params,
+        clc: ClcState | None = None,
+        *,
+        dynamic: DynamicState | None = None,
+        loc=None,
+        ip=None,
     ) -> "SingleTileVarlenScheduler":
         if const_expr(params.scheduling_mode == SchedulingMode.CLC):
             block_idx = cute.arch.block_idx()
@@ -968,8 +1058,14 @@ class SingleTileVarlenScheduler:
                 loc=loc,
                 ip=ip,
             )
+        assert (params.scheduling_mode == SchedulingMode.DYNAMIC) == (
+            dynamic is not None
+        ), "the DYNAMIC schedule and its DynamicState come together"
+        # The first tile comes from the CTA's grid coordinates.
         tile_idx, split_idx, _ = cute.arch.block_idx()
-        return SingleTileVarlenScheduler(params, tile_idx, split_idx, loc=loc, ip=ip)
+        return SingleTileVarlenScheduler(
+            params, tile_idx, split_idx, dynamic=dynamic, loc=loc, ip=ip
+        )
 
     # called by host
     @staticmethod
@@ -1006,6 +1102,13 @@ class SingleTileVarlenScheduler:
                 total_blocks_max // params.cluster_shape_m * params.cluster_shape_m
             )
             bound = total_blocks_max * params.num_head
+        if cutlass.const_expr(params.scheduling_mode == SchedulingMode.DYNAMIC):
+            assert params.sm_margin is not None
+            sm_count = HardwareInfo().get_device_multiprocessor_count()
+            max_ctas = (
+                (sm_count - params.sm_margin) // params.cluster_shape_m
+            ) * params.cluster_shape_m
+            bound = cutlass.min(bound, max_ctas)
         return (bound, params.num_splits, Int32(1))
 
     @staticmethod
@@ -1246,6 +1349,23 @@ class SingleTileVarlenScheduler:
         return self._varlen_coord_map()
 
     @cute.jit
+    def _claim_unit(self) -> Int32:
+        """Claim the next cluster-unit tile index (DYNAMIC; whole scheduler warp).
+
+        Units below the grid's cluster count are the clusters' first tiles
+        (their own cluster indices), so claimed units start right after them.
+        """
+        params = self.params
+        assert params.mTileCounter is not None
+        claimed = Int32(0)
+        if cute.arch.lane_idx() == 0:
+            claimed = Int32(
+                cute.arch.atomic_add(params.mTileCounter.iterator, Int32(1))
+            )
+        claimed = cute.arch.shuffle_sync(claimed, 0)
+        return claimed + cute.arch.grid_dim()[0] // params.cluster_shape_m
+
+    @cute.jit
     def initial_work_tile_info(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             clc_work = self.clc.initial_work_tile_info()
@@ -1263,6 +1383,12 @@ class SingleTileVarlenScheduler:
     def prefetch_next_work(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             self.clc.prefetch_next_work(loc=loc, ip=ip)
+        elif const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
+            assert self.dynamic is not None  # mypy
+            # Acquiring the slot before claiming keeps a cluster at most one
+            # claimed tile ahead of the tile its slowest warp is processing.
+            self.dynamic.producer_acquire(loc=loc, ip=ip)
+            self.dynamic.publish(self._claim_unit(), self.params.cluster_shape_m)
 
     def advance_to_next_work(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
@@ -1270,19 +1396,37 @@ class SingleTileVarlenScheduler:
             work = self.get_current_work()
             self.clc.consumer_release(loc=loc, ip=ip)
             return work
+        if const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
+            assert self.dynamic is not None  # mypy
+            self.dynamic.consumer_wait(loc=loc, ip=ip)
+            unit = self.dynamic.read_published()
+            self.dynamic.consumer_release(loc=loc, ip=ip)
+            cluster_size = self.params.cluster_shape_m
+            self._tile_idx = (
+                unit * cluster_size + cute.arch.block_idx()[0] % cluster_size
+            )
+            return self._varlen_coord_map()
         self._is_first_block = False
         return self.get_current_work()
 
     def producer_tail(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             self.clc.producer_tail(loc=loc, ip=ip)
+        elif const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
+            assert self.dynamic is not None  # mypy
+            self.dynamic.producer_tail(loc=loc, ip=ip)
+
+    def _mlir_objs(self) -> list:
+        objs = [self.params, self._tile_idx, self._split_idx]
+        if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
+            objs.append(self.clc)
+        elif const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
+            objs.append(self.dynamic)
+        return objs
 
     def __extract_mlir_values__(self):
         values, self._values_pos = [], []
-        objs = [self.params, self._tile_idx, self._split_idx]
-        if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
-            objs += [self.clc]
-        for obj in objs:
+        for obj in self._mlir_objs():
             obj_values = cutlass.extract_mlir_values(obj)
             values += obj_values
             self._values_pos.append(len(obj_values))
@@ -1290,13 +1434,20 @@ class SingleTileVarlenScheduler:
 
     def __new_from_mlir_values__(self, values):
         obj_list = []
-        objs = [self.params, self._tile_idx, self._split_idx]
-        if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
-            objs += [self.clc]
-        for obj, n_items in zip(objs, self._values_pos):
+        for obj, n_items in zip(self._mlir_objs(), self._values_pos):
             obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
             values = values[n_items:]
-        return self.__class__(*obj_list, loc=self._loc)
+        params, tile_idx, split_idx, *state = obj_list
+        is_clc = const_expr(self.params.scheduling_mode == SchedulingMode.CLC)
+        is_dynamic = const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC)
+        return self.__class__(
+            params,
+            tile_idx,
+            split_idx,
+            state[0] if is_clc else None,
+            dynamic=state[0] if is_dynamic else None,
+            loc=self._loc,
+        )
 
 
 # -----------------------------------------------------------------------------
