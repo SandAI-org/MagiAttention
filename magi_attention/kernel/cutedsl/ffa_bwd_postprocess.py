@@ -477,7 +477,7 @@ class FFABwdPostProcess:
                 g2s_thr_copy = tiled_copy_accum.get_slice(tidx)
 
                 # S -> R
-                tdQrdQ_fp32 = cute.make_fragment(tdQrdQ.shape, cutlass.Float32)
+                tdQrdQ_fp32 = cute.make_rmem_tensor(tdQrdQ.shape, cutlass.Float32)
                 tdQrdQ_s2r = cute.make_tensor(tdQrdQ_fp32.iterator, tdQrdQ_fp32.shape)
 
                 smem_copy_atom = sm100_utils_basic.get_smem_store_op(

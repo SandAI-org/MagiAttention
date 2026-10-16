@@ -31,7 +31,6 @@ from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import LayoutEnum
 
 # isort: split
-import quack.activation
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
@@ -3803,17 +3802,20 @@ class FFABwdSm100:
             if process_tile:
                 # --- Producer tail ---
                 # Empty groups skip tail: the consumer never acquired those stages.
+                # producer_tail advances the state it receives. The DSL threads a state
+                # out of this dynamic region only if it is assigned or has a method
+                # called on it here, so pass a clone of any other state.
                 if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
-                    pipeline_Q.producer_tail(producer_state_Q_Qt)
-                    pipeline_LSE.producer_tail(producer_state_LSE)
-                    pipeline_dO.producer_tail(producer_state_O_Ot)
-                    pipeline_dPsum.producer_tail(producer_state_dPsum)
+                    pipeline_Q.producer_tail(producer_state_Q_Qt.clone())
+                    pipeline_LSE.producer_tail(producer_state_LSE.clone())
+                    pipeline_dO.producer_tail(producer_state_O_Ot.clone())
+                    pipeline_dPsum.producer_tail(producer_state_dPsum.clone())
                 else:
                     if const_expr(should_load_Q):
                         pipeline_Q.producer_tail(producer_state_Q_LSE.clone())
                         pipeline_LSE.producer_tail(producer_state_Q_LSE)
                         if const_expr(tma_atom_Qt is not None):
-                            pipeline_Qt.producer_tail(producer_state_Qt)
+                            pipeline_Qt.producer_tail(producer_state_Qt.clone())
                     if const_expr(should_load_dO):
                         pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
                         pipeline_dPsum.producer_tail(producer_state_dO_dPsum)
@@ -5503,7 +5505,7 @@ class FFABwdSm100:
                                 (
                                     tdPrdP_cur[2 * v],
                                     tdPrdP_cur[2 * v + 1],
-                                ) = quack.activation.sub_packed_f32x2(
+                                ) = cutedsl_utils.sub_packed_f32x2(
                                     (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                                     dPsum_pair,
                                 )
@@ -5929,7 +5931,7 @@ class FFABwdSm100:
                             (
                                 tdPrdP_cur[2 * v],
                                 tdPrdP_cur[2 * v + 1],
-                            ) = quack.activation.sub_packed_f32x2(
+                            ) = cutedsl_utils.sub_packed_f32x2(
                                 (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), dPsum_pair
                             )
                             (

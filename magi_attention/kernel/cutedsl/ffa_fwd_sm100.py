@@ -4935,21 +4935,27 @@ class FFAFwdSm100:
         ptr_1, ptr_2, two_locks = self._range_lock_ptrs(
             mRangeLocks, head_idx, row_offset
         )
+        # The cute.arch atomic wrappers need an LLVM pointer value: not every
+        # DSL build converts a cute.Pointer object, so pass `.llvm_ptr`.
         # Loop-carried spin state: the CAS must re-execute every iteration.
         acquired = cute.arch.atomic_cas(
-            ptr_1, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+            ptr_1.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
         )
         while acquired != 0:
             acquired = cute.arch.atomic_cas(
-                ptr_1, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+                ptr_1.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
             )
         if two_locks:
             acquired_2 = cute.arch.atomic_cas(
-                ptr_2, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+                ptr_2.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
             )
             while acquired_2 != 0:
                 acquired_2 = cute.arch.atomic_cas(
-                    ptr_2, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+                    ptr_2.llvm_ptr,
+                    cmp=Int32(0),
+                    val=Int32(1),
+                    sem="acquire",
+                    scope="gpu",
                 )
 
     @cute.jit
@@ -4960,8 +4966,8 @@ class FFAFwdSm100:
             mRangeLocks, head_idx, row_offset
         )
         if two_locks:
-            cute.arch.atomic_exch(ptr_2, Int32(0), sem="release", scope="gpu")
-        cute.arch.atomic_exch(ptr_1, Int32(0), sem="release", scope="gpu")
+            cute.arch.atomic_exch(ptr_2.llvm_ptr, Int32(0), sem="release", scope="gpu")
+        cute.arch.atomic_exch(ptr_1.llvm_ptr, Int32(0), sem="release", scope="gpu")
 
     @cute.jit
     def correction_rescale(
