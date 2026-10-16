@@ -31,7 +31,6 @@ from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import LayoutEnum
 
 # isort: split
-import quack.activation
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
@@ -5503,7 +5502,7 @@ class FFABwdSm100:
                                 (
                                     tdPrdP_cur[2 * v],
                                     tdPrdP_cur[2 * v + 1],
-                                ) = quack.activation.sub_packed_f32x2(
+                                ) = cutedsl_utils.sub_packed_f32x2(
                                     (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                                     dPsum_pair,
                                 )
@@ -5929,7 +5928,7 @@ class FFABwdSm100:
                             (
                                 tdPrdP_cur[2 * v],
                                 tdPrdP_cur[2 * v + 1],
-                            ) = quack.activation.sub_packed_f32x2(
+                            ) = cutedsl_utils.sub_packed_f32x2(
                                 (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), dPsum_pair
                             )
                             (
