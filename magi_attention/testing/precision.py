@@ -19,7 +19,6 @@ import torch
 import torch.distributed as dist
 from packaging import version
 
-from magi_attention.functional.utils import safe_subtract
 from magi_attention.utils.dtype import max_fp_dtype
 
 if version.parse(torch.__version__) > version.parse("2.4"):
@@ -307,13 +306,20 @@ def calc_inf_norm(
     a: torch.Tensor,
     b: torch.Tensor,
 ) -> float:
+    """Max of ``|a - b|`` where equal entries, including equal ``-inf`` LSE rows
+    that attend to no key, contribute 0 and a finite entry against a non-finite
+    one gives ``inf``."""
     dtype = max_fp_dtype(a.dtype, b.dtype, torch.float32)
-    return safe_subtract(a.to(dtype), b.to(dtype)).norm(p=float("inf")).item()
+    a = a.to(dtype)
+    b = b.to(dtype)
+    return torch.where(a == b, 0.0, a - b).norm(p=float("inf")).item()
 
 
 @torch.no_grad
 def calc_rounding_noise_norm(ref: torch.Tensor) -> float:
-    """Max of ``|ref + 0.3 - 0.3 - ref|`` in ``ref``'s dtype: about one ulp at ``|ref| + 0.3``."""
+    """Max of ``|ref + 0.3 - 0.3 - ref|`` over the finite entries of ``ref`` in
+    its dtype: about one ulp at ``|ref| + 0.3``."""
+    ref = ref[torch.isfinite(ref)]
     if ref.numel() == 0:
         return 0.0
     return (ref + 0.3 - 0.3 - ref).abs().max().item()
