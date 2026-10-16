@@ -14,6 +14,7 @@
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
+import inspect
 import math
 from functools import lru_cache, partial
 from typing import Callable, Optional, Tuple, Type, overload
@@ -32,6 +33,11 @@ ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Threa
 
 load_cubin_module_data_og = cutlass.base_dsl.runtime.cuda.load_cubin_module_data
 cute_compile_og = cute.compile
+
+# NVVM result-type inference depends on both the DSL and CUDA backend versions.
+# Inspect each binding once, outside kernel tracing, instead of keying on CUDA.
+_FMAX_REQUIRES_RESULT_TYPE = "res" in inspect.signature(nvvm.fmax).parameters
+_ATOMICRMW_REQUIRES_RESULT_TYPE = "res" in inspect.signature(nvvm.atomicrmw).parameters
 
 
 @lru_cache
@@ -374,13 +380,15 @@ def fmax(
     loc=None,
     ip=None,
 ) -> Float32:
+    result_type = {"res": T.f32()} if _FMAX_REQUIRES_RESULT_TYPE else {}
     return Float32(
         nvvm.fmax(
-            Float32(a).ir_value(loc=loc, ip=ip),
-            Float32(b).ir_value(loc=loc, ip=ip),
+            a=Float32(a).ir_value(loc=loc, ip=ip),
+            b=Float32(b).ir_value(loc=loc, ip=ip),
             c=Float32(c).ir_value(loc=loc, ip=ip) if c is not None else None,
             loc=loc,
             ip=ip,
+            **result_type,
         )
     )
 
@@ -504,10 +512,12 @@ sub_packed_f32x2 = partial(
 def atomic_add_fp32(
     a: float | Float32, gmem_ptr: cute.Pointer, *, loc=None, ip=None
 ) -> None:
+    result_type = {"res": T.f32()} if _ATOMICRMW_REQUIRES_RESULT_TYPE else {}
     nvvm.atomicrmw(
         op=nvvm.AtomicOpKind.FADD,
         ptr=gmem_ptr.llvm_ptr,
         a=Float32(a).ir_value(),
+        **result_type,
     )
 
 
