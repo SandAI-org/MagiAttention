@@ -44,15 +44,27 @@ try:
         LinearBlockSparseTensorsTorch,
         bhqk_to_linear_sparse_tensors,
     )
-except ImportError:
+except (ImportError, AttributeError) as exc:
+    # A flash_attn_cute that fails while importing, e.g. one built for another
+    # CUTLASS DSL release, counts as not installed.
     is_fa4_installed = False
+    fa4_import_error: BaseException | None = exc
 else:
     is_fa4_installed = True
+    fa4_import_error = None
+
+# The not-installed error carries the import exception so a broken install is
+# distinguishable from a missing one.
+_FA4_NOT_INSTALLED_MSG = (
+    "FlashAttn4 is not installed"
+    if fa4_import_error is None
+    else f"FlashAttn4 is not installed: {fa4_import_error!r}"
+)
 
 # Optional: only needed for FA4AttnArg.compute_mask with arbitrary masks
 try:
     from flash_attn_cute.mask_definitions import flex_arbitrary_mask
-except ImportError:
+except (ImportError, AttributeError):
     flex_arbitrary_mask = None  # type: ignore[assignment]
 
 try:
@@ -318,7 +330,7 @@ class FA4AttnArg(AttnArg):
     qhead_per_kvhead: int = 1
 
     def __post_init__(self):
-        assert is_fa4_installed, "FlashAttn4 is not installed"
+        assert is_fa4_installed, _FA4_NOT_INSTALLED_MSG
         assert is_magi_to_hstu_installed, "magi_to_hstu_cuda is not installed"
         if self.headdim_v is None:
             self.headdim_v = self.headdim

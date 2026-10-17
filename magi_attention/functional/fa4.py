@@ -19,6 +19,9 @@ from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.collection.calc_meta import AttnArg, FA4AttnArg
 
+_cutlass_import_error: BaseException | None = None
+_cute_import_error: BaseException | None = None
+
 try:
     # CUTLASS package layout (ffa_fa3).
     from flash_attn_cute.ffa_fa3.flash_attn_interface import (
@@ -27,20 +30,35 @@ try:
     from flash_attn_cute.ffa_fa3.flash_attn_interface import (
         _flash_attn_forward as _flash_attn_forward_cutlass,
     )
-except ImportError:
+except (ImportError, AttributeError) as exc:
+    # A flash_attn_cute that fails while importing, e.g. one built for another
+    # CUTLASS DSL release, counts as not installed.
     _has_cutlass_backend = False
+    _cutlass_import_error = exc
 else:
     _has_cutlass_backend = True
 
 try:
     # FFA_FA4 DSL interface.
     from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
-except ImportError:
+except (ImportError, AttributeError) as exc:
     _has_cute_backend = False
+    _cute_import_error = exc
 else:
     _has_cute_backend = True
 
 is_fa4_installed = _has_cutlass_backend or _has_cute_backend
+
+# Either backend makes FA4 installed, so the import exception is reported only
+# when both imports failed; the first failure is the one shown.
+fa4_import_error: BaseException | None = (
+    None if is_fa4_installed else _cutlass_import_error or _cute_import_error
+)
+_FA4_NOT_INSTALLED_MSG = (
+    "FlashAttn4 is not installed"
+    if fa4_import_error is None
+    else f"FlashAttn4 is not installed: {fa4_import_error!r}"
+)
 
 
 def _use_cutlass_on_current_device() -> bool:
@@ -66,7 +84,7 @@ def _should_use_cutlass_backend(device: torch.device) -> bool:
         if not _has_cutlass_backend:
             raise RuntimeError(
                 "Detected sm80/sm90 GPU, but cutlass backend (flash_attn_cute.ffa_fa3) "
-                "is not available."
+                f"is not available: {_cutlass_import_error!r}"
             )
         return True
     return False
@@ -133,7 +151,7 @@ def fa4_fwd(
     softcap: float = 0.0,
     sink_layout: AttnSinkLayout = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    assert is_fa4_installed, "FlashAttn4 is not installed"
+    assert is_fa4_installed, _FA4_NOT_INSTALLED_MSG
     assert isinstance(attn_arg, FA4AttnArg), "FA4 is only supported for FA4AttnArg"
 
     # Get FA4 arguments
@@ -234,7 +252,7 @@ def fa4_bwd(
     sink_layout: AttnSinkLayout = "sh",
     deterministic: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    assert is_fa4_installed, "FA4 backend is not installed"
+    assert is_fa4_installed, _FA4_NOT_INSTALLED_MSG
     assert sink is None, "FA4 backend does not support learnable sink"
     assert isinstance(attn_arg, FA4AttnArg), "FA4 is only supported for FA4AttnArg"
 
