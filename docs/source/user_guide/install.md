@@ -85,11 +85,49 @@ This step needs to be performed on the **BARE-METAL HOST OPERATING SYSTEM**, **N
     pip install -r requirements.txt
     ```
 
+:::{note}
+`requirements.txt` accepts `nvidia-cutlass-dsl` 4.4.2 to 4.8.0 except 4.6.0 and 4.6.1, and `quack-kernels` 0.4.1 to 0.6.5. The releases 4.6.0 and 4.6.1 add their own thread election around non-tensor bulk copies. The MagiAttention kernels already wrap those copies in `elect_one`, so the two elections nest. That combination was not run and the two releases are excluded.
+
+Each `quack-kernels` release calls `nvidia-cutlass-dsl` APIs that other DSL releases removed. The supported pairs are:
+
+| `nvidia-cutlass-dsl` | `quack-kernels` |
+|---|---|
+| 4.4.2 | 0.4.1 |
+| 4.6.2 | 0.6.4 |
+| 4.7.0 to 4.8.0 | 0.6.5 |
+
+The runtime check is stricter than pip. pip accepts any combination inside the two `requirements.txt` ranges, but `import magi_attention` checks the installed pair against this table when it loads the CuTeDSL kernels. If the pair is not in the table, or one of the two packages is not installed, the import raises `CuteDslRequirementError` for every kernel backend. This command installs the newest supported pair:
+
+```bash
+pip install --upgrade "nvidia-cutlass-dsl[cu13]<=4.8.0" "quack-kernels<=0.6.5"
+```
+
+A fresh `pip install -r requirements.txt` resolves to the newest pair, 4.8.0 and 0.6.5. In an existing environment, upgrade both packages together with the command above. Do not use `pip install --upgrade -r requirements.txt` for this, because it also upgrades unrelated packages such as `setuptools` and `packaging`.
+
+CI tests the two ends of the range: 4.4.2 with 0.4.1, and 4.8.0 with 0.6.5. The two middle pairs were tested only outside CI, on Blackwell. 4.6.2 with 0.6.4 passed `tests/test_kernel/cutedsl/` and the `cutedsl` cases of `tests/test_pipeline.py` with head dim 64 and 128 at world size 1 and 2. 4.7.0 with 0.6.5 passed `tests/test_kernel/cutedsl/`. Other releases inside the range were not run.
+:::
+
+:::{warning}
+With `nvidia-cutlass-dsl` below 4.8.0, a compiled CuTeDSL function can hang when three or more threads of one process call it for the first time at the same time ([CUTLASS #3706](https://github.com/NVIDIA/cutlass/issues/3706)). This was reproduced with 4.4.2, 4.6.2 and 4.7.0, and not with 4.8.0. Two threads, or a first call from one thread before the other threads call the function, do not hang. MagiAttention does not call a CuTeDSL function from several threads at the same time.
+:::
+
 ### Install flash_attn_cute (optional)
 
 :::{note}
-If you would like to try MagiAttention on Ampere or Blackwell, for now you're required to install `flash_attn_cute` package to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html) as a temporary workaround.
+If you want the [FFA_FA4 backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html) on Ampere or Blackwell, install `flash_attn_cute`. The default `ffa` backend supports Hopper only.
 :::
+
+::::{warning}
+The `FFA_FA4` backend (`flash_attn_cute`, built from the FlashAttention submodule) requires `nvidia-cutlass-dsl>=4.4.2,<4.6.0`. It uses `cute.core.ThrMma` and `cute.make_fragment`, which 4.6.0 removed. The package metadata of `flash_attn_cute` declares only the lower bound, so pip does not enforce the upper bound. On 4.6.0 and newer, `flash_attn_cute` fails to import and MagiAttention treats the `fa4` backend as not installed. The other backends keep working if the installed `nvidia-cutlass-dsl` / `quack-kernels` pair is in the table of supported pairs above. If you select the `fa4` backend, MagiAttention raises a `RuntimeError` that names the installed `nvidia-cutlass-dsl` version, the required range, the original import error, and the commands below.
+
+`FFA_FA4` was tested with `nvidia-cutlass-dsl` 4.4.2 only. To use it, install the pair 4.4.2 and 0.4.1, which is also a supported pair for the other backends:
+
+```bash
+pip install "nvidia-cutlass-dsl[cu13]==4.4.2" "quack-kernels==0.4.1"
+```
+
+Then install or reinstall `flash_attn_cute` from the MagiAttention source root with the bash script below.
+::::
 
 * bash script:
 
@@ -124,7 +162,7 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
     export MAGI_ATTENTION_PREBUILD_FFA=0 # for now, native ffa does not support Blackwell
     pip install --no-build-isolation .
 
-    export MAGI_ATTENTION_FA4_BACKEND=1 # always set it when using MagiAttention on Blackwell
+    export MAGI_ATTENTION_KERNEL_BACKEND=fa4 # requires flash_attn_cute, see "Install flash_attn_cute" above
     ```
 
 * pip install command for Ampere:
@@ -134,7 +172,7 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
     export MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=1 # for now, magi_attn_comm does not support Ampere
     pip install --no-build-isolation .
 
-    export MAGI_ATTENTION_FA4_BACKEND=1 # always set it when using MagiAttention on Ampere
+    export MAGI_ATTENTION_KERNEL_BACKEND=fa4 # requires flash_attn_cute, see "Install flash_attn_cute" above
     ```
 
 ### PreCompile FFA_FA4 kernels (optional)

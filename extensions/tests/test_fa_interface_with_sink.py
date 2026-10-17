@@ -64,16 +64,13 @@ except ImportError:
 else:
     is_fa3_installed = True
 
-try:
-    from magi_attn_extensions.fa4_interface_with_sink import (
-        fa4_func_with_sink,
-        fa4_varlen_func_with_sink,
-    )
-except ImportError:
-    is_fa4_installed = False
-else:
-    is_fa4_installed = True
-
+# The module imports even when flash_attn.cute does not; is_fa4_installed is
+# its own import probe of flash_attn.cute.
+from magi_attn_extensions.fa4_interface_with_sink import (
+    fa4_func_with_sink,
+    fa4_varlen_func_with_sink,
+    is_fa4_installed,
+)
 
 DEVICE_CAPABILITY = torch.cuda.get_device_capability()[0]
 

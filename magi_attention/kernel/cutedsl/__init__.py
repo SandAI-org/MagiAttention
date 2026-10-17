@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Runs before the relative imports below, so the project rejects pairs outside
+# `CUTEDSL_PAIRS` before cutlass and quack are imported. A dunder assignment
+# keeps the imports after it valid for flake8 (E402).
+from magi_attention.utils.backend_requirements import check_cutedsl_installation
+
+__cutedsl_versions__ = check_cutedsl_installation()
+
+# isort: split
 from .ffa_utils import (
     MT_MAP,
     TorchFlexAttnArgs,

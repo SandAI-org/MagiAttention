@@ -28,7 +28,9 @@ from magi_attention.functional.utils import (
 
 try:
     from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
-except ImportError:
+except (ImportError, AttributeError):
+    # A flash_attn.cute that calls CUTLASS DSL APIs the installed
+    # nvidia-cutlass-dsl removed raises AttributeError while importing.
     is_fa4_installed = False
 else:
     is_fa4_installed = True
