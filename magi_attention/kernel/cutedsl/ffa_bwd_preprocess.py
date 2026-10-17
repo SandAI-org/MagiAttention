@@ -68,7 +68,7 @@ class FFABwdPreProcess:
         use_padded_offsets: bool = True,
         dq_accum_hdim_multiple: int = 32,
         use_dense_dqacc_for_ranges: bool = False,
-        disable_fwd_atomic_reduction: bool = False,
+        q_ranges_disjoint: bool = False,
     ):
         """
         All contiguous dimensions must be at least 16 bytes aligned which indicates the head dimension
@@ -80,6 +80,10 @@ class FFABwdPreProcess:
         :type tile_m: int
         :param num_threads: number of threads
         :type num_threads: int
+        :param q_ranges_disjoint: the q ranges are pairwise disjoint, so their
+            tiles fit a grid bounded by total_q; otherwise the grid holds
+            max_seqlen_q rows per range
+        :type q_ranges_disjoint: bool
         """
         self.use_pdl = BaseDSL._get_dsl().get_arch_enum() >= Arch.sm_90a
         self.dtype = dtype
@@ -101,7 +105,7 @@ class FFABwdPreProcess:
         self.num_threads = num_threads
         self.use_padded_offsets = use_padded_offsets
         self.use_dense_dqacc_for_ranges = use_dense_dqacc_for_ranges
-        self.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction
+        self.q_ranges_disjoint = q_ranges_disjoint
 
     def _check_tile(self) -> None:
         """Validate the kernel config (dtype, head dim, threads)."""
@@ -240,9 +244,7 @@ class FFABwdPreProcess:
             mQRanges=mQRanges,
             max_outer_range_width=(
                 max_seqlen_q
-                if const_expr(
-                    mQRanges is not None and not self.disable_fwd_atomic_reduction
-                )
+                if const_expr(mQRanges is not None and not self.q_ranges_disjoint)
                 else None
             ),
         )
@@ -456,7 +458,7 @@ def _compile_bwd_preprocess(
     has_dq_accum,
     use_padded_offsets,
     use_dense_dqacc_for_ranges,
-    disable_fwd_atomic_reduction,
+    q_ranges_disjoint,
 ):
     """Compile bwd preprocess kernel using cute fake tensors (no real GPU tensors needed)."""
     is_varlen_q = has_cuseqlens_q or has_ranges
@@ -507,7 +509,7 @@ def _compile_bwd_preprocess(
             32 if use_dense_dqacc_for_ranges or not has_ranges else 16
         ),
         use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
-        disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
+        q_ranges_disjoint=q_ranges_disjoint,
     )
     return cute.compile(
         fa_bwd_pre,
@@ -545,7 +547,7 @@ def bwd_preprocess(
     q_ranges: torch.Tensor | None = None,
     max_seqlen_q: int = 0,
     use_dense_dqacc_for_ranges: bool = False,
-    disable_fwd_atomic_reduction: bool = False,
+    q_ranges_disjoint: bool = False,
 ):
     """Backward preprocess: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum."""
     compile_key = (
@@ -560,7 +562,7 @@ def bwd_preprocess(
         dq_accum is not None,
         use_padded_offsets,
         use_dense_dqacc_for_ranges,
-        disable_fwd_atomic_reduction,
+        q_ranges_disjoint,
     )
     assert (
         q_ranges is None or max_seqlen_q > 0
