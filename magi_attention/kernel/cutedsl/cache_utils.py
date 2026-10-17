@@ -33,6 +33,7 @@ import tvm_ffi
 # isort: split
 import cutlass
 import cutlass.cute as cute
+import quack
 from cutlass.cutlass_dsl import JitCompiledFunction
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,10 @@ def _compute_source_fingerprint() -> str:
     - Any .py file under magi_attention/kernel/cutedsl is added, removed, renamed, or modified.
     - The Python minor version changes (e.g. 3.13 -> 3.14).
     - The cutlass or tvm_ffi package version changes.
+    - The quack-kernels version changes: the quack helpers called from the kernels
+      emit device code that differs between quack releases.
+    - The CUDA version of the DSL compiler backend changes: the cu12 and cu13
+      wheels of the same DSL release generate different code.
 
     Computed once per process and cached.
     """
@@ -88,6 +93,9 @@ def _compute_source_fingerprint() -> str:
     h.update(f"py{sys.version_info.major}.{sys.version_info.minor}".encode())
     h.update(f"cutlass={cutlass.__version__}".encode())
     h.update(f"tvm_ffi={tvm_ffi.__version__}".encode())
+    h.update(f"quack={quack.__version__}".encode())
+    cuda_version = cutlass.CUDA_VERSION
+    h.update(f"cuda={cuda_version.major}.{cuda_version.minor}".encode())
 
     for src in sorted(cute_root.rglob("*.py")):
         if not src.is_file():
