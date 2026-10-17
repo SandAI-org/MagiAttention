@@ -85,11 +85,37 @@ This step needs to be performed on the **BARE-METAL HOST OPERATING SYSTEM**, **N
     pip install -r requirements.txt
     ```
 
+:::{note}
+`requirements.txt` accepts `nvidia-cutlass-dsl` 4.4.2 to 4.8.0 except 4.6.0 and 4.6.1. These two releases add their own thread election around non-tensor bulk copies. The MagiAttention kernels already wrap those copies in `elect_one`, so the two elections nest. That combination was not run and the two releases are excluded.
+
+Each `nvidia-cutlass-dsl` release needs a matching `quack-kernels` release. The tested pairs are:
+
+| `nvidia-cutlass-dsl` | `quack-kernels` |
+|---|---|
+| 4.4.2 | 0.4.1 |
+| 4.6.2 | 0.6.4 |
+| 4.8.0 | 0.6.5 |
+
+Other versions inside the range resolve with pip but were not run.
+
+A fresh `pip install -r requirements.txt` resolves to the newest pair, 4.8.0 and 0.6.5. If you upgrade only `nvidia-cutlass-dsl` in an existing environment, the installed `quack-kernels` can be incompatible. For example, `quack-kernels` 0.4.1 fails at `import quack` with `nvidia-cutlass-dsl` 4.6 or newer. `pip install --upgrade -r requirements.txt` upgrades both packages to the newest pair.
+:::
+
 ### Install flash_attn_cute (optional)
 
 :::{note}
-If you would like to try MagiAttention on Ampere or Blackwell, for now you're required to install `flash_attn_cute` package to enable [FFA_FA backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html) as a temporary workaround.
+If you want the [FFA_FA4 backend](https://SandAI-org.github.io/MagiAttention/docs/main/blog/blackwell_ffa_fa4.html) on Ampere or Blackwell, install `flash_attn_cute`. The default `ffa` backend supports Hopper only.
 :::
+
+::::{warning}
+The `FFA_FA4` backend (`flash_attn_cute`, built from the FlashAttention submodule) requires `nvidia-cutlass-dsl` below 4.6.0. It uses `cute.core.ThrMma` and `cute.make_fragment`, which 4.6.0 removed. On 4.6.0 and newer, `flash_attn_cute` fails to import, and MagiAttention treats the `fa4` backend as not installed; the other backends keep working.
+
+`FFA_FA4` was tested with `nvidia-cutlass-dsl` 4.4.2 only. To use it, install the matching pair before installing `flash_attn_cute`:
+
+```bash
+pip install "nvidia-cutlass-dsl[cu13]==4.4.2" "quack-kernels==0.4.1"
+```
+::::
 
 * bash script:
 
@@ -124,7 +150,7 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
     export MAGI_ATTENTION_PREBUILD_FFA=0 # for now, native ffa does not support Blackwell
     pip install --no-build-isolation .
 
-    export MAGI_ATTENTION_FA4_BACKEND=1 # always set it when using MagiAttention on Blackwell
+    export MAGI_ATTENTION_KERNEL_BACKEND=fa4 # requires flash_attn_cute, see "Install flash_attn_cute" above
     ```
 
 * pip install command for Ampere:
@@ -134,7 +160,7 @@ We have several [environment variables](https://SandAI-org.github.io/MagiAttenti
     export MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=1 # for now, magi_attn_comm does not support Ampere
     pip install --no-build-isolation .
 
-    export MAGI_ATTENTION_FA4_BACKEND=1 # always set it when using MagiAttention on Ampere
+    export MAGI_ATTENTION_KERNEL_BACKEND=fa4 # requires flash_attn_cute, see "Install flash_attn_cute" above
     ```
 
 ### PreCompile FFA_FA4 kernels (optional)
