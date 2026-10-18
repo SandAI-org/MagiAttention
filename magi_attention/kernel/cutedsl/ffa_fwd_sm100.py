@@ -1281,8 +1281,6 @@ class FFAFwdSm100:
             tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
             # --- smem tensors ---
-            # row max and row sum for backward
-            sScale: cute.struct.MemRange[Float32, self.q_stage * self.m_block_size * 2]
 
             sQ: cute.struct.Align[
                 cute.struct.MemRange[self.q_dtype, sQ_size], self.buffer_align_bytes
@@ -1294,6 +1292,17 @@ class FFAFwdSm100:
             ]
             sO: cute.struct.Align[
                 cute.struct.MemRange[self.o_dtype, sO_size], self.buffer_align_bytes
+            ]
+            # Per-row corr_scale and final row_sum/row_max: the softmax warps
+            # write it and the correction warps read it every KV block. Keep it
+            # after sO. At the struct front it adds shared-load bank conflicts
+            # and makes the non-persistent 1-CTA hd64 kernel about 2% slower.
+            # It needs no extra bytes here: at the front, sQ's 1024-byte
+            # alignment already reserved its space.
+            # test_ffa_fwd_smem_layout.py pins the sScale offset.
+            sScale: cute.struct.Align[
+                cute.struct.MemRange[Float32, self.q_stage * self.m_block_size * 2],
+                128,
             ]
 
         self.shared_storage = SharedStorage
