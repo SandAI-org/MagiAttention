@@ -67,9 +67,23 @@ ensure_platform_test_dependencies() {
     mkdir -p "$stamp_dir"
     rm -f "$stamp"
     echo "Installing flash_attn_cute test dependency for $archs"
-    (cd "$repo_root/$source_root" && \
+    (
+        cd "$repo_root/$source_root" || exit
+        # PIP_CONSTRAINT holds whitespace-separated files. The platform
+        # profile states its file relative to the source root, but the install
+        # script runs pip inside the submodule, so every relative file is made
+        # absolute.
+        if [[ -n "${PIP_CONSTRAINT:-}" ]]; then
+            read -r -a constraint_files <<< "$PIP_CONSTRAINT"
+            for index in "${!constraint_files[@]}"; do
+                [[ "${constraint_files[index]}" == /* ]] ||
+                    constraint_files[index]=$PWD/${constraint_files[index]}
+            done
+            export PIP_CONSTRAINT="${constraint_files[*]}"
+        fi
         MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY="$compute_capability" \
-        bash scripts/install_flash_attn_cute.sh "$archs")
+            bash scripts/install_flash_attn_cute.sh "$archs"
+    )
     python -c 'import flash_attn_cute'
     : > "$stamp.tmp"
     mv -f "$stamp.tmp" "$stamp"
@@ -86,8 +100,6 @@ precompile_platform_test_kernels() {
     [[ -n "${MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS:-}" ]] || return 0
 
     export MAGI_ATTENTION_FFA_FA4_CACHE_DIR="$test_cwd/ffa_fa4_cache"
-    export MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED=1
-    export MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR="$test_cwd/ffa_cutedsl_cache"
     echo "Precompiling FFA_FA4 kernels into $MAGI_ATTENTION_FFA_FA4_CACHE_DIR"
     (cd "$test_cwd" && \
         PYTHONPATH="$test_pythonpath" \
@@ -135,14 +147,14 @@ recipe_digest() {
         *) check_node "$node"; return ;;
     esac
     profile=$(platform_profile) || return
-    python - "$repo_root/$source_root/.github/configs/ci_input_policy.json" "$node" "$recipe" "$profile" <<'PY'
+    python - "$repo_root/$source_root" "$node" "$recipe" "$profile" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-path, node, recipe, profile = sys.argv[1:]
-policy = json.loads(Path(path).read_text())
+package_root, node, recipe, profile = sys.argv[1:]
+policy = json.loads(Path(package_root, ".github/configs/ci_input_policy.json").read_text())
 projection = {
     "exclusions": sorted(policy["nodes"][node]["exclusions"]["portable"]),
     "layer": "portable",
@@ -153,6 +165,15 @@ projection = {
     "root": policy["nodes"][node]["root"],
     "version": policy["version"],
 }
+# The profile names the constraint file by path, and .github is not part of
+# the source digest, so the file content must enter the recipe here.
+constraint = json.loads(profile)["test_environment"].get("PIP_CONSTRAINT")
+if constraint is not None:
+    try:
+        content = Path(package_root, constraint).read_bytes()
+    except OSError as exc:
+        raise SystemExit(f"Cannot read the platform PIP_CONSTRAINT file {constraint}: {exc}")
+    projection["pip_constraint_sha256"] = hashlib.sha256(content).hexdigest()
 payload = json.dumps(projection, sort_keys=True, separators=(",", ":")).encode()
 print(hashlib.sha256(payload).hexdigest())
 PY
@@ -320,6 +341,11 @@ print(os.pathsep.join(
 PY
     )
     apply_test_environment
+    # A profile that enables the CuTeDSL FFA kernel cache gets a new cache dir
+    # in the temporary test directory, shared by the test processes of a run.
+    if [[ "${MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED:-0}" == 1 ]]; then
+        export MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR="$test_cwd/ffa_cutedsl_cache"
+    fi
     ensure_platform_test_dependencies
     case "${1:?node is required}" in
         magi_attention)

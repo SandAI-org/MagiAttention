@@ -1,0 +1,4 @@
+# CuTeDSL pair for the wheel build and the b300_fa4 platform profile.
+# flash_attn_cute (FFA_FA4, built from the flash-attention submodule) needs nvidia-cutlass-dsl < 4.6.0.
+nvidia-cutlass-dsl==4.4.2
+quack-kernels==0.4.1

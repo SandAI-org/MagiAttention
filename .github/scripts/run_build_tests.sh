@@ -64,10 +64,18 @@ test_packages() {
     local main_changed=${1:?main change flag is required}
     local ci_changed=${2:?CI protocol change flag is required}
     local trusted=${3:?trust flag is required}
+    # The platform profile decides whether the MagiAttnExtensions suite runs;
+    # the wheel import checks of install-wheel cover every platform.
+    local test_extensions=${CI_TEST_EXTENSIONS:?CI_TEST_EXTENSIONS is required}
     local coverage_generated=false
 
+    case "$test_extensions" in
+        true|false) ;;
+        *) echo "CI_TEST_EXTENSIONS must be 'true' or 'false', got '$test_extensions'" >&2; return 2 ;;
+    esac
     prepare_runtime_lock
     bash .github/tests/test_portable_validation.sh
+    bash .github/tests/test_install_requirements.sh
     python .github/tests/test_source_dependency_cache.py
     python .github/tests/test_compiled_artifact_cache.py
     if [[ "$main_changed" == true || "$ci_changed" == true ]]; then
@@ -89,7 +97,9 @@ test_packages() {
         fi
     fi
 
-    if [[ "$trusted" == true ]] && \
+    if [[ "$test_extensions" == false ]]; then
+        echo "Skipped MagiAttnExtensions tests on platform ${TASK_CI_PLATFORM:?TASK_CI_PLATFORM is required}"
+    elif [[ "$trusted" == true ]] && \
         bash .github/scripts/portable_validation.sh verify magi_attn_extensions; then
         echo "Reused portable MagiAttnExtensions validation"
     else

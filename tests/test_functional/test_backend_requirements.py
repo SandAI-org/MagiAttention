@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 import magi_attention
@@ -39,6 +40,7 @@ from magi_attention.utils.backend_requirements import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REQUIREMENTS_TXT = REPO_ROOT / "requirements.txt"
+CI_CONSTRAINTS_TXT = REPO_ROOT / ".github" / "configs" / "ci_constraints.txt"
 # The directory that holds the imported magi_attention package; a child
 # interpreter with it first on PYTHONPATH imports the same package.
 PACKAGE_PARENT = Path(magi_attention.__file__).resolve().parents[1]
@@ -140,6 +142,21 @@ def test_version_constants_are_consistent():
         dsl_spec.contains(tested_dsl) and quack_spec.contains(tested_quack)
         for dsl_spec, quack_spec in CUTEDSL_PAIRS
     )
+
+    # The CI fa4 job installs the pins of ci_constraints.txt, so they are the
+    # pair the fa4 error message tells users to install.
+    pins = {}
+    for line in CI_CONSTRAINTS_TXT.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            requirement = Requirement(line)
+            (spec,) = requirement.specifier
+            assert spec.operator == "==", line
+            pins[canonicalize_name(requirement.name)] = Version(spec.version)
+    assert pins == {
+        canonicalize_name(CUTEDSL_DSL_REQUIREMENT.name): tested_dsl,
+        canonicalize_name(CUTEDSL_QUACK_REQUIREMENT.name): tested_quack,
+    }
 
 
 @pytest.mark.parametrize(
