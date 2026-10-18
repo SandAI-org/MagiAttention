@@ -1451,6 +1451,19 @@ class FFABwdSm100:
                     cute.struct.MemRange[self.ds_dtype, cute.cosize(self.sdSt_layout)],
                     128,
                 ]
+                # sLSE must start at least about 128 KiB after the struct
+                # start: below that offset the LDS of LSE before the exp2
+                # FFMA stalls on the short scoreboard and the bwd runs 12-18%
+                # slower. sdQacc precedes the stats so sLSE clears that offset
+                # for both sdO sizes (the 16 KiB bf16 single-writer sdV tile at
+                # hd64 and the 32 KiB fp32 reduce strip).
+                # test_ffa_bwd_smem_layout.py pins the sLSE offset.
+                sdQacc: cute.struct.Align[
+                    cute.struct.MemRange[
+                        self.dqacc_dtype, cute.cosize(self.sdQacc_layout)
+                    ],
+                    self.buffer_align_bytes,
+                ]
                 sLSE: cute.struct.Align[
                     cute.struct.MemRange[self.lse_dtype, cute.cosize(self.sLSE_layout)],
                     128,
@@ -1460,12 +1473,6 @@ class FFABwdSm100:
                         self.dpsum_dtype, cute.cosize(self.sdPsum_layout)
                     ],
                     128,
-                ]
-                sdQacc: cute.struct.Align[
-                    cute.struct.MemRange[
-                        self.dqacc_dtype, cute.cosize(self.sdQacc_layout)
-                    ],
-                    self.buffer_align_bytes,
                 ]
 
         self.shared_storage = SharedStorage
