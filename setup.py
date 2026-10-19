@@ -739,10 +739,12 @@ def prebuild_ffa_kernels() -> None:
                 flush=True,
             )
         except Exception as e:
-            print(
-                f"[prebuild WARNING] failed to collect test kernel specs: {e}",
-                flush=True,
-            )
+            # The CI wheel goes to a shared compiled-artifact cache whose key does
+            # not cover every Python dependency version, and later runs install it
+            # without building, so a failed collection must fail the build.
+            raise RuntimeError(
+                f"[prebuild] CI mode: failed to collect test kernel specs: {e}"
+            ) from e
 
     # URIs already covered by the test specs — skip duplicates to avoid
     # two concurrent ninja builds racing in the same kernel directory.
