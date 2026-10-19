@@ -33,6 +33,7 @@ import weakref
 
 import torch
 
+from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -51,6 +52,10 @@ __all__ = ["cutedsl_fwd", "cutedsl_bwd"]
 # - disable_fwd_atomic_reduction requires sorted, pairwise-disjoint q;
 #   AttnArg only certifies disjointness, so sortedness is checked here.
 #
+# All three are judged on the range tensors passed to the kernel, because the
+# bwd range merge in calc_meta reorders the rows. This costs one device-to-host
+# copy per AttnArg; later calls hit the cache.
+#
 # Cached per AttnArg: the runtime manager reuses args across steps and the
 # derivations sort all ranges. Keyed by id() because AttnArg is unhashable;
 # the finalizer evicts the entry before the id can be reused.
@@ -67,9 +72,12 @@ def _bwd_range_contracts(
         return hit[2], hit[3], hit[4]
     if hit is None:
         weakref.finalize(attn_arg, _bwd_contract_cache.pop, key, None)
-    q_cov = attn_arg.q_ranges_bwd.is_full_coverage(total_q)
-    k_cov = attn_arg.k_ranges_bwd.is_cu_seqlens(total_k)
-    q_sorted = attn_arg.q_ranges_bwd.is_sorted()
+    ffa_args = attn_arg.to_ffa_args(is_bwd=True)
+    q_ranges = AttnRanges.from_ranges(ffa_args["q_ranges"].tolist())
+    k_ranges = AttnRanges.from_ranges(ffa_args["k_ranges"].tolist())
+    q_cov = q_ranges.is_full_coverage(total_q)
+    k_cov = k_ranges.is_cu_seqlens(total_k)
+    q_sorted = q_ranges.is_sorted()
     _bwd_contract_cache[key] = (total_q, total_k, q_cov, k_cov, q_sorted)
     return q_cov, k_cov, q_sorted
 
