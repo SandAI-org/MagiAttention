@@ -5443,9 +5443,8 @@ class FFAFwdSm100:
             self.qhead_per_kvhead,
         )
 
-        # load acc O from smem to rmem for wider vectorization
+        # rmem staging of O for wider vectorization
         tOrO = cute.make_fragment_like(tOsO, self.o_dtype)
-        cute.autovec_copy(tOsO, tOrO)
 
         # --- Debug print ---
 
@@ -5474,6 +5473,13 @@ class FFAFwdSm100:
                     t0OcO[0, rest_m, 0][0]
                     < seqlen_q - m_tile_idx * self.m_block_size - tOcO[0][0]
                 ):
+                    # Load each row chunk under its own row predicate. A
+                    # whole-stage smem load ahead of the predicated stores
+                    # keeps the whole stage live across the row loop and
+                    # spills it to local memory.
+                    cute.autovec_copy(
+                        tOsO[None, rest_m, None], tOrO[None, rest_m, None]
+                    )
                     cute.copy(
                         gmem_tiled_copy_O,
                         tOrO[None, rest_m, None],
@@ -5483,6 +5489,8 @@ class FFAFwdSm100:
                         else None,
                     )
         else:
+            # pack_gqa.store_O has no per-row-chunk predicate to load under
+            cute.autovec_copy(tOsO, tOrO)
             pack_gqa.store_O(
                 mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_tile_idx, seqlen_q
             )
