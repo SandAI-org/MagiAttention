@@ -24,9 +24,10 @@ import cutlass.cute as cute
 import torch
 from cutlass import Float32, Int32, const_expr, pipeline
 from cutlass._mlir.dialects import llvm, nvvm
-from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.runtime import from_dlpack
 from cutlass.cutlass_dsl import NumericMeta, T, dsl_user_op
+
+from .dsl_compat import FastDivmodDivisor
 
 StaticTypes = (cutlass.Constexpr, NumericMeta, int, bool, str, float, type(None))
 ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)

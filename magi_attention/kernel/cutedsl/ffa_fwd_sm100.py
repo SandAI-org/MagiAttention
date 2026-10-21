@@ -31,10 +31,8 @@ import cutlass.cute as cute
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
 from cutlass import Boolean, Float32, Int32, Int64, const_expr, pipeline
-from cutlass.base_dsl.arch import Arch
-from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync
-from cutlass.cutlass_dsl import BaseDSL
+from cutlass.cutlass_dsl import Arch, BaseDSL
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import ClcDynamicPersistentTileScheduler
 
@@ -47,6 +45,14 @@ from . import pipeline as ffa_pipeline
 from . import sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
+from .dsl_compat import (
+    FastDivmodDivisor,
+    LayoutEnum,
+    SmemAllocator,
+    Tcgen05OperandMajorMode,
+    TmemAllocator,
+    make_trivial_tiled_mma,
+)
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm100
@@ -901,10 +907,10 @@ class FFAFwdSm100:
 
         # --- Make tiled MMA for S=QK.T ---
 
-        q_major_mode = tcgen05.OperandMajorMode.K
-        k_major_mode = tcgen05.OperandMajorMode.K
-        v_major_mode = tcgen05.OperandMajorMode.MN  # V.T
-        self.o_layout = cutlass.utils.LayoutEnum.from_tensor(mO)
+        q_major_mode = Tcgen05OperandMajorMode.K
+        k_major_mode = Tcgen05OperandMajorMode.K
+        v_major_mode = Tcgen05OperandMajorMode.MN  # V.T
+        self.o_layout = LayoutEnum.from_tensor(mO)
 
         # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
         # Permutation MNK: (_,_,_)
@@ -914,7 +920,8 @@ class FFAFwdSm100:
         # TV Layout A:     (2,(128,16)):(128,(1,256))
         # TV Layout B:     (2,(64,16)):(64,(1,128))
         # TV Layout C:     (2,(128,128)):(128,(1,256))
-        tiled_mma_qk = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_qk = make_trivial_tiled_mma(
+            self.q_dtype,
             self.q_dtype,
             q_major_mode,
             k_major_mode,
@@ -939,7 +946,7 @@ class FFAFwdSm100:
 
         # the intermediate tensor p is from tmem & mK-major
         p_source = tcgen05.OperandSource.TMEM
-        p_major_mode = tcgen05.OperandMajorMode.K
+        p_major_mode = Tcgen05OperandMajorMode.K
 
         # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
         # Permutation MNK: (_,_,_)
@@ -949,7 +956,8 @@ class FFAFwdSm100:
         # TV Layout A:     (2,(128,16)):(128,(1,256))
         # TV Layout B:     (2,(64,16)):(64,(1,128))
         # TV Layout C:     (2,(128,128)):(128,(1,256))
-        tiled_mma_pv = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_pv = make_trivial_tiled_mma(
+            self.v_dtype,
             self.v_dtype,
             p_major_mode,
             v_major_mode,
@@ -1540,7 +1548,7 @@ class FFAFwdSm100:
 
         # --- Alloc smem storage and fetch ptrs ---
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         storage = smem.allocate(self.shared_storage)
 
         # Pipeline mbarrier ptrs
@@ -1579,7 +1587,7 @@ class FFAFwdSm100:
                 )
             ),
         )
-        tmem = cutlass.utils.TmemAllocator(
+        tmem = TmemAllocator(
             alloc_result_dst_smem_ptr=tmem_holding_buf_ptr,
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,

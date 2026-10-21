@@ -29,12 +29,9 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.utils.hopper_helpers as sm90_utils_basic
 from cutlass import Float32, Int32, const_expr, pipeline
-from cutlass.base_dsl.arch import Arch
-from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync, warpgroup
-from cutlass.cutlass_dsl import BaseDSL
+from cutlass.cutlass_dsl import Arch, BaseDSL
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
-from cutlass.utils import LayoutEnum
 
 # isort: split
 from quack import copy_utils, layout_utils, sm90_utils
@@ -44,6 +41,12 @@ from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
+from .dsl_compat import (
+    FastDivmodDivisor,
+    LayoutEnum,
+    SmemAllocator,
+    WarpgroupOperandMajorMode,
+)
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwd
@@ -273,8 +276,8 @@ class FFAFwdSm90:
         tiled_mma_qk = sm90_utils_basic.make_trivial_tiled_mma(
             self.dtype,
             self.dtype,
-            warpgroup.OperandMajorMode.K,
-            warpgroup.OperandMajorMode.K,
+            WarpgroupOperandMajorMode.K,
+            WarpgroupOperandMajorMode.K,
             Float32,
             atom_layout_mnk=(self.tile_m // 64, 1, 1),
             tiler_mn=(64, self.tile_n),
@@ -292,8 +295,8 @@ class FFAFwdSm90:
         tiled_mma_pv = sm90_utils_basic.make_trivial_tiled_mma(
             self.dtype,
             self.dtype,
-            warpgroup.OperandMajorMode.K,
-            warpgroup.OperandMajorMode.MN,
+            WarpgroupOperandMajorMode.K,
+            WarpgroupOperandMajorMode.MN,
             Float32,
             atom_layout_mnk=(
                 self.tile_m // 64,
@@ -964,7 +967,7 @@ class FFAFwdSm90:
 
         # --- Alloc smem storage and fetch ptrs ---
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         storage = smem.allocate(self.shared_storage_cls)
         mbar_ptr_Q = storage.mbar_ptr_Q.data_ptr()
 

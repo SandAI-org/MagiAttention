@@ -16,6 +16,8 @@ import torch
 import triton
 from packaging.version import Version
 
+from magi_attention.utils import backend_requirements
+
 __version__ = "1.0.0"
 
 
@@ -278,3 +280,79 @@ def is_cuda_version_lt(version: str, release_only: bool = True) -> bool:
 
     lhs = _CUDA_RELEASE if release_only else _CUDA_VERSION
     return lhs < _parse(version, release_only)
+
+
+# --------  nvidia-cutlass-dsl version predicates --------
+
+# The DSL version is read inside each predicate: reading it at import would
+# move the supported-pair check of `check_cutedsl_installation` from
+# `magi_attention.kernel.cutedsl` to the first module that imports this one.
+
+
+def _cutedsl_version(release_only: bool) -> tuple[int, ...] | Version:
+    return _parse(backend_requirements.check_cutedsl_installation()[0], release_only)
+
+
+def is_cutedsl_version_eq(version: str, release_only: bool = True) -> bool:
+    """Return True if the installed nvidia-cutlass-dsl version is == *version*.
+
+    The installed version is the one ``check_cutedsl_installation`` validated,
+    so the call raises ``CuteDslRequirementError`` for an unsupported pair.
+
+    Args:
+        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
+        release_only: If True (default), compare only the numeric release segment
+            ``(major, minor, patch)``, ignoring pre/dev/post/local suffixes. If
+            False, use full PEP 440 semantics where e.g. ``4.8.0rc1 < 4.8.0``.
+    """
+    return _cutedsl_version(release_only) == _parse(version, release_only)
+
+
+def is_cutedsl_version_ne(version: str, release_only: bool = True) -> bool:
+    """Return True if the installed nvidia-cutlass-dsl version is != *version*.
+
+    Args:
+        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
+        release_only: See :func:`is_cutedsl_version_eq`.
+    """
+    return _cutedsl_version(release_only) != _parse(version, release_only)
+
+
+def is_cutedsl_version_ge(version: str, release_only: bool = True) -> bool:
+    """Return True if the installed nvidia-cutlass-dsl version is >= *version*.
+
+    Args:
+        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
+        release_only: See :func:`is_cutedsl_version_eq`.
+    """
+    return _cutedsl_version(release_only) >= _parse(version, release_only)
+
+
+def is_cutedsl_version_gt(version: str, release_only: bool = True) -> bool:
+    """Return True if the installed nvidia-cutlass-dsl version is > *version*.
+
+    Args:
+        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
+        release_only: See :func:`is_cutedsl_version_eq`.
+    """
+    return _cutedsl_version(release_only) > _parse(version, release_only)
+
+
+def is_cutedsl_version_le(version: str, release_only: bool = True) -> bool:
+    """Return True if the installed nvidia-cutlass-dsl version is <= *version*.
+
+    Args:
+        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
+        release_only: See :func:`is_cutedsl_version_eq`.
+    """
+    return _cutedsl_version(release_only) <= _parse(version, release_only)
+
+
+def is_cutedsl_version_lt(version: str, release_only: bool = True) -> bool:
+    """Return True if the installed nvidia-cutlass-dsl version is < *version*.
+
+    Args:
+        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
+        release_only: See :func:`is_cutedsl_version_eq`.
+    """
+    return _cutedsl_version(release_only) < _parse(version, release_only)

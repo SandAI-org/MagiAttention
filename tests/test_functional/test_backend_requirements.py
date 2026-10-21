@@ -37,6 +37,14 @@ from magi_attention.utils.backend_requirements import (
     CuteDslRequirementError,
     check_cutedsl_installation,
 )
+from magi_attention.utils.version import (
+    is_cutedsl_version_eq,
+    is_cutedsl_version_ge,
+    is_cutedsl_version_gt,
+    is_cutedsl_version_le,
+    is_cutedsl_version_lt,
+    is_cutedsl_version_ne,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REQUIREMENTS_TXT = REPO_ROOT / "requirements.txt"
@@ -200,6 +208,47 @@ def test_check_rejects_a_pair_outside_the_table(fake_installed_versions, dsl, qu
 def test_check_accepts_a_pair_in_the_table(fake_installed_versions, dsl, quack):
     fake_installed_versions(dsl, quack)
     assert check_cutedsl_installation() == (dsl, quack)
+
+
+CUTEDSL_VERSION_PREDICATES = {
+    "==": is_cutedsl_version_eq,
+    "!=": is_cutedsl_version_ne,
+    ">=": is_cutedsl_version_ge,
+    ">": is_cutedsl_version_gt,
+    "<=": is_cutedsl_version_le,
+    "<": is_cutedsl_version_lt,
+}
+
+
+@pytest.mark.parametrize(
+    "dsl, quack, version, release_only, holds",
+    [
+        ("4.6.2", "0.6.4", "4.6.2", True, {"==", ">=", "<="}),
+        ("4.6.2", "0.6.4", "4.6.1", True, {"!=", ">=", ">"}),
+        ("4.6.2", "0.6.4", "4.7.0", True, {"!=", "<=", "<"}),
+        # A shorter version is a shorter release tuple, not a prefix match.
+        ("4.6.2", "0.6.4", "4.6", True, {"!=", ">=", ">"}),
+        ("4.7.0.post1", "0.6.5", "4.7.0", True, {"==", ">=", "<="}),
+        ("4.7.0.post1", "0.6.5", "4.7.0", False, {"!=", ">=", ">"}),
+        # The predicates read the version that check_cutedsl_installation
+        # validated, so an unsupported pair raises.
+        ("4.6.0", "0.6.4", "4.5.0", True, CuteDslRequirementError),
+    ],
+)
+def test_cutedsl_version_predicates(
+    fake_installed_versions, dsl, quack, version, release_only, holds
+):
+    fake_installed_versions(dsl, quack)
+    if holds is CuteDslRequirementError:
+        for predicate in CUTEDSL_VERSION_PREDICATES.values():
+            with pytest.raises(CuteDslRequirementError):
+                predicate(version, release_only=release_only)
+        return
+    assert {
+        operator
+        for operator, predicate in CUTEDSL_VERSION_PREDICATES.items()
+        if predicate(version, release_only=release_only)
+    } == holds
 
 
 def test_import_checks_the_pair_before_importing_quack():

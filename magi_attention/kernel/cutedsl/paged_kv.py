@@ -21,11 +21,11 @@ from typing import Type
 import cutlass
 import cutlass.cute as cute
 from cutlass import Int32, const_expr
-from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .dsl_compat import FastDivmodDivisor
 
 
 @dataclass
