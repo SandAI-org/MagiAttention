@@ -1275,9 +1275,9 @@ class FFAFwdSm100:
             # --- tmem ptr ---
 
             # Tmem dealloc cluster mbarrier
-            tmem_dealloc_mbar_ptr: Int64
+            tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
             # Tmem holding buffer ptr
-            tmem_holding_buf_ptr: Int32
+            tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
             # --- smem tensors ---
             # row max and row sum for backward
@@ -1562,8 +1562,8 @@ class FFAFwdSm100:
         mbar_O_epi = storage.mbar_O_epi.data_ptr()
 
         # tmem buf/dealloc ptrs
-        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
-        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr.data_ptr()
+        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr.data_ptr()
 
         # --- Alloc tmem alloc/dealloc barrier ---
 

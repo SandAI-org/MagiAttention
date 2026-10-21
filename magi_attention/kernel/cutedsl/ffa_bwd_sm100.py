@@ -1329,18 +1329,18 @@ class FFABwdSm100:
                 # --- tmem ptr ---
 
                 # Tmem dealloc cluster mbarrier
-                tmem_dealloc_mbar_ptr: Int64
+                tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
                 # Tmem holding buffer ptr
-                tmem_holding_buf_ptr: Int32
+                tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
                 # --- 2-CTA mbarrier ptrs ---
 
                 Qt_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
                 Kt_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.single_stage]
-                dS_cluster_empty_mbar_ptr: cutlass.Int64
-                dS_cluster_full_mbar_ptr: cutlass.Int64
-                dS_cluster_leader_mbar_ptr: cutlass.Int64
-                dQacc_empty_mbar_ptr: cutlass.Int64
+                dS_cluster_empty_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
+                dS_cluster_full_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
+                dS_cluster_leader_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
+                dQacc_empty_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
 
                 # --- smem tensors ---
 
@@ -1424,9 +1424,9 @@ class FFABwdSm100:
                 # --- tmem ptr ---
 
                 # Tmem dealloc cluster mbarrier
-                tmem_dealloc_mbar_ptr: Int64
+                tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
                 # Tmem holding buffer ptr
-                tmem_holding_buf_ptr: Int32
+                tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
                 # --- smem tensors ---
 
@@ -1799,10 +1799,10 @@ class FFABwdSm100:
         dQ_cluster_empty_mbar_ptr = storage.dQ_cluster_empty_mbar_ptr.data_ptr()
 
         if const_expr(self.use_2cta_instrs):
-            dS_cluster_full_mbar_ptr = storage.dS_cluster_full_mbar_ptr
-            dS_cluster_empty_mbar_ptr = storage.dS_cluster_empty_mbar_ptr
-            dS_cluster_leader_mbar_ptr = storage.dS_cluster_leader_mbar_ptr
-            dQacc_empty_mbar_ptr = storage.dQacc_empty_mbar_ptr
+            dS_cluster_full_mbar_ptr = storage.dS_cluster_full_mbar_ptr.data_ptr()
+            dS_cluster_empty_mbar_ptr = storage.dS_cluster_empty_mbar_ptr.data_ptr()
+            dS_cluster_leader_mbar_ptr = storage.dS_cluster_leader_mbar_ptr.data_ptr()
+            dQacc_empty_mbar_ptr = storage.dQacc_empty_mbar_ptr.data_ptr()
         else:
             dS_cluster_full_mbar_ptr = None
             dS_cluster_empty_mbar_ptr = None
@@ -1824,8 +1824,8 @@ class FFABwdSm100:
             Kt_mbar_ptr = storage.Kt_mbar_ptr.data_ptr()
 
         # tmem buf/dealloc ptrs
-        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
-        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr.data_ptr()
+        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr.data_ptr()
 
         # --- Cluster mbarrier initialization ---
 
