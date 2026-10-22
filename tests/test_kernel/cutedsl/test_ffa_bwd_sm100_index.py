@@ -24,7 +24,7 @@ Usage (from the repo root):
     python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py smoke
     python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py correct
     python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py bench
-    python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py bench --seqlen 4096 --topk 512
+    python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py bench --seqlen 32768 --topk 4096
 
 NCU (three representative cases; compilation and forward excluded):
     ncu --profile-from-start off --kernel-name regex:FFABwdSm100Index \\
@@ -420,7 +420,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=(*_MODES, "profile"))
     parser.add_argument("--seqlen", type=int, choices=(4096, 8192, 16384, 32768))
-    parser.add_argument("--topk", type=int, choices=(512, 1024, 2048))
+    parser.add_argument("--topk", type=int, choices=(512, 1024, 2048, 4096))
     args = parser.parse_args()
     if (args.seqlen is None) != (args.topk is None):
         parser.error("--seqlen and --topk must be supplied together")
