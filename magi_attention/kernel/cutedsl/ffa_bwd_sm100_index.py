@@ -44,6 +44,10 @@ Single CTA, CLC-persistent, warp specialized (20 warps / 640 threads):
 Per K tile the MMA warp issues S = Q @ K^T, dP = dO @ V^T, dV^T = dO^T @ P,
 dQ += dS @ K (then releases K), dK^T = Q^T @ dS, software pipelined by one
 K tile: S of tile n + 1 is issued before dQ / dK of tile n.
+
+S and dP read their A operand (Q / dO) from TMEM, copied there by tcgen05.cp
+once per Q tile: an N = tile_n = 64 MMA with both operands in smem is bound
+by the smem operand reads, not by the tensor core.
 """
 
 import math
@@ -171,25 +175,28 @@ class FFABwdSm100Index:
         )
 
         # TMEM buffer distribution (columns), every buffer owns its columns:
-        # dQ [0, HD) stays resident for the whole Q tile,
-        # S / dP / dV.T / dK.T are refreshed per K tile.
-        # dV.T / dK.T are double buffered so the MMA warp can produce the next
-        # K tile while the reduce warps still drain the previous one:
-        # stage s lives at tmem_dV/dK_offset + s * dKV_stage_stride.
+        # dQ [0, HD) and the 16-bit A operands Q / dO (HD / 2 columns each)
+        # stay resident for the whole Q tile, S / dP / dV.T / dK.T are
+        # refreshed per K tile. dV.T / dK.T stage s lives at
+        # tmem_dV/dK_offset + s * dKV_stage_stride. They are single buffered so
+        # Q / dO fit; the reduce warps release a stage right after T2R, before
+        # the slow bulk reduce, so the MMA warp rarely waits on it.
         self.tmem_alloc_cols = cute.arch.get_max_tmem_alloc_cols("sm_100")
-        self.dKV_stage = 2
+        self.dKV_stage = 1
         self.dKV_stage_stride = 2 * self.tile_n
         self.tmem_dQ_offset = 0
         self.tmem_S_offset = self.tmem_dQ_offset + self.head_dim
         self.tmem_dP_offset = self.tmem_S_offset + self.tile_n
         self.tmem_dV_offset = self.tmem_dP_offset + self.tile_n
         self.tmem_dK_offset = self.tmem_dV_offset + self.tile_n
-        assert (
+        self.tmem_Q_offset = (
             self.tmem_dK_offset
             + (self.dKV_stage - 1) * self.dKV_stage_stride
             + self.tile_n
-            <= self.tmem_alloc_cols
         )
+        # two 16-bit elements per 32-bit TMEM column
+        self.tmem_dO_offset = self.tmem_Q_offset + self.head_dim // 2
+        assert self.tmem_dO_offset + self.head_dim // 2 <= self.tmem_alloc_cols
 
         # setmaxnreg is warpgroup-uniform: WG0 load_KV, WG1 compute,
         # WG2/WG3 reduce, WG4 mma/load/clc/empty.
@@ -226,7 +233,8 @@ class FFABwdSm100Index:
             )
             print(
                 f"{prefix}{self.tmem_dQ_offset=} | {self.tmem_S_offset=} | {self.tmem_dP_offset=} | "
-                f"{self.tmem_dV_offset=} | {self.tmem_dK_offset=}"
+                f"{self.tmem_dV_offset=} | {self.tmem_dK_offset=} | "
+                f"{self.tmem_Q_offset=} | {self.tmem_dO_offset=}"
             )
             print(
                 f"{prefix}{self.num_regs_load_KV=} | {self.num_regs_compute=} | "
@@ -278,6 +286,7 @@ class FFABwdSm100Index:
 
     def _get_tiled_mma(self):
         # --- S = Q @ K.T with (K, K) major ---
+        # A = Q read from tQ (TMEM copy of sQ), B = K read from sK
         tiled_mma_S = sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype,
             tcgen05.OperandMajorMode.K,
@@ -285,9 +294,11 @@ class FFABwdSm100Index:
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_qk[:2],
+            a_source=tcgen05.OperandSource.TMEM,
         )
 
         # --- dP = dO @ V.T with (K, K) major ---
+        # A = dO read from tdO (TMEM copy of sdO), B = V read from sV
         tiled_mma_dP = sm100_utils_basic.make_trivial_tiled_mma(
             self.do_dtype,
             tcgen05.OperandMajorMode.K,
@@ -295,6 +306,7 @@ class FFABwdSm100Index:
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_dov[:2],
+            a_source=tcgen05.OperandSource.TMEM,
         )
 
         # --- dV.T = dO.T @ P with (MN, MN) major ---
@@ -1037,6 +1049,19 @@ class FFABwdSm100Index:
             thr_mma_dQ.partition_shape_C(self.mma_tiler_dsk[:2])
         )
         tdQtdQ = cute.make_tensor(tmem_ptr + self.tmem_dQ_offset, tdQtdQ.layout)
+        # tSrQ / tdPrdO: TMEM A operands of S / dP, (MMA_tA=(tileQ128,16),MMA_Q1,MMA_HD=(4,2))
+        tSrQ = tiled_mma_S.make_fragment_A(
+            cute.make_tensor(
+                cute.recast_ptr(tmem_ptr + self.tmem_Q_offset, dtype=self.q_dtype),
+                cute.slice_(sQ_layout, (None, None, None, 0)).outer,
+            )
+        )
+        tdPrdO = tiled_mma_dP.make_fragment_A(
+            cute.make_tensor(
+                cute.recast_ptr(tmem_ptr + self.tmem_dO_offset, dtype=self.do_dtype),
+                cute.slice_(sdO_layout, (None, None, None, 0)).outer,
+            )
+        )
 
         # --- Make other info ---
 
@@ -1170,6 +1195,8 @@ class FFABwdSm100Index:
                 sP,
                 sdS,
                 sdSt,
+                tSrQ,
+                tdPrdO,
                 tStS,
                 tdPtdP,
                 tdVtdV,
@@ -1627,6 +1654,8 @@ class FFABwdSm100Index:
         sP: cute.Tensor,
         sdS: cute.Tensor,
         sdSt: cute.Tensor,
+        tSrQ: cute.Tensor,
+        tdPrdO: cute.Tensor,
         tStS: cute.Tensor,
         tdPtdP: cute.Tensor,
         tdVtdV: cute.Tensor,
@@ -1647,17 +1676,31 @@ class FFABwdSm100Index:
     ):
         # --- Make GEMM fragments & define GEMM funcs ---
 
-        # S = Q @ K.T
-        tSrQ = tiled_mma_S.make_fragment_A(sQ)
+        # S = Q @ K.T, A from TMEM (TS: tA_addr is passed explicitly)
         tSrK = tiled_mma_S.make_fragment_B(sK)
         mma_s_qk_fn = partial(
-            sm100_utils.gemm_w_idx, tiled_mma_S, tStS, tSrQ, tSrK, zero_init=True
+            sm100_utils.gemm_ptx_w_idx,
+            tiled_mma_S,
+            tStS,
+            tSrQ,
+            tSrK,
+            sA=None,
+            sB=sK,
+            zero_init=True,
+            tA_addr=self.tmem_Q_offset,
         )
-        # dP = dO @ V.T
-        tdPrdO = tiled_mma_dP.make_fragment_A(sdO)
+        # dP = dO @ V.T, A from TMEM
         tdPrV = tiled_mma_dP.make_fragment_B(sV)
         mma_dp_dov_fn = partial(
-            sm100_utils.gemm_w_idx, tiled_mma_dP, tdPtdP, tdPrdO, tdPrV, zero_init=True
+            sm100_utils.gemm_ptx_w_idx,
+            tiled_mma_dP,
+            tdPtdP,
+            tdPrdO,
+            tdPrV,
+            sA=None,
+            sB=sV,
+            zero_init=True,
+            tA_addr=self.tmem_dO_offset,
         )
         # dV.T = dO.T @ P, accumulator stage picked per K tile
         tdVrdOt = tiled_mma_dV.make_fragment_A(sdOt)
@@ -1689,6 +1732,38 @@ class FFABwdSm100Index:
         mma_dq_dsk_fn = partial(
             sm100_utils.gemm_w_idx, tiled_mma_dQ, tdQtdQ, tdQrdS, tdQrKt, A_idx=0
         )
+
+        # --- Make S2T copies sQ -> tQ / sdO -> tdO (tcgen05.cp, 128 rows x 16 elems each) ---
+
+        # NOTE: overwriting tQ / tdO needs no extra wait: sQ / sdO of the next
+        # Q tile only land after the QdO release, which fires once every earlier
+        # MMA (S / dP reading tQ / tdO included) has completed. The TMEM A
+        # fragments lose their base column (hence tA_addr above), so the S2T
+        # destinations rebuild it from tStS.
+        s2t_atom = cute.make_copy_atom(
+            tcgen05.Cp128x256bOp(self.cta_group), self.q_dtype
+        )
+        tmem_ptr = tStS.iterator - self.tmem_S_offset
+        tQ = cute.make_tensor(
+            cute.recast_ptr(tmem_ptr + self.tmem_Q_offset, dtype=self.q_dtype),
+            tSrQ.layout,
+        )
+        tdO = cute.make_tensor(
+            cute.recast_ptr(tmem_ptr + self.tmem_dO_offset, dtype=self.do_dtype),
+            tdPrdO.layout,
+        )
+        tiled_s2t_Q = tcgen05.make_s2t_copy(s2t_atom, tQ)
+        thr_s2t_Q = tiled_s2t_Q.get_slice(0)
+        tQsQ_s2t = tcgen05.get_s2t_smem_desc_tensor(
+            tiled_s2t_Q, thr_s2t_Q.partition_S(sQ[None, None, None, 0])
+        )
+        tQtQ_s2t = thr_s2t_Q.partition_D(tQ)
+        tiled_s2t_dO = tcgen05.make_s2t_copy(s2t_atom, tdO)
+        thr_s2t_dO = tiled_s2t_dO.get_slice(0)
+        tdOsdO_s2t = tcgen05.get_s2t_smem_desc_tensor(
+            tiled_s2t_dO, thr_s2t_dO.partition_S(sdO[None, None, None, 0])
+        )
+        tdOtdO_s2t = thr_s2t_dO.partition_D(tdO)
 
         # --- Init pipeline states ---
 
@@ -1739,6 +1814,10 @@ class FFABwdSm100Index:
             # Wait for sQ/sdO to be full (resident for the whole K loop)
             pipeline_QdO.consumer_wait(consumer_state_QdO)
 
+            # Copy sQ/sdO into the TMEM A operands of S/dP
+            cute.copy(tiled_s2t_Q, tQsQ_s2t, tQtQ_s2t)
+            cute.copy(tiled_s2t_dO, tdOsdO_s2t, tdOtdO_s2t)
+
             # Acquire tdQ to be empty (previous Q tile's dQ consumed by compute)
             pipeline_dQ.producer_acquire(producer_state_dQ)
 
@@ -1753,7 +1832,7 @@ class FFABwdSm100Index:
 
                 pipeline_K.consumer_wait(consumer_state_K_wait)
                 pipeline_S.producer_acquire(producer_state_S)
-                mma_s_qk_fn(A_idx=0, B_idx=consumer_state_K_wait.index)
+                mma_s_qk_fn(B_idx=consumer_state_K_wait.index)
                 pipeline_S.producer_commit(producer_state_S)
                 producer_state_S.advance()
                 consumer_state_K_wait.advance()
@@ -1762,7 +1841,7 @@ class FFABwdSm100Index:
 
                 pipeline_V.consumer_wait(consumer_state_V)
                 pipeline_dP.producer_acquire(producer_state_dP)
-                mma_dp_dov_fn(A_idx=0, B_idx=consumer_state_V.index)
+                mma_dp_dov_fn(B_idx=consumer_state_V.index)
                 pipeline_dP.producer_commit(producer_state_dP)
                 producer_state_dP.advance()
 
@@ -1790,7 +1869,7 @@ class FFABwdSm100Index:
 
                     pipeline_K.consumer_wait(consumer_state_K_wait)
                     pipeline_S.producer_acquire(producer_state_S)
-                    mma_s_qk_fn(A_idx=0, B_idx=consumer_state_K_wait.index)
+                    mma_s_qk_fn(B_idx=consumer_state_K_wait.index)
                     pipeline_S.producer_commit(producer_state_S)
                     producer_state_S.advance()
                     consumer_state_K_wait.advance()
@@ -1820,7 +1899,7 @@ class FFABwdSm100Index:
 
                     pipeline_V.consumer_wait(consumer_state_V)
                     pipeline_dP.producer_acquire(producer_state_dP)
-                    mma_dp_dov_fn(A_idx=0, B_idx=consumer_state_V.index)
+                    mma_dp_dov_fn(B_idx=consumer_state_V.index)
                     pipeline_dP.producer_commit(producer_state_dP)
                     producer_state_dP.advance()
 
