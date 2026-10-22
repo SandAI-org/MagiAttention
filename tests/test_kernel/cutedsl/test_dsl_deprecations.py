@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Fails when importing magi_attention or compiling a CuTeDSL FFA kernel emits
-# a DeprecationWarning of the installed DSL. Each configuration compiles in a
-# fresh interpreter (dsl_deprecation_compile.py) with the persistent kernel
-# cache disabled, because a kernel loaded from a compile cache is not traced
-# and emits no warning. The gate counts a DeprecationWarning attributed to the
-# tree under test or to the DSL; third-party deprecations are out of scope.
+# Check import and tracing deprecations in fresh processes with caching disabled.
 
 import json
 import os
@@ -43,19 +38,16 @@ pytestmark = pytest.mark.skipif(
 
 _CHILD = Path(__file__).with_name("dsl_deprecation_compile.py")
 _PACKAGE_DIR = Path(magi_attention.__file__).resolve().parent
-# A child interpreter with this directory first on PYTHONPATH imports the
-# same magi_attention package as this process.
+# Keep child imports tied to the package under test.
 _PACKAGE_PARENT = _PACKAGE_DIR.parent
 _CHILD_TIMEOUT_S = 120
 
 _CACHE_ENABLED_ENV = "MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED"
 _CACHE_DIR_ENV = "MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR"
 _DISABLE_2CTA_ENV = "MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA"
-# Every configuration uses the device's kernel path and the default 2-CTA
-# selection (d128_full builds the 2-CTA backward), so these must be unset.
+# Preserve SM100 dispatch and the default 2-CTA selection.
 _KERNEL_SELECTION_ENVS = (_DISABLE_2CTA_ENV, "MAGI_ATTENTION_FFA_CUTEDSL_ARCH")
-# These DSL variables install error or ignore filters for every warning
-# category, which would replace the recorder of the child.
+# Remove DSL filters that could suppress warnings or turn them into errors.
 _DSL_WARNING_FILTER_ENVS = ("CUTE_DSL_WARNINGS_AS_ERRORS", "CUTE_DSL_WARNINGS_IGNORE")
 
 
@@ -72,15 +64,9 @@ def _pinned_conflicts() -> list[str]:
 
 
 def _gated_deprecations(records: list[dict], cutlass_dir: Path) -> list[dict]:
-    """DeprecationWarning records the gate counts.
+    """Select deprecations attributed to files under magi_attention or cutlass.
 
-    The gate counts a DeprecationWarning attributed to the tree under test or
-    to the DSL; third-party deprecations are out of scope. A record counts when
-    its resolved filename lies under the magi_attention package directory or
-    under ``cutlass_dir``, the resolved directory of the DSL's ``cutlass``
-    package. The first covers DSL warn sites whose ``stacklevel`` reaches the
-    kernel source that called the deprecated name; the second covers warn
-    sites whose ``stacklevel`` stays inside the DSL.
+    Both locations are needed because DSL warnings can name the caller via stacklevel.
     """
     source_dirs = (_PACKAGE_DIR, cutlass_dir.resolve())
     return [

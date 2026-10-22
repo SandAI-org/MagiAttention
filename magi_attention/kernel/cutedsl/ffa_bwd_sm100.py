@@ -265,12 +265,7 @@ class FFABwdSm100:
             self.num_regs_load = 104 if self.use_2cta_instrs else 96 - 8
             self.num_regs_mma = 104 if self.use_2cta_instrs else self.num_regs_load
         else:
-            # With 136 registers the 2-CTA compute warps spill mbarrier phases
-            # and smem addresses to local memory inside the m_block loop on
-            # some supported DSL releases; 144 removes the spills on all of
-            # them. The 2-CTA reduce warps fit in 120, which keeps the
-            # per-thread sum of the four warpgroup budgets within 512
-            # (asserted below).
+            # Give 2-CTA compute more registers to limit spills within the CTA budget.
             self.num_regs_reduce = 120 if self.use_2cta_instrs else 136
             self.num_regs_compute = 144
             self.num_regs_load = 104 if self.use_2cta_instrs else 96 - 8
@@ -2520,10 +2515,7 @@ class FFABwdSm100:
         if warp_idx >= self.reduce_warp_ids[0] and warp_idx <= self.reduce_warp_ids[-1]:
             # --- Adjust rmem usage ---
 
-            # Each warp starts at the launch count of 128 registers (512
-            # threads per CTA). setmaxregister_increase to a count below the
-            # current one is an illegal instruction, so a smaller budget is
-            # applied with setmaxregister_decrease.
+            # Reduce warps enter with 128 registers; lower budgets require decrease.
             if const_expr(self.num_regs_reduce < 128):
                 cute.arch.setmaxregister_decrease(self.num_regs_reduce)
             else:
@@ -3826,9 +3818,8 @@ class FFABwdSm100:
             if process_tile:
                 # --- Producer tail ---
                 # Empty groups skip tail: the consumer never acquired those stages.
-                # producer_tail advances the state it receives. The DSL threads a state
-                # out of this dynamic region only if it is assigned or has a method
-                # called on it here, so pass a clone of any other state.
+                # Clone states passed only as arguments: the DSL does not export their
+                # updates from this dynamic region.
                 if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
                     pipeline_Q.producer_tail(producer_state_Q_Qt.clone())
                     pipeline_LSE.producer_tail(producer_state_LSE.clone())

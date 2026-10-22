@@ -44,14 +44,12 @@ def main() -> None:
     assert b300["PIP_INDEX_URL"] == "https://mirrors.aliyun.com/pypi/simple/"
     assert b300_fa4["PIP_INDEX_URL"] == "https://mirrors.aliyun.com/pypi/simple/"
 
-    # Only the fa4 profile installs flash_attn_cute and precompiles FFA_FA4
-    # kernels; the precompile script fails to import with the newest DSL.
+    # flash_attn_cute precompilation requires the fa4 profile's pinned DSL.
     assert b300_fa4["MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS"] == "sm100"
     assert "MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS" not in h100
     assert "MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS" not in b300
 
-    # The DSL pair is the pinned constraint for fa4 and the upper bound of
-    # requirements.txt otherwise.
+    # Only the fa4 test profile pins the DSL pair.
     assert [
         name
         for name, environment in environments.items()
@@ -59,8 +57,7 @@ def main() -> None:
     ] == ["b300_fa4"]
     assert b300_fa4["PIP_CONSTRAINT"] == ".github/configs/ci_constraints.txt"
 
-    # The profile constraint file is appended to the PIP_CONSTRAINT of the
-    # base image, once, and other variables keep their profile values.
+    # Preserve image constraints and avoid duplicating the profile constraint.
     image = "/etc/pip/constraint.txt"
     both = f"{image} {b300_fa4['PIP_CONSTRAINT']}"
     for inherited, constraint in (
@@ -84,7 +81,7 @@ def main() -> None:
     assert b300["MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED"] == "1"
     assert b300_fa4["MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED"] == "1"
 
-    # b300 runs the newest DSL, under which the FA4 extension tests cannot run.
+    # DSL 4.8.0 cannot import the FA4 implementation used by the extension tests.
     assert h100["CI_TEST_EXTENSIONS"] == "true"
     assert b300["CI_TEST_EXTENSIONS"] == "false"
     assert b300_fa4["CI_TEST_EXTENSIONS"] == "true"
@@ -109,7 +106,7 @@ def main() -> None:
         else:
             os.environ["B300_CI_ENABLED"] = original
 
-    # runner_label must name a runner label, not the profile.
+    # Reject profile names that are not runner labels.
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "ci_platforms.json"
         invalid = json.loads(platforms.config_path().read_text(encoding="utf-8"))

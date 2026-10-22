@@ -284,9 +284,7 @@ def is_cuda_version_lt(version: str, release_only: bool = True) -> bool:
 
 # --------  nvidia-cutlass-dsl version predicates --------
 
-# The DSL version is read inside each predicate: reading it at import would
-# move the supported-pair check of `check_cutedsl_installation` from
-# `magi_attention.kernel.cutedsl` to the first module that imports this one.
+# Defer dependency validation until a version predicate is called.
 
 
 def _cutedsl_version(release_only: bool) -> tuple[int, ...] | Version:
@@ -296,8 +294,7 @@ def _cutedsl_version(release_only: bool) -> tuple[int, ...] | Version:
 def is_cutedsl_version_eq(version: str, release_only: bool = True) -> bool:
     """Return True if the installed nvidia-cutlass-dsl version is == *version*.
 
-    The installed version is the one ``check_cutedsl_installation`` validated,
-    so the call raises ``CuteDslRequirementError`` for an unsupported pair.
+    Raises ``CuteDslRequirementError`` for missing or unsupported DSL/quack pairs.
 
     Args:
         version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
@@ -309,50 +306,25 @@ def is_cutedsl_version_eq(version: str, release_only: bool = True) -> bool:
 
 
 def is_cutedsl_version_ne(version: str, release_only: bool = True) -> bool:
-    """Return True if the installed nvidia-cutlass-dsl version is != *version*.
-
-    Args:
-        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
-        release_only: See :func:`is_cutedsl_version_eq`.
-    """
+    """DSL != comparison; see :func:`is_cutedsl_version_eq` for semantics."""
     return _cutedsl_version(release_only) != _parse(version, release_only)
 
 
 def is_cutedsl_version_ge(version: str, release_only: bool = True) -> bool:
-    """Return True if the installed nvidia-cutlass-dsl version is >= *version*.
-
-    Args:
-        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
-        release_only: See :func:`is_cutedsl_version_eq`.
-    """
+    """DSL >= comparison; see :func:`is_cutedsl_version_eq` for semantics."""
     return _cutedsl_version(release_only) >= _parse(version, release_only)
 
 
 def is_cutedsl_version_gt(version: str, release_only: bool = True) -> bool:
-    """Return True if the installed nvidia-cutlass-dsl version is > *version*.
-
-    Args:
-        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
-        release_only: See :func:`is_cutedsl_version_eq`.
-    """
+    """DSL > comparison; see :func:`is_cutedsl_version_eq` for semantics."""
     return _cutedsl_version(release_only) > _parse(version, release_only)
 
 
 def is_cutedsl_version_le(version: str, release_only: bool = True) -> bool:
-    """Return True if the installed nvidia-cutlass-dsl version is <= *version*.
-
-    Args:
-        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
-        release_only: See :func:`is_cutedsl_version_eq`.
-    """
+    """DSL <= comparison; see :func:`is_cutedsl_version_eq` for semantics."""
     return _cutedsl_version(release_only) <= _parse(version, release_only)
 
 
 def is_cutedsl_version_lt(version: str, release_only: bool = True) -> bool:
-    """Return True if the installed nvidia-cutlass-dsl version is < *version*.
-
-    Args:
-        version: Version string to compare against, e.g. ``"4.8"`` or ``"4.8.0"``.
-        release_only: See :func:`is_cutedsl_version_eq`.
-    """
+    """DSL < comparison; see :func:`is_cutedsl_version_eq` for semantics."""
     return _cutedsl_version(release_only) < _parse(version, release_only)

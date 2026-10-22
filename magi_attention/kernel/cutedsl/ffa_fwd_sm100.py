@@ -515,11 +515,7 @@ class FFAFwdSm100:
         if "ex2_emu_freq" in self._tune:
             self.enable_ex2_emu = self._tune["ex2_emu_freq"] > 0
         if self.head_dim_padded < 96:
-            # With a budget above 176 ptxas may schedule the softmax loop so
-            # that most exp2 results stay live until the bf16 conversion and
-            # the P store to tmem, which delays the PV MMA and the correction
-            # warps. 176 keeps the conversion interleaved with the exp2 on
-            # every supported toolchain.
+            # Favor interleaved exp2/conversion with 176 registers in hd64 softmax.
             self.num_regs_softmax = 176 if not paged_kv_non_tma else 184
             self.num_regs_correction = 64
             self.num_regs_other = 48 if not paged_kv_non_tma else 80
@@ -4948,8 +4944,7 @@ class FFAFwdSm100:
         ptr_1, ptr_2, two_locks = self._range_lock_ptrs(
             mRangeLocks, head_idx, row_offset
         )
-        # The cute.arch atomic wrappers need an LLVM pointer value: not every
-        # DSL build converts a cute.Pointer object, so pass `.llvm_ptr`.
+        # Use LLVM pointers for cute.arch atomics across supported DSL versions.
         # Loop-carried spin state: the CAS must re-execute every iteration.
         acquired = cute.arch.atomic_cas(
             ptr_1.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
@@ -5478,10 +5473,7 @@ class FFAFwdSm100:
                     t0OcO[0, rest_m, 0][0]
                     < seqlen_q - m_tile_idx * self.m_block_size - tOcO[0][0]
                 ):
-                    # Load each row chunk under its own row predicate. A
-                    # whole-stage smem load ahead of the predicated stores
-                    # keeps the whole stage live across the row loop and
-                    # spills it to local memory.
+                    # Limit register lifetimes to one row chunk to reduce spills.
                     cute.autovec_copy(
                         tOsO[None, rest_m, None], tOrO[None, rest_m, None]
                     )
@@ -5494,7 +5486,7 @@ class FFAFwdSm100:
                         else None,
                     )
         else:
-            # pack_gqa.store_O has no per-row-chunk predicate to load under
+            # PackGQA applies row predicates internally to a complete rmem fragment.
             cute.autovec_copy(tOsO, tOrO)
             pack_gqa.store_O(
                 mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_tile_idx, seqlen_q

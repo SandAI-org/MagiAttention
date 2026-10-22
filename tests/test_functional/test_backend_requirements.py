@@ -49,8 +49,7 @@ from magi_attention.utils.version import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REQUIREMENTS_TXT = REPO_ROOT / "requirements.txt"
 CI_CONSTRAINTS_TXT = REPO_ROOT / ".github" / "configs" / "ci_constraints.txt"
-# The directory that holds the imported magi_attention package; a child
-# interpreter with it first on PYTHONPATH imports the same package.
+# Keep child imports tied to the package under test.
 PACKAGE_PARENT = Path(magi_attention.__file__).resolve().parents[1]
 EXPECTED_UPGRADE_COMMAND = (
     'pip install --upgrade "nvidia-cutlass-dsl[cu13]<=4.8.0" "quack-kernels<=0.6.5"'
@@ -76,15 +75,14 @@ def fake_installed_versions(monkeypatch):
             backend_requirements, "installed_versions", lambda: (dsl, quack)
         )
 
-    # lru_cache keeps a previous pass; it never keeps a raised exception.
+    # Isolate cached successful checks between cases.
     check_cutedsl_installation.cache_clear()
     yield install
     check_cutedsl_installation.cache_clear()
 
 
 def _run_in_fresh_interpreter(code: str) -> dict:
-    """Run ``code`` in a new interpreter that imports the same magi_attention
-    and return the JSON object on its last stdout line."""
+    """Run ``code`` in a fresh interpreter and read JSON from its last stdout line."""
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(PACKAGE_PARENT), *filter(None, [env.get("PYTHONPATH")])]
@@ -101,8 +99,7 @@ def _run_in_fresh_interpreter(code: str) -> dict:
 
 
 def _versions_at_the_bounds(*specifier_sets: SpecifierSet) -> set[Version]:
-    """Return every version a specifier names, and the patch releases on both
-    sides of it."""
+    """Return named versions and their adjacent patch releases."""
     versions = set()
     for specifier_set in specifier_sets:
         for spec in specifier_set:
@@ -128,10 +125,7 @@ def test_version_constants_are_consistent():
         *((dsl_spec, dsl_range) for dsl_spec, _ in CUTEDSL_PAIRS),
         *((quack_spec, quack_range) for _, quack_spec in CUTEDSL_PAIRS),
     ]:
-        # A pair specifier with both bounds is an interval, and a range is an
-        # interval without its `!=` versions. The interval lies inside the range
-        # when the range contains every pair version among the bounds of both,
-        # the releases next to them, and the excluded versions.
+        # Check bounds, exclusions, and adjacent patch releases.
         operators = {spec.operator for spec in pair_spec}
         assert operators & {">=", ">", "=="}, f"{pair_spec} has no lower bound"
         assert operators & {"<=", "<", "=="}, f"{pair_spec} has no upper bound"
@@ -151,8 +145,7 @@ def test_version_constants_are_consistent():
         for dsl_spec, quack_spec in CUTEDSL_PAIRS
     )
 
-    # The CI fa4 job installs the pins of ci_constraints.txt, so they are the
-    # pair the fa4 error message tells users to install.
+    # The fa4 install advice must match the pair tested in CI.
     pins = {}
     for line in CI_CONSTRAINTS_TXT.read_text().splitlines():
         line = line.split("#", 1)[0].strip()
@@ -174,7 +167,7 @@ def test_version_constants_are_consistent():
         ("4.5.0", "0.6.5"),
         ("4.6.0", "0.6.4"),
         ("4.8.1", "0.6.5"),
-        # The DSL version of one pair with the quack version of another.
+        # Individually supported releases can form an unsupported pair.
         ("4.6.2", "0.6.5"),
         ("4.7.0", "0.6.4"),
         ("4.4.2", "0.6.4"),
@@ -226,12 +219,11 @@ CUTEDSL_VERSION_PREDICATES = {
         ("4.6.2", "0.6.4", "4.6.2", True, {"==", ">=", "<="}),
         ("4.6.2", "0.6.4", "4.6.1", True, {"!=", ">=", ">"}),
         ("4.6.2", "0.6.4", "4.7.0", True, {"!=", "<=", "<"}),
-        # A shorter version is a shorter release tuple, not a prefix match.
+        # release_only compares numeric tuples, including their length.
         ("4.6.2", "0.6.4", "4.6", True, {"!=", ">=", ">"}),
         ("4.7.0.post1", "0.6.5", "4.7.0", True, {"==", ">=", "<="}),
         ("4.7.0.post1", "0.6.5", "4.7.0", False, {"!=", ">=", ">"}),
-        # The predicates read the version that check_cutedsl_installation
-        # validated, so an unsupported pair raises.
+        # Version predicates also reject unsupported pairs.
         ("4.6.0", "0.6.4", "4.5.0", True, CuteDslRequirementError),
     ],
 )
@@ -252,12 +244,7 @@ def test_cutedsl_version_predicates(
 
 
 def test_import_checks_the_pair_before_importing_quack():
-    # A fresh interpreter reports an unsupported pair through the distribution
-    # metadata; the import must fail with CuteDslRequirementError before quack
-    # or a kernel module is imported. flash_attn_cute is blocked because the fa4
-    # import probe of magi_attention.meta imports cutlass and quack before
-    # magi_attention.kernel.cutedsl when flash_attn_cute is installed, and an
-    # imported module's version takes precedence over the faked metadata.
+    # Block the fa4 probe so imported module versions cannot override test metadata.
     child = "\n".join(
         [
             "import importlib.metadata, importlib.util, json, sys",
@@ -288,13 +275,8 @@ def test_import_checks_the_pair_before_importing_quack():
 
 @pytest.mark.parametrize("quack_error", ["ImportError", "AttributeError"])
 def test_import_reports_the_pair_when_the_fa4_probe_fails_in_quack(quack_error):
-    # When flash_attn_cute is installed, the fa4 import probe of
-    # magi_attention.meta imports cutlass and quack before
-    # magi_attention.kernel.cutedsl checks the pair. Here flash_attn_cute
-    # imports the real cutlass and then a quack that fails the way an
-    # unsupported pair does. The probe must catch that error so that the import
-    # still fails with CuteDslRequirementError. quack-kernels 0.5.0 is in no
-    # supported pair, so the check rejects every nvidia-cutlass-dsl version.
+    # The fa4 probe can fail in quack before the pair check runs.
+    # quack 0.5.0 ensures rejection regardless of the installed DSL version.
     child = "\n".join(
         [
             "import importlib.metadata, importlib.util, json, sys",
@@ -336,10 +318,7 @@ def test_import_reports_the_pair_when_the_fa4_probe_fails_in_quack(quack_error):
 
 
 def test_a_failing_flash_attn_cute_import_disables_the_fa4_backend():
-    # flash_attn_cute built against another CUTLASS DSL release raises
-    # AttributeError inside its import. magi_attention and fa4_utils must still
-    # import, report fa4 as not installed, and raise the not-installed
-    # RuntimeError, chained to the import error, when the fa4 backend is used.
+    # Preserve package imports and report the original error at fa4 entry points.
     error = "module 'cutlass.cute.core' has no attribute 'ThrMma'"
     child = "\n".join(
         [
@@ -372,8 +351,7 @@ def test_a_failing_flash_attn_cute_import_disables_the_fa4_backend():
             "    record('fa4_fwd', lambda: fa4.fa4_fwd(None, None, None, None, None))",
             "    record('fa4_bwd', lambda: fa4.fa4_bwd(",
             "        None, None, None, None, None, None, None, None))",
-            # Before SM100 the tile sizes come from flash_attn_cute, whose
-            # import raises the AttributeError again.
+            # The SM90 tile-size query must work when flash_attn_cute cannot import.
             "    calc_meta.COMPUTE_CAPABILITY = 9",
             "    result['tile_sizes'] = calc_meta._resolve_tile_sizes('forward', 128)",
             "except Exception as exc:",

@@ -14,12 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Checks how install_requirements.sh chooses and verifies the CuTeDSL pair.
-# pip is replaced by a stub that records its arguments, and the installed
-# versions come from stub distribution metadata on PYTHONPATH, which
-# importlib.metadata searches before site-packages. With
-# FAKE_PIP_UPGRADED_SITE set, an upgrade call replaces that metadata with the
-# metadata in FAKE_PIP_UPGRADED_SITE.
+# Check CuTeDSL pair selection without installing packages.
+# The pip stub records arguments; optional upgrades replace test metadata.
 
 set -euo pipefail
 
@@ -52,8 +48,7 @@ printf '%s\n' \
     'quack-kernels>=0.4.1,<=0.6.5' \
     > "$workspace/project_strict_upper/requirements.txt"
 
-# A constraint file of a whole image: pip options and other packages are not
-# part of the pair and must not fail the installation.
+# Pair validation must ignore unrelated packages and pip options.
 pair_constraint="$workspace/pair_constraint.txt"
 printf '%s\n' \
     '# pinned pair' \
@@ -64,7 +59,7 @@ printf '%s\n' \
     > "$pair_constraint"
 dsl_only_constraint="$workspace/dsl_only_constraint.txt"
 printf 'nvidia-cutlass-dsl==4.4.2\n' > "$dsl_only_constraint"
-# The constraint file of the base image pins neither package of the pair.
+# Image constraints can leave both packages unpinned.
 image_constraint="$workspace/image_constraint.txt"
 printf '%s\n' \
     '--extra-index-url https://example.invalid/simple' \
@@ -158,8 +153,7 @@ installed 4.7.0 0.6.5
 run_install 1 "$project"
 expect_output "  nvidia-cutlass-dsl: expected 4.8.0, installed 4.7.0"
 
-# A constraint file that pins neither package, as the base image exports it,
-# does not stop the upgrade.
+# Constraints on unrelated packages must still allow the pair upgrade.
 installed 4.7.0 0.6.5
 upgraded 4.8.0 0.6.5
 run_install 0 "$project" PIP_CONSTRAINT="$image_constraint" FAKE_PIP_UPGRADED_SITE="$upgraded_site"
@@ -168,15 +162,14 @@ expect_output "Expected CuTeDSL pair: nvidia-cutlass-dsl==4.8.0, quack-kernels==
 expect_output "Installed CuTeDSL pair: nvidia-cutlass-dsl==4.8.0, quack-kernels==0.6.5"
 expect_line "$pip_log" "pip install --upgrade nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.0,!=4.6.0,!=4.6.1 quack-kernels>=0.4.1,<=0.6.5 --index-url $index"
 
-# The constraint source requires the pinned versions and ignores other lines.
+# A pair pin selects constraint mode.
 installed 4.4.2 0.4.1
 run_install 0 "$project" PIP_CONSTRAINT="$pair_constraint"
 expect_output "CuTeDSL pair source: constraint"
 expect_output "Expected CuTeDSL pair: nvidia-cutlass-dsl==4.4.2, quack-kernels==0.4.1"
 expect_no_upgrade
 
-# PIP_CONSTRAINT names several files separated by whitespace; a pin in any of
-# them selects the constraint source.
+# A pair pin in any PIP_CONSTRAINT file selects constraint mode.
 installed 4.4.2 0.4.1
 upgraded 4.8.0 0.6.5
 run_install 0 "$project" PIP_CONSTRAINT="$image_constraint $pair_constraint" \
@@ -196,7 +189,7 @@ installed 4.4.2 0.4.1
 run_install 0 "$project" PIP_CONSTRAINT="$dsl_only_constraint"
 expect_output "Expected CuTeDSL pair: nvidia-cutlass-dsl==4.4.2"
 
-# Invalid input fails before or instead of the upgrade.
+# Invalid pair specifications must fail without upgrading.
 installed 4.8.0 0.6.5
 run_install 1 "$workspace/project_strict_upper"
 expect_text "$output" "needs exactly one '<=' or '==' bound"

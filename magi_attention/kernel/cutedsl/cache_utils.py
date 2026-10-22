@@ -80,10 +80,7 @@ def _compute_source_fingerprint() -> str:
     - Any .py file under magi_attention/kernel/cutedsl is added, removed, renamed, or modified.
     - The Python minor version changes (e.g. 3.13 -> 3.14).
     - The cutlass or tvm_ffi package version changes.
-    - The quack-kernels version changes: the quack helpers called from the kernels
-      emit device code that differs between quack releases.
-    - The CUDA version of the DSL compiler backend changes: the cu12 and cu13
-      wheels of the same DSL release generate different code.
+    - The quack-kernels or DSL compiler's CUDA version changes (both affect codegen).
 
     Computed once per process and cached.
     """

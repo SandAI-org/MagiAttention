@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Package requirements of the CuTeDSL-based attention backends.
-#
-# This module imports only the standard library and `packaging`, so the checks
-# run before cutlass, quack or flash_attn_cute is imported.
+# Keep requirement checks importable without loading cutlass, quack or FA4.
 
 import sys
 from functools import lru_cache
@@ -31,26 +28,18 @@ CUTEDSL_DSL_REQUIREMENT = Requirement(
 )
 CUTEDSL_QUACK_REQUIREMENT = Requirement("quack-kernels>=0.4.1,<=0.6.5")
 
-# The (nvidia-cutlass-dsl, quack-kernels) combinations the CuTeDSL kernels
-# support. Each quack-kernels release calls DSL APIs that other DSL releases
-# removed, so the project rejects a combination outside this table before
-# cutlass and quack are imported. pip accepts any combination inside the two
-# requirements.txt ranges, so this check is stricter than pip. Every pair must
-# lie inside both ranges.
+# Supported pairs must satisfy requirements.txt and quack's DSL API dependencies.
 CUTEDSL_PAIRS: tuple[tuple[SpecifierSet, SpecifierSet], ...] = (
     (SpecifierSet("==4.4.2"), SpecifierSet("==0.4.1")),
     (SpecifierSet("==4.6.2"), SpecifierSet("==0.6.4")),
     (SpecifierSet(">=4.7.0,<=4.8.0"), SpecifierSet("==0.6.5")),
 )
 
-# flash_attn_cute (the fa4 backend) uses `cute.core.ThrMma` and
-# `cute.make_fragment`, which nvidia-cutlass-dsl 4.6.0 removed. Its own package
-# metadata declares only the lower bound.
+# flash_attn_cute uses cute.core.ThrMma and cute.make_fragment, removed in
+# DSL 4.6.0; its metadata omits this upper bound.
 FA4_DSL_REQUIREMENT = Requirement("nvidia-cutlass-dsl>=4.4.2,<4.6.0")
 
-# The (nvidia-cutlass-dsl, quack-kernels) pair the fa4 backend was tested with.
-# It must be in CUTEDSL_PAIRS, satisfy FA4_DSL_REQUIREMENT, and equal the two
-# pins of .github/configs/ci_constraints.txt, which the CI fa4 job installs.
+# Must satisfy CUTEDSL_PAIRS and FA4_DSL_REQUIREMENT and match the FA4 CI pins.
 FA4_TESTED_PAIR: tuple[Version, Version] = (Version("4.4.2"), Version("0.4.1"))
 
 _FA4_REINSTALL_COMMAND = "bash scripts/install_flash_attn_cute.sh <archs, e.g. sm100>"
@@ -65,8 +54,7 @@ def _upper_bound(requirement: Requirement) -> str:
     return next(spec.version for spec in requirement.specifier if spec.operator == "<=")
 
 
-# Installs the newest pair: pip picks the highest release under each upper
-# bound, and the two upper bounds form the last entry of CUTEDSL_PAIRS.
+# The requirement upper bounds must form a supported pair.
 CUTEDSL_UPGRADE_COMMAND = "pip install --upgrade " + " ".join(
     f'"{_name_with_extras(requirement)}<={_upper_bound(requirement)}"'
     for requirement in (CUTEDSL_DSL_REQUIREMENT, CUTEDSL_QUACK_REQUIREMENT)
@@ -81,13 +69,11 @@ _FA4_INSTALL_COMMAND = "pip install " + " ".join(
 
 
 class CuteDslRequirementError(RuntimeError):
-    """The installed nvidia-cutlass-dsl / quack-kernels pair is not in
-    ``CUTEDSL_PAIRS``, or one of the two packages is not installed."""
+    """Missing CuTeDSL dependencies or an unsupported DSL/quack pair."""
 
 
 def _module_version(module_name: str, distribution: str) -> str | None:
-    # A module that is already imported is the one the kernels bind to, and
-    # sys.path can point the distribution metadata at another installation.
+    # Kernels use imported modules; metadata may describe another installation.
     module = sys.modules.get(module_name)
     if module is not None:
         return module.__version__
@@ -98,12 +84,9 @@ def _module_version(module_name: str, distribution: str) -> str | None:
 
 
 def installed_versions() -> tuple[str | None, str | None]:
-    """Return the ``(nvidia-cutlass-dsl, quack-kernels)`` versions in use.
+    """Return (DSL, quack) versions, preferring loaded modules over metadata.
 
-    For each package, the ``__version__`` of the imported module (``cutlass``,
-    ``quack``) is used when the module is already imported; otherwise the
-    version comes from the installed distribution metadata. ``None`` means the
-    package is not installed.
+    A missing distribution returns ``None`` for that package.
     """
     return (
         _module_version("cutlass", CUTEDSL_DSL_REQUIREMENT.name),
@@ -117,17 +100,10 @@ def _format_version(version: str | None) -> str:
 
 @lru_cache(maxsize=None)
 def check_cutedsl_installation() -> tuple[str, str]:
-    """Check that the installed nvidia-cutlass-dsl / quack-kernels versions are
-    one of ``CUTEDSL_PAIRS``.
-
-    Returns:
-        The ``(nvidia-cutlass-dsl, quack-kernels)`` versions that passed.
+    """Return installed (DSL, quack) versions after checking ``CUTEDSL_PAIRS``.
 
     Raises:
-        CuteDslRequirementError: if either package is not installed or the pair
-            is not in ``CUTEDSL_PAIRS``. The message names the installed
-            versions, the supported pairs, and the pip command that installs
-            the newest supported pair.
+        CuteDslRequirementError: A package is missing or the pair is unsupported.
     """
     dsl_version, quack_version = installed_versions()
     if (
@@ -157,11 +133,7 @@ def check_cutedsl_installation() -> tuple[str, str]:
 
 
 def fa4_not_installed_message(exc: BaseException) -> str:
-    """Return the error message for a failed import of flash_attn_cute.
-
-    Args:
-        exc: The exception raised while importing flash_attn_cute.
-    """
+    """Describe a flash_attn_cute import failure and its installation requirements."""
     dsl_version, _ = installed_versions()
     return (
         "The fa4 backend needs flash_attn_cute, which failed to import.\n"

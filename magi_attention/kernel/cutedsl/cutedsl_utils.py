@@ -36,7 +36,6 @@ load_cubin_module_data_og = cutlass.base_dsl.runtime.cuda.load_cubin_module_data
 cute_compile_og = cute.compile
 
 # NVVM result-type inference depends on both the DSL and CUDA backend versions.
-# Inspect each binding once, outside kernel tracing, instead of keying on CUDA.
 _FMAX_REQUIRES_RESULT_TYPE = "res" in inspect.signature(nvvm.fmax).parameters
 _ATOMICRMW_REQUIRES_RESULT_TYPE = "res" in inspect.signature(nvvm.atomicrmw).parameters
 

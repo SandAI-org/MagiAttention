@@ -55,8 +55,7 @@ cp "$standalone/magi_attention/package.py" "$consumer/vendor/MagiAttention/magi_
 cp "$standalone/tests/test.txt" "$consumer/vendor/MagiAttention/tests/test.txt"
 cp "$standalone/extensions/package.txt" "$consumer/vendor/MagiAttention/extensions/package.txt"
 cp "$standalone/extensions/tests/test.txt" "$consumer/vendor/MagiAttention/extensions/tests/test.txt"
-# The flash_attn_cute install records the PIP_CONSTRAINT it receives and
-# fails, so run-test stops before pytest.
+# Record install constraints and stop run-test before pytest.
 mkdir -p "$standalone/scripts" "$consumer/vendor/MagiAttention/scripts"
 printf '%s\n' \
     '#!/bin/bash' \
@@ -110,9 +109,7 @@ set -e
     exit 1
 }
 
-# run-test passes every PIP_CONSTRAINT file to the flash_attn_cute install:
-# an inherited file of the base image stays, and the relative profile file
-# becomes absolute because the install runs pip in another directory.
+# Preserve image constraints and resolve profile paths before entering the submodule.
 constraint_record="$workspace/install_constraint.txt"
 standalone_root=$(git -C "$standalone" rev-parse --show-toplevel)
 mkdir -p "$workspace/runner_temp"
@@ -132,9 +129,7 @@ for inherited in "" /etc/pip/constraint.txt; do
     }
 done
 
-# The b300_fa4 profile names its pip constraint file by path, and .github is
-# not source input, so only the recipe can carry the constraint content: a
-# content change must move the b300_fa4 fingerprint and leave h100 unchanged.
+# Constraint content must affect the b300_fa4 fingerprint without affecting h100.
 printf '# changed\n' >> "$standalone/.github/configs/ci_constraints.txt"
 git -C "$standalone" commit -qam "change constraints"
 changed_main_fa4=$(cd "$standalone" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=b300_fa4 bash .github/scripts/portable_validation.sh fingerprint magi_attention)

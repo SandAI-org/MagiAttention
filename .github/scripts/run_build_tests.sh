@@ -64,8 +64,7 @@ test_packages() {
     local main_changed=${1:?main change flag is required}
     local ci_changed=${2:?CI protocol change flag is required}
     local trusted=${3:?trust flag is required}
-    # The platform profile decides whether the MagiAttnExtensions suite runs;
-    # the wheel import checks of install-wheel cover every platform.
+    # install-wheel checks imports even when extension tests are disabled.
     local test_extensions=${CI_TEST_EXTENSIONS:?CI_TEST_EXTENSIONS is required}
     local coverage_generated=false
 

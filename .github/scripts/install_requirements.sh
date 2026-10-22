@@ -14,15 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Installs the repository requirements and checks the installed CuTeDSL pair
-# (nvidia-cutlass-dsl, quack-kernels). If the files named by PIP_CONSTRAINT pin
-# at least one of the two packages with ==, each pinned package must be
-# installed at that version and nothing is upgraded. Otherwise, also when
-# PIP_CONSTRAINT is unset or names only a base-image constraint file without
-# such a pin, the script upgrades only the two packages to the newest release
-# that requirements.txt allows and requires the inclusive upper bound of each
-# requirement; upgrading the whole requirements file would also move unrelated
-# tools such as setuptools.
+# If PIP_CONSTRAINT pins either CuTeDSL package with ==, verify those pins;
+# otherwise upgrade only the pair and require its requirements.txt upper bounds.
 
 set -euo pipefail
 
@@ -34,11 +27,6 @@ unset https_proxy
 pip_index_url=${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple/}
 echo "Using Python package index: $pip_index_url"
 
-# cutedsl_pair <command>
-#   source: print `constraint` or `upgrade`, the mode described above.
-#   upgrade-requirements: print the two requirement lines of requirements.txt.
-#   expected: print the versions the installation must end with.
-#   verify: print the installed pair and fail unless it matches `expected`.
 cutedsl_pair() {
     python - "${1:?command is required}" <<'PY'
 import importlib.metadata
@@ -60,9 +48,7 @@ def requirements(path):
     except OSError as exc:
         raise SystemExit(f"Cannot read {path}: {exc}")
     found = {}
-    # Only lines naming the pair are parsed, so pip options and entries this
-    # script does not check (for example in an image-wide constraint file)
-    # cannot fail the installation.
+    # Leave unrelated requirements and pip options to pip.
     for number, line in enumerate(lines, start=1):
         text = line.split("#", 1)[0].strip()
         name = re.match(r"[A-Za-z0-9._-]*", text).group()

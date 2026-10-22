@@ -17,8 +17,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 PLATFORM_RE = re.compile(r"[a-z][a-z0-9_-]*")
 ENV_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
-# Platforms in matrix order. A platform is a test profile, and several
-# profiles may run on one runner label.
+# Test profiles in matrix order; multiple profiles may share a runner label.
 PLATFORMS = ("h100", "b300", "b300_fa4")
 RUNNER_LABELS = frozenset({"h100", "b300"})
 
@@ -83,12 +82,10 @@ def platform_profile(platform: str) -> dict[str, Any]:
 
 
 def test_environment(platform: str) -> dict[str, str]:
-    """Variables to export for ``platform``.
-    A profile PIP_CONSTRAINT is appended to a non-empty inherited
-    PIP_CONSTRAINT, so a constraint file of the base image stays in force; pip
-    reads the value as whitespace-separated constraint files. A file that the
-    inherited value already names is not added again, because a test job
-    applies the profile through GITHUB_ENV and again in portable_validation.sh."""
+    """Return profile variables, preserving inherited PIP_CONSTRAINT files.
+
+    Reapplying the profile must not duplicate its constraint file.
+    """
     environment = dict(platform_profile(platform)["test_environment"])
     profile_constraint = environment.get("PIP_CONSTRAINT")
     inherited = os.environ.get("PIP_CONSTRAINT", "").split()
@@ -100,10 +97,7 @@ def test_environment(platform: str) -> dict[str, str]:
 
 
 def enabled_platforms(platforms: dict[str, Any]) -> list[str]:
-    """Platforms of the validated ``platforms`` config to schedule.
-    B300_CI_ENABLED gates every platform that runs on the b300 runner label,
-    because GitHub keeps a job without a matching runner queued instead of
-    skipping it."""
+    """Omit disabled B300 profiles so jobs do not wait for an unavailable runner."""
     enabled = os.environ.get("B300_CI_ENABLED", "false").strip().lower()
     if enabled not in {"true", "false"}:
         raise ConfigurationError("B300_CI_ENABLED must be 'true' or 'false'")

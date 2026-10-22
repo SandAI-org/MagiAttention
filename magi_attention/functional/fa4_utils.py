@@ -51,9 +51,7 @@ _KERNEL_OBJ_FILE = "kernel_obj.o"
 _KERNEL_LIB_FILE = "kernel_lib.so"
 
 
-# The compile caches exist only when flash_attn_cute imported. Only
-# load_precompiled_ffa_fa4 and precompile_ffa_fa4 (with its workers) read
-# COMPILED_META_DICT, after check_fa4_installation.
+# Cache entry points must call check_fa4_installation before accessing these caches.
 if is_fa4_installed:
     from flash_attn_cute.interface import (
         _bwd_postprocess_convert,

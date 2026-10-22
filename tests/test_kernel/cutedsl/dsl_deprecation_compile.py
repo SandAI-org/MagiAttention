@@ -12,17 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Child process of test_dsl_deprecations.py: compiles and runs the forward and
-# backward of one CuTeDSL FFA configuration on the device and prints, as the
-# last stdout line, every warning recorded from the first import of
-# magi_attention to the end of the run.
-#
-# The process must be fresh for each configuration: its in-process compile
-# caches start empty, so every kernel of the run is traced, and part of the
-# deprecated-name accesses happen at import time. The module imports only the
-# standard library at top level, so the warning recorder is installed before
-# magi_attention and the DSL are imported.
-#
+# Use a fresh process per configuration to capture import and tracing warnings.
+# Keep DSL imports inside the warning recorder.
 # Usage: python dsl_deprecation_compile.py <configuration name>
 
 from __future__ import annotations
@@ -38,12 +29,7 @@ RESULT_PREFIX = "DSL_DEPRECATION_RESULT "
 
 @dataclass(frozen=True)
 class CompileConfig:
-    """One SM100 kernel configuration of the deprecation gate.
-
-    has_ranges: the run passes ``q_ranges`` / ``k_ranges`` (packed layout);
-        otherwise it uses the dense batched layout.
-    mask_type: the ``mask_types`` argument of ``flex_flash_attn_func``.
-    """
+    """One SM100 attention configuration for deprecation checks."""
 
     name: str
     head_dim: int
@@ -51,9 +37,7 @@ class CompileConfig:
     mask_type: int = 0
 
 
-# Dense full attention launches the persistent forward and, at hd128, the
-# 2-CTA backward; the hd64 causal ranges run launches the non-persistent
-# forward and the 1-CTA backward.
+# Cover persistent fwd / 2-CTA bwd and non-persistent fwd / 1-CTA bwd.
 CONFIGS: tuple[CompileConfig, ...] = (
     CompileConfig("d128_full", 128),
     CompileConfig("r64_causal", 64, has_ranges=True, mask_type=1),

@@ -64,8 +64,7 @@ except ImportError:
 else:
     is_fa3_installed = True
 
-# The module imports even when flash_attn.cute does not; is_fa4_installed is
-# its own import probe of flash_attn.cute.
+# The wrapper can import even when its flash_attn.cute dependency is unavailable.
 from magi_attn_extensions.fa4_interface_with_sink import (
     fa4_func_with_sink,
     fa4_varlen_func_with_sink,

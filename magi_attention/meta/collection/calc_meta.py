@@ -39,11 +39,7 @@ except ImportError:
 else:
     is_magi_to_hstu_installed = True
 
-# Import probe for flash_attn_cute, the package of the fa4 backend.
-# fa4_import_error keeps the import exception for the fa4 error message. The
-# probe can import quack before magi_attention.kernel.cutedsl checks the
-# nvidia-cutlass-dsl / quack-kernels pair; catching AttributeError as well as
-# ImportError keeps an unsupported pair reportable by that check.
+# Allow the CuTeDSL pair check to run after quack fails during this FA4 probe.
 try:
     from flash_attn_cute.block_sparsity import (
         BlockSparseTensorsTorch,
@@ -59,14 +55,7 @@ else:
 
 
 def check_fa4_installation() -> None:
-    """Check that flash_attn_cute, the package of the fa4 backend, imported.
-
-    Raises:
-        RuntimeError: if flash_attn_cute failed to import. The message names
-            the installed nvidia-cutlass-dsl version, the version range that
-            flash_attn_cute needs and the install commands. The import
-            exception is the ``__cause__``.
-    """
+    """Raise RuntimeError from a failed FA4 import, with installation guidance."""
     if fa4_import_error is None:
         return
     message = fa4_not_installed_message(fa4_import_error)
@@ -311,13 +300,10 @@ def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
     On SM80/SM90, the tile sizes depend on ``headdim`` and are queried
     from the C++ (hopper) backend via ``get_tile_sizes_by_backend``.
     """
-    # Without flash_attn_cute the default is returned; FA4AttnArg then raises
-    # the not-installed error.
+    # FA4AttnArg.__post_init__ checks availability before resolving tile sizes.
     if COMPUTE_CAPABILITY >= 10 or not is_fa4_installed:
         return _DEFAULT_FA4_TILE_SIZE
 
-    # flash_attn_cute imported without error, so the ImportError below means
-    # only that this flash_attn_cute build has no get_tile_sizes_by_backend.
     try:
         from flash_attn_cute.utils import get_tile_sizes_by_backend
 

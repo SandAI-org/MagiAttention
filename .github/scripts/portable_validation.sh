@@ -69,10 +69,7 @@ ensure_platform_test_dependencies() {
     echo "Installing flash_attn_cute test dependency for $archs"
     (
         cd "$repo_root/$source_root" || exit
-        # PIP_CONSTRAINT holds whitespace-separated files. The platform
-        # profile states its file relative to the source root, but the install
-        # script runs pip inside the submodule, so every relative file is made
-        # absolute.
+        # Resolve constraint paths before the installer changes directories.
         if [[ -n "${PIP_CONSTRAINT:-}" ]]; then
             read -r -a constraint_files <<< "$PIP_CONSTRAINT"
             for index in "${!constraint_files[@]}"; do
@@ -165,8 +162,7 @@ projection = {
     "root": policy["nodes"][node]["root"],
     "version": policy["version"],
 }
-# The profile names the constraint file by path, and .github is not part of
-# the source digest, so the file content must enter the recipe here.
+# Include constraint contents here because the source digest excludes .github.
 constraint = json.loads(profile)["test_environment"].get("PIP_CONSTRAINT")
 if constraint is not None:
     try:
@@ -341,8 +337,7 @@ print(os.pathsep.join(
 PY
     )
     apply_test_environment
-    # A profile that enables the CuTeDSL FFA kernel cache gets a new cache dir
-    # in the temporary test directory, shared by the test processes of a run.
+    # Share the CuTeDSL cache within this test run only.
     if [[ "${MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED:-0}" == 1 ]]; then
         export MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR="$test_cwd/ffa_cutedsl_cache"
     fi

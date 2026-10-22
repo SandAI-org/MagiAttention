@@ -31,8 +31,7 @@ if is_fa4_installed:
     # FFA_FA4 DSL interface.
     from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
 
-    # flash_attn_cute.ffa_fa3 is the CUTLASS backend for sm80/sm90. It is an
-    # optional sub-package that is installed separately from flash_attn_cute.
+    # The SM80/SM90 backend is an optional, separately installed subpackage.
     try:
         from flash_attn_cute.ffa_fa3.flash_attn_interface import (
             _flash_attn_backward as _flash_attn_backward_cutlass,
