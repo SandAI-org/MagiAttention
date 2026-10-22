@@ -34,8 +34,8 @@ Single CTA, CLC-persistent, warp specialized (20 warps / 640 threads):
 
 - warp 0-3   ``load_KV``: cp.async gather of the indexed K/V rows per K tile
 - warp 4-7   ``compute``: T2R S/dP, softmax -> P / dS into smem, dQ epilogue per Q tile
-- warp 8-11  ``reduce`` dV: T2R dV^T, atomic add into the indexed fp32 dV rows
-- warp 12-15 ``reduce`` dK: T2R dK^T, atomic add into the indexed fp32 dK rows
+- warp 8-11  ``reduce`` dV: T2R dV^T, stage rows in smem, TMA reduce-add into the indexed fp32 dV rows
+- warp 12-15 ``reduce`` dK: T2R dK^T, stage rows in smem, TMA reduce-add into the indexed fp32 dK rows
 - warp 16    ``mma``: all tcgen05 GEMMs, TMEM alloc/free
 - warp 17    ``load``: TMA Q/dO and per-lane LSE/dPsum once per Q tile
 - warp 18    CLC scheduler producer
@@ -161,6 +161,14 @@ class FFABwdSm100Index:
             barrier_id=int(NamedBarrierBwdSm100Index.dQEpilogue),
             num_threads=len(self.compute_warp_ids) * cute.arch.WARP_SIZE,
         )
+        self.reduce_dV_barrier = pipeline.NamedBarrier(
+            barrier_id=int(NamedBarrierBwdSm100Index.ReduceDV),
+            num_threads=len(self.reduce_dV_warp_ids) * cute.arch.WARP_SIZE,
+        )
+        self.reduce_dK_barrier = pipeline.NamedBarrier(
+            barrier_id=int(NamedBarrierBwdSm100Index.ReduceDK),
+            num_threads=len(self.reduce_dK_warp_ids) * cute.arch.WARP_SIZE,
+        )
 
         # TMEM buffer distribution (columns), every buffer owns its columns:
         # dQ [0, HD) stays resident for the whole Q tile,
@@ -235,8 +243,26 @@ class FFABwdSm100Index:
         self.t2r_ncol = 32
         assert self.tile_n % self.t2r_ncol == 0
         assert self.head_dim % self.t2r_ncol == 0
-        # reduce_dKV: chunk c of a K tile maps to the lane-distributed row ids of register c
+        # reduce_dKV: each warp T2Rs a 32-lane head-dim slice of dV.T / dK.T
         assert self.t2r_ncol == cute.arch.WARP_SIZE
+
+        # reduce_dKV staging: per reduce WG, `reduce_stage` buffers of
+        # `reduce_chunk` full fp32 K rows, one bulk reduce per row, issued by
+        # all 4 warps of the WG (a single issuing warp caps near 3.5 TB/s)
+        self.reduce_chunk = 32
+        self.reduce_stage = 2
+        # reduce_dKV's one-barrier-per-chunk handoff needs a second buffer
+        assert self.reduce_stage >= 2
+        assert self.reduce_chunk % 4 == 0
+        assert self.reduce_chunk // 4 <= cute.arch.WARP_SIZE
+        assert self.tile_n % (self.reduce_chunk * self.reduce_stage) == 0
+        # (HD, rows, stage, dV / dK WG), compact column-major
+        self.sdKV_stage_shape = (
+            self.head_dim,
+            self.reduce_chunk,
+            self.reduce_stage,
+            2,
+        )
 
         # K/V gather: 128-bit cp.async, one 128B swizzle row (64 elems) per thread row
         self.gather_copy_bits = 128
@@ -621,6 +647,11 @@ class FFABwdSm100Index:
                 cute.struct.MemRange[Float32, cute.cosize(self.sdPsum_layout)],
                 128,
             ]
+            # dV / dK rows staged for the TMA reduce-add
+            sdKV_stage: cute.struct.Align[
+                cute.struct.MemRange[Float32, math.prod(self.sdKV_stage_shape)],
+                128,
+            ]
 
         self.shared_storage = SharedStorage
 
@@ -965,6 +996,9 @@ class FFABwdSm100Index:
 
         sLSE = storage.sLSE.get_tensor(sLSE_layout)
         sdPsum = storage.sdPsum.get_tensor(sdPsum_layout)
+        sdKV_stage = storage.sdKV_stage.get_tensor(
+            cute.make_layout(self.sdKV_stage_shape)
+        )
 
         # --- Make tmem fragments of tS / tdP / tdV / tdK / tdQ ---
 
@@ -1222,6 +1256,8 @@ class FFABwdSm100Index:
                     mdVacc,
                     mIndices,
                     mTopkLen,
+                    sdKV_stage[None, None, None, 0],
+                    self.reduce_dV_barrier,
                     pipeline_dV,
                     tile_scheduler,
                 )
@@ -1232,6 +1268,8 @@ class FFABwdSm100Index:
                     mdKacc,
                     mIndices,
                     mTopkLen,
+                    sdKV_stage[None, None, None, 1],
+                    self.reduce_dK_barrier,
                     pipeline_dK,
                     tile_scheduler,
                 )
@@ -2113,6 +2151,23 @@ class FFABwdSm100Index:
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
 
+    def _cols_by_stage_chunk(
+        self, tAcccAcc_t2r: cute.Tensor, num_chunks: int
+    ) -> list[list[tuple[int, int, int]]]:
+        """Trace-time map: staging chunk q -> (T2R chunk, element, row in q) of its K columns."""
+        cols_of_chunk: list[list[tuple[int, int, int]]] = [
+            [] for _ in range(self.tile_n // self.reduce_chunk)
+        ]
+        for c in range(num_chunks):
+            tAcccAcc_c = tAcccAcc_t2r[None, 0, 0, c]
+            for i in range(cute.size(tAcccAcc_c)):
+                col = tAcccAcc_c[i][1]
+                assert isinstance(col, int), "T2R column coords must be static"
+                cols_of_chunk[col // self.reduce_chunk].append(
+                    (c, i, col % self.reduce_chunk)
+                )
+        return cols_of_chunk
+
     @cute.jit
     def reduce_dKV(
         self,
@@ -2121,16 +2176,24 @@ class FFABwdSm100Index:
         mAcc: cute.Tensor,
         mIndices: cute.Tensor,
         mTopkLen: cute.Tensor,
+        sStage: cute.Tensor,
+        reduce_barrier: pipeline.NamedBarrier,
         pipeline_acc: pipeline.PipelineUmmaAsync,
         tile_scheduler: TileSchedulerProtocol,
     ):
-        """T2R dV.T (or dK.T) per K tile and atomically add it into the gathered fp32 rows.
+        """T2R dV.T (or dK.T) per K tile and TMA reduce-add it into the gathered fp32 rows.
 
-        Each thread owns one head-dim lane and ``tile_n`` K columns, so a warp's
-        atomics at a fixed column hit 32 consecutive fp32 words of one K row.
+        Each thread owns one head-dim lane and ``tile_n`` K columns. The WG
+        stages ``reduce_chunk`` full fp32 K rows at a time into ``sStage``
+        (HD, rows, stage), then every warp issues the bulk reduce-adds of its
+        ``reduce_chunk // 4`` staged rows into their gathered K rows. Whole
+        512B rows, since the TMA op rate (not bytes) bounds 128B ops. Keeping
+        per-element REDs off the SM matters beyond L2 bandwidth: they stall
+        the softmax warps, so REDs and softmax time add up instead of overlap.
         """
         tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * 4)
         lane = cute.arch.lane_idx()
+        warp_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
 
         # tAcc_t2r: (T2R_ATOM=((32,32),1),1,1,CHUNK2)
         # tAcccAcc_t2r: (T2R_ATOM=(32,1),1,1,CHUNK2) of (hd, col) coords
@@ -2139,6 +2202,11 @@ class FFABwdSm100Index:
         )
         num_chunks = cute.size(tAcccAcc_t2r, mode=[3])
         hd_idx = tAcccAcc_t2r[0][0]
+        cols_of_chunk = self._cols_by_stage_chunk(tAcccAcc_t2r, num_chunks)
+        # Row q * reduce_chunk + warp_in_wg * rows_per_warp + l of chunk q is
+        # reduced by lane l of this warp
+        rows_per_warp = self.reduce_chunk // 4
+        issue_row = warp_in_wg * rows_per_warp + lane
 
         consumer_state = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.dKV_stage
@@ -2158,20 +2226,20 @@ class FFABwdSm100Index:
             mAcc_cur = mAcc[None, None, head_idx_kv]
             # mIdx_cur: (topk,) global K row ids of this Q tile
             mIdx_cur = mIndices[m_block, head_idx_kv, None]
-            # This thread's head-dim lane of K row 0; K row r is at + r * head_dim
-            acc_base = cutedsl_utils.elem_pointer(mAcc_cur, (0, hd_idx))
+            # K row r of the accumulator starts at acc_row0 + r * head_dim
+            acc_row0 = cutedsl_utils.elem_pointer(mAcc_cur, (0, 0))
 
             for n_block in cutlass.range(n_block_max, unroll=1):
                 col_limit = topk_len - n_block * self.tile_n
 
-                # Prefetch the K row offsets of this tile, column c * 32 + l on lane l
-                tIrRowOff = cute.make_rmem_tensor((num_chunks,), Int32)
-                for c in cutlass.range_constexpr(num_chunks):
-                    col = c * self.t2r_ncol + lane
+                # Prefetch the K row offsets this lane reduces into
+                tIrRowOff = cute.make_rmem_tensor((len(cols_of_chunk),), Int32)
+                for q in cutlass.range_constexpr(len(cols_of_chunk)):
+                    col = q * self.reduce_chunk + issue_row % self.reduce_chunk
                     row_idx = Int32(0)
                     if col < col_limit:
                         row_idx = mIdx_cur[n_block * self.tile_n + col]
-                    tIrRowOff[c] = row_idx * self.head_dim
+                    tIrRowOff[q] = row_idx * self.head_dim
 
                 # Wait for tAcc to be full, T2R copy it to registers
                 pipeline_acc.consumer_wait(consumer_state)
@@ -2182,51 +2250,43 @@ class FFABwdSm100Index:
                         tiled_t2r, tAcc_t2r_cur[None, 0, 0, c], tAccrAcc[None, 0, 0, c]
                     )
 
-                # Release tAcc to be empty before the atomics
+                # Release tAcc to be empty before the reduce
                 cute.arch.fence_view_async_tmem_load()
                 cute.arch.sync_warp()
                 with cute.arch.elect_one():
                     pipeline_acc.consumer_release(consumer_state)
                 consumer_state.advance()
 
-                # Atomic add the valid columns into their gathered K rows. Full
-                # tiles must stay branch-free: a branch per RED keeps the compiler
-                # from pipelining the REDs, which bounds the whole kernel.
-                if col_limit >= self.tile_n:
-                    self._atomic_add_tile(
-                        tAccrAcc, tAcccAcc_t2r, tIrRowOff, acc_base, col_limit, False
-                    )
-                else:
-                    self._atomic_add_tile(
-                        tAccrAcc, tAcccAcc_t2r, tIrRowOff, acc_base, col_limit, True
-                    )
+                for q in cutlass.range_constexpr(len(cols_of_chunk)):
+                    stage = q % self.reduce_stage
+                    # Stage chunk q's K rows; a warp store fills 128B of one row.
+                    # Buffer `stage` was last read by chunk q - reduce_stage,
+                    # which the issuer drained before the previous barrier.
+                    for k in cutlass.range_constexpr(len(cols_of_chunk[q])):
+                        c, i, row = cols_of_chunk[q][k]
+                        sStage[hd_idx, row, stage] = tAccrAcc[None, 0, 0, c][i]
+                    cute.arch.fence_view_async_shared()
+                    # Chunk q + 1 - reduce_stage must be read before the barrier
+                    # releases its buffer to the stores of chunk q + 1
+                    cute.arch.cp_async_bulk_wait_group(self.reduce_stage - 2, read=True)
+                    reduce_barrier.arrive_and_wait()
+                    # Columns at or past topk_len are zero and not reduced
+                    if (
+                        lane < rows_per_warp
+                        and q * self.reduce_chunk + issue_row < col_limit
+                    ):
+                        copy_utils.cpasync_reduce_bulk_add_f32(
+                            cutedsl_utils.elem_pointer(sStage, (0, issue_row, stage)),
+                            acc_row0 + tIrRowOff[q],
+                            self.head_dim * Float32.width // 8,
+                        )
+                    cute.arch.cp_async_bulk_commit_group()
 
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
 
-    @cute.jit
-    def _atomic_add_tile(
-        self,
-        tAccrAcc: cute.Tensor,
-        tAcccAcc_t2r: cute.Tensor,
-        tIrRowOff: cute.Tensor,
-        acc_base: cute.Pointer,
-        col_limit: Int32,
-        predicated: cutlass.Constexpr[bool],
-    ):
-        """Atomic add one T2R'd K tile; lane l of ``tIrRowOff[c]`` holds column c * 32 + l's row offset."""
-        for c in cutlass.range_constexpr(cute.size(tAcccAcc_t2r, mode=[3])):
-            tAccrAcc_c = tAccrAcc[None, 0, 0, c]
-            tAcccAcc_c = tAcccAcc_t2r[None, 0, 0, c]
-            for i in cutlass.range(cute.size(tAccrAcc_c), unroll_full=True):
-                col = tAcccAcc_c[i][1]
-                # shuffle_sync needs every lane: keep it outside the predicate
-                row_off = cute.arch.shuffle_sync(tIrRowOff[c], col - c * self.t2r_ncol)
-                if const_expr(predicated):
-                    if col < col_limit:
-                        cutedsl_utils.atomic_add_fp32(tAccrAcc_c[i], acc_base + row_off)
-                else:
-                    cutedsl_utils.atomic_add_fp32(tAccrAcc_c[i], acc_base + row_off)
+        # The fp32 accumulators are read by the postprocess kernel
+        cute.arch.cp_async_bulk_wait_group(0, read=False)
 
 
 def ffa_bwd_sm100_index(
@@ -2290,7 +2350,8 @@ def ffa_bwd_sm100_index(
     )
     device = q.device
     dtype = to_cute_dtype(q.dtype)
-    kv_stage = 3
+    # The third K/V stage's smem goes to the dK/dV reduce staging instead
+    kv_stage = 2
 
     # Valid ids precede the -1 padding, so the count is the per-row inner length
     topk_len = (index_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
