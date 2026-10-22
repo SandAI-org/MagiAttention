@@ -265,8 +265,14 @@ class FFABwdSm100:
             self.num_regs_load = 104 if self.use_2cta_instrs else 96 - 8
             self.num_regs_mma = 104 if self.use_2cta_instrs else self.num_regs_load
         else:
-            self.num_regs_reduce = 136 if self.use_2cta_instrs else 136
-            self.num_regs_compute = 136 if self.use_2cta_instrs else 144
+            # With 136 registers the 2-CTA compute warps spill mbarrier phases
+            # and smem addresses to local memory inside the m_block loop on
+            # some supported DSL releases; 144 removes the spills on all of
+            # them. The 2-CTA reduce warps fit in 120, which keeps the
+            # per-thread sum of the four warpgroup budgets within 512
+            # (asserted below).
+            self.num_regs_reduce = 120 if self.use_2cta_instrs else 136
+            self.num_regs_compute = 144
             self.num_regs_load = 104 if self.use_2cta_instrs else 96 - 8
             self.num_regs_mma = 104 if self.use_2cta_instrs else self.num_regs_load
         self.num_regs_empty = 24
@@ -2512,9 +2518,16 @@ class FFABwdSm100:
         #  Reduce WarpGroup
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx >= self.reduce_warp_ids[0] and warp_idx <= self.reduce_warp_ids[-1]:
-            # --- Increase rmem usage ---
+            # --- Adjust rmem usage ---
 
-            cute.arch.setmaxregister_increase(self.num_regs_reduce)
+            # Each warp starts at the launch count of 128 registers (512
+            # threads per CTA). setmaxregister_increase to a count below the
+            # current one is an illegal instruction, so a smaller budget is
+            # applied with setmaxregister_decrease.
+            if const_expr(self.num_regs_reduce < 128):
+                cute.arch.setmaxregister_decrease(self.num_regs_reduce)
+            else:
+                cute.arch.setmaxregister_increase(self.num_regs_reduce)
 
             # --- Wait and retrieve tmem buffer ---
 
