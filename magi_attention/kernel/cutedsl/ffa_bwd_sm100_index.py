@@ -42,7 +42,8 @@ Single CTA, CLC-persistent, warp specialized (20 warps / 640 threads):
 - warp 19    empty (register donor)
 
 Per K tile the MMA warp issues S = Q @ K^T, dP = dO @ V^T, dV^T = dO^T @ P,
-dQ += dS @ K (then releases K), dK^T = Q^T @ dS.
+dQ += dS @ K (then releases K), dK^T = Q^T @ dS, software pipelined by one
+K tile: S of tile n + 1 is issued before dQ / dK of tile n.
 """
 
 import math
@@ -103,6 +104,8 @@ class FFABwdSm100Index:
         assert tile_m == 128, "tile_m must be 128 (one TMEM lane per Q row)"
         # reduce_dKV keeps one K row id per lane for every 32 columns
         assert tile_n % cute.arch.WARP_SIZE == 0 and tile_n <= 128
+        # the MMA warp holds sK of two K tiles at once (S of the next, dQ of the current)
+        assert kv_stage >= 2
 
         self.tile_m = tile_m
         self.tile_n = tile_n
@@ -1654,6 +1657,10 @@ class FFABwdSm100Index:
         consumer_state_QdO = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.QdO_stage
         )
+        # sK is waited on by S one K tile before dQ releases it
+        consumer_state_K_wait = ffa_pipeline.make_pipeline_state(
+            pipeline.PipelineUserType.Consumer, self.kv_stage
+        )
         consumer_state_K = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.kv_stage
         )
@@ -1697,16 +1704,23 @@ class FFABwdSm100Index:
             # Acquire tdQ to be empty (previous Q tile's dQ consumed by compute)
             pipeline_dQ.producer_acquire(producer_state_dQ)
 
-            for n_block in cutlass.range(n_block_max, unroll=1):
-                # --- GEMM: S = Q @ K.T ---
+            # Software pipelined by one K tile: S / dP of tile n + 1 are issued
+            # around dQ / dK of tile n, so the softmax of tile n + 1 overlaps
+            # dQ(n) / dK(n). Order: S(0) dP(0) | dV(n) S(n+1) dQ(n) dK(n) dP(n+1).
+            # NOTE: keep this prologue + `has_next` shape; folding the prologue
+            # into the loop as guarded sections makes ptxas spill in the compute
+            # and reduce warps.
+            if n_block_max > 0:
+                # --- GEMM: S = Q @ K.T of tile 0 ---
 
-                pipeline_K.consumer_wait(consumer_state_K)
+                pipeline_K.consumer_wait(consumer_state_K_wait)
                 pipeline_S.producer_acquire(producer_state_S)
-                mma_s_qk_fn(A_idx=0, B_idx=consumer_state_K.index)
+                mma_s_qk_fn(A_idx=0, B_idx=consumer_state_K_wait.index)
                 pipeline_S.producer_commit(producer_state_S)
                 producer_state_S.advance()
+                consumer_state_K_wait.advance()
 
-                # --- GEMM: dP = dO @ V.T ---
+                # --- GEMM: dP = dO @ V.T of tile 0 ---
 
                 pipeline_V.consumer_wait(consumer_state_V)
                 pipeline_dP.producer_acquire(producer_state_dP)
@@ -1717,6 +1731,9 @@ class FFABwdSm100Index:
                 # Release sV to be empty
                 pipeline_V.consumer_release(consumer_state_V)
                 consumer_state_V.advance()
+
+            for n_block in cutlass.range(n_block_max, unroll=1):
+                has_next = n_block + 1 < n_block_max
 
                 # --- GEMM: dV.T = dO.T @ P ---
 
@@ -1729,6 +1746,16 @@ class FFABwdSm100Index:
                 # Release sP to be empty
                 pipeline_P.consumer_release(consumer_state_P)
                 consumer_state_P.advance()
+
+                if has_next:
+                    # --- GEMM: S = Q @ K.T of tile n + 1 ---
+
+                    pipeline_K.consumer_wait(consumer_state_K_wait)
+                    pipeline_S.producer_acquire(producer_state_S)
+                    mma_s_qk_fn(A_idx=0, B_idx=consumer_state_K_wait.index)
+                    pipeline_S.producer_commit(producer_state_S)
+                    producer_state_S.advance()
+                    consumer_state_K_wait.advance()
 
                 # --- GEMM: dQ += dS @ K ---
 
@@ -1749,6 +1776,19 @@ class FFABwdSm100Index:
                 # Release sdS to be empty
                 pipeline_dS.consumer_release(consumer_state_dS)
                 consumer_state_dS.advance()
+
+                if has_next:
+                    # --- GEMM: dP = dO @ V.T of tile n + 1 ---
+
+                    pipeline_V.consumer_wait(consumer_state_V)
+                    pipeline_dP.producer_acquire(producer_state_dP)
+                    mma_dp_dov_fn(A_idx=0, B_idx=consumer_state_V.index)
+                    pipeline_dP.producer_commit(producer_state_dP)
+                    producer_state_dP.advance()
+
+                    # Release sV to be empty
+                    pipeline_V.consumer_release(consumer_state_V)
+                    consumer_state_V.advance()
 
             # Commit tdQ to be full; this commit tracks every MMA issued above,
             # so the compute warps may also reuse sP/sdS as sdQ once it lands.
