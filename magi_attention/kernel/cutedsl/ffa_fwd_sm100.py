@@ -515,7 +515,12 @@ class FFAFwdSm100:
         if "ex2_emu_freq" in self._tune:
             self.enable_ex2_emu = self._tune["ex2_emu_freq"] > 0
         if self.head_dim_padded < 96:
-            self.num_regs_softmax = 200 if not paged_kv_non_tma else 184
+            # With a budget above 176 ptxas may schedule the softmax loop so
+            # that most exp2 results stay live until the bf16 conversion and
+            # the P store to tmem, which delays the PV MMA and the correction
+            # warps. 176 keeps the conversion interleaved with the exp2 on
+            # every supported toolchain.
+            self.num_regs_softmax = 176 if not paged_kv_non_tma else 184
             self.num_regs_correction = 64
             self.num_regs_other = 48 if not paged_kv_non_tma else 80
         else:
