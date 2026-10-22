@@ -24,9 +24,17 @@ Usage (from the repo root):
     python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py smoke
     python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py correct
     python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py bench
+    python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py bench --seqlen 4096 --topk 512
+
+NCU (three representative cases; compilation and forward excluded):
+    ncu --profile-from-start off --kernel-name regex:FFABwdSm100Index \\
+        --section SpeedOfLight --section MemoryWorkloadAnalysis \\
+        --section SchedulerStats --section WarpStateStats --section LaunchStats \\
+        --section Occupancy --section SourceCounters -o backward \\
+        python tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py profile
 """
 
-import sys
+import argparse
 from collections.abc import Callable
 from functools import partial
 
@@ -181,7 +189,7 @@ def _assert_grad(
     dtype: torch.dtype,
     test_case: str,
 ) -> None:
-    assert not actual.isnan().any(), f"{test_case} => {name}: NaN in the output"
+    assert actual.isfinite().all(), f"{test_case} => {name}: nonfinite output"
     rtol = _GRAD_RTOL[name].get(dtype, _GRAD_RTOL_DEFAULT[name])
     atol = EPSILON
     actual_norm = calc_inf_norm(actual, high)
@@ -220,6 +228,8 @@ def _run_case(
     *,
     var_len: bool = False,
     dense: bool = False,
+    valid_lengths: tuple[int, ...] | None = None,
+    unsorted: bool = False,
 ) -> None:
     """fp64 reference forward, new backward, check grads against the fp64 reference."""
     device = "cuda"
@@ -235,6 +245,14 @@ def _run_case(
         indices = _build_indices(
             total_q, total_k, topk, var_len=var_len, seed=0, device=device
         )
+    if unsorted:
+        # Reverse valid ids before padding: legal indices need not be sorted.
+        indices = indices.flip(-1).contiguous()
+    if valid_lengths is not None:
+        lengths = torch.tensor(valid_lengths, device=device)
+        rows = torch.arange(indices.shape[0] * NUM_HEADS_KV, device=device)
+        lengths = lengths[rows % len(valid_lengths)].view(-1, NUM_HEADS_KV, 1)
+        indices = torch.where(torch.arange(topk, device=device) < lengths, indices, -1)
     mask = _build_mask(indices, total_q, total_k)
 
     out, meta = ref_attn_func(
@@ -277,6 +295,16 @@ def _run_case(
     _assert_grad("dq", dq, dq_hi, dq_lo, dtype, test_case)
     _assert_grad("dk", dk, dk_hi, dk_lo, dtype, test_case)
     _assert_grad("dv", dv, dv_hi, dv_lo, dtype, test_case)
+    # Empty query rows and unreferenced K/V rows must be exactly zero.
+    empty_q = ~mask.any(dim=-1).transpose(0, 1)
+    singleton_q = (mask.sum(dim=-1) == 1).transpose(0, 1)
+    unused_k = ~mask[:: NUM_HEADS_Q // NUM_HEADS_KV].any(dim=1).transpose(0, 1)
+    assert torch.count_nonzero(dq[empty_q]) == 0, f"{test_case}: nonzero empty dQ"
+    assert (
+        torch.count_nonzero(dq[singleton_q]) == 0
+    ), f"{test_case}: nonzero singleton dQ"
+    assert torch.count_nonzero(dk[unused_k]) == 0, f"{test_case}: nonzero unused dK"
+    assert torch.count_nonzero(dv[unused_k]) == 0, f"{test_case}: nonzero unused dV"
     print(f"PASS {test_case}")
 
 
@@ -302,6 +330,16 @@ def correct() -> None:
         _run_case("q1000_k1500_topk200", 1000, 1500, 200, dtype)
         # indices = arange(total_k): same function as the full mask
         _run_case("q1024_k1024_dense", 1024, 1024, 1024, dtype, dense=True)
+        _run_case(
+            "boundary_unsorted_tail_q",
+            257,
+            193,
+            128,
+            dtype,
+            valid_lengths=(0, 1, 63, 64, 65),
+            unsorted=True,
+        )
+        _run_case("all_empty_tail_q", 129, 193, 128, dtype, valid_lengths=(0,))
 
 
 def _time_ms(fn: Callable[[], object], warmup: int, iters: int) -> float:
@@ -318,7 +356,7 @@ def _time_ms(fn: Callable[[], object], warmup: int, iters: int) -> float:
     return start.elapsed_time(end) / iters
 
 
-def bench() -> None:
+def bench(*, cases: list[tuple[int, int]] | None = None, profile: bool = False) -> None:
     """Time backward only (preprocess + DSA kernel + dK/dV postprocess) and print TFLOPS."""
     device = "cuda"
     dtype = torch.bfloat16
@@ -331,37 +369,47 @@ def bench() -> None:
         f"head_dim={HEAD_DIM} dtype={dtype}"
     )
     print(f"{'seqlen':>8} {'topk':>6} {'ms':>10} {'TFLOPS':>10}")
-    for seqlen in [4096, 8192, 16384, 32768]:
-        for topk in [512, 1024, 2048]:
-            torch.manual_seed(0)
-            q = torch.randn(seqlen, NUM_HEADS_Q, HEAD_DIM, device=device, dtype=dtype)
-            k = torch.randn(seqlen, NUM_HEADS_KV, HEAD_DIM, device=device, dtype=dtype)
-            v = torch.randn(seqlen, NUM_HEADS_KV, HEAD_DIM, device=device, dtype=dtype)
-            do = torch.randn_like(q)
-            indices = _build_indices(
-                seqlen, seqlen, topk, var_len=False, seed=0, device=device
-            )
-            out, lse = _dsa_fwd_gather(q, k, v, indices, softmax_scale)
-            run_bwd = partial(
-                ffa_bwd_sm100_index,
-                q,
-                k,
-                v,
-                out,
-                do,
-                lse,
-                indices,
-                softmax_scale=softmax_scale,
-            )
-            ms = _time_ms(run_bwd, warmup=warmup, iters=iters)
-            # 4 * area * heads * head_dim for fwd, x2.5 for bwd (with recompute)
-            flops = 2.5 * 4 * seqlen * topk * NUM_HEADS_Q * HEAD_DIM
-            tflops = flops / ms * 1e-9
-            print(f"{seqlen:8d} {topk:6d} {ms:10.3f} {tflops:10.2f}")
+    if cases is None:
+        cases = [(s, k) for s in [4096, 8192, 16384, 32768] for k in [1024, 2048, 4096]]
+    for seqlen, topk in cases:
+        torch.manual_seed(0)
+        q = torch.randn(seqlen, NUM_HEADS_Q, HEAD_DIM, device=device, dtype=dtype)
+        k = torch.randn(seqlen, NUM_HEADS_KV, HEAD_DIM, device=device, dtype=dtype)
+        v = torch.randn(seqlen, NUM_HEADS_KV, HEAD_DIM, device=device, dtype=dtype)
+        do = torch.randn_like(q)
+        indices = _build_indices(
+            seqlen, seqlen, topk, var_len=False, seed=0, device=device
+        )
+        out, lse = _dsa_fwd_gather(q, k, v, indices, softmax_scale)
+        run_bwd = partial(
+            ffa_bwd_sm100_index,
+            q,
+            k,
+            v,
+            out,
+            do,
+            lse,
+            indices,
+            softmax_scale=softmax_scale,
+        )
+        if profile:
+            for _ in range(warmup):
+                run_bwd()
+            torch.cuda.synchronize()
+            # Use ncu --profile-from-start off and a main-kernel name filter.
+            torch.cuda.cudart().cudaProfilerStart()
+            run_bwd()
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaProfilerStop()
+            continue
+        ms = _time_ms(run_bwd, warmup=warmup, iters=iters)
+        # 4 * area * heads * head_dim for fwd, x2.5 for bwd (with recompute)
+        flops = 2.5 * 4 * seqlen * topk * NUM_HEADS_Q * HEAD_DIM
+        tflops = flops / ms * 1e-9
+        print(f"{seqlen:8d} {topk:6d} {ms:10.3f} {tflops:10.2f}")
 
 
-_SCRIPT = "tests/test_kernel/cutedsl/test_ffa_bwd_sm100_index.py"
-_MODES = {
+_MODES: dict[str, Callable[[], None]] = {
     "smoke": smoke,
     "correct": correct,
     "bench": bench,
@@ -369,12 +417,24 @@ _MODES = {
 
 
 def main() -> None:
-    if len(sys.argv) != 2 or sys.argv[1] not in _MODES:
-        print(f"usage: python {_SCRIPT} smoke|correct|bench", file=sys.stderr)
-        raise SystemExit(2)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=(*_MODES, "profile"))
+    parser.add_argument("--seqlen", type=int, choices=(4096, 8192, 16384, 32768))
+    parser.add_argument("--topk", type=int, choices=(512, 1024, 2048))
+    args = parser.parse_args()
+    if (args.seqlen is None) != (args.topk is None):
+        parser.error("--seqlen and --topk must be supplied together")
+    if args.seqlen is not None and args.mode not in ("bench", "profile"):
+        parser.error("case selection requires bench or profile")
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required")
-    _MODES[sys.argv[1]]()
+    if args.mode in ("bench", "profile"):
+        cases = [(args.seqlen, args.topk)] if args.seqlen is not None else None
+        if args.mode == "profile" and cases is None:
+            cases = [(4096, 512), (16384, 1024), (32768, 2048)]
+        bench(cases=cases, profile=args.mode == "profile")
+    else:
+        _MODES[args.mode]()
 
 
 if __name__ == "__main__":

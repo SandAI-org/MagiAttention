@@ -162,13 +162,23 @@ class FFABwdSm100Index:
         # TMEM buffer distribution (columns), every buffer owns its columns:
         # dQ [0, HD) stays resident for the whole Q tile,
         # S / dP / dV.T / dK.T are refreshed per K tile.
+        # dV.T / dK.T are double buffered so the MMA warp can produce the next
+        # K tile while the reduce warps still drain the previous one:
+        # stage s lives at tmem_dV/dK_offset + s * dKV_stage_stride.
         self.tmem_alloc_cols = cute.arch.get_max_tmem_alloc_cols("sm_100")
+        self.dKV_stage = 2
+        self.dKV_stage_stride = 2 * self.tile_n
         self.tmem_dQ_offset = 0
         self.tmem_S_offset = self.tmem_dQ_offset + self.head_dim
         self.tmem_dP_offset = self.tmem_S_offset + self.tile_n
         self.tmem_dV_offset = self.tmem_dP_offset + self.tile_n
         self.tmem_dK_offset = self.tmem_dV_offset + self.tile_n
-        assert self.tmem_dK_offset + self.tile_n <= self.tmem_alloc_cols
+        assert (
+            self.tmem_dK_offset
+            + (self.dKV_stage - 1) * self.dKV_stage_stride
+            + self.tile_n
+            <= self.tmem_alloc_cols
+        )
 
         # setmaxnreg is warpgroup-uniform: WG0 load_KV, WG1 compute,
         # WG2/WG3 reduce, WG4 mma/load/clc/empty.
@@ -196,7 +206,9 @@ class FFABwdSm100Index:
             print()
             print(f"{prefix}Initialized FFABwdSm100Index with: ")
             print(f"{prefix}{self.head_dim=} | {self.qhead_per_kvhead=}")
-            print(f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.kv_stage=}")
+            print(
+                f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.kv_stage=} | {self.dKV_stage=}"
+            )
             print(f"{prefix}{self.mma_tiler_qk=} | {self.mma_tiler_dov=}")
             print(
                 f"{prefix}{self.mma_tiler_dop=} | {self.mma_tiler_qds=} | {self.mma_tiler_dsk=}"
@@ -557,8 +569,8 @@ class FFABwdSm100Index:
             dP_mbar_ptr: cute.struct.MemRange[Int64, 2 * self.single_stage]
             P_mbar_ptr: cute.struct.MemRange[Int64, 2 * self.single_stage]
             dS_mbar_ptr: cute.struct.MemRange[Int64, 2 * self.single_stage]
-            dV_mbar_ptr: cute.struct.MemRange[Int64, 2 * self.single_stage]
-            dK_mbar_ptr: cute.struct.MemRange[Int64, 2 * self.single_stage]
+            dV_mbar_ptr: cute.struct.MemRange[Int64, 2 * self.dKV_stage]
+            dK_mbar_ptr: cute.struct.MemRange[Int64, 2 * self.dKV_stage]
             dQ_mbar_ptr: cute.struct.MemRange[Int64, 2 * self.single_stage]
 
             # --- CLC buffers ---
@@ -868,7 +880,7 @@ class FFABwdSm100Index:
         )
         # dV / dK pipelines (MMA -> reduce)
         pipeline_dV = pipeline.PipelineUmmaAsync.create(
-            num_stages=self.single_stage,
+            num_stages=self.dKV_stage,
             producer_group=mma_warp,
             consumer_group=reduce_dV_warps,
             barrier_storage=storage.dV_mbar_ptr.data_ptr(),
@@ -876,7 +888,7 @@ class FFABwdSm100Index:
             defer_sync=True,
         )
         pipeline_dK = pipeline.PipelineUmmaAsync.create(
-            num_stages=self.single_stage,
+            num_stages=self.dKV_stage,
             producer_group=mma_warp,
             consumer_group=reduce_dK_warps,
             barrier_storage=storage.dK_mbar_ptr.data_ptr(),
@@ -1224,6 +1236,13 @@ class FFABwdSm100Index:
             # --- Arrive mma warp's tmem dealloc ---
 
             tmem_alloc_barrier.arrive()
+
+    @cute.jit
+    def _dKV_stage_view(self, tAcc: cute.Tensor, stage: Int32) -> cute.Tensor:
+        """TMEM view of dV.T / dK.T accumulator ``stage`` (stage 0 is ``tAcc`` itself)."""
+        return cute.make_tensor(
+            tAcc.iterator + stage * self.dKV_stage_stride, tAcc.layout
+        )
 
     @cute.jit
     def _num_n_blocks(self, topk_len: Int32) -> Int32:
@@ -1599,28 +1618,26 @@ class FFABwdSm100Index:
         mma_dp_dov_fn = partial(
             sm100_utils.gemm_w_idx, tiled_mma_dP, tdPtdP, tdPrdO, tdPrV, zero_init=True
         )
-        # dV.T = dO.T @ P
+        # dV.T = dO.T @ P, accumulator stage picked per K tile
         tdVrdOt = tiled_mma_dV.make_fragment_A(sdOt)
         tdVrP = tiled_mma_dV.make_fragment_B(sP)
         mma_dv_dop_fn = partial(
             sm100_utils.gemm_w_idx,
             tiled_mma_dV,
-            tdVtdV,
-            tdVrdOt,
-            tdVrP,
+            tCrA=tdVrdOt,
+            tCrB=tdVrP,
             A_idx=0,
             B_idx=0,
             zero_init=True,
         )
-        # dK.T = Q.T @ dS
+        # dK.T = Q.T @ dS, accumulator stage picked per K tile
         tdKrQt = tiled_mma_dK.make_fragment_A(sQt)
         tdKrdS = tiled_mma_dK.make_fragment_B(sdSt)
         mma_dk_qds_fn = partial(
             sm100_utils.gemm_w_idx,
             tiled_mma_dK,
-            tdKtdK,
-            tdKrQt,
-            tdKrdS,
+            tCrA=tdKrQt,
+            tCrB=tdKrdS,
             A_idx=0,
             B_idx=0,
             zero_init=True,
@@ -1656,10 +1673,10 @@ class FFABwdSm100Index:
             pipeline.PipelineUserType.Producer, self.single_stage
         )
         producer_state_dV = ffa_pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Producer, self.single_stage
+            pipeline.PipelineUserType.Producer, self.dKV_stage
         )
         producer_state_dK = ffa_pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Producer, self.single_stage
+            pipeline.PipelineUserType.Producer, self.dKV_stage
         )
         producer_state_dQ = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Producer, self.single_stage
@@ -1705,7 +1722,7 @@ class FFABwdSm100Index:
 
                 pipeline_P.consumer_wait(consumer_state_P)
                 pipeline_dV.producer_acquire(producer_state_dV)
-                mma_dv_dop_fn()
+                mma_dv_dop_fn(acc=self._dKV_stage_view(tdVtdV, producer_state_dV.index))
                 pipeline_dV.producer_commit(producer_state_dV)
                 producer_state_dV.advance()
 
@@ -1725,7 +1742,7 @@ class FFABwdSm100Index:
                 # --- GEMM: dK.T = Q.T @ dS ---
 
                 pipeline_dK.producer_acquire(producer_state_dK)
-                mma_dk_qds_fn()
+                mma_dk_qds_fn(acc=self._dKV_stage_view(tdKtdK, producer_state_dK.index))
                 pipeline_dK.producer_commit(producer_state_dK)
                 producer_state_dK.advance()
 
@@ -2084,7 +2101,7 @@ class FFABwdSm100Index:
         hd_idx = tAcccAcc_t2r[0][0]
 
         consumer_state = ffa_pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Consumer, self.single_stage
+            pipeline.PipelineUserType.Consumer, self.dKV_stage
         )
 
         # /////////////////////////////////////////////////////////////////////////////
@@ -2101,25 +2118,28 @@ class FFABwdSm100Index:
             mAcc_cur = mAcc[None, None, head_idx_kv]
             # mIdx_cur: (topk,) global K row ids of this Q tile
             mIdx_cur = mIndices[m_block, head_idx_kv, None]
+            # This thread's head-dim lane of K row 0; K row r is at + r * head_dim
+            acc_base = cutedsl_utils.elem_pointer(mAcc_cur, (0, hd_idx))
 
             for n_block in cutlass.range(n_block_max, unroll=1):
                 col_limit = topk_len - n_block * self.tile_n
 
-                # Prefetch the K row ids of this tile, column c * 32 + l on lane l
-                tIrRow = cute.make_rmem_tensor((num_chunks,), Int32)
+                # Prefetch the K row offsets of this tile, column c * 32 + l on lane l
+                tIrRowOff = cute.make_rmem_tensor((num_chunks,), Int32)
                 for c in cutlass.range_constexpr(num_chunks):
                     col = c * self.t2r_ncol + lane
                     row_idx = Int32(0)
                     if col < col_limit:
                         row_idx = mIdx_cur[n_block * self.tile_n + col]
-                    tIrRow[c] = row_idx
+                    tIrRowOff[c] = row_idx * self.head_dim
 
                 # Wait for tAcc to be full, T2R copy it to registers
                 pipeline_acc.consumer_wait(consumer_state)
                 tAccrAcc = cute.make_rmem_tensor(tAcccAcc_t2r.shape, Float32)
+                tAcc_t2r_cur = self._dKV_stage_view(tAcc_t2r, consumer_state.index)
                 for c in cutlass.range_constexpr(num_chunks):
                     cute.copy(
-                        tiled_t2r, tAcc_t2r[None, 0, 0, c], tAccrAcc[None, 0, 0, c]
+                        tiled_t2r, tAcc_t2r_cur[None, 0, 0, c], tAccrAcc[None, 0, 0, c]
                     )
 
                 # Release tAcc to be empty before the atomics
@@ -2129,24 +2149,44 @@ class FFABwdSm100Index:
                     pipeline_acc.consumer_release(consumer_state)
                 consumer_state.advance()
 
-                # Atomic add the valid columns into their gathered K rows
-                for c in cutlass.range_constexpr(num_chunks):
-                    tAccrAcc_c = tAccrAcc[None, 0, 0, c]
-                    tAcccAcc_c = tAcccAcc_t2r[None, 0, 0, c]
-                    for i in cutlass.range(cute.size(tAccrAcc_c), unroll_full=True):
-                        col = tAcccAcc_c[i][1]
-                        # shuffle_sync needs every lane: keep it outside the predicate
-                        row_idx = cute.arch.shuffle_sync(
-                            tIrRow[c], col - c * self.t2r_ncol
-                        )
-                        if col < col_limit:
-                            cutedsl_utils.atomic_add_fp32(
-                                tAccrAcc_c[i],
-                                cutedsl_utils.elem_pointer(mAcc_cur, (row_idx, hd_idx)),
-                            )
+                # Atomic add the valid columns into their gathered K rows. Full
+                # tiles must stay branch-free: a branch per RED keeps the compiler
+                # from pipelining the REDs, which bounds the whole kernel.
+                if col_limit >= self.tile_n:
+                    self._atomic_add_tile(
+                        tAccrAcc, tAcccAcc_t2r, tIrRowOff, acc_base, col_limit, False
+                    )
+                else:
+                    self._atomic_add_tile(
+                        tAccrAcc, tAcccAcc_t2r, tIrRowOff, acc_base, col_limit, True
+                    )
 
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
+
+    @cute.jit
+    def _atomic_add_tile(
+        self,
+        tAccrAcc: cute.Tensor,
+        tAcccAcc_t2r: cute.Tensor,
+        tIrRowOff: cute.Tensor,
+        acc_base: cute.Pointer,
+        col_limit: Int32,
+        predicated: cutlass.Constexpr[bool],
+    ):
+        """Atomic add one T2R'd K tile; lane l of ``tIrRowOff[c]`` holds column c * 32 + l's row offset."""
+        for c in cutlass.range_constexpr(cute.size(tAcccAcc_t2r, mode=[3])):
+            tAccrAcc_c = tAccrAcc[None, 0, 0, c]
+            tAcccAcc_c = tAcccAcc_t2r[None, 0, 0, c]
+            for i in cutlass.range(cute.size(tAccrAcc_c), unroll_full=True):
+                col = tAcccAcc_c[i][1]
+                # shuffle_sync needs every lane: keep it outside the predicate
+                row_off = cute.arch.shuffle_sync(tIrRowOff[c], col - c * self.t2r_ncol)
+                if const_expr(predicated):
+                    if col < col_limit:
+                        cutedsl_utils.atomic_add_fp32(tAccrAcc_c[i], acc_base + row_off)
+                else:
+                    cutedsl_utils.atomic_add_fp32(tAccrAcc_c[i], acc_base + row_off)
 
 
 def ffa_bwd_sm100_index(
@@ -2261,6 +2301,8 @@ def ffa_bwd_sm100_index(
     if dv is None:
         dv = torch.empty_like(v)
     total_k_rounded_padded = ((total_k + tile_n - 1) // tile_n + 1) * tile_n
+    # reduce_dKV addresses accumulator rows with Int32 element offsets
+    assert total_k_rounded_padded * head_dim < 2**31, "total_k too large"
     dk_accum = torch.zeros(
         num_head_kv,
         total_k_rounded_padded * head_dim,
