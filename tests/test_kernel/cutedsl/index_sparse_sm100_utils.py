@@ -18,19 +18,22 @@ Shared by ``test_index_sparse_bwd_sm100.py`` and
 ``exps/attn/cutedsl/run_index_sparse_sm100_benchmark.py`` so the test and the
 bench agree on which sm90 inputs SM100 can serve today.
 
-sm90 contract (``flex_flash_attn_func(index_sparse_indices=..., q_block_size=1)``):
+sm90 contract (``flex_flash_attn_func(index_sparse_indices=..., q_block_size=qbs)``):
 
 - q / out / do ``(total_q, num_heads_q, d)``, k / v ``(total_k, num_heads_kv, d)``,
   lse ``(total_q, num_heads_q)`` fp32 natural log.
-- ``index_sparse_indices`` int32 ``(total_q, num_heads_kv, topk)``: per q
-  *token* and kv head, the K token ids (``sparse_k_block_size == 1``) or K block
-  ids (block ``i`` covers K tokens ``[i * kbs, (i + 1) * kbs)``), -1 padded at
-  the tail.
+- ``index_sparse_indices`` int32 ``(ceil(total_q / qbs), num_heads_kv, topk)``:
+  per block of ``qbs`` q tokens and kv head, the K token ids
+  (``sparse_k_block_size == 1``) or K block ids (block ``i`` covers K tokens
+  ``[i * kbs, (i + 1) * kbs)``), -1 padded at the tail.
 
-SM100 contract (``ffa_bwd_sm100_index``): one index row per 128-token Q tile
-of a q head. The two meet when ``num_heads_q / num_heads_kv == 128``: the 128 q
-heads of one (token, kv head) are refolded into one 128-row Q tile, so the sm90
-index row of that token is exactly the SM100 index row of that tile.
+SM100 contract (``ffa_bwd_sm100_index``): one index row per ``q_block_size``
+consecutive q rows of a q head. The two meet for any q-head group
+``G = num_heads_q / num_heads_kv``: the G q heads of one (token, kv head) are
+refolded into G consecutive q rows of one kv head, so a block of ``qbs`` tokens
+becomes ``qbs * G`` consecutive rows and, with ``q_block_size = qbs * G``, its
+sm90 index row is exactly the SM100 index row of those rows. ``qbs * G == 128``
+puts one q block in each 128-row Q tile, the case with no wasted MMA rows.
 """
 
 import math
@@ -43,8 +46,6 @@ from magi_attention.kernel.cutedsl.ffa_bwd_sm100_index import (
     ffa_bwd_sm100_index,
 )
 
-SM100_INDEX_TILE_M = 128
-
 
 class Sm100IndexGap(Enum):
     """sm90 IndexSparse features the SM100 backward cannot serve yet.
@@ -55,10 +56,6 @@ class Sm100IndexGap(Enum):
     """
 
     HEAD_DIM = "head_dim != 128: FFABwdSm100Index fixes head_dim at 128"
-    Q_HEAD_GROUP = (
-        "num_heads_q / num_heads_kv != 128: per-token indices only map onto the "
-        "128-row Q tile when one token's q heads fill it exactly"
-    )
     SPARSE_K_BLOCK = (
         "sparse_k_block_size > 1: the kernel gathers single K tokens, not K blocks"
     )
@@ -75,16 +72,12 @@ class Sm100IndexUnsupportedError(NotImplementedError):
 def sm100_index_bwd_gaps(
     *,
     head_dim: int,
-    num_heads_q: int,
-    num_heads_kv: int,
     sparse_k_block_size: int,
 ) -> list[Sm100IndexGap]:
     """The ``Sm100IndexGap`` members an sm90 IndexSparse backward call needs."""
     gaps = []
     if head_dim != FFABwdSm100Index.head_dim:
         gaps.append(Sm100IndexGap.HEAD_DIM)
-    if num_heads_q != num_heads_kv * SM100_INDEX_TILE_M:
-        gaps.append(Sm100IndexGap.Q_HEAD_GROUP)
     if sparse_k_block_size != 1:
         gaps.append(Sm100IndexGap.SPARSE_K_BLOCK)
     return gaps
@@ -99,13 +92,15 @@ def ffa_bwd_sm100_index_sm90_layout(
     lse: torch.Tensor,
     index_sparse_indices: torch.Tensor,
     *,
+    q_block_size: int = 1,
     sparse_k_block_size: int = 1,
     softmax_scale: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """IndexSparse backward with sm90 tensors, run by ``ffa_bwd_sm100_index``.
 
-    Assumes valid ids precede the -1 padding in every index row (both sm90
-    index builders produce that). Returns (dq, dk, dv) in the sm90 layout.
+    ``q_block_size`` is the sm90 one: q tokens per index row. Assumes valid ids
+    precede the -1 padding in every index row (both sm90 index builders produce
+    that). Returns (dq, dk, dv) in the sm90 layout.
 
     Raises:
         Sm100IndexUnsupportedError: the call needs an ``Sm100IndexGap``.
@@ -113,20 +108,20 @@ def ffa_bwd_sm100_index_sm90_layout(
     total_q, num_heads_q, head_dim = q.shape
     total_k, num_heads_kv, _ = k.shape
     gaps = sm100_index_bwd_gaps(
-        head_dim=head_dim,
-        num_heads_q=num_heads_q,
-        num_heads_kv=num_heads_kv,
-        sparse_k_block_size=sparse_k_block_size,
+        head_dim=head_dim, sparse_k_block_size=sparse_k_block_size
     )
     if gaps:
         raise Sm100IndexUnsupportedError(gaps)
-    assert index_sparse_indices.shape[:2] == (total_q, num_heads_kv)
+    assert num_heads_q % num_heads_kv == 0
+    num_q_blocks = (total_q + q_block_size - 1) // q_block_size
+    assert index_sparse_indices.shape[:2] == (num_q_blocks, num_heads_kv)
     assert lse.shape == (total_q, num_heads_q)
 
     group = num_heads_q // num_heads_kv
 
     # (total_q, nhk * group, ...) -> (total_q * group, nhk, ...): each token's
-    # group q heads of one kv head become the rows of one Q tile.
+    # group q heads of one kv head become group consecutive q rows, so a q
+    # block of q_block_size tokens becomes q_block_size * group rows.
     # A view when num_heads_kv == 1, a copy otherwise. The view must not go
     # through transpose: that leaves a non-unit stride on the size-1 head dim,
     # which the kernel rejects for lse.
@@ -153,7 +148,7 @@ def ffa_bwd_sm100_index_sm90_layout(
         fold(lse),
         index_sparse_indices,
         softmax_scale=softmax_scale,
-        tile_m=SM100_INDEX_TILE_M,
+        q_block_size=q_block_size * group,
     )
     return unfold(dq), dk, dv
 
@@ -164,14 +159,16 @@ def index_sparse_ref_fwd(
     v: torch.Tensor,
     index_sparse_indices: torch.Tensor,
     *,
+    q_block_size: int = 1,
     sparse_k_block_size: int = 1,
     softmax_scale: float | None = None,
     chunk_tokens: int = 256,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """fp32 gather forward for the sm90 IndexSparse contract; returns (out, lse).
 
-    Gather semantics: a K id listed twice is attended twice. Rows without a
-    valid id get out = 0 and lse = -inf.
+    Token ``t`` uses index row ``t // q_block_size``. Gather semantics: a K id
+    listed twice is attended twice. Rows without a valid id get out = 0 and
+    lse = -inf.
     """
     total_q, num_heads_q, head_dim = q.shape
     num_heads_kv = k.shape[1]
@@ -184,7 +181,8 @@ def index_sparse_ref_fwd(
     block_offsets = torch.arange(sparse_k_block_size, device=q.device)
     for t0 in range(0, total_q, chunk_tokens):
         t1 = min(t0 + chunk_tokens, total_q)
-        ids = index_sparse_indices[t0:t1].long()
+        token_blocks = torch.arange(t0, t1, device=q.device) // q_block_size
+        ids = index_sparse_indices[token_blocks].long()
         valid = ids >= 0
         if sparse_k_block_size > 1:
             ids = (ids[..., None] * sparse_k_block_size + block_offsets).flatten(-2)

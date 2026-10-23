@@ -23,12 +23,17 @@ inner-loop-K kernel with the contiguous K/V TMA replaced by a token gather.
 
 Sparsity semantics:
 
-- q block ``b`` covers q tokens ``[b * tile_m, min((b + 1) * tile_m, total_q))``
-  of every q head; there are no q/k ranges.
+- q block ``b`` covers q tokens
+  ``[b * q_block_size, min((b + 1) * q_block_size, total_q))`` of every q head;
+  there are no q/k ranges.
 - ``index_sparse_indices[b, h_kv, :]`` lists the global K token ids in
   ``[0, total_k)`` attended by q block ``b`` for kv head ``h_kv`` (shared by all
   q heads of that group). Valid ids come first and are pairwise distinct; the
   tail is padded with -1, and ``topk_len[b, h_kv]`` counts the valid ids.
+- A Q tile is always ``tile_m`` consecutive q tokens of one q head. With
+  ``q_block_size < tile_m`` (or not a multiple of it) the tile overlaps several
+  q blocks ("segments"): its K loop runs every segment's gathered K tiles in
+  turn, and rows outside the current segment get P = dS = 0.
 
 Single CTA, CLC-persistent, warp specialized (20 warps / 640 threads):
 
@@ -103,9 +108,11 @@ class FFABwdSm100Index:
         tile_m: int = 128,
         tile_n: int = 64,
         kv_stage: int = 3,
+        q_block_size: cutlass.Constexpr[int] = 128,
         debug_print: bool = False,
     ):
         assert tile_m == 128, "tile_m must be 128 (one TMEM lane per Q row)"
+        assert q_block_size >= 1
         # reduce_dKV keeps one K row id per lane for every 32 columns
         assert tile_n % cute.arch.WARP_SIZE == 0 and tile_n <= 128
         # the MMA warp holds sK of two K tiles at once (S of the next, dQ of the current)
@@ -115,6 +122,9 @@ class FFABwdSm100Index:
         self.tile_n = tile_n
         self.kv_stage = kv_stage
         self.qhead_per_kvhead = qhead_per_kvhead
+        self.q_block_size = q_block_size
+        # every Q tile lies inside one q block, so it has a single segment
+        self.single_segment = q_block_size % tile_m == 0
 
         # CTA tiler: (Q, K, HD)
         self.cta_tiler = (tile_m, tile_n, self.head_dim)
@@ -223,7 +233,9 @@ class FFABwdSm100Index:
             prefix = "[bwd_sm100_index_init] "
             print()
             print(f"{prefix}Initialized FFABwdSm100Index with: ")
-            print(f"{prefix}{self.head_dim=} | {self.qhead_per_kvhead=}")
+            print(
+                f"{prefix}{self.head_dim=} | {self.qhead_per_kvhead=} | {self.q_block_size=}"
+            )
             print(
                 f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.kv_stage=} | {self.dKV_stage=}"
             )
@@ -563,7 +575,8 @@ class FFABwdSm100Index:
         # --- Make tile scheduler class/args ---
 
         # mQRanges must be the single range [0, total_q), so the scheduled
-        # m_block is also the q block row of mIndices / mTopkLen.
+        # m_block is the Q tile of rows [m_block * tile_m, (m_block + 1) * tile_m);
+        # _q_tile_segments maps it to its q block rows of mIndices / mTopkLen.
         TileScheduler = SingleTileVarlenScheduler
         tile_sched_args = TileSchedulerArguments(
             num_block=cute.ceil_div(cute.size(mQ.shape[0]), self.tile_m),
@@ -1314,8 +1327,47 @@ class FFABwdSm100Index:
 
     @cute.jit
     def _num_n_blocks(self, topk_len: Int32) -> Int32:
-        """Number of gathered K tiles in the inner loop of one Q tile."""
+        """Number of gathered K tiles of one q block (segment)."""
         return (topk_len + self.tile_n - 1) // self.tile_n
+
+    @cute.jit
+    def _q_tile_segments(self, mTopkLen: cute.Tensor, m_block: Int32):
+        """(first q block, number of q blocks) overlapping the rows of Q tile ``m_block``."""
+        if const_expr(self.single_segment):
+            qb_first = m_block // (self.q_block_size // self.tile_m)
+            num_seg = Int32(1)
+        else:
+            row0 = m_block * self.tile_m
+            qb_first = row0 // self.q_block_size
+            qb_last = cutlass.min(
+                (row0 + self.tile_m - 1) // self.q_block_size,
+                mTopkLen.shape[0] - 1,
+            )
+            num_seg = qb_last - qb_first + 1
+        return qb_first, num_seg
+
+    @cute.jit
+    def _tile_num_n_blocks(
+        self,
+        mTopkLen: cute.Tensor,
+        qb_first: Int32,
+        num_seg: Int32,
+        head_idx_kv: Int32,
+    ) -> Int32:
+        """Gathered K tiles over every segment of one Q tile: the flat K loop length."""
+        n_block_max = self._num_n_blocks(mTopkLen[qb_first, head_idx_kv])
+        if const_expr(not self.single_segment):
+            for s in cutlass.range(1, num_seg, unroll=1):
+                n_block_max += self._num_n_blocks(mTopkLen[qb_first + s, head_idx_kv])
+        return n_block_max
+
+    @cute.jit
+    def _segment_row_valid(
+        self, row_idx: Int32, m_block: Int32, qb: Int32
+    ) -> cutlass.Boolean:
+        """True if Q tile row ``row_idx`` belongs to q block ``qb``."""
+        row_lo = qb * self.q_block_size - m_block * self.tile_m
+        return row_idx >= row_lo and row_idx < row_lo + self.q_block_size
 
     @cute.jit
     def clc_scheduler_warp(
@@ -1567,71 +1619,75 @@ class FFABwdSm100Index:
         while work_tile.is_valid_tile:
             m_block, head_idx, _, _ = work_tile.tile_idx
             head_idx_kv = head_idx // self.qhead_per_kvhead
-            topk_len = mTopkLen[m_block, head_idx_kv]
-            n_block_max = self._num_n_blocks(topk_len)
+            qb_first, num_seg = self._q_tile_segments(mTopkLen, m_block)
 
             # mK_cur / mV_cur: (seqK,HD) over all K tokens, rows picked by mIdx_cur
             mK_cur = mK[None, None, head_idx_kv]
             mV_cur = mV[None, None, head_idx_kv]
-            # mIdx_cur: (topk,) global K row ids of this Q tile
-            mIdx_cur = mIndices[m_block, head_idx_kv, None]
 
             # //////////////////////////////////////////////
-            #  K loop: gathered K/V tiles
+            #  K loop: gathered K/V tiles of every segment in turn
             # //////////////////////////////////////////////
 
-            for n_block in cutlass.range(n_block_max, unroll=1):
-                col_limit = topk_len - n_block * self.tile_n
+            for s in cutlass.range(num_seg, unroll=1):
+                qb = qb_first + s
+                topk_len = mTopkLen[qb, head_idx_kv]
+                n_block_max = self._num_n_blocks(topk_len)
+                # mIdx_cur: (topk,) global K row ids of this segment's q block
+                mIdx_cur = mIndices[qb, head_idx_kv, None]
 
-                # Padding rows gather K/V row 0: masked columns still need finite
-                # K/V, otherwise dQ = dS @ K picks up 0 * NaN from stale smem.
-                tKVrRow = cute.make_rmem_tensor((num_rows_per_thr,), Int32)
-                for m in cutlass.range_constexpr(num_rows_per_thr):
-                    row = tKVcKV[0, m, 0][0]
-                    row_idx = Int32(0)
-                    if row < col_limit:
-                        row_idx = mIdx_cur[n_block * self.tile_n + row]
-                    tKVrRow[m] = row_idx
+                for n_block in cutlass.range(n_block_max, unroll=1):
+                    col_limit = topk_len - n_block * self.tile_n
 
-                # --- Gather K ---
+                    # Padding rows gather K/V row 0: masked columns still need finite
+                    # K/V, otherwise dQ = dS @ K picks up 0 * NaN from stale smem.
+                    tKVrRow = cute.make_rmem_tensor((num_rows_per_thr,), Int32)
+                    for m in cutlass.range_constexpr(num_rows_per_thr):
+                        row = tKVcKV[0, m, 0][0]
+                        row_idx = Int32(0)
+                        if row < col_limit:
+                            row_idx = mIdx_cur[n_block * self.tile_n + row]
+                        tKVrRow[m] = row_idx
 
-                pipeline_K.producer_acquire(producer_state_K)
-                self._gather_rows(
-                    tiled_gather,
-                    mK_cur,
-                    tKsK[None, None, None, producer_state_K.index],
-                    tKVcKV,
-                    tKVrRow,
-                )
-                cute.arch.cp_async_commit_group()
-                cute.arch.cp_async_wait_group(0)
+                    # --- Gather K ---
 
-                # Commit sK to be full: make the cp.async writes visible to UMMA
-                cute.arch.fence_view_async_shared()
-                cute.arch.sync_warp()
-                with cute.arch.elect_one():
-                    pipeline_K.producer_commit(producer_state_K)
-                producer_state_K.advance()
+                    pipeline_K.producer_acquire(producer_state_K)
+                    self._gather_rows(
+                        tiled_gather,
+                        mK_cur,
+                        tKsK[None, None, None, producer_state_K.index],
+                        tKVcKV,
+                        tKVrRow,
+                    )
+                    cute.arch.cp_async_commit_group()
+                    cute.arch.cp_async_wait_group(0)
 
-                # --- Gather V (same rows as K) ---
+                    # Commit sK to be full: make the cp.async writes visible to UMMA
+                    cute.arch.fence_view_async_shared()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_K.producer_commit(producer_state_K)
+                    producer_state_K.advance()
 
-                pipeline_V.producer_acquire(producer_state_V)
-                self._gather_rows(
-                    tiled_gather,
-                    mV_cur,
-                    tVsV[None, None, None, producer_state_V.index],
-                    tKVcKV,
-                    tKVrRow,
-                )
-                cute.arch.cp_async_commit_group()
-                cute.arch.cp_async_wait_group(0)
+                    # --- Gather V (same rows as K) ---
 
-                # Commit sV to be full: make the cp.async writes visible to UMMA
-                cute.arch.fence_view_async_shared()
-                cute.arch.sync_warp()
-                with cute.arch.elect_one():
-                    pipeline_V.producer_commit(producer_state_V)
-                producer_state_V.advance()
+                    pipeline_V.producer_acquire(producer_state_V)
+                    self._gather_rows(
+                        tiled_gather,
+                        mV_cur,
+                        tVsV[None, None, None, producer_state_V.index],
+                        tKVcKV,
+                        tKVrRow,
+                    )
+                    cute.arch.cp_async_commit_group()
+                    cute.arch.cp_async_wait_group(0)
+
+                    # Commit sV to be full: make the cp.async writes visible to UMMA
+                    cute.arch.fence_view_async_shared()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_V.producer_commit(producer_state_V)
+                    producer_state_V.advance()
 
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
@@ -1808,8 +1864,11 @@ class FFABwdSm100Index:
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             m_block, head_idx, _, _ = work_tile.tile_idx
-            topk_len = mTopkLen[m_block, head_idx // self.qhead_per_kvhead]
-            n_block_max = self._num_n_blocks(topk_len)
+            # The flat K loop runs every segment's K tiles back to back
+            qb_first, num_seg = self._q_tile_segments(mTopkLen, m_block)
+            n_block_max = self._tile_num_n_blocks(
+                mTopkLen, qb_first, num_seg, head_idx // self.qhead_per_kvhead
+            )
 
             # Wait for sQ/sdO to be full (resident for the whole K loop)
             pipeline_QdO.consumer_wait(consumer_state_QdO)
@@ -2077,11 +2136,14 @@ class FFABwdSm100Index:
         while work_tile.is_valid_tile:
             m_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen_info = SeqlenInfoCls(batch_idx)
-            topk_len = mTopkLen[m_block, head_idx // self.qhead_per_kvhead]
-            n_block_max = self._num_n_blocks(topk_len)
+            head_idx_kv = head_idx // self.qhead_per_kvhead
+            qb_first, num_seg = self._q_tile_segments(mTopkLen, m_block)
+            n_block_total = self._tile_num_n_blocks(
+                mTopkLen, qb_first, num_seg, head_idx_kv
+            )
 
             # Rows at or past total_q are masked to P = dS = 0
-            row_valid = row_idx < seqlen_info.seqlen_q - m_block * self.tile_m
+            row_in_q = row_idx < seqlen_info.seqlen_q - m_block * self.tile_m
 
             # --- S2R LSE / dPsum of this thread's row ---
 
@@ -2089,85 +2151,98 @@ class FFABwdSm100Index:
             row_lse = sLSE[row_idx]
             row_dpsum = sdPsum[row_idx]
 
-            for n_block in cutlass.range(n_block_max, unroll=1):
-                # Gathered columns at or past topk_len are masked to P = dS = 0
-                col_limit = topk_len - n_block * self.tile_n
-
-                # //////////////////////////////////////////////
-                #  Softmax-fwd: rP = exp2(rS * scale_log2 - rLSE)
-                #  and R2S copy rP to sP
-                # //////////////////////////////////////////////
-
-                # Wait for tS to be full, T2R copy tS to rS
-                pipeline_S.consumer_wait(consumer_state_S)
-                tSrS = cute.make_rmem_tensor(tScS_t2r.shape, Float32)
-                for c in cutlass.range_constexpr(num_chunks_S):
-                    cute.copy(tiled_t2r_S, tStS_t2r[None, 0, 0, c], tSrS[None, 0, 0, c])
-
-                # Release tS to be empty
-                cute.arch.fence_view_async_tmem_load()
-                cute.arch.sync_warp()
-                with cute.arch.elect_one():
-                    pipeline_S.consumer_release(consumer_state_S)
-                consumer_state_S.advance()
-
-                # Apply mask and softmax-fwd (rS now holds rP in fp32)
-                for i in cutlass.range(cute.size(tSrS), unroll_full=True):
-                    p = cute.math.exp2(
-                        tSrS[i] * softmax_scale_log2 - row_lse, fastmath=True
-                    )
-                    is_valid = row_valid and tScS_t2r[i][1] < col_limit
-                    tSrS[i] = p if is_valid else Float32(0.0)
-
-                # Acquire sP to be empty (previous dV GEMM done), R2S copy rP to sP
-                pipeline_P.producer_acquire(producer_state_P)
-                for c in cutlass.range_constexpr(num_chunks_S):
-                    copy_utils.cvt_copy(
-                        tiled_r2s_PdS, tSrS[None, 0, 0, c], tPsP_r2s[None, 0, 0, c]
+            for s in cutlass.range(num_seg, unroll=1):
+                qb = qb_first + s
+                topk_len = mTopkLen[qb, head_idx_kv]
+                n_block_max = self._num_n_blocks(topk_len)
+                # Rows of the other segments' q blocks are masked to P = dS = 0
+                row_valid = row_in_q
+                if const_expr(not self.single_segment):
+                    row_valid = row_in_q and self._segment_row_valid(
+                        row_idx, m_block, qb
                     )
 
-                # Commit sP to be full
-                cute.arch.fence_view_async_shared()
-                cute.arch.sync_warp()
-                with cute.arch.elect_one():
-                    pipeline_P.producer_commit(producer_state_P)
-                producer_state_P.advance()
+                for n_block in cutlass.range(n_block_max, unroll=1):
+                    # Gathered columns at or past topk_len are masked to P = dS = 0
+                    col_limit = topk_len - n_block * self.tile_n
 
-                # //////////////////////////////////////////////
-                #  Softmax-bwd: rdS = rP * (rdP - rdPsum) * scale
-                #  after T2R copy tdP to rdP, then R2S copy rdS to sdS
-                # //////////////////////////////////////////////
+                    # //////////////////////////////////////////////
+                    #  Softmax-fwd: rP = exp2(rS * scale_log2 - rLSE)
+                    #  and R2S copy rP to sP
+                    # //////////////////////////////////////////////
 
-                # Wait for tdP to be full, acquire sdS to be empty
-                pipeline_dP.consumer_wait(consumer_state_dP)
-                pipeline_dS.producer_acquire(producer_state_dS)
-                for c in cutlass.range_constexpr(num_chunks_S):
-                    tdPrdP = cute.make_rmem_tensor(
-                        tScS_t2r[None, 0, 0, c].shape, Float32
-                    )
-                    cute.copy(tiled_t2r_S, tdPtdP_t2r[None, 0, 0, c], tdPrdP)
-                    tSrP_cur = tSrS[None, 0, 0, c]
-                    for i in cutlass.range(cute.size(tdPrdP), unroll_full=True):
-                        tdPrdP[i] = (
-                            tSrP_cur[i] * (tdPrdP[i] - row_dpsum) * softmax_scale
+                    # Wait for tS to be full, T2R copy tS to rS
+                    pipeline_S.consumer_wait(consumer_state_S)
+                    tSrS = cute.make_rmem_tensor(tScS_t2r.shape, Float32)
+                    for c in cutlass.range_constexpr(num_chunks_S):
+                        cute.copy(
+                            tiled_t2r_S, tStS_t2r[None, 0, 0, c], tSrS[None, 0, 0, c]
                         )
-                    copy_utils.cvt_copy(
-                        tiled_r2s_PdS, tdPrdP, tdSsdS_r2s[None, 0, 0, c]
-                    )
 
-                # Release tdP to be empty
-                cute.arch.fence_view_async_tmem_load()
-                cute.arch.sync_warp()
-                with cute.arch.elect_one():
-                    pipeline_dP.consumer_release(consumer_state_dP)
-                consumer_state_dP.advance()
+                    # Release tS to be empty
+                    cute.arch.fence_view_async_tmem_load()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_S.consumer_release(consumer_state_S)
+                    consumer_state_S.advance()
 
-                # Commit sdS to be full
-                cute.arch.fence_view_async_shared()
-                cute.arch.sync_warp()
-                with cute.arch.elect_one():
-                    pipeline_dS.producer_commit(producer_state_dS)
-                producer_state_dS.advance()
+                    # Apply mask and softmax-fwd (rS now holds rP in fp32)
+                    for i in cutlass.range(cute.size(tSrS), unroll_full=True):
+                        p = cute.math.exp2(
+                            tSrS[i] * softmax_scale_log2 - row_lse, fastmath=True
+                        )
+                        is_valid = row_valid and tScS_t2r[i][1] < col_limit
+                        tSrS[i] = p if is_valid else Float32(0.0)
+
+                    # Acquire sP to be empty (previous dV GEMM done), R2S copy rP to sP
+                    pipeline_P.producer_acquire(producer_state_P)
+                    for c in cutlass.range_constexpr(num_chunks_S):
+                        copy_utils.cvt_copy(
+                            tiled_r2s_PdS, tSrS[None, 0, 0, c], tPsP_r2s[None, 0, 0, c]
+                        )
+
+                    # Commit sP to be full
+                    cute.arch.fence_view_async_shared()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_P.producer_commit(producer_state_P)
+                    producer_state_P.advance()
+
+                    # //////////////////////////////////////////////
+                    #  Softmax-bwd: rdS = rP * (rdP - rdPsum) * scale
+                    #  after T2R copy tdP to rdP, then R2S copy rdS to sdS
+                    # //////////////////////////////////////////////
+
+                    # Wait for tdP to be full, acquire sdS to be empty
+                    pipeline_dP.consumer_wait(consumer_state_dP)
+                    pipeline_dS.producer_acquire(producer_state_dS)
+                    for c in cutlass.range_constexpr(num_chunks_S):
+                        tdPrdP = cute.make_rmem_tensor(
+                            tScS_t2r[None, 0, 0, c].shape, Float32
+                        )
+                        cute.copy(tiled_t2r_S, tdPtdP_t2r[None, 0, 0, c], tdPrdP)
+                        tSrP_cur = tSrS[None, 0, 0, c]
+                        for i in cutlass.range(cute.size(tdPrdP), unroll_full=True):
+                            tdPrdP[i] = (
+                                tSrP_cur[i] * (tdPrdP[i] - row_dpsum) * softmax_scale
+                            )
+                        copy_utils.cvt_copy(
+                            tiled_r2s_PdS, tdPrdP, tdSsdS_r2s[None, 0, 0, c]
+                        )
+
+                    # Release tdP to be empty
+                    cute.arch.fence_view_async_tmem_load()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_dP.consumer_release(consumer_state_dP)
+                    consumer_state_dP.advance()
+
+                    # Commit sdS to be full
+                    cute.arch.fence_view_async_shared()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_dS.producer_commit(producer_state_dS)
+                    producer_state_dS.advance()
 
             # Release sLSE/sdPsum to be empty
             cute.arch.sync_warp()
@@ -2184,7 +2259,7 @@ class FFABwdSm100Index:
             pipeline_dQ.consumer_wait(consumer_state_dQ)
             for c in cutlass.range_constexpr(num_chunks_dQ):
                 tdQrdQ = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
-                if n_block_max > 0:
+                if n_block_total > 0:
                     cute.copy(tiled_t2r_dQ, tdQtdQ_t2r[None, 0, 0, c], tdQrdQ)
                 else:
                     # empty K range: dQ is zero and tdQ was never written
@@ -2298,68 +2373,78 @@ class FFABwdSm100Index:
         while work_tile.is_valid_tile:
             m_block, head_idx, _, _ = work_tile.tile_idx
             head_idx_kv = head_idx // self.qhead_per_kvhead
-            topk_len = mTopkLen[m_block, head_idx_kv]
-            n_block_max = self._num_n_blocks(topk_len)
+            qb_first, num_seg = self._q_tile_segments(mTopkLen, m_block)
 
             # mAcc_cur: (seqK,HD) row-major fp32 over all K tokens
             mAcc_cur = mAcc[None, None, head_idx_kv]
-            # mIdx_cur: (topk,) global K row ids of this Q tile
-            mIdx_cur = mIndices[m_block, head_idx_kv, None]
             # K row r of the accumulator starts at acc_row0 + r * head_dim
             acc_row0 = cutedsl_utils.elem_pointer(mAcc_cur, (0, 0))
 
-            for n_block in cutlass.range(n_block_max, unroll=1):
-                col_limit = topk_len - n_block * self.tile_n
+            for s in cutlass.range(num_seg, unroll=1):
+                qb = qb_first + s
+                topk_len = mTopkLen[qb, head_idx_kv]
+                n_block_max = self._num_n_blocks(topk_len)
+                # mIdx_cur: (topk,) global K row ids of this segment's q block
+                mIdx_cur = mIndices[qb, head_idx_kv, None]
 
-                # Prefetch the K row offsets this lane reduces into
-                tIrRowOff = cute.make_rmem_tensor((len(cols_of_chunk),), Int32)
-                for q in cutlass.range_constexpr(len(cols_of_chunk)):
-                    col = q * self.reduce_chunk + issue_row % self.reduce_chunk
-                    row_idx = Int32(0)
-                    if col < col_limit:
-                        row_idx = mIdx_cur[n_block * self.tile_n + col]
-                    tIrRowOff[q] = row_idx * self.head_dim
+                for n_block in cutlass.range(n_block_max, unroll=1):
+                    col_limit = topk_len - n_block * self.tile_n
 
-                # Wait for tAcc to be full, T2R copy it to registers
-                pipeline_acc.consumer_wait(consumer_state)
-                tAccrAcc = cute.make_rmem_tensor(tAcccAcc_t2r.shape, Float32)
-                tAcc_t2r_cur = self._dKV_stage_view(tAcc_t2r, consumer_state.index)
-                for c in cutlass.range_constexpr(num_chunks):
-                    cute.copy(
-                        tiled_t2r, tAcc_t2r_cur[None, 0, 0, c], tAccrAcc[None, 0, 0, c]
-                    )
+                    # Prefetch the K row offsets this lane reduces into
+                    tIrRowOff = cute.make_rmem_tensor((len(cols_of_chunk),), Int32)
+                    for q in cutlass.range_constexpr(len(cols_of_chunk)):
+                        col = q * self.reduce_chunk + issue_row % self.reduce_chunk
+                        row_idx = Int32(0)
+                        if col < col_limit:
+                            row_idx = mIdx_cur[n_block * self.tile_n + col]
+                        tIrRowOff[q] = row_idx * self.head_dim
 
-                # Release tAcc to be empty before the reduce
-                cute.arch.fence_view_async_tmem_load()
-                cute.arch.sync_warp()
-                with cute.arch.elect_one():
-                    pipeline_acc.consumer_release(consumer_state)
-                consumer_state.advance()
-
-                for q in cutlass.range_constexpr(len(cols_of_chunk)):
-                    stage = q % self.reduce_stage
-                    # Stage chunk q's K rows; a warp store fills 128B of one row.
-                    # Buffer `stage` was last read by chunk q - reduce_stage,
-                    # which the issuer drained before the previous barrier.
-                    for k in cutlass.range_constexpr(len(cols_of_chunk[q])):
-                        c, i, row = cols_of_chunk[q][k]
-                        sStage[hd_idx, row, stage] = tAccrAcc[None, 0, 0, c][i]
-                    cute.arch.fence_view_async_shared()
-                    # Chunk q + 1 - reduce_stage must be read before the barrier
-                    # releases its buffer to the stores of chunk q + 1
-                    cute.arch.cp_async_bulk_wait_group(self.reduce_stage - 2, read=True)
-                    reduce_barrier.arrive_and_wait()
-                    # Columns at or past topk_len are zero and not reduced
-                    if (
-                        lane < rows_per_warp
-                        and q * self.reduce_chunk + issue_row < col_limit
-                    ):
-                        copy_utils.cpasync_reduce_bulk_add_f32(
-                            cutedsl_utils.elem_pointer(sStage, (0, issue_row, stage)),
-                            acc_row0 + tIrRowOff[q],
-                            self.head_dim * Float32.width // 8,
+                    # Wait for tAcc to be full, T2R copy it to registers
+                    pipeline_acc.consumer_wait(consumer_state)
+                    tAccrAcc = cute.make_rmem_tensor(tAcccAcc_t2r.shape, Float32)
+                    tAcc_t2r_cur = self._dKV_stage_view(tAcc_t2r, consumer_state.index)
+                    for c in cutlass.range_constexpr(num_chunks):
+                        cute.copy(
+                            tiled_t2r,
+                            tAcc_t2r_cur[None, 0, 0, c],
+                            tAccrAcc[None, 0, 0, c],
                         )
-                    cute.arch.cp_async_bulk_commit_group()
+
+                    # Release tAcc to be empty before the reduce
+                    cute.arch.fence_view_async_tmem_load()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_acc.consumer_release(consumer_state)
+                    consumer_state.advance()
+
+                    for q in cutlass.range_constexpr(len(cols_of_chunk)):
+                        stage = q % self.reduce_stage
+                        # Stage chunk q's K rows; a warp store fills 128B of one row.
+                        # Buffer `stage` was last read by chunk q - reduce_stage,
+                        # which the issuer drained before the previous barrier.
+                        for k in cutlass.range_constexpr(len(cols_of_chunk[q])):
+                            c, i, row = cols_of_chunk[q][k]
+                            sStage[hd_idx, row, stage] = tAccrAcc[None, 0, 0, c][i]
+                        cute.arch.fence_view_async_shared()
+                        # Chunk q + 1 - reduce_stage must be read before the barrier
+                        # releases its buffer to the stores of chunk q + 1
+                        cute.arch.cp_async_bulk_wait_group(
+                            self.reduce_stage - 2, read=True
+                        )
+                        reduce_barrier.arrive_and_wait()
+                        # Columns at or past topk_len are zero and not reduced
+                        if (
+                            lane < rows_per_warp
+                            and q * self.reduce_chunk + issue_row < col_limit
+                        ):
+                            copy_utils.cpasync_reduce_bulk_add_f32(
+                                cutedsl_utils.elem_pointer(
+                                    sStage, (0, issue_row, stage)
+                                ),
+                                acc_row0 + tIrRowOff[q],
+                                self.head_dim * Float32.width // 8,
+                            )
+                        cute.arch.cp_async_bulk_commit_group()
 
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
@@ -2383,14 +2468,20 @@ def ffa_bwd_sm100_index(
     dq: Optional[torch.Tensor] = None,
     dk: Optional[torch.Tensor] = None,
     dv: Optional[torch.Tensor] = None,
+    q_block_size: Optional[int] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass of index-sparse (DSA) attention on SM100.
 
     Args:
-        index_sparse_indices: int32 ``(ceil(total_q / tile_m), num_heads_kv, topk)``.
-            Row ``[b, h_kv]`` holds the distinct global K token ids attended by
-            q tokens ``[b * tile_m, (b + 1) * tile_m)`` of every q head mapped to
-            kv head ``h_kv``; valid ids come first and the tail is padded with -1.
+        index_sparse_indices: int32
+            ``(ceil(total_q / q_block_size), num_heads_kv, topk)``. Row ``[b, h_kv]``
+            holds the distinct global K token ids attended by q tokens
+            ``[b * q_block_size, (b + 1) * q_block_size)`` of every q head mapped
+            to kv head ``h_kv``; valid ids come first and the tail is padded with -1.
+        q_block_size: q tokens per index row, any value >= 1; ``None`` means
+            ``tile_m``. Below ``tile_m`` a Q tile still computes all ``tile_m``
+            rows against each of its q blocks' K tiles, so only
+            ``q_block_size / tile_m`` of its MMA work is useful.
 
     Returns:
         A tuple of (dQ, dK, dV) with the same shapes and dtypes as q, k, v.
@@ -2418,7 +2509,11 @@ def ffa_bwd_sm100_index(
     total_k, num_head_kv, _ = v.shape
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     qhead_per_kvhead = num_head // num_head_kv
-    num_q_blocks = (total_q + tile_m - 1) // tile_m
+    if q_block_size is None:
+        q_block_size = tile_m
+    assert q_block_size >= 1
+    num_q_tiles = (total_q + tile_m - 1) // tile_m
+    num_q_blocks = (total_q + q_block_size - 1) // q_block_size
     assert index_sparse_indices.dtype == torch.int32
     assert index_sparse_indices.ndim == 3 and index_sparse_indices.shape[:2] == (
         num_q_blocks,
@@ -2443,7 +2538,7 @@ def ffa_bwd_sm100_index(
     # --- Preprocess: dPsum = (o * dout).sum(-1), lse_log2 = lse * log2(e) ---
 
     # Row-major token-space stats + one tile guard for the tail tile's TMA box.
-    total_q_rounded_padded = (num_q_blocks + 1) * tile_m
+    total_q_rounded_padded = (num_q_tiles + 1) * tile_m
     # Zeros, not empty: the tail tile reads the padding rows.
     dpsum = torch.zeros(
         num_head, total_q_rounded_padded, dtype=torch.float32, device=device
@@ -2504,6 +2599,7 @@ def ffa_bwd_sm100_index(
         tile_m,
         tile_n,
         kv_stage,
+        q_block_size,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
     compile_cache = ffa_bwd_sm100_index.compile_cache  # type: ignore[attr-defined]
@@ -2513,6 +2609,7 @@ def ffa_bwd_sm100_index(
             tile_m=tile_m,
             tile_n=tile_n,
             kv_stage=kv_stage,
+            q_block_size=q_block_size,
             debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
         )
         q_tensor, k_tensor, v_tensor, do_tensor, dq_tensor = [
