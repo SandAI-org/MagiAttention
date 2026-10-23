@@ -36,7 +36,9 @@ CUTEDSL_PAIRS: tuple[tuple[SpecifierSet, SpecifierSet], ...] = (
 )
 
 # flash_attn_cute uses cute.core.ThrMma and cute.make_fragment, removed in
-# DSL 4.6.0; its metadata omits this upper bound.
+# DSL 4.6.0; its metadata omits this upper bound. The bound can be lifted when
+# the FlashAttention submodule moves to a flash_attn_cute release that uses
+# neither API.
 FA4_DSL_REQUIREMENT = Requirement("nvidia-cutlass-dsl>=4.4.2,<4.6.0")
 
 # Must satisfy CUTEDSL_PAIRS and FA4_DSL_REQUIREMENT and match the FA4 CI pins.
