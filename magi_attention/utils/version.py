@@ -18,8 +18,6 @@ from packaging.version import Version
 
 from magi_attention.utils import backend_requirements
 
-__version__ = "1.0.0"
-
 
 def _parse(version: str, release_only: bool) -> tuple[int, ...] | Version:
     v = Version(version)
