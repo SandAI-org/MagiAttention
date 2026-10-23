@@ -26,7 +26,7 @@ from .fa2_interface_with_sink import (
 
 try:
     from .fa4_interface_with_sink import fa4_func_with_sink, fa4_varlen_func_with_sink
-except ImportError:
+except (ImportError, AttributeError):
     pass
 
 try:

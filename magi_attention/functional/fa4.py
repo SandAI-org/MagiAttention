@@ -17,30 +17,32 @@ import torch
 
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.meta.collection.calc_meta import AttnArg, FA4AttnArg
+from magi_attention.meta.collection.calc_meta import (
+    AttnArg,
+    FA4AttnArg,
+    check_fa4_installation,
+    is_fa4_installed,
+)
 
-try:
-    # CUTLASS package layout (ffa_fa3).
-    from flash_attn_cute.ffa_fa3.flash_attn_interface import (
-        _flash_attn_backward as _flash_attn_backward_cutlass,
-    )
-    from flash_attn_cute.ffa_fa3.flash_attn_interface import (
-        _flash_attn_forward as _flash_attn_forward_cutlass,
-    )
-except ImportError:
-    _has_cutlass_backend = False
-else:
-    _has_cutlass_backend = True
+_has_cutlass_backend = False
+_cutlass_import_error: BaseException | None = None
 
-try:
+if is_fa4_installed:
     # FFA_FA4 DSL interface.
     from flash_attn_cute.interface import _flash_attn_bwd, _flash_attn_fwd
-except ImportError:
-    _has_cute_backend = False
-else:
-    _has_cute_backend = True
 
-is_fa4_installed = _has_cutlass_backend or _has_cute_backend
+    # The SM80/SM90 backend is an optional, separately installed subpackage.
+    try:
+        from flash_attn_cute.ffa_fa3.flash_attn_interface import (
+            _flash_attn_backward as _flash_attn_backward_cutlass,
+        )
+        from flash_attn_cute.ffa_fa3.flash_attn_interface import (
+            _flash_attn_forward as _flash_attn_forward_cutlass,
+        )
+    except (ImportError, AttributeError) as exc:
+        _cutlass_import_error = exc
+    else:
+        _has_cutlass_backend = True
 
 
 def _use_cutlass_on_current_device() -> bool:
@@ -53,7 +55,7 @@ def _use_cutlass_on_current_device() -> bool:
     return cc_major in (8, 9)
 
 
-if _has_cute_backend and not _use_cutlass_on_current_device():
+if is_fa4_installed and not _use_cutlass_on_current_device():
     from .fa4_utils import load_precompiled_ffa_fa4
 
     load_precompiled_ffa_fa4()
@@ -66,7 +68,7 @@ def _should_use_cutlass_backend(device: torch.device) -> bool:
         if not _has_cutlass_backend:
             raise RuntimeError(
                 "Detected sm80/sm90 GPU, but cutlass backend (flash_attn_cute.ffa_fa3) "
-                "is not available."
+                f"is not available: {_cutlass_import_error!r}"
             )
         return True
     return False
@@ -133,7 +135,7 @@ def fa4_fwd(
     softcap: float = 0.0,
     sink_layout: AttnSinkLayout = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    assert is_fa4_installed, "FlashAttn4 is not installed"
+    check_fa4_installation()
     assert isinstance(attn_arg, FA4AttnArg), "FA4 is only supported for FA4AttnArg"
 
     # Get FA4 arguments
@@ -187,11 +189,6 @@ def fa4_fwd(
             k2q_block_sparse_full_idx=k2q_full_idx,
         )
     else:
-        if not _has_cute_backend:
-            raise RuntimeError(
-                "FA4 CUDA backend is not available for this architecture. "
-                "Need flash_attn_cute.interface for non-sm80/sm90 devices."
-            )
         out, lse = _flash_attn_fwd(
             q,
             k,
@@ -234,7 +231,7 @@ def fa4_bwd(
     sink_layout: AttnSinkLayout = "sh",
     deterministic: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    assert is_fa4_installed, "FA4 backend is not installed"
+    check_fa4_installation()
     assert sink is None, "FA4 backend does not support learnable sink"
     assert isinstance(attn_arg, FA4AttnArg), "FA4 is only supported for FA4AttnArg"
 
@@ -291,11 +288,6 @@ def fa4_bwd(
         dk = dk[..., : k.shape[-1]]
         dv = dv[..., : v.shape[-1]]
     else:
-        if not _has_cute_backend:
-            raise RuntimeError(
-                "FA4 CUDA backend is not available for this architecture. "
-                "Need flash_attn_cute.interface for non-sm80/sm90 devices."
-            )
         dq, dk, dv = _flash_attn_bwd(
             q=q,
             k=k,

@@ -29,21 +29,13 @@ from tqdm import tqdm
 
 from magi_attention.common import AttnRanges
 from magi_attention.env import ffa as ffa_env
-from magi_attention.meta.collection.calc_meta import FA4AttnArg
+from magi_attention.meta.collection.calc_meta import (
+    FA4AttnArg,
+    check_fa4_installation,
+    is_fa4_installed,
+)
 
 logger = logging.getLogger(__name__)
-
-try:
-    from flash_attn_cute.interface import (
-        _bwd_postprocess_convert,
-        _bwd_preprocess,
-        _flash_attn_bwd,
-        _flash_attn_fwd,
-    )
-except ImportError:
-    is_fa4_installed = False
-else:
-    is_fa4_installed = True
 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -59,18 +51,25 @@ _KERNEL_OBJ_FILE = "kernel_obj.o"
 _KERNEL_LIB_FILE = "kernel_lib.so"
 
 
-COMPILED_META_DICT = {
-    "fwd": {"cache_dict": _flash_attn_fwd.compile_cache},
-    "bwd": {"cache_dict": _flash_attn_bwd.compile_cache},
-    "bwd_pre": {"cache_dict": _bwd_preprocess.compile_cache},
-    "bwd_post": {"cache_dict": _bwd_postprocess_convert.compile_cache},
-}
+# Cache entry points must call check_fa4_installation before accessing these caches.
+if is_fa4_installed:
+    from flash_attn_cute.interface import (
+        _bwd_postprocess_convert,
+        _bwd_preprocess,
+        _flash_attn_bwd,
+        _flash_attn_fwd,
+    )
+
+    COMPILED_META_DICT = {
+        "fwd": {"cache_dict": _flash_attn_fwd.compile_cache},
+        "bwd": {"cache_dict": _flash_attn_bwd.compile_cache},
+        "bwd_pre": {"cache_dict": _bwd_preprocess.compile_cache},
+        "bwd_post": {"cache_dict": _bwd_postprocess_convert.compile_cache},
+    }
 
 
 def load_precompiled_ffa_fa4():
-    assert (
-        is_fa4_installed
-    ), "FlashAttn4 is not installed, cannot load pre-compiled kernels"
+    check_fa4_installation()
 
     logger.info(f"Loading pre-compiled FFA_FA4 kernels from {FFA_FA4_CACHE_DIR} ...")
 
@@ -305,7 +304,7 @@ def precompile_ffa_fa4(
     A rerun replaces the kernels of the grid in the cache dir. The kernels
     outside the grid stay in the cache dir.
     """
-    assert is_fa4_installed, "FlashAttn4 is not installed, cannot pre-compile kernels"
+    check_fa4_installation()
     assert num_workers >= 1, f"num_workers must be positive, got {num_workers}"
 
     configs: list[FA4PrecompileConfig] = [

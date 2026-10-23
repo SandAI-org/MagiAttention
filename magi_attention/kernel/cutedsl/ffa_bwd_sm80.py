@@ -25,7 +25,6 @@ from typing import Callable, Optional, Type
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.utils as utils_basic
 from cutlass import Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp
 
@@ -34,6 +33,7 @@ from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
+from .dsl_compat import SmemAllocator, get_smem_capacity_in_bytes
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .seqlen_info import SeqlenInfoQK
@@ -187,7 +187,7 @@ class FFABwdSm80:
             else (smem_usage_Q + smem_usage_V)
         )
         smem_usage = smem_usage_QV + smem_usage_dO + smem_usage_K
-        smem_capacity = utils_basic.get_smem_capacity_in_bytes(self.smem_capacity_arch)
+        smem_capacity = get_smem_capacity_in_bytes(self.smem_capacity_arch)
         if smem_usage > smem_capacity:
             raise ValueError(
                 f"SMEM usage {smem_usage} B exceeds {self.smem_capacity_arch} "
@@ -1005,7 +1005,7 @@ class FFABwdSm80:
             # Alloc smem storage and make smem tensors for sQ/sK/sV
             # ///////////////////////////////////////////////////////////////////////////////
 
-            smem = cutlass.utils.SmemAllocator()
+            smem = SmemAllocator()
             storage = smem.allocate(self.shared_storage_cls)
 
             # sQ/sdO: S<3,3,3> o 0 o ((ATOM_Q8,LAY_tileQ8),(ATOM_HD64,LAY_tileHD2),(1,1)):((64,512),(1,4096),(0,0))

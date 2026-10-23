@@ -25,13 +25,10 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
 from cutlass import Float32, Int32, Int64, const_expr, pipeline
-from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
-from cutlass.utils import LayoutEnum
 
 # isort: split
-import quack.activation
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
@@ -40,6 +37,14 @@ from . import pipeline as ffa_pipeline
 from . import sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
+from .dsl_compat import (
+    FastDivmodDivisor,
+    LayoutEnum,
+    SmemAllocator,
+    Tcgen05OperandMajorMode,
+    TmemAllocator,
+    make_trivial_tiled_mma,
+)
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwdSm100
@@ -260,8 +265,9 @@ class FFABwdSm100:
             self.num_regs_load = 104 if self.use_2cta_instrs else 96 - 8
             self.num_regs_mma = 104 if self.use_2cta_instrs else self.num_regs_load
         else:
-            self.num_regs_reduce = 136 if self.use_2cta_instrs else 136
-            self.num_regs_compute = 136 if self.use_2cta_instrs else 144
+            # Give 2-CTA compute more registers to limit spills within the CTA budget.
+            self.num_regs_reduce = 120 if self.use_2cta_instrs else 136
+            self.num_regs_compute = 144
             self.num_regs_load = 104 if self.use_2cta_instrs else 96 - 8
             self.num_regs_mma = 104 if self.use_2cta_instrs else self.num_regs_load
         self.num_regs_empty = 24
@@ -419,10 +425,11 @@ class FFABwdSm100:
         # TV Layout A:     (2,(128,16)):(128,(1,256))
         # TV Layout B:     (2,(64,16)):(64,(1,128))
         # TV Layout C:     (2,(128,128)):(128,(1,256))
-        tiled_mma_S = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_S = make_trivial_tiled_mma(
             self.q_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.K,
+            self.q_dtype,
+            Tcgen05OperandMajorMode.K,
+            Tcgen05OperandMajorMode.K,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_kq[:2],
@@ -438,10 +445,11 @@ class FFABwdSm100:
         # TV Layout A:     (2,(128,16)):(128,(1,256))
         # TV Layout B:     (2,(64,16)):(64,(1,128))
         # TV Layout C:     (2,(128,128)):(128,(1,256))
-        tiled_mma_dP = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dP = make_trivial_tiled_mma(
             self.do_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.K,
+            self.do_dtype,
+            Tcgen05OperandMajorMode.K,
+            Tcgen05OperandMajorMode.K,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_vdo[:2],
@@ -457,10 +465,11 @@ class FFABwdSm100:
         # TV Layout A:     (2,(128,16)):(128,(1,256))
         # TV Layout B:     (2,(64,16)):(64,(1,128))
         # TV Layout C:     (2,(128,128)):(128,(1,256))
-        tiled_mma_dV = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dV = make_trivial_tiled_mma(
             self.do_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.MN,
+            self.do_dtype,
+            Tcgen05OperandMajorMode.K,
+            Tcgen05OperandMajorMode.MN,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_pdo[:2],
@@ -477,10 +486,11 @@ class FFABwdSm100:
         # TV Layout A:     (2,(128,16)):(128,(1,256))
         # TV Layout B:     (2,(64,16)):(64,(1,128))
         # TV Layout C:     (2,(128,128)):(128,(1,256))
-        tiled_mma_dK = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dK = make_trivial_tiled_mma(
             self.do_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.MN,
+            self.do_dtype,
+            Tcgen05OperandMajorMode.K,
+            Tcgen05OperandMajorMode.MN,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_dsq[:2],
@@ -501,10 +511,11 @@ class FFABwdSm100:
         # TV Layout A:     (2,(64,16)):(64,(1,128))
         # TV Layout B:     (2,(64,16)):(64,(1,128))
         # TV Layout C:     (2,(64,128)):(64,(1,128))
-        tiled_mma_dQ = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dQ = make_trivial_tiled_mma(
             self.k_dtype,
-            tcgen05.OperandMajorMode.MN,
-            tcgen05.OperandMajorMode.MN,
+            self.k_dtype,
+            Tcgen05OperandMajorMode.MN,
+            Tcgen05OperandMajorMode.MN,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_dsk[:2],
@@ -523,7 +534,7 @@ class FFABwdSm100:
         # (64,32,2):  S<3,4,3> o 0 o ((8,8),(32,1),(1,2)):((32,256),(1,0),(0,2048))
         layout_atom = sm100_utils_basic.make_smem_layout_atom(
             sm100_utils_basic.get_smem_layout_atom_ab(
-                tcgen05.OperandMajorMode.K,
+                Tcgen05OperandMajorMode.K,
                 Float32,
                 (rows, ncols),
             ),
@@ -961,9 +972,9 @@ class FFABwdSm100:
             self.mdV_layout_enum = LayoutEnum.from_tensor(mdV)
             dK_major_mode = self.mdK_layout_enum.mma_major_mode()
             dV_major_mode = self.mdV_layout_enum.mma_major_mode()
-            if const_expr(dK_major_mode != tcgen05.OperandMajorMode.K):
+            if const_expr(dK_major_mode != Tcgen05OperandMajorMode.K):
                 raise RuntimeError("The layout of mdK is wrong")
-            if const_expr(dV_major_mode != tcgen05.OperandMajorMode.K):
+            if const_expr(dV_major_mode != Tcgen05OperandMajorMode.K):
                 raise RuntimeError("The layout of mdV is wrong")
 
         if const_expr(self.is_varlen_k and self.dKV_postprocess):
@@ -1319,18 +1330,18 @@ class FFABwdSm100:
                 # --- tmem ptr ---
 
                 # Tmem dealloc cluster mbarrier
-                tmem_dealloc_mbar_ptr: Int64
+                tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
                 # Tmem holding buffer ptr
-                tmem_holding_buf_ptr: Int32
+                tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
                 # --- 2-CTA mbarrier ptrs ---
 
                 Qt_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
                 Kt_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.single_stage]
-                dS_cluster_empty_mbar_ptr: cutlass.Int64
-                dS_cluster_full_mbar_ptr: cutlass.Int64
-                dS_cluster_leader_mbar_ptr: cutlass.Int64
-                dQacc_empty_mbar_ptr: cutlass.Int64
+                dS_cluster_empty_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
+                dS_cluster_full_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
+                dS_cluster_leader_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
+                dQacc_empty_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
 
                 # --- smem tensors ---
 
@@ -1414,9 +1425,9 @@ class FFABwdSm100:
                 # --- tmem ptr ---
 
                 # Tmem dealloc cluster mbarrier
-                tmem_dealloc_mbar_ptr: Int64
+                tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
                 # Tmem holding buffer ptr
-                tmem_holding_buf_ptr: Int32
+                tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
                 # --- smem tensors ---
 
@@ -1781,7 +1792,7 @@ class FFABwdSm100:
 
         # --- Alloc smem storage and fetch ptrs ---
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         storage = smem.allocate(self.shared_storage)
 
         # Cluster mbarrier ptrs
@@ -1789,10 +1800,10 @@ class FFABwdSm100:
         dQ_cluster_empty_mbar_ptr = storage.dQ_cluster_empty_mbar_ptr.data_ptr()
 
         if const_expr(self.use_2cta_instrs):
-            dS_cluster_full_mbar_ptr = storage.dS_cluster_full_mbar_ptr
-            dS_cluster_empty_mbar_ptr = storage.dS_cluster_empty_mbar_ptr
-            dS_cluster_leader_mbar_ptr = storage.dS_cluster_leader_mbar_ptr
-            dQacc_empty_mbar_ptr = storage.dQacc_empty_mbar_ptr
+            dS_cluster_full_mbar_ptr = storage.dS_cluster_full_mbar_ptr.data_ptr()
+            dS_cluster_empty_mbar_ptr = storage.dS_cluster_empty_mbar_ptr.data_ptr()
+            dS_cluster_leader_mbar_ptr = storage.dS_cluster_leader_mbar_ptr.data_ptr()
+            dQacc_empty_mbar_ptr = storage.dQacc_empty_mbar_ptr.data_ptr()
         else:
             dS_cluster_full_mbar_ptr = None
             dS_cluster_empty_mbar_ptr = None
@@ -1814,8 +1825,8 @@ class FFABwdSm100:
             Kt_mbar_ptr = storage.Kt_mbar_ptr.data_ptr()
 
         # tmem buf/dealloc ptrs
-        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
-        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr.data_ptr()
+        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr.data_ptr()
 
         # --- Cluster mbarrier initialization ---
 
@@ -1852,7 +1863,7 @@ class FFABwdSm100:
             num_threads=cute.arch.WARP_SIZE
             * len((self.mma_warp_id, *self.compute_warp_ids, *self.reduce_warp_ids)),
         )
-        tmem = cutlass.utils.TmemAllocator(
+        tmem = TmemAllocator(
             alloc_result_dst_smem_ptr=tmem_holding_buf_ptr,
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,
@@ -2502,9 +2513,13 @@ class FFABwdSm100:
         #  Reduce WarpGroup
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx >= self.reduce_warp_ids[0] and warp_idx <= self.reduce_warp_ids[-1]:
-            # --- Increase rmem usage ---
+            # --- Adjust rmem usage ---
 
-            cute.arch.setmaxregister_increase(self.num_regs_reduce)
+            # Reduce warps enter with 128 registers; lower budgets require decrease.
+            if const_expr(self.num_regs_reduce < 128):
+                cute.arch.setmaxregister_decrease(self.num_regs_reduce)
+            else:
+                cute.arch.setmaxregister_increase(self.num_regs_reduce)
 
             # --- Wait and retrieve tmem buffer ---
 
@@ -3803,17 +3818,19 @@ class FFABwdSm100:
             if process_tile:
                 # --- Producer tail ---
                 # Empty groups skip tail: the consumer never acquired those stages.
+                # Clone states passed only as arguments: the DSL does not export their
+                # updates from this dynamic region.
                 if const_expr(self.use_2cta_instrs and self.tile_hdim == 192):
-                    pipeline_Q.producer_tail(producer_state_Q_Qt)
-                    pipeline_LSE.producer_tail(producer_state_LSE)
-                    pipeline_dO.producer_tail(producer_state_O_Ot)
-                    pipeline_dPsum.producer_tail(producer_state_dPsum)
+                    pipeline_Q.producer_tail(producer_state_Q_Qt.clone())
+                    pipeline_LSE.producer_tail(producer_state_LSE.clone())
+                    pipeline_dO.producer_tail(producer_state_O_Ot.clone())
+                    pipeline_dPsum.producer_tail(producer_state_dPsum.clone())
                 else:
                     if const_expr(should_load_Q):
                         pipeline_Q.producer_tail(producer_state_Q_LSE.clone())
                         pipeline_LSE.producer_tail(producer_state_Q_LSE)
                         if const_expr(tma_atom_Qt is not None):
-                            pipeline_Qt.producer_tail(producer_state_Qt)
+                            pipeline_Qt.producer_tail(producer_state_Qt.clone())
                     if const_expr(should_load_dO):
                         pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
                         pipeline_dPsum.producer_tail(producer_state_dO_dPsum)
@@ -5503,7 +5520,7 @@ class FFABwdSm100:
                                 (
                                     tdPrdP_cur[2 * v],
                                     tdPrdP_cur[2 * v + 1],
-                                ) = quack.activation.sub_packed_f32x2(
+                                ) = cutedsl_utils.sub_packed_f32x2(
                                     (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                                     dPsum_pair,
                                 )
@@ -5929,7 +5946,7 @@ class FFABwdSm100:
                             (
                                 tdPrdP_cur[2 * v],
                                 tdPrdP_cur[2 * v + 1],
-                            ) = quack.activation.sub_packed_f32x2(
+                            ) = cutedsl_utils.sub_packed_f32x2(
                                 (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), dPsum_pair
                             )
                             (

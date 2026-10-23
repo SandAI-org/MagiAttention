@@ -25,7 +25,6 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Int32, const_expr
 from cutlass._mlir import ir
-from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.typing import Boolean
 from cutlass.cutlass_dsl import extract_mlir_values
 from cutlass.cutlass_dsl import min as dsl_min
@@ -41,6 +40,7 @@ from cutlass.utils.hardware_info import HardwareInfo
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
+from .dsl_compat import FastDivmodDivisor
 
 
 class SchedulingMode(IntEnum):

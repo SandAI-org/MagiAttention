@@ -22,11 +22,11 @@ from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout, MagiAttentionKernelBackend
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.env.general import is_profile_mode_enable, is_sanity_check_enable
-from magi_attention.meta.collection.calc_meta import FA4AttnArg
+from magi_attention.meta.collection.calc_meta import FA4AttnArg, check_fa4_installation
 from magi_attention.utils import nvtx
 
 from ._flex_flash_attn_jit import _snapshot_env, get_ffa_jit_mod
-from .fa4 import fa4_bwd, fa4_fwd, is_fa4_installed
+from .fa4 import fa4_bwd, fa4_fwd
 
 try:
     from magi_attention import magi_attn_ext  # type: ignore[attr-defined]
@@ -1673,10 +1673,7 @@ def flex_flash_attn_func(
     ), "Deterministic mode is not supported when bwd_inner_loop_k is True."
 
     if env.general.kernel_backend() == MagiAttentionKernelBackend.FA4:
-        assert is_fa4_installed, (
-            "FA4 backend is enabled (MAGI_ATTENTION_FA4_BACKEND=1), "
-            "but FlashAttn4 is not installed."
-        )
+        check_fa4_installation()
         _FA4_UNSUPPORTED = {
             "sink": sink is not None,
             "deterministic": deterministic,

@@ -25,9 +25,7 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.utils.hopper_helpers as sm90_utils_basic
 from cutlass import Boolean, Float32, Int32, const_expr, pipeline
-from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync, warpgroup
-from cutlass.utils import LayoutEnum
 from quack import copy_utils, layout_utils, sm90_utils
 from quack.cute_dsl_utils import ParamsBase
 from quack.sm90_utils import gemm_w_idx, gemm_zero_init
@@ -36,6 +34,12 @@ from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
+from .dsl_compat import (
+    FastDivmodDivisor,
+    LayoutEnum,
+    SmemAllocator,
+    WarpgroupOperandMajorMode,
+)
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwd
@@ -294,8 +298,8 @@ class FFABwdSm90:
         tiled_mma_SdP = sm90_utils_basic.make_trivial_tiled_mma(
             self.dtype,
             self.dtype,
-            warpgroup.OperandMajorMode.K,
-            warpgroup.OperandMajorMode.K,
+            WarpgroupOperandMajorMode.K,
+            WarpgroupOperandMajorMode.K,
             Float32,
             atom_layout_mnk=maybe_swap_mn(atom_layout_SdP, self.SdP_swapAB),
             tiler_mn=(64, tiler_mn_SdP[1] if not self.SdP_swapAB else tiler_mn_SdP[0]),
@@ -327,10 +331,10 @@ class FFABwdSm90:
             sm90_utils_basic.make_trivial_tiled_mma(
                 self.dtype,
                 self.dtype,
-                warpgroup.OperandMajorMode.MN
+                WarpgroupOperandMajorMode.MN
                 if not self.mma_dkv_is_rs
-                else warpgroup.OperandMajorMode.K,
-                warpgroup.OperandMajorMode.MN,
+                else WarpgroupOperandMajorMode.K,
+                WarpgroupOperandMajorMode.MN,
                 Float32,
                 atom_layout_mnk=maybe_swap_mn(atom_layout_dKV, self.dKV_swapAB),
                 tiler_mn=(64, tiler_mn_d[1] if not self.dKV_swapAB else tiler_mn_d[0]),
@@ -359,12 +363,12 @@ class FFABwdSm90:
         tiled_mma_dQ = sm90_utils_basic.make_trivial_tiled_mma(
             self.dtype,
             self.dtype,
-            warpgroup.OperandMajorMode.K
+            WarpgroupOperandMajorMode.K
             if not self.dQ_swapAB
-            else warpgroup.OperandMajorMode.MN,
-            warpgroup.OperandMajorMode.MN
+            else WarpgroupOperandMajorMode.MN,
+            WarpgroupOperandMajorMode.MN
             if not self.dQ_swapAB
-            else warpgroup.OperandMajorMode.K,
+            else WarpgroupOperandMajorMode.K,
             Float32,
             atom_layout_mnk=maybe_swap_mn(atom_layout_dQ, self.dQ_swapAB),
             tiler_mn=(64, tiler_mn_dQ[1] if not self.dQ_swapAB else tiler_mn_dQ[0]),
@@ -1057,7 +1061,7 @@ class FFABwdSm90:
 
         # --- Alloc smem storage and fetch ptrs ---
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         storage = smem.allocate(self.shared_storage_cls)
 
         # --- Make pipelines ---

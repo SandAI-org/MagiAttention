@@ -31,10 +31,8 @@ import cutlass.cute as cute
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
 from cutlass import Boolean, Float32, Int32, Int64, const_expr, pipeline
-from cutlass.base_dsl.arch import Arch
-from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync
-from cutlass.cutlass_dsl import BaseDSL
+from cutlass.cutlass_dsl import Arch, BaseDSL
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import ClcDynamicPersistentTileScheduler
 
@@ -47,6 +45,14 @@ from . import pipeline as ffa_pipeline
 from . import sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
+from .dsl_compat import (
+    FastDivmodDivisor,
+    LayoutEnum,
+    SmemAllocator,
+    Tcgen05OperandMajorMode,
+    TmemAllocator,
+    make_trivial_tiled_mma,
+)
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwdSm100
@@ -509,7 +515,8 @@ class FFAFwdSm100:
         if "ex2_emu_freq" in self._tune:
             self.enable_ex2_emu = self._tune["ex2_emu_freq"] > 0
         if self.head_dim_padded < 96:
-            self.num_regs_softmax = 200 if not paged_kv_non_tma else 184
+            # Favor interleaved exp2/conversion with 176 registers in hd64 softmax.
+            self.num_regs_softmax = 176 if not paged_kv_non_tma else 184
             self.num_regs_correction = 64
             self.num_regs_other = 48 if not paged_kv_non_tma else 80
         else:
@@ -901,10 +908,10 @@ class FFAFwdSm100:
 
         # --- Make tiled MMA for S=QK.T ---
 
-        q_major_mode = tcgen05.OperandMajorMode.K
-        k_major_mode = tcgen05.OperandMajorMode.K
-        v_major_mode = tcgen05.OperandMajorMode.MN  # V.T
-        self.o_layout = cutlass.utils.LayoutEnum.from_tensor(mO)
+        q_major_mode = Tcgen05OperandMajorMode.K
+        k_major_mode = Tcgen05OperandMajorMode.K
+        v_major_mode = Tcgen05OperandMajorMode.MN  # V.T
+        self.o_layout = LayoutEnum.from_tensor(mO)
 
         # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
         # Permutation MNK: (_,_,_)
@@ -914,7 +921,8 @@ class FFAFwdSm100:
         # TV Layout A:     (2,(128,16)):(128,(1,256))
         # TV Layout B:     (2,(64,16)):(64,(1,128))
         # TV Layout C:     (2,(128,128)):(128,(1,256))
-        tiled_mma_qk = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_qk = make_trivial_tiled_mma(
+            self.q_dtype,
             self.q_dtype,
             q_major_mode,
             k_major_mode,
@@ -939,7 +947,7 @@ class FFAFwdSm100:
 
         # the intermediate tensor p is from tmem & mK-major
         p_source = tcgen05.OperandSource.TMEM
-        p_major_mode = tcgen05.OperandMajorMode.K
+        p_major_mode = Tcgen05OperandMajorMode.K
 
         # Thr Layout VMNK: (2,1,1,1):(1,0,0,0)
         # Permutation MNK: (_,_,_)
@@ -949,7 +957,8 @@ class FFAFwdSm100:
         # TV Layout A:     (2,(128,16)):(128,(1,256))
         # TV Layout B:     (2,(64,16)):(64,(1,128))
         # TV Layout C:     (2,(128,128)):(128,(1,256))
-        tiled_mma_pv = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_pv = make_trivial_tiled_mma(
+            self.v_dtype,
             self.v_dtype,
             p_major_mode,
             v_major_mode,
@@ -1267,9 +1276,9 @@ class FFAFwdSm100:
             # --- tmem ptr ---
 
             # Tmem dealloc cluster mbarrier
-            tmem_dealloc_mbar_ptr: Int64
+            tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
             # Tmem holding buffer ptr
-            tmem_holding_buf_ptr: Int32
+            tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
             # --- smem tensors ---
             # row max and row sum for backward
@@ -1540,7 +1549,7 @@ class FFAFwdSm100:
 
         # --- Alloc smem storage and fetch ptrs ---
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         storage = smem.allocate(self.shared_storage)
 
         # Pipeline mbarrier ptrs
@@ -1554,8 +1563,8 @@ class FFAFwdSm100:
         mbar_O_epi = storage.mbar_O_epi.data_ptr()
 
         # tmem buf/dealloc ptrs
-        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr
-        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr
+        tmem_holding_buf_ptr = storage.tmem_holding_buf_ptr.data_ptr()
+        tmem_dealloc_mbar_ptr = storage.tmem_dealloc_mbar_ptr.data_ptr()
 
         # --- Alloc tmem alloc/dealloc barrier ---
 
@@ -1579,7 +1588,7 @@ class FFAFwdSm100:
                 )
             ),
         )
-        tmem = cutlass.utils.TmemAllocator(
+        tmem = TmemAllocator(
             alloc_result_dst_smem_ptr=tmem_holding_buf_ptr,
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,
@@ -4935,21 +4944,26 @@ class FFAFwdSm100:
         ptr_1, ptr_2, two_locks = self._range_lock_ptrs(
             mRangeLocks, head_idx, row_offset
         )
+        # Use LLVM pointers for cute.arch atomics across supported DSL versions.
         # Loop-carried spin state: the CAS must re-execute every iteration.
         acquired = cute.arch.atomic_cas(
-            ptr_1, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+            ptr_1.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
         )
         while acquired != 0:
             acquired = cute.arch.atomic_cas(
-                ptr_1, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+                ptr_1.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
             )
         if two_locks:
             acquired_2 = cute.arch.atomic_cas(
-                ptr_2, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+                ptr_2.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
             )
             while acquired_2 != 0:
                 acquired_2 = cute.arch.atomic_cas(
-                    ptr_2, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
+                    ptr_2.llvm_ptr,
+                    cmp=Int32(0),
+                    val=Int32(1),
+                    sem="acquire",
+                    scope="gpu",
                 )
 
     @cute.jit
@@ -4960,8 +4974,8 @@ class FFAFwdSm100:
             mRangeLocks, head_idx, row_offset
         )
         if two_locks:
-            cute.arch.atomic_exch(ptr_2, Int32(0), sem="release", scope="gpu")
-        cute.arch.atomic_exch(ptr_1, Int32(0), sem="release", scope="gpu")
+            cute.arch.atomic_exch(ptr_2.llvm_ptr, Int32(0), sem="release", scope="gpu")
+        cute.arch.atomic_exch(ptr_1.llvm_ptr, Int32(0), sem="release", scope="gpu")
 
     @cute.jit
     def correction_rescale(
@@ -5429,9 +5443,8 @@ class FFAFwdSm100:
             self.qhead_per_kvhead,
         )
 
-        # load acc O from smem to rmem for wider vectorization
+        # rmem staging of O for wider vectorization
         tOrO = cute.make_fragment_like(tOsO, self.o_dtype)
-        cute.autovec_copy(tOsO, tOrO)
 
         # --- Debug print ---
 
@@ -5460,6 +5473,10 @@ class FFAFwdSm100:
                     t0OcO[0, rest_m, 0][0]
                     < seqlen_q - m_tile_idx * self.m_block_size - tOcO[0][0]
                 ):
+                    # Limit register lifetimes to one row chunk to reduce spills.
+                    cute.autovec_copy(
+                        tOsO[None, rest_m, None], tOrO[None, rest_m, None]
+                    )
                     cute.copy(
                         gmem_tiled_copy_O,
                         tOrO[None, rest_m, None],
@@ -5469,6 +5486,8 @@ class FFAFwdSm100:
                         else None,
                     )
         else:
+            # PackGQA applies row predicates internally to a complete rmem fragment.
+            cute.autovec_copy(tOsO, tOrO)
             pack_gqa.store_O(
                 mO_cur, tOrO, gmem_tiled_copy_O, tidx, m_tile_idx, seqlen_q
             )

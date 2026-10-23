@@ -4,6 +4,7 @@
     "h100": {
       "runner_label": "h100",
       "test_environment": {
+        "CI_TEST_EXTENSIONS": "true",
         "MAGI_ATTENTION_JIT_COMPILE_DISABLED": "1",
         "MAGI_ATTENTION_TEST_BACKEND": "ffa,sdpa",
         "MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH": "0",
@@ -14,10 +15,24 @@
     "b300": {
       "runner_label": "b300",
       "test_environment": {
+        "CI_TEST_EXTENSIONS": "false",
+        "MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED": "1",
+        "MAGI_ATTENTION_JIT_COMPILE_DISABLED": "1",
+        "MAGI_ATTENTION_TEST_BACKEND": "cutedsl,sdpa",
+        "MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH": "0",
+        "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/"
+      }
+    },
+    "b300_fa4": {
+      "runner_label": "b300",
+      "test_environment": {
+        "CI_TEST_EXTENSIONS": "true",
+        "MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED": "1",
         "MAGI_ATTENTION_JIT_COMPILE_DISABLED": "1",
         "MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS": "sm100",
-        "MAGI_ATTENTION_TEST_BACKEND": "fa4,cutedsl,sdpa",
+        "MAGI_ATTENTION_TEST_BACKEND": "fa4,cutedsl",
         "MAGI_ATTENTION_TEST_PRINT_NO_MISMATCH": "0",
+        "PIP_CONSTRAINT": ".github/configs/ci_constraints.txt",
         "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/"
       }
     }

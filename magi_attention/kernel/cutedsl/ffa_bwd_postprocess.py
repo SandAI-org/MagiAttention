@@ -30,8 +30,7 @@ import cutlass.utils.blackwell_helpers as sm100_utils_basic
 import cutlass.utils.hopper_helpers as sm90_utils_basic
 import torch
 from cutlass import Float32, const_expr
-from cutlass.cute.nvgpu import cpasync, warp, warpgroup
-from cutlass.utils import LayoutEnum
+from cutlass.cute.nvgpu import cpasync, warp
 
 # isort: split
 from quack import copy_utils, layout_utils, sm90_utils
@@ -40,6 +39,13 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
 from .cache_utils import get_jit_cache
+from .dsl_compat import (
+    LayoutEnum,
+    SmemAllocator,
+    Tcgen05OperandMajorMode,
+    WarpgroupOperandMajorMode,
+    make_trivial_tiled_mma,
+)
 from .ffa_utils import make_fake_bwd_tensors
 from .seqlen_info import SeqlenInfoQK
 from .tile_scheduler import (
@@ -135,8 +141,8 @@ class FFABwdPostProcess:
             tiled_mma = sm90_utils_basic.make_trivial_tiled_mma(
                 self.dtype,
                 self.dtype,
-                warpgroup.OperandMajorMode.K,  # These don't matter, we only care about the accum
-                warpgroup.OperandMajorMode.K,
+                WarpgroupOperandMajorMode.K,  # These don't matter, we only care about the accum
+                WarpgroupOperandMajorMode.K,
                 Float32,
                 atom_layout_mnk=(
                     atom_layout_dQ if not self.dQ_swapAB else atom_layout_dQ[::-1]
@@ -146,10 +152,11 @@ class FFABwdPostProcess:
             )
         else:
             cta_group = tcgen05.CtaGroup.ONE
-            tiled_mma = sm100_utils_basic.make_trivial_tiled_mma(
+            tiled_mma = make_trivial_tiled_mma(
                 self.dtype,
-                tcgen05.OperandMajorMode.MN,  # dS_major_mode
-                tcgen05.OperandMajorMode.MN,  # Kt_major_mode
+                self.dtype,
+                Tcgen05OperandMajorMode.MN,  # dS_major_mode
+                Tcgen05OperandMajorMode.MN,  # Kt_major_mode
                 Float32,
                 cta_group,
                 (self.tile_m, self.tile_hdim),
@@ -369,7 +376,7 @@ class FFABwdPostProcess:
         # ///////////////////////////////////////////////////////////////////////////////
         # Get shared memory buffer
         # ///////////////////////////////////////////////////////////////////////////////
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         sdQaccum = smem.allocate_tensor(
             cutlass.Float32, sdQaccum_layout, byte_alignment=1024
         )
@@ -477,7 +484,7 @@ class FFABwdPostProcess:
                 g2s_thr_copy = tiled_copy_accum.get_slice(tidx)
 
                 # S -> R
-                tdQrdQ_fp32 = cute.make_fragment(tdQrdQ.shape, cutlass.Float32)
+                tdQrdQ_fp32 = cute.make_rmem_tensor(tdQrdQ.shape, cutlass.Float32)
                 tdQrdQ_s2r = cute.make_tensor(tdQrdQ_fp32.iterator, tdQrdQ_fp32.shape)
 
                 smem_copy_atom = sm100_utils_basic.get_smem_store_op(

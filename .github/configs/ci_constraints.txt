@@ -1,0 +1,3 @@
+# Shared by wheel builds and b300_fa4; flash_attn_cute requires DSL < 4.6.0.
+nvidia-cutlass-dsl==4.4.2
+quack-kernels==0.4.1

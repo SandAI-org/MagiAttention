@@ -17,6 +17,9 @@ from typing import Any
 SCHEMA_VERSION = 1
 PLATFORM_RE = re.compile(r"[a-z][a-z0-9_-]*")
 ENV_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
+# Test profiles in matrix order; multiple profiles may share a runner label.
+PLATFORMS = ("h100", "b300", "b300_fa4")
+RUNNER_LABELS = frozenset({"h100", "b300"})
 
 
 class ConfigurationError(ValueError):
@@ -38,8 +41,10 @@ def load_config() -> dict[str, Any]:
     if data["schema_version"] != SCHEMA_VERSION:
         raise ConfigurationError(f"schema_version must be {SCHEMA_VERSION}")
     platforms = data["platforms"]
-    if not isinstance(platforms, dict) or set(platforms) != {"h100", "b300"}:
-        raise ConfigurationError("platforms must define exactly h100 and b300")
+    if not isinstance(platforms, dict) or set(platforms) != set(PLATFORMS):
+        raise ConfigurationError(
+            f"platforms must define exactly {', '.join(PLATFORMS)}"
+        )
     for name, profile in platforms.items():
         if not PLATFORM_RE.fullmatch(name):
             raise ConfigurationError(f"invalid platform name: {name!r}")
@@ -50,8 +55,10 @@ def load_config() -> dict[str, Any]:
             raise ConfigurationError(
                 f"platform {name} must define runner_label and test_environment"
             )
-        if profile["runner_label"] != name:
-            raise ConfigurationError(f"platform {name} runner_label must be {name!r}")
+        if profile["runner_label"] not in RUNNER_LABELS:
+            raise ConfigurationError(
+                f"platform {name} runner_label must be one of {sorted(RUNNER_LABELS)}"
+            )
         environment = profile["test_environment"]
         if not isinstance(environment, dict):
             raise ConfigurationError(
@@ -74,16 +81,41 @@ def platform_profile(platform: str) -> dict[str, Any]:
         raise ConfigurationError(f"unsupported CI platform: {platform}") from exc
 
 
-def enabled_platforms() -> list[str]:
+def test_environment(platform: str) -> dict[str, str]:
+    """Return profile variables, preserving inherited PIP_CONSTRAINT files.
+
+    Reapplying the profile must not duplicate its constraint file.
+    """
+    environment = dict(platform_profile(platform)["test_environment"])
+    profile_constraint = environment.get("PIP_CONSTRAINT")
+    inherited = os.environ.get("PIP_CONSTRAINT", "").split()
+    if profile_constraint is not None and inherited:
+        if profile_constraint not in inherited:
+            inherited.append(profile_constraint)
+        environment["PIP_CONSTRAINT"] = " ".join(inherited)
+    return environment
+
+
+def enabled_platforms(platforms: dict[str, Any]) -> list[str]:
+    """Omit disabled B300 profiles so jobs do not wait for an unavailable runner."""
     enabled = os.environ.get("B300_CI_ENABLED", "false").strip().lower()
     if enabled not in {"true", "false"}:
         raise ConfigurationError("B300_CI_ENABLED must be 'true' or 'false'")
-    return ["h100", "b300"] if enabled == "true" else ["h100"]
+    return [
+        platform
+        for platform in PLATFORMS
+        if enabled == "true" or platforms[platform]["runner_label"] != "b300"
+    ]
 
 
 def matrix() -> dict[str, list[dict[str, str]]]:
-    load_config()
-    return {"include": [{"platform": platform} for platform in enabled_platforms()]}
+    platforms = load_config()["platforms"]
+    return {
+        "include": [
+            {"platform": platform, "runner_label": platforms[platform]["runner_label"]}
+            for platform in enabled_platforms(platforms)
+        ]
+    }
 
 
 def main() -> None:
@@ -110,9 +142,7 @@ def main() -> None:
                 )
             )
         elif args.command == "environment":
-            for name, value in sorted(
-                platform_profile(args.platform)["test_environment"].items()
-            ):
+            for name, value in sorted(test_environment(args.platform).items()):
                 print(f"{name}={value}")
     except ConfigurationError as exc:
         raise SystemExit(str(exc)) from exc

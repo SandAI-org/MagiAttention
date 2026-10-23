@@ -28,7 +28,8 @@ from magi_attention.functional.utils import (
 
 try:
     from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
-except ImportError:
+except (ImportError, AttributeError):
+    # Removed DSL APIs can raise AttributeError during flash_attn.cute imports.
     is_fa4_installed = False
 else:
     is_fa4_installed = True

@@ -28,6 +28,8 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cutlass_dsl import T, dsl_user_op
 
+from .dsl_compat import Tcgen05OperandMajorMode
+
 # ---------------------------------------------------------------------------
 # Enumerations that match the HW encodings (values MUST stay identical)
 # ---------------------------------------------------------------------------
@@ -206,12 +208,8 @@ def mma_op_to_idesc(op: cute.nvgpu.tcgen05.mma.MmaOp):
         op.acc_dtype,
         op.shape_mnk[0],
         op.shape_mnk[1],
-        Major.K
-        if op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
-        else Major.MN,
-        Major.K
-        if op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
-        else Major.MN,
+        Major.K if op.a_major_mode == Tcgen05OperandMajorMode.K else Major.MN,
+        Major.K if op.b_major_mode == Tcgen05OperandMajorMode.K else Major.MN,
     )
 
 
@@ -478,9 +476,7 @@ def gemm_ptx(
                 cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
                 sA_swizzle,
                 Major.K
-                if const_expr(
-                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
-                )
+                if const_expr(op.a_major_mode == Tcgen05OperandMajorMode.K)
                 else Major.MN,
             )
         )
@@ -496,7 +492,7 @@ def gemm_ptx(
             cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
             sB_swizzle,
             Major.K
-            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            if const_expr(op.b_major_mode == Tcgen05OperandMajorMode.K)
             else Major.MN,
         )
     )
@@ -596,9 +592,7 @@ def gemm_ptx_loop(
                 cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
                 sA_swizzle,
                 Major.K
-                if const_expr(
-                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
-                )
+                if const_expr(op.a_major_mode == Tcgen05OperandMajorMode.K)
                 else Major.MN,
             )
         )
@@ -614,7 +608,7 @@ def gemm_ptx_loop(
             cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
             sB_swizzle,
             Major.K
-            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            if const_expr(op.b_major_mode == Tcgen05OperandMajorMode.K)
             else Major.MN,
         )
     )
@@ -773,9 +767,7 @@ def gemm_ptx_partial(
                 cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
                 sA_swizzle,
                 Major.K
-                if const_expr(
-                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
-                )
+                if const_expr(op.a_major_mode == Tcgen05OperandMajorMode.K)
                 else Major.MN,
             )
         )
@@ -791,7 +783,7 @@ def gemm_ptx_partial(
             cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
             sB_swizzle,
             Major.K
-            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            if const_expr(op.b_major_mode == Tcgen05OperandMajorMode.K)
             else Major.MN,
         )
     )
@@ -1012,9 +1004,7 @@ def gemm_ptx_partial1(
                 cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
                 sA_swizzle,
                 Major.K
-                if const_expr(
-                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
-                )
+                if const_expr(op.a_major_mode == Tcgen05OperandMajorMode.K)
                 else Major.MN,
             )
         )
@@ -1029,7 +1019,7 @@ def gemm_ptx_partial1(
             cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
             sB_swizzle,
             Major.K
-            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            if const_expr(op.b_major_mode == Tcgen05OperandMajorMode.K)
             else Major.MN,
         )
     )

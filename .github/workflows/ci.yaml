@@ -64,6 +64,7 @@ jobs:
               - '.github/configs/ci_platforms.json'
               - '.github/configs/ci_input_policy.json'
               - '.github/configs/ci_dependencies.json'
+              - '.github/configs/ci_constraints.txt'
               - '.github/workflows/ci.yaml'
               - '.github/configs/base_image_tag.txt'
               - '.github/scripts/**'
@@ -143,6 +144,9 @@ jobs:
         run: bash .github/scripts/verify_task_runner.sh
       - name: Apply platform environment
         run: python .github/scripts/ci_platforms.py environment "$TASK_CI_PLATFORM" >> "$GITHUB_ENV"
+      - name: Pin the CuTeDSL pair for the build
+        # Wheel fingerprints omit Python dependency versions, so pin the CuTeDSL pair.
+        run: echo "PIP_CONSTRAINT=${PIP_CONSTRAINT:+$PIP_CONSTRAINT }.github/configs/ci_constraints.txt" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: bash .github/scripts/run_build_tests.sh install
       - name: Build wheels
@@ -174,7 +178,7 @@ jobs:
       matrix: ${{ fromJSON(needs.plan_platforms.outputs.matrix) }}
     # Approval trusts the reviewed PR code with job secrets and shared-cache access.
     environment: ${{ github.event_name == 'pull_request_target' && 'ci-internal' || '' }}
-    runs-on: [ci-spot-job, "${{ matrix.platform }}"]
+    runs-on: [ci-spot-job, "${{ matrix.runner_label }}"]
     env:
       TASK_CI_PLATFORM: ${{ matrix.platform }}
       GIT_CONFIG_COUNT: '1'
