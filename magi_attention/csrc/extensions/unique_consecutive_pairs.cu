@@ -14,6 +14,7 @@
  * limitations under the License.
  *********************************************************************************/
 
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include <cub/device/device_scan.cuh>
@@ -62,21 +63,6 @@ __global__ void gather_uniques(const IntPair* sorted_pairs, const int* d_flags, 
   }
 }
 
-/**
- * @brief Sets the last element of an array to a specific value.
- * The index at which to write is provided by a pointer to a device integer.
- * This kernel is intended to be launched with a single block and a single thread.
- *
- * @param d_array The device array to modify.
- * @param d_index A device pointer to an integer that holds the index where the value should be written.
- * @param value The integer value to write.
- */
-__global__ void set_last_element(int* d_array, const int* d_index, int value) {
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
-    d_array[*d_index] = value;
-  }
-}
-
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs_ext(torch::Tensor sorted_input_tensor) {
   // check input tensor
   TORCH_CHECK(sorted_input_tensor.is_cuda(), "Input tensor must be a CUDA tensor");
@@ -92,6 +78,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
         torch::empty({0}, sorted_input_tensor.options().dtype(torch::kInt32))};
   }
 
+  // Every launch goes to the caller's current stream so the kernels order
+  // with the torch ops around them and can be captured into a CUDA graph.
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+
   // d_flags(i): whether the input tensor value is the first unique value at idx i.
   // d_write_indices(i):
   auto d_flags = torch::empty({n}, sorted_input_tensor.options().dtype(torch::kInt32));
@@ -105,7 +95,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
   // --- Pass 1: flag the unique_value ---
   int threadsPerBlock = 256;
   int blocksPerGrid = (n + threadsPerBlock - 1) / threadsPerBlock;
-  mark_uniques<<<blocksPerGrid, threadsPerBlock>>>(d_sorted_pairs_ptr, d_flags.data_ptr<int>(), n);
+  mark_uniques<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(d_sorted_pairs_ptr, d_flags.data_ptr<int>(), n);
   CHECK_CUDA_KERNEL_LAUNCH();
 
   // --- Pass 2: compute unique_count and exclusive_sum from d_flags  ---
@@ -116,38 +106,33 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
   cuda::std::plus<> scan_op;
   int initial_value = 0;
 
-  cub::DeviceScan::ExclusiveScan(d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n);
+  cub::DeviceScan::ExclusiveScan(
+      d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n, stream);
   auto d_temp_storage_tensor = torch::empty({(long)temp_storage_bytes_scan}, sorted_input_tensor.options().dtype(torch::kByte));
   // Get the raw pointer from this byte tensor. It now points to a memory block of the exact required size.
   d_temp_storage_scan = d_temp_storage_tensor.data_ptr();
-  cub::DeviceScan::ExclusiveScan(d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n);
+  cub::DeviceScan::ExclusiveScan(
+      d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n, stream);
   CHECK_CUDA_KERNEL_LAUNCH();
 
   // --- out elements ---
-  int h_unique_n = n; // set elements to total_element_num to avoid sync between cpu and gpu.
-
-  // d_unique_pairs_out: The unique out tensor, elements with index >= d_unique_count_out are undefined value.
-  // d_unique_indices_out: Original indices of the unique items
-  // Allocate n+1 for d_unique_indices_out to hold the final element.
-  auto d_unique_pairs_out = torch::empty({h_unique_n, 2}, sorted_input_tensor.options());
-  auto d_unique_indices_out = torch::empty({h_unique_n + 1}, sorted_input_tensor.options().dtype(torch::kInt32));
+  // Both outputs keep the full length n so the unique count U never has to be
+  // read back to the host. Callers walk all n groups, so the tail must be empty
+  // groups: pairs[U:n] = [0, 0] and indices[U:n+1] = n (the CSR end, written
+  // at indices[U] as well). An uninitialized tail hands them arbitrary ranges.
+  int h_unique_n = n;
+  auto d_unique_pairs_out = torch::zeros({h_unique_n, 2}, sorted_input_tensor.options());
+  auto d_unique_indices_out = torch::full({h_unique_n + 1}, n, sorted_input_tensor.options().dtype(torch::kInt32));
 
   // ---  Pass 3: Gather the unique items and their original indices ---
   if (h_unique_n > 0) {
     int* unique_pairs_out_ptr = d_unique_pairs_out.data_ptr<int>();
     IntPair* d_unique_out_ptr = reinterpret_cast<IntPair*>(unique_pairs_out_ptr);
 
-    gather_uniques<<<blocksPerGrid, threadsPerBlock>>>(
+    gather_uniques<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
         d_sorted_pairs_ptr, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), d_unique_out_ptr, d_unique_indices_out.data_ptr<int>(), n);
     CHECK_CUDA_KERNEL_LAUNCH();
   }
-
-  // --- Pass 4: Append the total length `n` to d_unique_indices_out ---
-  // This makes calculating the size of each consecutive group easier on the caller side.
-  // The size of group `i` is then `unique_indices[i+1] - unique_indices[i]`.
-  // The value of d_unique_count_out (on the device) is the index where we need to write `n`.
-  set_last_element<<<1, 1>>>(d_unique_indices_out.data_ptr<int>(), d_unique_count_out.data_ptr<int>(), n);
-  CHECK_CUDA_KERNEL_LAUNCH();
 
   return {d_unique_pairs_out, d_unique_indices_out, d_unique_count_out};
 }
