@@ -35,8 +35,10 @@ FAIL, and also on any GAP unless MAGI_ATTENTION_TEST_SM100_INDEX_ALLOW_GAPS=1
 Structure:
   TestIndexSparseBwdSm100Sweep              — sm90 Classic sweep: q_seqlen × kv_seqlen × topk
   TestIndexSparseBwdSm100ComprehensiveSweep — sm90 Comprehensive sweep: head_config × head_dim × kbs
-  TestIndexSparseBwdSm100Harness            — the adapter's multi-kv-head refold, and that the
-                                              comparison rejects wrong gradients
+  TestIndexSparseBwdSm100Harness            — the adapter's multi-kv-head refold, q-head groups
+                                              whose q blocks straddle the 128-row Q tile, q
+                                              blocks of several tokens (sm90 q_block_size > 1),
+                                              and that the comparison rejects wrong gradients
 
 Not ported from the sm90 test:
   - inner_dir / inner_load_mode / inner_store_mode / swap_bwd_qk_loop: sm90
@@ -121,12 +123,18 @@ def _run_index_sparse_config(
     default_max = max(topk) if isinstance(topk, list) else topk
     max_topk = cfg.get("max_topk", default_max)
     sparse_k_block_size = cfg.get("sparse_k_block_size", 1)
+    # q tokens per index row (the sm90 q_block_size); the sm90 test always uses 1
+    q_block_size = cfg.get("q_block_size", 1)
     dtype = cfg.get("dtype", torch.bfloat16)
     atol = cfg.get("atol", DEFAULT_FWD_ATOL)
     bwd_atol = cfg.get("bwd_atol", DEFAULT_BWD_DQ_ATOL)
     # The sm90 test flattens kv heads into the sequence; keep_kv_heads feeds
     # the kernel num_heads_kv > 1 instead (sm90 accepts both).
     flatten_kv_heads = not cfg.get("keep_kv_heads", False)
+    # Flattening interleaves kv heads into the token axis, which would split a
+    # q block of real tokens across index rows.
+    assert q_block_size == 1 or NHK == 1 or not flatten_kv_heads
+    assert S_q % q_block_size == 0
 
     q = torch.randn(B, S_q, NHQ, D, dtype=dtype, device=device)
     k = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
@@ -141,10 +149,11 @@ def _run_index_sparse_config(
         NHQ = NHQ // NHK
         NHK = 1
 
+    # (B * S_q / q_block_size, NHK, max_topk): one row per q block
     index_sparse_indices = build_index_sparse_indices(
         B,
         NHK,
-        S_q,
+        S_q // q_block_size,
         S_kv,
         topk,
         max_topk,
@@ -163,6 +172,7 @@ def _run_index_sparse_config(
         k_ffa,
         v_ffa,
         index_sparse_indices,
+        q_block_size=q_block_size,
         sparse_k_block_size=sparse_k_block_size,
     )
     do = torch.randn_like(out)
@@ -170,7 +180,7 @@ def _run_index_sparse_config(
     test_case = (
         f"[NHQ={cfg['NHQ']},NHK={cfg['NHK']},S_q={cfg.get('S_q', cfg.get('S'))},"
         f"S_kv={cfg.get('S_kv', cfg.get('S'))},"
-        f"B={B},D={D},topk={topk},max_topk={max_topk},"
+        f"B={B},D={D},topk={topk},max_topk={max_topk},q_block_size={q_block_size},"
         f"sparse_k_block_size={sparse_k_block_size},dtype={dtype},"
         f"flat:NHQ_eff={NHQ},NHK_eff={NHK},S_q_eff={S_q},S_kv_eff={S_kv}]"
     )
@@ -184,11 +194,13 @@ def _run_index_sparse_config(
         do,
         lse,
         index_sparse_indices,
+        q_block_size=q_block_size,
         sparse_k_block_size=sparse_k_block_size,
     )
 
+    # The mask builder takes one index row per q token
     sdpa_mask = get_sdpa_mask_from_index_sparse_indices(
-        index_sparse_indices,
+        index_sparse_indices.repeat_interleave(q_block_size, dim=0),
         B,
         NHQ,
         NHK,
@@ -434,6 +446,56 @@ class TestIndexSparseBwdSm100Harness(unittest.TestCase):
             "keep_kv_heads": True,
         }
         _run_index_sparse_config(self.device, config)
+
+    def test_refold_small_group_keeps_multiple_kv_heads(self):
+        """num_heads_kv = 2 with 4 q heads each: 32 q blocks share one Q tile, via a copy."""
+        config = {
+            "B": 1,
+            "S": 256,
+            "NHQ": 8,
+            "NHK": 2,
+            "D": 128,
+            "topk": 128,
+            "keep_kv_heads": True,
+        }
+        _run_index_sparse_config(self.device, config)
+
+    def test_q_head_group_straddles_q_tile(self):
+        """Groups that neither divide nor are multiples of 128: q blocks cross tile edges."""
+        for nhq in (48, 192):
+            with self.subTest(nhq=nhq):
+                config = {
+                    "B": 1,
+                    "S": 256,
+                    "NHQ": nhq,
+                    "NHK": 1,
+                    "D": 128,
+                    "topk": 128,
+                }
+                _run_index_sparse_config(self.device, config)
+
+    def test_q_block_of_tokens_shares_indices(self):
+        """sm90 q_block_size > 1: q_block_size * group rows share one index row.
+
+        16 x 8 fills one 128-row Q tile exactly; 4 x 8 puts four q blocks in a tile.
+        """
+        for q_block_size, nhq, nhk, keep_kv_heads in (
+            (16, 8, 1, False),
+            (16, 16, 2, True),
+            (4, 8, 1, False),
+        ):
+            with self.subTest(q_block_size=q_block_size, nhq=nhq, nhk=nhk):
+                config = {
+                    "B": 1,
+                    "S": 256,
+                    "NHQ": nhq,
+                    "NHK": nhk,
+                    "D": 128,
+                    "topk": 128,
+                    "q_block_size": q_block_size,
+                    "keep_kv_heads": keep_kv_heads,
+                }
+                _run_index_sparse_config(self.device, config)
 
     def test_comparison_rejects_dk_on_wrong_rows(self):
         """A PASS must mean something: dK scattered one K row off has to fail."""

@@ -24,14 +24,18 @@ kernel through ``ffa_bwd_sm100_index_sm90_layout``, the adapter that
 
 Scenarios (``SCENARIOS``) extend the sm90 bench (MQA128, D=128, topk=2048)
 with the axes of the sm90 IndexSparse test: head_dim 64, GQA / MHA (kv heads
-flattened into the sequence as that test does) and sparse_k_block_size > 1.
+flattened into the sequence as that test does) and sparse_k_block_size > 1,
+plus q_block_size > 1 (``qbs`` consecutive q tokens share one index row; then
+the ``qbs`` per-block ids are drawn once per block instead of once per token).
 Combinations SM100 cannot serve yet report N/A (the ``Sm100IndexGap`` names are
 printed) and start reporting numbers once the gap is closed.
 
 Methods (BWD only — SM100 has no IndexSparse forward; out / lse are computed
 once, outside the timed region, by the Triton forward or the fp32 reference):
   - ffa_sm100_index      : ffa_bwd_sm100_index (preprocess + main kernel + postprocess)
-  - triton_token_sparse  : Triton token-sparse backward (autograd), MQA tl.dot
+  - triton_token_sparse  : Triton token-sparse backward (autograd), MQA tl.dot; with
+                           qbs > 1 each q block's tokens are folded into its heads
+                           (the sm90 view trick), which computes the same function
   - flexattention        : FlexAttention backward on the 128x128 block mask
 
 Reporting effective sparse TFLOPs/s: 2.5 * 4 * S * topk_tokens * nhq * hd.
@@ -92,9 +96,16 @@ class IndexSparseScenario:
     nhq: int
     nhk: int
     hd: int
-    # index entries per q token: K tokens when kbs == 1, K blocks of kbs tokens otherwise
+    # index entries per q block: K tokens when kbs == 1, K blocks of kbs tokens otherwise
     topk: int
     kbs: int = 1
+    # q tokens per index row (the sm90 q_block_size)
+    qbs: int = 1
+
+    def __post_init__(self):
+        # Flattening interleaves kv heads into the token axis, which would split
+        # a q block of real tokens across index rows.
+        assert self.qbs == 1 or self.nhk == 1, "qbs > 1 needs nhk == 1"
 
     @property
     def topk_tokens(self) -> int:
@@ -104,6 +115,11 @@ class IndexSparseScenario:
     def nhq_flat(self) -> int:
         """q heads per token once kv heads are flattened into the sequence."""
         return self.nhq // self.nhk
+
+    @property
+    def nhq_triton(self) -> int:
+        """q heads per Triton row once a q block's tokens are folded into heads."""
+        return self.qbs * self.nhq_flat
 
 
 SCENARIOS: dict[str, IndexSparseScenario] = {
@@ -120,6 +136,10 @@ SCENARIOS: dict[str, IndexSparseScenario] = {
     ),
     "mqa128_hd128_kbs128_topk16": IndexSparseScenario(
         nhq=128, nhk=1, hd=128, topk=16, kbs=128
+    ),
+    # 16 tokens x 8 q heads = 128 rows share one index row: one full SM100 Q tile
+    "gqa8x1_qbs16_hd128_topk2048": IndexSparseScenario(
+        nhq=8, nhk=1, hd=128, topk=2048, qbs=16
     ),
 }
 
@@ -179,7 +199,7 @@ class FlatInputs:
     q: torch.Tensor  # (S * nhk, nhq_flat, hd)
     k: torch.Tensor  # (S * nhk, 1, hd)
     v: torch.Tensor  # (S * nhk, 1, hd)
-    indices: torch.Tensor  # (S * nhk, 1, topk): K token or K block ids
+    indices: torch.Tensor  # (S * nhk / qbs, 1, topk): K token or K block ids
 
 
 def make_flat_inputs(sc: IndexSparseScenario, S: int, device) -> FlatInputs:
@@ -188,13 +208,13 @@ def make_flat_inputs(sc: IndexSparseScenario, S: int, device) -> FlatInputs:
     k = torch.randn(total, 1, sc.hd, device=device, dtype=dtype)
     v = torch.randn(total, 1, sc.hd, device=device, dtype=dtype)
     indices = build_index_sparse_indices(
-        b, S * sc.nhk, 1, sc.topk, device, num_k_ids=S * sc.nhk // sc.kbs
+        b, S * sc.nhk // sc.qbs, 1, sc.topk, device, num_k_ids=S * sc.nhk // sc.kbs
     )
     return FlatInputs(q=q, k=k, v=v, indices=indices)
 
 
 def token_ids_2d(inp: FlatInputs, kbs: int) -> torch.Tensor:
-    """(total_q, topk_tokens) K token ids, K blocks expanded to their tokens."""
+    """(num_q_blocks, topk_tokens) K token ids, K blocks expanded to their tokens."""
     ids = inp.indices[:, 0, :]
     if kbs == 1:
         return ids
@@ -202,9 +222,14 @@ def token_ids_2d(inp: FlatInputs, kbs: int) -> torch.Tensor:
     return (ids[..., None] * kbs + offsets).flatten(-2).contiguous()
 
 
+def fold_q_block(x: torch.Tensor, qbs: int) -> torch.Tensor:
+    """(total_q, nh, ...) -> (total_q / qbs, qbs * nh, ...): a q block's tokens become heads."""
+    return x.reshape(x.shape[0] // qbs, qbs * x.shape[1], *x.shape[2:])
+
+
 def triton_unsupported_reason(sc: IndexSparseScenario) -> str | None:
-    if sc.nhq_flat < TRITON_MIN_HEADS_Q:
-        return f"q heads per token {sc.nhq_flat} < {TRITON_MIN_HEADS_Q}"
+    if sc.nhq_triton < TRITON_MIN_HEADS_Q:
+        return f"q heads per Triton row {sc.nhq_triton} < {TRITON_MIN_HEADS_Q}"
     if sc.hd not in TRITON_HEAD_DIMS:
         return f"head_dim {sc.hd} not in {TRITON_HEAD_DIMS}"
     return None
@@ -215,11 +240,21 @@ def forward_out_lse(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """out / lse for the backward: Triton forward when it applies, fp32 reference otherwise."""
     if triton_unsupported_reason(sc) is None:
-        return token_sparse_fwd(
-            inp.q, inp.k, inp.v, token_ids_2d(inp, sc.kbs), return_lse=True
+        out, lse = token_sparse_fwd(
+            fold_q_block(inp.q, sc.qbs),
+            inp.k,
+            inp.v,
+            token_ids_2d(inp, sc.kbs),
+            return_lse=True,
         )
+        return out.reshape(inp.q.shape), lse.reshape(inp.q.shape[:2])
     return index_sparse_ref_fwd(
-        inp.q, inp.k, inp.v, inp.indices, sparse_k_block_size=sc.kbs
+        inp.q,
+        inp.k,
+        inp.v,
+        inp.indices,
+        q_block_size=sc.qbs,
+        sparse_k_block_size=sc.kbs,
     )
 
 
@@ -227,12 +262,7 @@ def forward_out_lse(
 
 
 def ffa_sm100_unsupported_reason(sc: IndexSparseScenario) -> str | None:
-    gaps = sm100_index_bwd_gaps(
-        head_dim=sc.hd,
-        num_heads_q=sc.nhq_flat,
-        num_heads_kv=1,
-        sparse_k_block_size=sc.kbs,
-    )
+    gaps = sm100_index_bwd_gaps(head_dim=sc.hd, sparse_k_block_size=sc.kbs)
     return ",".join(g.name for g in gaps) if gaps else None
 
 
@@ -255,7 +285,7 @@ def ref_bwd_grads(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """fp32 autograd gather reference: a repeated K id is attended twice."""
     q, k, v = (t.detach().float().requires_grad_(True) for t in (inp.q, inp.k, inp.v))
-    ids = token_ids_2d(inp, sc.kbs).long()
+    ids = token_ids_2d(inp, sc.kbs).long().repeat_interleave(sc.qbs, dim=0)
     k_sel, v_sel = k[ids, 0], v[ids, 0]
     s = torch.einsum("thd,tkd->thk", q, k_sel) / math.sqrt(sc.hd)
     o = torch.einsum("thk,tkd->thd", torch.softmax(s, dim=-1), v_sel)
@@ -286,6 +316,7 @@ def sanity_check(
             hd=sc.hd,
             topk=max(1, 128 // sc.kbs),
             kbs=sc.kbs,
+            qbs=sc.qbs,
         )
         set_random_seed(SEED)
         inp = make_flat_inputs(sc_check, S_check, device)
@@ -309,17 +340,19 @@ def sanity_check(
                         do,
                         lse,
                         inp.indices,
+                        q_block_size=sc_check.qbs,
                         sparse_k_block_size=sc_check.kbs,
                     )
                 else:
                     q, k, v = (
                         t.detach().clone().requires_grad_(True)
-                        for t in (inp.q, inp.k, inp.v)
+                        for t in (fold_q_block(inp.q, sc_check.qbs), inp.k, inp.v)
                     )
                     token_sparse_attn(
                         q, k, v, token_ids_2d(inp, sc_check.kbs)
-                    ).backward(do)
-                    grads = (q.grad, k.grad, v.grad)
+                    ).backward(fold_q_block(do, sc_check.qbs))
+                    assert q.grad is not None
+                    grads = (q.grad.reshape(inp.q.shape), k.grad, v.grad)
                 errs = [
                     ((g.float() - r).abs().max() / r.abs().max()).item()
                     for g, r in zip(grads, ref)
@@ -377,12 +410,16 @@ def bwd_benchmark(S, method, scenario, sanity_failed):
                 do,
                 lse,
                 inp.indices,
+                q_block_size=sc.qbs,
                 sparse_k_block_size=sc.kbs,
             )
 
         elif method == "triton_token_sparse":
             inp = make_flat_inputs(sc, S, device)
-            q, k, v = (t.requires_grad_(True) for t in (inp.q, inp.k, inp.v))
+            q, k, v = (
+                t.detach().requires_grad_(True)
+                for t in (fold_q_block(inp.q, sc.qbs), inp.k, inp.v)
+            )
             out = token_sparse_attn(q, k, v, token_ids_2d(inp, sc.kbs))
             do = torch.randn_like(out)
 
@@ -449,7 +486,7 @@ def make_bwd_configs(
                 # also the output dir name: no newline / spaces
                 plot_name=(
                     f"index-sparse-bwd-sm100-nhq{sc.nhq}-nhk{sc.nhk}-hd{sc.hd}"
-                    f"-topk{sc.topk}-kbs{sc.kbs}"
+                    f"-topk{sc.topk}-kbs{sc.kbs}-qbs{sc.qbs}"
                 ),
                 args={
                     "scenario": name,

@@ -14,10 +14,11 @@
 
 """Agile harness for ``ffa_bwd_sm100_index`` (SM100 DSA backward).
 
-Every q block of 128 tokens attends, per kv head, to its own ``topk`` K tokens
-(``index_sparse_indices`` of shape ``(ceil(total_q / 128), num_heads_kv, topk)``,
--1 padded at the tail). ``correct`` runs the fp64 reference forward over the
-dense mask built from the indices; ``bench`` uses a chunked gather forward.
+Every q block of ``q_block_size`` tokens (128 unless a case sets it) attends,
+per kv head, to its own ``topk`` K tokens (``index_sparse_indices`` of shape
+``(ceil(total_q / q_block_size), num_heads_kv, topk)``, -1 padded at the tail).
+``correct`` runs the fp64 reference forward over the dense mask built from the
+indices; ``bench`` uses a chunked gather forward.
 Backward always uses ``ffa_bwd_sm100_index``.
 
 Usage (from the repo root):
@@ -67,8 +68,8 @@ _GRAD_RTOL = {
 _GRAD_RTOL_DEFAULT = {"dq": 0.2, "dk": 0.08, "dv": 0.05}
 
 
-def _num_q_blocks(total_q: int) -> int:
-    return (total_q + TILE_M - 1) // TILE_M
+def _num_q_blocks(total_q: int, q_block_size: int = TILE_M) -> int:
+    return (total_q + q_block_size - 1) // q_block_size
 
 
 def _build_indices(
@@ -79,10 +80,11 @@ def _build_indices(
     var_len: bool,
     seed: int,
     device: str,
+    q_block_size: int = TILE_M,
 ) -> torch.Tensor:
     """Distinct sorted K ids per (q block, kv head); ``var_len`` -1 pads a random tail."""
     gen = torch.Generator(device=device).manual_seed(seed)
-    num_rows = _num_q_blocks(total_q) * NUM_HEADS_KV
+    num_rows = _num_q_blocks(total_q, q_block_size) * NUM_HEADS_KV
     keys = torch.rand(num_rows, total_k, generator=gen, device=device)
     ids = keys.topk(topk, dim=-1, largest=False).indices.sort(dim=-1).values
     if var_len:
@@ -97,7 +99,9 @@ def _build_dense_indices(total_q: int, total_k: int, device: str) -> torch.Tenso
     return ids.expand(_num_q_blocks(total_q), NUM_HEADS_KV, total_k).contiguous()
 
 
-def _build_mask(indices: torch.Tensor, total_q: int, total_k: int) -> torch.Tensor:
+def _build_mask(
+    indices: torch.Tensor, total_q: int, total_k: int, q_block_size: int = TILE_M
+) -> torch.Tensor:
     """(num_heads_q, total_q, total_k) bool mask equivalent to ``indices``."""
     num_q_blocks, num_heads_kv, _ = indices.shape
     # -1 padding scatters into a dropped extra column
@@ -109,7 +113,7 @@ def _build_mask(indices: torch.Tensor, total_q: int, total_k: int) -> torch.Tens
     mask_kv = (
         mask_blk[..., :total_k]
         .permute(1, 0, 2)
-        .repeat_interleave(TILE_M, dim=1)[:, :total_q]
+        .repeat_interleave(q_block_size, dim=1)[:, :total_q]
     )
     return mask_kv.repeat_interleave(NUM_HEADS_Q // num_heads_kv, dim=0)
 
@@ -230,6 +234,7 @@ def _run_case(
     dense: bool = False,
     valid_lengths: tuple[int, ...] | None = None,
     unsorted: bool = False,
+    q_block_size: int = TILE_M,
 ) -> None:
     """fp64 reference forward, new backward, check grads against the fp64 reference."""
     device = "cuda"
@@ -243,7 +248,13 @@ def _run_case(
         indices = _build_dense_indices(total_q, total_k, device)
     else:
         indices = _build_indices(
-            total_q, total_k, topk, var_len=var_len, seed=0, device=device
+            total_q,
+            total_k,
+            topk,
+            var_len=var_len,
+            seed=0,
+            device=device,
+            q_block_size=q_block_size,
         )
     if unsorted:
         # Reverse valid ids before padding: legal indices need not be sorted.
@@ -253,7 +264,7 @@ def _run_case(
         rows = torch.arange(indices.shape[0] * NUM_HEADS_KV, device=device)
         lengths = lengths[rows % len(valid_lengths)].view(-1, NUM_HEADS_KV, 1)
         indices = torch.where(torch.arange(topk, device=device) < lengths, indices, -1)
-    mask = _build_mask(indices, total_q, total_k)
+    mask = _build_mask(indices, total_q, total_k, q_block_size)
 
     out, meta = ref_attn_func(
         q=q,
@@ -283,6 +294,7 @@ def _run_case(
         dq=torch.full_like(q, float("nan")),
         dk=torch.full_like(k, float("nan")),
         dv=torch.full_like(v, float("nan")),
+        q_block_size=q_block_size,
     )
 
     dq_hi, dk_hi, dv_hi = _ref_grads(
@@ -320,7 +332,7 @@ def smoke() -> None:
 
 
 def correct() -> None:
-    """Fixed / padded / ragged / dense-equivalent indices, bf16 and fp16."""
+    """Fixed / padded / ragged / dense-equivalent indices and q_block_size != 128, bf16 and fp16."""
     for dtype in (torch.bfloat16, torch.float16):
         # topk a multiple of tile_n, all ids valid
         _run_case("q1024_k1024_topk256", 1024, 1024, 256, dtype)
@@ -340,6 +352,38 @@ def correct() -> None:
         #     unsorted=True,
         # )
         _run_case("all_empty_tail_q", 129, 193, 128, dtype, valid_lengths=(0,))
+        # q_block_size < tile_m: 128 q blocks per Q tile, empty and partial segments
+        _run_case(
+            "q1000_k1024_topk128_qbs1",
+            1000,
+            1024,
+            128,
+            dtype,
+            valid_lengths=(0, 63, 64, 65, 128),
+            q_block_size=1,
+        )
+        # 32 q blocks per Q tile, partial last q block
+        _run_case("q1022_k1024_topk128_qbs4", 1022, 1024, 128, dtype, q_block_size=4)
+        # q blocks straddle Q tile edges (48 neither divides nor is a multiple of 128)
+        _run_case(
+            "q1000_k1500_topk200_qbs48",
+            1000,
+            1500,
+            200,
+            dtype,
+            valid_lengths=(0, 64, 129, 200),
+            q_block_size=48,
+        )
+        # q_block_size > tile_m, not a multiple: some Q tiles hold two q blocks
+        _run_case(
+            "q1000_k1024_topk256_qbs192",
+            1000,
+            1024,
+            256,
+            dtype,
+            valid_lengths=(256, 100, 0, 190),
+            q_block_size=192,
+        )
 
 
 def _time_ms(fn: Callable[[], object], warmup: int, iters: int) -> float:
