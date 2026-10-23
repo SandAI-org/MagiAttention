@@ -54,14 +54,14 @@ class FFAFwdPostProcess:
         self,
         mO: cute.Tensor,
         mLSE: cute.Tensor,
-        mSink: Optional[cute.Tensor] = None,
+        mLSESink: Optional[cute.Tensor] = None,
         stream: cuda.CUstream = None,
     ):
-        assert (mSink is not None) == self.has_sink
+        assert (mLSESink is not None) == self.has_sink
         total_q = mO.shape[0]
         num_head = mO.shape[1]
         grid = (cute.ceil_div(total_q, self.tile_m), num_head, 1)
-        self.kernel(mO, mLSE, mSink).launch(
+        self.kernel(mO, mLSE, mLSESink).launch(
             grid=grid, block=[self.tile_m, 1, 1], stream=stream
         )
 
@@ -70,7 +70,7 @@ class FFAFwdPostProcess:
         self,
         mO: cute.Tensor,
         mLSE: cute.Tensor,
-        mSink: Optional[cute.Tensor],
+        mLSESink: Optional[cute.Tensor],
     ):
         tidx = cute.arch.thread_idx()[0]
         block, head_idx = cute.arch.block_idx()[0], cute.arch.block_idx()[1]
@@ -83,9 +83,8 @@ class FFAFwdPostProcess:
 
             o_scale = Float32(0.0)
             if const_expr(self.has_sink):
-                assert mSink is not None
-                # One sink logit per head: lse_sink = log(exp(sink)) = sink.
-                lse_sink = Float32(mSink[head_idx])
+                assert mLSESink is not None
+                lse_sink = Float32(mLSESink[head_idx])
                 LOG2_E = math.log2(math.e)
                 LN2 = math.log(2.0)
                 lse_final = lse_sink
@@ -102,19 +101,25 @@ class FFAFwdPostProcess:
                     o_scale = cute.math.exp2((lse - lse_final) * LOG2_E, fastmath=True)
                 mLSE[row, head_idx] = lse_final
 
-            if is_empty or const_expr(self.has_sink):
-                gO_row = mO[row, head_idx, None]
-                num_vecs = self.head_dim_v // self.vec_elems
+            gO_row = mO[row, head_idx, None]
+            num_vecs = self.head_dim_v // self.vec_elems
+            if is_empty:
+                # Store zeros without reading O: an uncovered row's O is
+                # uninitialized and may hold NaN/Inf, which a 0 scale keeps.
                 for i in cutlass.range(num_vecs, unroll_full=True):
                     gO_vec = cute.local_tile(gO_row, (self.vec_elems,), (i,))
                     rO = cute.make_rmem_tensor((self.vec_elems,), self.o_dtype)
-                    if const_expr(self.has_sink):
+                    rO.fill(0)
+                    cute.autovec_copy(rO, gO_vec)
+            if const_expr(self.has_sink):
+                if not is_empty:
+                    for i in cutlass.range(num_vecs, unroll_full=True):
+                        gO_vec = cute.local_tile(gO_row, (self.vec_elems,), (i,))
+                        rO = cute.make_rmem_tensor((self.vec_elems,), self.o_dtype)
                         cute.autovec_copy(gO_vec, rO)
                         for j in cutlass.range(self.vec_elems, unroll_full=True):
                             rO[j] = self.o_dtype(Float32(rO[j]) * o_scale)
-                    else:
-                        rO.fill(0)
-                    cute.autovec_copy(rO, gO_vec)
+                        cute.autovec_copy(rO, gO_vec)
 
 
 def _compile_fwd_postprocess(
@@ -134,16 +139,14 @@ def _compile_fwd_postprocess(
         div = 128 // o_dtype.width
         mO = fake_tensor(o_dtype, (total_q, num_head, head_dim_v), divisibility=div)
         mLSE = fake_tensor(Float32, (total_q, num_head), divisibility=1)
-        mSink = (
-            fake_tensor(cutlass.BFloat16, (num_head,), divisibility=1)
-            if has_sink
-            else None
+        mLSESink = (
+            fake_tensor(Float32, (num_head,), divisibility=1) if has_sink else None
         )
         cache[cache_key] = cute.compile(
             obj,
             mO,
             mLSE,
-            mSink,
+            mLSESink,
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi",
         )
@@ -153,11 +156,16 @@ def _compile_fwd_postprocess(
 def fwd_postprocess(
     out: torch.Tensor,
     lse: torch.Tensor,
-    sink: torch.Tensor | None,
+    lse_sink: torch.Tensor | None,
 ) -> None:
-    """In-place: zero O rows whose LSE is -inf, fold the sink into O/LSE."""
-    compiled = _compile_fwd_postprocess(out.dtype, out.shape[-1], sink is not None)
-    compiled(out, lse, sink)
+    """In-place: zero O rows whose LSE is -inf, fold the sink into O/LSE.
+
+    ``lse_sink`` is fp32 ``[num_head]``: each head's log-sum-exp over its sink
+    logits.
+    """
+    assert lse_sink is None or lse_sink.dtype == torch.float32
+    compiled = _compile_fwd_postprocess(out.dtype, out.shape[-1], lse_sink is not None)
+    compiled(out, lse, lse_sink)
 
 
 fwd_postprocess.compile_cache = get_jit_cache("ffa_fwd_postprocess")
