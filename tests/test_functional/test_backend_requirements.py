@@ -16,16 +16,20 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
+from unittest import TestCase, mock
 
-import pytest
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
+from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 from magi_attention.meta.collection import calc_meta
+from magi_attention.testing import parameterize
 from magi_attention.utils import backend_requirements
 from magi_attention.utils.backend_requirements import (
     CUTEDSL_DSL_REQUIREMENT,
@@ -68,17 +72,18 @@ def _requirements_txt() -> dict[str, Requirement]:
     return requirements
 
 
-@pytest.fixture
-def fake_installed_versions(monkeypatch):
-    def install(dsl: str | None, quack: str | None) -> None:
-        monkeypatch.setattr(
-            backend_requirements, "installed_versions", lambda: (dsl, quack)
-        )
-
+@contextmanager
+def _fake_installed_versions(dsl: str | None, quack: str | None) -> Iterator[None]:
+    """Report ``(dsl, quack)`` as the installed pair within the context."""
     # Isolate cached successful checks between cases.
     check_cutedsl_installation.cache_clear()
-    yield install
-    check_cutedsl_installation.cache_clear()
+    try:
+        with mock.patch.object(
+            backend_requirements, "installed_versions", lambda: (dsl, quack)
+        ):
+            yield
+    finally:
+        check_cutedsl_installation.cache_clear()
 
 
 def _run_in_fresh_interpreter(code: str) -> dict:
@@ -112,97 +117,6 @@ def _versions_at_the_bounds(*specifier_sets: SpecifierSet) -> set[Version]:
     return versions
 
 
-def test_version_constants_are_consistent():
-    requirements = _requirements_txt()
-    for constant in (CUTEDSL_DSL_REQUIREMENT, CUTEDSL_QUACK_REQUIREMENT):
-        listed = requirements[constant.name]
-        assert listed.specifier == constant.specifier
-        assert listed.extras == constant.extras
-
-    dsl_range = requirements[CUTEDSL_DSL_REQUIREMENT.name].specifier
-    quack_range = requirements[CUTEDSL_QUACK_REQUIREMENT.name].specifier
-    for pair_spec, range_spec in [
-        *((dsl_spec, dsl_range) for dsl_spec, _ in CUTEDSL_PAIRS),
-        *((quack_spec, quack_range) for _, quack_spec in CUTEDSL_PAIRS),
-    ]:
-        # Check bounds, exclusions, and adjacent patch releases.
-        operators = {spec.operator for spec in pair_spec}
-        assert operators & {">=", ">", "=="}, f"{pair_spec} has no lower bound"
-        assert operators & {"<=", "<", "=="}, f"{pair_spec} has no upper bound"
-        for version in _versions_at_the_bounds(pair_spec, range_spec):
-            if pair_spec.contains(version):
-                assert range_spec.contains(version), (pair_spec, version, range_spec)
-
-    assert CUTEDSL_UPGRADE_COMMAND == EXPECTED_UPGRADE_COMMAND
-    newest_dsl_spec, newest_quack_spec = CUTEDSL_PAIRS[-1]
-    assert newest_dsl_spec.contains("4.8.0")
-    assert newest_quack_spec.contains("0.6.5")
-
-    tested_dsl, tested_quack = FA4_TESTED_PAIR
-    assert FA4_DSL_REQUIREMENT.specifier.contains(tested_dsl)
-    assert any(
-        dsl_spec.contains(tested_dsl) and quack_spec.contains(tested_quack)
-        for dsl_spec, quack_spec in CUTEDSL_PAIRS
-    )
-
-    # The fa4 install advice must match the pair tested in CI.
-    pins = {}
-    for line in CI_CONSTRAINTS_TXT.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            requirement = Requirement(line)
-            (spec,) = requirement.specifier
-            assert spec.operator == "==", line
-            pins[canonicalize_name(requirement.name)] = Version(spec.version)
-    assert pins == {
-        canonicalize_name(CUTEDSL_DSL_REQUIREMENT.name): tested_dsl,
-        canonicalize_name(CUTEDSL_QUACK_REQUIREMENT.name): tested_quack,
-    }
-
-
-@pytest.mark.parametrize(
-    "dsl, quack",
-    [
-        ("4.8.0", "0.4.1"),
-        ("4.5.0", "0.6.5"),
-        ("4.6.0", "0.6.4"),
-        ("4.8.1", "0.6.5"),
-        # Individually supported releases can form an unsupported pair.
-        ("4.6.2", "0.6.5"),
-        ("4.7.0", "0.6.4"),
-        ("4.4.2", "0.6.4"),
-        ("4.6.2", "0.4.1"),
-        (None, None),
-        ("4.8.0", None),
-        (None, "0.6.5"),
-    ],
-)
-def test_check_rejects_a_pair_outside_the_table(fake_installed_versions, dsl, quack):
-    fake_installed_versions(dsl, quack)
-    with pytest.raises(CuteDslRequirementError) as excinfo:
-        check_cutedsl_installation()
-    message = str(excinfo.value)
-    assert EXPECTED_UPGRADE_COMMAND in message
-    assert f"nvidia-cutlass-dsl {dsl or 'not installed'}" in message
-    assert f"quack-kernels {quack or 'not installed'}" in message
-    assert str(CUTEDSL_DSL_REQUIREMENT) in message
-    assert str(CUTEDSL_QUACK_REQUIREMENT) in message
-
-
-@pytest.mark.parametrize(
-    "dsl, quack",
-    [
-        ("4.8.0", "0.6.5"),
-        ("4.7.0", "0.6.5"),
-        ("4.4.2", "0.4.1"),
-        ("4.6.2", "0.6.4"),
-    ],
-)
-def test_check_accepts_a_pair_in_the_table(fake_installed_versions, dsl, quack):
-    fake_installed_versions(dsl, quack)
-    assert check_cutedsl_installation() == (dsl, quack)
-
-
 CUTEDSL_VERSION_PREDICATES = {
     "==": is_cutedsl_version_eq,
     "!=": is_cutedsl_version_ne,
@@ -213,160 +127,258 @@ CUTEDSL_VERSION_PREDICATES = {
 }
 
 
-@pytest.mark.parametrize(
-    "dsl, quack, version, release_only, holds",
-    [
-        ("4.6.2", "0.6.4", "4.6.2", True, {"==", ">=", "<="}),
-        ("4.6.2", "0.6.4", "4.6.1", True, {"!=", ">=", ">"}),
-        ("4.6.2", "0.6.4", "4.7.0", True, {"!=", "<=", "<"}),
-        # release_only compares numeric tuples, including their length.
-        ("4.6.2", "0.6.4", "4.6", True, {"!=", ">=", ">"}),
-        ("4.7.0.post1", "0.6.5", "4.7.0", True, {"==", ">=", "<="}),
-        ("4.7.0.post1", "0.6.5", "4.7.0", False, {"!=", ">=", ">"}),
-        # Version predicates also reject unsupported pairs.
-        ("4.6.0", "0.6.4", "4.5.0", True, CuteDslRequirementError),
-    ],
-)
-def test_cutedsl_version_predicates(
-    fake_installed_versions, dsl, quack, version, release_only, holds
-):
-    fake_installed_versions(dsl, quack)
-    if holds is CuteDslRequirementError:
-        for predicate in CUTEDSL_VERSION_PREDICATES.values():
-            with pytest.raises(CuteDslRequirementError):
-                predicate(version, release_only=release_only)
-        return
-    assert {
-        operator
-        for operator, predicate in CUTEDSL_VERSION_PREDICATES.items()
-        if predicate(version, release_only=release_only)
-    } == holds
+class TestBackendRequirements(TestCase):
+    def test_version_constants_are_consistent(self):
+        requirements = _requirements_txt()
+        for constant in (CUTEDSL_DSL_REQUIREMENT, CUTEDSL_QUACK_REQUIREMENT):
+            listed = requirements[constant.name]
+            assert listed.specifier == constant.specifier
+            assert listed.extras == constant.extras
 
+        dsl_range = requirements[CUTEDSL_DSL_REQUIREMENT.name].specifier
+        quack_range = requirements[CUTEDSL_QUACK_REQUIREMENT.name].specifier
+        for pair_spec, range_spec in [
+            *((dsl_spec, dsl_range) for dsl_spec, _ in CUTEDSL_PAIRS),
+            *((quack_spec, quack_range) for _, quack_spec in CUTEDSL_PAIRS),
+        ]:
+            # Check bounds, exclusions, and adjacent patch releases.
+            operators = {spec.operator for spec in pair_spec}
+            assert operators & {">=", ">", "=="}, f"{pair_spec} has no lower bound"
+            assert operators & {"<=", "<", "=="}, f"{pair_spec} has no upper bound"
+            for version in _versions_at_the_bounds(pair_spec, range_spec):
+                if pair_spec.contains(version):
+                    assert range_spec.contains(version), (
+                        pair_spec,
+                        version,
+                        range_spec,
+                    )
 
-def test_import_checks_the_pair_before_importing_quack():
-    # Block the fa4 probe so imported module versions cannot override test metadata.
-    child = "\n".join(
+        assert CUTEDSL_UPGRADE_COMMAND == EXPECTED_UPGRADE_COMMAND
+        newest_dsl_spec, newest_quack_spec = CUTEDSL_PAIRS[-1]
+        assert newest_dsl_spec.contains("4.8.0")
+        assert newest_quack_spec.contains("0.6.5")
+
+        tested_dsl, tested_quack = FA4_TESTED_PAIR
+        assert FA4_DSL_REQUIREMENT.specifier.contains(tested_dsl)
+        assert any(
+            dsl_spec.contains(tested_dsl) and quack_spec.contains(tested_quack)
+            for dsl_spec, quack_spec in CUTEDSL_PAIRS
+        )
+
+        # The fa4 install advice must match the pair tested in CI.
+        pins = {}
+        for line in CI_CONSTRAINTS_TXT.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                requirement = Requirement(line)
+                (spec,) = requirement.specifier
+                assert spec.operator == "==", line
+                pins[canonicalize_name(requirement.name)] = Version(spec.version)
+        assert pins == {
+            canonicalize_name(CUTEDSL_DSL_REQUIREMENT.name): tested_dsl,
+            canonicalize_name(CUTEDSL_QUACK_REQUIREMENT.name): tested_quack,
+        }
+
+    @parameterize(
+        "installed",
         [
-            "import importlib.metadata, importlib.util, json, sys",
-            "sys.modules['flash_attn_cute'] = None",
-            "fake = {'nvidia-cutlass-dsl': '4.8.0', 'quack-kernels': '0.4.1'}",
-            "real = importlib.metadata.version",
-            "importlib.metadata.version = lambda name: fake.get(name) or real(name)",
-            "result = {'origin': importlib.util.find_spec('magi_attention').origin}",
-            "try:",
-            "    import magi_attention",
-            "except Exception as exc:",
-            "    result['error'] = type(exc).__module__ + '.' + type(exc).__qualname__",
-            "    result['message'] = str(exc)",
-            "result['quack_imported'] = 'quack' in sys.modules",
-            "result['kernel_imported'] = 'magi_attention.kernel.cutedsl.ffa_utils' in sys.modules",
-            "print(json.dumps(result))",
-        ]
+            ("4.8.0", "0.4.1"),
+            ("4.5.0", "0.6.5"),
+            ("4.6.0", "0.6.4"),
+            ("4.8.1", "0.6.5"),
+            # Individually supported releases can form an unsupported pair.
+            ("4.6.2", "0.6.5"),
+            ("4.7.0", "0.6.4"),
+            ("4.4.2", "0.6.4"),
+            ("4.6.2", "0.4.1"),
+            (None, None),
+            ("4.8.0", None),
+            (None, "0.6.5"),
+        ],
     )
-    result = _run_in_fresh_interpreter(child)
-    assert result["origin"] == magi_attention.__file__, result
-    assert result.get("error") == (
-        "magi_attention.utils.backend_requirements.CuteDslRequirementError"
-    ), result
-    assert EXPECTED_UPGRADE_COMMAND in result["message"]
-    assert result["quack_imported"] is False
-    assert result["kernel_imported"] is False
+    def test_check_rejects_a_pair_outside_the_table(self, installed):
+        dsl, quack = installed
+        with _fake_installed_versions(dsl, quack):
+            with self.assertRaises(CuteDslRequirementError) as raised:
+                check_cutedsl_installation()
+        message = str(raised.exception)
+        assert EXPECTED_UPGRADE_COMMAND in message
+        assert f"nvidia-cutlass-dsl {dsl or 'not installed'}" in message
+        assert f"quack-kernels {quack or 'not installed'}" in message
+        assert str(CUTEDSL_DSL_REQUIREMENT) in message
+        assert str(CUTEDSL_QUACK_REQUIREMENT) in message
 
-
-@pytest.mark.parametrize("quack_error", ["ImportError", "AttributeError"])
-def test_import_reports_the_pair_when_the_fa4_probe_fails_in_quack(quack_error):
-    # The fa4 probe can fail in quack before the pair check runs.
-    # quack 0.5.0 ensures rejection regardless of the installed DSL version.
-    child = "\n".join(
+    @parameterize(
+        "installed",
         [
-            "import importlib.metadata, importlib.util, json, sys",
-            "result = {'origin': importlib.util.find_spec('magi_attention').origin}",
-            "class FlashAttnCuteWithBrokenQuack:",
-            "    def find_spec(self, name, path=None, target=None):",
-            "        if name == 'quack':",
-            f"            raise {quack_error}('quack does not match cutlass')",
-            "        if name == 'flash_attn_cute':",
-            "            result['flash_attn_cute_imported'] = True",
-            "            import cutlass",
-            "            import quack",
-            "sys.meta_path.insert(0, FlashAttnCuteWithBrokenQuack())",
-            "fake = {'quack-kernels': '0.5.0'}",
-            "real = importlib.metadata.version",
-            "importlib.metadata.version = lambda name: fake.get(name) or real(name)",
-            "try:",
-            "    import magi_attention",
-            "except Exception as exc:",
-            "    result['error'] = type(exc).__module__ + '.' + type(exc).__qualname__",
-            "    result['message'] = str(exc)",
-            "result['cutlass_imported'] = 'cutlass' in sys.modules",
-            "result['quack_imported'] = 'quack' in sys.modules",
-            "result['kernel_imported'] = 'magi_attention.kernel.cutedsl.ffa_utils' in sys.modules",
-            "print(json.dumps(result))",
-        ]
+            ("4.8.0", "0.6.5"),
+            ("4.7.0", "0.6.5"),
+            ("4.4.2", "0.4.1"),
+            ("4.6.2", "0.6.4"),
+        ],
     )
-    result = _run_in_fresh_interpreter(child)
-    assert result["origin"] == magi_attention.__file__, result
-    assert result.get("error") == (
-        "magi_attention.utils.backend_requirements.CuteDslRequirementError"
-    ), result
-    assert "quack-kernels 0.5.0" in result["message"]
-    assert EXPECTED_UPGRADE_COMMAND in result["message"]
-    assert result["flash_attn_cute_imported"] is True
-    assert result["cutlass_imported"] is True
-    assert result["quack_imported"] is False
-    assert result["kernel_imported"] is False
+    def test_check_accepts_a_pair_in_the_table(self, installed):
+        dsl, quack = installed
+        with _fake_installed_versions(dsl, quack):
+            assert check_cutedsl_installation() == (dsl, quack)
 
-
-def test_a_failing_flash_attn_cute_import_disables_the_fa4_backend():
-    # Preserve package imports and report the original error at fa4 entry points.
-    error = "module 'cutlass.cute.core' has no attribute 'ThrMma'"
-    child = "\n".join(
+    # (dsl, quack, version, release_only, operators that hold or the raised error)
+    @parameterize(
+        "case",
         [
-            "import json, sys",
-            "class BrokenFlashAttnCute:",
-            "    def find_spec(self, name, path=None, target=None):",
-            "        if name == 'flash_attn_cute':",
-            f"            raise AttributeError({error!r})",
-            "sys.meta_path.insert(0, BrokenFlashAttnCute())",
-            "result = {}",
-            "def record(name, call):",
-            "    try:",
-            "        call()",
-            "    except RuntimeError as exc:",
-            "        result[name] = [str(exc), repr(exc.__cause__)]",
-            "try:",
-            "    import magi_attention",
-            "    from magi_attention.common import AttnRanges",
-            "    from magi_attention.functional import fa4, fa4_utils",
-            "    from magi_attention.meta.collection import calc_meta",
-            "    result['origin'] = magi_attention.__file__",
-            "    result['is_fa4_installed'] = [",
-            "        calc_meta.is_fa4_installed, fa4.is_fa4_installed]",
-            "    result['has_compiled_meta_dict'] = hasattr(",
-            "        fa4_utils, 'COMPILED_META_DICT')",
-            "    ranges = AttnRanges.from_ranges([[0, 128]])",
-            "    record('FA4AttnArg', lambda: calc_meta.FA4AttnArg(",
-            "        q_ranges=ranges, k_ranges=ranges, attn_type_map=[0]))",
-            "    record('load_precompiled_ffa_fa4', fa4_utils.load_precompiled_ffa_fa4)",
-            "    record('fa4_fwd', lambda: fa4.fa4_fwd(None, None, None, None, None))",
-            "    record('fa4_bwd', lambda: fa4.fa4_bwd(",
-            "        None, None, None, None, None, None, None, None))",
-            # The SM90 tile-size query must work when flash_attn_cute cannot import.
-            "    calc_meta.COMPUTE_CAPABILITY = 9",
-            "    result['tile_sizes'] = calc_meta._resolve_tile_sizes('forward', 128)",
-            "except Exception as exc:",
-            "    result['error'] = repr(exc)",
-            "print(json.dumps(result))",
-        ]
+            ("4.6.2", "0.6.4", "4.6.2", True, {"==", ">=", "<="}),
+            ("4.6.2", "0.6.4", "4.6.1", True, {"!=", ">=", ">"}),
+            ("4.6.2", "0.6.4", "4.7.0", True, {"!=", "<=", "<"}),
+            # release_only compares numeric tuples, including their length.
+            ("4.6.2", "0.6.4", "4.6", True, {"!=", ">=", ">"}),
+            ("4.7.0.post1", "0.6.5", "4.7.0", True, {"==", ">=", "<="}),
+            ("4.7.0.post1", "0.6.5", "4.7.0", False, {"!=", ">=", ">"}),
+            # Version predicates also reject unsupported pairs.
+            ("4.6.0", "0.6.4", "4.5.0", True, CuteDslRequirementError),
+        ],
     )
-    result = _run_in_fresh_interpreter(child)
-    assert "error" not in result, result
-    assert result["origin"] == magi_attention.__file__, result
-    assert result["is_fa4_installed"] == [False, False]
-    assert result["has_compiled_meta_dict"] is False
-    assert result["tile_sizes"] == list(calc_meta._DEFAULT_FA4_TILE_SIZE)
-    for name in ("FA4AttnArg", "load_precompiled_ffa_fa4", "fa4_fwd", "fa4_bwd"):
-        message, cause = result[name]
-        assert str(FA4_DSL_REQUIREMENT) in message
-        assert 'pip install "nvidia-cutlass-dsl[cu13]==4.4.2"' in message
-        assert cause == repr(AttributeError(error))
+    def test_cutedsl_version_predicates(self, case):
+        dsl, quack, version, release_only, holds = case
+        with _fake_installed_versions(dsl, quack):
+            if holds is CuteDslRequirementError:
+                for predicate in CUTEDSL_VERSION_PREDICATES.values():
+                    with self.assertRaises(CuteDslRequirementError):
+                        predicate(version, release_only=release_only)
+                return
+            assert {
+                operator
+                for operator, predicate in CUTEDSL_VERSION_PREDICATES.items()
+                if predicate(version, release_only=release_only)
+            } == holds
+
+    def test_import_checks_the_pair_before_importing_quack(self):
+        # Block the fa4 probe so imported module versions cannot override test metadata.
+        child = "\n".join(
+            [
+                "import importlib.metadata, importlib.util, json, sys",
+                "sys.modules['flash_attn_cute'] = None",
+                "fake = {'nvidia-cutlass-dsl': '4.8.0', 'quack-kernels': '0.4.1'}",
+                "real = importlib.metadata.version",
+                "importlib.metadata.version = lambda name: fake.get(name) or real(name)",
+                "result = {'origin': importlib.util.find_spec('magi_attention').origin}",
+                "try:",
+                "    import magi_attention",
+                "except Exception as exc:",
+                "    result['error'] = type(exc).__module__ + '.' + type(exc).__qualname__",
+                "    result['message'] = str(exc)",
+                "result['quack_imported'] = 'quack' in sys.modules",
+                "result['kernel_imported'] = 'magi_attention.kernel.cutedsl.ffa_utils' in sys.modules",
+                "print(json.dumps(result))",
+            ]
+        )
+        result = _run_in_fresh_interpreter(child)
+        assert result["origin"] == magi_attention.__file__, result
+        assert result.get("error") == (
+            "magi_attention.utils.backend_requirements.CuteDslRequirementError"
+        ), result
+        assert EXPECTED_UPGRADE_COMMAND in result["message"]
+        assert result["quack_imported"] is False
+        assert result["kernel_imported"] is False
+
+    @parameterize("quack_error", ["ImportError", "AttributeError"])
+    def test_import_reports_the_pair_when_the_fa4_probe_fails_in_quack(
+        self, quack_error
+    ):
+        # The fa4 probe can fail in quack before the pair check runs.
+        # quack 0.5.0 ensures rejection regardless of the installed DSL version.
+        child = "\n".join(
+            [
+                "import importlib.metadata, importlib.util, json, sys",
+                "result = {'origin': importlib.util.find_spec('magi_attention').origin}",
+                "class FlashAttnCuteWithBrokenQuack:",
+                "    def find_spec(self, name, path=None, target=None):",
+                "        if name == 'quack':",
+                f"            raise {quack_error}('quack does not match cutlass')",
+                "        if name == 'flash_attn_cute':",
+                "            result['flash_attn_cute_imported'] = True",
+                "            import cutlass",
+                "            import quack",
+                "sys.meta_path.insert(0, FlashAttnCuteWithBrokenQuack())",
+                "fake = {'quack-kernels': '0.5.0'}",
+                "real = importlib.metadata.version",
+                "importlib.metadata.version = lambda name: fake.get(name) or real(name)",
+                "try:",
+                "    import magi_attention",
+                "except Exception as exc:",
+                "    result['error'] = type(exc).__module__ + '.' + type(exc).__qualname__",
+                "    result['message'] = str(exc)",
+                "result['cutlass_imported'] = 'cutlass' in sys.modules",
+                "result['quack_imported'] = 'quack' in sys.modules",
+                "result['kernel_imported'] = 'magi_attention.kernel.cutedsl.ffa_utils' in sys.modules",
+                "print(json.dumps(result))",
+            ]
+        )
+        result = _run_in_fresh_interpreter(child)
+        assert result["origin"] == magi_attention.__file__, result
+        assert result.get("error") == (
+            "magi_attention.utils.backend_requirements.CuteDslRequirementError"
+        ), result
+        assert "quack-kernels 0.5.0" in result["message"]
+        assert EXPECTED_UPGRADE_COMMAND in result["message"]
+        assert result["flash_attn_cute_imported"] is True
+        assert result["cutlass_imported"] is True
+        assert result["quack_imported"] is False
+        assert result["kernel_imported"] is False
+
+    def test_a_failing_flash_attn_cute_import_disables_the_fa4_backend(self):
+        # Preserve package imports and report the original error at fa4 entry points.
+        error = "module 'cutlass.cute.core' has no attribute 'ThrMma'"
+        child = "\n".join(
+            [
+                "import json, sys",
+                "class BrokenFlashAttnCute:",
+                "    def find_spec(self, name, path=None, target=None):",
+                "        if name == 'flash_attn_cute':",
+                f"            raise AttributeError({error!r})",
+                "sys.meta_path.insert(0, BrokenFlashAttnCute())",
+                "result = {}",
+                "def record(name, call):",
+                "    try:",
+                "        call()",
+                "    except RuntimeError as exc:",
+                "        result[name] = [str(exc), repr(exc.__cause__)]",
+                "try:",
+                "    import magi_attention",
+                "    from magi_attention.common import AttnRanges",
+                "    from magi_attention.functional import fa4, fa4_utils",
+                "    from magi_attention.meta.collection import calc_meta",
+                "    result['origin'] = magi_attention.__file__",
+                "    result['is_fa4_installed'] = [",
+                "        calc_meta.is_fa4_installed, fa4.is_fa4_installed]",
+                "    result['has_compiled_meta_dict'] = hasattr(",
+                "        fa4_utils, 'COMPILED_META_DICT')",
+                "    ranges = AttnRanges.from_ranges([[0, 128]])",
+                "    record('FA4AttnArg', lambda: calc_meta.FA4AttnArg(",
+                "        q_ranges=ranges, k_ranges=ranges, attn_type_map=[0]))",
+                "    record('load_precompiled_ffa_fa4', fa4_utils.load_precompiled_ffa_fa4)",
+                "    record('fa4_fwd', lambda: fa4.fa4_fwd(None, None, None, None, None))",
+                "    record('fa4_bwd', lambda: fa4.fa4_bwd(",
+                "        None, None, None, None, None, None, None, None))",
+                # The SM90 tile-size query must work when flash_attn_cute cannot import.
+                "    calc_meta.COMPUTE_CAPABILITY = 9",
+                "    result['tile_sizes'] = calc_meta._resolve_tile_sizes('forward', 128)",
+                "except Exception as exc:",
+                "    result['error'] = repr(exc)",
+                "print(json.dumps(result))",
+            ]
+        )
+        result = _run_in_fresh_interpreter(child)
+        assert "error" not in result, result
+        assert result["origin"] == magi_attention.__file__, result
+        assert result["is_fa4_installed"] == [False, False]
+        assert result["has_compiled_meta_dict"] is False
+        assert result["tile_sizes"] == list(calc_meta._DEFAULT_FA4_TILE_SIZE)
+        for name in ("FA4AttnArg", "load_precompiled_ffa_fa4", "fa4_fwd", "fa4_bwd"):
+            message, cause = result[name]
+            assert str(FA4_DSL_REQUIREMENT) in message
+            assert 'pip install "nvidia-cutlass-dsl[cu13]==4.4.2"' in message
+            assert cause == repr(AttributeError(error))
+
+
+if __name__ == "__main__":
+    run_tests()

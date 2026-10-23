@@ -18,25 +18,22 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from unittest import TestCase
 
-import pytest
 import torch
+from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
-from tests.test_kernel.cutedsl.dsl_deprecation_compile import (
+from magi_attention.testing import parameterize
+from tests.test_kernel.cutedsl.dsl_deprecation_test_utils import (
     CONFIGS,
     RESULT_PREFIX,
     CompileConfig,
 )
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
-    reason="the gate compiles and launches the SM100 kernels on a GPU of "
-    "compute capability 10",
-)
-
-_CHILD = Path(__file__).with_name("dsl_deprecation_compile.py")
+_CHILD = Path(__file__).with_name("dsl_deprecation_test_utils.py")
 _PACKAGE_DIR = Path(magi_attention.__file__).resolve().parent
 # Keep child imports tied to the package under test.
 _PACKAGE_PARENT = _PACKAGE_DIR.parent
@@ -103,29 +100,45 @@ def _compile_in_fresh_interpreter(config: CompileConfig, cache_dir: Path) -> dic
     return json.loads(line[len(RESULT_PREFIX) :])
 
 
-@pytest.mark.parametrize("config", CONFIGS, ids=[config.name for config in CONFIGS])
-def test_compile_emits_no_dsl_deprecation_warning(
-    config: CompileConfig, tmp_path: Path
-) -> None:
-    conflicts = _pinned_conflicts()
-    if conflicts:
-        pytest.skip(f"{config.name} needs {', '.join(conflicts)} unset")
+class TestDslDeprecations(TestCase):
+    def setUp(self) -> None:
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest(
+                "the gate compiles and launches the SM100 kernels on a GPU of "
+                "compute capability 10"
+            )
+        conflicts = _pinned_conflicts()
+        if conflicts:
+            self.skipTest(f"the gate needs {', '.join(conflicts)} unset")
 
-    result = _compile_in_fresh_interpreter(config, tmp_path / "ffa_cutedsl_cache")
+    @parameterize("config", list(CONFIGS))
+    def test_compile_emits_no_dsl_deprecation_warning(
+        self, config: CompileConfig
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = _compile_in_fresh_interpreter(
+                config, Path(tmp_dir) / "ffa_cutedsl_cache"
+            )
 
-    assert (
-        Path(result["magi_attention_file"]).resolve()
-        == Path(magi_attention.__file__).resolve()
-    )
-    # A kernel loaded from the persistent cache is not traced.
-    assert result["cache_enabled"] is False
-
-    deprecations = _gated_deprecations(result["records"], Path(result["cutlass_dir"]))
-    assert not deprecations, (
-        f"{len(deprecations)} DeprecationWarning(s) while compiling "
-        f"{config.name}:\n"
-        + "\n".join(
-            f"  {record['filename']}:{record['lineno']}: {record['message']}"
-            for record in deprecations
+        assert (
+            Path(result["magi_attention_file"]).resolve()
+            == Path(magi_attention.__file__).resolve()
         )
-    )
+        # A kernel loaded from the persistent cache is not traced.
+        assert result["cache_enabled"] is False
+
+        deprecations = _gated_deprecations(
+            result["records"], Path(result["cutlass_dir"])
+        )
+        assert not deprecations, (
+            f"{len(deprecations)} DeprecationWarning(s) while compiling "
+            f"{config.name}:\n"
+            + "\n".join(
+                f"  {record['filename']}:{record['lineno']}: {record['message']}"
+                for record in deprecations
+            )
+        )
+
+
+if __name__ == "__main__":
+    run_tests()
