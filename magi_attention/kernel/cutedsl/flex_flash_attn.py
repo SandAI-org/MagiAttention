@@ -1118,16 +1118,15 @@ def _flex_flash_attn_bwd(
             "dq_type/dk_type/dv_type other than the input dtype require SM100/SM110"
         )
 
-    # The caller's sorted, pairwise-disjoint q_ranges contract holds for the
-    # rows the kernels see only without the K-merge, which repeats a q range
-    # once per K group it pairs with.
+    # Without the in-kernel K-merge the kernels see the caller's sorted, disjoint
+    # q_ranges; the K-merge repeats a q range once per K group.
     q_ranges_disjoint = direct_dq_init and not range_merge_active
     use_dense_dqacc_for_ranges = q_ranges_disjoint and head_dim % 32 == 0
     if q_ranges_disjoint and magiattn_cutedsl.is_ffa_debug_mode_enabled():
         assert q_ranges is not None
         assert bool((q_ranges[1:, 0] >= q_ranges[:-1, 1]).all().item()), (
-            "disable_fwd_atomic_reduction requires sorted, pairwise-disjoint "
-            "q_ranges (r[i+1].start >= r[i].end)"
+            "disable_fwd_atomic_reduction without range merge requires sorted, "
+            "pairwise-disjoint q_ranges (r[i+1].start >= r[i].end)"
         )
     dkv_empty = not has_ranges or direct_dkv or declared_k_full_coverage
     dq_empty = not has_ranges or direct_dq_init or declared_q_full_coverage

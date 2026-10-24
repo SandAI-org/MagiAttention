@@ -71,8 +71,7 @@ class TestCutedslUtils(TestCase):
     def test_fmax(self, enable_tvm_ffi):
         _check_fmax(use_c=False, enable_tvm_ffi=enable_tvm_ffi)
 
-    # A separate method, so that the skip on older GPUs does not hide the
-    # two-input cases: a skip inside a parameterize loop ends the whole method.
+    # Separate method: a skipTest inside parameterize ends all remaining cases.
     @parameterize("enable_tvm_ffi", [False, True])
     def test_fmax_three_inputs(self, enable_tvm_ffi):
         if torch.cuda.get_device_capability()[0] < 10:

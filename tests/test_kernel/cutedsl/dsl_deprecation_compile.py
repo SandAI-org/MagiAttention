@@ -14,7 +14,7 @@
 
 # Use a fresh process per configuration to capture import and tracing warnings.
 # Keep DSL imports inside the warning recorder.
-# Usage: python dsl_deprecation_test_utils.py <configuration name>
+# Usage: python dsl_deprecation_compile.py <configuration name>
 
 from __future__ import annotations
 

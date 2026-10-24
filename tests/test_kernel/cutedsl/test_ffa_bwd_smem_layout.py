@@ -12,17 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared-memory layout of the SM100 CuTeDSL FFA backward kernel.
+"""sLSE offset in the SharedStorage of the SM100 CuTeDSL FFA bwd kernel.
 
-The bwd softmax warps read LSE from ``sLSE`` right before the exp2 FFMA. With
-``sLSE`` below about 128 KiB from the start of the kernel's ``SharedStorage``
-struct, these reads stall on the short scoreboard and the hd64 bwd runs
-12-18% slower. The size of ``sdO`` depends on the dK/dV mode (a 16 KiB bf16
-single-writer ``sdV`` tile or a 32 KiB fp32 reduce strip at hd64), so the
-member order of the struct decides whether every mode clears that offset.
-
-Each case builds one bwd specialization up to its kernel launch and reads the
-``sLSE`` offset of the struct that the launch would use; no kernel compiles.
+sLSE must stay at or above 127 KiB from the struct start in every dK/dV mode
+(the sdO size differs between them). Each case builds one specialization up to
+its kernel launch; no kernel compiles.
 """
 
 import itertools
@@ -198,17 +192,15 @@ class TestFfaBwdSmemLayout(TestCase):
         self.assertEqual(kernel.is_persistent, variant.persistent, str(variant))
         return kernel
 
-    def test_one_cta_slse_offset_clears_the_stall_offset(self):
-        """Every hd64 1-CTA bwd struct keeps sLSE at or above the smallest
-        offset measured fast, in both dK/dV modes, both dQ modes, scalar and
-        per-range masks."""
+    def test_one_cta_slse_offset_at_least_127kib(self):
+        """hd64 1-CTA bwd: sLSE >= 127 KiB in both dK/dV modes, both dQ modes,
+        scalar and per-range masks."""
         variants = _one_cta_variants()
         offsets: dict[_Variant, int] = {}
         for variant in variants:
             kernel = self._build(variant)
             self.assertEqual(kernel.cta_group_size, 1, str(variant))
             offsets[variant] = kernel.shared_storage._offsets["sLSE"]
-            print(f"ran {variant} sLSE={offsets[variant]}", flush=True)
         # Both sdO sizes must be in the matrix for the check to cover them.
         self.assertEqual(
             {v.single_writer_dkv for v in variants}, {False, True}, "dK/dV modes"
@@ -221,14 +213,12 @@ class TestFfaBwdSmemLayout(TestCase):
             + "; ".join(f"{v} -> {off}" for v, off in low.items()),
         )
 
-    def test_two_cta_slse_offset(self):
-        """The hd128 2-CTA bwd struct keeps sLSE at or above the smallest
-        offset measured fast in both dK/dV modes."""
+    def test_two_cta_slse_offset_at_least_127kib(self):
+        """hd128 2-CTA bwd: sLSE >= 127 KiB in both dK/dV modes."""
         for variant in _two_cta_variants():
             kernel = self._build(variant)
             self.assertEqual(kernel.cta_group_size, 2, str(variant))
             offset = kernel.shared_storage._offsets["sLSE"]
-            print(f"ran {variant} sLSE={offset}", flush=True)
             self.assertGreaterEqual(offset, _MIN_FAST_SLSE_OFFSET, str(variant))
 
 

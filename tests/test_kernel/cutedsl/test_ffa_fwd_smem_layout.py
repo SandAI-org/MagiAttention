@@ -12,20 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared-memory layout of the SM100 CuTeDSL FFA forward kernel.
+"""sScale offset in the SharedStorage of the SM100 CuTeDSL FFA fwd kernel.
 
-The fwd softmax warps write the per-row ``corr_scale`` and the final row
-sum / row max to ``sScale``, and the correction warps read it every KV block.
-With ``sScale`` at the front of the kernel's ``SharedStorage`` struct (a few
-hundred bytes from its start), the kernel issues extra shared-load bank
-conflicts and the non-persistent 1-CTA hd64 ranges direct-store fwd runs about
-2% slower. The struct has no free bytes at the 1-CTA hd64/hd128 sizes, and a
-member added at the front costs none either: the 1024-byte alignment of
-``sQ`` absorbs it. The size therefore does not show that ``sScale`` was moved
-back to the front; only its offset does.
-
-Each case builds one fwd specialization up to its kernel launch and reads the
-``sScale`` offset of the struct that the launch would use; no kernel compiles.
+The struct size cannot detect sScale moving back to the front, so the test
+pins its offset. Each case builds one specialization up to its kernel launch;
+no kernel compiles.
 """
 
 import itertools
@@ -268,15 +259,9 @@ class TestFfaFwdSmemLayout(TestCase):
         offsets: dict[_Variant, int] = {}
         for variant, reason in _matrix():
             if reason is not None:
-                print(f"skip {variant}: {reason}", flush=True)
                 continue
             kernel = self._build(variant)
             offsets[variant] = kernel.shared_storage._offsets["sScale"]
-            print(
-                f"ran {variant} cta={kernel.cta_group_size} "
-                f"persistent={kernel.is_persistent} sScale={offsets[variant]}",
-                flush=True,
-            )
         # The check covers a specialization only when the matrix builds it.
         self.assertEqual({v.persistent for v in offsets}, {False, True})
         self.assertEqual({v.sO_borrow_kv for v in offsets}, {False, True})

@@ -52,9 +52,8 @@ __all__ = ["cutedsl_fwd", "cutedsl_bwd"]
 # - disable_fwd_atomic_reduction requires sorted, pairwise-disjoint q;
 #   AttnArg only certifies disjointness, so sortedness is checked here.
 #
-# All three are judged on the range tensors passed to the kernel, because the
-# bwd range merge in calc_meta reorders the rows. This costs one device-to-host
-# copy per AttnArg; later calls hit the cache.
+# All three are checked on the ranges passed to the kernel: the bwd range
+# merge in calc_meta reorders rows (one D2H copy per AttnArg, then cached).
 #
 # Cached per AttnArg: the runtime manager reuses args across steps and the
 # derivations sort all ranges. Keyed by id() because AttnArg is unhashable;

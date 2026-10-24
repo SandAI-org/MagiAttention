@@ -110,7 +110,6 @@ MAGI_ATTENTION_TEST_ATTN_CONFIG=full_attn_14k \
 | `MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE` | `bwd_hp_reduce` | `0` / `1` |
 | `MAGI_ATTENTION_FLATTEN_HEAD_GROUPS` | `flatten_head_groups` | `0` / `1` |
 | `MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE` | `bwd_hide_tail_reduce` | `0` / `1` |
-| `MAGI_ATTENTION_RANGE_MERGE` | range merge | `0` / `1` |
 
 > **Note:** The legacy env vars `MAGI_ATTENTION_SDPA_BACKEND` and `MAGI_ATTENTION_FA4_BACKEND` are still supported for backward compatibility, but must **not** be set together with `MAGI_ATTENTION_KERNEL_BACKEND`.
 

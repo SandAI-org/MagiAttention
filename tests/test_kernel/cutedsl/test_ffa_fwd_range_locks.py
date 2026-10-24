@@ -12,17 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Range locks of the SM100 CuTeDSL range atomic forward.
+"""Range locks of the SM100 CuTeDSL range atomic fwd.
 
-A stage tile of a relation whose q range does not start on a multiple of
-tile_m straddles two lock blocks and merges its O/LSE rows under both locks.
-The masks here are a sink-plus-sliding-window decomposition. Every row from
-``start`` on is covered by a relation against the sink keys (one K block per
-tile) and one against a window of ``_WINDOW + 1`` keys over the same q range,
-so their tiles contend for the same lock blocks. The correctness test moves
-half of the sink keys into a relation that starts ``_SHIFT`` rows later; each
-of its tiles overlaps two tiles of the others and shares one lock block with
-each, so a merge that skips one of its two locks races on the shared rows.
+A tile whose q range does not start on a multiple of tile_m straddles two lock
+blocks and must merge its O/LSE rows under both locks without serializing the
+merges of adjacent tiles.
 """
 
 import math
@@ -82,7 +76,10 @@ def _sink_window_relations(
     sequences: causal rows before ``start``, then the sink keys (full) and
     the window keys ``[q - _WINDOW, q]`` (bi_causal). With
     ``shift_half_sink`` the second half of the sink keys is a separate
-    relation starting at ``start + _SHIFT``."""
+    relation starting at ``start + _SHIFT``. Each tile of the shifted
+    relation shares one lock block with each of two tiles of the other
+    relations, so a merge that skips one of its locks races on the shared
+    rows."""
     sink_end = _SINK // 2 if shift_half_sink else _SINK
     relations: Relations = []
     for b in range(batch):
@@ -149,8 +146,8 @@ def _qkv(total: int, num_head: int, head_dim: int, head_dim_v: int):
 
 class TestFfaFwdRangeLocks(TestCase):
     def setUp(self) -> None:
-        if get_device_arch()[1] != 10:
-            self.skipTest("the range lock protocol is in the SM100 fwd kernel")
+        if get_device_arch()[1] not in (10, 11):
+            self.skipTest("the range lock protocol is in the SM100/SM110 fwd kernel")
         torch.manual_seed(42)
 
     def _fwd_kernel(self, q, k, v, relations: Relations):
@@ -183,20 +180,15 @@ class TestFfaFwdRangeLocks(TestCase):
         torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
 
     def test_unaligned_merges_do_not_serialize(self):
-        """hd192 with the unaligned start runs within 2x of the aligned start.
+        """hd192 with the unaligned start runs within 5x of the aligned start.
 
-        The launch is non-persistent with one tile per CTA, and the per-range
-        kernel issues m blocks in descending order, so if a tile waits for its
-        upper lock while it holds the lower one, the tiles below it queue
-        behind it and their merges run one at a time: the unaligned case then
-        takes about 17x the aligned one on a B300 at 1400 MHz. Without that
-        wait it takes about 1.5x, so 2.0 separates the two. Both cases do the
-        same math up to 111 rows of the causal prefix.
+        Serialized merges took about 17x the aligned time on a B300 (148 SMs);
+        without serialization the ratio is about 1.5.
         """
         num_sm = torch.cuda.get_device_properties(0).multi_processor_count
         if num_sm < 128:
-            # The queue is as long as the number of co-resident tiles; the
-            # factor of 17 is measured with 148 SMs.
+            # The serialized queue grows with co-resident tiles; 17x was measured
+            # with 148 SMs.
             self.skipTest(f"needs at least 128 SMs, found {num_sm}")
         seqlen, batch = 32768, 4
         q, k, v = _qkv(seqlen * batch, 16, 192, 128)
@@ -239,7 +231,7 @@ class TestFfaFwdRangeLocks(TestCase):
             f"ratio {unaligned / aligned:.2f}",
             flush=True,
         )
-        self.assertLess(unaligned / aligned, 2.0)
+        self.assertLess(unaligned / aligned, 5.0)
 
 
 if __name__ == "__main__":

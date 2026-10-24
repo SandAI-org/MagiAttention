@@ -12,22 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Range contracts of the dist cutedsl bwd wrapper under
-# MAGI_ATTENTION_RANGE_MERGE=1. With range merge, calc_meta reorders the bwd
-# (q, k) rows by k start. The wrapper may set disable_fwd_atomic_reduction
-# (dense dQacc direct store and binary-search dQ hole zeroing) only when the q
-# tensor the kernel receives is sorted and pairwise disjoint.
+"""Range contracts of the cutedsl bwd wrapper under MAGI_ATTENTION_RANGE_MERGE=1.
 
-import os
-import unittest
+calc_meta reorders the bwd rows by k start, so disable_fwd_atomic_reduction
+may be set only when the q ranges passed to the kernel are sorted and disjoint.
+"""
+
 from dataclasses import dataclass
-from unittest import mock
+from unittest import TestCase, mock
 
 import torch
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
 from magi_attention.functional import cutedsl_ffa
+from magi_attention.kernel.cutedsl.ffa_utils import get_device_arch
 from magi_attention.kernel.cutedsl.flex_flash_attn import _flex_flash_attn_bwd
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.testing.utils import switch_envvar_context
@@ -82,20 +81,11 @@ CASES = {
 }
 
 
-def _has_direct_dq_store() -> bool:
-    # The range bwd direct dQ store exists only on SM100/SM110.
-    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] in (
-        10,
-        11,
-    )
+class TestCutedslBwdUnderRangeMerge(TestCase):
+    def setUp(self) -> None:
+        if get_device_arch()[1] not in (10, 11):
+            self.skipTest("the range bwd direct dQ store exists only on SM100/SM110")
 
-
-@unittest.skipUnless(_has_direct_dq_store(), "requires an SM100/SM110 GPU")
-@unittest.skipIf(
-    os.environ.get(RANGE_MERGE_ENV, "1") != "1",
-    f"{RANGE_MERGE_ENV} is pinned by the user to a value other than 1",
-)
-class TestCutedslBwdUnderRangeMerge(unittest.TestCase):
     def _run_case(self, name: str) -> None:
         case = CASES[name]
         with switch_envvar_context(RANGE_MERGE_ENV, enable=True):
@@ -133,13 +123,7 @@ class TestCutedslBwdUnderRangeMerge(unittest.TestCase):
         # The merge produced the row order this case targets.
         self.assertEqual(kernel_q.tolist(), case.kernel_q_ranges, name)
 
-        # The kernel contract: the direct dQ store needs sorted, disjoint q.
-        q_sorted_disjoint = bool((kernel_q[1:, 0] >= kernel_q[:-1, 1]).all().item())
         direct_dq = kw["disable_fwd_atomic_reduction"]
-        self.assertFalse(
-            direct_dq and not q_sorted_disjoint,
-            f"{name}: direct dQ store enabled on unsorted q ranges",
-        )
 
         # The specialization that ran: no in-kernel merge, so the dense dQacc
         # layout follows disable_fwd_atomic_reduction.

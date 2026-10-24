@@ -1281,7 +1281,6 @@ class FFAFwdSm100:
             tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
             # --- smem tensors ---
-
             sQ: cute.struct.Align[
                 cute.struct.MemRange[self.q_dtype, sQ_size], self.buffer_align_bytes
             ]
@@ -1293,13 +1292,10 @@ class FFAFwdSm100:
             sO: cute.struct.Align[
                 cute.struct.MemRange[self.o_dtype, sO_size], self.buffer_align_bytes
             ]
-            # Per-row corr_scale and final row_sum/row_max: the softmax warps
-            # write it and the correction warps read it every KV block. Keep it
-            # after sO. At the struct front it adds shared-load bank conflicts
-            # and makes the non-persistent 1-CTA hd64 kernel about 2% slower.
-            # It needs no extra bytes here: at the front, sQ's 1024-byte
-            # alignment already reserved its space.
-            # test_ffa_fwd_smem_layout.py pins the sScale offset.
+            # Per-row corr_scale and final row_sum/row_max (softmax -> correction
+            # warps). Keep it after sO: at the SharedStorage front its loads hit
+            # bank conflicts and the non-persistent 1-CTA hd64 fwd runs ~2% slower.
+            # Pinned by test_ffa_fwd_smem_layout.py.
             sScale: cute.struct.Align[
                 cute.struct.MemRange[Float32, self.q_stage * self.m_block_size * 2],
                 128,
@@ -4952,11 +4948,9 @@ class FFAFwdSm100:
     ):
         """Lock the one or two blocks the tile's rows straddle.
 
-        The O/LSE merge read-modify-writes rows of both blocks, so it holds
-        both locks. The upper lock is only tried; when that attempt fails, the
-        lower lock is released and the acquisition restarts. A tile that waits for
-        the upper lock while it holds the lower one makes the tile of the
-        block below wait too, and the merges of such tiles run one at a time.
+        The upper lock is only try-locked; on failure the lower lock is released
+        and both are retried, so no tile waits while holding a lock (that
+        serializes the merges of adjacent tiles).
         """
         ptr_1, ptr_2, two_locks = self._range_lock_ptrs(
             mRangeLocks, head_idx, row_offset

@@ -158,11 +158,8 @@ class TestFfaRangeMergePreprocess(DistTestBase):
     @parameterize("path", ["merge", "plan", "disjoint"])
     @parameterize("d", [64, 128])
     def test_range_merge_preprocess_grid(self, d, path):
-        """The K-merge of relations (P, K0), (P, K1), (P, K2), (U, K3) feeds the
-        bwd preprocess 13 q tiles over 5 tiles of tokens, P's three groups
-        first: a grid bounded by total_q stops inside P's rows and leaves U
-        without lse_log2, dpsum and a zeroed dQ accumulator, so the merge
-        (``True`` or a precomputed plan) must take the per-range grid. Pairwise
+        """Under the K-merge (range_merge=True or a plan) the bwd preprocess
+        grid must cover every merged q tile instead of stopping at total_q;
         disjoint q ranges without the merge keep the total_q-bounded grid."""
         self._skip_unless_sm100()
         device, dtype, nheads = self.device, torch.bfloat16, 2

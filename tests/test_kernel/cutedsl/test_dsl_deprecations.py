@@ -27,13 +27,13 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 from magi_attention.testing import parameterize
-from tests.test_kernel.cutedsl.dsl_deprecation_test_utils import (
+from tests.test_kernel.cutedsl.dsl_deprecation_compile import (
     CONFIGS,
     RESULT_PREFIX,
     CompileConfig,
 )
 
-_CHILD = Path(__file__).with_name("dsl_deprecation_test_utils.py")
+_CHILD = Path(__file__).with_name("dsl_deprecation_compile.py")
 _PACKAGE_DIR = Path(magi_attention.__file__).resolve().parent
 # Keep child imports tied to the package under test.
 _PACKAGE_PARENT = _PACKAGE_DIR.parent
