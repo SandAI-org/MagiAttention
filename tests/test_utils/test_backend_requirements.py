@@ -33,6 +33,7 @@ from magi_attention.testing import parameterize
 from magi_attention.utils import backend_requirements
 from magi_attention.utils.backend_requirements import (
     CUTEDSL_DSL_REQUIREMENT,
+    CUTEDSL_LIBS_BASE_DISTRIBUTION,
     CUTEDSL_PAIRS,
     CUTEDSL_QUACK_REQUIREMENT,
     CUTEDSL_UPGRADE_COMMAND,
@@ -58,6 +59,7 @@ PACKAGE_PARENT = Path(magi_attention.__file__).resolve().parents[1]
 EXPECTED_UPGRADE_COMMAND = (
     'pip install --upgrade "nvidia-cutlass-dsl[cu13]<=4.8.0" "quack-kernels<=0.6.5"'
 )
+_MATCH_DSL = object()
 
 
 def _requirements_txt() -> dict[str, Requirement]:
@@ -73,13 +75,27 @@ def _requirements_txt() -> dict[str, Requirement]:
 
 
 @contextmanager
-def _fake_installed_versions(dsl: str | None, quack: str | None) -> Iterator[None]:
-    """Report ``(dsl, quack)`` as the installed pair within the context."""
+def _fake_installed_versions(
+    dsl: str | None,
+    quack: str | None,
+    libs_base: str | None | object = _MATCH_DSL,
+) -> Iterator[None]:
+    """Report a DSL/quack pair and matching libs-base unless overridden."""
+    if libs_base is _MATCH_DSL:
+        libs_base = dsl
+    assert libs_base is None or isinstance(libs_base, str)
     # Isolate cached successful checks between cases.
     check_cutedsl_installation.cache_clear()
     try:
-        with mock.patch.object(
-            backend_requirements, "installed_versions", lambda: (dsl, quack)
+        with (
+            mock.patch.object(
+                backend_requirements, "installed_versions", lambda: (dsl, quack)
+            ),
+            mock.patch.object(
+                backend_requirements,
+                "_installed_cutedsl_libs_base_version",
+                lambda: libs_base,
+            ),
         ):
             yield
     finally:
@@ -221,6 +237,18 @@ class TestBackendRequirements(TestCase):
         dsl, quack = installed
         with _fake_installed_versions(dsl, quack):
             assert check_cutedsl_installation() == (dsl, quack)
+
+    @parameterize("libs_base", [None, "4.4.1", "4.4.3", "4.8.0"])
+    def test_check_rejects_missing_or_mismatched_libs_base(self, libs_base):
+        with _fake_installed_versions("4.4.2", "0.4.1", libs_base):
+            with self.assertRaises(CuteDslRequirementError) as raised:
+                check_cutedsl_installation()
+        message = str(raised.exception)
+        assert (
+            f"{CUTEDSL_LIBS_BASE_DISTRIBUTION} {libs_base or 'not installed'}"
+            in message
+        )
+        assert "must have the same version" in message
 
     # (dsl, quack, version, release_only, operators that hold or the raised error)
     @parameterize(
