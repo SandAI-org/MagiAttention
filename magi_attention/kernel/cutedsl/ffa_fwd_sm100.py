@@ -1294,7 +1294,7 @@ class FFAFwdSm100:
             ]
             # TODO: Identify the true cause.
             # Per-row corr_scale and final row_sum/row_max (softmax -> correction
-            # warps). 
+            # warps).
             # Keep it after sO: at the SharedStorage front its loads hit
             # bank conflicts.
             sScale: cute.struct.Align[
