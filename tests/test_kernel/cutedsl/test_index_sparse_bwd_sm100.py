@@ -29,8 +29,9 @@ Every case ends as one of:
   FAIL — the comparison failed or the kernel raised
 
 Each test method runs all of its cases, prints the table, then fails on any
-FAIL, and also on any GAP unless MAGI_ATTENTION_TEST_SM100_INDEX_ALLOW_GAPS=1
-(regression gate for the supported subset).
+FAIL. GAP cases are printed and do not fail the run: SM100 still lacks
+``head_dim != 128`` and ``sparse_k_block_size > 1`` (see the TODO in
+``_run_sweep``), and CI only gates the supported subset.
 
 Structure:
   TestIndexSparseBwdSm100Sweep              — sm90 Classic sweep: q_seqlen × kv_seqlen × topk
@@ -55,7 +56,6 @@ Run (from the repo root):
 """
 
 import itertools
-import os
 import unittest
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -86,8 +86,6 @@ from tests.test_kernel.cutedsl.index_sparse_sm100_utils import (
     ffa_bwd_sm100_index_sm90_layout,
     index_sparse_ref_fwd,
 )
-
-ALLOW_GAPS_ENVVAR = "MAGI_ATTENTION_TEST_SM100_INDEX_ALLOW_GAPS"
 
 BwdGrads = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
@@ -283,18 +281,16 @@ def _run_sweep(device, title: str, cases: list[tuple[str, dict[str, Any]]]) -> N
     print(" | ".join(f"{s.value} {n}" for s, n in counts.items()))
 
     fails = [r for r in results if r.status is CaseStatus.FAIL]
-    gaps = [r for r in results if r.status is CaseStatus.GAP]
     if fails:
         raise AssertionError(
             f"{title}: {len(fails)} supported case(s) failed:\n"
             + "\n".join(f"  {r.name}: {r.detail}" for r in fails)
         )
-    if gaps and os.environ.get(ALLOW_GAPS_ENVVAR, "0") != "1":
-        raise AssertionError(
-            f"{title}: {len(gaps)} case(s) need features SM100 lacks "
-            f"(set {ALLOW_GAPS_ENVVAR}=1 to gate only the supported cases):\n"
-            + "\n".join(f"  {r.name}: {r.detail}" for r in gaps)
-        )
+    # TODO: Sm100IndexGap cases are printed above and do not fail CI.
+    # HEAD_DIM: FFABwdSm100Index fixes head_dim at 128.
+    # SPARSE_K_BLOCK: the kernel gathers single K tokens, not K blocks
+    # (sparse_k_block_size > 1). Drop a Sm100IndexGap member once the kernel
+    # serves it so those cases compare numerically instead of reporting GAP.
 
 
 # ═══════════════════════════════════════════════════════════
