@@ -13,10 +13,10 @@
 # limitations under the License.
 
 
-"""RangeMerge backward preprocess grid of the SM100 CuTeDSL FFA kernel.
+"""Bwd preprocess of the SM100 CuTeDSL FFA kernel with and without range merge.
 
-The K-merge repeats a q range once per K group it pairs with, so the bwd
-preprocess must not bound its grid by total_q under the merge.
+The preprocess grid is bounded by total_q only when the q ranges the kernels
+see are pairwise disjoint; the K-merge repeats a q range once per K group.
 """
 
 from contextlib import contextmanager
@@ -83,7 +83,7 @@ def _record_bwd_kernels() -> Iterator[dict[str, list]]:
         yield built
 
 
-class TestFfaRangeMergePreprocess(DistTestBase):
+class TestFfaPreprocess(DistTestBase):
     @property
     def seed(self) -> int:
         return 42
@@ -102,7 +102,7 @@ class TestFfaRangeMergePreprocess(DistTestBase):
 
     def _skip_unless_sm100(self) -> None:
         if get_device_arch()[1] not in (10, 11):
-            self.skipTest("RangeMerge bwd requires SM100/SM110")
+            self.skipTest("the bwd preprocess under test is the SM100/SM110 path")
 
     def _log_ran(self, test_case: str) -> None:
         print(f"[RANK {self.rank}] ran {test_case}", flush=True)
@@ -155,32 +155,37 @@ class TestFfaRangeMergePreprocess(DistTestBase):
         self.assertLessEqual(err, bound, f"{test_case} {name}: {err=} {bound=}")
 
     @with_run_in_mp
-    @parameterize("path", ["merge", "plan", "disjoint"])
+    @parameterize("q_layout", ["overlap", "disjoint"])
+    @parameterize("merge", ["none", "merge", "plan"])
     @parameterize("d", [64, 128])
-    def test_range_merge_preprocess_grid(self, d, path):
-        """Under the K-merge (range_merge=True or a plan) the bwd preprocess
-        grid must cover every merged q tile instead of stopping at total_q;
-        disjoint q ranges without the merge keep the total_q-bounded grid."""
+    def test_bwd_preprocess(self, d, merge, q_layout):
+        """out/dQ/dK/dV match the reference with and without range merge, and
+        the preprocess grid is bounded by total_q only for disjoint q without
+        merge. In the overlap layout P's rows appear three times, so a
+        total_q-bounded grid would leave U's rows unprocessed."""
         self._skip_unless_sm100()
         device, dtype, nheads = self.device, torch.bfloat16, 2
         p_rows, u_rows = [0, 512], [512, 640]
         k_segs = [[i * 128, (i + 1) * 128] for i in range(4)]
-        if path == "disjoint":
-            q_ranges, k_ranges = [p_rows, u_rows], [[0, 384], [384, 512]]
-        else:
+        if q_layout == "overlap":
             q_ranges, k_ranges = [p_rows, p_rows, p_rows, u_rows], k_segs
+        else:
+            q_ranges, k_ranges = [p_rows, u_rows], [[0, 384], [384, 512]]
         attn_type_map = [MT_MAP.full] * len(q_ranges)
         q_ranges_t = torch.tensor(q_ranges, device=device, dtype=torch.int32)
         k_ranges_t = torch.tensor(k_ranges, device=device, dtype=torch.int32)
         mask_types_t = torch.tensor(attn_type_map, device=device, dtype=torch.int32)
-        range_merge: bool | RangeMergePlan = path == "merge"
-        if path == "plan":
+        range_merge: bool | RangeMergePlan = merge == "merge"
+        if merge == "plan":
             range_merge = plan_range_merge(q_ranges_t, k_ranges_t, mask_types_t)
-        torch.random.manual_seed(self.seed + d + len(path))
+        # Overlapping q without merge needs the atomic dQ path; merge needs the
+        # direct one.
+        direct_dq = not (q_layout == "overlap" and merge == "none")
+        torch.random.manual_seed(self.seed + d)
         q = torch.randn(640, nheads, d, device=device, dtype=dtype, requires_grad=True)
         k = torch.randn(512, nheads, d, device=device, dtype=dtype, requires_grad=True)
         v = torch.randn_like(k, requires_grad=True)
-        test_case = f"[test_range_merge_preprocess_grid][{d=}][{path=}]"
+        test_case = f"[test_bwd_preprocess][{q_layout=}][{merge=}][{d=}]"
         self._log_ran(test_case)
         with _record_bwd_kernels() as built:
             out, _ = flex_flash_attn_func(
@@ -192,7 +197,7 @@ class TestFfaRangeMergePreprocess(DistTestBase):
                 mask_types=mask_types_t,
                 max_seqlen_q=max(end - start for start, end in q_ranges),
                 max_seqlen_k=max(end - start for start, end in k_ranges),
-                disable_fwd_atomic_reduction=True,
+                disable_fwd_atomic_reduction=direct_dq,
                 disable_bwd_dkv_atomic_reduction=True,
                 range_merge=range_merge,
             )
@@ -227,13 +232,16 @@ class TestFfaRangeMergePreprocess(DistTestBase):
                 test_case,
             )
 
-        merged = path != "disjoint"
+        merged = merge != "none"
+        q_ranges_disjoint = q_layout == "disjoint" and not merged
         (bwd_kernel,) = built["bwd"]
         (preprocess,) = built["preprocess"]
         self.assertEqual(bwd_kernel.range_merge, merged, test_case)
         self.assertEqual(bwd_kernel.cta_group_size, 2 if d == 128 else 1, test_case)
-        self.assertEqual(bwd_kernel.use_dense_dqacc_for_ranges, not merged, test_case)
-        self.assertEqual(preprocess.q_ranges_disjoint, not merged, test_case)
+        self.assertEqual(
+            bwd_kernel.use_dense_dqacc_for_ranges, q_ranges_disjoint, test_case
+        )
+        self.assertEqual(preprocess.q_ranges_disjoint, q_ranges_disjoint, test_case)
 
 
 if __name__ == "__main__":

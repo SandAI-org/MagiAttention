@@ -1295,7 +1295,6 @@ class FFAFwdSm100:
             # Per-row corr_scale and final row_sum/row_max (softmax -> correction
             # warps). Keep it after sO: at the SharedStorage front its loads hit
             # bank conflicts and the non-persistent 1-CTA hd64 fwd runs ~2% slower.
-            # Pinned by test_ffa_fwd_smem_layout.py.
             sScale: cute.struct.Align[
                 cute.struct.MemRange[Float32, self.q_stage * self.m_block_size * 2],
                 128,

@@ -1455,7 +1455,6 @@ class FFABwdSm100:
                 # start; at 129024 B the LSE load before exp2 stalls on the short
                 # scoreboard and the hd64 1-CTA bwd runs 12-18% slower. sdQacc
                 # goes before sLSE and sdPsum so both sdO sizes meet this.
-                # Pinned by test_ffa_bwd_smem_layout.py.
                 sdQacc: cute.struct.Align[
                     cute.struct.MemRange[
                         self.dqacc_dtype, cute.cosize(self.sdQacc_layout)
