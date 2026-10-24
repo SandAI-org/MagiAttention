@@ -124,22 +124,27 @@ class IndexSparseScenario:
 
 SCENARIOS: dict[str, IndexSparseScenario] = {
     # the sm90 bench scenario
-    "mqa128_hd128_topk2048": IndexSparseScenario(nhq=128, nhk=1, hd=128, topk=2048),
-    "mqa128_hd128_topk1024": IndexSparseScenario(nhq=128, nhk=1, hd=128, topk=1024),
+    # "mqa128_hd128_topk2048": IndexSparseScenario(nhq=128, nhk=1, hd=128, topk=2048),
+    # "mqa128_hd128_topk1024": IndexSparseScenario(nhq=128, nhk=1, hd=128, topk=1024),
     "mqa128_hd128_topk4096": IndexSparseScenario(nhq=128, nhk=1, hd=128, topk=4096),
-    "mqa128_hd64_topk2048": IndexSparseScenario(nhq=128, nhk=1, hd=64, topk=2048),
-    "gqa128x2_hd128_topk2048": IndexSparseScenario(nhq=128, nhk=2, hd=128, topk=2048),
-    "gqa32x4_hd128_topk2048": IndexSparseScenario(nhq=32, nhk=4, hd=128, topk=2048),
-    "mha32_hd128_topk2048": IndexSparseScenario(nhq=32, nhk=32, hd=128, topk=2048),
-    "mqa128_hd128_kbs8_topk256": IndexSparseScenario(
-        nhq=128, nhk=1, hd=128, topk=256, kbs=8
+    # "mqa128_hd64_topk2048": IndexSparseScenario(nhq=128, nhk=1, hd=64, topk=2048), # Not Support hd = 64
+    # "gqa128x2_hd128_topk2048": IndexSparseScenario(nhq=128, nhk=2, hd=128, topk=2048),
+    # "gqa32x4_hd128_topk2048": IndexSparseScenario(nhq=32, nhk=4, hd=128, topk=2048),
+    # "mha32_hd128_topk2048": IndexSparseScenario(nhq=32, nhk=32, hd=128, topk=2048),
+    # "mqa128_hd128_kbs8_topk256": IndexSparseScenario(
+    #     nhq=128, nhk=1, hd=128, topk=256, kbs=8
+    # ), # Not Support kbs = 8
+    # "mqa128_hd128_kbs128_topk16": IndexSparseScenario(
+    #     nhq=128, nhk=1, hd=128, topk=16, kbs=128
+    # tokens x q heads = 128 rows share one index row: one full SM100 Q tile
+    "gqa8x1_qbs16_hd128_topk4096": IndexSparseScenario(
+        nhq=8, nhk=1, hd=128, topk=4096, qbs=16
     ),
-    "mqa128_hd128_kbs128_topk16": IndexSparseScenario(
-        nhq=128, nhk=1, hd=128, topk=16, kbs=128
+    "gqa4x1_qbs32_hd128_topk4096": IndexSparseScenario(
+        nhq=4, nhk=1, hd=128, topk=4096, qbs=32
     ),
-    # 16 tokens x 8 q heads = 128 rows share one index row: one full SM100 Q tile
-    "gqa8x1_qbs16_hd128_topk2048": IndexSparseScenario(
-        nhq=8, nhk=1, hd=128, topk=2048, qbs=16
+    "gqa16x1_qbs8_hd128_topk4096": IndexSparseScenario(
+        nhq=16, nhk=1, hd=128, topk=4096, qbs=8
     ),
 }
 
