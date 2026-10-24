@@ -1451,6 +1451,16 @@ class FFABwdSm100:
                     cute.struct.MemRange[self.ds_dtype, cute.cosize(self.sdSt_layout)],
                     128,
                 ]
+                # TODO: Identify the true cause.
+                # Keep sLSE at or above 130048 B (127 KiB) from the SharedStorage
+                # start; at 129024 B the LSE load before exp2 stalls on the short
+                # scoreboard.
+                sdQacc: cute.struct.Align[
+                    cute.struct.MemRange[
+                        self.dqacc_dtype, cute.cosize(self.sdQacc_layout)
+                    ],
+                    self.buffer_align_bytes,
+                ]
                 sLSE: cute.struct.Align[
                     cute.struct.MemRange[self.lse_dtype, cute.cosize(self.sLSE_layout)],
                     128,
@@ -1460,12 +1470,6 @@ class FFABwdSm100:
                         self.dpsum_dtype, cute.cosize(self.sdPsum_layout)
                     ],
                     128,
-                ]
-                sdQacc: cute.struct.Align[
-                    cute.struct.MemRange[
-                        self.dqacc_dtype, cute.cosize(self.sdQacc_layout)
-                    ],
-                    self.buffer_align_bytes,
                 ]
 
         self.shared_storage = SharedStorage
