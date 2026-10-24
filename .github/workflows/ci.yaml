@@ -144,9 +144,6 @@ jobs:
         run: bash .github/scripts/verify_task_runner.sh
       - name: Apply platform environment
         run: python .github/scripts/ci_platforms.py environment "$TASK_CI_PLATFORM" >> "$GITHUB_ENV"
-      - name: Pin the CuTeDSL pair for the build
-        # Wheel fingerprints omit Python dependency versions, so pin the CuTeDSL pair.
-        run: echo "PIP_CONSTRAINT=${PIP_CONSTRAINT:+$PIP_CONSTRAINT }.github/configs/ci_constraints.txt" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: bash .github/scripts/run_build_tests.sh install
       - name: Build wheels
