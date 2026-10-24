@@ -1451,10 +1451,10 @@ class FFABwdSm100:
                     cute.struct.MemRange[self.ds_dtype, cute.cosize(self.sdSt_layout)],
                     128,
                 ]
+                # TODO: Identify the true cause.
                 # Keep sLSE at or above 130048 B (127 KiB) from the SharedStorage
                 # start; at 129024 B the LSE load before exp2 stalls on the short
-                # scoreboard and the hd64 1-CTA bwd runs 12-18% slower. sdQacc
-                # goes before sLSE and sdPsum so both sdO sizes meet this.
+                # scoreboard. 
                 sdQacc: cute.struct.Align[
                     cute.struct.MemRange[
                         self.dqacc_dtype, cute.cosize(self.sdQacc_layout)
