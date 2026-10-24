@@ -194,7 +194,9 @@ jobs:
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
-          submodules: recursive
+          # The regular B300 profile uses only the installed wheels and the
+          # CuTeDSL/SDPA backends. FA4 still needs its source submodule.
+          submodules: ${{ matrix.platform == 'b300' && 'false' || 'recursive' }}
           fetch-depth: 0
           persist-credentials: false
           # Fork PR code runs only after ci-internal environment approval.
