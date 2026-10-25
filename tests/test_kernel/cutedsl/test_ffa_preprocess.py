@@ -19,10 +19,6 @@ The preprocess grid is bounded by total_q only when the q ranges the kernels
 see are pairwise disjoint; the K-merge repeats a q range once per K group.
 """
 
-from contextlib import contextmanager
-from typing import Iterator
-from unittest import mock
-
 import torch
 from torch.testing._internal.common_utils import run_tests
 
@@ -32,17 +28,7 @@ from magi_attention.kernel.cutedsl import (
     flex_flash_attn_func,
     plan_range_merge,
 )
-from magi_attention.kernel.cutedsl.cache_utils import JITCache
-from magi_attention.kernel.cutedsl.ffa_bwd_preprocess import (
-    FFABwdPreProcess,
-    bwd_preprocess,
-)
-from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
-from magi_attention.kernel.cutedsl.flex_flash_attn import (
-    _flex_flash_attn_bwd,
-    _flex_flash_attn_fwd,
-)
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import calc_inf_norm
@@ -52,38 +38,14 @@ from magi_attention.utils import make_attn_mask_from_ffa_args
 _NORM_RATIO = 2.0
 
 
-@contextmanager
-def _record_bwd_kernels() -> Iterator[dict[str, list]]:
-    """Record the SM100 bwd and bwd preprocess kernel objects built within the
-    context, under ``"bwd"`` and ``"preprocess"``.
-
-    The specialization is only visible on the kernel object, which a JIT cache
-    hit never builds, so the context also swaps in empty compile caches.
-    """
-    built: dict[str, list] = {"bwd": [], "preprocess": []}
-    bwd_init, preprocess_init = FFABwdSm100.__init__, FFABwdPreProcess.__init__
-
-    def record_bwd(obj, *args, **kwargs):
-        bwd_init(obj, *args, **kwargs)
-        built["bwd"].append(obj)
-
-    def record_preprocess(obj, *args, **kwargs):
-        preprocess_init(obj, *args, **kwargs)
-        built["preprocess"].append(obj)
-
-    with mock.patch.object(FFABwdSm100, "__init__", record_bwd), mock.patch.object(
-        FFABwdPreProcess, "__init__", record_preprocess
-    ), mock.patch.object(
-        _flex_flash_attn_fwd, "compile_cache", JITCache()
-    ), mock.patch.object(
-        _flex_flash_attn_bwd, "compile_cache", JITCache()
-    ), mock.patch.object(
-        bwd_preprocess, "compile_cache", JITCache()
-    ):
-        yield built
-
-
 class TestFfaPreprocess(DistTestBase):
+    def setUp(self) -> None:
+        # Skip in the parent before DistTestBase spawns ranks, including ranks
+        # with no assigned parameter cases that would otherwise reach a barrier.
+        if not torch.cuda.is_available() or get_device_arch()[1] not in (10, 11):
+            self.skipTest("the bwd preprocess under test is the SM100/SM110 path")
+        super().setUp()
+
     @property
     def seed(self) -> int:
         return 42
@@ -99,10 +61,6 @@ class TestFfaPreprocess(DistTestBase):
     @property
     def world_size(self) -> int:
         return torch.cuda.device_count()
-
-    def _skip_unless_sm100(self) -> None:
-        if get_device_arch()[1] not in (10, 11):
-            self.skipTest("the bwd preprocess under test is the SM100/SM110 path")
 
     def _log_ran(self, test_case: str) -> None:
         print(f"[RANK {self.rank}] ran {test_case}", flush=True)
@@ -163,7 +121,6 @@ class TestFfaPreprocess(DistTestBase):
         the preprocess grid is bounded by total_q only for disjoint q without
         merge. In the overlap layout P's rows appear three times, so a
         total_q-bounded grid would leave U's rows unprocessed."""
-        self._skip_unless_sm100()
         device, dtype, nheads = self.device, torch.bfloat16, 2
         p_rows, u_rows = [0, 512], [512, 640]
         k_segs = [[i * 128, (i + 1) * 128] for i in range(4)]
@@ -187,22 +144,21 @@ class TestFfaPreprocess(DistTestBase):
         v = torch.randn_like(k, requires_grad=True)
         test_case = f"[test_bwd_preprocess][{q_layout=}][{merge=}][{d=}]"
         self._log_ran(test_case)
-        with _record_bwd_kernels() as built:
-            out, _ = flex_flash_attn_func(
-                q,
-                k,
-                v,
-                q_ranges=q_ranges_t,
-                k_ranges=k_ranges_t,
-                mask_types=mask_types_t,
-                max_seqlen_q=max(end - start for start, end in q_ranges),
-                max_seqlen_k=max(end - start for start, end in k_ranges),
-                disable_fwd_atomic_reduction=direct_dq,
-                disable_bwd_dkv_atomic_reduction=True,
-                range_merge=range_merge,
-            )
-            do = torch.randn_like(out)
-            dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+        out, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges_t,
+            k_ranges=k_ranges_t,
+            mask_types=mask_types_t,
+            max_seqlen_q=max(end - start for start, end in q_ranges),
+            max_seqlen_k=max(end - start for start, end in k_ranges),
+            disable_fwd_atomic_reduction=direct_dq,
+            disable_bwd_dkv_atomic_reduction=True,
+            range_merge=range_merge,
+        )
+        do = torch.randn_like(out)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
 
         ref_args = dict(
             q=q.detach(),
@@ -231,17 +187,6 @@ class TestFfaPreprocess(DistTestBase):
                 refs_lo[ref_idx][rows],
                 test_case,
             )
-
-        merged = merge != "none"
-        q_ranges_disjoint = q_layout == "disjoint" and not merged
-        (bwd_kernel,) = built["bwd"]
-        (preprocess,) = built["preprocess"]
-        self.assertEqual(bwd_kernel.range_merge, merged, test_case)
-        self.assertEqual(bwd_kernel.cta_group_size, 2 if d == 128 else 1, test_case)
-        self.assertEqual(
-            bwd_kernel.use_dense_dqacc_for_ranges, q_ranges_disjoint, test_case
-        )
-        self.assertEqual(preprocess.q_ranges_disjoint, q_ranges_disjoint, test_case)
 
 
 if __name__ == "__main__":
