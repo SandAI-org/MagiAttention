@@ -38,7 +38,7 @@ from magi_attention.utils import make_attn_mask_from_ffa_args
 _NORM_RATIO = 2.0
 
 
-class TestFfaPreprocess(DistTestBase):
+class TestFFAPreprocess(DistTestBase):
     def setUp(self) -> None:
         # Skip in the parent before DistTestBase spawns ranks, including ranks
         # with no assigned parameter cases that would otherwise reach a barrier.
