@@ -27,6 +27,7 @@ CUTEDSL_DSL_REQUIREMENT = Requirement(
     "nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.0,!=4.6.0,!=4.6.1"
 )
 CUTEDSL_QUACK_REQUIREMENT = Requirement("quack-kernels>=0.4.1,<=0.6.5")
+CUTEDSL_LIBS_BASE_DISTRIBUTION = "nvidia-cutlass-dsl-libs-base"
 
 # Supported pairs must satisfy requirements.txt and quack's DSL API dependencies.
 CUTEDSL_PAIRS: tuple[tuple[SpecifierSet, SpecifierSet], ...] = (
@@ -36,7 +37,8 @@ CUTEDSL_PAIRS: tuple[tuple[SpecifierSet, SpecifierSet], ...] = (
 )
 
 # flash_attn_cute uses cute.core.ThrMma and cute.make_fragment, removed in
-# DSL 4.6.0; its metadata omits this upper bound.
+# DSL 4.6.0; its metadata omits this upper bound. Lift it once the
+# FlashAttention submodule drops both APIs.
 FA4_DSL_REQUIREMENT = Requirement("nvidia-cutlass-dsl>=4.4.2,<4.6.0")
 
 # Must satisfy CUTEDSL_PAIRS and FA4_DSL_REQUIREMENT and match the FA4 CI pins.
@@ -69,7 +71,7 @@ _FA4_INSTALL_COMMAND = "pip install " + " ".join(
 
 
 class CuteDslRequirementError(RuntimeError):
-    """Missing CuTeDSL dependencies or an unsupported DSL/quack pair."""
+    """Missing or inconsistent CuTeDSL dependencies, or an unsupported pair."""
 
 
 def _module_version(module_name: str, distribution: str) -> str | None:
@@ -94,21 +96,32 @@ def installed_versions() -> tuple[str | None, str | None]:
     )
 
 
+def _installed_cutedsl_libs_base_version() -> str | None:
+    try:
+        return metadata.version(CUTEDSL_LIBS_BASE_DISTRIBUTION)
+    except metadata.PackageNotFoundError:
+        return None
+
+
 def _format_version(version: str | None) -> str:
     return "not installed" if version is None else version
 
 
 @lru_cache(maxsize=None)
 def check_cutedsl_installation() -> tuple[str, str]:
-    """Return installed (DSL, quack) versions after checking ``CUTEDSL_PAIRS``.
+    """Return installed (DSL, quack) versions after validating the DSL stack.
 
     Raises:
-        CuteDslRequirementError: A package is missing or the pair is unsupported.
+        CuteDslRequirementError: A package is missing, DSL and libs-base differ,
+            or the DSL/quack pair is unsupported.
     """
     dsl_version, quack_version = installed_versions()
+    libs_base_version = _installed_cutedsl_libs_base_version()
     if (
         dsl_version is not None
         and quack_version is not None
+        and libs_base_version is not None
+        and Version(dsl_version) == Version(libs_base_version)
         and any(
             dsl_spec.contains(dsl_version) and quack_spec.contains(quack_version)
             for dsl_spec, quack_spec in CUTEDSL_PAIRS
@@ -125,7 +138,11 @@ def check_cutedsl_installation() -> tuple[str, str]:
         "The CuTeDSL attention kernels need a supported "
         f"{CUTEDSL_DSL_REQUIREMENT.name} / {CUTEDSL_QUACK_REQUIREMENT.name} pair.\n"
         f"Installed: {CUTEDSL_DSL_REQUIREMENT.name} {_format_version(dsl_version)}, "
+        f"{CUTEDSL_LIBS_BASE_DISTRIBUTION} "
+        f"{_format_version(libs_base_version)}, "
         f"{CUTEDSL_QUACK_REQUIREMENT.name} {_format_version(quack_version)}.\n"
+        f"{CUTEDSL_LIBS_BASE_DISTRIBUTION} must have the same version as "
+        f"{CUTEDSL_DSL_REQUIREMENT.name}.\n"
         f"Required: {CUTEDSL_DSL_REQUIREMENT}, {CUTEDSL_QUACK_REQUIREMENT}, "
         f"as one of these pairs:\n{supported_pairs}\n"
         f"Install the newest supported pair with:\n  {CUTEDSL_UPGRADE_COMMAND}"

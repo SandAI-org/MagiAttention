@@ -12,17 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import TestCase
+
 import cutlass
 import cutlass.cute as cute
-import pytest
 import torch
 from cutlass.cute.runtime import from_dlpack
+from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.kernel.cutedsl.cutedsl_utils import atomic_add_fp32, fmax
-
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is required"
-)
+from magi_attention.testing import parameterize
 
 
 @cute.kernel
@@ -38,11 +37,7 @@ def _fmax(a: cute.Tensor, b: cute.Tensor, out: cute.Tensor, use_c: cutlass.Const
     _fmax_kernel(a, b, out, use_c).launch(grid=(1, 1, 1), block=(32, 1, 1))
 
 
-@pytest.mark.parametrize("use_c", [False, True])
-@pytest.mark.parametrize("enable_tvm_ffi", [False, True])
-def test_fmax(use_c, enable_tvm_ffi):
-    if use_c and torch.cuda.get_device_capability()[0] < 10:
-        pytest.skip("Three-input fmax requires SM100 or newer")
+def _check_fmax(use_c: bool, enable_tvm_ffi: bool) -> None:
     a = torch.linspace(-2, 2, 32, device="cuda")
     b = a.flip(0)
     out = torch.empty_like(a)
@@ -67,12 +62,32 @@ def _atomic_add(a: cute.Tensor, out: cute.Tensor):
     _atomic_add_kernel(a, out).launch(grid=(1, 1, 1), block=(32, 1, 1))
 
 
-@pytest.mark.parametrize("enable_tvm_ffi", [False, True])
-def test_atomic_add_fp32(enable_tvm_ffi):
-    a = torch.arange(32, device="cuda", dtype=torch.float32)
-    out = torch.zeros(1, device="cuda")
-    tensors = [from_dlpack(t, enable_tvm_ffi=enable_tvm_ffi) for t in (a, out)]
-    options = "--enable-tvm-ffi" if enable_tvm_ffi else ""
-    compiled = cute.compile(_atomic_add, *tensors, options=options)
-    compiled(*((a, out) if enable_tvm_ffi else tensors))
-    torch.testing.assert_close(out[0], a.sum(), rtol=0, atol=0)
+class TestCutedslUtils(TestCase):
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required")
+
+    @parameterize("enable_tvm_ffi", [False, True])
+    def test_fmax(self, enable_tvm_ffi):
+        _check_fmax(use_c=False, enable_tvm_ffi=enable_tvm_ffi)
+
+    # Separate method: a skipTest inside parameterize ends all remaining cases.
+    @parameterize("enable_tvm_ffi", [False, True])
+    def test_fmax_three_inputs(self, enable_tvm_ffi):
+        if torch.cuda.get_device_capability()[0] < 10:
+            self.skipTest("Three-input fmax requires SM100 or newer")
+        _check_fmax(use_c=True, enable_tvm_ffi=enable_tvm_ffi)
+
+    @parameterize("enable_tvm_ffi", [False, True])
+    def test_atomic_add_fp32(self, enable_tvm_ffi):
+        a = torch.arange(32, device="cuda", dtype=torch.float32)
+        out = torch.zeros(1, device="cuda")
+        tensors = [from_dlpack(t, enable_tvm_ffi=enable_tvm_ffi) for t in (a, out)]
+        options = "--enable-tvm-ffi" if enable_tvm_ffi else ""
+        compiled = cute.compile(_atomic_add, *tensors, options=options)
+        compiled(*((a, out) if enable_tvm_ffi else tensors))
+        torch.testing.assert_close(out[0], a.sum(), rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    run_tests()

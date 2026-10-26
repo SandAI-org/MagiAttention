@@ -1281,9 +1281,6 @@ class FFAFwdSm100:
             tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
             # --- smem tensors ---
-            # row max and row sum for backward
-            sScale: cute.struct.MemRange[Float32, self.q_stage * self.m_block_size * 2]
-
             sQ: cute.struct.Align[
                 cute.struct.MemRange[self.q_dtype, sQ_size], self.buffer_align_bytes
             ]
@@ -1294,6 +1291,15 @@ class FFAFwdSm100:
             ]
             sO: cute.struct.Align[
                 cute.struct.MemRange[self.o_dtype, sO_size], self.buffer_align_bytes
+            ]
+            # TODO: Identify the true cause.
+            # Per-row corr_scale and final row_sum/row_max (softmax -> correction
+            # warps).
+            # Keep it after sO: at the SharedStorage front its loads hit
+            # bank conflicts.
+            sScale: cute.struct.Align[
+                cute.struct.MemRange[Float32, self.q_stage * self.m_block_size * 2],
+                128,
             ]
 
         self.shared_storage = SharedStorage
@@ -4941,23 +4947,32 @@ class FFAFwdSm100:
     def _acquire_range_locks(
         self, mRangeLocks: cute.Tensor, head_idx: Int32, row_offset: Int32
     ):
+        """Lock the one or two blocks the tile's rows straddle.
+
+        The upper lock is only try-locked; on failure the lower lock is released
+        and both are retried, so no tile waits while holding a lock (that
+        serializes the merges of adjacent tiles).
+        """
         ptr_1, ptr_2, two_locks = self._range_lock_ptrs(
             mRangeLocks, head_idx, row_offset
         )
         # Use LLVM pointers for cute.arch atomics across supported DSL versions.
-        # Loop-carried spin state: the CAS must re-execute every iteration.
-        acquired = cute.arch.atomic_cas(
-            ptr_1.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
-        )
-        while acquired != 0:
+        locked = Int32(0)
+        while locked == 0:
+            # Loop-carried spin state: the CAS must re-execute every iteration.
             acquired = cute.arch.atomic_cas(
                 ptr_1.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
             )
-        if two_locks:
-            acquired_2 = cute.arch.atomic_cas(
-                ptr_2.llvm_ptr, cmp=Int32(0), val=Int32(1), sem="acquire", scope="gpu"
-            )
-            while acquired_2 != 0:
+            while acquired != 0:
+                acquired = cute.arch.atomic_cas(
+                    ptr_1.llvm_ptr,
+                    cmp=Int32(0),
+                    val=Int32(1),
+                    sem="acquire",
+                    scope="gpu",
+                )
+            locked = Int32(1)
+            if two_locks:
                 acquired_2 = cute.arch.atomic_cas(
                     ptr_2.llvm_ptr,
                     cmp=Int32(0),
@@ -4965,6 +4980,12 @@ class FFAFwdSm100:
                     sem="acquire",
                     scope="gpu",
                 )
+                if acquired_2 != 0:
+                    # Nothing was written under the lower lock, so no fence.
+                    cute.arch.atomic_exch(
+                        ptr_1.llvm_ptr, Int32(0), sem="release", scope="gpu"
+                    )
+                    locked = Int32(0)
 
     @cute.jit
     def _release_range_locks(

@@ -16,9 +16,10 @@ import torch
 import triton
 from packaging.version import Version
 
-from magi_attention.utils import backend_requirements
+from .backend_requirements import check_cutedsl_installation
 
-__version__ = "1.0.0"
+# Version of this forkable utility module, independent of the package version.
+__version__ = "1.0.4"
 
 
 def _parse(version: str, release_only: bool) -> tuple[int, ...] | Version:
@@ -288,7 +289,7 @@ def is_cuda_version_lt(version: str, release_only: bool = True) -> bool:
 
 
 def _cutedsl_version(release_only: bool) -> tuple[int, ...] | Version:
-    return _parse(backend_requirements.check_cutedsl_installation()[0], release_only)
+    return _parse(check_cutedsl_installation()[0], release_only)
 
 
 def is_cutedsl_version_eq(version: str, release_only: bool = True) -> bool:

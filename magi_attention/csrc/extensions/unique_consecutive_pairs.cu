@@ -62,19 +62,15 @@ __global__ void gather_uniques(const IntPair* sorted_pairs, const int* d_flags, 
   }
 }
 
-/**
- * @brief Sets the last element of an array to a specific value.
- * The index at which to write is provided by a pointer to a device integer.
- * This kernel is intended to be launched with a single block and a single thread.
- *
- * @param d_array The device array to modify.
- * @param d_index A device pointer to an integer that holds the index where the value should be written.
- * @param value The integer value to write.
- */
-__global__ void set_last_element(int* d_array, const int* d_index, int value) {
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
-    d_array[*d_index] = value;
-  }
+// Consumers walk all n slots without copying the unique count to the host.
+// Represent the unused slots as empty ranges and empty CSR groups.
+__global__ void pad_unique_tail(IntPair* pairs, int* indices, const int* unique_count, int n) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < *unique_count || idx > n)
+    return;
+  if (idx < n)
+    pairs[idx] = {0, 0};
+  indices[idx] = n;
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs_ext(torch::Tensor sorted_input_tensor) {
@@ -126,7 +122,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
   // --- out elements ---
   int h_unique_n = n; // set elements to total_element_num to avoid sync between cpu and gpu.
 
-  // d_unique_pairs_out: The unique out tensor, elements with index >= d_unique_count_out are undefined value.
+  // d_unique_pairs_out: unique pairs followed by empty [0, 0] ranges.
   // d_unique_indices_out: Original indices of the unique items
   // Allocate n+1 for d_unique_indices_out to hold the final element.
   auto d_unique_pairs_out = torch::empty({h_unique_n, 2}, sorted_input_tensor.options());
@@ -142,11 +138,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
     CHECK_CUDA_KERNEL_LAUNCH();
   }
 
-  // --- Pass 4: Append the total length `n` to d_unique_indices_out ---
-  // This makes calculating the size of each consecutive group easier on the caller side.
-  // The size of group `i` is then `unique_indices[i+1] - unique_indices[i]`.
-  // The value of d_unique_count_out (on the device) is the index where we need to write `n`.
-  set_last_element<<<1, 1>>>(d_unique_indices_out.data_ptr<int>(), d_unique_count_out.data_ptr<int>(), n);
+  // --- Pass 4: Pad unused groups and the final CSR entry ---
+  // No gather thread writes at or after unique_count, so only the tail needs
+  // initialization. Include indices[n] even when all input pairs are unique.
+  pad_unique_tail<<<(n + 1 + threadsPerBlock - 1) / threadsPerBlock, threadsPerBlock>>>(
+      reinterpret_cast<IntPair*>(d_unique_pairs_out.data_ptr<int>()), d_unique_indices_out.data_ptr<int>(), d_unique_count_out.data_ptr<int>(), n);
   CHECK_CUDA_KERNEL_LAUNCH();
 
   return {d_unique_pairs_out, d_unique_indices_out, d_unique_count_out};
