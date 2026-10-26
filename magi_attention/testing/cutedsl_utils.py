@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared configs, input builders and reference checks for the CuTeDSL FFA tests."""
-
+import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -43,10 +42,6 @@ from magi_attention.utils.general import set_random_seed, str2seed
 
 Ranges = list[list[int]]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Architecture and kernel path
-# ─────────────────────────────────────────────────────────────────────────────
-
 # Major arches whose kernels consume q/k ranges natively: overlapping q ranges
 # (atomic O merge), per-range mask types, RangeMerge, sink, non-input out dtype.
 SM100_FAMILY_MAJOR_ARCHS = (10, 11)
@@ -69,7 +64,8 @@ class KernelPath(Enum):
 # On Ampere the native kernels already are the SM80 ones.
 KERNEL_PATHS = (
     [KernelPath.NATIVE]
-    if torch.cuda.is_available() and is_ampere()
+    if os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_ARCH") is not None
+    or (torch.cuda.is_available() and is_ampere())
     else [KernelPath.NATIVE, KernelPath.SM80]
 )
 
@@ -97,16 +93,17 @@ def use_kernel_path(path: KernelPath) -> Iterator[None]:
         get_device_arch.cache_clear()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test base and shapes
-# ─────────────────────────────────────────────────────────────────────────────
-
 # A cold run JIT-compiles every kernel variant of the sweep.
 DIST_TEST_TIMEOUT_SECONDS = 3600
 
 
 class CuteDSLDistTestBase(DistTestBase):
     """Spread independent parameter combinations over all visible GPUs."""
+
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required")
+        super().setUp()
 
     @property
     def device(self) -> int:
@@ -135,10 +132,7 @@ _NUM_HEADS_Q = 6
 MHA_HD64 = HeadConfig("mha_hd64", _NUM_HEADS_Q, _NUM_HEADS_Q, 64)
 MHA_HD128 = HeadConfig("mha_hd128", _NUM_HEADS_Q, _NUM_HEADS_Q, 128)
 GQA_HD128 = HeadConfig("gqa_hd128", _NUM_HEADS_Q, _NUM_HEADS_Q // 2, 128)
-MQA_HD64 = HeadConfig("mqa_hd64", _NUM_HEADS_Q, 1, 64)
 MQA_HD128 = HeadConfig("mqa_hd128", _NUM_HEADS_Q, 1, 128)
-
-INPUT_DTYPES = [torch.bfloat16, torch.float16]
 
 
 def seed_test_case(test_case: str) -> None:
@@ -164,11 +158,6 @@ def make_qkv(
         rand(k_tokens_shape, heads.num_heads_kv),
         rand(k_tokens_shape, heads.num_heads_kv),
     )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Ranges and mask types
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def ranges_from_lengths(lengths: Sequence[int], start: int = 0) -> Ranges:
@@ -198,11 +187,6 @@ def mask_types_arg(attn_type_map: list[int], device: int | str) -> int | torch.T
 def cycle_mask_types(pattern: Sequence[int], num_ranges: int) -> list[int]:
     """Repeat ``pattern`` over ``num_ranges`` relations."""
     return [pattern[i % len(pattern)] for i in range(num_ranges)]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Reference comparison
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -253,14 +237,14 @@ def _torch_reference(
         k=k_ref,
         v=v_ref,
         mask=mask,
-        sink=None if sink is None else sink.detach(),
+        sink=sink,
         layout="thd",
         # The sdpa reference has no sink support.
         backend="sdpa" if sink is None else "torch",
         high_precision=high_precision,
     )
-    dq, dk, dv = torch.autograd.grad(out, (q_ref, k_ref, v_ref), do.to(out.dtype))
-    return AttnTensors(out=out, dq=dq, dk=dk, dv=dv)
+    grads = torch.autograd.grad(out, (q_ref, k_ref, v_ref), do.to(out.dtype))
+    return AttnTensors(out, *grads)
 
 
 def _check_one(
@@ -270,24 +254,15 @@ def _check_one(
     ref_lo: torch.Tensor,
     dtype: torch.dtype,
     test_case: str,
-) -> list[str]:
-    """Bound the error by the low-precision reference's own error: an Linf
-    norm gate (flash-attn style) plus an rtol mismatch ratio (torch style).
-
-    The Linf gate also allows the rounding noise of ``ref_hi`` in its stored
-    dtype, as ``test_pipeline`` and the FlashAttention tests do.
-    """
+) -> None:
+    """Check maximum error and the fraction of elements exceeding tolerance."""
     actual = actual.to(ref_hi.dtype)
     rtol = _RTOL[name][dtype]
-    errors = []
     norm = calc_inf_norm(actual, ref_hi)
     ref_norm = calc_inf_norm(ref_lo, ref_hi)
     noise_norm = calc_rounding_noise_norm(ref_hi)
-    if norm > NORM_RTOL_RATIO * ref_norm + NORM_ROUNDING_NOISE_RATIO * noise_norm:
-        errors.append(
-            f"{test_case} => {name}: {norm=} > {NORM_RTOL_RATIO} x {ref_norm=} "
-            f"+ {NORM_ROUNDING_NOISE_RATIO} x {noise_norm=}"
-        )
+    bound = NORM_RTOL_RATIO * ref_norm + NORM_ROUNDING_NOISE_RATIO * noise_norm
+    assert norm <= bound, f"{test_case} => {name}: {norm=}, {bound=}"
     mismatch_threshold = extract_mismatch_threshold(
         actual=ref_lo,
         expected=ref_hi,
@@ -297,19 +272,15 @@ def _check_one(
         min_mismatch_thres=_MIN_MISMATCH_THRES[name],
         max_mismatch_thres=MAX_MISMATCH_THRES,
     )
-    try:
-        assert_close(
-            actual,
-            ref_hi,
-            atol=EPSILON,
-            rtol=rtol,
-            mismatch_threshold=mismatch_threshold,
-            test_case=f"{test_case} => {name}",
-            print_rank=-1,
-        )
-    except AssertionError as e:
-        errors.append(str(e))
-    return errors
+    assert_close(
+        actual,
+        ref_hi,
+        atol=EPSILON,
+        rtol=rtol,
+        mismatch_threshold=mismatch_threshold,
+        test_case=f"{test_case} => {name}",
+        print_rank=-1,
+    )
 
 
 def assert_close_to_torch_ref(
@@ -345,13 +316,8 @@ def assert_close_to_torch_ref(
         for high_precision in (True, False)
     ]
     ref_hi, ref_lo = (dict(ref.named()) for ref in references)
-    errors = []
     for name, value in actual.named():
-        errors += _check_one(
-            name, value, ref_hi[name], ref_lo[name], q.dtype, test_case
-        )
-    if errors:
-        raise AssertionError("\n\n".join(errors))
+        _check_one(name, value, ref_hi[name], ref_lo[name], q.dtype, test_case)
 
 
 def torch_reference_out_lse(

@@ -114,7 +114,7 @@ class TestCutedslBwdUnderRangeMerge(TestCase):
             with mock.patch.object(
                 cutedsl_ffa, "_flex_flash_attn_bwd", wraps=_flex_flash_attn_bwd
             ) as bwd:
-                dq, dk, dv = cutedsl_ffa.cutedsl_bwd(
+                dq, dk, dv, _ = cutedsl_ffa.cutedsl_bwd(
                     do, q, k, v, out, lse, attn_arg, softmax_scale=None, softcap=0.0
                 )
 

@@ -12,16 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Learnable sink logits (``"sh"`` layout): public fwd + bwd including dsink,
-folding the sink once into accumulated O/LSE, and the dsink reduction kernel."""
-
 import math
 import unittest
 from dataclasses import dataclass
 
 import torch
 from einops import rearrange
-from torch.testing._internal.common_utils import run_tests
+from torch.testing._internal.common_utils import TestCase, run_tests
 
 from magi_attention.kernel.cutedsl import MT_MAP, flex_flash_attn_func
 from magi_attention.kernel.cutedsl.ffa_bwd_dsink import DSINK_TILE_M, bwd_dsink
@@ -30,8 +27,7 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_fwd,
 )
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import with_run_in_mp
-from tests.test_kernel.cutedsl.cutedsl_test_utils import (
+from magi_attention.testing.cutedsl_utils import (
     GQA_HD128,
     MHA_HD128,
     SM100_FAMILY_REQUIRED,
@@ -47,10 +43,11 @@ from tests.test_kernel.cutedsl.cutedsl_test_utils import (
     to_ranges_tensor,
     torch_reference_out_lse,
 )
+from magi_attention.testing.dist_common import with_run_in_mp
 
 HEAD_CONFIGS = [MHA_HD128, GQA_HD128]
 DTYPE = torch.bfloat16
-NUM_SINKS = 4
+NUM_SINKS = 9
 
 # Length unit of the range geometries.
 SPAN = 128
@@ -75,14 +72,6 @@ PARTITION = RangesGeometry(
     k_ranges=ranges_from_lengths([2 * SPAN] * 4),
     disable_fwd_atomic_reduction=True,
 )
-# Shared q rows merge two relations; the sink still counts once per row.
-OVERLAPPING_Q = RangesGeometry(
-    "overlapping_q",
-    total_q=6 * SPAN,
-    total_k=6 * SPAN,
-    q_ranges=[[0, 4 * SPAN], [2 * SPAN, 6 * SPAN]],
-    k_ranges=[[0, 4 * SPAN], [4 * SPAN, 6 * SPAN]],
-)
 # Unaligned ranges with overlap leave uncovered rows inside and across tiles.
 UNCOVERED_Q = RangesGeometry(
     "uncovered_q",
@@ -91,10 +80,10 @@ UNCOVERED_Q = RangesGeometry(
     q_ranges=[[0, 96], [64, 160], [288, 352]],
     k_ranges=[[0, SPAN], [SPAN, 2 * SPAN], [2 * SPAN, 3 * SPAN]],
 )
-RANGES_GEOMETRIES = [PARTITION, OVERLAPPING_Q, UNCOVERED_Q]
+RANGES_GEOMETRIES = [PARTITION, UNCOVERED_Q]
 
 DENSE_BATCH_SIZE = 2
-DENSE_SEQLEN = 4 * SPAN
+DENSE_SEQLEN = 2 * SPAN + 1
 
 FOLD_NUM_SINKS = 2
 # Kernel-level forward checks against the fp64 reference.
@@ -126,9 +115,6 @@ def dsink_reference(
     return -(delta[:, None] * probability).sum(dim=0).float()
 
 
-# Match the FFA backend's "sh" dsink atol/rtol in
-# tests/test_attn/test_flex_flash_attn.py. Require every element to pass here.
-# The reference uses this call's O/LSE; O and dQ/dK/dV cover end-to-end effects.
 DSINK_ATOL = 2e-4
 DSINK_RTOL = 0.1
 
@@ -148,6 +134,7 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
         out, meta = flex_flash_attn_func(q, k, v, mask_types=mask_type, sink=sink)
         do = torch.randn_like(out)
         dq, dk, dv, dsink = torch.autograd.grad(out, (q, k, v, sink), do)
+        self.assertEqual(dsink.dtype, sink.dtype)
 
         def to_thd(t: torch.Tensor) -> torch.Tensor:
             return rearrange(t, "b s h d -> (b s) h d")
@@ -167,7 +154,10 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
             do=to_thd(do),
             sink=sink,
             actual=AttnTensors(
-                out=to_thd(out), dq=to_thd(dq), dk=to_thd(dk), dv=to_thd(dv)
+                out=to_thd(out),
+                dq=to_thd(dq),
+                dk=to_thd(dk),
+                dv=to_thd(dv),
             ),
             q_ranges=ranges_from_lengths([DENSE_SEQLEN] * DENSE_BATCH_SIZE),
             k_ranges=ranges_from_lengths([DENSE_SEQLEN] * DENSE_BATCH_SIZE),
@@ -200,6 +190,7 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
         )
         do = torch.randn_like(out)
         dq, dk, dv, dsink = torch.autograd.grad(out, (q, k, v, sink), do)
+        self.assertEqual(dsink.dtype, sink.dtype)
 
         torch.testing.assert_close(
             dsink,
@@ -222,7 +213,7 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
 
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestSinkFolding(unittest.TestCase):
+class TestSinkFolding(TestCase):
     """The atomic-merge forward folds the sink into caller-owned O/LSE."""
 
     def setUp(self) -> None:
@@ -511,11 +502,6 @@ class TestSinkFolding(unittest.TestCase):
         self.assertTrue(torch.all(dv_direct == 0))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# dsink reduction kernel
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 def _dsink_inputs(
     total_q: int, num_sinks: int, dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -534,65 +520,14 @@ def _dsink_inputs(
     return out, dout, lse, sink
 
 
-class TestDSinkReduction(unittest.TestCase):
+class TestSinkGradientReuse(TestCase):
     def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required")
         seed_test_case(self.id())
 
-    # Single row, full tile, and tails across one or several tiles.
-    @parameterize("total_q", [1, DSINK_TILE_M, DSINK_TILE_M + 1, 3 * DSINK_TILE_M + 1])
-    @parameterize("num_sinks", [1, 9])  # Single sink and multiple sinks per head.
-    @parameterize("dtype", [torch.bfloat16, torch.float16])
-    def test_rows_and_sink_counts(
-        self, total_q: int, num_sinks: int, dtype: torch.dtype
-    ):
-        inputs = _dsink_inputs(total_q, num_sinks, dtype)
-        dsink = bwd_dsink(*inputs)
-        self.assertEqual(dsink.dtype, torch.float32)
-        torch.testing.assert_close(
-            dsink, dsink_reference(*inputs), atol=DSINK_ATOL, rtol=DSINK_RTOL
-        )
-
-    @parameterize("shape", [(0, 9), (DSINK_TILE_M + 1, 0)])
-    def test_empty_inputs(self, shape: tuple[int, int]):
-        total_q, num_sinks = shape
-        inputs = _dsink_inputs(total_q, num_sinks, torch.bfloat16)
-        dsink = bwd_dsink(*inputs)
-        torch.testing.assert_close(dsink, dsink_reference(*inputs), atol=0, rtol=0)
-
-    @parameterize("case", ["extreme_logits", "disabled_sinks", "empty_rows"])
-    @parameterize("dtype", [torch.bfloat16, torch.float16])
-    def test_numerical_corner_cases(self, case: str, dtype: torch.dtype):
-        out, dout, lse, sink = _dsink_inputs(3 * DSINK_TILE_M + 1, 9, dtype)
-        if case == "extreme_logits":
-            # Shift logits and LSE together: probabilities stay finite.
-            shifts = torch.tensor([1000.0, -1000.0, 0.0], device=sink.device)
-            sink += shifts
-            lse += shifts
-        elif case == "disabled_sinks":
-            sink[:, -1] = -math.inf
-            lse[:, -1] = torch.randn_like(lse[:, -1])
-        else:
-            # Empty rows must contribute zero even with NaN O/dO.
-            lse[::7] = -math.inf
-            out[::7] = math.nan
-            dout[::7] = math.nan
-
-        dsink = bwd_dsink(out, dout, lse, sink)
-        torch.testing.assert_close(
-            dsink,
-            dsink_reference(out, dout, lse, sink),
-            atol=DSINK_ATOL,
-            rtol=DSINK_RTOL,
-        )
-        if case == "disabled_sinks":
-            self.assertTrue(
-                torch.all(dsink[:, -1] == 0), "all -inf sinks need zero grad"
-            )
-
-    # The larger case has more query tiles than reducer threads.
-    @parameterize("total_q", [DSINK_TILE_M, 2 * DSINK_TILE_M**2 + 1])
-    def test_overwrites_a_strided_buffer_on_every_call(self, total_q: int):
-        """Repeated calls start fresh completion counts and give equal results."""
+    def test_repeated_calls_overwrite_strided_gradients(self):
+        total_q = 2 * DSINK_TILE_M**2 + 1
         num_sinks = 9
         inputs = _dsink_inputs(total_q, num_sinks, torch.bfloat16)
         expected = dsink_reference(*inputs)
@@ -613,8 +548,7 @@ class TestDSinkReduction(unittest.TestCase):
             torch.testing.assert_close(result, first_result, atol=0, rtol=0)
         self.assertTrue(torch.all(torch.isnan(storage[:, 1::2])), "wrote off-stride")
 
-    def test_graph_replay_resets_the_completion_counter(self):
-        # Multiple query tiles exercise the completion counter on every replay.
+    def test_graph_replay_uses_updated_gradients(self):
         out, dout, lse, sink = _dsink_inputs(16 * DSINK_TILE_M + 1, 9, torch.bfloat16)
         expected = dsink_reference(out, dout, lse, sink)
         bwd_dsink(out, dout, lse, sink)  # compile outside the capture

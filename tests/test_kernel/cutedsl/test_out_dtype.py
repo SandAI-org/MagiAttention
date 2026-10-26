@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Output dtypes other than the input dtype (SM100/SM110): the forward O and
-the backward dQ / dK / dV."""
-
 import unittest
 from dataclasses import dataclass
 
@@ -27,8 +24,7 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_fwd,
 )
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import with_run_in_mp
-from tests.test_kernel.cutedsl.cutedsl_test_utils import (
+from magi_attention.testing.cutedsl_utils import (
     GQA_HD128,
     MHA_HD128,
     SM100_FAMILY_REQUIRED,
@@ -43,6 +39,7 @@ from tests.test_kernel.cutedsl.cutedsl_test_utils import (
     seed_test_case,
     to_ranges_tensor,
 )
+from magi_attention.testing.dist_common import with_run_in_mp
 
 DTYPE = torch.bfloat16
 HEAD_CONFIGS = [MHA_HD128, GQA_HD128]

@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""RangeMerge (SM100/SM110): relations sharing an outer interval are folded
-into one group, Q-merged in the forward and K-merged in the backward."""
-
 import unittest
 
 import torch
@@ -27,8 +24,7 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
 )
 from magi_attention.kernel.cutedsl.range_merge import bwd_range_merge_arg
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import with_run_in_mp
-from tests.test_kernel.cutedsl.cutedsl_test_utils import (
+from magi_attention.testing.cutedsl_utils import (
     MHA_HD64,
     MHA_HD128,
     SM100_FAMILY_REQUIRED,
@@ -43,6 +39,7 @@ from tests.test_kernel.cutedsl.cutedsl_test_utils import (
     seed_test_case,
     to_ranges_tensor,
 )
+from magi_attention.testing.dist_common import with_run_in_mp
 
 # Unique-writer dK/dV, which the backward merge requires, is MHA-only.
 HEAD_CONFIGS = [MHA_HD64, MHA_HD128]

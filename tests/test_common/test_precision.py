@@ -15,44 +15,51 @@
 import math
 
 import torch
+from torch.testing._internal.common_utils import TestCase, run_tests
 
+from magi_attention.testing import parameterize
+from magi_attention.testing.cutedsl_utils import _check_one
 from magi_attention.testing.precision import calc_inf_norm, calc_rounding_noise_norm
 
 NEG_INF = float("-inf")
 POS_INF = float("inf")
 
 
-class TestNonFiniteLinfGate:
-    """``-inf`` LSE rows that attend to no key must count as zero error when
-    both sides agree and as ``inf`` error when they disagree."""
+class TestPrecision(TestCase):
+    @parameterize(
+        "case",
+        [
+            (NEG_INF, NEG_INF, 0.5),
+            (0.0, NEG_INF, POS_INF),
+            (NEG_INF, 0.0, POS_INF),
+            (POS_INF, NEG_INF, POS_INF),
+            (math.nan, NEG_INF, math.nan),
+        ],
+    )
+    def test_non_finite_entries_preserve_error(self, case: tuple[float, float, float]):
+        actual, expected, error = case
+        norm = calc_inf_norm(torch.tensor([actual, 1.5]), torch.tensor([expected, 1.0]))
+        if math.isnan(error):
+            self.assertTrue(math.isnan(norm))
+        else:
+            self.assertEqual(norm, error)
 
-    def test_equal_neg_inf_rows_are_zero_error(self):
-        ref = torch.tensor([NEG_INF, 1.0, 2.0])
-        assert calc_inf_norm(ref.clone(), ref) == 0.0
-        assert calc_inf_norm(torch.tensor([NEG_INF, 1.5, 2.0]), ref) == 0.5
-
-    def test_finite_against_neg_inf_is_inf_error(self):
-        ref = torch.tensor([NEG_INF, 1.0])
-        assert calc_inf_norm(torch.tensor([0.0, 1.0]), ref) == POS_INF
-        assert calc_inf_norm(ref, torch.tensor([0.0, 1.0])) == POS_INF
-
-    def test_opposite_inf_signs_are_inf_error(self):
-        assert (
-            calc_inf_norm(torch.tensor([POS_INF, 1.0]), torch.tensor([NEG_INF, 1.0]))
-            == POS_INF
+    @parameterize("values", [[3.0, 1000.0], []])
+    def test_rounding_noise_ignores_uncovered_rows(self, values: list[float]):
+        ref = torch.tensor([NEG_INF, *values])
+        self.assertEqual(
+            calc_rounding_noise_norm(ref),
+            calc_rounding_noise_norm(torch.tensor(values)) if values else 0.0,
         )
 
-    def test_nan_output_is_not_zero_error(self):
-        norm = calc_inf_norm(
-            torch.tensor([float("nan"), 1.0]), torch.tensor([NEG_INF, 1.0])
-        )
-        assert math.isnan(norm)
+    @parameterize("value", [math.nan, POS_INF, NEG_INF])
+    def test_reference_comparison_rejects_non_finite_output(self, value: float):
+        ref = torch.ones(1024)
+        actual = ref.clone()
+        actual[0] = value
+        with self.assertRaises(AssertionError):
+            _check_one("out", actual, ref, ref, torch.bfloat16, self.id())
 
-    def test_rounding_noise_skips_non_finite_entries(self):
-        ref = torch.tensor([NEG_INF, 3.0, 1000.0])
-        noise = calc_rounding_noise_norm(ref)
-        assert math.isfinite(noise)
-        assert noise == calc_rounding_noise_norm(ref[1:])
 
-    def test_rounding_noise_of_all_neg_inf_is_zero(self):
-        assert calc_rounding_noise_norm(torch.tensor([NEG_INF, NEG_INF])) == 0.0
+if __name__ == "__main__":
+    run_tests()

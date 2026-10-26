@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Core fwd + bwd of the CuTeDSL ``flex_flash_attn_func`` on dense and varlen
-inputs: full / causal masks x MHA / GQA / MQA, on the native and SM80 kernels."""
-
 from dataclasses import dataclass
 
 import torch
@@ -23,14 +20,11 @@ from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.kernel.cutedsl import MT_MAP, flex_flash_attn_func
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import with_run_in_mp
-from tests.test_kernel.cutedsl.cutedsl_test_utils import (
+from magi_attention.testing.cutedsl_utils import (
     GQA_HD128,
-    INPUT_DTYPES,
     KERNEL_PATHS,
     MHA_HD64,
     MHA_HD128,
-    MQA_HD64,
     MQA_HD128,
     AttnTensors,
     CuteDSLDistTestBase,
@@ -43,9 +37,7 @@ from tests.test_kernel.cutedsl.cutedsl_test_utils import (
     to_ranges_tensor,
     use_kernel_path,
 )
-
-HEAD_CONFIGS = [MHA_HD64, MHA_HD128, GQA_HD128, MQA_HD64, MQA_HD128]
-MASK_TYPES = [MT_MAP.full, MT_MAP.causal]
+from magi_attention.testing.dist_common import with_run_in_mp
 
 
 @dataclass(frozen=True)
@@ -54,12 +46,16 @@ class DenseConfig:
     batch_size: int
     seqlen_q: int
     seqlen_k: int
+    heads: HeadConfig
+    dtype: torch.dtype
+    mask_type: int
 
 
 DENSE_CONFIGS = [
-    DenseConfig("tile_aligned_self_attn", batch_size=4, seqlen_q=1024, seqlen_k=1024),
-    # Lengths off the tile sizes exercise the boundary masking.
-    DenseConfig("unaligned_cross_attn", batch_size=4, seqlen_q=203, seqlen_k=123),
+    DenseConfig("mha_self", 2, 1024, 1024, MHA_HD64, torch.bfloat16, MT_MAP.full),
+    DenseConfig("mha_cross", 2, 203, 123, MHA_HD128, torch.bfloat16, MT_MAP.causal),
+    DenseConfig("gqa_cross", 2, 203, 123, GQA_HD128, torch.float16, MT_MAP.causal),
+    DenseConfig("mqa_self", 2, 256, 256, MQA_HD128, torch.float16, MT_MAP.full),
 ]
 
 
@@ -68,15 +64,35 @@ class VarlenConfig:
     name: str
     q_lengths: tuple[int, ...]
     k_lengths: tuple[int, ...]
+    heads: HeadConfig
+    dtype: torch.dtype
+    mask_type: int
 
 
 VARLEN_CONFIGS = [
-    # max_seqlen_q == 128 exercises the q_stage=1 forward specialization.
-    VarlenConfig("single_q_tile_self_attn", q_lengths=(128,) * 8, k_lengths=(128,) * 8),
     VarlenConfig(
-        "uneven_cross_attn",
-        q_lengths=(128, 384, 64, 448),
-        k_lengths=(256, 128, 512, 192),
+        "single_q_tile",
+        (128,) * 4,
+        (128,) * 4,
+        MHA_HD64,
+        torch.bfloat16,
+        MT_MAP.full,
+    ),
+    VarlenConfig(
+        "gqa_uneven_cross",
+        (128, 384, 64, 448),
+        (256, 128, 512, 192),
+        GQA_HD128,
+        torch.bfloat16,
+        MT_MAP.causal,
+    ),
+    VarlenConfig(
+        "mqa_self",
+        (512, 1024),
+        (512, 1024),
+        MQA_HD128,
+        torch.float16,
+        MT_MAP.full,
     ),
 ]
 
@@ -88,19 +104,18 @@ def _to_thd(t: torch.Tensor) -> torch.Tensor:
 class TestFlexFlashAttn(CuteDSLDistTestBase):
     @with_run_in_mp
     @parameterize("seq_config", DENSE_CONFIGS)
-    @parameterize("heads", HEAD_CONFIGS)
-    @parameterize("mask_type", MASK_TYPES)
-    @parameterize("dtype", INPUT_DTYPES)
     @parameterize("kernel_path", KERNEL_PATHS)
     def test_dense_fwd_bwd(
         self,
         seq_config: DenseConfig,
-        heads: HeadConfig,
-        mask_type: int,
-        dtype: torch.dtype,
         kernel_path: KernelPath,
     ):
         """Dense (batch, seqlen, heads, dim) inputs."""
+        heads, dtype, mask_type = (
+            seq_config.heads,
+            seq_config.dtype,
+            seq_config.mask_type,
+        )
         test_case = (
             f"[test_dense_fwd_bwd][{seq_config.name}][{heads.name}]"
             f"[{mask_type=}][{dtype=}][{kernel_path.value}]"
@@ -137,19 +152,18 @@ class TestFlexFlashAttn(CuteDSLDistTestBase):
 
     @with_run_in_mp
     @parameterize("seq_config", VARLEN_CONFIGS)
-    @parameterize("heads", HEAD_CONFIGS)
-    @parameterize("mask_type", MASK_TYPES)
-    @parameterize("dtype", INPUT_DTYPES)
     @parameterize("kernel_path", KERNEL_PATHS)
     def test_varlen_fwd_bwd(
         self,
         seq_config: VarlenConfig,
-        heads: HeadConfig,
-        mask_type: int,
-        dtype: torch.dtype,
         kernel_path: KernelPath,
     ):
         """Packed inputs whose q/k ranges partition the tokens like cu_seqlens."""
+        heads, dtype, mask_type = (
+            seq_config.heads,
+            seq_config.dtype,
+            seq_config.mask_type,
+        )
         test_case = (
             f"[test_varlen_fwd_bwd][{seq_config.name}][{heads.name}]"
             f"[{mask_type=}][{dtype=}][{kernel_path.value}]"

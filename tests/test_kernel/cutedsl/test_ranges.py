@@ -12,22 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""q/k-range features of the SM100/SM110 kernels: per-range mask types,
-overlapping q ranges (atomic O merge), the unique-writer contracts, and O/LSE
-accumulation over several calls."""
-
 import math
 import unittest
 from dataclasses import dataclass
 
 import torch
-from torch.testing._internal.common_utils import run_tests
+from torch.testing._internal.common_utils import TestCase, run_tests
 
 from magi_attention.kernel.cutedsl import MT_MAP, flex_flash_attn_func
 from magi_attention.kernel.cutedsl.flex_flash_attn import _flex_flash_attn_fwd
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import with_run_in_mp
-from tests.test_kernel.cutedsl.cutedsl_test_utils import (
+from magi_attention.testing.cutedsl_utils import (
     GQA_HD128,
     MHA_HD128,
     SM100_FAMILY_REQUIRED,
@@ -45,6 +40,7 @@ from tests.test_kernel.cutedsl.cutedsl_test_utils import (
     to_ranges_tensor,
     torch_reference_out_lse,
 )
+from magi_attention.testing.dist_common import with_run_in_mp
 
 HEAD_CONFIGS = [MHA_HD128, GQA_HD128]
 DTYPE = torch.bfloat16
@@ -181,7 +177,7 @@ class TestRanges(CuteDSLDistTestBase):
 
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestRangeAccumulation(unittest.TestCase):
+class TestRangeAccumulation(TestCase):
     """Atomic-merge forward calls accumulating into caller-owned O/LSE."""
 
     def setUp(self) -> None:
