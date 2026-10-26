@@ -3832,12 +3832,12 @@ class FFABwdSm100:
                 else:
                     if const_expr(should_load_Q):
                         pipeline_Q.producer_tail(producer_state_Q_LSE.clone())
-                        pipeline_LSE.producer_tail(producer_state_Q_LSE)
+                        pipeline_LSE.producer_tail(producer_state_Q_LSE.clone())
                         if const_expr(tma_atom_Qt is not None):
                             pipeline_Qt.producer_tail(producer_state_Qt.clone())
                     if const_expr(should_load_dO):
                         pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
-                        pipeline_dPsum.producer_tail(producer_state_dO_dPsum)
+                        pipeline_dPsum.producer_tail(producer_state_dO_dPsum.clone())
 
             # Advance to next KV tile
             tile_scheduler.prefetch_next_work()

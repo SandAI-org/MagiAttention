@@ -41,6 +41,7 @@ from . import cutedsl_utils, sm80_utils
 from .cache_utils import get_jit_cache
 from .dsl_compat import (
     LayoutEnum,
+    LoadCacheMode,
     SmemAllocator,
     Tcgen05OperandMajorMode,
     WarpgroupOperandMajorMode,
@@ -173,7 +174,7 @@ class FFABwdPostProcess:
         universal_copy_bits = 128
         async_copy_elems_accum = universal_copy_bits // Float32.width
         atom_async_copy_accum = cute.make_copy_atom(
-            cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
+            cpasync.CopyG2SOp(cache_mode=LoadCacheMode.GLOBAL),
             Float32,
             num_bits_per_copy=universal_copy_bits,
         )

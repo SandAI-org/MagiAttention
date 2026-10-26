@@ -35,7 +35,11 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
 from .block_info import BlockInfo
-from .dsl_compat import SmemAllocator, get_smem_capacity_in_bytes
+from .dsl_compat import (
+    LoadCacheMode,
+    SmemAllocator,
+    get_smem_capacity_in_bytes,
+)
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierFwd
@@ -393,7 +397,7 @@ class FFAFwdSm80:
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
         # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
         atom_async_copy = cute.make_copy_atom(
-            cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
+            cpasync.CopyG2SOp(cache_mode=LoadCacheMode.GLOBAL),
             self.dtype,
             num_bits_per_copy=universal_copy_bits,
         )
