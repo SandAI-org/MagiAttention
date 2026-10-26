@@ -57,7 +57,7 @@ def is_sm100_family() -> bool:
 class KernelPath(Enum):
     """Which arch's kernels serve the call."""
 
-    NATIVE = "native"  # the kernels of the visible device
+    NATIVE = "native"  # preserve MAGI_ATTENTION_FFA_CUTEDSL_ARCH or detect the device
     SM80 = "sm80"  # the SM80 kernels, whose SASS also runs on newer GPUs
 
 

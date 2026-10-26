@@ -12,12 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Range contracts of the cutedsl bwd wrapper under MAGI_ATTENTION_RANGE_MERGE=1.
-
-calc_meta reorders the bwd rows by k start, so disable_fwd_atomic_reduction
-may be set only when the q ranges passed to the kernel are sorted and disjoint.
-"""
-
 from dataclasses import dataclass
 from unittest import TestCase, mock
 
@@ -82,6 +76,12 @@ CASES = {
 
 
 class TestCutedslBwdUnderRangeMerge(TestCase):
+    """Backward range ordering under MAGI_ATTENTION_RANGE_MERGE=1.
+
+    calc_meta reorders backward rows by k start. disable_fwd_atomic_reduction
+    requires the q ranges passed to the kernel to be sorted and disjoint.
+    """
+
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("the range bwd direct dQ store exists only on SM100/SM110")

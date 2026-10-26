@@ -158,7 +158,7 @@ class TestFlexFlashAttn(CuteDSLDistTestBase):
         seq_config: VarlenConfig,
         kernel_path: KernelPath,
     ):
-        """Packed inputs whose q/k ranges partition the tokens like cu_seqlens."""
+        """Consecutive, disjoint q/k ranges partition packed tokens by sequence."""
         heads, dtype, mask_type = (
             seq_config.heads,
             seq_config.dtype,

@@ -102,7 +102,6 @@ class TestRangeMerge(CuteDSLDistTestBase):
         q_ranges_t = to_ranges_tensor(q_ranges, self.device)
         k_ranges_t = to_ranges_tensor(k_ranges, self.device)
         mask_types = mask_types_arg(attn_type_map, self.device)
-        # Exercise both on-the-fly planning and a precomputed RangeMergePlan.
         range_merge: bool | RangeMergePlan = (
             True
             if pattern == "full"

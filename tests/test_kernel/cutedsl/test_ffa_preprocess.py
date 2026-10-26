@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-"""Bwd preprocess of the SM100 CuTeDSL FFA kernel with and without range merge.
-
-The preprocess grid is bounded by total_q only when the q ranges the kernels
-see are pairwise disjoint; the K-merge repeats a q range once per K group.
-"""
-
 import torch
 from torch.testing._internal.common_utils import run_tests
 
@@ -39,6 +32,12 @@ _NORM_RATIO = 2.0
 
 
 class TestFFAPreprocess(DistTestBase):
+    """SM100 backward preprocessing with and without range merge.
+
+    The preprocess grid is bounded by total_q only when the kernel's q ranges
+    are pairwise disjoint; the K-merge repeats a q range once per K group.
+    """
+
     def setUp(self) -> None:
         # Skip in the parent before DistTestBase spawns ranks, including ranks
         # with no assigned parameter cases that would otherwise reach a barrier.
