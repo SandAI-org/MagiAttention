@@ -33,11 +33,7 @@ from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
-from .dsl_compat import (
-    LoadCacheMode,
-    SmemAllocator,
-    get_smem_capacity_in_bytes,
-)
+from .dsl_compat import LoadCacheMode, SmemAllocator, get_smem_capacity_in_bytes
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .seqlen_info import SeqlenInfoQK
