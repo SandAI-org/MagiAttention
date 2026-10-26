@@ -150,7 +150,7 @@ class FFABwdDSink:
                 # this CTA's partials and acquires those of every CTA that
                 # added before it.
                 completed = cute.arch.atomic_add(
-                    mCounter.iterator + head_idx,
+                    (mCounter.iterator + head_idx).llvm_ptr,
                     Int32(1),
                     sem="acq_rel",
                     scope="gpu",
