@@ -20,10 +20,14 @@ import torch
 from torch.testing._internal.common_utils import TestCase, run_tests
 
 from magi_attention.kernel.cutedsl import MT_MAP, flex_flash_attn_func
-from magi_attention.kernel.cutedsl.flex_flash_attn import _flex_flash_attn_fwd
+from magi_attention.kernel.cutedsl.flex_flash_attn import (
+    _flex_flash_attn_bwd,
+    _flex_flash_attn_fwd,
+)
 from magi_attention.testing import parameterize
 from magi_attention.testing.cutedsl_utils import (
     GQA_HD128,
+    MHA_HD64,
     MHA_HD128,
     SM100_FAMILY_REQUIRED,
     AttnTensors,
@@ -275,6 +279,212 @@ class TestRangeAccumulation(TestCase):
             out[accumulated], out_prev[accumulated], atol=0, rtol=0
         )
         torch.testing.assert_close(lse, lse_prev, atol=0, rtol=0)
+
+
+# SM reservation of the overlap tests: the grid is capped at num_sm - SM_MARGIN.
+SM_MARGIN = 4
+# Runs of empty BiCausal tiles need a grid of two CTAs, so each CTA walks many
+# tiles and the per-tile handoff phases cycle.
+EMPTY_TILE_SEGMENTS = 16
+EMPTY_TILE_LEN_Q = 256
+EMPTY_TILE_LEN_K = 128
+
+
+def _compiled_entries(kernel: object) -> int:
+    """Number of compiled specializations the kernel entry point holds.
+
+    ``_flex_flash_attn_fwd``/``_bwd`` attach their JIT cache at import time, so
+    a test can count the specializations a call compiles.
+    """
+    return len(getattr(kernel, "compile_cache").cache)
+
+
+@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
+class TestPersistentSmMargin(CuteDSLDistTestBase):
+    """``sm_margin`` caps the persistent grid without changing the result.
+
+    A launch grid is not observable from a test, so the reservation is asserted
+    on the compiled specialization: ``sm_margin > 0`` compiles the persistent
+    kernel, and the margin value itself is a runtime argument of that kernel.
+    """
+
+    def _run_margin(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        do: torch.Tensor,
+        *,
+        q_ranges: Ranges,
+        k_ranges: Ranges,
+        mask_types: int | torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        sm_margin: int,
+        direct: bool,
+    ) -> tuple[torch.Tensor, ...]:
+        out, meta = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=to_ranges_tensor(q_ranges, self.device),
+            k_ranges=to_ranges_tensor(k_ranges, self.device),
+            mask_types=mask_types,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            disable_fwd_atomic_reduction=direct,
+            disable_bwd_dkv_atomic_reduction=direct,
+            sm_margin=sm_margin,
+        )
+        assert meta.lse is not None
+        grad_out = do.to(out.dtype)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), grad_out)
+        return out.detach(), meta.lse.detach(), dq, dk, dv, grad_out
+
+    @with_run_in_mp
+    @parameterize("heads", [MHA_HD64, MHA_HD128])
+    def test_sm_margin_matches_full_grid(self, heads: HeadConfig):
+        """The same ranges give the same tensors on the full and the capped grid."""
+        test_case = f"[test_sm_margin_matches_full_grid][{heads.name}]"
+        seed_test_case(test_case)
+        q_ranges = ranges_from_lengths([Q_RANGE_LEN] * NUM_RELATIONS)
+        k_ranges = ranges_from_lengths([K_RANGE_LEN] * NUM_RELATIONS)
+        q, k, v = make_qkv(
+            (NUM_RELATIONS * Q_RANGE_LEN,),
+            (NUM_RELATIONS * K_RANGE_LEN,),
+            heads,
+            DTYPE,
+            self.device,
+        )
+        do = torch.randn_like(q)
+
+        runs, grew = {}, {}
+        for margin in (0, SM_MARGIN, 2 * SM_MARGIN):
+            fwd_before = _compiled_entries(_flex_flash_attn_fwd)
+            bwd_before = _compiled_entries(_flex_flash_attn_bwd)
+            runs[margin] = self._run_margin(
+                q,
+                k,
+                v,
+                do,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                mask_types=MT_MAP.full,
+                max_seqlen_q=Q_RANGE_LEN,
+                max_seqlen_k=K_RANGE_LEN,
+                sm_margin=margin,
+                direct=True,
+            )
+            grew[margin] = (
+                _compiled_entries(_flex_flash_attn_fwd) - fwd_before,
+                _compiled_entries(_flex_flash_attn_bwd) - bwd_before,
+            )
+
+        # Zero margin compiles the static range kernels; a nonzero margin
+        # compiles the persistent ones; the margin value is a runtime argument,
+        # so 4 and 8 share one compiled kernel.
+        self.assertEqual(grew[0], (1, 1), f"{test_case} => full grid")
+        self.assertEqual(grew[SM_MARGIN], (1, 1), f"{test_case} => persistent")
+        self.assertEqual(grew[2 * SM_MARGIN], (0, 0), f"{test_case} => shared")
+
+        out0, lse0, dq0, dk0, dv0, _ = runs[0]
+        for margin in (SM_MARGIN, 2 * SM_MARGIN):
+            out, lse, dq, dk, dv, grad_out = runs[margin]
+            # Every output element has a single writer, so the tile order of
+            # the schedule must not change a bit. dQ accumulates over the K
+            # tiles, so its last bit may follow the tile order.
+            torch.testing.assert_close(out, out0, rtol=0, atol=0)
+            torch.testing.assert_close(lse, lse0, rtol=0, atol=0)
+            for name, got, ref in (("dq", dq, dq0), ("dk", dk, dk0), ("dv", dv, dv0)):
+                torch.testing.assert_close(
+                    got,
+                    ref,
+                    msg=lambda m, n=name: f"{test_case} => {n}: {m}",
+                )
+            assert_close_to_torch_ref(
+                q=q.detach(),
+                k=k.detach(),
+                v=v.detach(),
+                do=grad_out,
+                actual=AttnTensors(out=out, dq=dq, dk=dk, dv=dv),
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_type_map=[MT_MAP.full] * NUM_RELATIONS,
+                test_case=f"{test_case}[{margin=}]",
+            )
+
+        # A dense call has no range kernel to cap its grid, so it rejects the
+        # reservation instead of silently running on every SM.
+        dense = torch.randn(1, 256, 2, 64, device=self.device, dtype=DTYPE)
+        dense_lse = torch.zeros(1, 2, 256, device=self.device, dtype=torch.float32)
+        with self.assertRaisesRegex(NotImplementedError, "sm_margin"):
+            _flex_flash_attn_fwd(dense, dense, dense, sm_margin=SM_MARGIN)
+        with self.assertRaisesRegex(NotImplementedError, "sm_margin"):
+            _flex_flash_attn_bwd(
+                dense, dense, dense, dense, dense_lse, dense, sm_margin=SM_MARGIN
+            )
+
+    @with_run_in_mp
+    @parameterize("heads", [MHA_HD64, MHA_HD128])
+    def test_sm_margin_empty_tile_runs(self, heads: HeadConfig):
+        """Runs of empty BiCausal tiles keep the per-tile handoff phases aligned.
+
+        A tile outside the band has no (q, k) pair, and every warp role skips it
+        in the same way. A two-CTA grid makes each CTA walk many tiles, so a
+        role that skips a different set of tiles desynchronizes its phase.
+        """
+        sm_count = torch.cuda.get_device_properties(self.device).multi_processor_count
+        if sm_count <= 2:
+            self.skipTest("a two-CTA persistent grid needs more than two SMs")
+        margin = sm_count - 2
+        test_case = f"[test_sm_margin_empty_tile_runs][{heads.name}][{margin=}]"
+        seed_test_case(test_case)
+        self.assertGreater(
+            EMPTY_TILE_SEGMENTS * heads.num_heads_q, 4 * (sm_count - margin)
+        )
+        pattern = [MT_MAP.full, MT_MAP.bi_causal, MT_MAP.bi_causal, MT_MAP.bi_causal]
+        attn_type_map = cycle_mask_types(pattern, EMPTY_TILE_SEGMENTS)
+        q_ranges = ranges_from_lengths([EMPTY_TILE_LEN_Q] * EMPTY_TILE_SEGMENTS)
+        k_ranges = ranges_from_lengths([EMPTY_TILE_LEN_K] * EMPTY_TILE_SEGMENTS)
+        q, k, v = make_qkv(
+            (EMPTY_TILE_SEGMENTS * EMPTY_TILE_LEN_Q,),
+            (EMPTY_TILE_SEGMENTS * EMPTY_TILE_LEN_K,),
+            heads,
+            DTYPE,
+            self.device,
+        )
+        do = torch.randn_like(q)
+
+        bwd_before = _compiled_entries(_flex_flash_attn_bwd)
+        out, _, dq, dk, dv, grad_out = self._run_margin(
+            q,
+            k,
+            v,
+            do,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            mask_types=mask_types_arg(attn_type_map, self.device),
+            max_seqlen_q=EMPTY_TILE_LEN_Q,
+            max_seqlen_k=EMPTY_TILE_LEN_K,
+            sm_margin=margin,
+            direct=False,
+        )
+        self.assertEqual(
+            _compiled_entries(_flex_flash_attn_bwd) - bwd_before,
+            1,
+            f"{test_case} => persistent backward",
+        )
+        assert_close_to_torch_ref(
+            q=q.detach(),
+            k=k.detach(),
+            v=v.detach(),
+            do=grad_out,
+            actual=AttnTensors(out=out, dq=dq, dk=dk, dv=dv),
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            test_case=test_case,
+        )
 
 
 if __name__ == "__main__":
