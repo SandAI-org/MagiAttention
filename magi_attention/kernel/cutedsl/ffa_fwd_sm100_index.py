@@ -335,11 +335,12 @@ class FFAFwdSm100Index:
             self.num_regs_correction = 88
             self.num_regs_other = 56
         else:
-            # Give warpgroup 3 (MMA + 3 gather warps) 72 registers so the cp.async gather loop
-            # does not spill to local memory.
-            self.num_regs_softmax = 176
-            self.num_regs_correction = 80
-            self.num_regs_other = 72
+            # Give warpgroup 3 (MMA + 3 gather warps) 96 registers: the cp.async gather loop's
+            # per-row shuffle, 64-bit address and validity compare spill to local memory at 72,
+            # and those spill loads are the kernel's dominant long-scoreboard stall.
+            self.num_regs_softmax = 168
+            self.num_regs_correction = 72
+            self.num_regs_other = 96
         assert (
             2 * self.num_regs_softmax + self.num_regs_correction + self.num_regs_other
         ) * 128 <= 64 * 1024
