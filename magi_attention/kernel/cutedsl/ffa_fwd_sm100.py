@@ -40,6 +40,8 @@ from cutlass.utils import ClcDynamicPersistentTileScheduler
 from quack import copy_utils, layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
+from magi_attention.utils.version import is_cutedsl_version_ge
+
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
 from . import sm100_utils
@@ -536,6 +538,20 @@ class FFAFwdSm100:
                 - self.num_regs_softmax * 2
                 - self.num_regs_correction
             )
+
+        if (
+            not self.disable_fwd_atomic_reduction
+            and is_cutedsl_version_ge("4.8.0")
+            and self.head_dim_padded >= 96
+            and not paged_kv_non_tma
+        ):
+            # NVVM 23 keeps the 64-bit GMEM pointers live across the CAS retry
+            # loop in correction_atomic and spills 336 B at 64-80 registers.
+            # Rebalance (168 * 2 + 128 + 48 = 512) so both the softmax warps and
+            # correction_atomic compile without a stack frame.
+            self.num_regs_softmax = 168
+            self.num_regs_correction = 128
+            self.num_regs_other = 48
 
         self.buffer_align_bytes = 1024
 

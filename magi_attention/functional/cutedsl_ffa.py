@@ -21,12 +21,13 @@ Function). These two functions call the raw
 ``_flex_flash_attn_fwd`` / ``_flex_flash_attn_bwd`` kernels directly. Tensor
 contracts: q/k ranges and mask type map as produced by
 ``AttnArg.to_ffa_args()``; ``lse`` is fp32 ``(total_q, nhq)`` on both the
-forward output and the backward input.
+forward output and the backward input; ``sink`` is the dist contract's
+``[n_sink, nhq]`` fp32 with layout "sh", and ``cutedsl_bwd`` returns the fp32
+partial ``dsink`` of the same shape (``None`` without ``sink``).
 
-Limitations, filtered at the dist level: attention sink is unsupported (the
-kernel takes a per-head scalar bf16 sink, the dist contract is
-``[n_sink, nhq]`` fp32), and ``deterministic=True`` with ranges is rejected
-by the kernel.
+Limitation: deterministic mode is rejected by ``dist_attn_runtime_mgr`` for
+the CUTEDSL backend, because ``validate_range_feature_support`` rejects
+deterministic backward with ranges.
 """
 
 import weakref
@@ -88,6 +89,7 @@ def cutedsl_fwd(
     attn_arg: AttnArg,
     softmax_scale: float | None,
     softcap: float,
+    sink: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward wrapper: returns (out, lse) with lse in the dist contract's (sq, nhq) layout."""
 
@@ -105,6 +107,8 @@ def cutedsl_fwd(
         max_seqlen_k=attn_arg.k_ranges.max_seqlen,
         softmax_scale=softmax_scale,
         softcap=softcap if softcap and softcap > 0 else None,
+        sink=sink,
+        sink_layout="sh",
         # The dist overlap path rescales partial (out, lse) pairs in fp32
         # (correct_attn_out_lse); a bf16/fp16 partial underflows that merge.
         disable_fwd_atomic_reduction=False,
@@ -130,8 +134,9 @@ def cutedsl_bwd(
     softmax_scale: float | None,
     softcap: float,
     dq_acc: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Partial dq/dk/dv in fp32 for one dist-attn stage.
+    sink: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Partial dq/dk/dv in fp32 for one dist-attn stage, plus dsink if ``sink`` is given.
 
     With ``dq_acc`` (fp32, shape of ``q``) the kernel adds this stage's dq onto
     it in place and the returned dq is ``dq_acc`` itself.
@@ -150,7 +155,7 @@ def cutedsl_bwd(
         o = o.to(q.dtype)
         do = do.to(q.dtype)
 
-    dq, dk, dv = _flex_flash_attn_bwd(
+    dq, dk, dv, dsink = _flex_flash_attn_bwd(
         q=q,
         k=k,
         v=v,
@@ -158,6 +163,8 @@ def cutedsl_bwd(
         lse=lse,
         dout=do,
         dq=dq_acc,
+        sink=sink,
+        sink_layout="sh",
         q_ranges=ffa_args["q_ranges"],
         k_ranges=ffa_args["k_ranges"],
         max_seqlen_q=attn_arg.q_ranges.max_seqlen,
@@ -177,4 +184,4 @@ def cutedsl_bwd(
         dk_type=torch.float32,
         dv_type=torch.float32,
     )
-    return dq, dk, dv
+    return dq, dk, dv, dsink

@@ -44,6 +44,7 @@ from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
     FastDivmodDivisor,
     LayoutEnum,
+    LoadCacheMode,
     SmemAllocator,
     WarpgroupOperandMajorMode,
 )
@@ -409,7 +410,7 @@ class FFAFwdSm90:
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
         # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
         atom_async_copy = cute.make_copy_atom(
-            cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
+            cpasync.CopyG2SOp(cache_mode=LoadCacheMode.GLOBAL),
             self.dtype,
             num_bits_per_copy=universal_copy_bits,
         )

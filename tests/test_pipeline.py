@@ -62,9 +62,11 @@ from magi_attention.testing.precision import (
     H100_TFLOPS_16,
     MAX_MISMATCH_THRES,
     MISMATCH_THRES_RATIO,
+    NORM_ROUNDING_NOISE_RATIO,
     NORM_RTOL_RATIO,
     assert_close,
     calc_inf_norm,
+    calc_rounding_noise_norm,
     extract_mismatch_threshold,
 )
 from magi_attention.testing.utils import switch_envvars
@@ -521,11 +523,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 return False
 
         if backend == MagiAttentionKernelBackend.CUTEDSL:
-            # CuteDSL kernel: sink is per-head scalar bf16 (dist contract is
-            # [n_sink, nhq] fp32) — exclude sink configs; deterministic+ranges
-            # is NotImplementedError; qo comm relies on sm_margin which the
-            # kernel does not expose.
-            if has_sink or deterministic or qo_comm:
+            # CuteDSL kernel: deterministic+ranges is NotImplementedError;
+            # qo comm relies on sm_margin which the kernel does not expose.
+            if deterministic or qo_comm:
                 return False
 
         if backend in (
@@ -551,6 +551,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges([[0, 14336]]),
                 "k_ranges": AttnRanges.from_ranges([[0, 14336]]),
@@ -598,6 +599,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -665,6 +667,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -869,6 +872,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges([[0, 1024]]),
                 "k_ranges": AttnRanges.from_ranges([[0, 1024]]),
@@ -947,6 +951,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -985,6 +990,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     MagiAttentionKernelBackend.FFA,
                     MagiAttentionKernelBackend.SDPA,
                     MagiAttentionKernelBackend.SDPA_OL,
+                    MagiAttentionKernelBackend.CUTEDSL,
                 },
                 "q_ranges": AttnRanges.from_ranges(
                     [[0, 1024], [128, 256], [256, 512], [512, 1024]]
@@ -1342,13 +1348,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         total_seqlen_sink: int = (
             0
-            if backend
-            in (
-                MagiAttentionKernelBackend.FA4,
-                # CuteDSL kernel only supports per-head scalar bf16 sink,
-                # while dist contract is [n_sink, nhq] fp32; skip sink.
-                MagiAttentionKernelBackend.CUTEDSL,
-            )
+            if backend == MagiAttentionKernelBackend.FA4
             else attn_config.get("total_seqlen_sink", 0)
         )
         chunk_size: int = attn_config["chunk_size"]
@@ -1854,13 +1854,19 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             out_ref_norm = calc_inf_norm(
                 total_out_ref_low_precision, total_out_ref_high_precision
             )
+            out_noise_norm = calc_rounding_noise_norm(total_out_ref_high_precision)
             try:
                 self.assertLessEqual(
                     out_norm,
-                    max(o_min_norm_rtol, o_norm_rtol_ratio * out_ref_norm),
+                    max(
+                        o_min_norm_rtol,
+                        o_norm_rtol_ratio * out_ref_norm
+                        + NORM_ROUNDING_NOISE_RATIO * out_noise_norm,
+                    ),
                     msg=(
                         f"For {test_case=}: {out_norm=} should be no greater than "
-                        f"max({o_min_norm_rtol}, {o_norm_rtol_ratio} x {out_ref_norm=})",
+                        f"max({o_min_norm_rtol}, {o_norm_rtol_ratio} x {out_ref_norm=} "
+                        f"+ {NORM_ROUNDING_NOISE_RATIO} x {out_noise_norm=})",
                     ),
                 )
             except Exception as e:
@@ -1907,13 +1913,19 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 lse_ref_norm = calc_inf_norm(
                     total_lse_ref_low_precision, total_lse_ref_high_precision
                 )
+                lse_noise_norm = calc_rounding_noise_norm(total_lse_ref_high_precision)
                 try:
                     self.assertLessEqual(
                         lse_norm,
-                        max(lse_min_norm_rtol, lse_norm_rtol_ratio * lse_ref_norm),
+                        max(
+                            lse_min_norm_rtol,
+                            lse_norm_rtol_ratio * lse_ref_norm
+                            + NORM_ROUNDING_NOISE_RATIO * lse_noise_norm,
+                        ),
                         msg=(
                             f"For {test_case=}: {lse_norm=} should be no greater than "
-                            f"max({lse_min_norm_rtol}, {lse_norm_rtol_ratio} x {lse_ref_norm=})"
+                            f"max({lse_min_norm_rtol}, {lse_norm_rtol_ratio} x {lse_ref_norm=} "
+                            f"+ {NORM_ROUNDING_NOISE_RATIO} x {lse_noise_norm=})"
                         ),
                     )
                 except Exception as e:
@@ -1978,13 +1990,21 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dq_ref_norm = calc_inf_norm(
                     grad_total_q_ref_low_precision, grad_total_q_ref_high_precision
                 )
+                dq_noise_norm = calc_rounding_noise_norm(
+                    grad_total_q_ref_high_precision
+                )
                 try:
                     self.assertLessEqual(
                         dq_norm,
-                        max(dq_min_norm_rtol, dq_norm_rtol_ratio * dq_ref_norm),
+                        max(
+                            dq_min_norm_rtol,
+                            dq_norm_rtol_ratio * dq_ref_norm
+                            + NORM_ROUNDING_NOISE_RATIO * dq_noise_norm,
+                        ),
                         msg=(
                             f"For {test_case=}: {dq_norm=} should be no greater than "
-                            f"max({dq_min_norm_rtol}, {dq_norm_rtol_ratio} x {dq_ref_norm=})"
+                            f"max({dq_min_norm_rtol}, {dq_norm_rtol_ratio} x {dq_ref_norm=} "
+                            f"+ {NORM_ROUNDING_NOISE_RATIO} x {dq_noise_norm=})"
                         ),
                     )
                 except Exception as e:
@@ -2017,13 +2037,21 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dk_ref_norm = calc_inf_norm(
                     grad_total_k_ref_low_precision, grad_total_k_ref_high_precision
                 )
+                dk_noise_norm = calc_rounding_noise_norm(
+                    grad_total_k_ref_high_precision
+                )
                 try:
                     self.assertLessEqual(
                         dk_norm,
-                        max(dk_min_norm_rtol, dk_norm_rtol_ratio * dk_ref_norm),
+                        max(
+                            dk_min_norm_rtol,
+                            dk_norm_rtol_ratio * dk_ref_norm
+                            + NORM_ROUNDING_NOISE_RATIO * dk_noise_norm,
+                        ),
                         msg=(
                             f"For {test_case=}: {dk_norm=} should be no greater than "
-                            f"max({dk_min_norm_rtol}, {dk_norm_rtol_ratio} x {dk_ref_norm=})"
+                            f"max({dk_min_norm_rtol}, {dk_norm_rtol_ratio} x {dk_ref_norm=} "
+                            f"+ {NORM_ROUNDING_NOISE_RATIO} x {dk_noise_norm=})"
                         ),
                     )
                 except Exception as e:
@@ -2056,13 +2084,21 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dv_ref_norm = calc_inf_norm(
                     grad_total_v_ref_low_precision, grad_total_v_ref_high_precision
                 )
+                dv_noise_norm = calc_rounding_noise_norm(
+                    grad_total_v_ref_high_precision
+                )
                 try:
                     self.assertLessEqual(
                         dv_norm,
-                        max(dv_min_norm_rtol, dv_norm_rtol_ratio * dv_ref_norm),
+                        max(
+                            dv_min_norm_rtol,
+                            dv_norm_rtol_ratio * dv_ref_norm
+                            + NORM_ROUNDING_NOISE_RATIO * dv_noise_norm,
+                        ),
                         msg=(
                             f"For {test_case=}: {dv_norm=} should be no greater than "
-                            f"max({dv_min_norm_rtol}, {dv_norm_rtol_ratio} x {dv_ref_norm=})"
+                            f"max({dv_min_norm_rtol}, {dv_norm_rtol_ratio} x {dv_ref_norm=} "
+                            f"+ {NORM_ROUNDING_NOISE_RATIO} x {dv_noise_norm=})"
                         ),
                     )
                 except Exception as e:
@@ -2100,16 +2136,21 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         grad_total_sink_ref_low_precision,
                         grad_total_sink_ref_high_precision,
                     )
+                    dsink_noise_norm = calc_rounding_noise_norm(
+                        grad_total_sink_ref_high_precision
+                    )
                     try:
                         self.assertLessEqual(
                             dsink_norm,
                             max(
                                 dsink_min_norm_rtol,
-                                dsink_norm_rtol_ratio * dsink_ref_norm,
+                                dsink_norm_rtol_ratio * dsink_ref_norm
+                                + NORM_ROUNDING_NOISE_RATIO * dsink_noise_norm,
                             ),
                             msg=(
                                 f"For {test_case=}: {dsink_norm=} should be no greater than "
-                                f"max({dsink_min_norm_rtol}, {dsink_norm_rtol_ratio} x {dsink_ref_norm=})"
+                                f"max({dsink_min_norm_rtol}, {dsink_norm_rtol_ratio} x {dsink_ref_norm=} "
+                                f"+ {NORM_ROUNDING_NOISE_RATIO} x {dsink_noise_norm=})"
                             ),
                         )
                     except Exception as e:

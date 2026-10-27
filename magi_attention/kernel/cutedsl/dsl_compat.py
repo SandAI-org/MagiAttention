@@ -25,9 +25,11 @@ from magi_attention.utils.version import is_cutedsl_version_ge
 
 # Before DSL 4.5, tcgen05 and warpgroup enum members compare unequal.
 if is_cutedsl_version_ge("4.5.0"):
+    from cutlass.cute.nvgpu import LoadCacheMode
     from cutlass.cute.nvgpu import OperandMajorMode as Tcgen05OperandMajorMode
     from cutlass.cute.nvgpu import OperandMajorMode as WarpgroupOperandMajorMode
 else:
+    from cutlass.cute.nvgpu.cpasync import LoadCacheMode
     from cutlass.cute.nvgpu.tcgen05 import OperandMajorMode as Tcgen05OperandMajorMode
     from cutlass.cute.nvgpu.warpgroup import (
         OperandMajorMode as WarpgroupOperandMajorMode,
@@ -103,6 +105,7 @@ else:
 __all__ = [
     "FastDivmodDivisor",
     "LayoutEnum",
+    "LoadCacheMode",
     "SmemAllocator",
     "Tcgen05OperandMajorMode",
     "TmemAllocator",

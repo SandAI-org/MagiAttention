@@ -33,7 +33,7 @@ from quack import layout_utils
 from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils, sm80_utils
-from .dsl_compat import SmemAllocator, get_smem_capacity_in_bytes
+from .dsl_compat import LoadCacheMode, SmemAllocator, get_smem_capacity_in_bytes
 from .ffa_utils import MT_MAP
 from .mask import AttentionMask
 from .seqlen_info import SeqlenInfoQK
@@ -468,7 +468,7 @@ class FFABwdSm80:
         # layout_src_tv: (1,8):(0,1) => 8 bf16 elements per thread
         # layout_dst_tv: (1,8):(0,1) => 8 bf16 elements per thread
         atom_async_copy = cute.make_copy_atom(
-            cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
+            cpasync.CopyG2SOp(cache_mode=LoadCacheMode.GLOBAL),
             self.dtype,
             num_bits_per_copy=universal_copy_bits,
         )
@@ -478,7 +478,7 @@ class FFABwdSm80:
         # layout_dst_tv=(1,4):(0,1) => 4 float32 elements per thread
         if cutlass.const_expr(not self.is_varlen_q):
             atom_async_copy_accum = cute.make_copy_atom(
-                cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
+                cpasync.CopyG2SOp(cache_mode=LoadCacheMode.GLOBAL),
                 cutlass.Float32,
                 num_bits_per_copy=universal_copy_bits,
             )

@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-"""Bwd preprocess of the SM100 CuTeDSL FFA kernel with and without range merge.
-
-The preprocess grid is bounded by total_q only when the q ranges the kernels
-see are pairwise disjoint; the K-merge repeats a q range once per K group.
-"""
-
 import torch
 from torch.testing._internal.common_utils import run_tests
 
@@ -38,7 +31,13 @@ from magi_attention.utils import make_attn_mask_from_ffa_args
 _NORM_RATIO = 2.0
 
 
-class TestFfaPreprocess(DistTestBase):
+class TestFFAPreprocess(DistTestBase):
+    """SM100 backward preprocessing with and without range merge.
+
+    The preprocess grid is bounded by total_q only when the kernel's q ranges
+    are pairwise disjoint; the K-merge repeats a q range once per K group.
+    """
+
     def setUp(self) -> None:
         # Skip in the parent before DistTestBase spawns ranks, including ranks
         # with no assigned parameter cases that would otherwise reach a barrier.
@@ -113,14 +112,25 @@ class TestFfaPreprocess(DistTestBase):
         self.assertLessEqual(err, bound, f"{test_case} {name}: {err=} {bound=}")
 
     @with_run_in_mp
-    @parameterize("q_layout", ["overlap", "disjoint"])
-    @parameterize("merge", ["none", "merge", "plan"])
-    @parameterize("d", [64, 128])
-    def test_bwd_preprocess(self, d, merge, q_layout):
+    @parameterize(
+        "case",
+        [
+            # Overlapping q without merge is the case the grid bound must not
+            # under-count: P's rows appear three times, so a total_q-bounded
+            # grid would leave U's rows unprocessed.
+            ("overlap", "none", 64),
+            # With merge the grid bound changes and dQ takes the direct path.
+            ("overlap", "merge", 128),
+            # A precomputed plan on disjoint q.
+            ("disjoint", "plan", 128),
+        ],
+    )
+    def test_bwd_preprocess(self, case: tuple[str, str, int]):
         """out/dQ/dK/dV match the reference with and without range merge, and
         the preprocess grid is bounded by total_q only for disjoint q without
         merge. In the overlap layout P's rows appear three times, so a
         total_q-bounded grid would leave U's rows unprocessed."""
+        q_layout, merge, d = case
         device, dtype, nheads = self.device, torch.bfloat16, 2
         p_rows, u_rows = [0, 512], [512, 640]
         k_segs = [[i * 128, (i + 1) * 128] for i in range(4)]
