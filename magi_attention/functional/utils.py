@@ -26,14 +26,22 @@ from magi_attention.utils.dtype import max_fp_dtype, to_higher_fp_dtype, to_trit
 def safe_subtract(
     a: torch.Tensor,
     b: torch.Tensor,
+    equal_inf_value: float | None = None,
 ) -> torch.Tensor:
-    """Safely subtracts two tensors,
-    where the subtraction results of two `-inf` will be set to `-inf`, instead of `nan`,
-    as well as the corr. gradients will be set to zeros
-    """
-    two_neg_inf_mask = (a == b) & (a == float("-inf"))
+    """Subtract tensors with zero gradients at replaced infinite entries.
 
-    return (a - b).masked_fill(two_neg_inf_mask, float("-inf"))
+    With ``equal_inf_value=None``, equal negative infinities produce ``-inf``
+    and equal positive infinities produce ``nan``.
+    An explicit value replaces the difference of equal infinities of either sign.
+    """
+    if equal_inf_value is None:
+        equal_inf_mask = (a == b) & (a == float("-inf"))
+        fill = float("-inf")
+    else:
+        equal_inf_mask = (a == b) & torch.isinf(a)
+        fill = equal_inf_value
+
+    return (a - b).masked_fill(equal_inf_mask, fill)
 
 
 def safe_lse(

@@ -44,6 +44,7 @@ from magi_attention.testing.cutedsl_utils import (
     torch_reference_out_lse,
 )
 from magi_attention.testing.dist_common import with_run_in_mp
+from magi_attention.testing.precision import assert_close, assert_equal
 
 DTYPE = torch.bfloat16
 NUM_SINKS = 9
@@ -149,13 +150,14 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
         def to_thd(t: torch.Tensor) -> torch.Tensor:
             return rearrange(t, "b s h d -> (b s) h d")
 
-        torch.testing.assert_close(
+        assert_close(
             dsink,
             dsink_reference(
                 to_thd(out), to_thd(do), rearrange(meta.lse, "b h s -> (b s) h"), sink
             ),
             atol=DSINK_ATOL,
             rtol=DSINK_RTOL,
+            test_case=f"{test_case} => dsink",
         )
         assert_close_to_torch_ref(
             q=to_thd(q.detach()),
@@ -202,11 +204,12 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
         dq, dk, dv, dsink = torch.autograd.grad(out, (q, k, v, sink), do)
         self.assertEqual(dsink.dtype, sink.dtype)
 
-        torch.testing.assert_close(
+        assert_close(
             dsink,
             dsink_reference(out, do, meta.lse, sink),
             atol=DSINK_ATOL,
             rtol=DSINK_RTOL,
+            test_case=f"{test_case} => dsink",
         )
         assert_close_to_torch_ref(
             q=q.detach(),
@@ -289,9 +292,10 @@ class TestSinkFolding(TestCase):
         for start, end in geometry.q_ranges:
             uncovered[start:end] = False
         self.assertTrue(torch.all(out[uncovered] == 0), "uncovered O is not zero")
-        torch.testing.assert_close(
+        assert_close(
             lse[uncovered],
             torch.logsumexp(sink, dim=0).expand(int(uncovered.sum()), -1),
+            test_case=f"{self.id()} => uncovered lse",
         )
         out_ref, lse_ref = torch_reference_out_lse(
             q=q,
@@ -302,8 +306,16 @@ class TestSinkFolding(TestCase):
             sink=sink,
         )
         tol = OUT_TOL[out_dtype]
-        torch.testing.assert_close(out.float(), out_ref, atol=tol, rtol=tol)
-        torch.testing.assert_close(lse, lse_ref, atol=LSE_ATOL, rtol=LSE_RTOL)
+        assert_close(
+            out.float(), out_ref, atol=tol, rtol=tol, test_case=f"{self.id()} => out"
+        )
+        assert_close(
+            lse,
+            lse_ref,
+            atol=LSE_ATOL,
+            rtol=LSE_RTOL,
+            test_case=f"{self.id()} => lse",
+        )
 
     @parameterize("sink_call", ["first", "last"])
     def test_sink_counts_once_across_accumulating_calls(self, sink_call: str):
@@ -333,8 +345,14 @@ class TestSinkFolding(TestCase):
             sink=sink,
         )
         tol = OUT_TOL[torch.float32]
-        torch.testing.assert_close(out, out_ref, atol=tol, rtol=tol)
-        torch.testing.assert_close(lse, lse_ref, atol=LSE_ATOL, rtol=LSE_RTOL)
+        assert_close(out, out_ref, atol=tol, rtol=tol, test_case=f"{self.id()} => out")
+        assert_close(
+            lse,
+            lse_ref,
+            atol=LSE_ATOL,
+            rtol=LSE_RTOL,
+            test_case=f"{self.id()} => lse",
+        )
 
     def test_empty_k_call_folds_the_sink(self):
         """Without keys the call only folds the sink into the stored state."""
@@ -353,17 +371,24 @@ class TestSinkFolding(TestCase):
         lse_sink = torch.logsumexp(sink, dim=0)
         lse_ref = torch.logaddexp(lse_prev[accumulated], lse_sink)
         rescale = torch.exp(lse_prev[accumulated] - lse_ref)[..., None]
-        torch.testing.assert_close(
-            lse[accumulated], lse_ref, atol=FOLD_ATOL, rtol=FOLD_RTOL
+        assert_close(
+            lse[accumulated],
+            lse_ref,
+            atol=FOLD_ATOL,
+            rtol=FOLD_RTOL,
+            test_case=f"{self.id()} => accumulated lse",
         )
-        torch.testing.assert_close(
+        assert_close(
             out[accumulated],
             out_prev[accumulated] * rescale,
             atol=FOLD_ATOL,
             rtol=FOLD_RTOL,
+            test_case=f"{self.id()} => accumulated out",
         )
         self.assertTrue(torch.all(out[empty] == 0), "empty-row O is not zero")
-        torch.testing.assert_close(lse[empty], lse_sink.expand(SPAN, -1))
+        assert_close(
+            lse[empty], lse_sink.expand(SPAN, -1), test_case=f"{self.id()} => empty lse"
+        )
 
     def test_empty_q_or_k_fwd_bwd_contracts(self):
         """Empty Q or empty K short-circuits fwd/bwd while preserving dsink and
@@ -382,8 +407,10 @@ class TestSinkFolding(TestCase):
             q_dense, k_dense, v_dense, sink=sink
         )
         self.assertTrue(torch.all(out_dense == 0))
-        torch.testing.assert_close(
-            lse_dense, lse_sink[None, :, None].expand_as(lse_dense)
+        assert_close(
+            lse_dense,
+            lse_sink[None, :, None].expand_as(lse_dense),
+            test_case=f"{self.id()} => dense empty-k lse",
         )
 
         q, k_empty, v_empty = make_qkv((SPAN,), (0,), heads, DTYPE, self.device)
@@ -399,7 +426,11 @@ class TestSinkFolding(TestCase):
             sink=sink,
         )
         self.assertTrue(torch.all(out_ranges == 0))
-        torch.testing.assert_close(lse_ranges, lse_sink.expand_as(lse_ranges))
+        assert_close(
+            lse_ranges,
+            lse_sink.expand_as(lse_ranges),
+            test_case=f"{self.id()} => ranges empty-k lse",
+        )
 
         out_saved = torch.randn_like(out_ranges)
         do = torch.randn_like(out_ranges)
@@ -420,11 +451,12 @@ class TestSinkFolding(TestCase):
         self.assertTrue(torch.all(dq_self == 0))
         self.assertEqual(dk_self.shape[0], 0)
         self.assertEqual(dv_self.shape[0], 0)
-        torch.testing.assert_close(
+        assert_close(
             dsink_out,
             dsink_reference(out_saved, do, lse_ranges, sink),
             atol=DSINK_ATOL,
             rtol=DSINK_RTOL,
+            test_case=f"{self.id()} => empty-k dsink",
         )
 
         dq_caller = torch.ones_like(q, dtype=torch.float32)
@@ -441,7 +473,7 @@ class TestSinkFolding(TestCase):
             k_ranges=k_ranges_empty,
             sink=sink,
         )
-        torch.testing.assert_close(dq_caller, dq_prev, atol=0, rtol=0)
+        assert_equal(dq_caller, dq_prev, test_case=f"{self.id()} => caller dq kept")
 
         # Empty Q on atomic fwd and on bwd: reducing dK/dV caller buffers keep
         # their contents, whereas self-allocated and single-writer dK/dV are zeroed.
@@ -550,12 +582,16 @@ class TestSinkGradientReuse(TestCase):
             dsink.fill_(math.nan)
             result = bwd_dsink(*inputs, dsink=dsink)
             self.assertIs(result, dsink)
-            torch.testing.assert_close(
-                result, expected, atol=DSINK_ATOL, rtol=DSINK_RTOL
+            assert_close(
+                result,
+                expected,
+                atol=DSINK_ATOL,
+                rtol=DSINK_RTOL,
+                test_case=f"{self.id()} => dsink",
             )
             if first_result is None:
                 first_result = result.clone()
-            torch.testing.assert_close(result, first_result, atol=0, rtol=0)
+            assert_equal(result, first_result, test_case=f"{self.id()} => dsink repeat")
         self.assertTrue(torch.all(torch.isnan(storage[:, 1::2])), "wrote off-stride")
 
     def test_graph_replay_uses_updated_gradients(self):
@@ -571,8 +607,12 @@ class TestSinkGradientReuse(TestCase):
             expected.neg_()
             result.fill_(math.nan)
             graph.replay()
-            torch.testing.assert_close(
-                result, expected, atol=DSINK_ATOL, rtol=DSINK_RTOL
+            assert_close(
+                result,
+                expected,
+                atol=DSINK_ATOL,
+                rtol=DSINK_RTOL,
+                test_case=f"{self.id()} => dsink replay",
             )
 
 

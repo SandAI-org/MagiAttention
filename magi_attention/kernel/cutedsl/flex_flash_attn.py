@@ -273,6 +273,11 @@ def _flex_flash_attn_fwd(
         assert sink.shape[1:] == (
             num_head,
         ), f"sink must be [n_sink, num_head], got {tuple(sink.shape)}"
+        # Reduce over the sinks once here rather than per row tile in the
+        # postprocess kernel: its grid is (tiles, num_head), so each CTA would
+        # repeat the reduction. Both sink-folding paths also need the same
+        # value: the direct store passes it to the main kernel, whose
+        # `learnable_sink` slot holds one logit per head.
         lse_sink = torch.logsumexp(sink.float(), dim=0)
 
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
