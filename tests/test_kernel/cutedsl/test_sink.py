@@ -177,9 +177,7 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
 
     @with_run_in_mp
     @parameterize("case", RANGES_SINK_CASES)
-    def test_ranges_sink_fwd_bwd(
-        self, case: tuple[RangesGeometry, HeadConfig]
-    ):
+    def test_ranges_sink_fwd_bwd(self, case: tuple[RangesGeometry, HeadConfig]):
         geometry, heads = case
         test_case = f"[test_ranges_sink_fwd_bwd][{geometry.name}][{heads.name}]"
         seed_test_case(test_case)
