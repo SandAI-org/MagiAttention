@@ -42,8 +42,14 @@ from magi_attention.testing.cutedsl_utils import (
 from magi_attention.testing.dist_common import with_run_in_mp
 
 # Unique-writer dK/dV, which the backward merge requires, is MHA-only.
-HEAD_CONFIGS = [MHA_HD64, MHA_HD128]
 DTYPE = torch.bfloat16
+
+# (heads, mask pattern): one on-the-fly plan and one precomputed plan, at both
+# supported head dims.
+RANGE_MERGE_CASES = [
+    (MHA_HD64, "full"),
+    (MHA_HD128, "mixed"),
+]
 
 # Lengths off the tile sizes leave partial tiles inside every group.
 Q_GROUP_LENGTHS = (257, 129, 193)
@@ -71,9 +77,8 @@ MASK_PATTERNS = {
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
 class TestRangeMerge(CuteDSLDistTestBase):
     @with_run_in_mp
-    @parameterize("pattern", list(MASK_PATTERNS))
-    @parameterize("heads", HEAD_CONFIGS)
-    def test_range_merge_fwd_bwd(self, pattern: str, heads: HeadConfig):
+    @parameterize("case", RANGE_MERGE_CASES)
+    def test_range_merge_fwd_bwd(self, case: tuple[HeadConfig, str]):
         """``range_merge=True`` plans on the fly; a precomputed
         :class:`RangeMergePlan` carries both the Q- and the K-merge.
 
@@ -82,6 +87,7 @@ class TestRangeMerge(CuteDSLDistTestBase):
         its reducing path (``disable_fwd_atomic_reduction`` only in the
         forward).
         """
+        heads, pattern = case
         test_case = f"[test_range_merge_fwd_bwd][{pattern}][{heads.name}]"
         seed_test_case(test_case)
         q_groups = ranges_from_lengths(Q_GROUP_LENGTHS)

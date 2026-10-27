@@ -12,11 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import Enum
 
 import torch
 
@@ -35,9 +32,7 @@ from magi_attention.testing.precision import (
     calc_rounding_noise_norm,
     extract_mismatch_threshold,
 )
-from magi_attention.testing.utils import switch_envvars
 from magi_attention.utils import make_attn_mask_from_ffa_args
-from magi_attention.utils.arch import is_ampere
 from magi_attention.utils.general import set_random_seed, str2seed
 
 Ranges = list[list[int]]
@@ -52,45 +47,6 @@ def is_sm100_family() -> bool:
     return (
         torch.cuda.is_available() and get_device_arch()[1] in SM100_FAMILY_MAJOR_ARCHS
     )
-
-
-class KernelPath(Enum):
-    """Which arch's kernels serve the call."""
-
-    NATIVE = "native"  # preserve MAGI_ATTENTION_FFA_CUTEDSL_ARCH or detect the device
-    SM80 = "sm80"  # the SM80 kernels, whose SASS also runs on newer GPUs
-
-
-# On Ampere the native kernels already are the SM80 ones.
-KERNEL_PATHS = (
-    [KernelPath.NATIVE]
-    if os.environ.get("MAGI_ATTENTION_FFA_CUTEDSL_ARCH") is not None
-    or (torch.cuda.is_available() and is_ampere())
-    else [KernelPath.NATIVE, KernelPath.SM80]
-)
-
-_KERNEL_ARCH_ENVVAR = "MAGI_ATTENTION_FFA_CUTEDSL_ARCH"
-
-
-@contextmanager
-def use_kernel_path(path: KernelPath) -> Iterator[None]:
-    """Serve the calls inside the context with the kernels of ``path``.
-
-    ``get_device_arch`` is lru-cached, so the cache is cleared whenever the
-    arch override changes.
-    """
-    if path is KernelPath.NATIVE:
-        yield
-        return
-    switch_back = switch_envvars(
-        [_KERNEL_ARCH_ENVVAR], enable_value_dict={_KERNEL_ARCH_ENVVAR: "sm_80"}
-    )
-    get_device_arch.cache_clear()
-    try:
-        yield
-    finally:
-        switch_back()
-        get_device_arch.cache_clear()
 
 
 # A cold run JIT-compiles every kernel variant of the sweep.

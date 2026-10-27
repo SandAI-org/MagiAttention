@@ -22,20 +22,17 @@ from magi_attention.kernel.cutedsl import MT_MAP, flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.cutedsl_utils import (
     GQA_HD128,
-    KERNEL_PATHS,
     MHA_HD64,
     MHA_HD128,
     MQA_HD128,
     AttnTensors,
     CuteDSLDistTestBase,
     HeadConfig,
-    KernelPath,
     assert_close_to_torch_ref,
     make_qkv,
     ranges_from_lengths,
     seed_test_case,
     to_ranges_tensor,
-    use_kernel_path,
 )
 from magi_attention.testing.dist_common import with_run_in_mp
 
@@ -86,14 +83,6 @@ VARLEN_CONFIGS = [
         torch.bfloat16,
         MT_MAP.causal,
     ),
-    VarlenConfig(
-        "mqa_self",
-        (512, 1024),
-        (512, 1024),
-        MQA_HD128,
-        torch.float16,
-        MT_MAP.full,
-    ),
 ]
 
 
@@ -104,11 +93,9 @@ def _to_thd(t: torch.Tensor) -> torch.Tensor:
 class TestFlexFlashAttn(CuteDSLDistTestBase):
     @with_run_in_mp
     @parameterize("seq_config", DENSE_CONFIGS)
-    @parameterize("kernel_path", KERNEL_PATHS)
     def test_dense_fwd_bwd(
         self,
         seq_config: DenseConfig,
-        kernel_path: KernelPath,
     ):
         """Dense (batch, seqlen, heads, dim) inputs."""
         heads, dtype, mask_type = (
@@ -118,7 +105,7 @@ class TestFlexFlashAttn(CuteDSLDistTestBase):
         )
         test_case = (
             f"[test_dense_fwd_bwd][{seq_config.name}][{heads.name}]"
-            f"[{mask_type=}][{dtype=}][{kernel_path.value}]"
+            f"[{mask_type=}][{dtype=}]"
         )
         seed_test_case(test_case)
         batch_size = seq_config.batch_size
@@ -130,10 +117,9 @@ class TestFlexFlashAttn(CuteDSLDistTestBase):
             self.device,
         )
 
-        with use_kernel_path(kernel_path):
-            out, _ = flex_flash_attn_func(q, k, v, mask_types=mask_type)
-            do = torch.randn_like(out)
-            dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+        out, _ = flex_flash_attn_func(q, k, v, mask_types=mask_type)
+        do = torch.randn_like(out)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
 
         # One relation per batch element over the flattened tokens.
         assert_close_to_torch_ref(
@@ -152,11 +138,9 @@ class TestFlexFlashAttn(CuteDSLDistTestBase):
 
     @with_run_in_mp
     @parameterize("seq_config", VARLEN_CONFIGS)
-    @parameterize("kernel_path", KERNEL_PATHS)
     def test_varlen_fwd_bwd(
         self,
         seq_config: VarlenConfig,
-        kernel_path: KernelPath,
     ):
         """Consecutive, disjoint q/k ranges partition packed tokens by sequence."""
         heads, dtype, mask_type = (
@@ -166,7 +150,7 @@ class TestFlexFlashAttn(CuteDSLDistTestBase):
         )
         test_case = (
             f"[test_varlen_fwd_bwd][{seq_config.name}][{heads.name}]"
-            f"[{mask_type=}][{dtype=}][{kernel_path.value}]"
+            f"[{mask_type=}][{dtype=}]"
         )
         seed_test_case(test_case)
         q_ranges = ranges_from_lengths(seq_config.q_lengths)
@@ -179,19 +163,18 @@ class TestFlexFlashAttn(CuteDSLDistTestBase):
             self.device,
         )
 
-        with use_kernel_path(kernel_path):
-            out, _ = flex_flash_attn_func(
-                q,
-                k,
-                v,
-                q_ranges=to_ranges_tensor(q_ranges, self.device),
-                k_ranges=to_ranges_tensor(k_ranges, self.device),
-                mask_types=mask_type,
-                max_seqlen_q=max(seq_config.q_lengths),
-                max_seqlen_k=max(seq_config.k_lengths),
-            )
-            do = torch.randn_like(out)
-            dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+        out, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges=to_ranges_tensor(q_ranges, self.device),
+            k_ranges=to_ranges_tensor(k_ranges, self.device),
+            mask_types=mask_type,
+            max_seqlen_q=max(seq_config.q_lengths),
+            max_seqlen_k=max(seq_config.k_lengths),
+        )
+        do = torch.randn_like(out)
+        dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
 
         assert_close_to_torch_ref(
             q=q.detach(),

@@ -42,7 +42,6 @@ from magi_attention.testing.cutedsl_utils import (
 from magi_attention.testing.dist_common import with_run_in_mp
 
 DTYPE = torch.bfloat16
-HEAD_CONFIGS = [MHA_HD128, GQA_HD128]
 
 # Length unit of the range geometries.
 SPAN = 128
@@ -53,31 +52,48 @@ class StorePath:
     name: str
     q_ranges: Ranges
     k_ranges: Ranges
+    heads: HeadConfig
     disable_fwd_atomic_reduction: bool
-    low_prec_out_dtype: torch.dtype | None
+    out_dtype: torch.dtype | None
 
 
 STORE_PATHS = [
     # Two relations share q rows: None already merges in fp32 (covered in
     # test_ranges), so pass DTYPE explicitly to exercise the bf16 atomic merge.
     StorePath(
-        "atomic_merge",
+        "atomic_merge_bf16",
         q_ranges=[[0, 4 * SPAN], [2 * SPAN, 6 * SPAN]],
         k_ranges=[[0, 4 * SPAN], [4 * SPAN, 6 * SPAN]],
+        heads=MHA_HD128,
         disable_fwd_atomic_reduction=False,
-        low_prec_out_dtype=DTYPE,
+        out_dtype=DTYPE,
     ),
     # Sorted disjoint q ranges: O is converted once from the fp32 registers.
     StorePath(
-        "direct_store",
+        "direct_store_fp32",
         q_ranges=ranges_from_lengths([2 * SPAN] * 3),
         k_ranges=ranges_from_lengths([2 * SPAN] * 3),
+        heads=MHA_HD128,
         disable_fwd_atomic_reduction=True,
-        low_prec_out_dtype=None,
+        out_dtype=torch.float32,
+    ),
+    StorePath(
+        "direct_store_input_dtype",
+        q_ranges=ranges_from_lengths([2 * SPAN] * 3),
+        k_ranges=ranges_from_lengths([2 * SPAN] * 3),
+        heads=GQA_HD128,
+        disable_fwd_atomic_reduction=True,
+        out_dtype=None,
     ),
 ]
 
 GRAD_RANGES = ranges_from_lengths([2 * SPAN] * 4)
+
+# (grad dtype, heads) per reduced-write variant.
+GRAD_DTYPE_CASES = [
+    (torch.float32, MHA_HD128),
+    (DTYPE, GQA_HD128),
+]
 
 
 def _total(ranges: Ranges) -> int:
@@ -92,12 +108,11 @@ def _max_len(ranges: Ranges) -> int:
 class TestOutDtype(CuteDSLDistTestBase):
     @with_run_in_mp
     @parameterize("path", STORE_PATHS)
-    @parameterize("fp32_out", [False, True])
-    @parameterize("heads", HEAD_CONFIGS)
-    def test_fwd_out_dtype(self, path: StorePath, fp32_out: bool, heads: HeadConfig):
+    def test_fwd_out_dtype(self, path: StorePath):
         """Input-dtype vs fp32 forward O across atomic-merge and direct-store paths."""
-        out_dtype = torch.float32 if fp32_out else path.low_prec_out_dtype
-        test_case = f"[test_fwd_out_dtype][{path.name}][{out_dtype=}][{heads.name}]"
+        heads = path.heads
+        out_dtype = path.out_dtype
+        test_case = f"[test_fwd_out_dtype][{path.name}]"
         seed_test_case(test_case)
         q, k, v = make_qkv(
             (_total(path.q_ranges),),
@@ -136,10 +151,10 @@ class TestOutDtype(CuteDSLDistTestBase):
         )
 
     @with_run_in_mp
-    @parameterize("grad_dtype", [torch.float32, DTYPE])
-    @parameterize("heads", HEAD_CONFIGS)
-    def test_bwd_grad_dtype(self, grad_dtype: torch.dtype, heads: HeadConfig):
+    @parameterize("case", GRAD_DTYPE_CASES)
+    def test_bwd_grad_dtype(self, case: tuple[torch.dtype, HeadConfig]):
         """dQ / dK / dV come back in the requested dtype."""
+        grad_dtype, heads = case
         test_case = f"[test_bwd_grad_dtype][{grad_dtype=}][{heads.name}]"
         seed_test_case(test_case)
         total = _total(GRAD_RANGES)

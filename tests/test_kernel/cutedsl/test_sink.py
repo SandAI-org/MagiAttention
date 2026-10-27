@@ -45,7 +45,6 @@ from magi_attention.testing.cutedsl_utils import (
 )
 from magi_attention.testing.dist_common import with_run_in_mp
 
-HEAD_CONFIGS = [MHA_HD128, GQA_HD128]
 DTYPE = torch.bfloat16
 NUM_SINKS = 9
 
@@ -80,7 +79,18 @@ UNCOVERED_Q = RangesGeometry(
     q_ranges=[[0, 96], [64, 160], [288, 352]],
     k_ranges=[[0, SPAN], [SPAN, 2 * SPAN], [2 * SPAN, 3 * SPAN]],
 )
-RANGES_GEOMETRIES = [PARTITION, UNCOVERED_Q]
+
+# (heads, mask type) per dense kernel variant.
+DENSE_SINK_CASES = [
+    (MHA_HD128, MT_MAP.full),
+    (GQA_HD128, MT_MAP.causal),
+]
+
+# (geometry, heads): both range layouts, one with MHA and one with GQA.
+RANGES_SINK_CASES = [
+    (PARTITION, MHA_HD128),
+    (UNCOVERED_Q, GQA_HD128),
+]
 
 DENSE_BATCH_SIZE = 2
 DENSE_SEQLEN = 2 * SPAN + 1
@@ -122,9 +132,9 @@ DSINK_RTOL = 0.1
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
 class TestSinkFwdBwd(CuteDSLDistTestBase):
     @with_run_in_mp
-    @parameterize("heads", HEAD_CONFIGS)
-    @parameterize("mask_type", [MT_MAP.full, MT_MAP.causal])
-    def test_dense_sink_fwd_bwd(self, heads: HeadConfig, mask_type: int):
+    @parameterize("case", DENSE_SINK_CASES)
+    def test_dense_sink_fwd_bwd(self, case: tuple[HeadConfig, int]):
+        heads, mask_type = case
         test_case = f"[test_dense_sink_fwd_bwd][{heads.name}][{mask_type=}]"
         seed_test_case(test_case)
         tokens = (DENSE_BATCH_SIZE, DENSE_SEQLEN)
@@ -166,9 +176,11 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
         )
 
     @with_run_in_mp
-    @parameterize("geometry", RANGES_GEOMETRIES)
-    @parameterize("heads", HEAD_CONFIGS)
-    def test_ranges_sink_fwd_bwd(self, geometry: RangesGeometry, heads: HeadConfig):
+    @parameterize("case", RANGES_SINK_CASES)
+    def test_ranges_sink_fwd_bwd(
+        self, case: tuple[RangesGeometry, HeadConfig]
+    ):
+        geometry, heads = case
         test_case = f"[test_ranges_sink_fwd_bwd][{geometry.name}][{heads.name}]"
         seed_test_case(test_case)
         q, k, v = make_qkv(

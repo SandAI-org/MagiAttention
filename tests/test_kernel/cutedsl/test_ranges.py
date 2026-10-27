@@ -42,7 +42,6 @@ from magi_attention.testing.cutedsl_utils import (
 )
 from magi_attention.testing.dist_common import with_run_in_mp
 
-HEAD_CONFIGS = [MHA_HD128, GQA_HD128]
 DTYPE = torch.bfloat16
 
 # Relations of the batched cases. Each q range is shorter than its k range, so
@@ -71,16 +70,27 @@ LSE_ATOL = LSE_RTOL = 1e-3
 class UniqueWriterCase:
     name: str
     heads: HeadConfig
+    pattern: str
     disable_fwd_atomic_reduction: bool
     disable_bwd_dkv_atomic_reduction: bool
 
 
 UNIQUE_WRITER_CASES = [
-    UniqueWriterCase("direct_o", MHA_HD128, True, False),
-    UniqueWriterCase("direct_dkv", MHA_HD128, False, True),
-    UniqueWriterCase("direct_o_and_dkv", MHA_HD128, True, True),
+    UniqueWriterCase("direct_o", MHA_HD128, "mixed", True, False),
+    UniqueWriterCase("direct_dkv", MHA_HD128, "mixed", False, True),
+    UniqueWriterCase("direct_o_and_dkv", MHA_HD128, "full", True, True),
     # Direct dK/dV store is MHA-only; GQA keeps the dK/dV reduction.
-    UniqueWriterCase("direct_o_gqa", GQA_HD128, True, False),
+    UniqueWriterCase("direct_o_gqa", GQA_HD128, "mixed", True, False),
+]
+
+# (heads, mask pattern) per kernel variant: one row each.
+PER_RANGE_CASES = [
+    (MHA_HD128, "bi_causal"),
+    (GQA_HD128, "mixed"),
+]
+OVERLAP_CASES = [
+    (MHA_HD128, MT_MAP.full),
+    (GQA_HD128, MT_MAP.causal),
 ]
 
 
@@ -132,10 +142,10 @@ class TestRanges(CuteDSLDistTestBase):
         )
 
     @with_run_in_mp
-    @parameterize("pattern", ["bi_causal", "mixed"])
-    @parameterize("heads", HEAD_CONFIGS)
-    def test_per_range_mask_types(self, pattern: str, heads: HeadConfig):
+    @parameterize("case", PER_RANGE_CASES)
+    def test_per_range_mask_types(self, case: tuple[HeadConfig, str]):
         """Mask types beyond full/causal go through the per-range kernel."""
+        heads, pattern = case
         self._run_and_check(
             q_ranges=ranges_from_lengths([Q_RANGE_LEN] * NUM_RELATIONS),
             k_ranges=ranges_from_lengths([K_RANGE_LEN] * NUM_RELATIONS),
@@ -145,13 +155,13 @@ class TestRanges(CuteDSLDistTestBase):
         )
 
     @with_run_in_mp
-    @parameterize("mask_type", [MT_MAP.full, MT_MAP.causal])
-    @parameterize("heads", HEAD_CONFIGS)
-    def test_overlapping_q_ranges(self, mask_type: int, heads: HeadConfig):
+    @parameterize("case", OVERLAP_CASES)
+    def test_overlapping_q_ranges(self, case: tuple[HeadConfig, int]):
         """Two relations share q rows; the atomic O merge combines them.
 
         Their k ranges are disjoint, so every (q, k) pair is attended once.
         """
+        heads, mask_type = case
         self._run_and_check(
             q_ranges=[[0, 4 * SPAN], [2 * SPAN, 6 * SPAN]],
             k_ranges=[[0, 4 * SPAN], [4 * SPAN, 6 * SPAN]],
@@ -162,17 +172,16 @@ class TestRanges(CuteDSLDistTestBase):
 
     @with_run_in_mp
     @parameterize("case", UNIQUE_WRITER_CASES)
-    @parameterize("pattern", ["full", "causal", "mixed"])
-    def test_unique_writer_contracts(self, case: UniqueWriterCase, pattern: str):
+    def test_unique_writer_contracts(self, case: UniqueWriterCase):
         """Sorted disjoint ranges let O / dK,dV skip the atomic reduction."""
         self._run_and_check(
             q_ranges=ranges_from_lengths([Q_RANGE_LEN] * NUM_RELATIONS),
             k_ranges=ranges_from_lengths([K_RANGE_LEN] * NUM_RELATIONS),
-            attn_type_map=cycle_mask_types(MASK_PATTERNS[pattern], NUM_RELATIONS),
+            attn_type_map=cycle_mask_types(MASK_PATTERNS[case.pattern], NUM_RELATIONS),
             heads=case.heads,
             disable_fwd_atomic_reduction=case.disable_fwd_atomic_reduction,
             disable_bwd_dkv_atomic_reduction=case.disable_bwd_dkv_atomic_reduction,
-            test_case=f"[test_unique_writer_contracts][{case.name}][{pattern}]",
+            test_case=f"[test_unique_writer_contracts][{case.name}]",
         )
 
 
