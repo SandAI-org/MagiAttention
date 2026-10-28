@@ -185,7 +185,6 @@ def _flex_flash_attn_fwd(
         sm_margin: number of SMs to reserve for concurrent kernels such as communication.
             Currently supported for q/k ranges on SM100/SM110; the forward
             with head_dim 192 ignores it.
-            Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
         max_logits: optional fp32 ``[num_head]`` buffer that the per-q-head
             maximum softmax logit (``softmax_scale * q.k``, after softcap,
             sinks excluded) over every attended (q, k) pair is merged into with
@@ -2130,7 +2129,6 @@ def flex_flash_attn_func(
     sm_margin: number of SMs to reserve for concurrent kernels such as communication.
         Currently supported for q/k ranges on SM100/SM110; the forward with
         head_dim 192 ignores it.
-        Set ``NCCL_CGA_CLUSTER_SIZE=1`` for NCCL communication overlap.
 
     return_max_logits: fill ``meta.max_logits`` with the fp32 ``[nheads]``
         per-q-head maximum softmax logit (after scale and softcap, sinks
