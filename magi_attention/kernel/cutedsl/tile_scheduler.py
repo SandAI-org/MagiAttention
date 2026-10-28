@@ -1359,8 +1359,11 @@ class SingleTileVarlenScheduler:
         assert params.mTileCounter is not None
         claimed = Int32(0)
         if cute.arch.lane_idx() == 0:
+            # Pass the raw LLVM pointer: `cute.arch.atomic_add` normalizes a
+            # cute pointer through `to_llvm_ptr`, which the CUDA 13 build of
+            # CuTeDSL does not provide.
             claimed = Int32(
-                cute.arch.atomic_add(params.mTileCounter.iterator, Int32(1))
+                cute.arch.atomic_add(params.mTileCounter.iterator.llvm_ptr, Int32(1))
             )
         claimed = cute.arch.shuffle_sync(claimed, 0)
         return claimed + cute.arch.grid_dim()[0] // params.cluster_shape_m
