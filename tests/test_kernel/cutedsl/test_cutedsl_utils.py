@@ -21,6 +21,7 @@ from cutlass.cute.runtime import from_dlpack
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.kernel.cutedsl.cutedsl_utils import atomic_add_fp32, fmax
+from magi_attention.testing.precision import assert_equal
 
 
 @cute.kernel
@@ -46,7 +47,7 @@ def _check_fmax(use_c: bool) -> None:
     expected = torch.maximum(a, b)
     if use_c:
         expected = expected.clamp_min(0.5)
-    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    assert_equal(out, expected, test_case=f"_check_fmax(use_c={use_c})")
 
 
 @cute.kernel
@@ -82,7 +83,7 @@ class TestCutedslUtils(TestCase):
         tensors = [from_dlpack(t, enable_tvm_ffi=True) for t in (a, out)]
         compiled = cute.compile(_atomic_add, *tensors, options="--enable-tvm-ffi")
         compiled(a, out)
-        torch.testing.assert_close(out[0], a.sum(), rtol=0, atol=0)
+        assert_equal(out[0], a.sum(), test_case="test_atomic_add_fp32")
 
 
 if __name__ == "__main__":

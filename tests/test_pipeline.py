@@ -64,6 +64,7 @@ from magi_attention.testing.precision import (
     MISMATCH_THRES_RATIO,
     NORM_ROUNDING_NOISE_RATIO,
     NORM_RTOL_RATIO,
+    ROUNDING_NOISE_PERTURBATION,
     assert_close,
     calc_inf_norm,
     calc_rounding_noise_norm,
@@ -523,9 +524,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 return False
 
         if backend == MagiAttentionKernelBackend.CUTEDSL:
-            # CuteDSL kernel: deterministic+ranges is NotImplementedError;
-            # qo comm relies on sm_margin which the kernel does not expose.
-            if deterministic or qo_comm:
+            # CuteDSL backend: deterministic+ranges is NotImplementedError.
+            if deterministic:
                 return False
 
         if backend in (
@@ -1854,7 +1854,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             out_ref_norm = calc_inf_norm(
                 total_out_ref_low_precision, total_out_ref_high_precision
             )
-            out_noise_norm = calc_rounding_noise_norm(total_out_ref_high_precision)
+            out_noise_norm = calc_rounding_noise_norm(
+                total_out_ref_high_precision,
+                perturbation=ROUNDING_NOISE_PERTURBATION,
+            )
             try:
                 self.assertLessEqual(
                     out_norm,
@@ -1913,7 +1916,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 lse_ref_norm = calc_inf_norm(
                     total_lse_ref_low_precision, total_lse_ref_high_precision
                 )
-                lse_noise_norm = calc_rounding_noise_norm(total_lse_ref_high_precision)
+                lse_noise_norm = calc_rounding_noise_norm(
+                    total_lse_ref_high_precision,
+                    perturbation=ROUNDING_NOISE_PERTURBATION,
+                )
                 try:
                     self.assertLessEqual(
                         lse_norm,
@@ -1991,7 +1997,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     grad_total_q_ref_low_precision, grad_total_q_ref_high_precision
                 )
                 dq_noise_norm = calc_rounding_noise_norm(
-                    grad_total_q_ref_high_precision
+                    grad_total_q_ref_high_precision,
+                    perturbation=ROUNDING_NOISE_PERTURBATION,
                 )
                 try:
                     self.assertLessEqual(
@@ -2038,7 +2045,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     grad_total_k_ref_low_precision, grad_total_k_ref_high_precision
                 )
                 dk_noise_norm = calc_rounding_noise_norm(
-                    grad_total_k_ref_high_precision
+                    grad_total_k_ref_high_precision,
+                    perturbation=ROUNDING_NOISE_PERTURBATION,
                 )
                 try:
                     self.assertLessEqual(
@@ -2085,7 +2093,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     grad_total_v_ref_low_precision, grad_total_v_ref_high_precision
                 )
                 dv_noise_norm = calc_rounding_noise_norm(
-                    grad_total_v_ref_high_precision
+                    grad_total_v_ref_high_precision,
+                    perturbation=ROUNDING_NOISE_PERTURBATION,
                 )
                 try:
                     self.assertLessEqual(
@@ -2137,7 +2146,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         grad_total_sink_ref_high_precision,
                     )
                     dsink_noise_norm = calc_rounding_noise_norm(
-                        grad_total_sink_ref_high_precision
+                        grad_total_sink_ref_high_precision,
+                        perturbation=ROUNDING_NOISE_PERTURBATION,
                     )
                     try:
                         self.assertLessEqual(

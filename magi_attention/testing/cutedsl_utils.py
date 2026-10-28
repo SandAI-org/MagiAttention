@@ -27,6 +27,7 @@ from magi_attention.testing.precision import (
     MISMATCH_THRES_RATIO,
     NORM_ROUNDING_NOISE_RATIO,
     NORM_RTOL_RATIO,
+    ROUNDING_NOISE_PERTURBATION,
     assert_close,
     calc_inf_norm,
     calc_rounding_noise_norm,
@@ -216,7 +217,9 @@ def _check_one(
     rtol = _RTOL[name][dtype]
     norm = calc_inf_norm(actual, ref_hi)
     ref_norm = calc_inf_norm(ref_lo, ref_hi)
-    noise_norm = calc_rounding_noise_norm(ref_hi)
+    noise_norm = calc_rounding_noise_norm(
+        ref_hi, perturbation=ROUNDING_NOISE_PERTURBATION
+    )
     bound = NORM_RTOL_RATIO * ref_norm + NORM_ROUNDING_NOISE_RATIO * noise_norm
     assert norm <= bound, f"{test_case} => {name}: {norm=}, {bound=}"
     mismatch_threshold = extract_mismatch_threshold(

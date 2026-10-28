@@ -59,3 +59,4 @@ class NamedBarrierBwdSm100(enum.IntEnum):
     Compute = enum.auto()
     dQaccReduce = enum.auto()
     TmemPtr = enum.auto()
+    StatsLoad = enum.auto()
