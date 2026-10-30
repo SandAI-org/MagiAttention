@@ -22,27 +22,28 @@ Given ``index_sparse_indices`` with shape
 ``(ceil(total_q / q_block_size), num_heads_kv, topk)`` of global K token ids (-1 padded),
 computes token-major ``out`` and natural-log ``lse``.
 
-Geometry (fixed; the constants and their reasons live in ``FFAFwdSm100Index.__init__``)::
+Geometry (fixed; see ``FFAFwdSm100Index.__init__`` for the constants and their reasons):
 
-    tile_m     128 rows = q_block_size query tokens x all G query heads of one KV head
-               (PackGQA row order, head fastest), so one tile shares one index row;
-               the kernel therefore requires q_block_size * G == 128
-    tile_n     128 K slots per stage
-    q_stage    1   -- one Q tile in flight, overlap comes from the N direction instead
-    kv_stage   5   -- (224 KiB smem budget - 64 KiB of Q and O) / 32 KiB per K|V stage
-    s_stage    2   -- S/P ping-pong over consecutive K tiles
+* ``tile_m``: 128 rows, one index row shared by ``q_block_size * G`` query rows.
+  PackGQA puts heads fastest and requires ``q_block_size * G == 128``.
+* ``tile_n``: 128 K slots per stage.
+* ``q_stage``: 1, with overlap in the N direction.
+* ``kv_stage``: 5, from (224 KiB shared memory - 64 KiB Q/O) / 32 KiB per K/V stage.
+* ``s_stage``: 2, ping-ponging S/P over consecutive K tiles.
+* All 512 TMEM columns: S0 uses 0-127, S1 128-255, O0 256-383, O1 384-511.
+  BF16 P aliases each S at +64 columns.
 
-    TMEM (512 columns, all of it):  S0 0-127  S1 128-255  O0 256-383  O1 384-511
-                                    P is bf16 and aliases S at +64, so 128 f32 columns hold both
+Roles:
 
-Roles -- 16 warps, one CTA per SM, one wave::
+* Warps 0-3: read S0 from TMEM; write P0 and softmax statistics.
+* Warps 4-7: read S1 from TMEM; write P1 and softmax statistics.
+* Warps 8-11: read O0/O1 and statistics; write sO, TMA output and LSE.
+* Warp 12: reads Q/K/V from shared memory and P0/P1; writes S0/S1 and O0/O1.
+* Warps 13-15: read index rows from global memory; gather K/V into shared memory.
 
-    warps    role         consumes                        produces
-    0-3      softmax S0   S0 (TMEM)                       P0 (TMEM), sm_stats
-    4-7      softmax S1   S1 (TMEM)                       P1 (TMEM), sm_stats
-    8-11     correction   O0/O1, sm_stats                 sO -> TMA store, LSE
-    12       MMA          Q, K, V (smem), P0/P1           S0/S1, O0/O1
-    13-15    gather       index rows (gmem)               K/V stages (smem, cp.async)
+Launch: persistent grid ``(min(num_SMs, num_tiles), 1, 1)``, where
+``num_tiles = ceil(total_q * G / 128) * num_heads_kv``; 512 threads per block,
+no cluster.
 
 The gather is the expensive half: three warps copy every gathered 256 B token row as sixteen 16 B
 ``cp.async`` operations, two rows per warp instruction, computing the SW128 swizzle in software.
@@ -55,8 +56,9 @@ I/O: see ``ffa_fwd_sm100_index`` (the Python entry point) for shapes, dtypes and
 """
 
 import math
+from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Sequence, Tuple
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -100,30 +102,32 @@ from .tile_scheduler import (
 # Beyond this |row_max * scale_log2| the packed FFMA x * s - max * s loses the exactness at the
 # max; the warp then subtracts the max first (see ``scale_subtract_rowmax_guarded``).
 FFMA_MAX_SCALED_ABS = 2048.0
+LN2 = math.log(2.0)
+
 
 # =============================================================================
-# Keys: enable_ex2_emu -- True on SM100, where exp2 is emulated by a polynomial; False on SM103,
-#                        which has a native MUFU.EX2. Only the register split differs between them.
-# Values:
-#   num_regs_softmax: int -- per-thread registers for each of the two softmax warpgroups (multiple
-#                     of 8; ``setmaxnreg`` rejects anything else).
-#   num_regs_correction: int -- per-thread registers for the correction warpgroup (multiple of 8).
-#   num_regs_other: int -- per-thread registers for warpgroup 3, i.e. the MMA warp plus the three
-#                     gather warps, which cannot be split because ``setmaxnreg`` is
-#                     warpgroup-uniform (multiple of 8).
+# Register splits
+# =============================================================================
+@dataclass(frozen=True)
+class _RegisterSplit:
+    softmax: int  # Per thread in each softmax warpgroup, multiple of 8.
+    correction: int  # Per thread in the correction warpgroup, multiple of 8.
+    other: int  # Per thread in the MMA/gather warpgroup, multiple of 8.
+
+
 # Constraint: (2 * num_regs_softmax + num_regs_correction + num_regs_other) * 128 <= 64 * 1024,
 # i.e. the four warpgroups together must fit the SM's 64 KiB register file. The SM100 row fills it
 # (512 per thread); the SM103 row deliberately stops at 504 and leaves 8 per thread unallocated,
 # which measured 0.5-2% faster than 168/72/104 on B300 at S=32768.
-# Why warpgroup 3 takes the lion's share: the cp.async gather loop keeps two_w, lane_base,
-# src_base_K/V, row_bytes, the four dst_rel bases, three prefetched token-id words and the pipeline
-# state live across 21 unrolled iterations. At 72 per thread it spilled 1.14M instructions to local
-# memory, which was the kernel's dominant long-scoreboard stall; at 96 it spills 0.20M.
+# On SM103 the cp.async gather loop keeps two_w, lane_base, src_base_K/V, row_bytes, four dst_rel
+# bases, three prefetched token-id words and the pipeline state live across 21 unrolled iterations.
+# On B300, 72 registers per thread spilled 1.14M instructions to local memory, the kernel's dominant
+# long-scoreboard stall; 96 registers spilled 0.20M. The SM100 row allocates 184 registers to each
+# softmax thread with polynomial exp2 emulation and 56 to each warpgroup 3 thread.
 _TUNING_CONFIG = {
-    True: {"num_regs_softmax": 184, "num_regs_correction": 88, "num_regs_other": 56},
-    False: {"num_regs_softmax": 168, "num_regs_correction": 72, "num_regs_other": 96},
+    True: _RegisterSplit(184, 88, 56),
+    False: _RegisterSplit(168, 72, 96),
 }
-# =============================================================================
 
 
 # =============================================================================
@@ -241,6 +245,36 @@ class _SubsetNamedBarrier(ffa_pipeline.NamedBarrier):
         )
 
 
+def _ldg_indices_int4(
+    indices: cute.Tensor, m_block: Int32, head_idx: Int32, slot: Int32
+) -> Tuple[Int32, Int32, Int32, Int32]:
+    """Load indices[m_block, head_idx, slot:slot+4] as one aligned int4 (slot % 4 == 0, 16 B aligned rows)."""
+    # NOTE: the asm is a raw ``ld.global.nc.v2.u64``, so the 16 B alignment is a hard requirement,
+    # not a hint: it holds because the wrapper asserts ``topk % 4 == 0`` and the index tensor is
+    # contiguous. ``.nc`` (non-coherent) is sound because the index row is read-only for the whole
+    # kernel, and it keeps these loads off the L1 coherence path the gather is already saturating.
+    ptr = indices.iterator + cute.crd2idx((m_block, head_idx, slot), indices.layout)
+    ptr = cute.make_ptr(Int32, ptr.toint(), indices.memspace, assumed_align=16)
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        [ptr.llvm_ptr],
+        "{\n\t"
+        ".reg .b64 v<2>;\n\t"
+        "ld.global.nc.v2.u64 {v0, v1}, [$4];\n\t"
+        "mov.b64 {$0, $1}, v0;\n\t"
+        "mov.b64 {$2, $3}, v1;\n\t"
+        "}\n",
+        ",".join(["=r"] * 4 + ["l"]),
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )
+    return tuple(Int32(llvm.extractvalue(T.i32(), out, [i])) for i in range(4))
+
+
+# =============================================================================
+# Softmax helpers
+# =============================================================================
 @cute.jit
 def scale_subtract_rowmax_guarded(
     softmax: SoftmaxSm100, acc_S_row: cute.Tensor, row_max: Float32
@@ -273,6 +307,22 @@ def scale_subtract_rowmax_guarded(
         )
 
 
+@cute.jit
+def apply_valid_mask(
+    acc_S: cute.Tensor,
+    w0: Uint32,
+    w1: Uint32,
+    w2: Uint32,
+    w3: Uint32,
+) -> None:
+    """Mask the tile columns whose validity bit is clear (word s covers columns s*32..s*32+31)."""
+    mask_r2p_lambda(
+        acc_S,
+        lambda s: (w0, w1, w2, w3)[s],
+        rank1=True,
+    )
+
+
 # =============================================================================
 # Public Kernel Class
 # =============================================================================
@@ -300,34 +350,29 @@ class FFAFwdSm100Index:
         assert (
             head_dim == self.head_dim
         ), f"the SM100 index-sparse forward supports head_dim {self.head_dim} only"
-        self.head_dim_padded = head_dim
-        self.head_dim_v_padded = head_dim
-        self.m_block_size = self.tile_m
-        self.n_block_size = self.tile_n
         self.q_stage = 1
         # The softmax warps publish P in two parts: they release s_p_o once 3/4 of the 128 columns
         # are in TMEM, so the MMA warp can start P @ V on a partial P and only waits on
         # pipeline_p_lastsplit for the last quarter. The 3/4 point is not critical -- 64, 96 and 112
         # all measured within noise on B300 -- but it must be a multiple of 32 (one TMEM store
         # fragment) and strictly below tile_n.
-        self.split_P_arrive = (self.n_block_size // 4 * 3) // 32 * 32
+        self.split_P_arrive = (self.tile_n // 4 * 3) // 32 * 32
         assert self.split_P_arrive % 32 == 0
-        assert self.split_P_arrive < self.n_block_size
+        assert 0 < self.split_P_arrive < self.tile_n
         self.arch = BaseDSL._get_dsl().get_arch_enum()
         assert (
             self.arch >= Arch.sm_100 and self.arch <= Arch.sm_110f
         ), "Only SM 10.x and 11.x are supported"
 
-        self.cta_tiler = (self.m_block_size, self.n_block_size, self.head_dim_padded)
         self.mma_tiler_qk = (
-            self.m_block_size,
-            self.n_block_size,
-            self.head_dim_padded,
+            self.tile_m,
+            self.tile_n,
+            self.head_dim,
         )
         self.mma_tiler_pv = (
-            self.m_block_size,
-            self.head_dim_v_padded,
-            self.n_block_size,
+            self.tile_m,
+            self.head_dim,
+            self.tile_n,
         )
         self.qk_acc_dtype = Float32
         self.pv_acc_dtype = Float32
@@ -336,19 +381,28 @@ class FFAFwdSm100Index:
         self.scheduling_mode = SchedulingMode.STATIC
         self.qhead_per_kvhead = qhead_per_kvhead
         assert (
-            self.m_block_size % self.qhead_per_kvhead == 0
+            self.tile_m % self.qhead_per_kvhead == 0
         ), "qhead_per_kvhead must divide the 128-row tile"
         # A 128-row tile is q_block_size query tokens x all query heads of one KV head (PackGQA row
         # order, head fastest), so tile m shares indices row m, which covers query tokens
         # [m * q_block_size, (m + 1) * q_block_size).
         self.pack_gqa = qhead_per_kvhead > 1
-        self.q_block_size = self.m_block_size // self.qhead_per_kvhead
+        self.q_block_size = self.tile_m // self.qhead_per_kvhead
         is_sm103 = self.arch >= Arch.sm_103 and self.arch <= Arch.sm_103f
         self.enable_ex2_emu = not is_sm103
+        self.ex2_emu_freq = 10 if self.enable_ex2_emu else 0
+        self.ex2_emu_start_frg = 0
 
         self.softmax0_warp_ids = (0, 1, 2, 3)
         self.softmax1_warp_ids = (4, 5, 6, 7)
         self.correction_warp_ids = (8, 9, 10, 11)
+        self.warps_per_wg = len(self.softmax0_warp_ids)
+        # Each correction warp pairs with the corresponding softmax warp.
+        assert (
+            len(self.softmax1_warp_ids)
+            == len(self.correction_warp_ids)
+            == self.warps_per_wg
+        )
         self.mma_warp_id = 12
         # Gather warps occupy warps 13-15 of warpgroup 3 (setmaxnreg is warpgroup-uniform),
         # and the correction warps issue the O TMA store.
@@ -367,36 +421,29 @@ class FFAFwdSm100Index:
 
         # Two S/P stages is not a tuning choice: S is f32 (128 columns) and O is f32 (128 columns),
         # so two of each already fill the 512 TMEM columns this SM has.
-        self.s_stage = 2  # Always 2: for q_stage=1 it's n-direction
-        self.tmem_s_offset = [0, self.n_block_size]  # e.g., 0, 128
+        self.s_stage = 2
+        self.tmem_s_offset = [0, self.tile_n]  # e.g., 0, 128
         self.tmem_o_offset = [
-            self.tmem_s_offset[-1] + self.n_block_size + i * self.head_dim_v_padded
+            self.tmem_s_offset[-1] + self.tile_n + i * self.head_dim
             for i in range(self.s_stage)
         ]  # e.g., 256, 384
-        self.tmem_total = self.tmem_o_offset[-1] + self.head_dim_v_padded
+        self.tmem_total = self.tmem_o_offset[-1] + self.head_dim
         # Exactly 512 of 512: the TMEM allocation is the whole tensor-memory budget.
         assert self.tmem_total <= self.tmem_alloc_cols
         # P is bf16, so a 128-wide f32 S column range also holds the 128-wide bf16 P, offset by 64.
-        self.tmem_s_to_p_offset = self.n_block_size // 2
+        self.tmem_s_to_p_offset = self.tile_n // 2
         self.tmem_p_offset = [
             self.tmem_s_offset[i] + self.tmem_s_to_p_offset for i in range(2)
         ]  # 64, 192
 
-        # vec buffer for row_max & row_sum
-        self.tmem_vec_offset = self.tmem_s_offset
-
         knobs = _TUNING_CONFIG[self.enable_ex2_emu]
-        self.num_regs_softmax = knobs["num_regs_softmax"]
-        self.num_regs_correction = knobs["num_regs_correction"]
-        self.num_regs_other = knobs["num_regs_other"]
+        self.num_regs_softmax = knobs.softmax
+        self.num_regs_correction = knobs.correction
+        self.num_regs_other = knobs.other
         assert (
             2 * self.num_regs_softmax + self.num_regs_correction + self.num_regs_other
         ) * 128 <= 64 * 1024
-        # Compile-time fast path: when every index slot is a valid id in [0, total_k) and the tile
-        # count is not padded by the even rounding, no tile can need masking, so the softmax warps
-        # skip both the per-warp index scan (first_masked_tile) and the mask itself. This is the
-        # caller's contract (wrapper argument ``assume_valid_ids``): checking it costs an aminmax
-        # pass plus a host sync, which measured more than the path saves.
+        # Skip the per-warp index scan and softmax mask when all slots are valid.
         self.ids_all_valid = ids_all_valid
 
         self.buffer_align_bytes = 1024
@@ -409,9 +456,7 @@ class FFAFwdSm100Index:
             print(
                 f"{prefix}{self.head_dim=} | {self.qhead_per_kvhead=} | {self.q_block_size=}"
             )
-            print(
-                f"{prefix}{self.m_block_size=} | {self.n_block_size=} | {self.s_stage=}"
-            )
+            print(f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.s_stage=}")
             print(
                 f"{prefix}{self.tmem_s_offset=} | {self.tmem_p_offset=} | {self.tmem_o_offset=}"
             )
@@ -423,23 +468,13 @@ class FFAFwdSm100Index:
     def _setup_attributes(self):
         """Set up pipeline stage counts from the shared-memory footprint."""
         smem_size_q = (
-            self.q_stage
-            * self.m_block_size
-            * self.head_dim_padded
-            * self.q_dtype.width
-            // 8
+            self.q_stage * self.tile_m * self.head_dim * self.q_dtype.width // 8
         )
         smem_size_o = (
-            self.q_stage
-            * self.m_block_size
-            * self.head_dim_v_padded
-            * self.o_dtype.width
-            // 8
+            self.q_stage * self.tile_m * self.head_dim * self.o_dtype.width // 8
         )
         smem_size_q_o = smem_size_q + smem_size_o
-        smem_size_kv_per_stage = (
-            self.n_block_size * self.head_dim_padded * self.k_dtype.width // 8
-        )
+        smem_size_kv_per_stage = self.tile_n * self.head_dim * self.k_dtype.width // 8
         # 224 KiB is the part of the SM's 228 KiB smem carve-out this kernel plans against, leaving
         # the difference to the barriers and the pipeline objects; the remaining budget divided by
         # one 128-slot K|V stage gives 5 for head_dim 128 bf16. Five is both the ceiling and the
@@ -513,9 +548,6 @@ class FFAFwdSm100Index:
         if const_expr(self.q_dtype != self.v_dtype):
             raise TypeError(f"Type mismatch: {self.q_dtype} != {self.v_dtype}")
         self._setup_attributes()
-        # Tuned defaults for the polynomial ex2 emulation path.
-        self.ex2_emu_freq = 10 if const_expr(self.enable_ex2_emu) else 0
-        self.ex2_emu_start_frg = 0
 
         q_major_mode = tcgen05.OperandMajorMode.K
         k_major_mode = tcgen05.OperandMajorMode.K
@@ -524,7 +556,6 @@ class FFAFwdSm100Index:
         # the intermediate tensor p is from tmem & mK-major
         p_source = tcgen05.OperandSource.TMEM
         p_major_mode = tcgen05.OperandMajorMode.K
-        assert self.q_dtype == self.k_dtype == self.v_dtype, "Q/K/V must share a dtype"
         tiled_mma_qk = sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype,
             q_major_mode,
@@ -543,7 +574,7 @@ class FFAFwdSm100Index:
             p_source,
         )
 
-        self.epi_tile = (self.m_block_size, self.head_dim_v_padded)
+        self.epi_tile = (self.tile_m, self.head_dim)
 
         sQ_layout = sm100_utils_basic.make_smem_layout_a(
             tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, self.q_stage
@@ -564,10 +595,10 @@ class FFAFwdSm100Index:
         # assumes: K-major SW128 (K) and MN-major SW128 (V) tiles of 128 x 128 16-bit elements are
         # the same bytes -- 64-element chunk c of token row r lives at c * 8192 + r * 64 elements.
         self.kv_stage_elems = cute.cosize(sK_layout) // self.kv_stage
-        self.chunk_stride_elems = self.n_block_size * self.gather_chunk_elems
+        self.chunk_stride_elems = self.tile_n * self.gather_chunk_elems
         assert cute.cosize(sV_layout) == cute.cosize(sK_layout)
-        assert self.kv_stage_elems == self.n_block_size * self.head_dim_padded
-        assert self.head_dim_padded % self.gather_chunk_elems == 0
+        assert self.kv_stage_elems == self.tile_n * self.head_dim
+        assert self.head_dim % self.gather_chunk_elems == 0
 
         if const_expr(self.pack_gqa):
             mQ = pack_gqa_layout(mQ, self.qhead_per_kvhead, nheads_kv, head_idx=2)
@@ -577,11 +608,9 @@ class FFAFwdSm100Index:
                     mLSE, self.qhead_per_kvhead, nheads_kv, head_idx=1
                 )
 
-        self.tma_copy_bytes = {
-            "Q": cute.size_in_bytes(
-                self.q_dtype, cute.select(sQ_layout, mode=[0, 1, 2])
-            ),
-        }
+        self.q_tma_copy_bytes = cute.size_in_bytes(
+            self.q_dtype, cute.select(sQ_layout, mode=[0, 1, 2])
+        )
         tma_load_op = cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE)
         tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
 
@@ -603,15 +632,15 @@ class FFAFwdSm100Index:
             else SingleTileScheduler
         )
         tile_sched_args = TileSchedulerArguments(
-            cute.ceil_div(cute.size(mQ.shape[0]), self.cta_tiler[0]),
+            cute.ceil_div(cute.size(mQ.shape[0]), self.mma_tiler_qk[0]),
             cute.size(mQ.shape[2]),
             cute.size(mQ.shape[3]),
             num_splits,
             seqlen_k,
             mQ.shape[1],
-            self.head_dim_v_padded,
+            self.head_dim,
             total_q=cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
-            tile_shape_mn=self.cta_tiler[:2],
+            tile_shape_mn=self.mma_tiler_qk[:2],
             qhead_per_kvhead_packgqa=self.qhead_per_kvhead
             if const_expr(self.pack_gqa)
             else 1,
@@ -624,18 +653,24 @@ class FFAFwdSm100Index:
 
         @cute.struct
         class SharedStorage:
-            # m_barriers for pipelines
+            # Q loaded / Q read.
             mbar_load_Q: cute.struct.MemRange[Int64, self.q_stage * 2]
+            # K/V gathered / K/V read.
             mbar_load_KV: cute.struct.MemRange[Int64, self.kv_stage * 2]
+            # S ready / P partially ready and O rescaled.
             mbar_S_full_P_full_O_rescaled: cute.struct.MemRange[Int64, self.s_stage * 2]
+            # Final P split ready; empty barrier unused.
             mbar_P_full_lastsplit: cute.struct.MemRange[Int64, self.s_stage * 2]
+            # O accumulator ready; empty barrier unused.
             mbar_O_full: cute.struct.MemRange[Int64, self.s_stage * 2]
+            # Full barrier unused / statistics slot available.
             mbar_softmax_stats: cute.struct.MemRange[Int64, self.s_stage * 2]
             # Tmem holding buffer
             tmem_holding_buf: Int32
             # Smem tensors
-            # store row max and row sum
-            sScale: cute.struct.MemRange[Float32, self.s_stage * self.m_block_size * 2]
+            # [stage * tile_m + row]: non-first acc_scale or final row_sum.
+            # [(s_stage + stage) * tile_m + row]: final row_max.
+            sScale: cute.struct.MemRange[Float32, self.s_stage * self.tile_m * 2]
             sO: cute.struct.Align[
                 cute.struct.MemRange[self.o_dtype, cute.cosize(sO_layout)],
                 self.buffer_align_bytes,
@@ -701,7 +736,6 @@ class FFAFwdSm100Index:
             min_blocks_per_mp=1,
         )
 
-    #  GPU device kernel
     @cute.kernel
     def kernel(
         self,
@@ -742,7 +776,7 @@ class FFAFwdSm100Index:
             for tma_atom in (tma_atom_Q, tma_atom_O):
                 cpasync.prefetch_descriptor(tma_atom)
 
-        # Alloc
+        # Shared memory
         smem = SmemAllocator()
         storage = smem.allocate(self.shared_storage)
 
@@ -758,18 +792,18 @@ class FFAFwdSm100Index:
                 )
             ),
         )
-        # Tensor memory dealloc barrier init
+        # Tensor memory allocator
         tmem = TmemAllocator(
             storage.tmem_holding_buf,
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,
         )
 
-        mma_warp = ThreadCooperativeGroup(len([self.mma_warp_id]))
+        mma_warp = ThreadCooperativeGroup(1)
         tma_warp = ThreadCooperativeGroup(1)
-        softmax_warps = ThreadCooperativeGroup(len(self.softmax0_warp_ids))
+        softmax_warps = ThreadCooperativeGroup(self.warps_per_wg)
         softmax_threads = ThreadCooperativeGroup(
-            cute.arch.WARP_SIZE * len(self.softmax0_warp_ids)
+            cute.arch.WARP_SIZE * self.warps_per_wg
         )
         correction_threads = ThreadCooperativeGroup(
             cute.arch.WARP_SIZE * len(self.correction_warp_ids)
@@ -777,20 +811,19 @@ class FFAFwdSm100Index:
         softmax_correction_threads = ThreadCooperativeGroup(
             cute.arch.WARP_SIZE * len(self.softmax0_warp_ids + self.correction_warp_ids)
         )
+        # TMA load -> MMA: full when Q is loaded, empty when Q has been read.
         pipeline_q = ffa_pipeline.PipelineTmaUmma.create(
             barrier_storage=storage.mbar_load_Q.data_ptr(),
             num_stages=self.q_stage,
             producer_group=tma_warp,
             consumer_group=mma_warp,
-            tx_count=self.tma_copy_bytes["Q"],
+            tx_count=self.q_tma_copy_bytes,
             defer_sync=True,
         )
-        # Every gather thread arrives on the full barrier itself once its cp.async group for the
-        # stage has completed and been fenced into the async proxy; the MMA warp releases with
-        # tcgen05.commit after the stage's MMA reads.
         gather_threads = ThreadCooperativeGroup(
             cute.arch.WARP_SIZE * len(self.load_warp_ids)
         )
+        # Gather -> MMA: full after fenced cp.async completion, empty after MMA reads K/V.
         pipeline_kv = ffa_pipeline.PipelineAsyncUmma.create(
             barrier_storage=storage.mbar_load_KV.data_ptr(),
             num_stages=self.kv_stage,
@@ -798,10 +831,7 @@ class FFAFwdSm100Index:
             consumer_group=mma_warp,
             defer_sync=True,
         )
-        # This pipeline is not the typical producer-consumer pipeline. The "producer" mma warp
-        # uses it to signal that S is ready, and the softmax threads wait for S to be ready.
-        # When softmax threads write P to tmem and the correction threads have rescaled O, they
-        # signal as "consumer". The mma warp then waits for that signal to do the P @ V gemm.
+        # MMA -> softmax/correction: full when S is ready, empty when P is partially ready and O rescaled.
         pipeline_s_p_o = ffa_pipeline.PipelineUmmaAsync.create(
             barrier_storage=storage.mbar_S_full_P_full_O_rescaled.data_ptr(),
             num_stages=self.s_stage,
@@ -809,6 +839,7 @@ class FFAFwdSm100Index:
             consumer_group=softmax_correction_threads,
             defer_sync=True,
         )
+        # Softmax -> MMA: full when the final P split is ready; empty is unused.
         pipeline_p_lastsplit = ffa_pipeline.PipelineAsyncUmma.create(
             barrier_storage=storage.mbar_P_full_lastsplit.data_ptr(),
             num_stages=self.s_stage,
@@ -816,7 +847,7 @@ class FFAFwdSm100Index:
             consumer_group=mma_warp,
             defer_sync=True,
         )
-        # MMA warp uses this to signal to the correction warps that O is ready.
+        # MMA -> correction: full when O is ready; empty is unused.
         pipeline_o_acc = ffa_pipeline.PipelineUmmaAsync.create(
             barrier_storage=storage.mbar_O_full.data_ptr(),
             num_stages=self.s_stage,
@@ -824,6 +855,8 @@ class FFAFwdSm100Index:
             consumer_group=correction_threads,
             defer_sync=True,
         )
+        # Softmax -> correction: full is unused; empty marks the stats slot available.
+        # Softmax signals ready statistics through sm_stats_barrier.
         pipeline_sm_stats = ffa_pipeline.PipelineAsync.create(
             barrier_storage=storage.mbar_softmax_stats.data_ptr(),
             num_stages=self.s_stage,
@@ -831,7 +864,8 @@ class FFAFwdSm100Index:
             consumer_group=correction_threads,
             defer_sync=True,
         )
-        # NamedBarrier for per-warp softmax-to-correction stats signaling
+        # SoftmaxStatsW0..W7: index = stage * 4 + warp; each barrier joins the softmax warp
+        # and correction warp for the same 32 rows (64 threads).
         sm_stats_barrier = _SubsetNamedBarrier(
             barrier_id=int(NamedBarrierFwdSm100.SoftmaxStatsW0),
             num_threads=cute.arch.WARP_SIZE * 2,
@@ -855,7 +889,7 @@ class FFAFwdSm100Index:
         sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
 
         sScale = storage.sScale.get_tensor(
-            cute.make_layout(self.s_stage * self.m_block_size * 2)
+            cute.make_layout(self.s_stage * self.tile_m * 2)
         )
 
         thr_mma_qk = tiled_mma_qk.get_slice(0)
@@ -869,7 +903,7 @@ class FFAFwdSm100Index:
         tOtO = cute.make_tensor(tOtO.iterator + self.tmem_o_offset[0], tOtO.layout)
         tP = cute.make_tensor(tStS.iterator, tP_layout.outer)
         tOrP = thr_mma_pv.make_fragment_A(tP)[None, None, None, 0]
-        # Need to multiply by width ratio bc tP is in v_dtype but tmem offsets are in FP32
+        # Multiply by width ratio because tP is in v_dtype but tmem offsets are in FP32.
         tP_width_ratio = Float32.width // self.v_dtype.width
         # Need to adjust the stage stride manually since the two stages aren't contiguous in tmem
         tP_stage_stride = (
@@ -888,7 +922,7 @@ class FFAFwdSm100Index:
         pipeline_init_wait()
 
         # =============================================================================
-        #  LOAD
+        # Load warps 13-15
         # =============================================================================
         if warp_idx >= self.load_warp_ids[0] and warp_idx <= self.load_warp_ids[-1]:
             cute.arch.setmaxregister_decrease(self.num_regs_other)
@@ -910,12 +944,12 @@ class FFAFwdSm100Index:
             )
 
         # =============================================================================
-        #  MMA
+        # MMA warp 12
         # =============================================================================
         if warp_idx == self.mma_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_other)
             # Alloc tensor memory buffer
-            tmem.allocate(cute.arch.get_max_tmem_alloc_cols("sm_100"))
+            tmem.allocate(self.tmem_alloc_cols)
             tmem_alloc_barrier.arrive_and_wait()
             tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
             self.mma(
@@ -940,10 +974,9 @@ class FFAFwdSm100Index:
             tmem.free(tmem_ptr)
 
         # =============================================================================
-        #  Softmax
+        # Softmax warps 0-7
         # =============================================================================
         if warp_idx <= self.softmax1_warp_ids[-1]:
-            # increase register after decreasing
             cute.arch.setmaxregister_increase(self.num_regs_softmax)
             # sync with mma warp before retrieving tmem ptr
             tmem_alloc_barrier.arrive_and_wait()
@@ -971,9 +1004,12 @@ class FFAFwdSm100Index:
             tmem_alloc_barrier.arrive()
 
         # =============================================================================
-        #  Correction
+        # Correction warps 8-11
         # =============================================================================
-        if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+        if (
+            warp_idx >= self.correction_warp_ids[0]
+            and warp_idx <= self.correction_warp_ids[-1]
+        ):
             cute.arch.setmaxregister_decrease(self.num_regs_correction)
             # sync with mma warp before retrieving tmem ptr
             tmem_alloc_barrier.arrive_and_wait()
@@ -1012,7 +1048,7 @@ class FFAFwdSm100Index:
         tma_atom_Q: cute.CopyAtom,
         pipeline_q: pipeline.PipelineAsync,
         pipeline_kv: pipeline.PipelineAsync,
-        tile_scheduler: "TileSchedulerProtocol",
+        tile_scheduler: TileSchedulerProtocol,
         mIndices: cute.Tensor,
         mTopkLen: Optional[cute.Tensor],
         seqlen_k: Int32,
@@ -1025,6 +1061,7 @@ class FFAFwdSm100Index:
         tidx = cute.arch.thread_idx()[0] % num_load_threads
         lane_idx = tidx % cute.arch.WARP_SIZE
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        is_q_load_warp = warp_idx == self.load_warp_ids[0]
         warp_rank = warp_idx - self.load_warp_ids[0]
         sKV_base_addr = Int32(sKV_base_ptr.toint())
         two_w, lane_base, src_base_K, row_bytes, dst_rel = self.cp_async_lane_constants(
@@ -1039,7 +1076,7 @@ class FFAFwdSm100Index:
         while work_tile.is_valid_tile:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             mQ_cur = mQ[None, None, None, batch_idx][None, None, head_idx]
-            tiler_gQ = ((self.mma_tiler_qk[0] * self.q_stage), self.head_dim_padded)
+            tiler_gQ = ((self.mma_tiler_qk[0] * self.q_stage), self.head_dim)
             gQ = cute.local_tile(mQ_cur, tiler_gQ, (m_block, 0))  # (128, 128)
             gQ = layout_utils.select(
                 cute.flat_divide(gQ, (self.mma_tiler_qk[0],)), mode=[0, 2, 1]
@@ -1050,7 +1087,7 @@ class FFAFwdSm100Index:
             )
 
             # With PackGQA, head_idx is the KV head; without it qhead_per_kvhead == 1 and the two agree.
-            topk_eff, block_iter_count, process_tile = self.tile_counts(
+            topk_eff, block_iter_count, has_work = self.tile_counts(
                 mIndices, mTopkLen, m_block, head_idx
             )
             gather = partial(
@@ -1077,7 +1114,7 @@ class FFAFwdSm100Index:
                 lane_idx=lane_idx,
             )
 
-            if process_tile:
+            if has_work:
                 # Row ids are resolved once per tile at its K load and kept for its V load two loads
                 # later: `b` holds the newest pending tile, `a` the one before it, `n0..n3` the raw token
                 # ids prefetched for the next K load.
@@ -1091,16 +1128,12 @@ class FFAFwdSm100Index:
                     producer_state=kv_producer_state,
                 )  # K0
                 a0, a1, a2, a3 = b0, b1, b2, b3
-                if (
-                    const_expr(len(self.load_warp_ids) == 1)
-                    or warp_idx == self.load_warp_ids[0]
-                ):
+                if is_q_load_warp:
                     pipeline_q.producer_acquire_w_index_phase(0, q_producer_phase)
                     tma_bar_ptr = pipeline_q.sync_object_full.get_barrier(0)
                     load_Q_fn(src_idx=0, dst_idx=0, tma_bar_ptr=tma_bar_ptr)
                 kv_producer_state.advance()
 
-                # q_stage=1 intra-warp overlap
                 # Load order: K[N-1], Q, K[N-2], {V[N-1-i], K[N-3-i]}x(N-2), V[1], V[0]
                 block_loop_count = block_iter_count - 2
                 q_producer_phase ^= 1
@@ -1134,16 +1167,12 @@ class FFAFwdSm100Index:
 
             tile_scheduler.prefetch_next_work()
             work_tile = tile_scheduler.advance_to_next_work()
-            # End of persistent scheduler loop
 
         # Every gather thread owns cp.async groups and full-barrier arrives: drain them, then all
         # threads wait for the MMA warp's last releases.
         self.cp_async_drain(pipeline_kv, kv_producer_state)
         pipeline_kv.producer_tail(kv_producer_state)
-        if (
-            const_expr(len(self.load_warp_ids) == 1)
-            or warp_idx == self.load_warp_ids[0]
-        ):
+        if is_q_load_warp:
             # This is equivalent to pipeline_q.producer_tail
             pipeline_q.producer_acquire_w_index_phase(
                 self.q_stage - 1, q_producer_phase
@@ -1171,26 +1200,15 @@ class FFAFwdSm100Index:
 
         Per K tile ``n`` the chain is ``QK(n) -> S[n % 2] -> softmax -> PV(n) -> O[n % 2]``, so the
         two alternating stages let tile ``n+1``'s QK overlap tile ``n``'s PV. K and V are separate
-        ``pipeline_kv`` stages, so the gather produces them interleaved::
+        ``pipeline_kv`` stages. Gather order is K0, K1, V0, K2, V1, K3, V2, ...;
+        issue order is S0=Q@K0, S1=Q@K1, {O0+=P0@V0, S0=Q@K2},
+        {O1+=P1@V1, S1=Q@K3}, ...
 
-            pipeline_kv   K0, K1, V0, K2, V1, K3, V2, ...
-            issued here   S0=Q@K0, S1=Q@K1, {O0+=P0@V0, S0=Q@K2}, {O1+=P1@V1, S1=Q@K3}, ...
-
-        Every handoff below is a pipeline this warp is the producer of:
-
-        ``pipeline_q``           Q stage free -> Q read, one stage per work item.
-        ``pipeline_kv``          K/V stage full -> K or V read, ``kv_stage`` stages.
-        ``pipeline_s_p_o``       S slot free -> P published; the correction warps release the slot
-                                 again after rescaling O.
-        ``pipeline_p_lastsplit`` the P columns the softmax warps had not written when they released
-                                 ``s_p_o``.
-        ``pipeline_o_acc``       O accumulator free -> PV may accumulate into it; the epilogue
-                                 commits both stages and the correction warps consume them.
 
         ``split_P_arrive`` is what lets ``P @ V`` start early: the softmax warps release ``s_p_o``
         after ``split_P_arrive`` of the 128 P columns and signal ``p_lastsplit`` for the rest, so
         this warp issues ``P @ V`` on a partial P and waits on ``p_lastsplit`` for the remainder
-        rather than on the whole tile.
+        rather than on the whole tile. See ``kernel`` for pipeline semantics.
 
         Requires: called by warp ``mma_warp_id`` alone. ``phase_s0``/``phase_s1`` are carried across
         work items because ``block_iter_count`` varies per item, and an mbarrier phase that drifted
@@ -1243,7 +1261,7 @@ class FFAFwdSm100Index:
                 self.tmem_o_offset[stage],
                 tOrP[None, None, None, stage],
                 sA=None,
-                split_arrive=self.split_P_arrive if self.split_P_arrive > 0 else None,
+                split_arrive=self.split_P_arrive,
             )
             for stage in range(self.s_stage)
         ]
@@ -1262,46 +1280,28 @@ class FFAFwdSm100Index:
         while work_tile.is_valid_tile:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
 
-            topk_eff, block_iter_count, process_tile = self.tile_counts(
+            topk_eff, block_iter_count, has_work = self.tile_counts(
                 mIndices, mTopkLen, m_block, head_idx
             )
 
-            if process_tile:
-                # =============================================================================
-                # q_stage=1: intra-warp overlap across n_block direction
-                # Pipeline KV order: K0, K1, V0, K2, V1, K3, V2, ...
-                # GEMM order: S0=Q@K0, S1=Q@K1, {O0+=P0@V0, S0=Q@K2}, {O1+=P1@V1, S1=Q@K3}, ...
-                # =============================================================================
-
+            if has_work:
                 # Prologue: wait Q0
                 pipeline_q.consumer_wait_w_index_phase(0, mma_q_consumer_phase)
                 mma_q_consumer_phase ^= 1
 
-                # S0 = Q @ K0
-                pipeline_kv.consumer_wait(mma_kv_consumer_state)
-                Ki_index = mma_kv_consumer_state.index
-                sK_cur = sK[None, None, None, Ki_index]
-                gemm_Si[0](
-                    smem_desc_start_b=sm100_utils.make_smem_desc_start_addr(
-                        sK_cur.iterator
+                # Issue the first two QK MMAs.
+                for stage in cutlass.range_constexpr(self.s_stage):
+                    pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                    Ki_index = mma_kv_consumer_state.index
+                    sK_cur = sK[None, None, None, Ki_index]
+                    gemm_Si[stage](
+                        smem_desc_start_b=sm100_utils.make_smem_desc_start_addr(
+                            sK_cur.iterator
+                        )
                     )
-                )
-                pipeline_s_p_o.producer_commit_w_index(0)  # signal S0 ready
-                pipeline_kv.consumer_release(mma_kv_consumer_state)
-                mma_kv_consumer_state.advance()
-
-                # S1 = Q @ K1
-                pipeline_kv.consumer_wait(mma_kv_consumer_state)
-                Ki_index = mma_kv_consumer_state.index
-                sK_cur = sK[None, None, None, Ki_index]
-                gemm_Si[1](
-                    smem_desc_start_b=sm100_utils.make_smem_desc_start_addr(
-                        sK_cur.iterator
-                    )
-                )
-                pipeline_s_p_o.producer_commit_w_index(1)  # signal S1 ready
-                pipeline_kv.consumer_release(mma_kv_consumer_state)
-                mma_kv_consumer_state.advance()
+                    pipeline_s_p_o.producer_commit_w_index(stage)
+                    pipeline_kv.consumer_release(mma_kv_consumer_state)
+                    mma_kv_consumer_state.advance()
 
                 # Flat loop: N-2 iterations, alternating stage 0/1
                 block_loop_count = block_iter_count - 2
@@ -1315,9 +1315,8 @@ class FFAFwdSm100Index:
                 sV_cur = sV[None, None, None, Vi_index]
                 sK_cur = sK[None, None, None, Ki_index]
 
-                pair_count = (
-                    block_loop_count // 2
-                )  # N even => block_loop_count = N-2 is even
+                # N and block_loop_count = N-2 are even.
+                pair_count = block_loop_count // 2
                 for i in cutlass.range(pair_count, unroll=1):
                     for stage in cutlass.range_constexpr(self.s_stage):
                         if const_expr(stage == 0):
@@ -1338,9 +1337,7 @@ class FFAFwdSm100Index:
                             zero_init=not O_acc_cur,
                             mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(
                                 stage
-                            )
-                            if self.split_P_arrive > 0
-                            else None,
+                            ),
                             mbar_phase=phase_cur,
                         )
                         # Overlap the independent K wait with the issued PV MMA.
@@ -1368,28 +1365,26 @@ class FFAFwdSm100Index:
                 pipeline_q.consumer_release_w_index(0)
 
                 # Epilogue: 2 PV GEMMs (N even: stage 0 first, stage 1 second)
-                for epi_stage_constexpr in cutlass.range_constexpr(2):
-                    if const_expr(epi_stage_constexpr == 0):
-                        epi_s, epi_p, epi_zi = 0, phase_s0, not O_acc_s0
+                for stage in cutlass.range_constexpr(self.s_stage):
+                    if const_expr(stage == 0):
+                        phase_cur, O_acc_cur = phase_s0, O_acc_s0
                     else:
-                        epi_s, epi_p, epi_zi = 1, phase_s1, not O_acc_s1
+                        phase_cur, O_acc_cur = phase_s1, O_acc_s1
                     pipeline_kv.consumer_wait(mma_kv_consumer_state)
                     Vi_index = mma_kv_consumer_state.index
                     tOrVi = tOrV[None, None, None, Vi_index]
                     sV_cur = sV[None, None, None, Vi_index]
-                    pipeline_s_p_o.producer_acquire_w_index_phase(epi_s, epi_p)
-                    gemm_Pi[epi_stage_constexpr](
+                    pipeline_s_p_o.producer_acquire_w_index_phase(stage, phase_cur)
+                    gemm_Pi[stage](
                         tCrB=tOrVi,
                         sB=sV_cur,
-                        zero_init=epi_zi,
+                        zero_init=not O_acc_cur,
                         mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(
-                            epi_s
-                        )
-                        if self.split_P_arrive > 0
-                        else None,
-                        mbar_phase=epi_p,
+                            stage
+                        ),
+                        mbar_phase=phase_cur,
                     )
-                    pipeline_o_acc.producer_commit_w_index(epi_s)
+                    pipeline_o_acc.producer_commit_w_index(stage)
                     pipeline_kv.consumer_release(mma_kv_consumer_state)
                     mma_kv_consumer_state.advance()
                 # Epilogue did one acquire per stage; advance phases for next tile
@@ -1398,13 +1393,11 @@ class FFAFwdSm100Index:
 
             # Advance to next tile
             work_tile = tile_scheduler.advance_to_next_work()
-        # End of persistent scheduler loop
 
         # We don't need pipeline_s_p_o.producer_tail() since there's no dangling mbarrier at the end
         # We don't need pipeline_o_acc.producer_tail() since we don't call
         # pipeline_o_acc.producer_acquire() inside the loop.
 
-    # for both softmax0 and softmax1 warp group
     @cute.jit
     def softmax_loop(
         self,
@@ -1412,32 +1405,35 @@ class FFAFwdSm100Index:
         softmax_scale_log2: Float32,
         softmax_scale: Float32,
         thr_mma_qk: cute.ThrMma,
-        tStS: cute.Tensor,  # ((TILE_M, TILE_N), 1, 1, q_stage)
+        tStS: cute.Tensor,  # ((TILE_M, TILE_N), 1, 1, s_stage)
         sScale: cute.Tensor,
         mLSE: Optional[cute.Tensor],
         pipeline_s_p_o: pipeline.PipelineAsync,
         pipeline_p_lastsplit: pipeline.PipelineAsync,
         pipeline_sm_stats: pipeline.PipelineAsync,
         sm_stats_barrier: pipeline.NamedBarrier,
-        tile_scheduler: "TileSchedulerProtocol",
+        tile_scheduler: TileSchedulerProtocol,
         mIndices: cute.Tensor,
         mTopkLen: Optional[cute.Tensor],
         seqlen_k: Int32,
     ):
-        """Process alternating K tiles and publish each row's softmax statistics to correction."""
-        tidx = cute.arch.thread_idx()[0] % (
-            cute.arch.WARP_SIZE * (len(self.softmax0_warp_ids))
-        )
+        """Process logical tiles N-1-stage, N-3-stage, ... in descending order.
+
+        Tiles that can contain invalid slots come first and take a masked step: slots >= topk_eff
+        (including the whole phantom tile), -1, and out-of-range ids are masked after gather
+        zero-fills their rows. The remaining tiles use a separate unmasked loop whose branch-free
+        body lets the compiler schedule the step well. ``ids_all_valid`` skips the scan. Each work
+        item acquires sm_stats once even when empty and arrives once per step plus once for final
+        statistics.
+        """
+        tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * self.warps_per_wg)
         lane_idx = tidx % cute.arch.WARP_SIZE
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % self.warps_per_wg
 
         tSAcc = tStS[(None, None), 0, 0, stage]  # (128, 128)
-        tScS = thr_mma_qk.partition_C(cute.make_identity_tensor(self.mma_tiler_qk[:2]))
-        tScS = tScS[(None, None), 0, 0]  # (128, 128)
-
         tilePlikeFP32 = self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
         tStP_layout = cute.composition(
-            tSAcc.layout, cute.make_layout((self.m_block_size, tilePlikeFP32))
+            tSAcc.layout, cute.make_layout((self.tile_m, tilePlikeFP32))
         )
         tStP = cute.make_tensor(tSAcc.iterator + self.tmem_s_to_p_offset, tStP_layout)
 
@@ -1487,29 +1483,16 @@ class FFAFwdSm100Index:
                 stage=stage,
             )
 
-            # Always acquire pipeline_sm_stats to stay in sync with correction
             pipeline_sm_stats.producer_acquire_w_index_phase(
                 stage, sm_stats_producer_phase
             )
             sm_stats_producer_phase ^= 1
 
             if has_work:
-                # block_iter_count is even: each WG processes exactly half the tiles
-                # WG0 (stage=0): logical tiles N-1, N-3, ... (stride 2)
-                # WG1 (stage=1): logical tiles N-2, N-4, ... (stride 2)
-                # Every slot >= topk_eff (so the whole phantom tile that even rounding adds), every
-                # -1 and every out-of-range id is masked to -inf (the gather zero-filled those rows).
                 wg_count = block_iter_count // 2
                 logical_first = block_iter_count - 1 - stage
 
-                # Tiles are processed in descending logical order, so the tiles that can contain an
-                # invalid slot (the padded tail, slots >= topk_len, the phantom tile, or anything from the
-                # first invalid id on) come first.  They take the masked softmax step; the remaining tiles
-                # take the mask-free step in a loop whose body has no branch, which the compiler needs to
-                # schedule the step well.
                 if const_expr(self.ids_all_valid):
-                    # Every slot is a valid id and even rounding added no phantom tile, so no tile
-                    # can hold an invalid slot: skip the scan and the mask entirely.
                     m_wg = Int32(0)
                 else:
                     t_mask = self.first_masked_tile(
@@ -1518,7 +1501,8 @@ class FFAFwdSm100Index:
                     # This WG's tiles are logical_first - 2 k; the masked ones are those >= t_mask.
                     m_wg = cutlass.min(
                         cutlass.max(
-                            (logical_first - t_mask) // self.s_stage + Int32(1), Int32(0)
+                            (logical_first - t_mask) // self.s_stage + Int32(1),
+                            Int32(0),
                         ),
                         wg_count,
                     )
@@ -1569,18 +1553,21 @@ class FFAFwdSm100Index:
                             mma_si_consumer_phase, sm_stats_producer_phase
                         )
 
-                sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
+                sScale[tidx + stage * self.tile_m] = softmax.row_sum[0]
                 sScale[
-                    tidx + stage * self.m_block_size + self.s_stage * self.m_block_size
+                    tidx + stage * self.tile_m + self.s_stage * self.tile_m
                 ] = softmax.row_max[0]
-                sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
+                sm_stats_barrier.arrive_w_index(
+                    index=stage * self.warps_per_wg + warp_idx
+                )
             else:
                 # Empty tile: arrive barrier once (synthetic "no work" signal for correction)
-                sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
+                sm_stats_barrier.arrive_w_index(
+                    index=stage * self.warps_per_wg + warp_idx
+                )
 
             # Advance to next tile
             work_tile = tile_scheduler.advance_to_next_work()
-        # End of persistent scheduler loop
 
         # This is equivalent to pipeline_sm_stats.producer_tail
         pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
@@ -1590,7 +1577,7 @@ class FFAFwdSm100Index:
         self,
         mma_si_consumer_phase: Int32,
         sm_stats_producer_phase: Int32,
-        softmax: "SoftmaxSm100",
+        softmax: SoftmaxSm100,
         thr_mma_qk: cute.ThrMma,
         pipeline_s_p_o: pipeline.PipelineAsync,
         pipeline_p_lastsplit: pipeline.PipelineAsync,
@@ -1606,7 +1593,7 @@ class FFAFwdSm100Index:
         is_first: bool = False,
     ) -> Tuple[cute.Int32, cute.Int32]:
         """Mask one score tile, update online statistics, and publish unnormalized P in two splits."""
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % self.warps_per_wg
         tilePlikeFP32 = self.mma_tiler_qk[1] // Float32.width * self.v_dtype.width
         tScS = thr_mma_qk.partition_C(cute.make_identity_tensor(self.mma_tiler_qk[:2]))
         tScS = tScS[(None, None), 0, 0]  # (128, 128)
@@ -1630,9 +1617,9 @@ class FFAFwdSm100Index:
 
         if const_expr(not is_first):
             thread_idx = thr_tmem_load.thr_idx
-            sScale[thread_idx + stage * self.m_block_size] = acc_scale
+            sScale[thread_idx + stage * self.tile_m] = acc_scale
         # Notify correction wg that row_max is ready
-        sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
+        sm_stats_barrier.arrive_w_index(index=stage * self.warps_per_wg + warp_idx)
 
         # One packed FFMA per pair (x * scale_log2 - row_max * scale_log2); the warp-uniform guard
         # falls back to subtract-then-scale beyond |row_max * scale_log2| >= 2048.
@@ -1654,28 +1641,54 @@ class FFAFwdSm100Index:
             cute.copy(
                 thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i]
             )
-            if const_expr(self.split_P_arrive > 0):
-                split_P_arrive_idx = (
-                    cute.size(tStP_r2t.shape[2])
-                    * self.split_P_arrive
-                    // self.n_block_size
-                )
-                if const_expr(i + 1 == split_P_arrive_idx):
-                    # Notify mma warp that the 1st half of P is ready
-                    cute.arch.fence_view_async_tmem_store()
-                    pipeline_s_p_o.consumer_release_w_index(stage)
-        # Notify mma warp that the 2nd half of P is ready
+            split_P_arrive_idx = (
+                cute.size(tStP_r2t.shape[2]) * self.split_P_arrive // self.tile_n
+            )
+            if const_expr(i + 1 == split_P_arrive_idx):
+                # Publish the first P split.
+                cute.arch.fence_view_async_tmem_store()
+                pipeline_s_p_o.consumer_release_w_index(stage)
+        # Publish the final P split.
         cute.arch.fence_view_async_tmem_store()
-        if const_expr(self.split_P_arrive > 0):
-            cute.arch.sync_warp()
-            with cute.arch.elect_one():
-                pipeline_p_lastsplit.producer_commit_w_index(stage)
-        else:
-            pipeline_s_p_o.consumer_release_w_index(stage)
+        cute.arch.sync_warp()
+        with cute.arch.elect_one():
+            pipeline_p_lastsplit.producer_commit_w_index(stage)
         # Accumulate the row sum before waiting for the correction warps to free the stats slot.
         softmax.update_row_sum(tSrS_t2r.load(), acc_scale, is_first)
         pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
         return mma_si_consumer_phase ^ 1, sm_stats_producer_phase ^ 1
+
+    @cute.jit
+    def combine_stage_stats(
+        self,
+        stats: Sequence[Tuple[Float32, Float32, Boolean]],
+        softmax_scale_log2: Float32,
+    ) -> Tuple[Float32, Float32, Float32, Float32]:
+        """Combine row maxima and sums from both softmax stages.
+
+        row_max is in unscaled S space, so the merge factor is
+        exp2((row_max - max_combined) * scale_log2). A stage with row_sum 0 or NaN
+        can have row_max 0.0 after softmax safe_max clamping, even when empty or padding-only.
+        Replace it with -inf so it does not affect max_combined.
+        """
+        row_sum0, row_max0, zero_or_nan0 = stats[0]
+        row_sum1, row_max1, zero_or_nan1 = stats[1]
+        rm0 = row_max0 if not zero_or_nan0 else -Float32.inf
+        rm1 = row_max1 if not zero_or_nan1 else -Float32.inf
+        max_combined = cutlass.max(rm0, rm1)
+        max_safe = max_combined if max_combined != -Float32.inf else Float32(0.0)
+        scale0 = (
+            cute.math.exp2((rm0 - max_safe) * softmax_scale_log2, fastmath=True)
+            if not zero_or_nan0
+            else Float32(0.0)
+        )
+        scale1 = (
+            cute.math.exp2((rm1 - max_safe) * softmax_scale_log2, fastmath=True)
+            if not zero_or_nan1
+            else Float32(0.0)
+        )
+        sum_combined = row_sum0 * scale0 + row_sum1 * scale1
+        return max_safe, scale0, scale1, sum_combined
 
     @cute.jit
     def correction_loop(
@@ -1685,7 +1698,7 @@ class FFAFwdSm100Index:
         tStS: cute.Tensor,
         tOtO: cute.Tensor,
         sScale: cute.Tensor,
-        mLSE: cute.Tensor,
+        mLSE: Optional[cute.Tensor],
         sO: cute.Tensor,
         pipeline_s_p_o: pipeline.PipelineAsync,
         pipeline_o_acc: pipeline.PipelineAsync,
@@ -1693,11 +1706,11 @@ class FFAFwdSm100Index:
         sm_stats_barrier: pipeline.NamedBarrier,
         softmax_scale_log2: Float32,
         seqlen_q: Int32,
-        tile_scheduler: "TileSchedulerProtocol",
+        tile_scheduler: TileSchedulerProtocol,
         mIndices: cute.Tensor,
         mTopkLen: Optional[cute.Tensor],
         mO: cute.Tensor,
-        tma_atom_O: Optional[cute.CopyAtom],
+        tma_atom_O: cute.CopyAtom,
     ):
         """Rescale, combine and store one work item's O, and write its LSE.
 
@@ -1726,9 +1739,9 @@ class FFAFwdSm100Index:
             cute.arch.WARP_SIZE * len(self.correction_warp_ids)
         )
         warp_idx_abs = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-        warp_idx = warp_idx_abs % 4
-        # With the epilogue folded into the correction warps, warp 8 issues the O TMA store and the
-        # four warps synchronise on this named barrier around the sO writes.
+        warp_idx = warp_idx_abs % self.warps_per_wg
+        # The store warp (correction_warp_ids[0]) issues the O TMA store; all correction warps
+        # synchronise on this named barrier around the sO writes.
         is_store_warp = warp_idx_abs == self.correction_warp_ids[0]
         corr_barrier = _SubsetNamedBarrier(
             barrier_id=int(NamedBarrierFwdSm100.Epilogue),
@@ -1747,7 +1760,7 @@ class FFAFwdSm100Index:
         while work_tile.is_valid_tile:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             mO_cur = mO[None, None, None, batch_idx][None, None, head_idx]
-            tiler_gO = (self.mma_tiler_pv[0], self.head_dim_v_padded)
+            tiler_gO = (self.mma_tiler_pv[0], self.head_dim)
             gO = cute.local_tile(mO_cur, tiler_gO, (m_block, 0))
             gO = layout_utils.select(
                 cute.flat_divide(gO, (self.mma_tiler_pv[0],)), mode=[0, 2, 1]
@@ -1765,21 +1778,22 @@ class FFAFwdSm100Index:
 
             if has_work:
                 # Ignore first signal from softmax as no correction is required
-                sm_stats_barrier.arrive_and_wait_w_index(index=0 * 4 + warp_idx)
+                sm_stats_barrier.arrive_and_wait_w_index(index=warp_idx)
                 pipeline_sm_stats.consumer_release_w_index(0)
                 # Wait for both softmax warp groups.
-                sm_stats_barrier.arrive_and_wait_w_index(index=1 * 4 + warp_idx)
+                sm_stats_barrier.arrive_and_wait_w_index(
+                    index=self.warps_per_wg + warp_idx
+                )
                 sm_stats_consumer_phase ^= 1
 
-                # q_stage=1 correction loop
                 corr_pair_count = (block_iter_count - 2) // 2
                 # Rescale the two alternating stages as a pair.
                 for i in cutlass.range(corr_pair_count, unroll=1):
                     for stage in cutlass.range_constexpr(self.s_stage):
                         sm_stats_barrier.arrive_and_wait_w_index(
-                            index=stage * 4 + warp_idx
+                            index=stage * self.warps_per_wg + warp_idx
                         )
-                        scale = sScale[tidx + stage * self.m_block_size]
+                        scale = sScale[tidx + stage * self.tile_m]
                         should_rescale = cute.arch.vote_ballot_sync(scale < 1.0) != 0
                         if should_rescale:
                             self.correction_rescale(
@@ -1792,47 +1806,24 @@ class FFAFwdSm100Index:
                     sm_stats_consumer_phase ^= 1
                 # N even: no remainder. Release final sm_stats stage 1.
                 pipeline_sm_stats.consumer_release_w_index(1)
-                # End of seqlen_corr_loop_steps
 
                 # Read final softmax stats for both stages
                 for stage in cutlass.range_constexpr(self.s_stage):
-                    sm_stats_barrier.arrive_and_wait_w_index(index=stage * 4 + warp_idx)
-                    row_sum = sScale[tidx + stage * self.m_block_size]
+                    sm_stats_barrier.arrive_and_wait_w_index(
+                        index=stage * self.warps_per_wg + warp_idx
+                    )
+                    row_sum = sScale[tidx + stage * self.tile_m]
                     row_max = sScale[
-                        tidx
-                        + stage * self.m_block_size
-                        + self.s_stage * self.m_block_size
+                        tidx + stage * self.tile_m + self.s_stage * self.tile_m
                     ]
                     pipeline_sm_stats.consumer_release_w_index(stage)
                     acc_O_mn_row_is_zero_or_nan = row_sum == 0.0 or row_sum != row_sum
                     stats[stage] = (row_sum, row_max, acc_O_mn_row_is_zero_or_nan)
 
-                # q_stage=1: combine O0 and O1, then write single output
-                row_sum0, row_max0, zero_or_nan0 = stats[0]
-                row_sum1, row_max1, zero_or_nan1 = stats[1]
-
-                # Compute combined scales for the two partial O accumulators
-                # row_max is in original S space (unscaled). To compute rescale
-                # factors we need exp2((row_max - max_combined) * scale_log2).
-                # For empty/padding stages (zero_or_nan=True), row_max may be 0.0 instead of -inf
-                # due to softmax's safe_max clamping. Use -inf for those to avoid polluting max_combined.
-                rm0 = row_max0 if not zero_or_nan0 else -Float32.inf
-                rm1 = row_max1 if not zero_or_nan1 else -Float32.inf
-                max_combined = cutlass.max(rm0, rm1)
-                max_safe = (
-                    max_combined if max_combined != -Float32.inf else Float32(0.0)
+                # Combine O0 and O1.
+                max_safe, scale0, scale1, sum_combined = self.combine_stage_stats(
+                    stats, softmax_scale_log2
                 )
-                scale0 = (
-                    cute.math.exp2((rm0 - max_safe) * softmax_scale_log2, fastmath=True)
-                    if not zero_or_nan0
-                    else Float32(0.0)
-                )
-                scale1 = (
-                    cute.math.exp2((rm1 - max_safe) * softmax_scale_log2, fastmath=True)
-                    if not zero_or_nan1
-                    else Float32(0.0)
-                )
-                sum_combined = row_sum0 * scale0 + row_sum1 * scale1
                 combined_zero_or_nan = (
                     sum_combined == 0.0 or sum_combined != sum_combined
                 )
@@ -1869,7 +1860,7 @@ class FFAFwdSm100Index:
                 # Match softmax's 1 barrier arrive per stage.
                 for stage_idx in cutlass.range_constexpr(self.s_stage):
                     sm_stats_barrier.arrive_and_wait_w_index(
-                        index=stage_idx * 4 + warp_idx
+                        index=stage_idx * self.warps_per_wg + warp_idx
                     )
                     pipeline_sm_stats.consumer_release_w_index(stage_idx)
                 sm_stats_consumer_phase ^= 1
@@ -1887,51 +1878,29 @@ class FFAFwdSm100Index:
                 self.correction_commit_sO(corr_barrier, is_store_warp, store_O_fn)
 
             if const_expr(mLSE is not None):
-                mLSE_cur = mLSE[None, head_idx, batch_idx]
-                # q_stage=1: compute combined LSE from two partial softmax stats
+                mLSE_cur = mLSE[None, head_idx, batch_idx]  # type: ignore[index]
+                # Compute LSE from both stages.
                 m_tile_idx = m_block
-                gLSE = cute.local_tile(mLSE_cur, (self.m_block_size,), (m_tile_idx,))
-                row_sum0, row_max0, zero_or_nan0 = stats[0]
-                row_sum1, row_max1, zero_or_nan1 = stats[1]
-                rm0_lse = row_max0 if not zero_or_nan0 else -Float32.inf
-                rm1_lse = row_max1 if not zero_or_nan1 else -Float32.inf
-                max_combined = cutlass.max(rm0_lse, rm1_lse)
-                max_safe = (
-                    max_combined if max_combined != -Float32.inf else Float32(0.0)
+                gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (m_tile_idx,))
+                max_safe, scale0, scale1, sum_combined = self.combine_stage_stats(
+                    stats, softmax_scale_log2
                 )
-                s0 = (
-                    cute.math.exp2(
-                        (rm0_lse - max_safe) * softmax_scale_log2, fastmath=True
-                    )
-                    if not zero_or_nan0
-                    else Float32(0.0)
-                )
-                s1 = (
-                    cute.math.exp2(
-                        (rm1_lse - max_safe) * softmax_scale_log2, fastmath=True
-                    )
-                    if not zero_or_nan1
-                    else Float32(0.0)
-                )
-                sum_comb = row_sum0 * s0 + row_sum1 * s1
-                comb_zero_or_nan = sum_comb == 0.0 or sum_comb != sum_comb
-                LN2 = math.log(2.0)
+                comb_zero_or_nan = sum_combined == 0.0 or sum_combined != sum_combined
                 lse = (
                     (
                         max_safe * softmax_scale_log2
-                        + cute.math.log2(sum_comb, fastmath=True)
+                        + cute.math.log2(sum_combined, fastmath=True)
                     )
                     * LN2
                     if not comb_zero_or_nan
                     else -Float32.inf
                 )
                 packed_seqlen_q = seqlen_q * self.qhead_per_kvhead
-                if tidx < packed_seqlen_q - m_tile_idx * self.m_block_size:
+                if tidx < packed_seqlen_q - m_tile_idx * self.tile_m:
                     gLSE[tidx] = lse
 
             # Advance to next tile
             work_tile = tile_scheduler.advance_to_next_work()
-        # End of persistent scheduler loop
 
         if is_store_warp:
             cute.arch.cp_async_bulk_wait_group(0, read=False)
@@ -1954,7 +1923,7 @@ class FFAFwdSm100Index:
         is_store_warp: Boolean,
         store_O_fn: Callable,
     ):
-        """Synchronize the fenced sO writers before warp 8 issues its TMA store."""
+        """Synchronize the fenced sO writers before the store warp issues its TMA store."""
         corr_barrier.arrive_and_wait()
         if is_store_warp:
             store_O_fn(src_idx=0, dst_idx=0)
@@ -1979,19 +1948,15 @@ class FFAFwdSm100Index:
             tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(corr_tile_size)),
             self.pv_acc_dtype,
         )
-        tOtO_i = cute.composition(
-            tOtO, cute.make_layout((self.m_block_size, corr_tile_size))
-        )
-        tOcO_i = cute.composition(
-            tOcO, cute.make_layout((self.m_block_size, corr_tile_size))
-        )
+        tOtO_i = cute.composition(tOtO, cute.make_layout((self.tile_m, corr_tile_size)))
+        tOcO_i = cute.composition(tOcO, cute.make_layout((self.tile_m, corr_tile_size)))
         thr_tmem_load = tcgen05.make_tmem_copy(tmem_load_atom, tOtO_i).get_slice(tidx)
         thr_tmem_store = tcgen05.make_tmem_copy(tmem_store_atom, tOtO_i).get_slice(tidx)
         tOtO_t2r = thr_tmem_load.partition_S(tOtO_i)
         tOrO_t2r_shape = thr_tmem_load.partition_D(tOcO_i).shape
         tOtO_r2t = thr_tmem_store.partition_D(tOtO_i)
 
-        frg_count = self.head_dim_v_padded // corr_tile_size
+        frg_count = self.head_dim // corr_tile_size
         for i in cutlass.range_constexpr(frg_count):
             tOrO_frg = cute.make_rmem_tensor(tOrO_t2r_shape, self.pv_acc_dtype)
             tOtO_t2r_i = cute.make_tensor(
@@ -2025,16 +1990,16 @@ class FFAFwdSm100Index:
         tOcO = thr_mma.partition_C(cute.make_identity_tensor(self.mma_tiler_pv[:2]))
 
         tOtO0_i = cute.logical_divide(
-            tOtO0, cute.make_layout((self.m_block_size, corr_tile_size))
+            tOtO0, cute.make_layout((self.tile_m, corr_tile_size))
         )
         tOtO1_i = cute.logical_divide(
-            tOtO1, cute.make_layout((self.m_block_size, corr_tile_size))
+            tOtO1, cute.make_layout((self.tile_m, corr_tile_size))
         )
         tOcO_i = cute.logical_divide(
-            tOcO, cute.make_layout((self.m_block_size, corr_tile_size))
+            tOcO, cute.make_layout((self.tile_m, corr_tile_size))
         )
         tOsO_i = cute.logical_divide(
-            tOsO, cute.make_layout((self.m_block_size, corr_tile_size))
+            tOsO, cute.make_layout((self.tile_m, corr_tile_size))
         )
 
         epi_subtile = (self.epi_tile[0], corr_tile_size)
@@ -2061,9 +2026,7 @@ class FFAFwdSm100Index:
             thr_tmem_load, tOsO_i[(None, None), None]
         )
         tOcO_t2r = thr_tmem_load.partition_D(tOcO_i[(None, None), None])
-        for i in cutlass.range(
-            self.head_dim_v_padded // corr_tile_size, unroll_full=True
-        ):
+        for i in cutlass.range(self.head_dim // corr_tile_size, unroll_full=True):
             tOtO0_t2r_i = tOtO0_t2r[None, 0, 0, i]
             tOtO1_t2r_i = tOtO1_t2r[None, 0, 0, i]
             tOsO_r2s_i = tOsO_s2r[None, 0, 0, i]
@@ -2106,7 +2069,7 @@ class FFAFwdSm100Index:
         zero-filled rows and are masked to -inf.
 
         NOTE: the phantom tile is why ``block_iter_count`` is even rather than exact. Both softmax
-        warpgroups and the correction warp must agree on it, so every role calls this and none of
+        warpgroups and the correction warps must agree on it, so every role calls this and none of
         them may compute the count a second way.
 
         Requires: no warp-role precondition -- all four roles call it once per work item.
@@ -2117,10 +2080,10 @@ class FFAFwdSm100Index:
             topk_eff = cutlass.min(
                 cutlass.max(mTopkLen[m_block, head_idx], Int32(0)), topk  # type: ignore[index]
             )
-        raw_tile_count = (topk_eff + self.n_block_size - 1) // self.n_block_size
+        raw_tile_count = (topk_eff + self.tile_n - 1) // self.tile_n
         block_iter_count = (raw_tile_count + 1) & ~1
-        process_tile = raw_tile_count > Int32(0)
-        return topk_eff, block_iter_count, process_tile
+        has_work = raw_tile_count > Int32(0)
+        return topk_eff, block_iter_count, has_work
 
     @cute.jit
     def first_masked_tile(
@@ -2147,9 +2110,9 @@ class FFAFwdSm100Index:
         """
         topk = Int32(mIndices.shape[2])
         cand = topk_eff
-        n_pass = (topk_eff + Int32(self.n_block_size - 1)) // self.n_block_size
+        n_pass = (topk_eff + Int32(self.tile_n - 1)) // self.tile_n
         for p in cutlass.range(n_pass, unroll=16):
-            slot = p * self.n_block_size + lane_idx * 4
+            slot = p * self.tile_n + lane_idx * 4
             toks = _ldg_indices_int4(
                 mIndices, m_block, head_idx, cutlass.min(slot, topk - Int32(4))
             )
@@ -2159,7 +2122,7 @@ class FFAFwdSm100Index:
                 cand = cutlass.min(cand, sj if invalid else topk_eff)
         for off in cutlass.range_constexpr(5):
             cand = cutlass.min(cand, cute.arch.shuffle_sync_bfly(cand, 1 << off))
-        return cand // self.n_block_size
+        return cand // self.tile_n
 
     @cute.jit
     def tile_valid_mask(
@@ -2180,9 +2143,9 @@ class FFAFwdSm100Index:
         Requires: one whole warp of a softmax warpgroup, with ``lane_idx`` the lane's index in it;
         the four words are handed to :func:`apply_valid_mask` by the caller.
         """
-        slot_base = logical_tile * self.n_block_size
+        slot_base = logical_tile * self.tile_n
         words = []
-        for s in cutlass.range_constexpr(self.n_block_size // cute.arch.WARP_SIZE):
+        for s in cutlass.range_constexpr(self.tile_n // cute.arch.WARP_SIZE):
             slot = slot_base + s * cute.arch.WARP_SIZE + lane_idx
             token = Int32(-1)
             if slot < topk_eff:
@@ -2206,9 +2169,9 @@ class FFAFwdSm100Index:
         the last load stay in bounds; validity is decided at use time from the unclamped slot.
         """
         topk = Int32(mIndices.shape[2])
-        slot_base = logical_tile * self.n_block_size
+        slot_base = logical_tile * self.tile_n
         toks = []
-        for r in cutlass.range_constexpr(self.n_block_size // cute.arch.WARP_SIZE):
+        for r in cutlass.range_constexpr(self.tile_n // cute.arch.WARP_SIZE):
             slot = slot_base + Int32(r * cute.arch.WARP_SIZE) + lane_idx
             toks.append(mIndices[m_block, head_idx, cutlass.min(slot, topk - Int32(1))])
         return toks[0], toks[1], toks[2], toks[3]
@@ -2237,9 +2200,9 @@ class FFAFwdSm100Index:
         Requires: one gather warp's lanes, with ``lane_idx`` the lane's index in its warp; the result
         is four registers, one per 32-slot word of the tile.
         """
-        slot_base = logical_tile * self.n_block_size
+        slot_base = logical_tile * self.tile_n
         rows = []
-        for r in cutlass.range_constexpr(self.n_block_size // cute.arch.WARP_SIZE):
+        for r in cutlass.range_constexpr(self.tile_n // cute.arch.WARP_SIZE):
             slot = slot_base + Int32(r * cute.arch.WARP_SIZE) + lane_idx
             tok = toks[r]
             valid = slot < topk_eff and tok >= Int32(0) and tok < seqlen_k
@@ -2328,11 +2291,11 @@ class FFAFwdSm100Index:
         Requires: called by the ``gather_warps`` warps of warpgroup 3 (``load_warp_ids``) only, with
         ``lane_idx`` the lane's index within its own warp.
         """
-        n_rows = self.n_block_size
+        n_rows = self.tile_n
         elem_bytes = self.k_dtype.width // 8
-        gw = self.gather_warps
-        rows_per_iter = 2 * gw
+        rows_per_iter = 2 * self.gather_warps
         n_iters = (n_rows + rows_per_iter - 1) // rows_per_iter
+        words = n_rows // cute.arch.WARP_SIZE
 
         # Prefetch the next K tile's token ids before anything that can stall.
         next_toks = None
@@ -2351,39 +2314,36 @@ class FFAFwdSm100Index:
         )
         dsts = [stage_base + dst_rel[j] for j in range(period)]
 
+        issue = partial(
+            self._cp_async_row_pair,
+            lane_base=lane_base,
+            two_w=two_w,
+            src_base=src_base,
+            row_bytes=row_bytes,
+        )
         for i in cutlass.range_constexpr(n_iters):
-            row_even_lo = (
-                rows_per_iter * i
-            )  # row_even for warp 0; warp w adds 2 w (< rows_per_iter)
+            # Warp w adds 2 w to warp 0's row_even.
+            row_even_lo = rows_per_iter * i
             row_even_hi = row_even_lo + rows_per_iter - 2
-            words = n_rows // cute.arch.WARP_SIZE
             v_lo = row_ids[row_even_lo // cute.arch.WARP_SIZE]
             v_hi = row_ids[min(row_even_hi // cute.arch.WARP_SIZE, words - 1)]
             if const_expr(row_even_hi < n_rows):
-                self._cp_async_row_pair(
+                issue(
                     row_even_lo,
                     row_even_hi,
                     v_lo,
                     v_hi,
-                    lane_base,
-                    two_w,
-                    src_base,
-                    row_bytes,
-                    dsts[i % period],
+                    dst=dsts[i % period],
                 )
             else:
                 # Only the warps whose rows exist issue this iteration (warp-uniform branch).
                 if Int32(row_even_lo) + two_w < Int32(n_rows):
-                    self._cp_async_row_pair(
+                    issue(
                         row_even_lo,
                         row_even_hi,
                         v_lo,
                         v_hi,
-                        lane_base,
-                        two_w,
-                        src_base,
-                        row_bytes,
-                        dsts[i % period],
+                        dst=dsts[i % period],
                     )
 
         depth = self.cp_async_depth_eff
@@ -2483,49 +2443,6 @@ class FFAFwdSm100Index:
                 )
 
 
-def _ldg_indices_int4(
-    indices: cute.Tensor, m_block: Int32, head_idx: Int32, slot: Int32
-) -> Tuple[Int32, Int32, Int32, Int32]:
-    """Load indices[m_block, head_idx, slot:slot+4] as one aligned int4 (slot % 4 == 0, 16 B aligned rows)."""
-    # NOTE: the asm is a raw ``ld.global.nc.v2.u64``, so the 16 B alignment is a hard requirement,
-    # not a hint: it holds because the wrapper asserts ``topk % 4 == 0`` and the index tensor is
-    # contiguous. ``.nc`` (non-coherent) is sound because the index row is read-only for the whole
-    # kernel, and it keeps these loads off the L1 coherence path the gather is already saturating.
-    ptr = indices.iterator + cute.crd2idx((m_block, head_idx, slot), indices.layout)
-    ptr = cute.make_ptr(Int32, ptr.toint(), indices.memspace, assumed_align=16)
-    out = llvm.inline_asm(
-        llvm.StructType.get_literal([T.i32()] * 4),
-        [ptr.llvm_ptr],
-        "{\n\t"
-        ".reg .b64 v<2>;\n\t"
-        "ld.global.nc.v2.u64 {v0, v1}, [$4];\n\t"
-        "mov.b64 {$0, $1}, v0;\n\t"
-        "mov.b64 {$2, $3}, v1;\n\t"
-        "}\n",
-        ",".join(["=r"] * 4 + ["l"]),
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-    )
-    return tuple(Int32(llvm.extractvalue(T.i32(), out, [i])) for i in range(4))
-
-
-@cute.jit
-def apply_valid_mask(
-    acc_S: cute.Tensor,
-    w0: Uint32,
-    w1: Uint32,
-    w2: Uint32,
-    w3: Uint32,
-) -> None:
-    """Mask the tile columns whose validity bit is clear (word s covers columns s*32..s*32+31)."""
-    mask_r2p_lambda(
-        acc_S,
-        lambda s: (w0, w1, w2, w3)[s],
-        rank1=True,
-    )
-
-
 # =============================================================================
 # Python entry point
 # =============================================================================
@@ -2562,8 +2479,8 @@ def ffa_fwd_sm100_index(
             ``[0, total_k)`` -- no ``-1`` padding and no out-of-range id. With ``topk`` a multiple
             of ``2 * tile_n`` this selects a compile-time fast path that drops the per-warp index
             scan and the softmax mask, worth about 4% at S=32768. A false assertion silently
-            attends the wrong tokens; the kernel cannot check it without paying more than the path
-            saves.
+            attends the wrong tokens; an aminmax pass and host sync to check it cost more than the
+            path saves.
 
     Returns:
         ``(out, lse)``: ``lse`` is the natural-log logsumexp of the scaled scores; a row
@@ -2612,13 +2529,8 @@ def ffa_fwd_sm100_index(
     assert k.is_contiguous() and v.is_contiguous(), "K/V must be contiguous row tables"
 
     dtype = to_cute_dtype(q.dtype)
-    # The all-valid fast path lets the softmax warps skip the per-warp index scan and the mask. It
-    # needs every slot to be a valid id in [0, total_k) and the even tile rounding to add no phantom
-    # tile. The second condition is checked here for free; the first is the caller's contract --
-    # verifying it costs an aminmax pass plus a host sync, which measured more than the path saves.
-    ids_all_valid = bool(assume_valid_ids) and topk % (
-        2 * FFAFwdSm100Index.tile_n
-    ) == 0
+    # A multiple of two tiles guarantees no phantom tile.
+    ids_all_valid = bool(assume_valid_ids) and topk % (2 * FFAFwdSm100Index.tile_n) == 0
     compile_key = (
         dtype,
         group,
