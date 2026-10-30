@@ -295,6 +295,7 @@ class FFAFwdSm100Index:
         head_dim: int = 128,
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
         debug_print: bool = False,
+        ids_all_valid: cutlass.Constexpr[bool] = False,
     ):
         assert (
             head_dim == self.head_dim
@@ -365,7 +366,7 @@ class FFAFwdSm100Index:
         )
 
         # Two S/P stages is not a tuning choice: S is f32 (128 columns) and O is f32 (128 columns),
-        # so two of each already fill the 512 TMEM columns this SM has. s_stage=3 is not expressible.
+        # so two of each already fill the 512 TMEM columns this SM has.
         self.s_stage = 2  # Always 2: for q_stage=1 it's n-direction
         self.tmem_s_offset = [0, self.n_block_size]  # e.g., 0, 128
         self.tmem_o_offset = [
@@ -391,6 +392,12 @@ class FFAFwdSm100Index:
         assert (
             2 * self.num_regs_softmax + self.num_regs_correction + self.num_regs_other
         ) * 128 <= 64 * 1024
+        # Compile-time fast path: when every index slot is a valid id in [0, total_k) and the tile
+        # count is not padded by the even rounding, no tile can need masking, so the softmax warps
+        # skip both the per-warp index scan (first_masked_tile) and the mask itself. This is the
+        # caller's contract (wrapper argument ``assume_valid_ids``): checking it costs an aminmax
+        # pass plus a host sync, which measured more than the path saves.
+        self.ids_all_valid = ids_all_valid
 
         self.buffer_align_bytes = 1024
         self.debug_print = debug_print
@@ -1500,16 +1507,21 @@ class FFAFwdSm100Index:
                 # first invalid id on) come first.  They take the masked softmax step; the remaining tiles
                 # take the mask-free step in a loop whose body has no branch, which the compiler needs to
                 # schedule the step well.
-                t_mask = self.first_masked_tile(
-                    mIndices, m_block, head_idx, topk_eff, seqlen_k, lane_idx
-                )
-                # This WG's tiles are logical_first - 2 k; the masked ones are those >= t_mask.
-                m_wg = cutlass.min(
-                    cutlass.max(
-                        (logical_first - t_mask) // self.s_stage + Int32(1), Int32(0)
-                    ),
-                    wg_count,
-                )
+                if const_expr(self.ids_all_valid):
+                    # Every slot is a valid id and even rounding added no phantom tile, so no tile
+                    # can hold an invalid slot: skip the scan and the mask entirely.
+                    m_wg = Int32(0)
+                else:
+                    t_mask = self.first_masked_tile(
+                        mIndices, m_block, head_idx, topk_eff, seqlen_k, lane_idx
+                    )
+                    # This WG's tiles are logical_first - 2 k; the masked ones are those >= t_mask.
+                    m_wg = cutlass.min(
+                        cutlass.max(
+                            (logical_first - t_mask) // self.s_stage + Int32(1), Int32(0)
+                        ),
+                        wg_count,
+                    )
                 if m_wg > Int32(0):
                     w0, w1, w2, w3 = self.tile_valid_mask(
                         mIndices,
@@ -2527,6 +2539,7 @@ def ffa_fwd_sm100_index(
     q_block_size: int = 1,
     out: Optional[torch.Tensor] = None,
     lse: Optional[torch.Tensor] = None,
+    assume_valid_ids: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass of index-sparse (DSA) attention on SM100.
 
@@ -2545,6 +2558,12 @@ def ffa_fwd_sm100_index(
             MHA).
         out, lse: optional preallocated ``(total_q, num_heads_q, 128)`` / fp32
             ``(total_q, num_heads_q)`` outputs.
+        assume_valid_ids: assert that every entry of ``index_sparse_indices`` is a valid id in
+            ``[0, total_k)`` -- no ``-1`` padding and no out-of-range id. With ``topk`` a multiple
+            of ``2 * tile_n`` this selects a compile-time fast path that drops the per-warp index
+            scan and the softmax mask, worth about 4% at S=32768. A false assertion silently
+            attends the wrong tokens; the kernel cannot check it without paying more than the path
+            saves.
 
     Returns:
         ``(out, lse)``: ``lse`` is the natural-log logsumexp of the scaled scores; a row
@@ -2593,11 +2612,19 @@ def ffa_fwd_sm100_index(
     assert k.is_contiguous() and v.is_contiguous(), "K/V must be contiguous row tables"
 
     dtype = to_cute_dtype(q.dtype)
+    # The all-valid fast path lets the softmax warps skip the per-warp index scan and the mask. It
+    # needs every slot to be a valid id in [0, total_k) and the even tile rounding to add no phantom
+    # tile. The second condition is checked here for free; the first is the caller's contract --
+    # verifying it costs an aminmax pass plus a host sync, which measured more than the path saves.
+    ids_all_valid = bool(assume_valid_ids) and topk % (
+        2 * FFAFwdSm100Index.tile_n
+    ) == 0
     compile_key = (
         dtype,
         group,
         torch.cuda.get_device_capability(q.device),
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+        ids_all_valid,
     )
     compile_cache = ffa_fwd_sm100_index.compile_cache  # type: ignore[attr-defined]
     if compile_key not in compile_cache:
@@ -2605,6 +2632,7 @@ def ffa_fwd_sm100_index(
             head_dim,
             qhead_per_kvhead=group,
             debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+            ids_all_valid=ids_all_valid,
         )
         q_tensor, k_tensor, v_tensor, out_tensor = [
             to_cute_tensor(t) for t in (q, k, v, out)
