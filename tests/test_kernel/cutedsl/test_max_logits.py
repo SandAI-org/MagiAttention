@@ -22,6 +22,7 @@ from magi_attention.kernel.cutedsl import MT_MAP, flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.cutedsl_utils import (
     MHA_HD64,
+    MHA_HD128,
     SM100_FAMILY_REQUIRED,
     HeadConfig,
     is_sm100_family,
@@ -34,77 +35,77 @@ from magi_attention.testing.precision import assert_close
 
 DTYPE = torch.bfloat16
 
-# A non-unit scale that is not 1/sqrt(head_dim), so a missing or an extra
-# factor of it changes the result.
+
 SCALE = 0.5
-SOFTCAP = 2.0
 
-SEGMENTS = 8
-SEG_LEN = 256
+SOFTCAP = 16.0
 
-# The softcap path uses tanh.approx, so the reported maximum can differ from an
-# exact tanh in the last digits of the approximation.
-MAX_LOGITS_ATOL = 5e-3
-MAX_LOGITS_RTOL = 5e-3
+Q_GROUP_LENGTHS = (257, 129)
+K_GROUP_LENGTHS = (129, 257)
+
+RELATION_GROUPS = [(0, 0), (0, 1), (1, 0)]
+
+MAX_LOGITS_RTOL = 5e-4
 
 
 def _reference_max_logits(
     q: torch.Tensor,
     k: torch.Tensor,
-    lengths: list[int],
-    *,
+    q_ranges: list[list[int]],
+    k_ranges: list[list[int]],
     softcap: float,
 ) -> torch.Tensor:
-    """Per-head max of the softmax input over every attended (q, k) pair.
-
-    Full-mask relations only: the mask does not change the unit of the tracked
-    maximum, which is what this test pins.
-    """
-    heads = q.shape[1]
-    out = torch.full((heads,), -math.inf, device=q.device, dtype=torch.float32)
-    start = 0
-    for length in lengths:
-        rows = q[start : start + length].float()
-        keys = k[start : start + length].float()
+    """Per-head max of the softmax input over every pair of full-mask relations."""
+    out = torch.full((q.shape[1],), -math.inf, device=q.device, dtype=torch.float32)
+    for (q_start, q_end), (k_start, k_end) in zip(q_ranges, k_ranges):
+        rows = q[q_start:q_end].float()
+        keys = k[k_start:k_end].float()
         scores = torch.einsum("qhd,khd->hqk", rows, keys) * SCALE
         if softcap > 0.0:
             scores = softcap * torch.tanh(scores / softcap)
         out = torch.maximum(out, scores.amax(dim=(1, 2)))
-        start += length
     return out
 
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
 class TestMaxLogits(TestCase):
-    """``return_max_logits`` reports the maximum in natural-log units.
-
-    A score modifier receives the scaled score, so the kernel must not scale
-    the tracked maximum a second time.
-    """
+    """``return_max_logits`` on the softcap and range-merge paths."""
 
     def setUp(self) -> None:
         self.device = torch.cuda.current_device()
 
-    def _check(self, heads: HeadConfig, softcap: float) -> None:
-        lengths = [SEG_LEN] * SEGMENTS
-        q_ranges = ranges_from_lengths(lengths)
-        test_case = f"[test_max_logits][{heads.name}][{softcap=}]"
+    def _check(self, heads: HeadConfig, softcap: float, range_merge: bool) -> None:
+        test_case = f"[test_max_logits][{heads.name}][{softcap=}][{range_merge=}]"
         seed_test_case(test_case)
-        q, k, v = make_qkv(
-            (SEGMENTS * SEG_LEN,), (SEGMENTS * SEG_LEN,), heads, DTYPE, self.device
+        q_groups = ranges_from_lengths(Q_GROUP_LENGTHS)
+        k_groups = ranges_from_lengths(K_GROUP_LENGTHS)
+        q_ranges = [q_groups[q_group] for q_group, _ in RELATION_GROUPS]
+        k_ranges = [k_groups[k_group] for _, k_group in RELATION_GROUPS]
+        q, k, v = (
+            t.detach()
+            for t in make_qkv(
+                (sum(Q_GROUP_LENGTHS),),
+                (sum(K_GROUP_LENGTHS),),
+                heads,
+                DTYPE,
+                self.device,
+            )
         )
 
         _, meta = flex_flash_attn_func(
-            q.detach(),
-            k.detach(),
-            v.detach(),
+            q,
+            k,
+            v,
             q_ranges=to_ranges_tensor(q_ranges, self.device),
-            k_ranges=to_ranges_tensor(q_ranges, self.device),
+            k_ranges=to_ranges_tensor(k_ranges, self.device),
             mask_types=MT_MAP.full,
-            max_seqlen_q=SEG_LEN,
-            max_seqlen_k=SEG_LEN,
+            max_seqlen_q=max(Q_GROUP_LENGTHS),
+            max_seqlen_k=max(K_GROUP_LENGTHS),
             softmax_scale=SCALE,
             softcap=softcap,
+            # The forward range merge requires a unique writer for O.
+            disable_fwd_atomic_reduction=range_merge,
+            range_merge=range_merge,
             return_max_logits=True,
         )
         assert meta.max_logits is not None
@@ -112,18 +113,19 @@ class TestMaxLogits(TestCase):
         self.assertEqual(tuple(meta.max_logits.shape), (heads.num_heads_q,))
         assert_close(
             meta.max_logits,
-            _reference_max_logits(
-                q=q.detach(), k=k.detach(), lengths=lengths, softcap=softcap
-            ),
-            atol=MAX_LOGITS_ATOL,
+            _reference_max_logits(q, k, q_ranges, k_ranges, softcap),
             rtol=MAX_LOGITS_RTOL,
             test_case=f"{test_case} => max_logits",
         )
 
-    @parameterize("softcap", [0.0, SOFTCAP])
-    def test_scaled_max_logits(self, softcap: float):
-        """The raw maximum is scaled once; a soft-capped one is already scaled."""
-        self._check(MHA_HD64, softcap)
+    def test_softcap(self):
+        """The reported maximum is ``softcap * tanh(scale * q.k / softcap)``."""
+        self._check(MHA_HD64, SOFTCAP, range_merge=False)
+
+    @parameterize("heads", [MHA_HD64, MHA_HD128])
+    def test_range_merge(self, heads: HeadConfig):
+        """The merged softmax loop covers every relation of a q group."""
+        self._check(heads, softcap=0.0, range_merge=True)
 
 
 if __name__ == "__main__":

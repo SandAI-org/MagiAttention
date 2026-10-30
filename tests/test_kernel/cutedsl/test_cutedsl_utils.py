@@ -26,6 +26,7 @@ from magi_attention.kernel.cutedsl.cutedsl_utils import (
     atomic_max_fp32,
     fmax,
 )
+from magi_attention.testing import parameterize
 from magi_attention.testing.precision import assert_equal
 
 
@@ -101,14 +102,14 @@ class TestCutedslUtils(TestCase):
         compiled(a, out)
         assert_equal(out[0], a.sum(), test_case="test_atomic_add_fp32")
 
-    def test_atomic_max_fp32(self):
-        """Both signs go through the signed-max / unsigned-min bit pair."""
-        a = torch.linspace(-2, 2, 32, device="cuda")
+    @parameterize("bounds", [(-2.0, 2.0), (-3.0, -1.0)])
+    def test_atomic_max_fp32(self, bounds: tuple[float, float]):
+        a = torch.linspace(*bounds, 32, device="cuda")
         out = torch.full((1,), -math.inf, device="cuda")
         tensors = [from_dlpack(t, enable_tvm_ffi=True) for t in (a, out)]
         compiled = cute.compile(_atomic_max, *tensors, options="--enable-tvm-ffi")
         compiled(a, out)
-        assert_equal(out[0], a.max(), test_case="test_atomic_max_fp32")
+        assert_equal(out[0], a.max(), test_case=f"test_atomic_max_fp32({bounds})")
 
 
 if __name__ == "__main__":
