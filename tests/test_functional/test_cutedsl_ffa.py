@@ -108,7 +108,7 @@ class TestCutedslBwdUnderRangeMerge(TestCase):
 
             q, k, v = randn(case.total_q), randn(case.total_k), randn(case.total_k)
             do = randn(case.total_q)
-            out, lse = cutedsl_ffa.cutedsl_fwd(
+            out, lse, _ = cutedsl_ffa.cutedsl_fwd(
                 q, k, v, attn_arg, softmax_scale=None, softcap=0.0
             )
             with mock.patch.object(
