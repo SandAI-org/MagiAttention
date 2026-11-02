@@ -38,6 +38,7 @@ Sparsity semantics:
 Single CTA, CLC-persistent, warp specialized (20 warps / 640 threads):
 
 - warp 0-3   ``load_KV``: cp.async gather of the indexed K/V rows per K tile
+  (the V rows complete asynchronously when ``gather_V_async``, see ``load_KV``)
 - warp 4-7   ``compute``: T2R S/dP, softmax -> P / dS into smem, dQ epilogue per Q tile
 - warp 8-11  ``reduce`` dV: T2R dV^T, stage rows in smem, TMA reduce-add into the indexed fp32 dV rows
 - warp 12-15 ``reduce`` dK: T2R dK^T, stage rows in smem, TMA reduce-add into the indexed fp32 dK rows
@@ -109,6 +110,7 @@ class FFABwdSm100Index:
         tile_n: int = 64,
         kv_stage: int = 3,
         q_block_size: cutlass.Constexpr[int] = 128,
+        gather_V_async: cutlass.Constexpr[bool] = False,
         debug_print: bool = False,
     ):
         assert tile_m == 128, "tile_m must be 128 (one TMEM lane per Q row)"
@@ -125,6 +127,8 @@ class FFABwdSm100Index:
         self.q_block_size = q_block_size
         # every Q tile lies inside one q block, so it has a single segment
         self.single_segment = q_block_size % tile_m == 0
+        # V rows land without the loaders waiting on them (see load_KV)
+        self.gather_V_async = gather_V_async
 
         # CTA tiler: (Q, K, HD)
         self.cta_tiler = (tile_m, tile_n, self.head_dim)
@@ -234,7 +238,8 @@ class FFABwdSm100Index:
             print()
             print(f"{prefix}Initialized FFABwdSm100Index with: ")
             print(
-                f"{prefix}{self.head_dim=} | {self.qhead_per_kvhead=} | {self.q_block_size=}"
+                f"{prefix}{self.head_dim=} | {self.qhead_per_kvhead=} | {self.q_block_size=} | "
+                f"{self.gather_V_async=}"
             )
             print(
                 f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.kv_stage=} | {self.dKV_stage=}"
@@ -858,9 +863,15 @@ class FFABwdSm100Index:
 
         # --- Make pipeline cooperative groups ---
 
-        # One arrive per warp (elected), except the TMA / UMMA agents.
+        # One arrive per warp (elected), except the TMA / UMMA agents and the
+        # async V gather, where every load_KV thread arrives once its rows land.
         load_warp = ThreadCooperativeGroup(1)
         load_KV_warps = ThreadCooperativeGroup(len(self.load_KV_warp_ids))
+        load_V_group = (
+            ThreadCooperativeGroup(self.num_load_KV_threads)
+            if const_expr(self.gather_V_async)
+            else load_KV_warps
+        )
         mma_warp = ThreadCooperativeGroup(1)
         compute_warps = ThreadCooperativeGroup(len(self.compute_warp_ids))
         reduce_dV_warps = ThreadCooperativeGroup(len(self.reduce_dV_warp_ids))
@@ -898,7 +909,7 @@ class FFABwdSm100Index:
         pipeline_V = pipeline.PipelineAsyncUmma.create(
             barrier_storage=storage.V_mbar_ptr.data_ptr(),
             num_stages=self.kv_stage,
-            producer_group=load_KV_warps,
+            producer_group=load_V_group,
             consumer_group=mma_warp,
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
@@ -1571,7 +1582,17 @@ class FFABwdSm100Index:
         pipeline_V: pipeline.PipelineAsyncUmma,
         tile_scheduler: TileSchedulerProtocol,
     ):
-        """Gather the indexed K/V rows of every K tile with cp.async (all load_KV warps)."""
+        """Gather the indexed K/V rows of every K tile with cp.async (all load_KV warps).
+
+        K is waited for and committed by the loaders themselves, the fastest
+        handoff: S needs the next K right after dQ frees its stage. With
+        ``gather_V_async`` V is not waited for: every thread arrives on the sV
+        full barrier through ``cp.async.mbarrier.arrive.noinc`` and moves on to
+        the next K, so when the rows miss L2 the V rows of a tile are in flight
+        while the loaders wait for the next sK stage, instead of after it.
+        Without it, K and V take turns with one tile in flight, which keeps the
+        gather from competing with the dK/dV reduce for L2 when both hit it.
+        """
         tidx = cute.arch.thread_idx()[0] % self.num_load_KV_threads
 
         # --- Make the cp.async gather copy over (tileK64,tileHD128) row views ---
@@ -1659,6 +1680,7 @@ class FFABwdSm100Index:
                         tKVcKV,
                         tKVrRow,
                     )
+                    # With gather_V_async this also drains the previous K tile's V rows
                     cute.arch.cp_async_commit_group()
                     cute.arch.cp_async_wait_group(0)
 
@@ -1679,14 +1701,21 @@ class FFABwdSm100Index:
                         tKVcKV,
                         tKVrRow,
                     )
-                    cute.arch.cp_async_commit_group()
-                    cute.arch.cp_async_wait_group(0)
+                    if const_expr(self.gather_V_async):
+                        # sV is full once every thread's rows land; the MMA warp
+                        # fences them into the async proxy after its wait
+                        cute.arch.cp_async_mbarrier_arrive_noinc(
+                            pipeline_V.producer_get_barrier(producer_state_V)
+                        )
+                    else:
+                        cute.arch.cp_async_commit_group()
+                        cute.arch.cp_async_wait_group(0)
 
-                    # Commit sV to be full: make the cp.async writes visible to UMMA
-                    cute.arch.fence_view_async_shared()
-                    cute.arch.sync_warp()
-                    with cute.arch.elect_one():
-                        pipeline_V.producer_commit(producer_state_V)
+                        # Commit sV to be full: make the cp.async writes visible to UMMA
+                        cute.arch.fence_view_async_shared()
+                        cute.arch.sync_warp()
+                        with cute.arch.elect_one():
+                            pipeline_V.producer_commit(producer_state_V)
                     producer_state_V.advance()
 
             # Advance to next Q tile
@@ -1886,6 +1915,9 @@ class FFABwdSm100Index:
             # NOTE: keep this prologue + `has_next` shape; folding the prologue
             # into the loop as guarded sections makes ptxas spill in the compute
             # and reduce warps.
+            # NOTE: with gather_V_async, sV is filled by cp.asyncs whose issuing
+            # threads never wait on them, so the proxy fence into the async
+            # proxy (UMMA operand reads) sits after each sV full-barrier wait.
             if n_block_max > 0:
                 # --- GEMM: S = Q @ K.T of tile 0 ---
 
@@ -1899,6 +1931,8 @@ class FFABwdSm100Index:
                 # --- GEMM: dP = dO @ V.T of tile 0 ---
 
                 pipeline_V.consumer_wait(consumer_state_V)
+                if const_expr(self.gather_V_async):
+                    cute.arch.fence_view_async_shared()
                 pipeline_dP.producer_acquire(producer_state_dP)
                 mma_dp_dov_fn(B_idx=consumer_state_V.index)
                 pipeline_dP.producer_commit(producer_state_dP)
@@ -1957,6 +1991,8 @@ class FFABwdSm100Index:
                     # --- GEMM: dP = dO @ V.T of tile n + 1 ---
 
                     pipeline_V.consumer_wait(consumer_state_V)
+                    if const_expr(self.gather_V_async):
+                        cute.arch.fence_view_async_shared()
                     pipeline_dP.producer_acquire(producer_state_dP)
                     mma_dp_dov_fn(B_idx=consumer_state_V.index)
                     pipeline_dP.producer_commit(producer_state_dP)
@@ -2453,6 +2489,26 @@ class FFABwdSm100Index:
         cute.arch.cp_async_bulk_wait_group(0, read=False)
 
 
+def gather_v_async_default(
+    total_k: int,
+    num_head_kv: int,
+    head_dim: int,
+    element_size: int,
+    l2_bytes: int,
+) -> bool:
+    """``gather_v_async`` of ``ffa_bwd_sm100_index`` when the caller passes ``None``.
+
+    True while the gathered K and V rows plus their fp32 dK / dV accumulator
+    rows of all kv heads lie between half of L2 and 4x L2: the gather then
+    misses L2 and is bound by DRAM latency. Below that the dK/dV reduce
+    saturates L2, above it the random gather and accumulator read-modify-writes
+    saturate DRAM bandwidth; either way a more concurrent gather only competes
+    with the reduce.
+    """
+    gather_bytes = total_k * num_head_kv * head_dim * (2 * element_size + 2 * 4)
+    return l2_bytes // 2 < gather_bytes <= 4 * l2_bytes
+
+
 def ffa_bwd_sm100_index(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2469,6 +2525,7 @@ def ffa_bwd_sm100_index(
     dk: Optional[torch.Tensor] = None,
     dv: Optional[torch.Tensor] = None,
     q_block_size: Optional[int] = None,
+    gather_v_async: Optional[bool] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass of index-sparse (DSA) attention on SM100.
 
@@ -2482,6 +2539,9 @@ def ffa_bwd_sm100_index(
             ``tile_m``. Below ``tile_m`` a Q tile still computes all ``tile_m``
             rows against each of its q blocks' K tiles, so only
             ``q_block_size / tile_m`` of its MMA work is useful.
+        gather_v_async: let the gathered V rows of a K tile land while the
+            loaders already wait for the next K (see ``FFABwdSm100Index.load_KV``).
+            ``None`` picks ``gather_v_async_default``.
 
     Returns:
         A tuple of (dQ, dK, dV) with the same shapes and dtypes as q, k, v.
@@ -2526,6 +2586,14 @@ def ffa_bwd_sm100_index(
     dtype = to_cute_dtype(q.dtype)
     # The third K/V stage's smem goes to the dK/dV reduce staging instead
     kv_stage = 2
+    if gather_v_async is None:
+        gather_v_async = gather_v_async_default(
+            total_k,
+            num_head_kv,
+            head_dim,
+            k.element_size(),
+            torch.cuda.get_device_properties(device).L2_cache_size,
+        )
 
     # Valid ids precede the -1 padding, so the count is the per-row inner length
     topk_len = (index_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
@@ -2600,6 +2668,7 @@ def ffa_bwd_sm100_index(
         tile_n,
         kv_stage,
         q_block_size,
+        gather_v_async,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
     compile_cache = ffa_bwd_sm100_index.compile_cache  # type: ignore[attr-defined]
@@ -2610,6 +2679,7 @@ def ffa_bwd_sm100_index(
             tile_n=tile_n,
             kv_stage=kv_stage,
             q_block_size=q_block_size,
+            gather_V_async=gather_v_async,
             debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
         )
         q_tensor, k_tensor, v_tensor, do_tensor, dq_tensor = [
