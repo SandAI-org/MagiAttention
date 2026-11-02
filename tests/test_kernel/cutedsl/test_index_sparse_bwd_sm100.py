@@ -40,7 +40,9 @@ Structure:
   TestIndexSparseBwdSm100Harness            — the adapter's multi-kv-head refold, q-head groups
                                               whose q blocks straddle the 128-row Q tile, q
                                               blocks of several tokens (sm90 q_block_size > 1),
-                                              and that the comparison rejects wrong gradients
+                                              both V gather handoffs (gather_v_async) and their
+                                              default, and that the comparison rejects wrong
+                                              gradients
 
 Not ported from the sm90 test:
   - inner_dir / inner_load_mode / inner_store_mode / swap_bwd_qk_loop: sm90
@@ -61,12 +63,14 @@ import unittest
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from typing import Any
 
 import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
+from magi_attention.kernel.cutedsl.ffa_bwd_sm100_index import gather_v_async_default
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import assert_close
 from magi_attention.utils import set_random_seed
@@ -549,6 +553,73 @@ class TestIndexSparseBwdSm100Harness(unittest.TestCase):
                     "keep_kv_heads": keep_kv_heads,
                 }
                 _run_index_sparse_config(self.device, config)
+
+    def test_gather_v_async_both_paths_match_reference(self):
+        """Both V gather handoffs are exact, whichever the footprint would pick.
+
+        The sweeps above are all small enough for the default to keep the
+        synchronous V gather, so force each path here: one q block per Q tile,
+        several q blocks per Q tile (segments), and -1 padded index rows whose
+        valid length is not a multiple of the 64-wide K tile.
+        """
+        configs = {
+            "mqa128": {"B": 1, "S": 256, "NHQ": 128, "NHK": 1, "D": 128, "topk": 128},
+            "mqa4_segments": {
+                "B": 1,
+                "S": 256,
+                "NHQ": 4,
+                "NHK": 1,
+                "D": 128,
+                "topk": 128,
+            },
+            "mqa128_ragged": {
+                "B": 2,
+                "S_q": 256,
+                "S_kv": 1000,
+                "NHQ": 128,
+                "NHK": 1,
+                "D": 128,
+                "topk": [64, 200],
+                "max_topk": 256,
+            },
+        }
+        for gather_v_async in (True, False):
+            for name, config in configs.items():
+                with self.subTest(gather_v_async=gather_v_async, config=name):
+                    _run_index_sparse_config(
+                        self.device,
+                        config,
+                        bwd_fn=partial(
+                            ffa_bwd_sm100_index_sm90_layout,
+                            gather_v_async=gather_v_async,
+                        ),
+                    )
+
+    def test_gather_v_async_default_follows_l2_footprint(self):
+        """The default is on only while K/V rows + fp32 dK/dV rows of all kv heads span (L2/2, 4x L2]."""
+        l2_bytes = 126 * 2**20
+        # bf16 K/V rows + fp32 dK/dV rows at head_dim 128: 1.5 KiB per (token, kv head)
+        row_bytes = 128 * (2 * 2 + 2 * 4)
+        lower_rows = l2_bytes // 2 // row_bytes
+        upper_rows = 4 * l2_bytes // row_bytes
+        self.assertFalse(
+            gather_v_async_default(lower_rows, 1, 128, 2, l2_bytes),
+            "exactly half of L2 still keeps the synchronous V gather",
+        )
+        self.assertTrue(gather_v_async_default(lower_rows + 1, 1, 128, 2, l2_bytes))
+        self.assertTrue(
+            gather_v_async_default(upper_rows, 1, 128, 2, l2_bytes),
+            "exactly 4x L2 still takes the async V gather",
+        )
+        self.assertFalse(gather_v_async_default(upper_rows + 1, 1, 128, 2, l2_bytes))
+        # one kv head: 32k tokens fit half of L2, 64k-256k do not, 512k is past 4x L2
+        self.assertFalse(gather_v_async_default(32768, 1, 128, 2, l2_bytes))
+        self.assertTrue(gather_v_async_default(65536, 1, 128, 2, l2_bytes))
+        self.assertTrue(gather_v_async_default(262144, 1, 128, 2, l2_bytes))
+        self.assertFalse(gather_v_async_default(524288, 1, 128, 2, l2_bytes))
+        # kv heads add up
+        self.assertTrue(gather_v_async_default(32768, 2, 128, 2, l2_bytes))
+        self.assertFalse(gather_v_async_default(262144, 2, 128, 2, l2_bytes))
 
     def test_comparison_rejects_dk_on_wrong_rows(self):
         """A PASS must mean something: dK scattered one K row off has to fail."""
