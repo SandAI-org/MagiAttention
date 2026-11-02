@@ -46,7 +46,11 @@ Methods:
                            the same function
   - flexattention        : FlexAttention forward / backward on the 128x128 block mask
 
-Reporting effective sparse TFLOPs/s: fwd 4 * S * topk_tokens * nhq * hd, bwd
+Sequence lengths: the swept ``S`` is the q and the kv length. ``--seqlen-q``
+fixes the q length instead and leaves ``S`` as the kv length, the shape of a
+context-parallel rank whose local q is a slice of the full sequence.
+
+Reporting effective sparse TFLOPs/s: fwd 4 * S_q * topk_tokens * nhq * hd, bwd
 2.5x the fwd FLOPs.
 
 Run:
@@ -55,6 +59,8 @@ Run:
     PYTHONPATH=../../.. python run_index_sparse_sm100_benchmark.py \\
         --directions fwd --scenarios gqa8x1_qbs16_hd128_topk4096 \\
         --methods ffa_sm100_index --seqlens 32768
+    PYTHONPATH=../../.. python run_index_sparse_sm100_benchmark.py \
+        --scenarios mqa128_hd128_topk8192 --seqlen-q 16384 --seqlens 131072
 """
 
 import argparse
@@ -178,6 +184,16 @@ SCENARIOS: dict[str, IndexSparseScenario] = {
     "gqa16x1_qbs8_hd128_topk4096": IndexSparseScenario(
         nhq=16, nhk=1, hd=128, topk=4096, qbs=8
     ),
+    "mqa128_hd128_topk8192": IndexSparseScenario(nhq=128, nhk=1, hd=128, topk=8192),
+    "gqa8x1_qbs16_hd128_topk8192": IndexSparseScenario(
+        nhq=8, nhk=1, hd=128, topk=8192, qbs=16
+    ),
+    "gqa4x1_qbs32_hd128_topk8192": IndexSparseScenario(
+        nhq=4, nhk=1, hd=128, topk=8192, qbs=32
+    ),
+    "gqa16x1_qbs8_hd128_topk8192": IndexSparseScenario(
+        nhq=16, nhk=1, hd=128, topk=8192, qbs=8
+    ),
 }
 
 # Line labels; make_configs appends the direction.
@@ -208,10 +224,10 @@ def build_index_sparse_indices(b, S, nhk, topk, device, num_k_ids=None):
     return global_pos.unsqueeze(1).expand(-1, nhk, -1).int().contiguous()
 
 
-def build_flex_sparse_block_mask(b, S, topk, nhq, device="cuda"):
+def build_flex_sparse_block_mask(b, S_q, S_kv, topk, nhq, device="cuda"):
     """Build a flex_attention block_mask for token-sparse pattern (sm90 bench)."""
-    num_q_blocks = S // FLEX_BLOCK
-    num_kv_blocks = S // FLEX_BLOCK
+    num_q_blocks = S_q // FLEX_BLOCK
+    num_kv_blocks = S_kv // FLEX_BLOCK
     kv_blocks_needed = min((topk + FLEX_BLOCK - 1) // FLEX_BLOCK, num_kv_blocks)
 
     selected_kv_blocks = torch.rand(num_q_blocks, num_kv_blocks, device=device).argsort(
@@ -226,7 +242,7 @@ def build_flex_sparse_block_mask(b, S, topk, nhq, device="cuda"):
         return mask_dense[q_idx // FLEX_BLOCK, kv_idx // FLEX_BLOCK]
 
     return create_block_mask(
-        sparse_mask_mod, B=None, H=None, Q_LEN=S, KV_LEN=S, device=device
+        sparse_mask_mod, B=None, H=None, Q_LEN=S_q, KV_LEN=S_kv, device=device
     )
 
 
@@ -234,19 +250,27 @@ def build_flex_sparse_block_mask(b, S, topk, nhq, device="cuda"):
 class FlatInputs:
     """sm90 IndexSparse tensors with kv heads flattened into the sequence (nhk = 1)."""
 
-    q: torch.Tensor  # (S * nhk, nhq_flat, hd)
-    k: torch.Tensor  # (S * nhk, 1, hd)
-    v: torch.Tensor  # (S * nhk, 1, hd)
-    indices: torch.Tensor  # (S * nhk / qbs, 1, topk): K token or K block ids
+    q: torch.Tensor  # (S_q * nhk, nhq_flat, hd)
+    k: torch.Tensor  # (S_kv * nhk, 1, hd)
+    v: torch.Tensor  # (S_kv * nhk, 1, hd)
+    indices: torch.Tensor  # (S_q * nhk / qbs, 1, topk): K token or K block ids
 
 
-def make_flat_inputs(sc: IndexSparseScenario, S: int, device) -> FlatInputs:
-    total = b * S * sc.nhk
-    q = torch.randn(total, sc.nhq_flat, sc.hd, device=device, dtype=dtype)
-    k = torch.randn(total, 1, sc.hd, device=device, dtype=dtype)
-    v = torch.randn(total, 1, sc.hd, device=device, dtype=dtype)
+def make_flat_inputs(
+    sc: IndexSparseScenario, S_q: int, S_kv: int, device
+) -> FlatInputs:
+    total_q = b * S_q * sc.nhk
+    total_kv = b * S_kv * sc.nhk
+    q = torch.randn(total_q, sc.nhq_flat, sc.hd, device=device, dtype=dtype)
+    k = torch.randn(total_kv, 1, sc.hd, device=device, dtype=dtype)
+    v = torch.randn(total_kv, 1, sc.hd, device=device, dtype=dtype)
     indices = build_index_sparse_indices(
-        b, S * sc.nhk // sc.qbs, 1, sc.topk, device, num_k_ids=S * sc.nhk // sc.kbs
+        b,
+        S_q * sc.nhk // sc.qbs,
+        1,
+        sc.topk,
+        device,
+        num_k_ids=S_kv * sc.nhk // sc.kbs,
     )
     return FlatInputs(q=q, k=k, v=v, indices=indices)
 
@@ -479,7 +503,7 @@ def sanity_check(
             qbs=sc.qbs,
         )
         set_random_seed(SEED)
-        inp = make_flat_inputs(sc_check, S_check, device)
+        inp = make_flat_inputs(sc_check, S_check, S_check, device)
         do = torch.randn_like(inp.q)
         for direction in directions:
             check: Callable[[str], tuple[dict[str, float], bool]]
@@ -529,12 +553,13 @@ def sanity_check(
 def make_fwd_fn(
     method: str,
     sc: IndexSparseScenario,
-    S: int,
+    S_q: int,
+    S_kv: int,
     device,
     assume_valid_ids: bool,
 ) -> Callable[[], object]:
     if method == "ffa_sm100_index":
-        inp = make_flat_inputs(sc, S, device)
+        inp = make_flat_inputs(sc, S_q, S_kv, device)
         return partial(
             ffa_fwd_sm100_index_sm90_layout,
             inp.q,
@@ -547,7 +572,7 @@ def make_fwd_fn(
         )
 
     if method == "triton_token_sparse":
-        inp = make_flat_inputs(sc, S, device)
+        inp = make_flat_inputs(sc, S_q, S_kv, device)
         return partial(
             token_sparse_fwd,
             fold_q_block(inp.q, sc.qbs),
@@ -557,11 +582,15 @@ def make_fwd_fn(
         )
 
     if method == "flexattention":
-        assert S % FLEX_BLOCK == 0, "FlexAttention requires S divisible by 128"
-        q = torch.randn(b, sc.nhq, S, sc.hd, device=device, dtype=dtype)
-        k = torch.randn(b, sc.nhk, S, sc.hd, device=device, dtype=dtype)
-        v = torch.randn(b, sc.nhk, S, sc.hd, device=device, dtype=dtype)
-        block_mask = build_flex_sparse_block_mask(b, S, sc.topk_tokens, sc.nhq, device)
+        assert (
+            S_q % FLEX_BLOCK == 0 and S_kv % FLEX_BLOCK == 0
+        ), "FlexAttention requires S_q and S_kv divisible by 128"
+        q = torch.randn(b, sc.nhq, S_q, sc.hd, device=device, dtype=dtype)
+        k = torch.randn(b, sc.nhk, S_kv, sc.hd, device=device, dtype=dtype)
+        v = torch.randn(b, sc.nhk, S_kv, sc.hd, device=device, dtype=dtype)
+        block_mask = build_flex_sparse_block_mask(
+            b, S_q, S_kv, sc.topk_tokens, sc.nhq, device
+        )
         flex_fn = torch.compile(flex_attention)
         return partial(flex_fn, q, k, v, block_mask=block_mask, enable_gqa=True)
 
@@ -571,11 +600,12 @@ def make_fwd_fn(
 def make_bwd_fn(
     method: str,
     sc: IndexSparseScenario,
-    S: int,
+    S_q: int,
+    S_kv: int,
     device,
 ) -> Callable[[], object]:
     if method == "ffa_sm100_index":
-        inp = make_flat_inputs(sc, S, device)
+        inp = make_flat_inputs(sc, S_q, S_kv, device)
         out, lse = forward_out_lse(inp, sc)
         do = torch.randn_like(out)
         return partial(
@@ -592,7 +622,7 @@ def make_bwd_fn(
         )
 
     if method == "triton_token_sparse":
-        inp = make_flat_inputs(sc, S, device)
+        inp = make_flat_inputs(sc, S_q, S_kv, device)
         q, k, v = (
             t.detach().requires_grad_(True)
             for t in (fold_q_block(inp.q, sc.qbs), inp.k, inp.v)
@@ -602,17 +632,21 @@ def make_bwd_fn(
         return partial(out.backward, do, retain_graph=True)
 
     if method == "flexattention":
-        assert S % FLEX_BLOCK == 0, "FlexAttention requires S divisible by 128"
+        assert (
+            S_q % FLEX_BLOCK == 0 and S_kv % FLEX_BLOCK == 0
+        ), "FlexAttention requires S_q and S_kv divisible by 128"
         q = torch.randn(
-            b, sc.nhq, S, sc.hd, device=device, dtype=dtype, requires_grad=True
+            b, sc.nhq, S_q, sc.hd, device=device, dtype=dtype, requires_grad=True
         )
         k = torch.randn(
-            b, sc.nhk, S, sc.hd, device=device, dtype=dtype, requires_grad=True
+            b, sc.nhk, S_kv, sc.hd, device=device, dtype=dtype, requires_grad=True
         )
         v = torch.randn(
-            b, sc.nhk, S, sc.hd, device=device, dtype=dtype, requires_grad=True
+            b, sc.nhk, S_kv, sc.hd, device=device, dtype=dtype, requires_grad=True
         )
-        block_mask = build_flex_sparse_block_mask(b, S, sc.topk_tokens, sc.nhq, device)
+        block_mask = build_flex_sparse_block_mask(
+            b, S_q, S_kv, sc.topk_tokens, sc.nhq, device
+        )
         flex_fn = torch.compile(flex_attention)
         out = flex_fn(q, k, v, block_mask=block_mask, enable_gqa=True)
         do = torch.randn_like(out)
@@ -627,9 +661,12 @@ flops_configs: list[Benchmark] = []
 
 
 @perf_report(flops_configs)
-def bench(S, method, scenario, direction, sanity_failed, assume_valid_ids):
+def bench(S, method, scenario, direction, sanity_failed, assume_valid_ids, seqlen_q):
+    """One timed call; ``S`` is the kv length, and the q length unless ``seqlen_q`` is set."""
     sc = SCENARIOS[scenario]
-    tag = f"[{direction.name} {method}] {scenario} S={S}"
+    S_kv = S
+    S_q = S if seqlen_q is None else seqlen_q
+    tag = f"[{direction.name} {method}] {scenario} S_q={S_q} S_kv={S_kv}"
     reason = UNSUPPORTED_REASON[direction, method](sc)
     if reason is not None:
         print(f"{tag}: N/A ({reason})")
@@ -638,17 +675,17 @@ def bench(S, method, scenario, direction, sanity_failed, assume_valid_ids):
         return {"flops": [BENCH_CASE_OOM] * 3}
 
     device = torch.cuda.current_device()
-    # Forward FLOPs: 2 (mul + add) x 2 (QK, PV) per (row, key, head-dim) triple.
+    # Forward FLOPs: 2 (mul + add) x 2 (QK, PV) per (q row, key, head-dim) triple.
     sparse_flops = (
-        4 * S * sc.topk_tokens * sc.nhq * sc.hd * FLOPS_RATIO_TO_FWD[direction]
+        4 * S_q * sc.topk_tokens * sc.nhq * sc.hd * FLOPS_RATIO_TO_FWD[direction]
     )
     set_random_seed(SEED + S)
 
     try:
         if direction is Direction.FWD:
-            fn = make_fwd_fn(method, sc, S, device, assume_valid_ids)
+            fn = make_fwd_fn(method, sc, S_q, S_kv, device, assume_valid_ids)
         else:
-            fn = make_bwd_fn(method, sc, S, device)
+            fn = make_bwd_fn(method, sc, S_q, S_kv, device)
         perf_dict = do_bench_flops(fn, quantiles=quantiles)
         perf_dict["flops"] = [sparse_flops / ms * 1e-9 for ms in perf_dict["flops"]]
 
@@ -670,6 +707,7 @@ def make_configs(
     seqlens: list[int],
     sanity_failed: dict[tuple[Direction, str], set[str]],
     assume_valid_ids: bool,
+    seqlen_q: int | None,
 ) -> list[Benchmark]:
     configs = []
     for direction in directions:
@@ -691,6 +729,7 @@ def make_configs(
                     plot_name=(
                         f"index-sparse-{direction.value}-sm100-nhq{sc.nhq}-nhk{sc.nhk}"
                         f"-hd{sc.hd}-topk{sc.topk}-kbs{sc.kbs}-qbs{sc.qbs}"
+                        + ("" if seqlen_q is None else f"-sq{seqlen_q}")
                     ),
                     args={
                         "scenario": name,
@@ -699,6 +738,7 @@ def make_configs(
                             sorted(sanity_failed.get((direction, name), ()))
                         ),
                         "assume_valid_ids": assume_valid_ids,
+                        "seqlen_q": seqlen_q,
                     },
                 )
             )
@@ -722,6 +762,12 @@ if __name__ == "__main__":
         "--methods", nargs="+", choices=list(METHODS), default=list(METHODS)
     )
     parser.add_argument("--seqlens", nargs="+", type=int, default=seqlen_vals)
+    parser.add_argument(
+        "--seqlen-q",
+        type=int,
+        default=None,
+        help="fixed q length; --seqlens then sweeps the kv length only",
+    )
     parser.add_argument(
         "--skip-sanity", action="store_true", help="Skip correctness check"
     )
@@ -750,6 +796,7 @@ if __name__ == "__main__":
             args.seqlens,
             sanity_failed,
             args.assume_valid_ids,
+            args.seqlen_q,
         )
     )
     out_root = gen_save_path("bench_index_sparse_sm100")

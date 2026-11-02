@@ -19,9 +19,10 @@ Replays ``tests/test_attn/test_index_sparse.py`` on SM100: same configs, same
 data (seed, q/k/v, ``build_index_sparse_indices``), same SDPA reference and
 tolerances. The backward runs ``ffa_bwd_sm100_index`` through
 ``ffa_bwd_sm100_index_sm90_layout``, which takes the sm90 tensors unchanged.
-SM100 has no IndexSparse forward, so out / lse come from the fp32 gather
-``index_sparse_ref_fwd``, itself checked against SDPA with the sm90 forward
-tolerance.
+It consumes out / lse of the fp32 gather ``index_sparse_ref_fwd``, itself
+checked against SDPA with the sm90 forward tolerance, so a failure here comes
+from the backward alone. ``test_index_sparse_fwd_sm100.py`` runs the SM100
+forward through the same runner.
 
 Every case ends as one of:
   PASS — dq / dk / dv match SDPA within the sm90 tolerances
@@ -67,6 +68,7 @@ from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.testing.precision import assert_close
 from magi_attention.utils import set_random_seed
 from magi_attention.utils.sparse_utils import (
     build_index_sparse_indices,
@@ -88,6 +90,11 @@ from tests.test_kernel.cutedsl.index_sparse_sm100_utils import (
 )
 
 BwdGrads = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+FwdOutLse = tuple[torch.Tensor, torch.Tensor]
+
+# lse of a forward under test against the fp32 gather: both accumulate in fp32
+# from the same 16-bit inputs and differ only by the exp2 / log2 approximations.
+FWD_LSE_ATOL = 1e-3
 
 
 def _is_sm100_family() -> bool:
@@ -102,12 +109,17 @@ def _is_sm100_family() -> bool:
 def _run_index_sparse_config(
     device,
     cfg: dict[str, Any],
-    bwd_fn: Callable[..., BwdGrads] = ffa_bwd_sm100_index_sm90_layout,
+    bwd_fn: Callable[..., BwdGrads] | None = ffa_bwd_sm100_index_sm90_layout,
+    fwd_fn: Callable[..., FwdOutLse] | None = None,
 ) -> None:
     """Run one sm90 index_sparse_indices config on SM100 and assert against SDPA.
 
-    Mirrors ``_run_index_sparse_config`` of the sm90 test, with the forward
-    replaced by ``index_sparse_ref_fwd`` and the backward by ``bwd_fn``.
+    Mirrors ``_run_index_sparse_config`` of the sm90 test. ``fwd_fn`` computes
+    out / lse; ``None`` uses the fp32 gather ``index_sparse_ref_fwd``. Either
+    way out is held to SDPA with the sm90 forward tolerance; the lse of a
+    ``fwd_fn`` is also held to the gather's lse. ``bwd_fn`` computes dq / dk / dv
+    from that out / lse and is held to the SDPA gradients; ``None`` checks the
+    forward only.
     """
     set_random_seed(SEED)
     B = cfg["B"]
@@ -165,7 +177,7 @@ def _run_index_sparse_config(
     q_ffa = rearrange(q, "b s h d -> (b s) h d").contiguous()
     k_ffa = rearrange(k, "b s h d -> (b s) h d").contiguous()
     v_ffa = rearrange(v, "b s h d -> (b s) h d").contiguous()
-    out, lse = index_sparse_ref_fwd(
+    ref_out, ref_lse = index_sparse_ref_fwd(
         q_ffa,
         k_ffa,
         v_ffa,
@@ -173,7 +185,6 @@ def _run_index_sparse_config(
         q_block_size=q_block_size,
         sparse_k_block_size=sparse_k_block_size,
     )
-    do = torch.randn_like(out)
 
     test_case = (
         f"[NHQ={cfg['NHQ']},NHK={cfg['NHK']},S_q={cfg.get('S_q', cfg.get('S'))},"
@@ -183,18 +194,32 @@ def _run_index_sparse_config(
         f"flat:NHQ_eff={NHQ},NHK_eff={NHK},S_q_eff={S_q},S_kv_eff={S_kv}]"
     )
 
-    # Raises Sm100IndexUnsupportedError before any launch for a gap case.
-    dq_ffa, dk_ffa, dv_ffa = bwd_fn(
-        q_ffa,
-        k_ffa,
-        v_ffa,
-        out,
-        do,
-        lse,
-        index_sparse_indices,
-        q_block_size=q_block_size,
-        sparse_k_block_size=sparse_k_block_size,
-    )
+    # fwd_fn / bwd_fn raise Sm100IndexUnsupportedError before any launch for a
+    # gap case.
+    if fwd_fn is None:
+        out, lse = ref_out, ref_lse
+    else:
+        out, lse = fwd_fn(
+            q_ffa,
+            k_ffa,
+            v_ffa,
+            index_sparse_indices,
+            q_block_size=q_block_size,
+            sparse_k_block_size=sparse_k_block_size,
+        )
+    if bwd_fn is not None:
+        do = torch.randn_like(out)
+        dq_ffa, dk_ffa, dv_ffa = bwd_fn(
+            q_ffa,
+            k_ffa,
+            v_ffa,
+            out,
+            do,
+            lse,
+            index_sparse_indices,
+            q_block_size=q_block_size,
+            sparse_k_block_size=sparse_k_block_size,
+        )
 
     # The mask builder takes one index row per q token
     sdpa_mask = get_sdpa_mask_from_index_sparse_indices(
@@ -208,10 +233,22 @@ def _run_index_sparse_config(
         sparse_k_block_size=sparse_k_block_size,
     )
 
-    # The forward reference feeds the backward: hold it to the sm90 forward bar.
+    # The forward feeds the backward: hold it to the sm90 forward bar.
     o_ffa = rearrange(out, "(b s) h d -> b s h d", b=B)
     o_ref = sdpa_ref_output(q, k, v, sdpa_mask, B=B, NHQ=NHQ, NHK=NHK)
-    compare_sdpa_fwd(o_ffa, o_ref, atol=atol, test_case=f"{test_case} ref_fwd")
+    if fwd_fn is None:
+        compare_sdpa_fwd(o_ffa, o_ref, atol=atol, test_case=f"{test_case} ref_fwd")
+    else:
+        compare_sdpa_fwd(o_ffa, o_ref, atol=atol, test_case=test_case)
+        assert_close(
+            lse,
+            ref_lse,
+            atol=cfg.get("lse_atol", FWD_LSE_ATOL),
+            rtol=0.0,
+            test_case=f"{test_case} => lse",
+        )
+    if bwd_fn is None:
+        return
 
     do_unpacked = rearrange(do, "(b s) h d -> b s h d", b=B)
     sdpa_dq, sdpa_dk, sdpa_dv = sdpa_ref_bwd_grads(
@@ -250,9 +287,16 @@ class CaseResult:
     detail: str
 
 
-def _run_case(device, name: str, cfg: dict[str, Any]) -> CaseResult:
+def _run_case(
+    device,
+    name: str,
+    cfg: dict[str, Any],
+    *,
+    bwd_fn: Callable[..., BwdGrads] | None,
+    fwd_fn: Callable[..., FwdOutLse] | None,
+) -> CaseResult:
     try:
-        _run_index_sparse_config(device, cfg)
+        _run_index_sparse_config(device, cfg, bwd_fn=bwd_fn, fwd_fn=fwd_fn)
     except Sm100IndexUnsupportedError as e:
         return CaseResult(name, CaseStatus.GAP, ",".join(g.name for g in e.gaps))
     except Exception as e:
@@ -265,13 +309,24 @@ def _run_case(device, name: str, cfg: dict[str, Any]) -> CaseResult:
     return CaseResult(name, CaseStatus.PASS, "")
 
 
-def _run_sweep(device, title: str, cases: list[tuple[str, dict[str, Any]]]) -> None:
+def _run_sweep(
+    device,
+    title: str,
+    cases: list[tuple[str, dict[str, Any]]],
+    *,
+    bwd_fn: Callable[..., BwdGrads] | None = ffa_bwd_sm100_index_sm90_layout,
+    fwd_fn: Callable[..., FwdOutLse] | None = None,
+) -> None:
     """Run every case (no fail-fast), print the table, then assert.
 
-    Not ``@parameterize``: it stops at the first failure, which would hide the
+    ``bwd_fn`` / ``fwd_fn`` are passed to ``_run_index_sparse_config``. Not
+    ``@parameterize``: it stops at the first failure, which would hide the
     status of the remaining cases.
     """
-    results = [_run_case(device, name, cfg) for name, cfg in cases]
+    results = [
+        _run_case(device, name, cfg, bwd_fn=bwd_fn, fwd_fn=fwd_fn)
+        for name, cfg in cases
+    ]
 
     width = max(len(r.name) for r in results)
     print(f"\n===== {title}: {len(results)} cases =====")
@@ -287,10 +342,12 @@ def _run_sweep(device, title: str, cases: list[tuple[str, dict[str, Any]]]) -> N
             + "\n".join(f"  {r.name}: {r.detail}" for r in fails)
         )
     # TODO: Sm100IndexGap cases are printed above and do not fail CI.
-    # HEAD_DIM: FFABwdSm100Index fixes head_dim at 128.
-    # SPARSE_K_BLOCK: the kernel gathers single K tokens, not K blocks
-    # (sparse_k_block_size > 1). Drop a Sm100IndexGap member once the kernel
-    # serves it so those cases compare numerically instead of reporting GAP.
+    # HEAD_DIM: FFAFwdSm100Index and FFABwdSm100Index fix head_dim at 128.
+    # SPARSE_K_BLOCK: the kernels gather single K tokens, not K blocks
+    # (sparse_k_block_size > 1).
+    # Q_TILE_FILL (forward only): one index row must fill one 128-row Q tile.
+    # Drop a Sm100IndexGap member once the kernels serve it so those cases
+    # compare numerically instead of reporting GAP.
 
 
 # ═══════════════════════════════════════════════════════════
