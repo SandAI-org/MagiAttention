@@ -115,15 +115,10 @@ class _RegisterSplit:
     other: int  # Per thread in the MMA/gather warpgroup, multiple of 8.
 
 
-# Keyed by FFAFwdSm100Index.enable_ex2_emu: True on SM100 / SM110, False on SM103.
-# Constraint: (2 * num_regs_softmax + num_regs_correction + num_regs_other) * 128 <= 64 * 1024,
-# i.e. the four warpgroups together fit the SM's 64K 32-bit registers.
-# SM100 runs polynomial exp2 emulation in the softmax warps, so each softmax thread gets 184
-# registers and each warpgroup 3 thread 56; the split uses all 512 per thread.
-# SM103 gives warpgroup 3 96 registers per thread: its cp.async gather loop keeps two_w, lane_base,
-# src_base_K/V, row_bytes, four dst_rel bases, three prefetched token-id words and the pipeline
-# state live across 21 unrolled iterations, and a smaller allocation spills that state to local
-# memory. The SM103 split sums to 504 per thread and leaves the last 8 unallocated.
+# Keyed by FFAFwdSm100Index.enable_ex2_emu (True on SM100 / SM110, False on SM103).
+# The four warpgroups share the SM's 64K registers: 2 * softmax + correction + other <= 512.
+# SM100: the softmax warps emulate exp2 with polynomials and need the most registers.
+# SM103: no emulation; warpgroup 3 gets more so the unrolled gather loop does not spill.
 _TUNING_CONFIG = {
     True: _RegisterSplit(184, 88, 56),
     False: _RegisterSplit(168, 72, 96),
@@ -143,19 +138,16 @@ def cp_async_16_zfill(
     loc: Optional[ir.Location] = None,
     ip: Optional[ir.InsertionPoint] = None,
 ) -> None:
-    """Copy 16 B from global to shared memory at ``dst_smem_addr + dst_imm_offset``.
+    """Copy 16 B from global to shared memory at ``dst_smem_addr + dst_imm_offset``, or write
+    16 zero bytes when ``row_id < 0``.
 
-    Writes 16 zero bytes instead when ``row_id < 0``.
+    ``row_id < 0`` sets the ``ignore-src`` predicate, so the source is not read and
+    ``src_gmem_addr`` may be unmapped. ``dst_imm_offset`` must be a Python int: it is emitted as
+    the instruction's immediate. Completion is tracked by the calling thread's ``cp.async``
+    groups. ``.cg`` keeps the gather out of L1, since each row is read once per use.
 
-    The sign of ``row_id`` drives the instruction's ``ignore-src`` predicate (one ``setp`` inside the
-    asm, no branch).  An ignored source is not read, so ``src_gmem_addr`` need not be mapped.
-    ``dst_imm_offset`` must be a Python int (it is emitted as the instruction's immediate).
-    Completion is tracked by the calling thread's ``cp.async`` groups.
-
-    NOTE: the instruction is ``.cg`` with no ``L2::cache_hint`` operand. Under
-    nvidia-cutlass-dsl 4.4.x on sm_103a the hinted form lowers to an uninitialized uniform-register
-    policy operand. ``.cg`` keeps the gather out of L1: each 256 B row is read once per use, so
-    L1 holds nothing that a later request reuses.
+    NOTE: an ``L2::cache_hint`` operand miscompiles under nvidia-cutlass-dsl 4.4.x on sm_103a
+    (uninitialized policy register).
     """
     assert isinstance(dst_imm_offset, int) and 0 <= dst_imm_offset < (
         1 << 24
@@ -336,9 +328,7 @@ class FFAFwdSm100Index:
     is_persistent_default = True
     # 64-element (128 B) chunks of a 16-bit row: the unit of the SW128 K-major smem tile.
     gather_chunk_elems = 64
-    # Warps 13-15 issue the K/V cp.async gathers. The correction warps issue the O TMA store and
-    # the static persistent scheduler needs no warp, so warpgroup 3 holds the MMA warp and three
-    # gather warps.
+    # Warps 13-15 issue the K/V cp.async gathers.
     gather_warps = 3
     # Keep at most one cp.async group in flight per gather thread before arriving on the
     # oldest stage barrier so the MMA warp receives completed K/V stages without extra slack.
@@ -355,10 +345,7 @@ class FFAFwdSm100Index:
             head_dim == self.head_dim
         ), f"the SM100 index-sparse forward supports head_dim {self.head_dim} only"
         self.q_stage = 1
-        # The softmax warps publish P in two parts: they release s_p_o once 3/4 of the 128 columns
-        # are in TMEM, so the MMA warp can start P @ V on a partial P and waits on
-        # pipeline_p_lastsplit only for the last quarter. The split point must be a multiple of 32
-        # (one TMEM store fragment) and strictly below tile_n.
+
         self.split_P_arrive = (self.tile_n // 4 * 3) // 32 * 32
         assert self.split_P_arrive % 32 == 0
         assert 0 < self.split_P_arrive < self.tile_n
@@ -478,14 +465,8 @@ class FFAFwdSm100Index:
         )
         smem_size_q_o = smem_size_q + smem_size_o
         smem_size_kv_per_stage = self.tile_n * self.head_dim * self.k_dtype.width // 8
-        # The kernel plans against 224 KiB of the SM's 228 KiB shared memory; the rest holds the
-        # barriers and the pipeline objects. Every K/V stage that fits is used, because the stages
-        # hide the cp.async gather latency: the budget left after Q and O, divided by one 128-slot
-        # K or V stage, gives 5 for head_dim 128 bf16.
         self.kv_stage = (224 * 1024 - smem_size_q_o) // smem_size_kv_per_stage
         assert self.s_stage >= self.q_stage
-        # Every extra cp.async group in flight delays a stage's full-barrier arrive past the point
-        # where the MMA warp needs that stage.
         assert (
             1 <= self.cp_async_depth <= self.kv_stage - 2
         ), "cp_async_depth must leave the MMA warp at least one stage"
