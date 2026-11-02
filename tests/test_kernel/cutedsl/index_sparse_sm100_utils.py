@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Serve the sm90 IndexSparse backward contract with ``ffa_bwd_sm100_index``.
+"""Serve the sm90 IndexSparse contract with the SM100 forward and backward.
 
 Shared by ``test_index_sparse_bwd_sm100.py`` and
 ``exps/attn/cutedsl/run_index_sparse_sm100_benchmark.py`` so the test and the
@@ -27,37 +27,54 @@ sm90 contract (``flex_flash_attn_func(index_sparse_indices=..., q_block_size=qbs
   (``sparse_k_block_size == 1``) or K block ids (block ``i`` covers K tokens
   ``[i * kbs, (i + 1) * kbs)``), -1 padded at the tail.
 
-SM100 contract (``ffa_bwd_sm100_index``): one index row per ``q_block_size``
-consecutive q rows of a q head. The two meet for any q-head group
-``G = num_heads_q / num_heads_kv``: the G q heads of one (token, kv head) are
-refolded into G consecutive q rows of one kv head, so a block of ``qbs`` tokens
-becomes ``qbs * G`` consecutive rows and, with ``q_block_size = qbs * G``, its
-sm90 index row is exactly the SM100 index row of those rows. ``qbs * G == 128``
-puts one q block in each 128-row Q tile, the case with no wasted MMA rows.
+SM100 forward contract (``ffa_fwd_sm100_index``): the sm90 layout itself, with
+``q_block_size`` counted in q tokens, plus two limits: ``qbs * G == 128`` for the
+q-head group ``G = num_heads_q / num_heads_kv`` (one index row fills one 128-row
+Q tile) and ``topk`` a multiple of 4.
+
+SM100 backward contract (``ffa_bwd_sm100_index``): one index row per
+``q_block_size`` consecutive q rows of a q head. The two meet for any G: the G
+q heads of one (token, kv head) are refolded into G consecutive q rows of one
+kv head, so a block of ``qbs`` tokens becomes ``qbs * G`` consecutive rows and,
+with ``q_block_size = qbs * G``, its sm90 index row is exactly the SM100 index
+row of those rows. ``qbs * G == 128`` puts one q block in each 128-row Q tile,
+the case with no wasted MMA rows.
 """
 
 import math
 from enum import Enum
 
 import torch
+import torch.nn.functional as F
 
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100_index import (
     FFABwdSm100Index,
     ffa_bwd_sm100_index,
 )
+from magi_attention.kernel.cutedsl.ffa_fwd_sm100_index import (
+    FFAFwdSm100Index,
+    ffa_fwd_sm100_index,
+)
 
 
 class Sm100IndexGap(Enum):
-    """sm90 IndexSparse features the SM100 backward cannot serve yet.
+    """sm90 IndexSparse features the SM100 forward or backward cannot serve yet.
 
-    Remove a member once the kernel (and the refold in
-    ``ffa_bwd_sm100_index_sm90_layout``) supports it; the cases that needed it
-    then run the numerical comparison instead of reporting a gap.
+    Remove a member once the kernels (and the adapters
+    ``ffa_fwd_sm100_index_sm90_layout`` / ``ffa_bwd_sm100_index_sm90_layout``)
+    support it; the cases that needed it then run the numerical comparison
+    instead of reporting a gap.
     """
 
-    HEAD_DIM = "head_dim != 128: FFABwdSm100Index fixes head_dim at 128"
+    HEAD_DIM = (
+        "head_dim != 128: FFAFwdSm100Index and FFABwdSm100Index fix head_dim at 128"
+    )
     SPARSE_K_BLOCK = (
-        "sparse_k_block_size > 1: the kernel gathers single K tokens, not K blocks"
+        "sparse_k_block_size > 1: the kernels gather single K tokens, not K blocks"
+    )
+    Q_TILE_FILL = (
+        "q_block_size * group != 128: FFAFwdSm100Index maps one index row onto "
+        "one 128-row Q tile"
     )
 
 
@@ -67,6 +84,81 @@ class Sm100IndexUnsupportedError(NotImplementedError):
     def __init__(self, gaps: list[Sm100IndexGap]):
         self.gaps = tuple(gaps)
         super().__init__("; ".join(f"{g.name}: {g.value}" for g in self.gaps))
+
+
+def sm100_index_fwd_gaps(
+    *,
+    head_dim: int,
+    sparse_k_block_size: int,
+    q_block_size: int,
+    group: int,
+) -> list[Sm100IndexGap]:
+    """The ``Sm100IndexGap`` members an sm90 IndexSparse forward call needs.
+
+    ``q_block_size`` is the sm90 one (q tokens per index row) and ``group`` is
+    ``num_heads_q / num_heads_kv``.
+    """
+    gaps = []
+    if head_dim != FFAFwdSm100Index.head_dim:
+        gaps.append(Sm100IndexGap.HEAD_DIM)
+    if sparse_k_block_size != 1:
+        gaps.append(Sm100IndexGap.SPARSE_K_BLOCK)
+    if q_block_size * group != FFAFwdSm100Index.tile_m:
+        gaps.append(Sm100IndexGap.Q_TILE_FILL)
+    return gaps
+
+
+def ffa_fwd_sm100_index_sm90_layout(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    index_sparse_indices: torch.Tensor,
+    *,
+    q_block_size: int = 1,
+    sparse_k_block_size: int = 1,
+    softmax_scale: float | None = None,
+    assume_valid_ids: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """IndexSparse forward with sm90 tensors, run by ``ffa_fwd_sm100_index``.
+
+    ``q_block_size`` is the sm90 one: q tokens per index row. The tensors reach
+    the kernel unchanged, except that an index whose ``topk`` is not a multiple
+    of ``FFAFwdSm100Index.topk_align`` is copied with -1 columns appended.
+    ``assume_valid_ids`` is forwarded to ``ffa_fwd_sm100_index`` and requires an
+    aligned ``topk``, since the appended -1 columns would break its promise.
+    Returns (out, lse) in the sm90 layout.
+
+    Raises:
+        Sm100IndexUnsupportedError: the call needs an ``Sm100IndexGap``.
+    """
+    _, num_heads_q, head_dim = q.shape
+    _, num_heads_kv, _ = k.shape
+    assert num_heads_q % num_heads_kv == 0
+    gaps = sm100_index_fwd_gaps(
+        head_dim=head_dim,
+        sparse_k_block_size=sparse_k_block_size,
+        q_block_size=q_block_size,
+        group=num_heads_q // num_heads_kv,
+    )
+    if gaps:
+        raise Sm100IndexUnsupportedError(gaps)
+
+    topk_pad = -index_sparse_indices.shape[-1] % FFAFwdSm100Index.topk_align
+    if topk_pad:
+        assert not assume_valid_ids, (
+            f"assume_valid_ids needs topk to be a multiple of "
+            f"{FFAFwdSm100Index.topk_align}: aligning it appends -1 ids"
+        )
+        index_sparse_indices = F.pad(index_sparse_indices, (0, topk_pad), value=-1)
+    return ffa_fwd_sm100_index(
+        q,
+        k,
+        v,
+        index_sparse_indices,
+        softmax_scale=softmax_scale,
+        q_block_size=q_block_size,
+        assume_valid_ids=assume_valid_ids,
+    )
 
 
 def sm100_index_bwd_gaps(
