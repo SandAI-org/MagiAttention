@@ -76,6 +76,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.utils.dtype import to_cute_dtype
+from magi_attention.utils.sparse_utils import partition_index_sparse_rows_by_k_chunk
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
@@ -95,6 +96,9 @@ from .tile_scheduler import (
     TileSchedulerProtocol,
 )
 
+# L2 cache policy of a TMA load (CUTLASS CacheHintSm90::EVICT_FIRST)
+TMA_CACHE_EVICT_FIRST = 0x12F0000000000000
+
 
 class FFABwdSm100Index:
     arch = 100
@@ -111,6 +115,8 @@ class FFABwdSm100Index:
         kv_stage: int = 3,
         q_block_size: cutlass.Constexpr[int] = 128,
         gather_V_async: cutlass.Constexpr[bool] = False,
+        k_chunk_pass: cutlass.Constexpr[bool] = False,
+        k_chunk_first: cutlass.Constexpr[bool] = False,
         debug_print: bool = False,
     ):
         assert tile_m == 128, "tile_m must be 128 (one TMEM lane per Q row)"
@@ -129,6 +135,17 @@ class FFABwdSm100Index:
         self.single_segment = q_block_size % tile_m == 0
         # V rows land without the loaders waiting on them (see load_KV)
         self.gather_V_async = gather_V_async
+        # One pass of a K-chunked backward: index rows start at mTopkStart and
+        # dQ is reduce-added into an fp32 accumulator (see ffa_bwd_sm100_index)
+        self.k_chunk_pass = k_chunk_pass
+        # The first pass stores its dQ partial (zeros for an empty K range), so
+        # the accumulator needs no zeroing; later passes reduce-add into it.
+        assert k_chunk_pass or not k_chunk_first
+        self.k_chunk_first = k_chunk_first
+        if k_chunk_pass:
+            # fp32 dQ goes out in (tile_m, tile_n) column halves through the
+            # sP | sdS bytes, partitioned like S
+            assert self.head_dim == 2 * tile_n
 
         # CTA tiler: (Q, K, HD)
         self.cta_tiler = (tile_m, tile_n, self.head_dim)
@@ -239,7 +256,7 @@ class FFABwdSm100Index:
             print(f"{prefix}Initialized FFABwdSm100Index with: ")
             print(
                 f"{prefix}{self.head_dim=} | {self.qhead_per_kvhead=} | {self.q_block_size=} | "
-                f"{self.gather_V_async=}"
+                f"{self.gather_V_async=} | {self.k_chunk_pass=} | {self.k_chunk_first=}"
             )
             print(
                 f"{prefix}{self.tile_m=} | {self.tile_n=} | {self.kv_stage=} | {self.dKV_stage=}"
@@ -425,10 +442,14 @@ class FFABwdSm100Index:
 
         # --- dQ epilogue ---
 
-        # sdQ: row-major (tileQ128,tileHD128), reuses the sP + sdS bytes
-        self.dQ_epi_tile = (self.tile_m, self.head_dim)
+        # sdQ: row-major (tileQ128,tileHD128) of dq_dtype, or with k_chunk_pass
+        # (tileQ128,tileHD64) of fp32 per half; reuses the sP + sdS bytes
+        if const_expr(self.k_chunk_pass):
+            self.dQ_epi_tile = (self.tile_m, self.head_dim // 2)
+        else:
+            self.dQ_epi_tile = (self.tile_m, self.head_dim)
         self.sdQ_layout = sm100_utils_basic.make_smem_layout_epi(
-            self.dq_dtype, LayoutEnum.ROW_MAJOR, self.dQ_epi_tile, 1
+            self.dq_epi_dtype, LayoutEnum.ROW_MAJOR, self.dQ_epi_tile, 1
         )
 
         # --- LSE / dPsum ---
@@ -461,6 +482,8 @@ class FFABwdSm100Index:
         mQRanges: cute.Tensor,
         mIndices: cute.Tensor,
         mTopkLen: cute.Tensor,
+        mTopkStart: Optional[cute.Tensor] = None,
+        mdQacc: Optional[cute.Tensor] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
         stream: cuda.CUstream = None,
     ):
@@ -475,6 +498,10 @@ class FFABwdSm100Index:
         self.do_dtype = mdO.element_type
         self.dq_dtype = mdQ.element_type
         self.ds_dtype = self.q_dtype
+        # dQ partials of a K-chunk pass are summed in fp32
+        self.dq_epi_dtype = Float32 if const_expr(self.k_chunk_pass) else self.dq_dtype
+        assert (mTopkStart is not None) == self.k_chunk_pass
+        assert (mdQacc is not None) == self.k_chunk_pass
 
         # (sq, nhq, hd) -> (sq, hd, nhq)
         mQ, mdO, mdQ = [layout_utils.select(t, mode=[0, 2, 1]) for t in (mQ, mdO, mdQ)]
@@ -536,32 +563,47 @@ class FFABwdSm100Index:
             self.cta_layout_vmnk.shape,
         )
 
-        # --- Make tiled TMA S2G-copy of dQ ---
+        # --- Make tiled TMA S2G-copy (or reduce-add, k_chunk_pass) of dQ ---
 
-        # 4D descriptor with the base shifted back by total_q rows: the row mode
-        # spans total_q rows and the 4th mode re-adds rows at unit row stride, so
-        # tile rows past the end of the current Q range exceed the row extent
-        # and are clipped by TMA instead of clobbering the next range.
-        total_q_dq = mdQ.shape[0]
-        row_stride_dq = mdQ.layout.stride[0]
-        mdQ_desc = cute.make_tensor(
-            (mdQ.iterator - Int64(total_q_dq) * row_stride_dq).align(16),
-            cute.make_layout(
-                (total_q_dq, mdQ.shape[1], mdQ.shape[2], 1 << 26),
-                stride=(
-                    row_stride_dq,
-                    mdQ.layout.stride[1],
-                    mdQ.layout.stride[2],
-                    row_stride_dq,
+        if const_expr(self.k_chunk_pass):
+            # (sq_padded, nhq, hd) -> (sq_padded, hd, nhq) fp32 accumulator, whose
+            # padding rows absorb the tail tile, so no clipping is needed
+            mdQacc = layout_utils.select(mdQacc, mode=[0, 2, 1])
+            tma_atom_dQ, tma_tensor_dQ = cpasync.make_tiled_tma_atom(
+                (
+                    cpasync.CopyBulkTensorTileS2GOp()
+                    if const_expr(self.k_chunk_first)
+                    else cpasync.CopyReduceBulkTensorTileS2GOp()
                 ),
-            ),
-        )
-        tma_atom_dQ, tma_tensor_dQ = cpasync.make_tiled_tma_atom(
-            cpasync.CopyBulkTensorTileS2GOp(),
-            mdQ_desc,
-            cute.select(self.sdQ_layout, mode=[0, 1]),
-            self.dQ_epi_tile,
-        )
+                mdQacc,
+                cute.select(self.sdQ_layout, mode=[0, 1]),
+                self.dQ_epi_tile,
+            )
+        else:
+            # 4D descriptor with the base shifted back by total_q rows: the row mode
+            # spans total_q rows and the 4th mode re-adds rows at unit row stride, so
+            # tile rows past the end of the current Q range exceed the row extent
+            # and are clipped by TMA instead of clobbering the next range.
+            total_q_dq = mdQ.shape[0]
+            row_stride_dq = mdQ.layout.stride[0]
+            mdQ_desc = cute.make_tensor(
+                (mdQ.iterator - Int64(total_q_dq) * row_stride_dq).align(16),
+                cute.make_layout(
+                    (total_q_dq, mdQ.shape[1], mdQ.shape[2], 1 << 26),
+                    stride=(
+                        row_stride_dq,
+                        mdQ.layout.stride[1],
+                        mdQ.layout.stride[2],
+                        row_stride_dq,
+                    ),
+                ),
+            )
+            tma_atom_dQ, tma_tensor_dQ = cpasync.make_tiled_tma_atom(
+                cpasync.CopyBulkTensorTileS2GOp(),
+                mdQ_desc,
+                cute.select(self.sdQ_layout, mode=[0, 1]),
+                self.dQ_epi_tile,
+            )
 
         self.tma_copy_bytes = {
             name: cute.size_in_bytes(
@@ -611,7 +653,9 @@ class FFABwdSm100Index:
 
         sPdS_elems = max(
             cute.cosize(self.sP_layout) + cute.cosize(self.sdS_layout),
-            cute.cosize(self.sdQ_layout) * self.dq_dtype.width // self.ds_dtype.width,
+            cute.cosize(self.sdQ_layout)
+            * self.dq_epi_dtype.width
+            // self.ds_dtype.width,
         )
         clc_response_size = self.sched_stages * 4
         clc_mbar_size = self.sched_stages * 2
@@ -736,6 +780,7 @@ class FFABwdSm100Index:
             mQRanges,
             mIndices,
             mTopkLen,
+            mTopkStart,
             tma_atom_Q,
             tma_atom_dO,
             tma_atom_dQ,
@@ -785,6 +830,7 @@ class FFABwdSm100Index:
         mQRanges: cute.Tensor,
         mIndices: cute.Tensor,
         mTopkLen: cute.Tensor,
+        mTopkStart: Optional[cute.Tensor],
         tma_atom_Q: cute.CopyAtom,
         tma_atom_dO: cute.CopyAtom,
         tma_atom_dQ: cute.CopyAtom,
@@ -1026,7 +1072,7 @@ class FFABwdSm100Index:
             sPdS_epi_layout.outer,
         )
         sdQ = cute.make_tensor(
-            cute.recast_ptr(sPdS_ptr, sdQ_layout.inner, dtype=self.dq_dtype),
+            cute.recast_ptr(sPdS_ptr, sdQ_layout.inner, dtype=self.dq_epi_dtype),
             sdQ_layout.outer,
         )
 
@@ -1182,6 +1228,7 @@ class FFABwdSm100Index:
                 mV,
                 mIndices,
                 mTopkLen,
+                mTopkStart,
                 sK,
                 sV,
                 pipeline_K,
@@ -1307,6 +1354,7 @@ class FFABwdSm100Index:
                     mdVacc,
                     mIndices,
                     mTopkLen,
+                    mTopkStart,
                     sdKV_stage[None, None, None, 0],
                     self.reduce_dV_barrier,
                     pipeline_dV,
@@ -1319,6 +1367,7 @@ class FFABwdSm100Index:
                     mdKacc,
                     mIndices,
                     mTopkLen,
+                    mTopkStart,
                     sdKV_stage[None, None, None, 1],
                     self.reduce_dK_barrier,
                     pipeline_dK,
@@ -1335,6 +1384,21 @@ class FFABwdSm100Index:
         return cute.make_tensor(
             tAcc.iterator + stage * self.dKV_stage_stride, tAcc.layout
         )
+
+    @cute.jit
+    def _segment_ids(
+        self,
+        mIndices: cute.Tensor,
+        mTopkStart: Optional[cute.Tensor],
+        qb: Int32,
+        head_idx_kv: Int32,
+    ) -> cute.Tensor:
+        """(topk,) K row ids of q block ``qb``; with k_chunk_pass, from this pass's chunk start."""
+        mIdx_row = mIndices[qb, head_idx_kv, None]
+        if const_expr(self.k_chunk_pass):
+            assert mTopkStart is not None
+            mIdx_row = cute.domain_offset((mTopkStart[qb, head_idx_kv],), mIdx_row)
+        return mIdx_row
 
     @cute.jit
     def _num_n_blocks(self, topk_len: Int32) -> Int32:
@@ -1503,8 +1567,18 @@ class FFABwdSm100Index:
             # --- Q / dO (once per Q tile, resident across the K loop) ---
 
             pipeline_QdO.producer_acquire(producer_state_QdO)
-            load_Q(m_block, producer_state=producer_state_QdO)
-            load_dO(m_block, producer_state=producer_state_QdO)
+            if const_expr(self.k_chunk_pass):
+                # Q/dO are read once per pass: keep the K chunk in L2 instead
+                evict_first = Int64(Int64(TMA_CACHE_EVICT_FIRST).ir_value())
+                load_Q(
+                    m_block, producer_state=producer_state_QdO, cache_policy=evict_first
+                )
+                load_dO(
+                    m_block, producer_state=producer_state_QdO, cache_policy=evict_first
+                )
+            else:
+                load_Q(m_block, producer_state=producer_state_QdO)
+                load_dO(m_block, producer_state=producer_state_QdO)
             pipeline_QdO.producer_commit(producer_state_QdO)
             producer_state_QdO.advance()
 
@@ -1576,6 +1650,7 @@ class FFABwdSm100Index:
         mV: cute.Tensor,
         mIndices: cute.Tensor,
         mTopkLen: cute.Tensor,
+        mTopkStart: Optional[cute.Tensor],
         sK: cute.Tensor,
         sV: cute.Tensor,
         pipeline_K: pipeline.PipelineAsyncUmma,
@@ -1655,7 +1730,7 @@ class FFABwdSm100Index:
                 topk_len = mTopkLen[qb, head_idx_kv]
                 n_block_max = self._num_n_blocks(topk_len)
                 # mIdx_cur: (topk,) global K row ids of this segment's q block
-                mIdx_cur = mIndices[qb, head_idx_kv, None]
+                mIdx_cur = self._segment_ids(mIndices, mTopkStart, qb, head_idx_kv)
 
                 for n_block in cutlass.range(n_block_max, unroll=1):
                     col_limit = topk_len - n_block * self.tile_n
@@ -2130,14 +2205,25 @@ class FFABwdSm100Index:
             self.ds_dtype,
         )
         sdQ_2d = sdQ[None, None, 0]
-        tiled_r2s_dQ, tdQsdQ_r2s = self._make_r2s(
-            thr_mma_dQ,
-            tiled_t2r_dQ,
-            thr_t2r_dQ,
-            sdQ_2d,
-            self.mma_tiler_dsk[:2],
-            self.dq_dtype,
-        )
+        if const_expr(self.k_chunk_pass):
+            # (tileQ128,tileHD64) fp32 halves are partitioned like S (tile_n == HD / 2)
+            tiled_r2s_dQ, tdQsdQ_r2s = self._make_r2s(
+                thr_mma_S,
+                tiled_t2r_S,
+                thr_t2r_S,
+                sdQ_2d,
+                self.mma_tiler_qk[:2],
+                Float32,
+            )
+        else:
+            tiled_r2s_dQ, tdQsdQ_r2s = self._make_r2s(
+                thr_mma_dQ,
+                tiled_t2r_dQ,
+                thr_t2r_dQ,
+                sdQ_2d,
+                self.mma_tiler_dsk[:2],
+                self.dq_dtype,
+            )
         num_chunks_S = cute.size(tScS_t2r, mode=[3])
         num_chunks_dQ = cute.size(tdQtdQ_t2r, mode=[3])
 
@@ -2287,56 +2373,134 @@ class FFABwdSm100Index:
             consumer_state_LSE.advance()
 
             # //////////////////////////////////////////////
-            #  dQ epilogue: T2R tdQ -> R2S sdQ -> TMA S2G
+            #  dQ epilogue: T2R tdQ -> R2S sdQ -> TMA S2G (store, or reduce-add of
+            #  two fp32 HD halves with k_chunk_pass)
             # //////////////////////////////////////////////
 
-            # Wait for tdQ to be full; it also implies every MMA reading sP/sdS
-            # of this Q tile has retired, so their bytes can be reused as sdQ.
-            pipeline_dQ.consumer_wait(consumer_state_dQ)
-            for c in cutlass.range_constexpr(num_chunks_dQ):
-                tdQrdQ = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
-                if n_block_total > 0:
-                    cute.copy(tiled_t2r_dQ, tdQtdQ_t2r[None, 0, 0, c], tdQrdQ)
-                else:
-                    # empty K range: dQ is zero and tdQ was never written
-                    tdQrdQ.fill(0.0)
-                copy_utils.cvt_copy(tiled_r2s_dQ, tdQrdQ, tdQsdQ_r2s[None, 0, 0, c])
-
-            # Release tdQ to be empty
-            cute.arch.fence_view_async_tmem_load()
-            cute.arch.sync_warp()
-            with cute.arch.elect_one():
-                pipeline_dQ.consumer_release(consumer_state_dQ)
-            consumer_state_dQ.advance()
-
-            # Make R2S stores visible to the TMA S2G copy
-            cute.arch.fence_view_async_shared()
-            self.dQ_epi_barrier.arrive_and_wait()
-
-            if warp_idx == self.compute_warp_ids[0]:
-                # Place the tile at row total_q - h0 (h0 = rows left in this range
-                # from the tile start) with 4th-mode offset offset_q + len_q, so
-                # the tile starts at row offset_q + m_block * tile_m and rows past
-                # the range end are clipped by TMA.
-                len_q = seqlen_info.seqlen_q
-                h0 = len_q - m_block * self.tile_m
-                blk = cute.domain_offset(
-                    (mdQ.shape[0] - h0, 0, head_idx, seqlen_info.offset_q + len_q),
-                    mdQ,
+            if const_expr(self.k_chunk_pass):
+                # Wait for tdQ to be full; it also implies every MMA reading sP/sdS
+                # of this Q tile has retired, so their bytes can be reused as sdQ.
+                pipeline_dQ.consumer_wait(consumer_state_dQ)
+                num_chunks_half = num_chunks_dQ // 2
+                # An empty K range has no partial (tdQ was never written): the
+                # first pass stores zeros, later passes add nothing.
+                has_partial = n_block_total > 0
+                writes_dQ = (
+                    cutlass.Boolean(True)
+                    if const_expr(self.k_chunk_first)
+                    else has_partial
                 )
-                gdQ = cute.local_tile(blk[(None, None, 0, 0)], self.dQ_epi_tile, (0, 0))
-                tdQsdQ_tma, tdQgdQ_tma = cpasync.tma_partition(
-                    tma_atom_dQ,
-                    0,  # no multicast
-                    cute.make_layout(1),
-                    cute.group_modes(sdQ_2d, 0, 2),
-                    cute.group_modes(gdQ, 0, 2),
-                )
-                cute.copy(tma_atom_dQ, tdQsdQ_tma, tdQgdQ_tma)
-                cute.arch.cp_async_bulk_commit_group()
-                # Drain the TMA smem read before sP/sdS are rewritten
-                cute.arch.cp_async_bulk_wait_group(0, read=True)
-            self.dQ_epi_barrier.arrive_and_wait()
+                for half in cutlass.range_constexpr(2):
+                    if writes_dQ:
+                        for c in cutlass.range_constexpr(num_chunks_half):
+                            tdQrdQ = cute.make_rmem_tensor(
+                                tScS_t2r[None, 0, 0, 0].shape, Float32
+                            )
+                            if has_partial:
+                                cute.copy(
+                                    tiled_t2r_dQ,
+                                    tdQtdQ_t2r[None, 0, 0, half * num_chunks_half + c],
+                                    tdQrdQ,
+                                )
+                            else:
+                                tdQrdQ.fill(0.0)
+                            copy_utils.cvt_copy(
+                                tiled_r2s_dQ, tdQrdQ, tdQsdQ_r2s[None, 0, 0, c]
+                            )
+                    if const_expr(half == 1):
+                        # Release tdQ to be empty
+                        cute.arch.fence_view_async_tmem_load()
+                        cute.arch.sync_warp()
+                        with cute.arch.elect_one():
+                            pipeline_dQ.consumer_release(consumer_state_dQ)
+                        consumer_state_dQ.advance()
+
+                    # Make R2S stores visible to the TMA reduce
+                    cute.arch.fence_view_async_shared()
+                    self.dQ_epi_barrier.arrive_and_wait()
+
+                    if warp_idx == self.compute_warp_ids[0] and writes_dQ:
+                        # The accumulator has padding rows past total_q, so the
+                        # tail tile needs no clipping.
+                        blk = cute.domain_offset(
+                            (
+                                seqlen_info.offset_q + m_block * self.tile_m,
+                                half * self.dQ_epi_tile[1],
+                            ),
+                            mdQ[None, None, head_idx],
+                        )
+                        gdQ = cute.local_tile(blk, self.dQ_epi_tile, (0, 0))
+                        tdQsdQ_tma, tdQgdQ_tma = cpasync.tma_partition(
+                            tma_atom_dQ,
+                            0,  # no multicast
+                            cute.make_layout(1),
+                            cute.group_modes(sdQ_2d, 0, 2),
+                            cute.group_modes(gdQ, 0, 2),
+                        )
+                        # Each pass streams the whole accumulator once: keep the K
+                        # chunk in L2 instead (store / reduce-add)
+                        cute.copy(
+                            tma_atom_dQ,
+                            tdQsdQ_tma,
+                            tdQgdQ_tma,
+                            cache_policy=Int64(Int64(TMA_CACHE_EVICT_FIRST).ir_value()),
+                        )
+                        cute.arch.cp_async_bulk_commit_group()
+                        # Drain the TMA smem read before sdQ / sP / sdS are rewritten
+                        cute.arch.cp_async_bulk_wait_group(0, read=True)
+                    self.dQ_epi_barrier.arrive_and_wait()
+            else:
+                # Wait for tdQ to be full; it also implies every MMA reading sP/sdS
+                # of this Q tile has retired, so their bytes can be reused as sdQ.
+                pipeline_dQ.consumer_wait(consumer_state_dQ)
+                for c in cutlass.range_constexpr(num_chunks_dQ):
+                    tdQrdQ = cute.make_rmem_tensor(
+                        tScS_t2r[None, 0, 0, 0].shape, Float32
+                    )
+                    if n_block_total > 0:
+                        cute.copy(tiled_t2r_dQ, tdQtdQ_t2r[None, 0, 0, c], tdQrdQ)
+                    else:
+                        # empty K range: dQ is zero and tdQ was never written
+                        tdQrdQ.fill(0.0)
+                    copy_utils.cvt_copy(tiled_r2s_dQ, tdQrdQ, tdQsdQ_r2s[None, 0, 0, c])
+
+                # Release tdQ to be empty
+                cute.arch.fence_view_async_tmem_load()
+                cute.arch.sync_warp()
+                with cute.arch.elect_one():
+                    pipeline_dQ.consumer_release(consumer_state_dQ)
+                consumer_state_dQ.advance()
+
+                # Make R2S stores visible to the TMA S2G copy
+                cute.arch.fence_view_async_shared()
+                self.dQ_epi_barrier.arrive_and_wait()
+
+                if warp_idx == self.compute_warp_ids[0]:
+                    # Place the tile at row total_q - h0 (h0 = rows left in this range
+                    # from the tile start) with 4th-mode offset offset_q + len_q, so
+                    # the tile starts at row offset_q + m_block * tile_m and rows past
+                    # the range end are clipped by TMA.
+                    len_q = seqlen_info.seqlen_q
+                    h0 = len_q - m_block * self.tile_m
+                    blk = cute.domain_offset(
+                        (mdQ.shape[0] - h0, 0, head_idx, seqlen_info.offset_q + len_q),
+                        mdQ,
+                    )
+                    gdQ = cute.local_tile(
+                        blk[(None, None, 0, 0)], self.dQ_epi_tile, (0, 0)
+                    )
+                    tdQsdQ_tma, tdQgdQ_tma = cpasync.tma_partition(
+                        tma_atom_dQ,
+                        0,  # no multicast
+                        cute.make_layout(1),
+                        cute.group_modes(sdQ_2d, 0, 2),
+                        cute.group_modes(gdQ, 0, 2),
+                    )
+                    cute.copy(tma_atom_dQ, tdQsdQ_tma, tdQgdQ_tma)
+                    cute.arch.cp_async_bulk_commit_group()
+                    # Drain the TMA smem read before sP/sdS are rewritten
+                    cute.arch.cp_async_bulk_wait_group(0, read=True)
+                self.dQ_epi_barrier.arrive_and_wait()
 
             # Advance to next Q tile
             work_tile = tile_scheduler.advance_to_next_work()
@@ -2366,6 +2530,7 @@ class FFABwdSm100Index:
         mAcc: cute.Tensor,
         mIndices: cute.Tensor,
         mTopkLen: cute.Tensor,
+        mTopkStart: Optional[cute.Tensor],
         sStage: cute.Tensor,
         reduce_barrier: pipeline.NamedBarrier,
         pipeline_acc: pipeline.PipelineUmmaAsync,
@@ -2421,7 +2586,7 @@ class FFABwdSm100Index:
                 topk_len = mTopkLen[qb, head_idx_kv]
                 n_block_max = self._num_n_blocks(topk_len)
                 # mIdx_cur: (topk,) global K row ids of this segment's q block
-                mIdx_cur = mIndices[qb, head_idx_kv, None]
+                mIdx_cur = self._segment_ids(mIndices, mTopkStart, qb, head_idx_kv)
 
                 for n_block in cutlass.range(n_block_max, unroll=1):
                     col_limit = topk_len - n_block * self.tile_n
@@ -2509,6 +2674,33 @@ def gather_v_async_default(
     return l2_bytes // 2 < gather_bytes <= 4 * l2_bytes
 
 
+def num_k_passes_default(
+    total_k: int,
+    num_head_kv: int,
+    head_dim: int,
+    element_size: int,
+    topk: int,
+    l2_bytes: int,
+) -> int:
+    """``num_k_passes`` of ``ffa_bwd_sm100_index`` when the caller passes ``None``.
+
+    The gathered K and V rows plus their fp32 dK / dV accumulator rows of all
+    kv heads are the working set of the random gather and reduce. Past 2x L2
+    most of it misses and the backward is bound by DRAM bandwidth; splitting
+    the K tokens into chunks of about 0.8x L2, all Q tiles visiting one chunk
+    per pass, brings much of it back into L2. Every pass revisits every Q tile
+    (Q/dO reload, pipeline fill, an fp32 dQ partial), which up to 2x L2, or
+    below 256 ids (4 K tiles) per row and pass, costs more than it saves.
+    """
+    gather_bytes = total_k * num_head_kv * head_dim * (2 * element_size + 2 * 4)
+    if gather_bytes <= 2 * l2_bytes:
+        return 1
+    num_passes = min(16, math.ceil(gather_bytes / (0.8 * l2_bytes)))
+    if topk < 256 * num_passes:
+        return 1
+    return num_passes
+
+
 def ffa_bwd_sm100_index(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2526,6 +2718,7 @@ def ffa_bwd_sm100_index(
     dv: Optional[torch.Tensor] = None,
     q_block_size: Optional[int] = None,
     gather_v_async: Optional[bool] = None,
+    num_k_passes: Optional[int] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass of index-sparse (DSA) attention on SM100.
 
@@ -2541,7 +2734,12 @@ def ffa_bwd_sm100_index(
             ``q_block_size / tile_m`` of its MMA work is useful.
         gather_v_async: let the gathered V rows of a K tile land while the
             loaders already wait for the next K (see ``FFABwdSm100Index.load_KV``).
-            ``None`` picks ``gather_v_async_default``.
+            ``None`` picks ``gather_v_async_default`` (of one pass's K chunk).
+        num_k_passes: split the K tokens into this many equal chunks and run
+            the kernel once per chunk, each pass covering every Q tile but only
+            its ids in that chunk, so that the K/V rows and dK/dV accumulators
+            a pass touches mostly stay in L2. dQ then sums the passes in fp32.
+            ``None`` picks ``num_k_passes_default``.
 
     Returns:
         A tuple of (dQ, dK, dV) with the same shapes and dtypes as q, k, v.
@@ -2586,17 +2784,41 @@ def ffa_bwd_sm100_index(
     dtype = to_cute_dtype(q.dtype)
     # The third K/V stage's smem goes to the dK/dV reduce staging instead
     kv_stage = 2
-    if gather_v_async is None:
-        gather_v_async = gather_v_async_default(
+    l2_bytes = torch.cuda.get_device_properties(device).L2_cache_size
+    if num_k_passes is None:
+        num_k_passes = num_k_passes_default(
             total_k,
             num_head_kv,
             head_dim,
             k.element_size(),
-            torch.cuda.get_device_properties(device).L2_cache_size,
+            index_sparse_indices.shape[-1],
+            l2_bytes,
+        )
+    assert num_k_passes >= 1
+    k_chunk_size = (total_k + num_k_passes - 1) // num_k_passes
+    k_chunk_pass = num_k_passes > 1
+    if gather_v_async is None:
+        # each pass gathers from one K chunk only
+        gather_v_async = gather_v_async_default(
+            k_chunk_size, num_head_kv, head_dim, k.element_size(), l2_bytes
         )
 
-    # Valid ids precede the -1 padding, so the count is the per-row inner length
-    topk_len = (index_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
+    if k_chunk_pass:
+        indices, chunk_starts, chunk_lens = partition_index_sparse_rows_by_k_chunk(
+            index_sparse_indices, k_chunk_size, num_k_passes
+        )
+        # Pass c reads ids [topk_starts[c], topk_starts[c] + topk_lens[c]) of
+        # every row. It ends at the last whole K tile of chunk c: the < tile_n ids
+        # left over join pass c + 1 (where they miss L2) instead of every pass
+        # padding a partial K tile.
+        pass_ends = (chunk_starts + chunk_lens) // tile_n * tile_n
+        pass_ends[-1] = chunk_starts[-1] + chunk_lens[-1]
+        topk_starts = torch.cat([torch.zeros_like(pass_ends[:1]), pass_ends[:-1]])
+        topk_lens = pass_ends - topk_starts
+    else:
+        indices = index_sparse_indices
+        # Valid ids precede the -1 padding, so the count is the per-row inner length
+        topk_lens = (index_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)[None]
 
     # One range over every token: the scheduler, dPsum preprocess, dQ epilogue
     # and dK/dV postprocess all run their full-mask single-batch paths.
@@ -2620,7 +2842,7 @@ def ffa_bwd_sm100_index(
         dpsum,
         lse,
         lse_log2,
-        None,  # dq_accum: dQ is stored directly
+        None,  # dq_accum: allocated below when the passes sum dQ
         None,  # cu_seqlens_q
         None,  # seqused_q
         None,  # dlse
@@ -2658,77 +2880,108 @@ def ffa_bwd_sm100_index(
         dtype=torch.float32,
         device=device,
     )
-
-    # --- Main kernel ---
-
-    compile_key = (
-        dtype,
-        qhead_per_kvhead,
-        tile_m,
-        tile_n,
-        kv_stage,
-        q_block_size,
-        gather_v_async,
-        magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+    # The passes sum dQ here in fp32 (the first pass stores, so no zeroing).
+    # Token-major like dq: a head-major flat (num_head, rows * head_dim) row
+    # overflows Int32 at long seqlen.
+    dq_accum = (
+        torch.empty(
+            total_q_rounded_padded,
+            num_head,
+            head_dim,
+            dtype=torch.float32,
+            device=device,
+        )
+        if k_chunk_pass
+        else None
     )
+
+    # --- Main kernel, once per K chunk ---
+
     compile_cache = ffa_bwd_sm100_index.compile_cache  # type: ignore[attr-defined]
-    if compile_key not in compile_cache:
-        ffa_bwd_obj = FFABwdSm100Index(
-            qhead_per_kvhead=qhead_per_kvhead,
-            tile_m=tile_m,
-            tile_n=tile_n,
-            kv_stage=kv_stage,
-            q_block_size=q_block_size,
-            gather_V_async=gather_v_async,
-            debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+    for k_pass in range(num_k_passes):
+        k_chunk_first = k_chunk_pass and k_pass == 0
+        compile_key = (
+            dtype,
+            qhead_per_kvhead,
+            tile_m,
+            tile_n,
+            kv_stage,
+            q_block_size,
+            gather_v_async,
+            k_chunk_pass,
+            k_chunk_first,
+            magiattn_cutedsl.is_ffa_debug_mode_enabled(),
         )
-        q_tensor, k_tensor, v_tensor, do_tensor, dq_tensor = [
-            to_cute_tensor(t) for t in (q, k, v, dout, dq)
-        ]
-        lse_log2_tensor, dpsum_tensor, dk_accum_tensor, dv_accum_tensor = [
-            to_cute_tensor(t) for t in (lse_log2, dpsum, dk_accum, dv_accum)
-        ]
-        q_ranges_tensor, indices_tensor, topk_len_tensor = [
-            to_cute_tensor(t, assumed_align=4)
-            for t in (q_ranges, index_sparse_indices, topk_len)
-        ]
-        compile_cache[compile_key] = cute.compile(
-            ffa_bwd_obj,
-            q_tensor,
-            k_tensor,
-            v_tensor,
-            do_tensor,
-            lse_log2_tensor,
-            dpsum_tensor,
-            dq_tensor,
-            dk_accum_tensor,
-            dv_accum_tensor,
+        if compile_key not in compile_cache:
+            ffa_bwd_obj = FFABwdSm100Index(
+                qhead_per_kvhead=qhead_per_kvhead,
+                tile_m=tile_m,
+                tile_n=tile_n,
+                kv_stage=kv_stage,
+                q_block_size=q_block_size,
+                gather_V_async=gather_v_async,
+                k_chunk_pass=k_chunk_pass,
+                k_chunk_first=k_chunk_first,
+                debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
+            )
+            q_tensor, k_tensor, v_tensor, do_tensor, dq_tensor = [
+                to_cute_tensor(t) for t in (q, k, v, dout, dq)
+            ]
+            lse_log2_tensor, dpsum_tensor, dk_accum_tensor, dv_accum_tensor = [
+                to_cute_tensor(t) for t in (lse_log2, dpsum, dk_accum, dv_accum)
+            ]
+            q_ranges_tensor, indices_tensor, topk_len_tensor = [
+                to_cute_tensor(t, assumed_align=4)
+                for t in (q_ranges, indices, topk_lens[0])
+            ]
+            topk_start_tensor, dq_accum_tensor = None, None
+            if k_chunk_pass:
+                topk_start_tensor = to_cute_tensor(topk_starts[0], assumed_align=4)
+                dq_accum_tensor = to_cute_tensor(dq_accum)
+            compile_cache[compile_key] = cute.compile(
+                ffa_bwd_obj,
+                q_tensor,
+                k_tensor,
+                v_tensor,
+                do_tensor,
+                lse_log2_tensor,
+                dpsum_tensor,
+                dq_tensor,
+                dk_accum_tensor,
+                dv_accum_tensor,
+                softmax_scale,
+                q_ranges_tensor,
+                indices_tensor,
+                topk_len_tensor,
+                topk_start_tensor,
+                dq_accum_tensor,
+                cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+                options="--enable-tvm-ffi",
+            )
+        compile_cache[compile_key](
+            q.detach(),
+            k.detach(),
+            v.detach(),
+            dout,
+            lse_log2,
+            dpsum,
+            dq,
+            dk_accum,
+            dv_accum,
             softmax_scale,
-            q_ranges_tensor,
-            indices_tensor,
-            topk_len_tensor,
-            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-            options="--enable-tvm-ffi",
+            q_ranges,
+            indices,
+            topk_lens[k_pass],
+            topk_starts[k_pass] if k_chunk_pass else None,
+            dq_accum,
         )
-    compile_cache[compile_key](
-        q.detach(),
-        k.detach(),
-        v.detach(),
-        dout,
-        lse_log2,
-        dpsum,
-        dq,
-        dk_accum,
-        dv_accum,
-        softmax_scale,
-        q_ranges,
-        index_sparse_indices,
-        topk_len,
-    )
 
-    # --- Postprocess: fp32 dK/dV accumulators -> dk/dv ---
+    # --- Postprocess: fp32 dQ (multi-pass) / dK / dV accumulators -> dq / dk / dv ---
 
-    # softmax_scale is already folded into dS, so dK needs no extra scale.
+    # softmax_scale is already folded into dS, so dQ / dK need no extra scale.
+    if k_chunk_pass:
+        assert dq_accum is not None
+        dq.copy_(dq_accum[:total_q])
     bwd_postprocess_rowmajor(dk_accum, dk, k_ranges, total_k, 1.0)
     bwd_postprocess_rowmajor(dv_accum, dv, k_ranges, total_k, 1.0)
 

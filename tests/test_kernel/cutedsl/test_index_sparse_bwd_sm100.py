@@ -40,9 +40,9 @@ Structure:
   TestIndexSparseBwdSm100Harness            — the adapter's multi-kv-head refold, q-head groups
                                               whose q blocks straddle the 128-row Q tile, q
                                               blocks of several tokens (sm90 q_block_size > 1),
-                                              both V gather handoffs (gather_v_async) and their
-                                              default, and that the comparison rejects wrong
-                                              gradients
+                                              both V gather handoffs (gather_v_async), K-chunked
+                                              passes (num_k_passes), their defaults, and that the
+                                              comparison rejects wrong gradients
 
 Not ported from the sm90 test:
   - inner_dir / inner_load_mode / inner_store_mode / swap_bwd_qk_loop: sm90
@@ -70,7 +70,10 @@ import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.kernel.cutedsl.ffa_bwd_sm100_index import gather_v_async_default
+from magi_attention.kernel.cutedsl.ffa_bwd_sm100_index import (
+    gather_v_async_default,
+    num_k_passes_default,
+)
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import assert_close
 from magi_attention.utils import set_random_seed
@@ -620,6 +623,78 @@ class TestIndexSparseBwdSm100Harness(unittest.TestCase):
         # kv heads add up
         self.assertTrue(gather_v_async_default(32768, 2, 128, 2, l2_bytes))
         self.assertFalse(gather_v_async_default(262144, 2, 128, 2, l2_bytes))
+
+    def test_k_chunked_passes_match_reference(self):
+        """Splitting K into passes sums dQ across them in fp32 and keeps dK/dV exact.
+
+        Pass counts that leave whole and ragged chunks, rows whose ids miss some
+        chunks (topk 128 of 256 tokens in 3 chunks), several q blocks per Q tile,
+        -1 padded rows and two kv heads kept apart.
+        """
+        configs = {
+            "mqa128": {"B": 1, "S": 256, "NHQ": 128, "NHK": 1, "D": 128, "topk": 128},
+            "mqa4_segments": {
+                "B": 1,
+                "S": 256,
+                "NHQ": 4,
+                "NHK": 1,
+                "D": 128,
+                "topk": 128,
+            },
+            "mqa128_ragged": {
+                "B": 2,
+                "S_q": 256,
+                "S_kv": 1000,
+                "NHQ": 128,
+                "NHK": 1,
+                "D": 128,
+                "topk": [64, 200],
+                "max_topk": 256,
+            },
+            "gqa_two_kv_heads": {
+                "B": 1,
+                "S": 256,
+                "NHQ": 8,
+                "NHK": 2,
+                "D": 128,
+                "topk": 128,
+                "keep_kv_heads": True,
+            },
+        }
+        for num_k_passes in (2, 3):
+            for name, config in configs.items():
+                with self.subTest(num_k_passes=num_k_passes, config=name):
+                    _run_index_sparse_config(
+                        self.device,
+                        config,
+                        bwd_fn=partial(
+                            ffa_bwd_sm100_index_sm90_layout, num_k_passes=num_k_passes
+                        ),
+                    )
+
+    def test_num_k_passes_default_follows_l2_footprint_and_topk(self):
+        """Passes start past 2x L2, aim at 0.8x L2 chunks, and need 256 ids per row and pass."""
+        l2_bytes = 126 * 2**20
+        # bf16 K/V rows + fp32 dK/dV rows at head_dim 128: 1.5 KiB per (token, kv head)
+        row_bytes = 128 * (2 * 2 + 2 * 4)
+        two_l2_rows = 2 * l2_bytes // row_bytes
+        self.assertEqual(
+            num_k_passes_default(two_l2_rows, 1, 128, 2, 2048, l2_bytes), 1
+        )
+        self.assertEqual(
+            num_k_passes_default(two_l2_rows + 1, 1, 128, 2, 2048, l2_bytes), 3
+        )
+        # one kv head: 128k tokens stay single pass, 256k / 512k take 4 / 8 passes
+        self.assertEqual(num_k_passes_default(131072, 1, 128, 2, 2048, l2_bytes), 1)
+        self.assertEqual(num_k_passes_default(262144, 1, 128, 2, 2048, l2_bytes), 4)
+        self.assertEqual(num_k_passes_default(524288, 1, 128, 2, 2048, l2_bytes), 8)
+        # kv heads add up
+        self.assertEqual(num_k_passes_default(262144, 2, 128, 2, 4096, l2_bytes), 8)
+        # fewer than 256 ids per row and pass: the passes would not pay off
+        self.assertEqual(num_k_passes_default(524288, 1, 128, 2, 1024, l2_bytes), 1)
+        self.assertEqual(num_k_passes_default(262144, 1, 128, 2, 1024, l2_bytes), 4)
+        # at most 16 passes
+        self.assertEqual(num_k_passes_default(2**21, 1, 128, 2, 8192, l2_bytes), 16)
 
     def test_comparison_rejects_dk_on_wrong_rows(self):
         """A PASS must mean something: dK scattered one K row off has to fail."""
