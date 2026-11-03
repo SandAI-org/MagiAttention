@@ -60,13 +60,13 @@ import torch
 from cutlass import Boolean, Float32, Int32, Int64, Uint32, const_expr
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
-from cutlass.utils import SmemAllocator
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.utils.dtype import to_cute_dtype
 
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import to_cute_tensor
+from .dsl_compat import SmemAllocator
 from .ffa_utils import maybe_contiguous
 
 LN2 = math.log(2.0)

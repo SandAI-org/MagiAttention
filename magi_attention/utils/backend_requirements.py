@@ -24,7 +24,7 @@ from packaging.version import Version
 
 # Must equal the nvidia-cutlass-dsl and quack-kernels lines of requirements.txt.
 CUTEDSL_DSL_REQUIREMENT = Requirement(
-    "nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.0,!=4.6.0,!=4.6.1"
+    "nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.1,!=4.6.0,!=4.6.1"
 )
 CUTEDSL_QUACK_REQUIREMENT = Requirement("quack-kernels>=0.4.1,<=0.6.5")
 CUTEDSL_LIBS_BASE_DISTRIBUTION = "nvidia-cutlass-dsl-libs-base"
@@ -33,7 +33,7 @@ CUTEDSL_LIBS_BASE_DISTRIBUTION = "nvidia-cutlass-dsl-libs-base"
 CUTEDSL_PAIRS: tuple[tuple[SpecifierSet, SpecifierSet], ...] = (
     (SpecifierSet("==4.4.2"), SpecifierSet("==0.4.1")),
     (SpecifierSet("==4.6.2"), SpecifierSet("==0.6.4")),
-    (SpecifierSet(">=4.7.0,<=4.8.0"), SpecifierSet("==0.6.5")),
+    (SpecifierSet(">=4.7.0,<=4.8.1"), SpecifierSet("==0.6.5")),
 )
 
 # flash_attn_cute uses cute.core.ThrMma and cute.make_fragment, removed in

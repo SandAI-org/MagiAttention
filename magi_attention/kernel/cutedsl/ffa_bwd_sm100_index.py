@@ -68,7 +68,7 @@ import torch
 from cutlass import Float32, Int32, Int64, const_expr, pipeline
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
-from cutlass.utils import ClcDynamicPersistentTileScheduler, LayoutEnum
+from cutlass.utils import ClcDynamicPersistentTileScheduler
 
 # isort: split
 from quack import copy_utils, layout_utils
@@ -83,6 +83,12 @@ from . import pipeline as ffa_pipeline
 from . import sm100_utils
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import ThreadCooperativeGroup, to_cute_tensor
+from .dsl_compat import (
+    LayoutEnum,
+    SmemAllocator,
+    Tcgen05OperandMajorMode,
+    TmemAllocator,
+)
 from .ffa_bwd_postprocess import bwd_postprocess_rowmajor
 from .ffa_bwd_preprocess import bwd_preprocess
 from .ffa_utils import maybe_contiguous
@@ -323,8 +329,8 @@ class FFABwdSm100Index:
         # A = Q read from tQ (TMEM copy of sQ), B = K read from sK
         tiled_mma_S = sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.K,
+            Tcgen05OperandMajorMode.K,
+            Tcgen05OperandMajorMode.K,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_qk[:2],
@@ -335,8 +341,8 @@ class FFABwdSm100Index:
         # A = dO read from tdO (TMEM copy of sdO), B = V read from sV
         tiled_mma_dP = sm100_utils_basic.make_trivial_tiled_mma(
             self.do_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.K,
+            Tcgen05OperandMajorMode.K,
+            Tcgen05OperandMajorMode.K,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_dov[:2],
@@ -347,8 +353,8 @@ class FFABwdSm100Index:
         # A = dO.T (HD, Q) read from sdO, B = P (K, Q) read from sP, both MN-major
         tiled_mma_dV = sm100_utils_basic.make_trivial_tiled_mma(
             self.do_dtype,
-            tcgen05.OperandMajorMode.MN,
-            tcgen05.OperandMajorMode.MN,
+            Tcgen05OperandMajorMode.MN,
+            Tcgen05OperandMajorMode.MN,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_dop[:2],
@@ -358,8 +364,8 @@ class FFABwdSm100Index:
         # A = Q.T (HD, Q) read from sQ, B = dS (K, Q) read from sdS, both MN-major
         tiled_mma_dK = sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype,
-            tcgen05.OperandMajorMode.MN,
-            tcgen05.OperandMajorMode.MN,
+            Tcgen05OperandMajorMode.MN,
+            Tcgen05OperandMajorMode.MN,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_qds[:2],
@@ -369,8 +375,8 @@ class FFABwdSm100Index:
         # A = dS (Q, K) K-major, B = K (HD, K) MN-major read from sK
         tiled_mma_dQ = sm100_utils_basic.make_trivial_tiled_mma(
             self.k_dtype,
-            tcgen05.OperandMajorMode.K,
-            tcgen05.OperandMajorMode.MN,
+            Tcgen05OperandMajorMode.K,
+            Tcgen05OperandMajorMode.MN,
             self.acc_dtype,
             self.cta_group,
             self.mma_tiler_dsk[:2],
@@ -879,7 +885,7 @@ class FFABwdSm100Index:
 
         # --- Alloc smem storage and fetch ptrs ---
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         storage = smem.allocate(self.shared_storage)
 
         # --- Alloc tmem alloc/dealloc barrier ---
@@ -899,7 +905,7 @@ class FFABwdSm100Index:
                 )
             ),
         )
-        tmem = cutlass.utils.TmemAllocator(
+        tmem = TmemAllocator(
             alloc_result_dst_smem_ptr=storage.tmem_holding_buf_ptr,
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,
@@ -2122,7 +2128,7 @@ class FFABwdSm100Index:
         self,
         thr_mma: cute.ThrMma,
         tiled_t2r: cute.TiledCopy,
-        thr_t2r: cute.core.ThrCopy,
+        thr_t2r: cute.ThrCopy,
         sEpi: cute.Tensor,
         mma_tile_mn: cute.Tile,
         dtype: cutlass.Constexpr,

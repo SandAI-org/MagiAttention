@@ -68,11 +68,9 @@ import torch
 from cutlass import Boolean, Float32, Int32, Int64, Uint32, const_expr, pipeline
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, nvvm
-from cutlass.base_dsl.arch import Arch
 from cutlass.cute.nvgpu import cpasync, tcgen05
-from cutlass.cutlass_dsl import BaseDSL, T, dsl_user_op
+from cutlass.cutlass_dsl import Arch, BaseDSL, T, dsl_user_op
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
-from cutlass.utils import LayoutEnum, SmemAllocator, TmemAllocator
 
 # isort: split
 from quack import copy_utils, layout_utils
@@ -86,6 +84,12 @@ from . import pipeline as ffa_pipeline
 from . import sm100_utils
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import ThreadCooperativeGroup, to_cute_tensor
+from .dsl_compat import (
+    LayoutEnum,
+    SmemAllocator,
+    Tcgen05OperandMajorMode,
+    TmemAllocator,
+)
 from .ffa_utils import maybe_contiguous
 from .mask import mask_r2p_lambda
 from .named_barrier import NamedBarrierFwdSm100
@@ -529,13 +533,13 @@ class FFAFwdSm100Index:
             raise TypeError(f"Type mismatch: {self.q_dtype} != {self.v_dtype}")
         self._setup_attributes()
 
-        q_major_mode = tcgen05.OperandMajorMode.K
-        k_major_mode = tcgen05.OperandMajorMode.K
-        v_major_mode = tcgen05.OperandMajorMode.MN
+        q_major_mode = Tcgen05OperandMajorMode.K
+        k_major_mode = Tcgen05OperandMajorMode.K
+        v_major_mode = Tcgen05OperandMajorMode.MN
         self.o_layout = LayoutEnum.from_tensor(mO)
         # the intermediate tensor p is from tmem & mK-major
         p_source = tcgen05.OperandSource.TMEM
-        p_major_mode = tcgen05.OperandMajorMode.K
+        p_major_mode = Tcgen05OperandMajorMode.K
         tiled_mma_qk = sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype,
             q_major_mode,
@@ -2545,7 +2549,7 @@ def ffa_fwd_sm100_index(
             None,  # topk_len: the padding -1 marks the unused slots
             cutlass.Int32(num_heads_kv),
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-            options="--enable-tvm-ffi",
+            options="--enable-tvm-ffi --ptxas-options=--opt-level=2",
         )
     compile_cache[compile_key](
         q.detach(),

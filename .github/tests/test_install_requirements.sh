@@ -40,7 +40,7 @@ output="$workspace/output.log"
 
 printf '%s\n' \
     'torch' \
-    'nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.0,!=4.6.0,!=4.6.1  # the DSL' \
+    'nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.1,!=4.6.0,!=4.6.1  # the DSL' \
     'quack-kernels>=0.4.1,<=0.6.5' \
     > "$workspace/project/requirements.txt"
 printf '%s\n' \
@@ -143,24 +143,24 @@ project="$workspace/project"
 index=https://pypi.tuna.tsinghua.edu.cn/simple/
 
 # Without PIP_CONSTRAINT, only the pair is upgraded, and both upper bounds are required.
-installed 4.8.0 0.6.5
+installed 4.8.1 0.6.5
 run_install 0 "$project"
-expect_output "Expected CuTeDSL pair: nvidia-cutlass-dsl==4.8.0, quack-kernels==0.6.5"
-expect_output "Installed CuTeDSL pair: nvidia-cutlass-dsl==4.8.0, quack-kernels==0.6.5"
-expect_line "$pip_log" "pip install --upgrade nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.0,!=4.6.0,!=4.6.1 quack-kernels>=0.4.1,<=0.6.5 --index-url $index"
+expect_output "Expected CuTeDSL pair: nvidia-cutlass-dsl==4.8.1, quack-kernels==0.6.5"
+expect_output "Installed CuTeDSL pair: nvidia-cutlass-dsl==4.8.1, quack-kernels==0.6.5"
+expect_line "$pip_log" "pip install --upgrade nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.1,!=4.6.0,!=4.6.1 quack-kernels>=0.4.1,<=0.6.5 --index-url $index"
 
 installed 4.7.0 0.6.5
 run_install 1 "$project"
-expect_output "  nvidia-cutlass-dsl: expected 4.8.0, installed 4.7.0"
+expect_output "  nvidia-cutlass-dsl: expected 4.8.1, installed 4.7.0"
 
 # Constraints on unrelated packages must still allow the pair upgrade.
 installed 4.7.0 0.6.5
-upgraded 4.8.0 0.6.5
+upgraded 4.8.1 0.6.5
 run_install 0 "$project" PIP_CONSTRAINT="$image_constraint" FAKE_PIP_UPGRADED_SITE="$upgraded_site"
 expect_output "CuTeDSL pair source: upgrade"
-expect_output "Expected CuTeDSL pair: nvidia-cutlass-dsl==4.8.0, quack-kernels==0.6.5"
-expect_output "Installed CuTeDSL pair: nvidia-cutlass-dsl==4.8.0, quack-kernels==0.6.5"
-expect_line "$pip_log" "pip install --upgrade nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.0,!=4.6.0,!=4.6.1 quack-kernels>=0.4.1,<=0.6.5 --index-url $index"
+expect_output "Expected CuTeDSL pair: nvidia-cutlass-dsl==4.8.1, quack-kernels==0.6.5"
+expect_output "Installed CuTeDSL pair: nvidia-cutlass-dsl==4.8.1, quack-kernels==0.6.5"
+expect_line "$pip_log" "pip install --upgrade nvidia-cutlass-dsl[cu13]>=4.4.2,<=4.8.1,!=4.6.0,!=4.6.1 quack-kernels>=0.4.1,<=0.6.5 --index-url $index"
 
 # A pair pin selects constraint mode.
 installed 4.4.2 0.4.1
@@ -171,7 +171,7 @@ expect_no_upgrade
 
 # A pair pin in any PIP_CONSTRAINT file selects constraint mode.
 installed 4.4.2 0.4.1
-upgraded 4.8.0 0.6.5
+upgraded 4.8.1 0.6.5
 run_install 0 "$project" PIP_CONSTRAINT="$image_constraint $pair_constraint" \
     FAKE_PIP_UPGRADED_SITE="$upgraded_site"
 expect_output "CuTeDSL pair source: constraint"

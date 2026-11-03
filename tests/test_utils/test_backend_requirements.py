@@ -57,7 +57,7 @@ CI_CONSTRAINTS_TXT = REPO_ROOT / ".github" / "configs" / "ci_constraints.txt"
 # Keep child imports tied to the package under test.
 PACKAGE_PARENT = Path(magi_attention.__file__).resolve().parents[1]
 EXPECTED_UPGRADE_COMMAND = (
-    'pip install --upgrade "nvidia-cutlass-dsl[cu13]<=4.8.0" "quack-kernels<=0.6.5"'
+    'pip install --upgrade "nvidia-cutlass-dsl[cu13]<=4.8.1" "quack-kernels<=0.6.5"'
 )
 _MATCH_DSL = object()
 
@@ -171,7 +171,7 @@ class TestBackendRequirements(TestCase):
 
         assert CUTEDSL_UPGRADE_COMMAND == EXPECTED_UPGRADE_COMMAND
         newest_dsl_spec, newest_quack_spec = CUTEDSL_PAIRS[-1]
-        assert newest_dsl_spec.contains("4.8.0")
+        assert newest_dsl_spec.contains("4.8.1")
         assert newest_quack_spec.contains("0.6.5")
 
         tested_dsl, tested_quack = FA4_TESTED_PAIR
@@ -201,7 +201,7 @@ class TestBackendRequirements(TestCase):
             ("4.8.0", "0.4.1"),
             ("4.5.0", "0.6.5"),
             ("4.6.0", "0.6.4"),
-            ("4.8.1", "0.6.5"),
+            ("4.8.2", "0.6.5"),
             # Individually supported releases can form an unsupported pair.
             ("4.6.2", "0.6.5"),
             ("4.7.0", "0.6.4"),
@@ -227,6 +227,7 @@ class TestBackendRequirements(TestCase):
     @parameterize(
         "installed",
         [
+            ("4.8.1", "0.6.5"),
             ("4.8.0", "0.6.5"),
             ("4.7.0", "0.6.5"),
             ("4.4.2", "0.4.1"),
