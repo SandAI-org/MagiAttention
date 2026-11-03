@@ -96,13 +96,14 @@ def ffa_bwd_sm100_index_sm90_layout(
     sparse_k_block_size: int = 1,
     softmax_scale: float | None = None,
     gather_v_async: bool | None = None,
+    num_k_passes: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """IndexSparse backward with sm90 tensors, run by ``ffa_bwd_sm100_index``.
 
     ``q_block_size`` is the sm90 one: q tokens per index row. Assumes valid ids
     precede the -1 padding in every index row (both sm90 index builders produce
-    that). ``gather_v_async`` is forwarded as is. Returns (dq, dk, dv) in the
-    sm90 layout.
+    that). ``gather_v_async`` and ``num_k_passes`` are forwarded as is.
+    Returns (dq, dk, dv) in the sm90 layout.
 
     Raises:
         Sm100IndexUnsupportedError: the call needs an ``Sm100IndexGap``.
@@ -152,6 +153,7 @@ def ffa_bwd_sm100_index_sm90_layout(
         softmax_scale=softmax_scale,
         q_block_size=q_block_size * group,
         gather_v_async=gather_v_async,
+        num_k_passes=num_k_passes,
     )
     return unfold(dq), dk, dv
 
