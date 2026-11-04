@@ -632,7 +632,7 @@ class FFAFwdSm120Index:
         ).launch(
             grid=grid,
             block=[self.threads_per_cta, 1, 1],
-            smem=SharedStorage.size_in_bytes(),
+            smem=self.shared_storage.size_in_bytes(),  # type: ignore[attr-defined]
             stream=stream,
             min_blocks_per_mp=1,
         )
@@ -839,7 +839,7 @@ class FFAFwdSm120Index:
                             mO,
                             mLSE,
                             mWorkspace,
-                            frags[1],
+                            frags[1],  # type: ignore[index]
                             pend,
                             n_kv,
                             nheads_kv,
@@ -855,7 +855,7 @@ class FFAFwdSm120Index:
             topk_eff = topk
             if const_expr(mTopkLen is not None):
                 topk_eff = cutlass.min(
-                    cutlass.max(mTopkLen[m_block, head_kv], Int32(0)), topk
+                    cutlass.max(mTopkLen[m_block, head_kv], Int32(0)), topk  # type: ignore[index]
                 )
             n_kv_eff = (topk_eff + (self.tile_n - 1)) // self.tile_n
             if const_expr(is_load):
@@ -1497,13 +1497,13 @@ class FFAFwdSm120Index:
         return m_new, l_old * alpha + row_sum
 
     @cute.jit
-    def finalize_row(self, l: Float32, m: Float32, scale_log2: Float32):
-        """Quad-reduce the row sum; return (1 / l or 0, log2-domain LSE or -inf)."""
-        l = l + shfl_bfly_f32(l, 1)
-        l = l + shfl_bfly_f32(l, 2)
-        has = l > Float32(0.0)
-        inv = cute.arch.rcp_approx(l) if has else Float32(0.0)
-        lse2 = m * scale_log2 + lg2_approx(l) if has else Float32(-math.inf)
+    def finalize_row(self, row_sum: Float32, m: Float32, scale_log2: Float32):
+        """Quad-reduce the row sum; return (1 / row_sum or 0, log2-domain LSE or -inf)."""
+        row_sum = row_sum + shfl_bfly_f32(row_sum, 1)
+        row_sum = row_sum + shfl_bfly_f32(row_sum, 2)
+        has = row_sum > Float32(0.0)
+        inv = cute.arch.rcp_approx(row_sum) if has else Float32(0.0)
+        lse2 = m * scale_log2 + lg2_approx(row_sum) if has else Float32(-math.inf)
         return inv, lse2
 
     @cute.jit

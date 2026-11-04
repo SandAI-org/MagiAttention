@@ -42,6 +42,7 @@ the case with no wasted MMA rows.
 """
 
 import math
+from collections.abc import Sequence
 from enum import Enum
 
 import torch
@@ -79,9 +80,13 @@ class Sm100IndexGap(Enum):
 
 
 class Sm100IndexUnsupportedError(NotImplementedError):
-    """Raised before any launch when the sm90 inputs need an ``Sm100IndexGap``."""
+    """Raised before any launch when the sm90 inputs need a kernel gap member.
 
-    def __init__(self, gaps: list[Sm100IndexGap]):
+    ``gaps`` holds ``Sm100IndexGap`` members, or the gap members of an architecture
+    whose error derives from this one so the shared case runner reports it as GAP.
+    """
+
+    def __init__(self, gaps: Sequence[Enum]):
         self.gaps = tuple(gaps)
         super().__init__("; ".join(f"{g.name}: {g.value}" for g in self.gaps))
 
