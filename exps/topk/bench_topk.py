@@ -296,7 +296,7 @@ def _run_batch_test(
     # pretty-print one table per backend
     k_labels = [f"k={k}" for k in k_list]
     col_w = max(18, max(len(lab) for lab in k_labels) + 2)
-    header = f"{'n \\\\ k':<16}" + "".join(lab.rjust(col_w) for lab in k_labels)
+    header = "n \\\\ k".ljust(16) + "".join(lab.rjust(col_w) for lab in k_labels)
 
     for b in backends:
         print(f"\n{'=' * 70}")
