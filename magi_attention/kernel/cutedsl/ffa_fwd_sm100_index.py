@@ -90,7 +90,7 @@ from .dsl_compat import (
     Tcgen05OperandMajorMode,
     TmemAllocator,
 )
-from .ffa_utils import maybe_contiguous
+from .ffa_utils import aligned_rows, maybe_contiguous
 from .mask import mask_r2p_lambda
 from .named_barrier import NamedBarrierFwdSm100
 from .pack_gqa import pack_gqa_layout
@@ -125,7 +125,7 @@ class _RegisterSplit:
 # SM103: no emulation; warpgroup 3 gets more so the unrolled gather loop does not spill.
 _TUNING_CONFIG = {
     True: _RegisterSplit(184, 88, 56),
-    False: _RegisterSplit(168, 72, 96),
+    False: _RegisterSplit(176, 64, 96),
 }
 
 
@@ -2500,10 +2500,14 @@ def ffa_fwd_sm100_index(
     assert total_k * num_heads_kv < 2**31, "total_k * num_heads_kv must fit in int32"
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
+    # Positive scaling preserves score ordering for online softmax.
+    assert (
+        math.isfinite(softmax_scale) and softmax_scale > 0
+    ), f"softmax_scale must be finite and positive, got {softmax_scale}"
 
-    q, k, v, index_sparse_indices = [
-        maybe_contiguous(t) for t in (q, k, v, index_sparse_indices)
-    ]
+    q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
+    # Index vector loads require 16 B row alignment.
+    index_sparse_indices = aligned_rows(index_sparse_indices)
     if out is None:
         out = torch.empty_like(q)
     if lse is None:

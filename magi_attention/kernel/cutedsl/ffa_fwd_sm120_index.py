@@ -67,7 +67,7 @@ from magi_attention.utils.dtype import to_cute_dtype
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import to_cute_tensor
 from .dsl_compat import SmemAllocator
-from .ffa_utils import maybe_contiguous
+from .ffa_utils import aligned_rows, maybe_contiguous
 
 LN2 = math.log(2.0)
 LOG2_E = math.log2(math.e)
@@ -1529,20 +1529,6 @@ class FFAFwdSm120Index:
 # =============================================================================
 # Python entry point
 # =============================================================================
-# Stream-K tile counters per (device, stream). Every launch leaves the counters it used at 0,
-# so the buffer is zeroed once at allocation instead of before every call.
-_stream_k_counters: dict[tuple[int, int], torch.Tensor] = {}
-
-
-def _stream_k_counter(num_tiles: int, device: torch.device) -> torch.Tensor:
-    key = (device.index, torch.cuda.current_stream(device).cuda_stream)
-    buf = _stream_k_counters.get(key)
-    if buf is None or buf.numel() < num_tiles:
-        buf = torch.zeros(num_tiles, dtype=torch.int32, device=device)
-        _stream_k_counters[key] = buf
-    return buf[:num_tiles]
-
-
 def ffa_fwd_sm120_index(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1619,10 +1605,14 @@ def ffa_fwd_sm120_index(
         topk_len = topk_len.contiguous()
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
+    # Positive scaling preserves score ordering for online softmax.
+    assert (
+        math.isfinite(softmax_scale) and softmax_scale > 0
+    ), f"softmax_scale must be finite and positive, got {softmax_scale}"
 
-    q, k, v, index_sparse_indices = [
-        maybe_contiguous(t) for t in (q, k, v, index_sparse_indices)
-    ]
+    q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
+    # Index vector loads require 16 B row alignment.
+    index_sparse_indices = aligned_rows(index_sparse_indices)
     assert q.is_contiguous() and k.is_contiguous() and v.is_contiguous()
     if out is None:
         out = torch.empty_like(q)
@@ -1653,7 +1643,10 @@ def ffa_fwd_sm120_index(
         workspace = torch.empty(
             num_ctas * 2 * piece_bytes, dtype=torch.uint8, device=q.device
         )
-        counter = _stream_k_counter(num_tiles, q.device)
+        # The counter belongs to this invocation, like the workspace it guards: a buffer shared
+        # across calls would let two concurrent launches (two CUDA graphs replayed on different
+        # streams, say) mix their completion counts while holding separate workspaces.
+        counter = torch.zeros(num_tiles, dtype=torch.int32, device=q.device)
     compile_key = (
         dtype,
         group,

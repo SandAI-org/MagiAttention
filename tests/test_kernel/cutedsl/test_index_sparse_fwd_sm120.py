@@ -28,7 +28,7 @@ Structure:
   TestIndexSparseFwdSm120Numerics           — kernel inputs the sm90 builder never makes
   TestIndexSparseFwdSm120StreamK            — the stream-K schedule: tiles split across two or
                                               many CTAs, the topk_len fallback and the
-                                              persistent tile counters
+                                              per-launch tile counters
 
 There is no SM120 index-sparse backward, so the SM100 end-to-end tests have
 no counterpart here.
@@ -46,7 +46,6 @@ from typing import Any
 import torch
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.kernel.cutedsl import ffa_fwd_sm120_index as sm120_index_module
 from magi_attention.kernel.cutedsl.cache_utils import JITCache
 from magi_attention.kernel.cutedsl.ffa_fwd_sm120_index import (
     FFAFwdSm120Index,
@@ -573,28 +572,20 @@ class TestIndexSparseFwdSm120StreamK(_Sm120IndexCheck):
         self._check(tq, 2048, 16, nhk, topk, torch.bfloat16, topk_len=topk_len)
         self.assertTrue(any(key[_KEY_STREAM_K] is False for key in _compile_keys()))
 
-    def test_repeated_calls_leave_counters_zeroed(self):
-        """The tile counters persist across calls: every launch must reset them."""
-        counters = sm120_index_module._stream_k_counters
+    def test_repeated_calls_agree(self):
+        """Each launch allocates its own counters, so results do not drift across calls."""
         first = self._check(4096, 4096, 8, 1, 2048, torch.bfloat16)
         for tq, topk in [(16, 4096), (1024, 256), (4096, 2048)]:
             self._check(tq, 4096, 8, 1, topk, torch.bfloat16)
-            torch.cuda.synchronize()
-            for buf in counters.values():
-                self.assertEqual(int(buf.count_nonzero()), 0)
         again = self._check(4096, 4096, 8, 1, 2048, torch.bfloat16)
         self.assertTrue(torch.equal(first[0], again[0]))
         self.assertTrue(torch.equal(first[1], again[1]))
 
-    def test_side_stream_gets_own_counters(self):
-        counters = sm120_index_module._stream_k_counters
+    def test_side_stream_results(self):
         self._check(4096, 4096, 8, 1, 2048, torch.bfloat16)
         side = torch.cuda.Stream()
         with torch.cuda.stream(side):
             self._check(4096, 4096, 8, 1, 2048, torch.bfloat16)
-            key = (torch.cuda.current_device(), side.cuda_stream)
-        self.assertIn(key, counters)
-        self.assertEqual(int(counters[key].count_nonzero()), 0)
 
 
 if __name__ == "__main__":
