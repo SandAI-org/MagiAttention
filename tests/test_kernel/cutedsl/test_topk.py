@@ -50,6 +50,10 @@ _shapes = [
     # number of CTA groups so each group loops over several rows.
     (2, 300000, 30000),
     (40, 300000, 3072),
+    # Row lengths that are not a multiple of the 16-byte vector width.
+    (3, 7, 3),
+    (2, 1001, 100),
+    (2, 300001, 3000),
 ]
 
 _dtypes = [torch.float32, torch.bfloat16]
@@ -108,6 +112,19 @@ def test_cutedsl_topk_ties(shape, dtype):
 
     indices = cutedsl_topk(x, k)
     assert torch.equal(indices, _lowest_index_topk_ref(x, k))
+
+
+@pytest.mark.parametrize("dtype", _dtypes)
+def test_cutedsl_topk_misaligned_base(dtype):
+    """A contiguous view that starts one element into its storage."""
+    batch, n, k = 4, 4096, 256
+
+    torch.manual_seed(42)
+    storage = torch.randn(batch * n + 1, dtype=dtype, device="cuda")
+    x = storage[1:].view(batch, n)
+    assert x.data_ptr() % 16
+
+    _verify_topk_indices(x, k, cutedsl_topk(x, k))
 
 
 def test_cutedsl_topk_rejects_sorted():

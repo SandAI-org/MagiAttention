@@ -1266,6 +1266,17 @@ def _cute_topk_indices(
         x_input = x2d.float().contiguous()
         align = 4
 
+    # The row loads are 16-byte vectors, so every row must start 16-byte
+    # aligned.  -inf pads never get selected: k <= n and ties keep the lowest
+    # indices, so any real element wins over a pad.
+    vec_elems = VEC_BF16 if is_bf16 else VEC_FP32
+    pad = (-n) % vec_elems
+    if pad:
+        x_input = torch.nn.functional.pad(x_input, (0, pad), value=float("-inf"))
+        n += pad
+    elif x_input.data_ptr() % 16:
+        x_input = x_input.clone()
+
     smem_cap = _compute_smem_cap(is_bf16)
     is_multi_cta = n > smem_cap
 
@@ -1281,7 +1292,6 @@ def _cute_topk_indices(
             )
 
         chunk_size = (n + ctas_per_group - 1) // ctas_per_group
-        vec_elems = VEC_BF16 if is_bf16 else VEC_FP32
         chunk_size = ((chunk_size + vec_elems - 1) // vec_elems) * vec_elems
         chunk_size = min(chunk_size, smem_cap)
 
