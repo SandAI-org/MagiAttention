@@ -11,12 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""DSA-specialized Triton backward for index-map sparse attention.
+"""Triton backward for DSA index-map sparse attention.
 
-Adapted from Ethan's MagiAttention DSA v4 backward.  It recomputes the
-probabilities from a saved LSE (natural log) and streams K/V rows by
-``index_map``, so any forward that produces ``out`` and ``lse`` (e.g. FFA
-IndexSparse) can be paired with it.
+Recomputes the probabilities from a saved LSE (natural log) and streams K/V
+rows by ``index_map``, so any forward that produces ``out`` and ``lse`` (e.g.
+FFA IndexSparse) can be paired with it.
 
 Layout:
     q / dout   [sq, nhq, hd]
@@ -53,7 +52,7 @@ def _autotune_configs():
     reset_to_zero=["DK_BUF_ptr", "DV_BUF_ptr"],
 )
 @triton.jit
-def _ffa_triton_bwd_kernel_v4(
+def _dsa_sparse_attn_bwd_kernel(
     Q_ptr,
     K_ptr,
     V_ptr,
@@ -254,7 +253,7 @@ def dsa_sparse_attn_bwd(
     dv_buf = torch.zeros_like(v_c, dtype=atomic_dtype)
 
     grid = (nhkv, sq, triton.cdiv(group_size, group_tile))
-    _ffa_triton_bwd_kernel_v4[grid](
+    _dsa_sparse_attn_bwd_kernel[grid](
         q_c,
         k_c,
         v_c,
