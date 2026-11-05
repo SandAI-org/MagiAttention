@@ -27,19 +27,9 @@ Layout:
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
-
-_ATOMIC_DTYPE = os.environ.get(
-    "DSA_FFA_TRITON_BWD_ATOMIC_DTYPE",
-    os.environ.get("DSA_BWD_V4_DTYPE", "bf16"),
-).strip()
-assert _ATOMIC_DTYPE in ("bf16", "fp32"), (
-    "DSA_FFA_TRITON_BWD_ATOMIC_DTYPE must be bf16 or fp32, " f"got {_ATOMIC_DTYPE}"
-)
 
 
 def _autotune_configs():
@@ -225,7 +215,7 @@ def dsa_sparse_attn_bwd(
     dlse: torch.Tensor | None,
     softmax_scale: float,
     group_tile: int | None = None,
-    use_bf16_atomic: bool | None = None,
+    use_bf16_atomic: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return ``(dq, dk, dv)``.  ``dlse`` (if given) is folded into ``delta``.
 
@@ -244,8 +234,6 @@ def dsa_sparse_attn_bwd(
         group_tile = group_size
     assert (group_tile & (group_tile - 1)) == 0 and 16 <= group_tile <= group_size
 
-    if use_bf16_atomic is None:
-        use_bf16_atomic = _ATOMIC_DTYPE == "bf16"
     atomic_dtype = torch.bfloat16 if use_bf16_atomic else torch.float32
 
     q_c = q.contiguous()
