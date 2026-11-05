@@ -39,14 +39,9 @@ Supports: float32, float16, bfloat16 inputs on CUDA.
 Public API
 ----------
 - ``cutedsl_topk(x, k, sorted=False, out_dtype=torch.int64)`` -> ``indices``
-- ``cutedsl_topk_available()`` -> ``bool``
-- ``cutedsl_topk_error()`` -> ``str | None``
 """
 
 from __future__ import annotations
-
-from functools import lru_cache
-from typing import Callable
 
 import cutlass
 import cutlass.cute as cute
@@ -1047,25 +1042,6 @@ def _cute_topk_indices(
 # ====================================================================
 
 
-@lru_cache(maxsize=1)
-def _load_cutedsl_topk() -> tuple[Callable | None, str | None]:
-    try:
-        _compile(False, False)
-        return _cute_topk_indices, None
-    except Exception as exc:
-        return None, f"{type(exc).__name__}: {exc}"
-
-
-def cutedsl_topk_available() -> bool:
-    fn, _ = _load_cutedsl_topk()
-    return fn is not None
-
-
-def cutedsl_topk_error() -> str | None:
-    _, error = _load_cutedsl_topk()
-    return error
-
-
 def cutedsl_topk(
     x: torch.Tensor,
     k: int,
@@ -1083,16 +1059,12 @@ def cutedsl_topk(
     if sorted:
         raise ValueError("cutedsl_topk does not support sorted=True")
 
-    fn, error = _load_cutedsl_topk()
-    if fn is None:
-        raise RuntimeError(f"cutedsl topk is not available: {error}")
-
     orig_shape = x.shape
     x2d = x.reshape(-1, orig_shape[-1]).contiguous()
     with nvtx.add_nvtx_event(
         f"DSA/cutedsl_topk rows={x2d.shape[0]} cols={x2d.shape[1]} k={k}"
     ):
-        indices = fn(x2d, k, sorted=False, out_dtype=out_dtype)
+        indices = _cute_topk_indices(x2d, k, sorted=False, out_dtype=out_dtype)
 
     out_shape = (*orig_shape[:-1], k)
     return indices.reshape(out_shape)

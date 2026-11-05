@@ -23,12 +23,11 @@ Run:
 """
 
 from itertools import product
-from unittest import skipUnless
 
 import torch
 from torch.testing._internal.common_utils import TestCase, run_tests
 
-from magi_attention.kernel.cutedsl.topk import cutedsl_topk, cutedsl_topk_available
+from magi_attention.kernel.cutedsl.topk import cutedsl_topk
 from magi_attention.testing import parameterize
 from magi_attention.testing.precision import assert_close, assert_equal
 
@@ -84,10 +83,6 @@ def _lowest_index_topk_ref(x: torch.Tensor, k: int) -> torch.Tensor:
     return selected.nonzero()[:, -1].view(*x.shape[:-1], k)
 
 
-@skipUnless(
-    cutedsl_topk_available(),
-    "cutedsl topk not available",
-)
 class TestCuteDSLTopK(TestCase):
     @parameterize("case", _cases)
     def test_cutedsl_topk(self, case):
