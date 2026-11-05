@@ -910,11 +910,13 @@ def _get_num_sms() -> int:
     ).multi_processor_count
 
 
+# The kernel relies on gstate being all-zero at launch and resets it on exit,
+# so a buffer may only be reused by launches serialized on the same stream.
 _gstate_cache: dict[tuple, torch.Tensor] = {}
 
 
 def _get_gstate(num_groups: int, device: torch.device) -> torch.Tensor:
-    key = (num_groups, device)
+    key = (device, torch.cuda.current_stream(device).cuda_stream)
     cached = _gstate_cache.get(key)
     if cached is not None and cached.shape[0] >= num_groups * GSTATE_SIZE:
         return cached
@@ -964,10 +966,8 @@ def _cute_topk_indices(
 
     if is_bf16:
         x_input = x2d.contiguous()
-        align = 2
     else:
         x_input = x2d.float().contiguous()
-        align = 4
 
     # The row loads are 16-byte vectors, so every row must start 16-byte
     # aligned.  -inf pads never get selected: k <= n and ties keep the lowest
@@ -1004,11 +1004,13 @@ def _cute_topk_indices(
 
         gstate = _get_gstate(num_groups, x.device)
 
+        # Pass torch tensors directly: tvm-ffi then launches on torch's
+        # current stream, while cute tensor wrappers fall back to the default.
         compiled = _compile(is_bf16, True)
         compiled(
-            cute.runtime.from_dlpack(x_input, assumed_align=align, enable_tvm_ffi=True),
-            cute.runtime.from_dlpack(out_indices, assumed_align=4, enable_tvm_ffi=True),
-            cute.runtime.from_dlpack(gstate, assumed_align=4, enable_tvm_ffi=True),
+            x_input,
+            out_indices,
+            gstate,
             k,
             chunk_size,
             ctas_per_group,
@@ -1019,9 +1021,9 @@ def _cute_topk_indices(
         dummy_state = _get_dummy_state(x.device)
         compiled = _compile(is_bf16, False)
         compiled(
-            cute.runtime.from_dlpack(x_input, assumed_align=align, enable_tvm_ffi=True),
-            cute.runtime.from_dlpack(out_indices, assumed_align=4, enable_tvm_ffi=True),
-            cute.runtime.from_dlpack(dummy_state, assumed_align=4, enable_tvm_ffi=True),
+            x_input,
+            out_indices,
+            dummy_state,
             k,
             0,
             0,

@@ -84,9 +84,8 @@ def _lowest_index_topk_ref(x: torch.Tensor, k: int) -> torch.Tensor:
     return selected.nonzero()[:, -1].view(*x.shape[:-1], k)
 
 
-@skipUnless(torch.cuda.is_available(), "CUDA required")
 @skipUnless(
-    torch.cuda.is_available() and cutedsl_topk_available(),
+    cutedsl_topk_available(),
     "cutedsl topk not available",
 )
 class TestCuteDSLTopK(TestCase):
@@ -142,6 +141,42 @@ class TestCuteDSLTopK(TestCase):
         self.assertTrue(x.data_ptr() % 16)
 
         _verify_topk_indices(x, k, cutedsl_topk(x, k))
+
+    @parameterize("dtype", _dtypes)
+    def test_cutedsl_topk_concurrent_streams(self, dtype):
+        """Multi-CTA launches overlapping on two streams must not share gstate."""
+        batch, n, k = 4, 300000, 3000
+        num_iters = 20
+
+        generator = torch.Generator(device="cuda").manual_seed(42)
+        inputs = [
+            torch.randn(batch, n, dtype=dtype, device="cuda", generator=generator)
+            for _ in range(2)
+        ]
+        refs = [_lowest_index_topk_ref(x, k) for x in inputs]
+        # JIT-compile before the timed window below.
+        cutedsl_topk(inputs[0], k)
+
+        main_stream = torch.cuda.current_stream()
+        streams = [torch.cuda.Stream() for _ in range(2)]
+        outputs: list[list[torch.Tensor]] = [[], []]
+        # Hold both streams until every launch is queued so the kernels overlap.
+        torch.cuda._sleep(100_000_000)
+        for s in streams:
+            s.wait_stream(main_stream)
+        for _ in range(num_iters):
+            for i, s in enumerate(streams):
+                with torch.cuda.stream(s):
+                    outputs[i].append(cutedsl_topk(inputs[i], k))
+        for s in streams:
+            main_stream.wait_stream(s)
+        torch.cuda.synchronize()
+
+        for i in range(2):
+            for out in outputs[i]:
+                assert_equal(
+                    out, refs[i], test_case=f"cutedsl_topk concurrent stream {i}"
+                )
 
     def test_cutedsl_topk_rejects_sorted(self):
         x = torch.randn(2, 1024, device="cuda")
