@@ -83,7 +83,7 @@ from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
 from . import sm100_utils
 from .cache_utils import get_jit_cache
-from .cutedsl_utils import ThreadCooperativeGroup, to_cute_tensor
+from .cutedsl_utils import ThreadCooperativeGroup, cp_async_16_zfill, to_cute_tensor
 from .dsl_compat import (
     LayoutEnum,
     SmemAllocator,
@@ -130,50 +130,8 @@ _TUNING_CONFIG = {
 
 
 # =============================================================================
-# Low-level bridges: zero-filling cp.async, opaque mov, barrier subsets
+# Low-level bridges: opaque mov, barrier subsets
 # =============================================================================
-@dsl_user_op
-def cp_async_16_zfill(
-    dst_smem_addr: cutlass.Int32,
-    src_gmem_addr: cutlass.Int64,
-    row_id: cutlass.Int32,
-    dst_imm_offset: int = 0,
-    *,
-    loc: Optional[ir.Location] = None,
-    ip: Optional[ir.InsertionPoint] = None,
-) -> None:
-    """Copy 16 B from global to shared memory at ``dst_smem_addr + dst_imm_offset``, or write
-    16 zero bytes when ``row_id < 0``.
-
-    ``row_id < 0`` sets the ``ignore-src`` predicate, so the source is not read and
-    ``src_gmem_addr`` may be unmapped. ``dst_imm_offset`` must be a Python int: it is emitted as
-    the instruction's immediate. Completion is tracked by the calling thread's ``cp.async``
-    groups. ``.cg`` keeps the gather out of L1, since each row is read once per use.
-
-    NOTE: an ``L2::cache_hint`` operand miscompiles under nvidia-cutlass-dsl 4.4.x on sm_103a
-    (uninitialized policy register).
-    """
-    assert isinstance(dst_imm_offset, int) and 0 <= dst_imm_offset < (
-        1 << 24
-    ), "immediate offset out of range"
-    llvm.inline_asm(
-        None,
-        [
-            cutlass.Int32(dst_smem_addr).ir_value(loc=loc, ip=ip),
-            cutlass.Int64(src_gmem_addr).ir_value(loc=loc, ip=ip),
-            cutlass.Int32(row_id).ir_value(loc=loc, ip=ip),
-        ],
-        "{\n\t.reg .pred p;\n\tsetp.lt.s32 p, $2, 0;\n\t"
-        f"cp.async.cg.shared.global [$0+{dst_imm_offset}], [$1], 16, p;\n}}",
-        "r,l,r",
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-
 @dsl_user_op
 def opaque_u32(
     value: cutlass.Uint32,

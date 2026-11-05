@@ -18,8 +18,7 @@
 
 """SM100 FFA backward for index-sparse (DSA) attention.
 
-Q tiles are the outer loop and gathered K tiles the inner loop, i.e. the
-inner-loop-K kernel with the contiguous K/V TMA replaced by a token gather.
+Q tiles are the outer loop and gathered K tiles the inner loop.
 
 Sparsity semantics:
 
@@ -76,7 +75,9 @@ from quack.cute_dsl_utils import ParamsBase
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.utils.dtype import to_cute_dtype
-from magi_attention.utils.sparse_utils import partition_index_sparse_rows_by_k_chunk
+from magi_attention.utils.index_sparse_utils import (
+    partition_index_sparse_rows_by_k_chunk,
+)
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline

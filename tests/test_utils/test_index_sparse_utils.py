@@ -17,7 +17,9 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.utils.sparse_utils import partition_index_sparse_rows_by_k_chunk
+from magi_attention.utils.index_sparse_utils import (
+    partition_index_sparse_rows_by_k_chunk,
+)
 
 
 def _partition_reference(

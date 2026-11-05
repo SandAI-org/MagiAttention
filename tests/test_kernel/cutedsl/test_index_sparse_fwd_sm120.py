@@ -23,8 +23,9 @@ sm90 forward tolerance, lse against the fp32 gather ``index_sparse_ref_fwd``.
 Structure:
   TestIndexSparseFwdSm120Sweep              — sm90 Classic sweep: q_seqlen × kv_seqlen × topk
   TestIndexSparseFwdSm120ComprehensiveSweep — sm90 Comprehensive sweep: head_config × head_dim × kbs
-  TestIndexSparseFwdSm120Harness            — the adapter, the all-valid path and that the
-                                              comparison rejects wrong outputs
+  TestIndexSparseFwdSm120Adapter            — the sm90 layout adapter: topk padding, the all-valid
+                                              path and gap reporting
+  TestIndexSparseFwdSm120Comparison         — the case runner rejects a shifted out or lse
   TestIndexSparseFwdSm120Numerics           — kernel inputs the sm90 builder never makes
   TestIndexSparseFwdSm120StreamK            — the stream-K schedule: tiles split across two or
                                               many CTAs, the topk_len fallback and the
@@ -54,14 +55,14 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm120_index import (
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.utils import set_random_seed
-from tests.test_attn.sparse_test_utils import SEED
-from tests.test_kernel.cutedsl.index_sparse_sm120_utils import (
+from magi_attention.utils.arch import is_sm12x
+from magi_attention.utils.index_sparse_utils import (
     Sm120IndexGap,
     Sm120IndexUnsupportedError,
     ffa_fwd_sm120_index_sm90_layout,
     index_sparse_ref_fwd,
-    is_sm120_family,
 )
+from tests.test_attn.sparse_test_utils import SEED
 from tests.test_kernel.cutedsl.test_index_sparse_bwd_sm100 import (
     FwdOutLse,
     _run_index_sparse_config,
@@ -91,7 +92,7 @@ def _compile_keys() -> list[tuple]:
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm120_family(), _NEEDS_SM120)
+@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
 class TestIndexSparseFwdSm120Sweep(DistTestBase):
     """sm90 Classic sweep: q_seqlen × kv_seqlen × topk, MQA128, D=128, kbs=1.
 
@@ -145,7 +146,7 @@ class TestIndexSparseFwdSm120Sweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm120_family(), _NEEDS_SM120)
+@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
 class TestIndexSparseFwdSm120ComprehensiveSweep(DistTestBase):
     """sm90 Comprehensive sweep: head_config × head_dim × kbs.
 
@@ -219,12 +220,14 @@ class TestIndexSparseFwdSm120ComprehensiveSweep(DistTestBase):
 
 
 # ═══════════════════════════════════════════════════════════
-# TestIndexSparseFwdSm120Harness — the adapter and the comparison
+# TestIndexSparseFwdSm120Adapter — the sm90 layout adapter
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm120_family(), _NEEDS_SM120)
-class TestIndexSparseFwdSm120Harness(unittest.TestCase):
+@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
+class TestIndexSparseFwdSm120Adapter(unittest.TestCase):
+    """``ffa_fwd_sm120_index_sm90_layout``: topk padding, the all-valid path and gap reporting."""
+
     @property
     def device(self):
         return torch.cuda.current_device()
@@ -276,6 +279,20 @@ class TestIndexSparseFwdSm120Harness(unittest.TestCase):
         with self.assertRaises(Sm120IndexUnsupportedError) as ctx:
             _run_fwd_config(self.device, config)
         self.assertEqual(ctx.exception.gaps, (Sm120IndexGap.Q_TILE_FILL,))
+
+
+# ═══════════════════════════════════════════════════════════
+# TestIndexSparseFwdSm120Comparison — the case runner rejects wrong outputs
+# ═══════════════════════════════════════════════════════════
+
+
+@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
+class TestIndexSparseFwdSm120Comparison(unittest.TestCase):
+    """A PASS of ``_run_index_sparse_config`` needs the right out and lse: shifted ones fail."""
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
 
     def test_comparison_rejects_out_on_wrong_head(self):
         """A PASS must mean something: out moved to the next q head has to fail."""
@@ -420,7 +437,7 @@ class _Sm120IndexCheck(unittest.TestCase):
         return out, lse
 
 
-@unittest.skipUnless(is_sm120_family(), _NEEDS_SM120)
+@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
 class TestIndexSparseFwdSm120Numerics(_Sm120IndexCheck):
     """The kernel's index contract beyond what the sm90 builder produces.
 
@@ -531,7 +548,7 @@ class TestIndexSparseFwdSm120Numerics(_Sm120IndexCheck):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm120_family(), _NEEDS_SM120)
+@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
 class TestIndexSparseFwdSm120StreamK(_Sm120IndexCheck):
     """Without ``topk_len`` one CTA per SM splits the (tile, KV block) units evenly.
 

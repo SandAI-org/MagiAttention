@@ -37,12 +37,12 @@ FAIL. GAP cases are printed and do not fail the run: SM100 still lacks
 Structure:
   TestIndexSparseBwdSm100Sweep              — sm90 Classic sweep: q_seqlen × kv_seqlen × topk
   TestIndexSparseBwdSm100ComprehensiveSweep — sm90 Comprehensive sweep: head_config × head_dim × kbs
-  TestIndexSparseBwdSm100Harness            — the adapter's multi-kv-head refold, q-head groups
+  TestIndexSparseBwdSm100Geometry           — the adapter's multi-kv-head refold, q-head groups
                                               whose q blocks straddle the 128-row Q tile, q
-                                              blocks of several tokens (sm90 q_block_size > 1),
-                                              both V gather handoffs (gather_v_async), K-chunked
-                                              passes (num_k_passes), their defaults, and that the
-                                              comparison rejects wrong gradients
+                                              blocks of several tokens (sm90 q_block_size > 1)
+  TestIndexSparseBwdSm100Options            — both V gather handoffs (gather_v_async), K-chunked
+                                              passes (num_k_passes) and their defaults
+  TestIndexSparseBwdSm100Comparison         — the case runner rejects a shifted dK
 
 Not ported from the sm90 test:
   - inner_dir / inner_load_mode / inner_store_mode / swap_bwd_qk_loop: sm90
@@ -77,6 +77,12 @@ from magi_attention.kernel.cutedsl.ffa_bwd_sm100_index import (
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import assert_close
 from magi_attention.utils import set_random_seed
+from magi_attention.utils.arch import is_sm10x
+from magi_attention.utils.index_sparse_utils import (
+    Sm100IndexUnsupportedError,
+    ffa_bwd_sm100_index_sm90_layout,
+    index_sparse_ref_fwd,
+)
 from magi_attention.utils.sparse_utils import (
     build_index_sparse_indices,
     get_sdpa_mask_from_index_sparse_indices,
@@ -90,11 +96,6 @@ from tests.test_attn.sparse_test_utils import (
     sdpa_ref_bwd_grads,
     sdpa_ref_output,
 )
-from tests.test_kernel.cutedsl.index_sparse_sm100_utils import (
-    Sm100IndexUnsupportedError,
-    ffa_bwd_sm100_index_sm90_layout,
-    index_sparse_ref_fwd,
-)
 
 BwdGrads = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 FwdOutLse = tuple[torch.Tensor, torch.Tensor]
@@ -102,10 +103,6 @@ FwdOutLse = tuple[torch.Tensor, torch.Tensor]
 # lse of a forward under test against the fp32 gather: both accumulate in fp32
 # from the same 16-bit inputs and differ only by the exp2 / log2 approximations.
 FWD_LSE_ATOL = 1e-3
-
-
-def _is_sm100_family() -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 10
 
 
 # ═══════════════════════════════════════════════════════════
@@ -362,7 +359,7 @@ def _run_sweep(
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(_is_sm100_family(), "ffa_bwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseBwdSm100Sweep(DistTestBase):
     """sm90 Classic sweep: q_seqlen × kv_seqlen × topk, MQA128, D=128, kbs=1."""
 
@@ -412,7 +409,7 @@ class TestIndexSparseBwdSm100Sweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(_is_sm100_family(), "ffa_bwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseBwdSm100ComprehensiveSweep(DistTestBase):
     """sm90 Comprehensive sweep: head_config × head_dim × kbs.
 
@@ -484,12 +481,14 @@ class TestIndexSparseBwdSm100ComprehensiveSweep(DistTestBase):
 
 
 # ═══════════════════════════════════════════════════════════
-# TestIndexSparseBwdSm100Harness — the harness itself
+# TestIndexSparseBwdSm100Geometry — q / kv head layouts the sweeps do not reach
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(_is_sm100_family(), "ffa_bwd_sm100_index needs an SM100 GPU")
-class TestIndexSparseBwdSm100Harness(unittest.TestCase):
+@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
+class TestIndexSparseBwdSm100Geometry(unittest.TestCase):
+    """The adapter's multi-kv-head refold and q blocks that do not fill one Q tile exactly."""
+
     @property
     def device(self):
         return torch.cuda.current_device()
@@ -556,6 +555,20 @@ class TestIndexSparseBwdSm100Harness(unittest.TestCase):
                     "keep_kv_heads": keep_kv_heads,
                 }
                 _run_index_sparse_config(self.device, config)
+
+
+# ═══════════════════════════════════════════════════════════
+# TestIndexSparseBwdSm100Options — gather_v_async and num_k_passes
+# ═══════════════════════════════════════════════════════════
+
+
+@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
+class TestIndexSparseBwdSm100Options(unittest.TestCase):
+    """``gather_v_async`` and ``num_k_passes``: each path against the reference, and their defaults."""
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
 
     def test_gather_v_async_both_paths_match_reference(self):
         """Both V gather handoffs are exact, whichever the footprint would pick.
@@ -695,6 +708,20 @@ class TestIndexSparseBwdSm100Harness(unittest.TestCase):
         self.assertEqual(num_k_passes_default(262144, 1, 128, 2, 1024, l2_bytes), 4)
         # at most 16 passes
         self.assertEqual(num_k_passes_default(2**21, 1, 128, 2, 8192, l2_bytes), 16)
+
+
+# ═══════════════════════════════════════════════════════════
+# TestIndexSparseBwdSm100Comparison — the case runner rejects wrong gradients
+# ═══════════════════════════════════════════════════════════
+
+
+@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
+class TestIndexSparseBwdSm100Comparison(unittest.TestCase):
+    """A PASS of ``_run_index_sparse_config`` needs the right gradients: a shifted dK fails."""
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
 
     def test_comparison_rejects_dk_on_wrong_rows(self):
         """A PASS must mean something: dK scattered one K row off has to fail."""

@@ -21,7 +21,7 @@ exactly as in ``exps/attn/sparse/run_index_sparse_comparison_benchmark.py``:
 per q block, ``topk`` sorted ``randint`` K ids (repeats allowed), and the same
 128x128 block mask for FlexAttention. The sm90 tensors reach the SM120 kernel
 through ``ffa_fwd_sm120_index_sm90_layout``, the adapter of
-``tests/test_kernel/cutedsl/index_sparse_sm120_utils.py``.
+``magi_attention/utils/index_sparse_utils.py``.
 
 Scenarios (``SCENARIOS``) are those of the SM100 bench: q_block_size > 1
 (``qbs`` consecutive q tokens share one index row) with ``qbs * nhq == 128``,
@@ -68,15 +68,15 @@ from magi_attention.benchmarking import (
     perf_report,
 )
 from magi_attention.utils import set_random_seed
-
-# isort: split
-from exps.attn.baselines.token_sparse_attn_triton import token_sparse_fwd
-from tests.test_kernel.cutedsl.index_sparse_sm120_utils import (
+from magi_attention.utils.index_sparse_utils import (
     Sm120IndexGap,
     ffa_fwd_sm120_index_sm90_layout,
     index_sparse_ref_fwd,
     sm120_index_fwd_gaps,
 )
+
+# isort: split
+from exps.attn.baselines.token_sparse_attn_triton import token_sparse_fwd
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 

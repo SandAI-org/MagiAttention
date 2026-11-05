@@ -51,472 +51,53 @@ Supported: BF16 / FP16, head_dim 128, ``G`` dividing 128, non-causal, SM 12.x.
 """
 
 import math
-from typing import Optional, Tuple
+from typing import Optional
 
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass import Boolean, Float32, Int32, Int64, Uint32, const_expr
-from cutlass._mlir.dialects import llvm
-from cutlass.cutlass_dsl import T, dsl_user_op
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.utils.dtype import to_cute_dtype
 
 from .cache_utils import get_jit_cache
-from .cutedsl_utils import to_cute_tensor
+from .cutedsl_utils import (
+    atom_add_gpu,
+    cp_async_16_zfill,
+    cp_async_mbar_arrive_noinc,
+    cp_async_wait_all,
+    cvt_pack,
+    fence_acq_rel_gpu,
+    fmax_f32,
+    ld_global_b32_pred,
+    ld_global_cg_v2_f32,
+    ld_global_cg_v4_f32,
+    ld_shared_b32,
+    ld_shared_v4,
+    ldsm_x4,
+    ldsm_x4_trans,
+    lg2_approx,
+    mbar_arrive,
+    mbar_init,
+    mbar_wait,
+    mma_16816,
+    opaque_i32,
+    shfl_bfly_f32,
+    st_global_b32_pred,
+    st_global_f32_pred,
+    st_global_v2_f32,
+    st_global_v4_f32,
+    st_shared_b32,
+    st_shared_v4,
+    to_cute_tensor,
+)
 from .dsl_compat import SmemAllocator
 from .ffa_utils import aligned_rows, maybe_contiguous
 
 LN2 = math.log(2.0)
 LOG2_E = math.log2(math.e)
-
-
-# =============================================================================
-# Inline PTX bridges
-# =============================================================================
-def _asm(ret_type, operands, text, constraints, side_effects, loc, ip):
-    return llvm.inline_asm(
-        ret_type,
-        operands,
-        text,
-        constraints,
-        has_side_effects=side_effects,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def mbar_init(addr: Int32, count: int, *, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        [Int32(addr).ir_value(loc=loc, ip=ip), Int32(count).ir_value(loc=loc, ip=ip)],
-        "mbarrier.init.shared::cta.b64 [$0], $1;",
-        "r,r",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def mbar_wait(addr: Int32, phase: Int32, *, loc=None, ip=None) -> None:
-    """Spin until the phase with parity ``phase`` of the mbarrier at ``addr`` has completed."""
-    _asm(
-        None,
-        [Int32(addr).ir_value(loc=loc, ip=ip), Int32(phase).ir_value(loc=loc, ip=ip)],
-        "{\n\t.reg .pred P1;\n\t"
-        "LAB_WAIT:\n\t"
-        "mbarrier.try_wait.parity.shared::cta.b64 P1, [$0], $1;\n\t"
-        "@P1 bra DONE;\n\t"
-        "bra LAB_WAIT;\n\t"
-        "DONE:\n\t}",
-        "r,r",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def mbar_arrive(addr: Int32, *, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        [Int32(addr).ir_value(loc=loc, ip=ip)],
-        "mbarrier.arrive.shared::cta.b64 _, [$0];",
-        "r",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def cp_async_mbar_arrive_noinc(addr: Int32, *, loc=None, ip=None) -> None:
-    """Arrive on the mbarrier once all prior cp.async of this thread have landed."""
-    _asm(
-        None,
-        [Int32(addr).ir_value(loc=loc, ip=ip)],
-        "cp.async.mbarrier.arrive.noinc.shared::cta.b64 [$0];",
-        "r",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def cp_async_wait_all(*, loc=None, ip=None) -> None:
-    _asm(None, [], "cp.async.wait_all;", "", True, loc, ip)
-
-
-@dsl_user_op
-def cp_async_16_zfill(
-    dst_smem_addr: Int32,
-    src_gmem_addr: Int64,
-    row_id: Int32,
-    dst_imm_offset: int = 0,
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """16 B global -> shared copy; writes zeros without reading the source when ``row_id < 0``."""
-    assert isinstance(dst_imm_offset, int) and 0 <= dst_imm_offset < (1 << 24)
-    _asm(
-        None,
-        [
-            Int32(dst_smem_addr).ir_value(loc=loc, ip=ip),
-            Int64(src_gmem_addr).ir_value(loc=loc, ip=ip),
-            Int32(row_id).ir_value(loc=loc, ip=ip),
-        ],
-        "{\n\t.reg .pred p;\n\tsetp.lt.s32 p, $2, 0;\n\t"
-        f"cp.async.cg.shared.global [$0+{dst_imm_offset}], [$1], 16, p;\n}}",
-        "r,l,r",
-        True,
-        loc,
-        ip,
-    )
-
-
-def _struct4(res, ty):
-    return tuple(llvm.extractvalue(ty, res, [i]) for i in range(4))
-
-
-@dsl_user_op
-def ldsm_x4(addr: Int32, imm: int = 0, *, loc=None, ip=None) -> Tuple[Int32, ...]:
-    res = _asm(
-        llvm.StructType.get_literal([T.i32()] * 4),
-        [Int32(addr).ir_value(loc=loc, ip=ip)],
-        f"ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{$0, $1, $2, $3}}, [$4+{imm}];",
-        "=r,=r,=r,=r,r",
-        False,
-        loc,
-        ip,
-    )
-    return tuple(Int32(v) for v in _struct4(res, T.i32()))
-
-
-@dsl_user_op
-def ldsm_x4_trans(addr: Int32, imm: int = 0, *, loc=None, ip=None) -> Tuple[Int32, ...]:
-    res = _asm(
-        llvm.StructType.get_literal([T.i32()] * 4),
-        [Int32(addr).ir_value(loc=loc, ip=ip)],
-        f"ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {{$0, $1, $2, $3}}, [$4+{imm}];",
-        "=r,=r,=r,=r,r",
-        False,
-        loc,
-        ip,
-    )
-    return tuple(Int32(v) for v in _struct4(res, T.i32()))
-
-
-@dsl_user_op
-def mma_16816(
-    ab_type: str,
-    a: Tuple[Int32, Int32, Int32, Int32],
-    b0: Int32,
-    b1: Int32,
-    c: Tuple[Float32, Float32, Float32, Float32],
-    *,
-    loc=None,
-    ip=None,
-) -> Tuple[Float32, ...]:
-    """``mma.sync.aligned.m16n8k16.row.col.f32.{ab}.{ab}.f32``."""
-    res = _asm(
-        llvm.StructType.get_literal([T.f32()] * 4),
-        [Int32(x).ir_value(loc=loc, ip=ip) for x in (*a, b0, b1)]
-        + [Float32(x).ir_value(loc=loc, ip=ip) for x in c],
-        f"mma.sync.aligned.m16n8k16.row.col.f32.{ab_type}.{ab_type}.f32 "
-        "{$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, $9}, {$10, $11, $12, $13};",
-        "=f,=f,=f,=f,r,r,r,r,r,r,0,1,2,3",
-        False,
-        loc,
-        ip,
-    )
-    return tuple(Float32(v) for v in _struct4(res, T.f32()))
-
-
-@dsl_user_op
-def cvt_pack(ab_type: str, lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int32:
-    """Two f32 -> one packed 16-bit pair, ``lo`` in the low half."""
-    return Int32(
-        _asm(
-            T.i32(),
-            [
-                Float32(hi).ir_value(loc=loc, ip=ip),
-                Float32(lo).ir_value(loc=loc, ip=ip),
-            ],
-            f"cvt.rn.{ab_type}x2.f32 $0, $1, $2;",
-            "=r,f,f",
-            False,
-            loc,
-            ip,
-        )
-    )
-
-
-@dsl_user_op
-def ld_global_b32_pred(addr: Int64, pred: Boolean, *, loc=None, ip=None) -> Int32:
-    """32-bit read-only global load, zero when ``pred`` is false (the address is then not read)."""
-    return Int32(
-        _asm(
-            T.i32(),
-            [
-                Int64(addr).ir_value(loc=loc, ip=ip),
-                Int32(pred).ir_value(loc=loc, ip=ip),
-            ],
-            "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\tmov.b32 $0, 0;\n\t"
-            "@p ld.global.nc.b32 $0, [$1];\n\t}",
-            "=r,l,r",
-            True,
-            loc,
-            ip,
-        )
-    )
-
-
-@dsl_user_op
-def st_global_b32_pred(
-    addr: Int64, value: Int32, pred: Boolean, *, loc=None, ip=None
-) -> None:
-    _asm(
-        None,
-        [
-            Int64(addr).ir_value(loc=loc, ip=ip),
-            Int32(value).ir_value(loc=loc, ip=ip),
-            Int32(pred).ir_value(loc=loc, ip=ip),
-        ],
-        "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\t@p st.global.b32 [$0], $1;\n\t}",
-        "l,r,r",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def st_global_f32_pred(
-    addr: Int64, value: Float32, pred: Boolean, *, loc=None, ip=None
-) -> None:
-    _asm(
-        None,
-        [
-            Int64(addr).ir_value(loc=loc, ip=ip),
-            Float32(value).ir_value(loc=loc, ip=ip),
-            Int32(pred).ir_value(loc=loc, ip=ip),
-        ],
-        "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\t@p st.global.f32 [$0], $1;\n\t}",
-        "l,f,r",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def ld_shared_v4(addr: Int32, *, loc=None, ip=None) -> Tuple[Int32, ...]:
-    res = _asm(
-        llvm.StructType.get_literal([T.i32()] * 4),
-        [Int32(addr).ir_value(loc=loc, ip=ip)],
-        "ld.shared.v4.b32 {$0, $1, $2, $3}, [$4];",
-        "=r,=r,=r,=r,r",
-        True,
-        loc,
-        ip,
-    )
-    return tuple(Int32(v) for v in _struct4(res, T.i32()))
-
-
-@dsl_user_op
-def st_shared_v4(
-    addr: Int32, w0: Int32, w1: Int32, w2: Int32, w3: Int32, *, loc=None, ip=None
-) -> None:
-    _asm(
-        None,
-        [Int32(x).ir_value(loc=loc, ip=ip) for x in (addr, w0, w1, w2, w3)],
-        "st.shared.v4.b32 [$0], {$1, $2, $3, $4};",
-        "r,r,r,r,r",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def shfl_bfly_f32(x: Float32, offset: int, *, loc=None, ip=None) -> Float32:
-    return Float32(
-        _asm(
-            T.f32(),
-            [Float32(x).ir_value(loc=loc, ip=ip)],
-            f"shfl.sync.bfly.b32 $0, $1, {offset}, 0x1f, 0xffffffff;",
-            "=f,f",
-            True,
-            loc,
-            ip,
-        )
-    )
-
-
-@dsl_user_op
-def fmax_f32(a: Float32, b: Float32, *, loc=None, ip=None) -> Float32:
-    return Float32(
-        _asm(
-            T.f32(),
-            [Float32(a).ir_value(loc=loc, ip=ip), Float32(b).ir_value(loc=loc, ip=ip)],
-            "max.f32 $0, $1, $2;",
-            "=f,f,f",
-            False,
-            loc,
-            ip,
-        )
-    )
-
-
-@dsl_user_op
-def lg2_approx(x: Float32, *, loc=None, ip=None) -> Float32:
-    return Float32(
-        _asm(
-            T.f32(),
-            [Float32(x).ir_value(loc=loc, ip=ip)],
-            "lg2.approx.ftz.f32 $0, $1;",
-            "=f,f",
-            False,
-            loc,
-            ip,
-        )
-    )
-
-
-@dsl_user_op
-def opaque_i32(value: Int32, *, loc=None, ip=None) -> Int32:
-    """Return ``value`` through a ``mov.b32`` the optimizer cannot see through.
-
-    Used to recompute the epilogue's row pointers instead of letting CSE keep the prologue's copy
-    live in registers across the whole KV loop.
-    """
-    return Int32(
-        _asm(
-            T.i32(),
-            [Int32(value).ir_value(loc=loc, ip=ip)],
-            "mov.b32 $0, $1;",
-            "=r,r",
-            True,
-            loc,
-            ip,
-        )
-    )
-
-
-@dsl_user_op
-def fence_acq_rel_gpu(*, loc=None, ip=None) -> None:
-    _asm(None, [], "fence.acq_rel.gpu;", "", True, loc, ip)
-
-
-@dsl_user_op
-def atom_add_gpu(addr: Int64, value: Int32, *, loc=None, ip=None) -> Int32:
-    return Int32(
-        _asm(
-            T.i32(),
-            [
-                Int64(addr).ir_value(loc=loc, ip=ip),
-                Int32(value).ir_value(loc=loc, ip=ip),
-            ],
-            "atom.add.relaxed.gpu.global.s32 $0, [$1], $2;",
-            "=r,l,r",
-            True,
-            loc,
-            ip,
-        )
-    )
-
-
-@dsl_user_op
-def st_global_v4_f32(addr: Int64, v0, v1, v2, v3, *, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        [Int64(addr).ir_value(loc=loc, ip=ip)]
-        + [Float32(x).ir_value(loc=loc, ip=ip) for x in (v0, v1, v2, v3)],
-        "st.global.v4.f32 [$0], {$1, $2, $3, $4};",
-        "l,f,f,f,f",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def st_global_v2_f32(addr: Int64, v0, v1, *, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        [Int64(addr).ir_value(loc=loc, ip=ip)]
-        + [Float32(x).ir_value(loc=loc, ip=ip) for x in (v0, v1)],
-        "st.global.v2.f32 [$0], {$1, $2};",
-        "l,f,f",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def ld_global_cg_v4_f32(addr: Int64, *, loc=None, ip=None) -> Tuple[Float32, ...]:
-    """L2-only load: the data was written by another CTA during this kernel."""
-    res = _asm(
-        llvm.StructType.get_literal([T.f32()] * 4),
-        [Int64(addr).ir_value(loc=loc, ip=ip)],
-        "ld.global.cg.v4.f32 {$0, $1, $2, $3}, [$4];",
-        "=f,=f,=f,=f,l",
-        True,
-        loc,
-        ip,
-    )
-    return tuple(Float32(v) for v in _struct4(res, T.f32()))
-
-
-@dsl_user_op
-def ld_global_cg_v2_f32(addr: Int64, *, loc=None, ip=None) -> Tuple[Float32, Float32]:
-    res = _asm(
-        llvm.StructType.get_literal([T.f32()] * 2),
-        [Int64(addr).ir_value(loc=loc, ip=ip)],
-        "ld.global.cg.v2.f32 {$0, $1}, [$2];",
-        "=f,=f,l",
-        True,
-        loc,
-        ip,
-    )
-    return tuple(Float32(llvm.extractvalue(T.f32(), res, [i])) for i in range(2))
-
-
-@dsl_user_op
-def st_shared_b32(addr: Int32, value: Int32, *, loc=None, ip=None) -> None:
-    _asm(
-        None,
-        [Int32(addr).ir_value(loc=loc, ip=ip), Int32(value).ir_value(loc=loc, ip=ip)],
-        "st.shared.b32 [$0], $1;",
-        "r,r",
-        True,
-        loc,
-        ip,
-    )
-
-
-@dsl_user_op
-def ld_shared_b32(addr: Int32, *, loc=None, ip=None) -> Int32:
-    return Int32(
-        _asm(
-            T.i32(),
-            [Int32(addr).ir_value(loc=loc, ip=ip)],
-            "ld.shared.b32 $0, [$1];",
-            "=r,r",
-            True,
-            loc,
-            ip,
-        )
-    )
 
 
 # =============================================================================

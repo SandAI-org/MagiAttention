@@ -29,21 +29,21 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm100_index import (
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.utils import set_random_seed
-from tests.test_attn.sparse_test_utils import SEED
-from tests.test_kernel.cutedsl.index_sparse_sm100_utils import (
+from magi_attention.utils.arch import is_sm10x
+from magi_attention.utils.index_sparse_utils import (
     Sm100IndexGap,
     Sm100IndexUnsupportedError,
     ffa_fwd_sm100_index_sm90_layout,
     index_sparse_ref_fwd,
 )
+from tests.test_attn.sparse_test_utils import SEED
 from tests.test_kernel.cutedsl.test_index_sparse_bwd_sm100 import (
     FwdOutLse,
-    _is_sm100_family,
     _run_index_sparse_config,
     _run_sweep,
 )
 
-# Forward only: the sweeps and the harness pass bwd_fn=None.
+# Forward only: every test of this file passes bwd_fn=None.
 _run_fwd_config = partial(
     _run_index_sparse_config, fwd_fn=ffa_fwd_sm100_index_sm90_layout, bwd_fn=None
 )
@@ -57,7 +57,7 @@ _run_fwd_sweep = partial(
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(_is_sm100_family(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100Sweep(DistTestBase):
     """sm90 Classic sweep: q_seqlen × kv_seqlen × topk, MQA128, D=128, kbs=1.
 
@@ -112,7 +112,7 @@ class TestIndexSparseFwdSm100Sweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(_is_sm100_family(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100ComprehensiveSweep(DistTestBase):
     """sm90 Comprehensive sweep: head_config × head_dim × kbs.
 
@@ -187,12 +187,14 @@ class TestIndexSparseFwdSm100ComprehensiveSweep(DistTestBase):
 
 
 # ═══════════════════════════════════════════════════════════
-# TestIndexSparseFwdSm100Harness — the adapter and the comparison
+# TestIndexSparseFwdSm100Adapter — the sm90 layout adapter
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(_is_sm100_family(), "ffa_fwd_sm100_index needs an SM100 GPU")
-class TestIndexSparseFwdSm100Harness(unittest.TestCase):
+@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
+class TestIndexSparseFwdSm100Adapter(unittest.TestCase):
+    """``ffa_fwd_sm100_index_sm90_layout``: topk padding, the all-valid path and gap reporting."""
+
     @property
     def device(self):
         return torch.cuda.current_device()
@@ -241,6 +243,20 @@ class TestIndexSparseFwdSm100Harness(unittest.TestCase):
         with self.assertRaises(Sm100IndexUnsupportedError) as ctx:
             _run_fwd_config(self.device, config)
         self.assertEqual(ctx.exception.gaps, (Sm100IndexGap.Q_TILE_FILL,))
+
+
+# ═══════════════════════════════════════════════════════════
+# TestIndexSparseFwdSm100Comparison — the case runner rejects wrong outputs
+# ═══════════════════════════════════════════════════════════
+
+
+@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
+class TestIndexSparseFwdSm100Comparison(unittest.TestCase):
+    """A PASS of ``_run_index_sparse_config`` needs the right out and lse: shifted ones fail."""
+
+    @property
+    def device(self):
+        return torch.cuda.current_device()
 
     def test_comparison_rejects_out_on_wrong_head(self):
         """A PASS must mean something: out moved to the next q head has to fail."""
@@ -306,7 +322,7 @@ def _random_indices(
     return idx
 
 
-@unittest.skipUnless(_is_sm100_family(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100Numerics(unittest.TestCase):
     """``ffa_fwd_sm100_index`` called directly against the fp32 gather reference.
 
@@ -465,7 +481,7 @@ class TestIndexSparseFwdSm100Numerics(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(_is_sm100_family(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100EndToEnd(unittest.TestCase):
     """out / lse of ``ffa_fwd_sm100_index`` feed ``ffa_bwd_sm100_index``.
 
