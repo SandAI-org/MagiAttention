@@ -15,7 +15,8 @@
 """Correctness tests for the CuTe DSL radix-select top-k kernel.
 
 The kernel is verified against ``torch.topk``: values gathered by the returned
-indices are sorted on both sides and compared with ``torch.testing.assert_close``.
+indices are sorted on both sides and compared with ``assert_close``. Index
+identity, including tie-breaking, is checked with ``assert_equal``.
 
 Run:
     pytest tests/test_kernel/cutedsl/test_topk.py -v
@@ -23,18 +24,12 @@ Run:
 
 from itertools import product
 
-import pytest
 import torch
+from torch.testing._internal.common_utils import TestCase, run_tests
 
-from magi_attention.kernel.cutedsl.topk import cutedsl_topk, cutedsl_topk_available
-
-pytestmark = [
-    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
-    pytest.mark.skipif(
-        not torch.cuda.is_available() or not cutedsl_topk_available(),
-        reason="cutedsl topk not available",
-    ),
-]
+from magi_attention.kernel.cutedsl.topk import cutedsl_topk
+from magi_attention.testing import parameterize
+from magi_attention.testing.precision import assert_close, assert_equal
 
 _shapes = [
     # (batch, n, k)
@@ -60,10 +55,7 @@ _dtypes = [torch.float32, torch.bfloat16]
 
 _cases = list(product(_shapes, _dtypes))
 
-
-def _case_id(case) -> str:
-    (b, n, k), dtype = case
-    return f"b{b}_n{n}_k{k}_{str(dtype).split('.')[-1]}"
+_tie_cases = list(product([(4, 4096, 256), (3, 300000, 30000)], _dtypes))
 
 
 def _verify_topk_indices(x: torch.Tensor, k: int, indices: torch.Tensor) -> None:
@@ -72,7 +64,13 @@ def _verify_topk_indices(x: torch.Tensor, k: int, indices: torch.Tensor) -> None
     gathered = (
         torch.gather(x.float(), -1, indices.long()).sort(dim=-1, descending=True).values
     )
-    torch.testing.assert_close(gathered, ref_values, atol=1e-5, rtol=1e-5)
+    assert_close(
+        gathered,
+        ref_values,
+        atol=1e-5,
+        rtol=1e-5,
+        test_case="cutedsl_topk values",
+    )
 
 
 def _lowest_index_topk_ref(x: torch.Tensor, k: int) -> torch.Tensor:
@@ -85,49 +83,101 @@ def _lowest_index_topk_ref(x: torch.Tensor, k: int) -> torch.Tensor:
     return selected.nonzero()[:, -1].view(*x.shape[:-1], k)
 
 
-@pytest.mark.parametrize("case", _cases, ids=[_case_id(c) for c in _cases])
-def test_cutedsl_topk(case):
-    (batch, n, k), dtype = case
+class TestCuteDSLTopK(TestCase):
+    @parameterize("case", _cases)
+    def test_cutedsl_topk(self, case):
+        (batch, n, k), dtype = case
 
-    torch.manual_seed(42)
-    x = torch.randn(batch, n, dtype=dtype, device="cuda")
+        generator = torch.Generator(device="cuda").manual_seed(42)
+        x = torch.randn(batch, n, dtype=dtype, device="cuda", generator=generator)
 
-    indices = cutedsl_topk(x, k, sorted=False)
-    _verify_topk_indices(x, k, indices)
-    assert bool((indices[:, 1:] > indices[:, :-1]).all()), "rows not strictly ascending"
-    assert torch.equal(indices, cutedsl_topk(x, k))
-    indices_i32 = cutedsl_topk(x, k, out_dtype=torch.int32)
-    assert indices_i32.dtype == torch.int32
-    assert torch.equal(indices_i32.long(), indices)
+        indices = cutedsl_topk(x, k, sorted=False)
+        _verify_topk_indices(x, k, indices)
+        self.assertTrue(
+            bool((indices[:, 1:] > indices[:, :-1]).all()),
+            "rows not strictly ascending",
+        )
+        assert_equal(indices, cutedsl_topk(x, k), test_case="cutedsl_topk default args")
+        indices_i32 = cutedsl_topk(x, k, out_dtype=torch.int32)
+        self.assertEqual(indices_i32.dtype, torch.int32)
+        assert_equal(
+            indices_i32.long(),
+            indices,
+            test_case="cutedsl_topk int32 indices",
+        )
+
+    @parameterize("case", _tie_cases)
+    def test_cutedsl_topk_ties(self, case):
+        """Heavy ties at the pivot: the kernel must keep the lowest tied indices."""
+        (batch, n, k), dtype = case
+
+        generator = torch.Generator(device="cuda").manual_seed(42)
+        x = torch.randint(0, 16, (batch, n), device="cuda", generator=generator).to(
+            dtype
+        )
+
+        indices = cutedsl_topk(x, k)
+        assert_equal(
+            indices,
+            _lowest_index_topk_ref(x, k),
+            test_case="cutedsl_topk lowest-index ties",
+        )
+
+    @parameterize("dtype", _dtypes)
+    def test_cutedsl_topk_misaligned_base(self, dtype):
+        """A contiguous view that starts one element into its storage."""
+        batch, n, k = 4, 4096, 256
+
+        generator = torch.Generator(device="cuda").manual_seed(42)
+        storage = torch.randn(
+            batch * n + 1, dtype=dtype, device="cuda", generator=generator
+        )
+        x = storage[1:].view(batch, n)
+        self.assertTrue(x.data_ptr() % 16)
+
+        _verify_topk_indices(x, k, cutedsl_topk(x, k))
+
+    @parameterize("dtype", _dtypes)
+    def test_cutedsl_topk_concurrent_streams(self, dtype):
+        """Multi-CTA launches overlapping on two streams must not share gstate."""
+        batch, n, k = 4, 300000, 3000
+        num_iters = 20
+
+        generator = torch.Generator(device="cuda").manual_seed(42)
+        inputs = [
+            torch.randn(batch, n, dtype=dtype, device="cuda", generator=generator)
+            for _ in range(2)
+        ]
+        refs = [_lowest_index_topk_ref(x, k) for x in inputs]
+        # JIT-compile before the timed window below.
+        cutedsl_topk(inputs[0], k)
+
+        main_stream = torch.cuda.current_stream()
+        streams = [torch.cuda.Stream() for _ in range(2)]
+        outputs: list[list[torch.Tensor]] = [[], []]
+        # Hold both streams until every launch is queued so the kernels overlap.
+        torch.cuda._sleep(100_000_000)
+        for s in streams:
+            s.wait_stream(main_stream)
+        for _ in range(num_iters):
+            for i, s in enumerate(streams):
+                with torch.cuda.stream(s):
+                    outputs[i].append(cutedsl_topk(inputs[i], k))
+        for s in streams:
+            main_stream.wait_stream(s)
+        torch.cuda.synchronize()
+
+        for i in range(2):
+            for out in outputs[i]:
+                assert_equal(
+                    out, refs[i], test_case=f"cutedsl_topk concurrent stream {i}"
+                )
+
+    def test_cutedsl_topk_rejects_sorted(self):
+        x = torch.randn(2, 1024, device="cuda")
+        with self.assertRaises(ValueError):
+            cutedsl_topk(x, 8, sorted=True)
 
 
-@pytest.mark.parametrize("shape", [(4, 4096, 256), (3, 300000, 30000)])
-@pytest.mark.parametrize("dtype", _dtypes)
-def test_cutedsl_topk_ties(shape, dtype):
-    """Heavy ties at the pivot: the kernel must keep the lowest tied indices."""
-    batch, n, k = shape
-
-    torch.manual_seed(42)
-    x = torch.randint(0, 16, (batch, n), device="cuda").to(dtype)
-
-    indices = cutedsl_topk(x, k)
-    assert torch.equal(indices, _lowest_index_topk_ref(x, k))
-
-
-@pytest.mark.parametrize("dtype", _dtypes)
-def test_cutedsl_topk_misaligned_base(dtype):
-    """A contiguous view that starts one element into its storage."""
-    batch, n, k = 4, 4096, 256
-
-    torch.manual_seed(42)
-    storage = torch.randn(batch * n + 1, dtype=dtype, device="cuda")
-    x = storage[1:].view(batch, n)
-    assert x.data_ptr() % 16
-
-    _verify_topk_indices(x, k, cutedsl_topk(x, k))
-
-
-def test_cutedsl_topk_rejects_sorted():
-    x = torch.randn(2, 1024, device="cuda")
-    with pytest.raises(ValueError):
-        cutedsl_topk(x, 8, sorted=True)
+if __name__ == "__main__":
+    run_tests()

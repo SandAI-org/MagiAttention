@@ -40,11 +40,7 @@ from typing import Any, Optional
 
 import torch
 
-from magi_attention.kernel.cutedsl.topk import (
-    cutedsl_topk,
-    cutedsl_topk_available,
-    cutedsl_topk_error,
-)
+from magi_attention.kernel.cutedsl.topk import cutedsl_topk
 
 # ---------------------------------------------------------------------------
 # Backend dispatch helpers (all return indices only)
@@ -56,8 +52,6 @@ def _torch_topk_fn(x: torch.Tensor, k: int, *, sorted: bool) -> torch.Tensor:
 
 
 def _cutedsl_topk_fn(x: torch.Tensor, k: int, *, sorted: bool) -> torch.Tensor:
-    if not cutedsl_topk_available():
-        raise RuntimeError(cutedsl_topk_error() or "cutedsl topk not available")
     return cutedsl_topk(x, k, sorted=sorted)
 
 

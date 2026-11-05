@@ -11,12 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""DSA-specialized Triton backward for index-map sparse attention.
+"""Triton backward for DSA index-map sparse attention.
 
-Adapted from Ethan's MagiAttention DSA v4 backward.  It recomputes the
-probabilities from a saved LSE (natural log) and streams K/V rows by
-``index_map``, so any forward that produces ``out`` and ``lse`` (e.g. FFA
-IndexSparse) can be paired with it.
+Recomputes the probabilities from a saved LSE (natural log) and streams K/V
+rows by ``index_map``, so any forward that produces ``out`` and ``lse`` (e.g.
+FFA IndexSparse) can be paired with it.
 
 Layout:
     q / dout   [sq, nhq, hd]
@@ -27,19 +26,9 @@ Layout:
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
-
-_ATOMIC_DTYPE = os.environ.get(
-    "DSA_FFA_TRITON_BWD_ATOMIC_DTYPE",
-    os.environ.get("DSA_BWD_V4_DTYPE", "bf16"),
-).strip()
-assert _ATOMIC_DTYPE in ("bf16", "fp32"), (
-    "DSA_FFA_TRITON_BWD_ATOMIC_DTYPE must be bf16 or fp32, " f"got {_ATOMIC_DTYPE}"
-)
 
 
 def _autotune_configs():
@@ -63,7 +52,7 @@ def _autotune_configs():
     reset_to_zero=["DK_BUF_ptr", "DV_BUF_ptr"],
 )
 @triton.jit
-def _ffa_triton_bwd_kernel_v4(
+def _dsa_sparse_attn_bwd_kernel(
     Q_ptr,
     K_ptr,
     V_ptr,
@@ -225,7 +214,7 @@ def dsa_sparse_attn_bwd(
     dlse: torch.Tensor | None,
     softmax_scale: float,
     group_tile: int | None = None,
-    use_bf16_atomic: bool | None = None,
+    use_bf16_atomic: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return ``(dq, dk, dv)``.  ``dlse`` (if given) is folded into ``delta``.
 
@@ -244,8 +233,6 @@ def dsa_sparse_attn_bwd(
         group_tile = group_size
     assert (group_tile & (group_tile - 1)) == 0 and 16 <= group_tile <= group_size
 
-    if use_bf16_atomic is None:
-        use_bf16_atomic = _ATOMIC_DTYPE == "bf16"
     atomic_dtype = torch.bfloat16 if use_bf16_atomic else torch.float32
 
     q_c = q.contiguous()
@@ -266,7 +253,7 @@ def dsa_sparse_attn_bwd(
     dv_buf = torch.zeros_like(v_c, dtype=atomic_dtype)
 
     grid = (nhkv, sq, triton.cdiv(group_size, group_tile))
-    _ffa_triton_bwd_kernel_v4[grid](
+    _dsa_sparse_attn_bwd_kernel[grid](
         q_c,
         k_c,
         v_c,

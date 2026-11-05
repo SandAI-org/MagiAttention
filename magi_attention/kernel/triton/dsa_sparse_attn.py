@@ -154,7 +154,8 @@ def _sparse_gqa_packed_fwd_kernel(
         acc = tl.dot(exp_qk.to(v_blk.dtype), v_blk, acc, out_dtype=tl.float32)
         max_log = new_max
 
-    out_vals = acc / sum_exp[:, None]
+    # Rows with no valid index have acc == 0 and sum_exp == 0; emit out = 0, lse = -inf.
+    out_vals = acc / tl.where(sum_exp > 0.0, sum_exp, 1.0)[:, None]
     out_ptrs = (
         output
         + pid_s * stride_os

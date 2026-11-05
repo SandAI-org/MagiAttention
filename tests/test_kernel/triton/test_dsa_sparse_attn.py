@@ -24,12 +24,11 @@ Run:
 
 import math
 
-import pytest
 import torch
+from torch.testing._internal.common_utils import TestCase, run_tests
 
 from magi_attention.kernel.triton import dsa_sparse_attn_bwd, sparse_gqa_packed_attn
-
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+from magi_attention.testing import parameterize
 
 _LN2 = math.log(2.0)
 
@@ -63,45 +62,6 @@ def _packed_ref(q, k, v, index_map, scale):
     return p @ vf, lse
 
 
-@pytest.mark.parametrize("num_heads", [16, 32])
-@pytest.mark.parametrize("topk", [64, 200])
-@pytest.mark.parametrize("bwd_autotune", [False, True])
-def test_sparse_gqa_packed_attn(num_heads, topk, bwd_autotune):
-    torch.manual_seed(0)
-    device = "cuda"
-    dtype = torch.bfloat16
-    sq, skv, hd = 64, 1024, 128
-    scale = hd**-0.5
-
-    q = torch.randn(sq, num_heads, hd, device=device, dtype=dtype)
-    k = torch.randn(skv, 1, hd, device=device, dtype=dtype)
-    v = torch.randn(skv, 1, hd, device=device, dtype=dtype)
-    idx = _unique_indices(sq, skv, topk, device)
-    # ragged rows: pad the tail of every other row with -1
-    idx[1::2, topk - topk // 4 :] = -1
-    index_map = idx.unsqueeze(0).contiguous()
-
-    q_ref, k_ref, v_ref = (t.detach().clone().requires_grad_() for t in (q, k, v))
-    out_ref, lse_ref = _packed_ref(q_ref, k_ref, v_ref, index_map, scale)
-
-    q_tri, k_tri, v_tri = (t.detach().clone().requires_grad_() for t in (q, k, v))
-    out, lse_log2 = sparse_gqa_packed_attn(
-        q_tri, k_tri, v_tri, index_map, scale, BWD_AUTOTUNE=bwd_autotune
-    )
-
-    _assert_rel_close(out, out_ref, "out", 1e-2)
-    _assert_rel_close(lse_log2 * _LN2, lse_ref, "lse", 1e-3)
-
-    dout = torch.randn_like(out)
-    dlse = torch.randn_like(lse_ref)
-    ((out_ref * dout.float()).sum() + (lse_ref * dlse).sum()).backward()
-    ((out.float() * dout.float()).sum() + (lse_log2 * _LN2 * dlse).sum()).backward()
-
-    _assert_rel_close(q_tri.grad, q_ref.grad, "dq", 2e-2)
-    _assert_rel_close(k_tri.grad, k_ref.grad, "dk", 2e-2)
-    _assert_rel_close(v_tri.grad, v_ref.grad, "dv", 2e-2)
-
-
 def _grouped_ref(q, k, v, index_map, scale):
     """fp32 reference for [sq, nhq, hd] x [skv, nhkv, hd] with per-head index_map."""
     sq, nhq, hd = q.shape
@@ -120,45 +80,140 @@ def _grouped_ref(q, k, v, index_map, scale):
     return torch.cat(outs, dim=1), torch.cat(lses, dim=1)  # [sq, nhq, hd], [sq, nhq]
 
 
-@pytest.mark.parametrize("num_heads_kv,group", [(1, 16), (2, 32), (1, 128)])
-@pytest.mark.parametrize("use_bf16_atomic", [False, True])
-def test_dsa_sparse_attn_bwd(num_heads_kv, group, use_bf16_atomic):
-    torch.manual_seed(0)
-    device = "cuda"
-    dtype = torch.bfloat16
-    sq, skv, hd, topk = 32, 512, 128, 192
-    nhq = num_heads_kv * group
-    scale = hd**-0.5
+class TestDSASparseAttn(TestCase):
+    @parameterize("num_heads", [16, 32])
+    @parameterize("topk", [64, 200])
+    @parameterize("bwd_autotune", [False, True])
+    def test_sparse_gqa_packed_attn(self, num_heads, topk, bwd_autotune):
+        torch.manual_seed(0)
+        device = "cuda"
+        dtype = torch.bfloat16
+        sq, skv, hd = 64, 1024, 128
+        scale = hd**-0.5
 
-    q = torch.randn(sq, nhq, hd, device=device, dtype=dtype)
-    k = torch.randn(skv, num_heads_kv, hd, device=device, dtype=dtype)
-    v = torch.randn(skv, num_heads_kv, hd, device=device, dtype=dtype)
-    index_map = torch.stack(
-        [_unique_indices(sq, skv, topk, device) for _ in range(num_heads_kv)]
-    ).contiguous()
+        q = torch.randn(sq, num_heads, hd, device=device, dtype=dtype)
+        k = torch.randn(skv, 1, hd, device=device, dtype=dtype)
+        v = torch.randn(skv, 1, hd, device=device, dtype=dtype)
+        idx = _unique_indices(sq, skv, topk, device)
+        # ragged rows: pad the tail of every other row with -1
+        idx[1::2, topk - topk // 4 :] = -1
+        index_map = idx.unsqueeze(0).contiguous()
 
-    q_ref, k_ref, v_ref = (t.detach().clone().requires_grad_() for t in (q, k, v))
-    out_ref, lse_ref = _grouped_ref(q_ref, k_ref, v_ref, index_map, scale)
-    dout = torch.randn(sq, nhq, hd, device=device, dtype=dtype)
-    dlse = torch.randn(sq, nhq, device=device, dtype=torch.float32)
-    ((out_ref * dout.float()).sum() + (lse_ref * dlse).sum()).backward()
+        q_ref, k_ref, v_ref = (t.detach().clone().requires_grad_() for t in (q, k, v))
+        out_ref, lse_ref = _packed_ref(q_ref, k_ref, v_ref, index_map, scale)
 
-    lse_saved = (
-        lse_ref.detach().view(sq, num_heads_kv, group).permute(1, 0, 2).contiguous()
-    )
-    dq, dk, dv = dsa_sparse_attn_bwd(
-        q,
-        k,
-        v,
-        index_map,
-        out_ref.detach().to(dtype),
-        lse_saved,
-        dout,
-        dlse,
-        scale,
-        use_bf16_atomic=use_bf16_atomic,
-    )
+        q_tri, k_tri, v_tri = (t.detach().clone().requires_grad_() for t in (q, k, v))
+        out, lse_log2 = sparse_gqa_packed_attn(
+            q_tri, k_tri, v_tri, index_map, scale, BWD_AUTOTUNE=bwd_autotune
+        )
 
-    _assert_rel_close(dq, q_ref.grad, "dq", 2e-2)
-    _assert_rel_close(dk, k_ref.grad, "dk", 2e-2)
-    _assert_rel_close(dv, v_ref.grad, "dv", 2e-2)
+        _assert_rel_close(out, out_ref, "out", 1e-2)
+        _assert_rel_close(lse_log2 * _LN2, lse_ref, "lse", 1e-3)
+
+        dout = torch.randn_like(out)
+        dlse = torch.randn_like(lse_ref)
+        ((out_ref * dout.float()).sum() + (lse_ref * dlse).sum()).backward()
+        ((out.float() * dout.float()).sum() + (lse_log2 * _LN2 * dlse).sum()).backward()
+
+        _assert_rel_close(q_tri.grad, q_ref.grad, "dq", 2e-2)
+        _assert_rel_close(k_tri.grad, k_ref.grad, "dk", 2e-2)
+        _assert_rel_close(v_tri.grad, v_ref.grad, "dv", 2e-2)
+
+    @parameterize("topk", [64, 200])
+    def test_sparse_gqa_packed_attn_empty_rows(self, topk):
+        torch.manual_seed(0)
+        device = "cuda"
+        dtype = torch.bfloat16
+        sq, num_heads, skv, hd = 64, 16, 1024, 128
+        scale = hd**-0.5
+
+        q = torch.randn(sq, num_heads, hd, device=device, dtype=dtype)
+        k = torch.randn(skv, 1, hd, device=device, dtype=dtype)
+        v = torch.randn(skv, 1, hd, device=device, dtype=dtype)
+        idx = _unique_indices(sq, skv, topk, device)
+        # rows with no valid index: all -1, or all out of range
+        idx[0::8] = -1
+        idx[5::8] = skv
+        # rows whose leading BK block(s) are fully invalid
+        idx[2::8, : topk // 2 + 1] = -1
+        index_map = idx.unsqueeze(0).contiguous()
+
+        empty = torch.zeros(sq, dtype=torch.bool, device=device)
+        empty[0::8] = True
+        empty[5::8] = True
+        nonempty = ~empty
+
+        q_tri, k_tri, v_tri = (t.detach().clone().requires_grad_() for t in (q, k, v))
+        out, lse_log2 = sparse_gqa_packed_attn(
+            q_tri, k_tri, v_tri, index_map, scale, BWD_AUTOTUNE=False
+        )
+
+        assert (out[empty] == 0).all(), "empty rows: out should be 0"
+        assert torch.isneginf(lse_log2[empty]).all(), "empty rows: lse should be -inf"
+
+        q_ref, k_ref, v_ref = (t.detach().clone().requires_grad_() for t in (q, k, v))
+        out_ref, lse_ref = _packed_ref(
+            q_ref[nonempty], k_ref, v_ref, index_map[:, nonempty], scale
+        )
+        _assert_rel_close(out[nonempty], out_ref, "out", 1e-2)
+        _assert_rel_close(lse_log2[nonempty] * _LN2, lse_ref, "lse", 1e-3)
+
+        dout = torch.randn_like(out)
+        dlse = torch.randn(sq, num_heads, device=device, dtype=torch.float32)
+        torch.autograd.backward(
+            [out_ref, lse_ref], [dout[nonempty].float(), dlse[nonempty]]
+        )
+        torch.autograd.backward([out, lse_log2], [dout, dlse * _LN2])
+
+        assert (q_tri.grad[empty] == 0).all(), "empty rows: dq should be 0"
+        _assert_rel_close(q_tri.grad[nonempty], q_ref.grad[nonempty], "dq", 2e-2)
+        _assert_rel_close(k_tri.grad, k_ref.grad, "dk", 2e-2)
+        _assert_rel_close(v_tri.grad, v_ref.grad, "dv", 2e-2)
+
+    @parameterize("kv_group", [(1, 16), (2, 32), (1, 128)])
+    @parameterize("use_bf16_atomic", [False, True])
+    def test_dsa_sparse_attn_bwd(self, kv_group, use_bf16_atomic):
+        num_heads_kv, group = kv_group
+        torch.manual_seed(0)
+        device = "cuda"
+        dtype = torch.bfloat16
+        sq, skv, hd, topk = 32, 512, 128, 192
+        nhq = num_heads_kv * group
+        scale = hd**-0.5
+
+        q = torch.randn(sq, nhq, hd, device=device, dtype=dtype)
+        k = torch.randn(skv, num_heads_kv, hd, device=device, dtype=dtype)
+        v = torch.randn(skv, num_heads_kv, hd, device=device, dtype=dtype)
+        index_map = torch.stack(
+            [_unique_indices(sq, skv, topk, device) for _ in range(num_heads_kv)]
+        ).contiguous()
+
+        q_ref, k_ref, v_ref = (t.detach().clone().requires_grad_() for t in (q, k, v))
+        out_ref, lse_ref = _grouped_ref(q_ref, k_ref, v_ref, index_map, scale)
+        dout = torch.randn(sq, nhq, hd, device=device, dtype=dtype)
+        dlse = torch.randn(sq, nhq, device=device, dtype=torch.float32)
+        ((out_ref * dout.float()).sum() + (lse_ref * dlse).sum()).backward()
+
+        lse_saved = (
+            lse_ref.detach().view(sq, num_heads_kv, group).permute(1, 0, 2).contiguous()
+        )
+        dq, dk, dv = dsa_sparse_attn_bwd(
+            q,
+            k,
+            v,
+            index_map,
+            out_ref.detach().to(dtype),
+            lse_saved,
+            dout,
+            dlse,
+            scale,
+            use_bf16_atomic=use_bf16_atomic,
+        )
+
+        _assert_rel_close(dq, q_ref.grad, "dq", 2e-2)
+        _assert_rel_close(dk, k_ref.grad, "dk", 2e-2)
+        _assert_rel_close(dv, v_ref.grad, "dv", 2e-2)
+
+
+if __name__ == "__main__":
+    run_tests()
