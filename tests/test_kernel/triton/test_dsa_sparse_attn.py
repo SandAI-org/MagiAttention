@@ -84,7 +84,10 @@ class TestDSASparseAttn(TestCase):
     @parameterize("num_heads", [16, 32])
     @parameterize("topk", [64, 200])
     @parameterize("bwd_autotune", [False, True])
-    def test_sparse_gqa_packed_attn(self, num_heads, topk, bwd_autotune):
+    @parameterize("use_bf16_atomic", [False, True])
+    def test_sparse_gqa_packed_attn(
+        self, num_heads, topk, bwd_autotune, use_bf16_atomic
+    ):
         torch.manual_seed(0)
         device = "cuda"
         dtype = torch.bfloat16
@@ -104,7 +107,13 @@ class TestDSASparseAttn(TestCase):
 
         q_tri, k_tri, v_tri = (t.detach().clone().requires_grad_() for t in (q, k, v))
         out, lse_log2 = sparse_gqa_packed_attn(
-            q_tri, k_tri, v_tri, index_map, scale, BWD_AUTOTUNE=bwd_autotune
+            q_tri,
+            k_tri,
+            v_tri,
+            index_map,
+            scale,
+            BWD_AUTOTUNE=bwd_autotune,
+            use_bf16_atomic=use_bf16_atomic,
         )
 
         _assert_rel_close(out, out_ref, "out", 1e-2)

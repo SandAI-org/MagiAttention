@@ -54,15 +54,15 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm120_index import (
 )
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
-from magi_attention.utils import set_random_seed
-from magi_attention.utils.arch import is_sm12x
-from tests.test_attn.sparse_test_utils import SEED
-from tests.test_kernel.cutedsl.index_sparse_sm100_utils import index_sparse_ref_fwd
-from tests.test_kernel.cutedsl.index_sparse_sm120_utils import (
+from magi_attention.testing.index_sparse import (
     Sm120IndexGap,
     Sm120IndexUnsupportedError,
     ffa_fwd_sm120_index_sm90_layout,
+    index_sparse_ref_fwd,
 )
+from magi_attention.utils import set_random_seed
+from magi_attention.utils.arch import is_sm12x
+from tests.test_attn.sparse_test_utils import SEED
 from tests.test_kernel.cutedsl.test_index_sparse_bwd_sm100 import (
     FwdOutLse,
     _run_index_sparse_config,

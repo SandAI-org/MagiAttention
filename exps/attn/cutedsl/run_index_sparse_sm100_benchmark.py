@@ -22,7 +22,7 @@ Data is generated exactly as in
 same 128x128 block mask for FlexAttention. The sm90 tensors reach the SM100
 kernels through ``ffa_fwd_sm100_index_sm90_layout`` and
 ``ffa_bwd_sm100_index_sm90_layout``, the adapters of
-``tests/test_kernel/cutedsl/index_sparse_sm100_utils.py``.
+``magi_attention/testing/index_sparse.py``.
 
 Scenarios (``SCENARIOS``) extend the sm90 bench (MQA128, D=128, topk=2048)
 with the axes of the sm90 IndexSparse test: head_dim 64, GQA / MHA (kv heads
@@ -53,13 +53,12 @@ context-parallel rank whose local q is a slice of the full sequence.
 Reporting effective sparse TFLOPs/s: fwd 4 * S_q * topk_tokens * nhq * hd, bwd
 2.5x the fwd FLOPs.
 
-Run:
-    cd exps/attn/cutedsl
-    PYTHONPATH=../../.. python run_index_sparse_sm100_benchmark.py
-    PYTHONPATH=../../.. python run_index_sparse_sm100_benchmark.py \\
+Run (from the repo root):
+    python -m exps.attn.cutedsl.run_index_sparse_sm100_benchmark
+    python -m exps.attn.cutedsl.run_index_sparse_sm100_benchmark \\
         --directions fwd --scenarios gqa8x1_qbs16_hd128_topk4096 \\
         --methods ffa_sm100_index --seqlens 32768
-    PYTHONPATH=../../.. python run_index_sparse_sm100_benchmark.py \
+    python -m exps.attn.cutedsl.run_index_sparse_sm100_benchmark \\
         --scenarios mqa128_hd128_topk8192 --seqlen-q 16384 --seqlens 131072
 """
 
@@ -81,20 +80,20 @@ from magi_attention.benchmarking import (
     gen_save_path,
     perf_report,
 )
-from magi_attention.utils import set_random_seed
-
-# isort: split
-from exps.attn.baselines.token_sparse_attn_triton import (
-    token_sparse_attn,
-    token_sparse_fwd,
-)
-from tests.test_kernel.cutedsl.index_sparse_sm100_utils import (
+from magi_attention.testing.index_sparse import (
     Sm100IndexGap,
     ffa_bwd_sm100_index_sm90_layout,
     ffa_fwd_sm100_index_sm90_layout,
     index_sparse_ref_fwd,
     sm100_index_bwd_gaps,
     sm100_index_fwd_gaps,
+)
+from magi_attention.utils import set_random_seed
+
+# isort: split
+from exps.attn.baselines.token_sparse_attn_triton import (
+    token_sparse_attn,
+    token_sparse_fwd,
 )
 
 # ─── Config ───────────────────────────────────────────────────────────────────

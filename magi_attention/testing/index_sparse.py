@@ -27,10 +27,15 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm100_index import (
     FFAFwdSm100Index,
     ffa_fwd_sm100_index,
 )
+from magi_attention.kernel.cutedsl.ffa_fwd_sm120_index import (
+    FFAFwdSm120Index,
+    ffa_fwd_sm120_index,
+)
 
-# Serve the sm90 IndexSparse contract with the SM100 forward / backward.
-# Shared by the tests under tests/test_kernel/cutedsl/ and the benchmarks under
-# exps/attn/cutedsl/ so they agree on which sm90 inputs SM100 can serve today.
+# Serve the sm90 IndexSparse contract with the SM100 forward / backward and the
+# SM120 forward. Shared by the tests under tests/test_kernel/cutedsl/ and the
+# benchmarks under exps/attn/cutedsl/ so they agree on which sm90 inputs SM100
+# and SM120 can serve today.
 #
 # sm90 contract (flex_flash_attn_func(index_sparse_indices=..., q_block_size=qbs)):
 # - q / out / do (total_q, num_heads_q, d), k / v (total_k, num_heads_kv, d),
@@ -52,6 +57,15 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm100_index import (
 # q_block_size = qbs * G, its sm90 index row is exactly the SM100 index row of
 # those rows. qbs * G == 128 puts one q block in each 128-row Q tile, the case
 # with no wasted MMA rows.
+#
+# SM120 forward contract (ffa_fwd_sm120_index): the sm90 layout itself, with
+# the limits of the SM100 forward: head_dim == 128, qbs * G == 128 and topk a
+# multiple of 4. There is no SM120 index-sparse backward.
+
+
+# ═══════════════════════════════════════════════════════════
+# SM100
+# ═══════════════════════════════════════════════════════════
 
 
 class Sm100IndexGap(Enum):
@@ -249,6 +263,117 @@ def ffa_bwd_sm100_index_sm90_layout(
         num_k_passes=num_k_passes,
     )
     return unfold(dq), dk, dv
+
+
+# ═══════════════════════════════════════════════════════════
+# SM120
+# ═══════════════════════════════════════════════════════════
+
+
+class Sm120IndexGap(Enum):
+    """sm90 IndexSparse forward features the SM120 forward cannot serve yet.
+
+    Remove a member once the kernel (and ``ffa_fwd_sm120_index_sm90_layout``)
+    supports it; the cases that needed it then run the numerical comparison
+    instead of reporting a gap.
+    """
+
+    HEAD_DIM = "head_dim != 128: FFAFwdSm120Index fixes head_dim at 128"
+    SPARSE_K_BLOCK = (
+        "sparse_k_block_size > 1: the kernel gathers single K tokens, not K blocks"
+    )
+    Q_TILE_FILL = (
+        "q_block_size * group != 128: FFAFwdSm120Index maps one index row onto "
+        "one 128-row Q tile"
+    )
+
+
+class Sm120IndexUnsupportedError(Sm100IndexUnsupportedError):
+    """Raised before any launch when the sm90 inputs need an ``Sm120IndexGap``.
+
+    Derives from the SM100 error so the shared case runner of
+    ``test_index_sparse_bwd_sm100.py`` reports such a case as GAP.
+    """
+
+
+def sm120_index_fwd_gaps(
+    *,
+    head_dim: int,
+    sparse_k_block_size: int,
+    q_block_size: int,
+    group: int,
+) -> list[Sm120IndexGap]:
+    """The ``Sm120IndexGap`` members an sm90 IndexSparse forward call needs.
+
+    ``q_block_size`` is the sm90 one (q tokens per index row) and ``group`` is
+    ``num_heads_q / num_heads_kv``.
+    """
+    gaps = []
+    if head_dim != FFAFwdSm120Index.head_dim:
+        gaps.append(Sm120IndexGap.HEAD_DIM)
+    if sparse_k_block_size != 1:
+        gaps.append(Sm120IndexGap.SPARSE_K_BLOCK)
+    if q_block_size * group != FFAFwdSm120Index.tile_m:
+        gaps.append(Sm120IndexGap.Q_TILE_FILL)
+    return gaps
+
+
+def ffa_fwd_sm120_index_sm90_layout(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    index_sparse_indices: torch.Tensor,
+    *,
+    q_block_size: int = 1,
+    sparse_k_block_size: int = 1,
+    softmax_scale: float | None = None,
+    assume_valid_ids: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """IndexSparse forward with sm90 tensors, run by ``ffa_fwd_sm120_index``.
+
+    ``q_block_size`` is the sm90 one: q tokens per index row. The tensors reach
+    the kernel unchanged, except that an index whose ``topk`` is not a multiple
+    of ``FFAFwdSm120Index.topk_align`` is copied with -1 columns appended.
+    ``assume_valid_ids`` is forwarded to ``ffa_fwd_sm120_index`` and requires an
+    aligned ``topk``, since the appended -1 columns would break its promise.
+    Returns (out, lse) in the sm90 layout.
+
+    Raises:
+        Sm120IndexUnsupportedError: the call needs an ``Sm120IndexGap``.
+    """
+    _, num_heads_q, head_dim = q.shape
+    _, num_heads_kv, _ = k.shape
+    assert num_heads_q % num_heads_kv == 0
+    gaps = sm120_index_fwd_gaps(
+        head_dim=head_dim,
+        sparse_k_block_size=sparse_k_block_size,
+        q_block_size=q_block_size,
+        group=num_heads_q // num_heads_kv,
+    )
+    if gaps:
+        raise Sm120IndexUnsupportedError(gaps)
+
+    topk_pad = -index_sparse_indices.shape[-1] % FFAFwdSm120Index.topk_align
+    if topk_pad:
+        assert not assume_valid_ids, (
+            f"assume_valid_ids needs topk to be a multiple of "
+            f"{FFAFwdSm120Index.topk_align}: aligning it appends -1 ids"
+        )
+        index_sparse_indices = F.pad(index_sparse_indices, (0, topk_pad), value=-1)
+    return ffa_fwd_sm120_index(
+        q,
+        k,
+        v,
+        index_sparse_indices,
+        softmax_scale=softmax_scale,
+        q_block_size=q_block_size,
+        assume_valid_ids=assume_valid_ids,
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+# Reference
+# ═══════════════════════════════════════════════════════════
 
 
 def index_sparse_ref_fwd(

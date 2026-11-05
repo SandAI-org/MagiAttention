@@ -24,16 +24,10 @@ Returns packed out [C * nh_kv, q_tile_padded, D] and log2 LSE.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
 
-_ATOMIC_DTYPE = os.environ.get("DSA_TRITON_BWD_ATOMIC_DTYPE", "bf16").strip()
-assert _ATOMIC_DTYPE in ("bf16", "fp32"), (
-    "DSA_TRITON_BWD_ATOMIC_DTYPE must be bf16 or fp32, " f"got {_ATOMIC_DTYPE}"
-)
 _MAX_TRITON_LINEAR_ELEMENTS = 2**31 - 1
 
 
@@ -354,7 +348,17 @@ def _sparse_gqa_packed_fwd(q, k, v, index_map, sm_scale, BK):
 
 
 def _sparse_gqa_packed_bwd(
-    q, k, v, index_map, do, delta, lse, sm_scale, BK, autotune: bool
+    q,
+    k,
+    v,
+    index_map,
+    do,
+    delta,
+    lse,
+    sm_scale,
+    BK,
+    autotune: bool,
+    use_bf16_atomic: bool,
 ):
     assert all(t.is_contiguous() for t in [q, k, v, index_map, do, delta, lse])
     SQ, H, D = q.shape
@@ -364,7 +368,7 @@ def _sparse_gqa_packed_bwd(
 
     DP = triton.next_power_of_2(D)
     dq = torch.empty_like(q)
-    atomic_dtype = torch.bfloat16 if _ATOMIC_DTYPE == "bf16" else torch.float32
+    atomic_dtype = torch.bfloat16 if use_bf16_atomic else torch.float32
     dk = torch.zeros_like(k, dtype=atomic_dtype)
     dv = torch.zeros_like(v, dtype=atomic_dtype)
     kernel_args = (
@@ -421,12 +425,24 @@ def _sparse_gqa_packed_bwd(
 
 class SparseGQAPackedFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, index_map, sm_scale, BK_FWD, BK_BWD, BWD_AUTOTUNE):
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        index_map,
+        sm_scale,
+        BK_FWD,
+        BK_BWD,
+        BWD_AUTOTUNE,
+        use_bf16_atomic,
+    ):
         out, lse = _sparse_gqa_packed_fwd(q, k, v, index_map, sm_scale, BK_FWD)
         ctx.save_for_backward(q, k, v, index_map, out, lse)
         ctx.sm_scale = sm_scale
         ctx.BK_BWD = BK_BWD
         ctx.BWD_AUTOTUNE = BWD_AUTOTUNE
+        ctx.use_bf16_atomic = use_bf16_atomic
         return out, lse
 
     @staticmethod
@@ -446,8 +462,9 @@ class SparseGQAPackedFn(torch.autograd.Function):
             ctx.sm_scale,
             ctx.BK_BWD,
             ctx.BWD_AUTOTUNE,
+            ctx.use_bf16_atomic,
         )
-        return dq, dk, dv, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None
 
 
 def sparse_gqa_packed_attn(
@@ -459,8 +476,13 @@ def sparse_gqa_packed_attn(
     BK_FWD: int = 64,
     BK_BWD: int = 64,
     BWD_AUTOTUNE: bool = True,
+    use_bf16_atomic: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Packed-layout DSA Triton attention.  Returns log2 LSE."""
+    """Packed-layout DSA Triton attention.  Returns log2 LSE.
+
+    ``use_bf16_atomic`` picks the dtype of the dK / dV atomic-add buffers of
+    the backward: bf16, or fp32 for higher precision at more memory traffic.
+    """
     if sm_scale is None:
         sm_scale = q.shape[-1] ** -0.5
     return SparseGQAPackedFn.apply(
@@ -472,4 +494,5 @@ def sparse_gqa_packed_attn(
         BK_FWD,
         BK_BWD,
         BWD_AUTOTUNE,
+        use_bf16_atomic,
     )

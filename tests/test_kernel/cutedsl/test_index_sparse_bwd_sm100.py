@@ -75,6 +75,11 @@ from magi_attention.kernel.cutedsl.ffa_bwd_sm100_index import (
     num_k_passes_default,
 )
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.testing.index_sparse import (
+    Sm100IndexUnsupportedError,
+    ffa_bwd_sm100_index_sm90_layout,
+    index_sparse_ref_fwd,
+)
 from magi_attention.testing.precision import assert_close
 from magi_attention.utils import set_random_seed
 from magi_attention.utils.arch import is_sm10x
@@ -90,11 +95,6 @@ from tests.test_attn.sparse_test_utils import (
     compare_sdpa_fwd,
     sdpa_ref_bwd_grads,
     sdpa_ref_output,
-)
-from tests.test_kernel.cutedsl.index_sparse_sm100_utils import (
-    Sm100IndexUnsupportedError,
-    ffa_bwd_sm100_index_sm90_layout,
-    index_sparse_ref_fwd,
 )
 
 BwdGrads = tuple[torch.Tensor, torch.Tensor, torch.Tensor]

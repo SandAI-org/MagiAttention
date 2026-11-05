@@ -21,7 +21,7 @@ exactly as in ``exps/attn/sparse/run_index_sparse_comparison_benchmark.py``:
 per q block, ``topk`` sorted ``randint`` K ids (repeats allowed), and the same
 128x128 block mask for FlexAttention. The sm90 tensors reach the SM120 kernel
 through ``ffa_fwd_sm120_index_sm90_layout``, the adapter of
-``tests/test_kernel/cutedsl/index_sparse_sm120_utils.py``.
+``magi_attention/testing/index_sparse.py``.
 
 Scenarios (``SCENARIOS``) are those of the SM100 bench: q_block_size > 1
 (``qbs`` consecutive q tokens share one index row) with ``qbs * nhq == 128``,
@@ -41,13 +41,12 @@ context-parallel rank whose local q is a slice of the full sequence.
 
 Reporting effective sparse TFLOPs/s: 4 * S_q * topk_tokens * nhq * hd.
 
-Run:
-    cd exps/attn/cutedsl
-    PYTHONPATH=../../.. python run_index_sparse_sm120_benchmark.py
-    PYTHONPATH=../../.. python run_index_sparse_sm120_benchmark.py \\
+Run (from the repo root):
+    python -m exps.attn.cutedsl.run_index_sparse_sm120_benchmark
+    python -m exps.attn.cutedsl.run_index_sparse_sm120_benchmark \\
         --scenarios gqa8x1_qbs16_hd128_topk4096 \\
         --methods ffa_sm120_index --seqlens 32768
-    PYTHONPATH=../../.. python run_index_sparse_sm120_benchmark.py \\
+    python -m exps.attn.cutedsl.run_index_sparse_sm120_benchmark \\
         --scenarios gqa8x1_qbs16_hd128_topk4096 --seqlen-q 16384 --seqlens 131072
 """
 
@@ -67,16 +66,16 @@ from magi_attention.benchmarking import (
     gen_save_path,
     perf_report,
 )
+from magi_attention.testing.index_sparse import (
+    Sm120IndexGap,
+    ffa_fwd_sm120_index_sm90_layout,
+    index_sparse_ref_fwd,
+    sm120_index_fwd_gaps,
+)
 from magi_attention.utils import set_random_seed
 
 # isort: split
 from exps.attn.baselines.token_sparse_attn_triton import token_sparse_fwd
-from tests.test_kernel.cutedsl.index_sparse_sm100_utils import index_sparse_ref_fwd
-from tests.test_kernel.cutedsl.index_sparse_sm120_utils import (
-    Sm120IndexGap,
-    ffa_fwd_sm120_index_sm90_layout,
-    sm120_index_fwd_gaps,
-)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
