@@ -22,7 +22,7 @@ Data is generated exactly as in
 same 128x128 block mask for FlexAttention. The sm90 tensors reach the SM100
 kernels through ``ffa_fwd_sm100_index_sm90_layout`` and
 ``ffa_bwd_sm100_index_sm90_layout``, the adapters of
-``magi_attention/utils/index_sparse_utils.py``.
+``tests/test_kernel/cutedsl/index_sparse_sm100_utils.py``.
 
 Scenarios (``SCENARIOS``) extend the sm90 bench (MQA128, D=128, topk=2048)
 with the axes of the sm90 IndexSparse test: head_dim 64, GQA / MHA (kv heads
@@ -82,19 +82,19 @@ from magi_attention.benchmarking import (
     perf_report,
 )
 from magi_attention.utils import set_random_seed
-from magi_attention.utils.index_sparse_utils import (
+
+# isort: split
+from exps.attn.baselines.token_sparse_attn_triton import (
+    token_sparse_attn,
+    token_sparse_fwd,
+)
+from tests.test_kernel.cutedsl.index_sparse_sm100_utils import (
     Sm100IndexGap,
     ffa_bwd_sm100_index_sm90_layout,
     ffa_fwd_sm100_index_sm90_layout,
     index_sparse_ref_fwd,
     sm100_index_bwd_gaps,
     sm100_index_fwd_gaps,
-)
-
-# isort: split
-from exps.attn.baselines.token_sparse_attn_triton import (
-    token_sparse_attn,
-    token_sparse_fwd,
 )
 
 # ─── Config ───────────────────────────────────────────────────────────────────
