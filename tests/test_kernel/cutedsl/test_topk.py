@@ -15,7 +15,8 @@
 """Correctness tests for the CuTe DSL radix-select top-k kernel.
 
 The kernel is verified against ``torch.topk``: values gathered by the returned
-indices are sorted on both sides and compared with ``torch.testing.assert_close``.
+indices are sorted on both sides and compared with ``assert_close``. Index
+identity, including tie-breaking, is checked with ``assert_equal``.
 
 Run:
     pytest tests/test_kernel/cutedsl/test_topk.py -v
@@ -29,6 +30,7 @@ from torch.testing._internal.common_utils import TestCase, run_tests
 
 from magi_attention.kernel.cutedsl.topk import cutedsl_topk, cutedsl_topk_available
 from magi_attention.testing import parameterize
+from magi_attention.testing.precision import assert_close, assert_equal
 
 _shapes = [
     # (batch, n, k)
@@ -63,7 +65,13 @@ def _verify_topk_indices(x: torch.Tensor, k: int, indices: torch.Tensor) -> None
     gathered = (
         torch.gather(x.float(), -1, indices.long()).sort(dim=-1, descending=True).values
     )
-    torch.testing.assert_close(gathered, ref_values, atol=1e-5, rtol=1e-5)
+    assert_close(
+        gathered,
+        ref_values,
+        atol=1e-5,
+        rtol=1e-5,
+        test_case="cutedsl_topk values",
+    )
 
 
 def _lowest_index_topk_ref(x: torch.Tensor, k: int) -> torch.Tensor:
@@ -95,10 +103,14 @@ class TestCuteDSLTopK(TestCase):
             bool((indices[:, 1:] > indices[:, :-1]).all()),
             "rows not strictly ascending",
         )
-        self.assertTrue(torch.equal(indices, cutedsl_topk(x, k)))
+        assert_equal(indices, cutedsl_topk(x, k), test_case="cutedsl_topk default args")
         indices_i32 = cutedsl_topk(x, k, out_dtype=torch.int32)
         self.assertEqual(indices_i32.dtype, torch.int32)
-        self.assertTrue(torch.equal(indices_i32.long(), indices))
+        assert_equal(
+            indices_i32.long(),
+            indices,
+            test_case="cutedsl_topk int32 indices",
+        )
 
     @parameterize("case", _tie_cases)
     def test_cutedsl_topk_ties(self, case):
@@ -111,7 +123,11 @@ class TestCuteDSLTopK(TestCase):
         )
 
         indices = cutedsl_topk(x, k)
-        self.assertTrue(torch.equal(indices, _lowest_index_topk_ref(x, k)))
+        assert_equal(
+            indices,
+            _lowest_index_topk_ref(x, k),
+            test_case="cutedsl_topk lowest-index ties",
+        )
 
     @parameterize("dtype", _dtypes)
     def test_cutedsl_topk_misaligned_base(self, dtype):
