@@ -119,6 +119,57 @@ class TestDSASparseAttn(TestCase):
         _assert_rel_close(k_tri.grad, k_ref.grad, "dk", 2e-2)
         _assert_rel_close(v_tri.grad, v_ref.grad, "dv", 2e-2)
 
+    @parameterize("topk", [64, 200])
+    def test_sparse_gqa_packed_attn_empty_rows(self, topk):
+        torch.manual_seed(0)
+        device = "cuda"
+        dtype = torch.bfloat16
+        sq, num_heads, skv, hd = 64, 16, 1024, 128
+        scale = hd**-0.5
+
+        q = torch.randn(sq, num_heads, hd, device=device, dtype=dtype)
+        k = torch.randn(skv, 1, hd, device=device, dtype=dtype)
+        v = torch.randn(skv, 1, hd, device=device, dtype=dtype)
+        idx = _unique_indices(sq, skv, topk, device)
+        # rows with no valid index: all -1, or all out of range
+        idx[0::8] = -1
+        idx[5::8] = skv
+        # rows whose leading BK block(s) are fully invalid
+        idx[2::8, : topk // 2 + 1] = -1
+        index_map = idx.unsqueeze(0).contiguous()
+
+        empty = torch.zeros(sq, dtype=torch.bool, device=device)
+        empty[0::8] = True
+        empty[5::8] = True
+        nonempty = ~empty
+
+        q_tri, k_tri, v_tri = (t.detach().clone().requires_grad_() for t in (q, k, v))
+        out, lse_log2 = sparse_gqa_packed_attn(
+            q_tri, k_tri, v_tri, index_map, scale, BWD_AUTOTUNE=False
+        )
+
+        assert (out[empty] == 0).all(), "empty rows: out should be 0"
+        assert torch.isneginf(lse_log2[empty]).all(), "empty rows: lse should be -inf"
+
+        q_ref, k_ref, v_ref = (t.detach().clone().requires_grad_() for t in (q, k, v))
+        out_ref, lse_ref = _packed_ref(
+            q_ref[nonempty], k_ref, v_ref, index_map[:, nonempty], scale
+        )
+        _assert_rel_close(out[nonempty], out_ref, "out", 1e-2)
+        _assert_rel_close(lse_log2[nonempty] * _LN2, lse_ref, "lse", 1e-3)
+
+        dout = torch.randn_like(out)
+        dlse = torch.randn(sq, num_heads, device=device, dtype=torch.float32)
+        torch.autograd.backward(
+            [out_ref, lse_ref], [dout[nonempty].float(), dlse[nonempty]]
+        )
+        torch.autograd.backward([out, lse_log2], [dout, dlse * _LN2])
+
+        assert (q_tri.grad[empty] == 0).all(), "empty rows: dq should be 0"
+        _assert_rel_close(q_tri.grad[nonempty], q_ref.grad[nonempty], "dq", 2e-2)
+        _assert_rel_close(k_tri.grad, k_ref.grad, "dk", 2e-2)
+        _assert_rel_close(v_tri.grad, v_ref.grad, "dv", 2e-2)
+
     @parameterize("kv_group", [(1, 16), (2, 32), (1, 128)])
     @parameterize("use_bf16_atomic", [False, True])
     def test_dsa_sparse_attn_bwd(self, kv_group, use_bf16_atomic):
