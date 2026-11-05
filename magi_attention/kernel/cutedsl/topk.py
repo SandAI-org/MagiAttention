@@ -55,6 +55,8 @@ from cutlass import BFloat16, Boolean, Float32, Int16, Int32, Int64, const_expr
 from quack.compile_utils import make_fake_tensor
 from quack.utils import elem_pointer, store_shared_remote
 
+from magi_attention.utils import nvtx
+
 from .cutedsl_utils import (
     VEC_BF16,
     VEC_FP32,
@@ -1085,13 +1087,10 @@ def cutedsl_topk(
 
     orig_shape = x.shape
     x2d = x.reshape(-1, orig_shape[-1]).contiguous()
-    torch.cuda.nvtx.range_push(
+    with nvtx.add_nvtx_event(
         f"DSA/cutedsl_topk rows={x2d.shape[0]} cols={x2d.shape[1]} k={k}"
-    )
-    try:
+    ):
         indices = fn(x2d, k, sorted=False, out_dtype=out_dtype)
-    finally:
-        torch.cuda.nvtx.range_pop()
 
     out_shape = (*orig_shape[:-1], k)
     return indices.reshape(out_shape)
