@@ -52,9 +52,28 @@ import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass import BFloat16, Boolean, Float32, Int16, Int32, Int64, const_expr
-from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 from quack.utils import elem_pointer, store_shared_remote
+
+from .cutedsl_utils import (
+    VEC_BF16,
+    VEC_FP32,
+    bf16_to_ordered16,
+    float_to_ordered,
+    gmem_atomic_add_relaxed,
+)
+from .cutedsl_utils import gmem_ld_acquire as ld_acquire
+from .cutedsl_utils import gmem_red_release as red_release
+from .cutedsl_utils import (
+    gmem_store_cs_i32,
+    int16_zext_to_int32,
+    st_release,
+    tensor_atomic_add,
+    u32_eq,
+    u32_gt,
+    vec_load_bf16_to_ordered16,
+    vec_load_fp32_to_ordered32,
+)
 
 # ====================================================================
 # Constants
@@ -91,324 +110,6 @@ GSTATE_SIZE = GSTATE_CTA_COUNTS + 2 * MAX_CTAS_PER_GROUP
 SCAN_WARPS = BLOCK_THREADS // 32
 SCAN_TOTAL = 2 * SCAN_WARPS
 SCAN_BASE = SCAN_TOTAL + 2
-
-
-# ====================================================================
-# Shared-memory helpers (from smem_ops)
-# ====================================================================
-
-
-@dsl_user_op
-def tensor_atomic_add(
-    tensor: cute.Tensor, idx: Int32, val: Int32, *, loc=None, ip=None
-) -> Int32:
-    """Atomic add val to tensor[idx], return old value. Works for both SMEM and GMEM."""
-    ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    return cute.arch.atomic_add(ptr, val, loc=loc, ip=ip)
-
-
-@dsl_user_op
-def u32_gt(a: Int32, b: Int32, *, loc=None, ip=None) -> Boolean:
-    """Unsigned greater-than: a >u b."""
-    from cutlass._mlir.dialects import arith as _arith
-
-    return Boolean(
-        _arith.CmpIOp(
-            _arith.CmpIPredicate.ugt,
-            a.ir_value(loc=loc, ip=ip),
-            b.ir_value(loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
-        ).result
-    )
-
-
-@dsl_user_op
-def u32_ge(a: Int32, b: Int32, *, loc=None, ip=None) -> Boolean:
-    """Unsigned greater-or-equal: a >=u b."""
-    from cutlass._mlir.dialects import arith as _arith
-
-    return Boolean(
-        _arith.CmpIOp(
-            _arith.CmpIPredicate.uge,
-            a.ir_value(loc=loc, ip=ip),
-            b.ir_value(loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
-        ).result
-    )
-
-
-@dsl_user_op
-def u32_lt(a: Int32, b: Int32, *, loc=None, ip=None) -> Boolean:
-    """Unsigned less-than: a <u b."""
-    from cutlass._mlir.dialects import arith as _arith
-
-    return Boolean(
-        _arith.CmpIOp(
-            _arith.CmpIPredicate.ult,
-            a.ir_value(loc=loc, ip=ip),
-            b.ir_value(loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
-        ).result
-    )
-
-
-@dsl_user_op
-def u32_eq(a: Int32, b: Int32, *, loc=None, ip=None) -> Boolean:
-    """Unsigned equal: a ==u b."""
-    return Boolean(a == b)
-
-
-# ====================================================================
-# Float <-> Ordered uint conversion (DSL)
-# ====================================================================
-
-
-@dsl_user_op
-def float_to_ordered(val: Float32, *, loc=None, ip=None) -> Int32:
-    from cutlass._mlir.dialects import arith as _arith
-
-    bits = Int32(
-        _arith.BitcastOp(T.i32(), val.ir_value(loc=loc, ip=ip), loc=loc, ip=ip).result
-    )
-    thirty_one = _arith.ConstantOp(T.i32(), 31, loc=loc, ip=ip).result
-    sign_mask = Int32(
-        _arith.ShRSIOp(bits.ir_value(loc=loc, ip=ip), thirty_one, loc=loc, ip=ip).result
-    )
-    return bits ^ (sign_mask | Int32(0x80000000))
-
-
-@dsl_user_op
-def ordered_to_float(val: Int32, *, loc=None, ip=None) -> Float32:
-    from cutlass._mlir.dialects import arith as _arith
-
-    mask = Int32(
-        _arith.ShRSIOp(
-            val.ir_value(loc=loc, ip=ip),
-            _arith.ConstantOp(T.i32(), 31, loc=loc, ip=ip).result,
-            loc=loc,
-            ip=ip,
-        ).result
-    )
-    inv_mask = Int32(
-        _arith.XOrIOp(
-            mask.ir_value(loc=loc, ip=ip),
-            _arith.ConstantOp(T.i32(), -1, loc=loc, ip=ip).result,
-            loc=loc,
-            ip=ip,
-        ).result
-    )
-    xor_mask = inv_mask | Int32(0x80000000)
-    bits = val ^ xor_mask
-    return Float32(
-        _arith.BitcastOp(T.f32(), bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip).result
-    )
-
-
-# ====================================================================
-# BFloat16 <-> Ordered uint16 conversion (DSL)
-# ====================================================================
-
-
-@dsl_user_op
-def bf16_to_ordered16(val: BFloat16, *, loc=None, ip=None) -> Int16:
-    from cutlass._mlir.dialects import arith as _arith
-
-    bits = Int16(
-        _arith.BitcastOp(T.i16(), val.ir_value(loc=loc, ip=ip), loc=loc, ip=ip).result
-    )
-    fifteen = _arith.ConstantOp(T.i16(), 15, loc=loc, ip=ip).result
-    sign_mask = Int16(
-        _arith.ShRSIOp(bits.ir_value(loc=loc, ip=ip), fifteen, loc=loc, ip=ip).result
-    )
-    return bits ^ (sign_mask | Int16(-32768))
-
-
-@dsl_user_op
-def ordered16_to_bf16(val: Int16, *, loc=None, ip=None) -> BFloat16:
-    from cutlass._mlir.dialects import arith as _arith
-
-    mask = Int16(
-        _arith.ShRSIOp(
-            val.ir_value(loc=loc, ip=ip),
-            _arith.ConstantOp(T.i16(), 15, loc=loc, ip=ip).result,
-            loc=loc,
-            ip=ip,
-        ).result
-    )
-    inv_mask = Int16(
-        _arith.XOrIOp(
-            mask.ir_value(loc=loc, ip=ip),
-            _arith.ConstantOp(T.i16(), -1, loc=loc, ip=ip).result,
-            loc=loc,
-            ip=ip,
-        ).result
-    )
-    xor_mask = inv_mask | Int16(-32768)
-    bits = val ^ xor_mask
-    return BFloat16(
-        _arith.BitcastOp(T.bf16(), bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip).result
-    )
-
-
-@dsl_user_op
-def int16_zext_to_int32(val: Int16, *, loc=None, ip=None) -> Int32:
-    from cutlass._mlir.dialects import arith as _arith
-
-    return Int32(
-        _arith.ExtUIOp(T.i32(), val.ir_value(loc=loc, ip=ip), loc=loc, ip=ip).result
-    )
-
-
-# ====================================================================
-# Vectorized GMEM -> SMEM load helpers
-# ====================================================================
-
-VEC_BF16 = 8
-VEC_FP32 = 4
-
-
-@dsl_user_op
-def vec_load_bf16_to_ordered16(
-    gmem_tensor: cute.Tensor,
-    gmem_base: Int32,
-    smem_tensor: cute.Tensor,
-    smem_base: Int32,
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """128-bit vectorized load: load 4xi32, bitcast each i32 to 2xbf16, convert to ordered16."""
-    from cutlass._mlir import ir
-    from cutlass._mlir.dialects import arith as _arith
-    from cutlass._mlir.dialects import vector as _vector
-
-    ptr = elem_pointer(gmem_tensor, gmem_base, loc=loc, ip=ip)
-    vec_i32_ty = ir.VectorType.get([4], Int32.mlir_type)
-    vec_i32 = cute.arch.load(ptr, vec_i32_ty, loc=loc, ip=ip)
-    fifteen = _arith.ConstantOp(T.i16(), 15, loc=loc, ip=ip).result
-    sign_const = Int16(-32768)
-    for j_val in range(4):
-        word = _vector.extractelement(
-            vec_i32,
-            position=_arith.constant(T.i32(), j_val, loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
-        )
-        lo_bits = Int16(_arith.TruncIOp(T.i16(), word, loc=loc, ip=ip).result)
-        hi_word = Int32(
-            _arith.ShRUIOp(
-                word,
-                _arith.ConstantOp(T.i32(), 16, loc=loc, ip=ip).result,
-                loc=loc,
-                ip=ip,
-            ).result
-        )
-        hi_bits = Int16(
-            _arith.TruncIOp(
-                T.i16(), hi_word.ir_value(loc=loc, ip=ip), loc=loc, ip=ip
-            ).result
-        )
-        for sub, bits in enumerate([lo_bits, hi_bits]):
-            sign_mask = Int16(
-                _arith.ShRSIOp(
-                    bits.ir_value(loc=loc, ip=ip), fifteen, loc=loc, ip=ip
-                ).result
-            )
-            ordered = bits ^ (sign_mask | sign_const)
-            smem_tensor[smem_base + Int32(j_val * 2 + sub)] = ordered
-
-
-@dsl_user_op
-def vec_load_fp32_to_ordered32(
-    gmem_tensor: cute.Tensor,
-    gmem_base: Int32,
-    smem_tensor: cute.Tensor,
-    smem_base: Int32,
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    from cutlass._mlir import ir
-    from cutlass._mlir.dialects import arith as _arith
-    from cutlass._mlir.dialects import vector as _vector
-
-    ptr = elem_pointer(gmem_tensor, gmem_base, loc=loc, ip=ip)
-    vec_ty = ir.VectorType.get([VEC_FP32], Float32.mlir_type)
-    vec = cute.arch.load(ptr, vec_ty, loc=loc, ip=ip)
-    for j_val in range(VEC_FP32):
-        elem_ir = _vector.extractelement(
-            vec,
-            position=_arith.constant(T.i32(), j_val, loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
-        )
-        bits = Int32(_arith.BitcastOp(T.i32(), elem_ir, loc=loc, ip=ip).result)
-        thirty_one = _arith.ConstantOp(T.i32(), 31, loc=loc, ip=ip).result
-        sign_mask = Int32(
-            _arith.ShRSIOp(
-                bits.ir_value(loc=loc, ip=ip), thirty_one, loc=loc, ip=ip
-            ).result
-        )
-        ordered = bits ^ (sign_mask | Int32(0x80000000))
-        smem_tensor[smem_base + Int32(j_val)] = ordered
-
-
-# ====================================================================
-# GMEM synchronization primitives
-# ====================================================================
-
-
-@dsl_user_op
-def ld_acquire(tensor: cute.Tensor, idx: Int32, *, loc=None, ip=None) -> Int32:
-    ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    return cute.arch.load(ptr, Int32, sem="acquire", scope="gpu", loc=loc, ip=ip)
-
-
-@dsl_user_op
-def red_release(
-    tensor: cute.Tensor, idx: Int32, val: Int32, *, loc=None, ip=None
-) -> Int32:
-    cute.arch.fence_acq_rel_gpu(loc=loc, ip=ip)
-    ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    return cute.arch.atomic_add(ptr, val, sem="relaxed", scope="gpu", loc=loc, ip=ip)
-
-
-@dsl_user_op
-def st_release(
-    tensor: cute.Tensor, idx: Int32, val: Int32, *, loc=None, ip=None
-) -> None:
-    cute.arch.fence_acq_rel_gpu(loc=loc, ip=ip)
-    ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    cute.arch.store(ptr, val, sem="release", scope="gpu", loc=loc, ip=ip)
-
-
-@dsl_user_op
-def gmem_atomic_add_relaxed(
-    tensor: cute.Tensor, idx: Int32, val: Int32, *, loc=None, ip=None
-) -> Int32:
-    ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    return cute.arch.atomic_add(ptr, val, sem="relaxed", scope="gpu", loc=loc, ip=ip)
-
-
-@dsl_user_op
-def gmem_store_cs_i32(
-    tensor: cute.Tensor, coord: cute.Coord, val: Int32, *, loc=None, ip=None
-) -> None:
-    """Store Int32 to GMEM with cache-streaming hint (st.cs)."""
-    ptr = elem_pointer(tensor, coord, loc=loc, ip=ip)
-    cute.arch.store(ptr, val, cop="cs", loc=loc, ip=ip)
-
-
-@dsl_user_op
-def gmem_store_cs_f32(
-    tensor: cute.Tensor, coord: cute.Coord, val: Float32, *, loc=None, ip=None
-) -> None:
-    """Store Float32 to GMEM with cache-streaming hint (st.cs)."""
-    ptr = elem_pointer(tensor, coord, loc=loc, ip=ip)
-    cute.arch.store(ptr, val, cop="cs", loc=loc, ip=ip)
 
 
 # ====================================================================
