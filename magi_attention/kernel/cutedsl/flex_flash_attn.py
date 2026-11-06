@@ -278,7 +278,11 @@ def _flex_flash_attn_fwd(
         # repeat the reduction. Both sink-folding paths also need the same
         # value: the direct store passes it to the main kernel, whose
         # `learnable_sink` slot holds one logit per head.
-        lse_sink = torch.logsumexp(sink.float(), dim=0)
+        # A single sink is its own logsumexp.
+        if sink.shape[0] == 1:
+            lse_sink = sink[0].float().contiguous()
+        else:
+            lse_sink = torch.logsumexp(sink.float(), dim=0)
 
     assert num_head % num_head_kv == 0, "num_head must be divisible by num_head_kv"
     alignment = 16 // q.element_size()
