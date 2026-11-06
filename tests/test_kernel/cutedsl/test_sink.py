@@ -187,7 +187,9 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
         self, case: tuple[RangesGeometry, HeadConfig], num_sinks: int
     ):
         geometry, heads = case
-        test_case = f"[test_ranges_sink_fwd_bwd][{geometry.name}][{heads.name}][{num_sinks=}]"
+        test_case = (
+            f"[test_ranges_sink_fwd_bwd][{geometry.name}][{heads.name}][{num_sinks=}]"
+        )
         seed_test_case(test_case)
         q, k, v = make_qkv(
             (geometry.total_q,), (geometry.total_k,), heads, DTYPE, self.device
