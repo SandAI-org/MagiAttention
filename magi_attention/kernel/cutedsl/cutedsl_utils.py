@@ -1569,11 +1569,8 @@ def vec_load_bf16_to_ordered16(
     fifteen = _arith.ConstantOp(T.i16(), 15, loc=loc, ip=ip).result
     sign_const = Int16(-32768)
     for j_val in range(4):
-        word = _vector.extractelement(
-            vec_i32,
-            position=_arith.constant(T.i32(), j_val, loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
+        word = _vector.extract(
+            vec_i32, dynamic_position=[], static_position=[j_val], loc=loc, ip=ip
         )
         lo_bits = Int16(_arith.TruncIOp(T.i16(), word, loc=loc, ip=ip).result)
         hi_word = Int32(
@@ -1617,11 +1614,8 @@ def vec_load_fp32_to_ordered32(
     vec_ty = ir.VectorType.get([VEC_FP32], Float32.mlir_type)
     vec = cute.arch.load(ptr, vec_ty, loc=loc, ip=ip)
     for j_val in range(VEC_FP32):
-        elem_ir = _vector.extractelement(
-            vec,
-            position=_arith.constant(T.i32(), j_val, loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
+        elem_ir = _vector.extract(
+            vec, dynamic_position=[], static_position=[j_val], loc=loc, ip=ip
         )
         bits = Int32(_arith.BitcastOp(T.i32(), elem_ir, loc=loc, ip=ip).result)
         thirty_one = _arith.ConstantOp(T.i32(), 31, loc=loc, ip=ip).result
