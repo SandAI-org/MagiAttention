@@ -2726,6 +2726,7 @@ def ffa_bwd_sm100_index(
     q_block_size: Optional[int] = None,
     gather_v_async: Optional[bool] = None,
     num_k_passes: Optional[int] = None,
+    dlse: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass of index-sparse (DSA) attention on SM100.
 
@@ -2747,6 +2748,8 @@ def ffa_bwd_sm100_index(
             its ids in that chunk, so that the K/V rows and dK/dV accumulators
             a pass touches mostly stay in L2. dQ then sums the passes in fp32.
             ``None`` picks ``num_k_passes_default``.
+        dlse: optional fp32 ``(total_q, num_heads_q)`` gradient of ``lse``; the
+            preprocess folds it into dPsum as ``sum(out * dout) - dlse``.
 
     Returns:
         A tuple of (dQ, dK, dV) with the same shapes and dtypes as q, k, v.
@@ -2764,6 +2767,10 @@ def ffa_bwd_sm100_index(
     )
     assert lse.shape == (q.shape[0], q.shape[1]) and lse.dtype == torch.float32
     assert lse.stride(-1) == 1
+    if dlse is not None:
+        assert dlse.shape == lse.shape and dlse.dtype == torch.float32
+        assert dlse.device == q.device
+        dlse = dlse.contiguous()
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
@@ -2852,7 +2859,7 @@ def ffa_bwd_sm100_index(
         None,  # dq_accum: allocated below when the passes sum dQ
         None,  # cu_seqlens_q
         None,  # seqused_q
-        None,  # dlse
+        dlse,
         dtype,
         head_dim,
         head_dim,

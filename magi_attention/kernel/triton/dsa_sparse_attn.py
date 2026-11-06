@@ -64,7 +64,7 @@ def _bwd_autotune_configs():
 # ---------------------------------------------------------------------------
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["SKV"])
 def _sparse_gqa_packed_fwd_kernel(
     q,
     k,
@@ -89,7 +89,7 @@ def _sparse_gqa_packed_fwd_kernel(
     stride_od,
     stride_ls,
     stride_lh,
-    SKV: tl.constexpr,
+    SKV,  # runtime: the packed KV length changes every step
     K: tl.constexpr,
     D: tl.constexpr,
     DP: tl.constexpr,
@@ -201,7 +201,7 @@ def _sparse_gqa_packed_bwd_kernel_impl(
     stride_dvs,
     stride_dvh,
     stride_dvd,
-    SKV: tl.constexpr,
+    SKV,  # runtime: the packed KV length changes every step
     K: tl.constexpr,
     D: tl.constexpr,
     DP: tl.constexpr,
@@ -286,12 +286,14 @@ def _sparse_gqa_packed_bwd_kernel_impl(
     tl.store(dq_ptrs, dq_acc.to(dq.dtype.element_ty), mask=mask_d[None, :])
 
 
-_sparse_gqa_packed_bwd_kernel = triton.jit(_sparse_gqa_packed_bwd_kernel_impl)
+_sparse_gqa_packed_bwd_kernel = triton.jit(
+    _sparse_gqa_packed_bwd_kernel_impl, do_not_specialize=["SKV"]
+)
 _sparse_gqa_packed_bwd_kernel_autotuned = triton.autotune(
     configs=_bwd_autotune_configs(),
     key=["K", "D", "H"],
     reset_to_zero=["dk", "dv"],
-)(triton.jit(_sparse_gqa_packed_bwd_kernel_impl))
+)(triton.jit(_sparse_gqa_packed_bwd_kernel_impl, do_not_specialize=["SKV"]))
 
 
 def _sparse_gqa_packed_fwd(q, k, v, index_map, sm_scale, BK):
