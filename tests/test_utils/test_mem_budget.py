@@ -22,6 +22,8 @@ GPU run: it executes one dense FFA fwd+bwd and compares
 ``torch.cuda.max_memory_allocated`` with the predicted bwd peak.
 """
 
+import pytest
+
 from magi_attention.utils.mem_budget import (
     FFAMemBudgetConfig,
     ffa_max_total_seqlen,
@@ -44,6 +46,7 @@ def _canonical(direction: str, seqlen: int, **kwargs) -> FFAMemBudgetConfig:
     )
 
 
+@pytest.mark.arch_independent
 class TestLedgerArithmetic:
     def test_bwd_dq_accum_at_524k_is_exactly_32_gib(self):
         # This is the famous "Tried to allocate 32.00 GiB" of the canonical
@@ -73,6 +76,7 @@ class TestLedgerArithmetic:
         assert base.peak_bytes - no_atomic.peak_bytes == 32 * GIB
 
 
+@pytest.mark.arch_independent
 class TestMaxSeqlenSolver:
     def test_bwd_baseline_caps_around_425k(self):
         s_max = ffa_max_total_seqlen(H100_BUDGET_BYTES, _canonical("bwd", 1))

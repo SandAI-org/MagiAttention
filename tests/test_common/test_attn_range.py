@@ -15,6 +15,7 @@
 import pytest
 
 
+@pytest.mark.arch_independent
 class TestAttnRange:
     def test_simple_properties(self, backend):
         from magi_attention.common import AttnRange
