@@ -1468,7 +1468,7 @@ def tensor_atomic_add(
 ) -> Int32:
     """Atomic add val to tensor[idx], return old value. Works for both SMEM and GMEM."""
     ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    return cute.arch.atomic_add(ptr, val, loc=loc, ip=ip)
+    return cute.arch.atomic_add(ptr.llvm_ptr, val, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -1565,7 +1565,7 @@ def vec_load_bf16_to_ordered16(
 
     ptr = elem_pointer(gmem_tensor, gmem_base, loc=loc, ip=ip)
     vec_i32_ty = ir.VectorType.get([4], Int32.mlir_type)
-    vec_i32 = cute.arch.load(ptr, vec_i32_ty, loc=loc, ip=ip)
+    vec_i32 = cute.arch.load(ptr.llvm_ptr, vec_i32_ty, loc=loc, ip=ip)
     fifteen = _arith.ConstantOp(T.i16(), 15, loc=loc, ip=ip).result
     sign_const = Int16(-32768)
     for j_val in range(4):
@@ -1612,7 +1612,7 @@ def vec_load_fp32_to_ordered32(
 
     ptr = elem_pointer(gmem_tensor, gmem_base, loc=loc, ip=ip)
     vec_ty = ir.VectorType.get([VEC_FP32], Float32.mlir_type)
-    vec = cute.arch.load(ptr, vec_ty, loc=loc, ip=ip)
+    vec = cute.arch.load(ptr.llvm_ptr, vec_ty, loc=loc, ip=ip)
     for j_val in range(VEC_FP32):
         elem_ir = _vector.extract(
             vec, dynamic_position=[], static_position=[j_val], loc=loc, ip=ip
@@ -1633,12 +1633,18 @@ def vec_load_fp32_to_ordered32(
 # ====================================================================
 # gmem_ld_acquire / gmem_red_release are prefixed so they do not shadow the
 # pointer-based ld_acquire / red_release barrier helpers above.
+#
+# cute.arch.load / store / atomic_* get the raw LLVM pointer: they normalize a
+# cute pointer through `to_llvm_ptr`, which the CUDA 13 build of CuTeDSL does
+# not provide.
 
 
 @dsl_user_op
 def gmem_ld_acquire(tensor: cute.Tensor, idx: Int32, *, loc=None, ip=None) -> Int32:
     ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    return cute.arch.load(ptr, Int32, sem="acquire", scope="gpu", loc=loc, ip=ip)
+    return cute.arch.load(
+        ptr.llvm_ptr, Int32, sem="acquire", scope="gpu", loc=loc, ip=ip
+    )
 
 
 @dsl_user_op
@@ -1647,7 +1653,9 @@ def gmem_red_release(
 ) -> Int32:
     cute.arch.fence_acq_rel_gpu(loc=loc, ip=ip)
     ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    return cute.arch.atomic_add(ptr, val, sem="relaxed", scope="gpu", loc=loc, ip=ip)
+    return cute.arch.atomic_add(
+        ptr.llvm_ptr, val, sem="relaxed", scope="gpu", loc=loc, ip=ip
+    )
 
 
 @dsl_user_op
@@ -1656,7 +1664,7 @@ def st_release(
 ) -> None:
     cute.arch.fence_acq_rel_gpu(loc=loc, ip=ip)
     ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    cute.arch.store(ptr, val, sem="release", scope="gpu", loc=loc, ip=ip)
+    cute.arch.store(ptr.llvm_ptr, val, sem="release", scope="gpu", loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -1664,7 +1672,9 @@ def gmem_atomic_add_relaxed(
     tensor: cute.Tensor, idx: Int32, val: Int32, *, loc=None, ip=None
 ) -> Int32:
     ptr = elem_pointer(tensor, idx, loc=loc, ip=ip)
-    return cute.arch.atomic_add(ptr, val, sem="relaxed", scope="gpu", loc=loc, ip=ip)
+    return cute.arch.atomic_add(
+        ptr.llvm_ptr, val, sem="relaxed", scope="gpu", loc=loc, ip=ip
+    )
 
 
 @dsl_user_op
@@ -1673,4 +1683,4 @@ def gmem_store_cs_i32(
 ) -> None:
     """Store Int32 to GMEM with cache-streaming hint (st.cs)."""
     ptr = elem_pointer(tensor, coord, loc=loc, ip=ip)
-    cute.arch.store(ptr, val, cop="cs", loc=loc, ip=ip)
+    cute.arch.store(ptr.llvm_ptr, val, cop="cs", loc=loc, ip=ip)
