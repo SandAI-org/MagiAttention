@@ -60,3 +60,11 @@ class NamedBarrierBwdSm100(enum.IntEnum):
     dQaccReduce = enum.auto()
     TmemPtr = enum.auto()
     StatsLoad = enum.auto()
+
+
+class NamedBarrierBwdSm100Index(enum.IntEnum):
+    Compute = enum.auto()  # starts from 1 as barrier 0 is reserved for sync_threads()
+    dQEpilogue = enum.auto()
+    TmemPtr = enum.auto()
+    ReduceDV = enum.auto()
+    ReduceDK = enum.auto()

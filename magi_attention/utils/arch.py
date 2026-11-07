@@ -51,3 +51,13 @@ def is_blackwell() -> bool:
     """Return True iff the current CUDA device is Blackwell (SM100+) or newer."""
     capability = get_dev_cap_num()
     return capability >= 100
+
+
+def is_sm10x() -> bool:
+    """Return True iff the current CUDA device is SM10.x (e.g. B200 / B300)."""
+    return get_dev_cap_num() // 10 == 10
+
+
+def is_sm12x() -> bool:
+    """Return True iff the current CUDA device is SM12.x (e.g. RTX 50xx / RTX PRO 6000)."""
+    return get_dev_cap_num() // 10 == 12

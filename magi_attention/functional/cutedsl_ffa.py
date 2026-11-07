@@ -30,11 +30,8 @@ the CUTEDSL backend, because ``validate_range_feature_support`` rejects
 deterministic backward with ranges.
 """
 
-import weakref
-
 import torch
 
-from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -42,44 +39,6 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
 from magi_attention.meta.collection.calc_meta import AttnArg
 
 __all__ = ["cutedsl_fwd", "cutedsl_bwd"]
-
-# Range contracts for the bwd kernel, derived exactly on the host. Each
-# consumer has its own contract (do not infer one from another):
-# - declared_q_full_coverage only skips dQ hole zeroing -> union coverage
-#   suffices, overlapping q rows are fine (is_full_coverage merges first).
-# - declared_k_full_coverage additionally feeds k_ranges_sorted_disjoint in
-#   the kernel host (scheduler grid bound Sum(len) <= total_k), so it may only
-#   be set for a sorted partition -> is_cu_seqlens, never is_full_coverage.
-# - disable_fwd_atomic_reduction requires sorted, pairwise-disjoint q;
-#   AttnArg only certifies disjointness, so sortedness is checked here.
-#
-# All three are checked on the ranges passed to the kernel: the bwd range
-# merge in calc_meta reorders rows (one D2H copy per AttnArg, then cached).
-#
-# Cached per AttnArg: the runtime manager reuses args across steps and the
-# derivations sort all ranges. Keyed by id() because AttnArg is unhashable;
-# the finalizer evicts the entry before the id can be reused.
-_bwd_contract_cache: dict[int, tuple[int, int, bool, bool, bool]] = {}
-
-
-def _bwd_range_contracts(
-    attn_arg: AttnArg, total_q: int, total_k: int
-) -> tuple[bool, bool, bool]:
-    """Return (q_full_coverage, k_full_coverage, q_sorted) for attn_arg."""
-    key = id(attn_arg)
-    hit = _bwd_contract_cache.get(key)
-    if hit is not None and hit[0] == total_q and hit[1] == total_k:
-        return hit[2], hit[3], hit[4]
-    if hit is None:
-        weakref.finalize(attn_arg, _bwd_contract_cache.pop, key, None)
-    ffa_args = attn_arg.to_ffa_args(is_bwd=True)
-    q_ranges = AttnRanges.from_ranges(ffa_args["q_ranges"].tolist())
-    k_ranges = AttnRanges.from_ranges(ffa_args["k_ranges"].tolist())
-    q_cov = q_ranges.is_full_coverage(total_q)
-    k_cov = k_ranges.is_cu_seqlens(total_k)
-    q_sorted = q_ranges.is_sorted()
-    _bwd_contract_cache[key] = (total_q, total_k, q_cov, k_cov, q_sorted)
-    return q_cov, k_cov, q_sorted
 
 
 def cutedsl_fwd(
@@ -148,9 +107,9 @@ def cutedsl_bwd(
     if not ffa_args:
         raise RuntimeError("cutedsl_bwd called with skip_attn_bwd=True")
 
-    q_full_coverage, k_full_coverage, q_sorted = _bwd_range_contracts(
-        attn_arg, q.shape[0], k.shape[0]
-    )
+    # Range flags of the bwd range tensors, computed by AttnArg on the host.
+    q_full_coverage = attn_arg.bwd_args_q_coverage_end == q.shape[0]
+    k_full_coverage = attn_arg.bwd_args_k_partition_end == k.shape[0]
 
     # If fwd went down the atomic path it returns fp32 out; the bwd kernel
     # consumes the input dtype, so cast back.
@@ -177,7 +136,8 @@ def cutedsl_bwd(
         deterministic=False,  # the kernel raises NotImplementedError for ranges + deterministic
         declared_q_full_coverage=q_full_coverage,
         declared_k_full_coverage=k_full_coverage,
-        disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction and q_sorted,
+        disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction
+        and attn_arg.bwd_args_q_sorted,
         disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
         range_merge=False,
         mask_types=ffa_args["attn_type_map"],

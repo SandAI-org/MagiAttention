@@ -584,6 +584,21 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+def aligned_rows(x, align_bytes: int = 16):
+    """Reuse ``x`` when rows have unit inner stride and start on ``align_bytes`` boundaries.
+
+    Copy other layouts into contiguous storage.
+    """
+    elems = align_bytes // x.element_size()
+    if (
+        x.stride(-1) == 1
+        and x.data_ptr() % align_bytes == 0
+        and all(s % elems == 0 for s in x.stride()[:-1])
+    ):
+        return x
+    return x.clone(memory_format=torch.contiguous_format)
+
+
 OUTPUT_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
 
 

@@ -134,13 +134,16 @@ DSINK_RTOL = 0.1
 class TestSinkFwdBwd(CuteDSLDistTestBase):
     @with_run_in_mp
     @parameterize("case", DENSE_SINK_CASES)
-    def test_dense_sink_fwd_bwd(self, case: tuple[HeadConfig, int]):
+    @parameterize("num_sinks", [1, NUM_SINKS])
+    def test_dense_sink_fwd_bwd(self, case: tuple[HeadConfig, int], num_sinks: int):
         heads, mask_type = case
-        test_case = f"[test_dense_sink_fwd_bwd][{heads.name}][{mask_type=}]"
+        test_case = (
+            f"[test_dense_sink_fwd_bwd][{heads.name}][{mask_type=}][{num_sinks=}]"
+        )
         seed_test_case(test_case)
         tokens = (DENSE_BATCH_SIZE, DENSE_SEQLEN)
         q, k, v = make_qkv(tokens, tokens, heads, DTYPE, self.device)
-        sink = make_sink(NUM_SINKS, heads.num_heads_q, self.device)
+        sink = make_sink(num_sinks, heads.num_heads_q, self.device)
 
         out, meta = flex_flash_attn_func(q, k, v, mask_types=mask_type, sink=sink)
         do = torch.randn_like(out)
@@ -179,14 +182,19 @@ class TestSinkFwdBwd(CuteDSLDistTestBase):
 
     @with_run_in_mp
     @parameterize("case", RANGES_SINK_CASES)
-    def test_ranges_sink_fwd_bwd(self, case: tuple[RangesGeometry, HeadConfig]):
+    @parameterize("num_sinks", [1, NUM_SINKS])
+    def test_ranges_sink_fwd_bwd(
+        self, case: tuple[RangesGeometry, HeadConfig], num_sinks: int
+    ):
         geometry, heads = case
-        test_case = f"[test_ranges_sink_fwd_bwd][{geometry.name}][{heads.name}]"
+        test_case = (
+            f"[test_ranges_sink_fwd_bwd][{geometry.name}][{heads.name}][{num_sinks=}]"
+        )
         seed_test_case(test_case)
         q, k, v = make_qkv(
             (geometry.total_q,), (geometry.total_k,), heads, DTYPE, self.device
         )
-        sink = make_sink(NUM_SINKS, heads.num_heads_q, self.device)
+        sink = make_sink(num_sinks, heads.num_heads_q, self.device)
 
         out, meta = flex_flash_attn_func(
             q,

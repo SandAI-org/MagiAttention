@@ -86,7 +86,7 @@ This step needs to be performed on the **BARE-METAL HOST OPERATING SYSTEM**, **N
     ```
 
 :::{note}
-`requirements.txt` accepts `nvidia-cutlass-dsl` 4.4.2 to 4.8.0 except 4.6.0 and 4.6.1, and `quack-kernels` 0.4.1 to 0.6.5. The releases 4.6.0 and 4.6.1 add their own thread election around non-tensor bulk copies. The MagiAttention kernels already wrap those copies in `elect_one`, so the two elections nest. That combination was not run and the two releases are excluded.
+`requirements.txt` accepts `nvidia-cutlass-dsl` 4.4.2 to 4.8.1 except 4.6.0 and 4.6.1, and `quack-kernels` 0.4.1 to 0.6.5. The releases 4.6.0 and 4.6.1 add their own thread election around non-tensor bulk copies. The MagiAttention kernels already wrap those copies in `elect_one`, so the two elections nest. That combination was not run and the two releases are excluded.
 
 Each `quack-kernels` release calls `nvidia-cutlass-dsl` APIs that other DSL releases removed. The supported pairs are:
 
@@ -94,17 +94,17 @@ Each `quack-kernels` release calls `nvidia-cutlass-dsl` APIs that other DSL rele
 |---|---|
 | 4.4.2 | 0.4.1 |
 | 4.6.2 | 0.6.4 |
-| 4.7.0 to 4.8.0 | 0.6.5 |
+| 4.7.0 to 4.8.1 | 0.6.5 |
 
 The runtime check is stricter than pip. pip accepts any combination inside the two `requirements.txt` ranges, but `import magi_attention` checks the installed pair against this table when it loads the CuTeDSL kernels. If the pair is not in the table, or one of the two packages is not installed, the import raises `CuteDslRequirementError` for every kernel backend. This command installs the newest supported pair:
 
 ```bash
-pip install --upgrade "nvidia-cutlass-dsl[cu13]<=4.8.0" "quack-kernels<=0.6.5"
+pip install --upgrade "nvidia-cutlass-dsl[cu13]<=4.8.1" "quack-kernels<=0.6.5"
 ```
 
-A fresh `pip install -r requirements.txt` resolves to the newest pair, 4.8.0 and 0.6.5. In an existing environment, upgrade both packages together with the command above. Do not use `pip install --upgrade -r requirements.txt` for this, because it also upgrades unrelated packages such as `setuptools` and `packaging`.
+A fresh `pip install -r requirements.txt` resolves to the newest pair, 4.8.1 and 0.6.5. In an existing environment, upgrade both packages together with the command above. Do not use `pip install --upgrade -r requirements.txt` for this, because it also upgrades unrelated packages such as `setuptools` and `packaging`.
 
-CI tests the two ends of the range: 4.4.2 with 0.4.1, and 4.8.0 with 0.6.5. The two middle pairs were tested only outside CI, on Blackwell. 4.6.2 with 0.6.4 passed `tests/test_kernel/cutedsl/` and the `cutedsl` cases of `tests/test_pipeline.py` with head dim 64 and 128 at world size 1 and 2. 4.7.0 with 0.6.5 passed `tests/test_kernel/cutedsl/`. Other releases inside the range were not run.
+CI tests the two ends of the range: 4.4.2 with 0.4.1, and 4.8.1 with 0.6.5. The two middle pairs were tested only outside CI, on Blackwell. 4.6.2 with 0.6.4 passed `tests/test_kernel/cutedsl/` and the `cutedsl` cases of `tests/test_pipeline.py` with head dim 64 and 128 at world size 1 and 2. 4.7.0 with 0.6.5 passed `tests/test_kernel/cutedsl/`. Other releases inside the range were not run.
 :::
 
 :::{warning}

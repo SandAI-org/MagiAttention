@@ -95,6 +95,14 @@ class AttnArg:
     #   ffa_bwd_args_dict: dict
     #   skip_attn_bwd: bool
     #   disable_bwd_dkv_atomic_reduction: bool
+    #
+    #   Range flags of the `ffa_bwd_args_dict` tensors, in their row order.
+    #   A length satisfies a flag when it equals the field:
+    #   bwd_args_q_sorted: bool, the q rows are sorted by start
+    #   bwd_args_q_coverage_end: int | None, `seqlen` if the union of the q rows
+    #       is [0, seqlen), else None
+    #   bwd_args_k_partition_end: int | None, `seqlen` if the k rows are a
+    #       sorted partition of [0, seqlen), else None
 
     def __post_init__(self):
         # shape check
@@ -182,6 +190,9 @@ class AttnArg:
         self.k_ranges_bwd = self.k_ranges
         self.attn_type_map_bwd = self.attn_type_map
         self.disable_bwd_dkv_atomic_reduction = False
+        self.bwd_args_q_sorted = False
+        self.bwd_args_q_coverage_end: int | None = None
+        self.bwd_args_k_partition_end: int | None = None
 
         # guard clause
         if self.skip_attn_bwd:
@@ -233,12 +244,20 @@ class AttnArg:
                 bwd_kq_map=bwd_kq_map,
                 bwd_unique_count=bwd_unique_count,
             )
+            # Row order of the bwd range tensors: rows sorted by k start (stable).
+            bwd_args_row_order = sorted(
+                range(len(self.k_ranges_bwd)),
+                key=lambda row: self.k_ranges_bwd[row].start,
+            )
         else:
             self.ffa_bwd_args_dict = dict(
                 q_ranges=q_ranges_tensor_bwd,
                 k_ranges=k_ranges_tensor_bwd,
                 attn_type_map=attn_type_map,
             )
+            bwd_args_row_order = list(range(len(self.k_ranges_bwd)))
+
+        self._init_bwd_args_range_flags(bwd_args_row_order)
 
         # init `disable_bwd_dkv_atomic_reduction` flag
         # NOTE: this flag only considers the non-overlapping and sorted of k ranges,
@@ -252,6 +271,13 @@ class AttnArg:
             # TODO: support auto range merge:
             #  when enabled, we should use the merged k_ranges above
         ) and not env.general.is_range_merge_enable()
+
+    def _init_bwd_args_range_flags(self, row_order: list[int]) -> None:
+        q_rows = AttnRanges.from_ranges([self.q_ranges_bwd[i] for i in row_order])
+        k_rows = AttnRanges.from_ranges([self.k_ranges_bwd[i] for i in row_order])
+        self.bwd_args_q_sorted = q_rows.is_sorted()
+        self.bwd_args_q_coverage_end = _cu_seqlens_end(self.q_ranges_bwd.merge())
+        self.bwd_args_k_partition_end = _cu_seqlens_end(k_rows)
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         return self.ffa_bwd_args_dict if is_bwd else self.ffa_fwd_args_dict
@@ -287,6 +313,12 @@ class AttnArg:
 
         repr_str = repr_str.rstrip(",\n") + "\n)"
         return repr_str
+
+
+def _cu_seqlens_end(ranges: AttnRanges) -> int | None:
+    """Return the ``seqlen`` for which ``ranges.is_cu_seqlens(seqlen)`` holds, or None."""
+    seqlen = ranges[-1].end if len(ranges) > 0 else 0
+    return seqlen if ranges.is_cu_seqlens(seqlen) else None
 
 
 def _resolve_tile_sizes(pass_type: str, headdim: int = 128) -> tuple[int, int]:
