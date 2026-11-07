@@ -158,3 +158,23 @@ OverlapConfig(degree=4, mode=AttnOverlapMode.STATIC)
 # dynamic overlap
 OverlapConfig(degree=None, mode=AttnOverlapMode.DYNAMIC)
 ```
+
+## Architecture-independent coverage
+
+Use `@pytest.mark.arch_independent` on reviewed CPU/Python contracts whose
+coverage does not depend on GPU architecture. Class markers apply to every
+method, so reconsider the marker before adding GPU cases to a marked class.
+Do not mark CUDA numerics, gradients, precision/RNG, compiler, or collective
+coverage merely because it is slow or shared by both CI platforms.
+
+The root collection hook skips these items only when `TASK_CI_PLATFORM` is
+`b300` or `b300_fa4` and the actual device is Blackwell. Hopper CI owns the
+shared coverage. Without that CI profile, local Blackwell runs remain complete;
+`--skip-slow`, architecture restrictions, and optional-dependency skips retain
+their existing behavior. The marker changes execution, not collection.
+
+The portable runner discovers the root hook when testing absolute paths from
+its temporary working directory with `--import-mode=append`; it continues to
+import the installed wheel. The tracked root `conftest.py` and tests already
+participate in the main package's trigger/portable input digests, so changing
+this policy invalidates previous validation without a cache schema change.

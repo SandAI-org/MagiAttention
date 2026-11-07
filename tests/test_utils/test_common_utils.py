@@ -15,6 +15,7 @@
 import unittest
 from unittest import TestCase
 
+import pytest
 import torch
 
 from magi_attention.utils import (
@@ -27,6 +28,7 @@ from magi_attention.utils import (
 )
 
 
+@pytest.mark.arch_independent
 class TestCommonUtils(TestCase):
     def test_flatten_nested_list(self):
         # ---------    empty list     --------- #
@@ -330,6 +332,7 @@ class TestCommonUtils(TestCase):
         self.assertEqual(matrix_t, ref_matrix_t)
 
 
+@pytest.mark.arch_independent
 class TestMagiAttentionPrecision(TestCase):
     def test_to_torch_dtype(self):
         from magi_attention.common.enum import MagiAttentionPrecision
@@ -340,6 +343,7 @@ class TestMagiAttentionPrecision(TestCase):
         assert MagiAttentionPrecision.FP64.to_torch_dtype() == torch.float64
 
 
+@pytest.mark.arch_independent
 class TestGeneralWork(TestCase):
     def test_unsupported_work_type_raises(self):
         from magi_attention.comm.work import GeneralWork
@@ -355,6 +359,7 @@ class TestGeneralWork(TestCase):
         gw.wait()
 
 
+@pytest.mark.arch_independent
 class TestWorkWithPostProcessFn(TestCase):
     def test_double_wait_raises(self):
         from magi_attention.comm.work import WorkWithPostProcessFn

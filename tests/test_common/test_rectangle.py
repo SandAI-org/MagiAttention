@@ -17,6 +17,7 @@ import random
 import pytest
 
 
+@pytest.mark.arch_independent
 class TestAttnRectangle:
     def test_init_with_attn_range(self, backend):
         """test init with AttnRange"""

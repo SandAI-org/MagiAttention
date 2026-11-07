@@ -50,6 +50,7 @@ def _make_slice(slice_id, mask_type_str, q_start, q_end, k_start, k_end):
     )
 
 
+@pytest.mark.arch_independent
 class TestAttnSlice:
     def test_area_full_mask(self):
         s = _make_slice(0, "full", 0, 10, 0, 20)
@@ -92,6 +93,7 @@ class TestAttnSlice:
         assert s != 42
 
 
+@pytest.mark.arch_independent
 class TestMultiKAttnSlice:
     def test_area_full_mask(self):
         from magi_attention.common import AttnRange, AttnRanges
@@ -131,6 +133,7 @@ class TestMultiKAttnSlice:
         assert s.area == 777
 
 
+@pytest.mark.arch_independent
 class TestAttnChunk:
     def test_iou_with_overlap(self):
         from magi_attention.meta.container.chunk import AttnChunk
@@ -158,6 +161,7 @@ class TestAttnChunk:
         assert c != 42
 
 
+@pytest.mark.arch_independent
 class TestAttnBucket:
     def test_iou_with_overlap(self):
         from magi_attention.meta.container.bucket import AttnBucket
