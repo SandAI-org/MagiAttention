@@ -17,6 +17,7 @@ import random
 import pytest
 
 
+@pytest.mark.arch_independent
 class TestAttnRectangles:
     def _setup_test_data(self):
         from magi_attention.common import AttnMaskType  # noqa: F401

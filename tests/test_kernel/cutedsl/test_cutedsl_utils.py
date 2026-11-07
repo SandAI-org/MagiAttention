@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from unittest import TestCase
 
 import cutlass
@@ -20,7 +21,12 @@ import torch
 from cutlass.cute.runtime import from_dlpack
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.kernel.cutedsl.cutedsl_utils import atomic_add_fp32, fmax
+from magi_attention.kernel.cutedsl.cutedsl_utils import (
+    atomic_add_fp32,
+    atomic_max_fp32,
+    fmax,
+)
+from magi_attention.testing import parameterize
 from magi_attention.testing.precision import assert_equal
 
 
@@ -61,6 +67,17 @@ def _atomic_add(a: cute.Tensor, out: cute.Tensor):
     _atomic_add_kernel(a, out).launch(grid=(1, 1, 1), block=(32, 1, 1))
 
 
+@cute.kernel
+def _atomic_max_kernel(a: cute.Tensor, out: cute.Tensor):
+    tidx, _, _ = cute.arch.thread_idx()
+    atomic_max_fp32(a[tidx], out.iterator)
+
+
+@cute.jit
+def _atomic_max(a: cute.Tensor, out: cute.Tensor):
+    _atomic_max_kernel(a, out).launch(grid=(1, 1, 1), block=(32, 1, 1))
+
+
 class TestCutedslUtils(TestCase):
     """Device helpers the kernels call, compiled the way production compiles them."""
 
@@ -84,6 +101,15 @@ class TestCutedslUtils(TestCase):
         compiled = cute.compile(_atomic_add, *tensors, options="--enable-tvm-ffi")
         compiled(a, out)
         assert_equal(out[0], a.sum(), test_case="test_atomic_add_fp32")
+
+    @parameterize("bounds", [(-2.0, 2.0), (-3.0, -1.0)])
+    def test_atomic_max_fp32(self, bounds: tuple[float, float]):
+        a = torch.linspace(*bounds, 32, device="cuda")
+        out = torch.full((1,), -math.inf, device="cuda")
+        tensors = [from_dlpack(t, enable_tvm_ffi=True) for t in (a, out)]
+        compiled = cute.compile(_atomic_max, *tensors, options="--enable-tvm-ffi")
+        compiled(a, out)
+        assert_equal(out[0], a.max(), test_case=f"test_atomic_max_fp32({bounds})")
 
 
 if __name__ == "__main__":

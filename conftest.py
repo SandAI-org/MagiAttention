@@ -31,14 +31,43 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: marks a test as slow to run")
 
+    config.addinivalue_line(
+        "markers",
+        "arch_independent: CPU/control-plane coverage shared across GPU architectures",
+    )
+
     attn_config_filter = config.getoption("--test-attn-config", default=None)
     if attn_config_filter is not None:
         os.environ["MAGI_ATTENTION_TEST_ATTN_CONFIG"] = attn_config_filter
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--skip-slow"):
         skip_slow = pytest.mark.skip(reason="skipped because --skip-slow was provided")
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
+
+    # Keep local Blackwell runs complete. Only deduplicate reviewed common
+    # coverage in the two Blackwell CI profiles; Hopper still runs it.
+    if os.environ.get("TASK_CI_PLATFORM") not in ("b300", "b300_fa4"):
+        return
+    marked = [item for item in items if item.get_closest_marker("arch_independent")]
+    if not marked:
+        return
+
+    # Import hardware helpers only when this policy could skip an item.
+    # CPU-only collection must remain possible, and is not Blackwell evidence.
+    import torch
+
+    if not torch.cuda.is_available():
+        return
+    from magi_attention.utils.arch import is_blackwell
+
+    if is_blackwell():
+        skip_common = pytest.mark.skip(
+            reason="architecture-independent coverage runs in Hopper CI"
+        )
+        for item in marked:
+            item.add_marker(skip_common)
