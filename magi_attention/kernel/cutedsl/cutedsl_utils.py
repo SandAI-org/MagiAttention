@@ -700,8 +700,34 @@ def warp_prefix_sum(val: Int32, lane: Optional[Int32] = None) -> Int32:
         partial_sum = cute.arch.shuffle_sync_up(val, offset=offset, mask_and_clamp=0)
         if lane >= offset:
             val += partial_sum
-        # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, partial_sum = %d, val = %d", cute.arch.thread_idx()[0] % 32, partial_sum, val)  # noqa: E501
+        # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, val = %d", cute.arch.thread_idx()[0] % 32, val)  # noqa: E501
     return val
+
+
+@dsl_user_op
+def lanemask_lt(*, loc=None, ip=None) -> Int32:
+    return Int32(_asm(T.i32(), [], "mov.u32 $0, %lanemask_lt;", "=r", False, loc, ip))
+
+
+@dsl_user_op
+def lanemask_gt(*, loc=None, ip=None) -> Int32:
+    return Int32(_asm(T.i32(), [], "mov.u32 $0, %lanemask_gt;", "=r", False, loc, ip))
+
+
+@dsl_user_op
+def match_any_sync(value: Int32, *, loc=None, ip=None) -> Int32:
+    """Mask of the lanes whose ``value`` equals this lane's."""
+    return Int32(
+        _asm(
+            T.i32(),
+            [Int32(value).ir_value(loc=loc, ip=ip)],
+            "match.any.sync.b32 $0, $1, 0xffffffff;",
+            "=r,r",
+            True,
+            loc,
+            ip,
+        )
+    )
 
 
 @dsl_user_op
@@ -1227,8 +1253,10 @@ def cvt_pack(ab_type: str, lo: Float32, hi: Float32, *, loc=None, ip=None) -> In
 
 
 @dsl_user_op
-def ld_global_b32_pred(addr: Int64, pred: Boolean, *, loc=None, ip=None) -> Int32:
-    """32-bit read-only global load, zero when ``pred`` is false (the address is then not read)."""
+def ld_global_b32_pred(
+    addr: Int64, pred: Boolean, *, fill: int = 0, loc=None, ip=None
+) -> Int32:
+    """32-bit read-only global load, ``fill`` when ``pred`` is false (the address is then not read)."""
     return Int32(
         _asm(
             T.i32(),
@@ -1236,7 +1264,7 @@ def ld_global_b32_pred(addr: Int64, pred: Boolean, *, loc=None, ip=None) -> Int3
                 Int64(addr).ir_value(loc=loc, ip=ip),
                 Int32(pred).ir_value(loc=loc, ip=ip),
             ],
-            "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\tmov.b32 $0, 0;\n\t"
+            f"{{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\tmov.b32 $0, {fill};\n\t"
             "@p ld.global.nc.b32 $0, [$1];\n\t}",
             "=r,l,r",
             True,
