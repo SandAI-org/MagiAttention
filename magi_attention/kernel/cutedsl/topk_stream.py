@@ -14,46 +14,19 @@
 
 """CuTe DSL streaming top-k for 16-bit rows (bf16 / fp16), one CTA per row.
 
-Each row is read from global memory once, in three steps:
+Each row is read from global memory once. A sampled threshold filters it into a shared
+buffer of candidates — one 32-bit word each, the order-preserving key of the value in
+the high half and the low 16 bits of its index in the low half, so candidates stay in
+index order — and a two-byte radix select finds the k-th key.
 
-1. Threshold. 64-element blocks spaced ``stride`` apart (``stride >= 2048``, at most 512
-   blocks per row) are loaded as a sample, and the ``ceil(c * k * sample / end)``-th
-   largest sample value becomes the threshold ``t``. ``c = min(1.5, 0.7 * CAND_CAPACITY / k)``
-   keeps the expected candidate count within 70% of the candidate buffer. Small blocks
-   keep a dense run of large values (a local window, a sink) from being over- or
-   under-weighted by the sample.
-2. Filter. A producer warp streams the row through a ring of four 8 KB stages, one bulk
-   copy per stage. Eight consumer warps compare each 8192-element round against ``t``
-   (``>=``), and a block-wide prefix sum appends the hits to an 18432-slot shared-memory
-   candidate buffer in index order. The high-byte histogram of the buffered keys is kept
-   up to date.
-3. Select. The histogram gives the high byte of the k-th largest key. One pass over the
-   candidates gives its low byte and how many of its ties are taken, and one more ordered
-   pass writes the indices through a shared-memory staging buffer.
+When a round of hits would overflow the buffer, the buffer is first cut to its top k
+and the threshold becomes their minimum, compared with ``>`` from then on: an element
+equal to it has a larger index than every kept tie, so it can never be selected. When
+the sampled threshold turns out too high (fewer than k elements reach it), the row is
+streamed again with ``t = -inf``.
 
-A candidate is one 32-bit word: the order-preserving key of the value in the high half and
-the low 16 bits of its index in the low half. Candidates are kept in index order, so the
-high index bits only grow; ``seg_start[h]`` is the first slot whose index lies in
-``[h << 16, (h + 1) << 16)``.
-
-When a round would overflow the candidate buffer, the buffer is first cut to its top k and
-the threshold becomes their minimum, compared with ``>`` from then on: an element equal to
-it has a larger index than every kept tie, so it can never be selected. When the sampled
-threshold turns out too high (fewer than k elements reach it), the row is streamed again
-with ``t = -inf``.
-
-Each row lists its indices ascending; ties at the k-th value keep the lowest indices.
-Values compare as IEEE floats: -0 equals +0, and NaN is never selected. A row with fewer
-than k selectable elements pads its tail with -1.
-
-Limits: ``k <= MAX_K``, so that after a cut to k entries one full round of hits still fits
-in the candidate buffer, and rows have at most ``MAX_N = 2**21`` elements, the 32 segments
-of ``2**16`` elements that ``seg_start`` covers.
-
-Public API
-----------
-- ``cutedsl_topk_stream(x, k, end=None, sorted=False, out_dtype=torch.int64)`` ->
-  ``indices``, the interface of ``topk.cutedsl_topk`` plus ``end``
+Limits: ``k <= MAX_K`` leaves room for one full round of hits after a cut, and rows
+have at most ``MAX_N = 2**21`` elements, the 32 segments that ``seg_start`` covers.
 """
 
 from typing import Any, NamedTuple
@@ -136,12 +109,12 @@ def _cmp_nibble(op: str, ty: str):
                     Int32(thr_x2).ir_value(loc=loc, ip=ip),
                 ],
                 "{\n\t.reg .b32 r0, r1, ind;\n\t"
-                # Each 16-bit half becomes 0xFFFF where the compare holds, else 0.
+                # 0xFFFF per 16-bit half where the compare holds.
                 f"set.{op}.s32.{ty}x2 r0, $1, $3;\n\t"
                 f"set.{op}.s32.{ty}x2 r1, $2, $3;\n\t"
-                # The high byte of each half: one signed byte (-1 or 0) per element.
+                # One signed byte (-1 or 0) per element, then the dot product with
+                # (-1, -2, -4, -8) packs the four bytes into the 4-bit mask.
                 "prmt.b32 ind, r0, r1, 0x7531;\n\t"
-                # The dot product with the bytes (-1, -2, -4, -8) is the 4-bit mask.
                 "dp4a.s32.s32 $0, ind, 0xF8FCFEFF, 0;\n\t}",
                 "=r,r,r,r",
                 False,
@@ -164,11 +137,11 @@ def to_key_x2(w: Int32, *, loc=None, ip=None) -> Int32:
         _asm(
             T.i32(),
             [Int32(w).ir_value(loc=loc, ip=ip)],
-            "{\n\t.reg .b32 s, m;\n\t"  # s: negative halves, m: per-half xor mask
+            "{\n\t.reg .b32 s, m;\n\t"
             "shr.u32 s, $1, 15;\n\t"  # sign bits to bits 0 and 16
-            "and.b32 s, s, 0x00010001;\n\t"  # s: 1 in each negative half
-            "mul.lo.u32 m, s, 0x7FFF;\n\t"  # m: 0x7FFF in each negative half
-            "xor.b32 m, m, 0x80008000;\n\t"  # m: 0xFFFF if negative, else 0x8000
+            "and.b32 s, s, 0x00010001;\n\t"  # one 1 per negative half
+            "mul.lo.u32 m, s, 0x7FFF;\n\t"  # 0x7FFF in each negative half
+            "xor.b32 m, m, 0x80008000;\n\t"  # 0xFFFF if negative, else 0x8000
             "xor.b32 m, $1, m;\n\t"  # b | 0x8000 if positive, else ~b
             # ~b + 1 cannot carry into the other half: ~b is below 0x8000.
             "add.u32 $0, m, s;\n\t}",  # negative: ~b + 1 = 0x10000 - b
@@ -217,15 +190,13 @@ class SmemAddrs(NamedTuple):
 
 
 class StreamTopK:
-    """Streaming top-k kernel, specialized on the 16-bit float type (``dtype_tag``:
-    ``"bf16"`` or ``"f16"``), the index type (``out_i64``: int64, else int32) and whether
-    ``mEnd`` holds a per-row length (``has_end``).
+    """Streaming top-k kernel, specialized on the dtype tag, the output index width and
+    whether ``mEnd`` holds a per-row length.
 
-    A CTA has ``CONSUMER_THREADS + 32`` threads. Warps ``0 .. CONSUMER_WARPS - 1`` are the
-    consumers: they sample the threshold, filter the ring tiles into the candidate buffer
-    and select. Warp ``CONSUMER_WARPS`` is the producer: its lane 0 issues the bulk copies
-    into the ring. For a row with ``end <= k`` only the consumers run, and they store every
-    selectable index directly.
+    A CTA has ``CONSUMER_THREADS + 32`` threads: warps ``0 .. CONSUMER_WARPS - 1`` sample
+    the threshold, filter the ring tiles into the candidate buffer and select; warp
+    ``CONSUMER_WARPS`` is the producer, whose lane 0 issues the bulk copies. A row with
+    ``end <= k`` is written directly by the consumers.
     """
 
     def __init__(self, dtype_tag: str, out_i64: bool, has_end: bool):
@@ -279,8 +250,7 @@ class StreamTopK:
             smem=self.shared_storage.size_in_bytes(),  # type: ignore[attr-defined]
             stream=stream,
             # Two CTAs per SM (the register cap and the shared-memory carveout are sized
-            # for two): the bulk copies of one CTA can overlap the select step of the
-            # other. No mechanism keeps the two CTAs in different steps.
+            # for two): the bulk copies of one CTA overlap the select step of the other.
             min_blocks_per_mp=2,
         )
 
@@ -369,17 +339,16 @@ class StreamTopK:
         num_tiles: Int32,
         tile_seq_base: Int32,
     ):
-        """Stream tiles ``0 .. num_tiles - 1`` of the row through the ring. Called by lane 0
+        """Stream tiles ``0 .. num_tiles - 1`` of the row through the ring; called by lane 0
         of the producer warp.
 
         Tile t is the ``tile_seq_base + t``-th tile through the ring. Its stage is that
-        sequence number modulo ``RING_STAGES``, and lap ``L = tile_seq // RING_STAGES``
-        of a stage completes phase ``L & 1`` of its
-        ``full_bar`` and ``empty_bar``. A second pass starts at ``tile_seq_base =
-        num_tiles``.
+        sequence number modulo ``RING_STAGES``, and lap ``L = tile_seq // RING_STAGES`` of
+        a stage completes phase ``L & 1`` of its ``full_bar`` and ``empty_bar``. A second
+        pass starts at ``tile_seq_base = num_tiles``.
         """
-        # Tiles below RING_STAGES are copied right away; prefetch the rest of the first
-        # L2_PREFETCH_TILES, then tile t + L2_PREFETCH_TILES when tile t is issued.
+        # Prefetch the tiles after the ring's first fill, then stay L2_PREFETCH_TILES
+        # ahead of the one being copied.
         prefetch_tile = Int32(RING_STAGES)
         while prefetch_tile < cutlass.min(num_tiles, Int32(L2_PREFETCH_TILES)):
             cp_async_bulk_prefetch_l2(
@@ -426,8 +395,8 @@ class StreamTopK:
         lane: Int32,
         warp: Int32,
     ):
-        """The three steps of the module docstring for a row with ``end > k``. Called by
-        all consumer threads."""
+        """Threshold, filter and select for a row with ``end > k``; called by all consumer
+        threads."""
         thr_bits = self.sample_threshold(row_ptr, end, k, smem, tidx, lane, warp)
         num_cand = self.filter_row(
             out_row, end, num_tiles, k, thr_bits, smem, tidx, lane, warp
@@ -445,8 +414,8 @@ class StreamTopK:
         lane: Int32,
         warp: Int32,
     ) -> Int32:
-        """Step 1: the bits of the filter threshold, or of -inf when the sample holds
-        fewer values than the rank it needs. Called by all consumer threads."""
+        """Bits of the filter threshold, or of -inf when the sample holds fewer values
+        than the rank it needs; called by all consumer threads."""
         sample_block_elems = const_expr(64)
         min_sample_stride = const_expr(32 * sample_block_elems)
         max_sample_blocks = const_expr(512)
@@ -535,13 +504,13 @@ class StreamTopK:
         lane: Int32,
         warp: Int32,
     ) -> Int32:
-        """Step 2: append every element of the row that passes the threshold to the
-        candidate buffer, and return the candidate count. Called by all consumer threads.
+        """Append every element of the row that passes the threshold to the candidate
+        buffer; returns the candidate count. Called by all consumer threads.
 
-        In round r, thread ``tidx`` reads elements ``[32 * (tidx % 128), + 32)`` of tile
-        ``2 * r + tidx // 128``. A warp releases the tile's stage after it appended its
-        hits. Pass 0 ends with the rescan decision on ``RESCAN_BAR``, which the producer
-        warp waits for.
+        In round r, thread ``tidx`` reads 32 elements of tile ``2 * r + tidx // 128``,
+        starting at ``32 * (tidx % 128)``. A warp releases the tile's stage after it
+        appended its hits. Pass 0 ends with the rescan decision, which the producer warp
+        waits for.
         """
         elems_per_thread = const_expr(ROUND_ELEMS // CONSUMER_THREADS)
         assert const_expr(
@@ -666,9 +635,9 @@ class StreamTopK:
                     strict_gt = Int32(1)
                     was_cut = Int32(1)
             if pass_idx == 0:
-                # The sampled threshold was too high when fewer than k elements reached
-                # it, no cut happened and it lies above -inf: stream the row again with
-                # t = -inf. Every input of the decision is the same in all consumers.
+                # The sampled threshold was too high: fewer than k elements reached it,
+                # no cut happened and it lies above -inf, so stream the row again with
+                # t = -inf. All consumers evaluate the same inputs.
                 rescan = Int32(0)
                 if num_cand < k and was_cut == 0 and thr_bits != self.neg_inf:
                     rescan = Int32(1)
@@ -698,8 +667,8 @@ class StreamTopK:
         lane: Int32,
         warp: Int32,
     ):
-        """Step 3: store the indices of the top k candidates ascending, and pad the row
-        with -1 up to k. Called by all consumer threads."""
+        """Store the indices of the top k candidates ascending, and pad the row with -1
+        up to k; called by all consumer threads."""
         # The candidate words and histogram counts of the last round must be visible to
         # every consumer.
         cute.arch.barrier(barrier_id=CONSUMER_BAR, number_of_threads=CONSUMER_THREADS)
@@ -739,8 +708,8 @@ class StreamTopK:
         lane: Int32,
         warp: Int32,
     ):
-        """Store every non-NaN index of ``[0, end)`` ascending and pad the tail with -1, for
-        a row with ``end <= k``. Called by all consumer threads."""
+        """Store every non-NaN index of ``[0, end)`` ascending and pad the tail with -1,
+        for a row with ``end <= k``; called by all consumer threads."""
         written = Int32(0)
         parity = Int32(0)
         base = Int32(0)
@@ -825,8 +794,7 @@ class StreamTopK:
         self, buf: Int32, chunk_offs, chunk_shifts, thr_x2: Int32, strict_gt: Int32
     ) -> Int32:
         """Bit e is set when element e of this thread's 32 in the tile at ``buf`` passes
-        the threshold: ``>`` when ``strict_gt``, else ``>=``. The four 16 B chunks are read
-        in a lane-rotated order so a warp's loads hit distinct banks."""
+        the threshold: ``>`` when ``strict_gt``, else ``>=``."""
         mask = Int32(0)
         if strict_gt != 0:
             f = _CMP[("gt", self.ty)]
@@ -984,24 +952,25 @@ class StreamTopK:
             st_shared_b32(hist + HIST_SINK * 4, Int32(0))
         cute.arch.barrier(barrier_id=CONSUMER_BAR, number_of_threads=CONSUMER_THREADS)
         per = 8 if const_expr(raw16) else 4
-        base = tidx * per
-        while base - tidx * per < cnt:
+        off = tidx * per
+        while off < cnt:
             if const_expr(raw16):
-                w = ld_shared_v4(vals + base * 2)
+                w = ld_shared_v4(vals + off * 2)
             else:
-                w = ld_shared_v4(vals + base * 4)
+                w = ld_shared_v4(vals + off * 4)
             for j in cutlass.range_constexpr(4):
                 halves = 2 if const_expr(raw16) else 1
-                key2 = w[j]
                 if const_expr(raw16):
                     key2 = to_key_x2(w[j])
+                else:
+                    key2 = w[j]
                 for h in cutlass.range_constexpr(halves):
                     if const_expr(raw16):
                         key = (key2 >> (16 * h)) & 0xFFFF
-                        slot = base + 2 * j + h
+                        slot = off + 2 * j + h
                     else:
                         key = (key2 >> 16) & 0xFFFF
-                        slot = base + j
+                        slot = off + j
                     bin_ = Int32(HIST_SINK)
                     if slot < cnt:
                         if const_expr(low_byte):
@@ -1010,7 +979,7 @@ class StreamTopK:
                         else:
                             bin_ = key >> 8
                     red_shared_add_u32(hist + bin_ * 4, Int32(1))
-            base = base + CONSUMER_THREADS * per
+            off = off + CONSUMER_THREADS * per
         cute.arch.barrier(barrier_id=CONSUMER_BAR, number_of_threads=CONSUMER_THREADS)
 
     @cute.jit
@@ -1072,18 +1041,15 @@ class StreamTopK:
         warp: Int32,
     ) -> Int32:
         """Keep the candidates with key > ``pivot_key`` and the first ``num_ties`` with key
-        == ``pivot_key``, in buffer order, and return how many were kept. Called by all
+        == ``pivot_key``, in buffer order; returns how many were kept. Called by all
         consumer threads.
 
-        ``to_gmem``: their indices go to ``out_row``. The kept entries of a chunk fill a
-        contiguous output range and are staged in the ring, which is free in step 3, so
-        the global stores coalesce.
-
-        Otherwise the buffer is compacted in place, and its high-byte histogram and
-        segment table are rebuilt; ``seg_now`` is the segment of the round being filtered,
-        whose hits are appended after the kept entries. Each chunk is read before the
-        barrier in ``block_sum2`` and written after it, and an entry never moves past its
-        own slot, so the in-place compaction is safe.
+        ``to_gmem``: the kept indices go to ``out_row``, staged in the ring (free in the
+        select step) so the global stores coalesce. Otherwise the buffer is compacted in
+        place and its high-byte histogram and segment table are rebuilt; ``seg_now`` is
+        the segment of the round being filtered, whose hits follow the kept entries. Each
+        chunk is read before the barrier in ``block_sum2`` and written after it, and an
+        entry never moves past its own slot, so the in-place compaction is safe.
         """
         keep_per_thread = const_expr(16)
         keep_chunk = const_expr(CONSUMER_THREADS * keep_per_thread)
@@ -1206,7 +1172,6 @@ class StreamTopK:
 # Host entry
 # ====================================================================
 
-# One compiled kernel per StreamTopK specialization: (dtype, index dtype, has end).
 _compiled_cache: dict[tuple, Any] = {}
 
 
@@ -1216,7 +1181,7 @@ def stream_topk_indices(
     end: torch.Tensor | None,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Indices ``[rows, k]`` of each row's top k; see the module docstring.
+    """Indices ``[rows, k]`` of each row's top k.
 
     ``x`` is a contiguous bf16 / fp16 ``[rows, n]`` tensor with ``n % 8 == 0``,
     ``n <= MAX_N`` and a 16 B aligned base; ``end`` (int32 ``[rows]``) limits row r to
