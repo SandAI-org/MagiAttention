@@ -2852,8 +2852,11 @@ def ffa_bwd_sm100_index(
 
     # One range over every token: the scheduler, dPsum preprocess, dQ epilogue
     # and dK/dV postprocess all run their full-mask single-batch paths.
-    q_ranges = torch.tensor([[0, total_q]], dtype=torch.int32, device=device)
-    k_ranges = torch.tensor([[0, total_k]], dtype=torch.int32, device=device)
+    # Filled on device
+    ranges = torch.zeros(2, 2, dtype=torch.int32, device=device)
+    ranges[0, 1].fill_(total_q)
+    ranges[1, 1].fill_(total_k)
+    q_ranges, k_ranges = ranges[0:1], ranges[1:2]
 
     # --- Preprocess: dPsum = (o * dout).sum(-1), lse_log2 = lse * log2(e) ---
 
