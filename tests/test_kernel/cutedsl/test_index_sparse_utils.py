@@ -18,6 +18,7 @@ from unittest import TestCase
 import torch
 
 from magi_attention.utils.index_sparse_utils import (
+    _partition_index_sparse_rows_by_k_chunk_launch,
     partition_index_sparse_rows_by_k_chunk,
 )
 
@@ -35,7 +36,8 @@ def _partition_reference(
 
 @unittest.skipUnless(torch.cuda.is_available(), "the partition kernel is Triton")
 class TestPartitionIndexSparseRowsByKChunk(TestCase):
-    def _check(self, num_q_blocks, nhk, topk, total_k, num_chunks, padded):
+    def _check(self, num_q_blocks, nhk, topk, total_k, num_chunks, padded, tile=0):
+        """``tile=0``: the public dispatch; ``None`` / an int force a kernel."""
         torch.manual_seed(0)
         chunk_size = (total_k + num_chunks - 1) // num_chunks
         indices = torch.randint(
@@ -45,7 +47,14 @@ class TestPartitionIndexSparseRowsByKChunk(TestCase):
             valid = torch.randint(0, topk + 1, (num_q_blocks, nhk, 1), device="cuda")
             col = torch.arange(topk, device="cuda")
             indices = torch.where(col < valid, indices, -1).int()
-        out = partition_index_sparse_rows_by_k_chunk(indices, chunk_size, num_chunks)
+        if tile == 0:
+            out = partition_index_sparse_rows_by_k_chunk(
+                indices, chunk_size, num_chunks
+            )
+        else:
+            out = _partition_index_sparse_rows_by_k_chunk_launch(
+                indices, chunk_size, num_chunks, tile
+            )
         ref = _partition_reference(indices, chunk_size, num_chunks)
         for name, a, b in zip(("partitioned", "starts", "lens"), out, ref):
             self.assertTrue(torch.equal(a, b), name)
@@ -59,6 +68,65 @@ class TestPartitionIndexSparseRowsByKChunk(TestCase):
         ):
             with self.subTest(topk=topk, num_chunks=num_chunks):
                 self._check(num_q_blocks, nhk, topk, total_k, num_chunks, padded=False)
+
+    def test_topk_past_16_bit_counts(self):
+        """Rows of 2**16 ids and more, a chunk alone holding 2**16 ids or more."""
+        for topk, total_k, num_chunks in (
+            (2**16, 2**19, 3),
+            (70000, 2**19, 5),
+            (2**17, 2**19, 16),
+            (400000, 400000, 2),
+        ):
+            with self.subTest(topk=topk, num_chunks=num_chunks):
+                self._check(4, 1, topk, total_k, num_chunks, padded=False)
+        self._check(3, 2, 70000, 2**19, 4, padded=True)
+
+    def test_tiled_kernel(self):
+        """Small tiles: ragged last tile, rows under a tile, ragged group of 4."""
+        for num_q_blocks, nhk, topk, total_k, num_chunks, tile in (
+            (40, 2, 300, 5000, 3, 128),
+            (16, 1, 1000, 70000, 8, 256),
+            (8, 1, 4096, 524288, 16, 512),
+            (9, 3, 777, 3000, 17, 64),
+            (5, 1, 100, 1000, 5, 128),
+            (16, 1, 128, 1000, 1, 32),
+        ):
+            for padded in (False, True):
+                with self.subTest(topk=topk, num_chunks=num_chunks, tile=tile):
+                    self._check(
+                        num_q_blocks, nhk, topk, total_k, num_chunks, padded, tile
+                    )
+
+    def test_sorted_rows(self):
+        """Ascending rows come back as they are, the chunk bounds binary searched."""
+        for num_q_blocks, nhk, topk, total_k, num_chunks in (
+            (40, 2, 300, 5000, 3),
+            (9, 3, 777, 3000, 17),
+            (16, 1, 128, 1000, 1),
+            (4, 1, 70000, 2**19, 6),
+            (2, 1, 400000, 400000, 2),
+        ):
+            for padded in (False, True):
+                with self.subTest(topk=topk, num_chunks=num_chunks, padded=padded):
+                    torch.manual_seed(0)
+                    chunk_size = (total_k + num_chunks - 1) // num_chunks
+                    indices = torch.randint(
+                        0, total_k, (num_q_blocks, nhk, topk), device="cuda"
+                    )
+                    indices = indices.sort(dim=-1).values.int()
+                    if padded:
+                        valid = torch.randint(
+                            0, topk + 1, (num_q_blocks, nhk, 1), device="cuda"
+                        )
+                        col = torch.arange(topk, device="cuda")
+                        indices = torch.where(col < valid, indices, -1).int()
+                    out = partition_index_sparse_rows_by_k_chunk(
+                        indices, chunk_size, num_chunks, rows_sorted=True
+                    )
+                    ref = _partition_reference(indices, chunk_size, num_chunks)
+                    self.assertEqual(out[0].data_ptr(), indices.data_ptr())
+                    for name, a, b in zip(("partitioned", "starts", "lens"), out, ref):
+                        self.assertTrue(torch.equal(a, b), name)
 
     def test_keeps_minus_one_tail(self):
         """Rows with any number of valid ids, including none and all."""
