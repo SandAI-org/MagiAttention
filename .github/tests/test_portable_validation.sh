@@ -49,10 +49,12 @@ printf '26.05.2\n' > "$standalone/.github/configs/base_image_tag.txt"
 printf '26.05.2\n' > "$consumer/runtime_tag.txt"
 printf 'main source\n' > "$standalone/magi_attention/package.py"
 printf 'main test\n' > "$standalone/tests/test.txt"
+printf '# collection policy\n' > "$standalone/conftest.py"
 printf 'extension source\n' > "$standalone/extensions/package.txt"
 printf 'extension test\n' > "$standalone/extensions/tests/test.txt"
 cp "$standalone/magi_attention/package.py" "$consumer/vendor/MagiAttention/magi_attention/package.py"
 cp "$standalone/tests/test.txt" "$consumer/vendor/MagiAttention/tests/test.txt"
+cp "$standalone/conftest.py" "$consumer/vendor/MagiAttention/conftest.py"
 cp "$standalone/extensions/package.txt" "$consumer/vendor/MagiAttention/extensions/package.txt"
 cp "$standalone/extensions/tests/test.txt" "$consumer/vendor/MagiAttention/extensions/tests/test.txt"
 # Record install constraints and stop run-test before pytest.
@@ -90,6 +92,26 @@ standalone_main_fa4=$(cd "$standalone" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PL
 consumer_main_fa4=$(cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=b300_fa4 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt bash vendor/MagiAttention/.github/scripts/portable_validation.sh fingerprint magi_attention)
 [[ "$standalone_main_fa4" == "$consumer_main_fa4" ]]
 [[ "$standalone_main_fa4" != "$standalone_main_b300" ]]
+
+# Collection policy changes must invalidate validation and trigger the package
+# in both layouts, even though they do not change a kernel.
+for layout in "$standalone" "$consumer"; do
+    if [[ "$layout" == "$standalone" ]]; then
+        collection_policy=conftest.py
+    else
+        collection_policy=vendor/MagiAttention/conftest.py
+    fi
+    printf '# updated collection policy\n' >> "$layout/$collection_policy"
+    git -C "$layout" add "$collection_policy"
+    git -C "$layout" commit -qm "update collection policy"
+done
+changed_main=$(cd "$standalone" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 bash .github/scripts/portable_validation.sh fingerprint magi_attention)
+changed_consumer=$(cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt bash vendor/MagiAttention/.github/scripts/portable_validation.sh fingerprint magi_attention)
+[[ "$changed_main" != "$standalone_main" && "$changed_main" == "$changed_consumer" ]]
+triggered=$(cd "$standalone" && python .github/scripts/ci_input_policy.py changed --layer trigger --node magi_attention --base HEAD^ --head HEAD)
+[[ "$triggered" == true ]]
+standalone_main=$changed_main
+consumer_main=$changed_consumer
 
 (cd "$standalone" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 VALIDATION_CACHE_TRUSTED=true GITHUB_REPOSITORY=SandAI-org/MagiAttention GITHUB_SHA=test \
     bash .github/scripts/portable_validation.sh write-success magi_attention >/dev/null)

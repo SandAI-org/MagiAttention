@@ -192,7 +192,9 @@ class TestCutedslBwdUnderRangeMerge(TestCase):
         )
 
     @staticmethod
-    def _fwd(attn_arg: AttnArg, q, k, v) -> tuple[torch.Tensor, torch.Tensor]:
+    def _fwd(
+        attn_arg: AttnArg, q, k, v
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         with switch_envvar_context(RANGE_MERGE_ENV, enable=True):
             return cutedsl_ffa.cutedsl_fwd(
                 q, k, v, attn_arg, softmax_scale=None, softcap=0.0
@@ -221,7 +223,7 @@ class TestCutedslBwdUnderRangeMerge(TestCase):
         case = CASES[name]
         attn_arg = _make_attn_arg(case.q_ranges, case.k_ranges)
         q, k, v, do = self._make_inputs(case)
-        out, lse = self._fwd(attn_arg, q, k, v)
+        out, lse, _ = self._fwd(attn_arg, q, k, v)
         with mock.patch.object(
             cutedsl_ffa, "_flex_flash_attn_bwd", wraps=_flex_flash_attn_bwd
         ) as bwd:
@@ -261,7 +263,7 @@ class TestCutedslBwdUnderRangeMerge(TestCase):
         q, k, v, do = self._make_inputs(case)
         # Compile the kernels outside the checked region.
         warmup_arg = _make_attn_arg(case.q_ranges, case.k_ranges)
-        out, lse = self._fwd(warmup_arg, q, k, v)
+        out, lse, _ = self._fwd(warmup_arg, q, k, v)
         self._bwd(warmup_arg, q, k, v, do, out, lse)
 
         attn_arg = _make_attn_arg(case.q_ranges, case.k_ranges)
