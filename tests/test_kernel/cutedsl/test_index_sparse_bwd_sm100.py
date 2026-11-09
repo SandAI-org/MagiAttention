@@ -562,6 +562,18 @@ class TestIndexSparseBwdSm100Geometry(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
+def _bwd_with_sorted_rows(q, k, v, out, do, lse, index_sparse_indices, **kwargs):
+    """Sort every row's valid ids ascending (attention does not depend on their
+    order), keeping the -1 tail, and pass the rows as sorted."""
+    pad = torch.iinfo(torch.int32).max
+    rows = torch.where(index_sparse_indices >= 0, index_sparse_indices, pad)
+    rows = rows.sort(dim=-1).values
+    rows = torch.where(rows == pad, -1, rows).int()
+    return ffa_bwd_sm100_index_sm90_layout(
+        q, k, v, out, do, lse, rows, index_sparse_rows_sorted=True, **kwargs
+    )
+
+
 @unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseBwdSm100Options(unittest.TestCase):
     """``gather_v_async`` and ``num_k_passes``: each path against the reference, and their defaults."""
@@ -675,15 +687,20 @@ class TestIndexSparseBwdSm100Options(unittest.TestCase):
             },
         }
         for num_k_passes in (2, 3):
-            for name, config in configs.items():
-                with self.subTest(num_k_passes=num_k_passes, config=name):
-                    _run_index_sparse_config(
-                        self.device,
-                        config,
-                        bwd_fn=partial(
-                            ffa_bwd_sm100_index_sm90_layout, num_k_passes=num_k_passes
-                        ),
-                    )
+            for rows_sorted in (False, True):
+                bwd_fn = partial(
+                    (
+                        _bwd_with_sorted_rows
+                        if rows_sorted
+                        else ffa_bwd_sm100_index_sm90_layout
+                    ),
+                    num_k_passes=num_k_passes,
+                )
+                for name, config in configs.items():
+                    with self.subTest(
+                        num_k_passes=num_k_passes, rows_sorted=rows_sorted, config=name
+                    ):
+                        _run_index_sparse_config(self.device, config, bwd_fn=bwd_fn)
 
     def test_num_k_passes_default_follows_l2_footprint_and_topk(self):
         """Passes start past 2x L2, aim at 0.8x L2 chunks, and need 256 ids per row and pass."""
@@ -708,6 +725,21 @@ class TestIndexSparseBwdSm100Options(unittest.TestCase):
         self.assertEqual(num_k_passes_default(262144, 1, 128, 2, 1024, l2_bytes), 4)
         # at most 16 passes
         self.assertEqual(num_k_passes_default(2**21, 1, 128, 2, 8192, l2_bytes), 16)
+
+    def test_num_k_passes_default_sorted_rows_take_half_l2_chunks(self):
+        """Ascending rows: same 2x L2 start, 0.5x L2 chunks, same caps."""
+        l2_bytes = 126 * 2**20
+        two_l2_rows = 2 * l2_bytes // (128 * (2 * 2 + 2 * 4))
+        passes = partial(num_k_passes_default, rows_sorted=True)
+        self.assertEqual(passes(two_l2_rows, 1, 128, 2, 2048, l2_bytes), 1)
+        self.assertEqual(passes(two_l2_rows + 1, 1, 128, 2, 2048, l2_bytes), 5)
+        # one kv head: 192k / 256k / 384k tokens take 5 / 7 / 10 passes
+        self.assertEqual(passes(196608, 1, 128, 2, 39296, l2_bytes), 5)
+        self.assertEqual(passes(262144, 1, 128, 2, 52480, l2_bytes), 7)
+        self.assertEqual(passes(393216, 1, 128, 2, 39296, l2_bytes), 10)
+        # fewer than 256 ids per row and pass
+        self.assertEqual(passes(393216, 1, 128, 2, 2048, l2_bytes), 1)
+        self.assertEqual(passes(786432, 1, 128, 2, 78592, l2_bytes), 16)
 
 
 # ═══════════════════════════════════════════════════════════
