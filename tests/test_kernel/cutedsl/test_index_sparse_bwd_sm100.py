@@ -71,6 +71,7 @@ from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100_index import (
+    ffa_bwd_sm100_index,
     gather_v_async_default,
     num_k_passes_default,
 )
@@ -708,6 +709,48 @@ class TestIndexSparseBwdSm100Options(unittest.TestCase):
         self.assertEqual(num_k_passes_default(262144, 1, 128, 2, 1024, l2_bytes), 4)
         # at most 16 passes
         self.assertEqual(num_k_passes_default(2**21, 1, 128, 2, 8192, l2_bytes), 16)
+
+    def test_host_path_has_no_cpu_gpu_sync(self):
+        """The host frontend only enqueues work, with one K pass or several."""
+        total_q, total_k, num_head, num_head_kv, head_dim = 512, 1024, 16, 1, 128
+        q = torch.randn(
+            total_q, num_head, head_dim, device=self.device, dtype=torch.bfloat16
+        )
+        k = torch.randn(
+            total_k, num_head_kv, head_dim, device=self.device, dtype=torch.bfloat16
+        )
+        v = torch.randn_like(k)
+        out = torch.randn_like(q)
+        dout = torch.randn_like(q)
+        lse = torch.full((total_q, num_head), 10.0, device=self.device)
+        indices = (
+            torch.rand(total_q // 128, num_head_kv, total_k, device=self.device)
+            .topk(256, dim=-1)
+            .indices.int()
+        )
+        for num_k_passes in (1, 2):
+            with self.subTest(num_k_passes=num_k_passes):
+                bwd = partial(
+                    ffa_bwd_sm100_index,
+                    q,
+                    k,
+                    v,
+                    out,
+                    dout,
+                    lse,
+                    indices,
+                    num_k_passes=num_k_passes,
+                )
+                # compile outside the check
+                bwd()
+                torch.cuda.synchronize()
+                prev_mode = torch.cuda.get_sync_debug_mode()
+                torch.cuda.set_sync_debug_mode("error")
+                try:
+                    bwd()
+                finally:
+                    torch.cuda.set_sync_debug_mode(prev_mode)
+                torch.cuda.synchronize()
 
 
 # ═══════════════════════════════════════════════════════════

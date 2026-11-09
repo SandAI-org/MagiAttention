@@ -75,9 +75,6 @@ from quack.cute_dsl_utils import ParamsBase
 
 import magi_attention.kernel.cutedsl as magiattn_cutedsl
 from magi_attention.utils.dtype import to_cute_dtype
-from magi_attention.utils.index_sparse_utils import (
-    partition_index_sparse_rows_by_k_chunk,
-)
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
@@ -93,6 +90,10 @@ from .dsl_compat import (
 from .ffa_bwd_postprocess import bwd_postprocess_rowmajor
 from .ffa_bwd_preprocess import bwd_preprocess
 from .ffa_utils import maybe_contiguous
+from .index_sparse_rows import (
+    count_index_sparse_valid_ids,
+    partition_index_sparse_rows_by_k_chunk,
+)
 from .named_barrier import NamedBarrierBwdSm100Index
 from .seqlen_info import SeqlenInfoQK
 from .tile_scheduler import (
@@ -2832,12 +2833,15 @@ def ffa_bwd_sm100_index(
     else:
         indices = index_sparse_indices
         # Valid ids precede the -1 padding, so the count is the per-row inner length
-        topk_lens = (index_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)[None]
+        topk_lens = count_index_sparse_valid_ids(index_sparse_indices)[None]
 
     # One range over every token: the scheduler, dPsum preprocess, dQ epilogue
-    # and dK/dV postprocess all run their full-mask single-batch paths.
-    q_ranges = torch.tensor([[0, total_q]], dtype=torch.int32, device=device)
-    k_ranges = torch.tensor([[0, total_k]], dtype=torch.int32, device=device)
+    # and dK/dV postprocess all run their full-mask single-batch paths. Filled
+    # on the device: a torch.tensor built from host values copies synchronously.
+    q_ranges = torch.zeros(1, 2, dtype=torch.int32, device=device)
+    q_ranges[:, 1] = total_q
+    k_ranges = torch.zeros(1, 2, dtype=torch.int32, device=device)
+    k_ranges[:, 1] = total_k
 
     # --- Preprocess: dPsum = (o * dout).sum(-1), lse_log2 = lse * log2(e) ---
 

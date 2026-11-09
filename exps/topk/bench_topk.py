@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Benchmark the CuTe DSL radix-select top-k against ``torch.topk``.
+"""Benchmark the CuTe DSL radix-select and streaming top-k against ``torch.topk``.
 
 All backends return indices only; timing is measured via CUDA events.
 
@@ -41,6 +41,7 @@ from typing import Any, Optional
 import torch
 
 from magi_attention.kernel.cutedsl.topk import cutedsl_topk
+from magi_attention.kernel.cutedsl.topk_stream import cutedsl_topk_stream
 
 # ---------------------------------------------------------------------------
 # Backend dispatch helpers (all return indices only)
@@ -55,9 +56,14 @@ def _cutedsl_topk_fn(x: torch.Tensor, k: int, *, sorted: bool) -> torch.Tensor:
     return cutedsl_topk(x, k, sorted=sorted)
 
 
+def _cutedsl_stream_topk_fn(x: torch.Tensor, k: int, *, sorted: bool) -> torch.Tensor:
+    return cutedsl_topk_stream(x, k, sorted=sorted)
+
+
 BACKENDS = {
     "torch": _torch_topk_fn,
     "cutedsl": _cutedsl_topk_fn,
+    "cutedsl_stream": _cutedsl_stream_topk_fn,
 }
 
 
@@ -307,10 +313,19 @@ def _run_batch_test(
             print(f"{row_label:<16}" + "".join(c.rjust(col_w) for c in cells))
         print("-" * len(header))
 
-    # cross-backend comparison: cutedsl vs torch speedup
-    if "cutedsl" in backends and "torch" in backends:
+    # cross-backend comparison: speedup of each later backend over each earlier one
+    pairs = [
+        (base, new)
+        for base, new in (
+            ("torch", "cutedsl"),
+            ("torch", "cutedsl_stream"),
+            ("cutedsl", "cutedsl_stream"),
+        )
+        if base in backends and new in backends
+    ]
+    for base, new in pairs:
         print(f"\n{'=' * 70}")
-        print("  speedup: torch / cutedsl  (>1 means cutedsl is faster)")
+        print(f"  speedup: {base} / {new}  (>1 means {new} is faster)")
         print("=" * 70)
         print(header)
         print("-" * len(header))
@@ -318,10 +333,10 @@ def _run_batch_test(
             row_label = f"n={n}"
             cells = []
             for k in k_list:
-                torch_ms = results["torch"].get((n, k))
-                cd_ms = results["cutedsl"].get((n, k))
-                if torch_ms is not None and cd_ms is not None and cd_ms > 0:
-                    cells.append(f"{torch_ms / cd_ms:.2f}x")
+                base_ms = results[base].get((n, k))
+                new_ms = results[new].get((n, k))
+                if base_ms is not None and new_ms is not None and new_ms > 0:
+                    cells.append(f"{base_ms / new_ms:.2f}x")
                 else:
                     cells.append("N/A")
             print(f"{row_label:<16}" + "".join(c.rjust(col_w) for c in cells))
@@ -359,9 +374,9 @@ def main() -> int:
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["torch", "cutedsl"],
+        default=["torch", "cutedsl", "cutedsl_stream"],
         choices=list(BACKENDS.keys()),
-        help="backends to benchmark (default: torch cutedsl)",
+        help="backends to benchmark (default: torch cutedsl cutedsl_stream)",
     )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)

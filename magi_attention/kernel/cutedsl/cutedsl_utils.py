@@ -700,8 +700,34 @@ def warp_prefix_sum(val: Int32, lane: Optional[Int32] = None) -> Int32:
         partial_sum = cute.arch.shuffle_sync_up(val, offset=offset, mask_and_clamp=0)
         if lane >= offset:
             val += partial_sum
-        # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, partial_sum = %d, val = %d", cute.arch.thread_idx()[0] % 32, partial_sum, val)  # noqa: E501
+        # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, val = %d", cute.arch.thread_idx()[0] % 32, val)  # noqa: E501
     return val
+
+
+@dsl_user_op
+def lanemask_lt(*, loc=None, ip=None) -> Int32:
+    return Int32(_asm(T.i32(), [], "mov.u32 $0, %lanemask_lt;", "=r", False, loc, ip))
+
+
+@dsl_user_op
+def lanemask_gt(*, loc=None, ip=None) -> Int32:
+    return Int32(_asm(T.i32(), [], "mov.u32 $0, %lanemask_gt;", "=r", False, loc, ip))
+
+
+@dsl_user_op
+def match_any_sync(value: Int32, *, loc=None, ip=None) -> Int32:
+    """Mask of the lanes whose ``value`` equals this lane's."""
+    return Int32(
+        _asm(
+            T.i32(),
+            [Int32(value).ir_value(loc=loc, ip=ip)],
+            "match.any.sync.b32 $0, $1, 0xffffffff;",
+            "=r,r",
+            True,
+            loc,
+            ip,
+        )
+    )
 
 
 @dsl_user_op
@@ -1227,8 +1253,10 @@ def cvt_pack(ab_type: str, lo: Float32, hi: Float32, *, loc=None, ip=None) -> In
 
 
 @dsl_user_op
-def ld_global_b32_pred(addr: Int64, pred: Boolean, *, loc=None, ip=None) -> Int32:
-    """32-bit read-only global load, zero when ``pred`` is false (the address is then not read)."""
+def ld_global_b32_pred(
+    addr: Int64, pred: Boolean, *, fill: int = 0, loc=None, ip=None
+) -> Int32:
+    """32-bit read-only global load, ``fill`` when ``pred`` is false (the address is then not read)."""
     return Int32(
         _asm(
             T.i32(),
@@ -1236,7 +1264,7 @@ def ld_global_b32_pred(addr: Int64, pred: Boolean, *, loc=None, ip=None) -> Int3
                 Int64(addr).ir_value(loc=loc, ip=ip),
                 Int32(pred).ir_value(loc=loc, ip=ip),
             ],
-            "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\tmov.b32 $0, 0;\n\t"
+            f"{{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\tmov.b32 $0, {fill};\n\t"
             "@p ld.global.nc.b32 $0, [$1];\n\t}",
             "=r,l,r",
             True,
@@ -1483,6 +1511,136 @@ def ld_shared_b32(addr: Int32, *, loc=None, ip=None) -> Int32:
             loc,
             ip,
         )
+    )
+
+
+@dsl_user_op
+def ld_shared_u16(addr: Int32, *, loc=None, ip=None) -> Int32:
+    """Zero-extended 16-bit shared-memory load."""
+    return Int32(
+        _asm(
+            T.i32(),
+            [Int32(addr).ir_value(loc=loc, ip=ip)],
+            "ld.shared.u16 $0, [$1];",
+            "=r,r",
+            True,
+            loc,
+            ip,
+        )
+    )
+
+
+@dsl_user_op
+def red_shared_add_u32(addr: Int32, value: Int32, *, loc=None, ip=None) -> None:
+    _asm(
+        None,
+        [Int32(addr).ir_value(loc=loc, ip=ip), Int32(value).ir_value(loc=loc, ip=ip)],
+        "red.shared.add.u32 [$0], $1;",
+        "r,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def red_shared_min_u32(addr: Int32, value: Int32, *, loc=None, ip=None) -> None:
+    _asm(
+        None,
+        [Int32(addr).ir_value(loc=loc, ip=ip), Int32(value).ir_value(loc=loc, ip=ip)],
+        "red.shared.min.u32 [$0], $1;",
+        "r,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def st_global_b32(addr: Int64, value: Int32, *, loc=None, ip=None) -> None:
+    _asm(
+        None,
+        [Int64(addr).ir_value(loc=loc, ip=ip), Int32(value).ir_value(loc=loc, ip=ip)],
+        "st.global.b32 [$0], $1;",
+        "l,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def st_global_b64(addr: Int64, value: Int64, *, loc=None, ip=None) -> None:
+    _asm(
+        None,
+        [Int64(addr).ir_value(loc=loc, ip=ip), Int64(value).ir_value(loc=loc, ip=ip)],
+        "st.global.b64 [$0], $1;",
+        "l,l",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def mbar_arrive_expect_tx(addr: Int32, nbytes: Int32, *, loc=None, ip=None) -> None:
+    """Arrive on the mbarrier at ``addr`` and add ``nbytes`` to its expected transaction bytes."""
+    _asm(
+        None,
+        [Int32(addr).ir_value(loc=loc, ip=ip), Int32(nbytes).ir_value(loc=loc, ip=ip)],
+        "mbarrier.arrive.expect_tx.shared::cta.b64 _, [$0], $1;",
+        "r,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def cp_async_bulk_g2s(
+    dst_smem_addr: Int32,
+    src_gmem_addr: Int64,
+    nbytes: Int32,
+    mbar_addr: Int32,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
+    """1D bulk copy of ``nbytes`` from global to shared memory, completed on the mbarrier at
+    ``mbar_addr``. ``nbytes`` and both addresses must be multiples of 16."""
+    _asm(
+        None,
+        [
+            Int32(dst_smem_addr).ir_value(loc=loc, ip=ip),
+            Int64(src_gmem_addr).ir_value(loc=loc, ip=ip),
+            Int32(nbytes).ir_value(loc=loc, ip=ip),
+            Int32(mbar_addr).ir_value(loc=loc, ip=ip),
+        ],
+        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [$0], [$1], $2, [$3];",
+        "r,l,r,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def cp_async_bulk_prefetch_l2(
+    src_gmem_addr: Int64, nbytes: Int32, *, loc=None, ip=None
+) -> None:
+    """Prefetch ``nbytes`` at ``src_gmem_addr`` into L2. ``nbytes`` and the address must be
+    multiples of 16."""
+    _asm(
+        None,
+        [
+            Int64(src_gmem_addr).ir_value(loc=loc, ip=ip),
+            Int32(nbytes).ir_value(loc=loc, ip=ip),
+        ],
+        "cp.async.bulk.prefetch.L2.global [$0], $1;",
+        "l,r",
+        True,
+        loc,
+        ip,
     )
 
 
