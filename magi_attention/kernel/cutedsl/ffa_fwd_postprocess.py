@@ -14,16 +14,8 @@
 
 # mypy: disable-error-code="attr-defined"
 
-"""Forward postprocess for the range kernels.
-
-A row whose LSE is ``-inf`` holds no result. The postprocess runs in place
-and leaves every such row with O = 0 and the sink-only LSE (``-inf`` without
-a sink). With a sink, the rows with a result take one of two variants:
-
-- after the atomic merge they do not include the sink, because each
-  overlapping relation would add it again, so the sink is merged into their
-  LSE and O is rescaled;
-- after the direct store they already include the sink and stay untouched.
+"""Overlapping relations must not each add the sink. The atomic path folds it
+in once during postprocessing; the direct store includes it in the main kernel.
 """
 
 import math
@@ -40,14 +32,6 @@ from .cache_utils import get_jit_cache
 
 
 class FFAFwdPostProcess:
-    """Zero O on the rows without a result and fold the sink into O/LSE.
-
-    With ``has_sink`` a row without a result gets ``lse_sink`` as its LSE.
-    ``sink_in_written_rows`` declares that the rows with a result already
-    include the sink, so they stay untouched; otherwise their LSE is merged
-    with ``lse_sink`` and O is rescaled to match.
-    """
-
     def __init__(
         self,
         o_dtype: Type[cutlass.Numeric],
@@ -196,8 +180,9 @@ def fwd_postprocess(
         lse_sink: fp32 ``[num_head]``, each head's log-sum-exp over its sink
             logits, or None without a sink. A row without a result gets it as
             its LSE.
-        sink_in_written_rows: the rows with a result already include the
-            sink and are left untouched. Without a sink the flag has no effect.
+        sink_in_written_rows: if True, rows with a result already include the
+            sink and are left untouched. Otherwise, merge their LSE with
+            ``lse_sink`` and rescale O. Without a sink the flag has no effect.
     """
     assert lse_sink is None or lse_sink.dtype == torch.float32
     # Without a sink the flag has no effect, so it is cleared to share the

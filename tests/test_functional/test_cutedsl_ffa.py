@@ -350,9 +350,7 @@ class TestCutedslBwdUnderRangeMerge(TestCase):
 class TestCutedslFwdStorePath(TestCase):
     """cutedsl_fwd direct-stores O only for sorted, disjoint q rows.
 
-    Each case asserts the direct-store and fill flags passed to the kernel and
-    compares out, lse and max_logits with an fp32 reference on every row. The
-    rows outside every q range must hold zero O and the sink-only LSE, because
+    Rows outside every q range must hold zero O and the sink-only LSE, because
     the dist merge reads every row of the partial (out, lse).
     """
 
