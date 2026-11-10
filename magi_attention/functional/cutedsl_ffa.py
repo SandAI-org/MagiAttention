@@ -68,10 +68,11 @@ def cutedsl_fwd(
             (q.shape[-2],), float("-inf"), dtype=torch.float32, device=q.device
         )
 
-    # The direct store gives every O and LSE row a unique writer, which needs
-    # q rows sorted by start and pairwise disjoint. The dist merge reads every
-    # row of a partial (out, lse), so the rows no q range covers are filled
-    # with O = 0 and the sink-only LSE.
+    # The kernel's disable_fwd_atomic_reduction declares q rows that are
+    # pairwise disjoint and sorted by start; AttnArg's flag of the same name
+    # covers only disjointness. The dist merge reads every row of the partial
+    # (out, lse), so the direct store must also fill the rows outside every
+    # q range with O = 0 and the sink-only LSE.
     direct_store = attn_arg.disable_fwd_atomic_reduction and attn_arg.fwd_args_q_sorted
     fill_uncovered_rows = attn_arg.fwd_args_q_coverage_end != q.shape[0]
 

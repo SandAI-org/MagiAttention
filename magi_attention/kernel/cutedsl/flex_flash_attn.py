@@ -193,14 +193,14 @@ def _flex_flash_attn_fwd(
             sinks excluded) over every attended (q, k) pair is merged into with
             an atomic max; the caller initializes it to ``-inf`` or a previous
             result. SM100/SM110 only.
-        fill_uncovered_rows: on return, every Q row outside every q range holds
-            O = 0 and the sink-only LSE (``-inf`` without a sink). The atomic
-            merge always produces that. The direct store over ranges otherwise
-            leaves those rows as they were, and this flag fills them, paying an
-            LSE ``-inf`` fill when ``lse`` is allocated here and one postprocess
-            launch. Only SM100/SM110 consume the q range rows, so only there can
-            rows be uncovered; elsewhere, and for dense inputs, the flag does
-            nothing. O is not initialized.
+        fill_uncovered_rows: on the SM100/SM110 direct store over q/k ranges,
+            write O = 0 and the sink-only LSE (``-inf`` without a sink) to
+            every Q row outside every q range, which the store otherwise
+            leaves untouched. Elsewhere the flag does nothing; the atomic merge
+            already writes this state to the rows whose LSE is still ``-inf``
+            after merging. The fill costs one postprocess launch, plus an LSE
+            ``-inf`` fill when ``lse`` is allocated here without a sink.
+            ``out`` needs no initialization.
 
     Returns:
         A tuple of (output, lse) where:
@@ -343,9 +343,9 @@ def _flex_flash_attn_fwd(
     # atomic path folds it once in the fwd postprocess instead.
     kernel_sink = lse_sink if disable_fwd_atomic_reduction else None
 
-    # Only the SM100/SM110 kernels read the q range rows, so only they can skip
-    # rows; other arches collapse the ranges into a cu_seqlens partition, and a
-    # dense input has no hole.
+    # The fill runs only after the SM100/SM110 range kernels. Other arches read
+    # the q ranges as cu_seqlens, whose caller contract is a sorted partition,
+    # and a dense input has no uncovered row.
     fill_uncovered = (
         fill_uncovered_rows
         and has_ranges
@@ -378,8 +378,8 @@ def _flex_flash_attn_fwd(
 
     if lse is None:
         # NOTE: LSE == -inf marks a row no relation wrote: the atomic merge
-        # starts from it, bwd_dsink skips it, and the postprocess of the
-        # uncovered rows keys on it.
+        # starts from it, bwd_dsink skips it, and the fwd postprocess finds the
+        # uncovered rows by it.
         if disable_fwd_atomic_reduction and sink is None and not fill_uncovered:
             lse = torch.empty(lse_shape, dtype=torch.float32, device=device)
         else:

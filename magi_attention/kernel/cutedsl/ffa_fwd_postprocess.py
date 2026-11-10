@@ -16,15 +16,14 @@
 
 """Forward postprocess for the range kernels.
 
-Every caller ends with O = 0 and the sink-only LSE (``-inf`` without a sink)
-on the rows no relation wrote, which is what a subsequent merge reads. Two
-in-place variants produce that state:
+A row whose LSE is ``-inf`` holds no result. The postprocess runs in place
+and leaves every such row with O = 0 and the sink-only LSE (``-inf`` without
+a sink). With a sink, the rows with a result take one of two variants:
 
-- the atomic merge reduces partial O/LSE from every relation that covers a Q
-  row, so those rows hold neither the sink nor the final normalization and it
-  folds the sink into them;
-- the direct store writes every covered row once with the sink already folded
-  in, so only the uncovered rows are filled.
+- after the atomic merge they do not include the sink, because each
+  overlapping relation would add it again, so the sink is merged into their
+  LSE and O is rescaled;
+- after the direct store they already include the sink and stay untouched.
 """
 
 import math
@@ -41,12 +40,12 @@ from .cache_utils import get_jit_cache
 
 
 class FFAFwdPostProcess:
-    """Fill the O/LSE rows that hold no result.
+    """Zero O on the rows without a result and fold the sink into O/LSE.
 
-    ``has_sink`` makes every uncovered row carry ``lse_sink``.
-    ``sink_in_written_rows`` says the rows holding a result already include the
-    sink, so those rows stay untouched; otherwise their LSE is merged with
-    ``lse_sink`` and O is rescaled to match.
+    With ``has_sink`` a row without a result gets ``lse_sink`` as its LSE.
+    ``sink_in_written_rows`` declares that the rows with a result already
+    include the sink, so they stay untouched; otherwise their LSE is merged
+    with ``lse_sink`` and O is rescaled to match.
     """
 
     def __init__(
@@ -192,19 +191,17 @@ def fwd_postprocess(
 
     Args:
         out: ``[total_q, num_head, head_dim_v]`` O buffer, fp32/fp16/bf16.
-        lse: fp32 ``[total_q, num_head]`` log-sum-exp; a row is uncovered when
-            its entry is ``-inf``.
+        lse: fp32 ``[total_q, num_head]`` log-sum-exp; ``-inf`` marks a
+            (row, head) without a result.
         lse_sink: fp32 ``[num_head]``, each head's log-sum-exp over its sink
-            logits, or None without a sink. An uncovered row stores it as its
-            LSE.
-        sink_in_written_rows: the rows holding a result already include the
-            sink, so they are left as they are. Without a sink no row holds
-            one, and the two settings do the same work.
+            logits, or None without a sink. A row without a result gets it as
+            its LSE.
+        sink_in_written_rows: the rows with a result already include the
+            sink and are left untouched. Without a sink the flag has no effect.
     """
     assert lse_sink is None or lse_sink.dtype == torch.float32
-    # A sink in the result rows only changes what the covered rows need; the
-    # uncovered rows of a sink-free call are zeroed by either setting, so both
-    # share one compiled variant.
+    # Without a sink the flag has no effect, so it is cleared to share the
+    # sink-free compiled variant.
     sink_in_written_rows = sink_in_written_rows and lse_sink is not None
     compiled = _compile_fwd_postprocess(
         out.dtype, out.shape[-1], lse_sink is not None, sink_in_written_rows

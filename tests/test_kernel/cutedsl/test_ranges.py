@@ -69,8 +69,9 @@ SPAN = 128
 ACCUM_ATOL = ACCUM_RTOL = 1e-2
 LSE_ATOL = LSE_RTOL = 1e-3
 
-# Direct-store hole geometry: the covered rows [64, 192) and [256, 384) leave
-# rows uncovered inside the first tile, inside the second and in the last.
+# Direct-store hole geometry: the q ranges [64, 192) and [256, 384) leave rows
+# [0, 64), [192, 256) and [384, 512) uncovered. Of the 128-row blocks of the
+# fwd postprocess, two are partly uncovered and the last is fully uncovered.
 HOLE_Q_RANGES: Ranges = [[64, SPAN + 64], [2 * SPAN, 3 * SPAN]]
 HOLE_K_RANGES: Ranges = [[0, 2 * SPAN], [2 * SPAN, 4 * SPAN]]
 HOLE_TOTAL_Q = 4 * SPAN
@@ -293,10 +294,11 @@ class TestRangeAccumulation(TestCase):
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
 class TestDirectStoreHoleFill(TestCase):
-    """The direct store fills the Q rows no range covers on request.
+    """The direct store writes rows outside every q range only with ``fill_uncovered_rows``.
 
-    The caller owns O and LSE, so an O prefilled with NaN and an LSE prefilled
-    with -inf show which rows the kernel wrote at all.
+    O is prefilled with NaN and LSE with -inf. A NaN left in O marks a row
+    nothing wrote, and it also catches a fill that scales the old O instead of
+    storing zeros.
     """
 
     def setUp(self) -> None:
@@ -356,7 +358,7 @@ class TestDirectStoreHoleFill(TestCase):
     @parameterize("out_dtype", [torch.float32, DTYPE])
     @parameterize("num_sinks", [0, 2])
     def test_fill_writes_uncovered_rows(self, out_dtype: torch.dtype, num_sinks: int):
-        """Filled rows hold O = 0 and the sink-only LSE; covered rows keep their result."""
+        """Uncovered rows hold O = 0 and the sink-only LSE; covered rows match the reference."""
         q, k, v = make_qkv(
             (HOLE_TOTAL_Q,), (HOLE_TOTAL_K,), self.heads, DTYPE, self.device
         )
@@ -401,7 +403,7 @@ class TestDirectStoreHoleFill(TestCase):
 
     @parameterize("out_dtype", [torch.float32, DTYPE])
     def test_default_leaves_uncovered_rows_untouched(self, out_dtype: torch.dtype):
-        """Without the fill the covered rows still match and the holes keep NaN."""
+        """Without the fill, covered rows match the reference and uncovered O keeps NaN."""
         q, k, v = make_qkv(
             (HOLE_TOTAL_Q,), (HOLE_TOTAL_K,), self.heads, DTYPE, self.device
         )

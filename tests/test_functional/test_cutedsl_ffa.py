@@ -122,7 +122,7 @@ FWD_STORE_CASES = {
         expect_direct_store=True,
         expect_fill_uncovered_rows=True,
     ),
-    # The q rows leave a hole inside the first tile and two whole tiles empty.
+    # Rows [0, 64), [192, 256) and [384, 512) lie outside every q range.
     "uncovered_at_both_ends": FwdStoreCase(
         q_ranges=[[64, 192], [256, 384]],
         k_ranges=[[0, 256], [256, 512]],
@@ -141,7 +141,7 @@ FWD_STORE_CASES = {
         expect_direct_store=False,
         expect_fill_uncovered_rows=False,
     ),
-    # The fwd merge sorts the rows by q start.
+    # The fwd range merge in AttnArg sorts the rows by q start.
     "unsorted_rows_under_range_merge": FwdStoreCase(
         q_ranges=[[256, 512], [0, 256]],
         k_ranges=[[0, 256], [256, 512]],
@@ -348,10 +348,12 @@ class TestCutedslBwdUnderRangeMerge(TestCase):
 
 
 class TestCutedslFwdStorePath(TestCase):
-    """cutedsl_fwd direct-stores O when the q rows are sorted and disjoint.
+    """cutedsl_fwd direct-stores O only for sorted, disjoint q rows.
 
-    The dist merge reads every row of the partial (out, lse), so the rows
-    outside every q range come back as zero O and the sink-only LSE.
+    Each case asserts the direct-store and fill flags passed to the kernel and
+    compares out, lse and max_logits with an fp32 reference on every row. The
+    rows outside every q range must hold zero O and the sink-only LSE, because
+    the dist merge reads every row of the partial (out, lse).
     """
 
     def setUp(self) -> None:
