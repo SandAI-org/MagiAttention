@@ -1457,6 +1457,136 @@ def ld_shared_b32(addr: Int32, *, loc=None, ip=None) -> Int32:
     )
 
 
+@dsl_user_op
+def ld_shared_u16(addr: Int32, *, loc=None, ip=None) -> Int32:
+    """Zero-extended 16-bit shared-memory load."""
+    return Int32(
+        _asm(
+            T.i32(),
+            [Int32(addr).ir_value(loc=loc, ip=ip)],
+            "ld.shared.u16 $0, [$1];",
+            "=r,r",
+            True,
+            loc,
+            ip,
+        )
+    )
+
+
+@dsl_user_op
+def red_shared_add_u32(addr: Int32, value: Int32, *, loc=None, ip=None) -> None:
+    _asm(
+        None,
+        [Int32(addr).ir_value(loc=loc, ip=ip), Int32(value).ir_value(loc=loc, ip=ip)],
+        "red.shared.add.u32 [$0], $1;",
+        "r,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def red_shared_min_u32(addr: Int32, value: Int32, *, loc=None, ip=None) -> None:
+    _asm(
+        None,
+        [Int32(addr).ir_value(loc=loc, ip=ip), Int32(value).ir_value(loc=loc, ip=ip)],
+        "red.shared.min.u32 [$0], $1;",
+        "r,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def st_global_b32(addr: Int64, value: Int32, *, loc=None, ip=None) -> None:
+    _asm(
+        None,
+        [Int64(addr).ir_value(loc=loc, ip=ip), Int32(value).ir_value(loc=loc, ip=ip)],
+        "st.global.b32 [$0], $1;",
+        "l,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def st_global_b64(addr: Int64, value: Int64, *, loc=None, ip=None) -> None:
+    _asm(
+        None,
+        [Int64(addr).ir_value(loc=loc, ip=ip), Int64(value).ir_value(loc=loc, ip=ip)],
+        "st.global.b64 [$0], $1;",
+        "l,l",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def mbar_arrive_expect_tx(addr: Int32, nbytes: Int32, *, loc=None, ip=None) -> None:
+    """Arrive on the mbarrier at ``addr`` and add ``nbytes`` to its expected transaction bytes."""
+    _asm(
+        None,
+        [Int32(addr).ir_value(loc=loc, ip=ip), Int32(nbytes).ir_value(loc=loc, ip=ip)],
+        "mbarrier.arrive.expect_tx.shared::cta.b64 _, [$0], $1;",
+        "r,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def cp_async_bulk_g2s(
+    dst_smem_addr: Int32,
+    src_gmem_addr: Int64,
+    nbytes: Int32,
+    mbar_addr: Int32,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
+    """1D bulk copy of ``nbytes`` from global to shared memory, completed on the mbarrier at
+    ``mbar_addr``. ``nbytes`` and both addresses must be multiples of 16."""
+    _asm(
+        None,
+        [
+            Int32(dst_smem_addr).ir_value(loc=loc, ip=ip),
+            Int64(src_gmem_addr).ir_value(loc=loc, ip=ip),
+            Int32(nbytes).ir_value(loc=loc, ip=ip),
+            Int32(mbar_addr).ir_value(loc=loc, ip=ip),
+        ],
+        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [$0], [$1], $2, [$3];",
+        "r,l,r,r",
+        True,
+        loc,
+        ip,
+    )
+
+
+@dsl_user_op
+def cp_async_bulk_prefetch_l2(
+    src_gmem_addr: Int64, nbytes: Int32, *, loc=None, ip=None
+) -> None:
+    """Prefetch ``nbytes`` at ``src_gmem_addr`` into L2. ``nbytes`` and the address must be
+    multiples of 16."""
+    _asm(
+        None,
+        [
+            Int64(src_gmem_addr).ir_value(loc=loc, ip=ip),
+            Int32(nbytes).ir_value(loc=loc, ip=ip),
+        ],
+        "cp.async.bulk.prefetch.L2.global [$0], $1;",
+        "l,r",
+        True,
+        loc,
+        ip,
+    )
+
+
 # ====================================================================
 # Shared-memory helpers (from smem_ops)
 # ====================================================================

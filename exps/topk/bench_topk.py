@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Benchmark the CuTe DSL radix-select top-k against ``torch.topk``.
+"""Benchmark the CuTe DSL radix-select and streaming top-k against ``torch.topk``.
 
 All backends return indices only; timing is measured via CUDA events.
 
@@ -36,11 +36,12 @@ Usage examples::
 from __future__ import annotations
 
 import argparse
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import torch
 
 from magi_attention.kernel.cutedsl.topk import cutedsl_topk
+from magi_attention.kernel.cutedsl.topk_stream import cutedsl_topk_stream
 
 # ---------------------------------------------------------------------------
 # Backend dispatch helpers (all return indices only)
@@ -55,9 +56,14 @@ def _cutedsl_topk_fn(x: torch.Tensor, k: int, *, sorted: bool) -> torch.Tensor:
     return cutedsl_topk(x, k, sorted=sorted)
 
 
+def _cutedsl_stream_topk_fn(x: torch.Tensor, k: int, *, sorted: bool) -> torch.Tensor:
+    return cutedsl_topk_stream(x, k, sorted=sorted)
+
+
 BACKENDS = {
     "torch": _torch_topk_fn,
     "cutedsl": _cutedsl_topk_fn,
+    "cutedsl_stream": _cutedsl_stream_topk_fn,
 }
 
 
@@ -88,6 +94,22 @@ def _bytes_to_mib(nbytes: int | float) -> float:
 
 def _bytes_to_gib(nbytes: int | float) -> float:
     return float(nbytes) / 1024**3
+
+
+def _tensor_bytes(tensor: torch.Tensor) -> int:
+    return tensor.numel() * tensor.element_size()
+
+
+def _io_bandwidth_gib_s(
+    input_bytes: int, output_bytes: int, elapsed_ms: float
+) -> float:
+    return _bytes_to_gib(input_bytes + output_bytes) / (elapsed_ms / 1_000.0)
+
+
+class _TimingResult(NamedTuple):
+    elapsed_ms: float
+    input_bytes: int
+    output_bytes: int
 
 
 # ---------------------------------------------------------------------------
@@ -129,10 +151,9 @@ def _bench_backend(
     elapsed_ms_total = start.elapsed_time(end)
     elapsed_ms = elapsed_ms_total / iters
 
-    input_bytes = x.numel() * x.element_size()
-    output_bytes = out_idx.numel() * out_idx.element_size()
-    io_bytes = input_bytes + output_bytes
-    throughput_gib_s = _bytes_to_gib(io_bytes) / (elapsed_ms / 1_000.0)
+    input_bytes = _tensor_bytes(x)
+    output_bytes = _tensor_bytes(out_idx)
+    throughput_gib_s = _io_bandwidth_gib_s(input_bytes, output_bytes, elapsed_ms)
 
     torch.cuda.empty_cache()
     torch.cuda.synchronize(device)
@@ -142,7 +163,7 @@ def _bench_backend(
     out_idx = fn(x, k, sorted=sorted)
     torch.cuda.synchronize(device)
     peak_allocated = torch.cuda.max_memory_allocated(device)
-    out_bytes = out_idx.numel() * out_idx.element_size()
+    out_bytes = _tensor_bytes(out_idx)
     peak_extra_bytes = peak_allocated - baseline_allocated
     estimated_temp_bytes = max(0, peak_extra_bytes - out_bytes)
 
@@ -197,8 +218,8 @@ def _bench_time_only(
     warmup: int,
     iters: int,
     device: torch.device,
-) -> Optional[float]:
-    """Return mean elapsed ms, or None if the backend fails."""
+) -> Optional[_TimingResult]:
+    """Return None if the backend fails during warmup."""
     try:
         for _ in range(warmup):
             fn(x, k, sorted=sorted)
@@ -210,10 +231,12 @@ def _bench_time_only(
     end = torch.cuda.Event(enable_timing=True)
     start.record()
     for _ in range(iters):
-        fn(x, k, sorted=sorted)
+        out_idx = fn(x, k, sorted=sorted)
     end.record()
     torch.cuda.synchronize(device)
-    return start.elapsed_time(end) / iters
+    return _TimingResult(
+        start.elapsed_time(end) / iters, _tensor_bytes(x), _tensor_bytes(out_idx)
+    )
 
 
 def _run_batch_test(
@@ -237,8 +260,7 @@ def _run_batch_test(
     print(f"device: {torch.cuda.get_device_name(device)}")
     print("=" * 70)
 
-    # results[backend][(n, k)] = elapsed_ms or None
-    results: dict[str, dict[tuple[int, int], Optional[float]]] = {
+    results: dict[str, dict[tuple[int, int], Optional[_TimingResult]]] = {
         b: {} for b in backends
     }
 
@@ -257,7 +279,7 @@ def _run_batch_test(
             tag = f"[rows={rows}, n={n}, k={k}]"
             for b in backends:
                 fn = BACKENDS[b]
-                ms = _bench_time_only(
+                result = _bench_time_only(
                     fn,
                     x,
                     k,
@@ -266,26 +288,20 @@ def _run_batch_test(
                     iters=iters,
                     device=device,
                 )
-                results[b][(n, k)] = ms
-                status = f"{ms:.3f} ms" if ms is not None else "SKIP"
+                results[b][(n, k)] = result
+                status = f"{result.elapsed_ms:.3f} ms" if result is not None else "SKIP"
                 print(f"  {tag} {b}: {status}")
 
         del x
         torch.cuda.empty_cache()
 
-    elem_size = torch.tensor([], dtype=dtype).element_size()
-
-    def _compute_bw(n: int, k: int, ms: float) -> float:
-        """IO bandwidth in GiB/s: (input + output) bytes / time."""
-        input_bytes = rows * n * elem_size
-        output_bytes = rows * k * 4  # indices are int32/int64 → 4 bytes typical
-        return _bytes_to_gib(input_bytes + output_bytes) / (ms / 1_000.0)
-
-    def _cell(n: int, k: int, ms: Optional[float]) -> str:
-        if ms is None:
+    def _cell(result: Optional[_TimingResult]) -> str:
+        if result is None:
             return "N/A"
-        bw = _compute_bw(n, k, ms)
-        return f"{ms:.3f}ms/{bw:.1f}"
+        bw = _io_bandwidth_gib_s(
+            result.input_bytes, result.output_bytes, result.elapsed_ms
+        )
+        return f"{result.elapsed_ms:.3f}ms/{bw:.1f}"
 
     # pretty-print one table per backend
     k_labels = [f"k={k}" for k in k_list]
@@ -302,15 +318,24 @@ def _run_batch_test(
             row_label = f"n={n}"
             cells = []
             for k in k_list:
-                ms = results[b].get((n, k))
-                cells.append(_cell(n, k, ms))
+                result = results[b].get((n, k))
+                cells.append(_cell(result))
             print(f"{row_label:<16}" + "".join(c.rjust(col_w) for c in cells))
         print("-" * len(header))
 
-    # cross-backend comparison: cutedsl vs torch speedup
-    if "cutedsl" in backends and "torch" in backends:
+    # cross-backend comparison: speedup of each later backend over each earlier one
+    pairs = [
+        (base, new)
+        for base, new in (
+            ("torch", "cutedsl"),
+            ("torch", "cutedsl_stream"),
+            ("cutedsl", "cutedsl_stream"),
+        )
+        if base in backends and new in backends
+    ]
+    for base, new in pairs:
         print(f"\n{'=' * 70}")
-        print("  speedup: torch / cutedsl  (>1 means cutedsl is faster)")
+        print(f"  speedup: {base} / {new}  (>1 means {new} is faster)")
         print("=" * 70)
         print(header)
         print("-" * len(header))
@@ -318,10 +343,16 @@ def _run_batch_test(
             row_label = f"n={n}"
             cells = []
             for k in k_list:
-                torch_ms = results["torch"].get((n, k))
-                cd_ms = results["cutedsl"].get((n, k))
-                if torch_ms is not None and cd_ms is not None and cd_ms > 0:
-                    cells.append(f"{torch_ms / cd_ms:.2f}x")
+                base_result = results[base].get((n, k))
+                new_result = results[new].get((n, k))
+                if (
+                    base_result is not None
+                    and new_result is not None
+                    and new_result.elapsed_ms > 0
+                ):
+                    cells.append(
+                        f"{base_result.elapsed_ms / new_result.elapsed_ms:.2f}x"
+                    )
                 else:
                     cells.append("N/A")
             print(f"{row_label:<16}" + "".join(c.rjust(col_w) for c in cells))
@@ -359,9 +390,9 @@ def main() -> int:
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["torch", "cutedsl"],
+        default=["torch", "cutedsl", "cutedsl_stream"],
         choices=list(BACKENDS.keys()),
-        help="backends to benchmark (default: torch cutedsl)",
+        help="backends to benchmark (default: torch cutedsl cutedsl_stream)",
     )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
