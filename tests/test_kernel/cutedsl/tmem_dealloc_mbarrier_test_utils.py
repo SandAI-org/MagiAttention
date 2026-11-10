@@ -12,10 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Trace the SM100 2-CTA backward kernel and report the arrival count of every
-# mbarrier it initializes. The DSL keeps the traced IR only when
-# CUTE_DSL_KEEP_IR is set before cutlass is imported, so this runs as a script
-# in a fresh process.
+# The DSL keeps the traced IR only when CUTE_DSL_KEEP_IR is set before cutlass
+# is imported, so this runs as a script in a fresh process.
 # Usage: python tmem_dealloc_mbarrier_test_utils.py
 
 from __future__ import annotations
@@ -45,7 +43,6 @@ def _operations(operation: ir.Operation) -> Iterator[ir.Operation]:
 
 
 def _mbarrier_init_arrival_counts(mlir: str) -> list[int]:
-    """Arrival count operand of every mbarrier init op in the module."""
     arrival_counts = []
     with ir.Context():
         module = ir.Module.parse(mlir)
@@ -59,10 +56,7 @@ def _mbarrier_init_arrival_counts(mlir: str) -> list[int]:
 
 
 def _trace_bwd() -> str:
-    """Run dense attention at head dim 128 and return the backward kernel's IR.
-
-    The backward kernel is 2-CTA at head dim 128 unless 2-CTA is disabled.
-    """
+    """The backward kernel is 2-CTA at head dim 128 unless 2-CTA is disabled."""
     torch.manual_seed(0)
     seqlen, num_heads, head_dim = 1024, 2, 128
     q, k, v = (

@@ -113,11 +113,9 @@ else:
         and waits on its own; a re-init that runs after the peer has arrived
         erases that arrival and the wait never returns. The peer can arrive
         first when the cluster has no work tile, because nothing then makes it
-        wait for this CTA's warps.
-
-        This rebuild copies the allocator and swaps in the rebuilt pointers, so
-        the constructor call at kernel scope is the only dealloc mbarrier init.
-        From 4.5.0 the DSL rebuilds with ``initialize_mbarrier=False``.
+        wait for this CTA's warps. Rebuilding without ``__init__`` keeps the
+        kernel-scope constructor the only dealloc mbarrier init; from 4.5.0 the
+        DSL rebuilds with ``initialize_mbarrier=False``.
         """
 
         def __new_from_mlir_values__(self, values: list[ir.Value]) -> "TmemAllocator":

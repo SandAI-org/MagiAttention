@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# A 2-CTA kernel must initialize the TmemAllocator dealloc mbarrier exactly
-# once. A second init can erase the dealloc arrival of the peer CTA, after
-# which TmemAllocator.free never returns.
+# A 2-CTA kernel must initialize the dealloc mbarrier exactly once; the
+# mechanism is documented on the compat subclass.
 
 import json
 import os
@@ -41,10 +40,8 @@ _CHILD_TIMEOUT_S = 120
 
 _CACHE_ENABLED_ENV = "MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED"
 
-# TmemAllocator initializes the dealloc mbarrier for the 32 threads of the
-# allocator warp. No other mbarrier of the SM100 backward kernel takes 32
-# arrivals.
-_DEALLOC_ARRIVAL_COUNT = 32
+# No other mbarrier of the SM100 backward kernel takes 32 arrivals.
+_DEALLOC_MBARRIER_ARRIVAL_COUNT = 32
 
 
 def _trace_in_fresh_interpreter(dump_dir: Path) -> dict:
@@ -88,7 +85,7 @@ class TestTmemDeallocMbarrier(TestCase):
         arrival_counts = result["arrival_counts"]
         # A 1-CTA kernel has no dealloc mbarrier, so one init also shows that
         # the traced kernel is the 2-CTA one.
-        dealloc_inits = arrival_counts.count(_DEALLOC_ARRIVAL_COUNT)
+        dealloc_inits = arrival_counts.count(_DEALLOC_MBARRIER_ARRIVAL_COUNT)
         assert dealloc_inits == 1, (
             f"the backward kernel initializes the dealloc mbarrier "
             f"{dealloc_inits} times on nvidia-cutlass-dsl "
