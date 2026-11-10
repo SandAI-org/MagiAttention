@@ -99,6 +99,7 @@ class FwdStoreCase:
     total_k: int
     range_merge: bool
     expect_direct_store: bool
+    expect_fill_uncovered_rows: bool
 
 
 FWD_STORE_CASES = {
@@ -109,6 +110,7 @@ FWD_STORE_CASES = {
         total_k=512,
         range_merge=False,
         expect_direct_store=True,
+        expect_fill_uncovered_rows=False,
     ),
     # Rows [128, 256) and [384, 512) lie outside every q range.
     "uncovered_rows": FwdStoreCase(
@@ -117,7 +119,18 @@ FWD_STORE_CASES = {
         total_q=512,
         total_k=512,
         range_merge=False,
-        expect_direct_store=False,
+        expect_direct_store=True,
+        expect_fill_uncovered_rows=True,
+    ),
+    # The q rows leave a hole inside the first tile and two whole tiles empty.
+    "uncovered_at_both_ends": FwdStoreCase(
+        q_ranges=[[64, 192], [256, 384]],
+        k_ranges=[[0, 256], [256, 512]],
+        total_q=512,
+        total_k=512,
+        range_merge=False,
+        expect_direct_store=True,
+        expect_fill_uncovered_rows=True,
     ),
     "unsorted_rows": FwdStoreCase(
         q_ranges=[[256, 512], [0, 256]],
@@ -126,6 +139,7 @@ FWD_STORE_CASES = {
         total_k=512,
         range_merge=False,
         expect_direct_store=False,
+        expect_fill_uncovered_rows=False,
     ),
     # The fwd merge sorts the rows by q start.
     "unsorted_rows_under_range_merge": FwdStoreCase(
@@ -135,6 +149,7 @@ FWD_STORE_CASES = {
         total_k=512,
         range_merge=True,
         expect_direct_store=True,
+        expect_fill_uncovered_rows=False,
     ),
     "overlapping_rows": FwdStoreCase(
         q_ranges=[[0, 256], [128, 512]],
@@ -143,6 +158,7 @@ FWD_STORE_CASES = {
         total_k=512,
         range_merge=False,
         expect_direct_store=False,
+        expect_fill_uncovered_rows=False,
     ),
 }
 
@@ -332,10 +348,10 @@ class TestCutedslBwdUnderRangeMerge(TestCase):
 
 
 class TestCutedslFwdStorePath(TestCase):
-    """cutedsl_fwd direct-stores O exactly when the q rows partition [0, total_q).
+    """cutedsl_fwd direct-stores O when the q rows are sorted and disjoint.
 
-    The dist merge reads every row of the partial (out, lse), so rows outside
-    every q range must come back as zero O and the sink-only LSE.
+    The dist merge reads every row of the partial (out, lse), so the rows
+    outside every q range come back as zero O and the sink-only LSE.
     """
 
     def setUp(self) -> None:
@@ -407,6 +423,9 @@ class TestCutedslFwdStorePath(TestCase):
         self.assertEqual(
             kw["disable_fwd_atomic_reduction"], case.expect_direct_store, name
         )
+        self.assertEqual(
+            kw["fill_uncovered_rows"], case.expect_fill_uncovered_rows, name
+        )
         self.assertEqual(out.dtype, torch.float32, name)
 
         ref_out, ref_lse, ref_max_logits = self._reference(case, q, k, v, sink)
@@ -463,7 +482,7 @@ class TestAttnArgBwdArgs(TestCase):
 
 
 class TestAttnArgFwdArgs(TestCase):
-    """AttnArg's host range flag matches the fwd range tensors it builds."""
+    """AttnArg's host range flags match the fwd range tensors it builds."""
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
@@ -478,9 +497,10 @@ class TestAttnArgFwdArgs(TestCase):
         q_ranges = AttnRanges.from_ranges(ffa_args["q_ranges"].tolist())
         msg = f"{range_merge=} {q_rows=} {k_rows=}"
 
+        self.assertEqual(attn_arg.fwd_args_q_sorted, q_ranges.is_sorted(), msg)
         self.assertEqual(
-            attn_arg.fwd_args_q_partition_end,
-            _end_if(q_ranges, q_ranges.is_cu_seqlens),
+            attn_arg.fwd_args_q_coverage_end,
+            _end_if(q_ranges, q_ranges.is_full_coverage),
             msg,
         )
 

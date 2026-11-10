@@ -150,6 +150,7 @@ def _flex_flash_attn_fwd(
     out_dtype: torch.dtype | None = None,
     sm_margin: int = 0,
     max_logits: torch.Tensor | None = None,
+    fill_uncovered_rows: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -167,16 +168,18 @@ def _flex_flash_attn_fwd(
         out: optional output buffer, allocated when None.
             Direct store (``disable_fwd_atomic_reduction=True``, forced for
             dense inputs and outside SM100/SM110) leaves uncovered Q rows
-            untouched; empty K zeroes all rows.
+            untouched, unless ``fill_uncovered_rows`` sets them to zero; empty
+            K zeroes all rows.
             Atomic merge accumulates into ``out``/``lse``. Rows with
             ``lse == -inf`` need no O initialization; rows still empty after
             merging are zeroed. Pass ``sink`` in at most one call per
             accumulation.
         lse: optional fp32 log-sum-exp buffer, filled with ``-inf`` when None
-            except on the direct-store path without a sink. A caller-provided
-            ``lse`` is not filled: it must hold ``-inf`` or a previous result
-            on the atomic-merge path, and ``-inf`` outside every q range on
-            the direct-store path with ``sink``.
+            except on the direct-store path without a sink and without
+            ``fill_uncovered_rows``. A caller-provided ``lse`` is not filled:
+            it must hold ``-inf`` or a previous result on the atomic-merge
+            path, and ``-inf`` outside every q range on the direct-store path
+            with ``sink`` or ``fill_uncovered_rows``.
         sink: optional ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
         out_dtype: GMEM O dtype, one of fp32/fp16/bf16. ``None`` takes the dtype
             of a caller-provided ``out``, else fp32 on the atomic-merge path
@@ -190,6 +193,14 @@ def _flex_flash_attn_fwd(
             sinks excluded) over every attended (q, k) pair is merged into with
             an atomic max; the caller initializes it to ``-inf`` or a previous
             result. SM100/SM110 only.
+        fill_uncovered_rows: on return, every Q row outside every q range holds
+            O = 0 and the sink-only LSE (``-inf`` without a sink). The atomic
+            merge always produces that. The direct store over ranges otherwise
+            leaves those rows as they were, and this flag fills them, paying an
+            LSE ``-inf`` fill when ``lse`` is allocated here and one postprocess
+            launch. Only SM100/SM110 consume the q range rows, so only there can
+            rows be uncovered; elsewhere, and for dense inputs, the flag does
+            nothing. O is not initialized.
 
     Returns:
         A tuple of (output, lse) where:
@@ -332,6 +343,16 @@ def _flex_flash_attn_fwd(
     # atomic path folds it once in the fwd postprocess instead.
     kernel_sink = lse_sink if disable_fwd_atomic_reduction else None
 
+    # Only the SM100/SM110 kernels read the q range rows, so only they can skip
+    # rows; other arches collapse the ranges into a cu_seqlens partition, and a
+    # dense input has no hole.
+    fill_uncovered = (
+        fill_uncovered_rows
+        and has_ranges
+        and major_arch in (10, 11)
+        and disable_fwd_atomic_reduction
+    )
+
     device = q.device
     q_batch_seqlen_shape = (batch_size, seqlen_q) if not has_ranges else (total_q,)
     lse_shape = (
@@ -357,8 +378,9 @@ def _flex_flash_attn_fwd(
 
     if lse is None:
         # NOTE: LSE == -inf marks a row no relation wrote: the atomic merge
-        # starts from it and bwd_dsink skips it.
-        if disable_fwd_atomic_reduction and sink is None:
+        # starts from it, bwd_dsink skips it, and the postprocess of the
+        # uncovered rows keys on it.
+        if disable_fwd_atomic_reduction and sink is None and not fill_uncovered:
             lse = torch.empty(lse_shape, dtype=torch.float32, device=device)
         else:
             lse = torch.full(
@@ -816,7 +838,11 @@ def _flex_flash_attn_fwd(
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
 
-    if not disable_fwd_atomic_reduction:
+    if fill_uncovered:
+        # The main kernel already folded the sink into the rows it wrote, so
+        # only the uncovered rows change: O = 0 and the sink-only LSE.
+        fwd_postprocess(out, lse, lse_sink, sink_in_written_rows=True)
+    elif not disable_fwd_atomic_reduction:
         fwd_postprocess(out, lse, lse_sink)
 
     return out, lse

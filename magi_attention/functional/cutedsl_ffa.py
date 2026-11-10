@@ -68,12 +68,12 @@ def cutedsl_fwd(
             (q.shape[-2],), float("-inf"), dtype=torch.float32, device=q.device
         )
 
-    # The direct store requires sorted, pairwise-disjoint q ranges and leaves
-    # the O/LSE rows outside every q range unwritten, while the dist merge
-    # reads every row of a partial (out, lse). It is therefore taken only when
-    # the q rows partition [0, total_q); any other relation keeps the atomic
-    # merge, which zeroes O and stores the sink-only LSE on uncovered rows.
-    q_partition = attn_arg.fwd_args_q_partition_end == q.shape[0]
+    # The direct store gives every O and LSE row a unique writer, which needs
+    # q rows sorted by start and pairwise disjoint. The dist merge reads every
+    # row of a partial (out, lse), so the rows no q range covers are filled
+    # with O = 0 and the sink-only LSE.
+    direct_store = attn_arg.disable_fwd_atomic_reduction and attn_arg.fwd_args_q_sorted
+    fill_uncovered_rows = attn_arg.fwd_args_q_coverage_end != q.shape[0]
 
     out, lse = _flex_flash_attn_fwd(
         q=q,
@@ -87,7 +87,8 @@ def cutedsl_fwd(
         softcap=softcap if softcap and softcap > 0 else None,
         sink=sink,
         sink_layout="sh",
-        disable_fwd_atomic_reduction=q_partition,
+        disable_fwd_atomic_reduction=direct_store,
+        fill_uncovered_rows=fill_uncovered_rows,
         # The dist overlap path rescales partial (out, lse) pairs in fp32
         # (correct_attn_out_lse); a bf16/fp16 partial underflows that merge.
         out_dtype=torch.float32,
