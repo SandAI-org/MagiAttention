@@ -14,6 +14,7 @@
 
 # Bind non-deprecated APIs at import time for each supported DSL version.
 
+import copy
 from typing import Type
 
 import cutlass
@@ -94,8 +95,43 @@ else:
 
 if is_cutedsl_version_ge("4.8.0"):
     from cutlass.memory import TmemAllocator
-else:
+elif is_cutedsl_version_ge("4.5.0"):
     from cutlass.utils import TmemAllocator
+else:
+    from cutlass._mlir import ir
+    from cutlass.cutlass_dsl import new_from_mlir_values
+    from cutlass.utils import TmemAllocator as _UpstreamTmemAllocator
+
+    class TmemAllocator(_UpstreamTmemAllocator):  # type: ignore[no-redef]
+        """TmemAllocator whose rebuild leaves the 2-CTA dealloc mbarrier alone.
+
+        The DSL rebuilds the allocator from its MLIR values at every dynamic
+        region that carries it, such as a warp-role ``if``. Before
+        nvidia-cutlass-dsl 4.5.0 the rebuild runs ``__init__``, so the allocator
+        warp re-runs ``mbarrier.init`` on its CTA's dealloc mbarrier in each
+        such region. In ``free`` each CTA arrives on the peer's dealloc mbarrier
+        and waits on its own; a re-init that runs after the peer has arrived
+        erases that arrival and the wait never returns. The peer can arrive
+        first when the cluster has no work tile, because nothing then makes it
+        wait for this CTA's warps.
+
+        This rebuild copies the allocator and swaps in the rebuilt pointers, so
+        the constructor call at kernel scope is the only dealloc mbarrier init.
+        From 4.5.0 the DSL rebuilds with ``initialize_mbarrier=False``.
+        """
+
+        def __new_from_mlir_values__(self, values: list[ir.Value]) -> "TmemAllocator":
+            assert len(values) == (2 if self._is_two_cta else 1)
+            rebuilt = copy.copy(self)
+            rebuilt._alloc_result_dst_smem_ptr = new_from_mlir_values(
+                self._alloc_result_dst_smem_ptr, [values[0]]
+            )
+            if self._is_two_cta:
+                rebuilt._two_cta_tmem_dealloc_mbar_ptr = new_from_mlir_values(
+                    self._two_cta_tmem_dealloc_mbar_ptr, [values[1]]
+                )
+            return rebuilt
+
 
 if is_cutedsl_version_ge("4.8.0"):
     from cutlass.memory import get_smem_capacity_in_bytes
