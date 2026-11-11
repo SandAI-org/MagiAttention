@@ -12,15 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Range-lock arithmetic of the packed atomic fwd, checked on the CPU.
-
-Mirrors the SM100 range atomic fwd: a stage tile ``m_tile`` of a relation
-starting at token ``q_start`` locks the blocks of global packed rows
-``[q_start * G + m_tile * tile_m, ... + tile_m)``, and the host allocates
-``ceil(total_q * G / tile_m) + 1`` blocks per kv head. Imports no kernel
-module, so it runs without a GPU.
-"""
-
 import unittest
 
 _TILE_M = 128
@@ -28,9 +19,11 @@ _TILE_M = 128
 
 class TestFfaPackGqaLockRows(unittest.TestCase):
     def test_packed_rows_stay_inside_their_stage_locks(self):
-        """Every valid packed row of a stage tile maps to a physical
-        (token, q head) whose lock block is one of the (at most two) blocks
-        the stage takes, and those blocks fit the host lock array."""
+        """A stage tile ``m_tile`` of a relation starting at token ``q_start``
+        locks the blocks of packed rows ``[q_start * G + m_tile * tile_m,
+        +tile_m)``, and the host allocates ``ceil(total_q * G / tile_m) + 1``
+        blocks per kv head; every valid packed row of the tile must fall in one
+        of the (at most two) locked blocks, inside the host lock array."""
         total_q = 1000
         for group in (1, 2, 4, 8, 16, 32, 64, 128):
             num_lock_blocks = (total_q * group + _TILE_M - 1) // _TILE_M + 1

@@ -45,9 +45,10 @@ from .dsl_compat import (
     TmemAllocator,
     make_trivial_tiled_mma,
 )
-from .ffa_utils import MT_MAP
+from .ffa_utils import MT_MAP, BwdGqaFold
 from .mask import AttentionMask
 from .named_barrier import NamedBarrierBwdSm100
+from .pack_gqa import make_packgqa_tiled_tma_atom, pack_gqa_layout
 from .seqlen_info import SeqlenInfoQK
 from .softmax import apply_score_mod_bwd_inner, apply_score_mod_inner
 from .sparse_utils import (
@@ -79,10 +80,7 @@ class FFABwdSm100:
         # kernel that reads mMaskTypes[batch].
         mask_type: int | None = MT_MAP.full,
         is_local: bool = False,
-        qhead_per_kvhead: cutlass.Constexpr[int] = 1,
-        # One tile per kv head that walks its q heads back to back, so dK/dV
-        # of a GQA group accumulate in one CTA and store directly.
-        cat_gqa: bool = False,
+        gqa_fold: BwdGqaFold = BwdGqaFold(1),
         tile_m: int = 128,
         tile_n: int = 128,
         is_persistent: bool = False,
@@ -158,12 +156,7 @@ class FFABwdSm100:
         self.mask_type = mask_type
         self.use_per_range_mask = mask_type is None
         self.is_local = is_local
-        self.qhead_per_kvhead = qhead_per_kvhead
-        self.pack_gqa = False
-        self.cat_gqa = cat_gqa and qhead_per_kvhead > 1
-        # Number of q heads one tile walks; 1 leaves the q-head loop a single
-        # trip so the non-cat kernels are unchanged.
-        self.cat_factor = qhead_per_kvhead if self.cat_gqa else 1
+        self.gqa_fold = gqa_fold
         self.deterministic = deterministic
         self.scheduling_mode = (
             SchedulingMode.DYNAMIC if is_persistent else SchedulingMode.STATIC
@@ -314,9 +307,7 @@ class FFABwdSm100:
             prefix = "[bwd_sm100_init] "
             print()
             print(f"{prefix}Initialized FFABwdSm100 with: ")
-            print(
-                f"{prefix}{self.tile_hdim=} | {self.tile_hdimv=} | {self.qhead_per_kvhead=} | {self.cat_gqa=}"
-            )
+            print(f"{prefix}{self.tile_hdim=} | {self.tile_hdimv=} | {self.gqa_fold=}")
             print(
                 f"{prefix}{self.mask_type=} | {self.maybe_causal=} | {self.is_local=} | "
                 f"{self.is_persistent=} | {self.deterministic=}"
@@ -361,6 +352,51 @@ class FFABwdSm100:
         and scheduler settings sized for causal work.
         """
         return self.mask_type is None or self.mask_type == MT_MAP.causal
+
+    def _kv_head(self, head_idx):
+        """KV head of a scheduler head: the head itself under head_loop (tiles
+        are kv heads), else the kv head that owns the scratch head."""
+        return (
+            head_idx
+            if const_expr(self.gqa_fold.head_loop)
+            else head_idx // self.gqa_fold.kv_group
+        )
+
+    def _q_token_coord(self, offset_q):
+        """Coordinate of Q token ``offset_q`` in a Q row mode, which is
+        ``(pack_factor, tokens)`` under packing."""
+        return (
+            offset_q if const_expr(self.gqa_fold.pack_factor == 1) else (None, offset_q)
+        )
+
+    def _q_rows(self, seqlen_q):
+        return (
+            seqlen_q
+            if const_expr(self.gqa_fold.pack_factor == 1)
+            else seqlen_q * self.gqa_fold.pack_factor
+        )
+
+    def _dQacc_reduce_grid(self, mdQacc_tma, mdQacc, scratch_head, offset_q):
+        """(dQ_reduce_rows, dQ_reduce_ncol) tiles of one scratch head's dQacc
+        rows, starting at Q token ``offset_q``, for the row-major reduce.
+
+        The unpacked descriptor is 2D over (head * padded_rows + row, col), so
+        a range start is a plain row coordinate; the packed descriptor keeps
+        the head as its own mode and rows as ``(pack_factor, tokens)``.
+        """
+        if const_expr(self.gqa_fold.pack_factor == 1):
+            padded_rows_q = mdQacc_tma.shape[0] // mdQacc.shape[1]
+            head_row_base = scratch_head * padded_rows_q + offset_q
+            mdQacc_head = cute.domain_offset((head_row_base, 0), mdQacc_tma)
+        else:
+            mdQacc_head = cute.domain_offset(
+                ((None, offset_q), 0), mdQacc_tma[None, None, scratch_head]
+            )
+        return cute.local_tile(
+            mdQacc_head,
+            (self.dQ_reduce_rows, self.dQ_reduce_ncol),
+            (None, None),
+        )
 
     def _setup_attributes(self):
         self.Q_stage = 1 if self.use_2cta_instrs else 2
@@ -830,11 +866,16 @@ class FFABwdSm100:
         self.is_varlen_k = mKRanges is not None or mSeqUsedK is not None
         self.is_varlen_q = mQRanges is not None or mSeqUsedQ is not None
         # Batched GQA reduces the q heads of a kv head from separate CTAs and
-        # orders them on per-(K block, kv head) semaphores; cat_gqa reduces
-        # them inside one CTA and needs no order.
+        # orders them on per-(K block, kv head) semaphores; a fold that covers
+        # every q head reduces them inside one CTA and needs no order.
         self.deterministic_dkv = (
-            self.deterministic and self.qhead_per_kvhead > 1 and not self.cat_gqa
+            self.deterministic and not self.gqa_fold.covers_all_qheads
         )
+        if const_expr(self.gqa_fold.pack_factor > 1):
+            assert mQRanges is not None, "pack_factor > 1 is defined on q/k ranges only"
+            assert (
+                not self.use_dense_dqacc_for_ranges
+            ), "pack_factor > 1 reduces dQ through the token-space row-major dQacc"
         # Ranges accumulate dQ/dK/dV in token-space row-major fp32 buffers
         # (LSE/dPsum are then only 4B aligned and are staged per lane); the
         # dense-dqacc option moves dQ to padded range-local slots instead.
@@ -842,7 +883,7 @@ class FFABwdSm100:
             self.is_varlen_q and not self.use_dense_dqacc_for_ranges
         )
 
-        self.dKV_postprocess = (self.qhead_per_kvhead > 1 and not self.cat_gqa) or (
+        self.dKV_postprocess = (not self.gqa_fold.covers_all_qheads) or (
             mKRanges is not None and not self.disable_bwd_dkv_atomic_reduction
         )
 
@@ -860,6 +901,14 @@ class FFABwdSm100:
             [1, 3, 2, 0] if const_expr(mQRanges is None) else [0, 2, 1]
         )
         mQ, mdO = [layout_utils.select(t, mode=QO_layout_transpose) for t in (mQ, mdO)]
+        pack_factor = self.gqa_fold.pack_factor
+        if const_expr(pack_factor > 1):
+            # (sq, hd, nhq) -> ((pack_factor, sq), hd, nhq / pack_factor)
+            num_scratch_heads = cute.size(mQ.shape[2]) // pack_factor
+            mQ, mdO = [
+                pack_gqa_layout(t, pack_factor, num_scratch_heads, head_idx=2)
+                for t in (mQ, mdO)
+            ]
 
         # (sq, hd, nhq, b) --> (hd, sq, nhq, b)
         # or (sq, hd, nhq) -> (hd, sq, nhq) if there's cu_seqlens_q
@@ -886,6 +935,12 @@ class FFABwdSm100:
             layout_utils.select(t, mode=LSE_dPsum_dQacc_transpose)
             for t in (mLSE, mdPsum)
         ]
+        if const_expr(pack_factor > 1):
+            # (sq, nhq) -> ((pack_factor, sq), nhq / pack_factor)
+            mLSE, mdPsum = [
+                pack_gqa_layout(t, pack_factor, num_scratch_heads, head_idx=1)
+                for t in (mLSE, mdPsum)
+            ]
 
         # --- Make mdQacc ---
 
@@ -964,22 +1019,42 @@ class FFABwdSm100:
             flat_extent = mdQacc.shape[0]
             # Host allocates flat_extent as padded_rows * tile_hdim exactly.
             padded_rows_q = flat_extent // self.tile_hdim
-            mdQacc_2d = cute.make_tensor(
-                mdQacc.iterator,
-                cute.make_layout(
-                    (num_q_heads * padded_rows_q, self.tile_hdim),
-                    stride=(self.tile_hdim, 1),
-                ),
-            )
-            sdQacc_tma_layout = cute.select(self.sdQacc_tma_layout, mode=[0, 1])
-            # global_dQacc[row:row+R, col:col+C]
-            # += shared_dQ[row:row+R, col:col+C]
-            tma_atom_dQacc, mdQacc_tma = cpasync.make_tiled_tma_atom(
-                cpasync.CopyReduceBulkTensorTileS2GOp(),
-                mdQacc_2d,
-                sdQacc_tma_layout,
-                (self.dQ_reduce_rows, self.dQ_reduce_ncol),
-            )
+            if const_expr(pack_factor > 1):
+                # (padded_rows, hd, nhq) -> ((pack_factor, padded_rows), hd,
+                # nhq / pack_factor)
+                mdQacc_3d = cute.make_tensor(
+                    mdQacc.iterator,
+                    cute.make_layout(
+                        (padded_rows_q, self.tile_hdim, num_q_heads),
+                        stride=(self.tile_hdim, 1, padded_rows_q * self.tile_hdim),
+                    ),
+                )
+                sdQacc_tma_layout = cute.select(self.sdQacc_tma_layout, mode=[0, 1])
+                tma_atom_dQacc, mdQacc_tma = make_packgqa_tiled_tma_atom(
+                    cpasync.CopyReduceBulkTensorTileS2GOp(),
+                    mdQacc_3d,
+                    sdQacc_tma_layout,
+                    (self.dQ_reduce_rows, self.dQ_reduce_ncol),
+                    pack_factor,
+                    head_idx=2,
+                )
+            else:
+                mdQacc_2d = cute.make_tensor(
+                    mdQacc.iterator,
+                    cute.make_layout(
+                        (num_q_heads * padded_rows_q, self.tile_hdim),
+                        stride=(self.tile_hdim, 1),
+                    ),
+                )
+                sdQacc_tma_layout = cute.select(self.sdQacc_tma_layout, mode=[0, 1])
+                # global_dQacc[row:row+R, col:col+C]
+                # += shared_dQ[row:row+R, col:col+C]
+                tma_atom_dQacc, mdQacc_tma = cpasync.make_tiled_tma_atom(
+                    cpasync.CopyReduceBulkTensorTileS2GOp(),
+                    mdQacc_2d,
+                    sdQacc_tma_layout,
+                    (self.dQ_reduce_rows, self.dQ_reduce_ncol),
+                )
 
         # --- Make tiled TMA S2G-copy of dK/dV ---
 
@@ -1260,10 +1335,11 @@ class FFABwdSm100:
             assert max_seqlen_k is not None, "quota ranges bwd needs max_seqlen_k"
         tile_sched_args = TileSchedulerArguments(
             num_block=cute.ceil_div(cute.size(mK.shape[0]), self.cta_tiler[0]),
-            # cat_gqa tiles are kv heads; each walks its q heads in-CTA.
+            # head_loop tiles are kv heads, each walking its scratch heads
+            # in-CTA; otherwise one tile per scratch head of the packed mQ.
             num_head=(
                 cute.size(mK.shape[2])
-                if const_expr(self.cat_gqa)
+                if const_expr(self.gqa_fold.head_loop)
                 else cute.size(mQ.shape[2])
             ),
             num_batch=(
@@ -1272,7 +1348,12 @@ class FFABwdSm100:
                 else cute.size(mKRanges.shape[0])  # type: ignore[union-attr] # const_expr guards None
             ),
             num_splits=1,
-            seqlen_k=cute.size(mQ.shape[0]),
+            # Q tokens, the token sub-mode of a packed row mode.
+            seqlen_k=(
+                cute.size(mQ.shape[0])
+                if const_expr(pack_factor == 1)
+                else mQ.shape[0][1]
+            ),
             headdim=mQ.shape[1],
             headdim_v=mV.shape[1],
             total_q=cute.size(mK.shape[0])
@@ -1285,7 +1366,8 @@ class FFABwdSm100:
                 max_seqlen_k if const_expr(needs_range_quota) else None
             ),
             mSeqUsedQ=mSeqUsedK,
-            qhead_per_kvhead_packgqa=1,  # pack_gqa disabled for bwd
+            # The scheduler's tiles are K blocks, which packing leaves unchanged.
+            qhead_per_kvhead_packgqa=1,
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
             sm_margin=sm_margin,
@@ -1541,9 +1623,7 @@ class FFABwdSm100:
 
         fastdiv_mods = None
         if const_expr(aux_tensors is not None):
-            seqlen_q = cute.size(mQ.shape[0]) // (
-                self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1
-            )
+            seqlen_q = cute.size(mQ.shape[0]) // pack_factor
             seqlen_k = cute.size(mK.shape[0])
             seqlen_q_divmod = FastDivmodDivisor(seqlen_q)
             seqlen_k_divmod = FastDivmodDivisor(seqlen_k)
@@ -1559,10 +1639,10 @@ class FFABwdSm100:
                 "2-CTA mode does not support block sparsity. "
                 "Please create kernel with use_2cta_instrs=False for block sparse attention."
             )
-        if const_expr(self.cat_gqa):
+        if const_expr(self.gqa_fold.head_loop or pack_factor > 1):
             assert (
                 blocksparse_tensors is None
-            ), "cat_gqa walks the dense m-block range per q head"
+            ), "a GQA fold walks the dense m-block range per scratch head"
         if const_expr(self.use_block_sparsity or aux_tensors is not None):
             assert all(
                 x is None for x in (mQRanges, mKRanges, mSeqUsedQ, mSeqUsedK)
@@ -2279,11 +2359,16 @@ class FFABwdSm100:
             False,  # is_split_kv
             window_size_left,
             window_size_right,
-            qhead_per_kvhead_packgqa=1,
+            qhead_per_kvhead_packgqa=self.gqa_fold.pack_factor,
         )
         SeqlenInfoCls = partial(
             SeqlenInfoQK.create,
-            seqlen_q_static=mQ.shape[0],
+            # Q tokens; seqlen_info stays in token units under packing.
+            seqlen_q_static=(
+                mQ.shape[0]
+                if const_expr(self.gqa_fold.pack_factor == 1)
+                else mQ.shape[0][1]
+            ),
             seqlen_k_static=mK.shape[0],
             mQRanges=mQRanges,
             mKRanges=mKRanges,
@@ -2300,6 +2385,7 @@ class FFABwdSm100:
             swap_AB=True,
             window_size_left=window_size_left,
             window_size_right=window_size_right,
+            qhead_per_kvhead_packgqa=self.gqa_fold.pack_factor,
         )
 
         # --- Cluster wait before tensor memory alloc ---
@@ -2779,7 +2865,9 @@ class FFABwdSm100:
                         seqlen_pair, n_block_for_bounds, attn_type_pair
                     )
                     for _ in cutlass.range(
-                        cutlass.max(hi_p - lo_p, Int32(0)) * self.cat_factor, unroll=1
+                        cutlass.max(hi_p - lo_p, Int32(0))
+                        * self.gqa_fold.groups_per_tile,
+                        unroll=1,
                     ):
                         cute.arch.mbarrier_wait(
                             dS_cluster_full_mbar_ptr, phase=dS_cluster_phase
@@ -2803,9 +2891,9 @@ class FFABwdSm100:
                     seqlen_info,
                     n_block_for_bounds,
                 )
-                if const_expr(self.cat_gqa):
-                    # One dS exchange per m block of every q head of the tile.
-                    num_iters = num_iters * self.cat_factor
+                if const_expr(self.gqa_fold.head_loop):
+                    # One dS exchange per m block of every scratch head of the tile.
+                    num_iters = num_iters * self.gqa_fold.groups_per_tile
                 if const_expr(not self.is_local and not self.is_varlen_q):
                     process_tile = True
                 else:
@@ -2849,9 +2937,14 @@ class FFABwdSm100:
 
     @cute.jit
     def _copy_stats(self, pipe, state, gBlk, sBlk, lane, bulk_ok):
-        """Stage a (tile_m,) fp32 stats block into smem."""
+        """Stage a (tile_m,) fp32 stats block into smem; packed rows are never
+        contiguous in gmem, so a packed block is staged per lane."""
         if const_expr(self.is_varlen_q):
-            if bulk_ok:
+            if const_expr(self.gqa_fold.pack_factor > 1):
+                for i in cutlass.range_constexpr(self.tile_m // cute.arch.WARP_SIZE):
+                    packed_row = lane + i * cute.arch.WARP_SIZE
+                    sBlk[packed_row] = gBlk[packed_row]
+            elif bulk_ok:
                 # bulk_ok guarantees a 16B-aligned base; .align(16) carries
                 # that fact to the verifier, which the 128-bit atom requires.
                 gBlk16 = cute.make_tensor(gBlk.iterator.align(16), gBlk.layout)
@@ -3020,11 +3113,7 @@ class FFABwdSm100:
                 m_block_min, m_block_max = block_info.get_m_block_min_max(
                     seqlen_info, n_block_for_bounds
                 )
-            head_idx_kv = (
-                head_idx
-                if const_expr(self.cat_gqa)
-                else head_idx // self.qhead_per_kvhead
-            )
+            head_idx_kv = self._kv_head(head_idx)
             n_block_cta_group = n_block // self.cta_group_size
 
             if const_expr(self.range_merge):
@@ -3051,11 +3140,12 @@ class FFABwdSm100:
                         or m_block_min < m_block_max
                     )
             # K/V/Kt are single-buffered and read by every q head of the tile,
-            # so they ride the first Q/dO/Qt stage of the first walk only.
+            # so only the first walk of a tile loads them.
             kv_pending = cutlass.Boolean(True)
 
-            for qh in cutlass.range(self.cat_factor, unroll=1):
-                q_head = head_idx * self.cat_factor + qh
+            for group in cutlass.range(self.gqa_fold.groups_per_tile, unroll=1):
+                scratch_head = head_idx * self.gqa_fold.groups_per_tile + group
+                q_off = self._q_token_coord(seqlen_info.offset_q)
                 # //////////////////////////////////////////////
                 #  Make gQ/gK/gV/gdO/gLSE/gdPsum
                 # //////////////////////////////////////////////
@@ -3065,7 +3155,7 @@ class FFABwdSm100:
                 # mV_cur: (seqK,HD):(1@1,1@0)
                 # mdO_cur: (HD,seqQ):(1@0,1@1) => actually dO.T
                 mQ_cur = seqlen_info.offset_batch_Q(mQ, batch_idx, dim=3)[
-                    None, None, q_head
+                    None, None, scratch_head
                 ]
                 mK_cur = seqlen_info.offset_batch_K(mK, batch_idx, dim=3)[
                     None, None, head_idx_kv
@@ -3074,10 +3164,10 @@ class FFABwdSm100:
                     None, None, head_idx_kv
                 ]
                 if const_expr(not seqlen_info.has_cu_seqlens_q):
-                    mdO_cur = mdO[None, None, q_head, batch_idx]
+                    mdO_cur = mdO[None, None, scratch_head, batch_idx]
                 else:
                     mdO_cur = cute.domain_offset(
-                        (0, seqlen_info.offset_q), mdO[None, None, q_head]
+                        (0, q_off), mdO[None, None, scratch_head]
                     )
                 # gQ: (tileQ128,tileHD128,restQ):(1@1,1@0,128@1)
                 # gK: (tileK128*CTA2,tileHD128):(1@1,1@0)
@@ -3105,10 +3195,10 @@ class FFABwdSm100:
                 # mdPsum_cur: (seqQ):(1)
                 mLSE_cur = seqlen_info.offset_batch_Q(
                     mLSE, batch_idx, dim=2, padded=True
-                )[None, q_head]
+                )[None, scratch_head]
                 mdPsum_cur = seqlen_info.offset_batch_Q(
                     mdPsum, batch_idx, dim=2, padded=True
-                )[None, q_head]
+                )[None, scratch_head]
                 # gLSE: (tileQ128,restQ):(1,128)
                 # gdPsum: (tileQ128,restQ):(1,128)
                 gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (None,))
@@ -3121,7 +3211,7 @@ class FFABwdSm100:
                 if const_expr(self.is_varlen_q):
                     stats_bulk_ok = cutlass.Boolean(
                         seqlen_info.padded_offset_q % 4 == 0
-                        and (q_head * mLSE.stride[1]) % 4 == 0
+                        and (scratch_head * mLSE.stride[1]) % 4 == 0
                     )
 
                 # mQt_cur: (HD,seqQ):(1@0,1@1)
@@ -3132,15 +3222,15 @@ class FFABwdSm100:
                         mQt is not None and mKt is not None and mdOt is not None
                     )  # mypy
                     if const_expr(not seqlen_info.has_cu_seqlens_q):
-                        mQt_cur = mQt[None, None, q_head, batch_idx]
-                        mdOt_cur = mdOt[None, None, q_head, batch_idx]
+                        mQt_cur = mQt[None, None, scratch_head, batch_idx]
+                        mdOt_cur = mdOt[None, None, scratch_head, batch_idx]
                     else:
-                        mQt_cur = cute.domain_offset((0, seqlen_info.offset_q, 0), mQt)[
-                            None, None, q_head
+                        mQt_cur = cute.domain_offset((0, q_off, 0), mQt)[
+                            None, None, scratch_head
                         ]
-                        mdOt_cur = cute.domain_offset(
-                            (seqlen_info.offset_q, 0, 0), mdOt
-                        )[None, None, q_head]
+                        mdOt_cur = cute.domain_offset((q_off, 0, 0), mdOt)[
+                            None, None, scratch_head
+                        ]
                     if const_expr(not seqlen_info.has_cu_seqlens_k):
                         mKt_cur = mKt[None, None, head_idx_kv, batch_idx]
                     else:
@@ -3402,10 +3492,11 @@ class FFABwdSm100:
                             seqlen_pair, n_block_for_bounds, attn_type_pair
                         )
                         mQ_p = seqlen_pair.offset_batch_Q(mQ, pair_beg + pj, dim=3)[
-                            None, None, q_head
+                            None, None, scratch_head
                         ]
+                        q_off_p = self._q_token_coord(seqlen_pair.offset_q)
                         mdO_p = cute.domain_offset(
-                            (0, seqlen_pair.offset_q), mdO[None, None, q_head]
+                            (0, q_off_p), mdO[None, None, scratch_head]
                         )
                         gQ_p = cute.local_tile(
                             mQ_p,
@@ -3419,10 +3510,10 @@ class FFABwdSm100:
                         )
                         mLSE_p = seqlen_pair.offset_batch_Q(
                             mLSE, pair_beg + pj, dim=2, padded=True
-                        )[None, q_head]
+                        )[None, scratch_head]
                         mdPsum_p = seqlen_pair.offset_batch_Q(
                             mdPsum, pair_beg + pj, dim=2, padded=True
-                        )[None, q_head]
+                        )[None, scratch_head]
                         gLSE_p = cute.local_tile(mLSE_p, (self.tile_m,), (None,))
                         gdPsum_p = cute.local_tile(mdPsum_p, (self.tile_m,), (None,))
                         load_Q_p, _tQs_p, _tQg_p = copy_utils.tma_get_copy_fn(
@@ -3450,12 +3541,12 @@ class FFABwdSm100:
                         load_Qt_p = None
                         load_dOt_p = None
                         if const_expr(self.use_2cta_instrs):
-                            mQt_p = cute.domain_offset(
-                                (0, seqlen_pair.offset_q, 0), mQt
-                            )[None, None, q_head]
-                            mdOt_p = cute.domain_offset(
-                                (seqlen_pair.offset_q, 0, 0), mdOt
-                            )[None, None, q_head]
+                            mQt_p = cute.domain_offset((0, q_off_p, 0), mQt)[
+                                None, None, scratch_head
+                            ]
+                            mdOt_p = cute.domain_offset((q_off_p, 0, 0), mdOt)[
+                                None, None, scratch_head
+                            ]
                             gQt_p = cute.local_tile(
                                 mQt_p,
                                 cute.select(self.mma_tiler_dsq, mode=[1, 2]),
@@ -4292,12 +4383,12 @@ class FFABwdSm100:
                 m_block_min, m_block_max = block_info.get_m_block_min_max(
                     seqlen_info, n_block_for_bounds
                 )
-            if const_expr(self.cat_gqa):
-                # The producer streams the q heads of this kv head back to back
-                # through one K/V stage, so a single dK/dV accumulation spans
-                # cat_factor walks of the m-block range.
+            if const_expr(self.gqa_fold.head_loop):
+                # One dK/dV accumulation spans the m-block walks of every
+                # scratch head of the kv head.
                 m_block_max = (
-                    m_block_min + (m_block_max - m_block_min) * self.cat_factor
+                    m_block_min
+                    + (m_block_max - m_block_min) * self.gqa_fold.groups_per_tile
                 )
 
             if const_expr(self.use_block_sparsity):  # TODO: review the logics
@@ -5015,7 +5106,7 @@ class FFABwdSm100:
             fastdiv_mods,
             seqlen_info,
             constant_q_idx=None,
-            qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+            qhead_per_kvhead=self.gqa_fold.pack_factor,
             transpose_indices=True,
         )
 
@@ -5047,7 +5138,7 @@ class FFABwdSm100:
             fastdiv_mods,
             seqlen_info,
             constant_q_idx=None,
-            qhead_per_kvhead=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+            qhead_per_kvhead=self.gqa_fold.pack_factor,
             transpose_indices=True,
         )
 
@@ -5498,8 +5589,8 @@ class FFABwdSm100:
                         )
                         cute.printf("")
 
-            for qh in cutlass.range(self.cat_factor, unroll=1):
-                q_head = head_idx * self.cat_factor + qh
+            for group in cutlass.range(self.gqa_fold.groups_per_tile, unroll=1):
+                scratch_head = head_idx * self.gqa_fold.groups_per_tile + group
                 # --- Define attn mask apply fn ---
 
                 mask = AttentionMaskCls(seqlen_info)
@@ -5526,7 +5617,8 @@ class FFABwdSm100:
                         mask_local=self.is_local,
                         mask_mod=self.mask_mod,
                         batch_idx=batch_idx,
-                        head_idx=q_head,
+                        # Packing excludes mask_mod, so this is the q head.
+                        head_idx=scratch_head,
                         aux_tensors=aux_tensors,
                         fastdiv_mods=fastdiv_mods,
                     )
@@ -5615,7 +5707,7 @@ class FFABwdSm100:
                                     thr_copy_t2r,
                                     thr_mma_S,
                                     batch_idx,
-                                    q_head,
+                                    scratch_head,
                                     m_block,
                                     n_block,
                                     softmax_scale,
@@ -5827,7 +5919,7 @@ class FFABwdSm100:
                                         tSrS_pre_cur,
                                         tScS_idx_cur,
                                         batch_idx,
-                                        q_head,
+                                        scratch_head,
                                         softmax_scale,
                                         seqlen_pair,
                                         aux_tensors,
@@ -6043,7 +6135,7 @@ class FFABwdSm100:
                                 pipeline_S_P.consumer_release(consumer_state_S_P_dP)
                         elif const_expr(self.use_2cta_instrs and self.tile_hdim <= 128):
                             # Signal S tmem load completion using pipeline_dS when 2cta hdim 128
-                            if qh > 0 or iter_idx > 0:
+                            if group > 0 or iter_idx > 0:
                                 cute.arch.fence_view_async_tmem_load()
                                 with cute.arch.elect_one():
                                     # Commit tdS to be full for prev iter in 2-CTA mode
@@ -6062,7 +6154,7 @@ class FFABwdSm100:
                                 thr_copy_t2r,
                                 thr_mma_S,
                                 batch_idx,
-                                q_head,
+                                scratch_head,
                                 m_block,
                                 n_block,
                                 softmax_scale,
@@ -6075,9 +6167,9 @@ class FFABwdSm100:
                         #  Apply mask on rS
                         # //////////////////////////////////////////////
 
-                        check_m_boundary = (
-                            m_block + 1
-                        ) * self.tile_m > seqlen_info.seqlen_q
+                        check_m_boundary = (m_block + 1) * self.tile_m > self._q_rows(
+                            seqlen_info.seqlen_q
+                        )
                         mask_fn(
                             tSrS_t2r,
                             m_block=m_block,
@@ -6271,7 +6363,7 @@ class FFABwdSm100:
                                     tSrS_pre_cur,
                                     tScS_idx_cur,
                                     batch_idx,
-                                    q_head,
+                                    scratch_head,
                                     softmax_scale,
                                     seqlen_info,
                                     aux_tensors,
@@ -6819,13 +6911,15 @@ class FFABwdSm100:
                             ]
                         )
 
-            for qh in cutlass.range(self.cat_factor, unroll=1):
-                q_head = head_idx * self.cat_factor + qh
+            for group in cutlass.range(self.gqa_fold.groups_per_tile, unroll=1):
+                scratch_head = head_idx * self.gqa_fold.groups_per_tile + group
                 # --- Make gdQacc ---
 
                 # mdQacc_cur: (seqQ*tileHD):(1)
+                # Only the slot-major reduce reads it; packing always uses the
+                # row-major reduce.
                 if const_expr(not seqlen_info.has_cu_seqlens_q):
-                    mdQacc_cur = mdQacc[None, q_head, batch_idx]
+                    mdQacc_cur = mdQacc[None, scratch_head, batch_idx]
                 else:
                     mdQacc_cur = cute.domain_offset(
                         (
@@ -6834,7 +6928,7 @@ class FFABwdSm100:
                                 divby=self.tile_hdim,
                             ),
                         ),
-                        mdQacc[None, q_head],
+                        mdQacc[None, scratch_head],
                     )
 
                 # gdQacc_: (tileQ128*tileHD128,restQ):(1,16384)
@@ -6852,13 +6946,8 @@ class FFABwdSm100:
                 tdQgdQ_tma = None
                 if const_expr(self.dQ_rowmajor_accum):
                     assert mdQacc_tma is not None
-                    padded_rows_q = mdQacc_tma.shape[0] // mdQacc.shape[1]
-                    head_row_base = q_head * padded_rows_q + seqlen_info.offset_q
-                    mdQacc_head_2d = cute.domain_offset((head_row_base, 0), mdQacc_tma)
-                    gdQacc_grid = cute.local_tile(
-                        mdQacc_head_2d,
-                        (self.dQ_reduce_rows, self.dQ_reduce_ncol),
-                        (None, None),
+                    gdQacc_grid = self._dQacc_reduce_grid(
+                        mdQacc_tma, mdQacc, scratch_head, seqlen_info.offset_q
                     )
                     tdQsdQ_tma, tdQgdQ_tma = cpasync.tma_partition(
                         tma_atom_dQacc,
@@ -6870,7 +6959,9 @@ class FFABwdSm100:
 
                 if const_expr(self.deterministic):
                     assert mdQ_semaphore is not None
-                    mdQ_semaphore_cur = mdQ_semaphore[None, None, q_head, batch_idx]
+                    mdQ_semaphore_cur = mdQ_semaphore[
+                        None, None, scratch_head, batch_idx
+                    ]
 
                 # --- Debug print ---
 
@@ -7006,21 +7097,9 @@ class FFABwdSm100:
                         )
                         if hi_p > lo_p:
                             process_tile = cutlass.Boolean(True)
-                        # row = physical_offset_q + local_row
-                        # col = head_dim_column
-                        # 2D tensor-coordinate grid for the reduce descriptor: rows
-                        # start at this head's flattened base plus the physical range
-                        # offset; any (unaligned) start is a plain coordinate.
                         assert mdQacc_tma is not None
-                        padded_rows_q = mdQacc_tma.shape[0] // mdQacc.shape[1]
-                        head_row_base = q_head * padded_rows_q + seqlen_pair.offset_q
-                        mdQacc_head_2d = cute.domain_offset(
-                            (head_row_base, 0), mdQacc_tma
-                        )
-                        gdQacc_grid = cute.local_tile(
-                            mdQacc_head_2d,
-                            (self.dQ_reduce_rows, self.dQ_reduce_ncol),
-                            (None, None),
+                        gdQacc_grid = self._dQacc_reduce_grid(
+                            mdQacc_tma, mdQacc, scratch_head, seqlen_pair.offset_q
                         )
                         tdQsdQ_tma, tdQgdQ_tma = cpasync.tma_partition(
                             tma_atom_dQacc,
@@ -7055,7 +7134,8 @@ class FFABwdSm100:
                             for stage in cutlass.range_constexpr(n_reduce_stages):
                                 smem_idx = dQ_tma_store_producer_state.index
                                 rows_valid = (
-                                    seqlen_pair.seqlen_q - m_block * self.tile_m
+                                    self._q_rows(seqlen_pair.seqlen_q)
+                                    - m_block * self.tile_m
                                 )
                                 if const_expr(self.use_2cta_instrs):
                                     frag_r = tdQrdQ[None, stage]
@@ -7197,7 +7277,8 @@ class FFABwdSm100:
 
                             if const_expr(self.dQ_rowmajor_accum):
                                 rows_valid = (
-                                    seqlen_info.seqlen_q - m_block * self.tile_m
+                                    self._q_rows(seqlen_info.seqlen_q)
+                                    - m_block * self.tile_m
                                 )
                                 if const_expr(not self.use_2cta_instrs):
                                     assert tdQrdQ_t2r is not None
@@ -7497,9 +7578,7 @@ class FFABwdSm100:
 
         # --- Make gdK/gdV ---
 
-        head_idx_kv = (
-            head_idx if const_expr(self.cat_gqa) else head_idx // self.qhead_per_kvhead
-        )
+        head_idx_kv = self._kv_head(head_idx)
         tdKVsdKV_tma = None
         tdKVgdKV_tma = None
         if const_expr(self.is_varlen_k and self.dKV_postprocess):
@@ -7618,7 +7697,7 @@ class FFABwdSm100:
                 mdKV_semaphore_cur.iterator,
                 tidx,
                 wg_idx,
-                head_idx % self.qhead_per_kvhead,
+                head_idx % self.gqa_fold.kv_group,
             )
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
 
@@ -7724,7 +7803,8 @@ class FFABwdSm100:
                     cute.arch.cp_async_bulk_wait_group(0, read=True)
                 else:
                     if const_expr(not self.dKV_postprocess):
-                        # If qhead_per_kvhead == 1, we only need to TMA store
+                        # A single dK/dV writer per (K tile, kv head) stores
+                        # with a plain TMA copy.
                         cute.copy(
                             tma_atom_dKV,
                             tdKVsdKV,

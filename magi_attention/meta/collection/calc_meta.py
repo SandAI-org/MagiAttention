@@ -284,11 +284,19 @@ class AttnArg:
         # NOTE: this flag only considers the non-overlapping and sorted of k ranges,
         # but it can only be enabled with MHA or GQA/MQA with special configuration (e.g., CatGQA)
         # thus requiring the upper level logic to decide whether to enable it actually
-        # curently we only enable it when k_ranges is non-overlapping and sorted, and CatGQA is enabled
+        # Only the cutedsl backward reads the bwd pack factor, so it qualifies GQA
+        # only on that backend.
         self.disable_bwd_dkv_atomic_reduction = (
             self.k_ranges_bwd.is_non_overlap()
             and self.k_ranges_bwd.is_sorted()
-            and env.general.is_cat_gqa_enable()
+            and (
+                env.general.is_cat_gqa_enable()
+                or (
+                    env.general.bwd_pack_factor() > 1
+                    and env.general.kernel_backend()
+                    == MagiAttentionKernelBackend.CUTEDSL
+                )
+            )
             # TODO: support auto range merge:
             #  when enabled, we should use the merged k_ranges above
         ) and not env.general.is_range_merge_enable()

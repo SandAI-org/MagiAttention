@@ -487,6 +487,14 @@ def check_flag_comb() -> None:
             not env.general.is_deterministic_mode_enable()
         ), "CUTEDSL backend is not compatible with deterministic mode for now"
 
+    if env.general.bwd_pack_factor() > 1:
+        # Only the CUTEDSL backward reads MAGI_ATTENTION_BWD_PACK_FACTOR; any
+        # other backend would ignore it.
+        assert env.general.kernel_backend() == MagiAttentionKernelBackend.CUTEDSL, (
+            "MAGI_ATTENTION_BWD_PACK_FACTOR > 1 requires "
+            "MAGI_ATTENTION_KERNEL_BACKEND=cutedsl"
+        )
+
 
 def init_dist_attn_runtime_key(
     q_ranges: AttnRanges,
