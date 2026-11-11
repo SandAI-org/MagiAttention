@@ -22,9 +22,9 @@ Unified implementation controlled by compile-time constants:
 
 Multi-CTA histogram reduction uses two levels:
   Level 1 (intra-pair):  Cluster DSMEM (store_shared_remote + mbarrier)
-                          between 2 CTAs in one cluster pair (~50ns)
+                          between 2 CTAs in one cluster pair
   Level 2 (inter-pair):  GMEM atomicAdd across cluster pairs
-                          + GMEM barrier + read-back (~400ns)
+                          + GMEM barrier + read-back
 
 Cluster size is fixed at 2 (compile-time). ctas_per_group is runtime.
 Grid layout: [num_groups, ctas_per_group, 1], cluster=[1, 2, 1].

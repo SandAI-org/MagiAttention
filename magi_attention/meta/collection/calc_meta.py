@@ -89,6 +89,12 @@ class AttnArg:
     #   skip_attn_fwd: bool
     #   disable_fwd_atomic_reduction: bool
     #
+    #   Range flags of the `ffa_fwd_args_dict` tensors, in their row order.
+    #   A length satisfies a flag when it equals the field:
+    #   fwd_args_q_sorted: bool, the q rows are sorted by start
+    #   fwd_args_q_coverage_end: int | None, `seqlen` if the union of the q rows
+    #       is [0, seqlen), else None
+    #
     #   q_ranges_bwd: AttnRanges
     #   k_ranges_bwd: AttnRanges
     #   attn_type_map_bwd: list[int]
@@ -120,6 +126,8 @@ class AttnArg:
         batch_size_fwd = len(self.q_ranges)
         self.skip_attn_fwd = batch_size_fwd == 0
         self.disable_fwd_atomic_reduction = False
+        self.fwd_args_q_sorted = False
+        self.fwd_args_q_coverage_end: int | None = None
 
         # guard clause
         if self.skip_attn_fwd:
@@ -176,12 +184,25 @@ class AttnArg:
                 fwd_qk_map=fwd_qk_map,
                 fwd_unique_count=fwd_unique_count,
             )
+            # Row order of the fwd range tensors: rows sorted by q start (stable).
+            fwd_args_row_order = sorted(
+                range(len(self.q_ranges)),
+                key=lambda row: self.q_ranges[row].start,
+            )
         else:
             self.ffa_fwd_args_dict = dict(
                 q_ranges=q_ranges_tensor_fwd,
                 k_ranges=k_ranges_tensor_fwd,
                 attn_type_map=mask_type_tensor_fwd,
             )
+            fwd_args_row_order = list(range(len(self.q_ranges)))
+
+        self._init_fwd_args_range_flags(fwd_args_row_order)
+
+    def _init_fwd_args_range_flags(self, row_order: list[int]) -> None:
+        q_rows = AttnRanges.from_ranges([self.q_ranges[i] for i in row_order])
+        self.fwd_args_q_sorted = q_rows.is_sorted()
+        self.fwd_args_q_coverage_end = _cu_seqlens_end(self.q_ranges.merge())
 
     def _init_ffa_bwd_args_dict(self) -> None:
         # just copy args from fwd
