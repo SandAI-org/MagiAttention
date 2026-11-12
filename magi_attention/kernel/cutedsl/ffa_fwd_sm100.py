@@ -344,9 +344,11 @@ class FFAFwdSm100:
             # Overlapping Q ranges merge under range locks in the correction
             # epilogue; that path only exists on the varlen/STG store route.
             assert is_varlen_q and not is_split_kv
-            # A packed stage tile must start on a token boundary: the range
-            # locks and the per-thread LSE merge index the packed rows by tile.
-            assert not pack_gqa or m_block_size % qhead_per_kvhead == 0
+            assert not pack_gqa or m_block_size % qhead_per_kvhead == 0, (
+                "pack_gqa on the range atomic fwd requires m_block_size "
+                f"({m_block_size}) to be a multiple of qhead_per_kvhead "
+                f"({qhead_per_kvhead})"
+            )
             # The prev-O gmem read is unpredicated along head_dim.
             assert not self.check_hdim_v_oob
         self.sO_borrow_kv = self.use_tma_KV and fwd_fp32_o_borrows_kv_smem(
@@ -4896,8 +4898,6 @@ class FFAFwdSm100:
                             if not acc_O_mn_row_is_zero_or_nan
                             else -Float32.inf
                         )
-                        # Under PackGQA the rows are packed (token, q head)
-                        # pairs, G * token + g, of the kv head head_idx.
                         num_rows = seqlen_info.seqlen_q
                         row_offset = seqlen_info.offset_q
                         if const_expr(self.pack_gqa):

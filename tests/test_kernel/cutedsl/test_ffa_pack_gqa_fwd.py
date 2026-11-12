@@ -12,19 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GQA row packing on the SM100 CuTeDSL range atomic forward.
-
-Packed row ``p`` of a relation starting at token ``q_start`` of kv head
-``h_kv`` is the physical ``(q_start + p // G, h_kv * G + p % G)``. O, LSE,
-range locks and max logits all use that physical identity, and the range
-atomic path sizes q_stage by the Q rows the MMA actually sees:
-``max_seqlen_q * G`` when packed, ``max_seqlen_q`` otherwise.
-"""
-
 import math
-from contextlib import contextmanager
-from typing import Iterator
-from unittest import TestCase, mock
+from unittest import TestCase
 
 import torch
 from torch.testing._internal.common_utils import run_tests
@@ -32,12 +21,11 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.common import AttnRanges
 from magi_attention.functional.cutedsl_ffa import cutedsl_fwd
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.cache_utils import JITCache
-from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
 from magi_attention.kernel.cutedsl.flex_flash_attn import _flex_flash_attn_fwd
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing.cutedsl_utils import record_fwd_kernels
 from magi_attention.utils import make_attn_mask_from_ffa_args
 
 _TILE_M = 128
@@ -47,26 +35,6 @@ _NUM_HEAD_KV = 2
 _TOL = 1e-2
 
 Relations = list[tuple[list[int], list[int], int]]
-
-
-@contextmanager
-def _record_fwd_kernels() -> Iterator[list[FFAFwdSm100]]:
-    """Record the SM100 fwd kernel objects built within the context.
-
-    The specialization is only visible on the kernel object, which a JIT cache
-    hit never builds, so the context also swaps in an empty compile cache.
-    """
-    built: list[FFAFwdSm100] = []
-    init = FFAFwdSm100.__init__
-
-    def record(obj, *args, **kwargs):
-        init(obj, *args, **kwargs)
-        built.append(obj)
-
-    with mock.patch.object(FFAFwdSm100, "__init__", record), mock.patch.object(
-        _flex_flash_attn_fwd, "compile_cache", JITCache()
-    ):
-        yield built
 
 
 def _relation_mask(len_q: int, len_k: int, mask_type: int, device) -> torch.Tensor:
@@ -183,7 +151,7 @@ class TestFfaPackGqaFwd(TestCase):
 
     def _packed_fwd(self, q, k, v, relations: Relations, **kwargs):
         """Packed atomic fwd that also returns the kernel object it built."""
-        with _record_fwd_kernels() as built:
+        with record_fwd_kernels() as built:
             out, lse = _flex_flash_attn_fwd(
                 q,
                 k,
@@ -196,7 +164,7 @@ class TestFfaPackGqaFwd(TestCase):
         return out, lse, built[0]
 
     # ─────────────────────────────────────────────────────────────────────
-    # q_stage (the prerequisite fix)
+    # q_stage
     # ─────────────────────────────────────────────────────────────────────
 
     @parameterize(
@@ -207,8 +175,8 @@ class TestFfaPackGqaFwd(TestCase):
             # pick two stages with the second one empty.
             (True, 128, torch.float32, 1, False, True),
             (True, 129, torch.float32, 2, False, True),
-            # The direct-store path keeps the G-scaled count, so 512 rows
-            # still select two stages and the 2-CTA kernel.
+            # The direct-store path counts G-scaled rows, so 512 rows select
+            # two stages and the 2-CTA kernel.
             (False, 128, torch.bfloat16, 2, True, False),
         ],
     )
@@ -231,7 +199,7 @@ class TestFfaPackGqaFwd(TestCase):
             for _ in range(2)
         )
 
-        with _record_fwd_kernels() as built:
+        with record_fwd_kernels() as built:
             out, _ = _flex_flash_attn_fwd(
                 q,
                 k,
@@ -497,8 +465,8 @@ class TestFfaPackGqaFwd(TestCase):
             torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
 
     def test_packed_bwd_consumes_packed_fwd_lse(self):
-        """The bwd (never packed) reads the physical LSE the packed fwd
-        wrote: gradients match those of the unpacked fwd."""
+        """The bwd reads the physical LSE the packed fwd wrote: gradients
+        match those of the unpacked fwd."""
         group = 4
         relations, total_q, total_k = _overlapping_relations(
             [33, 150], coverage=2, mask_types=[MT_MAP.full, MT_MAP.causal]
@@ -563,7 +531,7 @@ class TestFfaPackGqaFwd(TestCase):
         )
         results = {}
         for pack in (None, True):
-            with _record_fwd_kernels() as built:
+            with record_fwd_kernels() as built:
                 results[pack] = cutedsl_fwd(
                     q, k, v, attn_arg, softmax_scale=None, softcap=0.0, pack_gqa=pack
                 )

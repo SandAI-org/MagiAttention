@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable
@@ -21,6 +22,7 @@ from unittest import TestCase, mock
 import torch
 from torch.testing._internal.common_utils import run_tests
 
+from magi_attention import env
 from magi_attention.common import AttnRanges
 from magi_attention.functional import cutedsl_ffa
 from magi_attention.kernel.cutedsl.ffa_utils import get_device_arch
@@ -30,9 +32,11 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
 )
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.testing import parameterize
-from magi_attention.testing.utils import switch_envvar_context
+from magi_attention.testing.cutedsl_utils import record_bwd_kernels
+from magi_attention.testing.utils import switch_env, switch_envvar_context
 
 RANGE_MERGE_ENV = "MAGI_ATTENTION_RANGE_MERGE"
+BWD_PACK_FACTOR_ENV = "MAGI_ATTENTION_BWD_PACK_FACTOR"
 NUM_HEADS = 2
 # A multiple of 32: with range_merge=False the kernel host then uses the dense
 # dQacc layout exactly when disable_fwd_atomic_reduction is set.
@@ -231,6 +235,22 @@ def _sync_error_mode():
         yield
     finally:
         torch.cuda.set_sync_debug_mode(prev_mode)
+
+
+def _fold_env(
+    backend: str, cat_gqa: bool, pack_factor: int, range_merge: bool = False
+) -> dict[str, str]:
+    """Environment variables that decide AttnArg's direct dK/dV grant and the
+    cutedsl backward GQA fold; the legacy backend toggles stay off so that
+    MAGI_ATTENTION_KERNEL_BACKEND alone selects the backend."""
+    return {
+        "MAGI_ATTENTION_KERNEL_BACKEND": backend,
+        "MAGI_ATTENTION_SDPA_BACKEND": "0",
+        "MAGI_ATTENTION_FA4_BACKEND": "0",
+        "MAGI_ATTENTION_CATGQA": "1" if cat_gqa else "0",
+        BWD_PACK_FACTOR_ENV: str(pack_factor),
+        RANGE_MERGE_ENV: "1" if range_merge else "0",
+    }
 
 
 class TestCutedslBwdUnderRangeMerge(TestCase):
@@ -503,6 +523,172 @@ class TestAttnArgFwdArgs(TestCase):
             _end_if(q_ranges, q_ranges.is_full_coverage),
             msg,
         )
+
+
+class TestBwdPackFactorEnv(TestCase):
+    """Parsing of MAGI_ATTENTION_BWD_PACK_FACTOR."""
+
+    def test_default_is_one(self):
+        # The magi_attention.testing env helpers only set values, so removing
+        # the variable needs mock.patch.dict, which restores it on exit.
+        with mock.patch.dict(os.environ):
+            os.environ.pop(BWD_PACK_FACTOR_ENV, None)
+            self.assertEqual(env.general.bwd_pack_factor(), 1)
+
+    def test_positive_integer(self):
+        for value in ("1", "2", "4", "64"):
+            with switch_env(BWD_PACK_FACTOR_ENV, value):
+                self.assertEqual(env.general.bwd_pack_factor(), int(value), value)
+
+    def test_invalid_value_raises(self):
+        for value in ("0", "-2"):
+            with switch_env(BWD_PACK_FACTOR_ENV, value):
+                with self.assertRaisesRegex(ValueError, "positive integer", msg=value):
+                    env.general.bwd_pack_factor()
+        for value in ("four", "2.5", ""):
+            with switch_env(BWD_PACK_FACTOR_ENV, value):
+                with self.assertRaisesRegex(ValueError, "invalid literal", msg=value):
+                    env.general.bwd_pack_factor()
+
+
+class TestAttnArgDirectDkvGrant(TestCase):
+    """AttnArg grants the direct dK/dV store (``disable_bwd_dkv_atomic_reduction``)
+    to sorted, disjoint k ranges only under CatGQA, or under a bwd pack factor
+    above 1 on the cutedsl backend, the only backend that reads
+    MAGI_ATTENTION_BWD_PACK_FACTOR."""
+
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("the bwd range tensors are built on a CUDA device")
+
+    @staticmethod
+    def _grant(
+        q_rows: list[list[int]],
+        k_rows: list[list[int]],
+        *,
+        backend: str,
+        cat_gqa: bool = False,
+        pack_factor: int = 1,
+        range_merge: bool = False,
+    ) -> bool:
+        with switch_env(_fold_env(backend, cat_gqa, pack_factor, range_merge)):
+            attn_arg = AttnArg(
+                q_ranges=AttnRanges.from_ranges(q_rows),
+                k_ranges=AttnRanges.from_ranges(k_rows),
+                attn_type_map=[0] * len(q_rows),
+            )
+        return attn_arg.disable_bwd_dkv_atomic_reduction
+
+    @parameterize("backend", ["cutedsl", "ffa", "sdpa", "sdpa_ol", "fa4"])
+    def test_grant_by_backend(self, backend: str):
+        rows = [[0, 128], [128, 256]]
+        self.assertFalse(self._grant(rows, rows, backend=backend), backend)
+        self.assertTrue(self._grant(rows, rows, backend=backend, cat_gqa=True), backend)
+        self.assertEqual(
+            self._grant(rows, rows, backend=backend, pack_factor=4),
+            backend == "cutedsl",
+            backend,
+        )
+
+    def test_pack_factor_keeps_the_k_range_conditions(self):
+        q_rows = [[0, 128], [128, 256]]
+        for k_rows in ([[0, 128], [64, 192]], [[128, 256], [0, 128]]):
+            self.assertFalse(
+                self._grant(q_rows, k_rows, backend="cutedsl", pack_factor=4),
+                str(k_rows),
+            )
+        self.assertFalse(
+            self._grant(
+                q_rows, q_rows, backend="cutedsl", pack_factor=4, range_merge=True
+            )
+        )
+
+
+class TestCutedslBwdPackFactor(TestCase):
+    """The dist cutedsl backward takes MAGI_ATTENTION_BWD_PACK_FACTOR, and the
+    direct dK/dV store that calc_meta grants for it reaches the kernel."""
+
+    NUM_HEADS_Q, NUM_HEADS_KV = 8, 2
+
+    def setUp(self) -> None:
+        if get_device_arch()[1] not in (10, 11):
+            self.skipTest("bwd_pack_factor > 1 requires SM100/SM110")
+
+    @staticmethod
+    def _reference_grads(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        do: torch.Tensor,
+        rows: list[list[int]],
+    ) -> tuple[torch.Tensor, ...]:
+        """fp32 GQA reference over the union of full (q, k) rectangles."""
+        mask = torch.zeros(q.shape[0], k.shape[0], dtype=torch.bool, device="cuda")
+        for start, end in rows:
+            mask[start:end, start:end] = True
+        group = q.shape[1] // k.shape[1]
+        qf, kf, vf = (t.float().requires_grad_(True) for t in (q, k, v))
+        kr, vr = (t.repeat_interleave(group, dim=1) for t in (kf, vf))
+        s = torch.einsum("qhd,khd->hqk", qf, kr) * HEAD_DIM**-0.5
+        p = torch.softmax(s.masked_fill(~mask[None], float("-inf")), -1)
+        torch.einsum("hqk,khd->qhd", p.nan_to_num(0.0), vr).backward(do.float())
+        return qf.grad, kf.grad, vf.grad
+
+    def test_env_pack_factor_reaches_the_kernel(self):
+        rows = [[0, 200], [200, 520]]
+        total = rows[-1][1]
+        gen = torch.Generator(device="cuda").manual_seed(1234)
+
+        def randn(num_heads: int) -> torch.Tensor:
+            return torch.randn(
+                total,
+                num_heads,
+                HEAD_DIM,
+                device="cuda",
+                dtype=torch.bfloat16,
+                generator=gen,
+            )
+
+        q, k, v, do = (
+            randn(self.NUM_HEADS_Q),
+            randn(self.NUM_HEADS_KV),
+            randn(self.NUM_HEADS_KV),
+            randn(self.NUM_HEADS_Q),
+        )
+        with switch_env(_fold_env("cutedsl", cat_gqa=False, pack_factor=4)):
+            attn_arg = AttnArg(
+                q_ranges=AttnRanges.from_ranges(rows),
+                k_ranges=AttnRanges.from_ranges(rows),
+                attn_type_map=[0] * len(rows),
+            )
+            out, lse, _ = cutedsl_ffa.cutedsl_fwd(
+                q, k, v, attn_arg, softmax_scale=None, softcap=0.0
+            )
+            with record_bwd_kernels() as built, mock.patch.object(
+                cutedsl_ffa, "_flex_flash_attn_bwd", wraps=_flex_flash_attn_bwd
+            ) as bwd:
+                dq, dk, dv, _ = cutedsl_ffa.cutedsl_bwd(
+                    do, q, k, v, out, lse, attn_arg, softmax_scale=None, softcap=0.0
+                )
+
+        kw = bwd.call_args.kwargs
+        self.assertEqual(kw["bwd_pack_factor"], 4)
+        self.assertFalse(kw["cat_gqa"])
+        self.assertTrue(kw["disable_bwd_dkv_atomic_reduction"])
+        (bwd_kernel,) = built
+        fold = bwd_kernel.gqa_fold
+        self.assertEqual((fold.pack_factor, fold.head_loop), (4, False))
+        self.assertFalse(bwd_kernel.dKV_postprocess)
+
+        ref_grads = self._reference_grads(q, k, v, do, rows)
+        for grad_name, got, ref in zip(("dq", "dk", "dv"), (dq, dk, dv), ref_grads):
+            torch.testing.assert_close(
+                got.float(),
+                ref,
+                atol=2e-2,
+                rtol=2e-2,
+                msg=lambda m: f"{grad_name}: {m}",
+            )
 
 
 if __name__ == "__main__":

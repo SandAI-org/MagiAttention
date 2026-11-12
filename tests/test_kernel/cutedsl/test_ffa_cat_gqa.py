@@ -12,58 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CatGQA backward of the SM100 CuTeDSL FFA kernel.
-
-With ``cat_gqa`` one bwd CTA per (K tile, kv head) walks the q heads of its
-group, so dK/dV of the group accumulate in one CTA and are stored once.
-"""
-
 import math
 from contextlib import contextmanager
 from typing import Iterator
-from unittest import mock
 
 import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.cache_utils import JITCache
-from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
 )
-from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing import parameterize
+from magi_attention.testing.cutedsl_utils import (
+    AttnTensors,
+    assert_close_to_torch_ref,
+    record_bwd_kernels,
+)
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
-from magi_attention.testing.precision import calc_inf_norm
 from magi_attention.testing.utils import switch_envvars
-from magi_attention.utils import make_attn_mask_from_ffa_args
-
-# The kernel may exceed the low-precision reference error by this factor.
-_NORM_RATIO = 2.0
-
-
-@contextmanager
-def _record_bwd_kernels() -> Iterator[list[FFABwdSm100]]:
-    """Record the SM100 bwd kernel objects built within the context.
-
-    The specialization is only visible on the kernel object, which a JIT cache
-    hit never builds, so the context also swaps in empty compile caches.
-    """
-    built: list[FFABwdSm100] = []
-    init = FFABwdSm100.__init__
-
-    def record(obj, *args, **kwargs):
-        init(obj, *args, **kwargs)
-        built.append(obj)
-
-    with mock.patch.object(FFABwdSm100, "__init__", record), mock.patch.object(
-        _flex_flash_attn_fwd, "compile_cache", JITCache()
-    ), mock.patch.object(_flex_flash_attn_bwd, "compile_cache", JITCache()):
-        yield built
 
 
 @contextmanager
@@ -105,48 +75,6 @@ class TestFfaCatGqa(DistTestBase):
     def _log_ran(self, test_case: str) -> None:
         print(f"[RANK {self.rank}] ran {test_case}", flush=True)
 
-    def assert_grads_close_to_ref(
-        self,
-        *,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        do: torch.Tensor,
-        grads: tuple[torch.Tensor, ...],
-        q_ranges: list[list[int]],
-        k_ranges: list[list[int]],
-        attn_type_map: list[int],
-        test_case: str,
-    ) -> None:
-        """dQ/dK/dV (packed thd) within ``_NORM_RATIO`` of the low-precision
-        reference error, both measured against the fp64 reference."""
-        mask = make_attn_mask_from_ffa_args(
-            q_ranges=AttnRanges.from_ranges(q_ranges),
-            k_ranges=AttnRanges.from_ranges(k_ranges),
-            attn_type_map=attn_type_map,
-            total_seqlen_q=q.shape[0],
-            total_seqlen_k=k.shape[0],
-            device=q.device,
-        )
-
-        def ref(high_precision: bool) -> tuple[torch.Tensor, ...]:
-            qkv = [t.detach().clone().requires_grad_() for t in (q, k, v)]
-            out, _ = ref_attn_func(
-                q=qkv[0],
-                k=qkv[1],
-                v=qkv[2],
-                mask=mask,
-                layout="thd",
-                high_precision=high_precision,
-            )
-            return torch.autograd.grad(out, qkv, do)
-
-        refs_hi, refs_lo = ref(True), ref(False)
-        for name, actual, hi, lo in zip(("dq", "dk", "dv"), grads, refs_hi, refs_lo):
-            err = calc_inf_norm(actual.to(hi.dtype), hi)
-            bound = _NORM_RATIO * calc_inf_norm(lo, hi) + 1e-4 * hi.abs().max().item()
-            self.assertLessEqual(err, bound, f"{test_case} {name}: {err=} {bound=}")
-
     # ─────────────────────────────────────────────────────────────────────
     # Dense
     # ─────────────────────────────────────────────────────────────────────
@@ -179,37 +107,48 @@ class TestFfaCatGqa(DistTestBase):
 
         do = None
 
-        def run(cat_gqa: bool) -> tuple[torch.Tensor, ...]:
+        def run(cat_gqa: bool) -> AttnTensors:
             nonlocal do
             out, _ = flex_flash_attn_func(
                 q, k, v, mask_types=MT_MAP.causal, deterministic=True, cat_gqa=cat_gqa
             )
             if do is None:
                 do = torch.randn_like(out)
-            return torch.autograd.grad(out, (q, k, v), do)
+            return AttnTensors(out.detach(), *torch.autograd.grad(out, (q, k, v), do))
 
         with _maybe_disable_2cta(not two_cta):
-            non_cat = run(False)
-            with _record_bwd_kernels() as built:
+            with record_bwd_kernels() as built_non_cat:
+                non_cat = run(False)
+            with record_bwd_kernels() as built:
                 cat = run(True)
             cat_again = run(True)
+        (non_cat_kernel,) = built_non_cat
+        fold = non_cat_kernel.gqa_fold
+        self.assertEqual((fold.pack_factor, fold.head_loop), (1, False), test_case)
         (bwd_kernel,) = built
-        self.assertTrue(bwd_kernel.cat_gqa, test_case)
+        fold = bwd_kernel.gqa_fold
+        self.assertEqual((fold.pack_factor, fold.head_loop), (1, True), test_case)
         self.assertFalse(bwd_kernel.dKV_postprocess, test_case)
         self.assertEqual(bwd_kernel.cta_group_size, 2 if two_cta else 1, test_case)
-        for name, a, b in zip(("dq", "dk", "dv"), cat, cat_again):
+        for name, a, b in zip(
+            ("dq", "dk", "dv"),
+            (cat.dq, cat.dk, cat.dv),
+            (cat_again.dq, cat_again.dk, cat_again.dv),
+        ):
             self.assertTrue(torch.equal(a, b), f"{test_case} {name} not bitwise stable")
 
         assert do is not None
         q_ranges = [[i * seqlen_q, (i + 1) * seqlen_q] for i in range(batch)]
         k_ranges = [[i * seqlen_k, (i + 1) * seqlen_k] for i in range(batch)]
-        for cat_gqa, grads in ((False, non_cat), (True, cat)):
-            self.assert_grads_close_to_ref(
+        for cat_gqa, result in ((False, non_cat), (True, cat)):
+            assert_close_to_torch_ref(
                 q=rearrange(q.detach(), "b s h d -> (b s) h d"),
                 k=rearrange(k.detach(), "b s h d -> (b s) h d"),
                 v=rearrange(v.detach(), "b s h d -> (b s) h d"),
                 do=rearrange(do, "b s h d -> (b s) h d"),
-                grads=tuple(rearrange(g, "b s h d -> (b s) h d") for g in grads),
+                actual=AttnTensors(
+                    *(rearrange(t, "b s h d -> (b s) h d") for _, t in result.named())
+                ),
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
                 attn_type_map=[MT_MAP.causal] * batch,
@@ -249,7 +188,7 @@ class TestFfaCatGqa(DistTestBase):
     @parameterize("d", [64, 128])
     def test_ranges(self, d, few_ctas, direct, mha_type):
         """Ranges on the atomic dK/dV merge and the direct dK/dV store, which
-        GQA takes only under ``cat_gqa``. ``few_ctas`` reserves all but two SMs,
+        the unfolded GQA backward rejects. ``few_ctas`` reserves all but two SMs,
         so each resident cluster walks at least three tiles of several q heads
         and the persistent loop carries pipeline phases and ``tile_done``
         across tiles."""
@@ -278,10 +217,11 @@ class TestFfaCatGqa(DistTestBase):
             )
             return dq, dk, dv
 
-        with _record_bwd_kernels() as built:
+        with record_bwd_kernels() as built:
             cat = bwd(True)
         (bwd_kernel,) = built
-        self.assertTrue(bwd_kernel.cat_gqa, test_case)
+        fold = bwd_kernel.gqa_fold
+        self.assertEqual((fold.pack_factor, fold.head_loop), (1, True), test_case)
         self.assertEqual(bwd_kernel.is_persistent, few_ctas, test_case)
         self.assertEqual(bwd_kernel.dKV_postprocess, not direct, test_case)
         if few_ctas:
@@ -295,14 +235,19 @@ class TestFfaCatGqa(DistTestBase):
             with self.assertRaises(AssertionError):
                 bwd(False)
         else:
-            checked.append((False, bwd(False)))
+            with record_bwd_kernels() as built_non_cat:
+                non_cat = bwd(False)
+            (non_cat_kernel,) = built_non_cat
+            fold = non_cat_kernel.gqa_fold
+            self.assertEqual((fold.pack_factor, fold.head_loop), (1, False), test_case)
+            checked.append((False, non_cat))
         for cat_gqa, grads in checked:
-            self.assert_grads_close_to_ref(
+            assert_close_to_torch_ref(
                 q=q,
                 k=k,
                 v=v,
                 do=do,
-                grads=grads,
+                actual=AttnTensors(out, *grads),
                 q_ranges=ranges,
                 k_ranges=ranges,
                 attn_type_map=attn_type_map,
@@ -338,7 +283,7 @@ class TestFfaCatGqa(DistTestBase):
         num_sm = torch.cuda.get_device_properties(self.device).multi_processor_count
         test_case = f"[test_range_merge][{d=}][{few_ctas=}]"
         self._log_ran(test_case)
-        with _record_bwd_kernels() as built:
+        with record_bwd_kernels() as built:
             out, _ = flex_flash_attn_func(
                 q,
                 k,
@@ -359,14 +304,16 @@ class TestFfaCatGqa(DistTestBase):
             do = torch.randn_like(out)
             grads = torch.autograd.grad(out, (q, k, v), do)
         (bwd_kernel,) = built
-        self.assertTrue(bwd_kernel.cat_gqa and bwd_kernel.range_merge, test_case)
+        fold = bwd_kernel.gqa_fold
+        self.assertEqual((fold.pack_factor, fold.head_loop), (1, True), test_case)
+        self.assertTrue(bwd_kernel.range_merge, test_case)
         self.assertEqual(bwd_kernel.is_persistent, few_ctas, test_case)
-        self.assert_grads_close_to_ref(
+        assert_close_to_torch_ref(
             q=q.detach(),
             k=k.detach(),
             v=v.detach(),
             do=do,
-            grads=grads,
+            actual=AttnTensors(out.detach(), *grads),
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
@@ -387,7 +334,7 @@ class TestFfaCatGqa(DistTestBase):
         ranges with the direct dK/dV store)."""
         self._skip_unless_sm100()
         if path == "ranges_direct" and not cat_gqa:
-            # GQA takes the direct dK/dV store only with cat_gqa (test_ranges
+            # The unfolded GQA backward has no direct dK/dV store (test_ranges
             # checks the rejection).
             return
         device, d = self.device, 128
@@ -412,12 +359,16 @@ class TestFfaCatGqa(DistTestBase):
             )
             return dq, dk, dv
 
-        fresh = bwd()
+        with record_bwd_kernels() as built:
+            fresh = bwd()
+        (bwd_kernel,) = built
+        dkv_accumulates = path == "ranges_atomic" or (path == "dense" and not cat_gqa)
+        test_case = f"[test_caller_buffers][{path=}][{cat_gqa=}]"
+        fold = bwd_kernel.gqa_fold
+        self.assertEqual((fold.pack_factor, fold.head_loop), (1, cat_gqa), test_case)
         init = [torch.randn_like(g) for g in fresh]
         bufs = [t.clone() for t in init]
         got = bwd(dq=bufs[0], dk=bufs[1], dv=bufs[2])
-        dkv_accumulates = path == "ranges_atomic" or (path == "dense" and not cat_gqa)
-        test_case = f"[test_caller_buffers][{path=}][{cat_gqa=}]"
         self._log_ran(test_case)
         for name, g, buf, base, accumulates in zip(
             ("dq", "dk", "dv"),
