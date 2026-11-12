@@ -223,15 +223,6 @@ class TestVariousChunkSolver(TestCase):
         self.assertEqual(sol.group_workloads, [9.0, 60.0])
         self.assertEqual(sol.num_overflow_slices, 1)
 
-        # with enough slack, B2 is placed within the capacity
-        sol = solve_various_chunk_dispatch(
-            ranges, num_groups=2, big_chunk_size=4, slack=0.5
-        )
-        self.check_solution(ranges, sol, num_groups=2)
-        self.assertEqual(sol.capacity, 12)
-        self.assertEqual(sol.num_overflow_slices, 0)
-        self.assertEqual(sol.group_q_ranges, [[(0, 6), (12, 15)], [(6, 12)]])
-
     def test_pad_align(self):
         ranges = [R((0, 8), 8.0, 2, 0), R((8, 12), 40.0, 2, 1)]
         sol = solve_various_chunk_dispatch(
@@ -298,7 +289,6 @@ class TestVariousChunkSolver(TestCase):
             dict(ranges=good, num_groups=0),
             dict(ranges=good, num_groups=2, big_chunk_size=0),
             dict(ranges=good, num_groups=2, align=0),
-            dict(ranges=good, num_groups=2, slack=-0.1),
             dict(ranges=good, num_groups=2, pad_align=0),
             dict(ranges=[R((4, 4), 1.0, 2, 0)], num_groups=2),
             dict(ranges=[R((0, 8), 1.0, 0, 0)], num_groups=2),

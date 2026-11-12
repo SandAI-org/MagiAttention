@@ -330,7 +330,6 @@ def solve_various_chunk_dispatch(
     big_chunk_size: int = 512,
     workload_fn: Callable[[VariousChunkRange], float] | None = None,
     align: int | None = None,
-    slack: float = 0.0,
     pad_align: int = 1,
 ) -> VariousChunkSolution:
     """Dispatch the q_ranges with various chunk sizes to ``num_groups`` groups,
@@ -341,7 +340,7 @@ def solve_various_chunk_dispatch(
         2. pack adjacent slices of the same sample into big chunks of at most ``big_chunk_size``,
             where a slice longer than ``big_chunk_size`` becomes an oversized big chunk on its own.
         3. the token capacity of each group is
-            ``round_up(ceil(total_seqlen * (1 + slack) / num_groups), align)``,
+            ``round_up(ceil(total_seqlen / num_groups), align)``,
             and at least the seqlen of the longest oversized big chunk.
         4. the 1st wave assigns the oversized big chunks in descending order of seqlen,
             each as a whole to the min-workload group that fits it.
@@ -358,7 +357,6 @@ def solve_various_chunk_dispatch(
             to estimate the workload of each range, if None, use ``range.weight`` instead
         align (int | None): the alignment of the capacity,
             if None, use the maximum chunk_size capped by ``big_chunk_size``
-        slack (float): the ratio of extra capacity of each group
         pad_align (int): the alignment of the padded seqlen of all groups
 
     Returns:
@@ -370,8 +368,6 @@ def solve_various_chunk_dispatch(
         raise ValueError(f"big_chunk_size should be positive, got {big_chunk_size=}")
     if align is not None and align <= 0:
         raise ValueError(f"align should be positive, got {align=}")
-    if slack < 0:
-        raise ValueError(f"slack should be non-negative, got {slack=}")
     if pad_align <= 0:
         raise ValueError(f"pad_align should be positive, got {pad_align=}")
     _validate_ranges(ranges)
@@ -398,7 +394,7 @@ def solve_various_chunk_dispatch(
     if align is None:
         align = min(max(r.chunk_size for r in ranges), big_chunk_size)
     total_seqlen = sum(r.seqlen for r in ranges)
-    capacity = _round_up(math.ceil(total_seqlen * (1 + slack) / num_groups), align)
+    capacity = _round_up(ceil_div(total_seqlen, num_groups), align)
     if oversized_chunks:
         capacity = max(capacity, max(c.seqlen for c in oversized_chunks))
 
