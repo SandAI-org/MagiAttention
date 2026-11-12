@@ -1014,23 +1014,25 @@ class TestDistAttnRuntimeMgr(DistTestBase):
 
 
 class TestCheckFlagComb(unittest.TestCase):
-    """Environment flag combinations that ``check_flag_comb`` rejects before
+    """Environment flag combinations that ``check_flag_comb`` validates before
     a dist-attn runtime is built; no device work."""
+
+    _BASE_FLAGS = {
+        "MAGI_ATTENTION_SDPA_BACKEND": "0",
+        "MAGI_ATTENTION_FA4_BACKEND": "0",
+        "MAGI_ATTENTION_DETERMINISTIC_MODE": "0",
+        "MAGI_ATTENTION_HIERARCHICAL_COMM": "0",
+        "MAGI_ATTENTION_NATIVE_GRPCOLL": "0",
+        "MAGI_ATTENTION_QO_COMM": "0",
+        "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE": "0",
+        "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE": "0",
+        "MAGI_ATTENTION_CATGQA": "0",
+        "MAGI_ATTENTION_BWD_PACK_FACTOR": "1",
+    }
 
     @parameterize("backend", ["ffa", "sdpa", "sdpa_ol", "fa4", "cutedsl"])
     def test_bwd_pack_factor_requires_cutedsl(self, backend: str):
-        # Every other flag that check_flag_comb inspects stays off.
-        flags = {
-            "MAGI_ATTENTION_KERNEL_BACKEND": backend,
-            "MAGI_ATTENTION_SDPA_BACKEND": "0",
-            "MAGI_ATTENTION_FA4_BACKEND": "0",
-            "MAGI_ATTENTION_DETERMINISTIC_MODE": "0",
-            "MAGI_ATTENTION_HIERARCHICAL_COMM": "0",
-            "MAGI_ATTENTION_NATIVE_GRPCOLL": "0",
-            "MAGI_ATTENTION_QO_COMM": "0",
-            "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE": "0",
-            "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE": "0",
-        }
+        flags = {**self._BASE_FLAGS, "MAGI_ATTENTION_KERNEL_BACKEND": backend}
         with switch_env({**flags, "MAGI_ATTENTION_BWD_PACK_FACTOR": "1"}):
             check_flag_comb()
         with switch_env({**flags, "MAGI_ATTENTION_BWD_PACK_FACTOR": "4"}):
@@ -1041,6 +1043,18 @@ class TestCheckFlagComb(unittest.TestCase):
                     AssertionError, "MAGI_ATTENTION_BWD_PACK_FACTOR > 1 requires"
                 ):
                     check_flag_comb()
+
+    def test_bwd_pack_factor_rejects_cat_gqa(self):
+        flags = {
+            **self._BASE_FLAGS,
+            "MAGI_ATTENTION_KERNEL_BACKEND": "cutedsl",
+            "MAGI_ATTENTION_CATGQA": "1",
+        }
+        with switch_env({**flags, "MAGI_ATTENTION_BWD_PACK_FACTOR": "1"}):
+            check_flag_comb()
+        with switch_env({**flags, "MAGI_ATTENTION_BWD_PACK_FACTOR": "2"}):
+            with self.assertRaisesRegex(AssertionError, "MAGI_ATTENTION_CATGQA=1"):
+                check_flag_comb()
 
 
 if __name__ == "__main__":

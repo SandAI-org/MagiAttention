@@ -85,6 +85,8 @@ class DistAttnRuntimeKey:
     kernel_backend: MagiAttentionKernelBackend
     precision: MagiAttentionPrecision | None
     is_range_merge_enable: bool
+    is_cat_gqa_enable: bool
+    bwd_pack_factor: int
 
     def __hash__(self) -> int:
         try:
@@ -115,6 +117,8 @@ class DistAttnRuntimeKey:
                     self.kernel_backend,
                     self.precision,
                     self.is_range_merge_enable,
+                    self.is_cat_gqa_enable,
+                    self.bwd_pack_factor,
                 )
             )
             object.__setattr__(self, "_cached_hash", h)
@@ -487,12 +491,17 @@ def check_flag_comb() -> None:
             not env.general.is_deterministic_mode_enable()
         ), "CUTEDSL backend is not compatible with deterministic mode for now"
 
-    if env.general.bwd_pack_factor() > 1:
+    bwd_pack_factor = env.general.bwd_pack_factor()
+    if bwd_pack_factor > 1:
         # Only the CUTEDSL backward reads MAGI_ATTENTION_BWD_PACK_FACTOR; any
         # other backend would ignore it.
         assert env.general.kernel_backend() == MagiAttentionKernelBackend.CUTEDSL, (
             "MAGI_ATTENTION_BWD_PACK_FACTOR > 1 requires "
             "MAGI_ATTENTION_KERNEL_BACKEND=cutedsl"
+        )
+        assert not env.general.is_cat_gqa_enable(), (
+            f"MAGI_ATTENTION_BWD_PACK_FACTOR ({bwd_pack_factor}) > 1 cannot be "
+            "combined with MAGI_ATTENTION_CATGQA=1"
         )
 
 
@@ -551,6 +560,8 @@ def init_dist_attn_runtime_key(
         kernel_backend=env.general.kernel_backend(),
         precision=env.general.precision(),
         is_range_merge_enable=env.general.is_range_merge_enable(),
+        is_cat_gqa_enable=env.general.is_cat_gqa_enable(),
+        bwd_pack_factor=env.general.bwd_pack_factor(),
     )
 
 
@@ -718,7 +729,9 @@ def init_dist_attn_runtime_mgr(
         "  flatten_head_groups   : %s\n"
         "  sdpa_backend          : %s\n"
         "  fa4_backend           : %s\n"
-        "  range_merge      : %s",
+        "  range_merge      : %s\n"
+        "  cat_gqa          : %s\n"
+        "  bwd_pack_factor  : %d",
         q_ranges,
         k_ranges,
         attn_mask_type,
@@ -748,6 +761,8 @@ def init_dist_attn_runtime_mgr(
         env.general.kernel_backend(),
         env.general.precision(),
         env.general.is_range_merge_enable(),
+        env.general.is_cat_gqa_enable(),
+        env.general.bwd_pack_factor(),
     )
 
     # Make dispatch meta

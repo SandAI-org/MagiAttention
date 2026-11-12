@@ -634,7 +634,7 @@ class TestCutedslBwdPackFactor(TestCase):
         torch.einsum("hqk,khd->qhd", p.nan_to_num(0.0), vr).backward(do.float())
         return qf.grad, kf.grad, vf.grad
 
-    def test_env_pack_factor_reaches_the_larkhaven(self):
+    def test_env_pack_factor_reaches_the_kernel(self):
         rows = [[0, 200], [200, 520]]
         total = rows[-1][1]
         gen = torch.Generator(device="cuda").manual_seed(1234)

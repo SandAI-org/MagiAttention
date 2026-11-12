@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from typing import Any
 from unittest import TestCase
 
@@ -27,7 +28,7 @@ from magi_attention.kernel.cutedsl.ffa_utils import (
     select_bwd_gqa_fold,
 )
 from magi_attention.kernel.cutedsl.flex_flash_attn import _flex_flash_attn_bwd
-from magi_attention.testing import parameterize
+from magi_attention.testing import assert_close, parameterize
 from magi_attention.testing.cutedsl_utils import (
     AttnTensors,
     assert_close_to_torch_ref,
@@ -708,6 +709,78 @@ class TestFfaPackGqaBwd(DistTestBase):
             v=v,
             do=do,
             actual=AttnTensors(out, dq - dq_init, dk, dv),
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            test_case=test_case,
+        )
+
+    @with_run_in_mp
+    @parameterize("fold_case", ["full_pack4", "pack2_loop3"])
+    @parameterize("d", [64, 128])
+    def test_sink_fold(self, d, fold_case):
+        """Learnable sink logits rescale the softmax denominator of packed
+        backward tiles and emit ``dsink`` through ``bwd_dsink``."""
+        self._skip_unless_sm100()
+        num_head, num_head_kv, pack_factor, expected = _FOLD_CASES[fold_case]
+        q_ranges = _contiguous_ranges(_Q_LENS)
+        k_ranges = _contiguous_ranges(_K_LENS)
+        attn_type_map = [_MASK_CYCLE[i % 4] for i in range(len(_Q_LENS))]
+        device, dtype = self.device, torch.bfloat16
+        total_q = max(end for _, end in q_ranges)
+        total_k = max(end for _, end in k_ranges)
+        torch.random.manual_seed(self.seed + d + num_head)
+        q = torch.randn(total_q, num_head, d, device=device, dtype=dtype)
+        k = torch.randn(total_k, num_head_kv, d, device=device, dtype=dtype)
+        v = torch.randn_like(k)
+        sink = torch.randn(2, num_head, device=device, dtype=torch.float32)
+        q, k, v, sink = (t.requires_grad_() for t in (q, k, v, sink))
+        test_case = f"[test_sink_fold][{d=}][{fold_case=}]"
+        self._log_ran(test_case)
+        with record_bwd_kernels() as built:
+            out, meta = flex_flash_attn_func(
+                q,
+                k,
+                v,
+                q_ranges=torch.tensor(q_ranges, device=device, dtype=torch.int32),
+                k_ranges=torch.tensor(k_ranges, device=device, dtype=torch.int32),
+                mask_types=torch.tensor(
+                    attn_type_map, device=device, dtype=torch.int32
+                ),
+                max_seqlen_q=max(end - start for start, end in q_ranges),
+                max_seqlen_k=max(end - start for start, end in k_ranges),
+                sink=sink,
+                disable_bwd_dkv_atomic_reduction=True,
+                bwd_pack_factor=pack_factor,
+            )
+            do = torch.randn_like(out)
+            dq, dk, dv, dsink = torch.autograd.grad(out, (q, k, v, sink), do)
+        (bwd_kernel,) = built
+        self._assert_kernel(bwd_kernel, test_case, fold=expected, d=d, direct=True)
+        self.assertEqual(dsink.dtype, sink.dtype)
+        has_keys = meta.lse != -math.inf
+        delta = (
+            out.detach().double().masked_fill(~has_keys[..., None], 0)
+            * do.double().masked_fill(~has_keys[..., None], 0)
+        ).sum(dim=-1)
+        prob = torch.exp(
+            sink.detach().double()[None] - meta.lse.double()[:, None]
+        ).masked_fill(~has_keys[:, None], 0)
+        dsink_ref = -(delta[:, None] * prob).sum(dim=0).float()
+        assert_close(
+            dsink,
+            dsink_ref,
+            atol=2e-4,
+            rtol=1e-2,
+            test_case=f"{test_case} => dsink",
+        )
+        assert_close_to_torch_ref(
+            q=q.detach(),
+            k=k.detach(),
+            v=v.detach(),
+            do=do,
+            sink=sink.detach(),
+            actual=AttnTensors(out.detach(), dq, dk, dv),
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
