@@ -994,6 +994,24 @@ def ld_acquire(lock_ptr: cute.Pointer, *, loc=None, ip=None) -> cutlass.Int32:
 
 
 @dsl_user_op
+def st_global_release_gpu_i32(
+    ptr: cute.Pointer, val: Int32, *, loc=None, ip=None
+) -> None:
+    ptr_i64 = ptr.toint(loc=loc, ip=ip).ir_value()
+    llvm.inline_asm(
+        None,
+        [ptr_i64, Int32(val).ir_value(loc=loc, ip=ip)],
+        "st.release.gpu.global.s32 [$0], $1;",
+        "l,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
 def red_relaxed(
     lock_ptr: cute.Pointer, val: cutlass.Constexpr[Int32], *, loc=None, ip=None
 ) -> None:

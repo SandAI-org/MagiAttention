@@ -93,6 +93,7 @@ from .cutedsl_utils import (
     ld_acquire,
     mbarrier_arrive_peer_release_cluster,
     mbarrier_wait_acquire_cluster,
+    st_global_release_gpu_i32,
 )
 
 
@@ -306,37 +307,40 @@ def arrive(
     wrote rows of the event must have completed them at the destination
     (bulk reductions: ``cp_async_bulk_wait_group(0, read=False)`` by the
     issuing thread) and reached a CTA barrier with the arriving thread; the
-    arriving thread then fences (``fence_acq_rel_gpu``) so the acq_rel
-    arrival carries those writes."""
-    count_ptr = elem_pointer(mChain, (block, head, 1))
-    prev = cute.arch.atomic_add(count_ptr, weight, sem="acq_rel", scope="gpu")
-    # Exact match: weights are those of the logical tile, so the arrival that
-    # completes the writer's sum is unique, and a sum stepping past the
-    # threshold never publishes (the successor then waits forever, which the
-    # tests detect, instead of starting early).
-    if prev + weight == 2 * cluster_size:
-        # The next writer of this block starts only after the publish below,
-        # so resetting the count before it cannot race with its arrivals; the
-        # release of the publish orders the reset before it.
-        cute.arch.atomic_exch(count_ptr, Int32(0), sem="relaxed", scope="gpu")
+    arriving thread then fences (``fence_acq_rel_gpu``) so a multi-participant
+    ``acq_rel`` arrival or single-participant release publish carries those
+    writes. When one participant owns the full ``2 * cluster_size`` weight of
+    the writer on ``(block, head)``, ``count`` is ``0`` and untouched, so it
+    publishes ``writer`` directly."""
+    if weight == 2 * cluster_size:
         publish(mChain, block, head, writer)
+    else:
+        count_ptr = elem_pointer(mChain, (block, head, 1))
+        prev = cute.arch.atomic_add(count_ptr, weight, sem="acq_rel", scope="gpu")
+        # Exact match: weights are those of the logical tile, so the arrival
+        # that completes the writer's sum is unique, and a sum stepping past
+        # the threshold never publishes (the successor then waits forever,
+        # which the tests detect, instead of starting early).
+        if prev + weight == 2 * cluster_size:
+            # Every earlier participant arrived with acq_rel on count_ptr, and
+            # the next writer starts only after the release publish below, so
+            # resetting the count cannot race with either writer's arrivals.
+            mChain[block, head, 1] = Int32(0)
+            publish(mChain, block, head, writer)
 
 
 @cute.jit
 def publish(mChain: cute.Tensor, block: Int32, head: Int32, writer: Int32) -> None:
     """Publish ``writer`` on ``block`` of ``head`` (release, gpu scope).
 
-    Called once per (writer, block), by the arrival completing the writer's
-    weight, after it reset the count. The acq_rel arrivals before it carry
-    every participant's destination writes, so a successor that reads
-    ``writer`` with ``wait_published`` (acquire) sees them.
+    Called once per (writer, block), either directly by a single-participant
+    writer or by the arrival completing a multi-participant writer's weight
+    after resetting the count. Prior CTA-synchronized destination writes (and
+    earlier participants' acq_rel arrivals) precede this release store, so a
+    successor that reads ``writer`` with ``wait_published`` (acquire) sees
+    them.
     """
-    cute.arch.atomic_exch(
-        elem_pointer(mChain, (block, head, 0)),
-        writer,
-        sem="release",
-        scope="gpu",
-    )
+    st_global_release_gpu_i32(elem_pointer(mChain, (block, head, 0)), writer)
 
 
 @cute.jit

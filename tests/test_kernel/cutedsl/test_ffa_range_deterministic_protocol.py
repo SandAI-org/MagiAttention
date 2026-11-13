@@ -251,10 +251,13 @@ def explore(
                         out_of_order = True
                     wr[b] = max(wr[b], moved.writer)
                 for b, weight in moved.arrivals:
-                    cnt[b] += weight
-                    if cnt[b] == 2:
-                        cnt[b] = 0
+                    if weight == 2:
                         pub[b] = moved.writer
+                    else:
+                        cnt[b] += weight
+                        if cnt[b] == 2:
+                            cnt[b] = 0
+                            pub[b] = moved.writer
             ws = list(workers)
             ws[i] = new_w
             stack.append((new_counter, tuple(ws), tuple(pub), tuple(cnt), tuple(wr)))
@@ -728,6 +731,25 @@ class TestRangeDeterministicProtocol(unittest.TestCase):
                     for row in range(ha, hb):
                         owners.setdefault(row, set()).add(rank)
         self.assertTrue(any(len(ranks) == 2 for ranks in owners.values()))
+
+    def test_single_participant_direct_publish_and_multi_participant_count(self):
+        """A full-weight arrival (weight 2) publishes directly without touching
+        the arrival count, alternating cleanly on one block with split-weight
+        writers (1 + 1) that accumulate and reset the count; an over-weight
+        arrival (weight 3) never publishes and blocks its successor."""
+        writers = range_writers(
+            [(0, self._M), (1, 2 * self._M + 1), (0, 2 * self._M)], self._M
+        )
+        self.assertCompletes(
+            self._run(writers, head_major_order(writers), 2, 2, ClaimMode.ATOMIC)
+        )
+        overweight = [
+            (Step(1, ((0, 0),), ((0, 3),), (0,)),),
+            (Step(2, ((0, 1),), ((0, 2),), (0,)),),
+        ]
+        outcome = explore(overweight, 2, 2, ClaimMode.ATOMIC)
+        self.assertTrue(outcome.stuck)
+        self.assertFalse(outcome.out_of_order)
 
 
 # ------------------------------------------------- 2-CTA pair handoff model
