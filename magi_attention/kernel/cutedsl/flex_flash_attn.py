@@ -1381,10 +1381,28 @@ def _flex_flash_attn_bwd(
             "disable_bwd_dkv_atomic_reduction requires a unique dK/dV writer "
             "per KV head: MHA, or GQA with cat_gqa or bwd_pack_factor > 1"
         )
-    # On q/k ranges the dQ rows of every relation (merged K group under
-    # RangeMerge) and K tile are merged in that order by the dQ range chain,
-    # and reduced dK/dV rows in (relation, q head) order by the dK/dV range
-    # chain.
+    direct_dkv = (
+        disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11)
+    )
+    direct_dq_init = (
+        disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
+    )
+    # Without the in-kernel K-merge the kernels see the caller's sorted, disjoint
+    # q_ranges; the K-merge repeats a q range once per K group.
+    q_ranges_disjoint = direct_dq_init and not range_merge_active
+    # Packed tiles reduce dQ through the token-space row-major dQacc, whose
+    # TMA box splits rows into (pack_factor, tokens). Disjoint q_ranges isolate
+    # each range into tile_m-aligned dQacc slots; deterministic launches order
+    # K-tile additions within each slot on per-slot semaphores.
+    use_dense_dqacc_for_ranges = (
+        q_ranges_disjoint and head_dim % 32 == 0 and gqa_fold.pack_factor == 1
+    )
+
+    # On q/k ranges with overlapping Q, dQ rows of every relation (merged K
+    # group under RangeMerge) and K tile are merged in that order by the dQ
+    # range chain; disjoint Q ranges with dense dQacc slots order each Q tile's
+    # active K tiles on per-slot semaphores. Reduced dK/dV rows are merged in
+    # (relation, q head) order by the dK/dV range chain.
     range_deterministic = deterministic and has_ranges
     dq_writer_stride: int | None = None
     if range_deterministic:
@@ -1399,9 +1417,13 @@ def _flex_flash_attn_bwd(
         # Writer numbers r * dq_writer_stride + n + 1 of the dQ chain, with
         # n below the cluster K tiles of max_seqlen_k; unique under the
         # max_seqlen_k contract (no K range is longer), which is trusted and
-        # checked only in FFA debug mode.
+        # checked only in FFA debug mode. Disjoint Q with dense dQacc uses
+        # per-slot semaphores and needs no dQ writer stride.
         max_k_tiles = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
-        dq_writer_stride = max_k_tiles
+        if not use_dense_dqacc_for_ranges:
+            dq_writer_stride = max_k_tiles
+        dq_max_writer = 0 if use_dense_dqacc_for_ranges else batch_size * max_k_tiles
+        dkv_max_writer = 0 if direct_dkv else batch_size * dkv_writer_stride
         num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
         validate_range_deterministic(
             head_dim=head_dim,
@@ -1414,9 +1436,9 @@ def _flex_flash_attn_bwd(
             * max_k_tiles
             * (num_head_kv if cat_gqa else num_head),
             # The last writers: r * stride + j + 1 with r < R and j < stride.
-            max_writer=batch_size * max(max_k_tiles, dkv_writer_stride),
+            max_writer=max(dq_max_writer, dkv_max_writer),
         )
-    # The deterministic range chains need the DYNAMIC schedule's ticket order
+    # Deterministic q/k-range launches need the DYNAMIC schedule's ticket order
     # even without an SM reservation.
     bwd_persistent = sm_margin > 0 or range_deterministic
     if bwd_persistent:
@@ -1440,13 +1462,6 @@ def _flex_flash_attn_bwd(
 
     k_ranges_sorted_disjoint = has_ranges and (
         declared_k_full_coverage or disable_bwd_dkv_atomic_reduction
-    )
-
-    direct_dkv = (
-        disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11)
-    )
-    direct_dq_init = (
-        disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
 
     # Ranges force accum+postprocess even for MHA: overlapping K ranges
@@ -1473,18 +1488,6 @@ def _flex_flash_attn_bwd(
             "dq_type/dk_type/dv_type other than the input dtype require SM100/SM110"
         )
 
-    # Without the in-kernel K-merge the kernels see the caller's sorted, disjoint
-    # q_ranges; the K-merge repeats a q range once per K group.
-    q_ranges_disjoint = direct_dq_init and not range_merge_active
-    # Packed tiles reduce dQ through the token-space row-major dQacc, whose
-    # TMA box splits rows into (pack_factor, tokens). The dQ chain orders
-    # reductions into the row-major token-space dQacc.
-    use_dense_dqacc_for_ranges = (
-        q_ranges_disjoint
-        and head_dim % 32 == 0
-        and gqa_fold.pack_factor == 1
-        and not range_deterministic
-    )
     if q_ranges_disjoint and magiattn_cutedsl.is_ffa_debug_mode_enabled():
         assert q_ranges is not None
         assert bool((q_ranges[1:, 0] >= q_ranges[:-1, 1]).all().item()), (
@@ -1681,10 +1684,19 @@ def _flex_flash_attn_bwd(
             dtype=torch.int32,
             device=device,
         )
+    elif range_deterministic and use_dense_dqacc_for_ranges:
+        dQ_semaphore = torch.zeros(
+            1,
+            num_head,
+            total_q_rounded_padded // m_block_size,
+            cluster_size,
+            dtype=torch.int32,
+            device=device,
+        )
     else:
         dQ_semaphore = None
     dq_chain_state = dq_conflict = None
-    if range_deterministic:
+    if range_deterministic and not use_dense_dqacc_for_ranges:
         # See range_chain: (published writer, arrival count) per (Q block,
         # q head), +1 guard block, and one conflict-state row per CTA of the
         # persistent grid, which has at most num_sm - sm_margin CTAs.

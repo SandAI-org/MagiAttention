@@ -36,10 +36,11 @@ A writer whose tiles sit in several work tiles (fwd O/LSE) arrives with
 weight 2 from a tile that is its only one with rows in ``b`` and 1 from
 each of two tiles sharing ``b`` (``tile_events``). A writer whose tiles all
 sit in one work tile (bwd dQ: one relation and cluster K tile walking the
-relation's Q tiles in order) arrives once per block, with weight 2, after
-the last of its tiles with rows in ``b`` (``tile_blocks``). Every event
-arrives exactly once, a tile whose rows got no contribution included, so a
-successor never waits on an arrival that never comes.
+relation's active Q tiles in order) arrives once per active block, with
+weight 2, after the last of its active tiles with rows in ``b``
+(``tile_blocks``). Masked-out tiles without active work skip the chain; a
+straddling active tile whose neighbor tile is masked out promotes its weight
+on the shared block from 1 to 2.
 
 Under 2-CTA both CTAs of a cluster write parts of one logical tile. Each
 arrives the logical tile's weight on the logical tile's blocks after its own
@@ -49,9 +50,9 @@ cluster size, so the publish covers the parts of every CTA.
 The chain orders writers, not the two CTAs inside one. Under RangeMerge a
 writer's pairs may overlap in Q, and a row in the half of CTA 1 for one
 pair can be in the half of CTA 0 for the next, so the bwd dQ of a 2-CTA
-merged writer also hands off between its CTAs at every pair boundary
-(``pair_handoff_arrive`` / ``pair_handoff_wait``): pair ``j`` adds only
-after both CTAs' additions of the pairs before it landed.
+merged writer hands off between its CTAs when an active pair overlaps Q rows
+written by an earlier active pair in the group
+(``pair_handoff_arrive`` / ``pair_handoff_wait``).
 
 Chain state, int32 ``(num_blocks, num_heads, 2)``: per (block, head), the
 last published writer and the arrival count of the writer in flight.
@@ -162,22 +163,23 @@ def scan_conflicts(
     range_from: Int32,
     range_to: Int32,
     block_size: cutlass.Constexpr[int],
-    last_writer: Callable[[Int32], Int32],
+    last_writer: Optional[Callable[[Int32], Int32]] = None,
     rows_per_token: cutlass.Constexpr[int] = 1,
     mCuBatches: Optional[cute.Tensor] = None,
+    block_writer: Optional[Callable[[Int32, Int32, Int32], Int32]] = None,
 ) -> None:
     """Record the blocks of the ranges in ``[range_from, range_to)`` for ``slot``.
 
-    Block ``b`` of range ``r`` gets ``last_writer(r)``, the highest writer of
-    ``r`` with events on its blocks; 0 means ``r`` has no work tile, which
-    records nothing, as does an empty range. ``mRanges`` holds token ranges;
-    range ``[s, e)`` covers the rows ``[s, e) * rows_per_token``, the blocks
-    ``tile_events`` gives for its tiles. Without ``mCuBatches`` range ``r``
-    is row ``r`` of ``mRanges``; with it, a merged group whose rows are
-    ``mCuBatches[r]`` to ``mCuBatches[r + 1]``, all recorded with the group's
-    writer. The whole warp calls; its lanes write the blocks of one row in
-    parallel, and any lane may read ``mConflict[slot, ...]`` after the
-    return.
+    Block ``b`` of range ``r`` gets ``last_writer(r)`` or ``block_writer(r, row, b)``,
+    the highest writer of ``r`` with events on ``b``; 0 means ``r`` has no
+    active work tile on ``b``, which records nothing, as does an empty range.
+    ``mRanges`` holds token ranges; range ``[s, e)`` covers the rows
+    ``[s, e) * rows_per_token``, the blocks ``tile_events`` gives for its
+    tiles. Without ``mCuBatches`` range ``r`` is row ``r`` of ``mRanges``;
+    with it, a merged group whose rows are ``mCuBatches[r]`` to
+    ``mCuBatches[r + 1]``. The whole warp calls; its lanes write the blocks
+    of one row in parallel, and any lane may read ``mConflict[slot, ...]``
+    after the return.
 
     A block shared by consecutive rows is stored by different lanes (its
     lane follows the row's first block), so the warp synchronizes after
@@ -188,26 +190,44 @@ def scan_conflicts(
     lane = cute.arch.lane_idx()
     r = range_from
     while r < range_to:
-        writer = last_writer(r)
+        writer = Int32(0)
+        if const_expr(block_writer is None):
+            assert last_writer is not None
+            writer = last_writer(r)
         if const_expr(mCuBatches is None):
             _record_row_blocks(
-                mRanges, mConflict, slot, r, writer, block_size, rows_per_token, lane
+                mRanges,
+                mConflict,
+                slot,
+                r,
+                r,
+                writer,
+                block_size,
+                rows_per_token,
+                lane,
+                block_writer=block_writer,
+                monotonic_group_merge=False,
             )
             cute.arch.sync_warp()
         else:
             assert mCuBatches is not None
-            row = Int32(mCuBatches[r])
+            row_start = Int32(mCuBatches[r])
+            row = row_start
             row_end = Int32(mCuBatches[r + 1])
             while row < row_end:
                 _record_row_blocks(
                     mRanges,
                     mConflict,
                     slot,
+                    r,
                     row,
                     writer,
                     block_size,
                     rows_per_token,
                     lane,
+                    block_writer=block_writer,
+                    monotonic_group_merge=const_expr(block_writer is not None),
+                    is_first_group_row=(row == row_start),
                 )
                 cute.arch.sync_warp()
                 row += 1
@@ -219,23 +239,42 @@ def _record_row_blocks(
     mRanges: cute.Tensor,
     mConflict: cute.Tensor,
     slot: Int32,
+    group_idx: Int32,
     row: Int32,
     writer: Int32,
     block_size: cutlass.Constexpr[int],
     rows_per_token: cutlass.Constexpr[int],
     lane: Int32,
+    block_writer: Optional[Callable[[Int32, Int32, Int32], Int32]] = None,
+    monotonic_group_merge: cutlass.Constexpr[bool] = False,
+    is_first_group_row: cutlass.Boolean = cutlass.Boolean(True),
 ) -> None:
-    """This lane's share of recording ``writer`` on the blocks of row ``row``
-    of ``mRanges``, a token range of ``rows_per_token`` rows per token;
-    nothing for an empty row or writer 0."""
+    """This lane's share of recording ``writer`` (or ``block_writer``) on the
+    blocks of row ``row`` of ``mRanges``, a token range of ``rows_per_token``
+    rows per token; nothing for an empty row or writer 0."""
     start = mRanges[row, 0] * rows_per_token
     end = mRanges[row, 1] * rows_per_token
-    if end > start and writer != 0:
-        block = start // block_size + lane
-        last_block = (end - 1) // block_size
-        while block <= last_block:
-            record_conflict(mConflict, slot, block, writer)
-            block += cute.arch.WARP_SIZE
+    if const_expr(block_writer is None):
+        if end > start and writer != 0:
+            block = start // block_size + lane
+            last_block = (end - 1) // block_size
+            while block <= last_block:
+                record_conflict(mConflict, slot, block, writer)
+                block += cute.arch.WARP_SIZE
+    else:
+        assert block_writer is not None
+        if end > start:
+            block = start // block_size + lane
+            last_block = (end - 1) // block_size
+            while block <= last_block:
+                w = block_writer(group_idx, row, block)
+                if w != 0:
+                    if const_expr(monotonic_group_merge):
+                        if is_first_group_row or w > Int32(mConflict[slot, block]):
+                            record_conflict(mConflict, slot, block, w)
+                    else:
+                        record_conflict(mConflict, slot, block, w)
+                block += cute.arch.WARP_SIZE
 
 
 @cute.jit

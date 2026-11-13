@@ -760,6 +760,8 @@ class HandoffMode(enum.Enum):
     NONE = enum.auto()
     # Handshake k on bar[k & 1], waiting for parity (k >> 1) & 1.
     TWO_BARRIERS = enum.auto()
+    # Two-barrier handshake gated on active TMA-box overlap with earlier active pairs.
+    OVERLAP_TWO_BARRIERS = enum.auto()
     # Handshake k on bar[0], waiting for parity k & 1.
     ONE_BARRIER = enum.auto()
 
@@ -817,15 +819,36 @@ def compile_pair_handoff(
     k = 0
     for w, walk in enumerate(walks):
         for qh in range(walk.q_heads):
+            seen_active = False
+            active_lo = 0
+            active_hi = 0
             for pj, pair in enumerate(walk.pairs):
                 has_work = pair.hi > pair.lo
                 wait = None
-                if (
-                    mode is not HandoffMode.NONE
-                    and pj >= 1
-                    and not (skip_handoff_without_work and not has_work)
-                ):
-                    if mode is HandoffMode.TWO_BARRIERS:
+                if mode is HandoffMode.OVERLAP_TWO_BARRIERS:
+                    needs_handoff = False
+                    if has_work:
+                        pair_lo = pair.q_start + pair.lo * tile
+                        pair_hi = pair.q_start + pair.hi * tile
+                        if seen_active:
+                            needs_handoff = pair_lo < active_hi and pair_hi > active_lo
+                            active_lo = min(active_lo, pair_lo)
+                            active_hi = max(active_hi, pair_hi)
+                        else:
+                            seen_active = True
+                            active_lo = pair_lo
+                            active_hi = pair_hi
+                else:
+                    needs_handoff = (
+                        mode is not HandoffMode.NONE
+                        and pj >= 1
+                        and not (skip_handoff_without_work and not has_work)
+                    )
+                if needs_handoff:
+                    if mode in (
+                        HandoffMode.TWO_BARRIERS,
+                        HandoffMode.OVERLAP_TWO_BARRIERS,
+                    ):
                         bar, parity = k & 1, (k >> 1) & 1
                     else:
                         bar, parity = 0, k & 1
@@ -1060,6 +1083,350 @@ class TestRangeMergeTwoCtaPairHandoff(unittest.TestCase):
             rank1_skips_handoff_without_work=True,
         )
         self.assertTrue(outcome.stuck)
+
+    def test_range_merge_two_cta_overlap_gated_handoff_orders_and_prunes(self):
+        """Gating the two-barrier handshake on overlap with earlier active TMA
+        boxes keeps both CTAs' handoff counts identical, skips work-free and
+        disjoint pairs completely, and orders every shared row on random walks."""
+        disjoint_and_empty = [
+            PairWalk(
+                (
+                    MergedPair(0, 4, 0, 1),
+                    MergedPair(2, 6, 1, 1),
+                    MergedPair(4, 8, 0, 1),
+                    MergedPair(12, 16, 0, 1),
+                ),
+                q_heads=2,
+            )
+        ]
+        for rank in (0, 1):
+            prog = compile_pair_handoff(
+                disjoint_and_empty, rank, self._M, HandoffMode.OVERLAP_TWO_BARRIERS
+            )
+            self.assertFalse(any(op[0] in ("arrive", "wait") for op in prog))
+        self.assertEqual(
+            run_pair_handoff(
+                disjoint_and_empty, self._M, HandoffMode.OVERLAP_TWO_BARRIERS
+            ),
+            Outcome(stuck=False, out_of_order=False),
+        )
+        self.assertEqual(
+            run_pair_handoff(self._walks(), self._M, HandoffMode.OVERLAP_TWO_BARRIERS),
+            Outcome(stuck=False, out_of_order=False),
+        )
+        rng = random.Random(11)
+        pruned = 0
+        for _ in range(100):
+            walks = random_pair_walks(rng, self._M)
+            prog_all_0 = compile_pair_handoff(
+                walks, 0, self._M, HandoffMode.TWO_BARRIERS
+            )
+            prog_ov_0 = compile_pair_handoff(
+                walks, 0, self._M, HandoffMode.OVERLAP_TWO_BARRIERS
+            )
+            prog_ov_1 = compile_pair_handoff(
+                walks, 1, self._M, HandoffMode.OVERLAP_TWO_BARRIERS
+            )
+            arrives_0 = sum(1 for op in prog_ov_0 if op[0] == "arrive")
+            arrives_1 = sum(1 for op in prog_ov_1 if op[0] == "arrive")
+            arrives_all = sum(1 for op in prog_all_0 if op[0] == "arrive")
+            self.assertEqual(arrives_0, arrives_1)
+            self.assertLessEqual(arrives_0, arrives_all)
+            if arrives_0 < arrives_all:
+                pruned += 1
+            self.assertEqual(
+                explore_pair_handoff((prog_ov_0, prog_ov_1)),
+                Outcome(stuck=False, out_of_order=False),
+                f"{walks=}",
+            )
+        self.assertGreater(pruned, 30)
+
+
+# ------------------------------------ active-tile masked bwd chain CPU model
+
+
+@dataclass(frozen=True)
+class MaskedPairSpec:
+    """Pair ``[q_start, q_end)`` whose Q tile ``m`` is active on K tiles
+    ``[n_min_by_m[m], n_max_by_m[m])`` (monotone ``n_min`` and ``n_max``)."""
+
+    q_start: int
+    q_end: int
+    n_bounds_by_m: tuple[tuple[int, int], ...]
+
+    def active_m_bounds(self, n: int) -> tuple[int, int]:
+        active = [m for m, (lo, hi) in enumerate(self.n_bounds_by_m) if lo <= n < hi]
+        if not active:
+            return (0, 0)
+        assert active == list(range(active[0], active[-1] + 1))
+        return (active[0], active[-1] + 1)
+
+
+def _pair_max_active_n1_on_block(pair: MaskedPairSpec, block: int, tile: int) -> int:
+    if pair.q_end <= pair.q_start:
+        return 0
+    b0 = pair.q_start // tile
+    max_n1 = 0
+    if (pair.q_start % tile) != 0 and block > b0:
+        m0 = block - b0 - 1
+        if 0 <= m0 < len(pair.n_bounds_by_m):
+            l0, r0 = pair.n_bounds_by_m[m0]
+            if r0 > l0:
+                max_n1 = max(max_n1, r0)
+    m1 = block - b0
+    if 0 <= m1 < len(pair.n_bounds_by_m):
+        l1, r1 = pair.n_bounds_by_m[m1]
+        if r1 > l1:
+            max_n1 = max(max_n1, r1)
+    return max_n1
+
+
+def _group_prev_active_n_on_block(
+    pairs: tuple[MaskedPairSpec, ...], n: int, block: int, tile: int
+) -> int:
+    prev_n = -1
+    for pair in pairs:
+        if pair.q_end <= pair.q_start:
+            continue
+        if not (pair.q_start // tile <= block <= (pair.q_end - 1) // tile):
+            continue
+        b0 = pair.q_start // tile
+        for m in (
+            [block - b0 - 1] if (pair.q_start % tile) != 0 and block > b0 else []
+        ) + [block - b0]:
+            if 0 <= m < len(pair.n_bounds_by_m):
+                lo, hi = pair.n_bounds_by_m[m]
+                if hi > lo and lo < n:
+                    prev_n = max(prev_n, min(n, hi) - 1)
+    return prev_n
+
+
+def _pairs_active_on_block_at_n(
+    pairs: tuple[MaskedPairSpec, ...], n: int, block: int, tile: int
+) -> bool:
+    for pair in pairs:
+        lo_m, hi_m = pair.active_m_bounds(n)
+        if hi_m > lo_m:
+            act_s = pair.q_start + lo_m * tile
+            act_e = min(pair.q_start + hi_m * tile, pair.q_end)
+            if act_e > act_s and act_s // tile <= block <= (act_e - 1) // tile:
+                return True
+    return False
+
+
+def compile_masked_merged_dq_local_tickets(
+    groups: list[tuple[tuple[MaskedPairSpec, ...], int]],
+    stride: int,
+    tile: int,
+) -> list[tuple[Step, ...]]:
+    """Build tickets using the kernel's local boundary-only conflict scan,
+    active-tile wait, and active-tile arrival rules (no m_skip loops)."""
+    # Simulate a single conflict column scanned lazily when n_min(hi_p - 1) == n.
+    tickets: list[tuple[Step, ...]] = []
+    conflict: dict[int, int] = {}
+    scanned = 0
+    for g, (pairs, k_tiles) in enumerate(groups):
+        for n in range(k_tiles):
+            writer = g * stride + n + 1
+            steps: list[Step] = []
+            for pj, pair in enumerate(pairs):
+                lo_p, hi_p = pair.active_m_bounds(n)
+                if hi_p > lo_p and scanned < g:
+                    n_min_last, _ = pair.n_bounds_by_m[hi_p - 1]
+                    if n_min_last == n:
+                        for h in range(scanned, g):
+                            h_pairs, _ = groups[h]
+                            for row_idx, hp in enumerate(h_pairs):
+                                if hp.q_end <= hp.q_start:
+                                    continue
+                                for b in blocks_of((hp.q_start, hp.q_end), tile):
+                                    n1 = _pair_max_active_n1_on_block(hp, b, tile)
+                                    if n1 > 0:
+                                        w_hb = h * stride + n1
+                                        if row_idx == 0 or w_hb > conflict.get(b, 0):
+                                            conflict[b] = w_hb
+                        scanned = g
+                tiles = logical_tiles(pair.q_start, pair.q_end, tile)
+                for m in range(lo_p, hi_p):
+                    rows = tiles[m]
+                    blks = blocks_of(rows, tile)
+                    left, right = blks[0], blks[-1]
+                    wait_left = not (m > lo_p and (pair.q_start % tile) != 0)
+                    wait_right = right != left
+                    if wait_left and _pairs_active_on_block_at_n(
+                        pairs[:pj], n, left, tile
+                    ):
+                        wait_left = False
+                    if wait_right and _pairs_active_on_block_at_n(
+                        pairs[:pj], n, right, tile
+                    ):
+                        wait_right = False
+                    n_min_m, _ = pair.n_bounds_by_m[m]
+                    waits: list[tuple[int, int]] = []
+                    if wait_left:
+                        prev_l = (
+                            -1
+                            if n == 0
+                            else (
+                                _group_prev_active_n_on_block(pairs, n, left, tile)
+                                if n_min_m == n
+                                else n - 1
+                            )
+                        )
+                        pred_l = (
+                            g * stride + prev_l + 1
+                            if prev_l >= 0
+                            else conflict.get(left, 0)
+                        )
+                        waits.append((left, pred_l))
+                    if wait_right:
+                        prev_r = (
+                            -1
+                            if n == 0
+                            else (
+                                _group_prev_active_n_on_block(pairs, n, right, tile)
+                                if n_min_m == n
+                                else n - 1
+                            )
+                        )
+                        pred_r = (
+                            g * stride + prev_r + 1
+                            if prev_r >= 0
+                            else conflict.get(right, 0)
+                        )
+                        waits.append((right, pred_r))
+                    arrive_left = not _pairs_active_on_block_at_n(
+                        pairs[pj + 1 :], n, left, tile
+                    )
+                    arrive_right = (
+                        right != left
+                        and m == hi_p - 1
+                        and not _pairs_active_on_block_at_n(
+                            pairs[pj + 1 :], n, right, tile
+                        )
+                    )
+                    arrivals: list[tuple[int, int]] = []
+                    if arrive_left:
+                        arrivals.append((left, 2))
+                    if arrive_right:
+                        arrivals.append((right, 2))
+                    steps.append(Step(writer, tuple(waits), tuple(arrivals), blks))
+            tickets.append(tuple(steps))
+    return tickets
+
+
+class TestMaskedActiveTileProtocol(unittest.TestCase):
+    """Protocol model for active-tile dual bounds (eliminating m_skip in dQ and
+    skipping masked-out K tiles in dK/dV with straddling weight promotion)."""
+
+    _M = 8
+
+    def _random_masked_pair(self, rng: random.Random, k_tiles: int) -> MaskedPairSpec:
+        start = rng.randint(0, 3 * self._M)
+        end = start + rng.randint(0, 3 * self._M + 3)
+        num_m = len(logical_tiles(start, end, self._M))
+        bounds: list[tuple[int, int]] = []
+        lo_raw = 0
+        hi_raw = 0
+        for _ in range(num_m):
+            lo_raw = rng.randint(lo_raw, k_tiles)
+            hi_raw = rng.randint(hi_raw, k_tiles)
+            bounds.append((min(lo_raw, hi_raw), hi_raw))
+        return MaskedPairSpec(start, end, tuple(bounds))
+
+    def test_masked_dq_local_rules_match_global_active_writers(self):
+        """With m_skip eliminated, unaligned straddling blocks whose neighbor Q
+        tile is masked out, blocks whose pair has empty active K tiles (leaving
+        mConflict untouched), and boundary-only lazy scan_conflicts produce the
+        exact global active-writer waits and arrivals and complete in order."""
+        rng = random.Random(17)
+        for _ in range(80):
+            num_groups = rng.randint(2, 4)
+            k_tiles_list = [rng.randint(0, 3) for _ in range(num_groups)]
+            stride = max(max(k_tiles_list), 1)
+            groups = [
+                (
+                    tuple(
+                        self._random_masked_pair(rng, k_tiles_list[g])
+                        for _ in range(rng.randint(1, 3))
+                    ),
+                    k_tiles_list[g],
+                )
+                for g in range(num_groups)
+            ]
+            local_tickets = compile_masked_merged_dq_local_tickets(
+                groups, stride, self._M
+            )
+            global_writers: list[Writer] = []
+            for g, (pairs, k_tiles) in enumerate(groups):
+                for n in range(k_tiles):
+                    active_tiles = tuple(
+                        logical_tiles(p.q_start, p.q_end, self._M)[m]
+                        for p in pairs
+                        for m in range(*p.active_m_bounds(n))
+                    )
+                    global_writers.append(
+                        Writer(
+                            g * stride + n + 1,
+                            WriterKind.SINGLE_WORK_TILE,
+                            (active_tiles,),
+                        )
+                    )
+            order = head_major_order(global_writers)
+            global_tickets = compile_tickets(global_writers, order, self._M)
+            # Collapse per-pair wait sets in SINGLE_WORK_TILE: first step touching b waits.
+            for lt, gt in zip(local_tickets, global_tickets):
+                self.assertEqual([s.blocks for s in lt], [s.blocks for s in gt])
+                self.assertEqual([s.arrivals for s in lt], [s.arrivals for s in gt])
+                seen_blocks: set[int] = set()
+                expected_first_waits: list[tuple[tuple[int, int], ...]] = []
+                for gs in gt:
+                    w_first = tuple((b, p) for b, p in gs.waits if b not in seen_blocks)
+                    seen_blocks.update(gs.blocks)
+                    expected_first_waits.append(w_first)
+                self.assertEqual([s.waits for s in lt], expected_first_waits)
+            workers = rng.randint(1, 3)
+            outcome = explore(
+                local_tickets, workers, rng.randint(1, workers), ClaimMode.ATOMIC
+            )
+            self.assertFalse(outcome.stuck)
+            self.assertFalse(outcome.out_of_order)
+
+    def test_masked_dkv_neighbor_weight_promotion_and_untouched_conflict(self):
+        """bwd dK/dV: skipping masked-out K tiles requires promoting an active
+        tile's weight from 1 to 2 on a straddled K block when its neighbor tile
+        is masked out, and leaving mConflict untouched when all K tiles touching
+        a block are masked out; without promotion the successor deadlocks."""
+        # Relation 0: [0, 3M) all active -> publishes 1 on blocks 0, 1, 2.
+        # Relation 1: [1, 2M + 2) has 3 K tiles ([1, 9), [9, 17), [17, 18)):
+        #   tile 0 active (straddles blocks 0 and 1), tiles 1 and 2 masked out!
+        #   Block 1 has neighbor tile 1 masked out -> tile 0 promotes weight on
+        #   block 1 from 1 to 2; block 2 has no active tile -> stays at writer 1!
+        # Relation 2: [0, 3M) all active -> waits for 2 on blocks 0, 1 and for
+        #   1 (NOT 2!) on block 2!
+        r0 = logical_tiles(0, 3 * self._M, self._M)
+        r1_all = logical_tiles(1, 2 * self._M + 2, self._M)
+        r2 = logical_tiles(0, 3 * self._M, self._M)
+        active_writers = [
+            Writer(1, WriterKind.MULTI_TILE, tuple((t,) for t in r0)),
+            Writer(2, WriterKind.MULTI_TILE, ((r1_all[0],), (), ())),
+            Writer(3, WriterKind.MULTI_TILE, tuple((t,) for t in r2)),
+        ]
+        order = head_major_order(active_writers)
+        promoted_tickets = compile_tickets(active_writers, order, self._M)
+        # Verify block 2 of writer 3 waits on writer 1 (mConflict left untouched by r1),
+        # and writer 2's active tile 0 arrives with promoted weight 2 on block 1.
+        self.assertEqual(promoted_tickets[3][0].arrivals, ((0, 2), (1, 2)))
+        self.assertEqual(promoted_tickets[8][0].waits, ((2, 1),))
+        self.assertEqual(
+            explore(promoted_tickets, 2, 2, ClaimMode.ATOMIC),
+            Outcome(stuck=False, out_of_order=False),
+        )
+        # Control: without neighbor weight promotion (weight 1 on block 1), writer 3 sticks.
+        unpromoted = list(promoted_tickets)
+        s0 = unpromoted[3][0]
+        unpromoted[3] = (Step(s0.writer, s0.waits, ((0, 2), (1, 1)), s0.blocks),)
+        self.assertTrue(explore(unpromoted, 2, 2, ClaimMode.ATOMIC).stuck)
 
 
 if __name__ == "__main__":

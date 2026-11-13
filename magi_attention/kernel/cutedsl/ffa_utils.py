@@ -241,9 +241,12 @@ def validate_range_deterministic(
     launch's chains (fwd ``R``, bwd dQ ``R * num_k_tiles``, bwd dK/dV
     ``R * G``), which must stay within int32.
 
-    The bwd dQ writer of cluster K tile ``n`` of relation ``r`` is
+    The chained bwd dQ writer of cluster K tile ``n`` of relation ``r`` is
     ``r * num_k_tiles + n + 1``, with ``num_k_tiles`` the cluster K tiles of
-    ``max_seqlen_k``; under RangeMerge ``r`` is the merged K group. The
+    ``max_seqlen_k``; under RangeMerge ``r`` is the merged K group. When
+    ``use_dense_dqacc_for_ranges`` is active (disjoint ``q_ranges``), each
+    range owns isolated ``tile_m``-aligned ``dQacc`` slots and orders K tiles
+    on per-slot semaphores without a dQ chain. For the chained dQ path, writer
     numbers are unique only if no K range is longer than ``max_seqlen_k``;
     the caller guarantees it, and FFA debug mode checks it against the
     ranges, as reading them back syncs.
