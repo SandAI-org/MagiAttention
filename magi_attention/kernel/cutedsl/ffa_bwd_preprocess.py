@@ -545,7 +545,7 @@ def bwd_preprocess(
     m_block_size: int,
     use_padded_offsets: bool = True,
     q_ranges: torch.Tensor | None = None,
-    max_seqlen_q: int = 0,
+    max_seqlen_q: int | None = None,
     use_dense_dqacc_for_ranges: bool = False,
     q_ranges_disjoint: bool = False,
 ):
@@ -564,8 +564,8 @@ def bwd_preprocess(
         use_dense_dqacc_for_ranges,
         q_ranges_disjoint,
     )
-    assert (
-        q_ranges is None or max_seqlen_q > 0
+    assert q_ranges is None or (
+        max_seqlen_q is not None and max_seqlen_q >= 0
     ), "ranges preprocess requires max_seqlen_q (the per-range launch bound)"
 
     if compile_key not in bwd_preprocess.compile_cache:
@@ -583,7 +583,7 @@ def bwd_preprocess(
         seqused_q,
         q_ranges,
         dlse,
-        max_seqlen_q,
+        0 if max_seqlen_q is None else max_seqlen_q,
     )
 
 

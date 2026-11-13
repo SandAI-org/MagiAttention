@@ -93,10 +93,11 @@ def _apply_range_merge(
     """The merged (group, pair) CSR form of one pass's relation rows.
 
     Forward merges on the Q axis, backward on the K axis; the caller picks
-    which tensor is outer. The plan holds ``[G, 2]`` outer groups, ``[R, 2]``
-    inner rows and ``[R]`` mask types for the caller's ``R`` relations
-    (materialized per row, since the merge reorders rows), and the
-    ``[G + 1]`` CSR between them.
+    which tensor is outer. The plan holds ``[M, 2]`` outer group slots (with
+    ``G == unique_count[0]`` active groups when ``unique_count`` is set, else
+    ``M == G``), ``[R, 2]`` inner rows and ``[R]`` mask types for the caller's
+    ``R`` relations (materialized per row, since the merge reorders rows), and
+    the ``[M + 1]`` CSR between them.
     """
     if isinstance(range_merge, RangeMergePlan):
         plan = range_merge
@@ -113,6 +114,14 @@ def _apply_range_merge(
         assert (
             plan.merged_outer_ranges_by_start.shape == plan.merged_outer_ranges.shape
         ), "RangeMergePlan start-ordered groups disagree with the groups"
+        if plan.unique_count is not None:
+            validate_tensor(
+                plan.unique_count,
+                "RangeMergePlan.unique_count",
+                (1,),
+                torch.int32,
+                outer_ranges.device,
+            )
         return plan
     return merge_qk_ranges(
         outer_ranges,
@@ -277,6 +286,7 @@ def _flex_flash_attn_fwd(
     )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
+    num_groups = None
     if range_merge_active:
         assert q_ranges is not None and k_ranges is not None  # has_ranges
         q_merge = _apply_range_merge(range_merge, q_ranges, k_ranges, mask_types)
@@ -284,6 +294,7 @@ def _flex_flash_attn_fwd(
         k_ranges = q_merge.sorted_inner_ranges
         mask_types = q_merge.sorted_mask_types
         cu_batches = q_merge.cu_batches
+        num_groups = q_merge.unique_count
         pack_gqa = False
     per_range, mask_type, mask_types_tensor = _split_mask_types(mask_types)
     # SM100/SM110 kernels consume mQRanges/mKRanges directly. Other arches
@@ -725,6 +736,7 @@ def _flex_flash_attn_fwd(
         use_clc_scheduler,
         persistent_launch,
         range_merge_active,
+        num_groups is not None,
         max_logits is not None,
         fwd_deterministic,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
@@ -902,6 +914,11 @@ def _flex_flash_attn_fwd(
                 if cu_batches is not None
                 else None
             )
+            compile_args.append(
+                to_cute_tensor(num_groups, assumed_align=4, leading_dim=0)
+                if num_groups is not None
+                else None
+            )
             compile_args.append(Int32(sm_margin) if ranges_persistent else None)
             compile_args.append(
                 to_cute_tensor(tile_counter, assumed_align=4, leading_dim=0)
@@ -955,6 +972,7 @@ def _flex_flash_attn_fwd(
         call_args.append(range_locks)
         call_args.append(max_seqlen_q)
         call_args.append(cu_batches)
+        call_args.append(num_groups)
         call_args.append(sm_margin if ranges_persistent else None)
         call_args.append(tile_counter)
         call_args.append(max_logits)
@@ -1122,6 +1140,7 @@ def _flex_flash_attn_bwd(
             )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
+    num_groups = None
     k_merge = None
     if range_merge_active:
         assert q_ranges is not None and k_ranges is not None  # has_ranges
@@ -1130,6 +1149,7 @@ def _flex_flash_attn_bwd(
         q_ranges = k_merge.sorted_inner_ranges
         mask_types = k_merge.sorted_mask_types
         cu_batches = k_merge.cu_batches
+        num_groups = k_merge.unique_count
     if has_ranges and major_arch not in (10, 11):
         cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
         cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
@@ -1842,6 +1862,7 @@ def _flex_flash_attn_bwd(
             disable_bwd_dkv_atomic_reduction,
             dk_dtype,
             range_merge_active,
+            num_groups is not None,
             use_dense_dqacc_for_ranges,
             k_ranges_sorted_disjoint,
             bwd_persistent,
@@ -2010,6 +2031,11 @@ def _flex_flash_attn_bwd(
                 if cu_batches is not None
                 else None
             )
+            bwd_compile_args.append(
+                to_cute_tensor(num_groups, assumed_align=4, leading_dim=0)
+                if num_groups is not None
+                else None
+            )
             # Runtime scalar: the compiled variant stays max_seqlen_k-agnostic.
             bwd_compile_args.append(Int32(seqlen_k))
             bwd_compile_args.append(Int32(sm_margin) if bwd_persistent else None)
@@ -2069,6 +2095,7 @@ def _flex_flash_attn_bwd(
     if major_arch in [10, 11]:
         bwd_call_args.append(mask_types_tensor)
         bwd_call_args.append(cu_batches)
+        bwd_call_args.append(num_groups)
         bwd_call_args.append(seqlen_k)
         bwd_call_args.append(sm_margin if bwd_persistent else None)
         bwd_call_args.append(tile_counter)
@@ -2464,8 +2491,9 @@ def flex_flash_attn_func(
         relations sharing an outer interval into (group, pair) CSR form so
         forward skips the atomic O merge; backward derives the dual K-merge.
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
-        contracts. ``True`` builds the merge tables in every call, which
-        synchronizes the device; pass a plan to capture a CUDA graph.
+        contracts. ``True`` builds the merge tables on device in every call
+        without host synchronization (CUDA-graph capturable); pass a
+        precomputed plan to reuse the tables across calls.
 
     out_dtype: dtype of the returned O, fp32/fp16/bf16. None returns the input
         dtype. A dtype other than the input dtype requires SM100/SM110. With

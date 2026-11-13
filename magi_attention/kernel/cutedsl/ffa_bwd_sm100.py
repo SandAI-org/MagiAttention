@@ -825,6 +825,7 @@ class FFABwdSm100:
         mdV_semaphore: Optional[cute.Tensor] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        mNumBatches: Optional[cute.Tensor] = None,
         max_seqlen_k: Int32 | None = None,
         sm_margin: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
@@ -1408,6 +1409,7 @@ class FFABwdSm100:
             tile_shape_mn=self.cta_tiler[:2],  # (tile_n, tile_m)
             cluster_shape_mn=self.cluster_shape_mnk[:2],
             mQRanges=mKRanges,
+            mNumBatches=mNumBatches,
             max_outer_range_width=(
                 max_seqlen_k if const_expr(needs_range_quota) else None
             ),
@@ -1879,11 +1881,8 @@ class FFABwdSm100:
         ).launch(
             grid=grid_dim,
             block=[self.threads_per_cta, 1, 1],
-            # DYNAMIC publishes tiles with st.async.shared::cluster, which needs
-            # a cluster launch even for one CTA.
             cluster=self.cluster_shape_mnk
             if cute.size(self.cluster_shape_mnk) > 1
-            or self.scheduling_mode == SchedulingMode.DYNAMIC
             else None,
             smem=self.shared_storage.size_in_bytes(),  # type: ignore[attr-defined]
             stream=stream,

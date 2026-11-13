@@ -890,7 +890,9 @@ class FFABwdPostProcessRowMajor:
             grid = (cute.ceil_div(mOut.shape[0], self.rows_per_cta), 1, num_head)
         else:
             grid = (
-                cute.ceil_div(max_seqlen, self.rows_per_cta),
+                cute.ceil_div(
+                    cutlass.max(max_seqlen, cutlass.Int32(1)), self.rows_per_cta
+                ),
                 mRanges.shape[0],
                 num_head,
             )
@@ -1044,9 +1046,10 @@ class FFABwdGradHoleCleanup:
                 lo = lo_next if active else lo
                 hi = hi_next if active else hi
 
-            prev_end = cutlass.Int32(mRanges[cutlass.max(lo - 1, 0), 1])
-            outside_prev = row >= prev_end
-            is_hole = cutlass.Boolean(True) if lo == 0 else outside_prev
+            is_hole = cutlass.Boolean(True)
+            if lo > 0:
+                prev_end = cutlass.Int32(mRanges[lo - 1, 1])
+                is_hole = row >= prev_end
             is_hole = is_hole if in_bounds else cutlass.Boolean(False)
         else:
             # Linear scan for unsorted disjoint ranges

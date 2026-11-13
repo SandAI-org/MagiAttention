@@ -792,7 +792,8 @@ class FFAFwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
         max_seqlen_q: Int32 | None = None,
-        mCuBatches: Optional[cute.Tensor] = None,  # [G + 1] CSR offsets for RangeMerge
+        mCuBatches: Optional[cute.Tensor] = None,  # [R + 1] CSR offsets for RangeMerge
+        mNumBatches: Optional[cute.Tensor] = None,  # [1] int32 active group count G
         sm_margin: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
@@ -853,6 +854,9 @@ class FFAFwdSm100:
         assert (
             mCuBatches is not None
         ) == self.range_merge, "RangeMerge requires the cu_batches CSR (and only then)"
+        assert (
+            mNumBatches is None or mCuBatches is not None
+        ), "mNumBatches requires RangeMerge"
         if const_expr(not self.disable_fwd_atomic_reduction):
             assert mLSE is not None, "atomic reduction merges through LSE"
             assert mO.element_type == self.o_dtype
@@ -1290,6 +1294,7 @@ class FFAFwdSm100:
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],
             mQRanges=mQRanges,
+            mNumBatches=mNumBatches,
             # Overlapping Q ranges need per-range grid bounds without persistence.
             max_outer_range_width=(
                 max_seqlen_q
@@ -1573,11 +1578,8 @@ class FFAFwdSm100:
         ).launch(
             grid=grid_dim,
             block=[self.threads_per_cta, 1, 1],
-            # DYNAMIC publishes tiles with st.async.shared::cluster, which needs
-            # a cluster launch even for one CTA.
             cluster=self.cluster_shape_mnk
             if cute.size(self.cluster_shape_mnk) > 1
-            or self.scheduling_mode == SchedulingMode.DYNAMIC
             else None,
             stream=stream,
             min_blocks_per_mp=1,
@@ -6074,7 +6076,7 @@ class FFAFwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
-        if const_expr(self.deterministic):
+        if const_expr(not self.use_clc_scheduler):
             assert isinstance(tile_scheduler, SingleTileVarlenScheduler)
             tile_scheduler.claim_first_work()
         work_tile = tile_scheduler.initial_work_tile_info()
