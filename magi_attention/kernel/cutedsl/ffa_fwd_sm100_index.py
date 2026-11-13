@@ -18,18 +18,6 @@
 
 """SM100 forward for index-sparse (DSA) attention, ``ffa_fwd_sm100_index``.
 
-Given ``index_sparse_indices`` with shape
-``(ceil(total_q / q_block_size), num_heads_kv, topk)`` of global K token ids (-1 padded),
-computes token-major ``out`` and natural-log ``lse``.
-
-Geometry (fixed; see ``FFAFwdSm100Index.__init__`` for the constants and their reasons):
-
-* ``tile_m``: 128 rows, one index row shared by ``q_block_size * G`` query rows.
-  PackGQA puts heads fastest and requires ``q_block_size * G == 128``.
-* ``tile_n``: 128 K slots per stage.
-* ``q_stage``: 1, with overlap in the N direction.
-* ``kv_stage``: 5, from (224 KiB shared memory - 64 KiB Q/O) / 32 KiB per K/V stage.
-* ``s_stage``: 2, ping-ponging S/P over consecutive K tiles.
 * All 512 TMEM columns: S0 uses 0-127, S1 128-255, O0 256-383, O1 384-511.
   BF16 P aliases each S at +64 columns.
 
@@ -41,17 +29,10 @@ Roles:
 * Warp 12: reads Q/K/V from shared memory and P0/P1; writes S0/S1 and O0/O1.
 * Warps 13-15: read index rows from global memory; gather K/V into shared memory.
 
-Launch: persistent grid ``(min(num_SMs, num_tiles), 1, 1)``, where
-``num_tiles = ceil(total_q * G / 128) * num_heads_kv``; 512 threads per block,
-no cluster.
-
-The gather is the expensive half: three warps copy every gathered 256 B token row as sixteen 16 B
-``cp.async`` operations, two rows per warp instruction, computing the SW128 swizzle in software.
 Invalid slots (``-1``, an out-of-range id, ``slot >= topk_eff``) are zero-filled by the copy's
 ``ignore-src`` predicate and masked to ``-inf`` by the softmax warps from validity words read off
 the index row.
 
-Supported: BF16 / FP16, head_dim 128, ``G`` dividing 128, non-causal, SM 10.x.
 I/O: see ``ffa_fwd_sm100_index`` (the Python entry point) for shapes, dtypes and alignment.
 """
 

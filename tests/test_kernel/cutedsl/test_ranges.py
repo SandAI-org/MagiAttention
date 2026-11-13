@@ -69,6 +69,17 @@ SPAN = 128
 ACCUM_ATOL = ACCUM_RTOL = 1e-2
 LSE_ATOL = LSE_RTOL = 1e-3
 
+# Direct-store hole geometry: the q ranges [64, 192) and [256, 384) leave rows
+# [0, 64), [192, 256) and [384, 512) uncovered. Of the 128-row blocks of the
+# fwd postprocess, two are partly uncovered and the last is fully uncovered.
+HOLE_Q_RANGES: Ranges = [[64, SPAN + 64], [2 * SPAN, 3 * SPAN]]
+HOLE_K_RANGES: Ranges = [[0, 2 * SPAN], [2 * SPAN, 4 * SPAN]]
+HOLE_TOTAL_Q = 4 * SPAN
+HOLE_TOTAL_K = 4 * SPAN
+
+# O tolerance per output dtype: the reference is computed in fp64.
+OUT_TOL = {torch.float32: 1e-2, torch.bfloat16: 2e-2}
+
 
 @dataclass(frozen=True)
 class UniqueWriterCase:
@@ -279,6 +290,149 @@ class TestRangeAccumulation(TestCase):
             out[accumulated], out_prev[accumulated], atol=0, rtol=0
         )
         torch.testing.assert_close(lse, lse_prev, atol=0, rtol=0)
+
+
+@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
+class TestDirectStoreHoleFill(TestCase):
+    """The direct store writes rows outside every q range only with ``fill_uncovered_rows``.
+
+    O is prefilled with NaN and LSE with -inf. A NaN left in O marks a row
+    nothing wrote, and it also catches a fill that scales the old O instead of
+    storing zeros.
+    """
+
+    def setUp(self) -> None:
+        self.device = torch.cuda.current_device()
+        self.heads = MHA_HD128
+        seed_test_case(self.id())
+
+    def _fwd(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        out: torch.Tensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+        *,
+        fill_uncovered_rows: bool,
+    ) -> None:
+        _flex_flash_attn_fwd(
+            q,
+            k,
+            v,
+            out=out,
+            lse=lse,
+            q_ranges=to_ranges_tensor(HOLE_Q_RANGES, self.device),
+            k_ranges=to_ranges_tensor(HOLE_K_RANGES, self.device),
+            mask_types=MT_MAP.full,
+            max_seqlen_q=max(end - start for start, end in HOLE_Q_RANGES),
+            max_seqlen_k=max(end - start for start, end in HOLE_K_RANGES),
+            sink=sink,
+            disable_fwd_atomic_reduction=True,
+            fill_uncovered_rows=fill_uncovered_rows,
+        )
+
+    def _uncovered(self) -> torch.Tensor:
+        uncovered = torch.ones(HOLE_TOTAL_Q, dtype=torch.bool, device=self.device)
+        for start, end in HOLE_Q_RANGES:
+            uncovered[start:end] = False
+        return uncovered
+
+    def _sink(self, num_sinks: int) -> torch.Tensor | None:
+        if num_sinks == 0:
+            return None
+        return torch.randn(num_sinks, self.heads.num_heads_q, device=self.device)
+
+    def _reference(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch_reference_out_lse(
+            q=q, k=k, v=v, q_ranges=HOLE_Q_RANGES, k_ranges=HOLE_K_RANGES, sink=sink
+        )
+
+    @parameterize("out_dtype", [torch.float32, DTYPE])
+    @parameterize("num_sinks", [0, 2])
+    def test_fill_writes_uncovered_rows(self, out_dtype: torch.dtype, num_sinks: int):
+        """Uncovered rows hold O = 0 and the sink-only LSE; covered rows match the reference."""
+        q, k, v = make_qkv(
+            (HOLE_TOTAL_Q,), (HOLE_TOTAL_K,), self.heads, DTYPE, self.device
+        )
+        sink = self._sink(num_sinks)
+        out = torch.full(
+            (HOLE_TOTAL_Q, self.heads.num_heads_q, self.heads.head_dim),
+            math.nan,
+            device=self.device,
+            dtype=out_dtype,
+        )
+        lse = torch.full(
+            (HOLE_TOTAL_Q, self.heads.num_heads_q), -math.inf, device=self.device
+        )
+
+        self._fwd(q, k, v, out, lse, sink, fill_uncovered_rows=True)
+
+        uncovered = self._uncovered()
+        covered = ~uncovered
+        self.assertFalse(
+            torch.isnan(out[covered]).any(), "a covered row kept the initial NaN"
+        )
+        self.assertTrue(torch.all(out[uncovered] == 0), "uncovered O is not zero")
+        lse_uncovered = (
+            torch.full(
+                (int(uncovered.sum()), self.heads.num_heads_q),
+                -math.inf,
+                device=self.device,
+            )
+            if sink is None
+            else torch.logsumexp(sink, dim=0).expand(int(uncovered.sum()), -1)
+        )
+        torch.testing.assert_close(lse[uncovered], lse_uncovered, atol=0, rtol=0)
+
+        out_ref, lse_ref = self._reference(q, k, v, sink)
+        tol = OUT_TOL[out_dtype]
+        torch.testing.assert_close(
+            out[covered].float(), out_ref[covered], atol=tol, rtol=tol
+        )
+        torch.testing.assert_close(
+            lse[covered], lse_ref[covered], atol=LSE_ATOL, rtol=LSE_RTOL
+        )
+
+    @parameterize("out_dtype", [torch.float32, DTYPE])
+    def test_default_leaves_uncovered_rows_untouched(self, out_dtype: torch.dtype):
+        """Without the fill, covered rows match the reference and uncovered O keeps NaN."""
+        q, k, v = make_qkv(
+            (HOLE_TOTAL_Q,), (HOLE_TOTAL_K,), self.heads, DTYPE, self.device
+        )
+        out = torch.full(
+            (HOLE_TOTAL_Q, self.heads.num_heads_q, self.heads.head_dim),
+            math.nan,
+            device=self.device,
+            dtype=out_dtype,
+        )
+        lse = torch.full(
+            (HOLE_TOTAL_Q, self.heads.num_heads_q), -math.inf, device=self.device
+        )
+
+        self._fwd(q, k, v, out, lse, None, fill_uncovered_rows=False)
+
+        uncovered = self._uncovered()
+        covered = ~uncovered
+        self.assertTrue(
+            torch.isnan(out[uncovered]).all(), "an uncovered row was written"
+        )
+
+        out_ref, lse_ref = self._reference(q, k, v, None)
+        tol = OUT_TOL[out_dtype]
+        torch.testing.assert_close(
+            out[covered].float(), out_ref[covered], atol=tol, rtol=tol
+        )
+        torch.testing.assert_close(
+            lse[covered], lse_ref[covered], atol=LSE_ATOL, rtol=LSE_RTOL
+        )
 
 
 # SM reservation of the overlap tests: the grid is capped at num_sm - SM_MARGIN.
