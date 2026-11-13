@@ -52,6 +52,13 @@ def _maybe_disable_2cta(disable: bool) -> Iterator[None]:
 
 
 class TestFfaCatGqa(DistTestBase):
+    def setUp(self) -> None:
+        # Skip in the parent before DistTestBase spawns ranks, including ranks
+        # with no assigned parameter cases that would otherwise reach a barrier.
+        if not torch.cuda.is_available() or get_device_arch()[1] not in (10, 11):
+            self.skipTest("cat_gqa requires SM100/SM110")
+        super().setUp()
+
     @property
     def seed(self) -> int:
         return 42
@@ -68,10 +75,6 @@ class TestFfaCatGqa(DistTestBase):
     def world_size(self) -> int:
         return torch.cuda.device_count()
 
-    def _skip_unless_sm100(self) -> None:
-        if get_device_arch()[1] not in (10, 11):
-            self.skipTest("cat_gqa requires SM100/SM110")
-
     def _log_ran(self, test_case: str) -> None:
         print(f"[RANK {self.rank}] ran {test_case}", flush=True)
 
@@ -87,7 +90,6 @@ class TestFfaCatGqa(DistTestBase):
         """Dense GQA/MQA with unaligned Q/K lengths on the 1-CTA and 2-CTA
         kernels: matches the reference, and two ``deterministic=True`` calls
         agree bitwise."""
-        self._skip_unless_sm100()
         if d == 192 and not two_cta:
             # The hd192 bwd mainloop is 2-CTA only. Per-combination skips
             # return: a SkipTest would end the whole test on this rank only.
@@ -192,7 +194,6 @@ class TestFfaCatGqa(DistTestBase):
         so each resident cluster walks at least three tiles of several q heads
         and the persistent loop carries pipeline phases and ``tile_done``
         across tiles."""
-        self._skip_unless_sm100()
         nheads_kv = {"gqa": 2, "mqa": 1}[mha_type]
         q, k, v, out, lse, do, ranges, attn_type_map, kwargs = self._ranges_inputs(
             nheads_kv, d, self.seed + d + int(few_ctas) + int(direct) + nheads_kv
@@ -261,7 +262,6 @@ class TestFfaCatGqa(DistTestBase):
         """RangeMerge groups of several relations, some of which leave a K tile
         without any Q block (bi-causal / causal pairs), so every warp walks
         empty pairs inside the q-head loop."""
-        self._skip_unless_sm100()
         device, dtype = self.device, torch.bfloat16
         q_groups = [(0, 257), (257, 386), (386, 579)]
         k_groups = [(0, 129), (129, 386), (386, 579)]
@@ -332,7 +332,6 @@ class TestFfaCatGqa(DistTestBase):
         reducing paths (dense GQA without ``cat_gqa``, ranges with atomic dK/dV)
         and are overwritten by the single-writer paths (dense ``cat_gqa``,
         ranges with the direct dK/dV store)."""
-        self._skip_unless_sm100()
         if path == "ranges_direct" and not cat_gqa:
             # The unfolded GQA backward has no direct dK/dV store (test_ranges
             # checks the rejection).

@@ -62,6 +62,13 @@ def _contiguous_ranges(lengths: list[int]) -> list[list[int]]:
 
 
 class TestFfaPackGqaBwd(DistTestBase):
+    def setUp(self) -> None:
+        # Skip in the parent before DistTestBase spawns ranks, including ranks
+        # with no assigned parameter cases that would otherwise reach a barrier.
+        if not torch.cuda.is_available() or get_device_arch()[1] not in (10, 11):
+            self.skipTest("bwd_pack_factor > 1 requires SM100/SM110")
+        super().setUp()
+
     @property
     def seed(self) -> int:
         return 42
@@ -77,10 +84,6 @@ class TestFfaPackGqaBwd(DistTestBase):
     @property
     def world_size(self) -> int:
         return torch.cuda.device_count()
-
-    def _skip_unless_sm100(self) -> None:
-        if get_device_arch()[1] not in (10, 11):
-            self.skipTest("bwd_pack_factor > 1 requires SM100/SM110")
 
     def _log_ran(self, test_case: str) -> None:
         print(f"[RANK {self.rank}] ran {test_case}", flush=True)
@@ -151,7 +154,6 @@ class TestFfaPackGqaBwd(DistTestBase):
         """Full and partial packs on the 1-CTA (d=64) and 2-CTA (d=128/192)
         kernels, with all four per-range mask types, unaligned range starts
         and short Q tails, on the atomic and the direct dK/dV store."""
-        self._skip_unless_sm100()
         num_head, num_head_kv, pack_factor, expected = _FOLD_CASES[fold_case]
         if d == 192 and fold_case == "full_pack8":
             # Same kernel shape as full_pack4 at d=192 apart from the pack
@@ -205,7 +207,6 @@ class TestFfaPackGqaBwd(DistTestBase):
         """The static mask entry (one ``int`` mask type) bounds and masks
         packed rows through ``get_m_block_min_max`` and the dense transposed
         mask; ``len_q != len_k`` moves the causal diagonal off the tile grid."""
-        self._skip_unless_sm100()
         q_ranges = _contiguous_ranges(_Q_LENS)
         k_ranges = _contiguous_ranges(_K_LENS)
         q, k, v, out, lse, do, kwargs = self._inputs(
@@ -253,7 +254,6 @@ class TestFfaPackGqaBwd(DistTestBase):
         and overlapping k ranges (atomic dK/dV) under the full pack. The
         (q, k) rectangles of the relations are pairwise disjoint, so the
         mask-union reference applies."""
-        self._skip_unless_sm100()
         q_ranges = [[0, 300], [200, 600], [600, 1000], [0, 150], [999, 1300]]
         k_ranges = [[0, 300], [300, 700], [100, 500], [700, 1000], [900, 1300]]
         attn_type_map = [_MASK_CYCLE[i % 4] for i in range(len(q_ranges))]
@@ -294,7 +294,6 @@ class TestFfaPackGqaBwd(DistTestBase):
         2-CTA cluster), and bi-causal relations with ``len_q > len_k`` give
         every CTA runs of K tiles without any Q block, whose direct dK/dV
         are zero-filled. Covers the 1-CTA (d=64) and 2-CTA (d=128) kernels."""
-        self._skip_unless_sm100()
         num_head, num_head_kv, pack_factor, expected = _FOLD_CASES[fold_case]
         nseg, len_q, len_k = 24, 300, 150
         pattern = [MT_MAP.full, MT_MAP.bi_causal, MT_MAP.bi_causal, MT_MAP.causal]
@@ -349,7 +348,6 @@ class TestFfaPackGqaBwd(DistTestBase):
         block, under the full pack (8/2: pack 4) and the partial pack with
         the head loop (12/2: pack 2, three groups), both requested through
         ``flex_flash_attn_func``."""
-        self._skip_unless_sm100()
         num_head, num_head_kv = heads
         pack_factor, expected = {
             (8, 2): (4, (4, False)),
@@ -417,7 +415,6 @@ class TestFfaPackGqaBwd(DistTestBase):
         an empty bi-causal band (``len_q > len_k``) next to non-empty ones.
         The empty-k relation shares its q rows with a non-empty relation, so
         every q row stays covered."""
-        self._skip_unless_sm100()
         q_ranges = [[0, 100], [100, 100], [0, 77], [100, 250], [250, 250], [250, 314]]
         k_ranges = [[0, 90], [90, 140], [140, 140], [140, 220], [220, 220], [220, 284]]
         attn_type_map = [
@@ -472,7 +469,6 @@ class TestFfaPackGqaBwd(DistTestBase):
     def test_caller_buffers(self, direct):
         """dQ always accumulates into a caller buffer; dK/dV accumulate on
         the atomic path and are overwritten by the direct store."""
-        self._skip_unless_sm100()
         q_ranges = _contiguous_ranges(_Q_LENS)
         k_ranges = _contiguous_ranges(_K_LENS)
         attn_type_map = [_MASK_CYCLE[i % 4] for i in range(len(_Q_LENS))]
@@ -539,7 +535,6 @@ class TestFfaPackGqaBwd(DistTestBase):
         """``bwd_pack_factor=4`` and ``bwd_pack_factor=1`` reduce the same
         partial products in a different order, so their gradients agree to
         fp32 rounding of the reduction."""
-        self._skip_unless_sm100()
         q_ranges = _contiguous_ranges(_Q_LENS)
         k_ranges = _contiguous_ranges(_K_LENS)
         attn_type_map = [_MASK_CYCLE[i % 4] for i in range(len(_Q_LENS))]
@@ -594,7 +589,6 @@ class TestFfaPackGqaBwd(DistTestBase):
         """Full packs of 16, 64 and 128 q heads per kv head, up to the Q rows
         of one CTA (128 on the 1-CTA kernel at d=64, 64 on the 2-CTA kernel
         at d=128), where a CTA holds a single token."""
-        self._skip_unless_sm100()
         d, num_head, num_head_kv, direct = case
         qhead_per_kvhead = num_head // num_head_kv
         q_ranges = _contiguous_ranges(_Q_LENS)
@@ -648,7 +642,6 @@ class TestFfaPackGqaBwd(DistTestBase):
         backward reduces dQ through the row-major dQacc. dQ accumulates onto a
         caller fp32 buffer. ``packed_persistent`` adds the remaining arguments
         of the dist backward: declared coverage and ``sm_margin > 0``."""
-        self._skip_unless_sm100()
         q_ranges = _contiguous_ranges(_Q_LENS)
         k_ranges = _contiguous_ranges(_K_LENS)
         attn_type_map = [_MASK_CYCLE[i % 4] for i in range(len(_Q_LENS))]
@@ -721,7 +714,6 @@ class TestFfaPackGqaBwd(DistTestBase):
     def test_sink_fold(self, d, fold_case):
         """Learnable sink logits rescale the softmax denominator of packed
         backward tiles and emit ``dsink`` through ``bwd_dsink``."""
-        self._skip_unless_sm100()
         num_head, num_head_kv, pack_factor, expected = _FOLD_CASES[fold_case]
         q_ranges = _contiguous_ranges(_Q_LENS)
         k_ranges = _contiguous_ranges(_K_LENS)
@@ -791,7 +783,6 @@ class TestFfaPackGqaBwd(DistTestBase):
     def test_rejections(self):
         """Requests that no fold can serve fail before any bwd kernel is
         built, including a pack factor passed through ``flex_flash_attn_func``."""
-        self._skip_unless_sm100()
         device, dtype = self.device, torch.bfloat16
         q_ranges = _contiguous_ranges([96, 160])
         ranges = torch.tensor(q_ranges, device=device, dtype=torch.int32)
