@@ -12,33 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib
-import sys
-
 import pytest
 
-
-@pytest.fixture(autouse=True)
-def _reload_slice_module():
-    """Ensure AttnMaskType identity is consistent after conftest.py module reloads."""
-    mods_to_reload = [
-        "magi_attention.common.enum",
-        "magi_attention.meta.container.slice",
-        "magi_attention.meta.container.chunk",
-        "magi_attention.meta.container.bucket",
-    ]
-    for mod_name in mods_to_reload:
-        if mod_name in sys.modules:
-            importlib.reload(sys.modules[mod_name])
-    yield
+from magi_attention.common import AttnRange, AttnRanges
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.meta.container.bucket import AttnBucket
+from magi_attention.meta.container.chunk import AttnChunk
+from magi_attention.meta.container.slice import AttnSlice, MultiKAttnSlice
 
 
 def _make_slice(slice_id, mask_type_str, q_start, q_end, k_start, k_end):
-    """Helper to create AttnSlice with fresh imports to avoid enum identity issues after module reload."""
-    from magi_attention.common import AttnRange
-    from magi_attention.common.enum import AttnMaskType
-    from magi_attention.meta.container.slice import AttnSlice
-
     mt = (
         AttnMaskType(mask_type_str) if isinstance(mask_type_str, str) else mask_type_str
     )
@@ -64,9 +47,6 @@ class TestAttnSlice:
         assert s_tri.area == (1 + 5) * 5 // 2
 
     def test_area_unsupported_mask_type(self):
-        from magi_attention.common import AttnRange
-        from magi_attention.meta.container.slice import AttnSlice
-
         s = AttnSlice(
             slice_id=0,
             mask_type="unsupported",
@@ -96,10 +76,6 @@ class TestAttnSlice:
 @pytest.mark.arch_independent
 class TestMultiKAttnSlice:
     def test_area_full_mask(self):
-        from magi_attention.common import AttnRange, AttnRanges
-        from magi_attention.common.enum import AttnMaskType
-        from magi_attention.meta.container.slice import MultiKAttnSlice
-
         s = MultiKAttnSlice(
             q_range=AttnRange(0, 10),
             k_ranges=AttnRanges.from_ranges([(0, 5), (10, 20)]),
@@ -108,9 +84,6 @@ class TestMultiKAttnSlice:
         assert s.area == 10 * 5 + 10 * 10
 
     def test_area_unsupported_mask_type(self):
-        from magi_attention.common import AttnRange, AttnRanges
-        from magi_attention.meta.container.slice import MultiKAttnSlice
-
         s = MultiKAttnSlice(
             q_range=AttnRange(0, 10),
             k_ranges=AttnRanges.from_ranges([(0, 5)]),
@@ -120,10 +93,6 @@ class TestMultiKAttnSlice:
             _ = s.area
 
     def test_area_setter(self):
-        from magi_attention.common import AttnRange, AttnRanges
-        from magi_attention.common.enum import AttnMaskType
-        from magi_attention.meta.container.slice import MultiKAttnSlice
-
         s = MultiKAttnSlice(
             q_range=AttnRange(0, 10),
             k_ranges=AttnRanges.from_ranges([(0, 5)]),
@@ -136,8 +105,6 @@ class TestMultiKAttnSlice:
 @pytest.mark.arch_independent
 class TestAttnChunk:
     def test_iou_with_overlap(self):
-        from magi_attention.meta.container.chunk import AttnChunk
-
         s1 = _make_slice(0, "full", 0, 10, 0, 20)
         s2 = _make_slice(1, "full", 0, 10, 10, 30)
         c1 = AttnChunk(chunk_id=0, q_slices=[s1])
@@ -148,14 +115,10 @@ class TestAttnChunk:
         assert iou == pytest.approx(10 / 40)
 
     def test_iou_empty_k_ranges(self):
-        from magi_attention.meta.container.chunk import AttnChunk
-
         c = AttnChunk(chunk_id=0, q_slices=[])
         assert c.iou == 0.0
 
     def test_eq_type_guard(self):
-        from magi_attention.meta.container.chunk import AttnChunk
-
         c = AttnChunk(chunk_id=0, q_slices=[])
         assert c != "not a chunk"
         assert c != 42
@@ -164,9 +127,6 @@ class TestAttnChunk:
 @pytest.mark.arch_independent
 class TestAttnBucket:
     def test_iou_with_overlap(self):
-        from magi_attention.meta.container.bucket import AttnBucket
-        from magi_attention.meta.container.chunk import AttnChunk
-
         s1 = _make_slice(0, "full", 0, 10, 0, 20)
         s2 = _make_slice(1, "full", 0, 10, 10, 30)
         c1 = AttnChunk(chunk_id=0, q_slices=[s1])
@@ -179,14 +139,10 @@ class TestAttnBucket:
         assert iou == pytest.approx(10 / 40)
 
     def test_iou_empty(self):
-        from magi_attention.meta.container.bucket import AttnBucket
-
         b = AttnBucket(cp_rank=0, q_chunks=[])
         assert b.iou == 0.0
 
     def test_eq_type_guard(self):
-        from magi_attention.meta.container.bucket import AttnBucket
-
         b = AttnBucket(cp_rank=0, q_chunks=[])
         assert b != "not a bucket"
         assert b != 42

@@ -28,24 +28,13 @@ from magi_attention.testing.utils import switch_envvars
 
 def reload_magi_modules():
     """Helper to reload magi_attention modules and update global names in this module."""
-    importlib.reload(sys.modules["magi_attention.common.range"])
-    importlib.reload(sys.modules["magi_attention.common.ranges"])
-    importlib.reload(sys.modules["magi_attention.common.enum"])
-    importlib.reload(sys.modules["magi_attention.common.mask"])
     importlib.reload(sys.modules["magi_attention.common"])
-    importlib.reload(sys.modules["magi_attention.testing.gt_dispatcher"])
     import magi_attention.common
-    import magi_attention.testing.gt_dispatcher
 
     # Update the global names in this test module
     test_module = sys.modules[__name__]
     test_module.AttnRange = magi_attention.common.AttnRange
     test_module.AttnRanges = magi_attention.common.AttnRanges
-    test_module.AttnMaskType = magi_attention.common.enum.AttnMaskType
-    test_module.AttnMask = magi_attention.common.AttnMask
-    test_module.GroundTruthDispatcher = (
-        magi_attention.testing.gt_dispatcher.GroundTruthDispatcher
-    )
     return magi_attention.common
 
 
@@ -64,6 +53,7 @@ class TestGroundTruthDispatcher(TestCase):
 
     def tearDown(self):
         self.switch_back()
+        reload_magi_modules()
 
     def test_make_sub_mask_with_sub_area(self):
         # AttnMask.make_sub_mask always produces Python AttnRanges (imported
