@@ -6,40 +6,236 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: MagiAttention\n"
+"Project-Id-Version: MagiAttention \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-03-31 18:08+0800\n"
+"POT-Creation-Date: 2026-11-13 10:06+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/blog/sparse_attn.md:11
-msgid "Optimize Sparse Attention in FFA (Coming Soon)"
-msgstr "在 FFA 中优化 Sparse Attention（即将推出）"
+#: ../../source/blog/sparse_attn.md:10
+msgid "Optimize Sparse Attention in FFA"
+msgstr "在 FFA 中优化 Sparse Attention"
 
-#: ../../source/blog/sparse_attn.md:13
-msgid "Todo"
-msgstr "待办"
+#: ../../source/blog/sparse_attn.md:12
+msgid "Introduction"
+msgstr "引言"
 
 #: ../../source/blog/sparse_attn.md:14
+#, python-brace-format
 msgid ""
-"The upcoming blog post will be released in the near future. Stay tuned!"
-msgstr "即将发布的博客文章将在不久的将来发布，敬请期待！"
+"Sparse attention has become an important technique for accelerating long-"
+"context training and inference. By letting each query attend to only a "
+"subset of key/value tokens, sparse attention substantially reduces the "
+"compute cost of standard softmax attention. Recent architectures such as "
+"DeepSeek Sparse Attention (`DSA`) "
+"{cite}`deepseekai2025deepseekv32pushingfrontieropen_sparse_attn` have "
+"demonstrated the effectiveness of dynamically selected sparse attention. "
+"However, turning theoretical FLOP reductions into actual GPU speedups "
+"remains challenging. Unlike dense FlashAttention, sparse attention "
+"introduces irregular memory accesses and small matrix multiplications "
+"that can under-utilize modern Tensor Cores. Efficient execution requires "
+"careful design of the sparse representation, work partitioning, and "
+"memory pipeline. In this post, we present the design and implementation "
+"of `IndexSparse Attention` in `MagiAttention`, and discuss how we "
+"optimize its forward, backward, and streaming top-{math}`k` kernels for "
+"NVIDIA Blackwell GPUs with CuTe DSL."
+msgstr ""
+"稀疏注意力已成为加速长上下文训练与推理的一项重要技术。通过让每个查询仅关注一部分键/值 token，稀疏注意力显著降低了标准 softmax 注意力的计算成本。近期诸如 DeepSeek Sparse Attention（`DSA`）{cite}`deepseekai2025deepseekv32pushingfrontieropen_sparse_attn` 等架构已经证明了动态选择稀疏注意力的有效性。然而，将 FLOPs 的理论减少转化为实际的 GPU 加速仍然具有挑战性。与稠密 FlashAttention 不同，稀疏注意力会引入不规则的内存访问和小矩阵乘法，可能无法充分利用现代 Tensor Core。高效执行需要周密设计稀疏表示、任务划分和内存流水线。在这篇文章中，我们介绍 `MagiAttention` 中的 `IndexSparse Attention` 设计与实现，并讨论我们如何使用 CuTe DSL 为 NVIDIA Blackwell GPU 优化其前向、反向与流式 top-{math}`k` 算子。"
 
 #: ../../source/blog/sparse_attn.md:17
+msgid "Sparse Patterns and Bottlenecks"
+msgstr "稀疏模式与性能瓶颈"
+
+#: ../../source/blog/sparse_attn.md:19
+#, python-brace-format
+msgid ""
+"Early sparse attention designs fix the attended subset by position — such"
+" as sliding windows, strided patterns, and global or sink tokens "
+"{cite}`child2019generatinglongsequencessparse_sparse_attn,beltagy2020longformerlongdocumenttransformer_sparse_attn,zaheer2021bigbirdtransformerslonger_sparse_attn`."
+" Recent trainable mechanisms instead select keys dynamically from content"
+" in two stages: a lightweight indexer scores the prefix to pick a fixed "
+"budget of keys per query, and main attention runs exact softmax attention"
+" over the selected keys only. Mainstream designs follow two granularity "
+"choices: **token-wise** `DSA` "
+"{cite}`deepseekai2025deepseekv32pushingfrontieropen_sparse_attn` picks "
+"{math}`k = 2048` individual tokens ({math}`B_k = 1`) on top of `MLA` in "
+"MQA mode, where all 128 query heads of one token share a single 512-dim "
+"latent KV vector (plus 64-dim RoPE) and one index list; **block-wise** "
+"`NSA` {cite}`yuan2025nativesparseattentionhardwarealigned_sparse_attn`, "
+"`MoBA` {cite}`lu2025mobamixtureblockattention_sparse_attn`, and `MSA` "
+"{cite}`lai2026minimaxsparseattention_sparse_attn` target standard 128-dim"
+" `GQA` by selecting contiguous KV blocks per group (or, as in `QSA` "
+"{cite}`qwenteam2026qwen38next_sparse_attn`, pooling every 4 keys into "
+"micro-blocks before scoring to cut the indexer's {math}`O(N^2)` cost)."
+msgstr ""
+"早期稀疏注意力方案按位置规定可见集合，例如滑动窗口、固定步长以及全局或 sink token {cite}`child2019generatinglongsequencessparse_sparse_attn,beltagy2020longformerlongdocumenttransformer_sparse_attn,zaheer2021bigbirdtransformerslonger_sparse_attn`。近期的可训练稀疏机制改为根据内容分两步动态筛选：先由轻量级 indexer 对历史前缀打分，为每个 query 选出固定预算的 key；主分支仅在选中的 key 上执行精确的 softmax attention。主流方案按选择粒度分为两类：**按单 token 选择**的 `DSA` {cite}`deepseekai2025deepseekv32pushingfrontieropen_sparse_attn` 建立在 `MLA` 的 MQA 模式之上，每个 query token 挑选 {math}`k = 2048` 个独立 token（{math}`B_k = 1`），同一个 token 的 128 个 query head 共用唯一一条 512 维 latent KV 向量（外加 64 维 RoPE）和同一份索引列表；**按块选择**的 `NSA` {cite}`yuan2025nativesparseattentionhardwarealigned_sparse_attn`、`MoBA` {cite}`lu2025mobamixtureblockattention_sparse_attn` 与 `MSA` {cite}`lai2026minimaxsparseattention_sparse_attn` 面向标准 128 维 `GQA`，按组选择连续的整块 KV（或如 `QSA` {cite}`qwenteam2026qwen38next_sparse_attn` 在打分前将每 4 个 key 池化为微块以削减 indexer 自身的 {math}`O(N^2)` 开销）。"
+
+#: ../../source/blog/sparse_attn.md:16
+#, python-brace-format
+msgid ""
+"Turning dynamic sparsity into real training speedups requires resolving "
+"three hardware bottlenecks "
+"{cite}`yan2026fsaalternativeefficientimplementation_sparse_attn,lai2026minimaxsparseattention_sparse_attn`:"
+msgstr ""
+"要把动态稀疏转化为训练阶段的真实加速，必须解决三个执行瓶颈 {cite}`yan2026fsaalternativeefficientimplementation_sparse_attn,lai2026minimaxsparseattention_sparse_attn`："
+
+#: ../../source/blog/sparse_attn.md:18
+#, python-brace-format
+msgid ""
+"**Tensor Core utilization.** On Blackwell, a single-CTA BF16 "
+"`tcgen05.mma` requires {math}`M = 64` or 128 rows. Under standard `GQA`, "
+"one query token has only {math}`G = H_q / H_{kv}` heads (typically 4 to "
+"16), so processing tokens one by one leaves most of {math}`M` as wasted "
+"padding."
+msgstr ""
+"**Tensor Core 利用率。** Blackwell 上单 CTA 的 BF16 `tcgen05.mma` 要求 {math}`M = 64` 或 128 行。标准 `GQA` 中单个 query token 在同组内只有 {math}`G = H_q / H_{kv}` 个 head（通常为 4 到 16），逐个 token 独立计算会让 {math}`M` 维的大部分行沦为空算的 padding。"
+
+#: ../../source/blog/sparse_attn.md:19
+#, python-brace-format
+msgid ""
+"**K/V reuse and loop order.** Loading K/V independently per query in a "
+"`Q-outer` loop gives an arithmetic intensity of only {math}`\\approx G` "
+"{cite}`lai2026minimaxsparseattention_sparse_attn`. Grouping work by KV "
+"block (`KV-outer`, arithmetic intensity {math}`\\approx \\frac{2}{3} "
+"B_k`) works well for large blocks like `MSA` ({math}`B_k = 128`), whereas"
+" at single-token granularity ({math}`B_k = 1`), inverting indices over "
+"{math}`N` tokens and splitting sink-token hotspots costs more than "
+"attention itself."
+msgstr ""
+"**K/V 复用与循环顺序。** 在 `Q-outer` 循环下每个 query 各自读取 K/V，算术强度只有 {math}`\\approx G` {cite}`lai2026minimaxsparseattention_sparse_attn`。按 KV 块分组的 `KV-outer`（算术强度 {math}`\\approx \\frac{2}{3} B_k`）适合 `MSA` 这类大尺寸块（{math}`B_k = 128`），而在单 token 粒度（{math}`B_k = 1`）下，对 {math}`N` 个独立位置建反向索引并切分 sink 热点的开销会超过 attention 计算本身。"
+
+#: ../../source/blog/sparse_attn.md:20
+msgid ""
+"**`head_dim` vs. backward on-chip memory.** While `MLA`'s 512 head "
+"dimension boosts forward arithmetic intensity, backward must "
+"simultaneously hold `Q`, `K`, `V`, `dO`, intermediate scores, and "
+"`dQ`/`dK`/`dV` accumulators in `TMEM` (512 columns per SM on Blackwell) "
+"and `SMEM`. An oversized `head_dim` exhausts `TMEM` and `SMEM`, shrinking"
+" tile sizes or pipeline depth and preventing backward from reaching high "
+"TFLOPS."
+msgstr ""
+"**`head_dim` 与反向片上存储。** `MLA` 的 512 维大 `head_dim` 虽然提高了前向的计算密度，但训练反向需要同时在 `TMEM`（Blackwell 上每个 SM 仅 512 列）和 `SMEM` 中容纳 `Q`、`K`、`V`、`dO`、中间分数与 `dQ`/`dK`/`dV` 累加器。过大的 `head_dim` 会占满 `TMEM` 和 `SMEM`，迫使缩窄 tile 尺寸或减少流水级数，反向无法打出高 TFLOPS。"
+
+#: ../../source/blog/sparse_attn.md:23
+msgid "IndexSparse Attention"
+msgstr "IndexSparse Attention"
+
+#: ../../source/blog/sparse_attn.md:25
+#, python-brace-format
+msgid ""
+"**Shared indexing.** In `FFA`, [AttnSlice](./magi_attn.md#attnslice-"
+"representation) represents masks as contiguous query–key rectangles, so "
+"token-wise selection degenerates into {math}`k` width-1 slices per query."
+" We therefore design **IndexSparse** in the CuTeDSL backend of `FFA` "
+"(`SM100` forward and backward, plus `SM120` forward), paired with a "
+"streaming top-{math}`k` operator `cutedsl_topk_stream`. To support token-"
+"level sparsity on standard `head_dim = 128` across both `MQA` and `GQA`, "
+"`IndexSparse` shares one index row across the {math}`G` query heads of a "
+"KV group and `q_block_size` consecutive query tokens such that "
+"`q_block_size * G = 128` (`q_block_size = 1` for `MQA-128`, `q_block_size"
+" = 16` for `8:1 GQA`). Every 128-row Q tile then attends to the exact "
+"same K/V rows in a single `Q-outer` pass — filling Tensor Cores and "
+"reusing K/V across all 128 rows without union-mask waste. Selections are "
+"passed as an `int32` tensor `index_sparse_indices` of shape "
+"`(ceil(total_q / q_block_size), num_heads_kv, topk)`, with valid global "
+"indices at the front and `-1` padding at the tail when fewer than "
+"{math}`k` keys are visible."
+msgstr ""
+"**共享索引。** `FFA` 原有的 [AttnSlice](./magi_attn.md#attnslice-representation) 用连续矩形表示 mask，按单 token 选择会让每个 query 退化出 {math}`k` 个宽度为 1 的切片。为此，我们在 `FFA` 的 CuTeDSL backend 中设计了 **IndexSparse**（包含 `SM100` 的前向与反向，以及 `SM120` 的前向），并配套实现了流式 top-{math}`k` 算子 `cutedsl_topk_stream`。为了在标准 `head_dim = 128` 上同时覆盖 `MQA` 与 `GQA`，`IndexSparse` 让同一个 KV 组内的 {math}`G` 个 query head 与连续 `q_block_size` 个 query token 共用同一行索引，满足 `q_block_size * G = 128`（`MQA-128` 取 `q_block_size = 1`，`8:1 GQA` 取 `q_block_size = 16`）。这样每个 128 行 Q tile 在单遍 `Q-outer` 循环内读取完全一致的 K/V 行——既填满了 Tensor Core，又在 tile 内全部 128 行间复用了 K/V，也没有相邻 token 取并集带来的无效计算。选中位置通过形状为 `(ceil(total_q / q_block_size), num_heads_kv, topk)` 的 `int32` 张量 `index_sparse_indices` 传入；可见 key 不足 {math}`k` 个时，有效全局下标排在行首、行尾补 `-1`。"
+
+#: ../../source/blog/sparse_attn.md:27
+#: ../../source/blog/sparse_attn.md:63
+msgid "Todo"
+msgstr "待补充"
+
+#: ../../source/blog/sparse_attn.md:28
+msgid "Add overall `IndexSparse` architecture figure here."
+msgstr "此处留白，待补充 `IndexSparse` 整体架构图。"
+
+#: ../../source/blog/sparse_attn.md:47
+msgid ""
+"`ffa_bwd_sm100_index` also accepts an optional `dlse` gradient tensor so "
+"an auxiliary KL loss on the indexer can backpropagate through `lse` "
+"directly."
+msgstr "`ffa_bwd_sm100_index` 还支持传入可选的 `dlse` 梯度张量，使 indexer 上的辅助 KL 损失可以直接经由 `lse` 传回梯度。"
+
+#: ../../source/blog/sparse_attn.md:50
+msgid "Kernel Design"
+msgstr "Kernel 设计"
+
+#: ../../source/blog/sparse_attn.md:52
+#, python-brace-format
+msgid ""
+"**Forward pass.** Each CTA owns one 128-row Q tile, loads Q contiguously,"
+" gathers the {math}`k` scattered K/V rows asynchronously, and reduces "
+"`out` and `lse` on chip with online softmax. Early causal positions with "
+"fewer than {math}`k` visible keys carry `-1` tail padding that must be "
+"masked to {math}`-\\infty`. Because valid indices sit at the front and "
+"`-1` appears only at the tail, the inner loop traverses K/V tiles **in "
+"reverse order from last to first**: partially padded tail tiles are "
+"handled up front, and the remaining tiles run without bounds checks or "
+"score masking (`assume_valid_ids=True` removes the check entirely at "
+"compile time when all rows are full)."
+msgstr ""
+"**前向计算。** 每个 CTA 负责一个 128 行 Q tile，连续加载 Q，异步 gather 选中的 {math}`k` 行离散 K/V，通过 online softmax 在片上直接归约出 `out` 和 `lse`。因果序列开头可见 key 不足 {math}`k` 个的位置带有 `-1` 尾部填充，需要在 softmax 前置为 {math}`-\\infty`。由于有效下标排在行首、`-1` 只出现在行尾，内层循环**从最后一个 K/V tile 往前逆序遍历**：先处理完尾部可能带填充的 tile，后续迭代全程不再做越界判断或分数 mask（每行都满 `topk` 个有效下标时，传入 `assume_valid_ids=True` 可在编译期彻底去掉该检查）。"
+
+#: ../../source/blog/sparse_attn.md:54
+#, python-brace-format
+msgid ""
+"**Backward pass.** `ffa_bwd_sm100_index` stays `Q-outer` as well to avoid"
+" per-step single-token index inversion and sink-token load skew: `dQ` "
+"accumulates on chip and writes back once, while scattered FP32 `dK`/`dV` "
+"updates are staged as full rows in shared memory and accumulated via "
+"asynchronous whole-row `TMA` `reduce.add`. As context length grows, the "
+"random K/V and `dK`/`dV` working set crosses the GPU's L2 capacity "
+"{math}`L_2`. In the L2-miss latency window {math}`(0.5\\, L_2,\\, 4\\, "
+"L_2]`, the kernel automatically overlaps V gathers with the next tile's K"
+" fetch (`gather_v_async`) to double in-flight reads; past {math}`2\\, "
+"L_2` where DRAM bandwidth saturates, it switches to L2-sized multi-pass "
+"execution (`num_k_passes`), bucket-sorting each index row into "
+"{math}`\\sim 0.8\\, L_2` KV chunks so every pass's random reads and "
+"reductions stay inside L2."
+msgstr ""
+"**反向计算。** `ffa_bwd_sm100_index` 同样保持 `Q-outer`，省去每步反转单 token 索引的开销并避开 sink token 的负载悬殊：`dQ` 在片上累加完一次写回，离散的 FP32 `dK`/`dV` 在 shared memory 凑齐整行后通过异步 `TMA` `reduce.add` 整行累加。随着上下文变长，随机读写跨越的 K/V 与 `dK`/`dV` 工作集逐步超出 GPU 的 L2 容量 {math}`L_2`。在 {math}`(0.5\\, L_2,\\, 4\\, L_2]` 的 L2 未命中延迟区间内，kernel 自动将 V 的异步 gather 与下一轮 K 的读取重叠（`gather_v_async`），使在途随机读翻倍以掩盖延迟；超过 {math}`2\\, L_2` 导致 DRAM 带宽饱和后，自动切入按 L2 分块的多遍模式（`num_k_passes`），先把每行索引按约 {math}`0.8\\, L_2` 宽的 KV 区间分桶归类，再按区间逐遍运行，让每一遍的随机读取和归约都收敛在 L2 内。"
+
+#: ../../source/blog/sparse_attn.md:56
+#, python-brace-format, python-format
+msgid ""
+"**Streaming Top-K (`cutedsl_topk_stream`).** Since softmax is monotonic, "
+"top-{math}`k` runs directly on raw BF16/FP16 indexer scores and outputs "
+"ascending indices {cite}`lai2026minimaxsparseattention_sparse_attn`. At "
+"long contexts, {math}`k / N` is tiny (over 99% of entries at {math}`k = "
+"2048, N = 256\\text{K}` sit below the threshold), yet multi-pass radix "
+"select re-reads the full row from HBM every pass. `cutedsl_topk_stream` "
+"({math}`N \\le 2^{21}, k \\le 10240`) assigns one CTA per row to stream "
+"HBM **only once** in the common case: it first samples strided 64-element"
+" blocks across `[0, end)` to estimate a conservative lower-bound "
+"threshold on chip, then streams the row once with TMA to filter survivors"
+" into an on-chip buffer for a final 2-byte radix select. Mid-scan "
+"compaction on ties and a {math}`-\\infty` rescan when survivors fall "
+"short of {math}`k` guarantee exact results."
+msgstr ""
+"**流式 Top-K（`cutedsl_topk_stream`）。** 由于 softmax 单调保序，top-{math}`k` 直接作用于原始 BF16/FP16 分数并按升序输出下标 {cite}`lai2026minimaxsparseattention_sparse_attn`。长上下文下 {math}`k / N` 极小（例如 {math}`k = 2048, N = 256\\text{K}` 时超过 99% 的分数低于阈值），而常规多遍 radix select 每轮都要从 HBM 重读整行。`cutedsl_topk_stream`（{math}`N \\le 2^{21}, k \\le 10240`）让单个 CTA 独立负责一整行，常见情况下**只流式读取一次 HBM**：先在有效区间 `[0, end)` 上隔段抽取 64 元素小块，在片上估出留有余量的下界阈值；再用 TMA 单遍流式扫描整行，将跨过门槛的候选滤入片上缓冲区做最终的两字节 radix select。遇到成片相等分数时中途就地裁剪、候选不足 {math}`k` 个时降为 {math}`-\\infty` 补扫一遍，保证结果严格精确。"
+
+#: ../../source/blog/sparse_attn.md:64
+msgid "Experiments and Roadmap"
+msgstr "实验与后续计划"
+
+#: ../../source/blog/sparse_attn.md:67
 msgid "Citation"
 msgstr "引用"
 
-#: ../../source/blog/sparse_attn.md:19
+#: ../../source/blog/sparse_attn.md:72
 msgid "If you find MagiAttention useful in your research, please cite:"
-msgstr "如果你在研究中发现 MagiAttention 有用，请引用："
+msgstr "如果你在研究中使用了 MagiAttention，欢迎引用："
 
-#: ../../source/blog/sparse_attn.md:30
+#: ../../source/blog/sparse_attn.md:83
 msgid "References"
 msgstr "参考文献"
