@@ -57,13 +57,8 @@ fi
 
 PYTHON_BIN="${PYTHON:-python3}"
 FLASH_ATTN_PKG_DIR="$($PYTHON_BIN -c '
-import importlib.util
-import pathlib
-
-spec = importlib.util.find_spec("flash_attn")
-if spec is None or spec.origin is None:
-    raise SystemExit(1)
-print(pathlib.Path(spec.origin).resolve().parent)
+from importlib.metadata import distribution
+print(distribution("flash-attn-4").locate_file("flash_attn"))
 ' 2>/dev/null)" || true
 if [[ -z "$FLASH_ATTN_PKG_DIR" || ! -d "$FLASH_ATTN_PKG_DIR" ]]; then
     echo "[magi_attn_extensions.apply_patches] ERROR: could not locate flash_attn with '$PYTHON_BIN'." >&2
@@ -74,6 +69,7 @@ echo "[magi_attn_extensions.apply_patches] flash_attn package dir: $FLASH_ATTN_P
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSIONS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REQUIRED_FA4_COMMIT="dceb374126248b17dbfee91c202514f533fd2ec6"
 PATCHES_DIR="$EXTENSIONS_ROOT/tools/patches"
 
 if [[ ! -d "$PATCHES_DIR" ]]; then
@@ -156,16 +152,15 @@ if [[ "$REVERSE" -eq 0 && "$DRY_RUN" -eq 0 && "$FAILED" -eq 0 ]]; then
     if ! "$PYTHON_BIN" -c '
 import inspect
 
-from flash_attn.cute.flash_fwd_sm100 import FlashAttentionForwardSm100
+from importlib.metadata import distribution
+import flash_attn
+flash_attn.__path__.insert(0, str(distribution("flash-attn-4").locate_file("flash_attn")))
 from flash_attn.cute.interface import _flash_attn_fwd
-
-fwd_params = inspect.signature(_flash_attn_fwd).parameters
-kernel_params = inspect.signature(FlashAttentionForwardSm100).parameters
-required_fwd = {"out_dtype"}
-required_kernel = {"fp32_O", "use_block_sparsity", "has_page_table"}
-missing = (required_fwd - fwd_params.keys()) | (required_kernel - kernel_params.keys())
-if missing:
-    raise SystemExit(f"missing patched FA4 parameters: {sorted(missing)}")
+if "out_dtype" not in inspect.signature(_flash_attn_fwd).parameters:
+    raise SystemExit("missing patched FA4 out_dtype")
+from flash_attn.cute.config import FwdHeuristicInputs
+if "fp32_output" not in FwdHeuristicInputs._fields:
+    raise SystemExit("missing FP32 shared-memory configuration")
 '; then
         echo "[magi_attn_extensions.apply_patches] FAILED: patched FA4 FP32-O interface validation failed" >&2
         (( FAILED++ )) || true
@@ -189,5 +184,6 @@ echo
 echo "[magi_attn_extensions.apply_patches] Done. requested=$requested_state $changed_label=$CHANGED skipped=$SKIPPED failed=$FAILED"
 
 if [[ "$FAILED" -gt 0 ]]; then
+    echo "[magi_attn_extensions.apply_patches] Requires flash-attn-4 built from commit $REQUIRED_FA4_COMMIT." >&2
     exit 1
 fi

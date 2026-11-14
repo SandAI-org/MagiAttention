@@ -74,6 +74,17 @@ from magi_attn_extensions.fa4_interface_with_sink import (
 DEVICE_CAPABILITY = torch.cuda.get_device_capability()[0]
 
 
+def _sink_grad_atol(
+    low_precision: torch.Tensor,
+    high_precision: torch.Tensor,
+    atol: float,
+    error_ratio: float,
+) -> float:
+    # Signed token sums can cancel, so preserve the reference's absolute error budget.
+    reference_error = (low_precision - high_precision).abs().max().item()
+    return max(atol, error_ratio * reference_error)
+
+
 class TestFAInterfaceWithSink(TestCase):
     def setUp(self):
         torch.manual_seed(self.seed)
@@ -547,6 +558,8 @@ class TestFAInterfaceWithSink(TestCase):
     )
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("causal", [False, True])
+    @parameterize("save_fp32_out_for_bwd", [False, True])
+    @parameterize("return_fp32_out", [False, True])
     def test_fa4_interface_with_sink(
         self,
         mode: str,
@@ -554,6 +567,8 @@ class TestFAInterfaceWithSink(TestCase):
         attn_config: dict[str, Any],
         dtype: torch.dtype,
         causal: bool,
+        save_fp32_out_for_bwd: bool,
+        return_fp32_out: bool,
     ):
         assert is_fa4_installed, "flash_attn_4 is not installed"
 
@@ -615,8 +630,19 @@ class TestFAInterfaceWithSink(TestCase):
                     sink_layout=sink_layout,
                     causal=causal,
                     return_attn_probs=True,
+                    save_fp32_out_for_bwd=save_fp32_out_for_bwd,
+                    return_fp32_out=return_fp32_out,
                 )
 
+                self.assertEqual(
+                    fa4_out.dtype, torch.float32 if return_fp32_out else dtype
+                )
+                self.assertEqual(
+                    fa4_out.grad_fn.saved_tensors[4].dtype,
+                    torch.float32
+                    if save_fp32_out_for_bwd or return_fp32_out
+                    else dtype,
+                )
                 fa4_out.backward(do_)
                 fa4_out = rearrange(fa4_out, "b s h d -> (b s) h d")
                 fa4_lse = rearrange(fa4_lse, "b h s -> (b s) h")
@@ -633,6 +659,17 @@ class TestFAInterfaceWithSink(TestCase):
                     sink_layout=sink_layout,
                     causal=causal,
                     return_attn_probs=True,
+                    save_fp32_out_for_bwd=save_fp32_out_for_bwd,
+                    return_fp32_out=return_fp32_out,
+                )
+                self.assertEqual(
+                    fa4_out.dtype, torch.float32 if return_fp32_out else dtype
+                )
+                self.assertEqual(
+                    fa4_out.grad_fn.saved_tensors[4].dtype,
+                    torch.float32
+                    if save_fp32_out_for_bwd or return_fp32_out
+                    else dtype,
                 )
                 fa4_out.backward(do)
                 fa4_lse = rearrange(fa4_lse, "h s -> s h")
@@ -663,10 +700,12 @@ class TestFAInterfaceWithSink(TestCase):
             grad_total_sink=fa4_dsink,
             grad_total_out=do,
             dtype=dtype,
+            check_dsink=True,
             sink_layout=sink_layout,
             test_case=(
                 f"fa4_interface_with_sink_[{mode=}]x"
                 f"[{attn_config=}]x[{dtype=}]x[{causal=}]"
+                f"x[{save_fp32_out_for_bwd=}]x[{return_fp32_out=}]"
             ),
         )
 
@@ -691,6 +730,7 @@ class TestFAInterfaceWithSink(TestCase):
         dtype: torch.dtype,
         sink_layout: AttnSinkLayout = "sh",
         test_case: str = "",
+        check_dsink: bool = False,
     ) -> None:
         # -----   customize tolerance / threshold  ---- #
 
@@ -752,9 +792,9 @@ class TestFAInterfaceWithSink(TestCase):
             total_sink.grad = None
 
         total_out_ref_high_precision, total_meta_ref_high_precision = ref_attn_func(
-            q=total_q,
-            k=total_k,
-            v=total_v,
+            q=total_q.to(total_out.dtype),
+            k=total_k.to(total_out.dtype),
+            v=total_v.to(total_out.dtype),
             sink=total_sink,
             mask=mask,
             layout="thd",
@@ -812,6 +852,7 @@ class TestFAInterfaceWithSink(TestCase):
             total_sink.grad if has_sink else None,
         )
 
+        total_out_ref_low_precision = total_out_ref_low_precision.to(total_out.dtype)
         err_msg_list: list[str] = []
 
         # -----   assert close for fwd out   ---- #
@@ -1030,9 +1071,20 @@ class TestFAInterfaceWithSink(TestCase):
                     ),
                 )
             except Exception as e:
-                # FIXME: dsink is easy to fail, disable it for now
-                print(f"dsink norm error for {test_case=}: \n{e}\n")
+                if check_dsink:
+                    err_msg_list.append(str(e))
+                else:
+                    print(f"dsink norm error for {test_case=}: \n{e}\n")
 
+            if check_dsink:
+                assert grad_total_sink_ref_low_precision is not None
+                assert grad_total_sink_ref_high_precision is not None
+                dsink_atol = _sink_grad_atol(
+                    grad_total_sink_ref_low_precision,
+                    grad_total_sink_ref_high_precision,
+                    dsink_atol,
+                    dsink_norm_rtol_ratio,
+                )
             # torch style with atol + rtol + mismatch threshold
             dsink_thres = extract_mismatch_threshold(
                 actual=grad_total_sink_ref_low_precision,
@@ -1052,9 +1104,10 @@ class TestFAInterfaceWithSink(TestCase):
                     test_case=f"{test_case} => dsink",
                 )
             except Exception as e:
-                # err_msg_list.append(str(e))
-                # FIXME: dsink is easy to fail, disable it for now
-                print(f"dsink mismatch error for {test_case=}: \n{e}\n")
+                if check_dsink:
+                    err_msg_list.append(str(e))
+                else:
+                    print(f"dsink mismatch error for {test_case=}: \n{e}\n")
 
         # -----   raise error if any error occurs   ---- #
 

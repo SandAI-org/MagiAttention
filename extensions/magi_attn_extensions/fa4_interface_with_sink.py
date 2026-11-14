@@ -463,7 +463,7 @@ def _fa4_fwd_op(
     fwd_kwargs = {}
     if fp32_out:
         fwd_kwargs["out_dtype"] = torch.float32
-    out, softmax_lse = _flash_attn_fwd(
+    out, softmax_lse, *_ = _flash_attn_fwd(
         q,
         k,
         v,
@@ -604,7 +604,7 @@ def _fa4_varlen_fwd_op(
     fwd_kwargs = {}
     if fp32_out:
         fwd_kwargs["out_dtype"] = torch.float32
-    out, softmax_lse = _flash_attn_fwd(
+    out, softmax_lse, *_ = _flash_attn_fwd(
         q,
         k,
         v,
