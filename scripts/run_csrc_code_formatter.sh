@@ -14,30 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Define the path to the clang-format executable.
-# You might need to adjust the version number (e.g., clang-format-15, clang-format-17)
-# or just "clang-format" if it's a generic link.
+set -euo pipefail
 
-# Read LLVM version from environment variable
-LLVM_VERSION=${LLVM_VERSION:-20}
+CLANG_FORMAT_VERSION=20.1.8
+CLANG_FORMAT_BIN="clang-format-${CLANG_FORMAT_VERSION%%.*}"
 
-CLANG_FORMAT_BIN="clang-format-${LLVM_VERSION}"
-
-INSTALL_CMD="bash scripts/install_clang_format.sh"
-
-# Check if the clang-format executable is available in the system's PATH.
-# 'command -v' attempts to locate the command.
-# '&> /dev/null' redirects both stdout and stderr to null, suppressing output during the check.
-if ! command -v "$CLANG_FORMAT_BIN" &> /dev/null
-then
-    echo "Error: '$CLANG_FORMAT_BIN' command not found."
-    echo "This pre-commit hook requires '$CLANG_FORMAT_BIN' to be installed."
-    echo "We recommend running '$INSTALL_CMD' to install it."
-    exit 1 # Exit with a non-zero status code, signaling failure to pre-commit.
+if ! command -v "$CLANG_FORMAT_BIN" >/dev/null 2>&1; then
+    echo "Error: ${CLANG_FORMAT_BIN} not found. Run sudo bash scripts/install_clang_format.sh."
+    exit 1
 fi
-
-# If clang-format is found, execute it with all arguments passed to this script.
-# 'exec' replaces the current shell process with the clang-format process,
-# meaning clang-format's exit status will become this script's exit status.
-# '"$@"' expands to all positional parameters passed to this script, preserving whitespace.
+INSTALLED_VERSION=$("$CLANG_FORMAT_BIN" --version | sed -nE 's/.*version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
+if [ "$INSTALLED_VERSION" != "$CLANG_FORMAT_VERSION" ]; then
+    echo "Error: expected clang-format ${CLANG_FORMAT_VERSION}, found ${INSTALLED_VERSION}."
+    echo "Run sudo bash scripts/install_clang_format.sh."
+    exit 1
+fi
 exec "$CLANG_FORMAT_BIN" "$@"
