@@ -20,6 +20,7 @@ from magi_attention.env import ffa as ffa_env
 
 __all__ = [
     "is_hierarchical_comm_enable",
+    "is_force_stage_by_stage_enable",
     "ffa_fwd_sm_margin_save_for_comm",
     "ffa_bwd_sm_margin_save_for_comm",
     "is_qo_comm_enable",
@@ -28,6 +29,18 @@ __all__ = [
     "is_native_grpcoll_enable",
     "dsink_all_reduce_op",
 ]
+
+
+def is_force_stage_by_stage_enable() -> bool:
+    """Force stage-by-stage remote prefetch in attention forward and backward.
+
+    Set ``MAGI_ATTENTION_FORCE_STAGE_BY_STAGE=1`` to fetch only the next
+    remote stage before computing the current stage. Defaults to ``0``.
+    This does not disable mandatory stage-by-stage prefetch for native
+    grpcoll or ``CUDA_DEVICE_MAX_CONNECTIONS=1``.
+    Keep this value consistent across CP ranks and throughout each call.
+    """
+    return os.environ.get("MAGI_ATTENTION_FORCE_STAGE_BY_STAGE", "0") == "1"
 
 
 def is_hierarchical_comm_enable() -> bool:

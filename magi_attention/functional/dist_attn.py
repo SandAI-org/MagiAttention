@@ -1065,7 +1065,8 @@ class DistAttnRuntime:
            grpcoll_buffer's memory is managed separately).
         """
         return (
-            env.general.is_cuda_device_max_connections_one()
+            env.comm.is_force_stage_by_stage_enable()
+            or env.general.is_cuda_device_max_connections_one()
             or env.comm.is_native_grpcoll_enable()
         )
 
@@ -1255,7 +1256,7 @@ class DistAttnRuntime:
             ), "FA4/CUTEDSL backends do not support return max logits"
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
-            f"{attn_arg.total_area=} | "
+            f"{attn_arg.total_area=:,} | "
             f"{attn_arg.q_ranges=} | "
             f"{attn_arg.k_ranges=}"
         ):
@@ -1375,7 +1376,7 @@ class DistAttnRuntime:
         _backend = self.kernel_backend
         with nvtx.add_nvtx_event(
             f"attn-bwd: "
-            f"{attn_arg.total_area=} | "
+            f"{attn_arg.total_area=:,} | "
             f"{attn_arg.q_ranges=} | "
             f"{attn_arg.k_ranges=}"
         ):
