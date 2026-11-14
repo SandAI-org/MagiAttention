@@ -57,6 +57,30 @@ def cutedsl_fwd(
     if not ffa_args:
         raise RuntimeError("cutedsl_fwd called with skip_attn_fwd=True")
 
+    # TODO: Pre-initializing uncovered rows is a workaround; initialize their
+    # output and LSE in the forward postprocess instead to avoid extra memory traffic.
+    direct_store = attn_arg.disable_fwd_atomic_reduction
+    out_buffer = lse_buffer = None
+    if direct_store and attn_arg.bwd_args_q_coverage_end != q.shape[0]:
+        # Direct stores leave uncovered Q rows untouched. Preserve the atomic
+        # path's zero output and sink-only (or empty) normalization there.
+        out_buffer = torch.zeros(
+            (q.shape[0], q.shape[1], v.shape[-1]),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        if sink is None:
+            lse_buffer = torch.full(
+                q.shape[:2], float("-inf"), dtype=torch.float32, device=q.device
+            )
+        else:
+            sink_lse = sink[0] if sink.shape[0] == 1 else torch.logsumexp(sink, dim=0)
+            lse_buffer = (
+                sink_lse.float()
+                .expand(q.shape[0], -1)
+                .clone(memory_format=torch.contiguous_format)
+            )
+
     out, lse = _flex_flash_attn_fwd(
         q=q,
         k=k,
@@ -69,10 +93,11 @@ def cutedsl_fwd(
         softcap=softcap if softcap and softcap > 0 else None,
         sink=sink,
         sink_layout="sh",
-        # The dist overlap path rescales partial (out, lse) pairs in fp32
-        # (correct_attn_out_lse); a bf16/fp16 partial underflows that merge.
-        disable_fwd_atomic_reduction=False,
+        # Stage merges require FP32 partial outputs on both store paths.
+        disable_fwd_atomic_reduction=direct_store,
         out_dtype=torch.float32,
+        out=out_buffer,
+        lse=lse_buffer,
         # range_merge: the dist layer's pre-merged relation IR is already the
         # input to AttnArg (merge happens in calc_meta), so the kernel sees the
         # plain per-range problem — no in-kernel merge needed.
