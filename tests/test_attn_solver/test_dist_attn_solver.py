@@ -14,6 +14,7 @@
 
 import types
 from types import SimpleNamespace
+from unittest import TestCase
 
 import numpy as np
 import torch
@@ -31,6 +32,8 @@ from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
 from magi_attention.meta.solver.overlap_solver import (
     OverlapConfig,
     OverlapSolver,
+    OverlapStageCost,
+    PipelineOverlapAlg,
     UniformOverlapAlg,
 )
 from magi_attention.testing import parameterize
@@ -2899,6 +2902,43 @@ class TestDistAttnSolver(DistTestBase):
         assert np.array_equal(answer_current_rank, result), (
             f"There's wrong with {rank=}, "
             f"when {q_ranges=}, {k_ranges=}, {attn_mask_type=}"
+        )
+
+
+class TestPipelineOverlapSolver(TestCase):
+    @parameterize("degree", [1, 2, 3, 4])
+    def test_partition_conserves_chunks_and_retains_uniform_candidate(self, degree):
+        costs = [OverlapStageCost(calc_cost=3)] + [
+            OverlapStageCost(comm_cost=2 + i % 3, calc_cost=5 + i * i)
+            for i in range(16)
+        ]
+        solver = OverlapSolver(PipelineOverlapAlg())
+        result, _ = solver.solve(costs, overlap_degree=degree)
+        uniform, _ = OverlapSolver(UniformOverlapAlg()).solve(
+            costs, overlap_degree=degree
+        )
+        self.assertEqual(
+            sorted(i for part in result.partitions for i in part), list(range(17))
+        )
+        self.assertIn(0, result.partitions[0])
+        self.assertTrue(all(any(i > 0 for i in part) for part in result.partitions))
+        self.assertLessEqual(
+            result.overall_cost, solver._pipeline_cost(costs, uniform.partitions)
+        )
+        repeated, _ = OverlapSolver(PipelineOverlapAlg()).solve(
+            costs, overlap_degree=degree
+        )
+        self.assertEqual(result, repeated)
+
+    def test_dynamic_degree_is_bounded_and_zero_costs_are_supported(self):
+        costs = [OverlapStageCost() for _ in range(9)]
+        result, candidates = OverlapSolver(PipelineOverlapAlg()).solve(
+            costs, dynamic_max_degree=3
+        )
+        self.assertTrue(all(1 <= degree <= 3 for degree in candidates))
+        self.assertEqual(result.overall_cost, 0)
+        self.assertEqual(
+            sorted(i for part in result.partitions for i in part), list(range(9))
         )
 
 
