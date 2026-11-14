@@ -55,6 +55,24 @@ class UniformOverlapAlg(OverlapAlg):
 
 
 @dataclass(frozen=True)
+class PipelineOverlapAlg(OverlapAlg):
+    """Bounded static partition search for forward and KV-only backward.
+
+    The model uses one shared communication lane for KV fetch and dKV reduce,
+    with backward compute estimated as 2.5 times forward. It is a heuristic,
+    not an execution-time measurement. Uniform remains a candidate.
+    """
+
+    @property
+    def type(self) -> OverlapAlgType:
+        return OverlapAlgType.PIPELINE
+
+    @property
+    def is_optimal(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True)
 class GreedyOverlapAlg(OverlapAlg):
     """The config/meta info dataclass for the greedy overlap algorithm"""
 
@@ -213,6 +231,7 @@ class OverlapSolver(nn.Module):
         self.solve_func = {
             OverlapAlgType.UNIFORM: self._solve_with_uniform,
             OverlapAlgType.GREEDY: self._solve_with_greedy,
+            OverlapAlgType.PIPELINE: self._solve_with_pipeline,
         }[self.alg.type]
 
         # return values
@@ -368,6 +387,95 @@ class OverlapSolver(nn.Module):
         else:
             solution = _solve_with_static_overlap_degree(overlap_degree)
             self.solution_dict[overlap_degree] = solution
+
+    @staticmethod
+    def _pipeline_cost(stage_costs, partitions):
+        costs = [
+            (
+                sum(stage_costs[i].comm_cost for i in part if i),
+                sum(stage_costs[i].calc_cost for i in part if i),
+            )
+            for part in partitions
+        ]
+        # Forward: fetches serialize, computation waits only for its own KV.
+        communication = 0.0
+        computation = stage_costs[0].calc_cost
+        for fetch, compute in costs:
+            communication += fetch
+            computation = max(computation, communication) + compute
+        forward = computation
+        # Backward: prefetch the next stage before submitting the current dKV
+        # reduce. Both operations use the same communication lane.
+        communication = costs[0][0] if costs else 0.0
+        ready = communication
+        computation = 2.5 * stage_costs[0].calc_cost
+        for index, (fetch, compute) in enumerate(costs):
+            begin = max(computation, ready)
+            computation = begin + 2.5 * compute
+            if index + 1 < len(costs):
+                communication = max(communication, begin) + costs[index + 1][0]
+                ready = communication
+            communication = max(communication, computation) + fetch
+        return forward + max(computation, communication)
+
+    def _solve_with_pipeline(
+        self, stage_costs, overlap_degree=None, dynamic_max_degree=None, **kwargs
+    ):
+        self.solution_dict.clear()
+        self._solve_with_uniform(
+            stage_costs,
+            overlap_degree,
+            dynamic_max_degree,
+            random_costs=False,
+            random_seed=None,
+        )
+        count = len(stage_costs) - 1
+        for degree, baseline in tuple(self.solution_dict.items()):
+            # Empty/one-stage cases retain the exact established layout.
+            if degree < 2 or degree > count:
+                self.solution_dict[degree] = OverlapSolution(
+                    overlap_degree=degree,
+                    partitions=baseline.partitions,
+                    overall_cost=self._pipeline_cost(stage_costs, baseline.partitions),
+                )
+                continue
+            candidates = [baseline.partitions]
+            # At most sixteen deterministic candidates, independent of token
+            # count. End stages keep at least half the uniform target weight.
+            weights = [c.comm_cost + c.calc_cost for c in stage_costs[1:]]
+            total = sum(weights)
+            if not total:
+                continue
+            prefix = [0.0]
+            for value in weights:
+                prefix.append(prefix[-1] + value)
+            for first in (0.5, 0.75, 1.0, 1.25):
+                for last in (0.5, 0.75, 1.0, 1.25):
+                    targets = [first] + [1.0] * (degree - 2) + [last]
+                    scale = total / sum(targets)
+                    cuts = [0]
+                    wanted = 0.0
+                    for index, target in enumerate(targets[:-1]):
+                        wanted += target * scale
+                        lo = cuts[-1] + 1
+                        hi = count - (degree - index - 1)
+                        cut = min(
+                            range(lo, hi + 1),
+                            key=lambda i: (abs(prefix[i] - wanted), i),
+                        )
+                        cuts.append(cut)
+                    cuts.append(count)
+                    parts = [list(range(a + 1, b + 1)) for a, b in zip(cuts, cuts[1:])]
+                    parts[0].insert(0, 0)
+                    candidates.append(parts)
+            best = min(
+                candidates, key=lambda parts: self._pipeline_cost(stage_costs, parts)
+            )
+            self.solution_dict[degree] = OverlapSolution(
+                overlap_degree=degree,
+                partitions=best,
+                overall_cost=self._pipeline_cost(stage_costs, best),
+            )
 
     def _solve_with_greedy(
         self,
