@@ -7,6 +7,7 @@
 magi_attn.md
 cp_benchmark.md
 native_grpcoll.md
+native_ffa.md
 blackwell_ffa_fa4.md
 attn_sink.md
 muon_qk_clip.md

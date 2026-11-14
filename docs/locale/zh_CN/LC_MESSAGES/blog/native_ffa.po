@@ -1,0 +1,1536 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, SandAI
+# This file is distributed under the same license as the MagiAttention
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-14 11:00+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/blog/native_ffa.md:10
+msgid "Flex-Flash-Attention: The Native Attention Kernel of MagiAttention"
+msgstr "Flex-Flash-Attention：MagiAttention 的原生注意力 Kernel"
+
+#: ../../source/blog/native_ffa.md:12
+msgid "Introduction"
+msgstr "引言"
+
+#: ../../source/blog/native_ffa.md:14
+#, python-brace-format
+msgid ""
+"`Flex-Flash-Attention` (`FFA`) is the attention kernel underneath "
+"`MagiAttention` {cite}`magiattention2025_native_ffa`. It keeps the IO-"
+"aware tiling and online softmax of `Flash-Attention` "
+"{cite}`dao2022flashattention_native_ffa,dao2023flashattention_native_ffa,shah2024flashattention3fastaccurateattention_native_ffa`,"
+" but replaces the batch/varlen abstraction with the [AttnSlice "
+"Representation](./magi_attn.md#attnslice-representation): an attention "
+"mask is an arbitrary list of `(QRange, KRange, MaskType)` rectangles that"
+" may overlap along both the query and the key dimensions. This is what "
+"makes the kernel *distributable*: after the dispatch solver and attn "
+"solver shard the global mask across context-parallel (CP) ranks, every "
+"rank and every overlap stage receives a plain list of slices, and `FFA` "
+"computes it without re-encoding."
+msgstr ""
+"`Flex-Flash-Attention`（`FFA`）是 `MagiAttention` "
+"{cite}`magiattention2025_native_ffa` 底层的注意力 kernel。它保留了 `Flash-Attention`"
+" "
+"{cite}`dao2022flashattention_native_ffa,dao2023flashattention_native_ffa,shah2024flashattention3fastaccurateattention_native_ffa`"
+" 的 IO 感知分块与 online softmax，但用 [AttnSlice Representation](./magi_attn.md"
+"#attnslice-representation) 取代了 batch/varlen 抽象：一个注意力 mask 被表示为任意多个 "
+"`(QRange, KRange, MaskType)` 矩形组成的列表，这些矩形在 query 和 key 两个维度上都允许重叠。正是这一点让 "
+"kernel 天然 *可分布*：dispatch solver 与 attn solver 把全局 mask 切分到各个 context-"
+"parallel（CP）rank 之后，每个 rank 的每个 overlap stage 拿到的都只是一份普通的 slice 列表，`FFA` "
+"无需任何重编码即可直接计算。"
+
+#: ../../source/blog/native_ffa.md:16
+msgid ""
+"This post is the entry point for everything about the native `FFA` "
+"kernel. We first describe the design shared by all architectures (the "
+"slice IR, the scheduling model, and how partial results from overlapping "
+"slices are reduced), then go through the Hopper (SM90) and Blackwell "
+"(SM100) implementations and where they differ, and finally list the "
+"features built on top of the kernel together with the dedicated posts "
+"that cover each of them."
+msgstr ""
+"本文是原生 `FFA` kernel 的总览入口。我们首先介绍与架构无关的公共设计（slice IR、调度模型，以及重叠 slice "
+"的部分结果如何归约），然后分别讲解 Hopper（SM90）与 Blackwell（SM100）上的实现及其差异，最后列出基于该 kernel "
+"构建的各项特性，并给出每项特性对应的专题文章。"
+
+#: ../../source/blog/native_ffa.md:18
+msgid ""
+"`FFA` currently has two native implementations, plus one temporary non-"
+"native backend for Blackwell:"
+msgstr "`FFA` 目前有两套原生实现，另外还有一个面向 Blackwell 的临时非原生 backend："
+
+#: ../../source/blog/native_ffa.md
+msgid "Backend"
+msgstr "Backend"
+
+#: ../../source/blog/native_ffa.md
+msgid "Target arch"
+msgstr "目标架构"
+
+#: ../../source/blog/native_ffa.md
+msgid "Implementation"
+msgstr "实现方式"
+
+#: ../../source/blog/native_ffa.md
+msgid "Status"
+msgstr "状态"
+
+#: ../../source/blog/native_ffa.md
+msgid "Selection"
+msgstr "启用方式"
+
+#: ../../source/blog/native_ffa.md
+msgid "`ffa` (native)"
+msgstr "`ffa`（原生）"
+
+#: ../../source/blog/native_ffa.md ../../source/blog/native_ffa.md:96
+msgid "SM90"
+msgstr "SM90"
+
+#: ../../source/blog/native_ffa.md
+msgid "CUDA C++ / CUTLASS, derived from `FA3`"
+msgstr "CUDA C++ / CUTLASS，源自 `FA3`"
+
+#: ../../source/blog/native_ffa.md
+msgid "Default, production"
+msgstr "默认，生产可用"
+
+#: ../../source/blog/native_ffa.md
+msgid "Default, or `MAGI_ATTENTION_KERNEL_BACKEND=ffa`"
+msgstr "默认，或 `MAGI_ATTENTION_KERNEL_BACKEND=ffa`"
+
+#: ../../source/blog/native_ffa.md
+msgid "`cutedsl` (native)"
+msgstr "`cutedsl`（原生）"
+
+#: ../../source/blog/native_ffa.md
+msgid "SM100 / SM110"
+msgstr "SM100 / SM110"
+
+#: ../../source/blog/native_ffa.md
+msgid "CuTe DSL, derived from the `FA4` CuTe codebase"
+msgstr "CuTe DSL，源自 `FA4` 的 CuTe 代码库"
+
+#: ../../source/blog/native_ffa.md
+msgid "Work in progress"
+msgstr "开发中（WIP）"
+
+#: ../../source/blog/native_ffa.md
+msgid "`MAGI_ATTENTION_KERNEL_BACKEND=cutedsl`"
+msgstr "`MAGI_ATTENTION_KERNEL_BACKEND=cutedsl`"
+
+#: ../../source/blog/native_ffa.md
+msgid "`fa4` (`FFA_FA4`)"
+msgstr "`fa4` (`FFA_FA4`)"
+
+#: ../../source/blog/native_ffa.md
+msgid "SM100 / SM80"
+msgstr "SM100 / SM80"
+
+#: ../../source/blog/native_ffa.md
+msgid "Forked `FA4` with an `HSTU Function` mask"
+msgstr "基于 fork 的 `FA4`，使用 `HSTU Function` 表示 mask"
+
+#: ../../source/blog/native_ffa.md
+msgid "Temporary, not native"
+msgstr "临时方案，非原生"
+
+#: ../../source/blog/native_ffa.md
+msgid "`MAGI_ATTENTION_KERNEL_BACKEND=fa4`"
+msgstr "`MAGI_ATTENTION_KERNEL_BACKEND=fa4`"
+
+#: ../../source/blog/native_ffa.md:27
+msgid ""
+"`FFA_FA4` is **not** the native `FFA` kernel and is **not** the default "
+"backend. It converts `AttnSlice` into an `HSTU Function` representation "
+"and runs a forked `Flash-Attention 4` kernel, as a stopgap that brought "
+"`MagiAttention` to Blackwell before the native SM100 kernel existed. See "
+"the separate [blog post](./blackwell_ffa_fa4.md) for details. The rest of"
+" this post only covers the two native implementations."
+msgstr ""
+"`FFA_FA4` **不是** 原生 `FFA` kernel，也 **不是** 默认 backend。它把 `AttnSlice` 转换为 "
+"`HSTU Function` 表示，再调用 fork 出来的 `Flash-Attention 4` kernel，是在原生 SM100 "
+"kernel 出现之前让 `MagiAttention` 能跑在 Blackwell 上的过渡方案。详见单独的 "
+"[博客](./blackwell_ffa_fa4.md)。本文其余部分只讨论两套原生实现。"
+
+#: ../../source/blog/native_ffa.md:31
+msgid "Design Overview"
+msgstr "设计概览"
+
+#: ../../source/blog/native_ffa.md:33
+msgid "AttnSlice as the Kernel IR"
+msgstr "以 AttnSlice 作为 Kernel IR"
+
+#: ../../source/blog/native_ffa.md:35
+msgid "The kernel consumes three tensors:"
+msgstr "kernel 接收三个张量："
+
+#: ../../source/blog/native_ffa.md:37
+msgid ""
+"`q_ranges`: `int32[R, 2]`, the `[start, end)` query token range of each "
+"slice over the packed `(total_q, num_heads_q, head_dim)` layout."
+msgstr ""
+"`q_ranges`：`int32[R, 2]`，每个 slice 在 packed 布局 `(total_q, num_heads_q, "
+"head_dim)` 上的 query token 区间 `[start, end)`。"
+
+#: ../../source/blog/native_ffa.md:38
+msgid ""
+"`k_ranges`: `int32[R, 2]`, the key token range of each slice over the "
+"packed `(total_k, num_heads_kv, head_dim)` layout."
+msgstr ""
+"`k_ranges`：`int32[R, 2]`，每个 slice 在 packed 布局 `(total_k, num_heads_kv, "
+"head_dim)` 上的 key token 区间。"
+
+#: ../../source/blog/native_ffa.md:39
+msgid ""
+"`attn_type_map`: `int32[R]`, the mask type of each slice: `0 = FULL`, `1 "
+"= CAUSAL`, `2 = INV_CAUSAL`, `3 = BI_CAUSAL`."
+msgstr ""
+"`attn_type_map`：`int32[R]`，每个 slice 的 mask 类型：`0 = FULL`、`1 = CAUSAL`、`2 "
+"= INV_CAUSAL`、`3 = BI_CAUSAL`。"
+
+#: ../../source/blog/native_ffa.md:41
+msgid ""
+"`CAUSAL` is aligned to the bottom-right corner of the slice, `INV_CAUSAL`"
+" to the top-left corner, and `BI_CAUSAL` is the intersection of the two "
+"(see [Basic Mask Types in AttnSlice](./magi_attn.md#basic-mask-types-in-"
+"attnslice) for figures). With these four types, sliding-window and block-"
+"causal patterns stay compact instead of degrading to one slice per row."
+msgstr ""
+"`CAUSAL` 对齐到 slice 的右下角，`INV_CAUSAL` 对齐到左上角，`BI_CAUSAL` 是两者的交集（图示见 [Basic"
+" Mask Types in AttnSlice](./magi_attn.md#basic-mask-types-in-"
+"attnslice)）。有了这四种类型，sliding-window 与 block-causal 等模式都能保持紧凑的表示，而不必退化成每行一个"
+" slice。"
+
+#: ../../source/blog/native_ffa.md:43
+msgid ""
+"Slices are not required to be sorted, disjoint, or aligned to tile "
+"boundaries. Several slices may share query rows (for example, a query "
+"chunk attending to several remote KV chunks in one CP stage) or share key"
+" rows (several query chunks attending to the same KV chunk). Handling "
+"those overlaps efficiently and correctly is the main difference between "
+"`FFA` and a varlen `Flash-Attention` kernel, and it shows up in three "
+"places: tile-range computation, work scheduling, and output reduction."
+msgstr ""
+"slice 不要求有序、不相交，也不要求与 tile 边界对齐。多个 slice 可以共享 query 行（例如某个 CP stage 中一个 "
+"query chunk 同时 attend 多个远端 KV chunk），也可以共享 key 行（多个 query chunk attend "
+"同一个 KV chunk）。高效且正确地处理这些重叠，是 `FFA` 与 varlen `Flash-Attention` kernel "
+"的核心区别，它体现在三个地方：tile 范围计算、任务调度以及输出归约。"
+
+#: ../../source/blog/native_ffa.md:45
+msgid "AttnSlice Formulation"
+msgstr "AttnSlice 表示"
+
+#: ../../source/blog/native_ffa.md:51
+#, python-brace-format
+msgid ""
+"An irregular mask decomposed into {math}`\\mathrm{AttnSlice}` units. Each"
+" unit is one `(QRange, KRange, MaskType)` triplet consumed directly by "
+"the `FFA` kernel."
+msgstr ""
+"一个不规则 mask 被分解为若干 {math}`\\mathrm{AttnSlice}` 单元，每个单元都是一个 `(QRange, "
+"KRange, MaskType)` 三元组，由 `FFA` kernel 直接消费。"
+
+#: ../../source/blog/native_ffa.md:54
+msgid "Tile Range per Slice"
+msgstr "每个 Slice 的 Tile 范围"
+
+#: ../../source/blog/native_ffa.md:56
+#, python-brace-format
+msgid ""
+"A forward work tile is `(slice, m_block, head)`. For slice {math}`b` with"
+" query length {math}`s_q`, key length {math}`s_k` and the rows "
+"{math}`[m_{min}, m_{max}]` of the current `m_block` (relative to the "
+"slice), the visible key-block range is:"
+msgstr ""
+"前向的一个 work tile 是 `(slice, m_block, head)`。对于 query 长度为 {math}`s_q`、key "
+"长度为 {math}`s_k` 的 slice {math}`b`，记当前 `m_block` 覆盖的行（相对 slice 起点）为 "
+"{math}`[m_{min}, m_{max}]`，则可见的 key block 范围为："
+
+#: ../../source/blog/native_ffa.md:58
+msgid ""
+"\\begin{aligned}\n"
+"n_{max} &= \\begin{cases}\n"
+"\\left\\lceil \\dfrac{m_{max} + 1 + s_k - s_q}{B_N} \\right\\rceil & "
+"\\texttt{CAUSAL},\\ \\texttt{BI-CAUSAL} \\\\[2mm]\n"
+"\\left\\lceil \\dfrac{s_k}{B_N} \\right\\rceil & \\texttt{FULL},\\ "
+"\\texttt{INV-CAUSAL}\n"
+"\\end{cases} \\\\\n"
+"n_{min} &= \\begin{cases}\n"
+"\\left\\lfloor \\dfrac{m_{min}}{B_N} \\right\\rfloor & \\texttt{INV-"
+"CAUSAL},\\ \\texttt{BI-CAUSAL} \\\\[2mm]\n"
+"0 & \\texttt{FULL},\\ \\texttt{CAUSAL}\n"
+"\\end{cases}\n"
+"\\end{aligned}"
+msgstr ""
+
+#: ../../source/blog/native_ffa.md:71
+#, python-brace-format
+msgid ""
+"with both bounds clamped to the slice. Inside {math}`[n_{min}, n_{max})`,"
+" only the blocks that intersect a diagonal need element-wise masking; the"
+" interior blocks run the unmasked fast path. Both implementations "
+"specialize the three regions (causal boundary, unmasked interior, "
+"inverse-causal boundary) at compile time, so the common unmasked "
+"iterations carry no mask instructions and no `-inf` row checks. The "
+"backward pass uses the dual formula to compute the `m_block` range of "
+"each `n_block`."
+msgstr ""
+"两个边界都会被截断到 slice 之内。在 {math}`[n_{min}, n_{max})` 中，只有与对角线相交的 block 需要逐元素 "
+"mask，内部 block 走无 mask 的快速路径。两套实现都在编译期把这三个区域（causal 边界、无 mask 内部、inverse-"
+"causal 边界）特化开，因此占多数的无 mask 迭代既没有 mask 指令，也没有 `-inf` 行检查。反向用对偶的公式为每个 "
+"`n_block` 计算 `m_block` 范围。"
+
+#: ../../source/blog/native_ffa.md:73
+msgid "Slice-Level Parallelism and Scheduling"
+msgstr "Slice 级并行与调度"
+
+#: ../../source/blog/native_ffa.md:75
+#, python-brace-format
+msgid ""
+"Each slice is treated like one sequence of a varlen batch, so the tile "
+"space is the concatenation of every slice's `m_block` tiles over all "
+"heads. Because slice sizes are arbitrary, a static one-tile-per-CTA grid "
+"can leave SMs idle at the tail, and a short slice next to a long one "
+"causes imbalance. `FFA` therefore uses **persistent CTAs with dynamic "
+"tile fetching**: the grid is sized to the number of available SMs, and a "
+"CTA grabs its next tile from a global atomic counter, decodes it into "
+"`(slice, m_block, head)` with a warp-level prefix sum over slice tile "
+"counts, and hands it to its consumer warps through shared memory. When "
+"the caller provides `max_seqlen_q` (an upper bound on the longest query "
+"range), the decode degrades to an {math}`O(1)` division."
+msgstr ""
+"每个 slice 都被当作 varlen batch 中的一条序列，因此 tile 空间是所有 slice 在所有 head 上的 "
+"`m_block` tile 拼接而成。由于 slice 大小任意，静态的「每个 CTA 一个 tile」网格容易在尾部让 SM 空闲，长短 "
+"slice 相邻时也会负载不均。因此 `FFA` 采用 **持久化 CTA + 动态取 tile**：网格大小等于可用 SM 数，CTA "
+"通过全局原子计数器领取下一个 tile，用 warp 级前缀和在各 slice 的 tile 数上解码出 `(slice, m_block, "
+"head)`，再经 shared memory 交给 consumer warp。如果调用方提供了 `max_seqlen_q`（最长 query"
+" 区间的上界），解码可以退化为一次 {math}`O(1)` 除法。"
+
+#: ../../source/blog/native_ffa.md:77
+msgid ""
+"The persistent grid is also how `FFA` cooperates with communication. "
+"`sm_margin` reserves SMs that the attention kernel will never occupy, so "
+"that the `GroupCast` and `GroupReduce` kernels of the next overlap stage "
+"can start immediately instead of queueing behind attention CTAs. See the "
+"[kernel overlap](./kernel_overlap.md) post for how `MagiAttention` uses "
+"this."
+msgstr ""
+"持久化网格也是 `FFA` 与通信协作的方式。`sm_margin` 会预留出 attention kernel 永远不会占用的 SM，让下一个 "
+"overlap stage 的 `GroupCast` 与 `GroupReduce` kernel 可以立即启动，而不必排在 attention"
+" CTA 之后。`MagiAttention` 如何利用这一点，请参见 [kernel overlap](./kernel_overlap.md)"
+" 一文。"
+
+#: ../../source/blog/native_ffa.md:79
+msgid "Reducing Partial Results Across Slices"
+msgstr "跨 Slice 的部分结果归约"
+
+#: ../../source/blog/native_ffa.md:81
+#, python-brace-format
+msgid ""
+"When several slices write the same output rows, each of them produces a "
+"partial output with its own log-sum-exp. Two partial results {math}`(O_1,"
+" \\mathrm{lse}_1)` and {math}`(O_2, \\mathrm{lse}_2)` for the same query "
+"row combine exactly as"
+msgstr ""
+"当多个 slice 写同一批输出行时，每个 slice 都会产生一份带有自身 log-sum-exp 的部分输出。同一 query "
+"行上的两份部分结果 {math}`(O_1, \\mathrm{lse}_1)` 与 {math}`(O_2, \\mathrm{lse}_2)`"
+" 可以按下式精确合并："
+
+#: ../../source/blog/native_ffa.md:83
+msgid ""
+"\\mathrm{lse} = \\log\\left(e^{\\mathrm{lse}_1} + "
+"e^{\\mathrm{lse}_2}\\right), \\qquad\n"
+"O = e^{\\mathrm{lse}_1 - \\mathrm{lse}}\\, O_1 + e^{\\mathrm{lse}_2 - "
+"\\mathrm{lse}}\\, O_2"
+msgstr ""
+
+#: ../../source/blog/native_ffa.md:88
+msgid ""
+"which is the same correction the distributed layer applies between CP "
+"stages. Since the merge is not a plain sum, it cannot be done with "
+"hardware atomic adds. `FFA` supports three reduction regimes, chosen per "
+"call:"
+msgstr ""
+"这与分布式层在 CP stage 之间所做的修正完全相同。由于这种合并不是简单求和，无法用硬件原子加完成。`FFA` "
+"支持三种归约模式，每次调用时选择："
+
+#: ../../source/blog/native_ffa.md:90
+msgid ""
+"**Locked LSE-weighted merge** (default, called \"atomic reduction\" in "
+"the API). The output buffer in global memory is itself the accumulator, "
+"kept in `float32` by default, and `lse` is initialized to `-inf`. In the "
+"epilogue, a CTA acquires a spin lock per `(q_block, head)` with "
+"`atomicCAS`; because a slice's query start is generally not aligned to "
+"`B_M`, a tile can straddle two physical blocks and needs both locks. "
+"Under the lock it reads the previous `lse`, computes the merged `lse`, "
+"rescales and adds the previous `O`, writes both back, issues a memory "
+"fence, and releases. A forward postprocess kernel then zero-fills rows "
+"that no slice covered (their `lse` is still `-inf`), folds in attention "
+"sink if present, and casts `O` to the requested dtype."
+msgstr ""
+"**加锁的 LSE 加权合并**（默认，API 中称为「atomic reduction」）。global memory "
+"中的输出缓冲本身就是累加器，默认为 `float32`，`lse` 初始化为 `-inf`。在 epilogue 中，CTA 用 "
+"`atomicCAS` 为每个 `(q_block, head)` 获取一把自旋锁；由于 slice 的 query 起点通常不与 `B_M` "
+"对齐，一个 tile 可能横跨两个物理 block，需要同时持有两把锁。持锁期间，它读出之前的 `lse`，计算合并后的 `lse`，把之前的 "
+"`O` 重缩放后与当前结果相加，二者写回后执行 memory fence 并释放锁。随后由前向 postprocess kernel 把没有任何 "
+"slice 覆盖的行（其 `lse` 仍为 `-inf`）清零，若有 attention sink 则将其合并进来，并把 `O` 转换为目标 "
+"dtype。"
+
+#: ../../source/blog/native_ffa.md:91
+msgid ""
+"**Direct store**. With `disable_fwd_atomic_reduction=True` (or "
+"`disable_bwd_dkv_atomic_reduction=True` in the backward pass), the caller"
+" guarantees that the relevant ranges are sorted and pairwise disjoint. "
+"Every output row then has a single writer, so the kernel stores results "
+"in the native dtype without locks, and uncovered rows are filled by the "
+"pre/post-processing kernels."
+msgstr ""
+"**直接写回**。设置 `disable_fwd_atomic_reduction=True`（反向对应 "
+"`disable_bwd_dkv_atomic_reduction=True`）时，调用方保证相关区间有序且两两不相交。此时每个输出行只有一个写者，kernel"
+" 无需加锁即可以原生 dtype 直接写回，未被覆盖的行由前/后处理 kernel 填充。"
+
+#: ../../source/blog/native_ffa.md:92
+msgid ""
+"**Range merge**. Slices that share the same `q_range` (forward) or "
+"`k_range` (backward) are grouped on the host into a CSR structure: sort "
+"by range, collapse consecutive duplicates, and record each group's slice "
+"offsets. One work tile then walks the key ranges of all slices in its "
+"group inside a single online-softmax loop, so the accumulator never "
+"leaves the chip and no global reduction is needed for that group. This is"
+" controlled by `range_merge` at the kernel level and by "
+"`MAGI_ATTENTION_RANGE_MERGE` in `MagiAttention` (experimental)."
+msgstr ""
+"**Range merge**。在 host 端，把 `q_range`（前向）或 `k_range`（反向）完全相同的 slice 分组为 "
+"CSR 结构：按区间排序、合并连续的重复项，并记录每组的 slice 偏移。之后一个 work tile 在单个 online softmax "
+"循环中遍历组内所有 slice 的 key 区间，累加器始终留在片上，这一组也就不需要任何全局归约。kernel 层通过 "
+"`range_merge` 控制，`MagiAttention` 中通过 `MAGI_ATTENTION_RANGE_MERGE` "
+"控制（实验特性）。"
+
+#: ../../source/blog/native_ffa.md:94
+msgid ""
+"The backward pass has the same problem along both dimensions. Here the "
+"reductions are plain sums, so they map to hardware: the gradient of the "
+"inner loop dimension (`dQ` when the outer loop is over K/V) is "
+"accumulated into a `float32` buffer with TMA bulk reduce-add, and the "
+"gradient of the outer dimension (`dK`, `dV`) uses reduce-add only when "
+"slices share key rows or when GQA folds several query heads onto one KV "
+"head. Otherwise it is stored directly."
+msgstr ""
+"反向在两个维度上都面临同样的问题，但这里的归约是普通求和，可以映射到硬件：内层循环维度的梯度（外层循环为 K/V 时即 `dQ`）通过 TMA "
+"bulk reduce-add 累加到 `float32` 缓冲；外层维度的梯度（`dK`、`dV`）只有在多个 slice 共享 key 行、或"
+" GQA 把多个 query head 折叠到同一个 KV head 时才使用 reduce-add，否则直接写回。"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "FFA Slice Atomic Reduction"
+msgstr "FFA Slice 原子归约"
+
+#: ../../source/blog/native_ffa.md:102
+msgid ""
+"Data loading, on-chip computation, and cross-slice reduction in the `FFA`"
+" forward and backward kernels."
+msgstr "`FFA` 前向与反向 kernel 中的数据加载、片上计算与跨 slice 归约。"
+
+#: ../../source/blog/native_ffa.md:105
+msgid "Pre- and Post-Processing Kernels"
+msgstr "前处理与后处理 Kernel"
+
+#: ../../source/blog/native_ffa.md:107
+msgid ""
+"Around the main kernels sit three small kernels, which are also the hooks"
+" where several features are implemented without touching the mainloop:"
+msgstr "主 kernel 周围有三个小 kernel，它们也是多项特性在不改动主循环的前提下得以实现的切入点："
+
+#: ../../source/blog/native_ffa.md:109
+msgid ""
+"**Forward postprocess**: zero-fills uncovered rows, merges the attention-"
+"sink LSE into `lse` and rescales `O`, and casts the `float32` "
+"accumulator."
+msgstr ""
+"**前向 postprocess**：将未覆盖的行清零，把 attention sink 的 LSE 合并进 `lse` 并重缩放 `O`，再转换"
+" `float32` 累加器的 dtype。"
+
+#: ../../source/blog/native_ffa.md:110
+#, python-brace-format
+msgid ""
+"**Backward preprocess**: computes {math}`\\Delta = \\mathrm{rowsum}(O "
+"\\circ dO)` (named `dPsum` in the code), converts `lse` to the "
+"{math}`\\log_2` domain used by `exp2`, and computes the sink gradient "
+"`dsink` on SM90."
+msgstr ""
+"**反向 preprocess**：计算 {math}`\\Delta = \\mathrm{rowsum}(O \\circ "
+"dO)`（代码中称为 `dPsum`），把 `lse` 转换到 `exp2` 所用的 {math}`\\log_2` 域，并在 SM90 上计算 "
+"sink 的梯度 `dsink`。"
+
+#: ../../source/blog/native_ffa.md:111
+msgid ""
+"**Backward postprocess**: applies `softmax_scale` to the accumulated "
+"gradients, casts them, and zero-fills key rows that no slice covered."
+msgstr ""
+"**反向 postprocess**：对累加得到的梯度乘以 `softmax_scale` 并转换 dtype，同时把没有任何 slice 覆盖的"
+" key 行清零。"
+
+#: ../../source/blog/native_ffa.md:113
+msgid "Deterministic Mode"
+msgstr "确定性模式"
+
+#: ../../source/blog/native_ffa.md:115
+msgid ""
+"The locked merge and the reduce-add accumulation are order-dependent in "
+"floating point. On SM90, `deterministic=True` makes the order fixed: "
+"every lock carries an `[arrive_num, counter]` pair, the scheduler tracks "
+"which slices have already visited each `(block, head)`, and a CTA waits "
+"until all slices with a smaller index have committed before it merges. "
+"This applies to the forward output, the backward `dQ`, and the backward "
+"`dK`/`dV`. The SM100 kernel does not support deterministic mode with "
+"ranges yet."
+msgstr ""
+"加锁合并与 reduce-add 累加在浮点意义下都依赖执行顺序。在 SM90 上，`deterministic=True` "
+"会固定这一顺序：每把锁附带一对 `[arrive_num, counter]`，调度器记录每个 `(block, head)` 已经被哪些 "
+"slice 访问过，CTA 在合并前会等待所有序号更小的 slice 提交完毕。该机制作用于前向输出、反向 `dQ` 以及反向 "
+"`dK`/`dV`。SM100 kernel 目前在 ranges 模式下还不支持确定性。"
+
+#: ../../source/blog/native_ffa.md:118
+msgid "SM90 Implementation (Hopper)"
+msgstr "SM90 实现（Hopper）"
+
+#: ../../source/blog/native_ffa.md:120
+#, python-brace-format
+msgid ""
+"The SM90 kernel is written in CUDA C++ on top of CUTLASS/CuTe and derives"
+" from the `Flash-Attention 3` codebase "
+"{cite}`shah2024flashattention3fastaccurateattention_native_ffa`. It is "
+"the default backend."
+msgstr ""
+"SM90 kernel 使用 CUDA C++ 基于 CUTLASS/CuTe 编写，源自 `Flash-Attention 3` 代码库 "
+"{cite}`shah2024flashattention3fastaccurateattention_native_ffa`，是当前的默认 "
+"backend。"
+
+#: ../../source/blog/native_ffa.md:122
+msgid "Warp Specialization and Pipeline"
+msgstr "Warp Specialization 与流水线"
+
+#: ../../source/blog/native_ffa.md:124
+msgid ""
+"The kernel is a warp-specialized persistent kernel. Warpgroup 0 is the "
+"producer, and one to three consumer warpgroups run WGMMA. Register "
+"budgets are rebalanced with `setmaxnreg` and are chosen on the Python "
+"side per configuration, for example `(producer, consumer) = (56, 256)` "
+"with one MMA warpgroup, `(40, 232)` with two, and `(32, 160)` with three."
+" In the TMA path, only one producer warp is needed and the other three "
+"exit early. In the sparse scatter path, the whole producer warpgroup "
+"issues `cp.async` loads."
+msgstr ""
+"这是一个 warp-specialized 的持久化 kernel。Warpgroup 0 是 producer，另有一到三个 consumer "
+"warpgroup 执行 WGMMA。寄存器配额通过 `setmaxnreg` 重新分配，并由 Python 侧按配置选定，例如一个 MMA "
+"warpgroup 时 `(producer, consumer) = (56, 256)`，两个时为 `(40, 232)`，三个时为 "
+"`(32, 160)`。TMA 路径只需要一个 producer warp，另外三个 warp 会提前退出；稀疏 scatter 路径则由整个 "
+"producer warpgroup 发起 `cp.async` 加载。"
+
+#: ../../source/blog/native_ffa.md:126
+msgid ""
+"Q is loaded once per tile with TMA. K and V each have their own two-stage"
+" pipeline, and the shared-memory buffer of `O` aliases the V buffer, "
+"since the epilogue only needs it after the last PV GEMM. The PV GEMM uses"
+" the register-sourced (RS) WGMMA variant, so `P` stays in registers after"
+" softmax and never goes through shared memory."
+msgstr ""
+"Q 在每个 tile 中通过 TMA 加载一次。K 和 V 各有一条两级流水线，`O` 的 shared memory 缓冲与 V 缓冲复用，因为"
+" epilogue 只在最后一次 PV GEMM 之后才需要它。PV GEMM 使用寄存器作为 A 操作数的（RS）WGMMA 变体，因此 "
+"softmax 之后 `P` 一直留在寄存器中，不经过 shared memory。"
+
+#: ../../source/blog/native_ffa.md:128
+msgid "Forward Mainloop"
+msgstr "前向主循环"
+
+#: ../../source/blog/native_ffa.md:130
+msgid "Two levels of overlap hide softmax latency behind Tensor Core work:"
+msgstr "两层重叠把 softmax 延迟隐藏在 Tensor Core 计算之后："
+
+#: ../../source/blog/native_ffa.md:132
+msgid ""
+"**Inter-warpgroup ping-pong**: with two consumer warpgroups, named "
+"barriers make one warpgroup run its GEMMs while the other runs softmax."
+msgstr ""
+"**Warpgroup 间 ping-pong**：有两个 consumer warpgroup 时，通过 named barrier 让一个 "
+"warpgroup 执行 GEMM 的同时另一个执行 softmax。"
+
+#: ../../source/blog/native_ffa.md:133
+#, python-brace-format
+msgid ""
+"**Intra-warpgroup overlap** (on by default): in the steady state, a "
+"warpgroup issues `S_i = Q K_i^T`, then issues `O += P_{i-1} V_{i-1}`, "
+"waits only for the first GEMM, runs mask and softmax on `S_i`, then waits"
+" for the PV GEMM before rescaling `O`. For `head_dim > 128`, `O` is "
+"rescaled before the PV GEMM is issued instead of after it completes."
+msgstr ""
+"**Warpgroup 内重叠**（默认开启）：稳态下，一个 warpgroup 先发起 `S_i = Q K_i^T`，再发起 `O += "
+"P_{i-1} V_{i-1}`，只等待第一个 GEMM 完成就对 `S_i` 做 mask 与 softmax，之后再等待 PV GEMM "
+"完成并重缩放 `O`。当 `head_dim > 128` 时，`O` 改为在发起 PV GEMM 之前重缩放，而不是在其完成之后。"
+
+#: ../../source/blog/native_ffa.md:135
+msgid ""
+"Forward tile sizes are `(B_M, B_N) = (192, 128)` for `head_dim <= 64` and"
+" `(128, 128)` for `head_dim <= 128`, and can be overridden with "
+"`ref_block_size`."
+msgstr ""
+"前向 tile 尺寸在 `head_dim <= 64` 时为 `(B_M, B_N) = (192, 128)`，在 `head_dim <= "
+"128` 时为 `(128, 128)`，可通过 `ref_block_size` 覆盖。"
+
+#: ../../source/blog/native_ffa.md:137
+#, python-brace-format
+msgid ""
+"For very short query ranges (for example the decode-like slices that "
+"appear in sparse or inference workloads), `swap_ab=True` computes "
+"{math}`S^\\mathrm{T} = K Q^\\mathrm{T}` and {math}`O^\\mathrm{T} = V "
+"P^\\mathrm{T}` instead. The short query dimension then maps to the `N` "
+"dimension of WGMMA, which can be as small as 8, rather than the `M` "
+"dimension, which must be a multiple of 64. `ref_block_size` then takes "
+"`(8 | 16 | 32 | 64, 64)`."
+msgstr ""
+"对于非常短的 query 区间（例如稀疏或推理负载中类似 decode 的 slice），`swap_ab=True` 会改为计算 "
+"{math}`S^\\mathrm{T} = K Q^\\mathrm{T}` 与 {math}`O^\\mathrm{T} = V "
+"P^\\mathrm{T}`。这样短的 query 维度被映射到 WGMMA 的 `N` 维（最小可到 8），而不是必须为 64 倍数的 `M` "
+"维。此时 `ref_block_size` 取 `(8 | 16 | 32 | 64, 64)`。"
+
+#: ../../source/blog/native_ffa.md:139
+msgid "Backward Mainloop"
+msgstr "反向主循环"
+
+#: ../../source/blog/native_ffa.md:141
+msgid "The backward kernel offers two loop orders:"
+msgstr "反向 kernel 提供两种循环顺序："
+
+#: ../../source/blog/native_ffa.md:143
+msgid ""
+"**LoopQ** (default): the outer loop is over K/V tiles, so `dK` and `dV` "
+"accumulate in registers, and the inner loop is over Q/dO tiles. `dQ` is "
+"written by a dedicated storer warp in the producer warpgroup with "
+"`SM90_TMA_REDUCE_ADD` into a `float32` buffer."
+msgstr ""
+"**LoopQ**（默认）：外层循环遍历 K/V tile，`dK` 与 `dV` 在寄存器中累加；内层循环遍历 Q/dO tile。`dQ` 由"
+" producer warpgroup 中专门的 storer warp 通过 `SM90_TMA_REDUCE_ADD` 写入 "
+"`float32` 缓冲。"
+
+#: ../../source/blog/native_ffa.md:144
+msgid ""
+"**LoopK** (`swap_bwd_qk_loop=True`): the outer loop is over Q/dO tiles, "
+"so `dQ` accumulates in registers, and two storer warps reduce-add "
+"`dK`/`dV`. This order suits shapes where few query tiles hit each key "
+"tile, such as index-sparse attention with small key blocks, and it is the"
+" order that supports `PackGQA` in the backward pass."
+msgstr ""
+"**LoopK**（`swap_bwd_qk_loop=True`）：外层循环遍历 Q/dO tile，`dQ` 在寄存器中累加，由两个 "
+"storer warp 对 `dK`/`dV` 做 reduce-add。这种顺序适合每个 key tile 只被少量 query tile "
+"命中的形状，例如 key block 较小的 index-sparse attention，同时它也是反向支持 `PackGQA` 的循环顺序。"
+
+#: ../../source/blog/native_ffa.md:146
+msgid ""
+"Inner-dimension gradients can be written with a 2D TMA tile reduce, a 1D "
+"bulk reduce (`cp.reduce.async.bulk.add.f32`, the default for sparse "
+"workloads), or scalar `atomicAdd`. The operand swap of each backward GEMM"
+" is chosen by `head_dim`: `S`/`dP` are swapped for `head_dim <= 128`, "
+"`dK`/`dV` for `head_dim > 128`, and `dQ` for `head_dim > 64`."
+msgstr ""
+"内层维度的梯度可以用 2D TMA tile reduce、1D bulk "
+"reduce（`cp.reduce.async.bulk.add.f32`，稀疏负载的默认方式）或标量 `atomicAdd` 写出。每个反向 "
+"GEMM 是否交换操作数由 `head_dim` 决定：`head_dim <= 128` 时交换 `S`/`dP`，`head_dim > "
+"128` 时交换 `dK`/`dV`，`head_dim > 64` 时交换 `dQ`。"
+
+#: ../../source/blog/native_ffa.md:148
+msgid "GQA"
+msgstr "GQA"
+
+#: ../../source/blog/native_ffa.md:150
+msgid ""
+"Without packing, each query head is a separate tile and is mapped to its "
+"KV head. With `pack_gqa=True`, the `G = num_heads_q / num_heads_kv` query"
+" heads that share a KV head are folded into the `M` dimension through a "
+"hierarchical TMA layout `((G, seqlen), head_dim, num_heads_kv)`, so one "
+"K/V tile load serves `G` heads. `cat_gqa` is an alternative layout for "
+"the backward pass that is mutually exclusive with `pack_gqa`."
+msgstr ""
+"不做 pack 时，每个 query head 是独立的 tile，并映射到其对应的 KV head。设置 `pack_gqa=True` "
+"后，共享同一个 KV head 的 `G = num_heads_q / num_heads_kv` 个 query head 通过层次化 TMA"
+" 布局 `((G, seqlen), head_dim, num_heads_kv)` 折叠进 `M` 维，一次 K/V tile 加载即可服务 "
+"`G` 个 head。`cat_gqa` 是反向的另一种布局，与 `pack_gqa` 互斥。"
+
+#: ../../source/blog/native_ffa.md:96 ../../source/blog/native_ffa.md:152
+#: ../../source/blog/native_ffa.md:222
+msgid "Compilation"
+msgstr "编译"
+
+#: ../../source/blog/native_ffa.md:154
+msgid ""
+"Each distinct configuration is rendered from a Jinja template into a "
+"single-variant `.cu` file, compiled with `nvcc` through Ninja, and cached"
+" on disk under a URI that encodes every specialization (direction, head "
+"dim, dtypes, softcap, reduction mode, deterministic, range merge, swap "
+"AB, GQA mode, sparse mode, tile size, and so on). Common configurations "
+"are pre-built into the wheel with the same machinery. See the [JIT "
+"compilation](./jit_compile.md) post for details."
+msgstr ""
+"每种不同的配置都会由 Jinja 模板渲染成一个只含单一变体的 `.cu` 文件，经 Ninja 调用 `nvcc` 编译，并以 URI "
+"为键缓存到磁盘；URI 编码了全部特化维度（方向、head dim、dtype、softcap、归约模式、确定性、range merge、swap"
+" AB、GQA 模式、稀疏模式、tile 尺寸等）。常用配置会用同一套机制预编译进 wheel。详见 [JIT "
+"编译](./jit_compile.md) 一文。"
+
+#: ../../source/blog/native_ffa.md:156 ../../source/blog/native_ffa.md:226
+msgid "Constraints"
+msgstr "约束"
+
+#: ../../source/blog/native_ffa.md:158
+msgid ""
+"The SM90 path targets `sm_90a` only, computes in `float16` or `bfloat16`,"
+" and accepts `head_dim <= 128` (rounded up to 64 or 128). `O` can be "
+"written as `float16`, `bfloat16`, or `float32`, and so can `dQ`, `dK`, "
+"and `dV`. The build requires CUDA 13 by default, because building with "
+"CUDA 12 can cause a significant performance drop. Set "
+"`MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1` to build with CUDA 12 anyway."
+msgstr ""
+"SM90 路径只面向 `sm_90a`，计算精度为 `float16` 或 `bfloat16`，支持 `head_dim <= "
+"128`（向上取整为 64 或 128）。`O` 可以输出为 `float16`、`bfloat16` 或 "
+"`float32`，`dQ`、`dK`、`dV` 同理。默认要求使用 CUDA 13 构建，因为用 CUDA 12 "
+"构建可能导致明显的性能下降；如仍需使用 CUDA 12，可设置 "
+"`MAGI_ATTENTION_ALLOW_BUILD_WITH_CUDA12=1`。"
+
+#: ../../source/blog/native_ffa.md:161
+msgid "SM100 Implementation (Blackwell)"
+msgstr "SM100 实现（Blackwell）"
+
+#: ../../source/blog/native_ffa.md:163
+#, python-brace-format
+msgid ""
+"The SM100 kernel is written in CuTe DSL {cite}`cutlass-pythonDSL-"
+"overview_native_ffa`. The codebase started from the `Flash-Attention 4` "
+"CuTe module {cite}`dao2025flashattention_cute_native_ffa` and was rebuilt"
+" as native `FFA`: the kernels read the `[R, 2]` range tensors directly "
+"instead of `cu_seqlens`, accept overlapping query and key ranges, read a "
+"per-slice mask type at runtime, and implement the same reduction regimes "
+"as the SM90 kernel. This is different from `FFA_FA4`, which translates "
+"slices into per-row `HSTU Function` intervals and block-sparse metadata "
+"before calling a forked `FA4` kernel."
+msgstr ""
+"SM100 kernel 使用 CuTe DSL {cite}`cutlass-pythonDSL-overview_native_ffa` "
+"编写。代码库起始于 `Flash-Attention 4` 的 CuTe 模块 "
+"{cite}`dao2025flashattention_cute_native_ffa`，并被重构为原生 `FFA`：kernel 直接读取 "
+"`[R, 2]` 的区间张量而非 `cu_seqlens`，支持 query 与 key 区间重叠，在运行时读取每个 slice 的 mask "
+"类型，并实现了与 SM90 kernel 相同的归约模式。这与 `FFA_FA4` 不同，后者会先把 slice 转换为逐行的 `HSTU "
+"Function` 区间与 block-sparse 元数据，再调用 fork 出来的 `FA4` kernel。"
+
+#: ../../source/blog/native_ffa.md:165
+msgid "Forward Kernel"
+msgstr "前向 Kernel"
+
+#: ../../source/blog/native_ffa.md:167
+msgid "The forward kernel uses 16 warps with fixed roles:"
+msgstr "前向 kernel 使用 16 个 warp，角色固定："
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Warps"
+msgstr "Warp"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Role"
+msgstr "角色"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "0-3"
+msgstr "0-3"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`softmax0`: softmax for the first Q tile"
+msgstr "`softmax0`：第一个 Q tile 的 softmax"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "4-7"
+msgstr "4-7"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`softmax1`: softmax for the second Q tile"
+msgstr "`softmax1`：第二个 Q tile 的 softmax"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "8-11"
+msgstr "8-11"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`correction`: `O` rescaling, and the epilogue for ranges"
+msgstr "`correction`：重缩放 `O`，并负责 ranges 模式下的 epilogue"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "12"
+msgstr "12"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`MMA`: issues all `tcgen05.mma` instructions"
+msgstr "`MMA`：发起所有 `tcgen05.mma` 指令"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "13"
+msgstr "13"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`epilogue` (dense path)"
+msgstr "`epilogue`（dense 路径）"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "14"
+msgstr "14"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`load`: TMA loads of Q, K, V"
+msgstr "`load`：通过 TMA 加载 Q、K、V"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "15"
+msgstr "15"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "spare, or the scheduler warp in persistent mode"
+msgstr "空闲，持久化模式下作为调度 warp"
+
+#: ../../source/blog/native_ffa.md:179
+#, python-brace-format
+msgid ""
+"Each CTA processes two 128-row Q tiles that share every K/V tile "
+"(`q_stage = 2`), and the two softmax warpgroups alternate between them. A"
+" single thread of the MMA warp issues every GEMM. It first computes `S_0 "
+"= Q_0 K_0^T` and `S_1 = Q_1 K_0^T`, and then, in each iteration, `O += "
+"P_{i-1} V_{i-1}` followed by `S = Q K_i^T` for each Q tile. The GEMM "
+"descriptors are pre-built in registers, so advancing a pipeline stage "
+"costs one integer add. To start the PV GEMM earlier, softmax signals it "
+"after the first three quarters of `P` are written, and a second barrier "
+"covers the last quarter."
+msgstr ""
+"每个 CTA 处理两个 128 行的 Q tile，它们共享每一个 K/V tile（`q_stage = 2`），两个 softmax "
+"warpgroup 在二者之间交替。MMA warp 中的单个线程发起所有 GEMM：先计算 `S_0 = Q_0 K_0^T` 和 `S_1 ="
+" Q_1 K_0^T`，之后每轮迭代对每个 Q tile 先算 `O += P_{i-1} V_{i-1}`，再算 `S = Q "
+"K_i^T`。GEMM descriptor 预先构造在寄存器中，推进一级流水只需一次整数加法。为了让 PV GEMM 更早启动，softmax "
+"在写完前四分之三的 `P` 后就发出信号，剩余四分之一由另一个 barrier 同步。"
+
+#: ../../source/blog/native_ffa.md:181
+msgid ""
+"All accumulators live in Tensor Memory (TMEM). The 512 columns are used "
+"exactly:"
+msgstr "所有累加器都位于 Tensor Memory（TMEM）中，512 列恰好用满："
+
+#: ../../source/blog/native_ffa.md:96
+msgid "TMEM columns"
+msgstr "TMEM 列"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Content"
+msgstr "内容"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`[0, 128)`"
+msgstr "`[0, 128)`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`S_0`, with `P_0` (bf16) aliased at `[64, 192)`"
+msgstr "`S_0`，`P_0`（bf16）复用 `[64, 192)`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`[128, 256)`"
+msgstr "`[128, 256)`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`S_1`, with `P_1` aliased at the same offset"
+msgstr "`S_1`，`P_1` 以相同偏移复用"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`[256, 256 + d_v)`"
+msgstr "`[256, 256 + d_v)`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`O_0`"
+msgstr "`O_0`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`[256 + d_v, 256 + 2 d_v)`"
+msgstr "`[256 + d_v, 256 + 2 d_v)`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`O_1`"
+msgstr "`O_1`"
+
+#: ../../source/blog/native_ffa.md:190
+msgid ""
+"Row max and row sum reuse the `S` columns once softmax has consumed them."
+" The PV GEMM reads `P` from TMEM as its A operand, so `P` never goes "
+"through shared memory."
+msgstr ""
+"softmax 消费完 `S` 后，row max 与 row sum 复用 `S` 所在的列。PV GEMM 直接从 TMEM 读取 `P` "
+"作为 A 操作数，因此 `P` 不经过 shared memory。"
+
+#: ../../source/blog/native_ffa.md:192
+msgid "Softmax uses two tricks inherited from `FA4`:"
+msgstr "softmax 沿用了 `FA4` 的两个技巧："
+
+#: ../../source/blog/native_ffa.md:194
+#, python-brace-format
+msgid ""
+"**Conditional rescaling**: the running max is only updated when the new "
+"max exceeds the old one by more than a threshold (8 in the "
+"{math}`\\log_2` domain for 16-bit inputs). Otherwise, the stale max is "
+"kept and the rescale factor is exactly 1. The correction warpgroup checks"
+" this with a warp ballot and skips rescaling `O` in TMEM when no row "
+"needs it."
+msgstr ""
+"**条件重缩放**：只有当新的最大值比旧值高出一个阈值（16-bit 输入时在 {math}`\\log_2` 域为 8）时才更新 running"
+" max，否则沿用旧的最大值，重缩放因子恰好为 1。correction warpgroup 用 warp ballot "
+"判断这一点，在没有任何行需要时跳过对 TMEM 中 `O` 的重缩放。"
+
+#: ../../source/blog/native_ffa.md:195
+msgid ""
+"**Software `exp2`**: a fraction of the exponentials are computed with a "
+"polynomial on the FMA pipes instead of the MUFU unit, to balance the two "
+"pipes. The fraction is tuned per `(2-CTA, causal, head_dim, arch)`. On "
+"SM103 (B300), whose special function units are fast enough on their own, "
+"the emulation is disabled."
+msgstr ""
+"**软件 `exp2`**：一部分指数运算改为在 FMA 流水线上用多项式计算，而不是走 MUFU 单元，以平衡两条流水线的负载。该比例按 "
+"`(2-CTA, causal, head_dim, arch)` 调优。SM103（B300）的特殊函数单元本身已经足够快，因此不启用该模拟。"
+
+#: ../../source/blog/native_ffa.md:197
+msgid ""
+"For ranges, the correction warpgroup also runs the epilogue, including "
+"the locked LSE-weighted merge described above. It takes the lock of the "
+"lower physical block with a blocking spin and the lock of the upper block"
+" with a try-lock. If the try-lock fails, it releases the lower lock and "
+"retries, so a CTA never waits while holding a lock."
+msgstr ""
+"在 ranges 模式下，correction warpgroup 还负责 epilogue，包括前文所述的加锁 LSE 加权合并。它对较低的物理"
+" block 以阻塞自旋方式加锁，对较高的 block 则使用 try-lock；try-lock 失败时先释放低块的锁再重试，从而保证 CTA "
+"不会在持锁的同时等待。"
+
+#: ../../source/blog/native_ffa.md:199
+msgid ""
+"Non-causal configurations with `head_dim` 128 or 192 can use 2-CTA MMA "
+"(`cta_group::2`, cluster `(2, 1)`), where an MMA tile spans 256 query "
+"rows across a CTA pair. Kernels that read per-slice mask types at runtime"
+" currently use 1-CTA instructions. The number of K/V pipeline stages is "
+"derived from the shared-memory budget, and when `O` is accumulated in "
+"`float32` it can reuse K/V slots that have already been consumed, which "
+"keeps two Q tiles resident."
+msgstr ""
+"`head_dim` 为 128 或 192 的非 causal 配置可以使用 2-CTA MMA（`cta_group::2`，cluster "
+"为 `(2, 1)`），此时一个 MMA tile 横跨一对 CTA 覆盖 256 行 query。运行时读取逐 slice mask 类型的 "
+"kernel 目前使用 1-CTA 指令。K/V 流水级数由 shared memory 预算推导得出；当 `O` 以 `float32` "
+"累加时，可以复用已经消费完的 K/V slot，从而保持两个 Q tile 常驻。"
+
+#: ../../source/blog/native_ffa.md:201
+msgid "Backward Kernel"
+msgstr "反向 Kernel"
+
+#: ../../source/blog/native_ffa.md:203
+msgid "The backward kernel also uses 16 warps:"
+msgstr "反向 kernel 同样使用 16 个 warp："
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`reduce`: drains `dQ` from TMEM and reduce-adds it to global memory"
+msgstr "`reduce`：从 TMEM 取出 `dQ` 并 reduce-add 到 global memory"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "4-11"
+msgstr "4-11"
+
+#: ../../source/blog/native_ffa.md:96
+msgid ""
+"`compute`: two warpgroups for the `S`/`dP` loads from TMEM, softmax "
+"recompute, `dS`, and the `dK`/`dV` epilogue"
+msgstr ""
+"`compute`：两个 warpgroup，负责从 TMEM 读取 `S`/`dP`、重算 softmax、计算 `dS` 以及 "
+"`dK`/`dV` 的 epilogue"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`MMA`"
+msgstr "`MMA`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`load`"
+msgstr "`load`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid ""
+"`relay`: forwards the peer CTA's \"half of `dS` ready\" signal to the "
+"leader CTA in 2-CTA mode"
+msgstr "`relay`：在 2-CTA 模式下，把 peer CTA 的「`dS` 半块就绪」信号转发给 leader CTA"
+
+#: ../../source/blog/native_ffa.md:214
+#, python-brace-format
+msgid ""
+"The loop order is K-outer, which corresponds to `LoopQ` on SM90. For each"
+" K/V tile, the kernel walks the visible Q tiles and issues five GEMMs: "
+"{math}`S^\\mathrm{T} = K Q^\\mathrm{T}`, {math}`dP^\\mathrm{T} = V\\, "
+"dO^\\mathrm{T}`, {math}`dV \\mathrel{+}= P^\\mathrm{T} dO`, {math}`dK "
+"\\mathrel{+}= dS^\\mathrm{T} Q`, and {math}`dQ = dS\\, K`. `S`, `dP`, "
+"`dV`, `dK`, and `dQ` all live in TMEM. `P` and `dS` alias the left halves"
+" of `S` and `dP`. `dQ` aliases `dP` in 1-CTA mode and the right half of "
+"`S` in 2-CTA mode, and in both cases the next producer GEMM waits until "
+"the reduce warpgroup has drained the previous `dQ`."
+msgstr ""
+"循环顺序为 K-outer，对应 SM90 上的 `LoopQ`。对每个 K/V tile，kernel 遍历可见的 Q tile 并发起五个 "
+"GEMM：{math}`S^\\mathrm{T} = K Q^\\mathrm{T}`、{math}`dP^\\mathrm{T} = V\\,"
+" dO^\\mathrm{T}`、{math}`dV \\mathrel{+}= P^\\mathrm{T} dO`、{math}`dK "
+"\\mathrel{+}= dS^\\mathrm{T} Q` 以及 {math}`dQ = dS\\, "
+"K`。`S`、`dP`、`dV`、`dK`、`dQ` 全部位于 TMEM 中，`P` 与 `dS` 分别复用 `S` 与 `dP` "
+"的左半部分。`dQ` 在 1-CTA 模式下与 `dP` 复用，在 2-CTA 模式下复用 `S` 的右半部分；两种情况下，下一个产生该区域的 "
+"GEMM 都要等 reduce warpgroup 取走上一份 `dQ` 之后才能开始。"
+
+#: ../../source/blog/native_ffa.md:216
+msgid ""
+"`dQ` goes from TMEM to registers, then to shared memory, and is reduce-"
+"added to a token-major `float32` buffer with TMA bulk reduce. The "
+"unaligned start of a query range is used directly as the TMA coordinate. "
+"A postprocess kernel applies `softmax_scale` and casts the result. "
+"`dK`/`dV` are stored directly with TMA for MHA with disjoint key ranges. "
+"For GQA, or when slices share key rows, they are reduce-added to "
+"`float32` buffers and cast afterwards. `head_dim >= 128` can use 2-CTA "
+"MMA, and `head_dim = 192` requires it."
+msgstr ""
+"`dQ` 从 TMEM 读到寄存器，再写入 shared memory，然后通过 TMA bulk reduce 累加到按 token "
+"行主序排布的 `float32` 缓冲中，未对齐的 query 区间起点直接作为 TMA 坐标使用。之后由 postprocess kernel "
+"乘以 `softmax_scale` 并转换 dtype。对于 key 区间不相交的 MHA，`dK`/`dV` 通过 TMA 直接写回；对于 "
+"GQA 或多个 slice 共享 key 行的情况，它们先 reduce-add 到 `float32` 缓冲，之后再转换 "
+"dtype。`head_dim >= 128` 时可以使用 2-CTA MMA，`head_dim = 192` 时必须使用。"
+
+#: ../../source/blog/native_ffa.md:96 ../../source/blog/native_ffa.md:218
+msgid "Scheduling"
+msgstr "调度"
+
+#: ../../source/blog/native_ffa.md:220
+msgid ""
+"By default, the SM100 forward kernel launches a static grid. Its size is "
+"an upper bound on the number of tiles, computed from `total_q + R * (B_M "
+"- 1)`, and each CTA decodes its tile from a prefix sum over slice "
+"lengths. When query ranges overlap and the kernel is not persistent, the "
+"grid becomes `(ceil(max_seqlen_q / B_M), heads, R)` so that each slice "
+"gets a fixed quota of CTAs. When `sm_margin > 0`, both passes switch to a"
+" dynamic persistent schedule. The grid is capped at `num_SMs - sm_margin`"
+" (rounded to the cluster size), and a scheduler warp in the leader CTA "
+"fetches tiles from a global atomic counter and broadcasts the tile index "
+"to every CTA of the cluster."
+msgstr ""
+"默认情况下，SM100 前向 kernel 启动一个静态网格，其大小是 tile 数的上界，由 `total_q + R * (B_M - 1)`"
+" 计算得出，每个 CTA 通过 slice 长度的前缀和解码出自己的 tile。当 query 区间存在重叠且 kernel 非持久化时，网格改为"
+" `(ceil(max_seqlen_q / B_M), heads, R)`，为每个 slice 分配固定配额的 CTA。当 "
+"`sm_margin > 0` 时，前向与反向都会切换为动态持久化调度：网格上限为 `num_SMs - sm_margin`（按 cluster"
+" 大小取整），由 leader CTA 中的调度 warp 从全局原子计数器领取 tile，并把 tile 索引广播给 cluster 内的所有 "
+"CTA。"
+
+#: ../../source/blog/native_ffa.md:224
+#, python-brace-format
+msgid ""
+"Kernels are compiled with `cute.compile` and launched through TVM FFI "
+"{cite}`cutlass-pythonDSL-cute-compile-with-tvm-ffi_native_ffa`, which "
+"removes most per-call host overhead. Compiled kernels are cached in "
+"memory by a compile key and can also be persisted to disk "
+"(`MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED`, "
+"`MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR`). The disk cache is keyed by a "
+"fingerprint of the kernel sources, the `nvidia-cutlass-dsl`, `quack-"
+"kernels`, and TVM FFI versions, and the CUDA version. The supported "
+"`nvidia-cutlass-dsl` / `quack-kernels` pairs are listed in the "
+"[Installation Guide](../user_guide/install.md)."
+msgstr ""
+"kernel 通过 `cute.compile` 编译，并经由 TVM FFI {cite}`cutlass-pythonDSL-cute-"
+"compile-with-tvm-ffi_native_ffa` 启动，从而去掉了大部分每次调用的 host 开销。编译好的 kernel 按 "
+"compile key "
+"缓存在内存中，也可以持久化到磁盘（`MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED`、`MAGI_ATTENTION_FFA_CUTEDSL_CACHE_DIR`）。磁盘缓存的键是一个指纹，由"
+" kernel 源码、`nvidia-cutlass-dsl`、`quack-kernels` 与 TVM FFI 的版本以及 CUDA "
+"版本共同决定。受支持的 `nvidia-cutlass-dsl` / `quack-kernels` 版本组合见 "
+"[安装指南](../user_guide/install.md)。"
+
+#: ../../source/blog/native_ffa.md:228
+msgid ""
+"The SM100 backend is still work in progress. It computes in `float16` or "
+"`bfloat16` and supports `head_dim <= 128` and `(head_dim, head_dim_v) = "
+"(192, 128)`. `O`, `dQ`, `dK`, and `dV` can be written as `float32`, "
+"`float16`, or `bfloat16`. Deterministic mode is not supported with "
+"ranges, `softcap` is not available on the per-slice-mask path, and "
+"`PackGQA` is only used by the forward pass when the output is direct-"
+"stored."
+msgstr ""
+"SM100 backend 仍在开发中。它的计算精度为 `float16` 或 `bfloat16`，支持 `head_dim <= 128` "
+"以及 `(head_dim, head_dim_v) = (192, 128)`。`O`、`dQ`、`dK`、`dV` 可以输出为 "
+"`float32`、`float16` 或 `bfloat16`。ranges 模式下不支持确定性，逐 slice mask 路径不支持 "
+"`softcap`，且 `PackGQA` 仅在前向直接写回输出时使用。"
+
+#: ../../source/blog/native_ffa.md:231
+msgid "SM90 vs. SM100 at a Glance"
+msgstr "SM90 与 SM100 对比一览"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Aspect"
+msgstr "维度"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "SM90 (`ffa`)"
+msgstr "SM90 (`ffa`)"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "SM100 (`cutedsl`)"
+msgstr "SM100 (`cutedsl`)"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Language and origin"
+msgstr "语言与来源"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "CUDA C++ / CUTLASS, from `FA3`"
+msgstr "CUDA C++ / CUTLASS，源自 `FA3`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "CuTe DSL, from the `FA4` CuTe module"
+msgstr "CuTe DSL，源自 `FA4` 的 CuTe 模块"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "MMA"
+msgstr "MMA"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Warpgroup `wgmma`, issued by each consumer warpgroup"
+msgstr "Warpgroup 级 `wgmma`，由每个 consumer warpgroup 发起"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`tcgen05.mma`, issued by a single thread, optional 2-CTA"
+msgstr "`tcgen05.mma`，由单线程发起，可选 2-CTA"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Accumulators"
+msgstr "累加器"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Registers (`P` reused as the RS operand)"
+msgstr "寄存器（`P` 复用为 RS 操作数）"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "TMEM (`S`, `P`, `O`, `dK`, `dV`, `dP`, `dQ`)"
+msgstr "TMEM（`S`、`P`、`O`、`dK`、`dV`、`dP`、`dQ`）"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Forward warp layout"
+msgstr "前向 warp 布局"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "1 producer + 1 to 3 MMA warpgroups"
+msgstr "1 个 producer + 1 到 3 个 MMA warpgroup"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Load / MMA / 2 softmax / correction / epilogue warps"
+msgstr "Load / MMA / 2 组 softmax / correction / epilogue warp"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Q tiles per CTA"
+msgstr "每个 CTA 的 Q tile 数"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "1 per consumer warpgroup, ping-pong across warpgroups"
+msgstr "每个 consumer warpgroup 1 个，warpgroup 之间 ping-pong"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "2 tiles ping-ponged inside one CTA"
+msgstr "单个 CTA 内 2 个 tile ping-pong"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Softmax latency hiding"
+msgstr "softmax 延迟隐藏"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Inter- and intra-warpgroup overlap"
+msgstr "Warpgroup 间与 warpgroup 内重叠"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Conditional rescaling, software `exp2`, split `P` arrival"
+msgstr "条件重缩放、软件 `exp2`、`P` 分段到达"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Forward overlapping-Q merge"
+msgstr "前向重叠 Q 的合并"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Locked LSE merge in the consumer epilogue"
+msgstr "在 consumer epilogue 中加锁做 LSE 合并"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Locked LSE merge in the correction warpgroup, with try-lock"
+msgstr "在 correction warpgroup 中加锁做 LSE 合并，配合 try-lock"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Backward loop order"
+msgstr "反向循环顺序"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`LoopQ` (default) or `LoopK`"
+msgstr "`LoopQ`（默认）或 `LoopK`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "K-outer"
+msgstr "K-outer"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`dQ` accumulation"
+msgstr "`dQ` 累加"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Storer warp, TMA reduce-add into `float32`"
+msgstr "storer warp，TMA reduce-add 到 `float32`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Reduce warpgroup, TMA bulk reduce-add into `float32`"
+msgstr "reduce warpgroup，TMA bulk reduce-add 到 `float32`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Always persistent, dynamic"
+msgstr "始终持久化，动态调度"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Static by default, dynamic persistent with `sm_margin > 0`"
+msgstr "默认静态，`sm_margin > 0` 时动态持久化"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Head dims"
+msgstr "Head dim"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "64, 128"
+msgstr "64, 128"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`<= 128`, and `(192, 128)`"
+msgstr "`<= 128`，以及 `(192, 128)`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Deterministic"
+msgstr "确定性"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Supported (`LoopQ`)"
+msgstr "支持（`LoopQ`）"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Not supported with ranges"
+msgstr "ranges 模式下不支持"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Jinja + `nvcc` + Ninja, AOT and JIT"
+msgstr "Jinja + `nvcc` + Ninja，AOT 与 JIT"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`cute.compile` + TVM FFI, memory and disk cache"
+msgstr "`cute.compile` + TVM FFI，内存与磁盘缓存"
+
+#: ../../source/blog/native_ffa.md:250
+msgid "Features"
+msgstr "特性"
+
+#: ../../source/blog/native_ffa.md:252
+msgid "The following features are built on the kernel. Each has a dedicated post."
+msgstr "以下特性都构建在该 kernel 之上，每项都有对应的专题文章。"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Feature"
+msgstr "特性"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "SM100"
+msgstr "SM100"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Post"
+msgstr "文章"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Flexible masks (`AttnSlice`, 4 mask types)"
+msgstr "灵活 mask（`AttnSlice`，4 种 mask 类型）"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Yes"
+msgstr "支持"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "[MagiAttention](./magi_attn.md)"
+msgstr "[MagiAttention](./magi_attn.md)"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Learnable attention sink"
+msgstr "可学习 attention sink"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "[Attention Sink](./attn_sink.md)"
+msgstr "[Attention Sink](./attn_sink.md)"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Muon QK-Clip (`max_logits`)"
+msgstr "Muon QK-Clip (`max_logits`)"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "[Muon QK-Clip](./muon_qk_clip.md)"
+msgstr "[Muon QK-Clip](./muon_qk_clip.md)"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Sparse attention"
+msgstr "稀疏注意力"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`BlockSparse`, `IndexSparse`"
+msgstr "`BlockSparse`、`IndexSparse`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`IndexSparse` (standalone kernels)"
+msgstr "`IndexSparse`（独立 kernel）"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "[Sparse Attention](./sparse_attn.md)"
+msgstr "[Sparse Attention](./sparse_attn.md)"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "GQA / MQA"
+msgstr "GQA / MQA"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`PackGQA`, `CatGQA`"
+msgstr "`PackGQA`、`CatGQA`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`PackGQA` (forward)"
+msgstr "`PackGQA`（前向）"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "This post"
+msgstr "本文"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Softcap"
+msgstr "Softcap"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Static-mask kernels only"
+msgstr "仅静态 mask kernel"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Configurable output / gradient dtype"
+msgstr "可配置输出 / 梯度 dtype"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "`sm_margin` for comm overlap"
+msgstr "用于通信重叠的 `sm_margin`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "[Kernel Overlap](./kernel_overlap.md)"
+msgstr "[Kernel Overlap](./kernel_overlap.md)"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Deterministic mode"
+msgstr "确定性模式"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Not with ranges"
+msgstr "ranges 模式下不支持"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "JIT compilation"
+msgstr "JIT 编译"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "Jinja + `nvcc`"
+msgstr "Jinja + `nvcc`"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "CuTe DSL"
+msgstr "CuTe DSL"
+
+#: ../../source/blog/native_ffa.md:96
+msgid "[JIT Compilation](./jit_compile.md)"
+msgstr "[JIT Compilation](./jit_compile.md)"
+
+#: ../../source/blog/native_ffa.md:267
+msgid "Math Foundation"
+msgstr "数学基础"
+
+#: ../../source/blog/native_ffa.md:269
+#, python-brace-format
+msgid ""
+"Both implementations follow the `Flash-Attention 2` formulation of the "
+"forward and backward passes: online softmax with a running max and sum in"
+" the forward pass, and recomputation of `P` from `lse` with "
+"{math}`\\Delta = \\mathrm{rowsum}(O \\circ dO)` in the backward pass. See"
+" [Flash Attention 2 Math Derivation](./fa2_math_derivation.md) for the "
+"full derivation that the kernels implement."
+msgstr ""
+"两套实现都遵循 `Flash-Attention 2` 的前向与反向公式：前向使用维护 running max 与 running sum 的 "
+"online softmax，反向利用 `lse` 重算 `P`，并使用 {math}`\\Delta = \\mathrm{rowsum}(O "
+"\\circ dO)`。kernel 所实现的完整推导请参见 [Flash Attention 2 "
+"数学推导](./fa2_math_derivation.md)。"
+
+#: ../../source/blog/native_ffa.md:271
+msgid "Learnable Attention Sink"
+msgstr "可学习 Attention Sink"
+
+#: ../../source/blog/native_ffa.md:273
+#, python-brace-format
+msgid ""
+"The sink only affects the softmax denominator, so neither implementation "
+"touches the mainloop for it. On SM90, the sink LSE is merged into `lse` "
+"and `O` is rescaled in the forward postprocess kernel, and `dsink` is "
+"computed in the backward preprocess kernel. On SM100, the direct-store "
+"path passes {math}`\\mathrm{logsumexp}(\\mathrm{sink})` to the kernel as "
+"one extra logit per head, the locked-merge path folds it in the forward "
+"postprocess kernel, and `dsink` comes from a separate kernel in which the"
+" last CTA of each head reduces the partial sums in a fixed order. See "
+"[Support Learnable Attention Sink](./attn_sink.md) for the math and the "
+"distributed implementation."
+msgstr ""
+"sink 只影响 softmax 的分母，因此两套实现都无需为它改动主循环。在 SM90 上，前向 postprocess kernel 把 "
+"sink 的 LSE 合并进 `lse` 并重缩放 `O`，`dsink` 则在反向 preprocess kernel 中计算。在 SM100 "
+"上，直接写回路径把 {math}`\\mathrm{logsumexp}(\\mathrm{sink})` 作为每个 head 额外的一个 "
+"logit 传给 kernel，加锁合并路径则在前向 postprocess kernel 中将其折叠进来；`dsink` 由一个独立 "
+"kernel 计算，每个 head 的最后一个 CTA 按固定顺序归约各部分和。数学推导与分布式实现见 [Support Learnable "
+"Attention Sink](./attn_sink.md)。"
+
+#: ../../source/blog/native_ffa.md:275
+msgid "Muon QK-Clip"
+msgstr "Muon QK-Clip"
+
+#: ../../source/blog/native_ffa.md:277
+msgid ""
+"`return_max_logits=True` returns the maximum attention logit per head. On"
+" SM90, each CTA reduces row maxima into a shared-memory slot per head "
+"with an atomic max and then updates global memory with another atomic "
+"max, so `num_heads_q <= 128` is required. On SM100, conditional rescaling"
+" means the running max lags the true max, so the softmax warpgroups track"
+" an exact row max in a separate register. The global update uses an IEEE "
+"bit-pattern trick: a signed integer max for non-negative values and an "
+"unsigned integer min for negative values. See [Support Muon QK-"
+"Clip](./muon_qk_clip.md) for the distributed reduction across CP ranks "
+"and stages."
+msgstr ""
+"`return_max_logits=True` 会返回每个 head 的最大 attention logit。在 SM90 上，每个 CTA "
+"先用原子 max 把各行最大值归约到 shared memory 中每个 head 的槽位，再用一次原子 max 更新 global "
+"memory，因此要求 `num_heads_q <= 128`。在 SM100 上，由于条件重缩放会让 running max "
+"滞后于真实最大值，softmax warpgroup 会在单独的寄存器中记录精确的行最大值；全局更新利用了 IEEE "
+"位模式技巧：非负值用有符号整数 max，负值用无符号整数 min。跨 CP rank 与跨 stage 的分布式归约见 [Support Muon"
+" QK-Clip](./muon_qk_clip.md)。"
+
+#: ../../source/blog/native_ffa.md:279
+msgid "Sparse Attention"
+msgstr "稀疏注意力"
+
+#: ../../source/blog/native_ffa.md:281
+msgid ""
+"On SM90, sparse attention runs inside the same kernel family. "
+"`BlockSparse` expresses uniformly sized key blocks through ranges, "
+"`IndexSparse` reads a `(total_q, num_heads_kv, topk)` index tensor "
+"directly, and the producer gathers K/V rows with `cp.async` (or TMA when "
+"key blocks are at least 128 tokens). The backward pass picks `LoopK` when"
+" key blocks are small. On SM100, `IndexSparse` has dedicated forward and "
+"backward kernels built around `PackGQA` tiles of 128 rows with shared "
+"token-level indices, together with a top-`k` kernel. These kernels are "
+"standalone and not yet wired into the distributed path. See [Optimize "
+"Sparse Attention in FFA](./sparse_attn.md) for the design and benchmarks."
+msgstr ""
+"在 SM90 上，稀疏注意力运行在同一个 kernel 家族中：`BlockSparse` 通过 ranges 表达大小统一的 key "
+"block，`IndexSparse` 直接读取形状为 `(total_q, num_heads_kv, topk)` "
+"的索引张量，producer 用 `cp.async`（key block 不小于 128 个 token 时用 TMA）gather K/V "
+"行；key block 较小时，反向选用 `LoopK`。在 SM100 上，`IndexSparse` 有专门的前向与反向 "
+"kernel，围绕共享 token 级索引的 128 行 `PackGQA` tile 设计，并配有一个 top-`k` kernel。这些 "
+"kernel 目前是独立的，尚未接入分布式路径。设计与 benchmark 见 [Optimize Sparse Attention in "
+"FFA](./sparse_attn.md)。"
+
+#: ../../source/blog/native_ffa.md:283
+msgid "FFA_FA4 Backend"
+msgstr "FFA_FA4 Backend"
+
+#: ../../source/blog/native_ffa.md:285
+msgid ""
+"`FFA_FA4` is a temporary Blackwell backend built on a forked `Flash-"
+"Attention 4` with an `HSTU Function` mask representation. It is not part "
+"of the native `FFA` kernel and is never selected by default. It is "
+"described in [Support Blackwell with FFA_FA4 "
+"Backend](./blackwell_ffa_fa4.md)."
+msgstr ""
+"`FFA_FA4` 是一个临时的 Blackwell backend，基于 fork 的 `Flash-Attention 4` 并使用 "
+"`HSTU Function` mask 表示。它不属于原生 `FFA` kernel，也永远不会被默认选中。详见 [Support "
+"Blackwell with FFA_FA4 Backend](./blackwell_ffa_fa4.md)。"
+
+#: ../../source/blog/native_ffa.md:288
+msgid "User Interface"
+msgstr "用户接口"
+
+#: ../../source/blog/native_ffa.md:290
+msgid "On Hopper, the native kernel is exposed as `flex_flash_attn_func`:"
+msgstr "在 Hopper 上，原生 kernel 以 `flex_flash_attn_func` 的形式提供："
+
+#: ../../source/blog/native_ffa.md:310
+msgid ""
+"On Blackwell, the CuTe DSL kernel has the same semantics, with keyword-"
+"only range arguments and `mask_types` in place of `attn_type_map`:"
+msgstr ""
+"在 Blackwell 上，CuTe DSL kernel 的语义相同，区别在于区间参数只能以关键字形式传入，且用 `mask_types` 代替"
+" `attn_type_map`："
+
+#: ../../source/blog/native_ffa.md:326
+msgid ""
+"`max_seqlen_q` and `max_seqlen_k` are hard upper bounds for the SM100 "
+"kernel: launch bounds are sized from them, so an underestimate silently "
+"drops work. Omit them to fall back to the safe `total_q` / `total_k` "
+"bounds."
+msgstr ""
+"对 SM100 kernel 而言，`max_seqlen_q` 与 `max_seqlen_k` 是硬性上界：launch "
+"范围按它们确定，传小了会静默丢失部分计算。不传时会回退到安全的 `total_q` / `total_k` 上界。"
+
+#: ../../source/blog/native_ffa.md:329
+msgid ""
+"For distributed attention, `calc_attn` picks the kernel through "
+"`MAGI_ATTENTION_KERNEL_BACKEND`: `ffa` (default) on Hopper, or `cutedsl` "
+"on Blackwell. The reduction mode, `sm_margin`, and range merge are "
+"configured by `MagiAttention` from the attn solver output and the "
+"[environment variables](../user_guide/env_variables.md), so `calc_attn` "
+"users do not pass them by hand."
+msgstr ""
+"在分布式注意力中，`calc_attn` 通过 `MAGI_ATTENTION_KERNEL_BACKEND` 选择 kernel：Hopper "
+"上用 `ffa`（默认），Blackwell 上用 `cutedsl`。归约模式、`sm_margin` 以及 range merge 都由 "
+"`MagiAttention` 根据 attn solver 的输出和 "
+"[环境变量](../user_guide/env_variables.md) 自动配置，`calc_attn` 的使用者无需手动传入。"
+
+#: ../../source/blog/native_ffa.md:332
+msgid "Roadmap"
+msgstr "路线图"
+
+#: ../../source/blog/native_ffa.md:334
+msgid ""
+"Promote the SM100 CuTe DSL kernel to the default Blackwell backend and "
+"retire `FFA_FA4`."
+msgstr "将 SM100 CuTe DSL kernel 提升为 Blackwell 上的默认 backend，并下线 `FFA_FA4`。"
+
+#: ../../source/blog/native_ffa.md:335
+msgid "Support deterministic mode and softcap with per-slice masks on SM100."
+msgstr "在 SM100 上为逐 slice mask 支持确定性模式与 softcap。"
+
+#: ../../source/blog/native_ffa.md:338
+msgid "Citation"
+msgstr "引用"
+
+#: ../../source/blog/native_ffa.md:340
+msgid "If you find MagiAttention useful in your research, please cite:"
+msgstr "如果您觉得 MagiAttention 对您的研究有帮助，请引用："
+
+#: ../../source/blog/native_ffa.md:351
+msgid "References"
+msgstr "参考文献"
