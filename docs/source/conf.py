@@ -59,6 +59,7 @@ blog_titles = [
     "magi_attn",
     "cp_benchmark",
     "native_grpcoll",
+    "native_ffa",
     "blackwell_ffa_fa4",
     "attn_sink",
     "muon_qk_clip",
