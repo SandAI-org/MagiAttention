@@ -356,7 +356,7 @@ def range_lse_reduce_kernel(
         tl.store(curr_out_lse_ptr, out_lse)
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def range_reduce(
     input: torch.Tensor,
     output: torch.Tensor,

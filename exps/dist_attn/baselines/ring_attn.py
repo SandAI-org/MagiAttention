@@ -142,7 +142,7 @@ def generate_scattar_reorder_indices(
 
 
 # use te tex.thd_grad_correction for varlen result collection
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _collect_result_varlen(
     out: torch.Tensor, out_: torch.Tensor, cu_seqlens_padded: torch.Tensor, chunk_idx
 ):
@@ -153,7 +153,7 @@ def _collect_result_varlen(
     tex.thd_grad_correction(out, out_, cu_seqlens_padded, first_op, second_op)
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def prepare_input_fwd(
     input,
     chunk_idx,
@@ -185,7 +185,7 @@ def prepare_input_fwd(
     return output, cu_seqlens_per_step
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def prepare_input_bwd(
     inputs,
     chunk_idx,
@@ -768,7 +768,7 @@ class TERingAttnFunc(torch.autograd.Function):
                 (cp_rank - i) % cp_size,
             )
 
-            with nvtx.add_nvtx_event("fused_attn_fwd"):
+            with nvtx.record("fused_attn_fwd"):
                 out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
                     True,
                     _max_seqlen_q,
@@ -1190,14 +1190,14 @@ class FA3RingAttnFunc(torch.autograd.Function):
 
             rumtime_meta_per_step = runtime_meta[i]
             if is_half_q:
-                with nvtx.add_nvtx_event("thd_read_half_tensor"):
+                with nvtx.record("thd_read_half_tensor"):
                     q_inputs[i % 2] = tex.thd_read_half_tensor(
                         q, cu_seqlens_q_padded, 1
                     )
             else:
                 q_inputs[i % 2] = q
             if is_half_kv:
-                with nvtx.add_nvtx_event("thd_read_half_tensor"):
+                with nvtx.record("thd_read_half_tensor"):
                     kv_inputs[i % 2] = tex.thd_read_half_tensor(
                         kv_inputs[i % 2], cu_seqlens_kv_padded, 0
                     )

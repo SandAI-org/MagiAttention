@@ -52,7 +52,7 @@ def _compute_chunk_actual_sizes(
     return [chunk_size] * (num_chunks - 1) + [last]
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def make_dispatch_meta_from_qk_ranges(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,

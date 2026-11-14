@@ -177,7 +177,7 @@ def flex_attn_sparse_fwd(
     # create block_mask
     # for sparse attention, creating block_mask can significantly accelerate
     block_mask = create_block_mask(topk_mask_mod, 1, nhq, sq, skv, device=q.device)
-    with nvtx.add_nvtx_event("flex_attn_func"):
+    with nvtx.record("flex_attn_func"):
         # use block_mask to handle sparsity, score_mod is set to None
         o_flex, lse_flex = flex_attn_func(
             q_flex,

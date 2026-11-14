@@ -1266,7 +1266,7 @@ def cutedsl_topk_stream(
         raise ValueError(f"k must be in [1, min({MAX_K}, n={n})], got {k}")
     if end is not None:
         end = end.reshape(-1).to(torch.int32).contiguous()
-    with nvtx.add_nvtx_event(f"DSA/cutedsl_topk_stream rows={rows} cols={n} k={k}"):
+    with nvtx.record(f"DSA/cutedsl_topk_stream rows={rows} cols={n} k={k}"):
         pad = (-n) % 8
         if pad or x2d.data_ptr() % 16:
             # Rows must start 16 B aligned; the padding is excluded through ``end``.

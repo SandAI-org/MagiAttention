@@ -1061,9 +1061,7 @@ def cutedsl_topk(
 
     orig_shape = x.shape
     x2d = x.reshape(-1, orig_shape[-1]).contiguous()
-    with nvtx.add_nvtx_event(
-        f"DSA/cutedsl_topk rows={x2d.shape[0]} cols={x2d.shape[1]} k={k}"
-    ):
+    with nvtx.record(f"DSA/cutedsl_topk rows={x2d.shape[0]} cols={x2d.shape[1]} k={k}"):
         indices = _cute_topk_indices(x2d, k, sorted=False, out_dtype=out_dtype)
 
     out_shape = (*orig_shape[:-1], k)

@@ -36,7 +36,7 @@ from magi_attention.utils import nvtx
 logger = getLogger(__name__)
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def make_attn_meta_from_dispatch_meta(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,

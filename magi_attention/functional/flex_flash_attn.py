@@ -335,7 +335,7 @@ def _flex_flash_attn_forward_compilable_fake(
     pass
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _flex_flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -617,7 +617,7 @@ def _flex_flash_attn_backward_compilable_fake(
     pass
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _flex_flash_attn_backward(
     dout: torch.Tensor,
     q: torch.Tensor,

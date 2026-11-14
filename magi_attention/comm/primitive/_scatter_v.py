@@ -21,7 +21,7 @@ __all__ = ["scatter_v"]
 
 
 @torch.no_grad()
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def scatter_v(
     x_global: torch.Tensor,
     group: dist.ProcessGroup,

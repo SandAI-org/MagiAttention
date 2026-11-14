@@ -135,7 +135,7 @@ def range_gather_per_row_kernel(
         tl.store(curr_out_ptr + cols, inp, mask=cols < elem_in_last_block)
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def range_gather(
     input: torch.Tensor,
     ranges: torch.Tensor,

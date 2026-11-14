@@ -472,7 +472,7 @@ def correct_out_lse_kernel(
     tl.store(curr_out_lse_ptr + out_lse_offs, out_lse, mask=row_mask)
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def correct_attn_out_lse(
     out1: torch.Tensor,
     lse1: torch.Tensor,

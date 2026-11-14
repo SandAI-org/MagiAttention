@@ -78,7 +78,7 @@ def native_group_cast_impl(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def native_group_cast_impl(
     input: torch.Tensor,
     output: torch.Tensor | None,
@@ -248,7 +248,7 @@ def native_group_reduce_impl(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def native_group_reduce_impl(
     input: torch.Tensor,
     output: torch.Tensor | None,

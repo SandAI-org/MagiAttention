@@ -357,7 +357,7 @@ def sanity_check_for_group_cast_meta_args_per_rank(
         )
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def unpermute_output(
     output: torch.Tensor,
     unperm_after_a2a_kwargs: dict,
@@ -372,7 +372,7 @@ def unpermute_output(
     )
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def unpermute_output_with_lse(
     output: torch.Tensor,
     output_lse: torch.Tensor,
@@ -395,7 +395,7 @@ def unpermute_output_with_lse(
     return output, output_lse
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _calc_group_cast_a2a_input_meta_args(
     input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
@@ -478,7 +478,7 @@ def _calc_group_cast_a2a_input_args(
     return a2a_input, a2a_input_split_size
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _calc_group_cast_a2a_output_meta_args(
     output_split_size_list: list[int],
     src_index_list: list[int],
@@ -589,7 +589,7 @@ def _calc_group_cast_a2a_output_args(
 
 
 @torch.no_grad()
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def calc_group_cast_a2a_args(
     input: torch.Tensor,
     output: torch.Tensor,
@@ -728,7 +728,7 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
         )
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def sum_reduce_output(
     output: torch.Tensor,
     a2a_output: torch.Tensor,
@@ -748,7 +748,7 @@ def sum_reduce_output(
     return output
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def avg_reduce_output(
     output: torch.Tensor,
     a2a_output: torch.Tensor,
@@ -768,7 +768,7 @@ def avg_reduce_output(
     return output
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def lse_reduce_output(
     output: torch.Tensor,
     output_lse: torch.Tensor,
@@ -792,7 +792,7 @@ def lse_reduce_output(
     return output
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _calc_group_reduce_a2a_input_meta_args(
     input_split_size_list: list[int],
     dst_index_list: list[int],
@@ -861,7 +861,7 @@ def _calc_group_reduce_a2a_input_args(
     return a2a_input, a2a_input_split_size
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _calc_group_reduce_a2a_output_meta_args(
     output_split_size_list: list[int],
     src_indices_list: list[list[int]],
@@ -969,7 +969,7 @@ def _calc_group_reduce_a2a_output_args(
 
 
 @torch.no_grad()
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def calc_group_reduce_a2a_args(
     input: torch.Tensor,
     output: torch.Tensor,
@@ -1299,7 +1299,7 @@ def transfer_splits_and_dst_idxs_to_t2r_idx(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def transfer_splits_and_dst_idxs_to_t2r_idx(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
@@ -1402,7 +1402,7 @@ def get_native_group_cast_meta(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def get_native_group_cast_meta(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
@@ -1495,7 +1495,7 @@ def get_a2av_perm_idxs_from_group_cast_meta(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def get_a2av_perm_idxs_from_group_cast_meta(
     output_split_sizes: list[int] | torch.Tensor,
     src_index: list[int] | torch.Tensor,
