@@ -605,7 +605,7 @@ def hier_group_cast_impl_with_a2av(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def hier_group_cast_impl_with_a2av(
     input_tensor: torch.Tensor,
     output_tensor: torch.Tensor | None,
@@ -1172,7 +1172,7 @@ def hier_group_reduce_impl_with_a2av(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def hier_group_reduce_impl_with_a2av(
     input_tensor: torch.Tensor,
     output_tensor: torch.Tensor | None,

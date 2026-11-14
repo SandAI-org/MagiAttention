@@ -51,7 +51,7 @@ def _split_dims(
 
 
 @torch.no_grad()
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def all_gather_v(
     x_local: torch.Tensor,
     group: dist.ProcessGroup,

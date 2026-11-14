@@ -441,7 +441,7 @@ class FA4AttnArg(AttnArg):
             bwd_sparse_tile_n = tile_n
 
         if is_magi_to_hstu_installed:
-            with nvtx.add_nvtx_event(
+            with nvtx.record(
                 f"create_q2k_csr_sparse_from_func-"
                 f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
                 f"tile_m={tile_m}-tile_n={tile_n}"
@@ -481,7 +481,7 @@ class FA4AttnArg(AttnArg):
                     # it (which fails when seqlen_q <= sparse_tile_m gives only 1 q-block).
                     block_size=(sparse_tile_m, tile_n),
                 )
-            with nvtx.add_nvtx_event(
+            with nvtx.record(
                 f"create_k2q_csr_sparse_from_func-"
                 f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
                 f"tile_m={tile_m}-tile_n={tile_n}"
@@ -591,7 +591,7 @@ class FA4AttnArg(AttnArg):
 
         # Transfer representation of attn mask from AttnSlice to HSTU Functions
         # where hstu_func: shape=(n_func, sq), and unsqueeze to (1, 1, n_func, sq) to be broadcastable
-        with nvtx.add_nvtx_event(
+        with nvtx.record(
             f"magi_to_hstu-"
             f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
             f"n_ub_func={n_ub_func}"

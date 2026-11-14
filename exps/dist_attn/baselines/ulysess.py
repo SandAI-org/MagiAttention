@@ -186,7 +186,7 @@ class TEUlysessAttnFunc(torch.autograd.Function):
         fp8_meta_kwargs = {}
         window_size = (-1, 0) if causal else (-1, -1)
 
-        with nvtx.add_nvtx_event("fused_attn_fwd"):
+        with nvtx.record("fused_attn_fwd"):
             out, aux_ctx_tensors = fused_attn_fwd(
                 True,  # is_training
                 max_seqlen_q,
@@ -271,7 +271,7 @@ class TEUlysessAttnFunc(torch.autograd.Function):
             "deterministic": ctx.deterministic,
         }
         fp8_meta_kwargs = {}
-        with nvtx.add_nvtx_event("fused_attn_bwd"):
+        with nvtx.record("fused_attn_bwd"):
             dq, dk, dv, _, _ = fused_attn_bwd(
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
@@ -410,7 +410,7 @@ class Ulysess(AttnBaselineInterface):
 
         return x_global
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def apply_attn(
         self,
         q: torch.Tensor,

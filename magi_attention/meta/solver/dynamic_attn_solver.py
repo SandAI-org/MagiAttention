@@ -47,7 +47,7 @@ if is_cpp_backend_enable():
 class DynamicAttnSolver(BaseDistAttnSolver):
     """The dynamic-attn solver class to process dispatch meta for calc/comm meta"""
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def __init__(
         self,
         algorithm: DynamicAttnAlgorithm,
@@ -132,7 +132,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                 new_ranges.append(AttnRange(r.start + offset, r.end + offset))
         return new_ranges
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def solve(
         self,
         q_ranges: AttnRanges,
@@ -310,7 +310,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         except Exception as e:  # pragma: no cover - debug only
             raise e
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _calc_intersection_with_index(
         self,
         rangesA: AttnRanges,
@@ -339,7 +339,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                 j += 1
         return intersections
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _calc_intersection(
         self,
         rangesA: AttnRanges,
@@ -380,7 +380,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             )
         return ranges
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _calc_group_collective_arg(
         self,
         calc_kv: bool = True,
@@ -498,7 +498,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         )
         return group_collective_arg
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def make_comm_meta(self) -> CommMeta:
         """Calculate communication meta for kv and qo group collective"""
 
@@ -551,7 +551,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             area += rects.area()
         return area
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def calc_host_and_remote_bucket_this_rank(self) -> None:
         bucket_this_rank: AttnRectangles = self.bucket_per_rank[self.cp_rank]
         host_ranges_q_this_rank: AttnRanges = self.host_ranges_q[self.cp_rank]
@@ -604,7 +604,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         # leftover rest_rects_q is remote job
         self.remote_bucket_this_rank.extend(rest_rects_q)
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def make_calc_meta(
         self,
     ) -> CalcMeta:

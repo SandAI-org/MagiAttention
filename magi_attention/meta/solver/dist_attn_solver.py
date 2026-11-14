@@ -206,7 +206,7 @@ class BaseDistAttnSolver(ABC):
 class DistAttnSolver(BaseDistAttnSolver):
     """The dist-attn solver class to process dispatch meta for calc/comm meta"""
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def __init__(
         self,
         num_heads_q: int,
@@ -295,7 +295,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             partitions_unperm_idxs=new_partitions_unperm_idxs,
         )
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def solve(
         self,
         q_ranges: AttnRanges,
@@ -436,7 +436,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return bucket_this_rank
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _init_host_remote_ranges_global_this_rank(
         self,
         dispatch_meta_q: DispatchMeta,
@@ -511,7 +511,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             remote_k_ranges_global_this_rank,
         )
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _init_host_rank_entry_this_rank(
         self,
         host_q_ranges_global: AttnRanges,
@@ -629,7 +629,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return host_rank_entry_this_rank
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _chunk_remote_k_ranges_global(
         self,
         remote_k_ranges_global: AttnRanges,
@@ -692,7 +692,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return remote_k_ranges_global_per_chunk
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _make_ith_attn_calc_host_slice(
         self,
         host_k_ranges_global: AttnRanges,
@@ -733,7 +733,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         )
         attn_calc_host_slice_local_list.extend(slice_maker.make())
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _make_ith_attn_calc_remote_slice_per_chunk(
         self,
         remote_k_ranges_global_per_chunk: list[AttnRanges],
@@ -774,7 +774,7 @@ class DistAttnSolver(BaseDistAttnSolver):
                 ith_attn_slice_global_mask_type=ith_attn_slice_global_mask_type,
             )
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _make_ith_attn_calc_remote_slice(
         self,
         remote_k_ranges_global: AttnRanges,
@@ -812,7 +812,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         )
         attn_calc_remote_slice_list.extend(slice_maker.make())  # type: ignore[arg-type]
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _init_remote_rank_entry_per_stage_this_rank(
         self,
         host_rank_entry_this_rank: HostRankEntry,
@@ -847,7 +847,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return remote_rank_entry_per_stage_this_rank
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _init_remote_rank_entry_per_rank_per_stage(
         self, remote_rank_entry_per_stage_this_rank: list[RemoteRankEntry]
     ) -> list[list[RemoteRankEntry]]:
@@ -886,7 +886,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return remote_rank_entry_per_rank_per_stage
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _calc_cost_pairs_per_chunk(
         self,
         host_rank_entry_this_rank: HostRankEntry,
@@ -940,7 +940,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return chunk_costs
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _solve_multi_stage_overlap(
         self,
         chunk_costs: list[OverlapStageCost],
@@ -1017,7 +1017,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return cost_partitions
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _calc_remote_rank_entry_per_stage(
         self,
         cost_partitions: list[list[int]],
@@ -1040,7 +1040,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         return remote_rank_entry_per_stage_this_rank
 
     # TODO delete some unnecessary logic
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _calc_remote_rank_entry_for_one_stage(
         self, cost_partiton: list[int], host_rank_entry_this_rank: HostRankEntry
     ) -> RemoteRankEntry:
@@ -1106,7 +1106,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             host_k_ranges_global_this_rank=host_rank_entry_this_rank.host_k_ranges_global,
         )
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _make_remote_entry_for_one_stage(
         self,
         slice_tuples: list[tuple[AttnRange, AttnRanges, list[AttnMaskType]]],
@@ -1149,7 +1149,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             attn_calc_remote_slice_local_list=attn_calc_remote_slice_local_list_this_stage,
         )
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _merge_ranges_and_masktypes(
         self,
         q_range: AttnRange,
@@ -1225,7 +1225,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             )
         )
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _calc_remote_rank_q_range_to_k_ranges_map(
         self,
         attn_calc_remote_slice_list_per_chunk_this_stage: list[list[MultiKAttnSlice]],
@@ -1364,7 +1364,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             map_slice_q_range_to_masktype,
         )
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _init_transfer_table_per_stage(
         self,
         remote_rank_entry_per_rank_per_stage: list[list[RemoteRankEntry]],
@@ -1405,7 +1405,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return transfer_table_per_stage
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _init_transfer_table_for_one_stage(
         self,
         remote_rank_entry_per_rank: list[RemoteRankEntry],
@@ -1502,7 +1502,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return transfer_table
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _init_transfer_info_this_rank_for_one_stage(
         self,
         remote_rank_entry_per_rank: list[RemoteRankEntry],
@@ -1601,7 +1601,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return transfer_info_this_rank
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _init_transfer_info_per_rank_per_stage(
         self,
         transfer_info_per_stage_this_rank: list[TransferInfo],
@@ -1665,7 +1665,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return transfer_info_per_rank_per_stage
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def make_comm_meta(self) -> CommMeta:
         """Calculate communication meta for kv and qo group collective"""
 
@@ -1712,7 +1712,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return comm_meta
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _calc_kv_group_collective_arg(
         self,
         transfer_table: TransferTable,
@@ -1835,7 +1835,7 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         return group_collective_arg
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def make_calc_meta(self) -> CalcMeta:
         """Calculate flex-flash-attention calculation meta"""
 

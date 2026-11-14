@@ -416,7 +416,7 @@ class _RollSimpleP2P(torch.autograd.Function):
         )
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def roll_simple_p2p(
     x_local: torch.Tensor,
     shift: int,
@@ -442,7 +442,7 @@ def roll_simple_p2p(
     return _RollSimpleP2P.apply(x_local, shift, meta, group, seq_dim)
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def roll_p2p(
     x_local: torch.Tensor,
     shift: int,

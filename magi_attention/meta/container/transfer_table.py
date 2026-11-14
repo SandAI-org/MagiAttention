@@ -51,7 +51,7 @@ class _PyGroupCastRanges(AttnRanges):
         if split:
             self._split()
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _split(self) -> None:
         """Split the ranges group as fragmented as possible"""
 

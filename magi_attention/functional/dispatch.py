@@ -189,7 +189,7 @@ class _UndispatchPartialGradFunc(torch.autograd.Function):
         )
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def dispatch_func(
     x_global: torch.Tensor,
     group: dist.ProcessGroup,
@@ -220,7 +220,7 @@ def dispatch_func(
     return _DispatchFunc.apply(x_global, group, meta, seq_dim)
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def undispatch_func(
     x_local: torch.Tensor,
     meta: DispatchMeta,

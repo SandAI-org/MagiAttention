@@ -191,7 +191,7 @@ def cu_seqlens2seqlens(cu_seqlens: list[int]) -> list[int]:
     return seqlens
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def flatten_nested_list(nested_list: NestedIntList) -> list[int]:
     # Initialize a stack with the reversed nested list to process elements from left to right
     stack = list(nested_list[::-1])

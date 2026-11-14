@@ -48,7 +48,7 @@ def _calc_a2v_comm_bytes(
 
 
 @torch.no_grad()
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def all2all_v(
     input: torch.Tensor,
     output: torch.Tensor,
@@ -87,7 +87,7 @@ def all2all_v(
         rank=dist.get_rank(group),
     )
 
-    with nvtx.add_nvtx_event(
+    with nvtx.record(
         (
             f"a2av: "
             f"{a2av_comm_bytes=} | "

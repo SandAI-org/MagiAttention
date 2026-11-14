@@ -264,7 +264,7 @@ class DistAttnRuntime:
 
     # ----------    API for fwd   --------- #
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def apply_fwd_partial_attn(
         self,
         q: torch.Tensor,
@@ -370,7 +370,7 @@ class DistAttnRuntime:
 
         return partial_out, meta
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def get_curr_q_kv_and_fetch_next(
         self,
         local_q: torch.Tensor,
@@ -462,7 +462,7 @@ class DistAttnRuntime:
 
         return curr_q, curr_kv
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def reduce_partial_out_lse(
         self,
         partial_remote_out: torch.Tensor | None,
@@ -503,7 +503,7 @@ class DistAttnRuntime:
             overlap_stage
         ] = partial_out_lse_reduce_work
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def prepare_reduced_local_out_lse(
         self,
         partial_local_out: torch.Tensor,
@@ -625,7 +625,7 @@ class DistAttnRuntime:
 
     # ----------    API for bwd   --------- #
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def apply_bwd_partial_attn(
         self,
         qo_do: FusedOrTupleTensor,
@@ -732,7 +732,7 @@ class DistAttnRuntime:
 
         return partial_dq, partial_dkv, partial_dsink
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def get_curr_qo_do_kv_lse_and_fetch_next(
         self,
         local_qo_do: FusedOrTupleTensor,
@@ -834,7 +834,7 @@ class DistAttnRuntime:
 
         return curr_qo_do, curr_kv, curr_lse
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def reduce_partial_dq_dkv(
         self,
         partial_remote_dq: torch.Tensor | None,
@@ -898,7 +898,7 @@ class DistAttnRuntime:
             kernel_barrier=kernel_barrier,
         )
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def reduce_partial_dsink(
         self,
         partial_global_dsink: torch.Tensor | None,
@@ -915,7 +915,7 @@ class DistAttnRuntime:
             partial_global_dsink=partial_global_dsink,
         )
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def prepare_reduced_local_dqkv_global_dsink(
         self,
         partial_local_dq: torch.Tensor,
@@ -1254,7 +1254,7 @@ class DistAttnRuntime:
                 MagiAttentionKernelBackend.FA4,
                 MagiAttentionKernelBackend.CUTEDSL,
             ), "FA4/CUTEDSL backends do not support return max logits"
-        with nvtx.add_nvtx_event(
+        with nvtx.record(
             f"attn-fwd: "
             f"{attn_arg.total_area=:,} | "
             f"{attn_arg.q_ranges=} | "
@@ -1374,7 +1374,7 @@ class DistAttnRuntime:
         is_host_stage: bool,
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
         _backend = self.kernel_backend
-        with nvtx.add_nvtx_event(
+        with nvtx.record(
             f"attn-bwd: "
             f"{attn_arg.total_area=:,} | "
             f"{attn_arg.q_ranges=} | "
@@ -1517,7 +1517,7 @@ class DistAttnRuntime:
 
         return partial_dq, partial_dkv, partial_dsink
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _fetch_remote_kv(
         self,
         local_kv: FusedOrTupleTensor,
@@ -1626,7 +1626,7 @@ class DistAttnRuntime:
         )
 
         # Launch group cast kernel
-        with nvtx.add_nvtx_event(
+        with nvtx.record(
             (
                 f"group_cast: "
                 f"{group_cast_kv_bytes=} | "
@@ -1664,7 +1664,7 @@ class DistAttnRuntime:
 
         return remote_kv_work, remote_kv_buffer
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _fetch_remote_q(
         self,
         local_q: torch.Tensor,
@@ -1729,7 +1729,7 @@ class DistAttnRuntime:
         )
 
         # Launch group cast kernel
-        with nvtx.add_nvtx_event(
+        with nvtx.record(
             (
                 f"group_cast: "
                 f"{group_cast_q_bytes=} | "
@@ -1753,7 +1753,7 @@ class DistAttnRuntime:
 
         return remote_q_work, remote_q_buffer
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _fetch_remote_qo_do_lse(
         self,
         local_qo_do: FusedOrTupleTensor,
@@ -1864,7 +1864,7 @@ class DistAttnRuntime:
             )
 
             # Launch group cast kernel
-            with nvtx.add_nvtx_event(
+            with nvtx.record(
                 (
                     f"group_cast: "
                     f"{group_cast_qo_do_lse_bytes=} | "
@@ -1932,7 +1932,7 @@ class DistAttnRuntime:
             group_cast_lse_rdma_bytes = 0
 
             # Launch group cast kernel for lse
-            with nvtx.add_nvtx_event(
+            with nvtx.record(
                 (
                     f"group_cast: "
                     f"{group_cast_lse_bytes=} | "
@@ -1982,7 +1982,7 @@ class DistAttnRuntime:
             group_cast_qo_do_rdma_bytes = 0
 
             # Launch group cast kernel for qo_do
-            with nvtx.add_nvtx_event(
+            with nvtx.record(
                 (
                     f"group_cast: "
                     f"{group_cast_qo_do_bytes=} | "
@@ -2018,7 +2018,7 @@ class DistAttnRuntime:
 
         return remote_qo_do_lse_work, remote_qo_do_lse_buffer
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _reduce_partial_out_lse(
         self,
         partial_remote_out: torch.Tensor | None,
@@ -2115,7 +2115,7 @@ class DistAttnRuntime:
             )
 
             # Launch group-reduce kernel
-            with nvtx.add_nvtx_event(
+            with nvtx.record(
                 (
                     f"group_reduce: "
                     f"{group_reduce_out_lse_bytes=} | "
@@ -2162,7 +2162,7 @@ class DistAttnRuntime:
 
         return partial_out_lse_reduce_work
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _reduce_partial_dkv(
         self,
         partial_remote_dkv: FusedOrTupleTensor | None,
@@ -2296,7 +2296,7 @@ class DistAttnRuntime:
         )
 
         # Launch group-reduce kernel
-        with nvtx.add_nvtx_event(
+        with nvtx.record(
             (
                 f"group_reduce: "
                 f"{group_reduce_dkv_bytes=} | "
@@ -2341,7 +2341,7 @@ class DistAttnRuntime:
 
         return partial_dkv_reduce_work
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _reduce_partial_dq(
         self,
         partial_remote_dq: torch.Tensor | None,
@@ -2420,7 +2420,7 @@ class DistAttnRuntime:
             )
 
             # Launch group-reduce kernel
-            with nvtx.add_nvtx_event(
+            with nvtx.record(
                 (
                     f"group_reduce: "
                     f"{group_reduce_dq_bytes=} | "
@@ -2455,7 +2455,7 @@ class DistAttnRuntime:
 
         return partial_dq_reduce_work
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def _reduce_partial_dsink(
         self,
         partial_global_dsink: torch.Tensor | None,

@@ -65,7 +65,7 @@ def a2av_group_cast_impl(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def a2av_group_cast_impl(
     input: torch.Tensor,
     output: torch.Tensor | None,
@@ -224,7 +224,7 @@ def a2av_group_reduce_impl(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def a2av_group_reduce_impl(
     input: torch.Tensor,
     output: torch.Tensor | None,

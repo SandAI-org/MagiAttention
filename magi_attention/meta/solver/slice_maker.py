@@ -221,7 +221,7 @@ class HostAttnSliceMaker:
             #   when q_range.seqlen > k_range.seqlen in the slice
             self.inv_causal_case_key = self.CausalCaseKey.PENTAGON
 
-    @nvtx.instrument_nvtx
+    @nvtx.instrument
     def make(self) -> list[AttnSlice]:
         match self.mask_type_global:
             case AttnMaskType.FULL:

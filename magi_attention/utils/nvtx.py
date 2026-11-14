@@ -40,7 +40,7 @@ import torch.distributed as dist
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.1.0"
+__version__ = "1.3.0"
 
 # Global flag to enable/disable the profiler
 _PROFILER_ENABLED = False
@@ -64,7 +64,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 ProfileType: TypeAlias = Literal["memory", "nsys"]
 
 # Prefix automatically prepended to every NVTX range recorded via
-# `add_nvtx_event` / `instrument_nvtx`, giving a consistent naming convention
+# `record` / `instrument`, giving a consistent naming convention
 # when profiling MagiAttention operations.
 NVTX_EVENT_PREFIX = ""
 
@@ -503,9 +503,9 @@ def profile_phase(
             )
 
 
-# NOTE: Since normally "switch_profile" is used in the training loop instead of inside the model,
+# NOTE: Since normally "profile_iters" is used in the training loop instead of inside the model,
 # we don't have to make it compatible with torch.compile
-def switch_profile(
+def profile_iters(
     iter_id: int,
     start: int,
     end: int,
@@ -565,7 +565,7 @@ def switch_profile(
         capture has started before training resumes and that all reports have
         been generated before training continues after ``end``.
     """
-    # Import locally because general.py uses @nvtx.instrument_nvtx. Importing
+    # Import locally because general.py uses @nvtx.instrument. Importing
     # general.py while this module is still being initialized creates a cycle.
     from .general import wrap_to_list
 
@@ -799,7 +799,7 @@ def _() -> None:
 
 # NOTE: since torch.compile does not support @contextlib.contextmanager,
 # we use the class-based context manager
-class add_nvtx_event:
+class record:
     """
     Context manager to add an NVTX event around a code block.
 
@@ -831,16 +831,16 @@ class add_nvtx_event:
 
 
 @overload
-def instrument_nvtx(func: F) -> F:
+def instrument(func: F) -> F:
     ...
 
 
 @overload
-def instrument_nvtx(*, label_fn: Callable[..., str]) -> Callable[[F], F]:
+def instrument(*, label_fn: Callable[..., str]) -> Callable[[F], F]:
     ...
 
 
-def instrument_nvtx(
+def instrument(
     func: Optional[F] = None,
     *,
     label_fn: Optional[Callable[..., str]] = None,
@@ -881,17 +881,17 @@ def instrument_nvtx(
             else:
                 label = fn.__qualname__
 
-            with add_nvtx_event(label):
+            with record(label):
                 ret_val = fn(*args, **kwargs)
             return ret_val
 
         return cast(F, wrapped_fn)
 
     if func is not None:
-        # Bare usage: @instrument_nvtx
+        # Bare usage: @instrument
         return decorator(func)
 
-    # Parameterized usage: @instrument_nvtx(label_fn=...)
+    # Parameterized usage: @instrument(label_fn=...)
     return decorator
 
 
@@ -900,7 +900,7 @@ class NvtxModuleMixin:
     Mixin for ``nn.Module`` that supplies an NVTX label carrying the module's
     fully-qualified name (FQN) within the model tree.
 
-    Combine it with ``@instrument_nvtx`` on ``forward`` (or any method) so the
+    Combine it with ``@instrument`` on ``forward`` (or any method) so the
     recorded range reads e.g. ``LlamaLikeBlock.forward (layers.0)``. Call
     ``assign_module_nvtx_fqns(model)`` once after building the model to populate
     each module's FQN (defaults to an empty FQN, i.e. no suffix, until then).

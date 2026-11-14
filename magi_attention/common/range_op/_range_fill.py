@@ -61,7 +61,7 @@ def range_fill_kernel(
         tl.store(curr_inp_ptr + cols, val, mask=cols < elem_in_last_block)
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def range_fill_(
     input: torch.Tensor,
     ranges: torch.Tensor,

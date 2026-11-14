@@ -152,7 +152,7 @@ class NSAAttnProfile:
         prof_iters, prof_start_iter, prof_end_iter = 10, 4, 7
         for iter in range(prof_iters):
             # init for nvtx
-            nvtx.switch_profile(
+            nvtx.profile_iters(
                 iter_id=iter,
                 start=prof_start_iter,
                 end=prof_end_iter,
