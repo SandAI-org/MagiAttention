@@ -67,8 +67,8 @@ else:
 # The wrapper can import even when its flash_attn.cute dependency is unavailable.
 from magi_attn_extensions.fa4_interface_with_sink import (
     fa4_func_with_sink,
+    fa4_import_error,
     fa4_varlen_func_with_sink,
-    is_fa4_installed,
 )
 
 DEVICE_CAPABILITY = torch.cuda.get_device_capability()[0]
@@ -555,7 +555,7 @@ class TestFAInterfaceWithSink(TestCase):
         dtype: torch.dtype,
         causal: bool,
     ):
-        assert is_fa4_installed, "flash_attn_4 is not installed"
+        self.assertIsNone(fa4_import_error, "flash_attn_4 failed to import")
 
         b = attn_config["batch_size"]
         sq, sk, s_sink = attn_config["sq"], attn_config["sk"], attn_config["s_sink"]
