@@ -19,22 +19,25 @@ from packaging.version import Version
 from .backend_requirements import check_cutedsl_installation
 
 # Version of this forkable utility module, independent of the package version.
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 
-def _parse(version: str, release_only: bool) -> tuple[int, ...] | Version:
+def _parse(version: str, release_only: bool) -> Version:
+    """Strip suffixes when requested, retaining Version's trailing-zero semantics."""
     v = Version(version)
-    return v.release if release_only else v
+    return Version(".".join(map(str, v.release))) if release_only else v
 
 
 # --------  torch version predicates --------
 
 _TORCH_VERSION = Version(torch.__version__)
-_TORCH_RELEASE = _TORCH_VERSION.release
+_TORCH_RELEASE = _parse(torch.__version__, True)
 
 
 def is_torch_version_eq(version: str, release_only: bool = True) -> bool:
     """Return True if the current torch version is == *version*.
+
+    Trailing release zeros compare equal, e.g. ``2.12 == 2.12.0``.
 
     Args:
         version: Version string to compare against, e.g. ``"2.12"`` or ``"2.12.1"``.
@@ -71,10 +74,8 @@ def is_torch_version_ge(version: str, release_only: bool = True) -> bool:
             ``a0`` or ``+nv26.04``. If False, use full PEP 440 semantics where
             e.g. ``2.12.0a0 < 2.12.0``.
     """
-    rhs = Version(version)
-    if release_only:
-        return _TORCH_RELEASE >= rhs.release
-    return _TORCH_VERSION >= rhs
+    lhs = _TORCH_RELEASE if release_only else _TORCH_VERSION
+    return lhs >= _parse(version, release_only)
 
 
 def is_torch_version_gt(version: str, release_only: bool = True) -> bool:
@@ -87,10 +88,8 @@ def is_torch_version_gt(version: str, release_only: bool = True) -> bool:
             ``a0`` or ``+nv26.04``. If False, use full PEP 440 semantics where
             e.g. ``2.12.0a0 < 2.12.0``.
     """
-    rhs = Version(version)
-    if release_only:
-        return _TORCH_RELEASE > rhs.release
-    return _TORCH_VERSION > rhs
+    lhs = _TORCH_RELEASE if release_only else _TORCH_VERSION
+    return lhs > _parse(version, release_only)
 
 
 def is_torch_version_le(version: str, release_only: bool = True) -> bool:
@@ -103,10 +102,8 @@ def is_torch_version_le(version: str, release_only: bool = True) -> bool:
             ``a0`` or ``+nv26.04``. If False, use full PEP 440 semantics where
             e.g. ``2.12.0a0 < 2.12.0``.
     """
-    rhs = Version(version)
-    if release_only:
-        return _TORCH_RELEASE <= rhs.release
-    return _TORCH_VERSION <= rhs
+    lhs = _TORCH_RELEASE if release_only else _TORCH_VERSION
+    return lhs <= _parse(version, release_only)
 
 
 def is_torch_version_lt(version: str, release_only: bool = True) -> bool:
@@ -119,16 +116,14 @@ def is_torch_version_lt(version: str, release_only: bool = True) -> bool:
             ``a0`` or ``+nv26.04``. If False, use full PEP 440 semantics where
             e.g. ``2.12.0a0 < 2.12.0``.
     """
-    rhs = Version(version)
-    if release_only:
-        return _TORCH_RELEASE < rhs.release
-    return _TORCH_VERSION < rhs
+    lhs = _TORCH_RELEASE if release_only else _TORCH_VERSION
+    return lhs < _parse(version, release_only)
 
 
 # --------  triton version predicates --------
 
 _TRITON_VERSION = Version(triton.__version__)
-_TRITON_RELEASE = _TRITON_VERSION.release
+_TRITON_RELEASE = _parse(triton.__version__, True)
 
 
 def is_triton_version_eq(version: str, release_only: bool = True) -> bool:
@@ -155,10 +150,8 @@ def is_triton_version_ge(version: str, release_only: bool = True) -> bool:
             ``a0`` or ``+nv26.04``. If False, use full PEP 440 semantics where
             e.g. ``3.6.0a0 < 3.6.0``.
     """
-    rhs = Version(version)
-    if release_only:
-        return _TRITON_RELEASE >= rhs.release
-    return _TRITON_VERSION >= rhs
+    lhs = _TRITON_RELEASE if release_only else _TRITON_VERSION
+    return lhs >= _parse(version, release_only)
 
 
 def is_triton_version_gt(version: str, release_only: bool = True) -> bool:
@@ -171,10 +164,8 @@ def is_triton_version_gt(version: str, release_only: bool = True) -> bool:
             ``a0`` or ``+nv26.04``. If False, use full PEP 440 semantics where
             e.g. ``3.6.0a0 < 3.6.0``.
     """
-    rhs = Version(version)
-    if release_only:
-        return _TRITON_RELEASE > rhs.release
-    return _TRITON_VERSION > rhs
+    lhs = _TRITON_RELEASE if release_only else _TRITON_VERSION
+    return lhs > _parse(version, release_only)
 
 
 def is_triton_version_le(version: str, release_only: bool = True) -> bool:
@@ -187,10 +178,8 @@ def is_triton_version_le(version: str, release_only: bool = True) -> bool:
             ``a0`` or ``+nv26.04``. If False, use full PEP 440 semantics where
             e.g. ``3.6.0a0 < 3.6.0``.
     """
-    rhs = Version(version)
-    if release_only:
-        return _TRITON_RELEASE <= rhs.release
-    return _TRITON_VERSION <= rhs
+    lhs = _TRITON_RELEASE if release_only else _TRITON_VERSION
+    return lhs <= _parse(version, release_only)
 
 
 def is_triton_version_lt(version: str, release_only: bool = True) -> bool:
@@ -203,17 +192,17 @@ def is_triton_version_lt(version: str, release_only: bool = True) -> bool:
             ``a0`` or ``+nv26.04``. If False, use full PEP 440 semantics where
             e.g. ``3.6.0a0 < 3.6.0``.
     """
-    rhs = Version(version)
-    if release_only:
-        return _TRITON_RELEASE < rhs.release
-    return _TRITON_VERSION < rhs
+    lhs = _TRITON_RELEASE if release_only else _TRITON_VERSION
+    return lhs < _parse(version, release_only)
 
 
 # --------  cuda version predicates --------
 
 _CUDA_VERSION_STR = torch.version.cuda
 _CUDA_VERSION = Version(_CUDA_VERSION_STR) if _CUDA_VERSION_STR is not None else None
-_CUDA_RELEASE = _CUDA_VERSION.release if _CUDA_VERSION is not None else None
+_CUDA_RELEASE = (
+    _parse(_CUDA_VERSION_STR, True) if _CUDA_VERSION_STR is not None else None
+)
 
 
 def has_cuda_version() -> bool:
@@ -256,10 +245,8 @@ def is_cuda_version_ge(version: str, release_only: bool = True) -> bool:
         return False
     assert _CUDA_RELEASE is not None  # mypy
 
-    rhs = Version(version)
-    if release_only:
-        return _CUDA_RELEASE >= rhs.release
-    return _CUDA_VERSION >= rhs
+    lhs = _CUDA_RELEASE if release_only else _CUDA_VERSION
+    return lhs >= _parse(version, release_only)
 
 
 def is_cuda_version_gt(version: str, release_only: bool = True) -> bool:
@@ -271,10 +258,8 @@ def is_cuda_version_gt(version: str, release_only: bool = True) -> bool:
         return False
     assert _CUDA_RELEASE is not None  # mypy
 
-    rhs = Version(version)
-    if release_only:
-        return _CUDA_RELEASE > rhs.release
-    return _CUDA_VERSION > rhs
+    lhs = _CUDA_RELEASE if release_only else _CUDA_VERSION
+    return lhs > _parse(version, release_only)
 
 
 def is_cuda_version_le(version: str, release_only: bool = True) -> bool:
@@ -286,10 +271,8 @@ def is_cuda_version_le(version: str, release_only: bool = True) -> bool:
         return False
     assert _CUDA_RELEASE is not None  # mypy
 
-    rhs = Version(version)
-    if release_only:
-        return _CUDA_RELEASE <= rhs.release
-    return _CUDA_VERSION <= rhs
+    lhs = _CUDA_RELEASE if release_only else _CUDA_VERSION
+    return lhs <= _parse(version, release_only)
 
 
 def is_cuda_version_lt(version: str, release_only: bool = True) -> bool:
@@ -301,10 +284,8 @@ def is_cuda_version_lt(version: str, release_only: bool = True) -> bool:
         return False
     assert _CUDA_RELEASE is not None  # mypy
 
-    rhs = Version(version)
-    if release_only:
-        return _CUDA_RELEASE < rhs.release
-    return _CUDA_VERSION < rhs
+    lhs = _CUDA_RELEASE if release_only else _CUDA_VERSION
+    return lhs < _parse(version, release_only)
 
 
 # --------  nvidia-cutlass-dsl version predicates --------
@@ -312,7 +293,7 @@ def is_cuda_version_lt(version: str, release_only: bool = True) -> bool:
 # Defer dependency validation until a version predicate is called.
 
 
-def _cutedsl_version(release_only: bool) -> tuple[int, ...] | Version:
+def _cutedsl_version(release_only: bool) -> Version:
     return _parse(check_cutedsl_installation()[0], release_only)
 
 
@@ -337,35 +318,19 @@ def is_cutedsl_version_ne(version: str, release_only: bool = True) -> bool:
 
 def is_cutedsl_version_ge(version: str, release_only: bool = True) -> bool:
     """DSL >= comparison; see :func:`is_cutedsl_version_eq` for semantics."""
-    lhs = Version(check_cutedsl_installation()[0])
-    rhs = Version(version)
-    if release_only:
-        return lhs.release >= rhs.release
-    return lhs >= rhs
+    return _cutedsl_version(release_only) >= _parse(version, release_only)
 
 
 def is_cutedsl_version_gt(version: str, release_only: bool = True) -> bool:
     """DSL > comparison; see :func:`is_cutedsl_version_eq` for semantics."""
-    lhs = Version(check_cutedsl_installation()[0])
-    rhs = Version(version)
-    if release_only:
-        return lhs.release > rhs.release
-    return lhs > rhs
+    return _cutedsl_version(release_only) > _parse(version, release_only)
 
 
 def is_cutedsl_version_le(version: str, release_only: bool = True) -> bool:
     """DSL <= comparison; see :func:`is_cutedsl_version_eq` for semantics."""
-    lhs = Version(check_cutedsl_installation()[0])
-    rhs = Version(version)
-    if release_only:
-        return lhs.release <= rhs.release
-    return lhs <= rhs
+    return _cutedsl_version(release_only) <= _parse(version, release_only)
 
 
 def is_cutedsl_version_lt(version: str, release_only: bool = True) -> bool:
     """DSL < comparison; see :func:`is_cutedsl_version_eq` for semantics."""
-    lhs = Version(check_cutedsl_installation()[0])
-    rhs = Version(version)
-    if release_only:
-        return lhs.release < rhs.release
-    return lhs < rhs
+    return _cutedsl_version(release_only) < _parse(version, release_only)

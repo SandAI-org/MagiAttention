@@ -77,5 +77,6 @@ repos:
     rev: v1.15.0
     hooks:
     -   id: mypy
+        additional_dependencies: [packaging==25.0]
         files: \.py$
         args: [--config=mypy.ini, --ignore-missing-imports, --python-version=3.10]
