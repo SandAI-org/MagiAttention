@@ -75,6 +75,7 @@ test_packages() {
     prepare_runtime_lock
     bash .github/tests/test_portable_validation.sh
     bash .github/tests/test_install_requirements.sh
+    python .github/tests/test_task_runner.py
     python .github/tests/test_source_dependency_cache.py
     python .github/tests/test_compiled_artifact_cache.py
     if [[ "$main_changed" == true || "$ci_changed" == true ]]; then

@@ -110,7 +110,7 @@ def main() -> None:
             "repository": "example/dependency",
             "consumer": "consumer",
             "cache_root": root / "cache",
-            "base_tag": "26.05.2",
+            "base_tag": "26.05.4",
             "platform": "h100",
             "recipe": "recipe",
         }
@@ -137,6 +137,14 @@ def main() -> None:
         assert builds == 2
         assert changed_source != first_source
         assert changed_artifact != first_artifact
+
+        # Dependency artifacts use the full tag, unlike standalone wheel family keys.
+        tag_source, tag_artifact = source_dependencies.build_or_reuse(
+            **{**common, "base_tag": "26.05.5"}
+        )
+        assert builds == 3
+        assert tag_source == changed_source
+        assert tag_artifact != changed_artifact
 
     print("source dependency cache tests passed")
 
