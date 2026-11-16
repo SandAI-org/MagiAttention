@@ -267,6 +267,20 @@ This feature is experimental and under active development for now,
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
+**MAGI_ATTENTION_BWD_PACK_FACTOR**
+
+- **Defaults to:** `1`
+- **Used by:** `magi_attention.env.general.bwd_pack_factor`
+
+Set this env variable to an integer above `1` to make the `cutedsl` flex-flash-attention backward process that many Q heads sharing one KV head together, so that K/V are read once for all Q heads of a KV head. A value above `1` also lets the backward store dK/dV directly when the K ranges of a stage are sorted and non-overlapping; with `MAGI_ATTENTION_RANGE_MERGE=1` dK/dV are reduced atomically.
+
+The value must be a positive integer that divides `num_heads_q // num_heads_kv` and also divides `128` for head dims below `128` and `64` for head dims `128` and `192`. A value above `1` requires `MAGI_ATTENTION_KERNEL_BACKEND=cutedsl` on SM100/SM110, does not support softcap, and cannot be combined with `MAGI_ATTENTION_CATGQA=1`.
+
+```{note}
+This feature is experimental and under active development for now,
+thus please do NOT enable it unless you know exactly what you are doing.
+```
+
 **MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE**
 
 - **Defaults to:** `0`

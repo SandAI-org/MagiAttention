@@ -912,6 +912,18 @@ thus please do NOT enable it unless you know exactly what you are doing.</p>
 <p>This feature is experimental and under active development for now,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
+<p><strong>MAGI_ATTENTION_BWD_PACK_FACTOR</strong></p>
+<ul class="simple">
+<li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">1</span></code></p></li>
+<li><p><strong>Used by:</strong> <code class="docutils literal notranslate"><span class="pre">magi_attention.env.general.bwd_pack_factor</span></code></p></li>
+</ul>
+<p>Set this env variable to an integer above <code class="docutils literal notranslate"><span class="pre">1</span></code> to make the <code class="docutils literal notranslate"><span class="pre">cutedsl</span></code> flex-flash-attention backward process that many Q heads sharing one KV head together, so that K/V are read once for all Q heads of a KV head. A value above <code class="docutils literal notranslate"><span class="pre">1</span></code> also lets the backward store dK/dV directly when the K ranges of a stage are sorted and non-overlapping; with <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_RANGE_MERGE=1</span></code> dK/dV are reduced atomically.</p>
+<p>The value must be a positive integer that divides <code class="docutils literal notranslate"><span class="pre">num_heads_q</span> <span class="pre">//</span> <span class="pre">num_heads_kv</span></code> and also divides <code class="docutils literal notranslate"><span class="pre">128</span></code> for head dims below <code class="docutils literal notranslate"><span class="pre">128</span></code> and <code class="docutils literal notranslate"><span class="pre">64</span></code> for head dims <code class="docutils literal notranslate"><span class="pre">128</span></code> and <code class="docutils literal notranslate"><span class="pre">192</span></code>. A value above <code class="docutils literal notranslate"><span class="pre">1</span></code> requires <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND=cutedsl</span></code> on SM100/SM110, does not support softcap, and cannot be combined with <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_CATGQA=1</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This feature is experimental and under active development for now,
+thus please do NOT enable it unless you know exactly what you are doing.</p>
+</div>
 <p><strong>MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE</strong></p>
 <ul class="simple">
 <li><p><strong>Defaults to:</strong> <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
