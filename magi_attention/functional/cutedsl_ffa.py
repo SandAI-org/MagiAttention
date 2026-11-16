@@ -89,7 +89,7 @@ def cutedsl_fwd(
         max_seqlen_q=attn_arg.q_ranges.max_seqlen,
         max_seqlen_k=attn_arg.k_ranges.max_seqlen,
         softmax_scale=softmax_scale,
-        softcap=softcap if softcap and softcap > 0 else None,
+        softcap=softcap,
         sink=sink,
         sink_layout="sh",
         disable_fwd_atomic_reduction=direct_store,

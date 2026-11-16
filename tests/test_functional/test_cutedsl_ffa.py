@@ -416,6 +416,29 @@ class TestCutedslFwdStorePath(TestCase):
         self._run_case(name, num_heads_q=4, num_heads_kv=2, num_sinks=2)
 
 
+@unittest.skipUnless(
+    torch.cuda.is_available(), "cutedsl_fwd and cutedsl_bwd take CUDA tensors"
+)
+class TestCutedslSoftcapInput(TestCase):
+    """cutedsl_fwd and cutedsl_bwd reject the same softcap values, so a
+    negative or NaN cap never runs the forward uncapped."""
+
+    @parameterize("softcap", [-30.0, float("nan")])
+    def test_invalid_softcap_raises_in_fwd_and_bwd(self, softcap: float):
+        rows = [[0, 128]]
+        attn_arg = _make_attn_arg(rows, rows, range_merge=False)
+        x = torch.randn(128, NUM_HEADS, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+        lse = torch.zeros(128, NUM_HEADS, device="cuda", dtype=torch.float32)
+        with self.assertRaisesRegex(ValueError, "softcap must be"):
+            cutedsl_ffa.cutedsl_fwd(
+                x, x, x, attn_arg, softmax_scale=None, softcap=softcap
+            )
+        with self.assertRaisesRegex(ValueError, "softcap must be"):
+            cutedsl_ffa.cutedsl_bwd(
+                x, x, x, x, x, lse, attn_arg, softmax_scale=None, softcap=softcap
+            )
+
+
 @require_blackwell
 class TestCutedslBwdPackFactor(TestCase):
     """The dist cutedsl backward takes MAGI_ATTENTION_BWD_PACK_FACTOR, and the
