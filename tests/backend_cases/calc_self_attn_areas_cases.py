@@ -12,40 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib
-import sys
 import unittest
 from typing import Optional
 from unittest import TestCase
 
 import numpy as np
 
-from magi_attention.common import AttnRanges
+from magi_attention.common import AttnRange, AttnRanges
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.common.range import AttnRange
 from magi_attention.meta import make_global_bucket_from_qk_ranges
 from magi_attention.meta.container import AttnBucket, AttnChunk, AttnSlice
 from magi_attention.testing import parameterize
-from magi_attention.testing.utils import switch_envvars
 from magi_attention.utils import argsort
-
-
-def reload_magi_modules():
-    """Helper to reload magi_attention modules and update global names in this module."""
-    importlib.reload(sys.modules["magi_attention.common"])
-    importlib.reload(sys.modules["magi_attention.meta._make_dispatch_meta"])
-    importlib.reload(sys.modules["magi_attention.meta"])
-    import magi_attention.common
-    import magi_attention.meta
-
-    # Update the global names in this test module
-    test_module = sys.modules[__name__]
-    test_module.AttnRange = magi_attention.common.AttnRange
-    test_module.AttnRanges = magi_attention.common.AttnRanges
-    test_module.make_global_bucket_from_qk_ranges = (
-        magi_attention.meta.make_global_bucket_from_qk_ranges
-    )
-    return magi_attention.common
 
 
 def add_range_to_array(
@@ -95,22 +73,6 @@ def add_range_to_array(
 
 
 class TestCalcSelfAttnAreas(TestCase):
-    @property
-    def use_cpp_backend(self):
-        return False
-
-    def setUp(self):
-        # Ensure we are using the specified backend
-        self.switch_back = switch_envvars(
-            ["MAGI_ATTENTION_CPP_BACKEND"],
-            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": self.use_cpp_backend},
-        )
-        reload_magi_modules()
-
-    def tearDown(self):
-        self.switch_back()
-        reload_magi_modules()
-
     def test_calc_self_attn_areas_one(self):
         q_ranges = AttnRanges.from_ranges(
             [
@@ -1380,12 +1342,6 @@ class TestCalcSelfAttnAreas(TestCase):
             f"There's wrong with {global_bucket=}, "
             f"when {q_ranges=}, {k_ranges=}, {attn_mask_type=} and {chunk_size=}"
         )
-
-
-class TestCppCalcSelfAttnAreas(TestCalcSelfAttnAreas):
-    @property
-    def use_cpp_backend(self):
-        return True
 
 
 if __name__ == "__main__":

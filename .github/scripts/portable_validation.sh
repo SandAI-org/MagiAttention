@@ -350,9 +350,9 @@ PY
                 (cd "$test_cwd" && \
                     PYTHONPATH="$clean_pythonpath" \
                     COVERAGE_FILE="$repo_root/.coverage" \
-                    coverage run --source magi_attention -m pytest \
+                    coverage run --parallel-mode --source magi_attention -m pytest \
                         -q -s --skip-slow --durations=0 --import-mode=append "$package_root/tests")
-                (cd "$repo_root" && coverage xml -i)
+                (cd "$repo_root" && coverage combine && coverage xml -i)
             else
                 (cd "$test_cwd" && \
                     PYTHONPATH="$clean_pythonpath" \
