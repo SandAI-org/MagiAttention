@@ -12,26 +12,65 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The DSL keeps the traced IR only when CUTE_DSL_KEEP_IR is set before cutlass
-# is imported, so this runs as a script in a fresh process.
-# Usage: python tmem_dealloc_mbarrier_test_utils.py
+"""Fresh-process probe of allocator reconstruction, without an attention kernel.
 
-from __future__ import annotations
+CUTE_DSL_KEEP_IR must be set before importing Cutlass. This kernel owns exactly
+one mbarrier: the allocator's two-CTA deallocation barrier. Inspecting all its
+initializers therefore identifies that barrier without guessing by arrival count
+among unrelated attention pipelines.
+"""
 
 import json
 from collections.abc import Iterator
 
 import cutlass
+import cutlass.cute as cute
+import cutlass.pipeline as pipeline
 import torch
+from cuda.bindings import driver as cuda
 from cutlass._mlir import ir
+from cutlass.cute.runtime import from_dlpack
 
 import magi_attention
-from magi_attention.kernel.cutedsl import flex_flash_attn
+from magi_attention.kernel.cutedsl.dsl_compat import SmemAllocator, TmemAllocator
 
 RESULT_PREFIX = "TMEM_DEALLOC_MBARRIER_RESULT "
-
-# The op name differs across the supported DSL versions.
 _MBARRIER_INIT_OPS = frozenset({"nvvm.mbarrier.init", "nvvm.mbarrier.init.shared"})
+
+
+class TmemAllocatorProbe:
+    @cute.jit
+    def __call__(self, done: cute.Tensor, stream: cuda.CUstream):
+        self.kernel(done).launch(
+            grid=(2, 1, 1), block=(32, 1, 1), cluster=(2, 1, 1), stream=stream
+        )
+
+    @cute.kernel
+    def kernel(self, done: cute.Tensor):
+        smem = SmemAllocator()
+        result_ptr = smem.allocate(cutlass.Int32, byte_alignment=8)
+        dealloc_ptr = smem.allocate(cutlass.Int64, byte_alignment=8)
+        allocator = TmemAllocator(
+            alloc_result_dst_smem_ptr=result_ptr,
+            barrier_for_retrieve=pipeline.NamedBarrier(barrier_id=1, num_threads=32),
+            allocator_warp_id=0,
+            is_two_cta=True,
+            two_cta_tmem_dealloc_mbar_ptr=dealloc_ptr,
+        )
+        cute.arch.cluster_arrive_relaxed()
+        cute.arch.cluster_wait()
+        warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        # A dynamic warp-role region rebuilds the allocator, exactly the
+        # operation that used to reinitialize its live deallocation barrier.
+        if warp == 0:
+            allocator.allocate(32)
+            allocator.wait_for_alloc()
+            ptr = allocator.retrieve_ptr(cutlass.Float32)
+            # Deliberately no work tile: both CTAs go straight to deallocation.
+            allocator.relinquish_alloc_permit()
+            allocator.free(ptr)
+        if cute.arch.thread_idx()[0] == 0:
+            done[cute.arch.block_idx()[0]] = 1
 
 
 def _operations(operation: ir.Operation) -> Iterator[ir.Operation]:
@@ -47,41 +86,31 @@ def _mbarrier_init_arrival_counts(mlir: str) -> list[int]:
     with ir.Context():
         module = ir.Module.parse(mlir)
         for operation in _operations(module.operation):
-            if operation.name not in _MBARRIER_INIT_OPS:
-                continue
-            constant = operation.operands[1].owner
-            assert constant.name == "arith.constant", constant.name
-            arrival_counts.append(ir.IntegerAttr(constant.attributes["value"]).value)
+            if operation.name in _MBARRIER_INIT_OPS:
+                constant = operation.operands[1].owner
+                assert constant.name == "arith.constant", constant.name
+                arrival_counts.append(
+                    ir.IntegerAttr(constant.attributes["value"]).value
+                )
     return arrival_counts
 
 
-def _trace_bwd() -> str:
-    """The backward kernel is 2-CTA at head dim 128 unless 2-CTA is disabled."""
-    torch.manual_seed(0)
-    seqlen, num_heads, head_dim = 1024, 2, 128
-    q, k, v = (
-        torch.randn(
-            (1, seqlen, num_heads, head_dim),
-            device="cuda",
-            dtype=torch.bfloat16,
-            requires_grad=True,
-        )
-        for _ in range(3)
-    )
-    out, _ = flex_flash_attn.flex_flash_attn_func(q, k, v, mask_types=0)
-    torch.autograd.grad(out, (q, k, v), torch.randn_like(out))
-    torch.cuda.synchronize()
-
-    compile_cache = flex_flash_attn._flex_flash_attn_bwd.compile_cache  # type: ignore[attr-defined]
-    (compiled,) = compile_cache.cache.values()
-    return compiled.__mlir__
-
-
 def main() -> None:
+    done = torch.zeros(2, device="cuda", dtype=torch.int32)
+    done_cute = from_dlpack(done)
+    stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    # Compile this specific probe directly; no attention wrapper/cache internals.
+    compiled = cute.compile(TmemAllocatorProbe(), done_cute, stream)
+    counts = _mbarrier_init_arrival_counts(compiled.__mlir__)
+    # Fail before launching known-bad IR, so a repeated init need not hang a GPU.
+    assert counts == [32], f"expected one deallocation barrier init, got {counts}"
+    compiled(done_cute, stream)
+    torch.cuda.synchronize()
     result = {
         "magi_attention_file": magi_attention.__file__,
         "cutlass_version": cutlass.__version__,
-        "arrival_counts": _mbarrier_init_arrival_counts(_trace_bwd()),
+        "arrival_counts": counts,
+        "completed_ctas": done.tolist(),
     }
     print(RESULT_PREFIX + json.dumps(result), flush=True)
 
