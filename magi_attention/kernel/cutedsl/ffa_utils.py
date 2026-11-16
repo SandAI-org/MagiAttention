@@ -192,6 +192,152 @@ def validate_range_feature_support(
         raise NotImplementedError("bwd RangeMerge is not supported at head_dim 192")
 
 
+# ---------------------------------------------------------------------------
+# SM100 backward GQA fold
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BwdGqaFold:
+    """How the SM100 backward folds the q heads of one kv head into its tiles.
+
+    ``pack_factor`` (pf) q heads share the rows of one Q tile: packed row ``r``
+    is token ``r // pf`` of q head ``scratch_head * pf + r % pf``, where the
+    scratch head indexes the ``num_head // pf`` packed heads of Q, dO, LSE,
+    dPsum and dQacc. A kv head owns ``kv_group = qhead_per_kvhead // pf``
+    scratch heads. Without ``head_loop`` each scratch head is its own tile;
+    with ``head_loop`` one tile per kv head walks its ``kv_group`` scratch
+    heads one after another, loading K/V once and keeping dK/dV in TMEM.
+
+    ``(1, False)`` is the unfolded backward (one tile per q head), ``(1, True)``
+    is ``cat_gqa``, ``(qhead_per_kvhead, False)`` the full pack and
+    ``(pf, True)`` with ``1 < pf < qhead_per_kvhead`` the partial pack. A
+    partial pack without ``head_loop`` is rejected; ``select_bwd_gqa_fold``
+    never builds it.
+    """
+
+    qhead_per_kvhead: int
+    pack_factor: int = 1
+    head_loop: bool = False
+
+    def __post_init__(self) -> None:
+        if self.qhead_per_kvhead < 1 or self.pack_factor < 1:
+            raise ValueError(
+                f"qhead_per_kvhead ({self.qhead_per_kvhead}) and pack_factor "
+                f"({self.pack_factor}) must be positive"
+            )
+        if self.qhead_per_kvhead % self.pack_factor != 0:
+            raise ValueError(
+                f"pack_factor ({self.pack_factor}) must divide qhead_per_kvhead "
+                f"({self.qhead_per_kvhead})"
+            )
+        if self.head_loop and self.kv_group == 1:
+            raise ValueError("head_loop needs more than one scratch head per kv head")
+        if self.pack_factor > 1 and self.kv_group > 1 and not self.head_loop:
+            raise ValueError(
+                f"pack_factor ({self.pack_factor}) below qhead_per_kvhead "
+                f"({self.qhead_per_kvhead}) needs head_loop"
+            )
+
+    @property
+    def kv_group(self) -> int:
+        """Scratch heads (packed groups of ``pack_factor`` q heads) per kv head."""
+        return self.qhead_per_kvhead // self.pack_factor
+
+    @property
+    def groups_per_tile(self) -> int:
+        """Scratch heads one tile walks: the whole kv group under ``head_loop``."""
+        return self.kv_group if self.head_loop else 1
+
+    @property
+    def covers_all_qheads(self) -> bool:
+        """One tile accumulates dK/dV over every q head of its kv head, so
+        dK/dV have a single writer per (K tile, kv head)."""
+        return self.kv_group == 1 or self.head_loop
+
+
+def select_bwd_gqa_fold(
+    *,
+    bwd_pack_factor: int,
+    cat_gqa: bool,
+    major_arch: int,
+    has_ranges: bool,
+    has_block_sparse: bool,
+    has_mask_mod: bool,
+    has_score_mod: bool,
+    has_softcap: bool,
+    deterministic: bool,
+    num_head: int,
+    num_head_kv: int,
+    tile_m: int,
+    cta_group_size: int,
+) -> BwdGqaFold:
+    """Validate the caller's backward GQA fold request and build its fold.
+
+    Args:
+        cta_group_size: CTAs per MMA (2 for the 2-CTA kernels); a CTA holds
+            ``tile_m // cta_group_size`` Q rows, which ``bwd_pack_factor`` must
+            divide so that every CTA holds whole tokens.
+
+    Raises:
+        ValueError: ``bwd_pack_factor`` is not a positive divisor of
+            ``qhead_per_kvhead``, or a value above 1 is combined with
+            ``cat_gqa``.
+        NotImplementedError: ``bwd_pack_factor`` > 1 outside the SM100/SM110
+            q/k-range kernels, together with block sparsity, mask_mod,
+            score_mod, softcap or deterministic, or not dividing the Q rows per
+            CTA.
+    """
+    qhead_per_kvhead = num_head // num_head_kv
+    if bwd_pack_factor < 1 or qhead_per_kvhead % bwd_pack_factor != 0:
+        raise ValueError(
+            f"bwd_pack_factor ({bwd_pack_factor}) must be a positive divisor of "
+            f"qhead_per_kvhead ({qhead_per_kvhead})"
+        )
+    if bwd_pack_factor > 1 and cat_gqa:
+        raise ValueError(
+            f"bwd_pack_factor ({bwd_pack_factor}) > 1 and cat_gqa=True select "
+            "different folds"
+        )
+    if qhead_per_kvhead == 1:
+        return BwdGqaFold(1)
+    if cat_gqa:
+        assert major_arch in (10, 11), "cat_gqa is only implemented on SM100/SM110"
+        assert not has_block_sparse, "cat_gqa does not support block sparsity"
+        return BwdGqaFold(qhead_per_kvhead, 1, head_loop=True)
+    if bwd_pack_factor == 1:
+        return BwdGqaFold(qhead_per_kvhead)
+    if major_arch not in (10, 11):
+        raise NotImplementedError(
+            f"bwd_pack_factor > 1 requires SM100/SM110, got major arch {major_arch}"
+        )
+    if not has_ranges:
+        raise NotImplementedError(
+            "bwd_pack_factor > 1 requires q/k ranges; the dense backward "
+            "does not pack"
+        )
+    for feature, requested in (
+        ("block sparsity", has_block_sparse),
+        ("mask_mod", has_mask_mod),
+        ("score_mod", has_score_mod),
+        ("softcap", has_softcap),
+        ("deterministic", deterministic),
+    ):
+        if requested:
+            raise NotImplementedError(f"bwd_pack_factor > 1 does not support {feature}")
+    rows_per_cta = tile_m // cta_group_size
+    if rows_per_cta % bwd_pack_factor != 0:
+        raise NotImplementedError(
+            f"bwd_pack_factor ({bwd_pack_factor}) must divide the Q rows per CTA "
+            f"({rows_per_cta} = tile_m {tile_m} / {cta_group_size} CTA per MMA)"
+        )
+    return BwdGqaFold(
+        qhead_per_kvhead,
+        bwd_pack_factor,
+        head_loop=bwd_pack_factor < qhead_per_kvhead,
+    )
+
+
 def ranges_to_cu_seqlens(ranges: torch.Tensor | None) -> torch.Tensor | None:
     """Collapse q/k ranges down to a cu_seqlens tensor.
 

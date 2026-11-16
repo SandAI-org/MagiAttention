@@ -20,19 +20,9 @@ import pytest
 
 
 def _reload_common_modules():
-    """Reload all magi_attention.common submodules so the backend switch takes effect."""
-    module_names = [
-        "magi_attention.common.range",
-        "magi_attention.common.ranges",
-        "magi_attention.common.enum",
-        "magi_attention.common.rectangle",
-        "magi_attention.common.rectangles",
-        "magi_attention.common.mask",
-        "magi_attention.common",
-    ]
-    for name in module_names:
-        if name in sys.modules:
-            importlib.reload(sys.modules[name])
+    """Reload magi_attention.common so the backend switch takes effect."""
+    if "magi_attention.common" in sys.modules:
+        importlib.reload(sys.modules["magi_attention.common"])
 
 
 def _has_cpp_backend():

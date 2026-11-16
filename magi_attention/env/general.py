@@ -35,6 +35,7 @@ __all__ = [
     "is_profile_mode_enable",
     "is_range_merge_enable",
     "is_cat_gqa_enable",
+    "bwd_pack_factor",
     "dist_attn_backward_hide_tail_reduce",
     "dist_attn_runtime_dict_size",
     "min_chunks_per_rank",
@@ -227,6 +228,28 @@ def is_cat_gqa_enable() -> bool:
     thus please do NOT enable it unless you know exactly what you are doing
     """
     return os.environ.get("MAGI_ATTENTION_CATGQA", "0") == "1"
+
+
+def bwd_pack_factor() -> int:
+    """
+    Set the value of this env variable to the number of Q heads sharing one
+    KV head that the cutedsl flex-flash-attention backward processes together.
+    A value above ``1`` requires ``MAGI_ATTENTION_KERNEL_BACKEND=cutedsl`` on
+    SM100/SM110, must divide ``num_heads_q // num_heads_kv`` and also ``128``
+    for head_dim below ``128`` or ``64`` for head_dim ``128`` and ``192``, does
+    not support softcap, and cannot be combined with ``MAGI_ATTENTION_CATGQA=1``.
+
+    Default value is ``1``
+
+    NOTE: this feature is experimental and under active development for now,
+    thus please do NOT enable it unless you know exactly what you are doing
+    """
+    pack_factor = int(os.environ.get("MAGI_ATTENTION_BWD_PACK_FACTOR", "1"))
+    if pack_factor < 1:
+        raise ValueError(
+            f"MAGI_ATTENTION_BWD_PACK_FACTOR must be a positive integer, got {pack_factor}"
+        )
+    return pack_factor
 
 
 def dist_attn_backward_hide_tail_reduce() -> bool:

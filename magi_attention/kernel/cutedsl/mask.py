@@ -745,6 +745,10 @@ class AttentionMask:
         assert not (
             cast(bool, mask_causal) and cast(bool, mask_local)
         ), "mask_causal and mask_local cannot be both True"
+        pf = self.qhead_per_kvhead_packgqa
+        assert pf == 1 or not (
+            cast(bool, mask_local) or mask_mod is not None
+        ), "the packed bwd mask supports no local window and no mask_mod"
         ROW = 0 if const_expr(not self.swap_AB) else 1
         COL = 1 if const_expr(not self.swap_AB) else 0
         # assert t0ScS_t2r[0][COL] == 0, "col0 == 0" # tmp comment for 2-cta bwd
@@ -842,9 +846,14 @@ class AttentionMask:
                 # neighbouring range's finite stats and leak through dK/dV's
                 # Q contraction (dQ's row predicate cannot cover them).
                 thr_row_offset = tScS_t2r[0][ROW]
-                seqlenq_row_limit = (
-                    self.seqlen_q - m_block * self.tile_m - thr_row_offset
-                )
+                if const_expr(pf > 1):
+                    seqlenq_row_limit = (
+                        self.seqlen_q * pf - m_block * self.tile_m - thr_row_offset
+                    )
+                else:
+                    seqlenq_row_limit = (
+                        self.seqlen_q - m_block * self.tile_m - thr_row_offset
+                    )
                 num_rep = cute.size(tScS_t2r, mode=[0])  # 16 or 32
                 num_wg = 2
                 hi_elem = row_to_r2p_idx(
@@ -862,8 +871,16 @@ class AttentionMask:
                         acc_S[i] = -cutlass.Float32.inf
         else:  # Causal or local
             thr_row_offset = tScS_t2r[0][ROW]
-            seqlenq_row_limit = self.seqlen_q - m_block * self.tile_m - thr_row_offset
-            causal_offset = seqlenq_row_limit - seqlenk_col_limit
+            if const_expr(pf > 1):
+                # Causal token threshold j + Sq - Sk of this thread's column j.
+                row_base = m_block * self.tile_m + thr_row_offset
+                seqlenq_row_limit = self.seqlen_q * pf - row_base
+                causal_offset = (self.seqlen_q - seqlenk_col_limit) * pf - row_base
+            else:
+                seqlenq_row_limit = (
+                    self.seqlen_q - m_block * self.tile_m - thr_row_offset
+                )
+                causal_offset = seqlenq_row_limit - seqlenk_col_limit
             if const_expr(mask_causal):
                 # tidx = cute.arch.thread_idx()[0] % 256
                 # if tidx < 32:
@@ -972,22 +989,34 @@ class AttentionMask:
         ROW → Q (``m_block``), COL → KV (``n_block``). Dual of the fwd helper:
         here the two sides are row limits rather than column limits.
         """
+        pf = self.qhead_per_kvhead_packgqa
         ROW = 0 if const_expr(not self.swap_AB) else 1
         COL = 1 if const_expr(not self.swap_AB) else 0
         thr_col_offset = tScS_t2r[0][COL]
         thr_row_offset = tScS_t2r[0][ROW]
         seqlenk_col_limit = self.seqlen_k - n_block * self.tile_n - thr_col_offset
-        seqlenq_row_limit = self.seqlen_q - m_block * self.tile_m - thr_row_offset
-        causal_offset = seqlenq_row_limit - seqlenk_col_limit
+        if const_expr(pf > 1):
+            row_base = m_block * self.tile_m + thr_row_offset
+            seqlenq_row_limit = self.seqlen_q * pf - row_base
+            # Column j sees tokens t >= j + Sq - Sk (causal) and t <= j
+            # (inv_causal).
+            causal_offset = (self.seqlen_q - seqlenk_col_limit) * pf - row_base
+            inv_causal_row_end = (self.seqlen_k - seqlenk_col_limit + 1) * pf - row_base
+        else:
+            seqlenq_row_limit = self.seqlen_q - m_block * self.tile_m - thr_row_offset
+            causal_offset = seqlenq_row_limit - seqlenk_col_limit
 
         row_limit_lo = Int32(0)
         if attn_type == MT_MAP.causal or attn_type == MT_MAP.bi_causal:
             row_limit_lo = causal_offset
         row_limit_hi = Int32(self.tile_m)
         if attn_type == MT_MAP.inv_causal or attn_type == MT_MAP.bi_causal:
-            # Visible rows are r <= causal_offset + (Sk - Sq); +1 makes it the
-            # exclusive bound that r2p_bitmask_below expects.
-            row_limit_hi = causal_offset + self.seqlen_k - self.seqlen_q + 1
+            if const_expr(pf > 1):
+                row_limit_hi = inv_causal_row_end
+            else:
+                # Visible rows are r <= causal_offset + (Sk - Sq); +1 makes it
+                # the exclusive bound that r2p_bitmask_below expects.
+                row_limit_hi = causal_offset + self.seqlen_k - self.seqlen_q + 1
         if const_expr(mask_seqlen):
             # Clamp the visible-row bound to seqlen_q: a tail tile's OOB rows
             # read a neighbouring range's finite LSE once accumulators live in

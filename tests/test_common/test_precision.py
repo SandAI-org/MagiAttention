@@ -71,6 +71,53 @@ class TestPrecision(TestCase):
         with self.assertRaises(AssertionError):
             _check_one("out", actual, ref, ref, torch.bfloat16, self.id())
 
+    @staticmethod
+    def _reference_case(
+        head_ref: float, head_actual: float, head_len: int = 256
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(actual, ref_hi, ref_lo) of 4096 elements with max |ref_hi| 4, where
+        head_ref and head_actual are given in units of max |ref_hi|.
+
+        actual equals the bf16 rounding of ref_hi except in the first head_len
+        elements. ref_lo misses every rtol on 41 elements (1%), which sets the
+        mismatch threshold to 2%."""
+        scale = 4.0
+        ref = scale * torch.linspace(0.25, 1.0, 4096, dtype=torch.float64)
+        ref[:head_len] = scale * head_ref
+        actual = ref.to(torch.bfloat16).to(torch.float64)
+        ref_lo = actual.clone()
+        ref_lo[-41:] *= 1.5
+        actual[:head_len] = scale * head_actual
+        return actual, ref, ref_lo
+
+    @parameterize("name", ["out", "dq", "dk", "dv"])
+    def test_reference_comparison_accepts_fp32_noise_at_zero_reference(self, name: str):
+        """Noise of 8 fp32 eps of max|ref| where the reference is exactly 0
+        passes, although its 6.25% share of the elements is above the 2%
+        mismatch threshold; with max|ref| at 4, an atol that does not scale
+        with max|ref| would count this noise."""
+        noise = 8 * torch.finfo(torch.float32).eps
+        actual, ref, ref_lo = self._reference_case(0.0, noise)
+        _check_one(name, actual, ref, ref_lo, torch.bfloat16, self.id())
+
+    @parameterize("name", ["out", "dq", "dk", "dv"])
+    def test_reference_comparison_rejects_error_at_zero_reference(self, name: str):
+        """An error of 1e-3 * max|ref| at exact-zero references on 6.25% of the
+        elements stays inside the Linf bound and fails the mismatch count."""
+        actual, ref, ref_lo = self._reference_case(0.0, 1e-3)
+        with self.assertRaisesRegex(AssertionError, "mismatch_ratio"):
+            _check_one(name, actual, ref, ref_lo, torch.bfloat16, self.id())
+
+    @parameterize("name", ["out", "dq", "dk", "dv"])
+    def test_reference_comparison_rejects_mismatch_fraction(self, name: str):
+        """A 50% relative error on small nonzero references passes on 1% of the
+        elements and fails on 6.25%, around the 2% mismatch threshold."""
+        actual, ref, ref_lo = self._reference_case(1e-3, 1.5e-3, head_len=41)
+        _check_one(name, actual, ref, ref_lo, torch.bfloat16, self.id())
+        actual, ref, ref_lo = self._reference_case(1e-3, 1.5e-3)
+        with self.assertRaisesRegex(AssertionError, "mismatch_ratio"):
+            _check_one(name, actual, ref, ref_lo, torch.bfloat16, self.id())
+
 
 class TestSafeSubtract(TestCase):
     @parameterize("equal_inf_value", [None, 0.0, 2.0, NEG_INF])

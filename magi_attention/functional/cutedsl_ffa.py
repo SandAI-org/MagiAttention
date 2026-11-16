@@ -32,6 +32,7 @@ deterministic backward with ranges.
 
 import torch
 
+from magi_attention import env
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -52,10 +53,13 @@ def cutedsl_fwd(
     sm_margin: int = 0,
     return_max_logits: bool = False,
     max_logits: torch.Tensor | None = None,
+    pack_gqa: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Forward wrapper: returns (out, lse, max_logits) with lse in the dist
     contract's (sq, nhq) layout. With ``return_max_logits`` the fp32 ``[nhq]``
-    max logits are merged into ``max_logits``, or into a new ``-inf`` buffer."""
+    max logits are merged into ``max_logits``, or into a new ``-inf`` buffer.
+    ``pack_gqa`` is forwarded to the kernel; the dist runtime leaves it
+    ``None``, which keeps the atomic-merge forward unpacked."""
 
     ffa_args = attn_arg.to_ffa_args(is_bwd=False)
     if not ffa_args:
@@ -67,6 +71,14 @@ def cutedsl_fwd(
         max_logits = torch.full(
             (q.shape[-2],), float("-inf"), dtype=torch.float32, device=q.device
         )
+
+    # The kernel's disable_fwd_atomic_reduction declares q rows that are
+    # pairwise disjoint and sorted by start; AttnArg's flag of the same name
+    # covers only disjointness. The dist merge reads every row of the partial
+    # (out, lse), so the direct store must also fill the rows outside every
+    # q range with O = 0 and the sink-only LSE.
+    direct_store = attn_arg.disable_fwd_atomic_reduction and attn_arg.fwd_args_q_sorted
+    fill_uncovered_rows = attn_arg.fwd_args_q_coverage_end != q.shape[0]
 
     out, lse = _flex_flash_attn_fwd(
         q=q,
@@ -80,9 +92,10 @@ def cutedsl_fwd(
         softcap=softcap if softcap and softcap > 0 else None,
         sink=sink,
         sink_layout="sh",
+        disable_fwd_atomic_reduction=direct_store,
+        fill_uncovered_rows=fill_uncovered_rows,
         # The dist overlap path rescales partial (out, lse) pairs in fp32
         # (correct_attn_out_lse); a bf16/fp16 partial underflows that merge.
-        disable_fwd_atomic_reduction=False,
         out_dtype=torch.float32,
         # range_merge: the dist layer's pre-merged relation IR is already the
         # input to AttnArg (merge happens in calc_meta), so the kernel sees the
@@ -91,6 +104,7 @@ def cutedsl_fwd(
         mask_types=ffa_args["attn_type_map"],
         sm_margin=sm_margin,
         max_logits=max_logits,
+        pack_gqa=pack_gqa,
     )
 
     return out, lse, max_logits
@@ -123,8 +137,8 @@ def cutedsl_bwd(
     q_full_coverage = attn_arg.bwd_args_q_coverage_end == q.shape[0]
     k_full_coverage = attn_arg.bwd_args_k_partition_end == k.shape[0]
 
-    # If fwd went down the atomic path it returns fp32 out; the bwd kernel
-    # consumes the input dtype, so cast back.
+    # cutedsl_fwd returns fp32 out; the bwd kernel consumes the input dtype,
+    # so cast back.
     if o.dtype != q.dtype:
         o = o.to(q.dtype)
         do = do.to(q.dtype)
@@ -159,5 +173,7 @@ def cutedsl_bwd(
         dk_type=torch.float32,
         dv_type=torch.float32,
         sm_margin=sm_margin,
+        cat_gqa=env.general.is_cat_gqa_enable(),
+        bwd_pack_factor=env.general.bwd_pack_factor(),
     )
     return dq, dk, dv, dsink

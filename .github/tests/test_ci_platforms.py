@@ -81,10 +81,9 @@ def main() -> None:
     assert b300["MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED"] == "1"
     assert b300_fa4["MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED"] == "1"
 
-    # DSL 4.8.0 cannot import the FA4 implementation used by the extension tests.
     assert h100["CI_TEST_EXTENSIONS"] == "true"
-    assert b300["CI_TEST_EXTENSIONS"] == "false"
-    assert b300_fa4["CI_TEST_EXTENSIONS"] == "true"
+    assert b300["CI_TEST_EXTENSIONS"] == "true"
+    assert b300_fa4["CI_TEST_EXTENSIONS"] == "false"
 
     original = os.environ.get("B300_CI_ENABLED")
     try:

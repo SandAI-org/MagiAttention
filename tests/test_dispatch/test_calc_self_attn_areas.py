@@ -32,28 +32,16 @@ from magi_attention.utils import argsort
 
 def reload_magi_modules():
     """Helper to reload magi_attention modules and update global names in this module."""
-    importlib.reload(sys.modules["magi_attention.common.range"])
-    importlib.reload(sys.modules["magi_attention.common.ranges"])
-    importlib.reload(sys.modules["magi_attention.common.enum"])
     importlib.reload(sys.modules["magi_attention.common"])
-    importlib.reload(sys.modules["magi_attention.meta.container.slice"])
-    importlib.reload(sys.modules["magi_attention.meta.container.chunk"])
-    importlib.reload(sys.modules["magi_attention.meta.container.bucket"])
-    importlib.reload(sys.modules["magi_attention.meta.container"])
     importlib.reload(sys.modules["magi_attention.meta._make_dispatch_meta"])
     importlib.reload(sys.modules["magi_attention.meta"])
     import magi_attention.common
     import magi_attention.meta
-    import magi_attention.meta.container
 
     # Update the global names in this test module
     test_module = sys.modules[__name__]
     test_module.AttnRange = magi_attention.common.AttnRange
     test_module.AttnRanges = magi_attention.common.AttnRanges
-    test_module.AttnMaskType = magi_attention.common.enum.AttnMaskType
-    test_module.AttnBucket = magi_attention.meta.container.AttnBucket
-    test_module.AttnChunk = magi_attention.meta.container.AttnChunk
-    test_module.AttnSlice = magi_attention.meta.container.AttnSlice
     test_module.make_global_bucket_from_qk_ranges = (
         magi_attention.meta.make_global_bucket_from_qk_ranges
     )
@@ -121,6 +109,7 @@ class TestCalcSelfAttnAreas(TestCase):
 
     def tearDown(self):
         self.switch_back()
+        reload_magi_modules()
 
     def test_calc_self_attn_areas_one(self):
         q_ranges = AttnRanges.from_ranges(

@@ -28,11 +28,13 @@ from magi_attention.functional.utils import (
 
 try:
     from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
-except (ImportError, AttributeError):
+except (ImportError, AttributeError) as exc:
     # Removed DSL APIs can raise AttributeError during flash_attn.cute imports.
     is_fa4_installed = False
+    fa4_import_error: BaseException | None = exc
 else:
     is_fa4_installed = True
+    fa4_import_error = None
 
 
 # Copied from https://github.com/Dao-AILab/flash-attention/blob/v2.8.2/flash_attn/flash_attn_interface.py#L56-73
@@ -463,7 +465,7 @@ def _fa4_fwd_op(
     fwd_kwargs = {}
     if fp32_out:
         fwd_kwargs["out_dtype"] = torch.float32
-    out, softmax_lse = _flash_attn_fwd(
+    out, softmax_lse, *_ = _flash_attn_fwd(
         q,
         k,
         v,
@@ -604,7 +606,7 @@ def _fa4_varlen_fwd_op(
     fwd_kwargs = {}
     if fp32_out:
         fwd_kwargs["out_dtype"] = torch.float32
-    out, softmax_lse = _flash_attn_fwd(
+    out, softmax_lse, *_ = _flash_attn_fwd(
         q,
         k,
         v,

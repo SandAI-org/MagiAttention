@@ -15,7 +15,7 @@
     "b300": {
       "runner_label": "b300",
       "test_environment": {
-        "CI_TEST_EXTENSIONS": "false",
+        "CI_TEST_EXTENSIONS": "true",
         "MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED": "1",
         "MAGI_ATTENTION_JIT_COMPILE_DISABLED": "1",
         "MAGI_ATTENTION_TEST_BACKEND": "cutedsl,sdpa",
@@ -26,7 +26,7 @@
     "b300_fa4": {
       "runner_label": "b300",
       "test_environment": {
-        "CI_TEST_EXTENSIONS": "true",
+        "CI_TEST_EXTENSIONS": "false",
         "MAGI_ATTENTION_FFA_CUTEDSL_CACHE_ENABLED": "1",
         "MAGI_ATTENTION_JIT_COMPILE_DISABLED": "1",
         "MAGI_ATTENTION_TEST_FLASH_ATTN_CUTE_ARCHS": "sm100",

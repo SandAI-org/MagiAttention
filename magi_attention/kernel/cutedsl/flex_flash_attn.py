@@ -64,6 +64,7 @@ from .ffa_utils import (
     normalize_mask_types,
     ranges_to_cu_seqlens,
     resolve_output_dtype,
+    select_bwd_gqa_fold,
     tile_size_bwd_sm90,
     tile_size_fwd_sm90,
     validate_arch,
@@ -150,6 +151,7 @@ def _flex_flash_attn_fwd(
     out_dtype: torch.dtype | None = None,
     sm_margin: int = 0,
     max_logits: torch.Tensor | None = None,
+    fill_uncovered_rows: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -167,17 +169,25 @@ def _flex_flash_attn_fwd(
         out: optional output buffer, allocated when None.
             Direct store (``disable_fwd_atomic_reduction=True``, forced for
             dense inputs and outside SM100/SM110) leaves uncovered Q rows
-            untouched; empty K zeroes all rows.
+            untouched, unless ``fill_uncovered_rows`` sets them to zero; empty
+            K zeroes all rows.
             Atomic merge accumulates into ``out``/``lse``. Rows with
             ``lse == -inf`` need no O initialization; rows still empty after
             merging are zeroed. Pass ``sink`` in at most one call per
             accumulation.
         lse: optional fp32 log-sum-exp buffer, filled with ``-inf`` when None
-            except on the direct-store path without a sink. A caller-provided
-            ``lse`` is not filled: it must hold ``-inf`` or a previous result
-            on the atomic-merge path, and ``-inf`` outside every q range on
-            the direct-store path with ``sink``.
+            except on the direct-store path without a sink and without
+            ``fill_uncovered_rows``. A caller-provided ``lse`` is not filled:
+            it must hold ``-inf`` or a previous result on the atomic-merge
+            path, and ``-inf`` outside every q range on the direct-store path
+            with ``sink`` or ``fill_uncovered_rows``.
         sink: optional ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
+        pack_gqa: fold the q heads of one kv head into the M dimension, so one
+            CTA serves ``(token, q_head)`` rows of a kv head. ``None`` enables
+            it for GQA except on the range atomic-merge path, where it is
+            opt-in and requires ``tile_m % (num_head // num_head_kv) == 0``.
+            SM80 and ``range_merge`` always run unpacked, including with
+            ``pack_gqa=True``.
         out_dtype: GMEM O dtype, one of fp32/fp16/bf16. ``None`` takes the dtype
             of a caller-provided ``out``, else fp32 on the atomic-merge path
             and the input dtype on the direct-store path. SM80/SM90/SM120
@@ -190,6 +200,14 @@ def _flex_flash_attn_fwd(
             sinks excluded) over every attended (q, k) pair is merged into with
             an atomic max; the caller initializes it to ``-inf`` or a previous
             result. SM100/SM110 only.
+        fill_uncovered_rows: on the SM100/SM110 direct store over q/k ranges,
+            write O = 0 and the sink-only LSE (``-inf`` without a sink) to
+            every Q row outside every q range, which the store otherwise
+            leaves untouched. Elsewhere the flag does nothing; the atomic merge
+            already writes this state to the rows whose LSE is still ``-inf``
+            after merging. The fill costs one postprocess launch, plus an LSE
+            ``-inf`` fill when ``lse`` is allocated here without a sink.
+            ``out`` needs no initialization.
 
     Returns:
         A tuple of (output, lse) where:
@@ -300,18 +318,18 @@ def _flex_flash_attn_fwd(
     if softcap == 0.0:
         softcap = None
     qhead_per_kvhead = num_head // num_head_kv
-    if pack_gqa is None:
-        pack_gqa = qhead_per_kvhead > 1
-
-    # The SM80 fwd kernel indexes mQ by query head directly; the packed-GQA
-    # epilogue path is unsupported, so force unpacked store.
-    if major_arch == 8:
-        pack_gqa = False
 
     # The atomic merge is a ranges-overlap path; a no-op for dense, and
     # unsupported outside SM100/SM110 — fall back to the direct store there.
     if not has_ranges or major_arch not in (10, 11):
         disable_fwd_atomic_reduction = True
+    if pack_gqa is None:
+        pack_gqa = qhead_per_kvhead > 1 and disable_fwd_atomic_reduction
+
+    # The SM80 fwd kernel indexes mQ by query head directly; the packed-GQA
+    # epilogue path is unsupported, so force unpacked store.
+    if major_arch == 8:
+        pack_gqa = False
     # Under the atomic merge the GMEM O buffer is the accumulator, so its dtype
     # is the merge precision; the direct store converts once from fp32 registers.
     out_torch_dtype = resolve_output_dtype(
@@ -324,13 +342,20 @@ def _flex_flash_attn_fwd(
         raise NotImplementedError(
             "out_dtype other than the input dtype requires SM100/SM110"
         )
-    if not disable_fwd_atomic_reduction:
-        # The atomic epilogue reads/writes prev-O by unpacked row.
-        pack_gqa = False
     # The kernel folds one sink logit per head, and lse_sink is the equivalent
     # single logit. Overlapping relations would re-add it per merge, so the
     # atomic path folds it once in the fwd postprocess instead.
     kernel_sink = lse_sink if disable_fwd_atomic_reduction else None
+
+    # The fill runs only after the SM100/SM110 range kernels. Other arches read
+    # the q ranges as cu_seqlens, whose caller contract is a sorted partition,
+    # and a dense input has no uncovered row.
+    fill_uncovered = (
+        fill_uncovered_rows
+        and has_ranges
+        and major_arch in (10, 11)
+        and disable_fwd_atomic_reduction
+    )
 
     device = q.device
     q_batch_seqlen_shape = (batch_size, seqlen_q) if not has_ranges else (total_q,)
@@ -357,8 +382,9 @@ def _flex_flash_attn_fwd(
 
     if lse is None:
         # NOTE: LSE == -inf marks a row no relation wrote: the atomic merge
-        # starts from it and bwd_dsink skips it.
-        if disable_fwd_atomic_reduction and sink is None:
+        # starts from it, bwd_dsink skips it, and the fwd postprocess finds the
+        # uncovered rows by it.
+        if disable_fwd_atomic_reduction and sink is None and not fill_uncovered:
             lse = torch.empty(lse_shape, dtype=torch.float32, device=device)
         else:
             lse = torch.full(
@@ -449,9 +475,25 @@ def _flex_flash_attn_fwd(
         ), f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
-    seqlen_q_packgqa = max_seqlen_q * qhead_per_kvhead
+    if pack_gqa and not disable_fwd_atomic_reduction and tile_m % qhead_per_kvhead != 0:
+        # Range locks and the per-thread LSE merge need every stage tile to
+        # start on a token boundary of the packed rows.
+        raise NotImplementedError(
+            f"pack_gqa on the range atomic fwd requires tile_m ({tile_m}) to be "
+            f"a multiple of qhead_per_kvhead ({qhead_per_kvhead})"
+        )
+    # Q rows that size q_stage and the 2-CTA choice: max_seqlen_q * G on every
+    # path except the range atomic one, which counts G only under pack_gqa.
+    q_rows_for_config = max_seqlen_q * qhead_per_kvhead
+    if (
+        major_arch in (10, 11)
+        and has_ranges
+        and not use_block_sparsity
+        and not disable_fwd_atomic_reduction
+    ):
+        q_rows_for_config = max_seqlen_q * (qhead_per_kvhead if pack_gqa else 1)
     if major_arch == 10:
-        q_stage = 2 if seqlen_q_packgqa > tile_m else 1
+        q_stage = 2 if q_rows_for_config > tile_m else 1
     else:
         q_stage = 1
 
@@ -463,7 +505,7 @@ def _flex_flash_attn_fwd(
         and not use_block_sparsity
         and int(math.ceil(head_dim / 16) * 16) in [128, 192]
         and int(math.ceil(head_dim_v / 16) * 16) == 128
-        and seqlen_q_packgqa > 2 * tile_m
+        and q_rows_for_config > 2 * tile_m
         and (tile_m % qhead_per_kvhead == 0 or not pack_gqa)
         and (
             not has_ranges
@@ -543,10 +585,15 @@ def _flex_flash_attn_fwd(
 
     range_locks = None
     if not disable_fwd_atomic_reduction:
-        # One int32 lock per (physical Q block, head); +1 guard tile.
-        num_lock_blocks = (total_q + tile_m - 1) // tile_m + 1
+        # One int32 lock per (tile_m rows, head) of the layout the kernel
+        # tiles (packed rows and kv heads under pack_gqa); +1 guard tile.
+        lock_rows = total_q * (qhead_per_kvhead if pack_gqa else 1)
+        num_lock_blocks = (lock_rows + tile_m - 1) // tile_m + 1
         range_locks = torch.zeros(
-            num_lock_blocks, num_head, dtype=torch.int32, device=device
+            num_lock_blocks,
+            num_head_kv if pack_gqa else num_head,
+            dtype=torch.int32,
+            device=device,
         )
     # The DYNAMIC schedule's tile counter.
     tile_counter = (
@@ -816,7 +863,11 @@ def _flex_flash_attn_fwd(
 
     _flex_flash_attn_fwd.compile_cache[compile_key](*call_args)
 
-    if not disable_fwd_atomic_reduction:
+    if fill_uncovered:
+        # The main kernel already folded the sink into the rows it wrote, so
+        # only the uncovered rows change: O = 0 and the sink-only LSE.
+        fwd_postprocess(out, lse, lse_sink, sink_in_written_rows=True)
+    elif not disable_fwd_atomic_reduction:
         fwd_postprocess(out, lse, lse_sink)
 
     return out, lse
@@ -847,7 +898,7 @@ def _flex_flash_attn_bwd(
     softcap: float = 0.0,
     sink: torch.Tensor | None = None,
     sink_layout: AttnSinkLayout = "sh",
-    pack_gqa: bool = False,
+    bwd_pack_factor: int = 1,
     deterministic: bool = False,
     disable_fwd_atomic_reduction: bool = False,
     disable_bwd_dkv_atomic_reduction: bool = False,
@@ -857,21 +908,33 @@ def _flex_flash_attn_bwd(
     declared_k_full_coverage: bool = False,
     dsink: torch.Tensor | None = None,
     sm_margin: int = 0,
+    cat_gqa: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Backward pass for FlexFlashAttention.
 
     Args:
         sink: the forward's ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
         dsink: optional fp32 ``[n_sink, num_head]`` buffer, overwritten.
+        bwd_pack_factor: number of q heads of one kv head that share the rows
+            of one Q tile; with fewer than ``qhead_per_kvhead`` the tile also
+            walks the remaining packed groups of its kv head.
+            ``select_bwd_gqa_fold`` holds the rules and raises on a value it
+            cannot serve.
+        cat_gqa: with ``bwd_pack_factor=1``, one CTA per (K tile, kv head)
+            walks the q heads of its group back to back, so dK/dV of the group
+            accumulate in one CTA and are stored once: dense GQA skips the fp32
+            dK/dV reduction. Ignored for MHA. SM100/SM110 only; no block
+            sparsity.
         dq_type, dk_type, dv_type: dtype of each gradient, one of fp32/fp16/bf16.
             ``None`` takes the dtype of the caller-provided buffer, else on
             SM100/SM110 fp32 for dQ and for reduced dK/dV and the input dtype
             for single-writer dK/dV. SM80/SM90/SM120 default to and accept only
             the input dtype. ``dk_type`` must equal ``dv_type``.
         dq, dk, dv: optional caller buffers. On reducing paths (dQ always;
-            dK/dV on dense GQA and ranges with atomic dK/dV) the postprocess
-            adds the gradient onto the buffer; single-writer dK/dV paths
-            overwrite it.
+            dK/dV on dense GQA without ``cat_gqa`` and on ranges with atomic
+            dK/dV) the postprocess adds the gradient onto the buffer;
+            single-writer dK/dV paths (dense MHA, dense ``cat_gqa``, ranges
+            with ``disable_bwd_dkv_atomic_reduction``) overwrite it.
         declared_q_full_coverage: q_ranges cover every Q token, so the dQ
             hole-zeroing sweep is skipped. Overlap is allowed. False is always
             safe.
@@ -1135,14 +1198,25 @@ def _flex_flash_attn_bwd(
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
     qhead_per_kvhead = num_head // num_head_kv
-    if pack_gqa is None:
-        pack_gqa = qhead_per_kvhead > 1  # type: ignore[unreachable]
-    # pack_gqa backward not yet supported in bwd
-    pack_gqa = False
+    gqa_fold = select_bwd_gqa_fold(
+        bwd_pack_factor=bwd_pack_factor,
+        cat_gqa=cat_gqa,
+        major_arch=major_arch,
+        has_ranges=has_ranges,
+        has_block_sparse=block_sparse_tensors is not None,
+        has_mask_mod=mask_mod is not None,
+        has_score_mod=score_mod is not None or score_mod_bwd is not None,
+        has_softcap=softcap != 0.0,
+        deterministic=deterministic,
+        num_head=num_head,
+        num_head_kv=num_head_kv,
+        tile_m=m_block_size,
+        cta_group_size=2 if use_2cta_instrs else 1,
+    )
     if disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11):
-        assert qhead_per_kvhead == 1, (
-            "disable_bwd_dkv_atomic_reduction requires MHA "
-            "(unique dK/dV writer per KV head)"
+        assert gqa_fold.covers_all_qheads, (
+            "disable_bwd_dkv_atomic_reduction requires a unique dK/dV writer "
+            "per KV head: MHA, or GQA with cat_gqa or bwd_pack_factor > 1"
         )
 
     if softcap != 0.0:
@@ -1176,7 +1250,7 @@ def _flex_flash_attn_bwd(
 
     # Ranges force accum+postprocess even for MHA: overlapping K ranges
     # would clobber direct stores from multiple CTAs.
-    dKV_postprocess = qhead_per_kvhead > 1 or (
+    dKV_postprocess = (not gqa_fold.covers_all_qheads) or (
         has_ranges and major_arch in (10, 11) and not disable_bwd_dkv_atomic_reduction
     )
 
@@ -1201,7 +1275,11 @@ def _flex_flash_attn_bwd(
     # Without the in-kernel K-merge the kernels see the caller's sorted, disjoint
     # q_ranges; the K-merge repeats a q range once per K group.
     q_ranges_disjoint = direct_dq_init and not range_merge_active
-    use_dense_dqacc_for_ranges = q_ranges_disjoint and head_dim % 32 == 0
+    # Packed tiles reduce dQ through the token-space row-major dQacc, whose
+    # TMA box splits rows into (pack_factor, tokens).
+    use_dense_dqacc_for_ranges = (
+        q_ranges_disjoint and head_dim % 32 == 0 and gqa_fold.pack_factor == 1
+    )
     if q_ranges_disjoint and magiattn_cutedsl.is_ffa_debug_mode_enabled():
         assert q_ranges is not None
         assert bool((q_ranges[1:, 0] >= q_ranges[:-1, 1]).all().item()), (
@@ -1400,7 +1478,7 @@ def _flex_flash_attn_bwd(
         torch.zeros(1, dtype=torch.int32, device=device) if sm_margin > 0 else None
     )
 
-    if deterministic and qhead_per_kvhead > 1:
+    if deterministic and not gqa_fold.covers_all_qheads:
         dK_semaphore = torch.zeros(
             batch_size,
             num_head_kv,
@@ -1493,12 +1571,11 @@ def _flex_flash_attn_bwd(
             dtype,
             head_dim,
             head_dim_v,
-            qhead_per_kvhead,
             mask_type,
             m_block_size,
             n_block_size,
             num_threads,
-            pack_gqa,
+            gqa_fold,
             num_stages_Q,
             num_stages_dO,
             SdP_swapAB,
@@ -1532,12 +1609,11 @@ def _flex_flash_attn_bwd(
             dtype,
             head_dim,
             head_dim_v,
-            qhead_per_kvhead,
             mask_type,
             m_block_size,
             n_block_size,
             num_threads,
-            pack_gqa,
+            gqa_fold,
             cluster_size,
             use_2cta_instrs,
             deterministic,
@@ -1611,7 +1687,7 @@ def _flex_flash_attn_bwd(
                     num_stages_Q,
                     num_stages_dO,
                     num_threads,
-                    pack_gqa,
+                    gqa_fold.pack_factor > 1,
                     mask_type,
                     SdP_swapAB,
                     dKV_swapAB,
@@ -1658,7 +1734,7 @@ def _flex_flash_attn_bwd(
                     head_dim_v,
                     mask_type=mask_type,
                     is_local=local,
-                    qhead_per_kvhead=qhead_per_kvhead,
+                    gqa_fold=gqa_fold,
                     tile_m=m_block_size,
                     tile_n=n_block_size,
                     cluster_size=cluster_size,
@@ -1916,6 +1992,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         out_dtype: torch.dtype | None = None,
         sm_margin: int = 0,
         return_max_logits: bool = False,
+        cat_gqa: bool = False,
+        bwd_pack_factor: int = 1,
     ):
         mask_types = normalize_mask_types(mask_types)
         flex_attn_args = flex_attn_args or TorchFlexAttnArgs()
@@ -1977,6 +2055,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         # Derived from the fwd flag, not a second user flag.
         ctx.bwd_range_merge = bwd_range_merge_arg(range_merge)
         ctx.sm_margin = sm_margin
+        ctx.cat_gqa = cat_gqa
+        ctx.bwd_pack_factor = bwd_pack_factor
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         # Drop the direct aux_tensors reference on ctx; the real tensors are
@@ -2037,6 +2117,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             flex_attn_args=flex_attn_args,
             range_merge=ctx.bwd_range_merge,
             sm_margin=ctx.sm_margin,
+            cat_gqa=ctx.cat_gqa,
+            bwd_pack_factor=ctx.bwd_pack_factor,
             # Autograd returns gradients in the input dtype.
             dq_type=q.dtype,
             dk_type=k.dtype,
@@ -2046,7 +2128,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if dsink is not None:
             dsink = dsink.to(sink.dtype)
         # NOTE: `sink` is the 11th positional input of `forward`
-        return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 10)
+        return dq, dk, dv, *((None,) * 7), dsink, *((None,) * 12)
 
 
 def flex_flash_attn_func(
@@ -2072,6 +2154,8 @@ def flex_flash_attn_func(
     out_dtype: torch.dtype | None = None,
     sm_margin: int = 0,
     return_max_logits: bool = False,
+    cat_gqa: bool = False,
+    bwd_pack_factor: int = 1,
 ) -> tuple[torch.Tensor, AttnForwardMeta]:
     """Flex-flash-attention interface (dense / ranges).
 
@@ -2103,21 +2187,31 @@ def flex_flash_attn_func(
     softcap: tanh logit soft-capping value, implemented via the score_mod
         machinery but exposed as a plain scalar.
 
+    pack_gqa: fold the q heads of one kv head into the M dimension of the
+        forward. ``None`` packs GQA except on the SM100/SM110 range
+        atomic-merge path, where packing is opt-in and needs the q-tile size
+        (128) to be a multiple of ``nheads_q // nheads_kv``. SM80 and
+        ``range_merge`` always run unpacked, including with ``pack_gqa=True``.
+        The backward does not read it; ``bwd_pack_factor`` sets the backward
+        packing.
+
     disable_fwd_atomic_reduction: caller contract that q_ranges are sorted
         and pairwise disjoint, giving every O and dQ row a unique writer.
         Forward then direct-stores O and leaves rows outside every q range
         unwritten: O is undefined there, and LSE is ``-inf`` with ``sink``
         (undefined without), whereas the atomic path zeroes O and stores the
-        sink-only LSE. The SM100/SM110
-        backward accumulates dQ in per-range slots (head_dim divisible by 32,
-        no ``range_merge``) instead of the row-major fp32 accumulator. Debug
-        mode validates the ordering.
+        sink-only LSE. The SM100/SM110 backward accumulates dQ in per-range
+        slots (head_dim divisible by 32, no ``range_merge``,
+        ``bwd_pack_factor=1``) instead of the row-major fp32 accumulator.
+        Debug mode validates the ordering.
 
     disable_bwd_dkv_atomic_reduction: caller contract that k_ranges are sorted
         and pairwise disjoint, giving every dK/dV row a unique CTA writer.
         The SM100/SM110 backward then stores dK/dV directly from the main
         kernel (native dtype, no fp32 accumulator, no postprocess) and only
-        zeroes coverage holes. MHA only.
+        zeroes coverage holes. GQA requires ``cat_gqa=True`` or
+        ``bwd_pack_factor > 1``, so that one CTA accumulates dK/dV over every
+        q head of a kv head.
 
     range_merge: ``True`` or a precomputed :class:`RangeMergePlan`. Folds
         relations sharing an outer interval into (group, pair) CSR form so
@@ -2138,6 +2232,31 @@ def flex_flash_attn_func(
         per-q-head maximum softmax logit (after scale and softcap, sinks
         excluded); ``-inf`` for a head without any attended pair. SM100/SM110
         only.
+
+    cat_gqa: run the backward with one CTA per (K tile, kv head) that walks
+        the q heads of its group back to back, so dK/dV accumulate in one CTA
+        and are stored once. Dense GQA skips the fp32 dK/dV reduction. There
+        are ``qhead_per_kvhead`` times fewer, longer tiles (a persistent launch
+        still caps its grid at ``num_sm - sm_margin``), so it only pays off
+        when the tile count is well above the SM count. This is the
+        ``bwd_pack_factor=1`` head loop; a ``bwd_pack_factor`` above 1 with
+        ``cat_gqa=True`` raises ``ValueError``. Ignored for MHA. SM100/SM110
+        only; no block sparsity. The forward is unaffected.
+
+    bwd_pack_factor: number of q heads of one kv head that the backward packs
+        into the rows of one Q tile, so one tile reads their shared K/V once.
+        ``1`` packs nothing. A value below ``nheads_q // nheads_kv`` makes each
+        tile also walk the remaining packed groups of its kv head one after
+        another. A value above 1 launches one tile per (K tile, kv head), with
+        the tile-count trade-off described under ``cat_gqa``. The value must
+        divide ``nheads_q // nheads_kv`` (MHA takes only ``1``) and the Q rows
+        that one CTA holds: 128 at head_dim below 128, 64 at head_dim 128 and
+        192 on the 2-CTA backward. A value above 1 requires q/k ranges
+        on SM100/SM110 and does not support block sparsity, mask_mod,
+        score_mod, softcap or ``deterministic``. The backward raises
+        ``ValueError`` for an invalid value and ``NotImplementedError`` for an
+        unsupported combination. Gradients differ from the unpacked backward
+        only in the fp32 summation order. The forward is unaffected.
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /
@@ -2167,6 +2286,8 @@ def flex_flash_attn_func(
         out_dtype,
         sm_margin,
         return_max_logits,
+        cat_gqa,
+        bwd_pack_factor,
     )
 
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)

@@ -14,6 +14,7 @@
  * limitations under the License.
  *********************************************************************************/
 
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include <cub/device/device_scan.cuh>
@@ -88,6 +89,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
         torch::empty({0}, sorted_input_tensor.options().dtype(torch::kInt32))};
   }
 
+  // Every launch goes to the caller's current stream so the kernels order
+  // with the torch ops around them and can be captured into a CUDA graph.
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+
   // d_flags(i): whether the input tensor value is the first unique value at idx i.
   // d_write_indices(i):
   auto d_flags = torch::empty({n}, sorted_input_tensor.options().dtype(torch::kInt32));
@@ -101,7 +106,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
   // --- Pass 1: flag the unique_value ---
   int threadsPerBlock = 256;
   int blocksPerGrid = (n + threadsPerBlock - 1) / threadsPerBlock;
-  mark_uniques<<<blocksPerGrid, threadsPerBlock>>>(d_sorted_pairs_ptr, d_flags.data_ptr<int>(), n);
+  mark_uniques<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(d_sorted_pairs_ptr, d_flags.data_ptr<int>(), n);
   CHECK_CUDA_KERNEL_LAUNCH();
 
   // --- Pass 2: compute unique_count and exclusive_sum from d_flags  ---
@@ -112,11 +117,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
   cuda::std::plus<> scan_op;
   int initial_value = 0;
 
-  cub::DeviceScan::ExclusiveScan(d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n);
+  cub::DeviceScan::ExclusiveScan(
+      d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n, stream);
   auto d_temp_storage_tensor = torch::empty({(long)temp_storage_bytes_scan}, sorted_input_tensor.options().dtype(torch::kByte));
   // Get the raw pointer from this byte tensor. It now points to a memory block of the exact required size.
   d_temp_storage_scan = d_temp_storage_tensor.data_ptr();
-  cub::DeviceScan::ExclusiveScan(d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n);
+  cub::DeviceScan::ExclusiveScan(
+      d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n, stream);
   CHECK_CUDA_KERNEL_LAUNCH();
 
   // --- out elements ---
@@ -133,7 +140,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
     int* unique_pairs_out_ptr = d_unique_pairs_out.data_ptr<int>();
     IntPair* d_unique_out_ptr = reinterpret_cast<IntPair*>(unique_pairs_out_ptr);
 
-    gather_uniques<<<blocksPerGrid, threadsPerBlock>>>(
+    gather_uniques<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
         d_sorted_pairs_ptr, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), d_unique_out_ptr, d_unique_indices_out.data_ptr<int>(), n);
     CHECK_CUDA_KERNEL_LAUNCH();
   }
@@ -141,7 +148,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
   // --- Pass 4: Pad unused groups and the final CSR entry ---
   // No gather thread writes at or after unique_count, so only the tail needs
   // initialization. Include indices[n] even when all input pairs are unique.
-  pad_unique_tail<<<(n + 1 + threadsPerBlock - 1) / threadsPerBlock, threadsPerBlock>>>(
+  pad_unique_tail<<<(n + 1 + threadsPerBlock - 1) / threadsPerBlock, threadsPerBlock, 0, stream>>>(
       reinterpret_cast<IntPair*>(d_unique_pairs_out.data_ptr<int>()), d_unique_indices_out.data_ptr<int>(), d_unique_count_out.data_ptr<int>(), n);
   CHECK_CUDA_KERNEL_LAUNCH();
 

@@ -122,7 +122,12 @@ class BlockInfo:
     def get_m_block_min_max(
         self, seqlen_info: SeqlenInfoQK, n_block: Int32
     ) -> Tuple[Int32, Int32]:
-        m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
+        pf = self.qhead_per_kvhead_packgqa
+        if const_expr(pf > 1):
+            assert not self.is_local, "packed bwd does not support local attention"
+            m_block_max = cute.ceil_div(seqlen_info.seqlen_q * pf, self.tile_m)
+        else:
+            m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
         m_block_min = 0
         if const_expr(
             self.is_causal or (self.is_local and self.window_size_right is not None)
@@ -132,6 +137,8 @@ class BlockInfo:
             m_idx_right = (
                 m_idx if const_expr(self.is_causal) else m_idx - self.window_size_right
             )
+            if const_expr(pf > 1):
+                m_idx_right = m_idx_right * pf
             m_block_min = max(m_block_min, m_idx_right // self.tile_m)
         if const_expr(self.is_local and self.window_size_left is not None):
             n_idx_max = (n_block + 1) * self.tile_n
@@ -153,14 +160,22 @@ class BlockInfo:
         the lower bound here and the upper bound in fwd; ``has_inv`` is the
         other way round.
         """
-        m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
+        pf = self.qhead_per_kvhead_packgqa
+        if const_expr(pf > 1):
+            m_block_max = cute.ceil_div(seqlen_info.seqlen_q * pf, self.tile_m)
+        else:
+            m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
         if attn_type == MT_MAP.inv_causal or attn_type == MT_MAP.bi_causal:
             n_idx_max = min(seqlen_info.seqlen_k, (n_block + 1) * self.tile_n)
+            if const_expr(pf > 1):
+                n_idx_max = n_idx_max * pf
             m_block_max = min(m_block_max, cute.ceil_div(n_idx_max, self.tile_m))
         m_block_min = Int32(0)
         if attn_type == MT_MAP.causal or attn_type == MT_MAP.bi_causal:
             n_idx_min = n_block * self.tile_n
             m_idx_right = n_idx_min + seqlen_info.seqlen_q - seqlen_info.seqlen_k
+            if const_expr(pf > 1):
+                m_idx_right = m_idx_right * pf
             m_block_min = max(m_block_min, m_idx_right // self.tile_m)
         return m_block_min, m_block_max
 

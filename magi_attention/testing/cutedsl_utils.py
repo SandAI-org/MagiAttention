@@ -12,17 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from unittest import mock
 
 import torch
 
 from magi_attention.common import AttnRanges
+from magi_attention.kernel.cutedsl.cache_utils import JITCache
+from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
+from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
+from magi_attention.kernel.cutedsl.flex_flash_attn import (
+    _flex_flash_attn_bwd,
+    _flex_flash_attn_fwd,
+)
 from magi_attention.testing import ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase
 from magi_attention.testing.precision import (
-    EPSILON,
     MAX_MISMATCH_THRES,
     MISMATCH_THRES_RATIO,
     NORM_ROUNDING_NOISE_RATIO,
@@ -97,6 +105,44 @@ def seed_test_case(test_case: str) -> None:
     set_random_seed(str2seed(test_case))
 
 
+@contextmanager
+def record_fwd_kernels() -> Iterator[list[FFAFwdSm100]]:
+    """Record the SM100 fwd kernel objects built within the context under an
+    empty fwd compile cache, as :func:`record_bwd_kernels` does for the bwd."""
+    built: list[FFAFwdSm100] = []
+    init = FFAFwdSm100.__init__
+
+    def record(obj, *args, **kwargs):
+        init(obj, *args, **kwargs)
+        built.append(obj)
+
+    with mock.patch.object(FFAFwdSm100, "__init__", record), mock.patch.object(
+        _flex_flash_attn_fwd, "compile_cache", JITCache()
+    ):
+        yield built
+
+
+@contextmanager
+def record_bwd_kernels() -> Iterator[list[FFABwdSm100]]:
+    """Record the SM100 bwd kernel objects built within the context.
+
+    The specialization is only visible on the kernel object, which a JIT cache
+    hit never builds, so the context also swaps in empty fwd and bwd compile
+    caches.
+    """
+    built: list[FFABwdSm100] = []
+    init = FFABwdSm100.__init__
+
+    def record(obj, *args, **kwargs):
+        init(obj, *args, **kwargs)
+        built.append(obj)
+
+    with mock.patch.object(FFABwdSm100, "__init__", record), mock.patch.object(
+        _flex_flash_attn_fwd, "compile_cache", JITCache()
+    ), mock.patch.object(_flex_flash_attn_bwd, "compile_cache", JITCache()):
+        yield built
+
+
 def make_qkv(
     q_tokens_shape: tuple[int, ...],
     k_tokens_shape: tuple[int, ...],
@@ -167,15 +213,8 @@ _RTOL = {
     "dv": {torch.bfloat16: 0.05, torch.float16: 0.05},
 }
 
-# Floor of the allowed mismatch ratio. Masked-out gradient positions hold
-# ~1e-7 noise where the reference is exactly 0: an infinite relative diff that
-# inflates the ratio on small shapes. The Linf-norm gate stays the primary one.
-_MIN_MISMATCH_THRES = {
-    "out": 5e-3,
-    "dq": 1e-2,
-    "dk": 1e-2,
-    "dv": 5e-3,
-}
+# fp32 rounding leaves up to ~7 fp32 eps of max|ref_hi| where ref_hi is exactly 0.
+_MISMATCH_ATOL_RATIO = 16 * torch.finfo(torch.float32).eps
 
 
 def _torch_reference(
@@ -222,19 +261,21 @@ def _check_one(
     )
     bound = NORM_RTOL_RATIO * ref_norm + NORM_ROUNDING_NOISE_RATIO * noise_norm
     assert norm <= bound, f"{test_case} => {name}: {norm=}, {bound=}"
+    finite_ref = ref_hi[torch.isfinite(ref_hi)]
+    ref_scale = finite_ref.abs().max().item() if finite_ref.numel() else 0.0
+    atol = _MISMATCH_ATOL_RATIO * ref_scale
     mismatch_threshold = extract_mismatch_threshold(
         actual=ref_lo,
         expected=ref_hi,
-        atol=EPSILON,
+        atol=atol,
         rtol=rtol,
         mismatch_thres_ratio=MISMATCH_THRES_RATIO,
-        min_mismatch_thres=_MIN_MISMATCH_THRES[name],
         max_mismatch_thres=MAX_MISMATCH_THRES,
     )
     assert_close(
         actual,
         ref_hi,
-        atol=EPSILON,
+        atol=atol,
         rtol=rtol,
         mismatch_threshold=mismatch_threshold,
         test_case=f"{test_case} => {name}",
