@@ -282,7 +282,6 @@ def select_bwd_gqa_fold(
     has_block_sparse: bool,
     has_mask_mod: bool,
     has_score_mod: bool,
-    has_softcap: bool,
     deterministic: bool,
     num_head: int,
     num_head_kv: int,
@@ -302,8 +301,7 @@ def select_bwd_gqa_fold(
             ``cat_gqa``.
         NotImplementedError: ``bwd_pack_factor`` > 1 outside the SM100/SM110
             q/k-range kernels, together with block sparsity, mask_mod,
-            score_mod, softcap or deterministic, or not dividing the Q rows per
-            CTA.
+            score_mod or deterministic, or not dividing the Q rows per CTA.
     """
     qhead_per_kvhead = num_head // num_head_kv
     if bwd_pack_factor < 1 or qhead_per_kvhead % bwd_pack_factor != 0:
@@ -337,7 +335,6 @@ def select_bwd_gqa_fold(
         ("block sparsity", has_block_sparse),
         ("mask_mod", has_mask_mod),
         ("score_mod", has_score_mod),
-        ("softcap", has_softcap),
         ("deterministic", deterministic),
     ):
         if requested:

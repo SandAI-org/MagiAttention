@@ -350,6 +350,44 @@ class TestFfaSoftcap(DistTestBase):
         )
 
     @with_run_in_mp
+    @parameterize("pack_factor", [4, 2])
+    @parameterize("d", [64, 128])
+    def test_ranges_bwd_pack_fold(self, d, pack_factor):
+        """GQA ranges with the packed bwd: every q head of a kv head shares
+        one Q tile (pack factor 4), or two packed groups share it one after
+        another in the head loop (pack factor 2)."""
+        if get_device_arch()[1] not in (10, 11):
+            return
+        q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._ranges_inputs(
+            2, d, self.seed + d + pack_factor
+        )
+        qhead_per_kvhead = q.shape[1] // k.shape[1]
+        test_case = f"[test_ranges_bwd_pack_fold][{d=}][{pack_factor=}]"
+        self._log_ran(test_case)
+        out, _, do, grads, built = self._fwd_bwd(
+            q, k, v, _SOFTCAP, bwd_pack_factor=pack_factor, **kwargs
+        )
+        self._assert_native(built, test_case)
+        (bwd_kernel,) = built["bwd"]
+        self.assertEqual(
+            (bwd_kernel.gqa_fold.pack_factor, bwd_kernel.gqa_fold.head_loop),
+            (pack_factor, pack_factor < qhead_per_kvhead),
+            test_case,
+        )
+        self.assert_close_to_ref(
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            out=out,
+            grads=grads,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            test_case=test_case,
+        )
+
+    @with_run_in_mp
     def test_ranges_sink_and_max_logits(self):
         """The sink joins the capped scores in the softmax, and max logits
         report the capped maximum per q head."""

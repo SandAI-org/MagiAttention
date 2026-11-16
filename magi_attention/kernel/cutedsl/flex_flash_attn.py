@@ -1219,7 +1219,6 @@ def _flex_flash_attn_bwd(
         has_block_sparse=block_sparse_tensors is not None,
         has_mask_mod=mask_mod is not None,
         has_score_mod=score_mod is not None or score_mod_bwd is not None,
-        has_softcap=softcap != 0.0,
         deterministic=deterministic,
         num_head=num_head,
         num_head_kv=num_head_kv,
