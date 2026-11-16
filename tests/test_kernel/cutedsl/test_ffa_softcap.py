@@ -33,9 +33,6 @@ from torch.testing._internal.common_utils import run_tests
 import magi_attention.kernel.cutedsl.flex_flash_attn as ffa_module
 from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.cache_utils import JITCache
-from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
-from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
 from magi_attention.kernel.cutedsl.ffa_utils import (
     MT_MAP,
     TorchFlexAttnArgs,
@@ -47,6 +44,7 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_fwd,
 )
 from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing.cutedsl_utils import record_bwd_kernels, record_fwd_kernels
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import calc_inf_norm
 from magi_attention.utils import make_attn_mask_from_ffa_args
@@ -58,30 +56,10 @@ _NORM_RATIO = 2.0
 
 @contextmanager
 def _record_kernels() -> Iterator[dict[str, list]]:
-    """Record the SM100 fwd/bwd kernel objects built within the context.
-
-    The specialization is only visible on the kernel object, which a JIT cache
-    hit never builds, so the context also swaps in empty compile caches.
-    """
-    built: dict[str, list] = {"fwd": [], "bwd": []}
-    fwd_init, bwd_init = FFAFwdSm100.__init__, FFABwdSm100.__init__
-
-    def record_fwd(obj, *args, **kwargs):
-        fwd_init(obj, *args, **kwargs)
-        built["fwd"].append(obj)
-
-    def record_bwd(obj, *args, **kwargs):
-        bwd_init(obj, *args, **kwargs)
-        built["bwd"].append(obj)
-
-    with mock.patch.object(FFAFwdSm100, "__init__", record_fwd), mock.patch.object(
-        FFABwdSm100, "__init__", record_bwd
-    ), mock.patch.object(
-        _flex_flash_attn_fwd, "compile_cache", JITCache()
-    ), mock.patch.object(
-        _flex_flash_attn_bwd, "compile_cache", JITCache()
-    ):
-        yield built
+    """Record the SM100 fwd/bwd kernel objects built within the context under
+    empty compile caches."""
+    with record_fwd_kernels() as fwd, record_bwd_kernels() as bwd:
+        yield {"fwd": fwd, "bwd": bwd}
 
 
 def _kernel_config(kernel) -> tuple:
@@ -90,7 +68,7 @@ def _kernel_config(kernel) -> tuple:
         kernel.cta_group_size,
         kernel.is_persistent,
         getattr(kernel, "pack_gqa", None),
-        getattr(kernel, "cat_gqa", None),
+        getattr(kernel, "gqa_fold", None),
         getattr(kernel, "range_merge", None),
     )
 
@@ -354,7 +332,10 @@ class TestFfaSoftcap(DistTestBase):
         )
         self._assert_native(built, test_case)
         self.assertTrue(all(x.pack_gqa for x in built["fwd"]), test_case)
-        self.assertTrue(all(x.cat_gqa for x in built["bwd"]), test_case)
+        for x in built["bwd"]:
+            self.assertEqual(
+                (x.gqa_fold.pack_factor, x.gqa_fold.head_loop), (1, True), test_case
+            )
         self.assert_close_to_ref(
             q=q,
             k=k,
@@ -493,9 +474,13 @@ class TestFfaSoftcap(DistTestBase):
         self._assert_native(built, test_case)
         if path == "merge_cat_gqa":
             self.assertTrue(all(x.range_merge for x in built["fwd"]), test_case)
-            self.assertTrue(
-                all(x.range_merge and x.cat_gqa for x in built["bwd"]), test_case
-            )
+            for x in built["bwd"]:
+                self.assertTrue(x.range_merge, test_case)
+                self.assertEqual(
+                    (x.gqa_fold.pack_factor, x.gqa_fold.head_loop),
+                    (1, True),
+                    test_case,
+                )
         self.assert_close_to_ref(
             q=q,
             k=k,
