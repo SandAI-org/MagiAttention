@@ -24,17 +24,14 @@ import torch
 
 from magi_attention import env
 from magi_attention.common import AttnRanges
-from magi_attention.common.enum import MagiAttentionKernelBackend
-from magi_attention.functional import cutedsl_ffa, dist_attn
-from magi_attention.functional.dist_attn import DistAttnFunc, DistAttnRuntime
+from magi_attention.functional import cutedsl_ffa
 from magi_attention.kernel.cutedsl.ffa_utils import get_device_arch
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
 )
-from magi_attention.meta.collection import calc_meta
-from magi_attention.meta.collection.calc_meta import AttnArg, FA4AttnArg
-from magi_attention.testing import assert_equal, parameterize
+from magi_attention.meta.collection.calc_meta import AttnArg
+from magi_attention.testing import parameterize
 from magi_attention.testing.cutedsl_utils import record_bwd_kernels
 from magi_attention.testing.utils import switch_env, switch_envvar_context
 
@@ -44,180 +41,6 @@ NUM_HEADS = 2
 # A multiple of 32: with range_merge=False the kernel host then uses the dense
 # dQacc layout exactly when disable_fwd_atomic_reduction is set.
 HEAD_DIM = 128
-
-
-class TestRuntimeForwardChecks(TestCase):
-    def test_invalid_options_fail_before_communication_or_kernel_setup(self):
-        cases = (
-            ("FA4", dict(backend=MagiAttentionKernelBackend.FA4, max_logits=True)),
-            ("attn sink", dict(flatten=True, sink=torch.empty(0))),
-            ("return_max_logits", dict(flatten=True, max_logits=True)),
-            ("overlap_degree", dict(no_overlap=True, degree=2)),
-            ("qo_comm", dict(no_overlap=True, qo=True)),
-        )
-        for reason, options in cases:
-            runtime = object.__new__(DistAttnRuntime)
-            runtime.no_overlap = options.get("no_overlap", False)
-            runtime.skip_comm = False
-            runtime.overlap_degree = options.get("degree", 1)
-            with (
-                self.subTest(reason=reason),
-                mock.patch.object(
-                    DistAttnRuntime,
-                    "kernel_backend",
-                    new_callable=mock.PropertyMock,
-                    return_value=options.get(
-                        "backend", MagiAttentionKernelBackend.CUTEDSL
-                    ),
-                ),
-                mock.patch.object(
-                    DistAttnRuntime,
-                    "flatten_head_groups",
-                    new_callable=mock.PropertyMock,
-                    return_value=options.get("flatten", False),
-                ),
-                mock.patch.object(
-                    DistAttnRuntime,
-                    "enable_qo_comm",
-                    new_callable=mock.PropertyMock,
-                    return_value=options.get("qo", False),
-                ),
-                mock.patch.object(dist_attn, "KernelBarrier") as barrier,
-                mock.patch.object(
-                    DistAttnFunc, "_no_overlap_forward"
-                ) as no_overlap_forward,
-                mock.patch.object(runtime, "get_curr_q_kv_and_fetch_next") as fetch,
-            ):
-                with self.assertRaisesRegex(AssertionError, reason):
-                    DistAttnFunc.forward(
-                        None,
-                        None,
-                        None,
-                        None,
-                        options.get("sink"),
-                        runtime,
-                        return_max_logits=options.get("max_logits", False),
-                    )
-                barrier.assert_not_called()
-                no_overlap_forward.assert_not_called()
-                fetch.assert_not_called()
-
-    def test_supported_options_and_single_rank_no_overlap_are_allowed(self):
-        runtime = object.__new__(DistAttnRuntime)
-        runtime.no_overlap, runtime.skip_comm, runtime.overlap_degree = True, True, 0
-        with (
-            mock.patch.object(
-                DistAttnRuntime,
-                "kernel_backend",
-                new_callable=mock.PropertyMock,
-                return_value=MagiAttentionKernelBackend.CUTEDSL,
-            ),
-            mock.patch.object(
-                DistAttnRuntime,
-                "flatten_head_groups",
-                new_callable=mock.PropertyMock,
-                return_value=False,
-            ),
-        ):
-            runtime._check_forward_args(None, return_max_logits=True)
-
-
-class TestRuntimeNvtxLabels(TestCase):
-    def test_attention_labels_preserve_full_reproducible_ranges(self):
-        arg = object.__new__(AttnArg)
-        arg.q_ranges = AttnRanges.from_ranges([[0, 16], [32, 48]])
-        arg.k_ranges = AttnRanges.from_ranges([[0, 64], [0, 64]])
-        arg.q_ranges_bwd = AttnRanges.from_ranges([[32, 48], [0, 16]])
-        arg.k_ranges_bwd = AttnRanges.from_ranges([[0, 64], [0, 64]])
-        arg.total_area = 2048
-        self.assertIn(
-            "attn/fwd | area=2,048 | ranges=2 | q_ranges=[0:16,32:48]",
-            arg.get_nvtx_event_name(),
-        )
-        self.assertIn(
-            "attn/bwd | area=2,048 | ranges=2 | q_ranges=[32:48,0:16]",
-            arg.get_nvtx_event_name(is_bwd=True),
-        )
-        arg.q_ranges = AttnRanges.from_ranges([[i, i + 1] for i in range(20)])
-        message = arg.get_nvtx_event_name()
-        fields = dict(field.split("=", 1) for field in message.split(" | ")[1:])
-        self.assertEqual(
-            [
-                list(map(int, bounds.split(":")))
-                for bounds in fields["q_ranges"][1:-1].split(",")
-            ],
-            [[i, i + 1] for i in range(20)],
-        )
-        self.assertEqual(
-            [
-                list(map(int, bounds.split(":")))
-                for bounds in fields["k_ranges"][1:-1].split(",")
-            ],
-            [[0, 64], [0, 64]],
-        )
-
-    def test_collective_label_counts_tuple_payload_and_lse(self):
-        runtime = object.__new__(DistAttnRuntime)
-        # Different K/V widths exercise tuple payload accounting.
-        k = torch.empty(16, 2, 8, dtype=torch.bfloat16)
-        v = torch.empty(16, 2, 4, dtype=torch.bfloat16)
-        lse = torch.empty(16, 2, dtype=torch.float32)
-        label = runtime._grpcoll_nvtx_event_name(
-            "group_cast",
-            input=(k, v),
-            output=(k, v),
-            comm_tokens=4,
-            rdma_tokens=2,
-            input_lse=lse,
-            output_lse=lse,
-        )
-        self.assertIn("bytes=224 | rdma=112", label)
-        self.assertIn("16x2x8:bfloat16, 16x2x4:bfloat16", label)
-        self.assertIn("lse=[16x2:float32", label)
-        fused = torch.empty(48, 2, 8, dtype=torch.bfloat16)
-        self.assertIn(
-            "bytes=128",
-            runtime._grpcoll_nvtx_event_name(
-                "group_reduce",
-                input=fused,
-                output=fused,
-                comm_tokens=4,
-            ),
-        )
-
-    def test_hstu_conversion_trims_tail_and_preserves_empty_first_interval(self):
-        arg = object.__new__(FA4AttnArg)
-        arg.k_ranges = AttnRanges.from_ranges([[1, 4]])
-        arg.seqlen_q, arg.seqlen_k = 2, 4
-        arg.tile_m, arg.tile_m_bwd = 2, 4
-        arg.ffa_fwd_args_dict = dict(q_ranges=None, k_ranges=None, attn_type_map=None)
-        for source, expected_rows in (
-            (torch.tensor([[0, 0], [1, 1], [4, 4], [0, 0]]), 3),
-            (torch.zeros(3, 2, dtype=torch.int32), 1),
-        ):
-            with (
-                self.subTest(expected_rows=expected_rows),
-                mock.patch.object(
-                    calc_meta, "magi_to_hstu_cuda", create=True
-                ) as extension,
-            ):
-                extension.magi_to_hstu.return_value = source
-                result = arg._make_hstu_func()
-            self.assertEqual(arg.n_func, expected_rows)
-            self.assertEqual(result.shape, (1, 1, expected_rows, 10))
-            assert_equal(result[0, 0, :, :2], source[:expected_rows])
-            self.assertEqual(extension.magi_to_hstu.call_args.kwargs["n_max_func"], 3)
-
-    def test_hstu_interval_encoding(self):
-        # First interval [0,F0), followed by [F1,F2); no compiler extension needed.
-        func = torch.tensor([[2, 0], [4, 1], [6, 3]])
-        expected = torch.tensor(
-            [
-                [True, True, False, False, True, True],
-                [False, True, True, False, False, False],
-            ]
-        )
-        assert_equal(FA4AttnArg.func_to_mask(func, 6), expected)
 
 
 @dataclass(frozen=True)

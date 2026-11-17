@@ -428,44 +428,45 @@ class Ulysess(AttnBaselineInterface):
 
         shard_q_meta = self.shard_meta["q"]
         shard_kv_meta = self.shard_meta["k"]
-        if self.backend == AttnBackend.TE:
-            if attn_mask_type == AttnMaskType.CAUSAL:
-                attn_mask = "padding_causal"
-            elif attn_mask_type == AttnMaskType.FULL:
-                attn_mask = "padding"
+        match self.backend:
+            case AttnBackend.TE:
+                if attn_mask_type == AttnMaskType.CAUSAL:
+                    attn_mask = "padding_causal"
+                elif attn_mask_type == AttnMaskType.FULL:
+                    attn_mask = "padding"
 
-            out, lse = TEUlysessAttnFunc.apply(
-                q_layer,
-                k_layer,
-                v_layer,
-                shard_q_meta.cu_seqlens,
-                shard_kv_meta.cu_seqlens,
-                shard_q_meta.max_seqlen_padded,
-                shard_kv_meta.max_seqlen_padded,
-                shard_q_meta.cu_seqlens_padded,
-                shard_kv_meta.cu_seqlens_padded,
-                dropout_p,
-                softmax_scale,
-                "thd",
-                attn_mask,
-                deterministic,
-            )
-        elif self.backend == AttnBackend.FA3:
-            if attn_mask_type == AttnMaskType.CAUSAL:
-                is_causal = True
-            elif attn_mask_type == AttnMaskType.FULL:
-                is_causal = False
+                out, lse = TEUlysessAttnFunc.apply(
+                    q_layer,
+                    k_layer,
+                    v_layer,
+                    shard_q_meta.cu_seqlens,
+                    shard_kv_meta.cu_seqlens,
+                    shard_q_meta.max_seqlen_padded,
+                    shard_kv_meta.max_seqlen_padded,
+                    shard_q_meta.cu_seqlens_padded,
+                    shard_kv_meta.cu_seqlens_padded,
+                    dropout_p,
+                    softmax_scale,
+                    "thd",
+                    attn_mask,
+                    deterministic,
+                )
+            case AttnBackend.FA3:
+                if attn_mask_type == AttnMaskType.CAUSAL:
+                    is_causal = True
+                elif attn_mask_type == AttnMaskType.FULL:
+                    is_causal = False
 
-            out, lse = FA3UlysessAttnFunc.apply(
-                q_layer,
-                k_layer,
-                v_layer,
-                self.runtime_meta_per_step,
-                is_causal,
-                dropout_p,
-                softmax_scale,
-                deterministic,
-            )
+                out, lse = FA3UlysessAttnFunc.apply(
+                    q_layer,
+                    k_layer,
+                    v_layer,
+                    self.runtime_meta_per_step,
+                    is_causal,
+                    dropout_p,
+                    softmax_scale,
+                    deterministic,
+                )
 
         # all2all comm
         out_layer = _varlen_all2all_after_attn(out, self.pg_a2a)

@@ -279,13 +279,14 @@ def dsa_attn_func(
         softmax_scale: float, scaling factor.
         backend: str, one of "flex", "ffa_block_sparse", "ffa_index_sparse", "sdpa".
     """
-    if backend == "flex":
-        return flex_attn_sparse_fwd(q, k, v, index_map, softmax_scale)
-    elif backend == "ffa_block_sparse":
-        return ffa_block_sparse_fwd(q, k, v, index_map, softmax_scale)
-    elif backend == "ffa_index_sparse":
-        return ffa_index_sparse_fwd(q, k, v, index_map, softmax_scale)
-    elif backend == "sdpa":
-        return sdpa_sparse_fwd(q, k, v, index_map, softmax_scale)
-    else:
-        raise ValueError(f"Invalid backend: {backend}")
+    match backend:
+        case "flex":
+            return flex_attn_sparse_fwd(q, k, v, index_map, softmax_scale)
+        case "ffa_block_sparse":
+            return ffa_block_sparse_fwd(q, k, v, index_map, softmax_scale)
+        case "ffa_index_sparse":
+            return ffa_index_sparse_fwd(q, k, v, index_map, softmax_scale)
+        case "sdpa":
+            return sdpa_sparse_fwd(q, k, v, index_map, softmax_scale)
+        case _:
+            raise ValueError(f"Invalid backend: {backend}")

@@ -145,6 +145,51 @@ def _validate_backend_precision(
             )
 
 
+class _AttnPrecisionContext:
+    """Adapt one call's Q/K/V and restore its output dtype, preserving autograd.
+
+    The body assigns ``out`` before leaving the context. LSE, max logits, and
+    sink keep their own precision contracts; no global Torch state is changed.
+    """
+
+    def __init__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        backend: MagiAttentionKernelBackend,
+        precision: MagiAttentionPrecision | None,
+    ) -> None:
+        self.q, self.k, self.v = q, k, v
+        self.backend = backend
+        self.precision = precision
+        self.output_dtype = q.dtype
+        self._out: torch.Tensor | None = None
+
+    def __enter__(self) -> "_AttnPrecisionContext":
+        _validate_backend_precision(self.backend, self.precision, self.q.dtype)
+        if self.precision is not None:
+            compute_dtype = self.precision.to_torch_dtype()
+            if compute_dtype != self.output_dtype:
+                self.q, self.k, self.v = (
+                    tensor.to(compute_dtype) for tensor in (self.q, self.k, self.v)
+                )
+        return self
+
+    @property
+    def out(self) -> torch.Tensor:
+        assert self._out is not None, "the attention call must assign its output"
+        return self._out
+
+    @out.setter
+    def out(self, value: torch.Tensor) -> None:
+        self._out = value
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if exc_type is None and self.out.dtype != self.output_dtype:
+            self.out = self.out.to(self.output_dtype)
+
+
 class DistAttnRuntime:
     """
     Runtime class for Distributed Flash Attention.
@@ -1261,103 +1306,106 @@ class DistAttnRuntime:
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
         backend = self.kernel_backend
         nvtx.start(attn_arg.get_nvtx_event_name(is_bwd=False))
-        if backend == MagiAttentionKernelBackend.SDPA_OL:
-            partial_out, meta = sdpa_online_fwd(
-                q=q,
-                k=k,
-                v=v,
-                sink=sink if is_host_stage else None,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                sink_layout="sh",
-                return_max_logits=return_max_logits,
-            )
-            if return_max_logits and max_logits_acc is not None:
-                assert meta.max_logits is not None
-                torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
-                meta.max_logits = max_logits_acc
-        elif backend == MagiAttentionKernelBackend.SDPA:
-            partial_out, meta = sdpa_fwd(
-                q=q,
-                k=k,
-                v=v,
-                sink=sink if is_host_stage else None,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                sink_layout="sh",
-                return_max_logits=return_max_logits,
-            )
-            if return_max_logits and max_logits_acc is not None:
-                assert meta.max_logits is not None
-                torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
-                meta.max_logits = max_logits_acc
-        elif backend == MagiAttentionKernelBackend.FA4:
-            partial_out, partial_lse = fa4_fwd(
-                q=q,
-                k=k,
-                v=v,
-                # NOTE: sink token needs to be applied only once
-                # thus we only apply it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                sink_layout="sh",
-            )
-            meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
-        elif backend == MagiAttentionKernelBackend.CUTEDSL:
-            partial_out, partial_lse, partial_max_logits = cutedsl_fwd(
-                q=q,
-                k=k,
-                v=v,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                # NOTE: sink token needs to be applied only once
-                # thus we only apply it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                sm_margin=self.fwd_sm_margin,
-                return_max_logits=return_max_logits,
-                max_logits=max_logits_acc,  # directly reduce to max_logits_acc
-            )
-            meta = AttnForwardMeta(lse=partial_lse, max_logits=partial_max_logits)
-        else:
-            partial_out, meta = _flex_flash_attn_forward(
-                q=q,
-                k=k,
-                v=v,
-                # NOTE: sink token needs to be applied only once
-                # thus we only apply it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                sink_layout="sh",
-                out=out_acc,  # directly reduce to out_acc
-                lse=lse_acc,  # directly reduce to lse_acc
-                **attn_arg.to_ffa_args(is_bwd=False),
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                # NOTE: always use high-precision for the partial out,
-                # to reduce the error caused by the out/lse correction
-                out_type=self.hp_dtype,
-                # NOTE: when using accumulative buffer, we need to always enable atomic reduction
-                # unless it is the first call when accumulative buffer is still None
-                disable_fwd_atomic_reduction=(
-                    attn_arg.disable_fwd_atomic_reduction and out_acc is None
-                ),
-                deterministic=self.deterministic,
-                sm_margin=self.fwd_sm_margin,
-                # optional args below mainly for sparse attn
-                ref_block_size=None,
-                max_outer_range_width=None,
-                range_merge=env.general.is_range_merge_enable(),
-                swap_ab=False,
-                pack_gqa=False,
-                block_sparse=False,
-                index_sparse=False,
-                return_max_logits=return_max_logits,
-                max_logits=max_logits_acc,  # directly reduce to max_logits_acc
-            )
+        match backend:
+            case MagiAttentionKernelBackend.SDPA_OL:
+                partial_out, meta = sdpa_online_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    sink=sink if is_host_stage else None,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                    return_max_logits=return_max_logits,
+                )
+                if return_max_logits and max_logits_acc is not None:
+                    assert meta.max_logits is not None
+                    torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
+                    meta.max_logits = max_logits_acc
+            case MagiAttentionKernelBackend.SDPA:
+                partial_out, meta = sdpa_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    sink=sink if is_host_stage else None,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                    return_max_logits=return_max_logits,
+                )
+                if return_max_logits and max_logits_acc is not None:
+                    assert meta.max_logits is not None
+                    torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
+                    meta.max_logits = max_logits_acc
+            case MagiAttentionKernelBackend.FA4:
+                partial_out, partial_lse = fa4_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                )
+                meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
+            case MagiAttentionKernelBackend.CUTEDSL:
+                partial_out, partial_lse, partial_max_logits = cutedsl_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    sm_margin=self.fwd_sm_margin,
+                    return_max_logits=return_max_logits,
+                    max_logits=max_logits_acc,  # directly reduce to max_logits_acc
+                )
+                meta = AttnForwardMeta(lse=partial_lse, max_logits=partial_max_logits)
+            case MagiAttentionKernelBackend.FFA:
+                partial_out, meta = _flex_flash_attn_forward(
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    sink_layout="sh",
+                    out=out_acc,  # directly reduce to out_acc
+                    lse=lse_acc,  # directly reduce to lse_acc
+                    **attn_arg.to_ffa_args(is_bwd=False),
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    # NOTE: always use high-precision for the partial out,
+                    # to reduce the error caused by the out/lse correction
+                    out_type=self.hp_dtype,
+                    # NOTE: when using accumulative buffer, we need to always enable atomic reduction
+                    # unless it is the first call when accumulative buffer is still None
+                    disable_fwd_atomic_reduction=(
+                        attn_arg.disable_fwd_atomic_reduction and out_acc is None
+                    ),
+                    deterministic=self.deterministic,
+                    sm_margin=self.fwd_sm_margin,
+                    # optional args below mainly for sparse attn
+                    ref_block_size=None,
+                    max_outer_range_width=None,
+                    range_merge=env.general.is_range_merge_enable(),
+                    swap_ab=False,
+                    pack_gqa=False,
+                    block_sparse=False,
+                    index_sparse=False,
+                    return_max_logits=return_max_logits,
+                    max_logits=max_logits_acc,  # directly reduce to max_logits_acc
+                )
+            case _:
+                raise ValueError(f"Unsupported attention backend: {backend}")
         nvtx.stop()
 
         return partial_out, meta
@@ -1379,132 +1427,135 @@ class DistAttnRuntime:
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
         backend = self.kernel_backend
         nvtx.start(attn_arg.get_nvtx_event_name(is_bwd=True))
-        if backend == MagiAttentionKernelBackend.SDPA_OL:
-            partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_online_bwd(
-                do=do,
-                q=q,
-                k=k,
-                v=v,
-                sink=sink if is_host_stage else None,
-                o=o,
-                lse=lse,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                sink_layout="sh",
-            )
-            partial_dkv = self._maybe_concat(
-                partial_dk, partial_dv, need_concat=self.concat_dkv
-            )
-        elif backend == MagiAttentionKernelBackend.SDPA:
-            partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
-                do=do,
-                q=q,
-                k=k,
-                v=v,
-                sink=sink if is_host_stage else None,
-                o=o,
-                lse=lse,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                sink_layout="sh",
-            )
-            partial_dkv = self._maybe_concat(
-                partial_dk, partial_dv, need_concat=self.concat_dkv
-            )
-        elif backend == MagiAttentionKernelBackend.FA4:
-            partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
-                do=do,
-                q=q,
-                k=k,
-                v=v,
-                # NOTE: dsink should be computed only once
-                # thus we only compute it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                o=o,
-                lse=lse,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                sink_layout="sh",
-                deterministic=self.deterministic,
-            )
-            partial_dkv = self._maybe_concat(
-                partial_dk, partial_dv, need_concat=self.concat_dkv
-            )
-        elif backend == MagiAttentionKernelBackend.CUTEDSL:
-            partial_dq, partial_dk, partial_dv, partial_dsink = cutedsl_bwd(
-                do=do,
-                q=q,
-                k=k,
-                v=v,
-                o=o,
-                lse=lse,
-                attn_arg=attn_arg,
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                dq_acc=dq_acc,  # directly reduce to dq_acc
-                # NOTE: dsink should be computed only once
-                # thus we only compute it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                sm_margin=self.bwd_sm_margin,
-            )
-            partial_dkv = self._maybe_concat(
-                partial_dk, partial_dv, need_concat=self.concat_dkv
-            )
-        else:
-            assert k.shape == v.shape, (
-                "The fused dKV buffer requires symmetric K/V shapes, "
-                f"but got {k.shape=} and {v.shape=}."
-            )
-            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
-            # init partial_dkv buffer
-            # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
-            # and we need to zero-initialize partial_dkv since it needs to be reduced
-            partial_dkv = torch.zeros(
-                dkv_shape,
-                dtype=self.hp_dtype,
-                device=k.device,
-            )
-            partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
-            (
-                partial_dq,
-                partial_dk,
-                partial_dv,
-                partial_dsink,
-            ) = _flex_flash_attn_backward(
-                dout=do,
-                q=q,
-                k=k,
-                v=v,
-                # NOTE: dsink should be computed only once
-                # thus we only compute it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                sink_layout="sh",
-                out=o,
-                lse=lse,
-                dq=dq_acc,  # directly reduce to dq_acc
-                dk=partial_dk,
-                dv=partial_dv,
-                dsink=None,  # let kernel initialize dsink if required
-                **attn_arg.to_ffa_args(is_bwd=True),
-                softmax_scale=softmax_scale,
-                softcap=softcap,
-                # NOTE: always use high precision for the partial dq, dkv
-                # to reduce the error caused by the atomic reduction inside the kernel
-                dq_type=self.hp_dtype,
-                dk_type=self.hp_dtype,
-                dv_type=self.hp_dtype,
-                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
-                disable_bwd_dq_atomic_reduction=False,
-                deterministic=self.deterministic,
-                sm_margin=self.bwd_sm_margin,
-                # optional args below mainly for sparse attn
-                range_merge=env.general.is_range_merge_enable(),
-                bwd_inner_loop_k=False,
-                cat_gqa=env.general.is_cat_gqa_enable(),
-            )
+        match backend:
+            case MagiAttentionKernelBackend.SDPA_OL:
+                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_online_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    sink=sink if is_host_stage else None,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            case MagiAttentionKernelBackend.SDPA:
+                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    sink=sink if is_host_stage else None,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            case MagiAttentionKernelBackend.FA4:
+                partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: dsink should be computed only once
+                    # thus we only compute it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                    deterministic=self.deterministic,
+                )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            case MagiAttentionKernelBackend.CUTEDSL:
+                partial_dq, partial_dk, partial_dv, partial_dsink = cutedsl_bwd(
+                    do=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    o=o,
+                    lse=lse,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    dq_acc=dq_acc,  # directly reduce to dq_acc
+                    # NOTE: dsink should be computed only once
+                    # thus we only compute it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    sm_margin=self.bwd_sm_margin,
+                )
+                partial_dkv = self._maybe_concat(
+                    partial_dk, partial_dv, need_concat=self.concat_dkv
+                )
+            case MagiAttentionKernelBackend.FFA:
+                assert k.shape == v.shape, (
+                    "The fused dKV buffer requires symmetric K/V shapes, "
+                    f"but got {k.shape=} and {v.shape=}."
+                )
+                dkv_shape = (k.shape[0] * 2, *k.shape[1:])
+                # init partial_dkv buffer
+                # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
+                # and we need to zero-initialize partial_dkv since it needs to be reduced
+                partial_dkv = torch.zeros(
+                    dkv_shape,
+                    dtype=self.hp_dtype,
+                    device=k.device,
+                )
+                partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
+                (
+                    partial_dq,
+                    partial_dk,
+                    partial_dv,
+                    partial_dsink,
+                ) = _flex_flash_attn_backward(
+                    dout=do,
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: dsink should be computed only once
+                    # thus we only compute it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    sink_layout="sh",
+                    out=o,
+                    lse=lse,
+                    dq=dq_acc,  # directly reduce to dq_acc
+                    dk=partial_dk,
+                    dv=partial_dv,
+                    dsink=None,  # let kernel initialize dsink if required
+                    **attn_arg.to_ffa_args(is_bwd=True),
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    # NOTE: always use high precision for the partial dq, dkv
+                    # to reduce the error caused by the atomic reduction inside the kernel
+                    dq_type=self.hp_dtype,
+                    dk_type=self.hp_dtype,
+                    dv_type=self.hp_dtype,
+                    disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
+                    disable_bwd_dq_atomic_reduction=False,
+                    deterministic=self.deterministic,
+                    sm_margin=self.bwd_sm_margin,
+                    # optional args below mainly for sparse attn
+                    range_merge=env.general.is_range_merge_enable(),
+                    bwd_inner_loop_k=False,
+                    cat_gqa=env.general.is_cat_gqa_enable(),
+                )
+            case _:
+                raise ValueError(f"Unsupported attention backend: {backend}")
         if not self.concat_dkv:  # make partial_dkv tupled tensors
             partial_dkv = (partial_dk, partial_dv)
         if partial_dsink is not None:
@@ -3686,32 +3737,18 @@ def dist_attn_func(
         lse: [num_tokens_q_local, num_heads_q]
         meta.max_logits: [num_heads_q] when return_max_logits is True
     """
-    # --- validate and maybe cast precision ---
-    _backend = dist_attn_runtime.kernel_backend
-    _precision = env.general.precision()
-    _validate_backend_precision(_backend, _precision, q.dtype)
+    with _AttnPrecisionContext(
+        q, k, v, dist_attn_runtime.kernel_backend, env.general.precision()
+    ) as precision_ctx:
+        precision_ctx.out, lse, max_logits = DistAttnFunc.apply(
+            precision_ctx.q,
+            precision_ctx.k,
+            precision_ctx.v,
+            sink,
+            dist_attn_runtime,
+            softmax_scale,
+            softcap,
+            return_max_logits,
+        )
 
-    orig_dtype = q.dtype
-    if _precision is not None:
-        compute_dtype = _precision.to_torch_dtype()
-        if compute_dtype != orig_dtype:
-            q = q.to(compute_dtype)
-            k = k.to(compute_dtype)
-            v = v.to(compute_dtype)
-
-    out, lse, max_logits = DistAttnFunc.apply(
-        q,
-        k,
-        v,
-        sink,
-        dist_attn_runtime,
-        softmax_scale,
-        softcap,
-        return_max_logits,
-    )
-
-    # cast output back to original dtype
-    if out.dtype != orig_dtype:
-        out = out.to(orig_dtype)
-
-    return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
+    return precision_ctx.out, AttnForwardMeta(lse=lse, max_logits=max_logits)
