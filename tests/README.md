@@ -178,21 +178,3 @@ its temporary working directory with `--import-mode=append`; it continues to
 import the installed wheel. The tracked root `conftest.py` and tests already
 participate in the main package's trigger/portable input digests, so changing
 this policy invalidates previous validation without a cache schema change.
-
-## Python/C++ backend isolation
-
-`pytest tests/test_backend_isolation.py` runs the common range/protocol and
-self-attention-area/ground-truth-dispatch contracts once per backend, in two
-fresh interpreters. The backend is selected before test collection; the parent
-never reloads modules or changes its backend. Missing C++ support fails its
-child instead of silently counting a Python fallback as C++ coverage.
-
-The shared cases live in `tests/backend_cases/*_cases.py` so ordinary discovery
-runs them through the isolation class. To debug one case directly, set the
-backend before starting pytest, for example:
-
-```bash
-MAGI_ATTENTION_CPP_BACKEND=1 python -m pytest tests/backend_cases/attn_range_cases.py
-```
-
-Keep new backend cases in these modules; do not switch backends in fixtures.

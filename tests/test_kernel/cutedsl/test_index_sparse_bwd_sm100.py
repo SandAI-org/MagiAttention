@@ -82,7 +82,7 @@ from magi_attention.testing.index_sparse import (
 )
 from magi_attention.testing.precision import assert_close
 from magi_attention.utils import set_random_seed
-from magi_attention.utils.arch import is_sm10x
+from magi_attention.utils.arch import is_sm
 from magi_attention.utils.sparse_utils import (
     build_index_sparse_indices,
     get_sdpa_mask_from_index_sparse_indices,
@@ -359,7 +359,7 @@ def _run_sweep(
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseBwdSm100Sweep(DistTestBase):
     """sm90 Classic sweep: q_seqlen × kv_seqlen × topk, MQA128, D=128, kbs=1."""
 
@@ -409,7 +409,7 @@ class TestIndexSparseBwdSm100Sweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseBwdSm100ComprehensiveSweep(DistTestBase):
     """sm90 Comprehensive sweep: head_config × head_dim × kbs.
 
@@ -485,7 +485,7 @@ class TestIndexSparseBwdSm100ComprehensiveSweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseBwdSm100Geometry(unittest.TestCase):
     """The adapter's multi-kv-head refold and q blocks that do not fill one Q tile exactly."""
 
@@ -574,7 +574,7 @@ def _bwd_with_sorted_rows(q, k, v, out, do, lse, index_sparse_indices, **kwargs)
     )
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseBwdSm100Options(unittest.TestCase):
     """``gather_v_async`` and ``num_k_passes``: each path against the reference, and their defaults."""
 
@@ -747,7 +747,7 @@ class TestIndexSparseBwdSm100Options(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_bwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseBwdSm100Comparison(unittest.TestCase):
     """A PASS of ``_run_index_sparse_config`` needs the right gradients: a shifted dK fails."""
 

@@ -35,7 +35,7 @@ from magi_attention.testing.index_sparse import (
     index_sparse_ref_fwd,
 )
 from magi_attention.utils import set_random_seed
-from magi_attention.utils.arch import is_sm10x
+from magi_attention.utils.arch import is_sm
 from tests.test_attn.sparse_test_utils import SEED
 from tests.test_kernel.cutedsl.test_index_sparse_bwd_sm100 import (
     FwdOutLse,
@@ -57,7 +57,7 @@ _run_fwd_sweep = partial(
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100Sweep(DistTestBase):
     """sm90 Classic sweep: q_seqlen × kv_seqlen × topk, MQA128, D=128, kbs=1.
 
@@ -112,7 +112,7 @@ class TestIndexSparseFwdSm100Sweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100ComprehensiveSweep(DistTestBase):
     """sm90 Comprehensive sweep: head_config × head_dim × kbs.
 
@@ -191,7 +191,7 @@ class TestIndexSparseFwdSm100ComprehensiveSweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100Adapter(unittest.TestCase):
     """``ffa_fwd_sm100_index_sm90_layout``: topk padding, the all-valid path and gap reporting."""
 
@@ -250,7 +250,7 @@ class TestIndexSparseFwdSm100Adapter(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100Comparison(unittest.TestCase):
     """A PASS of ``_run_index_sparse_config`` needs the right out and lse: shifted ones fail."""
 
@@ -322,7 +322,7 @@ def _random_indices(
     return idx
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100Numerics(unittest.TestCase):
     """``ffa_fwd_sm100_index`` called directly against the fp32 gather reference.
 
@@ -481,7 +481,7 @@ class TestIndexSparseFwdSm100Numerics(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm10x(), "ffa_fwd_sm100_index needs an SM100 GPU")
+@unittest.skipUnless(is_sm(100, 103), "ffa_fwd_sm100_index needs an SM100 GPU")
 class TestIndexSparseFwdSm100EndToEnd(unittest.TestCase):
     """out / lse of ``ffa_fwd_sm100_index`` feed ``ffa_bwd_sm100_index``.
 

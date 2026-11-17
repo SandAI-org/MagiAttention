@@ -38,7 +38,7 @@ from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_backward,
     _flex_flash_attn_forward,
 )
-from magi_attention.utils.nvtx import instrument, record
+from magi_attention.utils import nvtx
 
 
 @dataclass
@@ -787,7 +787,7 @@ class USPAllGatherNSA:
         # cmp/slc/win
         self.gate_proj = torch.nn.Linear(hidden_dim, 3, dtype=dtype, device=device)
 
-    @instrument
+    @nvtx.instrument
     def pre_compute_attn_runtime_meta(
         self,
         ranges_q: AttnRanges,
@@ -886,7 +886,7 @@ class USPAllGatherNSA:
                 cmp_range = AttnRange(start_cmp, start_cmp + seqlen_cmp)
                 self.ranges_k_cmp.append(cmp_range)
 
-    @instrument
+    @nvtx.instrument
     def dispatch(
         self,
         x_global: torch.Tensor,
@@ -911,7 +911,7 @@ class USPAllGatherNSA:
 
         return x_local
 
-    @instrument
+    @nvtx.instrument
     def undispatch(
         self,
         x_local: torch.Tensor,
@@ -922,7 +922,7 @@ class USPAllGatherNSA:
 
         return x_global
 
-    @instrument
+    @nvtx.instrument
     def apply_attn(
         self,
         q: torch.Tensor,
@@ -939,7 +939,7 @@ class USPAllGatherNSA:
         k_layer = _varlen_all2all_before_attn(k, self.pg_a2a)
         v_layer = _varlen_all2all_before_attn(v, self.pg_a2a)
 
-        with record("compress kv blocks"):
+        with nvtx.record("compress kv blocks"):
             # n,l,h,d
             k_cmp_blocks = extract_blocks_varlen(k_layer, self.l_cmp, self.stride)
             v_cmp_blocks = extract_blocks_varlen(v_layer, self.l_cmp, self.stride)
@@ -951,7 +951,7 @@ class USPAllGatherNSA:
                 -1
             )
 
-        with record("FFACmpAGAttnFunc"):
+        with nvtx.record("FFACmpAGAttnFunc"):
             out_cmp, softmax_lse_cmp, P_slc_idx = FFACmpAGAttnFunc.apply(
                 q_layer,
                 k_cmp_layer,
@@ -974,7 +974,7 @@ class USPAllGatherNSA:
                 None,
             )
 
-        with record("FFATopkAGAttnFunc"):
+        with nvtx.record("FFATopkAGAttnFunc"):
             out_slc, lse_slc = FFATopkAGAttnFunc.apply(
                 q_layer,
                 k_layer,
@@ -992,7 +992,7 @@ class USPAllGatherNSA:
                 None,
             )
 
-        with record("FFAWinAGAttnFunc"):
+        with nvtx.record("FFAWinAGAttnFunc"):
             out_win, lse_win = FFAWinAGAttnFunc.apply(
                 q_layer,
                 k_layer,

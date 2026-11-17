@@ -17,6 +17,7 @@ from unittest import TestCase
 
 import torch
 
+from magi_attention.testing import assert_equal
 from magi_attention.utils.index_sparse_utils import (
     _partition_index_sparse_rows_by_k_chunk_launch,
     partition_index_sparse_rows_by_k_chunk,
@@ -34,7 +35,6 @@ def _partition_reference(
     return partitioned, starts, lens
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "the partition kernel is Triton")
 class TestPartitionIndexSparseRowsByKChunk(TestCase):
     def _check(self, num_q_blocks, nhk, topk, total_k, num_chunks, padded, tile=0):
         """``tile=0``: the public dispatch; ``None`` / an int force a kernel."""
@@ -57,7 +57,7 @@ class TestPartitionIndexSparseRowsByKChunk(TestCase):
             )
         ref = _partition_reference(indices, chunk_size, num_chunks)
         for name, a, b in zip(("partitioned", "starts", "lens"), out, ref):
-            self.assertTrue(torch.equal(a, b), name)
+            assert_equal(a, b, test_case=name)
 
     def test_groups_ids_by_chunk_keeping_row_order(self):
         """Full rows, one or several kv heads, chunk counts with and without a ragged group of 4."""
@@ -126,7 +126,7 @@ class TestPartitionIndexSparseRowsByKChunk(TestCase):
                     ref = _partition_reference(indices, chunk_size, num_chunks)
                     self.assertEqual(out[0].data_ptr(), indices.data_ptr())
                     for name, a, b in zip(("partitioned", "starts", "lens"), out, ref):
-                        self.assertTrue(torch.equal(a, b), name)
+                        assert_equal(a, b, test_case=name)
 
     def test_keeps_minus_one_tail(self):
         """Rows with any number of valid ids, including none and all."""
@@ -138,9 +138,9 @@ class TestPartitionIndexSparseRowsByKChunk(TestCase):
         partitioned, starts, lens = partition_index_sparse_rows_by_k_chunk(
             indices, 1000, 1
         )
-        self.assertTrue(torch.equal(partitioned, indices))
-        self.assertTrue(torch.equal(starts, torch.zeros_like(starts)))
-        self.assertTrue(torch.equal(lens, torch.full_like(lens, 128)))
+        assert_equal(partitioned, indices)
+        assert_equal(starts, torch.zeros_like(starts))
+        assert_equal(lens, torch.full_like(lens, 128))
 
 
 if __name__ == "__main__":

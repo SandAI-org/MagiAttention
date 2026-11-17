@@ -25,9 +25,8 @@ from pathlib import Path
 from unittest import TestCase
 
 import magi_attention
-from magi_attention.utils.arch import is_sm10x
+from magi_attention.utils.arch import is_sm
 
-_CHILD = Path(__file__).with_name("tmem_dealloc_mbarrier_test_utils.py")
 # Keep child imports tied to the package under test.
 _PACKAGE_PARENT = Path(magi_attention.__file__).resolve().parent.parent
 _CHILD_TIMEOUT_S = 120
@@ -43,7 +42,7 @@ def _trace_in_fresh_interpreter(dump_dir: Path) -> dict:
         [str(_PACKAGE_PARENT), *filter(None, [env.get("PYTHONPATH")])]
     )
     proc = subprocess.run(
-        [sys.executable, "-u", str(_CHILD)],
+        [sys.executable, "-u", "-m", "magi_attention.testing.tmem_allocator_probe"],
         env=env,
         capture_output=True,
         text=True,
@@ -57,7 +56,7 @@ def _trace_in_fresh_interpreter(dump_dir: Path) -> dict:
 
 
 class TestTmemDeallocMbarrier(TestCase):
-    @unittest.skipUnless(is_sm10x(), "requires SM10.x")
+    @unittest.skipUnless(is_sm(100, 103), "requires SM100/103")
     def test_allocator_reconstruction_initializes_dealloc_mbarrier_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             result = _trace_in_fresh_interpreter(Path(tmp_dir))

@@ -12,18 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
+import sys
 import unittest
 from unittest import TestCase
 
-from magi_attention.common import AttnRange
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.mask import AttnMask
+from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import MinHeapDispatchAlg
 from magi_attention.testing.gt_dispatcher import GroundTruthDispatcher
+from magi_attention.testing.utils import switch_envvars
+
+
+def reload_magi_modules():
+    """Helper to reload magi_attention modules and update global names in this module."""
+    importlib.reload(sys.modules["magi_attention.common"])
+    import magi_attention.common
+
+    # Update the global names in this test module
+    test_module = sys.modules[__name__]
+    test_module.AttnRange = magi_attention.common.AttnRange
+    test_module.AttnRanges = magi_attention.common.AttnRanges
+    return magi_attention.common
 
 
 class TestGroundTruthDispatcher(TestCase):
+    @property
+    def use_cpp_backend(self):
+        return False
+
+    def setUp(self):
+        # Ensure we are using the specified backend
+        self.switch_back = switch_envvars(
+            ["MAGI_ATTENTION_CPP_BACKEND"],
+            enable_dict={"MAGI_ATTENTION_CPP_BACKEND": self.use_cpp_backend},
+        )
+        reload_magi_modules()
+
+    def tearDown(self):
+        self.switch_back()
+        reload_magi_modules()
+
     def test_make_sub_mask_with_sub_area(self):
         # AttnMask.make_sub_mask always produces Python AttnRanges (imported
         # via magi_attention.common.ranges), so comparisons must use the same
@@ -219,6 +250,12 @@ class TestGroundTruthDispatcher(TestCase):
             gt_dispatcher._chunk_masks, global_bucket.q_chunks
         ):
             self.assertEqual(chunk_mask.area, chunk.area)
+
+
+class TestCppGroundTruthDispatcher(TestGroundTruthDispatcher):
+    @property
+    def use_cpp_backend(self):
+        return True
 
 
 if __name__ == "__main__":
