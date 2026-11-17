@@ -50,6 +50,10 @@ docs/
 │   │   ├── quickstart.md    # 快速开始
 │   │   ├── magi_api.md      # API 参考
 │   │   └── env_variables.md # 环境变量参考
+│   ├── developer_guide/     # 开发者指南，与用户指南和博客并列
+│   │   ├── toc.md           # 开发者指南目录
+│   │   ├── contributing.md  # 贡献流程与代码规范
+│   │   └── testing.md       # 测试组织与运行指南
 │   └── blog/                # 技术博客文章
 │       ├── toc.md           # 博客章节的目录
 │       ├── refs/            # BibTeX 引用文件（每篇博客一个）
@@ -59,6 +63,7 @@ docs/
 │   └── zh_CN/LC_MESSAGES/
 │       ├── index.po
 │       ├── user_guide/*.po
+│       ├── developer_guide/*.po
 │       └── blog/*.po
 ├── build/                   # 生成的输出（已被 git 忽略）
 ├── requirements.txt         # Python 依赖
@@ -115,6 +120,12 @@ my_new_page.md          # <-- 在这里添加你的新文件
 make clean && make html
 open build/html/index.html
 ```
+
+### 新增开发者指南
+
+在 `source/developer_guide/` 新建页面并登记到该目录的 `toc.md`。
+开发者指南与用户指南、博客在站点顶层并列，不应挂到 `user_guide/toc.md`。
+贡献指南和测试指南在此维护；中文翻译沿用下文的 `.po` 工作流。
 
 ### 新增一篇博客文章
 

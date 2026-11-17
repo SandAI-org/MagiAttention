@@ -1,4 +1,4 @@
-# Contributing Guide
+# Contributing
 
 
 ## Git Pull Request
@@ -14,7 +14,7 @@ Please follow these steps to open a pull request:
 
 ## Requirements
 
-First of all, please install the required packages specific for developers by running:
+Run the following commands from the repository root. First, install the required packages specific for developers by running:
 
 ```bash
 pip install -r requirements.txt
@@ -24,15 +24,8 @@ pip install -r requirements_dev.txt
 
 ### Unit Tests
 
-We use [PyTest](https://docs.pytest.org/en/latest/) to execute tests. You can install pytest by `pip install pytest`. Then, simply run:
-
-```bash
-pytest tests/
-```
-
-> [!NOTE]
-> As some of the tests require initialization of the distributed backend, GPUs are needed to execute these tests.
-
+See the [testing guide](testing.md) for test organization, local commands,
+backend coverage, architecture requirements, and test authoring conventions.
 
 ### Code Style
 
@@ -66,8 +59,9 @@ pre-commit run
 # you may check: https://pre-commit.com/
 ```
 
-> [!NOTE]
-> Code format checking will be automatically executed when you commit your changes.
+:::{note}
+Code format checking will be automatically executed when you commit your changes.
+:::
 
 
 ### Type Stubs (C++ Extension)
@@ -80,5 +74,6 @@ Ensure the extension is installed in your environment, then run:
 pybind11-stubgen magi_attention.magi_attn_ext -o .
 ```
 
-> [!IMPORTANT]
-> Failure to update stubs after modifying C++ code may cause type checking errors during CI.
+:::{important}
+Failure to update stubs after modifying C++ code may cause type checking errors during CI.
+:::

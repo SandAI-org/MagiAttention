@@ -1,0 +1,114 @@
+# Chinese (Simplified, China) translations for MagiAttention.
+# Copyright (C) 2026 2025-2026, SandAI
+# This file is distributed under the same license as the MagiAttention project.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention VERSION\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2026-11-17 12:22+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: MagiAttention contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/contributing.md:1
+msgid "Contributing"
+msgstr "贡献指南"
+
+#: ../../source/developer_guide/contributing.md:4
+msgid "Git Pull Request"
+msgstr "提交 Pull Request"
+
+#: ../../source/developer_guide/contributing.md:6
+msgid "Please follow these steps to open a pull request:"
+msgstr "请按以下步骤提交 Pull Request："
+
+#: ../../source/developer_guide/contributing.md:8
+msgid "Fork the repository"
+msgstr "Fork 本仓库"
+
+#: ../../source/developer_guide/contributing.md:9
+msgid "Create your feature branch (`git checkout -b feature/AmazingFeature`)"
+msgstr "创建功能分支（`git checkout -b feature/AmazingFeature`）"
+
+#: ../../source/developer_guide/contributing.md:10
+msgid "Commit your changes (`git commit -m 'Add some AmazingFeature'`)"
+msgstr "提交改动（`git commit -m 'Add some AmazingFeature'`）"
+
+#: ../../source/developer_guide/contributing.md:11
+msgid "Push to the branch (`git push origin feature/AmazingFeature`)"
+msgstr "推送分支（`git push origin feature/AmazingFeature`）"
+
+#: ../../source/developer_guide/contributing.md:12
+msgid "Open a Pull Request"
+msgstr "创建 Pull Request"
+
+#: ../../source/developer_guide/contributing.md:15
+msgid "Requirements"
+msgstr "依赖要求"
+
+#: ../../source/developer_guide/contributing.md:17
+msgid ""
+"Run the following commands from the repository root. First, install the required packages "
+"specific for developers by running:"
+msgstr "在仓库根目录执行以下命令，首先安装开发所需的依赖："
+
+#: ../../source/developer_guide/contributing.md:25
+msgid "Unit Tests"
+msgstr "单元测试"
+
+#: ../../source/developer_guide/contributing.md:27
+msgid ""
+"See the [testing guide](testing.md) for test organization, local commands, backend coverage, "
+"architecture requirements, and test authoring conventions."
+msgstr "测试目录、运行命令、backend 覆盖、架构要求和编写规范详见[测试指南](testing.md)。"
+
+#: ../../source/developer_guide/contributing.md:30
+msgid "Code Style"
+msgstr "代码风格"
+
+#: ../../source/developer_guide/contributing.md:32
+msgid ""
+"We have some static checks when you commit your code change, please make sure you can pass all "
+"the tests and make sure the coding style follows our requirements. We use pre-commit hooks to "
+"make sure the code is aligned with the writing standard. To set up the code style checking, you "
+"need to follow the steps below."
+msgstr "提交改动时需要通过静态检查和相关测试。仓库使用 pre-commit hooks 维护统一代码风格，设置步骤如下。"
+
+#: ../../source/developer_guide/contributing.md:34
+msgid "clang-format:"
+msgstr "clang-format："
+
+#: ../../source/developer_guide/contributing.md:41
+msgid "pre-commit:"
+msgstr "pre-commit："
+
+#: ../../source/developer_guide/contributing.md:62
+msgid "Code format checking will be automatically executed when you commit your changes."
+msgstr "提交改动时会自动执行代码风格检查。"
+
+#: ../../source/developer_guide/contributing.md:66
+msgid "Type Stubs (C++ Extension)"
+msgstr "类型存根（C++ 扩展）"
+
+#: ../../source/developer_guide/contributing.md:68
+msgid ""
+"If you modify the C++ extension (`magi_attn_ext`), please remember to regenerate the Python type "
+"stubs (`.pyi` files). This ensures that static type checkers (like MyPy) and IDEs can correctly "
+"recognize the updated C++ signatures."
+msgstr "修改 C++ 扩展（`magi_attn_ext`）后，请重新生成 Python 类型存根（`.pyi`），确保 MyPy 等类型检查器和 IDE 正确识别新的 C++ 签名。"
+
+#: ../../source/developer_guide/contributing.md:70
+msgid "Ensure the extension is installed in your environment, then run:"
+msgstr "确认扩展已安装，然后执行："
+
+#: ../../source/developer_guide/contributing.md:76
+msgid "Failure to update stubs after modifying C++ code may cause type checking errors during CI."
+msgstr "修改 C++ 代码后未更新类型存根，可能导致 CI 类型检查失败。"

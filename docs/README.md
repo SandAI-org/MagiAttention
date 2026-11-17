@@ -50,6 +50,10 @@ docs/
 │   │   ├── quickstart.md    # Quick start guide
 │   │   ├── magi_api.md      # API reference
 │   │   └── env_variables.md # Environment variables reference
+│   ├── developer_guide/     # Developer guide, alongside user guide and blogs
+│   │   ├── toc.md           # Developer guide table of contents
+│   │   ├── contributing.md  # Contribution workflow and code style
+│   │   └── testing.md       # Test organization and execution
 │   └── blog/                # Technical blog posts
 │       ├── toc.md           # Table of contents for blog section
 │       ├── refs/            # BibTeX citation files (one per blog post)
@@ -59,6 +63,7 @@ docs/
 │   └── zh_CN/LC_MESSAGES/
 │       ├── index.po
 │       ├── user_guide/*.po
+│       ├── developer_guide/*.po
 │       └── blog/*.po
 ├── build/                   # Generated output (git-ignored)
 ├── requirements.txt         # Python dependencies
@@ -115,6 +120,10 @@ my_new_page.md          # <-- add your new file here
 make clean && make html
 open build/html/index.html
 ```
+
+### Adding a Developer Guide Page
+
+Create the page under `source/developer_guide/` and register it in that directory's `toc.md`. The developer guide is a top-level sibling of the user guide and blogs; do not register it under `user_guide/toc.md`. Contributing and testing guidance live here, with Chinese translations maintained through the `.po` workflow below.
 
 ### Adding a New Blog Post
 
