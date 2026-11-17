@@ -27,7 +27,8 @@ from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_buffer_mgr
 from magi_attention.common.enum import MagiAttentionKernelBackend
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
+from magi_attention.functional.dist_attn import dist_attn_func
+from magi_attention.functional.dist_attn_runtime import DistAttnRuntime
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.testing import parameterize, ref_attn_func

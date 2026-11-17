@@ -38,7 +38,8 @@ from magi_attention.config import (
     OverlapConfig,
 )
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
-from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
+from magi_attention.functional.dist_attn import dist_attn_func
+from magi_attention.functional.dist_attn_runtime import DistAttnRuntime
 from magi_attention.functional.roll import roll_p2p as roll_func
 from magi_attention.functional.roll import roll_simple_p2p as roll_simple_func
 from magi_attention.meta import (

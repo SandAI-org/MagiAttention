@@ -23,7 +23,8 @@ from magi_attention.common.enum import (
     MagiAttentionPrecision,
 )
 from magi_attention.functional import dist_attn
-from magi_attention.functional.dist_attn import DistAttnFunc, DistAttnRuntime
+from magi_attention.functional.dist_attn import DistAttnFunc
+from magi_attention.functional.dist_attn_runtime import DistAttnRuntime
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.testing import assert_equal
 
