@@ -23,9 +23,12 @@ This ensures the two backends remain interchangeable:
 
 import inspect
 import re
+import unittest
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from magi_attention.common.enum import AttnMaskType as PyAttnMaskType
 from magi_attention.common.protocols import (
     AttnMaskTypeProtocol,
     AttnRangeProtocol,
@@ -33,42 +36,72 @@ from magi_attention.common.protocols import (
     AttnRectangleProtocol,
     AttnRectanglesProtocol,
 )
+from magi_attention.common.range import AttnRange as PyAttnRange
+from magi_attention.common.ranges import AttnRanges as PyAttnRanges
+from magi_attention.common.rectangle import AttnRectangle as PyAttnRectangle
+from magi_attention.common.rectangles import AttnRectangles as PyAttnRectangles
+from magi_attention.testing import parameterize
+
+cpp_backend: ModuleType | None
+try:
+    from magi_attention import magi_attn_ext as cpp_backend
+except ImportError:
+    cpp_backend = None
 
 
-class TestProtocolConformance:
+class TestProtocolConformance(unittest.TestCase):
+    backend = "python"
+
+    def setUp(self):
+        if self.backend == "cpp":
+            if cpp_backend is None:
+                self.skipTest("magi_attn_ext not available")
+            self.types = cpp_backend
+        else:
+            self.types = SimpleNamespace(
+                AttnRange=PyAttnRange,
+                AttnRanges=PyAttnRanges,
+                AttnMaskType=PyAttnMaskType,
+                AttnRectangle=PyAttnRectangle,
+                AttnRectangles=PyAttnRectangles,
+            )
+
     """Verify both backends satisfy the Protocol contracts (method existence)."""
 
-    def test_attn_mask_type(self, backend):
-        from magi_attention.common import AttnMaskType
+    def test_attn_mask_type(self):
+        AttnMaskType = self.types.AttnMaskType
 
-        assert isinstance(AttnMaskType.FULL, AttnMaskTypeProtocol)
+        self.assertTrue(isinstance(AttnMaskType.FULL, AttnMaskTypeProtocol))
 
-    def test_attn_range(self, backend):
-        from magi_attention.common import AttnRange
+    def test_attn_range(self):
+        AttnRange = self.types.AttnRange
 
         r = AttnRange(0, 10)
-        assert isinstance(r, AttnRangeProtocol)
+        self.assertTrue(isinstance(r, AttnRangeProtocol))
 
-    def test_attn_ranges(self, backend):
-        from magi_attention.common import AttnRange, AttnRanges
+    def test_attn_ranges(self):
+        AttnRange = self.types.AttnRange
+        AttnRanges = self.types.AttnRanges
 
         rs = AttnRanges()
         rs.append(AttnRange(0, 10))
-        assert isinstance(rs, AttnRangesProtocol)
+        self.assertTrue(isinstance(rs, AttnRangesProtocol))
 
-    def test_attn_rectangle(self, backend):
-        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
+    def test_attn_rectangle(self):
+        AttnMaskType = self.types.AttnMaskType
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(
             AttnRange(0, 10), AttnRange(0, 10), mask_type=AttnMaskType.FULL
         )
-        assert isinstance(rect, AttnRectangleProtocol)
+        self.assertTrue(isinstance(rect, AttnRectangleProtocol))
 
-    def test_attn_rectangles(self, backend):
-        from magi_attention.common import AttnRectangles
+    def test_attn_rectangles(self):
+        AttnRectangles = self.types.AttnRectangles
 
         rects = AttnRectangles()
-        assert isinstance(rects, AttnRectanglesProtocol)
+        self.assertTrue(isinstance(rects, AttnRectanglesProtocol))
 
 
 def _get_param_names_python(cls, method_name):
@@ -218,75 +251,93 @@ def _has_cpp_backend():
 
 
 @pytest.mark.skipif(not _has_cpp_backend(), reason="magi_attn_ext not available")
-class TestSignatureAlignment:
+class TestSignatureAlignment(unittest.TestCase):
     """Verify that Python and C++ backends have identical parameter names."""
 
-    @pytest.mark.parametrize("method_name", _ATTN_RANGE_METHODS)
+    @parameterize("method_name", _ATTN_RANGE_METHODS)
     def test_attn_range_signature(self, method_name):
         from magi_attention.common.range import AttnRange as PyClass
         from magi_attention.magi_attn_ext import AttnRange as CppClass
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)
-        assert (
-            cpp_params is not None
-        ), f"Could not parse C++ signature for {method_name}"
-        assert (
-            py_params == cpp_params
-        ), f"AttnRange.{method_name} param mismatch: python={py_params} cpp={cpp_params}"
+        self.assertIsNot(
+            cpp_params, None, msg=f"Could not parse C++ signature for {method_name}"
+        )
+        self.assertEqual(
+            py_params,
+            cpp_params,
+            msg=f"AttnRange.{method_name} param mismatch: python={py_params} cpp={cpp_params}",
+        )
 
-    @pytest.mark.parametrize("method_name", _ATTN_RANGES_METHODS)
+    @parameterize("method_name", _ATTN_RANGES_METHODS)
     def test_attn_ranges_signature(self, method_name):
         from magi_attention.common.ranges import AttnRanges as PyClass
         from magi_attention.magi_attn_ext import AttnRanges as CppClass
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)
-        assert (
-            cpp_params is not None
-        ), f"Could not parse C++ signature for {method_name}"
-        assert (
-            py_params == cpp_params
-        ), f"AttnRanges.{method_name} param mismatch: python={py_params} cpp={cpp_params}"
+        self.assertIsNot(
+            cpp_params, None, msg=f"Could not parse C++ signature for {method_name}"
+        )
+        self.assertEqual(
+            py_params,
+            cpp_params,
+            msg=f"AttnRanges.{method_name} param mismatch: python={py_params} cpp={cpp_params}",
+        )
 
-    @pytest.mark.parametrize("method_name", _ATTN_RECTANGLE_METHODS)
+    @parameterize("method_name", _ATTN_RECTANGLE_METHODS)
     def test_attn_rectangle_signature(self, method_name):
         from magi_attention.common.rectangle import AttnRectangle as PyClass
         from magi_attention.magi_attn_ext import AttnRectangle as CppClass
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)
-        assert (
-            cpp_params is not None
-        ), f"Could not parse C++ signature for {method_name}"
-        assert (
-            py_params == cpp_params
-        ), f"AttnRectangle.{method_name} param mismatch: python={py_params} cpp={cpp_params}"
+        self.assertIsNot(
+            cpp_params, None, msg=f"Could not parse C++ signature for {method_name}"
+        )
+        self.assertEqual(
+            py_params,
+            cpp_params,
+            msg=f"AttnRectangle.{method_name} param mismatch: python={py_params} cpp={cpp_params}",
+        )
 
-    @pytest.mark.parametrize("method_name", _ATTN_RECTANGLES_METHODS)
+    @parameterize("method_name", _ATTN_RECTANGLES_METHODS)
     def test_attn_rectangles_signature(self, method_name):
         from magi_attention.common.rectangles import AttnRectangles as PyClass
         from magi_attention.magi_attn_ext import AttnRectangles as CppClass
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)
-        assert (
-            cpp_params is not None
-        ), f"Could not parse C++ signature for {method_name}"
-        assert (
-            py_params == cpp_params
-        ), f"AttnRectangles.{method_name} param mismatch: python={py_params} cpp={cpp_params}"
+        self.assertIsNot(
+            cpp_params, None, msg=f"Could not parse C++ signature for {method_name}"
+        )
+        self.assertEqual(
+            py_params,
+            cpp_params,
+            msg=f"AttnRectangles.{method_name} param mismatch: python={py_params} cpp={cpp_params}",
+        )
 
-    @pytest.mark.parametrize("method_name", _ATTN_MASK_TYPE_METHODS)
+    @parameterize("method_name", _ATTN_MASK_TYPE_METHODS)
     def test_attn_mask_type_signature(self, method_name):
         from magi_attention.common.enum import AttnMaskType as PyClass
         from magi_attention.magi_attn_ext import AttnMaskType as CppClass
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)
-        assert (
-            cpp_params is not None
-        ), f"Could not parse C++ signature for {method_name}"
-        assert (
-            py_params == cpp_params
-        ), f"AttnMaskType.{method_name} param mismatch: python={py_params} cpp={cpp_params}"
+        self.assertIsNot(
+            cpp_params, None, msg=f"Could not parse C++ signature for {method_name}"
+        )
+        self.assertEqual(
+            py_params,
+            cpp_params,
+            msg=f"AttnMaskType.{method_name} param mismatch: python={py_params} cpp={cpp_params}",
+        )
+
+
+class TestCppProtocolConformance(TestProtocolConformance):
+    backend = "cpp"
+
+
+if __name__ == "__main__":
+    unittest.main()

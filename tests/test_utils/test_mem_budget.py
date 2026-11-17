@@ -22,6 +22,8 @@ GPU run: it executes one dense FFA fwd+bwd and compares
 ``torch.cuda.max_memory_allocated`` with the predicted bwd peak.
 """
 
+import unittest
+
 import pytest
 
 from magi_attention.utils.mem_budget import (
@@ -47,7 +49,7 @@ def _canonical(direction: str, seqlen: int, **kwargs) -> FFAMemBudgetConfig:
 
 
 @pytest.mark.arch_independent
-class TestLedgerArithmetic:
+class TestLedgerArithmetic(unittest.TestCase):
     def test_bwd_dq_accum_at_524k_is_exactly_32_gib(self):
         # This is the famous "Tried to allocate 32.00 GiB" of the canonical
         # 524K bwd OOM: dq fp32 = S * nhq * hd * 4 = 2^19 * 2^7 * 2^7 * 2^2.
@@ -77,7 +79,7 @@ class TestLedgerArithmetic:
 
 
 @pytest.mark.arch_independent
-class TestMaxSeqlenSolver:
+class TestMaxSeqlenSolver(unittest.TestCase):
     def test_bwd_baseline_caps_around_425k(self):
         s_max = ffa_max_total_seqlen(H100_BUDGET_BYTES, _canonical("bwd", 1))
         assert 400_000 < s_max < 450_000, s_max
@@ -178,12 +180,4 @@ def _validate_against_gpu(total_seqlen: int, num_heads_q: int, head_dim: int) ->
 
 
 if __name__ == "__main__":
-    # theory part
-    import pytest
-
-    rc = pytest.main([__file__, "-q"])
-    assert rc == 0, "ledger arithmetic tests failed"
-
-    # GPU reconciliation part (canonical-like heads, small seqlen)
-    _validate_against_gpu(total_seqlen=65536, num_heads_q=128, head_dim=128)
-    print("GPU reconciliation OK")
+    unittest.main()

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
 from functools import partial
 
 import numpy as np
@@ -19,14 +20,8 @@ import pytest
 import torch
 
 
-@pytest.fixture(params=["python"])
-def backend(request):
-    """AttnMask is Python-only, so only test with Python backend."""
-    yield request.param
-
-
-class TestAttnMask:
-    def test_mask_factory_constructors(self, backend):
+class TestAttnMask(unittest.TestCase):
+    def test_mask_factory_constructors(self):
         from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
 
         # --------     factory constructor1: from_ranges  --------- #
@@ -97,14 +92,15 @@ class TestAttnMask:
             device=AttnMask.device,
         )
 
-        assert np.equal(
-            attn_mask.mask_flag_array,
-            np.array(ref_mask_flag_list),
-        ).all()
+        self.assertTrue(
+            np.equal(attn_mask.mask_flag_array, np.array(ref_mask_flag_list)).all()
+        )
 
-        assert torch.equal(
-            attn_mask.mask_tensor[..., AttnMask.mask_flag_dim_idx],
-            ref_mask_flag_tensor,
+        self.assertTrue(
+            torch.equal(
+                attn_mask.mask_tensor[..., AttnMask.mask_flag_dim_idx],
+                ref_mask_flag_tensor,
+            )
         )
 
         # --------     factory constructor1: from_mask  --------- #
@@ -113,9 +109,9 @@ class TestAttnMask:
             mask=ref_mask_flag_tensor,
         )
 
-        assert attn_mask2.q_ranges == q_ranges
-        assert attn_mask2.k_ranges == k_ranges
-        assert attn_mask2.attn_mask_type == attn_mask_type
+        self.assertEqual(attn_mask2.q_ranges, q_ranges)
+        self.assertEqual(attn_mask2.k_ranges, k_ranges)
+        self.assertEqual(attn_mask2.attn_mask_type, attn_mask_type)
 
         # --------     __init__ is forbidden to users  --------- #
 
@@ -129,7 +125,7 @@ class TestAttnMask:
                 total_seqlen_k=total_seqlen_k,
             )
 
-    def test_make_sub_mask_with_calc_sub_area(self, backend):
+    def test_make_sub_mask_with_calc_sub_area(self):
         from magi_attention.common import AttnMask, AttnMaskType, AttnRange, AttnRanges
 
         # --------------      init sample meta      -------------- #
@@ -170,7 +166,7 @@ class TestAttnMask:
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
         )
-        assert attn_mask.area == 82
+        self.assertEqual(attn_mask.area, 82)
 
         # --------------      sub mask 1       -------------- #
 
@@ -181,26 +177,31 @@ class TestAttnMask:
             q_range=sub_q_range,
             k_range=sub_k_range,
         )
-        assert sub_area1 == 41
+        self.assertEqual(sub_area1, 41)
 
         sub_attn_mask1 = attn_mask.make_sub_mask(
             q_range=sub_q_range,
             k_range=sub_k_range,
         )
-        assert sub_attn_mask1.area == sub_area1
+        self.assertEqual(sub_attn_mask1.area, sub_area1)
 
-        assert sub_attn_mask1.q_ranges == AttnRanges.from_ranges(
-            [[0, 2], [2, 5], [5, 8], [8, 9]]
+        self.assertEqual(
+            sub_attn_mask1.q_ranges,
+            AttnRanges.from_ranges([[0, 2], [2, 5], [5, 8], [8, 9]]),
         )
-        assert sub_attn_mask1.k_ranges == AttnRanges.from_ranges(
-            [[0, 3], [3, 11], [11, 12], [0, 9]]
+        self.assertEqual(
+            sub_attn_mask1.k_ranges,
+            AttnRanges.from_ranges([[0, 3], [3, 11], [11, 12], [0, 9]]),
         )
-        assert sub_attn_mask1.attn_mask_type == [
-            AttnMaskType.CAUSAL,
-            AttnMaskType.FULL,
-            AttnMaskType.FULL,
-            AttnMaskType.FULL,
-        ]
+        self.assertEqual(
+            sub_attn_mask1.attn_mask_type,
+            [
+                AttnMaskType.CAUSAL,
+                AttnMaskType.FULL,
+                AttnMaskType.FULL,
+                AttnMaskType.FULL,
+            ],
+        )
 
         # --------------      sub mask 2       -------------- #
 
@@ -211,26 +212,31 @@ class TestAttnMask:
             q_range=sub_q_range,
             k_range=sub_k_range,
         )
-        assert sub_area2 == 31
+        self.assertEqual(sub_area2, 31)
 
         sub_attn_mask2 = attn_mask.make_sub_mask(
             q_range=sub_q_range,
             k_range=sub_k_range,
         )
-        assert sub_attn_mask2.area == sub_area2
+        self.assertEqual(sub_attn_mask2.area, sub_area2)
 
-        assert sub_attn_mask2.q_ranges == AttnRanges.from_ranges(
-            [[0, 6], [6, 9], [9, 12], [12, 14]]
+        self.assertEqual(
+            sub_attn_mask2.q_ranges,
+            AttnRanges.from_ranges([[0, 6], [6, 9], [9, 12], [12, 14]]),
         )
-        assert sub_attn_mask2.k_ranges == AttnRanges.from_ranges(
-            [[0, 4], [4, 7], [9, 9], [1, 7]]
+        self.assertEqual(
+            sub_attn_mask2.k_ranges,
+            AttnRanges.from_ranges([[0, 4], [4, 7], [9, 9], [1, 7]]),
         )
-        assert sub_attn_mask2.attn_mask_type == [
-            AttnMaskType.CAUSAL,
-            AttnMaskType.FULL,
-            AttnMaskType.CAUSAL,
-            AttnMaskType.FULL,
-        ]
+        self.assertEqual(
+            sub_attn_mask2.attn_mask_type,
+            [
+                AttnMaskType.CAUSAL,
+                AttnMaskType.FULL,
+                AttnMaskType.CAUSAL,
+                AttnMaskType.FULL,
+            ],
+        )
 
         # --------------      sub mask 3       -------------- #
 
@@ -241,27 +247,32 @@ class TestAttnMask:
             q_range=sub_q_range,
             k_range=sub_k_range,
         )
-        assert sub_area3 == 53
+        self.assertEqual(sub_area3, 53)
 
         sub_attn_mask3 = attn_mask.make_sub_mask(
             q_range=sub_q_range,
             k_range=sub_k_range,
         )
-        assert sub_attn_mask3.area == sub_area3
+        self.assertEqual(sub_attn_mask3.area, sub_area3)
 
-        assert sub_attn_mask3.q_ranges == AttnRanges.from_ranges(
-            [[0, 1], [1, 4], [4, 7], [7, 9], [9, 11]]
+        self.assertEqual(
+            sub_attn_mask3.q_ranges,
+            AttnRanges.from_ranges([[0, 1], [1, 4], [4, 7], [7, 9], [9, 11]]),
         )
-        assert sub_attn_mask3.k_ranges == AttnRanges.from_ranges(
-            [[0, 1], [1, 8], [4, 4], [0, 8], [0, 8]]
+        self.assertEqual(
+            sub_attn_mask3.k_ranges,
+            AttnRanges.from_ranges([[0, 1], [1, 8], [4, 4], [0, 8], [0, 8]]),
         )
-        assert sub_attn_mask3.attn_mask_type == [
-            AttnMaskType.FULL,
-            AttnMaskType.FULL,
-            AttnMaskType.CAUSAL,
-            AttnMaskType.CAUSAL,
-            AttnMaskType.FULL,
-        ]
+        self.assertEqual(
+            sub_attn_mask3.attn_mask_type,
+            [
+                AttnMaskType.FULL,
+                AttnMaskType.FULL,
+                AttnMaskType.CAUSAL,
+                AttnMaskType.CAUSAL,
+                AttnMaskType.FULL,
+            ],
+        )
 
         # --------------      sub mask 4       -------------- #
 
@@ -272,27 +283,26 @@ class TestAttnMask:
             q_range=sub_q_range,
             k_range=sub_k_range,
         )
-        assert sub_area4 == 24
+        self.assertEqual(sub_area4, 24)
 
         sub_attn_mask4 = attn_mask.make_sub_mask(
             q_range=sub_q_range,
             k_range=sub_k_range,
         )
-        assert sub_attn_mask4.area == sub_area4
+        self.assertEqual(sub_attn_mask4.area, sub_area4)
 
-        assert sub_attn_mask4.q_ranges == AttnRanges.from_ranges(
-            [[0, 2], [2, 5], [5, 8]]
+        self.assertEqual(
+            sub_attn_mask4.q_ranges, AttnRanges.from_ranges([[0, 2], [2, 5], [5, 8]])
         )
-        assert sub_attn_mask4.k_ranges == AttnRanges.from_ranges(
-            [[0, 0], [0, 8], [5, 5]]
+        self.assertEqual(
+            sub_attn_mask4.k_ranges, AttnRanges.from_ranges([[0, 0], [0, 8], [5, 5]])
         )
-        assert sub_attn_mask4.attn_mask_type == [
-            AttnMaskType.CAUSAL,
-            AttnMaskType.FULL,
-            AttnMaskType.CAUSAL,
-        ]
+        self.assertEqual(
+            sub_attn_mask4.attn_mask_type,
+            [AttnMaskType.CAUSAL, AttnMaskType.FULL, AttnMaskType.CAUSAL],
+        )
 
-    def test_mask_type_bool_func(self, backend):
+    def test_mask_type_bool_func(self):
         from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
 
         q_ranges = AttnRanges.from_ranges(
@@ -334,8 +344,8 @@ class TestAttnMask:
             k_ranges=k_ranges, attn_mask_type=attn_mask_type
         )
 
-        assert pure_full_mask.is_square()
-        assert pure_full_mask.is_pure_full()
+        self.assertTrue(pure_full_mask.is_square())
+        self.assertTrue(pure_full_mask.is_pure_full())
 
         # --------    pure causal mask  --------- #
 
@@ -356,7 +366,7 @@ class TestAttnMask:
             k_ranges=k_ranges, attn_mask_type=attn_mask_type
         )
 
-        assert pure_full_mask.is_pure_causal()
+        self.assertTrue(pure_full_mask.is_pure_causal())
 
         # --------    varlen full mask  --------- #
 
@@ -416,17 +426,17 @@ class TestAttnMask:
             k_ranges=k_ranges4, attn_mask_type=attn_mask_type
         )
 
-        assert varlen_full_mask1.is_varlen_full()
-        assert not varlen_full_mask2.is_varlen_full()
-        assert not varlen_full_mask3.is_varlen_full()
-        assert not varlen_full_mask4.is_varlen_full()
+        self.assertTrue(varlen_full_mask1.is_varlen_full())
+        self.assertFalse(varlen_full_mask2.is_varlen_full())
+        self.assertFalse(varlen_full_mask3.is_varlen_full())
+        self.assertFalse(varlen_full_mask4.is_varlen_full())
 
         # --------    varlen causal mask  --------- #
 
-        assert not varlen_full_mask1.is_varlen_causal()
-        assert not varlen_full_mask2.is_varlen_causal()
-        assert not varlen_full_mask3.is_varlen_causal()
-        assert not varlen_full_mask4.is_varlen_causal()
+        self.assertFalse(varlen_full_mask1.is_varlen_causal())
+        self.assertFalse(varlen_full_mask2.is_varlen_causal())
+        self.assertFalse(varlen_full_mask3.is_varlen_causal())
+        self.assertFalse(varlen_full_mask4.is_varlen_causal())
 
         attn_mask_type = [AttnMaskType.CAUSAL] * len(q_ranges)
 
@@ -443,12 +453,12 @@ class TestAttnMask:
             k_ranges=k_ranges4, attn_mask_type=attn_mask_type
         )
 
-        assert varlen_causal_mask1.is_varlen_causal()
-        assert not varlen_causal_mask2.is_varlen_causal()
-        assert not varlen_causal_mask3.is_varlen_causal()
-        assert not varlen_causal_mask4.is_varlen_causal()
+        self.assertTrue(varlen_causal_mask1.is_varlen_causal())
+        self.assertFalse(varlen_causal_mask2.is_varlen_causal())
+        self.assertFalse(varlen_causal_mask3.is_varlen_causal())
+        self.assertFalse(varlen_causal_mask4.is_varlen_causal())
 
-    def test_make_causal_mask(self, backend):
+    def test_make_causal_mask(self):
         from magi_attention.common import AttnMask
 
         # ---------    square causal mask     --------- #
@@ -478,8 +488,8 @@ class TestAttnMask:
             dtype=torch.int32,
             device="cpu",
         )
-        assert torch.equal(mask_tl, ref_mask)
-        assert torch.equal(mask_br, ref_mask)
+        self.assertTrue(torch.equal(mask_tl, ref_mask))
+        self.assertTrue(torch.equal(mask_br, ref_mask))
 
         # ---------    "tall" causal mask when sq > sk     --------- #
 
@@ -505,7 +515,7 @@ class TestAttnMask:
             device="cpu",
         )
 
-        assert torch.equal(mask_tl, ref_mask_tl)
+        self.assertTrue(torch.equal(mask_tl, ref_mask_tl))
 
         ref_mask_br = torch.tensor(
             [
@@ -529,7 +539,7 @@ class TestAttnMask:
             device="cpu",
         )
 
-        assert torch.equal(mask_br, ref_mask_br)
+        self.assertTrue(torch.equal(mask_br, ref_mask_br))
 
         # ---------    "fat" causal mask when sq < sk     --------- #
 
@@ -552,7 +562,7 @@ class TestAttnMask:
             device="cpu",
         )
 
-        assert torch.equal(mask_tl, ref_mask_tl)
+        self.assertTrue(torch.equal(mask_tl, ref_mask_tl))
 
         ref_mask_br = torch.tensor(
             [
@@ -573,9 +583,9 @@ class TestAttnMask:
             device="cpu",
         )
 
-        assert torch.equal(mask_br, ref_mask_br)
+        self.assertTrue(torch.equal(mask_br, ref_mask_br))
 
-    def test_from_ranges_invalid_mask_type(self, backend):
+    def test_from_ranges_invalid_mask_type(self):
         from magi_attention.common import AttnMask, AttnRanges
 
         q_ranges = AttnRanges.from_ranges([(0, 5)])
@@ -588,7 +598,7 @@ class TestAttnMask:
                     attn_mask_type=["invalid_type"],
                 )
 
-    def test_is_empty(self, backend):
+    def test_is_empty(self):
         from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
 
         q_ranges = AttnRanges.from_ranges([(0, 5)])
@@ -599,9 +609,9 @@ class TestAttnMask:
                 k_ranges=k_ranges,
                 attn_mask_type=[AttnMaskType.FULL],
             )
-        assert not mask.is_empty()
+        self.assertFalse(mask.is_empty())
 
-    def test_eq_with_non_mask(self, backend):
+    def test_eq_with_non_mask(self):
         from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
 
         q_ranges = AttnRanges.from_ranges([(0, 3)])
@@ -612,11 +622,15 @@ class TestAttnMask:
                 k_ranges=k_ranges,
                 attn_mask_type=[AttnMaskType.FULL],
             )
-        assert mask != "not a mask"
-        assert mask != 42
+        self.assertNotEqual(mask, "not a mask")
+        self.assertNotEqual(mask, 42)
 
-    def test_make_causal_mask_invalid_align(self, backend):
+    def test_make_causal_mask_invalid_align(self):
         from magi_attention.common import AttnMask
 
         with pytest.raises(ValueError, match="Invalid alignment"):
             AttnMask.make_causal_mask(5, 5, align="center")
+
+
+if __name__ == "__main__":
+    unittest.main()

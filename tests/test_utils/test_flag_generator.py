@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
 from typing import Any
 
 import pytest
@@ -264,7 +265,7 @@ class TestFlagGenerator(DistTestBase):
                 print(f"For [{name}]: Comb {idx} => {flag_comb}")
 
 
-class TestFlagGeneratorNoValidComb:
+class TestFlagGeneratorNoValidComb(unittest.TestCase):
     """Tests that do not require distributed environment."""
 
     def test_get_next_valid_comb_no_valid_raises(self):

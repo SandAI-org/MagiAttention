@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
+
 import pytest
 
 from magi_attention.common import AttnRange, AttnRanges
@@ -34,17 +36,17 @@ def _make_slice(slice_id, mask_type_str, q_start, q_end, k_start, k_end):
 
 
 @pytest.mark.arch_independent
-class TestAttnSlice:
+class TestAttnSlice(unittest.TestCase):
     def test_area_full_mask(self):
         s = _make_slice(0, "full", 0, 10, 0, 20)
-        assert s.area == 200
+        self.assertEqual(s.area, 200)
 
     def test_area_causal_mask(self):
         s = _make_slice(0, "causal", 0, 5, 0, 10)
-        assert s.area == (2 * 10 - 5 + 1) * 5 // 2
+        self.assertEqual(s.area, (2 * 10 - 5 + 1) * 5 // 2)
 
         s_tri = _make_slice(1, "causal", 0, 10, 0, 5)
-        assert s_tri.area == (1 + 5) * 5 // 2
+        self.assertEqual(s_tri.area, (1 + 5) * 5 // 2)
 
     def test_area_unsupported_mask_type(self):
         s = AttnSlice(
@@ -59,29 +61,29 @@ class TestAttnSlice:
     def test_area_setter(self):
         s = _make_slice(0, "full", 0, 10, 0, 10)
         s.area = 999
-        assert s.area == 999
+        self.assertEqual(s.area, 999)
 
     def test_iou_with(self):
         s1 = _make_slice(0, "full", 0, 10, 0, 10)
         s2 = _make_slice(1, "full", 0, 10, 5, 15)
         iou = s1.iou_with(s2)
-        assert iou == 5 / 15
+        self.assertEqual(iou, 5 / 15)
 
     def test_eq_type_guard(self):
         s = _make_slice(0, "full", 0, 10, 0, 10)
-        assert s != "not a slice"
-        assert s != 42
+        self.assertNotEqual(s, "not a slice")
+        self.assertNotEqual(s, 42)
 
 
 @pytest.mark.arch_independent
-class TestMultiKAttnSlice:
+class TestMultiKAttnSlice(unittest.TestCase):
     def test_area_full_mask(self):
         s = MultiKAttnSlice(
             q_range=AttnRange(0, 10),
             k_ranges=AttnRanges.from_ranges([(0, 5), (10, 20)]),
             mask_types=[AttnMaskType(v) for v in ["full", "full"]],
         )
-        assert s.area == 10 * 5 + 10 * 10
+        self.assertEqual(s.area, 10 * 5 + 10 * 10)
 
     def test_area_unsupported_mask_type(self):
         s = MultiKAttnSlice(
@@ -99,11 +101,11 @@ class TestMultiKAttnSlice:
             mask_types=[AttnMaskType("full")],
         )
         s.area = 777
-        assert s.area == 777
+        self.assertEqual(s.area, 777)
 
 
 @pytest.mark.arch_independent
-class TestAttnChunk:
+class TestAttnChunk(unittest.TestCase):
     def test_iou_with_overlap(self):
         s1 = _make_slice(0, "full", 0, 10, 0, 20)
         s2 = _make_slice(1, "full", 0, 10, 10, 30)
@@ -112,20 +114,20 @@ class TestAttnChunk:
 
         # intersect_size_with = 10, union_size_with = 20 + 20 = 40
         iou = c1.iou_with(c2)
-        assert iou == pytest.approx(10 / 40)
+        self.assertEqual(iou, pytest.approx(10 / 40))
 
     def test_iou_empty_k_ranges(self):
         c = AttnChunk(chunk_id=0, q_slices=[])
-        assert c.iou == 0.0
+        self.assertEqual(c.iou, 0.0)
 
     def test_eq_type_guard(self):
         c = AttnChunk(chunk_id=0, q_slices=[])
-        assert c != "not a chunk"
-        assert c != 42
+        self.assertNotEqual(c, "not a chunk")
+        self.assertNotEqual(c, 42)
 
 
 @pytest.mark.arch_independent
-class TestAttnBucket:
+class TestAttnBucket(unittest.TestCase):
     def test_iou_with_overlap(self):
         s1 = _make_slice(0, "full", 0, 10, 0, 20)
         s2 = _make_slice(1, "full", 0, 10, 10, 30)
@@ -136,13 +138,17 @@ class TestAttnBucket:
 
         # intersect_size_with = 10, union_size_with = 20 + 20 = 40
         iou = b1.iou_with(b2)
-        assert iou == pytest.approx(10 / 40)
+        self.assertEqual(iou, pytest.approx(10 / 40))
 
     def test_iou_empty(self):
         b = AttnBucket(cp_rank=0, q_chunks=[])
-        assert b.iou == 0.0
+        self.assertEqual(b.iou, 0.0)
 
     def test_eq_type_guard(self):
         b = AttnBucket(cp_rank=0, q_chunks=[])
-        assert b != "not a bucket"
-        assert b != 42
+        self.assertNotEqual(b, "not a bucket")
+        self.assertNotEqual(b, 42)
+
+
+if __name__ == "__main__":
+    unittest.main()

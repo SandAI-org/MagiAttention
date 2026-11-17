@@ -12,51 +12,82 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
+from types import ModuleType, SimpleNamespace
+
 import pytest
+
+from magi_attention.common.enum import AttnMaskType as PyAttnMaskType
+from magi_attention.common.range import AttnRange as PyAttnRange
+from magi_attention.common.ranges import AttnRanges as PyAttnRanges
+from magi_attention.common.rectangle import AttnRectangle as PyAttnRectangle
+from magi_attention.common.rectangles import AttnRectangles as PyAttnRectangles
+
+cpp_backend: ModuleType | None
+try:
+    from magi_attention import magi_attn_ext as cpp_backend
+except ImportError:
+    cpp_backend = None
 
 
 @pytest.mark.arch_independent
-class TestAttnRange:
-    def test_simple_properties(self, backend):
-        from magi_attention.common import AttnRange
+class TestAttnRange(unittest.TestCase):
+    backend = "python"
+
+    def setUp(self):
+        if self.backend == "cpp":
+            if cpp_backend is None:
+                self.skipTest("magi_attn_ext not available")
+            self.types = cpp_backend
+        else:
+            self.types = SimpleNamespace(
+                AttnRange=PyAttnRange,
+                AttnRanges=PyAttnRanges,
+                AttnMaskType=PyAttnMaskType,
+                AttnRectangle=PyAttnRectangle,
+                AttnRectangles=PyAttnRectangles,
+            )
+
+    def test_simple_properties(self):
+        AttnRange = self.types.AttnRange
 
         # ---------    init an attn range     --------- #
 
         attn_range = AttnRange(0, 10)
-        assert attn_range.start == 0
-        assert attn_range.end == 10
-        assert attn_range.seqlen == 10
-        assert len(attn_range) == 10
-        assert not attn_range.is_empty()
+        self.assertEqual(attn_range.start, 0)
+        self.assertEqual(attn_range.end, 10)
+        self.assertEqual(attn_range.seqlen, 10)
+        self.assertEqual(len(attn_range), 10)
+        self.assertFalse(attn_range.is_empty())
 
         # ---------    change its start     --------- #
 
         attn_range.start = 4
-        assert attn_range.start == 4
-        assert attn_range.end == 10
-        assert attn_range.seqlen == 6
-        assert attn_range.seqlen == 6
-        assert len(attn_range) == 6
+        self.assertEqual(attn_range.start, 4)
+        self.assertEqual(attn_range.end, 10)
+        self.assertEqual(attn_range.seqlen, 6)
+        self.assertEqual(attn_range.seqlen, 6)
+        self.assertEqual(len(attn_range), 6)
 
         # ---------    change its end     --------- #
 
         attn_range.end = 12
-        assert attn_range.start == 4
-        assert attn_range.end == 12
-        assert attn_range.seqlen == 8
-        assert attn_range.seqlen == 8
-        assert len(attn_range) == 8
+        self.assertEqual(attn_range.start, 4)
+        self.assertEqual(attn_range.end, 12)
+        self.assertEqual(attn_range.seqlen, 8)
+        self.assertEqual(attn_range.seqlen, 8)
+        self.assertEqual(len(attn_range), 8)
 
         # ---------    test empty range     --------- #
 
         attn_range.start = 5
         attn_range.end = 5
-        assert attn_range.start == 5
-        assert attn_range.end == 5
-        assert attn_range.seqlen == 0
-        assert attn_range.seqlen == 0
-        assert len(attn_range) == 0
-        assert attn_range.is_empty()
+        self.assertEqual(attn_range.start, 5)
+        self.assertEqual(attn_range.end, 5)
+        self.assertEqual(attn_range.seqlen, 0)
+        self.assertEqual(attn_range.seqlen, 0)
+        self.assertEqual(len(attn_range), 0)
+        self.assertTrue(attn_range.is_empty())
 
         # ---------    test read-only properties     --------- #
 
@@ -68,28 +99,26 @@ class TestAttnRange:
 
         # ---------    test range equal with some other simple APIs    --------- #
         attn_range2 = AttnRange(7, 9)
-        assert attn_range != attn_range2
+        self.assertNotEqual(attn_range, attn_range2)
 
         attn_range3 = AttnRange(0, 0)
-        assert attn_range3.is_empty()
-        assert attn_range != attn_range3  # both empty, but not equal
+        self.assertTrue(attn_range3.is_empty())
+        self.assertNotEqual(attn_range, attn_range3)
 
         attn_range4 = attn_range3.offset(5)
-        assert attn_range4.is_empty()
-        assert attn_range == attn_range4
+        self.assertTrue(attn_range4.is_empty())
+        self.assertEqual(attn_range, attn_range4)
 
         naive_attn_range4 = attn_range4.to_naive_range()
-        assert naive_attn_range4 == (5, 5)
-        assert (
-            attn_range != naive_attn_range4
-        )  # the same content, but not the same type
+        self.assertEqual(naive_attn_range4, (5, 5))
+        self.assertNotEqual(attn_range, naive_attn_range4)
         attn_range4_from_naive = AttnRange.from_range(
             naive_attn_range4
         )  # another contructor, from naive range
-        assert attn_range == attn_range4_from_naive
+        self.assertEqual(attn_range, attn_range4_from_naive)
 
-    def test_set_ops(self, backend):
-        from magi_attention.common import AttnRange
+    def test_set_ops(self):
+        AttnRange = self.types.AttnRange
 
         # ---------    init several attn ranges     --------- #
         # the attn ranges below can be mapped into the axis as below:
@@ -107,46 +136,46 @@ class TestAttnRange:
 
         # ---------    test is subrange of     --------- #
 
-        assert attn_range2.is_subrange_of(attn_range1)
-        assert not attn_range3.is_subrange_of(attn_range1)
-        assert not attn_range5.is_subrange_of(attn_range1)
+        self.assertTrue(attn_range2.is_subrange_of(attn_range1))
+        self.assertFalse(attn_range3.is_subrange_of(attn_range1))
+        self.assertFalse(attn_range5.is_subrange_of(attn_range1))
 
         # ---------    test intersect     --------- #
 
-        assert attn_range1.intersect(attn_range2) == attn_range2
-        assert attn_range1.intersect(attn_range4).is_empty()
-        assert attn_range1.intersect(attn_range5) == AttnRange(8, 9)
-        assert attn_range4.intersect(attn_range5) == AttnRange(10, 12)
-        assert attn_range4.is_overlap_with(attn_range5)
-        assert not attn_range2.is_overlap_with(attn_range5)
+        self.assertEqual(attn_range1.intersect(attn_range2), attn_range2)
+        self.assertTrue(attn_range1.intersect(attn_range4).is_empty())
+        self.assertEqual(attn_range1.intersect(attn_range5), AttnRange(8, 9))
+        self.assertEqual(attn_range4.intersect(attn_range5), AttnRange(10, 12))
+        self.assertTrue(attn_range4.is_overlap_with(attn_range5))
+        self.assertFalse(attn_range2.is_overlap_with(attn_range5))
 
         # ---------    test diff by     --------- #
 
         # case1: two disjoint ranges
         attn_diff_ranges_13 = attn_range1.diff_by(attn_range3)
-        assert len(attn_diff_ranges_13) == 1
-        assert attn_diff_ranges_13[0] == attn_range3
+        self.assertEqual(len(attn_diff_ranges_13), 1)
+        self.assertEqual(attn_diff_ranges_13[0], attn_range3)
         attn_diff_ranges_31 = attn_range3.diff_by(attn_range1)
-        assert len(attn_diff_ranges_31) == 1
-        assert attn_diff_ranges_31[0] == attn_range1
+        self.assertEqual(len(attn_diff_ranges_31), 1)
+        self.assertEqual(attn_diff_ranges_31[0], attn_range1)
 
         # case2: range and its sub range
-        assert attn_range1.diff_by(attn_range2) == []
+        self.assertEqual(attn_range1.diff_by(attn_range2), [])
         attn_diff_ranges_21 = attn_range2.diff_by(attn_range1)
-        assert len(attn_diff_ranges_21) == 2
-        assert attn_diff_ranges_21[0] == AttnRange(2, 4)
-        assert attn_diff_ranges_21[1] == AttnRange(7, 9)
+        self.assertEqual(len(attn_diff_ranges_21), 2)
+        self.assertEqual(attn_diff_ranges_21[0], AttnRange(2, 4))
+        self.assertEqual(attn_diff_ranges_21[1], AttnRange(7, 9))
 
         # case3: overlapped ranges but not case2
         attn_diff_ranges_15 = attn_range1.diff_by(attn_range5)
-        assert len(attn_diff_ranges_15) == 1
-        assert attn_diff_ranges_15[0] == AttnRange(9, 12)
+        self.assertEqual(len(attn_diff_ranges_15), 1)
+        self.assertEqual(attn_diff_ranges_15[0], AttnRange(9, 12))
         attn_diff_ranges_51 = attn_range5.diff_by(attn_range1)
-        assert len(attn_diff_ranges_51) == 1
-        assert attn_diff_ranges_51[0] == AttnRange(2, 8)
+        self.assertEqual(len(attn_diff_ranges_51), 1)
+        self.assertEqual(attn_diff_ranges_51[0], AttnRange(2, 8))
 
-    def test_truncate(self, backend):
-        from magi_attention.common import AttnRange
+    def test_truncate(self):
+        AttnRange = self.types.AttnRange
 
         attn_range = AttnRange(9, 15)
 
@@ -156,7 +185,7 @@ class TestAttnRange:
             start=trunc_start,
             end=trunc_end,
         )
-        assert trunc_range == attn_range
+        self.assertEqual(trunc_range, attn_range)
 
         # ---------    case2: with dummy truncate     --------- #
         trunc_start, trunc_end = 0, 20
@@ -164,7 +193,7 @@ class TestAttnRange:
             start=trunc_start,
             end=trunc_end,
         )
-        assert trunc_range == attn_range
+        self.assertEqual(trunc_range, attn_range)
 
         # ---------    case3: with left truncate     --------- #
         trunc_start, trunc_end = 11, None
@@ -172,7 +201,7 @@ class TestAttnRange:
             start=trunc_start,
             end=trunc_end,
         )
-        assert trunc_range == AttnRange(11, 15)
+        self.assertEqual(trunc_range, AttnRange(11, 15))
 
         # ---------    case4: with right truncate     --------- #
         trunc_start, trunc_end = None, 13
@@ -180,7 +209,7 @@ class TestAttnRange:
             start=trunc_start,
             end=trunc_end,
         )
-        assert trunc_range == AttnRange(9, 13)
+        self.assertEqual(trunc_range, AttnRange(9, 13))
 
         # ---------    case5: with left+right truncate     --------- #
         trunc_start, trunc_end = 11, 13
@@ -188,7 +217,7 @@ class TestAttnRange:
             start=trunc_start,
             end=trunc_end,
         )
-        assert trunc_range == AttnRange(11, 13)
+        self.assertEqual(trunc_range, AttnRange(11, 13))
 
         # -----    case6: with left+right truncate but too left   ---- #
         trunc_start, trunc_end = 1, 7
@@ -196,7 +225,7 @@ class TestAttnRange:
             start=trunc_start,
             end=trunc_end,
         )
-        assert trunc_range.is_empty()
+        self.assertTrue(trunc_range.is_empty())
 
         # -----    case7: with left+right truncate but too right   ---- #
         trunc_start, trunc_end = 17, 23
@@ -204,32 +233,32 @@ class TestAttnRange:
             start=trunc_start,
             end=trunc_end,
         )
-        assert trunc_range.is_empty()
+        self.assertTrue(trunc_range.is_empty())
 
-    def test_validation_methods(self, backend):
-        from magi_attention.common import AttnRange
+    def test_validation_methods(self):
+        AttnRange = self.types.AttnRange
         from magi_attention.common.range import RangeError
 
         # ---------    test is_valid_close (closed interval)     --------- #
         attn_range = AttnRange(5, 10)
 
         # Valid cases for closed interval [start, end]
-        assert attn_range.is_valid_close()  # 5 <= 10
-        assert attn_range.is_valid_close(3, 8)  # 3 <= 8
-        assert attn_range.is_valid_close(7, 7)  # 7 <= 7
+        self.assertTrue(attn_range.is_valid_close())
+        self.assertTrue(attn_range.is_valid_close(3, 8))
+        self.assertTrue(attn_range.is_valid_close(7, 7))
 
         # Invalid cases for closed interval
-        assert not attn_range.is_valid_close(8, 6)  # 8 > 6
+        self.assertFalse(attn_range.is_valid_close(8, 6))
 
         # ---------    test is_valid_open (open interval)     --------- #
 
         # Valid cases for open interval [start, end)
-        assert attn_range.is_valid_open()  # 5 < 10
-        assert attn_range.is_valid_open(3, 8)  # 3 < 8
+        self.assertTrue(attn_range.is_valid_open())
+        self.assertTrue(attn_range.is_valid_open(3, 8))
 
         # Invalid cases for open interval
-        assert not attn_range.is_valid_open(7, 7)  # 7 >= 7
-        assert not attn_range.is_valid_open(8, 6)  # 8 > 6
+        self.assertFalse(attn_range.is_valid_open(7, 7))
+        self.assertFalse(attn_range.is_valid_open(8, 6))
 
         # ---------    test check_valid with closed interval rule     --------- #
 
@@ -242,105 +271,113 @@ class TestAttnRange:
         with pytest.raises(RangeError):
             attn_range.check_valid(8, 6)
 
-    def test_offset_and_operations(self, backend):
-        from magi_attention.common import AttnRange
+    def test_offset_and_operations(self):
+        AttnRange = self.types.AttnRange
 
         attn_rect_range = AttnRange(3, 8)
 
         # ---------    test offset     --------- #
         offset_range = attn_rect_range.offset(5)
-        assert offset_range.start == 8
-        assert offset_range.end == 13
-        assert isinstance(offset_range, AttnRange)
+        self.assertEqual(offset_range.start, 8)
+        self.assertEqual(offset_range.end, 13)
+        self.assertTrue(isinstance(offset_range, AttnRange))
 
         # ---------    test negative offset     --------- #
         neg_offset_range = attn_rect_range.offset(-2)
-        assert neg_offset_range.start == 1
-        assert neg_offset_range.end == 6
-        assert isinstance(neg_offset_range, AttnRange)
+        self.assertEqual(neg_offset_range.start, 1)
+        self.assertEqual(neg_offset_range.end, 6)
+        self.assertTrue(isinstance(neg_offset_range, AttnRange))
 
         # ---------    test zero offset     --------- #
         zero_offset_range = attn_rect_range.offset(0)
-        assert zero_offset_range == attn_rect_range
-        assert isinstance(zero_offset_range, AttnRange)
+        self.assertEqual(zero_offset_range, attn_rect_range)
+        self.assertTrue(isinstance(zero_offset_range, AttnRange))
 
-    def test_edge_cases(self, backend):
-        from magi_attention.common import AttnRange
+    def test_edge_cases(self):
+        AttnRange = self.types.AttnRange
 
         # ---------    test zero length range     --------- #
         zero_range = AttnRange(5, 5)
-        assert zero_range.is_empty()
-        assert zero_range.seqlen == 0
-        assert len(zero_range) == 0
+        self.assertTrue(zero_range.is_empty())
+        self.assertEqual(zero_range.seqlen, 0)
+        self.assertEqual(len(zero_range), 0)
 
         # ---------    test single element range     --------- #
         single_range = AttnRange(5, 6)
-        assert not single_range.is_empty()
-        assert single_range.seqlen == 1
-        assert len(single_range) == 1
+        self.assertFalse(single_range.is_empty())
+        self.assertEqual(single_range.seqlen, 1)
+        self.assertEqual(len(single_range), 1)
 
-    def test_from_range_with_check(self, backend):
-        from magi_attention.common import AttnRange
+    def test_from_range_with_check(self):
+        AttnRange = self.types.AttnRange
 
         r = AttnRange.from_range((0, 10), check=True)
-        assert r == AttnRange(0, 10)
+        self.assertEqual(r, AttnRange(0, 10))
 
         r2 = AttnRange.from_range(AttnRange(3, 7), check=True)
-        assert r2 == AttnRange(3, 7)
+        self.assertEqual(r2, AttnRange(3, 7))
 
         r_empty = AttnRange.from_range((5, 5), check=True)
-        assert r_empty.is_empty()
+        self.assertTrue(r_empty.is_empty())
 
-    def test_intersect_size(self, backend):
-        from magi_attention.common import AttnRange
+    def test_intersect_size(self):
+        AttnRange = self.types.AttnRange
 
         r1 = AttnRange(0, 10)
         r2 = AttnRange(5, 15)
-        assert r1.intersect_size(r2) == 5
+        self.assertEqual(r1.intersect_size(r2), 5)
 
         r3 = AttnRange(20, 30)
-        assert r1.intersect_size(r3) == 0
+        self.assertEqual(r1.intersect_size(r3), 0)
 
         r4 = AttnRange(3, 7)
-        assert r1.intersect_size(r4) == 4
+        self.assertEqual(r1.intersect_size(r4), 4)
 
-        assert r1.intersect_size(r1) == 10
+        self.assertEqual(r1.intersect_size(r1), 10)
 
-    def test_union(self, backend):
-        from magi_attention.common import AttnRange
+    def test_union(self):
+        AttnRange = self.types.AttnRange
 
         r1 = AttnRange(0, 10)
         r2 = AttnRange(5, 15)
         result = r1.union(r2)
-        assert len(result) == 1
-        assert result[0] == AttnRange(0, 15)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], AttnRange(0, 15))
 
         r3 = AttnRange(20, 30)
         result_disjoint = r1.union(r3)
-        assert len(result_disjoint) == 2
+        self.assertEqual(len(result_disjoint), 2)
 
         r_sub = AttnRange(3, 7)
         result_sub = r1.union(r_sub)
-        assert len(result_sub) == 1
-        assert result_sub[0] == r1
+        self.assertEqual(len(result_sub), 1)
+        self.assertEqual(result_sub[0], r1)
 
         result_sub_rev = r_sub.union(r1)
-        assert len(result_sub_rev) == 1
-        assert result_sub_rev[0] == r1
+        self.assertEqual(len(result_sub_rev), 1)
+        self.assertEqual(result_sub_rev[0], r1)
 
         empty = AttnRange(5, 5)
         result_with_empty = r1.union(empty)
-        assert len(result_with_empty) == 2
+        self.assertEqual(len(result_with_empty), 2)
 
-    def test_union_size(self, backend):
-        from magi_attention.common import AttnRange
+    def test_union_size(self):
+        AttnRange = self.types.AttnRange
 
         r1 = AttnRange(0, 10)
         r2 = AttnRange(5, 15)
-        assert r1.union_size(r2) == 15
+        self.assertEqual(r1.union_size(r2), 15)
 
         r3 = AttnRange(20, 30)
-        assert r1.union_size(r3) == 20
+        self.assertEqual(r1.union_size(r3), 20)
 
         r_sub = AttnRange(3, 7)
-        assert r1.union_size(r_sub) == 10
+        self.assertEqual(r1.union_size(r_sub), 10)
+
+
+class TestCppAttnRange(TestAttnRange):
+    backend = "cpp"
+
+
+if __name__ == "__main__":
+    unittest.main()
