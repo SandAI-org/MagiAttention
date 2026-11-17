@@ -53,61 +53,6 @@ Extensions to provide supplementary utilities based on MagiAttention.
   ```
 
 
-## DSA Interface 🧪
-
-### Unitest
-
-```bash
-cd MagiAttention/extensions
-
-pytest tests/test_dsa_interface.py
-```
-
-### Basic Usage for DSA Interface
-
-#### Basic Usage for dsa_attn_func
-
-```python
-import torch
-from magi_attn_extensions import dsa_attn_func
-
-sq, skv = 256, 512
-nhq, nhkv, hd = 16, 4, 128
-topk = 32
-dtype = torch.bfloat16
-device = torch.cuda.current_device()
-backend = "flex"  # options: {"flex", "ffa_block_sparse", "ffa_index_sparse", "sdpa"}
-
-q = torch.randn((sq, nhq, hd), dtype=dtype, device=device)
-k = torch.randn((skv, nhkv, hd), dtype=dtype, device=device)
-v = torch.randn((skv, nhkv, hd), dtype=dtype, device=device)
-
-# construct random index_map: (nhkv, sq, topk)
-# each Q token corresponds to topk K tokens for each KV head
-index_map = torch.stack(
-    [
-        torch.stack(
-            [torch.randperm(skv, device=device)[:topk] for _ in range(sq)]
-        )
-        for _ in range(nhkv)
-    ]
-).to(torch.int32)
-
-softmax_scale = hd**-0.5
-
-out, lse = dsa_attn_func(
-    q=q,
-    k=k,
-    v=v,
-    index_map=index_map,
-    softmax_scale=softmax_scale,
-    backend=backend,
-)
-# out: (sq, nhq, hd)
-# lse: (sq, nhq)
-```
-
-
 ## FlashAttention with Attention Sink 🚀
 
 ### Unitest

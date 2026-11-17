@@ -73,7 +73,6 @@ TEST_MODULES_WITH_KERNEL_SPECS = [
     "tests.test_attn.test_block_sparse",
     "tests.test_attn.test_index_sparse",
     "tests.test_pipeline",
-    "extensions.tests.test_dsa_interface",
 ]
 
 _DEFAULT_ARCH = (9, 0)
