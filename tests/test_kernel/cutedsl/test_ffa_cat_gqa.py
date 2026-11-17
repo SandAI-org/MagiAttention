@@ -21,7 +21,7 @@ from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
+from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -34,6 +34,7 @@ from magi_attention.testing.cutedsl_utils import (
 )
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.utils import switch_envvars
+from magi_attention.utils.arch import is_blackwell
 
 
 @contextmanager
@@ -55,8 +56,8 @@ class TestFfaCatGqa(DistTestBase):
     def setUp(self) -> None:
         # Skip in the parent before DistTestBase spawns ranks, including ranks
         # with no assigned parameter cases that would otherwise reach a barrier.
-        if not torch.cuda.is_available() or get_device_arch()[1] not in (10, 11):
-            self.skipTest("cat_gqa requires SM100/SM110")
+        if not is_blackwell():
+            self.skipTest("cat_gqa requires Blackwell")
         super().setUp()
 
     @property

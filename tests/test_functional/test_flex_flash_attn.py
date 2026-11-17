@@ -44,10 +44,11 @@ from magi_attention.testing.precision import (
     extract_mismatch_threshold,
 )
 from magi_attention.utils import is_list_value_any, make_attn_mask_from_ffa_args
+from magi_attention.utils.arch import is_hopper
 
 
 @unittest.skipIf(
-    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    not is_hopper(),
     "This test targets the C++ FFA, which supports only sm90.",
 )
 class TestFlexFlashAttn(DistTestBase):

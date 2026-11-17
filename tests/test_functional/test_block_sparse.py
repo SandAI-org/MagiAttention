@@ -21,12 +21,7 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
-from magi_attention.utils.sparse_utils import (
-    generate_block_sparse_pattern,
-    generate_ranges_from_block_mask_triton,
-    get_sdpa_mask_from_block_sparse_mask,
-)
-from tests.test_attn.sparse_test_utils import (
+from magi_attention.testing.sparse import (
     SparsePackLayout,
     compare_sdpa_bwd_all,
     compare_sdpa_fwd,
@@ -37,6 +32,12 @@ from tests.test_attn.sparse_test_utils import (
     sdpa_ref_output,
     unpack_ffa_output,
 )
+from magi_attention.utils.arch import is_hopper
+from magi_attention.utils.sparse_utils import (
+    generate_block_sparse_pattern,
+    generate_ranges_from_block_mask_triton,
+    get_sdpa_mask_from_block_sparse_mask,
+)
 
 # ═══════════════════════════════════════════════════════════
 # TestBlockSparseSweep — Classic CI sweep
@@ -44,7 +45,7 @@ from tests.test_attn.sparse_test_utils import (
 
 
 @unittest.skipIf(
-    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    not is_hopper(),
     "This test targets the C++ FFA, which supports only sm90.",
 )
 class TestBlockSparseSweep(DistTestBase):
@@ -205,7 +206,7 @@ class TestBlockSparseSweep(DistTestBase):
 
 
 @unittest.skipIf(
-    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    not is_hopper(),
     "This test targets the C++ FFA, which supports only sm90.",
 )
 class TestBlockSparseComprehensiveSweep(DistTestBase):

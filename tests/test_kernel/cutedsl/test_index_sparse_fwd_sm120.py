@@ -55,27 +55,25 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm120_index import (
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.index_sparse import (
+    FwdOutLse,
     Sm120IndexGap,
     Sm120IndexUnsupportedError,
     ffa_fwd_sm120_index_sm90_layout,
     index_sparse_ref_fwd,
+    run_index_sparse_config,
+    run_index_sparse_sweep,
 )
+from magi_attention.testing.sparse import SEED
 from magi_attention.utils import set_random_seed
 from magi_attention.utils.arch import is_sm
-from tests.test_attn.sparse_test_utils import SEED
-from tests.test_kernel.cutedsl.test_index_sparse_bwd_sm100 import (
-    FwdOutLse,
-    _run_index_sparse_config,
-    _run_sweep,
-)
 
 require_5090 = unittest.skipUnless(is_sm(120, 121), "requires SM120/121")
 
 _run_fwd_config = partial(
-    _run_index_sparse_config, fwd_fn=ffa_fwd_sm120_index_sm90_layout, bwd_fn=None
+    run_index_sparse_config, fwd_fn=ffa_fwd_sm120_index_sm90_layout, bwd_fn=None
 )
 _run_fwd_sweep = partial(
-    _run_sweep, fwd_fn=ffa_fwd_sm120_index_sm90_layout, bwd_fn=None
+    run_index_sparse_sweep, fwd_fn=ffa_fwd_sm120_index_sm90_layout, bwd_fn=None
 )
 
 # Positions of the compile-key flags of ffa_fwd_sm120_index:
@@ -96,7 +94,7 @@ def _compile_keys() -> list[tuple]:
 class TestIndexSparseFwdSm120Sweep(DistTestBase):
     """sm90 Classic sweep: q_seqlen × kv_seqlen × topk, MQA128, D=128, kbs=1.
 
-    Replays the configs of ``tests/test_attn/test_index_sparse.py`` through
+    Replays the configs of ``tests/test_functional/test_index_sparse.py`` through
     ``ffa_fwd_sm120_index_sm90_layout``.
     """
 
@@ -248,7 +246,7 @@ class TestIndexSparseFwdSm120Adapter(unittest.TestCase):
             "topk": 2 * FFAFwdSm120Index.tile_n,
             "q_block_size": 16,
         }
-        _run_index_sparse_config(
+        run_index_sparse_config(
             self.device,
             config,
             fwd_fn=partial(ffa_fwd_sm120_index_sm90_layout, assume_valid_ids=True),
@@ -288,7 +286,7 @@ class TestIndexSparseFwdSm120Adapter(unittest.TestCase):
 
 @require_5090
 class TestIndexSparseFwdSm120Comparison(unittest.TestCase):
-    """A PASS of ``_run_index_sparse_config`` needs the right out and lse: shifted ones fail."""
+    """A PASS of ``run_index_sparse_config`` needs the right out and lse: shifted ones fail."""
 
     @property
     def device(self):
@@ -311,7 +309,7 @@ class TestIndexSparseFwdSm120Comparison(unittest.TestCase):
             "q_block_size": 16,
         }
         with self.assertRaises(AssertionError) as ctx:
-            _run_index_sparse_config(
+            run_index_sparse_config(
                 self.device, config, fwd_fn=shifted_out_fwd, bwd_fn=None
             )
         self.assertIn("=> fwd_out", str(ctx.exception))
@@ -333,7 +331,7 @@ class TestIndexSparseFwdSm120Comparison(unittest.TestCase):
             "q_block_size": 16,
         }
         with self.assertRaises(AssertionError) as ctx:
-            _run_index_sparse_config(
+            run_index_sparse_config(
                 self.device, config, fwd_fn=shifted_lse_fwd, bwd_fn=None
             )
         self.assertIn("=> lse", str(ctx.exception))

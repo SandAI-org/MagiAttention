@@ -29,28 +29,26 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm100_index import (
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.index_sparse import (
+    FwdOutLse,
     Sm100IndexGap,
     Sm100IndexUnsupportedError,
     ffa_fwd_sm100_index_sm90_layout,
     index_sparse_ref_fwd,
+    run_index_sparse_config,
+    run_index_sparse_sweep,
 )
+from magi_attention.testing.sparse import SEED
 from magi_attention.utils import set_random_seed
 from magi_attention.utils.arch import is_sm
-from tests.test_attn.sparse_test_utils import SEED
-from tests.test_kernel.cutedsl.test_index_sparse_bwd_sm100 import (
-    FwdOutLse,
-    _run_index_sparse_config,
-    _run_sweep,
-)
 
 require_blackwell = unittest.skipUnless(is_sm(100, 103), "requires Blackwell SM100/103")
 
 # Forward only: every test of this file passes bwd_fn=None.
 _run_fwd_config = partial(
-    _run_index_sparse_config, fwd_fn=ffa_fwd_sm100_index_sm90_layout, bwd_fn=None
+    run_index_sparse_config, fwd_fn=ffa_fwd_sm100_index_sm90_layout, bwd_fn=None
 )
 _run_fwd_sweep = partial(
-    _run_sweep, fwd_fn=ffa_fwd_sm100_index_sm90_layout, bwd_fn=None
+    run_index_sparse_sweep, fwd_fn=ffa_fwd_sm100_index_sm90_layout, bwd_fn=None
 )
 
 
@@ -63,7 +61,7 @@ _run_fwd_sweep = partial(
 class TestIndexSparseFwdSm100Sweep(DistTestBase):
     """sm90 Classic sweep: q_seqlen × kv_seqlen × topk, MQA128, D=128, kbs=1.
 
-    Replays the configs of ``tests/test_attn/test_index_sparse.py`` through
+    Replays the configs of ``tests/test_functional/test_index_sparse.py`` through
     ``ffa_fwd_sm100_index_sm90_layout``: out against SDPA with the sm90 forward
     tolerance, lse against the fp32 gather ``index_sparse_ref_fwd``.
     """
@@ -217,7 +215,7 @@ class TestIndexSparseFwdSm100Adapter(unittest.TestCase):
             "topk": 2 * FFAFwdSm100Index.tile_n,
             "q_block_size": 16,
         }
-        _run_index_sparse_config(
+        run_index_sparse_config(
             self.device,
             config,
             fwd_fn=partial(ffa_fwd_sm100_index_sm90_layout, assume_valid_ids=True),
@@ -254,7 +252,7 @@ class TestIndexSparseFwdSm100Adapter(unittest.TestCase):
 
 @require_blackwell
 class TestIndexSparseFwdSm100Comparison(unittest.TestCase):
-    """A PASS of ``_run_index_sparse_config`` needs the right out and lse: shifted ones fail."""
+    """A PASS of ``run_index_sparse_config`` needs the right out and lse: shifted ones fail."""
 
     @property
     def device(self):
@@ -277,7 +275,7 @@ class TestIndexSparseFwdSm100Comparison(unittest.TestCase):
             "q_block_size": 16,
         }
         with self.assertRaises(AssertionError) as ctx:
-            _run_index_sparse_config(
+            run_index_sparse_config(
                 self.device, config, fwd_fn=shifted_out_fwd, bwd_fn=None
             )
         self.assertIn("=> fwd_out", str(ctx.exception))
@@ -299,7 +297,7 @@ class TestIndexSparseFwdSm100Comparison(unittest.TestCase):
             "q_block_size": 16,
         }
         with self.assertRaises(AssertionError) as ctx:
-            _run_index_sparse_config(
+            run_index_sparse_config(
                 self.device, config, fwd_fn=shifted_lse_fwd, bwd_fn=None
             )
         self.assertIn("=> lse", str(ctx.exception))
@@ -504,7 +502,7 @@ class TestIndexSparseFwdSm100EndToEnd(unittest.TestCase):
             "topk": 128,
             "q_block_size": 16,
         }
-        _run_index_sparse_config(
+        run_index_sparse_config(
             self.device, config, fwd_fn=ffa_fwd_sm100_index_sm90_layout
         )
 
@@ -519,7 +517,7 @@ class TestIndexSparseFwdSm100EndToEnd(unittest.TestCase):
             "q_block_size": 16,
             "keep_kv_heads": True,
         }
-        _run_index_sparse_config(
+        run_index_sparse_config(
             self.device, config, fwd_fn=ffa_fwd_sm100_index_sm90_layout
         )
 
@@ -533,7 +531,7 @@ class TestIndexSparseFwdSm100EndToEnd(unittest.TestCase):
             "topk": 128,
             "q_block_size": 128,
         }
-        _run_index_sparse_config(
+        run_index_sparse_config(
             self.device, config, fwd_fn=ffa_fwd_sm100_index_sm90_layout
         )
 

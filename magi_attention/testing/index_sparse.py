@@ -13,11 +13,14 @@
 # limitations under the License.
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import torch
 import torch.nn.functional as F
+from einops import rearrange
 
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100_index import (
     FFABwdSm100Index,
@@ -30,6 +33,21 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm100_index import (
 from magi_attention.kernel.cutedsl.ffa_fwd_sm120_index import (
     FFAFwdSm120Index,
     ffa_fwd_sm120_index,
+)
+from magi_attention.testing.precision import assert_close
+from magi_attention.testing.sparse import (
+    DEFAULT_BWD_DQ_ATOL,
+    DEFAULT_FWD_ATOL,
+    SEED,
+    compare_sdpa_bwd_all,
+    compare_sdpa_fwd,
+    sdpa_ref_bwd_grads,
+    sdpa_ref_output,
+)
+from magi_attention.utils import set_random_seed
+from magi_attention.utils.sparse_utils import (
+    build_index_sparse_indices,
+    get_sdpa_mask_from_index_sparse_indices,
 )
 
 # Serve the sm90 IndexSparse contract with the SM100 forward / backward and the
@@ -426,3 +444,248 @@ def index_sparse_ref_fwd(
         out[t0:t1] = o.reshape(t1 - t0, num_heads_q, head_dim).to(q.dtype)
         lse[t0:t1] = lse_c.reshape(t1 - t0, num_heads_q)
     return out, lse
+
+
+# ---------------------------------------------------------------------------
+# Shared numerical case runner and sweep reports
+# ---------------------------------------------------------------------------
+
+BwdGrads = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+FwdOutLse = tuple[torch.Tensor, torch.Tensor]
+
+
+FWD_LSE_ATOL = 1e-3
+
+
+def run_index_sparse_config(
+    device,
+    cfg: dict[str, Any],
+    bwd_fn: Callable[..., BwdGrads] | None = ffa_bwd_sm100_index_sm90_layout,
+    fwd_fn: Callable[..., FwdOutLse] | None = None,
+) -> None:
+    """Run one sm90 index_sparse_indices config on SM100 and assert against SDPA.
+
+    Mirrors ``run_index_sparse_config`` of the sm90 test. ``fwd_fn`` computes
+    out / lse; ``None`` uses the fp32 gather ``index_sparse_ref_fwd``. Either
+    way out is held to SDPA with the sm90 forward tolerance; the lse of a
+    ``fwd_fn`` is also held to the gather's lse. ``bwd_fn`` computes dq / dk / dv
+    from that out / lse and is held to the SDPA gradients; ``None`` checks the
+    forward only.
+    """
+    set_random_seed(SEED)
+    B = cfg["B"]
+    S = cfg.get("S", None)
+    S_kv = cfg.get("S_kv", S)
+    S_q = cfg.get("S_q", min(S_kv, 256))
+    NHQ = cfg["NHQ"]
+    NHK = cfg["NHK"]
+    D = cfg.get("D", 128)
+    topk = cfg["topk"]
+    default_max = max(topk) if isinstance(topk, list) else topk
+    max_topk = cfg.get("max_topk", default_max)
+    sparse_k_block_size = cfg.get("sparse_k_block_size", 1)
+    # q tokens per index row (the sm90 q_block_size); the sm90 test always uses 1
+    q_block_size = cfg.get("q_block_size", 1)
+    dtype = cfg.get("dtype", torch.bfloat16)
+    atol = cfg.get("atol", DEFAULT_FWD_ATOL)
+    bwd_atol = cfg.get("bwd_atol", DEFAULT_BWD_DQ_ATOL)
+    # The sm90 test flattens kv heads into the sequence; keep_kv_heads feeds
+    # the kernel num_heads_kv > 1 instead (sm90 accepts both).
+    flatten_kv_heads = not cfg.get("keep_kv_heads", False)
+    # Flattening interleaves kv heads into the token axis, which would split a
+    # q block of real tokens across index rows.
+    assert q_block_size == 1 or NHK == 1 or not flatten_kv_heads
+    assert S_q % q_block_size == 0
+
+    q = torch.randn(B, S_q, NHQ, D, dtype=dtype, device=device)
+    k = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
+    v = torch.randn(B, S_kv, NHK, D, dtype=dtype, device=device)
+
+    if NHK > 1 and flatten_kv_heads:
+        q = rearrange(q, "b s (h1 h2) d -> b (s h1) h2 d", h1=NHK)
+        k = rearrange(k, "b s h d -> b (s h) 1 d")
+        v = rearrange(v, "b s h d -> b (s h) 1 d")
+        S_q = S_q * NHK
+        S_kv = S_kv * NHK
+        NHQ = NHQ // NHK
+        NHK = 1
+
+    # (B * S_q / q_block_size, NHK, max_topk): one row per q block
+    index_sparse_indices = build_index_sparse_indices(
+        B,
+        NHK,
+        S_q // q_block_size,
+        S_kv,
+        topk,
+        max_topk,
+        device,
+        sparse_k_block_size=sparse_k_block_size,
+    )
+
+    # Token-major with native heads. With NHK == 1 (every flattened case) this
+    # is exactly the sm90 SEQ_MAJOR packing (pack_q_for_ffa / pack_kv_for_ffa),
+    # which cannot express NHK > 1.
+    q_ffa = rearrange(q, "b s h d -> (b s) h d").contiguous()
+    k_ffa = rearrange(k, "b s h d -> (b s) h d").contiguous()
+    v_ffa = rearrange(v, "b s h d -> (b s) h d").contiguous()
+    ref_out, ref_lse = index_sparse_ref_fwd(
+        q_ffa,
+        k_ffa,
+        v_ffa,
+        index_sparse_indices,
+        q_block_size=q_block_size,
+        sparse_k_block_size=sparse_k_block_size,
+    )
+
+    test_case = (
+        f"[NHQ={cfg['NHQ']},NHK={cfg['NHK']},S_q={cfg.get('S_q', cfg.get('S'))},"
+        f"S_kv={cfg.get('S_kv', cfg.get('S'))},"
+        f"B={B},D={D},topk={topk},max_topk={max_topk},q_block_size={q_block_size},"
+        f"sparse_k_block_size={sparse_k_block_size},dtype={dtype},"
+        f"flat:NHQ_eff={NHQ},NHK_eff={NHK},S_q_eff={S_q},S_kv_eff={S_kv}]"
+    )
+
+    # fwd_fn / bwd_fn raise Sm100IndexUnsupportedError before any launch for a
+    # gap case.
+    if fwd_fn is None:
+        out, lse = ref_out, ref_lse
+    else:
+        out, lse = fwd_fn(
+            q_ffa,
+            k_ffa,
+            v_ffa,
+            index_sparse_indices,
+            q_block_size=q_block_size,
+            sparse_k_block_size=sparse_k_block_size,
+        )
+    if bwd_fn is not None:
+        do = torch.randn_like(out)
+        dq_ffa, dk_ffa, dv_ffa = bwd_fn(
+            q_ffa,
+            k_ffa,
+            v_ffa,
+            out,
+            do,
+            lse,
+            index_sparse_indices,
+            q_block_size=q_block_size,
+            sparse_k_block_size=sparse_k_block_size,
+        )
+
+    # The mask builder takes one index row per q token
+    sdpa_mask = get_sdpa_mask_from_index_sparse_indices(
+        index_sparse_indices.repeat_interleave(q_block_size, dim=0),
+        B,
+        NHQ,
+        NHK,
+        S_q,
+        S_kv,
+        device,
+        sparse_k_block_size=sparse_k_block_size,
+    )
+
+    # The forward feeds the backward: hold it to the sm90 forward bar.
+    o_ffa = rearrange(out, "(b s) h d -> b s h d", b=B)
+    o_ref = sdpa_ref_output(q, k, v, sdpa_mask, B=B, NHQ=NHQ, NHK=NHK)
+    if fwd_fn is None:
+        compare_sdpa_fwd(o_ffa, o_ref, atol=atol, test_case=f"{test_case} ref_fwd")
+    else:
+        compare_sdpa_fwd(o_ffa, o_ref, atol=atol, test_case=test_case)
+        assert_close(
+            lse,
+            ref_lse,
+            atol=cfg.get("lse_atol", FWD_LSE_ATOL),
+            rtol=0.0,
+            test_case=f"{test_case} => lse",
+        )
+    if bwd_fn is None:
+        return
+
+    do_unpacked = rearrange(do, "(b s) h d -> b s h d", b=B)
+    sdpa_dq, sdpa_dk, sdpa_dv = sdpa_ref_bwd_grads(
+        do_unpacked, q, k, v, sdpa_mask, NHQ=NHQ, NHK=NHK
+    )
+    dq_ffa = rearrange(dq_ffa, "(b s) h d -> b h s d", b=B)
+    dk_ffa = rearrange(dk_ffa, "(b s) h d -> b h s d", b=B)
+    dv_ffa = rearrange(dv_ffa, "(b s) h d -> b h s d", b=B)
+    compare_sdpa_bwd_all(
+        ffa_dq=dq_ffa,
+        ffa_dk=dk_ffa,
+        ffa_dv=dv_ffa,
+        sdpa_dq=sdpa_dq,
+        sdpa_dk=sdpa_dk,
+        sdpa_dv=sdpa_dv,
+        test_case=test_case,
+        dq_atol=bwd_atol,
+    )
+
+
+class CaseStatus(Enum):
+    PASS = "PASS"
+    GAP = "GAP"
+    FAIL = "FAIL"
+
+
+@dataclass
+class CaseResult:
+    name: str
+    status: CaseStatus
+    detail: str
+
+
+def _run_case(
+    device,
+    name: str,
+    cfg: dict[str, Any],
+    *,
+    bwd_fn: Callable[..., BwdGrads] | None,
+    fwd_fn: Callable[..., FwdOutLse] | None,
+) -> CaseResult:
+    try:
+        run_index_sparse_config(device, cfg, bwd_fn=bwd_fn, fwd_fn=fwd_fn)
+    except Sm100IndexUnsupportedError as e:
+        return CaseResult(name, CaseStatus.GAP, ",".join(g.name for g in e.gaps))
+    except Exception as e:
+        msg = str(e).strip().splitlines()
+        return CaseResult(
+            name, CaseStatus.FAIL, f"{type(e).__name__}: {msg[0] if msg else ''}"
+        )
+    finally:
+        torch.cuda.empty_cache()
+    return CaseResult(name, CaseStatus.PASS, "")
+
+
+def run_index_sparse_sweep(
+    device,
+    title: str,
+    cases: list[tuple[str, dict[str, Any]]],
+    *,
+    bwd_fn: Callable[..., BwdGrads] | None = ffa_bwd_sm100_index_sm90_layout,
+    fwd_fn: Callable[..., FwdOutLse] | None = None,
+) -> None:
+    """Run every case (no fail-fast), print the table, then assert.
+
+    ``bwd_fn`` / ``fwd_fn`` are passed to ``run_index_sparse_config``. Not
+    ``@parameterize``: it stops at the first failure, which would hide the
+    status of the remaining cases.
+    """
+    results = [
+        _run_case(device, name, cfg, bwd_fn=bwd_fn, fwd_fn=fwd_fn)
+        for name, cfg in cases
+    ]
+
+    width = max(len(r.name) for r in results)
+    print(f"\n===== {title}: {len(results)} cases =====")
+    for r in results:
+        print(f"{r.status.value:<5} {r.name:<{width}}  {r.detail}")
+    counts = {s: sum(r.status is s for r in results) for s in CaseStatus}
+    print(" | ".join(f"{s.value} {n}" for s, n in counts.items()))
+
+    fails = [r for r in results if r.status is CaseStatus.FAIL]
+    if fails:
+        raise AssertionError(
+            f"{title}: {len(fails)} supported case(s) failed:\n"
+            + "\n".join(f"  {r.name}: {r.detail}" for r in fails)
+        )

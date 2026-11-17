@@ -76,6 +76,7 @@ from magi_attention.utils import (
     get_comm_cost_factor,
     is_list_value_all,
 )
+from magi_attention.utils.arch import is_hopper
 
 
 class TestInterfaceBaseWithWorldSize1(DistTestBase):
@@ -812,7 +813,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
         super().test_interface(*args, **kwargs)
 
     @unittest.skipIf(
-        torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+        not is_hopper(),
         "This test targets the C++ FFA, which supports only sm90.",
     )
     @skip_if_lt_x_gpu(8)

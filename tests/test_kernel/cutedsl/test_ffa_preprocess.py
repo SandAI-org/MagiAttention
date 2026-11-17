@@ -21,11 +21,12 @@ from magi_attention.kernel.cutedsl import (
     flex_flash_attn_func,
     plan_range_merge,
 )
-from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
+from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import calc_inf_norm
 from magi_attention.utils import make_attn_mask_from_ffa_args
+from magi_attention.utils.arch import is_blackwell
 
 # The kernel may exceed the low-precision reference error by this factor.
 _NORM_RATIO = 2.0
@@ -41,7 +42,7 @@ class TestFFAPreprocess(DistTestBase):
     def setUp(self) -> None:
         # Skip in the parent before DistTestBase spawns ranks, including ranks
         # with no assigned parameter cases that would otherwise reach a barrier.
-        if not torch.cuda.is_available() or get_device_arch()[1] not in (10, 11):
+        if not is_blackwell():
             self.skipTest("the bwd preprocess under test is the SM100/SM110 path")
         super().setUp()
 

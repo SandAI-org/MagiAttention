@@ -22,11 +22,13 @@ from magi_attention.common.enum import (
     MagiAttentionKernelBackend,
     MagiAttentionPrecision,
 )
+from magi_attention.dist_attn_runtime_mgr import check_flag_comb
 from magi_attention.functional import dist_attn
 from magi_attention.functional.dist_attn import DistAttnFunc
 from magi_attention.functional.dist_attn_runtime import DistAttnRuntime
 from magi_attention.meta.collection.calc_meta import AttnArg
-from magi_attention.testing import assert_equal
+from magi_attention.testing import assert_equal, parameterize
+from magi_attention.testing.utils import switch_env
 
 
 class TestRuntimeForwardChecks(TestCase):
@@ -249,6 +251,50 @@ class TestAttentionPrecision(TestCase):
                 dist_attn.dist_attn_func(value, value, value, runtime)
         self.assertEqual(value.dtype, torch.float32)
         self.assertEqual(torch.get_default_dtype(), default_dtype)
+
+
+class TestCheckFlagComb(unittest.TestCase):
+    """Environment flag combinations that ``check_flag_comb`` validates before
+    a dist-attn runtime is built; no device work."""
+
+    _BASE_FLAGS = {
+        "MAGI_ATTENTION_SDPA_BACKEND": "0",
+        "MAGI_ATTENTION_FA4_BACKEND": "0",
+        "MAGI_ATTENTION_DETERMINISTIC_MODE": "0",
+        "MAGI_ATTENTION_HIERARCHICAL_COMM": "0",
+        "MAGI_ATTENTION_NATIVE_GRPCOLL": "0",
+        "MAGI_ATTENTION_QO_COMM": "0",
+        "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE": "0",
+        "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE": "0",
+        "MAGI_ATTENTION_CATGQA": "0",
+        "MAGI_ATTENTION_BWD_PACK_FACTOR": "1",
+    }
+
+    @parameterize("backend", ["ffa", "sdpa", "sdpa_ol", "fa4", "cutedsl"])
+    def test_bwd_pack_factor_requires_cutedsl(self, backend: str):
+        flags = {**self._BASE_FLAGS, "MAGI_ATTENTION_KERNEL_BACKEND": backend}
+        with switch_env({**flags, "MAGI_ATTENTION_BWD_PACK_FACTOR": "1"}):
+            check_flag_comb()
+        with switch_env({**flags, "MAGI_ATTENTION_BWD_PACK_FACTOR": "4"}):
+            if backend == "cutedsl":
+                check_flag_comb()
+            else:
+                with self.assertRaisesRegex(
+                    AssertionError, "MAGI_ATTENTION_BWD_PACK_FACTOR > 1 requires"
+                ):
+                    check_flag_comb()
+
+    def test_bwd_pack_factor_rejects_cat_gqa(self):
+        flags = {
+            **self._BASE_FLAGS,
+            "MAGI_ATTENTION_KERNEL_BACKEND": "cutedsl",
+            "MAGI_ATTENTION_CATGQA": "1",
+        }
+        with switch_env({**flags, "MAGI_ATTENTION_BWD_PACK_FACTOR": "1"}):
+            check_flag_comb()
+        with switch_env({**flags, "MAGI_ATTENTION_BWD_PACK_FACTOR": "2"}):
+            with self.assertRaisesRegex(AssertionError, "MAGI_ATTENTION_CATGQA=1"):
+                check_flag_comb()
 
 
 if __name__ == "__main__":

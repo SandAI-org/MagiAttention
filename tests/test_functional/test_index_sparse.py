@@ -55,12 +55,7 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
-from magi_attention.utils import set_random_seed
-from magi_attention.utils.sparse_utils import (
-    build_index_sparse_indices,
-    get_sdpa_mask_from_index_sparse_indices,
-)
-from tests.test_attn.sparse_test_utils import (
+from magi_attention.testing.sparse import (
     DEFAULT_BWD_DQ_ATOL,
     DEFAULT_FWD_ATOL,
     SEED,
@@ -74,6 +69,12 @@ from tests.test_attn.sparse_test_utils import (
     sdpa_ref_bwd_grads,
     sdpa_ref_output,
     unpack_ffa_output,
+)
+from magi_attention.utils import set_random_seed
+from magi_attention.utils.arch import is_hopper
+from magi_attention.utils.sparse_utils import (
+    build_index_sparse_indices,
+    get_sdpa_mask_from_index_sparse_indices,
 )
 
 # ═══════════════════════════════════════════════════════════
@@ -400,7 +401,7 @@ def _run_view_trick(
 
 
 @unittest.skipIf(
-    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    not is_hopper(),
     "This test targets the C++ FFA, which supports only sm90.",
 )
 class TestIndexSparseViewTrick(unittest.TestCase):
@@ -509,7 +510,7 @@ class TestIndexSparseViewTrick(unittest.TestCase):
 
 
 @unittest.skipIf(
-    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    not is_hopper(),
     "This test targets the C++ FFA, which supports only sm90.",
 )
 class TestIndexSparseSweep(DistTestBase):
@@ -600,7 +601,7 @@ class TestIndexSparseSweep(DistTestBase):
 
 
 @unittest.skipIf(
-    torch.cuda.is_available() and torch.cuda.get_device_capability() != (9, 0),
+    not is_hopper(),
     "This test targets the C++ FFA, which supports only sm90.",
 )
 class TestIndexSparseComprehensiveSweep(DistTestBase):

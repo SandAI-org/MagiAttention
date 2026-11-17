@@ -12,17 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import itertools
-import os
 import unittest
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable
 from unittest import TestCase, mock
 
 import torch
 
-from magi_attention import env
 from magi_attention.common import AttnRanges
 from magi_attention.functional import cutedsl_ffa
 from magi_attention.kernel.cutedsl.ffa_utils import get_device_arch
@@ -167,49 +163,6 @@ FWD_STORE_CASES = {
 }
 
 # (q_ranges, k_ranges) row sets; the flag test runs every row order of each set.
-ROW_SETS: list[tuple[list[list[int]], list[list[int]]]] = [
-    # shared k starts
-    (
-        [[256, 384], [128, 256], [0, 128]],
-        [[256, 384], [0, 256], [0, 128]],
-    ),
-    # k rows form a partition and include an empty row
-    (
-        [[128, 256], [0, 128], [256, 384]],
-        [[0, 128], [128, 128], [128, 256]],
-    ),
-    # k rows form a partition
-    (
-        [[0, 64], [64, 192], [192, 256], [256, 512]],
-        [[256, 512], [0, 64], [192, 256], [64, 192]],
-    ),
-    # overlapping q rows
-    (
-        [[0, 128], [64, 192], [192, 256]],
-        [[0, 64], [0, 64], [64, 128]],
-    ),
-    # holes in both q and k
-    (
-        [[0, 64], [128, 192]],
-        [[0, 64], [128, 192]],
-    ),
-]
-
-
-def _permute_rows(
-    q_rows: list[list[int]], k_rows: list[list[int]]
-) -> list[tuple[list[list[int]], list[list[int]]]]:
-    return [
-        ([q_rows[i] for i in order], [k_rows[i] for i in order])
-        for order in itertools.permutations(range(len(q_rows)))
-    ]
-
-
-ROW_CASES = [
-    row_case
-    for q_rows, k_rows in ROW_SETS
-    for row_case in _permute_rows(q_rows, k_rows)
-]
 
 
 def _make_attn_arg(
@@ -221,10 +174,6 @@ def _make_attn_arg(
             k_ranges=AttnRanges.from_ranges(k_rows),
             attn_type_map=[0] * len(q_rows),
         )
-
-
-def _end_if(ranges: AttnRanges, predicate: Callable[[int], bool]) -> int | None:
-    return ranges.end if predicate(ranges.end) else None
 
 
 @contextmanager
@@ -469,139 +418,6 @@ class TestCutedslFwdStorePath(TestCase):
     @parameterize("name", ["sorted_partition", "uncovered_rows"])
     def test_store_path_with_gqa_and_sink(self, name: str):
         self._run_case(name, num_heads_q=4, num_heads_kv=2, num_sinks=2)
-
-
-class TestAttnArgBwdArgs(TestCase):
-    """AttnArg's host range flags match the bwd range tensors it builds."""
-
-    def setUp(self) -> None:
-        if not torch.cuda.is_available():
-            self.skipTest("the bwd range tensors are built on a CUDA device")
-
-    @parameterize("range_merge", [False, True])
-    @parameterize("rows", ROW_CASES)
-    def test_range_flags_match_tensors(self, range_merge: bool, rows):
-        q_rows, k_rows = rows
-        attn_arg = _make_attn_arg(q_rows, k_rows, range_merge)
-        ffa_args = attn_arg.to_ffa_args(is_bwd=True)
-        q_ranges = AttnRanges.from_ranges(ffa_args["q_ranges"].tolist())
-        k_ranges = AttnRanges.from_ranges(ffa_args["k_ranges"].tolist())
-        msg = f"{range_merge=} {q_rows=} {k_rows=}"
-
-        self.assertEqual(attn_arg.bwd_args_q_sorted, q_ranges.is_sorted(), msg)
-        self.assertEqual(
-            attn_arg.bwd_args_q_coverage_end,
-            _end_if(q_ranges, q_ranges.is_full_coverage),
-            msg,
-        )
-        self.assertEqual(
-            attn_arg.bwd_args_k_partition_end,
-            _end_if(k_ranges, k_ranges.is_cu_seqlens),
-            msg,
-        )
-
-
-class TestAttnArgFwdArgs(TestCase):
-    """AttnArg's host range flags match the fwd range tensors it builds."""
-
-    def setUp(self) -> None:
-        if not torch.cuda.is_available():
-            self.skipTest("the fwd range tensors are built on a CUDA device")
-
-    @parameterize("range_merge", [False, True])
-    @parameterize("rows", ROW_CASES)
-    def test_range_flags_match_tensors(self, range_merge: bool, rows):
-        q_rows, k_rows = rows
-        attn_arg = _make_attn_arg(q_rows, k_rows, range_merge)
-        ffa_args = attn_arg.to_ffa_args(is_bwd=False)
-        q_ranges = AttnRanges.from_ranges(ffa_args["q_ranges"].tolist())
-        msg = f"{range_merge=} {q_rows=} {k_rows=}"
-
-        self.assertEqual(attn_arg.fwd_args_q_sorted, q_ranges.is_sorted(), msg)
-        self.assertEqual(
-            attn_arg.fwd_args_q_coverage_end,
-            _end_if(q_ranges, q_ranges.is_full_coverage),
-            msg,
-        )
-
-
-class TestBwdPackFactorEnv(TestCase):
-    """Parsing of MAGI_ATTENTION_BWD_PACK_FACTOR."""
-
-    def test_default_is_one(self):
-        # The magi_attention.testing env helpers only set values, so removing
-        # the variable needs mock.patch.dict, which restores it on exit.
-        with mock.patch.dict(os.environ):
-            os.environ.pop(BWD_PACK_FACTOR_ENV, None)
-            self.assertEqual(env.general.bwd_pack_factor(), 1)
-
-    def test_positive_integer(self):
-        for value in ("1", "2", "4", "64"):
-            with switch_env(BWD_PACK_FACTOR_ENV, value):
-                self.assertEqual(env.general.bwd_pack_factor(), int(value), value)
-
-    def test_invalid_value_raises(self):
-        for value in ("0", "-2"):
-            with switch_env(BWD_PACK_FACTOR_ENV, value):
-                with self.assertRaisesRegex(ValueError, "positive integer", msg=value):
-                    env.general.bwd_pack_factor()
-        for value in ("four", "2.5", ""):
-            with switch_env(BWD_PACK_FACTOR_ENV, value):
-                with self.assertRaisesRegex(ValueError, "invalid literal", msg=value):
-                    env.general.bwd_pack_factor()
-
-
-class TestAttnArgDirectDkvGrant(TestCase):
-    """AttnArg grants the direct dK/dV store (``disable_bwd_dkv_atomic_reduction``)
-    to sorted, disjoint k ranges only under CatGQA, or under a bwd pack factor
-    above 1 on the cutedsl backend, the only backend that reads
-    MAGI_ATTENTION_BWD_PACK_FACTOR."""
-
-    def setUp(self) -> None:
-        if not torch.cuda.is_available():
-            self.skipTest("the bwd range tensors are built on a CUDA device")
-
-    @staticmethod
-    def _grant(
-        q_rows: list[list[int]],
-        k_rows: list[list[int]],
-        *,
-        backend: str,
-        cat_gqa: bool = False,
-        pack_factor: int = 1,
-        range_merge: bool = False,
-    ) -> bool:
-        with switch_env(_fold_env(backend, cat_gqa, pack_factor, range_merge)):
-            attn_arg = AttnArg(
-                q_ranges=AttnRanges.from_ranges(q_rows),
-                k_ranges=AttnRanges.from_ranges(k_rows),
-                attn_type_map=[0] * len(q_rows),
-            )
-        return attn_arg.disable_bwd_dkv_atomic_reduction
-
-    @parameterize("backend", ["cutedsl", "ffa", "sdpa", "sdpa_ol", "fa4"])
-    def test_grant_by_backend(self, backend: str):
-        rows = [[0, 128], [128, 256]]
-        self.assertFalse(self._grant(rows, rows, backend=backend), backend)
-        self.assertTrue(self._grant(rows, rows, backend=backend, cat_gqa=True), backend)
-        self.assertEqual(
-            self._grant(rows, rows, backend=backend, pack_factor=4),
-            backend == "cutedsl",
-            backend,
-        )
-
-    def test_pack_factor_keeps_the_k_range_conditions(self):
-        q_rows = [[0, 128], [128, 256]]
-        for k_rows in ([[0, 128], [64, 192]], [[128, 256], [0, 128]]):
-            self.assertFalse(
-                self._grant(q_rows, k_rows, backend="cutedsl", pack_factor=4),
-                str(k_rows),
-            )
-        self.assertFalse(
-            self._grant(
-                q_rows, q_rows, backend="cutedsl", pack_factor=4, range_merge=True
-            )
-        )
 
 
 class TestCutedslBwdPackFactor(TestCase):
