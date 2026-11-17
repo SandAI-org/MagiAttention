@@ -67,7 +67,7 @@ class TestRuntimeForwardChecks(TestCase):
                     new_callable=mock.PropertyMock,
                     return_value=options.get("qo", False),
                 ),
-                mock.patch.object(dist_attn, "KernelBarrier") as barrier,
+                mock.patch.object(dist_attn, "create_kernel_barrier") as barrier,
                 mock.patch.object(
                     DistAttnFunc, "_no_overlap_forward"
                 ) as no_overlap_forward,

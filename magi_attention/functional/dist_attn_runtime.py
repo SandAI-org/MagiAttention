@@ -15,7 +15,7 @@
 # mypy: disable-error-code="union-attr,list-item"
 import warnings
 from logging import getLogger
-from typing import Any, SupportsInt, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -33,37 +33,15 @@ from magi_attention.utils import is_same_process_group, nvtx
 from magi_attention.utils.dtype import max_fp_dtype
 
 from .cutedsl_ffa import cutedsl_bwd, cutedsl_fwd
+from .dist_attn_utils import create_kernel_barrier
 from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
 from .sdpa_online import sdpa_online_bwd, sdpa_online_fwd
 from .utils import calc_lse_sink_compiled, correct_attn_out_lse, sink_bwd_compiled
 
-try:
-    from magi_attention.magi_attn_ext import KernelBarrier as KernelBarrier
-except ImportError:
-    is_magi_attn_ext_installed = False
-
-    class KernelBarrier:  # type: ignore[no-redef]
-        def __init__(self, target: SupportsInt) -> None:
-            raise ImportError(
-                "magi_attn_ext module is not installed, please install magi_attention with magi_attn_ext"
-            )
-
-        def __repr__(self) -> str:
-            return "KernelBarrier(dummy)"
-
-        def get_value(self) -> int:
-            return 0
-
-        def reset(self) -> None:
-            ...
-
-        def synchronize(self) -> None:
-            ...
-
-else:
-    is_magi_attn_ext_installed = True
+if TYPE_CHECKING:
+    from magi_attention.magi_attn_ext import KernelBarrier
 
 
 logger = getLogger(__name__)
@@ -299,7 +277,7 @@ class DistAttnRuntime:
         local_q: torch.Tensor,
         local_kv: FusedOrTupleTensor,
         overlap_stage: int | None = None,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> tuple[torch.Tensor, FusedOrTupleTensor]:
         """
         Get current q,kv and fetch next q,kv for the given overlap stage
@@ -394,7 +372,7 @@ class DistAttnRuntime:
         partial_local_lse: torch.Tensor,
         ref_remote_out: torch.Tensor,
         overlap_stage: int,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> None:
         """
         Reduce remote out and lse to local out and lse for the given remote overlap stage
@@ -658,7 +636,7 @@ class DistAttnRuntime:
         local_kv: FusedOrTupleTensor,
         local_lse: torch.Tensor,
         overlap_stage: int | None = None,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> tuple[FusedOrTupleTensor, FusedOrTupleTensor, torch.Tensor]:
         """
         Get current qo_do,kv,lse and fetch next qo_do,kv,lse for the given overlap stage
@@ -763,7 +741,7 @@ class DistAttnRuntime:
         partial_local_dkv: FusedOrTupleTensor,
         ref_remote_kv: FusedOrTupleTensor,
         overlap_stage: int,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> None:
         """
         Reduce remote dq,dkv to local dq,dkv for the given remote overlap stage
@@ -1456,7 +1434,7 @@ class DistAttnRuntime:
         local_kv: FusedOrTupleTensor,
         overlap_stage: int,
         buffer_name: GrpCollBufferName | None = None,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> WorkWithBuffer:
         """
         Fetch remote kv buffer from other ranks to local for the given overlap stage,
@@ -1574,7 +1552,7 @@ class DistAttnRuntime:
         local_q: torch.Tensor,
         overlap_stage: int,
         buffer_name: GrpCollBufferName | None = None,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> WorkWithBuffer:
         """
         Fetch remote q buffer from other ranks to local for the given overlap stage,
@@ -1646,7 +1624,7 @@ class DistAttnRuntime:
         local_lse: torch.Tensor,
         overlap_stage: int,
         buffer_name: GrpCollBufferName | None = None,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> WorkWithBuffer:
         """
         Fetch remote q, o, do, lse buffer from other ranks to local for the given overlap stage,
@@ -1858,7 +1836,7 @@ class DistAttnRuntime:
         ref_remote_out: torch.Tensor,
         overlap_stage: int,
         buffer_name: GrpCollBufferName | None = None,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> WorkWithPostProcessFn:
         """
         Reduce remote out and lse to lse-reduce to local out and lse for the given overlap stage,
@@ -1978,7 +1956,7 @@ class DistAttnRuntime:
         ref_remote_dkv: FusedOrTupleTensor,
         overlap_stage: int,
         buffer_name: GrpCollBufferName | None = None,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> WorkWithPostProcessFn:
         """
         Reduce remote dkv to local dkv for the given overlap stage
@@ -2126,7 +2104,7 @@ class DistAttnRuntime:
         ref_remote_dq: torch.Tensor,
         overlap_stage: int,
         buffer_name: GrpCollBufferName | None = None,
-        kernel_barrier: KernelBarrier | None = None,
+        kernel_barrier: "KernelBarrier | None" = None,
     ) -> WorkWithPostProcessFn:
         """
         Reduce remote dq to local dq for the given overlap stage
@@ -2440,8 +2418,12 @@ class DistAttnRuntime:
             f"but got {self.overlap_degree=}"
         )
 
-        kernel_barrier_fetch = KernelBarrier(self.bwd_kernel_barrier_fetch_target)
-        kernel_barrier_reduce = KernelBarrier(self.bwd_kernel_barrier_reduce_target)
+        kernel_barrier_fetch = create_kernel_barrier(
+            self.bwd_kernel_barrier_fetch_target
+        )
+        kernel_barrier_reduce = create_kernel_barrier(
+            self.bwd_kernel_barrier_reduce_target
+        )
 
         # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)
         (

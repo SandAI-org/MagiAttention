@@ -20,101 +20,15 @@ import torch
 
 from magi_attention import env
 from magi_attention.common import AttnForwardMeta
-from magi_attention.common.enum import (
-    MagiAttentionKernelBackend,
-    MagiAttentionPrecision,
+
+from .dist_attn_runtime import DistAttnRuntime
+from .dist_attn_utils import (
+    _prepare_attn_inputs,
+    _restore_attn_output,
+    create_kernel_barrier,
 )
 
-from .dist_attn_runtime import DistAttnRuntime, KernelBarrier
-
 logger = getLogger(__name__)
-
-# --- backend x precision compatibility matrix ---
-# FFA / FA4: only support bf16 / fp16 (hardware kernels)
-# SDPA / SDPA_OL: support bf16 / fp16 / fp32 / fp64 (pure-torch)
-_BACKEND_SUPPORTED_PRECISIONS: dict[
-    MagiAttentionKernelBackend, set[MagiAttentionPrecision]
-] = {
-    MagiAttentionKernelBackend.FFA: {
-        MagiAttentionPrecision.BF16,
-        MagiAttentionPrecision.FP16,
-    },
-    MagiAttentionKernelBackend.FA4: {
-        MagiAttentionPrecision.BF16,
-        MagiAttentionPrecision.FP16,
-    },
-    MagiAttentionKernelBackend.SDPA: {
-        MagiAttentionPrecision.BF16,
-        MagiAttentionPrecision.FP16,
-        MagiAttentionPrecision.FP32,
-        MagiAttentionPrecision.FP64,
-    },
-    MagiAttentionKernelBackend.SDPA_OL: {
-        MagiAttentionPrecision.BF16,
-        MagiAttentionPrecision.FP16,
-        MagiAttentionPrecision.FP32,
-        MagiAttentionPrecision.FP64,
-    },
-    MagiAttentionKernelBackend.CUTEDSL: {
-        MagiAttentionPrecision.BF16,
-        MagiAttentionPrecision.FP16,
-    },
-}
-
-
-def _validate_backend_precision(
-    backend: MagiAttentionKernelBackend,
-    precision: MagiAttentionPrecision | None,
-    input_dtype: torch.dtype,
-) -> None:
-    """Validate the (backend, precision, input_dtype) combination at the
-    entrance of dist_attn, raising early and clearly on illegal combos."""
-
-    if precision is not None:
-        supported = _BACKEND_SUPPORTED_PRECISIONS[backend]
-        assert precision in supported, (
-            f"MAGI_ATTENTION_PRECISION={precision.value} is not supported by "
-            f"kernel backend {backend.value}. "
-            f"Supported precisions: {sorted(p.value for p in supported)}"
-        )
-    else:
-        _DTYPE_TO_PRECISION = {
-            torch.bfloat16: MagiAttentionPrecision.BF16,
-            torch.float16: MagiAttentionPrecision.FP16,
-            torch.float32: MagiAttentionPrecision.FP32,
-            torch.float64: MagiAttentionPrecision.FP64,
-        }
-        inferred = _DTYPE_TO_PRECISION.get(input_dtype)
-        if inferred is not None:
-            supported = _BACKEND_SUPPORTED_PRECISIONS[backend]
-            assert inferred in supported, (
-                f"Input dtype {input_dtype} is not supported by "
-                f"kernel backend {backend.value}. "
-                f"Supported precisions: {sorted(p.value for p in supported)}. "
-                f"Set MAGI_ATTENTION_PRECISION to override."
-            )
-
-
-def _prepare_attn_inputs(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    backend: MagiAttentionKernelBackend,
-    precision: MagiAttentionPrecision | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.dtype]:
-    """Validate compute precision and adapt Q/K/V without changing global state."""
-    output_dtype = q.dtype
-    _validate_backend_precision(backend, precision, output_dtype)
-    if precision is not None:
-        compute_dtype = precision.to_torch_dtype()
-        if compute_dtype != output_dtype:
-            q, k, v = (tensor.to(compute_dtype) for tensor in (q, k, v))
-    return q, k, v, output_dtype
-
-
-def _restore_attn_output(out: torch.Tensor, output_dtype: torch.dtype) -> torch.Tensor:
-    """Restore the caller's output dtype while preserving the gradient path."""
-    return out.to(output_dtype) if out.dtype != output_dtype else out
 
 
 class DistAttnFunc(torch.autograd.Function):
@@ -180,10 +94,10 @@ class DistAttnFunc(torch.autograd.Function):
             )
 
         # init kernel barrier for native grpcoll to ensure comm kernel is always preceded by compute kernel
-        kernel_barrier_fetch = KernelBarrier(
+        kernel_barrier_fetch = create_kernel_barrier(
             dist_attn_runtime.fwd_kernel_barrier_fetch_target
         )
-        kernel_barrier_reduce = KernelBarrier(
+        kernel_barrier_reduce = create_kernel_barrier(
             dist_attn_runtime.fwd_kernel_barrier_reduce_target
         )
 
@@ -622,10 +536,10 @@ class DistAttnFunc(torch.autograd.Function):
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
 
-        kernel_barrier_fetch = KernelBarrier(
+        kernel_barrier_fetch = create_kernel_barrier(
             dist_attn_runtime.bwd_kernel_barrier_fetch_target
         )
-        kernel_barrier_reduce = KernelBarrier(
+        kernel_barrier_reduce = create_kernel_barrier(
             dist_attn_runtime.bwd_kernel_barrier_reduce_target
         )
 
@@ -800,8 +714,18 @@ def dist_attn_func(
     q, k, v, output_dtype = _prepare_attn_inputs(
         q, k, v, dist_attn_runtime.kernel_backend, env.general.precision()
     )
+
     out, lse, max_logits = DistAttnFunc.apply(
-        q, k, v, sink, dist_attn_runtime, softmax_scale, softcap, return_max_logits
+        q,
+        k,
+        v,
+        sink,
+        dist_attn_runtime,
+        softmax_scale,
+        softcap,
+        return_max_logits,
     )
+
     out = _restore_attn_output(out, output_dtype)
+
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)

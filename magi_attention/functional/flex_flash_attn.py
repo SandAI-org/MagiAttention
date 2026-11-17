@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from contextlib import contextmanager
 
 import torch
@@ -24,6 +25,7 @@ from magi_attention.common.ranges import AttnRanges
 from magi_attention.env.general import is_profile_mode_enable, is_sanity_check_enable
 from magi_attention.meta.collection.calc_meta import FA4AttnArg, check_fa4_installation
 from magi_attention.utils import nvtx
+from magi_attention.utils.sparse_utils import invert_index_sparse_indices
 
 from ._flex_flash_attn_jit import _snapshot_env, get_ffa_jit_mod
 from .fa4 import fa4_bwd, fa4_fwd
@@ -1091,10 +1093,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 nhk = k.size(1)
                 seqlen_k = v.size(0)
 
-                from magi_attention.utils.sparse_utils import (
-                    invert_index_sparse_indices,
-                )
-
                 if _loopq_kbs > 1 and nhk != 1:
                     raise NotImplementedError(
                         f"IndexSparse BWD InnerLoopQ with sparse_k_block_size>1 requires nhk=1, "
@@ -1607,8 +1605,6 @@ def flex_flash_attn_func(
             assert q_ranges is not None
             k_sizes = k_ranges[:, 1] - k_ranges[:, 0]
             if not (k_sizes == k_sizes[0]).all().item():
-                import warnings
-
                 warnings.warn(
                     f"block_sparse: non-uniform k_ranges detected "
                     f"(sizes in [{k_sizes.min().item()}, {k_sizes.max().item()}]). "
