@@ -82,6 +82,18 @@ if is_cutedsl_version_ge("4.6.1"):
 else:
     from cutlass.cute import FastDivmodDivisor
 
+# The CLC wheel helpers are deprecated in DSL 4.8; keep the 4.4.2 API there.
+if is_cutedsl_version_ge("4.8.0"):
+    from .clc_scheduler import (
+        ClcDynamicPersistentTileScheduler,
+        ClcDynamicPersistentTileSchedulerParams,
+    )
+else:
+    from cutlass.utils import (  # type: ignore[no-redef]
+        ClcDynamicPersistentTileScheduler,
+        ClcDynamicPersistentTileSchedulerParams,
+    )
+
 # DSL 4.8 deprecates these cutlass.utils exports.
 if is_cutedsl_version_ge("4.8.0"):
     from cutlass.tensor_utils import LayoutEnum
@@ -137,6 +149,8 @@ else:
     from cutlass.utils import get_smem_capacity_in_bytes
 
 __all__ = [
+    "ClcDynamicPersistentTileScheduler",
+    "ClcDynamicPersistentTileSchedulerParams",
     "FastDivmodDivisor",
     "LayoutEnum",
     "LoadCacheMode",

@@ -71,6 +71,7 @@ from .cutedsl_utils import (
     vec_load_bf16_to_ordered16,
     vec_load_fp32_to_ordered32,
 )
+from .dsl_compat import SmemAllocator
 
 # ====================================================================
 # Constants
@@ -424,7 +425,7 @@ class RadixTopK:
         tidx = cute.arch.thread_idx()[0]
         n = mInput.shape[1]
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         s_hist = smem.allocate_tensor(Int32, cute.make_layout(RADIX), byte_alignment=16)
         s_sfx = smem.allocate_tensor(Int32, cute.make_layout(RADIX), byte_alignment=16)
         s_prefix_t = smem.allocate_tensor(Int32, cute.make_layout(1), byte_alignment=4)

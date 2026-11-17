@@ -31,12 +31,12 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from .dsl_compat import Tcgen05OperandMajorMode
 
 # DSL 4.5 renamed the FP8 MMA ops; blackwell_helpers returns the new classes there.
-_FP8_MMA_OPS: tuple[type, ...] = (tcgen05.mma.MmaFP8Op,)
-_MXF8_MMA_OPS: tuple[type, ...] = (tcgen05.mma.MmaMXF8Op,)
 if hasattr(tcgen05.mma, "MmaF8F6F4Op"):
-    _FP8_MMA_OPS += (tcgen05.mma.MmaF8F6F4Op,)
-if hasattr(tcgen05.mma, "MmaMXF8F6F4Op"):
-    _MXF8_MMA_OPS += (tcgen05.mma.MmaMXF8F6F4Op,)
+    _FP8_MMA_OPS: tuple[type, ...] = (tcgen05.mma.MmaF8F6F4Op,)
+    _MXF8_MMA_OPS: tuple[type, ...] = (tcgen05.mma.MmaMXF8F6F4Op,)
+else:  # DSL < 4.5 uses the original, then-supported names.
+    _FP8_MMA_OPS = (tcgen05.mma.MmaFP8Op,)
+    _MXF8_MMA_OPS = (tcgen05.mma.MmaMXF8Op,)
 
 # ---------------------------------------------------------------------------
 # Enumerations that match the HW encodings (values MUST stay identical)

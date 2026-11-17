@@ -70,6 +70,7 @@ from .dsl_compat import (
     SmemAllocator,
     Tcgen05OperandMajorMode,
     TmemAllocator,
+    make_trivial_tiled_mma,
 )
 from .ffa_utils import aligned_rows, maybe_contiguous
 from .mask import mask_r2p_lambda
@@ -479,7 +480,8 @@ class FFAFwdSm100Index:
         # the intermediate tensor p is from tmem & mK-major
         p_source = tcgen05.OperandSource.TMEM
         p_major_mode = Tcgen05OperandMajorMode.K
-        tiled_mma_qk = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_qk = make_trivial_tiled_mma(
+            self.q_dtype,
             self.q_dtype,
             q_major_mode,
             k_major_mode,
@@ -487,7 +489,8 @@ class FFAFwdSm100Index:
             tcgen05.CtaGroup.ONE,
             self.mma_tiler_qk[:2],
         )
-        tiled_mma_pv = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_pv = make_trivial_tiled_mma(
+            self.q_dtype,
             self.q_dtype,
             p_major_mode,
             v_major_mode,
@@ -589,7 +592,7 @@ class FFAFwdSm100Index:
             # Full barrier unused / statistics slot available.
             mbar_softmax_stats: cute.struct.MemRange[Int64, self.s_stage * 2]
             # Tmem holding buffer
-            tmem_holding_buf: Int32
+            tmem_holding_buf: cute.struct.MemRange[Int32, 1]
             # Smem tensors
             # [stage * tile_m + row]: non-first acc_scale or final row_sum.
             # [(s_stage + stage) * tile_m + row]: final row_max.
@@ -717,7 +720,7 @@ class FFAFwdSm100Index:
         )
         # Tensor memory allocator
         tmem = TmemAllocator(
-            storage.tmem_holding_buf,
+            storage.tmem_holding_buf.data_ptr(),
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,
         )

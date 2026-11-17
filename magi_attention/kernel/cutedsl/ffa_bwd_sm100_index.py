@@ -67,7 +67,6 @@ import torch
 from cutlass import Float32, Int32, Int64, const_expr, pipeline
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
-from cutlass.utils import ClcDynamicPersistentTileScheduler
 
 # isort: split
 from quack import copy_utils, layout_utils
@@ -85,10 +84,12 @@ from . import sm100_utils
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import ThreadCooperativeGroup, to_cute_tensor
 from .dsl_compat import (
+    ClcDynamicPersistentTileScheduler,
     LayoutEnum,
     SmemAllocator,
     Tcgen05OperandMajorMode,
     TmemAllocator,
+    make_trivial_tiled_mma,
 )
 from .ffa_bwd_postprocess import bwd_postprocess_rowmajor
 from .ffa_bwd_preprocess import bwd_preprocess
@@ -328,7 +329,8 @@ class FFABwdSm100Index:
     def _get_tiled_mma(self):
         # --- S = Q @ K.T with (K, K) major ---
         # A = Q read from tQ (TMEM copy of sQ), B = K read from sK
-        tiled_mma_S = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_S = make_trivial_tiled_mma(
+            self.q_dtype,
             self.q_dtype,
             Tcgen05OperandMajorMode.K,
             Tcgen05OperandMajorMode.K,
@@ -340,7 +342,8 @@ class FFABwdSm100Index:
 
         # --- dP = dO @ V.T with (K, K) major ---
         # A = dO read from tdO (TMEM copy of sdO), B = V read from sV
-        tiled_mma_dP = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dP = make_trivial_tiled_mma(
+            self.do_dtype,
             self.do_dtype,
             Tcgen05OperandMajorMode.K,
             Tcgen05OperandMajorMode.K,
@@ -352,7 +355,8 @@ class FFABwdSm100Index:
 
         # --- dV.T = dO.T @ P with (MN, MN) major ---
         # A = dO.T (HD, Q) read from sdO, B = P (K, Q) read from sP, both MN-major
-        tiled_mma_dV = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dV = make_trivial_tiled_mma(
+            self.do_dtype,
             self.do_dtype,
             Tcgen05OperandMajorMode.MN,
             Tcgen05OperandMajorMode.MN,
@@ -363,7 +367,8 @@ class FFABwdSm100Index:
 
         # --- dK.T = Q.T @ dS with (MN, MN) major ---
         # A = Q.T (HD, Q) read from sQ, B = dS (K, Q) read from sdS, both MN-major
-        tiled_mma_dK = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dK = make_trivial_tiled_mma(
+            self.q_dtype,
             self.q_dtype,
             Tcgen05OperandMajorMode.MN,
             Tcgen05OperandMajorMode.MN,
@@ -374,7 +379,8 @@ class FFABwdSm100Index:
 
         # --- dQ = dS @ K with (K, MN) major ---
         # A = dS (Q, K) K-major, B = K (HD, K) MN-major read from sK
-        tiled_mma_dQ = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dQ = make_trivial_tiled_mma(
+            self.k_dtype,
             self.k_dtype,
             Tcgen05OperandMajorMode.K,
             Tcgen05OperandMajorMode.MN,
@@ -694,8 +700,8 @@ class FFABwdSm100Index:
 
             # --- tmem ptr ---
 
-            tmem_dealloc_mbar_ptr: Int64
-            tmem_holding_buf_ptr: Int32
+            tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
+            tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
             # --- smem tensors ---
 
@@ -907,11 +913,11 @@ class FFABwdSm100Index:
             ),
         )
         tmem = TmemAllocator(
-            alloc_result_dst_smem_ptr=storage.tmem_holding_buf_ptr,
+            alloc_result_dst_smem_ptr=storage.tmem_holding_buf_ptr.data_ptr(),
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,
             is_two_cta=False,
-            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar_ptr,
+            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar_ptr.data_ptr(),
         )
 
         # --- Make pipeline cooperative groups ---

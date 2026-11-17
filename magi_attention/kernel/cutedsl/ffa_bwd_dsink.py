@@ -34,6 +34,7 @@ from magi_attention.utils.dtype import to_cute_dtype
 
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import warp_reduce
+from .dsl_compat import SmemAllocator
 
 # Query rows per CTA, with one row per thread.
 DSINK_TILE_M = 128
@@ -104,7 +105,7 @@ class FFABwdDSink:
         num_m_blocks = cute.ceil_div(total_q, self.tile_m)
         n_sink = mSink.shape[0]
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         sWarpSum = smem.allocate_tensor(
             Float32, cute.make_layout(self.num_warps), byte_alignment=16
         )

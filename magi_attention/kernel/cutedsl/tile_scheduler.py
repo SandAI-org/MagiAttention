@@ -30,10 +30,6 @@ from cutlass.cutlass_dsl import extract_mlir_values
 from cutlass.cutlass_dsl import min as dsl_min
 from cutlass.cutlass_dsl import new_from_mlir_values
 from cutlass.pipeline import PipelineClcFetchAsync, PipelineState
-from cutlass.utils import (
-    ClcDynamicPersistentTileScheduler,
-    ClcDynamicPersistentTileSchedulerParams,
-)
 from cutlass.utils.hardware_info import HardwareInfo
 
 # isort: split
@@ -41,7 +37,11 @@ from quack.cute_dsl_utils import ParamsBase
 from quack.utils import store_shared_remote
 
 from . import cutedsl_utils
-from .dsl_compat import FastDivmodDivisor
+from .dsl_compat import (
+    ClcDynamicPersistentTileScheduler,
+    ClcDynamicPersistentTileSchedulerParams,
+    FastDivmodDivisor,
+)
 
 
 class SchedulingMode(IntEnum):

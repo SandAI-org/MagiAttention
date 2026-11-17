@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import itertools
 import os
 import unittest
@@ -46,7 +47,7 @@ HEAD_DIM = 128
 
 
 class TestRuntimeNvtxLabels(TestCase):
-    def test_attention_labels_use_selected_direction_and_bound_range_text(self):
+    def test_attention_labels_preserve_full_reproducible_ranges(self):
         arg = object.__new__(AttnArg)
         arg.q_ranges = AttnRanges.from_ranges([[0, 16], [32, 48]])
         arg.k_ranges = AttnRanges.from_ranges([[0, 64], [0, 64]])
@@ -54,15 +55,20 @@ class TestRuntimeNvtxLabels(TestCase):
         arg.k_ranges_bwd = AttnRanges.from_ranges([[0, 64], [0, 64]])
         arg.total_area = 2048
         self.assertIn(
-            "attn/fwd | area=2,048 | ranges=2 | Q=[0:16, 32:48]",
+            "attn/fwd | area=2,048 | ranges=2 | q_ranges=[[0, 16], [32, 48]]",
             arg.get_nvtx_event_name(),
         )
         self.assertIn(
-            "attn/bwd | area=2,048 | ranges=2 | Q=[32:48, 0:16]",
+            "attn/bwd | area=2,048 | ranges=2 | q_ranges=[[32, 48], [0, 16]]",
             arg.get_nvtx_event_name(is_bwd=True),
         )
         arg.q_ranges = AttnRanges.from_ranges([[i, i + 1] for i in range(20)])
-        self.assertIn("...(+12)", arg.get_nvtx_event_name())
+        message = arg.get_nvtx_event_name()
+        fields = dict(field.split("=", 1) for field in message.split(" | ")[1:])
+        self.assertEqual(
+            ast.literal_eval(fields["q_ranges"]), [[i, i + 1] for i in range(20)]
+        )
+        self.assertEqual(ast.literal_eval(fields["k_ranges"]), [[0, 64], [0, 64]])
 
     def test_collective_label_counts_tuple_payload_and_lse(self):
         runtime = object.__new__(DistAttnRuntime)

@@ -1254,106 +1254,104 @@ class DistAttnRuntime:
                 _backend != MagiAttentionKernelBackend.FA4
             ), "FA4 backend does not support return max logits"
         nvtx.start(attn_arg.get_nvtx_event_name(is_bwd=False))
-        try:
-            if _backend == MagiAttentionKernelBackend.SDPA_OL:
-                partial_out, meta = sdpa_online_fwd(
-                    q=q,
-                    k=k,
-                    v=v,
-                    sink=sink if is_host_stage else None,
-                    attn_arg=attn_arg,
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    sink_layout="sh",
-                    return_max_logits=return_max_logits,
-                )
-                if return_max_logits and max_logits_acc is not None:
-                    assert meta.max_logits is not None
-                    torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
-                    meta.max_logits = max_logits_acc
-            elif _backend == MagiAttentionKernelBackend.SDPA:
-                partial_out, meta = sdpa_fwd(
-                    q=q,
-                    k=k,
-                    v=v,
-                    sink=sink if is_host_stage else None,
-                    attn_arg=attn_arg,
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    sink_layout="sh",
-                    return_max_logits=return_max_logits,
-                )
-                if return_max_logits and max_logits_acc is not None:
-                    assert meta.max_logits is not None
-                    torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
-                    meta.max_logits = max_logits_acc
-            elif _backend == MagiAttentionKernelBackend.FA4:
-                partial_out, partial_lse = fa4_fwd(
-                    q=q,
-                    k=k,
-                    v=v,
-                    # NOTE: sink token needs to be applied only once
-                    # thus we only apply it at the host stage if not skipped
-                    sink=sink if is_host_stage else None,
-                    attn_arg=attn_arg,
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    sink_layout="sh",
-                )
-                meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
-            elif _backend == MagiAttentionKernelBackend.CUTEDSL:
-                partial_out, partial_lse, partial_max_logits = cutedsl_fwd(
-                    q=q,
-                    k=k,
-                    v=v,
-                    attn_arg=attn_arg,
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    # NOTE: sink token needs to be applied only once
-                    # thus we only apply it at the host stage if not skipped
-                    sink=sink if is_host_stage else None,
-                    sm_margin=self.fwd_sm_margin,
-                    return_max_logits=return_max_logits,
-                    max_logits=max_logits_acc,  # directly reduce to max_logits_acc
-                )
-                meta = AttnForwardMeta(lse=partial_lse, max_logits=partial_max_logits)
-            else:
-                partial_out, meta = _flex_flash_attn_forward(
-                    q=q,
-                    k=k,
-                    v=v,
-                    # NOTE: sink token needs to be applied only once
-                    # thus we only apply it at the host stage if not skipped
-                    sink=sink if is_host_stage else None,
-                    sink_layout="sh",
-                    out=out_acc,  # directly reduce to out_acc
-                    lse=lse_acc,  # directly reduce to lse_acc
-                    **attn_arg.to_ffa_args(is_bwd=False),
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    # NOTE: always use high-precision for the partial out,
-                    # to reduce the error caused by the out/lse correction
-                    out_type=self.hp_dtype,
-                    # NOTE: when using accumulative buffer, we need to always enable atomic reduction
-                    # unless it is the first call when accumulative buffer is still None
-                    disable_fwd_atomic_reduction=(
-                        attn_arg.disable_fwd_atomic_reduction and out_acc is None
-                    ),
-                    deterministic=self.deterministic,
-                    sm_margin=self.fwd_sm_margin,
-                    # optional args below mainly for sparse attn
-                    ref_block_size=None,
-                    max_outer_range_width=None,
-                    range_merge=env.general.is_range_merge_enable(),
-                    swap_ab=False,
-                    pack_gqa=False,
-                    block_sparse=False,
-                    index_sparse=False,
-                    return_max_logits=return_max_logits,
-                    max_logits=max_logits_acc,  # directly reduce to max_logits_acc
-                )
-        finally:
-            nvtx.stop()
+        if _backend == MagiAttentionKernelBackend.SDPA_OL:
+            partial_out, meta = sdpa_online_fwd(
+                q=q,
+                k=k,
+                v=v,
+                sink=sink if is_host_stage else None,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                sink_layout="sh",
+                return_max_logits=return_max_logits,
+            )
+            if return_max_logits and max_logits_acc is not None:
+                assert meta.max_logits is not None
+                torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
+                meta.max_logits = max_logits_acc
+        elif _backend == MagiAttentionKernelBackend.SDPA:
+            partial_out, meta = sdpa_fwd(
+                q=q,
+                k=k,
+                v=v,
+                sink=sink if is_host_stage else None,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                sink_layout="sh",
+                return_max_logits=return_max_logits,
+            )
+            if return_max_logits and max_logits_acc is not None:
+                assert meta.max_logits is not None
+                torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
+                meta.max_logits = max_logits_acc
+        elif _backend == MagiAttentionKernelBackend.FA4:
+            partial_out, partial_lse = fa4_fwd(
+                q=q,
+                k=k,
+                v=v,
+                # NOTE: sink token needs to be applied only once
+                # thus we only apply it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                sink_layout="sh",
+            )
+            meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
+        elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+            partial_out, partial_lse, partial_max_logits = cutedsl_fwd(
+                q=q,
+                k=k,
+                v=v,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                # NOTE: sink token needs to be applied only once
+                # thus we only apply it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
+                sm_margin=self.fwd_sm_margin,
+                return_max_logits=return_max_logits,
+                max_logits=max_logits_acc,  # directly reduce to max_logits_acc
+            )
+            meta = AttnForwardMeta(lse=partial_lse, max_logits=partial_max_logits)
+        else:
+            partial_out, meta = _flex_flash_attn_forward(
+                q=q,
+                k=k,
+                v=v,
+                # NOTE: sink token needs to be applied only once
+                # thus we only apply it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
+                sink_layout="sh",
+                out=out_acc,  # directly reduce to out_acc
+                lse=lse_acc,  # directly reduce to lse_acc
+                **attn_arg.to_ffa_args(is_bwd=False),
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                # NOTE: always use high-precision for the partial out,
+                # to reduce the error caused by the out/lse correction
+                out_type=self.hp_dtype,
+                # NOTE: when using accumulative buffer, we need to always enable atomic reduction
+                # unless it is the first call when accumulative buffer is still None
+                disable_fwd_atomic_reduction=(
+                    attn_arg.disable_fwd_atomic_reduction and out_acc is None
+                ),
+                deterministic=self.deterministic,
+                sm_margin=self.fwd_sm_margin,
+                # optional args below mainly for sparse attn
+                ref_block_size=None,
+                max_outer_range_width=None,
+                range_merge=env.general.is_range_merge_enable(),
+                swap_ab=False,
+                pack_gqa=False,
+                block_sparse=False,
+                index_sparse=False,
+                return_max_logits=return_max_logits,
+                max_logits=max_logits_acc,  # directly reduce to max_logits_acc
+            )
+        nvtx.stop()
 
         return partial_out, meta
 
@@ -1374,143 +1372,138 @@ class DistAttnRuntime:
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
         _backend = self.kernel_backend
         nvtx.start(attn_arg.get_nvtx_event_name(is_bwd=True))
-        try:
-            if _backend == MagiAttentionKernelBackend.SDPA_OL:
-                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_online_bwd(
-                    do=do,
-                    q=q,
-                    k=k,
-                    v=v,
-                    sink=sink if is_host_stage else None,
-                    o=o,
-                    lse=lse,
-                    attn_arg=attn_arg,
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    sink_layout="sh",
-                )
-                partial_dkv = self._maybe_concat(
-                    partial_dk, partial_dv, need_concat=self.concat_dkv
-                )
-            elif _backend == MagiAttentionKernelBackend.SDPA:
-                partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
-                    do=do,
-                    q=q,
-                    k=k,
-                    v=v,
-                    sink=sink if is_host_stage else None,
-                    o=o,
-                    lse=lse,
-                    attn_arg=attn_arg,
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    sink_layout="sh",
-                )
-                partial_dkv = self._maybe_concat(
-                    partial_dk, partial_dv, need_concat=self.concat_dkv
-                )
-            elif _backend == MagiAttentionKernelBackend.FA4:
-                partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
-                    do=do,
-                    q=q,
-                    k=k,
-                    v=v,
-                    # NOTE: dsink should be computed only once
-                    # thus we only compute it at the host stage if not skipped
-                    sink=sink if is_host_stage else None,
-                    o=o,
-                    lse=lse,
-                    attn_arg=attn_arg,
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    sink_layout="sh",
-                    deterministic=self.deterministic,
-                )
-                partial_dkv = self._maybe_concat(
-                    partial_dk, partial_dv, need_concat=self.concat_dkv
-                )
-            elif _backend == MagiAttentionKernelBackend.CUTEDSL:
-                partial_dq, partial_dk, partial_dv, partial_dsink = cutedsl_bwd(
-                    do=do,
-                    q=q,
-                    k=k,
-                    v=v,
-                    o=o,
-                    lse=lse,
-                    attn_arg=attn_arg,
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    dq_acc=dq_acc,  # directly reduce to dq_acc
-                    # NOTE: dsink should be computed only once
-                    # thus we only compute it at the host stage if not skipped
-                    sink=sink if is_host_stage else None,
-                    sm_margin=self.bwd_sm_margin,
-                )
-                partial_dkv = self._maybe_concat(
-                    partial_dk, partial_dv, need_concat=self.concat_dkv
-                )
-            else:
-                assert k.shape == v.shape, (
-                    "The fused dKV buffer requires symmetric K/V shapes, "
-                    f"but got {k.shape=} and {v.shape=}."
-                )
-                dkv_shape = (k.shape[0] * 2, *k.shape[1:])
-                # init partial_dkv buffer
-                # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
-                # and we need to zero-initialize partial_dkv since it needs to be reduced
-                partial_dkv = torch.zeros(
-                    dkv_shape,
-                    dtype=self.hp_dtype,
-                    device=k.device,
-                )
-                partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
-
-                (
-                    partial_dq,
-                    partial_dk,
-                    partial_dv,
-                    partial_dsink,
-                ) = _flex_flash_attn_backward(
-                    dout=do,
-                    q=q,
-                    k=k,
-                    v=v,
-                    # NOTE: dsink should be computed only once
-                    # thus we only compute it at the host stage if not skipped
-                    sink=sink if is_host_stage else None,
-                    sink_layout="sh",
-                    out=o,
-                    lse=lse,
-                    dq=dq_acc,  # directly reduce to dq_acc
-                    dk=partial_dk,
-                    dv=partial_dv,
-                    dsink=None,  # let kernel initialize dsink if required
-                    **attn_arg.to_ffa_args(is_bwd=True),
-                    softmax_scale=softmax_scale,
-                    softcap=softcap,
-                    # NOTE: always use high precision for the partial dq, dkv
-                    # to reduce the error caused by the atomic reduction inside the kernel
-                    dq_type=self.hp_dtype,
-                    dk_type=self.hp_dtype,
-                    dv_type=self.hp_dtype,
-                    disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
-                    disable_bwd_dq_atomic_reduction=False,
-                    deterministic=self.deterministic,
-                    sm_margin=self.bwd_sm_margin,
-                    # optional args below mainly for sparse attn
-                    range_merge=env.general.is_range_merge_enable(),
-                    bwd_inner_loop_k=False,
-                    cat_gqa=env.general.is_cat_gqa_enable(),
-                )
-
-            if not self.concat_dkv:  # make partial_dkv tupled tensors
-                partial_dkv = (partial_dk, partial_dv)
-
-            if partial_dsink is not None:
-                # NOTE: make sure the partial_dsink is contiguous before communication
-                partial_dsink = partial_dsink.contiguous()
-        finally:
-            nvtx.stop()
+        if _backend == MagiAttentionKernelBackend.SDPA_OL:
+            partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_online_bwd(
+                do=do,
+                q=q,
+                k=k,
+                v=v,
+                sink=sink if is_host_stage else None,
+                o=o,
+                lse=lse,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                sink_layout="sh",
+            )
+            partial_dkv = self._maybe_concat(
+                partial_dk, partial_dv, need_concat=self.concat_dkv
+            )
+        elif _backend == MagiAttentionKernelBackend.SDPA:
+            partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
+                do=do,
+                q=q,
+                k=k,
+                v=v,
+                sink=sink if is_host_stage else None,
+                o=o,
+                lse=lse,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                sink_layout="sh",
+            )
+            partial_dkv = self._maybe_concat(
+                partial_dk, partial_dv, need_concat=self.concat_dkv
+            )
+        elif _backend == MagiAttentionKernelBackend.FA4:
+            partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
+                do=do,
+                q=q,
+                k=k,
+                v=v,
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
+                o=o,
+                lse=lse,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                sink_layout="sh",
+                deterministic=self.deterministic,
+            )
+            partial_dkv = self._maybe_concat(
+                partial_dk, partial_dv, need_concat=self.concat_dkv
+            )
+        elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+            partial_dq, partial_dk, partial_dv, partial_dsink = cutedsl_bwd(
+                do=do,
+                q=q,
+                k=k,
+                v=v,
+                o=o,
+                lse=lse,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                dq_acc=dq_acc,  # directly reduce to dq_acc
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
+                sm_margin=self.bwd_sm_margin,
+            )
+            partial_dkv = self._maybe_concat(
+                partial_dk, partial_dv, need_concat=self.concat_dkv
+            )
+        else:
+            assert k.shape == v.shape, (
+                "The fused dKV buffer requires symmetric K/V shapes, "
+                f"but got {k.shape=} and {v.shape=}."
+            )
+            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
+            # init partial_dkv buffer
+            # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
+            # and we need to zero-initialize partial_dkv since it needs to be reduced
+            partial_dkv = torch.zeros(
+                dkv_shape,
+                dtype=self.hp_dtype,
+                device=k.device,
+            )
+            partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
+            (
+                partial_dq,
+                partial_dk,
+                partial_dv,
+                partial_dsink,
+            ) = _flex_flash_attn_backward(
+                dout=do,
+                q=q,
+                k=k,
+                v=v,
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
+                sink_layout="sh",
+                out=o,
+                lse=lse,
+                dq=dq_acc,  # directly reduce to dq_acc
+                dk=partial_dk,
+                dv=partial_dv,
+                dsink=None,  # let kernel initialize dsink if required
+                **attn_arg.to_ffa_args(is_bwd=True),
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                # NOTE: always use high precision for the partial dq, dkv
+                # to reduce the error caused by the atomic reduction inside the kernel
+                dq_type=self.hp_dtype,
+                dk_type=self.hp_dtype,
+                dv_type=self.hp_dtype,
+                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
+                disable_bwd_dq_atomic_reduction=False,
+                deterministic=self.deterministic,
+                sm_margin=self.bwd_sm_margin,
+                # optional args below mainly for sparse attn
+                range_merge=env.general.is_range_merge_enable(),
+                bwd_inner_loop_k=False,
+                cat_gqa=env.general.is_cat_gqa_enable(),
+            )
+        if not self.concat_dkv:  # make partial_dkv tupled tensors
+            partial_dkv = (partial_dk, partial_dv)
+        if partial_dsink is not None:
+            # NOTE: make sure the partial_dsink is contiguous before communication
+            partial_dsink = partial_dsink.contiguous()
+        nvtx.stop()
 
         return partial_dq, partial_dkv, partial_dsink
 
@@ -1606,18 +1599,16 @@ class DistAttnRuntime:
                 rdma_tokens=group_cast_kwargs.get("internode_output_seqlen", 0),
             )
         )
-        try:
-            remote_kv_work = group_cast(
-                input=local_kv,
-                output=remote_kv_buffer,
-                **group_cast_kwargs,
-                group=self.cp_group_gc,
-                async_op=True,
-                buffer_name=buffer_name,
-                kernel_barrier=kernel_barrier,
-            )
-        finally:
-            nvtx.stop()
+        remote_kv_work = group_cast(
+            input=local_kv,
+            output=remote_kv_buffer,
+            **group_cast_kwargs,
+            group=self.cp_group_gc,
+            async_op=True,
+            buffer_name=buffer_name,
+            kernel_barrier=kernel_barrier,
+        )
+        nvtx.stop()
 
         # For asymmetric: wrap the work so wait_post_process splits the fused
         # buffer back into a (remote_k, remote_v) tuple along the head_dim.
@@ -1692,18 +1683,16 @@ class DistAttnRuntime:
                 rdma_tokens=group_cast_kwargs.get("internode_output_seqlen", 0),
             )
         )
-        try:
-            remote_q_work = group_cast(
-                input=local_q,
-                output=remote_q_buffer,
-                **group_cast_kwargs,
-                group=self.cp_group_gc,
-                async_op=True,
-                buffer_name=buffer_name,
-                kernel_barrier=kernel_barrier,
-            )
-        finally:
-            nvtx.stop()
+        remote_q_work = group_cast(
+            input=local_q,
+            output=remote_q_buffer,
+            **group_cast_kwargs,
+            group=self.cp_group_gc,
+            async_op=True,
+            buffer_name=buffer_name,
+            kernel_barrier=kernel_barrier,
+        )
+        nvtx.stop()
 
         return remote_q_work, remote_q_buffer
 
@@ -1801,21 +1790,19 @@ class DistAttnRuntime:
                     output_lse=remote_lse_buffer,
                 )
             )
-            try:
-                remote_qo_do_lse_work = group_cast(
-                    input=local_qo_do,
-                    output=remote_qo_do_buffer,
-                    **group_cast_kwargs,
-                    group=self.cp_group_gc,
-                    async_op=True,
-                    cast_lse=True,
-                    input_lse=local_lse,
-                    output_lse=remote_lse_buffer,
-                    buffer_name=buffer_name,
-                    kernel_barrier=kernel_barrier,
-                )
-            finally:
-                nvtx.stop()
+            remote_qo_do_lse_work = group_cast(
+                input=local_qo_do,
+                output=remote_qo_do_buffer,
+                **group_cast_kwargs,
+                group=self.cp_group_gc,
+                async_op=True,
+                cast_lse=True,
+                input_lse=local_lse,
+                output_lse=remote_lse_buffer,
+                buffer_name=buffer_name,
+                kernel_barrier=kernel_barrier,
+            )
+            nvtx.stop()
 
             # Pack the buffers for qo_do and lse together
             remote_qo_do_lse_buffer = (remote_qo_do_buffer, remote_lse_buffer)
@@ -1855,17 +1842,15 @@ class DistAttnRuntime:
                     rdma_tokens=0,
                 )
             )
-            try:
-                remote_lse_work = group_cast(
-                    input=local_lse,
-                    output=remote_lse_buffer,
-                    **group_cast_kwargs_lse,
-                    group=self.cp_group_gc,
-                    async_op=True,
-                    buffer_name=buffer_name,
-                )
-            finally:
-                nvtx.stop()
+            remote_lse_work = group_cast(
+                input=local_lse,
+                output=remote_lse_buffer,
+                **group_cast_kwargs_lse,
+                group=self.cp_group_gc,
+                async_op=True,
+                buffer_name=buffer_name,
+            )
+            nvtx.stop()
 
             # -------   for q,o,do   ------- #
 
@@ -1895,17 +1880,15 @@ class DistAttnRuntime:
                     rdma_tokens=0,
                 )
             )
-            try:
-                remote_qo_do_work = group_cast(
-                    input=local_qo_do,
-                    output=remote_qo_do_buffer,
-                    **group_cast_kwargs_qo_do,
-                    group=self.cp_group_gc,
-                    async_op=True,
-                    buffer_name=buffer_name,
-                )
-            finally:
-                nvtx.stop()
+            remote_qo_do_work = group_cast(
+                input=local_qo_do,
+                output=remote_qo_do_buffer,
+                **group_cast_kwargs_qo_do,
+                group=self.cp_group_gc,
+                async_op=True,
+                buffer_name=buffer_name,
+            )
+            nvtx.stop()
 
             # pack the works for qo_do and lse together
             remote_qo_do_lse_work = WorkWithPostProcessFn(
@@ -2012,21 +1995,19 @@ class DistAttnRuntime:
                     output_lse=partial_local_lse,
                 )
             )
-            try:
-                partial_out_lse_reduce_work = group_reduce(
-                    input=partial_remote_out,
-                    input_lse=partial_remote_lse,
-                    output=partial_local_out,
-                    output_lse=partial_local_lse,
-                    **group_reduce_kwargs,
-                    group=self.cp_group_gr,
-                    async_op=True,
-                    **partial_out_lse_reduce_kwargs,
-                    buffer_name=buffer_name,
-                    kernel_barrier=kernel_barrier,
-                )
-            finally:
-                nvtx.stop()
+            partial_out_lse_reduce_work = group_reduce(
+                input=partial_remote_out,
+                input_lse=partial_remote_lse,
+                output=partial_local_out,
+                output_lse=partial_local_lse,
+                **group_reduce_kwargs,
+                group=self.cp_group_gr,
+                async_op=True,
+                **partial_out_lse_reduce_kwargs,
+                buffer_name=buffer_name,
+                kernel_barrier=kernel_barrier,
+            )
+            nvtx.stop()
         else:
             if not self.fwd_out_lse_use_acc and partial_remote_out is not None:
                 # NOTE: the partial remote out and lse have NOT been reduced to
@@ -2161,19 +2142,17 @@ class DistAttnRuntime:
                 rdma_tokens=group_reduce_kwargs.get("internode_output_seqlen", 0),
             )
         )
-        try:
-            partial_dkv_reduce_work = group_reduce(
-                input=partial_remote_dkv,
-                output=partial_local_dkv,
-                **group_reduce_kwargs,
-                group=self.cp_group_gr,
-                async_op=True,
-                **partial_dkv_reduce_kwargs,
-                buffer_name=buffer_name,
-                kernel_barrier=kernel_barrier,
-            )
-        finally:
-            nvtx.stop()
+        partial_dkv_reduce_work = group_reduce(
+            input=partial_remote_dkv,
+            output=partial_local_dkv,
+            **group_reduce_kwargs,
+            group=self.cp_group_gr,
+            async_op=True,
+            **partial_dkv_reduce_kwargs,
+            buffer_name=buffer_name,
+            kernel_barrier=kernel_barrier,
+        )
+        nvtx.stop()
 
         # For asymmetric: hijack the post_process_fn to split the fused local
         # dkv buffer back into a (dk, dv) tuple along the head_dim. The caller
@@ -2268,19 +2247,17 @@ class DistAttnRuntime:
                     rdma_tokens=group_reduce_kwargs.get("internode_output_seqlen", 0),
                 )
             )
-            try:
-                partial_dq_reduce_work = group_reduce(
-                    input=partial_remote_dq,
-                    output=partial_local_dq,
-                    **group_reduce_kwargs,
-                    group=self.cp_group_gr,
-                    async_op=True,
-                    **partial_dq_reduce_kwargs,
-                    buffer_name=buffer_name,
-                    kernel_barrier=kernel_barrier,
-                )
-            finally:
-                nvtx.stop()
+            partial_dq_reduce_work = group_reduce(
+                input=partial_remote_dq,
+                output=partial_local_dq,
+                **group_reduce_kwargs,
+                group=self.cp_group_gr,
+                async_op=True,
+                **partial_dq_reduce_kwargs,
+                buffer_name=buffer_name,
+                kernel_barrier=kernel_barrier,
+            )
+            nvtx.stop()
         else:
             if not self.bwd_dq_use_acc and partial_remote_dq is not None:
                 # NOTE: the partial remote dq has NOT been reduced to partial local dq

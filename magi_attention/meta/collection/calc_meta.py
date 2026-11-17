@@ -126,16 +126,11 @@ class AttnArg:
         q_ranges = self.q_ranges_bwd if is_bwd else self.q_ranges
         k_ranges = self.k_ranges_bwd if is_bwd else self.k_ranges
 
-        def format_ranges(ranges: AttnRanges) -> str:
-            entries = [f"{r.start}:{r.end}" for r in ranges[:8]]
-            if len(ranges) > 8:
-                entries.append(f"...(+{len(ranges) - 8})")
-            return "[" + ", ".join(entries) + "]"
-
         phase = "bwd" if is_bwd else "fwd"
         return (
             f"attn/{phase} | area={self.total_area:,} | ranges={len(q_ranges)} | "
-            f"Q={format_ranges(q_ranges)} | K={format_ranges(k_ranges)}"
+            f"q_ranges={[list(r) for r in q_ranges.to_naive_ranges()]} | "
+            f"k_ranges={[list(r) for r in k_ranges.to_naive_ranges()]}"
         )
 
     def _init_ffa_fwd_args_dict(self) -> None:
@@ -492,76 +487,70 @@ class FA4AttnArg(AttnArg):
                 f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
                 f"tile_m={tile_m}-tile_n={tile_n}"
             )
-            try:
-                (
-                    cuda_k_mask_cnt,
-                    cuda_k_mask_offset,
-                    cuda_k_mask_idx,
-                    cuda_k_full_cnt,
-                    cuda_k_full_offset,
-                    cuda_k_full_idx,
-                ) = create_block_mask_cuda.create_q2k_csr_sparse_from_func(
-                    hstu_func,
-                    self.seqlen_q,
-                    self.seqlen_k,
-                    Q_BLOCK_SIZE=sparse_tile_m,
-                    KV_BLOCK_SIZE=tile_n,
-                    check_q_boundary=False,
-                )
-
-                # Convert to LinearBlockSparseTensorsTorch format
-                # CUDA kernel returns:
-                #   - cnt: [B, H, num_blocks] - kept 3D for FA-cute (>=v1.1.1) expected layout
-                #   - offset: [B * H * num_blocks + 1] - flattened exclusive prefix sum (starts with 0)
-                #   - idx: [total_blocks] - compact indices
-                linear_k_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_k_mask_cnt,
-                    mask_block_offset=cuda_k_mask_offset,
-                    mask_block_idx=cuda_k_mask_idx,
-                    full_block_cnt=cuda_k_full_cnt,
-                    full_block_offset=cuda_k_full_offset,
-                    full_block_idx=cuda_k_full_idx,
-                    # The fwd path (and the dq half of bwd) sets q_stage=2 on sm100,
-                    # so base_m_block = q_stage * tile_m = sparse_tile_m. Declare the
-                    # block size explicitly so the new FA backend doesn't have to infer
-                    # it (which fails when seqlen_q <= sparse_tile_m gives only 1 q-block).
-                    block_size=(sparse_tile_m, tile_n),
-                )
-            finally:
-                nvtx.stop()
+            (
+                cuda_k_mask_cnt,
+                cuda_k_mask_offset,
+                cuda_k_mask_idx,
+                cuda_k_full_cnt,
+                cuda_k_full_offset,
+                cuda_k_full_idx,
+            ) = create_block_mask_cuda.create_q2k_csr_sparse_from_func(
+                hstu_func,
+                self.seqlen_q,
+                self.seqlen_k,
+                Q_BLOCK_SIZE=sparse_tile_m,
+                KV_BLOCK_SIZE=tile_n,
+                check_q_boundary=False,
+            )
+            # Convert to LinearBlockSparseTensorsTorch format
+            # CUDA kernel returns:
+            #   - cnt: [B, H, num_blocks] - kept 3D for FA-cute (>=v1.1.1) expected layout
+            #   - offset: [B * H * num_blocks + 1] - flattened exclusive prefix sum (starts with 0)
+            #   - idx: [total_blocks] - compact indices
+            linear_k_block_sparse_mask = LinearBlockSparseTensorsTorch(
+                mask_block_cnt=cuda_k_mask_cnt,
+                mask_block_offset=cuda_k_mask_offset,
+                mask_block_idx=cuda_k_mask_idx,
+                full_block_cnt=cuda_k_full_cnt,
+                full_block_offset=cuda_k_full_offset,
+                full_block_idx=cuda_k_full_idx,
+                # The fwd path (and the dq half of bwd) sets q_stage=2 on sm100,
+                # so base_m_block = q_stage * tile_m = sparse_tile_m. Declare the
+                # block size explicitly so the new FA backend doesn't have to infer
+                # it (which fails when seqlen_q <= sparse_tile_m gives only 1 q-block).
+                block_size=(sparse_tile_m, tile_n),
+            )
+            nvtx.stop()
             nvtx.start(
                 f"create_k2q_csr_sparse_from_func-"
                 f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
                 f"tile_m={tile_m}-tile_n={tile_n}"
             )
-            try:
-                (
-                    cuda_q_mask_cnt,
-                    cuda_q_mask_offset,
-                    cuda_q_mask_idx,
-                    cuda_q_full_cnt,
-                    cuda_q_full_offset,
-                    cuda_q_full_idx,
-                ) = create_block_mask_cuda.create_k2q_csr_sparse_from_func(
-                    hstu_func,
-                    self.seqlen_q,
-                    self.seqlen_k,
-                    Q_BLOCK_SIZE=bwd_sparse_tile_m,
-                    KV_BLOCK_SIZE=bwd_sparse_tile_n,
-                )
-
-                linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_q_mask_cnt,
-                    mask_block_offset=cuda_q_mask_offset,
-                    mask_block_idx=cuda_q_mask_idx,
-                    full_block_cnt=cuda_q_full_cnt,
-                    full_block_offset=cuda_q_full_offset,
-                    full_block_idx=cuda_q_full_idx,
-                    # Match the K2Q CSR block to the selected backward attention tile.
-                    block_size=(bwd_sparse_tile_m, bwd_sparse_tile_n),
-                )
-            finally:
-                nvtx.stop()
+            (
+                cuda_q_mask_cnt,
+                cuda_q_mask_offset,
+                cuda_q_mask_idx,
+                cuda_q_full_cnt,
+                cuda_q_full_offset,
+                cuda_q_full_idx,
+            ) = create_block_mask_cuda.create_k2q_csr_sparse_from_func(
+                hstu_func,
+                self.seqlen_q,
+                self.seqlen_k,
+                Q_BLOCK_SIZE=bwd_sparse_tile_m,
+                KV_BLOCK_SIZE=bwd_sparse_tile_n,
+            )
+            linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
+                mask_block_cnt=cuda_q_mask_cnt,
+                mask_block_offset=cuda_q_mask_offset,
+                mask_block_idx=cuda_q_mask_idx,
+                full_block_cnt=cuda_q_full_cnt,
+                full_block_offset=cuda_q_full_offset,
+                full_block_idx=cuda_q_full_idx,
+                # Match the K2Q CSR block to the selected backward attention tile.
+                block_size=(bwd_sparse_tile_m, bwd_sparse_tile_n),
+            )
+            nvtx.stop()
         else:
             # Prepare mask_mod
             def mask_mod_flex(b, h, q_idx, kv_idx, arbitrary_func=hstu_func):
@@ -667,29 +656,23 @@ class FA4AttnArg(AttnArg):
         nvtx.start(
             f"magi_to_hstu-seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-n_ub_func={n_ub_func}"
         )
-        try:
-            hstu_func = magi_to_hstu_cuda.magi_to_hstu(
-                q_ranges=self.ffa_fwd_args_dict["q_ranges"],
-                k_ranges=self.ffa_fwd_args_dict["k_ranges"],
-                mask_types=self.ffa_fwd_args_dict["attn_type_map"],
-                seqlen_q=self.seqlen_q,
-                seqlen_k=self.seqlen_k,
-                n_max_func=n_ub_func,
-            )
-
-            # FA4 compiles on n_func: drop unused tail rows. Floor 1 because
-            # all-zero row 0 is a valid empty first interval (first k starts > 0).
-            live_rows = hstu_func.ne(0).any(dim=1)
-            row_ordinal = torch.arange(
-                1, hstu_func.size(0) + 1, device=hstu_func.device
-            )
-            n_keep = max(int((live_rows * row_ordinal).max().item()), 1)
-            hstu_func = hstu_func[:n_keep]
-            self.n_func = hstu_func.size(0)
-
-            hstu_func = hstu_func.unsqueeze(0).unsqueeze(0)
-        finally:
-            nvtx.stop()
+        hstu_func = magi_to_hstu_cuda.magi_to_hstu(
+            q_ranges=self.ffa_fwd_args_dict["q_ranges"],
+            k_ranges=self.ffa_fwd_args_dict["k_ranges"],
+            mask_types=self.ffa_fwd_args_dict["attn_type_map"],
+            seqlen_q=self.seqlen_q,
+            seqlen_k=self.seqlen_k,
+            n_max_func=n_ub_func,
+        )
+        # FA4 compiles on n_func: drop unused tail rows. Floor 1 because
+        # all-zero row 0 is a valid empty first interval (first k starts > 0).
+        live_rows = hstu_func.ne(0).any(dim=1)
+        row_ordinal = torch.arange(1, hstu_func.size(0) + 1, device=hstu_func.device)
+        n_keep = max(int((live_rows * row_ordinal).max().item()), 1)
+        hstu_func = hstu_func[:n_keep]
+        self.n_func = hstu_func.size(0)
+        hstu_func = hstu_func.unsqueeze(0).unsqueeze(0)
+        nvtx.stop()
 
         # Pad hstu_func to avoid out-of-bounds access in FA4 kernels
         from magi_attention.api.functools import pad_at_dim
@@ -759,6 +742,31 @@ class FA4AttnArg(AttnArg):
             interval 1: [F1, F2)
             interval 2: [F3, F4)
             ...
+
+        Broadcasting example for the first interval:
+        Assuming seqlen_q = 4, seqlen_k = 8, func[0] = [3, 5, 2, 6]  # F0 value for each q
+        k_indices [1, seqlen_k] broadcasted along rows, F0 [seqlen_q, 1] broadcasted along columns
+        k_indices [1, 8]:  [[0, 1, 2, 3, 4, 5, 6, 7]]
+                        ↓ copied 4 rows
+                [[0, 1, 2, 3, 4, 5, 6, 7],
+                    [0, 1, 2, 3, 4, 5, 6, 7],
+                    [0, 1, 2, 3, 4, 5, 6, 7],
+                    [0, 1, 2, 3, 4, 5, 6, 7]]
+
+        F0 [4, 1]:         [[3],       → copied 8 columns → [[3, 3, 3, 3, 3, 3, 3, 3],
+                            [5],                     [5, 5, 5, 5, 5, 5, 5, 5],
+                            [2],                     [2, 2, 2, 2, 2, 2, 2, 2],
+                            [6]]                     [6, 6, 6, 6, 6, 6, 6, 6]]
+
+                        k=0  k=1  k=2  k=3  k=4  k=5  k=6  k=7
+                ┌────┬────┬────┬────┬────┬────┬────┬────┐
+        q0 (F0=3) │ T  │ T  │ T  │ F  │ F  │ F  │ F  │ F  │  → [0,3) visible
+                ├────┼────┼────┼────┼────┼────┼────┼────┤
+        q1 (F0=5) │ T  │ T  │ T  │ T  │ T  │ F  │ F  │ F  │  → [0,5) visible
+                ├────┼────┼────┼────┼────┼────┼────┼────┤
+        q2 (F0=2) │ T  │ T  │ F  │ F  │ F  │ F  │ F  │ F  │  → [0,2) visible
+                ├────┼────┼────┼────┼────┼────┼────┼────┤
+        q3 (F0=6) │ T  │ T  │ T  │ T  │ T  │ T  │ F  │ F  │  → [0,6) visible
         """
         n_max_func, seqlen_q = func.shape
         device = func.device

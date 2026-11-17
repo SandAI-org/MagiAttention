@@ -42,7 +42,7 @@ from .general import wrap_to_list
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.3.1"
+__version__ = "1.3.0"
 
 # Global flag to enable/disable the profiler
 _PROFILER_ENABLED = False
@@ -796,7 +796,7 @@ def _() -> None:
 
 
 def start(event_name: str) -> None:
-    """Start a same-thread NVTX range, paired with ``stop`` in finally.
+    """Start a same-thread NVTX range, paired with a subsequent ``stop``.
 
     Reuses the compile custom op and the same prefix as instrument.
     For reliable kernel attribution, place scopes outside compiled calls;

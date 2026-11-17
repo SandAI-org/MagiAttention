@@ -19,7 +19,7 @@ from packaging.version import Version
 from .backend_requirements import check_cutedsl_installation
 
 # Version of this forkable utility module, independent of the package version.
-__version__ = "1.0.6"
+__version__ = "1.0.5"
 
 
 def _parse(version: str, release_only: bool) -> Version:
