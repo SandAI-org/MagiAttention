@@ -20,7 +20,7 @@ from magi_attention.utils import nvtx
 __all__ = ["scatter_v"]
 
 
-@torch.no_grad()
+@torch.no_grad
 @nvtx.instrument
 def scatter_v(
     x_global: torch.Tensor,

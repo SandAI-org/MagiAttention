@@ -47,7 +47,7 @@ def _calc_a2v_comm_bytes(
     return total_num * stride0 * dtype.itemsize
 
 
-@torch.no_grad()
+@torch.no_grad
 @nvtx.instrument
 def all2all_v(
     input: torch.Tensor,

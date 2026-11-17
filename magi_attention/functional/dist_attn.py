@@ -1253,12 +1253,8 @@ class DistAttnRuntime:
             assert (
                 _backend != MagiAttentionKernelBackend.FA4
             ), "FA4 backend does not support return max logits"
-        with nvtx.record(
-            f"attn-fwd: "
-            f"{attn_arg.total_area=:,} | "
-            f"{attn_arg.q_ranges=} | "
-            f"{attn_arg.k_ranges=}"
-        ):
+        nvtx.start(attn_arg.get_nvtx_event_name(is_bwd=False))
+        try:
             if _backend == MagiAttentionKernelBackend.SDPA_OL:
                 partial_out, meta = sdpa_online_fwd(
                     q=q,
@@ -1356,6 +1352,8 @@ class DistAttnRuntime:
                     return_max_logits=return_max_logits,
                     max_logits=max_logits_acc,  # directly reduce to max_logits_acc
                 )
+        finally:
+            nvtx.stop()
 
         return partial_out, meta
 
@@ -1375,12 +1373,8 @@ class DistAttnRuntime:
         is_host_stage: bool,
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
         _backend = self.kernel_backend
-        with nvtx.record(
-            f"attn-bwd: "
-            f"{attn_arg.total_area=:,} | "
-            f"{attn_arg.q_ranges=} | "
-            f"{attn_arg.k_ranges=}"
-        ):
+        nvtx.start(attn_arg.get_nvtx_event_name(is_bwd=True))
+        try:
             if _backend == MagiAttentionKernelBackend.SDPA_OL:
                 partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_online_bwd(
                     do=do,
@@ -1515,6 +1509,8 @@ class DistAttnRuntime:
             if partial_dsink is not None:
                 # NOTE: make sure the partial_dsink is contiguous before communication
                 partial_dsink = partial_dsink.contiguous()
+        finally:
+            nvtx.stop()
 
         return partial_dq, partial_dkv, partial_dsink
 
@@ -1598,48 +1594,19 @@ class DistAttnRuntime:
             device=device,
         )
 
-        # Compute communication bytes for nvtx logging
-        if is_fused:
-            input_kv_shape = local_kv.shape
-            input_kv_dtype = local_kv.dtype
-            output_kv_shape = remote_kv_buffer.shape
-            output_kv_dtype = remote_kv_buffer.dtype
-            num_tensors = 1
-        else:  # tuple branch, symmetric K/V chunked into individual buffers
+        if not is_fused:
             remote_kv_buffer = self._maybe_chunk(remote_kv_buffer, num_chunks=2)
-            input_kv_shape = local_kv[0].shape
-            input_kv_dtype = local_kv[0].dtype
-            output_kv_shape = remote_kv_buffer[0].shape
-            output_kv_dtype = remote_kv_buffer[0].dtype
-            num_tensors = 2
-        group_cast_kv_bytes = self._compute_grpcoll_bytes(
-            comm_tokens=group_cast_arg.group_cast_comm_tokens * num_tensors,
-            input=local_kv if is_fused else local_kv[0],
-        )
 
-        # Compute RDMA communication bytes for nvtx logging
-        internode_output_seqlen: int = group_cast_kwargs.get(
-            "internode_output_seqlen", 0
-        )
-        group_cast_kv_rdma_bytes = self._compute_grpcoll_bytes(
-            comm_tokens=internode_output_seqlen * num_tensors,
-            input=local_kv if is_fused else local_kv[0],
-        )
-
-        # Launch group cast kernel
-        with nvtx.record(
-            (
-                f"group_cast: "
-                f"{group_cast_kv_bytes=} | "
-                f"{group_cast_kv_rdma_bytes=} | "
-                f"{input_kv_shape=} | "
-                f"{input_kv_dtype=} | "
-                f"{output_kv_shape=} | "
-                f"{output_kv_dtype=} | "
-                f"{num_tensors=} | "
-                f"{asymmetric_kv=}"
+        nvtx.start(
+            self._grpcoll_nvtx_event_name(
+                "group_cast",
+                input=local_kv,
+                output=remote_kv_buffer,
+                comm_tokens=group_cast_arg.group_cast_comm_tokens,
+                rdma_tokens=group_cast_kwargs.get("internode_output_seqlen", 0),
             )
-        ):
+        )
+        try:
             remote_kv_work = group_cast(
                 input=local_kv,
                 output=remote_kv_buffer,
@@ -1649,6 +1616,8 @@ class DistAttnRuntime:
                 buffer_name=buffer_name,
                 kernel_barrier=kernel_barrier,
             )
+        finally:
+            nvtx.stop()
 
         # For asymmetric: wrap the work so wait_post_process splits the fused
         # buffer back into a (remote_k, remote_v) tuple along the head_dim.
@@ -1714,34 +1683,16 @@ class DistAttnRuntime:
             device=local_q.device,
         )
 
-        # Compute total communication bytes for nvtx logging
-        group_cast_q_bytes = self._compute_grpcoll_bytes(
-            comm_tokens=group_cast_arg.group_cast_comm_tokens,
-            input=local_q,
-        )
-
-        # Compute RDMA communication bytes for nvtx logging
-        internode_output_seqlen: int = group_cast_kwargs.get(
-            "internode_output_seqlen", 0
-        )
-        group_cast_q_rdma_bytes = self._compute_grpcoll_bytes(
-            comm_tokens=internode_output_seqlen,
-            input=local_q,
-        )
-
-        # Launch group cast kernel
-        with nvtx.record(
-            (
-                f"group_cast: "
-                f"{group_cast_q_bytes=} | "
-                f"{group_cast_q_rdma_bytes=} | "
-                f"input_q.shape={local_q.shape} | "
-                f"input_q.dtype={local_q.dtype} | "
-                f"output_q.shape={remote_q_buffer.shape} | "
-                f"output_q.dtype={remote_q_buffer.dtype} | "
-                f"num_tensors=1"
+        nvtx.start(
+            self._grpcoll_nvtx_event_name(
+                "group_cast",
+                input=local_q,
+                output=remote_q_buffer,
+                comm_tokens=group_cast_arg.group_cast_comm_tokens,
+                rdma_tokens=group_cast_kwargs.get("internode_output_seqlen", 0),
             )
-        ):
+        )
+        try:
             remote_q_work = group_cast(
                 input=local_q,
                 output=remote_q_buffer,
@@ -1751,6 +1702,8 @@ class DistAttnRuntime:
                 buffer_name=buffer_name,
                 kernel_barrier=kernel_barrier,
             )
+        finally:
+            nvtx.stop()
 
         return remote_q_work, remote_q_buffer
 
@@ -1837,50 +1790,18 @@ class DistAttnRuntime:
             )
             remote_qo_do_buffer = self._maybe_chunk(remote_qo_do_buffer, num_chunks=3)
 
-            # Compute communication bytes for nvtx logging
-            group_cast_qo_do_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=group_cast_arg.group_cast_comm_tokens * 3,
-                input=local_qo_do[0],
-            )
-            group_cast_lse_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=group_cast_arg.group_cast_comm_tokens,
-                lse=local_lse,
-            )
-            group_cast_qo_do_lse_bytes = group_cast_qo_do_bytes + group_cast_lse_bytes
-
-            # Compute RDMA communication bytes for nvtx logging
-            internode_output_seqlen: int = group_cast_kwargs.get(
-                "internode_output_seqlen", 0
-            )
-            group_cast_qo_do_rdma_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=internode_output_seqlen * 3,
-                input=local_qo_do[0],
-            )
-            group_cast_lse_rdma_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=internode_output_seqlen,
-                input=local_lse,
-            )
-            group_cast_qo_do_lse_rdma_bytes = (
-                group_cast_qo_do_rdma_bytes + group_cast_lse_rdma_bytes
-            )
-
-            # Launch group cast kernel
-            with nvtx.record(
-                (
-                    f"group_cast: "
-                    f"{group_cast_qo_do_lse_bytes=} | "
-                    f"{group_cast_qo_do_lse_rdma_bytes=} | "
-                    f"input_qo_do.shape={local_qo_do[0].shape} | "
-                    f"input_qo_do.dtype={local_qo_do[0].dtype} | "
-                    f"output_qo_do.dtype={remote_qo_do_buffer[0].dtype} | "
-                    f"output_qo_do.dtype={remote_qo_do_buffer[0].dtype} | "
-                    f"input_lse_shape={local_lse.shape} | "
-                    f"input_lse_dtype={local_lse.dtype} | "
-                    f"output_lse_shape={remote_lse_buffer.shape} | "
-                    f"output_lse_dtype={remote_lse_buffer.dtype} | "
-                    f"num_tensors_qo_do=3 | num_tensors_lse=1"
+            nvtx.start(
+                self._grpcoll_nvtx_event_name(
+                    "group_cast",
+                    input=local_qo_do,
+                    output=remote_qo_do_buffer,
+                    comm_tokens=group_cast_arg.group_cast_comm_tokens,
+                    rdma_tokens=group_cast_kwargs.get("internode_output_seqlen", 0),
+                    input_lse=local_lse,
+                    output_lse=remote_lse_buffer,
                 )
-            ):
+            )
+            try:
                 remote_qo_do_lse_work = group_cast(
                     input=local_qo_do,
                     output=remote_qo_do_buffer,
@@ -1893,6 +1814,8 @@ class DistAttnRuntime:
                     buffer_name=buffer_name,
                     kernel_barrier=kernel_barrier,
                 )
+            finally:
+                nvtx.stop()
 
             # Pack the buffers for qo_do and lse together
             remote_qo_do_lse_buffer = (remote_qo_do_buffer, remote_lse_buffer)
@@ -1923,28 +1846,16 @@ class DistAttnRuntime:
                 device=device,
             )
 
-            # Compute communication bytes for nvtx logging
-            group_cast_lse_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=group_cast_arg_lse.group_cast_comm_tokens,
-                lse=local_lse,
-            )
-
-            # Compute RDMA communication bytes for nvtx logging
-            group_cast_lse_rdma_bytes = 0
-
-            # Launch group cast kernel for lse
-            with nvtx.record(
-                (
-                    f"group_cast: "
-                    f"{group_cast_lse_bytes=} | "
-                    f"{group_cast_lse_rdma_bytes=} | "
-                    f"input_lse.shape={local_lse.shape} | "
-                    f"input_lse.dtype={local_lse.dtype} | "
-                    f"output_lse.shape={remote_lse_buffer.shape} | "
-                    f"output_lse.dtype={remote_lse_buffer.dtype} | "
-                    f"num_tensors=1"
+            nvtx.start(
+                self._grpcoll_nvtx_event_name(
+                    "group_cast",
+                    input=local_lse,
+                    output=remote_lse_buffer,
+                    comm_tokens=group_cast_arg_lse.group_cast_comm_tokens,
+                    rdma_tokens=0,
                 )
-            ):
+            )
+            try:
                 remote_lse_work = group_cast(
                     input=local_lse,
                     output=remote_lse_buffer,
@@ -1953,6 +1864,8 @@ class DistAttnRuntime:
                     async_op=True,
                     buffer_name=buffer_name,
                 )
+            finally:
+                nvtx.stop()
 
             # -------   for q,o,do   ------- #
 
@@ -1972,29 +1885,17 @@ class DistAttnRuntime:
                 device=device,
             )
 
-            # Compute communication bytes for nvtx logging
-            assert isinstance(local_qo_do, torch.Tensor)  # mypy
-            group_cast_qo_do_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=group_cast_arg_qo_do.group_cast_comm_tokens,
-                input=local_qo_do,
-            )
-
-            # Compute RDMA communication bytes for nvtx logging
-            group_cast_qo_do_rdma_bytes = 0
-
-            # Launch group cast kernel for qo_do
-            with nvtx.record(
-                (
-                    f"group_cast: "
-                    f"{group_cast_qo_do_bytes=} | "
-                    f"{group_cast_qo_do_rdma_bytes=} | "
-                    f"input_qo_do.shape={local_qo_do.shape} | "
-                    f"input_qo_do.dtype={local_qo_do.dtype} | "
-                    f"output_qo_do.shape={remote_qo_do_buffer.shape} | "  # type: ignore[attr-defined]
-                    f"output_qo_do.dtype={remote_qo_do_buffer.dtype} | "  # type: ignore[attr-defined]
-                    f"num_tensors=1"
+            assert isinstance(local_qo_do, torch.Tensor)
+            nvtx.start(
+                self._grpcoll_nvtx_event_name(
+                    "group_cast",
+                    input=local_qo_do,
+                    output=remote_qo_do_buffer,
+                    comm_tokens=group_cast_arg_qo_do.group_cast_comm_tokens,
+                    rdma_tokens=0,
                 )
-            ):
+            )
+            try:
                 remote_qo_do_work = group_cast(
                     input=local_qo_do,
                     output=remote_qo_do_buffer,
@@ -2003,6 +1904,8 @@ class DistAttnRuntime:
                     async_op=True,
                     buffer_name=buffer_name,
                 )
+            finally:
+                nvtx.stop()
 
             # pack the works for qo_do and lse together
             remote_qo_do_lse_work = WorkWithPostProcessFn(
@@ -2098,40 +2001,18 @@ class DistAttnRuntime:
                     ),
                 )
 
-            # Compute communication bytes for nvtx logging
-            group_reduce_out_lse_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=group_reduce_arg.group_reduce_comm_tokens,
-                input=partial_remote_out,
-                lse=partial_remote_lse,
-            )
-
-            # Compute RDMA communication bytes for nvtx logging
-            internode_output_seqlen: int = group_reduce_kwargs.get(
-                "internode_output_seqlen", 0
-            )
-            group_reduce_out_lse_rdma_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=internode_output_seqlen,
-                input=partial_remote_out,
-                lse=partial_remote_lse,
-            )
-
-            # Launch group-reduce kernel
-            with nvtx.record(
-                (
-                    f"group_reduce: "
-                    f"{group_reduce_out_lse_bytes=} | "
-                    f"{group_reduce_out_lse_rdma_bytes=} | "
-                    f"input_out.shape={partial_remote_out.shape} | "
-                    f"input_out.dtype={partial_remote_out.dtype} | "
-                    f"output_out.shape={partial_local_out.shape} | "
-                    f"output_out.dtype={partial_local_out.dtype} |"
-                    f"input_lse.shape={partial_remote_lse.shape} | "
-                    f"input_lse.dtype={partial_remote_lse.dtype} | "
-                    f"output_lse.shape={partial_local_lse.shape} | "
-                    f"output_lse.dtype={partial_local_lse.dtype} | "
-                    f"num_tensors_out=1 | num_tensors_lse=1"
+            nvtx.start(
+                self._grpcoll_nvtx_event_name(
+                    "group_reduce",
+                    input=partial_remote_out,
+                    output=partial_local_out,
+                    comm_tokens=group_reduce_arg.group_reduce_comm_tokens,
+                    rdma_tokens=group_reduce_kwargs.get("internode_output_seqlen", 0),
+                    input_lse=partial_remote_lse,
+                    output_lse=partial_local_lse,
                 )
-            ):
+            )
+            try:
                 partial_out_lse_reduce_work = group_reduce(
                     input=partial_remote_out,
                     input_lse=partial_remote_lse,
@@ -2144,6 +2025,8 @@ class DistAttnRuntime:
                     buffer_name=buffer_name,
                     kernel_barrier=kernel_barrier,
                 )
+            finally:
+                nvtx.stop()
         else:
             if not self.fwd_out_lse_use_acc and partial_remote_out is not None:
                 # NOTE: the partial remote out and lse have NOT been reduced to
@@ -2269,47 +2152,16 @@ class DistAttnRuntime:
                 comm_dtype=self._maybe_hp_dtype(dtype, self.bwd_hp_reduce),
             )
 
-        # Compute communication bytes for nvtx logging
-        if is_fused:
-            input_dkv_shape = partial_remote_dkv.shape
-            input_dkv_dtype = partial_remote_dkv.dtype
-            output_dkv_shape = partial_local_dkv.shape
-            output_dkv_dtype = partial_local_dkv.dtype
-            num_tensors_of_dkv = 1
-        else:
-            input_dkv_shape = partial_remote_dkv[0].shape  # type: ignore
-            input_dkv_dtype = partial_remote_dkv[0].dtype  # type: ignore
-            output_dkv_shape = partial_local_dkv[0].shape
-            output_dkv_dtype = partial_local_dkv[0].dtype
-            num_tensors_of_dkv = 2
-        group_reduce_dkv_bytes = self._compute_grpcoll_bytes(
-            comm_tokens=group_reduce_arg.group_reduce_comm_tokens * num_tensors_of_dkv,
-            input=partial_remote_dkv if is_fused else partial_remote_dkv[0],  # type: ignore
-        )
-
-        # Compute RDMA communication bytes for nvtx logging
-        internode_output_seqlen: int = group_reduce_kwargs.get(
-            "internode_output_seqlen", 0
-        )
-        group_reduce_dkv_rdma_bytes = self._compute_grpcoll_bytes(
-            comm_tokens=internode_output_seqlen * num_tensors_of_dkv,
-            input=partial_remote_dkv if is_fused else partial_remote_dkv[0],  # type: ignore
-        )
-
-        # Launch group-reduce kernel
-        with nvtx.record(
-            (
-                f"group_reduce: "
-                f"{group_reduce_dkv_bytes=} | "
-                f"{group_reduce_dkv_rdma_bytes=} | "
-                f"{input_dkv_shape=} | "
-                f"{input_dkv_dtype=} | "
-                f"{output_dkv_shape=} | "
-                f"{output_dkv_dtype=} | "
-                f"{num_tensors_of_dkv=} | "
-                f"{asymmetric_kv=}"
+        nvtx.start(
+            self._grpcoll_nvtx_event_name(
+                "group_reduce",
+                input=partial_remote_dkv,
+                output=partial_local_dkv,
+                comm_tokens=group_reduce_arg.group_reduce_comm_tokens,
+                rdma_tokens=group_reduce_kwargs.get("internode_output_seqlen", 0),
             )
-        ):
+        )
+        try:
             partial_dkv_reduce_work = group_reduce(
                 input=partial_remote_dkv,
                 output=partial_local_dkv,
@@ -2320,6 +2172,8 @@ class DistAttnRuntime:
                 buffer_name=buffer_name,
                 kernel_barrier=kernel_barrier,
             )
+        finally:
+            nvtx.stop()
 
         # For asymmetric: hijack the post_process_fn to split the fused local
         # dkv buffer back into a (dk, dv) tuple along the head_dim. The caller
@@ -2405,34 +2259,16 @@ class DistAttnRuntime:
                     ),
                 )
 
-            # Compute communication bytes for nvtx logging
-            group_reduce_dq_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=group_reduce_arg.group_reduce_comm_tokens,
-                input=partial_remote_dq,
-            )
-
-            # Compute RDMA communication bytes for nvtx logging
-            internode_output_seqlen: int = group_reduce_kwargs.get(
-                "internode_output_seqlen", 0
-            )
-            group_reduce_dq_rdma_bytes = self._compute_grpcoll_bytes(
-                comm_tokens=internode_output_seqlen,
-                input=partial_remote_dq,
-            )
-
-            # Launch group-reduce kernel
-            with nvtx.record(
-                (
-                    f"group_reduce: "
-                    f"{group_reduce_dq_bytes=} | "
-                    f"{group_reduce_dq_rdma_bytes=} | "
-                    f"input_dq.shape={partial_remote_dq.shape} | "
-                    f"input_dq.dtype={partial_remote_dq.dtype} | "
-                    f"output_dq.shape={partial_local_dq.shape} | "
-                    f"output_dq.dtype={partial_local_dq.dtype} | "
-                    f"num_tensors_dq=1"
+            nvtx.start(
+                self._grpcoll_nvtx_event_name(
+                    "group_reduce",
+                    input=partial_remote_dq,
+                    output=partial_local_dq,
+                    comm_tokens=group_reduce_arg.group_reduce_comm_tokens,
+                    rdma_tokens=group_reduce_kwargs.get("internode_output_seqlen", 0),
                 )
-            ):
+            )
+            try:
                 partial_dq_reduce_work = group_reduce(
                     input=partial_remote_dq,
                     output=partial_local_dq,
@@ -2443,6 +2279,8 @@ class DistAttnRuntime:
                     buffer_name=buffer_name,
                     kernel_barrier=kernel_barrier,
                 )
+            finally:
+                nvtx.stop()
         else:
             if not self.bwd_dq_use_acc and partial_remote_dq is not None:
                 # NOTE: the partial remote dq has NOT been reduced to partial local dq
@@ -2850,6 +2688,42 @@ class DistAttnRuntime:
             None,  # softcap
             None,  # return_max_logits
         )
+
+    def _grpcoll_nvtx_event_name(
+        self,
+        operation: str,
+        input: FusedOrTupleTensor,
+        output: FusedOrTupleTensor,
+        comm_tokens: int,
+        rdma_tokens: int = 0,
+        input_lse: torch.Tensor | None = None,
+        output_lse: torch.Tensor | None = None,
+    ) -> str:
+        """Describe a collective's payload and byte volume without device reads."""
+        inputs = (input,) if isinstance(input, torch.Tensor) else input
+        outputs = (output,) if isinstance(output, torch.Tensor) else output
+        total_bytes = sum(
+            self._compute_grpcoll_bytes(comm_tokens, tensor) for tensor in inputs
+        )
+        rdma_bytes = sum(
+            self._compute_grpcoll_bytes(rdma_tokens, tensor) for tensor in inputs
+        )
+        total_bytes += self._compute_grpcoll_bytes(comm_tokens, lse=input_lse)
+        rdma_bytes += self._compute_grpcoll_bytes(rdma_tokens, lse=input_lse)
+
+        def describe(tensors: tuple[torch.Tensor, ...]) -> str:
+            return ", ".join(
+                f"{'x'.join(map(str, tensor.shape))}:{str(tensor.dtype).removeprefix('torch.')}"
+                for tensor in tensors
+            )
+
+        message = (
+            f"{operation} | bytes={total_bytes:,} | rdma={rdma_bytes:,} | "
+            f"in=[{describe(inputs)}] | out=[{describe(outputs)}]"
+        )
+        if input_lse is not None and output_lse is not None:
+            message += f" | lse=[{describe((input_lse,))} -> {describe((output_lse,))}]"
+        return message
 
     def _compute_grpcoll_bytes(
         self,

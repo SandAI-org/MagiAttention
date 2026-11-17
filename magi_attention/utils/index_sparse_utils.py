@@ -314,11 +314,14 @@ def partition_index_sparse_rows_by_k_chunk(
     assert index_sparse_indices.dim() == 3
     assert index_sparse_indices.dtype == torch.int32
     assert chunk_size >= 1 and num_chunks >= 1
+
     indices = index_sparse_indices.contiguous()
     if rows_sorted:
         return _sorted_rows_chunk_bounds(indices, chunk_size, num_chunks)
+
     topk = indices.shape[-1]
     tile = None if topk <= _MAX_SINGLE_BLOCK else _TILE
+
     return _partition_index_sparse_rows_by_k_chunk_launch(
         indices, chunk_size, num_chunks, tile
     )

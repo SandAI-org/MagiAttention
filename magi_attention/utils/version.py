@@ -19,7 +19,7 @@ from packaging.version import Version
 from .backend_requirements import check_cutedsl_installation
 
 # Version of this forkable utility module, independent of the package version.
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 
 def _parse(version: str, release_only: bool) -> Version:
@@ -30,7 +30,7 @@ def _parse(version: str, release_only: bool) -> Version:
 
 # --------  torch version predicates --------
 
-_TORCH_VERSION = Version(torch.__version__)
+_TORCH_VERSION = _parse(torch.__version__, False)
 _TORCH_RELEASE = _parse(torch.__version__, True)
 
 
@@ -122,7 +122,7 @@ def is_torch_version_lt(version: str, release_only: bool = True) -> bool:
 
 # --------  triton version predicates --------
 
-_TRITON_VERSION = Version(triton.__version__)
+_TRITON_VERSION = _parse(triton.__version__, False)
 _TRITON_RELEASE = _parse(triton.__version__, True)
 
 
@@ -199,7 +199,9 @@ def is_triton_version_lt(version: str, release_only: bool = True) -> bool:
 # --------  cuda version predicates --------
 
 _CUDA_VERSION_STR = torch.version.cuda
-_CUDA_VERSION = Version(_CUDA_VERSION_STR) if _CUDA_VERSION_STR is not None else None
+_CUDA_VERSION = (
+    _parse(_CUDA_VERSION_STR, False) if _CUDA_VERSION_STR is not None else None
+)
 _CUDA_RELEASE = (
     _parse(_CUDA_VERSION_STR, True) if _CUDA_VERSION_STR is not None else None
 )
@@ -334,3 +336,48 @@ def is_cutedsl_version_le(version: str, release_only: bool = True) -> bool:
 def is_cutedsl_version_lt(version: str, release_only: bool = True) -> bool:
     """DSL < comparison; see :func:`is_cutedsl_version_eq` for semantics."""
     return _cutedsl_version(release_only) < _parse(version, release_only)
+
+
+# --------  quack version predicates --------
+
+
+def is_quack_version_eq(version: str, release_only: bool = True) -> bool:
+    """Return whether the validated Quack version is == *version*."""
+    return _parse(check_cutedsl_installation()[1], release_only) == _parse(
+        version, release_only
+    )
+
+
+def is_quack_version_ne(version: str, release_only: bool = True) -> bool:
+    """Return whether the validated Quack version is != *version*."""
+    return _parse(check_cutedsl_installation()[1], release_only) != _parse(
+        version, release_only
+    )
+
+
+def is_quack_version_ge(version: str, release_only: bool = True) -> bool:
+    """Return whether the validated Quack version is >= *version*."""
+    return _parse(check_cutedsl_installation()[1], release_only) >= _parse(
+        version, release_only
+    )
+
+
+def is_quack_version_gt(version: str, release_only: bool = True) -> bool:
+    """Return whether the validated Quack version is > *version*."""
+    return _parse(check_cutedsl_installation()[1], release_only) > _parse(
+        version, release_only
+    )
+
+
+def is_quack_version_le(version: str, release_only: bool = True) -> bool:
+    """Return whether the validated Quack version is <= *version*."""
+    return _parse(check_cutedsl_installation()[1], release_only) <= _parse(
+        version, release_only
+    )
+
+
+def is_quack_version_lt(version: str, release_only: bool = True) -> bool:
+    """Return whether the validated Quack version is < *version*."""
+    return _parse(check_cutedsl_installation()[1], release_only) < _parse(
+        version, release_only
+    )

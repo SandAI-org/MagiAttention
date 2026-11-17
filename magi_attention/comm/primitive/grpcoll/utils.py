@@ -588,7 +588,7 @@ def _calc_group_cast_a2a_output_args(
     )
 
 
-@torch.no_grad()
+@torch.no_grad
 @nvtx.instrument
 def calc_group_cast_a2a_args(
     input: torch.Tensor,
@@ -968,7 +968,7 @@ def _calc_group_reduce_a2a_output_args(
     )
 
 
-@torch.no_grad()
+@torch.no_grad
 @nvtx.instrument
 def calc_group_reduce_a2a_args(
     input: torch.Tensor,

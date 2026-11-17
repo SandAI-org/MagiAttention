@@ -38,9 +38,11 @@ from typing import (
 import torch
 import torch.distributed as dist
 
+from .general import wrap_to_list
+
 logger = logging.getLogger(__name__)
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # Global flag to enable/disable the profiler
 _PROFILER_ENABLED = False
@@ -565,10 +567,6 @@ def profile_iters(
         capture has started before training resumes and that all reports have
         been generated before training continues after ``end``.
     """
-    # Import locally because general.py uses @nvtx.instrument. Importing
-    # general.py while this module is still being initialized creates a cycle.
-    from .general import wrap_to_list
-
     # --- Checks and early returns / raises ---
 
     if not enable:
@@ -797,37 +795,50 @@ def _() -> None:
     pass
 
 
-# NOTE: since torch.compile does not support @contextlib.contextmanager,
+def start(event_name: str) -> None:
+    """Start a same-thread NVTX range, paired with ``stop`` in finally.
+
+    Reuses the compile custom op and the same prefix as instrument.
+    For reliable kernel attribution, place scopes outside compiled calls;
+    compilers may erase or move internal diagnostic markers.
+    """
+    if torch.compiler.is_compiling():
+        nvtx_range_push("MagiAttention::torch compile region")
+    else:
+        torch.cuda.nvtx.range_push(f"{NVTX_EVENT_PREFIX}{event_name}")
+
+
+def stop() -> None:
+    """End the most recent range on the same host thread."""
+    if torch.compiler.is_compiling():
+        nvtx_range_pop()
+    else:
+        torch.cuda.nvtx.range_pop()
+
+
+# NOTE: Since torch.compile does not support @contextlib.contextmanager,
 # we use the class-based context manager
 class record:
     """
     Context manager to add an NVTX event around a code block.
 
     The recorded range name is automatically prefixed with ``NVTX_EVENT_PREFIX``
-    for a consistent naming convention.
+    for a consistent naming convention. Place the scope outside compiled calls
+    when its boundaries must enclose the corresponding kernel launches.
 
     Args:
         event_name (str): The name of the event to be recorded.
     """
 
     def __init__(self, event_name: str):
-        self.enter_name = f"{NVTX_EVENT_PREFIX}{event_name}"
+        self.event_name = event_name
 
     def __enter__(self):
-        if torch.compiler.is_compiling():
-            # NOTE: torch.compile supports neither retrieving the attributes from "self"
-            # nor modifying a variable not in the current scope
-            # so we have no choice but assign a constant event name when compiling
-            nvtx_range_push("MagiAttention::torch compile region")
-        else:
-            torch.cuda.nvtx.range_push(self.enter_name)
+        start(self.event_name)
         return self
 
     def __exit__(self, *excinfo):
-        if torch.compiler.is_compiling():
-            nvtx_range_pop()
-        else:
-            torch.cuda.nvtx.range_pop()
+        stop()
 
 
 @overload

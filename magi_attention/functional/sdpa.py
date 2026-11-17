@@ -142,7 +142,7 @@ def _sdpa_fwd(
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)
 
 
-@torch.no_grad()
+@torch.no_grad
 def sdpa_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -376,7 +376,7 @@ def _sdpa_bwd(
     return dq, dk, dv
 
 
-@torch.no_grad()
+@torch.no_grad
 def sdpa_bwd(
     do: torch.Tensor,
     q: torch.Tensor,

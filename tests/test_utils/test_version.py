@@ -37,13 +37,13 @@ class TestVersionComparisons(unittest.TestCase):
     def test_all_components_agree_on_release_and_full_ordering(self) -> None:
         current = "2.12.0a0+nv26.05"
         patches: dict[str, Any] = {
-            "check_cutedsl_installation": lambda: (current, "unused")
+            "check_cutedsl_installation": lambda: (current, current)
         }
         for component in ("TORCH", "TRITON", "CUDA"):
             patches[f"_{component}_VERSION"] = Version(current)
             patches[f"_{component}_RELEASE"] = Version("2.12.0")
         with mock.patch.multiple(version, **patches):
-            for component in ("torch", "triton", "cuda", "cutedsl"):
+            for component in ("torch", "triton", "cuda", "cutedsl", "quack"):
                 # Release comparison normalizes trailing zeros; full ordering
                 # still distinguishes the installed prerelease from stable.
                 expected = {

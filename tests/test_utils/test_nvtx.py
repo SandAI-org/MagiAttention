@@ -17,6 +17,41 @@ import torch.distributed as dist
 from magi_attention.utils import nvtx
 
 
+class TestNvtxRanges(TestCase):
+    def test_explicit_ranges_and_record_share_prefix_and_pair_on_error(self):
+        with (
+            mock.patch.object(torch.compiler, "is_compiling", return_value=False),
+            mock.patch.object(torch.cuda.nvtx, "range_push") as push,
+            mock.patch.object(torch.cuda.nvtx, "range_pop") as pop,
+        ):
+            nvtx.start("outer")
+            try:
+                with self.assertRaisesRegex(ValueError, "example"):
+                    with nvtx.record("inner"):
+                        raise ValueError("example")
+            finally:
+                nvtx.stop()
+        self.assertEqual(
+            push.call_args_list,
+            [
+                mock.call(nvtx.NVTX_EVENT_PREFIX + "outer"),
+                mock.call(nvtx.NVTX_EVENT_PREFIX + "inner"),
+            ],
+        )
+        self.assertEqual(pop.call_count, 2)
+
+    def test_compiling_uses_registered_ops(self):
+        with (
+            mock.patch.object(torch.compiler, "is_compiling", return_value=True),
+            mock.patch.object(nvtx, "nvtx_range_push") as push,
+            mock.patch.object(nvtx, "nvtx_range_pop") as pop,
+        ):
+            nvtx.start("dynamic label")
+            nvtx.stop()
+        push.assert_called_once_with("MagiAttention::torch compile region")
+        pop.assert_called_once_with()
+
+
 class TestNsysController(TestCase):
     def test_only_local_rank_zero_controls_profiled_node(self):
         with (

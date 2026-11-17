@@ -50,7 +50,7 @@ def _split_dims(
     return this_dim, other_dims
 
 
-@torch.no_grad()
+@torch.no_grad
 @nvtx.instrument
 def all_gather_v(
     x_local: torch.Tensor,

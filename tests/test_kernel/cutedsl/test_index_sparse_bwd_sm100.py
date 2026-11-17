@@ -97,6 +97,8 @@ from tests.test_attn.sparse_test_utils import (
     sdpa_ref_output,
 )
 
+require_blackwell = unittest.skipUnless(is_sm(100, 103), "requires Blackwell SM100/103")
+
 BwdGrads = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 FwdOutLse = tuple[torch.Tensor, torch.Tensor]
 
@@ -359,7 +361,7 @@ def _run_sweep(
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
+@require_blackwell
 class TestIndexSparseBwdSm100Sweep(DistTestBase):
     """sm90 Classic sweep: q_seqlen × kv_seqlen × topk, MQA128, D=128, kbs=1."""
 
@@ -409,7 +411,7 @@ class TestIndexSparseBwdSm100Sweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
+@require_blackwell
 class TestIndexSparseBwdSm100ComprehensiveSweep(DistTestBase):
     """sm90 Comprehensive sweep: head_config × head_dim × kbs.
 
@@ -485,7 +487,7 @@ class TestIndexSparseBwdSm100ComprehensiveSweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
+@require_blackwell
 class TestIndexSparseBwdSm100Geometry(unittest.TestCase):
     """The adapter's multi-kv-head refold and q blocks that do not fill one Q tile exactly."""
 
@@ -574,7 +576,7 @@ def _bwd_with_sorted_rows(q, k, v, out, do, lse, index_sparse_indices, **kwargs)
     )
 
 
-@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
+@require_blackwell
 class TestIndexSparseBwdSm100Options(unittest.TestCase):
     """``gather_v_async`` and ``num_k_passes``: each path against the reference, and their defaults."""
 
@@ -747,7 +749,7 @@ class TestIndexSparseBwdSm100Options(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm(100, 103), "ffa_bwd_sm100_index needs an SM100 GPU")
+@require_blackwell
 class TestIndexSparseBwdSm100Comparison(unittest.TestCase):
     """A PASS of ``_run_index_sparse_config`` needs the right gradients: a shifted dK fails."""
 

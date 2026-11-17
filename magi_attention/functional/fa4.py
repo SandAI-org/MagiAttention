@@ -124,7 +124,7 @@ def _extract_linear_sparse_tensors(block_sparse):
     )
 
 
-@torch.no_grad()
+@torch.no_grad
 def fa4_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -216,7 +216,7 @@ def fa4_fwd(
     return out, lse
 
 
-@torch.no_grad()
+@torch.no_grad
 def fa4_bwd(
     do: torch.Tensor,
     q: torch.Tensor,
