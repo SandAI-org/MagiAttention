@@ -73,7 +73,7 @@ class TestRangeGather(TestCase):
 
     @property
     def device(self) -> int:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device("cuda")
 
     @parameterize("kernel_backend", ["per_row", "per_range"])
     def test_range_gather(self, kernel_backend: RangeGatherKernelBackend):

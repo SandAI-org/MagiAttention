@@ -193,7 +193,7 @@ class TestRangeReduce(TestCase):
 
     @property
     def device(self) -> int:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device("cuda")
 
     @property
     def dtype(self) -> torch.dtype:

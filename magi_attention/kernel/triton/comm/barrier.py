@@ -21,7 +21,7 @@
 import triton
 import triton.language as tl
 
-from .triton_utils import get_flat_bid, get_flat_tid
+from .utils import get_flat_bid, get_flat_tid
 
 # ".reg .u32   %tmp32_<1>;":
 #   allocate a 32-bit register named %tmp32_0

@@ -54,7 +54,7 @@ class TestRangeFill(TestCase):
 
     @property
     def device(self) -> int:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device("cuda")
 
     def test_range_fill(self):
         """Test range_fill_ function by comparing with reference implementation"""

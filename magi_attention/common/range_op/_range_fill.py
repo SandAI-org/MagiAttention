@@ -15,50 +15,13 @@
 
 import torch
 import triton
-import triton.language as tl
 
+from magi_attention.kernel.triton.range_ops import range_fill_kernel
 from magi_attention.utils import nvtx
 
 from .utils import _calc_cu_range_sizes, _calc_ranges_row_map
 
 __all__ = ["range_fill_"]
-
-
-@triton.jit
-def range_fill_kernel(
-    input_ptr,
-    ranges_ptr,
-    cu_range_sizes_ptr,
-    val,
-    row_map_ptr,
-    input_stride,
-    N: tl.constexpr,
-    N_BLOCK: tl.constexpr,
-    ELEM_PER_BLOCK: tl.constexpr,
-):
-    row_idx = tl.program_id(0)
-    block_idx_in_row = tl.program_id(1)
-
-    range_idx = tl.load(row_map_ptr + row_idx)
-    cu_range_size = tl.load(cu_range_sizes_ptr + range_idx)
-    row_idx_in_range = row_idx - cu_range_size
-
-    range_start = tl.load(ranges_ptr + range_idx * 2)
-
-    inp_idx = (
-        range_start + row_idx_in_range
-    ) * input_stride + block_idx_in_row * ELEM_PER_BLOCK
-    curr_inp_ptr = input_ptr + inp_idx
-
-    is_last_block = block_idx_in_row == N_BLOCK - 1
-
-    if not is_last_block:
-        cols = tl.arange(0, ELEM_PER_BLOCK)
-        tl.store(curr_inp_ptr + cols, val)
-    else:
-        elem_in_last_block = N - block_idx_in_row * ELEM_PER_BLOCK
-        cols = tl.arange(0, ELEM_PER_BLOCK)
-        tl.store(curr_inp_ptr + cols, val, mask=cols < elem_in_last_block)
 
 
 @nvtx.instrument

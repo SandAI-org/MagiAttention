@@ -21,8 +21,6 @@ from typing import Any, Callable, TypeAlias, overload
 
 import torch
 import torch.distributed as dist
-import triton
-import triton.language as tl
 
 from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
@@ -36,6 +34,7 @@ from magi_attention.common.range_op.utils import (
     _calc_ranges_row_map,
 )
 from magi_attention.common.ranges import NaiveRanges
+from magi_attention.kernel.triton.comm.varlen_copy import _varlen_for_each_copy_triton
 from magi_attention.utils import is_list_type_all, nvtx
 
 # ------------------        common helpers       ------------------ #
@@ -1213,66 +1212,6 @@ def get_group_reduce_handle_from_sym_group_cast(
     handle: GrpCollHandle = native_grpcoll_handle_dict["group_reduce"]
 
     return handle
-
-
-@triton.jit
-def _varlen_for_each_copy_kernel(
-    output_ptr,
-    input_flat_ptr,
-    num_dst_ptr,
-    offsets_ptr,
-    stride_output_row,
-    num_ranks,
-    BLOCK_SIZE_N: tl.constexpr,
-):
-    split_idx = tl.program_id(axis=0)
-    col_block_idx = tl.program_id(axis=1)
-
-    col_start = col_block_idx * BLOCK_SIZE_N
-
-    num_dst = tl.load(num_dst_ptr + split_idx)
-
-    offset_in_flat_input = tl.load(offsets_ptr + split_idx)
-
-    output_row_base_ptr = output_ptr + split_idx * stride_output_row
-    input_flat_base_ptr = input_flat_ptr + offset_in_flat_input
-
-    cols_in_block = col_start + tl.arange(0, BLOCK_SIZE_N)
-
-    write_mask = (cols_in_block < num_ranks) & (cols_in_block < num_dst)
-
-    values_to_write = tl.load(
-        input_flat_base_ptr + cols_in_block, mask=write_mask, other=-1
-    )
-
-    tl.store(output_row_base_ptr + cols_in_block, values_to_write, mask=write_mask)
-
-
-def _varlen_for_each_copy_triton(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-    num_dst: torch.Tensor,
-    cu_num_dst: torch.Tensor,
-) -> torch.Tensor:
-    num_splits, num_ranks = dst.shape
-
-    if num_splits == 0:
-        return dst
-
-    BLOCK_SIZE_N = triton.next_power_of_2(num_ranks)
-    grid = (num_splits, triton.cdiv(num_ranks, BLOCK_SIZE_N))
-
-    _varlen_for_each_copy_kernel[grid](
-        dst,
-        src,
-        num_dst,
-        cu_num_dst,
-        dst.stride(0),
-        num_ranks,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-    )
-
-    return dst
 
 
 @overload
