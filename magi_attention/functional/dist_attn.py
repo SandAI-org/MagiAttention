@@ -313,13 +313,6 @@ class DistAttnRuntime:
         """
         is_host_stage = self.is_host_stage(overlap_stage)
 
-        # FIXME
-        if self.flatten_head_groups:
-            assert sink is None, "Flattening head groups is incompatible with attn sink"
-            assert (
-                return_max_logits is False
-            ), "Flattening head groups is incompatible with return_max_logits"
-
         # fetch attn arg
         if is_host_stage:
             attn_arg = self.calc_meta.local_attn_arg
@@ -670,10 +663,6 @@ class DistAttnRuntime:
         """
 
         is_host_stage = self.is_host_stage(overlap_stage)
-
-        # FIXME
-        if self.flatten_head_groups:
-            assert sink is None, "Flattening head groups is incompatible with attn sink"
 
         # fetch attn arg
         if is_host_stage:
@@ -1233,6 +1222,28 @@ class DistAttnRuntime:
 
     # ----------    internal API   --------- #
 
+    def _check_forward_args(
+        self,
+        sink: torch.Tensor | None,
+        return_max_logits: bool,
+    ) -> None:
+        """Validate call-wide options before fetching tensors or launching kernels."""
+        if return_max_logits:
+            assert (
+                self.kernel_backend != MagiAttentionKernelBackend.FA4
+            ), "FA4 backend does not support return max logits"
+        if self.flatten_head_groups:
+            assert sink is None, "Flattening head groups is incompatible with attn sink"
+            assert (
+                not return_max_logits
+            ), "Flattening head groups is incompatible with return_max_logits"
+        if self.no_overlap and not self.skip_comm:
+            assert self.overlap_degree == 1, (
+                "no_overlap mode requires overlap_degree==1 (from CommMeta), "
+                f"but got {self.overlap_degree=}"
+            )
+            assert not self.enable_qo_comm, "no_overlap mode does not support qo_comm"
+
     def _launch_attn_fwd_kernel(
         self,
         q: torch.Tensor,
@@ -1248,13 +1259,9 @@ class DistAttnRuntime:
         is_host_stage: bool,
         return_max_logits: bool = False,
     ) -> tuple[torch.Tensor, AttnForwardMeta]:
-        _backend = self.kernel_backend
-        if return_max_logits:
-            assert (
-                _backend != MagiAttentionKernelBackend.FA4
-            ), "FA4 backend does not support return max logits"
+        backend = self.kernel_backend
         nvtx.start(attn_arg.get_nvtx_event_name(is_bwd=False))
-        if _backend == MagiAttentionKernelBackend.SDPA_OL:
+        if backend == MagiAttentionKernelBackend.SDPA_OL:
             partial_out, meta = sdpa_online_fwd(
                 q=q,
                 k=k,
@@ -1270,7 +1277,7 @@ class DistAttnRuntime:
                 assert meta.max_logits is not None
                 torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
                 meta.max_logits = max_logits_acc
-        elif _backend == MagiAttentionKernelBackend.SDPA:
+        elif backend == MagiAttentionKernelBackend.SDPA:
             partial_out, meta = sdpa_fwd(
                 q=q,
                 k=k,
@@ -1286,7 +1293,7 @@ class DistAttnRuntime:
                 assert meta.max_logits is not None
                 torch.maximum(max_logits_acc, meta.max_logits, out=max_logits_acc)
                 meta.max_logits = max_logits_acc
-        elif _backend == MagiAttentionKernelBackend.FA4:
+        elif backend == MagiAttentionKernelBackend.FA4:
             partial_out, partial_lse = fa4_fwd(
                 q=q,
                 k=k,
@@ -1300,7 +1307,7 @@ class DistAttnRuntime:
                 sink_layout="sh",
             )
             meta = AttnForwardMeta(lse=partial_lse, max_logits=None)
-        elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+        elif backend == MagiAttentionKernelBackend.CUTEDSL:
             partial_out, partial_lse, partial_max_logits = cutedsl_fwd(
                 q=q,
                 k=k,
@@ -1370,9 +1377,9 @@ class DistAttnRuntime:
         softcap: float,
         is_host_stage: bool,
     ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
-        _backend = self.kernel_backend
+        backend = self.kernel_backend
         nvtx.start(attn_arg.get_nvtx_event_name(is_bwd=True))
-        if _backend == MagiAttentionKernelBackend.SDPA_OL:
+        if backend == MagiAttentionKernelBackend.SDPA_OL:
             partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_online_bwd(
                 do=do,
                 q=q,
@@ -1389,7 +1396,7 @@ class DistAttnRuntime:
             partial_dkv = self._maybe_concat(
                 partial_dk, partial_dv, need_concat=self.concat_dkv
             )
-        elif _backend == MagiAttentionKernelBackend.SDPA:
+        elif backend == MagiAttentionKernelBackend.SDPA:
             partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
                 do=do,
                 q=q,
@@ -1406,7 +1413,7 @@ class DistAttnRuntime:
             partial_dkv = self._maybe_concat(
                 partial_dk, partial_dv, need_concat=self.concat_dkv
             )
-        elif _backend == MagiAttentionKernelBackend.FA4:
+        elif backend == MagiAttentionKernelBackend.FA4:
             partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
                 do=do,
                 q=q,
@@ -1426,7 +1433,7 @@ class DistAttnRuntime:
             partial_dkv = self._maybe_concat(
                 partial_dk, partial_dv, need_concat=self.concat_dkv
             )
-        elif _backend == MagiAttentionKernelBackend.CUTEDSL:
+        elif backend == MagiAttentionKernelBackend.CUTEDSL:
             partial_dq, partial_dk, partial_dv, partial_dsink = cutedsl_bwd(
                 do=do,
                 q=q,
@@ -3046,6 +3053,8 @@ class DistAttnFunc(torch.autograd.Function):
             local_lse: [num_tokens_q_local, num_heads_q]
             local_max_logits: [num_heads_q] when return_max_logits is True
         """
+        dist_attn_runtime._check_forward_args(global_sink, return_max_logits)
+
         if dist_attn_runtime.no_overlap and not dist_attn_runtime.skip_comm:
             return DistAttnFunc._no_overlap_forward(
                 ctx,
@@ -3217,14 +3226,6 @@ class DistAttnFunc(torch.autograd.Function):
         """No-overlap forward: blocking group_cast, concat KV, single attention call.
         Avoids LSE reduce entirely by computing attention over the full KV in one pass.
         """
-        assert dist_attn_runtime.overlap_degree == 1, (
-            f"no_overlap mode requires overlap_degree==1 (from CommMeta), "
-            f"but got {dist_attn_runtime.overlap_degree=}"
-        )
-        assert (
-            not dist_attn_runtime.enable_qo_comm
-        ), "no_overlap mode does not support qo_comm"
-
         # -- Step 1: prepare local qkv (flatten head groups, maybe concat kv) --
         local_q, local_kv = dist_attn_runtime._maybe_flatten_local_qkv_head_groups(
             local_q=local_q,

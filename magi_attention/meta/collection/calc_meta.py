@@ -126,11 +126,13 @@ class AttnArg:
         q_ranges = self.q_ranges_bwd if is_bwd else self.q_ranges
         k_ranges = self.k_ranges_bwd if is_bwd else self.k_ranges
 
+        def format_ranges(ranges: AttnRanges) -> str:
+            return "[" + ",".join(f"{r.start}:{r.end}" for r in ranges) + "]"
+
         phase = "bwd" if is_bwd else "fwd"
         return (
             f"attn/{phase} | area={self.total_area:,} | ranges={len(q_ranges)} | "
-            f"q_ranges={[list(r) for r in q_ranges.to_naive_ranges()]} | "
-            f"k_ranges={[list(r) for r in k_ranges.to_naive_ranges()]}"
+            f"q_ranges={format_ranges(q_ranges)} | k_ranges={format_ranges(k_ranges)}"
         )
 
     def _init_ffa_fwd_args_dict(self) -> None:
@@ -744,29 +746,26 @@ class FA4AttnArg(AttnArg):
             ...
 
         Broadcasting example for the first interval:
-        Assuming seqlen_q = 4, seqlen_k = 8, func[0] = [3, 5, 2, 6]  # F0 value for each q
-        k_indices [1, seqlen_k] broadcasted along rows, F0 [seqlen_q, 1] broadcasted along columns
-        k_indices [1, 8]:  [[0, 1, 2, 3, 4, 5, 6, 7]]
-                        ↓ copied 4 rows
-                [[0, 1, 2, 3, 4, 5, 6, 7],
-                    [0, 1, 2, 3, 4, 5, 6, 7],
-                    [0, 1, 2, 3, 4, 5, 6, 7],
-                    [0, 1, 2, 3, 4, 5, 6, 7]]
 
-        F0 [4, 1]:         [[3],       → copied 8 columns → [[3, 3, 3, 3, 3, 3, 3, 3],
-                            [5],                     [5, 5, 5, 5, 5, 5, 5, 5],
-                            [2],                     [2, 2, 2, 2, 2, 2, 2, 2],
-                            [6]]                     [6, 6, 6, 6, 6, 6, 6, 6]]
+        .. code-block:: text
 
-                        k=0  k=1  k=2  k=3  k=4  k=5  k=6  k=7
-                ┌────┬────┬────┬────┬────┬────┬────┬────┐
-        q0 (F0=3) │ T  │ T  │ T  │ F  │ F  │ F  │ F  │ F  │  → [0,3) visible
-                ├────┼────┼────┼────┼────┼────┼────┼────┤
-        q1 (F0=5) │ T  │ T  │ T  │ T  │ T  │ F  │ F  │ F  │  → [0,5) visible
-                ├────┼────┼────┼────┼────┼────┼────┼────┤
-        q2 (F0=2) │ T  │ T  │ F  │ F  │ F  │ F  │ F  │ F  │  → [0,2) visible
-                ├────┼────┼────┼────┼────┼────┼────┼────┤
-        q3 (F0=6) │ T  │ T  │ T  │ T  │ T  │ T  │ F  │ F  │  → [0,6) visible
+            seqlen_q = 4, seqlen_k = 8, F0 = [3, 5, 2, 6]
+            k_indices has shape [1, 8]; F0[:, None] has shape [4, 1].
+            Broadcasting compares every row's F0 against all eight columns:
+
+            F0[:, None]              k_indices (broadcast to four rows)
+            [[3],                    [[0, 1, 2, 3, 4, 5, 6, 7],
+             [5],                     [0, 1, 2, 3, 4, 5, 6, 7],
+             [2],                     [0, 1, 2, 3, 4, 5, 6, 7],
+             [6]]                     [0, 1, 2, 3, 4, 5, 6, 7]]
+
+            mask = k_indices < F0[:, None]
+
+                        k=0  1  2  3  4  5  6  7
+            q0 (F0=3):    T  T  T  F  F  F  F  F   [0, 3)
+            q1 (F0=5):    T  T  T  T  T  F  F  F   [0, 5)
+            q2 (F0=2):    T  T  F  F  F  F  F  F   [0, 2)
+            q3 (F0=6):    T  T  T  T  T  T  F  F   [0, 6)
         """
         n_max_func, seqlen_q = func.shape
         device = func.device

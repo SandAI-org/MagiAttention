@@ -34,6 +34,7 @@ from cutlass import Boolean, Float32, Int32, Int64, const_expr, pipeline
 from cutlass.cute.nvgpu import cpasync
 from cutlass.cutlass_dsl import Arch, BaseDSL
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
+from cutlass.utils import ClcDynamicPersistentTileScheduler
 
 # isort: split
 from quack import copy_utils, layout_utils
@@ -47,7 +48,6 @@ from . import sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
-    ClcDynamicPersistentTileScheduler,
     FastDivmodDivisor,
     LayoutEnum,
     SmemAllocator,

@@ -8,7 +8,6 @@ repos:
 -   repo: local
     hooks:
     -   id: copyright_checker
-        exclude: ^magi_attention/kernel/cutedsl/clc_scheduler\.py$
         name: check for copyright
         entry: python3 ./tools/codestyle/copyright.py
         language: system

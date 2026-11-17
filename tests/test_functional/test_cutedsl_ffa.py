@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ast
 import itertools
 import os
 import unittest
@@ -25,8 +24,9 @@ import torch
 
 from magi_attention import env
 from magi_attention.common import AttnRanges
-from magi_attention.functional import cutedsl_ffa
-from magi_attention.functional.dist_attn import DistAttnRuntime
+from magi_attention.common.enum import MagiAttentionKernelBackend
+from magi_attention.functional import cutedsl_ffa, dist_attn
+from magi_attention.functional.dist_attn import DistAttnFunc, DistAttnRuntime
 from magi_attention.kernel.cutedsl.ffa_utils import get_device_arch
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
@@ -46,6 +46,82 @@ NUM_HEADS = 2
 HEAD_DIM = 128
 
 
+class TestRuntimeForwardChecks(TestCase):
+    def test_invalid_options_fail_before_communication_or_kernel_setup(self):
+        cases = (
+            ("FA4", dict(backend=MagiAttentionKernelBackend.FA4, max_logits=True)),
+            ("attn sink", dict(flatten=True, sink=torch.empty(0))),
+            ("return_max_logits", dict(flatten=True, max_logits=True)),
+            ("overlap_degree", dict(no_overlap=True, degree=2)),
+            ("qo_comm", dict(no_overlap=True, qo=True)),
+        )
+        for reason, options in cases:
+            runtime = object.__new__(DistAttnRuntime)
+            runtime.no_overlap = options.get("no_overlap", False)
+            runtime.skip_comm = False
+            runtime.overlap_degree = options.get("degree", 1)
+            with (
+                self.subTest(reason=reason),
+                mock.patch.object(
+                    DistAttnRuntime,
+                    "kernel_backend",
+                    new_callable=mock.PropertyMock,
+                    return_value=options.get(
+                        "backend", MagiAttentionKernelBackend.CUTEDSL
+                    ),
+                ),
+                mock.patch.object(
+                    DistAttnRuntime,
+                    "flatten_head_groups",
+                    new_callable=mock.PropertyMock,
+                    return_value=options.get("flatten", False),
+                ),
+                mock.patch.object(
+                    DistAttnRuntime,
+                    "enable_qo_comm",
+                    new_callable=mock.PropertyMock,
+                    return_value=options.get("qo", False),
+                ),
+                mock.patch.object(dist_attn, "KernelBarrier") as barrier,
+                mock.patch.object(
+                    DistAttnFunc, "_no_overlap_forward"
+                ) as no_overlap_forward,
+                mock.patch.object(runtime, "get_curr_q_kv_and_fetch_next") as fetch,
+            ):
+                with self.assertRaisesRegex(AssertionError, reason):
+                    DistAttnFunc.forward(
+                        None,
+                        None,
+                        None,
+                        None,
+                        options.get("sink"),
+                        runtime,
+                        return_max_logits=options.get("max_logits", False),
+                    )
+                barrier.assert_not_called()
+                no_overlap_forward.assert_not_called()
+                fetch.assert_not_called()
+
+    def test_supported_options_and_single_rank_no_overlap_are_allowed(self):
+        runtime = object.__new__(DistAttnRuntime)
+        runtime.no_overlap, runtime.skip_comm, runtime.overlap_degree = True, True, 0
+        with (
+            mock.patch.object(
+                DistAttnRuntime,
+                "kernel_backend",
+                new_callable=mock.PropertyMock,
+                return_value=MagiAttentionKernelBackend.CUTEDSL,
+            ),
+            mock.patch.object(
+                DistAttnRuntime,
+                "flatten_head_groups",
+                new_callable=mock.PropertyMock,
+                return_value=False,
+            ),
+        ):
+            runtime._check_forward_args(None, return_max_logits=True)
+
+
 class TestRuntimeNvtxLabels(TestCase):
     def test_attention_labels_preserve_full_reproducible_ranges(self):
         arg = object.__new__(AttnArg)
@@ -55,20 +131,30 @@ class TestRuntimeNvtxLabels(TestCase):
         arg.k_ranges_bwd = AttnRanges.from_ranges([[0, 64], [0, 64]])
         arg.total_area = 2048
         self.assertIn(
-            "attn/fwd | area=2,048 | ranges=2 | q_ranges=[[0, 16], [32, 48]]",
+            "attn/fwd | area=2,048 | ranges=2 | q_ranges=[0:16,32:48]",
             arg.get_nvtx_event_name(),
         )
         self.assertIn(
-            "attn/bwd | area=2,048 | ranges=2 | q_ranges=[[32, 48], [0, 16]]",
+            "attn/bwd | area=2,048 | ranges=2 | q_ranges=[32:48,0:16]",
             arg.get_nvtx_event_name(is_bwd=True),
         )
         arg.q_ranges = AttnRanges.from_ranges([[i, i + 1] for i in range(20)])
         message = arg.get_nvtx_event_name()
         fields = dict(field.split("=", 1) for field in message.split(" | ")[1:])
         self.assertEqual(
-            ast.literal_eval(fields["q_ranges"]), [[i, i + 1] for i in range(20)]
+            [
+                list(map(int, bounds.split(":")))
+                for bounds in fields["q_ranges"][1:-1].split(",")
+            ],
+            [[i, i + 1] for i in range(20)],
         )
-        self.assertEqual(ast.literal_eval(fields["k_ranges"]), [[0, 64], [0, 64]])
+        self.assertEqual(
+            [
+                list(map(int, bounds.split(":")))
+                for bounds in fields["k_ranges"][1:-1].split(",")
+            ],
+            [[0, 64], [0, 64]],
+        )
 
     def test_collective_label_counts_tuple_payload_and_lse(self):
         runtime = object.__new__(DistAttnRuntime)

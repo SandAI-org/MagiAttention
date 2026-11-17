@@ -67,6 +67,7 @@ import torch
 from cutlass import Float32, Int32, Int64, const_expr, pipeline
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
+from cutlass.utils import ClcDynamicPersistentTileScheduler
 
 # isort: split
 from quack import copy_utils, layout_utils
@@ -84,7 +85,6 @@ from . import sm100_utils
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import ThreadCooperativeGroup, to_cute_tensor
 from .dsl_compat import (
-    ClcDynamicPersistentTileScheduler,
     LayoutEnum,
     SmemAllocator,
     Tcgen05OperandMajorMode,
