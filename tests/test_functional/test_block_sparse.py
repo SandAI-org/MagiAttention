@@ -21,6 +21,7 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.testing.precompile import add_ffa_spec
 from magi_attention.testing.sparse import (
     SparsePackLayout,
     compare_sdpa_bwd_all,
@@ -44,10 +45,7 @@ from magi_attention.utils.sparse_utils import (
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipIf(
-    not is_hopper(),
-    "This test targets the C++ FFA, which supports only sm90.",
-)
+@unittest.skipUnless(is_hopper(), "requires Hopper")
 class TestBlockSparseSweep(DistTestBase):
     """BlockSparse Classic sweep — CI gate.
 
@@ -83,7 +81,6 @@ class TestBlockSparseSweep(DistTestBase):
         (MQA128 + kbs=128); only the BWD loop direction changes kernels.
         The dense reference adds the non-sparse ARM+PackGQA128 kernels.
         """
-        from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
         # dense reference: block_sparse=False, ARM, PackGQA128, swap=True
@@ -205,10 +202,7 @@ class TestBlockSparseSweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipIf(
-    not is_hopper(),
-    "This test targets the C++ FFA, which supports only sm90.",
-)
+@unittest.skipUnless(is_hopper(), "requires Hopper")
 class TestBlockSparseComprehensiveSweep(DistTestBase):
     """BlockSparse Comprehensive sweep — CI.
 
@@ -249,7 +243,6 @@ class TestBlockSparseComprehensiveSweep(DistTestBase):
         FWD + BWD (LoopK + LoopQ) for each (pack_f × hd × k_size × inner modes) combo.
         q_size and sparsity_ratio are runtime-only (don't affect compilation).
         """
-        from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
         seen_pack_f: set = set()

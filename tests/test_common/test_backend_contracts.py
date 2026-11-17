@@ -26,8 +26,6 @@ import re
 import unittest
 from types import ModuleType, SimpleNamespace
 
-import pytest
-
 from magi_attention.common.enum import AttnMaskType as PyAttnMaskType
 from magi_attention.common.protocols import (
     AttnMaskTypeProtocol,
@@ -50,6 +48,8 @@ except ImportError:
 
 
 class TestProtocolConformance(unittest.TestCase):
+    """Verify both backends satisfy the Protocol contracts (method existence)."""
+
     backend = "python"
 
     def setUp(self):
@@ -65,8 +65,6 @@ class TestProtocolConformance(unittest.TestCase):
                 AttnRectangle=PyAttnRectangle,
                 AttnRectangles=PyAttnRectangles,
             )
-
-    """Verify both backends satisfy the Protocol contracts (method existence)."""
 
     def test_attn_mask_type(self):
         AttnMaskType = self.types.AttnMaskType
@@ -241,23 +239,14 @@ _ATTN_MASK_TYPE_METHODS = [
 ]
 
 
-def _has_cpp_backend():
-    try:
-        import magi_attention.magi_attn_ext  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-@pytest.mark.skipif(not _has_cpp_backend(), reason="magi_attn_ext not available")
+@unittest.skipUnless(cpp_backend is not None, "magi_attn_ext not available")
 class TestSignatureAlignment(unittest.TestCase):
     """Verify that Python and C++ backends have identical parameter names."""
 
     @parameterize("method_name", _ATTN_RANGE_METHODS)
     def test_attn_range_signature(self, method_name):
-        from magi_attention.common.range import AttnRange as PyClass
-        from magi_attention.magi_attn_ext import AttnRange as CppClass
+        PyClass = PyAttnRange
+        CppClass = cpp_backend.AttnRange
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)
@@ -272,8 +261,8 @@ class TestSignatureAlignment(unittest.TestCase):
 
     @parameterize("method_name", _ATTN_RANGES_METHODS)
     def test_attn_ranges_signature(self, method_name):
-        from magi_attention.common.ranges import AttnRanges as PyClass
-        from magi_attention.magi_attn_ext import AttnRanges as CppClass
+        PyClass = PyAttnRanges
+        CppClass = cpp_backend.AttnRanges
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)
@@ -288,8 +277,8 @@ class TestSignatureAlignment(unittest.TestCase):
 
     @parameterize("method_name", _ATTN_RECTANGLE_METHODS)
     def test_attn_rectangle_signature(self, method_name):
-        from magi_attention.common.rectangle import AttnRectangle as PyClass
-        from magi_attention.magi_attn_ext import AttnRectangle as CppClass
+        PyClass = PyAttnRectangle
+        CppClass = cpp_backend.AttnRectangle
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)
@@ -304,8 +293,8 @@ class TestSignatureAlignment(unittest.TestCase):
 
     @parameterize("method_name", _ATTN_RECTANGLES_METHODS)
     def test_attn_rectangles_signature(self, method_name):
-        from magi_attention.common.rectangles import AttnRectangles as PyClass
-        from magi_attention.magi_attn_ext import AttnRectangles as CppClass
+        PyClass = PyAttnRectangles
+        CppClass = cpp_backend.AttnRectangles
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)
@@ -320,8 +309,8 @@ class TestSignatureAlignment(unittest.TestCase):
 
     @parameterize("method_name", _ATTN_MASK_TYPE_METHODS)
     def test_attn_mask_type_signature(self, method_name):
-        from magi_attention.common.enum import AttnMaskType as PyClass
-        from magi_attention.magi_attn_ext import AttnMaskType as CppClass
+        PyClass = PyAttnMaskType
+        CppClass = cpp_backend.AttnMaskType
 
         py_params = _get_param_names_python(PyClass, method_name)
         cpp_params = _get_param_names_pybind(CppClass, method_name)

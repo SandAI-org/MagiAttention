@@ -20,7 +20,11 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DispatchConfig, MinHeapDispatchAlg
-from magi_attention.functional.dispatch import dispatch_func, undispatch_func
+from magi_attention.functional.dispatch import (
+    _select_local_chunks,
+    dispatch_func,
+    undispatch_func,
+)
 from magi_attention.meta import make_dispatch_meta_from_qk_ranges
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 
@@ -232,8 +236,6 @@ class TestDispatch(DistTestBase):
         all_partial_grads = [torch.zeros_like(partial_grad) for _ in range(world_size)]
         dist.all_gather(all_partial_grads, partial_grad, group=group)
         summed_grad = sum(all_partial_grads)
-
-        from magi_attention.functional.dispatch import _select_local_chunks
 
         expected_grad = _select_local_chunks(summed_grad, meta, rank, seq_dim)
 

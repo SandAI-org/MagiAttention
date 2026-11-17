@@ -95,10 +95,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
     def seed(self) -> int:
         return 42
 
-    @unittest.skipIf(
-        not is_hopper(),
-        "This test targets the C++ FFA, which supports only sm90.",
-    )
+    @unittest.skipUnless(is_hopper(), "requires Hopper")
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize(

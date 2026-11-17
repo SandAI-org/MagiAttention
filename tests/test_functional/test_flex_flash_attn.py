@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import random
 import time
 import unittest
 from datetime import datetime
+from itertools import product
 from typing import Any
 
 import pytest
@@ -25,6 +27,7 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.functional import flex_flash_attn_func
+from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_backward,
     _flex_flash_attn_forward,
@@ -43,14 +46,20 @@ from magi_attention.testing.precision import (
     calc_inf_norm,
     extract_mismatch_threshold,
 )
+from magi_attention.testing.precompile import add_ffa_spec
 from magi_attention.utils import is_list_value_any, make_attn_mask_from_ffa_args
 from magi_attention.utils.arch import is_hopper
-
-
-@unittest.skipIf(
-    not is_hopper(),
-    "This test targets the C++ FFA, which supports only sm90.",
+from magi_attention.utils.sparse_utils import (
+    build_index_sparse_indices,
+    deprecated_slow_get_sdpa_mask_from_block_sparse_mask,
+    generate_block_sparse_pattern,
+    generate_ranges_from_block_mask_triton,
+    get_sdpa_mask_from_block_sparse_mask,
+    get_sdpa_mask_from_index_sparse_indices,
 )
+
+
+@unittest.skipUnless(is_hopper(), "requires Hopper")
 class TestFlexFlashAttn(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
@@ -234,10 +243,6 @@ class TestFlexFlashAttn(DistTestBase):
 
     @classmethod
     def precompile_kernel_specs(cls) -> dict:
-        from itertools import product
-
-        from magi_attention.testing.precompile import add_ffa_spec
-
         specs: dict = {}
         _DTYPES = [torch.bfloat16, torch.float16]
         _PGF = cls._PACK_GQA_FACTORS  # [1, 2, 8]
@@ -2510,9 +2515,6 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
         tol: float = 2e-2,
     ):
         """Comparison helper: block_sparse variants vs the dense-TMA ffa reference."""
-        from magi_attention.utils.sparse_utils import (
-            generate_ranges_from_block_mask_triton,
-        )
 
         device = self.device
         nhq, nhk, head_dim = 128, 1, 128
@@ -2574,11 +2576,6 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
     def test_sdpa_mask_build_vectorized(self):
         """Verify vectorized get_sdpa_mask_from_block_sparse_mask matches a
         naive python-loop reference and is significantly faster."""
-        from magi_attention.utils.sparse_utils import (
-            deprecated_slow_get_sdpa_mask_from_block_sparse_mask,
-            generate_block_sparse_pattern,
-            get_sdpa_mask_from_block_sparse_mask,
-        )
 
         device = self.device
         seqlen, q_bs, k_bs = 512, 64, 64
@@ -2633,9 +2630,6 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
         """Tier-1: consumer-side scatter dX store
         (MAGI_ATTENTION_FFA_INNER_STORE_IN_PRODUCER=false) for both
         LoopK (dKV from consumer WGs) and LoopQ (dQ from consumer WGs)."""
-        import os
-
-        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
         test_case = "[consumer_dkv_store]"
         print(f"\n>>> {test_case} START", flush=True)
@@ -2662,9 +2656,6 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
         """Tier-1: scalar atomicAdd dX store fallback
         (MAGI_ATTENTION_FFA_INNER_STORE_MODE=atomicadd, i.e.
         kInnerStoreMode==InnerStoreMode::AtomicAdd) for both LoopK and LoopQ."""
-        import os
-
-        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
         test_case = "[scalar_dx_store]"
         print(f"\n>>> {test_case} START", flush=True)
@@ -2691,9 +2682,6 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
     @pytest.mark.slow
     def test_intra_wg_overlap_off(self):
         """Verify Dense FWD+BWD passes with IntraWGOverlap=false (non-overlapped V load)."""
-        import os
-
-        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
         device = self.device
         torch.manual_seed(42)
@@ -2766,13 +2754,6 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
         block), verifies padding_mask is applied to the correct block when
         the sparse iteration direction is flipped.
         """
-        import os
-
-        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
-        from magi_attention.utils.sparse_utils import (
-            build_index_sparse_indices,
-            get_sdpa_mask_from_index_sparse_indices,
-        )
 
         device = self.device
         torch.manual_seed(42)
@@ -2918,9 +2899,6 @@ class TestFlexFlashAttnSimple(unittest.TestCase):
     @pytest.mark.slow
     def test_use_mask_dispatch_off(self):
         """Verify Dense FWD+BWD passes with UseMaskDispatch=false (original mask loop)."""
-        import os
-
-        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_mod
 
         device = self.device
         torch.manual_seed(42)

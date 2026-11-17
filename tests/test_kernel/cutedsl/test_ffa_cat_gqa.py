@@ -14,8 +14,6 @@
 
 import math
 import unittest
-from contextlib import contextmanager
-from typing import Iterator
 
 import torch
 from einops import rearrange
@@ -34,23 +32,14 @@ from magi_attention.testing.cutedsl_utils import (
     record_bwd_kernels,
 )
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
-from magi_attention.testing.utils import switch_envvars
+from magi_attention.testing.utils import switch_env
 from magi_attention.utils.arch import is_blackwell
 
 
-@contextmanager
-def _maybe_disable_2cta(disable: bool) -> Iterator[None]:
-    if not disable:
-        yield
-        return
-    switch_back = switch_envvars(
-        ["MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA"],
-        enable_value_dict={"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "1"},
+def _maybe_disable_2cta(disable: bool) -> switch_env:
+    return switch_env(
+        {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": True} if disable else {}
     )
-    try:
-        yield
-    finally:
-        switch_back()
 
 
 @unittest.skipUnless(is_blackwell(), "requires Blackwell")

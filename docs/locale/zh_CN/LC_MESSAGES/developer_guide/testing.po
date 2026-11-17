@@ -61,8 +61,8 @@ msgid "`tests/test_utils`"
 msgstr "`tests/test_utils`"
 
 #: ../../source/developer_guide/testing.md:12
-msgid "Production utilities"
-msgstr "生产工具函数"
+msgid "Production utilities and environment option parsing"
+msgstr "生产工具函数与运行时环境选项解析"
 
 #: ../../source/developer_guide/testing.md:12
 msgid "`tests/test_testing`"
@@ -121,8 +121,8 @@ msgid "Local public API and mask construction contracts"
 msgstr "局部公开 API 与 mask 构造合同"
 
 #: ../../source/developer_guide/testing.md:19
-msgid "`tests/test_env.py`"
-msgstr "`tests/test_env.py`"
+msgid "`tests/test_env`"
+msgstr "`tests/test_env`"
 
 #: ../../source/developer_guide/testing.md:20
 msgid "Runtime environment option parsing"

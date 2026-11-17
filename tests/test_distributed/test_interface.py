@@ -812,10 +812,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
     def test_interface(self, *args, **kwargs):
         super().test_interface(*args, **kwargs)
 
-    @unittest.skipIf(
-        not is_hopper(),
-        "This test targets the C++ FFA, which supports only sm90.",
-    )
+    @unittest.skipUnless(is_hopper(), "requires Hopper")
     @skip_if_lt_x_gpu(8)
     @with_comms
     @switch_deterministic_mode_decorator(enable=True)

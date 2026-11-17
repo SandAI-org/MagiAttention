@@ -98,10 +98,7 @@ _RM_BWD_LOOPK_CASES = [
 ]
 
 
-@unittest.skipIf(
-    not is_hopper(),
-    "This test targets the C++ FFA, which supports only sm90.",
-)
+@unittest.skipUnless(is_hopper(), "requires Hopper")
 class TestRangeMergeBwdLoopK(DistTestBase):
     """End-to-end correctness test for BWD LoopK path with range_merge=True."""
 

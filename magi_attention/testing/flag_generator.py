@@ -15,7 +15,8 @@
 import itertools
 import math
 import random
-from typing import Any, Callable, Generator, Literal, TypeAlias
+from collections.abc import Generator
+from typing import Any, Callable, Literal, TypeAlias
 
 import torch.distributed as dist
 

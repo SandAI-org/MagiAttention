@@ -9,7 +9,7 @@ local contracts, even when both exercise the same public function.
 | --- | --- |
 | `tests/test_common` | Core values, protocols, and host range metadata |
 | `tests/test_meta` | Containers, collections, and local solver contracts |
-| `tests/test_utils` | Production utilities |
+| `tests/test_utils` | Production utilities and environment option parsing |
 | `tests/test_testing` | Test helpers and reference implementations |
 | `tests/test_functional` | Attention wrappers, autograd, and local runtime contracts |
 | `tests/test_kernel/cuda` | Native CUDA kernel contracts |
@@ -17,7 +17,6 @@ local contracts, even when both exercise the same public function.
 | `tests/test_kernel/triton` | Triton kernels, including range operations |
 | `tests/test_distributed` | Process groups, collectives, and distributed API/runtime integration |
 | `tests/test_api` | Local public API and mask construction contracts |
-| `tests/test_env.py` | Runtime environment option parsing |
 | `tests/test_pipeline.py` | End-to-end attention pipeline |
 
 A worker-based kernel sweep can still belong in `test_kernel`: spawning workers

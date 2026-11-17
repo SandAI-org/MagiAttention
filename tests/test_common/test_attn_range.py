@@ -19,6 +19,7 @@ import pytest
 
 from magi_attention.common.enum import AttnMaskType as PyAttnMaskType
 from magi_attention.common.range import AttnRange as PyAttnRange
+from magi_attention.common.range import RangeError
 from magi_attention.common.ranges import AttnRanges as PyAttnRanges
 from magi_attention.common.rectangle import AttnRectangle as PyAttnRectangle
 from magi_attention.common.rectangles import AttnRectangles as PyAttnRectangles
@@ -237,7 +238,6 @@ class TestAttnRange(unittest.TestCase):
 
     def test_validation_methods(self):
         AttnRange = self.types.AttnRange
-        from magi_attention.common.range import RangeError
 
         # ---------    test is_valid_close (closed interval)     --------- #
         attn_range = AttnRange(5, 10)

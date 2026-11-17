@@ -16,9 +16,9 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 from unittest import TestCase, mock
 
 from packaging.requirements import Requirement

@@ -15,10 +15,9 @@
 """Shared helpers for block_sparse and index_sparse attention tests."""
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from enum import Enum
-from typing import Iterator
 
 import torch
 import torch.nn.functional as F

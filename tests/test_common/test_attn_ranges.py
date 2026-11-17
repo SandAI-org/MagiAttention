@@ -16,6 +16,7 @@ import unittest
 from types import ModuleType, SimpleNamespace
 
 import pytest
+import torch
 
 from magi_attention.common.enum import AttnMaskType as PyAttnMaskType
 from magi_attention.common.range import AttnRange as PyAttnRange
@@ -1096,8 +1097,6 @@ class TestAttnRanges(unittest.TestCase):
             _ = empty.end
 
     def test_to_tensor_empty(self):
-        import torch
-
         AttnRanges = self.types.AttnRanges
 
         empty = AttnRanges()

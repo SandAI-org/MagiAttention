@@ -55,6 +55,7 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.testing.precompile import add_ffa_spec
 from magi_attention.testing.sparse import (
     DEFAULT_BWD_DQ_ATOL,
     DEFAULT_FWD_ATOL,
@@ -400,10 +401,7 @@ def _run_view_trick(
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipIf(
-    not is_hopper(),
-    "This test targets the C++ FFA, which supports only sm90.",
-)
+@unittest.skipUnless(is_hopper(), "requires Hopper")
 class TestIndexSparseViewTrick(unittest.TestCase):
     """Standalone IndexSparse view-trick tests.
 
@@ -416,7 +414,6 @@ class TestIndexSparseViewTrick(unittest.TestCase):
     @classmethod
     def precompile_kernel_specs(cls):
         """Standard precompile interface — see magi_attention/testing/precompile.py."""
-        from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
 
@@ -509,10 +506,7 @@ class TestIndexSparseViewTrick(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipIf(
-    not is_hopper(),
-    "This test targets the C++ FFA, which supports only sm90.",
-)
+@unittest.skipUnless(is_hopper(), "requires Hopper")
 class TestIndexSparseSweep(DistTestBase):
     """IndexSparse Classic sweep — CI gate.
 
@@ -531,7 +525,6 @@ class TestIndexSparseSweep(DistTestBase):
         All classic combos share the same compile params: MQA128 kbs=1.
         FWD + BWD InnerLoopK (swap_bwd_qk_loop=True).
         """
-        from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
         # FWD: disable_fwd_atomic, ref_block_size=(128,128)
@@ -600,10 +593,7 @@ class TestIndexSparseSweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipIf(
-    not is_hopper(),
-    "This test targets the C++ FFA, which supports only sm90.",
-)
+@unittest.skipUnless(is_hopper(), "requires Hopper")
 class TestIndexSparseComprehensiveSweep(DistTestBase):
     """IndexSparse Comprehensive sweep — CI.
 
@@ -656,7 +646,6 @@ class TestIndexSparseComprehensiveSweep(DistTestBase):
 
         FWD + BWD LoopQ/LoopK for each (head × hd × kbs × inner modes) combo.
         """
-        from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
         kBlockN = 128
