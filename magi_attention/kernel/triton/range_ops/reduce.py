@@ -22,7 +22,7 @@ from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
 from magi_attention.utils import nvtx
 from magi_attention.utils.dtype import fp_dtype_ge, max_fp_dtype, to_triton_dtype
 
-from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
+from .utils import calc_cu_range_sizes, calc_out2inp_range_map, calc_ranges_row_map
 
 __all__ = ["range_reduce"]
 
@@ -477,7 +477,7 @@ def range_reduce(
                 out2inp_range_map,
                 unique_ordered_out_ranges,
                 out2inp_range_map_stride,
-            ) = _calc_out2inp_range_map(
+            ) = calc_out2inp_range_map(
                 output_ranges,
                 device=input.device,
             )
@@ -491,7 +491,7 @@ def range_reduce(
     cu_range_sizes = kwargs.pop("cu_range_sizes", None)
     total_size = kwargs.pop("total_size", None)
     if cu_range_sizes is None or total_size is None:
-        cu_range_sizes, total_size = _calc_cu_range_sizes(
+        cu_range_sizes, total_size = calc_cu_range_sizes(
             unique_ordered_out_ranges if deterministic else input_ranges,
             device=input.device,
         )
@@ -506,7 +506,7 @@ def range_reduce(
     # Calculate row_map if not provided
     row_map = kwargs.pop("row_map", None)
     if row_map is None:
-        row_map = _calc_ranges_row_map(
+        row_map = calc_ranges_row_map(
             unique_ordered_out_ranges if deterministic else input_ranges,
             total_size,
         )

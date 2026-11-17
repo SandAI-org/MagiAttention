@@ -23,9 +23,9 @@ from magi_attention.common import AttnForwardMeta
 
 from .dist_attn_runtime import DistAttnRuntime
 from .dist_attn_utils import (
-    _prepare_attn_inputs,
-    _restore_attn_output,
     create_kernel_barrier,
+    prepare_attn_inputs,
+    restore_attn_output,
 )
 
 logger = getLogger(__name__)
@@ -711,7 +711,7 @@ def dist_attn_func(
         lse: [num_tokens_q_local, num_heads_q]
         meta.max_logits: [num_heads_q] when return_max_logits is True
     """
-    q, k, v, output_dtype = _prepare_attn_inputs(
+    q, k, v, output_dtype = prepare_attn_inputs(
         q, k, v, dist_attn_runtime.kernel_backend, env.general.precision()
     )
 
@@ -726,6 +726,6 @@ def dist_attn_func(
         return_max_logits,
     )
 
-    out = _restore_attn_output(out, output_dtype)
+    out = restore_attn_output(out, output_dtype)
 
     return out, AttnForwardMeta(lse=lse, max_logits=max_logits)

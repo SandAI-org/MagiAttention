@@ -28,12 +28,12 @@ from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp, GrpCollBufferName, OutMaybeWithLSE
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.ranges import NaiveRanges
-from magi_attention.kernel.triton.comm.varlen_copy import _varlen_for_each_copy_triton
+from magi_attention.kernel.triton.comm.varlen_copy import varlen_for_each_copy_triton
 from magi_attention.kernel.triton.range_ops import range_gather, range_reduce
 from magi_attention.kernel.triton.range_ops.utils import (
-    _calc_cu_range_sizes,
-    _calc_out2inp_range_map,
-    _calc_ranges_row_map,
+    calc_cu_range_sizes,
+    calc_out2inp_range_map,
+    calc_ranges_row_map,
 )
 from magi_attention.utils import is_list_type_all, nvtx
 
@@ -196,23 +196,23 @@ def _calc_range_reduce_kwargs_from_ranges(
     range_reduce_kwargs["input_ranges"] = input_ranges
 
     if deterministic:
-        (out2inp_range_map, unique_ordered_out_ranges, _) = _calc_out2inp_range_map(
+        (out2inp_range_map, unique_ordered_out_ranges, _) = calc_out2inp_range_map(
             output_ranges,
-            # first put to cpu to avoid d2h in `_calc_cu_range_sizes` below
+            # first put to cpu to avoid d2h in `calc_cu_range_sizes` below
             device=torch.device("cpu"),
         )
 
-        cu_range_sizes, total_size = _calc_cu_range_sizes(
+        cu_range_sizes, total_size = calc_cu_range_sizes(
             unique_ordered_out_ranges,
             device=device,
         )
 
-        # put back to device before `_calc_ranges_row_map`
+        # put back to device before `calc_ranges_row_map`
         # to make row_map a device tensor
         out2inp_range_map = out2inp_range_map.to(device)
         unique_ordered_out_ranges = unique_ordered_out_ranges.to(device)
 
-        row_map = _calc_ranges_row_map(
+        row_map = calc_ranges_row_map(
             unique_ordered_out_ranges,
             total_size,
         )
@@ -1284,7 +1284,7 @@ def transfer_splits_and_dst_idxs_to_t2r_idx(
             device=device,
         )
 
-        _varlen_for_each_copy_triton(
+        varlen_for_each_copy_triton(
             dst=t2r_idx,
             src=dst_indices_tensor,
             num_dst=num_dst_tensor,

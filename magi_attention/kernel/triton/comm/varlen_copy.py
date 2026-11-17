@@ -50,7 +50,7 @@ def _varlen_for_each_copy_kernel(
     tl.store(output_row_base_ptr + cols_in_block, values_to_write, mask=write_mask)
 
 
-def _varlen_for_each_copy_triton(
+def varlen_for_each_copy_triton(
     dst: torch.Tensor,
     src: torch.Tensor,
     num_dst: torch.Tensor,

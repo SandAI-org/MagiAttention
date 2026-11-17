@@ -17,7 +17,7 @@ import torch
 from magi_attention.common.ranges import NaiveRanges
 
 
-def _calc_cu_range_sizes(
+def calc_cu_range_sizes(
     ranges: torch.Tensor | NaiveRanges,
     device: torch.device,
 ) -> tuple[torch.Tensor, int]:
@@ -35,7 +35,7 @@ def _calc_cu_range_sizes(
     return cu_range_sizes, total_size
 
 
-def _calc_ranges_row_map(
+def calc_ranges_row_map(
     ranges: torch.Tensor,
     total_size: int,
 ) -> torch.Tensor:
@@ -51,7 +51,7 @@ def _calc_ranges_row_map(
     return row_map
 
 
-def _calc_out2inp_range_map(
+def calc_out2inp_range_map(
     output_ranges: torch.Tensor | NaiveRanges,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:

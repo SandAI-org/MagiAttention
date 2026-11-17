@@ -16,10 +16,10 @@ from typing import TYPE_CHECKING
 
 from magi_attention.env.general import is_cpp_backend_enable
 
-from . import enum, jit  # noqa: E402
-from .forward_meta import AttnForwardMeta  # noqa: E402
-from .mask import AttnMask  # noqa: E402
-from .range import RangeError  # noqa: E402
+from . import enum, jit
+from .forward_meta import AttnForwardMeta
+from .mask import AttnMask
+from .range import RangeError
 
 # ---------------------------------------------------------------------------
 # Unified routing layer: C++ backend vs Python backend

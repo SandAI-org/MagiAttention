@@ -73,7 +73,7 @@ _BACKEND_SUPPORTED_PRECISIONS: dict[
 }
 
 
-def _validate_backend_precision(
+def validate_backend_precision(
     backend: MagiAttentionKernelBackend,
     precision: MagiAttentionPrecision | None,
     input_dtype: torch.dtype,
@@ -106,7 +106,7 @@ def _validate_backend_precision(
             )
 
 
-def _prepare_attn_inputs(
+def prepare_attn_inputs(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -115,7 +115,7 @@ def _prepare_attn_inputs(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.dtype]:
     """Validate compute precision and adapt Q/K/V without changing global state."""
     output_dtype = q.dtype
-    _validate_backend_precision(backend, precision, output_dtype)
+    validate_backend_precision(backend, precision, output_dtype)
     if precision is not None:
         compute_dtype = precision.to_torch_dtype()
         if compute_dtype != output_dtype:
@@ -123,6 +123,6 @@ def _prepare_attn_inputs(
     return q, k, v, output_dtype
 
 
-def _restore_attn_output(out: torch.Tensor, output_dtype: torch.dtype) -> torch.Tensor:
+def restore_attn_output(out: torch.Tensor, output_dtype: torch.dtype) -> torch.Tensor:
     """Restore the caller's output dtype while preserving the gradient path."""
     return out.to(output_dtype) if out.dtype != output_dtype else out

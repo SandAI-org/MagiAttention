@@ -18,9 +18,9 @@ from unittest import TestCase
 import torch
 
 from magi_attention.kernel.triton.range_ops.utils import (
-    _calc_cu_range_sizes,
-    _calc_out2inp_range_map,
-    _calc_ranges_row_map,
+    calc_cu_range_sizes,
+    calc_out2inp_range_map,
+    calc_ranges_row_map,
 )
 
 
@@ -41,7 +41,7 @@ class TestRangeOpUtils(TestCase):
             [0, 2, 5, 6], dtype=torch.int64, device=self.device
         )
         total_size_ref = 6
-        cu_range_sizes, total_size = _calc_cu_range_sizes(ranges, device=self.device)
+        cu_range_sizes, total_size = calc_cu_range_sizes(ranges, device=self.device)
 
         self.assertEqual(total_size, total_size_ref)
         self.assertTrue(torch.equal(cu_range_sizes, cu_range_sizes_ref))
@@ -55,7 +55,7 @@ class TestRangeOpUtils(TestCase):
         )
         cu_range_sizes_ref = torch.tensor([0], dtype=torch.int64, device=self.device)
         total_size_ref = 0
-        cu_range_sizes, total_size = _calc_cu_range_sizes(ranges, device=self.device)
+        cu_range_sizes, total_size = calc_cu_range_sizes(ranges, device=self.device)
 
         self.assertEqual(total_size, total_size_ref)
         self.assertTrue(torch.equal(cu_range_sizes, cu_range_sizes_ref))
@@ -73,7 +73,7 @@ class TestRangeOpUtils(TestCase):
             [0, 0, 1, 1, 1, 2], dtype=torch.int64, device=self.device
         )
 
-        row_map = _calc_ranges_row_map(ranges, total_size=total_size)
+        row_map = calc_ranges_row_map(ranges, total_size=total_size)
 
         self.assertTrue(torch.equal(row_map, row_map_ref))
 
@@ -87,7 +87,7 @@ class TestRangeOpUtils(TestCase):
         total_size = 0
         row_map_ref = torch.tensor([], dtype=torch.int64, device=self.device)
 
-        row_map = _calc_ranges_row_map(ranges, total_size=total_size)
+        row_map = calc_ranges_row_map(ranges, total_size=total_size)
 
         self.assertTrue(torch.equal(row_map, row_map_ref))
 
@@ -117,7 +117,7 @@ class TestRangeOpUtils(TestCase):
             out2inp_range_map,
             unique_ordered_out_ranges,
             max_inp_indices_size,
-        ) = _calc_out2inp_range_map(output_ranges, device=self.device)
+        ) = calc_out2inp_range_map(output_ranges, device=self.device)
 
         self.assertTrue(torch.equal(out2inp_range_map, out2inp_range_map_ref))
         self.assertTrue(
@@ -142,7 +142,7 @@ class TestRangeOpUtils(TestCase):
             out2inp_range_map,
             unique_ordered_out_ranges,
             max_inp_indices_size,
-        ) = _calc_out2inp_range_map(output_ranges, device=self.device)
+        ) = calc_out2inp_range_map(output_ranges, device=self.device)
 
         self.assertTrue(torch.equal(out2inp_range_map, out2inp_range_map_ref))
         self.assertTrue(

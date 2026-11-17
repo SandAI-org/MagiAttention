@@ -21,7 +21,7 @@ import triton.language as tl
 from magi_attention.utils import nvtx
 from magi_attention.utils.arch import is_blackwell
 
-from .utils import _calc_cu_range_sizes, _calc_ranges_row_map
+from .utils import calc_cu_range_sizes, calc_ranges_row_map
 
 __all__ = ["range_gather"]
 
@@ -169,7 +169,7 @@ def range_gather(
     cu_range_sizes = kwargs.pop("cu_range_sizes", None)
     total_size = kwargs.pop("total_size", None)
     if cu_range_sizes is None or total_size is None:
-        cu_range_sizes, total_size = _calc_cu_range_sizes(
+        cu_range_sizes, total_size = calc_cu_range_sizes(
             ranges,
             device=input.device,
         )
@@ -195,7 +195,7 @@ def range_gather(
     if kernel_backend == "per_row":
         row_map = kwargs.pop("row_map", None)
         if row_map is None:
-            row_map = _calc_ranges_row_map(ranges, total_size)
+            row_map = calc_ranges_row_map(ranges, total_size)
         else:
             row_map = row_map.contiguous()
         # sanity check
