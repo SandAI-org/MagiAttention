@@ -19,8 +19,8 @@ from unittest import TestCase
 import torch
 
 from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
-from magi_attention.common.range_op import range_reduce
 from magi_attention.functional.utils import correct_attn_lse, correct_attn_out
+from magi_attention.kernel.triton.range_ops import range_reduce
 from magi_attention.testing import parameterize
 from magi_attention.utils.dtype import fp_dtype_ge, max_fp_dtype
 

@@ -17,7 +17,7 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.common.range_op import range_fill_
+from magi_attention.kernel.triton.range_ops import range_fill_
 
 
 def range_fill_ref(

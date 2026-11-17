@@ -18,8 +18,8 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.common.range_op import range_gather
-from magi_attention.common.range_op._range_gather import RangeGatherKernelBackend
+from magi_attention.kernel.triton.range_ops import range_gather
+from magi_attention.kernel.triton.range_ops.gather import RangeGatherKernelBackend
 from magi_attention.testing import parameterize
 
 

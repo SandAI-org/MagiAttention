@@ -17,7 +17,7 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.common.range_op.utils import (
+from magi_attention.kernel.triton.range_ops.utils import (
     _calc_cu_range_sizes,
     _calc_out2inp_range_map,
     _calc_ranges_row_map,

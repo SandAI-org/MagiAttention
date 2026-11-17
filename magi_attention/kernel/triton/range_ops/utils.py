@@ -14,7 +14,7 @@
 
 import torch
 
-from ..ranges import NaiveRanges
+from magi_attention.common.ranges import NaiveRanges
 
 
 def _calc_cu_range_sizes(

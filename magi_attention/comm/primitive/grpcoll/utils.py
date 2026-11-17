@@ -27,14 +27,14 @@ from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp, GrpCollBufferName, OutMaybeWithLSE
 from magi_attention.common.range import NaiveRange
-from magi_attention.common.range_op import range_gather, range_reduce
-from magi_attention.common.range_op.utils import (
+from magi_attention.common.ranges import NaiveRanges
+from magi_attention.kernel.triton.comm.varlen_copy import _varlen_for_each_copy_triton
+from magi_attention.kernel.triton.range_ops import range_gather, range_reduce
+from magi_attention.kernel.triton.range_ops.utils import (
     _calc_cu_range_sizes,
     _calc_out2inp_range_map,
     _calc_ranges_row_map,
 )
-from magi_attention.common.ranges import NaiveRanges
-from magi_attention.kernel.triton.comm.varlen_copy import _varlen_for_each_copy_triton
 from magi_attention.utils import is_list_type_all, nvtx
 
 # ------------------        common helpers       ------------------ #
