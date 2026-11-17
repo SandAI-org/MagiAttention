@@ -46,7 +46,7 @@ def requirements(path: str) -> dict[str, tuple[str, Requirement]]:
         lines = Path(path).read_text().splitlines()
     except OSError as exc:
         raise SystemExit(f"Cannot read {path}: {exc}")
-    found = {}
+    found: dict[str, tuple[str, Requirement]] = {}
     # Leave unrelated requirements and pip options to pip.
     for number, line in enumerate(lines, start=1):
         text = line.split("#", 1)[0].strip()
