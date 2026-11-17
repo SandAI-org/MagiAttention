@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
+
 import torch
 from torch.testing._internal.common_utils import run_tests
 
@@ -32,19 +34,13 @@ from magi_attention.utils.arch import is_blackwell
 _NORM_RATIO = 2.0
 
 
+@unittest.skipUnless(is_blackwell(), "requires Blackwell")
 class TestFFAPreprocess(DistTestBase):
     """SM100 backward preprocessing with and without range merge.
 
     The preprocess grid is bounded by total_q only when the kernel's q ranges
     are pairwise disjoint; the K-merge repeats a q range once per K group.
     """
-
-    def setUp(self) -> None:
-        # Skip in the parent before DistTestBase spawns ranks, including ranks
-        # with no assigned parameter cases that would otherwise reach a barrier.
-        if not is_blackwell():
-            self.skipTest("the bwd preprocess under test is the SM100/SM110 path")
-        super().setUp()
 
     @property
     def seed(self) -> int:

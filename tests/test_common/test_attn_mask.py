@@ -22,7 +22,9 @@ import torch
 
 class TestAttnMask(unittest.TestCase):
     def test_mask_factory_constructors(self):
-        from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
+        from magi_attention.common.enum import AttnMaskType
+        from magi_attention.common.mask import AttnMask
+        from magi_attention.common.ranges import AttnRanges
 
         # --------     factory constructor1: from_ranges  --------- #
 
@@ -126,7 +128,10 @@ class TestAttnMask(unittest.TestCase):
             )
 
     def test_make_sub_mask_with_calc_sub_area(self):
-        from magi_attention.common import AttnMask, AttnMaskType, AttnRange, AttnRanges
+        from magi_attention.common.enum import AttnMaskType
+        from magi_attention.common.mask import AttnMask
+        from magi_attention.common.range import AttnRange
+        from magi_attention.common.ranges import AttnRanges
 
         # --------------      init sample meta      -------------- #
 
@@ -303,7 +308,9 @@ class TestAttnMask(unittest.TestCase):
         )
 
     def test_mask_type_bool_func(self):
-        from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
+        from magi_attention.common.enum import AttnMaskType
+        from magi_attention.common.mask import AttnMask
+        from magi_attention.common.ranges import AttnRanges
 
         q_ranges = AttnRanges.from_ranges(
             [
@@ -459,7 +466,7 @@ class TestAttnMask(unittest.TestCase):
         self.assertFalse(varlen_causal_mask4.is_varlen_causal())
 
     def test_make_causal_mask(self):
-        from magi_attention.common import AttnMask
+        from magi_attention.common.mask import AttnMask
 
         # ---------    square causal mask     --------- #
 
@@ -586,7 +593,8 @@ class TestAttnMask(unittest.TestCase):
         self.assertTrue(torch.equal(mask_br, ref_mask_br))
 
     def test_from_ranges_invalid_mask_type(self):
-        from magi_attention.common import AttnMask, AttnRanges
+        from magi_attention.common.mask import AttnMask
+        from magi_attention.common.ranges import AttnRanges
 
         q_ranges = AttnRanges.from_ranges([(0, 5)])
         k_ranges = AttnRanges.from_ranges([(0, 5)])
@@ -599,7 +607,9 @@ class TestAttnMask(unittest.TestCase):
                 )
 
     def test_is_empty(self):
-        from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
+        from magi_attention.common.enum import AttnMaskType
+        from magi_attention.common.mask import AttnMask
+        from magi_attention.common.ranges import AttnRanges
 
         q_ranges = AttnRanges.from_ranges([(0, 5)])
         k_ranges = AttnRanges.from_ranges([(0, 5)])
@@ -612,7 +622,9 @@ class TestAttnMask(unittest.TestCase):
         self.assertFalse(mask.is_empty())
 
     def test_eq_with_non_mask(self):
-        from magi_attention.common import AttnMask, AttnMaskType, AttnRanges
+        from magi_attention.common.enum import AttnMaskType
+        from magi_attention.common.mask import AttnMask
+        from magi_attention.common.ranges import AttnRanges
 
         q_ranges = AttnRanges.from_ranges([(0, 3)])
         k_ranges = AttnRanges.from_ranges([(0, 3)])
@@ -626,7 +638,7 @@ class TestAttnMask(unittest.TestCase):
         self.assertNotEqual(mask, 42)
 
     def test_make_causal_mask_invalid_align(self):
-        from magi_attention.common import AttnMask
+        from magi_attention.common.mask import AttnMask
 
         with pytest.raises(ValueError, match="Invalid alignment"):
             AttnMask.make_causal_mask(5, 5, align="center")

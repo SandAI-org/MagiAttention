@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import math
+import unittest
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -52,14 +53,8 @@ def _maybe_disable_2cta(disable: bool) -> Iterator[None]:
         switch_back()
 
 
+@unittest.skipUnless(is_blackwell(), "requires Blackwell")
 class TestFfaCatGqa(DistTestBase):
-    def setUp(self) -> None:
-        # Skip in the parent before DistTestBase spawns ranks, including ranks
-        # with no assigned parameter cases that would otherwise reach a barrier.
-        if not is_blackwell():
-            self.skipTest("cat_gqa requires Blackwell")
-        super().setUp()
-
     @property
     def seed(self) -> int:
         return 42

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import math
+import unittest
 from typing import Any
 from unittest import TestCase
 
@@ -61,14 +62,8 @@ def _contiguous_ranges(lengths: list[int]) -> list[list[int]]:
     return ranges
 
 
+@unittest.skipUnless(is_blackwell(), "requires Blackwell")
 class TestFfaPackGqaBwd(DistTestBase):
-    def setUp(self) -> None:
-        # Skip in the parent before DistTestBase spawns ranks, including ranks
-        # with no assigned parameter cases that would otherwise reach a barrier.
-        if not is_blackwell():
-            self.skipTest("bwd_pack_factor > 1 requires Blackwell")
-        super().setUp()
-
     @property
     def seed(self) -> int:
         return 42

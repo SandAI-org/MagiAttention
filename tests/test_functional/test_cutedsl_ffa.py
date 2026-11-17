@@ -21,7 +21,6 @@ import torch
 
 from magi_attention.common import AttnRanges
 from magi_attention.functional import cutedsl_ffa
-from magi_attention.kernel.cutedsl.ffa_utils import get_device_arch
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -30,6 +29,9 @@ from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.testing import parameterize
 from magi_attention.testing.cutedsl_utils import record_bwd_kernels
 from magi_attention.testing.utils import switch_env, switch_envvar_context
+from magi_attention.utils.arch import is_blackwell
+
+require_blackwell = unittest.skipUnless(is_blackwell(), "requires Blackwell")
 
 RANGE_MERGE_ENV = "MAGI_ATTENTION_RANGE_MERGE"
 BWD_PACK_FACTOR_ENV = "MAGI_ATTENTION_BWD_PACK_FACTOR"
@@ -202,16 +204,13 @@ def _fold_env(
     }
 
 
+@require_blackwell
 class TestCutedslBwdUnderRangeMerge(TestCase):
     """Backward range ordering under MAGI_ATTENTION_RANGE_MERGE=1.
 
     calc_meta reorders backward rows by k start. disable_fwd_atomic_reduction
     requires the q ranges passed to the kernel to be sorted and disjoint.
     """
-
-    def setUp(self) -> None:
-        if get_device_arch()[1] not in (10, 11):
-            self.skipTest("the range bwd direct dQ store exists only on SM100/SM110")
 
     @staticmethod
     def _make_inputs(case: RangeCase) -> tuple[torch.Tensor, ...]:
@@ -316,16 +315,13 @@ class TestCutedslBwdUnderRangeMerge(TestCase):
             self._bwd(attn_arg, q, k, v, do, out, lse)
 
 
+@require_blackwell
 class TestCutedslFwdStorePath(TestCase):
     """cutedsl_fwd direct-stores O only for sorted, disjoint q rows.
 
     Rows outside every q range must hold zero O and the sink-only LSE, because
     the dist merge reads every row of the partial (out, lse).
     """
-
-    def setUp(self) -> None:
-        if get_device_arch()[1] not in (10, 11):
-            self.skipTest("the fp32 range fwd exists only on SM100/SM110")
 
     @staticmethod
     def _make_inputs(
@@ -420,15 +416,12 @@ class TestCutedslFwdStorePath(TestCase):
         self._run_case(name, num_heads_q=4, num_heads_kv=2, num_sinks=2)
 
 
+@require_blackwell
 class TestCutedslBwdPackFactor(TestCase):
     """The dist cutedsl backward takes MAGI_ATTENTION_BWD_PACK_FACTOR, and the
     direct dK/dV store that calc_meta grants for it reaches the kernel."""
 
     NUM_HEADS_Q, NUM_HEADS_KV = 8, 2
-
-    def setUp(self) -> None:
-        if get_device_arch()[1] not in (10, 11):
-            self.skipTest("bwd_pack_factor > 1 requires SM100/SM110")
 
     @staticmethod
     def _reference_grads(
