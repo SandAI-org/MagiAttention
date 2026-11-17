@@ -1383,5 +1383,10 @@ class TestCalcSelfAttnAreas(TestCase):
         process.close()
 
 
+def load_tests(loader, tests, pattern):
+    """Keep unittest discovery on the isolated entry, as pytest does."""
+    return loader.loadTestsFromTestCase(TestCalcSelfAttnAreas)
+
+
 if __name__ == "__main__":
     unittest.main()
