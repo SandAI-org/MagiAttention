@@ -122,6 +122,8 @@ def _check_copyright(path):
                 match = RE_COPYRIGHT.search(line)
                 if match:
                     year_str = match.group(1)
+                    if match.group(2) is not None:
+                        year_str += f"-{match.group(2)}"
                     if NOW == 2025:
                         return 1 if year_str == "2025" else 2
                     else:

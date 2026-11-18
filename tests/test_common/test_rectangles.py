@@ -13,16 +13,45 @@
 # limitations under the License.
 
 import random
+import unittest
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from magi_attention.common.enum import AttnMaskType as PyAttnMaskType
+from magi_attention.common.range import AttnRange as PyAttnRange
+from magi_attention.common.ranges import AttnRanges as PyAttnRanges
+from magi_attention.common.rectangle import AttnRectangle as PyAttnRectangle
+from magi_attention.common.rectangles import AttnRectangles as PyAttnRectangles
+
+cpp_backend: ModuleType | None
+try:
+    from magi_attention import magi_attn_ext as cpp_backend
+except ImportError:
+    cpp_backend = None
+
 
 @pytest.mark.arch_independent
-class TestAttnRectangles:
+class TestAttnRectangles(unittest.TestCase):
+    backend = "python"
+
+    def setUp(self):
+        if self.backend == "cpp":
+            if cpp_backend is None:
+                self.skipTest("magi_attn_ext not available")
+            self.types = cpp_backend
+        else:
+            self.types = SimpleNamespace(
+                AttnRange=PyAttnRange,
+                AttnRanges=PyAttnRanges,
+                AttnMaskType=PyAttnMaskType,
+                AttnRectangle=PyAttnRectangle,
+                AttnRectangles=PyAttnRectangles,
+            )
+
     def _setup_test_data(self):
-        from magi_attention.common import AttnMaskType  # noqa: F401
-        from magi_attention.common import AttnRectangles  # noqa: F401
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         self.rect1 = AttnRectangle(
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
@@ -34,18 +63,20 @@ class TestAttnRectangles:
             AttnRange(5, 15), AttnRange(5, 25), AttnRange(-3, 17)
         )
 
-    def test_init(self, backend):
+    def test_init(self):
         """test init"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         rects = AttnRectangles()
-        assert len(rects) == 0
-        assert rects.is_empty()
-        assert rects.is_valid()
+        self.assertEqual(len(rects), 0)
+        self.assertTrue(rects.is_empty())
+        self.assertTrue(rects.is_valid())
 
-    def test_append(self, backend):
+    def test_append(self):
         """test append rectangle"""
-        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -53,12 +84,12 @@ class TestAttnRectangles:
 
         # test normal append
         rects.append(self.rect1)
-        assert len(rects) == 1
-        assert rects[0] == self.rect1
+        self.assertEqual(len(rects), 1)
+        self.assertEqual(rects[0], self.rect1)
 
         # test append with check
         rects.append(self.rect2, check=True)
-        assert len(rects) == 2
+        self.assertEqual(len(rects), 2)
 
         # test append invalid rectangle (should raise exception)
         invalid_rect = AttnRectangle(
@@ -69,9 +100,9 @@ class TestAttnRectangles:
         with pytest.raises(ValueError):
             rects.append(invalid_rect, check=True)
 
-    def test_extend(self, backend):
+    def test_extend(self):
         """test extend rectangle list"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -84,26 +115,28 @@ class TestAttnRectangles:
 
         # test normal extend
         rects1.extend(rects2)
-        assert len(rects1) == 3
-        assert rects1[2] == self.rect3
+        self.assertEqual(len(rects1), 3)
+        self.assertEqual(rects1[2], self.rect3)
 
         # test extend with check
         rects3 = AttnRectangles()
         rects3.append(self.rect1)
         rects1.extend(rects3, check=True)
-        assert len(rects1) == 4
+        self.assertEqual(len(rects1), 4)
 
-    def test_from_ranges(self, backend):
+    def test_from_ranges(self):
         """test from ranges"""
-        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangles
+        AttnRange = self.types.AttnRange
+        AttnRectangles = self.types.AttnRectangles
 
         # test using AttnRange
         q_ranges = [AttnRange(0, 10), AttnRange(10, 20)]
         k_ranges = [AttnRange(0, 20), AttnRange(20, 40)]
+        AttnMaskType = self.types.AttnMaskType
         mask_types = [AttnMaskType.FULL, AttnMaskType.CAUSAL]
 
         rects = AttnRectangles.from_ranges(q_ranges, k_ranges, mask_types)
-        assert len(rects) == 2
+        self.assertEqual(len(rects), 2)
 
         # test using integer mask_types
         int_mask_types = [0, 1, 2, 3]
@@ -113,28 +146,30 @@ class TestAttnRectangles:
         rects_int = AttnRectangles.from_ranges(
             q_ranges_int, k_ranges_int, int_mask_types
         )
-        assert len(rects_int) == 4
+        self.assertEqual(len(rects_int), 4)
 
         # test using AttnRange
         attn_ranges = [AttnRange(0, 10), AttnRange(10, 20)]
         rects_attn = AttnRectangles.from_ranges(attn_ranges, attn_ranges, [0, 0])
-        assert len(rects_attn) == 2
+        self.assertEqual(len(rects_attn), 2)
 
         # test length mismatch exception
         with pytest.raises((AssertionError, ValueError, RuntimeError)):
             AttnRectangles.from_ranges([AttnRange(0, 10)], [AttnRange(0, 20)], [0, 1])
 
-    def test_is_valid(self, backend):
+    def test_is_valid(self):
         """test validity check"""
-        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
         rects = AttnRectangles()
-        assert rects.is_valid()  # empty list is always valid
+        self.assertTrue(rects.is_valid())
 
         rects.append(self.rect1)
-        assert rects.is_valid()
+        self.assertTrue(rects.is_valid())
 
         # test invalid rectangle
         invalid_rect = AttnRectangle(
@@ -143,11 +178,13 @@ class TestAttnRectangles:
         invalid_rect.q_range.start = 10
         invalid_rect.q_range.end = 5
         rects[0] = invalid_rect
-        assert not rects.is_valid()
+        self.assertFalse(rects.is_valid())
 
-    def test_check_valid(self, backend):
+    def test_check_valid(self):
         """test validity check (raise exception)"""
-        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -167,9 +204,9 @@ class TestAttnRectangles:
         with pytest.raises((ValueError, RuntimeError, AssertionError)):
             rects.check_valid()
 
-    def test_get_qo_ranges_union(self, backend):
+    def test_get_qo_ranges_union(self):
         """test get Q/O ranges union"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -178,16 +215,16 @@ class TestAttnRectangles:
         rects.append(self.rect2)
 
         qo_ranges = rects.get_qo_ranges_union()
-        assert qo_ranges.total_seqlen == 20  # 0-10 + 10-20
+        self.assertEqual(qo_ranges.total_seqlen, 20)
 
         # test empty list
         empty_rects = AttnRectangles()
         empty_qo_ranges = empty_rects.get_qo_ranges_union()
-        assert empty_qo_ranges.total_seqlen == 0
+        self.assertEqual(empty_qo_ranges.total_seqlen, 0)
 
-    def test_get_kv_ranges_union(self, backend):
+    def test_get_kv_ranges_union(self):
         """test get K/V ranges union"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -196,16 +233,16 @@ class TestAttnRectangles:
         rects.append(self.rect2)
 
         kv_ranges = rects.get_kv_ranges_union()
-        assert kv_ranges.total_seqlen == 30  # 0-20 + 20-30
+        self.assertEqual(kv_ranges.total_seqlen, 30)
 
         # test empty list
         empty_rects = AttnRectangles()
         empty_kv_ranges = empty_rects.get_kv_ranges_union()
-        assert empty_kv_ranges.total_seqlen == 0
+        self.assertEqual(empty_kv_ranges.total_seqlen, 0)
 
-    def test_total_seqlen_qo(self, backend):
+    def test_total_seqlen_qo(self):
         """test total seqlen Q/O"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -213,15 +250,15 @@ class TestAttnRectangles:
         rects.append(self.rect1)
         rects.append(self.rect2)
 
-        assert rects.total_seqlen_qo() == 20
+        self.assertEqual(rects.total_seqlen_qo(), 20)
 
         # test empty list
         empty_rects = AttnRectangles()
-        assert empty_rects.total_seqlen_qo() == 0
+        self.assertEqual(empty_rects.total_seqlen_qo(), 0)
 
-    def test_total_seqlen_kv(self, backend):
+    def test_total_seqlen_kv(self):
         """test total seqlen K/V"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -229,15 +266,15 @@ class TestAttnRectangles:
         rects.append(self.rect1)
         rects.append(self.rect2)
 
-        assert rects.total_seqlen_kv() == 30
+        self.assertEqual(rects.total_seqlen_kv(), 30)
 
         # test empty list
         empty_rects = AttnRectangles()
-        assert empty_rects.total_seqlen_kv() == 0
+        self.assertEqual(empty_rects.total_seqlen_kv(), 0)
 
-    def test_cut_q(self, backend):
+    def test_cut_q(self):
         """test cut Q"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -251,24 +288,24 @@ class TestAttnRectangles:
         # check cutting result - adjust expected value based on actual cutting logic
         # rect1: [0, 10) x [0, 20)
         # rect2: [10, 20) x [20, 30)
-        assert len(left_rects) >= 1
-        assert len(right_rects) >= 1
+        self.assertTrue(len(left_rects) >= 1)
+        self.assertTrue(len(right_rects) >= 1)
 
         # check area conservation
         original_area = rects.area()
         left_area = left_rects.area()
         right_area = right_rects.area()
-        assert original_area == left_area + right_area
+        self.assertEqual(original_area, left_area + right_area)
 
         # test empty list cutting
         empty_rects = AttnRectangles()
         left_empty, right_empty = empty_rects.cut_q(10)
-        assert len(left_empty) == 0
-        assert len(right_empty) == 0
+        self.assertEqual(len(left_empty), 0)
+        self.assertEqual(len(right_empty), 0)
 
-    def test_cut_k(self, backend):
+    def test_cut_k(self):
         """test cut K"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -282,24 +319,24 @@ class TestAttnRectangles:
         # check cutting result - adjust expected value based on actual cutting logic
         # rect1: [0, 10) x [0, 20)
         # rect2: [10, 20) x [20, 30)
-        assert len(left_rects) >= 1
-        assert len(right_rects) >= 1
+        self.assertTrue(len(left_rects) >= 1)
+        self.assertTrue(len(right_rects) >= 1)
 
         # check area conservation
         original_area = rects.area()
         left_area = left_rects.area()
         right_area = right_rects.area()
-        assert original_area == left_area + right_area
+        self.assertEqual(original_area, left_area + right_area)
 
         # test empty list cutting
         empty_rects = AttnRectangles()
         left_empty, right_empty = empty_rects.cut_k(10)
-        assert len(left_empty) == 0
-        assert len(right_empty) == 0
+        self.assertEqual(len(left_empty), 0)
+        self.assertEqual(len(right_empty), 0)
 
-    def test_get_rects_within_q_segment(self, backend):
+    def test_get_rects_within_q_segment(self):
         """test get rects within Q segment"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -313,27 +350,27 @@ class TestAttnRectangles:
         # rect1: [0, 10) - overlap with [5, 15) (0 < 15 and 10 > 5)
         # rect2: [10, 20) - overlap with [5, 15) (10 < 15 and 20 > 5)
         # rect3: [5, 15) - fully contained in [5, 15)
-        assert len(segment_rects) == 3
+        self.assertEqual(len(segment_rects), 3)
 
         # get partially overlapping segment
         segment_rects = rects.get_rects_within_q_segment(15, 25)
         # rect1: [0, 10) - not overlap (10 <= 15)
         # rect2: [10, 20) - overlap with [15, 25) (10 < 25 and 20 > 15)
         # rect3: [5, 15) - not overlap (15 >= 15)
-        assert len(segment_rects) == 1  # only rect2
+        self.assertEqual(len(segment_rects), 1)
 
         # get non-overlapping segment
         segment_rects = rects.get_rects_within_q_segment(30, 40)
-        assert len(segment_rects) == 0
+        self.assertEqual(len(segment_rects), 0)
 
         # test empty list
         empty_rects = AttnRectangles()
         empty_segment = empty_rects.get_rects_within_q_segment(0, 10)
-        assert len(empty_segment) == 0
+        self.assertEqual(len(empty_segment), 0)
 
-    def test_get_rects_within_k_segment(self, backend):
+    def test_get_rects_within_k_segment(self):
         """test get rects within K segment"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -347,60 +384,60 @@ class TestAttnRectangles:
         # rect1: [0, 20) - overlap with [5, 25) (0 < 25 and 20 > 5)
         # rect2: [20, 30) - overlap with [5, 25) (20 < 25 and 30 > 5)
         # rect3: [5, 25) - fully contained in [5, 25)
-        assert len(segment_rects) == 3
+        self.assertEqual(len(segment_rects), 3)
 
         # get partially overlapping segment
         segment_rects = rects.get_rects_within_k_segment(25, 35)
         # rect1: [0, 20) - not overlap (20 <= 25)
         # rect2: [20, 30) - overlap with [25, 35) (20 < 35 and 30 > 25)
         # rect3: [5, 25) - not overlap (25 >= 25)
-        assert len(segment_rects) == 1  # only rect2
+        self.assertEqual(len(segment_rects), 1)
 
         # get non-overlapping segment
         segment_rects = rects.get_rects_within_k_segment(40, 50)
-        assert len(segment_rects) == 0
+        self.assertEqual(len(segment_rects), 0)
 
         # test empty list
         empty_rects = AttnRectangles()
         empty_segment = empty_rects.get_rects_within_k_segment(0, 10)
-        assert len(empty_segment) == 0
+        self.assertEqual(len(empty_segment), 0)
 
-    def test_area(self, backend):
+    def test_area(self):
         """test total area calculation"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
         rects = AttnRectangles()
-        assert rects.area() == 0  # empty list area is 0
+        self.assertEqual(rects.area(), 0)
 
         rects.append(self.rect1)
-        assert rects.area() == self.rect1.area()
+        self.assertEqual(rects.area(), self.rect1.area())
 
         rects.append(self.rect2)
         expected_area = self.rect1.area() + self.rect2.area()
-        assert rects.area() == expected_area
+        self.assertEqual(rects.area(), expected_area)
 
-    def test_properties(self, backend):
+    def test_properties(self):
         """test property access"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
         # test empty list
         empty_rects = AttnRectangles()
-        assert empty_rects.size == 0
-        assert empty_rects.is_empty()
+        self.assertEqual(empty_rects.size, 0)
+        self.assertTrue(empty_rects.is_empty())
 
         # test non-empty list
         rects = AttnRectangles()
         rects.append(self.rect1)
-        assert rects.size == 1
-        assert not rects.is_empty()
+        self.assertEqual(rects.size, 1)
+        self.assertFalse(rects.is_empty())
 
-    def test_indexing(self, backend):
+    def test_indexing(self):
         """test indexing access"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -410,23 +447,25 @@ class TestAttnRectangles:
         rects.append(self.rect3)
 
         # test integer indexing
-        assert rects[0] == self.rect1
-        assert rects[1] == self.rect2
-        assert rects[2] == self.rect3
+        self.assertEqual(rects[0], self.rect1)
+        self.assertEqual(rects[1], self.rect2)
+        self.assertEqual(rects[2], self.rect3)
 
         # test slice indexing
         slice_rects = rects[1:3]
-        assert len(slice_rects) == 2
-        assert slice_rects[0] == self.rect2
-        assert slice_rects[1] == self.rect3
+        self.assertEqual(len(slice_rects), 2)
+        self.assertEqual(slice_rects[0], self.rect2)
+        self.assertEqual(slice_rects[1], self.rect3)
 
         # test negative indexing
-        assert rects[-1] == self.rect3
-        assert rects[-2] == self.rect2
+        self.assertEqual(rects[-1], self.rect3)
+        self.assertEqual(rects[-2], self.rect2)
 
-    def test_setitem(self, backend):
+    def test_setitem(self):
         """test indexing assignment"""
-        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -439,17 +478,17 @@ class TestAttnRectangles:
             AttnRange(100, 110), AttnRange(100, 120), AttnRange(0, 20)
         )
         rects[0] = new_rect
-        assert rects[0] == new_rect
+        self.assertEqual(rects[0], new_rect)
 
         # test slice assignment
         new_rects = AttnRectangles()
         new_rects.append(new_rect)
         rects[1:2] = new_rects
-        assert rects[1] == new_rect
+        self.assertEqual(rects[1], new_rect)
 
-    def test_iteration(self, backend):
+    def test_iteration(self):
         """test iteration"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -460,19 +499,19 @@ class TestAttnRectangles:
 
         # test iteration
         rect_list = list(rects)
-        assert len(rect_list) == 3
-        assert rect_list[0] == self.rect1
-        assert rect_list[1] == self.rect2
-        assert rect_list[2] == self.rect3
+        self.assertEqual(len(rect_list), 3)
+        self.assertEqual(rect_list[0], self.rect1)
+        self.assertEqual(rect_list[1], self.rect2)
+        self.assertEqual(rect_list[2], self.rect3)
 
         # test empty list iteration
         empty_rects = AttnRectangles()
         empty_list = list(empty_rects)
-        assert len(empty_list) == 0
+        self.assertEqual(len(empty_list), 0)
 
-    def test_equality_and_hash(self, backend):
+    def test_equality_and_hash(self):
         """test equality and hash"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -489,20 +528,20 @@ class TestAttnRectangles:
         rects3.append(self.rect3)
 
         # test equality
-        assert rects1 == rects2
-        assert rects1 != rects3
+        self.assertEqual(rects1, rects2)
+        self.assertNotEqual(rects1, rects3)
 
         # test hash
-        assert hash(rects1) == hash(rects2)
-        assert hash(rects1) != hash(rects3)
+        self.assertEqual(hash(rects1), hash(rects2))
+        self.assertNotEqual(hash(rects1), hash(rects3))
 
         # test comparison with empty list
         empty_rects = AttnRectangles()
-        assert rects1 != empty_rects
+        self.assertNotEqual(rects1, empty_rects)
 
-    def test_repr(self, backend):
+    def test_repr(self):
         """test string representation"""
-        from magi_attention.common import AttnRectangles
+        AttnRectangles = self.types.AttnRectangles
 
         self._setup_test_data()
 
@@ -510,16 +549,18 @@ class TestAttnRectangles:
 
         # test empty list representation
         empty_repr = repr(rects)
-        assert "[-1, -1) x [-1, -1): None" in empty_repr
+        self.assertIn("[-1, -1) x [-1, -1): None", empty_repr)
 
         # test non-empty list representation
         rects.append(self.rect1)
         non_empty_repr = repr(rects)
-        assert "[0, 10)" in non_empty_repr
+        self.assertIn("[0, 10)", non_empty_repr)
 
-    def test_random_cut_q_k(self, backend):
+    def test_random_cut_q_k(self):
         """test random cut q or k by area conservation method"""
-        from magi_attention.common import AttnRange, AttnRectangle, AttnRectangles
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
+        AttnRectangles = self.types.AttnRectangles
 
         # random test 100 times
         for _ in range(100):
@@ -560,9 +601,17 @@ class TestAttnRectangles:
                 if rects.total_seqlen_qo() > 0:
                     cut_pos = random.randint(0, rects.total_seqlen_qo())
                     left, right = rects.cut_q(cut_pos)
-                    assert rects.area() == left.area() + right.area()
+                    self.assertEqual(rects.area(), left.area() + right.area())
 
                 if rects.total_seqlen_kv() > 0:
                     cut_pos = random.randint(0, rects.total_seqlen_kv())
                     left, right = rects.cut_k(cut_pos)
-                    assert rects.area() == left.area() + right.area()
+                    self.assertEqual(rects.area(), left.area() + right.area())
+
+
+class TestCppAttnRectangles(TestAttnRectangles):
+    backend = "cpp"
+
+
+if __name__ == "__main__":
+    unittest.main()

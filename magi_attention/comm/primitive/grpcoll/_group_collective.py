@@ -76,8 +76,8 @@ def group_cast(
     ...
 
 
-@torch.no_grad()
-@nvtx.instrument_nvtx
+@torch.no_grad
+@nvtx.instrument
 def group_cast(
     input: torch.Tensor,
     output: torch.Tensor | None,
@@ -250,8 +250,8 @@ def group_reduce(
     ...
 
 
-@torch.no_grad()
-@nvtx.instrument_nvtx
+@torch.no_grad
+@nvtx.instrument
 def group_reduce(
     input: torch.Tensor,
     output: torch.Tensor | None,

@@ -16,9 +16,9 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 from unittest import TestCase, mock
 
 from packaging.requirements import Requirement
@@ -407,6 +407,49 @@ class TestBackendRequirements(TestCase):
             assert str(FA4_DSL_REQUIREMENT) in message
             assert 'pip install "nvidia-cutlass-dsl[cu13]==4.4.2"' in message
             assert cause == repr(AttributeError(error))
+
+    def test_native_annotations_import_without_extensions(self):
+        child = """
+import importlib.abc
+import json
+import sys
+
+class BlockNativeExtensions(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.startswith(("magi_attention.magi_attn_ext", "magi_attention.magi_attn_comm")):
+            raise ModuleNotFoundError(fullname)
+        return None
+
+sys.meta_path.insert(0, BlockNativeExtensions())
+
+from magi_attention.functional.dist_attn import dist_attn_func
+from magi_attention.functional.dist_attn_runtime import DistAttnRuntime
+from magi_attention.functional.dist_attn_utils import create_kernel_barrier
+from magi_attention.comm.primitive.grpcoll import _buffer
+from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
+from magi_attention.comm.primitive.grpcoll._event import EventOverlap, create_event_handle
+
+operations = {
+    "barrier": lambda: create_kernel_barrier(1),
+    "config": GrpCollConfig().to_kernel_config,
+    "event": create_event_handle,
+    "overlap": EventOverlap,
+}
+result = {}
+for name, operation in operations.items():
+    try:
+        operation()
+    except ImportError as exc:
+        result[name] = str(exc)
+    else:
+        raise AssertionError(f"{name} accepted a missing native extension")
+print(json.dumps(result))
+"""
+        result = _run_in_fresh_interpreter(child)
+        self.assertEqual(set(result), {"barrier", "config", "event", "overlap"})
+        self.assertIn("magi_attn_ext", result["barrier"])
+        for name in ("config", "event", "overlap"):
+            self.assertIn("magi_attn_comm", result[name])
 
 
 if __name__ == "__main__":

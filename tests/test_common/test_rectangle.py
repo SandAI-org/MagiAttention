@@ -13,57 +13,93 @@
 # limitations under the License.
 
 import random
+import unittest
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from magi_attention.common.enum import AttnMaskType as PyAttnMaskType
+from magi_attention.common.range import AttnRange as PyAttnRange
+from magi_attention.common.ranges import AttnRanges as PyAttnRanges
+from magi_attention.common.rectangle import AttnRectangle as PyAttnRectangle
+from magi_attention.common.rectangles import AttnRectangles as PyAttnRectangles
+
+cpp_backend: ModuleType | None
+try:
+    from magi_attention import magi_attn_ext as cpp_backend
+except ImportError:
+    cpp_backend = None
+
 
 @pytest.mark.arch_independent
-class TestAttnRectangle:
-    def test_init_with_attn_range(self, backend):
+class TestAttnRectangle(unittest.TestCase):
+    backend = "python"
+
+    def setUp(self):
+        if self.backend == "cpp":
+            if cpp_backend is None:
+                self.skipTest("magi_attn_ext not available")
+            self.types = cpp_backend
+        else:
+            self.types = SimpleNamespace(
+                AttnRange=PyAttnRange,
+                AttnRanges=PyAttnRanges,
+                AttnMaskType=PyAttnMaskType,
+                AttnRectangle=PyAttnRectangle,
+                AttnRectangles=PyAttnRectangles,
+            )
+
+    def test_init_with_attn_range(self):
         """test init with AttnRange"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         q_range = AttnRange(0, 10)
         k_range = AttnRange(0, 20)
         d_range = AttnRange(-5, 5)
 
         rect = AttnRectangle(q_range, k_range, d_range)
-        assert isinstance(rect.q_range, AttnRange)
-        assert isinstance(rect.k_range, AttnRange)
-        assert isinstance(rect.d_range, AttnRange)
-        assert rect.q_range.start == 0
-        assert rect.q_range.end == 10
-        assert rect.k_range.start == 0
-        assert rect.k_range.end == 15
-        assert rect.d_range.start == -5
-        assert rect.d_range.end == 5
+        self.assertTrue(isinstance(rect.q_range, AttnRange))
+        self.assertTrue(isinstance(rect.k_range, AttnRange))
+        self.assertTrue(isinstance(rect.d_range, AttnRange))
+        self.assertEqual(rect.q_range.start, 0)
+        self.assertEqual(rect.q_range.end, 10)
+        self.assertEqual(rect.k_range.start, 0)
+        self.assertEqual(rect.k_range.end, 15)
+        self.assertEqual(rect.d_range.start, -5)
+        self.assertEqual(rect.d_range.end, 5)
 
-    def test_init_with_large_d_range(self, backend):
+    def test_init_with_large_d_range(self):
         """test init with large d_range"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         q_range = AttnRange(0, 10)
         k_range = AttnRange(0, 20)
         d_range = AttnRange(-100, 100)
 
         rect = AttnRectangle(q_range, k_range, d_range)
-        assert rect.d_range.start == -9
-        assert rect.d_range.end == 19
+        self.assertEqual(rect.d_range.start, -9)
+        self.assertEqual(rect.d_range.end, 19)
 
-    def test_causal_mask_d_range_adjustment(self, backend):
+    def test_causal_mask_d_range_adjustment(self):
         """test causal mask d_range adjustment"""
-        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
+        AttnMaskType = self.types.AttnMaskType
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         q_range = AttnRange(0, 10)
         k_range = AttnRange(0, 20)
 
         rect = AttnRectangle(q_range, k_range, mask_type=AttnMaskType.CAUSAL)
         expected_d_end = k_range.end - q_range.end
-        assert rect.d_range.end == expected_d_end
+        self.assertEqual(rect.d_range.end, expected_d_end)
 
-    def test_bicausal_mask_d_range_adjustment(self, backend):
+    def test_bicausal_mask_d_range_adjustment(self):
         """test bicausal mask d_range adjustment"""
-        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
+        AttnMaskType = self.types.AttnMaskType
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         q_range = AttnRange(0, 10)
         k_range = AttnRange(0, 20)
@@ -71,55 +107,60 @@ class TestAttnRectangle:
         rect = AttnRectangle(q_range, k_range, mask_type=AttnMaskType.BICAUSAL)
         expected_d_start = k_range.start - q_range.start
         expected_d_end = k_range.end - q_range.end
-        assert rect.d_range.start == expected_d_start
-        assert rect.d_range.end == expected_d_end
+        self.assertEqual(rect.d_range.start, expected_d_start)
+        self.assertEqual(rect.d_range.end, expected_d_end)
 
-    def test_invcausal_mask_d_range_adjustment(self, backend):
+    def test_invcausal_mask_d_range_adjustment(self):
         """test invcausal mask d_range adjustment"""
-        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
+        AttnMaskType = self.types.AttnMaskType
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         q_range = AttnRange(0, 10)
         k_range = AttnRange(0, 20)
 
         rect = AttnRectangle(q_range, k_range, mask_type=AttnMaskType.INVCAUSAL)
         expected_d_start = k_range.start - q_range.start
-        assert rect.d_range.start == expected_d_start
+        self.assertEqual(rect.d_range.start, expected_d_start)
 
-    def test_property_setters(self, backend):
+    def test_property_setters(self):
         """test property setters"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
         new_q_range = AttnRange(5, 15)
         rect.q_range = new_q_range
-        assert rect.q_range == new_q_range
+        self.assertEqual(rect.q_range, new_q_range)
 
         new_k_range = AttnRange(5, 25)
         rect.k_range = new_k_range
-        assert rect.k_range == new_k_range
+        self.assertEqual(rect.k_range, new_k_range)
 
         new_d_range = AttnRange(-10, 10)
         rect.d_range = new_d_range
-        assert rect.d_range == new_d_range
+        self.assertEqual(rect.d_range, new_d_range)
 
-    def test_is_valid(self, backend):
+    def test_is_valid(self):
         """test validity check"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         valid_rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
-        assert valid_rect.is_valid()
+        self.assertTrue(valid_rect.is_valid())
 
         invalid_rect = AttnRectangle(
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5)
         )
         invalid_rect.q_range.start = 10
         invalid_rect.q_range.end = 0
-        assert not invalid_rect.is_valid()
+        self.assertFalse(invalid_rect.is_valid())
 
-    def test_check_valid(self, backend):
+    def test_check_valid(self):
         """test validity check (raise exception)"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
@@ -130,56 +171,61 @@ class TestAttnRectangle:
         with pytest.raises((ValueError, RuntimeError)):
             rect.q_range = existing_invalid_range
 
-    def test_get_valid_or_none(self, backend):
+    def test_get_valid_or_none(self):
         """test get valid rect or None"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         valid_rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
-        assert valid_rect.get_valid_or_none() == valid_rect
+        self.assertEqual(valid_rect.get_valid_or_none(), valid_rect)
 
         invalid_rect = AttnRectangle(
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5)
         )
         invalid_rect.q_range.start = 10
         invalid_rect.q_range.end = 0
-        assert invalid_rect.get_valid_or_none() is None
+        self.assertIs(invalid_rect.get_valid_or_none(), None)
 
-    def test_shrink_d_range(self, backend):
+    def test_shrink_d_range(self):
         """test d_range shrink"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(AttnRange(10, 20), AttnRange(10, 30), AttnRange(-100, 100))
 
         result = rect.shrink_d_range()
-        assert result
-        assert rect.d_range.start == -9
-        assert rect.d_range.end == 19
+        self.assertTrue(result)
+        self.assertEqual(rect.d_range.start, -9)
+        self.assertEqual(rect.d_range.end, 19)
 
-    def test_shrink_q_range(self, backend):
+    def test_shrink_q_range(self):
         """test q_range shrink"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(AttnRange(0, 20), AttnRange(10, 15), AttnRange(-4, 4))
 
         result = rect.shrink_q_range()
-        assert result
-        assert rect.q_range.start >= 6
-        assert rect.q_range.end <= 19
+        self.assertTrue(result)
+        self.assertTrue(rect.q_range.start >= 6)
+        self.assertTrue(rect.q_range.end <= 19)
 
-    def test_shrink_k_range(self, backend):
+    def test_shrink_k_range(self):
         """test k_range shrink"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(AttnRange(10, 15), AttnRange(0, 20), AttnRange(-4, 4))
 
         result = rect.shrink_k_range()
-        assert result
-        assert rect.k_range.start >= 6
-        assert rect.k_range.end <= 19
+        self.assertTrue(result)
+        self.assertTrue(rect.k_range.start >= 6)
+        self.assertTrue(rect.k_range.end <= 19)
 
-    def test_count_areas(self, backend):
+    def test_count_areas(self):
         """test count areas"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         for _ in range(100):
             q_start = random.randint(0, 99)
@@ -210,11 +256,12 @@ class TestAttnRectangle:
 
             area = rand_rect.area()
 
-            assert area == standard_area
+            self.assertEqual(area, standard_area)
 
-    def test_cut_q(self, backend):
+    def test_cut_q(self):
         """test cut q"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         for _ in range(100):
             q_start = random.randint(0, 99)
@@ -242,18 +289,19 @@ class TestAttnRectangle:
             left_rect, right_rect = rand_rect.cut_q(cut_pos)
 
             if left_rect is not None:
-                assert left_rect.q_range.end <= cut_pos
+                self.assertTrue(left_rect.q_range.end <= cut_pos)
             if right_rect is not None:
-                assert right_rect.q_range.start >= cut_pos
+                self.assertTrue(right_rect.q_range.start >= cut_pos)
 
             total_area = rand_rect.area()
             left_area = left_rect.area() if left_rect is not None else 0
             right_area = right_rect.area() if right_rect is not None else 0
-            assert total_area == left_area + right_area
+            self.assertEqual(total_area, left_area + right_area)
 
-    def test_cut_k(self, backend):
+    def test_cut_k(self):
         """test cut k"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         for _ in range(100):
             q_start = random.randint(0, 99)
@@ -281,58 +329,63 @@ class TestAttnRectangle:
             left_rect, right_rect = rand_rect.cut_k(cut_pos)
 
             if left_rect is not None:
-                assert left_rect.k_range.end <= cut_pos
+                self.assertTrue(left_rect.k_range.end <= cut_pos)
             if right_rect is not None:
-                assert right_rect.k_range.start >= cut_pos
+                self.assertTrue(right_rect.k_range.start >= cut_pos)
 
             total_area = rand_rect.area()
             left_area = left_rect.area() if left_rect is not None else 0
             right_area = right_rect.area() if right_rect is not None else 0
-            assert total_area == left_area + right_area
+            self.assertEqual(total_area, left_area + right_area)
 
-    def test_get_rect_within_q_segment(self, backend):
+    def test_get_rect_within_q_segment(self):
         """test get rect within q segment"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(AttnRange(0, 20), AttnRange(0, 20), AttnRange(-5, 5))
 
         segment_rect = rect.get_rect_within_q_segment(5, 15)
-        assert segment_rect is not None
-        assert segment_rect.q_range.start == 5
-        assert segment_rect.q_range.end == 15
+        self.assertIsNot(segment_rect, None)
+        self.assertEqual(segment_rect.q_range.start, 5)
+        self.assertEqual(segment_rect.q_range.end, 15)
 
         segment_rect = rect.get_rect_within_q_segment(25, 35)
-        assert segment_rect is None
+        self.assertIs(segment_rect, None)
 
-    def test_get_rect_within_k_segment(self, backend):
+    def test_get_rect_within_k_segment(self):
         """test get rect within k segment"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(AttnRange(0, 20), AttnRange(0, 20), AttnRange(-5, 5))
 
         segment_rect = rect.get_rect_within_k_segment(5, 15)
-        assert segment_rect is not None
-        assert segment_rect.k_range.start == 5
-        assert segment_rect.k_range.end == 15
+        self.assertIsNot(segment_rect, None)
+        self.assertEqual(segment_rect.k_range.start, 5)
+        self.assertEqual(segment_rect.k_range.end, 15)
 
         segment_rect = rect.get_rect_within_k_segment(25, 35)
-        assert segment_rect is None
+        self.assertIs(segment_rect, None)
 
-    def test_intersection_boundary_methods(self, backend):
+    def test_intersection_boundary_methods(self):
         """test intersection boundary methods"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
         q_id_left = rect.intersection_q_id_on_left_boundary()
-        assert q_id_left == 5
+        self.assertEqual(q_id_left, 5)
 
         q_id_right = rect.intersection_q_id_on_right_boundary()
-        assert q_id_right == 9
+        self.assertEqual(q_id_right, 9)
 
-    def test_mask_type_checks(self, backend):
+    def test_mask_type_checks(self):
         """test mask type checks"""
-        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
+        AttnMaskType = self.types.AttnMaskType
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         for _ in range(100):
             q_start = random.randint(0, 99)
@@ -348,39 +401,41 @@ class TestAttnRectangle:
             rect_full = AttnRectangle(
                 q_range, k_range, AttnRange(d_min_full, d_max_full)
             )
-            assert rect_full.is_full()
+            self.assertTrue(rect_full.is_full())
 
             rect_causal = AttnRectangle(q_range, k_range, mask_type=AttnMaskType.CAUSAL)
-            assert rect_causal.is_causal()
+            self.assertTrue(rect_causal.is_causal())
 
             rect_inv = AttnRectangle(q_range, k_range, mask_type=AttnMaskType.INVCAUSAL)
-            assert rect_inv.is_inv_causal()
+            self.assertTrue(rect_inv.is_inv_causal())
 
             if q_range.seqlen > k_range.seqlen:
                 continue
 
             rect_bi = AttnRectangle(q_range, k_range, mask_type=AttnMaskType.BICAUSAL)
-            assert rect_bi.is_bi_causal()
+            self.assertTrue(rect_bi.is_bi_causal())
 
-    def test_to_qk_range_mask_type(self, backend):
+    def test_to_qk_range_mask_type(self):
         """test convert to qk range and mask type"""
-        from magi_attention.common import AttnMaskType, AttnRange, AttnRectangle
+        AttnMaskType = self.types.AttnMaskType
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         full_rect = AttnRectangle(
             AttnRange(0, 10), AttnRange(0, 20), AttnRange(-100, 100)
         )
         result = full_rect.to_qk_range_mask_type()
-        assert len(result) == 1
+        self.assertEqual(len(result), 1)
         q_range, k_range, mask_type = result[0]
-        assert mask_type == 0  # FULL
+        self.assertEqual(mask_type, 0)
 
         causal_rect = AttnRectangle(
             AttnRange(0, 10), AttnRange(0, 20), mask_type=AttnMaskType.CAUSAL
         )
         result = causal_rect.to_qk_range_mask_type()
-        assert len(result) == 1
+        self.assertEqual(len(result), 1)
         q_range, k_range, mask_type = result[0]
-        assert mask_type == 1  # CAUSAL
+        self.assertEqual(mask_type, 1)
 
         for _ in range(100):
             q_start = random.randint(0, 99)
@@ -404,7 +459,7 @@ class TestAttnRectangle:
             )
 
             parts = rand_rect.to_qk_range_mask_type()
-            assert len(parts) <= 3
+            self.assertTrue(len(parts) <= 3)
 
             total_area = rand_rect.area()
             sum_area = 0
@@ -412,11 +467,12 @@ class TestAttnRectangle:
                 sub_rect = AttnRectangle(q_r, k_r, mask_type=mask_t)
                 sum_area += sub_rect.area()
 
-            assert total_area == sum_area
+            self.assertEqual(total_area, sum_area)
 
-    def test_equality_and_hash(self, backend):
+    def test_equality_and_hash(self):
         """test equality and hash"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect1 = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
@@ -424,18 +480,27 @@ class TestAttnRectangle:
 
         rect3 = AttnRectangle(AttnRange(1, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
-        assert rect1 == rect2
-        assert rect1 != rect3
-        assert hash(rect1) == hash(rect2)
-        assert hash(rect1) != hash(rect3)
+        self.assertEqual(rect1, rect2)
+        self.assertNotEqual(rect1, rect3)
+        self.assertEqual(hash(rect1), hash(rect2))
+        self.assertNotEqual(hash(rect1), hash(rect3))
 
-    def test_repr(self, backend):
+    def test_repr(self):
         """test string representation"""
-        from magi_attention.common import AttnRange, AttnRectangle
+        AttnRange = self.types.AttnRange
+        AttnRectangle = self.types.AttnRectangle
 
         rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
         repr_str = repr(rect)
-        assert "0, 10" in repr_str
-        assert "0, 15" in repr_str
-        assert "-5, 5" in repr_str
+        self.assertIn("0, 10", repr_str)
+        self.assertIn("0, 15", repr_str)
+        self.assertIn("-5, 5", repr_str)
+
+
+class TestCppAttnRectangle(TestAttnRectangle):
+    backend = "cpp"
+
+
+if __name__ == "__main__":
+    unittest.main()

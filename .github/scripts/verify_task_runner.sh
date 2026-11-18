@@ -52,15 +52,11 @@ printf 'runner=%s platform=%s job=%s sha=%s utc=%s\n' \
 printf 'shared_cache=%s\n' "$CI_WORKSPACE_ROOT"
 declared_base_tag=$(tr -d '[:space:]' < .github/configs/base_image_tag.txt)
 python .github/scripts/ci_platforms.py profile "${TASK_CI_PLATFORM:?TASK_CI_PLATFORM is required}" >/dev/null
-printf 'workflow_declared_base_tag=%s\n' "$declared_base_tag"
-expected_image="registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:$declared_base_tag"
-if [[ "${TASK_CI_BASE_IMAGE:-}" != "$expected_image" ]]; then
-    echo "::error::Expected task runner image $expected_image, got ${TASK_CI_BASE_IMAGE:-<unset>}" >&2
-    exit 1
-fi
-printf 'workflow_declared_base_image=%s\n' "$TASK_CI_BASE_IMAGE"
+printf 'declared_base_tag=%s\n' "$declared_base_tag"
+# This optional environment report is not a trusted image/digest attestation.
+printf 'runtime_reported_base_tag=%s\n' "${MAGI_BASE_IMAGE_TAG:-<unset>}"
 if [[ -n "${MAGI_BASE_IMAGE_TAG:-}" && "$MAGI_BASE_IMAGE_TAG" != "$declared_base_tag" ]]; then
-    echo "::error::Task runner base tag $MAGI_BASE_IMAGE_TAG does not match declared $declared_base_tag" >&2
+    echo "::error::Runtime-reported base tag $MAGI_BASE_IMAGE_TAG does not match declared $declared_base_tag" >&2
     exit 1
 fi
 if [[ "${VALIDATION_CACHE_TRUSTED:-false}" == true ]]; then

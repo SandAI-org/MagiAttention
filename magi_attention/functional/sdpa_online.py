@@ -205,7 +205,7 @@ def sdpa_online_fwd_calc(
     return out, lse, max_logits
 
 
-@torch.no_grad()
+@torch.no_grad
 def sdpa_online_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -260,7 +260,7 @@ def sdpa_online_fwd(
 from .sdpa import _sdpa_bwd as _sdpa_online_bwd  # noqa: E402
 
 
-@torch.no_grad()
+@torch.no_grad
 def sdpa_online_bwd(
     do: torch.Tensor,
     q: torch.Tensor,

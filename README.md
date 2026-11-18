@@ -124,7 +124,7 @@ For detailed performance benchmarks of MagiAttention on various hardware setups 
 
 ## Contributing 🤝
 
-We welcome and value any contributions and collaborations. Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
+We welcome and value any contributions and collaborations. Please check out [Contributing Guide](https://SandAI-org.github.io/MagiAttention/docs/main/developer_guide/contributing.html) for how to get involved.
 
 
 ## WeChat Group 💬

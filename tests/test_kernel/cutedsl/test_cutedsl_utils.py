@@ -13,21 +13,26 @@
 # limitations under the License.
 
 import math
+import re
+import tempfile
+import unittest
 from unittest import TestCase
 
 import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass.cute.runtime import from_dlpack
-from torch.testing._internal.common_utils import run_tests
+from cutlass.pipeline import NamedBarrier
 
 from magi_attention.kernel.cutedsl.cutedsl_utils import (
     atomic_add_fp32,
     atomic_max_fp32,
     fmax,
 )
+from magi_attention.kernel.cutedsl.dsl_compat import SmemAllocator, TmemAllocator
 from magi_attention.testing import parameterize
 from magi_attention.testing.precision import assert_equal
+from magi_attention.utils.arch import is_sm
 
 
 @cute.kernel
@@ -78,12 +83,48 @@ def _atomic_max(a: cute.Tensor, out: cute.Tensor):
     _atomic_max_kernel(a, out).launch(grid=(1, 1, 1), block=(32, 1, 1))
 
 
+@cute.jit
+def _rebuild_two_cta_allocator():
+    _rebuild_two_cta_allocator_kernel().launch(
+        grid=(2, 1, 1), block=(32, 1, 1), cluster=(2, 1, 1)
+    )
+
+
+@cute.kernel
+def _rebuild_two_cta_allocator_kernel():
+    smem = SmemAllocator()
+    allocator = TmemAllocator(
+        alloc_result_dst_smem_ptr=smem.allocate(cutlass.Int32, byte_alignment=8),
+        barrier_for_retrieve=NamedBarrier(barrier_id=1, num_threads=32),
+        allocator_warp_id=0,
+        is_two_cta=True,
+        two_cta_tmem_dealloc_mbar_ptr=smem.allocate(cutlass.Int64, byte_alignment=8),
+    )
+    if cute.arch.make_warp_uniform(cute.arch.warp_idx()) == 0:
+        # Carry the allocator through a dynamic region, forcing reconstruction.
+        allocator.allocate(32)
+        allocator.wait_for_alloc()
+        ptr = allocator.retrieve_ptr(cutlass.Float32)
+        allocator.relinquish_alloc_permit()
+        allocator.free(ptr)
+
+
 class TestCutedslUtils(TestCase):
     """Device helpers the kernels call, compiled the way production compiles them."""
 
-    def setUp(self) -> None:
-        if not torch.cuda.is_available():
-            self.skipTest("CUDA is required")
+    @unittest.skipUnless(is_sm(100, 103), "requires SM100/103")
+    def test_two_cta_allocator_rebuild_does_not_reinitialize_barrier(self):
+        # DSL < 4.5 reconstructed via __init__, resetting a live barrier.
+        # Inspect PTX without launching this potentially deadlocking kernel.
+        with tempfile.TemporaryDirectory() as dump_dir:
+            compiled = cute.compile(
+                _rebuild_two_cta_allocator,
+                options=f"--keep-ptx --dump-dir={dump_dir}",
+            )
+            ptx = compiled.__ptx__
+            self.assertIsNotNone(ptx)
+            inits = re.findall(r"mbarrier\.init[^;]*;", ptx)
+            self.assertEqual(len(inits), 1, inits)
 
     def test_fmax(self):
         _check_fmax(use_c=False)
@@ -113,4 +154,4 @@ class TestCutedslUtils(TestCase):
 
 
 if __name__ == "__main__":
-    run_tests()
+    unittest.main()

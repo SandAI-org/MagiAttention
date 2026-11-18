@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import math
+import unittest
 from typing import Any
 from unittest import TestCase
 
@@ -24,7 +25,6 @@ from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
 from magi_attention.kernel.cutedsl.ffa_utils import (
     MT_MAP,
     BwdGqaFold,
-    get_device_arch,
     select_bwd_gqa_fold,
 )
 from magi_attention.kernel.cutedsl.flex_flash_attn import _flex_flash_attn_bwd
@@ -35,6 +35,7 @@ from magi_attention.testing.cutedsl_utils import (
     record_bwd_kernels,
 )
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.utils.arch import is_blackwell
 
 # Relation lengths with range starts that are neither tile- nor
 # group-aligned, Q tails of 1..tile_m-1 packed rows, and inv/bi-causal
@@ -61,14 +62,8 @@ def _contiguous_ranges(lengths: list[int]) -> list[list[int]]:
     return ranges
 
 
+@unittest.skipUnless(is_blackwell(), "requires Blackwell")
 class TestFfaPackGqaBwd(DistTestBase):
-    def setUp(self) -> None:
-        # Skip in the parent before DistTestBase spawns ranks, including ranks
-        # with no assigned parameter cases that would otherwise reach a barrier.
-        if not torch.cuda.is_available() or get_device_arch()[1] not in (10, 11):
-            self.skipTest("bwd_pack_factor > 1 requires SM100/SM110")
-        super().setUp()
-
     @property
     def seed(self) -> int:
         return 42

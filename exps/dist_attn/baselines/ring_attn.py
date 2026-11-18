@@ -142,7 +142,7 @@ def generate_scattar_reorder_indices(
 
 
 # use te tex.thd_grad_correction for varlen result collection
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _collect_result_varlen(
     out: torch.Tensor, out_: torch.Tensor, cu_seqlens_padded: torch.Tensor, chunk_idx
 ):
@@ -153,7 +153,7 @@ def _collect_result_varlen(
     tex.thd_grad_correction(out, out_, cu_seqlens_padded, first_op, second_op)
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def prepare_input_fwd(
     input,
     chunk_idx,
@@ -185,7 +185,7 @@ def prepare_input_fwd(
     return output, cu_seqlens_per_step
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def prepare_input_bwd(
     inputs,
     chunk_idx,
@@ -768,7 +768,7 @@ class TERingAttnFunc(torch.autograd.Function):
                 (cp_rank - i) % cp_size,
             )
 
-            with nvtx.add_nvtx_event("fused_attn_fwd"):
+            with nvtx.record("fused_attn_fwd"):
                 out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
                     True,
                     _max_seqlen_q,
@@ -1190,14 +1190,14 @@ class FA3RingAttnFunc(torch.autograd.Function):
 
             rumtime_meta_per_step = runtime_meta[i]
             if is_half_q:
-                with nvtx.add_nvtx_event("thd_read_half_tensor"):
+                with nvtx.record("thd_read_half_tensor"):
                     q_inputs[i % 2] = tex.thd_read_half_tensor(
                         q, cu_seqlens_q_padded, 1
                     )
             else:
                 q_inputs[i % 2] = q
             if is_half_kv:
-                with nvtx.add_nvtx_event("thd_read_half_tensor"):
+                with nvtx.record("thd_read_half_tensor"):
                     kv_inputs[i % 2] = tex.thd_read_half_tensor(
                         kv_inputs[i % 2], cu_seqlens_kv_padded, 0
                     )
@@ -1616,51 +1616,52 @@ class RingAttnAllGather(AttnBaselineInterface):
         shard_q_meta = self.shard_meta["q"]
         shard_kv_meta = self.shard_meta["k"]
 
-        if self.backend == AttnBackend.TE:
-            if attn_mask_type == AttnMaskType.CAUSAL:
-                attn_mask = "padding_causal_bottom_right"
-            elif attn_mask_type == AttnMaskType.FULL:
-                attn_mask = "padding"
+        match self.backend:
+            case AttnBackend.TE:
+                if attn_mask_type == AttnMaskType.CAUSAL:
+                    attn_mask = "padding_causal_bottom_right"
+                elif attn_mask_type == AttnMaskType.FULL:
+                    attn_mask = "padding"
 
-            out_layer, lse = TERingAGAttnFunc.apply(
-                q,
-                k,
-                v,
-                shard_q_meta.cu_seqlens,
-                shard_kv_meta.cu_seqlens,
-                shard_q_meta.max_seqlen_padded // cp_size,
-                shard_kv_meta.max_seqlen_padded,
-                shard_q_meta.cu_seqlens_padded // cp_size,
-                shard_kv_meta.cu_seqlens_padded,
-                self.gather_indices,
-                self.scatter_indices,
-                dropout_p,
-                softmax_scale,
-                "thd",
-                self.pg_p2p,
-                attn_mask,
-                deterministic,
-            )
-        elif self.backend == AttnBackend.FA3:
-            if attn_mask_type == AttnMaskType.CAUSAL:
-                is_causal = True
-            elif attn_mask_type == AttnMaskType.FULL:
-                is_causal = False
+                out_layer, lse = TERingAGAttnFunc.apply(
+                    q,
+                    k,
+                    v,
+                    shard_q_meta.cu_seqlens,
+                    shard_kv_meta.cu_seqlens,
+                    shard_q_meta.max_seqlen_padded // cp_size,
+                    shard_kv_meta.max_seqlen_padded,
+                    shard_q_meta.cu_seqlens_padded // cp_size,
+                    shard_kv_meta.cu_seqlens_padded,
+                    self.gather_indices,
+                    self.scatter_indices,
+                    dropout_p,
+                    softmax_scale,
+                    "thd",
+                    self.pg_p2p,
+                    attn_mask,
+                    deterministic,
+                )
+            case AttnBackend.FA3:
+                if attn_mask_type == AttnMaskType.CAUSAL:
+                    is_causal = True
+                elif attn_mask_type == AttnMaskType.FULL:
+                    is_causal = False
 
-            out_layer, lse = FA3RingAGAttnFunc.apply(
-                q,
-                k,
-                v,
-                shard_q_meta.cu_seqlens_padded // cp_size,
-                self.gather_indices,
-                self.scatter_indices,
-                self.runtime_meta_per_step,
-                is_causal,
-                dropout_p,
-                softmax_scale,
-                self.pg_p2p,
-                deterministic,
-            )
+                out_layer, lse = FA3RingAGAttnFunc.apply(
+                    q,
+                    k,
+                    v,
+                    shard_q_meta.cu_seqlens_padded // cp_size,
+                    self.gather_indices,
+                    self.scatter_indices,
+                    self.runtime_meta_per_step,
+                    is_causal,
+                    dropout_p,
+                    softmax_scale,
+                    self.pg_p2p,
+                    deterministic,
+                )
 
         return out_layer, lse
 
@@ -1825,48 +1826,48 @@ class RingAttnP2P(AttnBaselineInterface):
         shard_q_meta = self.shard_meta["q"]
         shard_kv_meta = self.shard_meta["k"]
 
-        if self.backend == AttnBackend.TE:
-            if attn_mask_type == AttnMaskType.CAUSAL:
-                attn_mask = "padding_causal"
-            elif attn_mask_type == AttnMaskType.FULL:
-                attn_mask = "padding"
+        match self.backend:
+            case AttnBackend.TE:
+                if attn_mask_type == AttnMaskType.CAUSAL:
+                    attn_mask = "padding_causal"
+                elif attn_mask_type == AttnMaskType.FULL:
+                    attn_mask = "padding"
 
-            out_layer, lse = TERingAttnFunc.apply(
-                q,
-                k,
-                v,
-                shard_q_meta.cu_seqlens,
-                shard_kv_meta.cu_seqlens,
-                shard_q_meta.max_seqlen_padded // cp_size,
-                shard_kv_meta.max_seqlen_padded // cp_size,
-                shard_q_meta.cu_seqlens_padded // cp_size,
-                shard_kv_meta.cu_seqlens_padded // cp_size,
-                dropout_p,
-                softmax_scale,
-                "thd",
-                self.pg_p2p,
-                attn_mask,
-                deterministic,
-            )
+                out_layer, lse = TERingAttnFunc.apply(
+                    q,
+                    k,
+                    v,
+                    shard_q_meta.cu_seqlens,
+                    shard_kv_meta.cu_seqlens,
+                    shard_q_meta.max_seqlen_padded // cp_size,
+                    shard_kv_meta.max_seqlen_padded // cp_size,
+                    shard_q_meta.cu_seqlens_padded // cp_size,
+                    shard_kv_meta.cu_seqlens_padded // cp_size,
+                    dropout_p,
+                    softmax_scale,
+                    "thd",
+                    self.pg_p2p,
+                    attn_mask,
+                    deterministic,
+                )
+            case AttnBackend.FA3:
+                if attn_mask_type == AttnMaskType.CAUSAL:
+                    is_causal = True
+                elif attn_mask_type == AttnMaskType.FULL:
+                    is_causal = False
 
-        elif self.backend == AttnBackend.FA3:
-            if attn_mask_type == AttnMaskType.CAUSAL:
-                is_causal = True
-            elif attn_mask_type == AttnMaskType.FULL:
-                is_causal = False
-
-            out_layer, lse = FA3RingAttnFunc.apply(
-                q,
-                k,
-                v,
-                shard_q_meta.cu_seqlens_padded // cp_size,
-                shard_kv_meta.cu_seqlens_padded // cp_size,
-                self.runtime_meta_per_step,
-                is_causal,
-                dropout_p,
-                softmax_scale,
-                self.pg_p2p,
-                deterministic,
-            )
+                out_layer, lse = FA3RingAttnFunc.apply(
+                    q,
+                    k,
+                    v,
+                    shard_q_meta.cu_seqlens_padded // cp_size,
+                    shard_kv_meta.cu_seqlens_padded // cp_size,
+                    self.runtime_meta_per_step,
+                    is_causal,
+                    dropout_p,
+                    softmax_scale,
+                    self.pg_p2p,
+                    deterministic,
+                )
 
         return out_layer, lse

@@ -572,8 +572,6 @@ def _dsink_inputs(
 
 class TestSinkGradientReuse(TestCase):
     def setUp(self) -> None:
-        if not torch.cuda.is_available():
-            self.skipTest("CUDA is required")
         seed_test_case(self.id())
 
     def test_repeated_calls_overwrite_strided_gradients(self):

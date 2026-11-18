@@ -38,8 +38,6 @@ try:
 except ImportError:
     pass
 
-from .dsa_interface import dsa_attn_func
-
 if importlib.util.find_spec("magi_attn_extensions._version") is None:
     warnings.warn(
         "You are using magi_attn_extensions without installing it. "
@@ -65,5 +63,4 @@ __all__ = [
     "fa3_qkvpacked_func_with_sink",
     "fa4_func_with_sink",
     "fa4_varlen_func_with_sink",
-    "dsa_attn_func",
 ]

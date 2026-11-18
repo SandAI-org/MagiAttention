@@ -1,0 +1,79 @@
+# Contributing
+
+
+## Git Pull Request
+
+Please follow these steps to open a pull request:
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
+
+
+## Requirements
+
+Run the following commands from the repository root. First, install the required packages specific for developers by running:
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements_dev.txt
+```
+
+
+### Unit Tests
+
+See the [testing guide](testing.md) for test organization, local commands,
+backend coverage, architecture requirements, and test authoring conventions.
+
+### Code Style
+
+We have some static checks when you commit your code change, please make sure you can pass all the tests and make sure the coding style follows our requirements. We use pre-commit hooks to make sure the code is aligned with the writing standard. To set up the code style checking, you need to follow the steps below.
+
+* clang-format:
+
+```bash
+# Install clang-format with llvm for csrc code format
+bash ./scripts/install_clang_format.sh
+```
+
+* pre-commit:
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Set up the hooks, which may take some time
+# Luckily, this step only needs to be performed once
+pre-commit install
+
+# Then each time you issue `git commit`,
+# it will automatically run pre-commit to polish your code
+
+# But if you want to manually run pre-commit
+# to check the code style before committing, you can run:
+pre-commit run
+
+# For more usage about pre-commit,
+# you may check: https://pre-commit.com/
+```
+
+:::{note}
+Code format checking will be automatically executed when you commit your changes.
+:::
+
+
+### Type Stubs (C++ Extension)
+
+If you modify the C++ extension (`magi_attn_ext`), please remember to regenerate the Python type stubs (`.pyi` files). This ensures that static type checkers (like MyPy) and IDEs can correctly recognize the updated C++ signatures.
+
+Ensure the extension is installed in your environment, then run:
+
+```bash
+pybind11-stubgen magi_attention.magi_attn_ext -o .
+```
+
+:::{important}
+Failure to update stubs after modifying C++ code may cause type checking errors during CI.
+:::

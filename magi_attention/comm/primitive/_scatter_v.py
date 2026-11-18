@@ -20,8 +20,8 @@ from magi_attention.utils import nvtx
 __all__ = ["scatter_v"]
 
 
-@torch.no_grad()
-@nvtx.instrument_nvtx
+@torch.no_grad
+@nvtx.instrument
 def scatter_v(
     x_global: torch.Tensor,
     group: dist.ProcessGroup,

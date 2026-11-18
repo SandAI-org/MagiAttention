@@ -45,8 +45,8 @@ cp "$policy" "$standalone/.github/configs/ci_input_policy.json"
 cp "$policy" "$consumer/vendor/MagiAttention/.github/configs/ci_input_policy.json"
 cp "$policy_helper" "$standalone/.github/scripts/ci_input_policy.py"
 cp "$policy_helper" "$consumer/vendor/MagiAttention/.github/scripts/ci_input_policy.py"
-printf '26.05.2\n' > "$standalone/.github/configs/base_image_tag.txt"
-printf '26.05.2\n' > "$consumer/runtime_tag.txt"
+printf '26.05.4\n' > "$standalone/.github/configs/base_image_tag.txt"
+printf '26.05.4\n' > "$consumer/runtime_tag.txt"
 printf 'main source\n' > "$standalone/magi_attention/package.py"
 printf 'main test\n' > "$standalone/tests/test.txt"
 printf '# collection policy\n' > "$standalone/conftest.py"
@@ -117,6 +117,17 @@ consumer_main=$changed_consumer
     bash .github/scripts/portable_validation.sh write-success magi_attention >/dev/null)
 (cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt \
     bash vendor/MagiAttention/.github/scripts/portable_validation.sh verify magi_attention)
+
+# A patch-tag change must not reuse an older full-tag validation marker.
+printf '26.05.5\n' > "$consumer/runtime_tag.txt"
+changed_tag=$(cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt bash vendor/MagiAttention/.github/scripts/portable_validation.sh fingerprint magi_attention)
+[[ "$changed_tag" != "$consumer_main" ]]
+if (cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt \
+    bash vendor/MagiAttention/.github/scripts/portable_validation.sh verify magi_attention >/dev/null 2>&1); then
+    echo "Expected a base patch-tag change to invalidate the portable marker" >&2
+    exit 1
+fi
+printf '26.05.4\n' > "$consumer/runtime_tag.txt"
 
 marker_dir=$(cd "$consumer" && CI_WORKSPACE_ROOT="$shared" TASK_CI_PLATFORM=h100 PORTABLE_SOURCE_ROOT=vendor/MagiAttention PORTABLE_BASE_TAG_FILE=runtime_tag.txt bash vendor/MagiAttention/.github/scripts/portable_validation.sh marker-dir magi_attention)
 [[ "$marker_dir" == *"/magi-attention/h100/"* ]]

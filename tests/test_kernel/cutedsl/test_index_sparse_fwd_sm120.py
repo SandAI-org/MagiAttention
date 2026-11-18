@@ -55,28 +55,26 @@ from magi_attention.kernel.cutedsl.ffa_fwd_sm120_index import (
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.index_sparse import (
+    FwdOutLse,
     Sm120IndexGap,
     Sm120IndexUnsupportedError,
     ffa_fwd_sm120_index_sm90_layout,
     index_sparse_ref_fwd,
+    run_index_sparse_config,
+    run_index_sparse_sweep,
 )
+from magi_attention.testing.sparse import SEED
 from magi_attention.utils import set_random_seed
-from magi_attention.utils.arch import is_sm12x
-from tests.test_attn.sparse_test_utils import SEED
-from tests.test_kernel.cutedsl.test_index_sparse_bwd_sm100 import (
-    FwdOutLse,
-    _run_index_sparse_config,
-    _run_sweep,
-)
+from magi_attention.utils.arch import is_sm
+
+require_5090 = unittest.skipUnless(is_sm(120, 121), "requires SM120/121")
 
 _run_fwd_config = partial(
-    _run_index_sparse_config, fwd_fn=ffa_fwd_sm120_index_sm90_layout, bwd_fn=None
+    run_index_sparse_config, fwd_fn=ffa_fwd_sm120_index_sm90_layout, bwd_fn=None
 )
 _run_fwd_sweep = partial(
-    _run_sweep, fwd_fn=ffa_fwd_sm120_index_sm90_layout, bwd_fn=None
+    run_index_sparse_sweep, fwd_fn=ffa_fwd_sm120_index_sm90_layout, bwd_fn=None
 )
-
-_NEEDS_SM120 = "ffa_fwd_sm120_index needs an SM120 GPU"
 
 # Positions of the compile-key flags of ffa_fwd_sm120_index:
 # (dtype, group, capability, debug, ids_all_valid, stream_k, two_pieces)
@@ -92,11 +90,11 @@ def _compile_keys() -> list[tuple]:
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
+@require_5090
 class TestIndexSparseFwdSm120Sweep(DistTestBase):
     """sm90 Classic sweep: q_seqlen × kv_seqlen × topk, MQA128, D=128, kbs=1.
 
-    Replays the configs of ``tests/test_attn/test_index_sparse.py`` through
+    Replays the configs of ``tests/test_functional/test_index_sparse.py`` through
     ``ffa_fwd_sm120_index_sm90_layout``.
     """
 
@@ -146,7 +144,7 @@ class TestIndexSparseFwdSm120Sweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
+@require_5090
 class TestIndexSparseFwdSm120ComprehensiveSweep(DistTestBase):
     """sm90 Comprehensive sweep: head_config × head_dim × kbs.
 
@@ -224,7 +222,7 @@ class TestIndexSparseFwdSm120ComprehensiveSweep(DistTestBase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
+@require_5090
 class TestIndexSparseFwdSm120Adapter(unittest.TestCase):
     """``ffa_fwd_sm120_index_sm90_layout``: topk padding, the all-valid path and gap reporting."""
 
@@ -248,7 +246,7 @@ class TestIndexSparseFwdSm120Adapter(unittest.TestCase):
             "topk": 2 * FFAFwdSm120Index.tile_n,
             "q_block_size": 16,
         }
-        _run_index_sparse_config(
+        run_index_sparse_config(
             self.device,
             config,
             fwd_fn=partial(ffa_fwd_sm120_index_sm90_layout, assume_valid_ids=True),
@@ -286,9 +284,9 @@ class TestIndexSparseFwdSm120Adapter(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
+@require_5090
 class TestIndexSparseFwdSm120Comparison(unittest.TestCase):
-    """A PASS of ``_run_index_sparse_config`` needs the right out and lse: shifted ones fail."""
+    """A PASS of ``run_index_sparse_config`` needs the right out and lse: shifted ones fail."""
 
     @property
     def device(self):
@@ -311,7 +309,7 @@ class TestIndexSparseFwdSm120Comparison(unittest.TestCase):
             "q_block_size": 16,
         }
         with self.assertRaises(AssertionError) as ctx:
-            _run_index_sparse_config(
+            run_index_sparse_config(
                 self.device, config, fwd_fn=shifted_out_fwd, bwd_fn=None
             )
         self.assertIn("=> fwd_out", str(ctx.exception))
@@ -333,7 +331,7 @@ class TestIndexSparseFwdSm120Comparison(unittest.TestCase):
             "q_block_size": 16,
         }
         with self.assertRaises(AssertionError) as ctx:
-            _run_index_sparse_config(
+            run_index_sparse_config(
                 self.device, config, fwd_fn=shifted_lse_fwd, bwd_fn=None
             )
         self.assertIn("=> lse", str(ctx.exception))
@@ -437,7 +435,7 @@ class _Sm120IndexCheck(unittest.TestCase):
         return out, lse
 
 
-@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
+@require_5090
 class TestIndexSparseFwdSm120Numerics(_Sm120IndexCheck):
     """The kernel's index contract beyond what the sm90 builder produces.
 
@@ -548,7 +546,7 @@ class TestIndexSparseFwdSm120Numerics(_Sm120IndexCheck):
 # ═══════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(is_sm12x(), _NEEDS_SM120)
+@require_5090
 class TestIndexSparseFwdSm120StreamK(_Sm120IndexCheck):
     """Without ``topk_len`` one CTA per SM splits the (tile, KV block) units evenly.
 

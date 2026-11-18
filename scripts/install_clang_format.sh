@@ -17,18 +17,18 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-LLVM_SH_URL="https://apt.llvm.org/llvm.sh"
-LLVM_SH_SCRIPT="llvm.sh"
-
-# Parse LLVM version from command-line argument
-if [ -n "$1" ]; then
-    LLVM_VERSION=$1
-else
-    LLVM_VERSION=20
+CLANG_FORMAT_VERSION=${1:-20.1.8}
+if [[ ! "$CLANG_FORMAT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Error: specify a full clang-format version, e.g. 20.1.8."
+    exit 1
 fi
+LLVM_VERSION=${CLANG_FORMAT_VERSION%%.*}
+LLVM_SH_URL="https://apt.llvm.org/llvm.sh"
+LLVM_SH_SCRIPT=$(mktemp)
+trap 'rm -f "$LLVM_SH_SCRIPT"' EXIT
 
 echo "======================================================"
-echo " Starting LLVM and clang-format-${LLVM_VERSION} installation "
+echo " Starting LLVM ${LLVM_VERSION} and clang-format ${CLANG_FORMAT_VERSION} installation "
 echo "======================================================"
 
 # Check for sudo permissions
@@ -68,7 +68,7 @@ chmod +x "${LLVM_SH_SCRIPT}"
 
 echo "Running LLVM installation script for version ${LLVM_VERSION}..."
 # The llvm.sh script adds the repo and installs the base clang package
-./"${LLVM_SH_SCRIPT}" "${LLVM_VERSION}"
+bash "${LLVM_SH_SCRIPT}" "${LLVM_VERSION}"
 
 # Clean up the downloaded script
 rm "${LLVM_SH_SCRIPT}"
@@ -77,39 +77,42 @@ rm "${LLVM_SH_SCRIPT}"
 echo "Installing clang-format-${LLVM_VERSION}..."
 # Refresh package list again after llvm.sh might have added new repos or updated existing ones
 apt update
-apt install -y "clang-format-${LLVM_VERSION}"
+# Debian package revisions differ by distribution; select the exact upstream
+# release, then pin its matching runtime libraries as well as the executable.
+PACKAGE_VERSION=$(apt-cache madison "clang-format-${LLVM_VERSION}" | awk -v expected="$CLANG_FORMAT_VERSION" '
+    {
+        upstream = $3
+        sub(/^[0-9]+:/, "", upstream)
+        split(upstream, parts, /[~+-]/)
+        if (parts[1] == expected) { print $3; exit }
+    }')
+if [ -z "$PACKAGE_VERSION" ]; then
+    echo "Error: clang-format ${CLANG_FORMAT_VERSION} is unavailable in the configured APT repositories."
+    exit 1
+fi
+apt install -y --allow-downgrades \
+    "clang-format-${LLVM_VERSION}=${PACKAGE_VERSION}" \
+    "libclang-cpp${LLVM_VERSION}=${PACKAGE_VERSION}" \
+    "libllvm${LLVM_VERSION}=${PACKAGE_VERSION}"
 
 # 4. Set up update-alternatives for clang-format
 echo "Setting up 'clang-format' command via update-alternatives..."
 if command_exists update-alternatives; then
-    # Check if clang-format-${LLVM_VERSION} is already registered
-    if ! update-alternatives --query clang-format | grep -q "/usr/bin/clang-format-${LLVM_VERSION}"; then
-        update-alternatives --install /usr/bin/clang-format clang-format "/usr/bin/clang-format-${LLVM_VERSION}" 100
-        echo "clang-format-${LLVM_VERSION} registered as default 'clang-format'."
-    else
-        echo "clang-format-${LLVM_VERSION} is already registered."
-    fi
-    # Ensure our version is selected if multiple exist
-    # This part is tricky for non-interactive. The previous `install` command usually sets it as default
-    # if it's the first or highest priority. If not, a manual `--config` might be needed.
-    # For now, we'll just inform the user if it's not the current default.
-    if ! update-alternatives --query clang-format | grep -q "link currently points to /usr/bin/clang-format-${LLVM_VERSION}"; then
-        echo "======================================================"
-        echo "Note: If 'clang-format' does not point to version ${LLVM_VERSION}, you might need to manually select it via:"
-        echo "   sudo update-alternatives --config clang-format"
-        echo "======================================================"
-    fi
+    update-alternatives --install /usr/bin/clang-format clang-format "/usr/bin/clang-format-${LLVM_VERSION}" 100
+    update-alternatives --set clang-format "/usr/bin/clang-format-${LLVM_VERSION}"
 else
     echo "Warning: update-alternatives command not found. You may need to manually link clang-format."
     echo "  Example: sudo ln -s /usr/bin/clang-format-${LLVM_VERSION} /usr/local/bin/clang-format"
 fi
 
+# Fail rather than silently accept a different patch release.
+INSTALLED_VERSION=$(clang-format-${LLVM_VERSION} --version | sed -nE 's/.*version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
+if [ "$INSTALLED_VERSION" != "$CLANG_FORMAT_VERSION" ]; then
+    echo "Error: expected clang-format ${CLANG_FORMAT_VERSION}, found ${INSTALLED_VERSION}."
+    exit 1
+fi
+echo "Verified clang-format ${INSTALLED_VERSION}."
 echo "======================================================"
 echo " LLVM and clang-format-${LLVM_VERSION} installation completed! "
 echo " You can now use 'clang-format --version' or 'clang-format-${LLVM_VERSION} --version'."
 echo "======================================================"
-
-# Final check for clang-format version
-echo "Checking installed clang-format version:"
-clang-format --version || true # Add || true to prevent script exit if clang-format is not in PATH or fails for some reason.
-clang-format-${LLVM_VERSION} --version || true

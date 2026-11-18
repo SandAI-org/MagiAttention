@@ -121,6 +121,20 @@ class AttnArg:
         # init ffa args for bwd
         self._init_ffa_bwd_args_dict()
 
+    def get_nvtx_event_name(self, is_bwd: bool = False) -> str:
+        """Describe this attention launch without reading device tensors."""
+        q_ranges = self.q_ranges_bwd if is_bwd else self.q_ranges
+        k_ranges = self.k_ranges_bwd if is_bwd else self.k_ranges
+
+        def format_ranges(ranges: AttnRanges) -> str:
+            return "[" + ",".join(f"{r.start}:{r.end}" for r in ranges) + "]"
+
+        phase = "bwd" if is_bwd else "fwd"
+        return (
+            f"attn/{phase} | area={self.total_area:,} | ranges={len(q_ranges)} | "
+            f"q_ranges={format_ranges(q_ranges)} | k_ranges={format_ranges(k_ranges)}"
+        )
+
     def _init_ffa_fwd_args_dict(self) -> None:
         # init `skip_attn_fwd` flag
         batch_size_fwd = len(self.q_ranges)
@@ -470,77 +484,75 @@ class FA4AttnArg(AttnArg):
             bwd_sparse_tile_n = tile_n
 
         if is_magi_to_hstu_installed:
-            with nvtx.add_nvtx_event(
+            nvtx.start(
                 f"create_q2k_csr_sparse_from_func-"
                 f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
                 f"tile_m={tile_m}-tile_n={tile_n}"
-            ):
-                # Q2K (Forward): fix q_block, loop kv_blocks
-                (
-                    cuda_k_mask_cnt,
-                    cuda_k_mask_offset,
-                    cuda_k_mask_idx,
-                    cuda_k_full_cnt,
-                    cuda_k_full_offset,
-                    cuda_k_full_idx,
-                ) = create_block_mask_cuda.create_q2k_csr_sparse_from_func(
-                    hstu_func,
-                    self.seqlen_q,
-                    self.seqlen_k,
-                    Q_BLOCK_SIZE=sparse_tile_m,
-                    KV_BLOCK_SIZE=tile_n,
-                    check_q_boundary=False,
-                )
-
-                # Convert to LinearBlockSparseTensorsTorch format
-                # CUDA kernel returns:
-                #   - cnt: [B, H, num_blocks] - kept 3D for FA-cute (>=v1.1.1) expected layout
-                #   - offset: [B * H * num_blocks + 1] - flattened exclusive prefix sum (starts with 0)
-                #   - idx: [total_blocks] - compact indices
-                linear_k_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_k_mask_cnt,
-                    mask_block_offset=cuda_k_mask_offset,
-                    mask_block_idx=cuda_k_mask_idx,
-                    full_block_cnt=cuda_k_full_cnt,
-                    full_block_offset=cuda_k_full_offset,
-                    full_block_idx=cuda_k_full_idx,
-                    # The fwd path (and the dq half of bwd) sets q_stage=2 on sm100,
-                    # so base_m_block = q_stage * tile_m = sparse_tile_m. Declare the
-                    # block size explicitly so the new FA backend doesn't have to infer
-                    # it (which fails when seqlen_q <= sparse_tile_m gives only 1 q-block).
-                    block_size=(sparse_tile_m, tile_n),
-                )
-            with nvtx.add_nvtx_event(
+            )
+            (
+                cuda_k_mask_cnt,
+                cuda_k_mask_offset,
+                cuda_k_mask_idx,
+                cuda_k_full_cnt,
+                cuda_k_full_offset,
+                cuda_k_full_idx,
+            ) = create_block_mask_cuda.create_q2k_csr_sparse_from_func(
+                hstu_func,
+                self.seqlen_q,
+                self.seqlen_k,
+                Q_BLOCK_SIZE=sparse_tile_m,
+                KV_BLOCK_SIZE=tile_n,
+                check_q_boundary=False,
+            )
+            # Convert to LinearBlockSparseTensorsTorch format
+            # CUDA kernel returns:
+            #   - cnt: [B, H, num_blocks] - kept 3D for FA-cute (>=v1.1.1) expected layout
+            #   - offset: [B * H * num_blocks + 1] - flattened exclusive prefix sum (starts with 0)
+            #   - idx: [total_blocks] - compact indices
+            linear_k_block_sparse_mask = LinearBlockSparseTensorsTorch(
+                mask_block_cnt=cuda_k_mask_cnt,
+                mask_block_offset=cuda_k_mask_offset,
+                mask_block_idx=cuda_k_mask_idx,
+                full_block_cnt=cuda_k_full_cnt,
+                full_block_offset=cuda_k_full_offset,
+                full_block_idx=cuda_k_full_idx,
+                # The fwd path (and the dq half of bwd) sets q_stage=2 on sm100,
+                # so base_m_block = q_stage * tile_m = sparse_tile_m. Declare the
+                # block size explicitly so the new FA backend doesn't have to infer
+                # it (which fails when seqlen_q <= sparse_tile_m gives only 1 q-block).
+                block_size=(sparse_tile_m, tile_n),
+            )
+            nvtx.stop()
+            nvtx.start(
                 f"create_k2q_csr_sparse_from_func-"
                 f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
                 f"tile_m={tile_m}-tile_n={tile_n}"
-            ):
-                # K2Q (Backward): fix kv_block, loop q_blocks
-                (
-                    cuda_q_mask_cnt,
-                    cuda_q_mask_offset,
-                    cuda_q_mask_idx,
-                    cuda_q_full_cnt,
-                    cuda_q_full_offset,
-                    cuda_q_full_idx,
-                ) = create_block_mask_cuda.create_k2q_csr_sparse_from_func(
-                    hstu_func,
-                    self.seqlen_q,
-                    self.seqlen_k,
-                    Q_BLOCK_SIZE=bwd_sparse_tile_m,
-                    KV_BLOCK_SIZE=bwd_sparse_tile_n,
-                )
-
-                linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
-                    mask_block_cnt=cuda_q_mask_cnt,
-                    mask_block_offset=cuda_q_mask_offset,
-                    mask_block_idx=cuda_q_mask_idx,
-                    full_block_cnt=cuda_q_full_cnt,
-                    full_block_offset=cuda_q_full_offset,
-                    full_block_idx=cuda_q_full_idx,
-                    # Match the K2Q CSR block to the selected backward attention tile.
-                    block_size=(bwd_sparse_tile_m, bwd_sparse_tile_n),
-                )
+            )
+            (
+                cuda_q_mask_cnt,
+                cuda_q_mask_offset,
+                cuda_q_mask_idx,
+                cuda_q_full_cnt,
+                cuda_q_full_offset,
+                cuda_q_full_idx,
+            ) = create_block_mask_cuda.create_k2q_csr_sparse_from_func(
+                hstu_func,
+                self.seqlen_q,
+                self.seqlen_k,
+                Q_BLOCK_SIZE=bwd_sparse_tile_m,
+                KV_BLOCK_SIZE=bwd_sparse_tile_n,
+            )
+            linear_q_block_sparse_mask = LinearBlockSparseTensorsTorch(
+                mask_block_cnt=cuda_q_mask_cnt,
+                mask_block_offset=cuda_q_mask_offset,
+                mask_block_idx=cuda_q_mask_idx,
+                full_block_cnt=cuda_q_full_cnt,
+                full_block_offset=cuda_q_full_offset,
+                full_block_idx=cuda_q_full_idx,
+                # Match the K2Q CSR block to the selected backward attention tile.
+                block_size=(bwd_sparse_tile_m, bwd_sparse_tile_n),
+            )
+            nvtx.stop()
         else:
             # Prepare mask_mod
             def mask_mod_flex(b, h, q_idx, kv_idx, arbitrary_func=hstu_func):
@@ -614,84 +626,10 @@ class FA4AttnArg(AttnArg):
             self.n_func = 0
             return
 
-        # magi_to_hstu allocation bound. Do not pass a tighter n_max_func:
-        # the kernel under-counts intervals when the first one starts at k>0.
-        n_ub_func = 2 * len(self.k_ranges) + 1
-
-        # Transfer representation of attn mask from AttnSlice to HSTU Functions
-        # where hstu_func: shape=(n_func, sq), and unsqueeze to (1, 1, n_func, sq) to be broadcastable
-        with nvtx.add_nvtx_event(
-            f"magi_to_hstu-"
-            f"seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-"
-            f"n_ub_func={n_ub_func}"
-        ):
-            hstu_func = magi_to_hstu_cuda.magi_to_hstu(
-                q_ranges=self.ffa_fwd_args_dict["q_ranges"],
-                k_ranges=self.ffa_fwd_args_dict["k_ranges"],
-                mask_types=self.ffa_fwd_args_dict["attn_type_map"],
-                seqlen_q=self.seqlen_q,
-                seqlen_k=self.seqlen_k,
-                n_max_func=n_ub_func,
-            )
-
-            # FA4 compiles on n_func: drop unused tail rows. Floor 1 because
-            # all-zero row 0 is a valid empty first interval (first k starts > 0).
-            live_rows = hstu_func.ne(0).any(dim=1)
-            row_ordinal = torch.arange(
-                1, hstu_func.size(0) + 1, device=hstu_func.device
-            )
-            n_keep = max(int((live_rows * row_ordinal).max().item()), 1)
-            hstu_func = hstu_func[:n_keep]
-            self.n_func = hstu_func.size(0)
-
-            hstu_func = hstu_func.unsqueeze(0).unsqueeze(0)
-
-        # Pad hstu_func to avoid out-of-bounds access in FA4 kernels
-        from magi_attention.api.functools import pad_at_dim
-
-        hstu_func = pad_at_dim(
-            hstu_func,
-            dim=-1,
-            pad_size=2 * max(self.tile_m, self.tile_m_bwd),
-            value=0,
-        )
-        aux_tensors = [hstu_func]
-
-        # Sanity check: convert hstu mask and attn slice to qxk bitmap mask
+        hstu_func = self._make_hstu_func()
         if env.general.is_sanity_check_enable():
-            # Path 1: mask from FFA args directly
-            mask_from_ffa = make_attn_mask_from_ffa_args(
-                q_ranges=self.q_ranges,
-                k_ranges=self.k_ranges,
-                attn_type_map=self.attn_type_map,
-                total_seqlen_q=self.seqlen_q,
-                total_seqlen_k=self.seqlen_k,
-                device=hstu_func.device,
-            )
-
-            # Path 2: mask from hstu_func (before padding)
-            # hstu_func shape: [1, 1, n_max_func, seqlen_q], squeeze to [n_max_func, seqlen_q]
-            hstu_func_squeezed = hstu_func.squeeze(0).squeeze(0)[:, : self.seqlen_q]
-            mask_from_func = self.func_to_mask(hstu_func_squeezed, self.seqlen_k)
-            # Compare the two masks
-            if not torch.equal(mask_from_ffa, mask_from_func):
-                diff_count = (mask_from_ffa != mask_from_func).sum().item()
-                # Find first mismatch position
-                mismatch_indices = (mask_from_ffa != mask_from_func).nonzero(
-                    as_tuple=False
-                )
-                assert len(mismatch_indices) > 0
-                first_mismatch = mismatch_indices[0]
-                q_idx, k_idx = first_mismatch[0].item(), first_mismatch[1].item()
-
-                raise RuntimeError(
-                    f"magi_to_hstu conversion mismatch! {diff_count} positions differ, "
-                    f"where:\n      {self.q_ranges=}\n      {self.k_ranges=}\n      {self.attn_type_map=}\n"
-                    f"      {self.n_func=}\n"
-                    f"      with the first mismatch at position: {q_idx=}, {k_idx=}, "
-                    f"ffa={mask_from_ffa[q_idx, k_idx].item()}, "
-                    f"func={mask_from_func[q_idx, k_idx].item()}"
-                )
+            self._check_hstu_mask(hstu_func)
+        aux_tensors = [hstu_func]
 
         self.fa4_fwd_args_dict = self._make_fa4_args_dict(
             hstu_func=hstu_func,
@@ -707,6 +645,80 @@ class FA4AttnArg(AttnArg):
                 aux_tensors=aux_tensors,
                 tile_m=self.tile_m_bwd,
                 tile_n=self.tile_n_bwd,
+            )
+
+    def _make_hstu_func(self) -> torch.Tensor:
+        """Convert ranges to padded HSTU intervals, trimming unused functions."""
+        # magi_to_hstu allocation bound. Do not pass a tighter n_max_func:
+        # the kernel under-counts intervals when the first one starts at k>0.
+        n_ub_func = 2 * len(self.k_ranges) + 1
+
+        # Transfer representation of attn mask from AttnSlice to HSTU Functions
+        # where hstu_func: shape=(n_func, sq), and unsqueeze to (1, 1, n_func, sq) to be broadcastable
+        nvtx.start(
+            f"magi_to_hstu-seqlen_q={self.seqlen_q}-seqlen_k={self.seqlen_k}-n_ub_func={n_ub_func}"
+        )
+        hstu_func = magi_to_hstu_cuda.magi_to_hstu(
+            q_ranges=self.ffa_fwd_args_dict["q_ranges"],
+            k_ranges=self.ffa_fwd_args_dict["k_ranges"],
+            mask_types=self.ffa_fwd_args_dict["attn_type_map"],
+            seqlen_q=self.seqlen_q,
+            seqlen_k=self.seqlen_k,
+            n_max_func=n_ub_func,
+        )
+        # FA4 compiles on n_func: drop unused tail rows. Floor 1 because
+        # all-zero row 0 is a valid empty first interval (first k starts > 0).
+        live_rows = hstu_func.ne(0).any(dim=1)
+        row_ordinal = torch.arange(1, hstu_func.size(0) + 1, device=hstu_func.device)
+        n_keep = max(int((live_rows * row_ordinal).max().item()), 1)
+        hstu_func = hstu_func[:n_keep]
+        self.n_func = hstu_func.size(0)
+        hstu_func = hstu_func.unsqueeze(0).unsqueeze(0)
+        nvtx.stop()
+
+        # Pad hstu_func to avoid out-of-bounds access in FA4 kernels
+        from magi_attention.api.functools import pad_at_dim
+
+        hstu_func = pad_at_dim(
+            hstu_func,
+            dim=-1,
+            pad_size=2 * max(self.tile_m, self.tile_m_bwd),
+            value=0,
+        )
+        return hstu_func
+
+    def _check_hstu_mask(self, hstu_func: torch.Tensor) -> None:
+        """Check the converted HSTU mask against the original FFA ranges."""
+        # Path 1: mask from FFA args directly
+        mask_from_ffa = make_attn_mask_from_ffa_args(
+            q_ranges=self.q_ranges,
+            k_ranges=self.k_ranges,
+            attn_type_map=self.attn_type_map,
+            total_seqlen_q=self.seqlen_q,
+            total_seqlen_k=self.seqlen_k,
+            device=hstu_func.device,
+        )
+
+        # Path 2: mask from hstu_func (before padding)
+        # hstu_func shape: [1, 1, n_max_func, seqlen_q], squeeze to [n_max_func, seqlen_q]
+        hstu_func_squeezed = hstu_func.squeeze(0).squeeze(0)[:, : self.seqlen_q]
+        mask_from_func = self.func_to_mask(hstu_func_squeezed, self.seqlen_k)
+        # Compare the two masks
+        if not torch.equal(mask_from_ffa, mask_from_func):
+            diff_count = (mask_from_ffa != mask_from_func).sum().item()
+            # Find first mismatch position
+            mismatch_indices = (mask_from_ffa != mask_from_func).nonzero(as_tuple=False)
+            assert len(mismatch_indices) > 0
+            first_mismatch = mismatch_indices[0]
+            q_idx, k_idx = first_mismatch[0].item(), first_mismatch[1].item()
+
+            raise RuntimeError(
+                f"magi_to_hstu conversion mismatch! {diff_count} positions differ, "
+                f"where:\n      {self.q_ranges=}\n      {self.k_ranges=}\n      {self.attn_type_map=}\n"
+                f"      {self.n_func=}\n"
+                f"      with the first mismatch at position: {q_idx=}, {k_idx=}, "
+                f"ffa={mask_from_ffa[q_idx, k_idx].item()}, "
+                f"func={mask_from_func[q_idx, k_idx].item()}"
             )
 
     def to_fa4_args(self, is_bwd: bool = False) -> dict:
@@ -732,6 +744,28 @@ class FA4AttnArg(AttnArg):
             interval 1: [F1, F2)
             interval 2: [F3, F4)
             ...
+
+        Broadcasting example for the first interval:
+
+        .. code-block:: text
+
+            seqlen_q = 4, seqlen_k = 8, F0 = [3, 5, 2, 6]
+            k_indices has shape [1, 8]; F0[:, None] has shape [4, 1].
+            Broadcasting compares every row's F0 against all eight columns:
+
+            F0[:, None]              k_indices (broadcast to four rows)
+            [[3],                    [[0, 1, 2, 3, 4, 5, 6, 7],
+             [5],                     [0, 1, 2, 3, 4, 5, 6, 7],
+             [2],                     [0, 1, 2, 3, 4, 5, 6, 7],
+             [6]]                     [0, 1, 2, 3, 4, 5, 6, 7]]
+
+            mask = k_indices < F0[:, None]
+
+                        k=0  1  2  3  4  5  6  7
+            q0 (F0=3):    T  T  T  F  F  F  F  F   [0, 3)
+            q1 (F0=5):    T  T  T  T  T  F  F  F   [0, 5)
+            q2 (F0=2):    T  T  F  F  F  F  F  F   [0, 2)
+            q3 (F0=6):    T  T  T  T  T  T  F  F   [0, 6)
         """
         n_max_func, seqlen_q = func.shape
         device = func.device
@@ -744,31 +778,6 @@ class FA4AttnArg(AttnArg):
 
         # Process first interval: [0, F0)
         F0 = func[0].unsqueeze(1)  # [seqlen_q, 1]
-        """
-            Assuming seqlen_q = 4, seqlen_k = 8, func[0] = [3, 5, 2, 6]  # F0 value for each q
-            k_indices [1, seqlen_k] broadcasted along rows, F0 [seqlen_q, 1] broadcasted along columns
-            k_indices [1, 8]:  [[0, 1, 2, 3, 4, 5, 6, 7]]
-                            ↓ copied 4 rows
-                    [[0, 1, 2, 3, 4, 5, 6, 7],
-                        [0, 1, 2, 3, 4, 5, 6, 7],
-                        [0, 1, 2, 3, 4, 5, 6, 7],
-                        [0, 1, 2, 3, 4, 5, 6, 7]]
-
-            F0 [4, 1]:         [[3],       → copied 8 columns → [[3, 3, 3, 3, 3, 3, 3, 3],
-                                [5],                     [5, 5, 5, 5, 5, 5, 5, 5],
-                                [2],                     [2, 2, 2, 2, 2, 2, 2, 2],
-                                [6]]                     [6, 6, 6, 6, 6, 6, 6, 6]]
-
-                            k=0  k=1  k=2  k=3  k=4  k=5  k=6  k=7
-                    ┌────┬────┬────┬────┬────┬────┬────┬────┐
-            q0 (F0=3) │ T  │ T  │ T  │ F  │ F  │ F  │ F  │ F  │  → [0,3) visible
-                    ├────┼────┼────┼────┼────┼────┼────┼────┤
-            q1 (F0=5) │ T  │ T  │ T  │ T  │ T  │ F  │ F  │ F  │  → [0,5) visible
-                    ├────┼────┼────┼────┼────┼────┼────┼────┤
-            q2 (F0=2) │ T  │ T  │ F  │ F  │ F  │ F  │ F  │ F  │  → [0,2) visible
-                    ├────┼────┼────┼────┼────┼────┼────┼────┤
-            q3 (F0=6) │ T  │ T  │ T  │ T  │ T  │ T  │ F  │ F  │  → [0,6) visible
-        """
         mask |= k_indices < F0
 
         # Process remaining intervals: [F_{2i+1}, F_{2i+2}) for i = 0, 1, ...

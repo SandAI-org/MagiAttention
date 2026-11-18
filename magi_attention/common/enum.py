@@ -124,6 +124,7 @@ class OverlapAlgType(Enum):
 
     UNIFORM = "uniform"
     GREEDY = "greedy"
+    PIPELINE = "pipeline"
 
 
 class DynamicAttnAlgType(Enum):

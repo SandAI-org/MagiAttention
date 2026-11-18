@@ -70,6 +70,7 @@ from magi_attention.testing.precision import (
     calc_rounding_noise_norm,
     extract_mismatch_threshold,
 )
+from magi_attention.testing.precompile import add_ffa_spec
 from magi_attention.testing.utils import switch_envvars
 from magi_attention.utils import (
     get_a2a_corr_factor,
@@ -175,7 +176,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         cat_gqa, return_max_logits, bwd_inner_loop_k flag combos used by
         test_pipeline and test_flex_flash_attn.
         """
-        from magi_attention.testing.precompile import add_ffa_spec
 
         specs: dict = {}
         for hd in [64, 128]:

@@ -89,6 +89,7 @@ from .dsl_compat import (
     SmemAllocator,
     Tcgen05OperandMajorMode,
     TmemAllocator,
+    make_trivial_tiled_mma,
 )
 from .ffa_bwd_postprocess import bwd_postprocess_rowmajor
 from .ffa_bwd_preprocess import bwd_preprocess
@@ -328,7 +329,8 @@ class FFABwdSm100Index:
     def _get_tiled_mma(self):
         # --- S = Q @ K.T with (K, K) major ---
         # A = Q read from tQ (TMEM copy of sQ), B = K read from sK
-        tiled_mma_S = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_S = make_trivial_tiled_mma(
+            self.q_dtype,
             self.q_dtype,
             Tcgen05OperandMajorMode.K,
             Tcgen05OperandMajorMode.K,
@@ -340,7 +342,8 @@ class FFABwdSm100Index:
 
         # --- dP = dO @ V.T with (K, K) major ---
         # A = dO read from tdO (TMEM copy of sdO), B = V read from sV
-        tiled_mma_dP = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dP = make_trivial_tiled_mma(
+            self.do_dtype,
             self.do_dtype,
             Tcgen05OperandMajorMode.K,
             Tcgen05OperandMajorMode.K,
@@ -352,7 +355,8 @@ class FFABwdSm100Index:
 
         # --- dV.T = dO.T @ P with (MN, MN) major ---
         # A = dO.T (HD, Q) read from sdO, B = P (K, Q) read from sP, both MN-major
-        tiled_mma_dV = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dV = make_trivial_tiled_mma(
+            self.do_dtype,
             self.do_dtype,
             Tcgen05OperandMajorMode.MN,
             Tcgen05OperandMajorMode.MN,
@@ -363,7 +367,8 @@ class FFABwdSm100Index:
 
         # --- dK.T = Q.T @ dS with (MN, MN) major ---
         # A = Q.T (HD, Q) read from sQ, B = dS (K, Q) read from sdS, both MN-major
-        tiled_mma_dK = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dK = make_trivial_tiled_mma(
+            self.q_dtype,
             self.q_dtype,
             Tcgen05OperandMajorMode.MN,
             Tcgen05OperandMajorMode.MN,
@@ -374,7 +379,8 @@ class FFABwdSm100Index:
 
         # --- dQ = dS @ K with (K, MN) major ---
         # A = dS (Q, K) K-major, B = K (HD, K) MN-major read from sK
-        tiled_mma_dQ = sm100_utils_basic.make_trivial_tiled_mma(
+        tiled_mma_dQ = make_trivial_tiled_mma(
+            self.k_dtype,
             self.k_dtype,
             Tcgen05OperandMajorMode.K,
             Tcgen05OperandMajorMode.MN,
@@ -694,8 +700,8 @@ class FFABwdSm100Index:
 
             # --- tmem ptr ---
 
-            tmem_dealloc_mbar_ptr: Int64
-            tmem_holding_buf_ptr: Int32
+            tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
+            tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
             # --- smem tensors ---
 
@@ -907,11 +913,11 @@ class FFABwdSm100Index:
             ),
         )
         tmem = TmemAllocator(
-            alloc_result_dst_smem_ptr=storage.tmem_holding_buf_ptr,
+            alloc_result_dst_smem_ptr=storage.tmem_holding_buf_ptr.data_ptr(),
             barrier_for_retrieve=tmem_alloc_barrier,
             allocator_warp_id=self.mma_warp_id,
             is_two_cta=False,
-            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar_ptr,
+            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar_ptr.data_ptr(),
         )
 
         # --- Make pipeline cooperative groups ---
@@ -2688,6 +2694,7 @@ def num_k_passes_default(
     element_size: int,
     topk: int,
     l2_bytes: int,
+    rows_sorted: bool = False,
 ) -> int:
     """``num_k_passes`` of ``ffa_bwd_sm100_index`` when the caller passes ``None``.
 
@@ -2698,11 +2705,16 @@ def num_k_passes_default(
     per pass, brings much of it back into L2. Every pass revisits every Q tile
     (Q/dO reload, pipeline fill, an fp32 dQ partial), which up to 2x L2, or
     below 256 ids (4 K tiles) per row and pass, costs more than it saves.
+
+    Ascending rows (``rows_sorted``) skip the regrouping of the rows by chunk,
+    whose cost grows with the pass count, and take smaller 0.5x L2 chunks: on
+    B300 that measured best from 192k to 768k K tokens.
     """
     gather_bytes = total_k * num_head_kv * head_dim * (2 * element_size + 2 * 4)
     if gather_bytes <= 2 * l2_bytes:
         return 1
-    num_passes = min(16, math.ceil(gather_bytes / (0.8 * l2_bytes)))
+    chunk_l2_fraction = 0.5 if rows_sorted else 0.8
+    num_passes = min(16, math.ceil(gather_bytes / (chunk_l2_fraction * l2_bytes)))
     if topk < 256 * num_passes:
         return 1
     return num_passes
@@ -2727,6 +2739,7 @@ def ffa_bwd_sm100_index(
     gather_v_async: Optional[bool] = None,
     num_k_passes: Optional[int] = None,
     dlse: Optional[torch.Tensor] = None,
+    index_sparse_rows_sorted: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass of index-sparse (DSA) attention on SM100.
 
@@ -2750,6 +2763,11 @@ def ffa_bwd_sm100_index(
             ``None`` picks ``num_k_passes_default``.
         dlse: optional fp32 ``(total_q, num_heads_q)`` gradient of ``lse``; the
             preprocess folds it into dPsum as ``sum(out * dout) - dlse``.
+        index_sparse_rows_sorted: the caller guarantees the valid ids of every
+            index row ascend (as top-k selectors emitting index order do). The
+            K-chunked passes then read the rows as they are instead of
+            regrouping them by chunk; unsorted rows passed as sorted give wrong
+            gradients.
 
     Returns:
         A tuple of (dQ, dK, dV) with the same shapes and dtypes as q, k, v.
@@ -2807,6 +2825,7 @@ def ffa_bwd_sm100_index(
             k.element_size(),
             index_sparse_indices.shape[-1],
             l2_bytes,
+            rows_sorted=index_sparse_rows_sorted,
         )
     assert num_k_passes >= 1
     k_chunk_size = (total_k + num_k_passes - 1) // num_k_passes
@@ -2819,7 +2838,10 @@ def ffa_bwd_sm100_index(
 
     if k_chunk_pass:
         indices, chunk_starts, chunk_lens = partition_index_sparse_rows_by_k_chunk(
-            index_sparse_indices, k_chunk_size, num_k_passes
+            index_sparse_indices,
+            k_chunk_size,
+            num_k_passes,
+            rows_sorted=index_sparse_rows_sorted,
         )
         # Pass c reads ids [topk_starts[c], topk_starts[c] + topk_lens[c]) of
         # every row. It ends at the last whole K tile of chunk c: the < tile_n ids
@@ -2836,8 +2858,11 @@ def ffa_bwd_sm100_index(
 
     # One range over every token: the scheduler, dPsum preprocess, dQ epilogue
     # and dK/dV postprocess all run their full-mask single-batch paths.
-    q_ranges = torch.tensor([[0, total_q]], dtype=torch.int32, device=device)
-    k_ranges = torch.tensor([[0, total_k]], dtype=torch.int32, device=device)
+    # Filled on device
+    ranges = torch.zeros(2, 2, dtype=torch.int32, device=device)
+    ranges[0, 1].fill_(total_q)
+    ranges[1, 1].fill_(total_k)
+    q_ranges, k_ranges = ranges[0:1], ranges[1:2]
 
     # --- Preprocess: dPsum = (o * dout).sum(-1), lse_log2 = lse * log2(e) ---
 

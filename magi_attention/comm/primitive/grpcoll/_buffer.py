@@ -46,7 +46,7 @@ from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import wrap_to_list
 
 from ._config import GrpCollConfig
-from ._event import EventHandle, EventOverlap
+from ._event import EventOverlap, create_event_handle
 from ._handle import GrpCollHandle, GrpCollInterHandle, GrpCollIntraHandle
 from .utils import check_nvlink_connections
 
@@ -1439,7 +1439,7 @@ class GrpCollBuffer:
         Returns:
             event: the captured event.
         """
-        return EventOverlap(EventHandle())
+        return EventOverlap(create_event_handle())
 
     @staticmethod
     def get_hidden_size_alignment(dtype: torch.dtype) -> int:

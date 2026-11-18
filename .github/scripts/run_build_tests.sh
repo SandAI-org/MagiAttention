@@ -26,6 +26,11 @@ install_dependencies() {
     python .github/scripts/install_source_dependencies.py
     pip install -r extensions/requirements.txt \
         --index-url "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple/}"
+    # Extension tests use the upstream FA4 package. The b300_fa4 profile
+    # uses the FlashAttention submodule with an older, incompatible CuTeDSL.
+    if [[ "${CI_TEST_EXTENSIONS:?CI_TEST_EXTENSIONS is required}" == true ]]; then
+        PYTHON=python bash extensions/scripts/apply_patches.sh
+    fi
 }
 
 build() {
@@ -75,6 +80,7 @@ test_packages() {
     prepare_runtime_lock
     bash .github/tests/test_portable_validation.sh
     bash .github/tests/test_install_requirements.sh
+    python .github/tests/test_task_runner.py
     python .github/tests/test_source_dependency_cache.py
     python .github/tests/test_compiled_artifact_cache.py
     if [[ "$main_changed" == true || "$ci_changed" == true ]]; then

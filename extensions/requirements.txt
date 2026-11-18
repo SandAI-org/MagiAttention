@@ -1,5 +1,5 @@
 versioningit>=2.0
 # flash_attn==2.8.4
 # flash_attn_3==3.0.0b1
-# flash-attn-4==4.0.0b14
-# magi_attention>=1.1.6
+# flash-attn-4: build from commit dceb374126248b17dbfee91c202514f533fd2ec6
+# magi_attention>=1.1.8

@@ -21,21 +21,20 @@ from typing import Any, Callable, TypeAlias, overload
 
 import torch
 import torch.distributed as dist
-import triton
-import triton.language as tl
 
 from magi_attention import env
 from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp, GrpCollBufferName, OutMaybeWithLSE
 from magi_attention.common.range import NaiveRange
-from magi_attention.common.range_op import range_gather, range_reduce
-from magi_attention.common.range_op.utils import (
-    _calc_cu_range_sizes,
-    _calc_out2inp_range_map,
-    _calc_ranges_row_map,
-)
 from magi_attention.common.ranges import NaiveRanges
+from magi_attention.kernel.triton.comm.varlen_copy import varlen_for_each_copy_triton
+from magi_attention.kernel.triton.range_ops import range_gather, range_reduce
+from magi_attention.kernel.triton.range_ops.utils import (
+    calc_cu_range_sizes,
+    calc_out2inp_range_map,
+    calc_ranges_row_map,
+)
 from magi_attention.utils import is_list_type_all, nvtx
 
 # ------------------        common helpers       ------------------ #
@@ -197,23 +196,23 @@ def _calc_range_reduce_kwargs_from_ranges(
     range_reduce_kwargs["input_ranges"] = input_ranges
 
     if deterministic:
-        (out2inp_range_map, unique_ordered_out_ranges, _) = _calc_out2inp_range_map(
+        (out2inp_range_map, unique_ordered_out_ranges, _) = calc_out2inp_range_map(
             output_ranges,
-            # first put to cpu to avoid d2h in `_calc_cu_range_sizes` below
+            # first put to cpu to avoid d2h in `calc_cu_range_sizes` below
             device=torch.device("cpu"),
         )
 
-        cu_range_sizes, total_size = _calc_cu_range_sizes(
+        cu_range_sizes, total_size = calc_cu_range_sizes(
             unique_ordered_out_ranges,
             device=device,
         )
 
-        # put back to device before `_calc_ranges_row_map`
+        # put back to device before `calc_ranges_row_map`
         # to make row_map a device tensor
         out2inp_range_map = out2inp_range_map.to(device)
         unique_ordered_out_ranges = unique_ordered_out_ranges.to(device)
 
-        row_map = _calc_ranges_row_map(
+        row_map = calc_ranges_row_map(
             unique_ordered_out_ranges,
             total_size,
         )
@@ -357,7 +356,7 @@ def sanity_check_for_group_cast_meta_args_per_rank(
         )
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def unpermute_output(
     output: torch.Tensor,
     unperm_after_a2a_kwargs: dict,
@@ -372,7 +371,7 @@ def unpermute_output(
     )
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def unpermute_output_with_lse(
     output: torch.Tensor,
     output_lse: torch.Tensor,
@@ -395,7 +394,7 @@ def unpermute_output_with_lse(
     return output, output_lse
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _calc_group_cast_a2a_input_meta_args(
     input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
@@ -478,7 +477,7 @@ def _calc_group_cast_a2a_input_args(
     return a2a_input, a2a_input_split_size
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _calc_group_cast_a2a_output_meta_args(
     output_split_size_list: list[int],
     src_index_list: list[int],
@@ -588,8 +587,8 @@ def _calc_group_cast_a2a_output_args(
     )
 
 
-@torch.no_grad()
-@nvtx.instrument_nvtx
+@torch.no_grad
+@nvtx.instrument
 def calc_group_cast_a2a_args(
     input: torch.Tensor,
     output: torch.Tensor,
@@ -728,7 +727,7 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
         )
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def sum_reduce_output(
     output: torch.Tensor,
     a2a_output: torch.Tensor,
@@ -748,7 +747,7 @@ def sum_reduce_output(
     return output
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def avg_reduce_output(
     output: torch.Tensor,
     a2a_output: torch.Tensor,
@@ -768,7 +767,7 @@ def avg_reduce_output(
     return output
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def lse_reduce_output(
     output: torch.Tensor,
     output_lse: torch.Tensor,
@@ -792,7 +791,7 @@ def lse_reduce_output(
     return output
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _calc_group_reduce_a2a_input_meta_args(
     input_split_size_list: list[int],
     dst_index_list: list[int],
@@ -861,7 +860,7 @@ def _calc_group_reduce_a2a_input_args(
     return a2a_input, a2a_input_split_size
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def _calc_group_reduce_a2a_output_meta_args(
     output_split_size_list: list[int],
     src_indices_list: list[list[int]],
@@ -968,8 +967,8 @@ def _calc_group_reduce_a2a_output_args(
     )
 
 
-@torch.no_grad()
-@nvtx.instrument_nvtx
+@torch.no_grad
+@nvtx.instrument
 def calc_group_reduce_a2a_args(
     input: torch.Tensor,
     output: torch.Tensor,
@@ -1215,66 +1214,6 @@ def get_group_reduce_handle_from_sym_group_cast(
     return handle
 
 
-@triton.jit
-def _varlen_for_each_copy_kernel(
-    output_ptr,
-    input_flat_ptr,
-    num_dst_ptr,
-    offsets_ptr,
-    stride_output_row,
-    num_ranks,
-    BLOCK_SIZE_N: tl.constexpr,
-):
-    split_idx = tl.program_id(axis=0)
-    col_block_idx = tl.program_id(axis=1)
-
-    col_start = col_block_idx * BLOCK_SIZE_N
-
-    num_dst = tl.load(num_dst_ptr + split_idx)
-
-    offset_in_flat_input = tl.load(offsets_ptr + split_idx)
-
-    output_row_base_ptr = output_ptr + split_idx * stride_output_row
-    input_flat_base_ptr = input_flat_ptr + offset_in_flat_input
-
-    cols_in_block = col_start + tl.arange(0, BLOCK_SIZE_N)
-
-    write_mask = (cols_in_block < num_ranks) & (cols_in_block < num_dst)
-
-    values_to_write = tl.load(
-        input_flat_base_ptr + cols_in_block, mask=write_mask, other=-1
-    )
-
-    tl.store(output_row_base_ptr + cols_in_block, values_to_write, mask=write_mask)
-
-
-def _varlen_for_each_copy_triton(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-    num_dst: torch.Tensor,
-    cu_num_dst: torch.Tensor,
-) -> torch.Tensor:
-    num_splits, num_ranks = dst.shape
-
-    if num_splits == 0:
-        return dst
-
-    BLOCK_SIZE_N = triton.next_power_of_2(num_ranks)
-    grid = (num_splits, triton.cdiv(num_ranks, BLOCK_SIZE_N))
-
-    _varlen_for_each_copy_kernel[grid](
-        dst,
-        src,
-        num_dst,
-        cu_num_dst,
-        dst.stride(0),
-        num_ranks,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-    )
-
-    return dst
-
-
 @overload
 def transfer_splits_and_dst_idxs_to_t2r_idx(
     input_split_sizes: list[int],
@@ -1299,7 +1238,7 @@ def transfer_splits_and_dst_idxs_to_t2r_idx(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def transfer_splits_and_dst_idxs_to_t2r_idx(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
@@ -1345,7 +1284,7 @@ def transfer_splits_and_dst_idxs_to_t2r_idx(
             device=device,
         )
 
-        _varlen_for_each_copy_triton(
+        varlen_for_each_copy_triton(
             dst=t2r_idx,
             src=dst_indices_tensor,
             num_dst=num_dst_tensor,
@@ -1402,7 +1341,7 @@ def get_native_group_cast_meta(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def get_native_group_cast_meta(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
@@ -1495,7 +1434,7 @@ def get_a2av_perm_idxs_from_group_cast_meta(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def get_a2av_perm_idxs_from_group_cast_meta(
     output_split_sizes: list[int] | torch.Tensor,
     src_index: list[int] | torch.Tensor,

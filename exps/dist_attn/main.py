@@ -194,7 +194,7 @@ if __name__ == "__main__":
 
     for iter in range(prof_iters):
         # init for nvtx
-        nvtx.switch_profile(
+        nvtx.profile_iters(
             iter_id=iter,
             start=prof_start_iter,
             end=prof_end_iter,

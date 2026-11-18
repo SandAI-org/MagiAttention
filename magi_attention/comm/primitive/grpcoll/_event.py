@@ -34,25 +34,29 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
+if TYPE_CHECKING:
+    from magi_attention.magi_attn_comm.grpcoll import EventHandle
 
-class EventHandle:
-    ...
-
-
+_NativeEventHandle: type["EventHandle"] | None
 try:
-    from magi_attention.magi_attn_comm.grpcoll import (  # type: ignore[no-redef] # noqa
-        EventHandle,
-    )
+    from magi_attention.magi_attn_comm import grpcoll
 except ImportError:
-    is_magi_attn_comm_installed = False
+    _NativeEventHandle = None
 else:
-    is_magi_attn_comm_installed = True
+    _NativeEventHandle = grpcoll.EventHandle
 
-__all__ = ["EventOverlap", "EventHandle"]
+__all__ = ["EventOverlap"]
+
+
+def create_event_handle() -> "EventHandle":
+    """Construct a native event; importing the wrapper needs no extension."""
+    if _NativeEventHandle is None:
+        raise ImportError("magi_attn_comm is required to create an event handle")
+    return _NativeEventHandle()
 
 
 class EventOverlap:
@@ -66,7 +70,7 @@ class EventOverlap:
 
     def __init__(
         self,
-        event: Optional[EventHandle] = None,
+        event: "EventHandle | None" = None,
         extra_tensors: Optional[tuple[torch.Tensor]] = None,
     ) -> None:
         """
@@ -76,9 +80,8 @@ class EventOverlap:
             event: the CUDA event captured.
             extra_tensors: an easier way to simulate PyTorch tensor `record_stream`, may be useful with CUDA graph.
         """
-        assert (
-            is_magi_attn_comm_installed
-        ), "The `magi_attn_comm` extension module is not installed."
+        if _NativeEventHandle is None:
+            raise ImportError("magi_attn_comm is required to create an event overlap")
 
         self.event = event
 
@@ -91,7 +94,7 @@ class EventOverlap:
         The current stream `torch.cuda.current_stream()` waits for the event to be finished.
         """
         if self.event is not None:
-            self.event.current_stream_wait()  # type: ignore[attr-defined]
+            self.event.current_stream_wait()
 
     def __enter__(self) -> Any:
         """
@@ -114,4 +117,4 @@ class EventOverlap:
         Please follow the example in the `__enter__` function.
         """
         if self.event is not None:
-            self.event.current_stream_wait()  # type: ignore[attr-defined]
+            self.event.current_stream_wait()

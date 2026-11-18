@@ -13,15 +13,14 @@
 # limitations under the License.
 
 import math
-from contextlib import contextmanager
-from typing import Iterator
+import unittest
 
 import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
+from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -33,32 +32,18 @@ from magi_attention.testing.cutedsl_utils import (
     record_bwd_kernels,
 )
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
-from magi_attention.testing.utils import switch_envvars
+from magi_attention.testing.utils import switch_env
+from magi_attention.utils.arch import is_blackwell
 
 
-@contextmanager
-def _maybe_disable_2cta(disable: bool) -> Iterator[None]:
-    if not disable:
-        yield
-        return
-    switch_back = switch_envvars(
-        ["MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA"],
-        enable_value_dict={"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "1"},
+def _maybe_disable_2cta(disable: bool) -> switch_env:
+    return switch_env(
+        {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": True} if disable else {}
     )
-    try:
-        yield
-    finally:
-        switch_back()
 
 
+@unittest.skipUnless(is_blackwell(), "requires Blackwell")
 class TestFfaCatGqa(DistTestBase):
-    def setUp(self) -> None:
-        # Skip in the parent before DistTestBase spawns ranks, including ranks
-        # with no assigned parameter cases that would otherwise reach a barrier.
-        if not torch.cuda.is_available() or get_device_arch()[1] not in (10, 11):
-            self.skipTest("cat_gqa requires SM100/SM110")
-        super().setUp()
-
     @property
     def seed(self) -> int:
         return 42

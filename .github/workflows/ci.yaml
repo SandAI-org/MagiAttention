@@ -15,7 +15,6 @@ permissions:
 
 env:
   CI_WORKSPACE_ROOT: /home/niubility2/ci_workspace
-  TASK_CI_BASE_IMAGE: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:26.05.2
   STANDALONE_ARTIFACT_NAMESPACE: magi-attention
   # One H100-built wheel carries native code for both Hopper and Blackwell.
   MAGI_ATTENTION_BUILD_COMPUTE_CAPABILITY: '90,100,103'

@@ -18,6 +18,8 @@ from unittest import TestCase
 import pytest
 import torch
 
+from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.common.enum import MagiAttentionPrecision
 from magi_attention.utils import (
     flatten_nested_list,
     is_list_type_all,
@@ -335,8 +337,6 @@ class TestCommonUtils(TestCase):
 @pytest.mark.arch_independent
 class TestMagiAttentionPrecision(TestCase):
     def test_to_torch_dtype(self):
-        from magi_attention.common.enum import MagiAttentionPrecision
-
         assert MagiAttentionPrecision.BF16.to_torch_dtype() == torch.bfloat16
         assert MagiAttentionPrecision.FP16.to_torch_dtype() == torch.float16
         assert MagiAttentionPrecision.FP32.to_torch_dtype() == torch.float32
@@ -346,15 +346,11 @@ class TestMagiAttentionPrecision(TestCase):
 @pytest.mark.arch_independent
 class TestGeneralWork(TestCase):
     def test_unsupported_work_type_raises(self):
-        from magi_attention.comm.work import GeneralWork
-
         gw = GeneralWork(work=12345)
         with self.assertRaises(TypeError):
             gw.wait()
 
     def test_none_work_no_op(self):
-        from magi_attention.comm.work import GeneralWork
-
         gw = GeneralWork(work=None)
         gw.wait()
 
@@ -362,8 +358,6 @@ class TestGeneralWork(TestCase):
 @pytest.mark.arch_independent
 class TestWorkWithPostProcessFn(TestCase):
     def test_double_wait_raises(self):
-        from magi_attention.comm.work import WorkWithPostProcessFn
-
         w = WorkWithPostProcessFn(work=None, post_process_fn=lambda: "ok")
         result = w.wait_post_process()
         assert result == "ok"

@@ -41,7 +41,9 @@ from quack.cute_dsl_utils import ParamsBase
 from quack.utils import store_shared_remote
 
 from . import cutedsl_utils
-from .dsl_compat import FastDivmodDivisor
+from .dsl_compat import (
+    FastDivmodDivisor,
+)
 
 
 class SchedulingMode(IntEnum):

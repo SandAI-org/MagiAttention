@@ -22,7 +22,7 @@ import torch.distributed as dist
 from magi_attention import env
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp
-from magi_attention.common.range_op import range_gather, range_reduce
+from magi_attention.kernel.triton.range_ops import range_gather, range_reduce
 from magi_attention.utils import is_list_type_all, nvtx
 
 from .._all2all_v import all2all_v
@@ -605,7 +605,7 @@ def hier_group_cast_impl_with_a2av(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def hier_group_cast_impl_with_a2av(
     input_tensor: torch.Tensor,
     output_tensor: torch.Tensor | None,
@@ -1172,7 +1172,7 @@ def hier_group_reduce_impl_with_a2av(
     ...
 
 
-@nvtx.instrument_nvtx
+@nvtx.instrument
 def hier_group_reduce_impl_with_a2av(
     input_tensor: torch.Tensor,
     output_tensor: torch.Tensor | None,

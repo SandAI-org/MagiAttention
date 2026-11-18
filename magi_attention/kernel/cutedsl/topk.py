@@ -71,6 +71,7 @@ from .cutedsl_utils import (
     vec_load_bf16_to_ordered16,
     vec_load_fp32_to_ordered32,
 )
+from .dsl_compat import SmemAllocator
 
 # ====================================================================
 # Constants
@@ -424,7 +425,7 @@ class RadixTopK:
         tidx = cute.arch.thread_idx()[0]
         n = mInput.shape[1]
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         s_hist = smem.allocate_tensor(Int32, cute.make_layout(RADIX), byte_alignment=16)
         s_sfx = smem.allocate_tensor(Int32, cute.make_layout(RADIX), byte_alignment=16)
         s_prefix_t = smem.allocate_tensor(Int32, cute.make_layout(1), byte_alignment=4)
@@ -1061,9 +1062,7 @@ def cutedsl_topk(
 
     orig_shape = x.shape
     x2d = x.reshape(-1, orig_shape[-1]).contiguous()
-    with nvtx.add_nvtx_event(
-        f"DSA/cutedsl_topk rows={x2d.shape[0]} cols={x2d.shape[1]} k={k}"
-    ):
+    with nvtx.record(f"DSA/cutedsl_topk rows={x2d.shape[0]} cols={x2d.shape[1]} k={k}"):
         indices = _cute_topk_indices(x2d, k, sorted=False, out_dtype=out_dtype)
 
     out_shape = (*orig_shape[:-1], k)

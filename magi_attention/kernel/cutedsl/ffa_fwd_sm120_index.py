@@ -950,8 +950,8 @@ class FFAFwdSm120Index:
             s0 = Float32(0.0)
             s1 = Float32(0.0)
             for j in cutlass.range_constexpr(2):
-                w0 = cute.arch.exp2(lses[j][0] - mu0)
-                w1 = cute.arch.exp2(lses[j][1] - mu1)
+                w0 = cute.math.exp2(lses[j][0] - mu0, fastmath=True)
+                w1 = cute.math.exp2(lses[j][1] - mu1, fastmath=True)
                 s0 = s0 + w0
                 s1 = s1 + w1
                 self.accumulate_piece(acc, ws_base, pieces[j], tid, w0, w1)
@@ -975,8 +975,8 @@ class FFAFwdSm120Index:
                 a, b = ld_global_cg_v2_f32(
                     lse_region + Int64(p) * self.piece_lse_bytes + Int64(tid * 8)
                 )
-                wa = cute.arch.exp2(a - mu0)
-                wb = cute.arch.exp2(b - mu1)
+                wa = cute.math.exp2(a - mu0, fastmath=True)
+                wb = cute.math.exp2(b - mu1, fastmath=True)
                 s0 = s0 + wa
                 s1 = s1 + wb
                 self.accumulate_piece(acc, ws_base, p, tid, wa, wb)
@@ -1064,12 +1064,14 @@ class FFAFwdSm120Index:
         m_new = fmax_f32(m_old, mx)
         # A row with no valid column so far keeps m = -inf; subtracting 0 keeps exp2 at 0.
         m_use = Float32(0.0) if m_new == Float32(-math.inf) else m_new
-        alpha = cute.arch.exp2((m_old - m_use) * scale_log2)
+        alpha = cute.math.exp2((m_old - m_use) * scale_log2, fastmath=True)
         neg_m_scaled = -(m_use * scale_log2)
         row_sum = Float32(0.0)
         for nf in cutlass.range_constexpr(16):
             for e in cutlass.range_constexpr(2):
-                p = cute.arch.exp2(tS[nf * 4 + r + e] * scale_log2 + neg_m_scaled)
+                p = cute.math.exp2(
+                    tS[nf * 4 + r + e] * scale_log2 + neg_m_scaled, fastmath=True
+                )
                 tS[nf * 4 + r + e] = p
                 row_sum = row_sum + p
         for df in cutlass.range_constexpr(16):

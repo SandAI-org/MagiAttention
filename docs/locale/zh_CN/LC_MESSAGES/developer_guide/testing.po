@@ -1,0 +1,710 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025-2026, SandAI
+# This file is distributed under the same license as the MagiAttention package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: MagiAttention \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-17 13:15+0000\n"
+"PO-Revision-Date: 2026-11-17 12:17+0000\n"
+"Last-Translator: MagiAttention contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/testing.md:1
+msgid "Testing"
+msgstr "测试指南"
+
+#: ../../source/developer_guide/testing.md:3
+msgid "Test organization"
+msgstr "测试组织"
+
+#: ../../source/developer_guide/testing.md:5
+msgid ""
+"Tests follow the layer they exercise. Keep distributed integration separate from local contracts,"
+" even when both exercise the same public function."
+msgstr "测试按被测层归属。即使涉及同一个公开函数，也应区分分布式集成与局部合同。"
+
+#: ../../source/developer_guide/testing.md:8
+msgid "Directory"
+msgstr "目录"
+
+#: ../../source/developer_guide/testing.md:8
+msgid "Responsibility"
+msgstr "职责"
+
+#: ../../source/developer_guide/testing.md:8
+msgid "`tests/test_common`"
+msgstr "`tests/test_common`"
+
+#: ../../source/developer_guide/testing.md:10
+msgid "Core values, protocols, and host range metadata"
+msgstr "核心值对象、协议与 host range 元数据"
+
+#: ../../source/developer_guide/testing.md:10
+msgid "`tests/test_meta`"
+msgstr "`tests/test_meta`"
+
+#: ../../source/developer_guide/testing.md:11
+msgid "Containers, collections, and local solver contracts"
+msgstr "容器、collection 与局部 solver 合同"
+
+#: ../../source/developer_guide/testing.md:11
+msgid "`tests/test_utils`"
+msgstr "`tests/test_utils`"
+
+#: ../../source/developer_guide/testing.md:12
+msgid "Production utilities and environment option parsing"
+msgstr "生产工具函数与运行时环境选项解析"
+
+#: ../../source/developer_guide/testing.md:12
+msgid "`tests/test_testing`"
+msgstr "`tests/test_testing`"
+
+#: ../../source/developer_guide/testing.md:13
+msgid "Test helpers and reference implementations"
+msgstr "测试工具与 reference 实现"
+
+#: ../../source/developer_guide/testing.md:13
+msgid "`tests/test_functional`"
+msgstr "`tests/test_functional`"
+
+#: ../../source/developer_guide/testing.md:14
+msgid "Attention wrappers, autograd, and local runtime contracts"
+msgstr "Attention wrapper、autograd 与 runtime 局部合同"
+
+#: ../../source/developer_guide/testing.md:14
+msgid "`tests/test_kernel/cuda`"
+msgstr "`tests/test_kernel/cuda`"
+
+#: ../../source/developer_guide/testing.md:15
+msgid "Native CUDA kernel contracts"
+msgstr "原生 CUDA kernel 合同"
+
+#: ../../source/developer_guide/testing.md:15
+msgid "`tests/test_kernel/cutedsl`"
+msgstr "`tests/test_kernel/cutedsl`"
+
+#: ../../source/developer_guide/testing.md:16
+msgid "CuTeDSL kernels and architecture-specific behavior"
+msgstr "CuTeDSL kernel 与架构相关行为"
+
+#: ../../source/developer_guide/testing.md:16
+msgid "`tests/test_kernel/triton`"
+msgstr "`tests/test_kernel/triton`"
+
+#: ../../source/developer_guide/testing.md:17
+msgid "Triton kernels, including range operations"
+msgstr "Triton kernel，包括 range operations"
+
+#: ../../source/developer_guide/testing.md:17
+msgid "`tests/test_distributed`"
+msgstr "`tests/test_distributed`"
+
+#: ../../source/developer_guide/testing.md:18
+msgid "Process groups, collectives, and distributed API/runtime integration"
+msgstr "进程组、collective 与分布式 API/runtime 集成"
+
+#: ../../source/developer_guide/testing.md:18
+msgid "`tests/test_api`"
+msgstr "`tests/test_api`"
+
+#: ../../source/developer_guide/testing.md:19
+msgid "Local public API and mask construction contracts"
+msgstr "局部公开 API 与 mask 构造合同"
+
+#: ../../source/developer_guide/testing.md:19
+msgid "`tests/test_pipeline.py`"
+msgstr "`tests/test_pipeline.py`"
+
+#: ../../source/developer_guide/testing.md:20
+msgid "End-to-end attention pipeline"
+msgstr "端到端 attention pipeline"
+
+#: ../../source/developer_guide/testing.md:22
+msgid ""
+"A worker-based kernel sweep can still belong in `test_kernel`: spawning workers alone does not "
+"make the behavior under test a communication integration test. Inspect its test base and required"
+" world size before running it."
+msgstr "通过 worker 扫描参数的 kernel 测试仍可归入 `test_kernel`：启动 worker 本身不表示在测试通信集成。运行前应核对测试基类及要求的 world size。"
+
+#: ../../source/developer_guide/testing.md:26
+msgid "Running a focused test"
+msgstr "运行针对性测试"
+
+#: ../../source/developer_guide/testing.md:28
+msgid ""
+"Run commands from the repository root with the dependencies from the [installation "
+"guide](../user_guide/install.md). Select enough GPUs for the test's world size. The following "
+"commands use one selected GPU for local tests:"
+msgstr "在仓库根目录执行命令，并按[安装指南](../user_guide/install.md)准备依赖。根据测试 world size 选择足够的 GPU。以下命令使用一张指定 GPU 运行局部测试："
+
+#: ../../source/developer_guide/testing.md:39
+msgid ""
+"Use `python -m pytest --collect-only -q tests` to inspect collection without claiming execution. "
+"`magi_attention.testing.parameterize` runs combinations inside each test method, so the pytest "
+"item count is not the parameter count. Distributed tests use the library's process launcher; do "
+"not also launch the same test with `torchrun` unless its entry point explicitly requires it."
+msgstr ""
+"使用 `python -m pytest --collect-only -q tests` "
+"核对收集结果，不能据此声称已执行。`magi_attention.testing.parameterize` 在测试方法内部运行参数组合，因此 pytest item "
+"数不等于参数组合数。分布式测试使用库内 launcher；除非入口明确要求，不要再用 `torchrun` 重复启动。"
+
+#: ../../source/developer_guide/testing.md:45
+msgid "Writing tests"
+msgstr "编写测试"
+
+#: ../../source/developer_guide/testing.md:47
+msgid ""
+"Use `unittest.TestCase` and `unittest.main()` for ordinary CPU or single-GPU contracts. Use the "
+"existing distributed test base and its `run_tests()` entry point when process-group or worker "
+"lifecycle is required. Prefer the library's `parameterize`, environment-switching helpers, and "
+"tensor assertions; keep exact equality distinct from numerical tolerance checks."
+msgstr ""
+"普通 CPU 或单 GPU 合同使用 `unittest.TestCase` 和 `unittest.main()`。需要进程组或 worker 生命周期时，复用现有分布式基类及 "
+"`run_tests()` 入口。优先使用库内 `parameterize`、环境切换工具及 tensor 断言；区分精确相等与数值容差。"
+
+#: ../../source/developer_guide/testing.md:53
+msgid ""
+"Use `magi_attention.utils.arch` for architecture conditions and the version helpers for "
+"dependency gates. Do not skip GPU tests merely because CUDA is unavailable: a required runtime "
+"failure should be visible. Keep architecture, version, rank-count, and explicit profiling "
+"restrictions meaningful."
+msgstr ""
+"使用 `magi_attention.utils.arch` 判断架构，使用版本 helper 设置依赖门禁。不要仅因 CUDA 不可用而跳过 GPU "
+"测试：所需运行环境故障应直接暴露。保留有意义的架构、版本、rank 数量及显式 profiling 限制。"
+
+#: ../../source/developer_guide/testing.md:58
+msgid ""
+"Helpers shared by independent tests belong in `magi_attention.testing`; small case-specific "
+"helpers stay in their test module. Do not import a test module from another test module. Keep "
+"profiling workloads explicitly opt-in."
+msgstr ""
+"独立测试共享的 helper 放入 `magi_attention.testing`，仅服务当前用例的小 helper 留在测试模块内。测试模块之间不要互相 import。Profiling "
+"工作负载必须显式启用。"
+
+#: ../../source/developer_guide/testing.md:62
+msgid "Python and C++ common backends"
+msgstr "Python 与 C++ common backend"
+
+#: ../../source/developer_guide/testing.md:64
+msgid ""
+"Common container tests select implementation types inside each file. The `TestAttnRange`, "
+"`TestAttnRanges`, rectangle, and protocol classes exercise Python; their `TestCpp*` subclasses "
+"repeat the contracts with native types. These tests do not change the package's backend or reload"
+" modules. `AttnMask` is Python-only. An unavailable native extension skips its direct "
+"implementation tests."
+msgstr ""
+"Common 容器测试在各文件内部选择实现类型。`TestAttnRange`、`TestAttnRanges`、rectangle 和 protocol 类验证 Python 实现，其 "
+"`TestCpp*` 子类使用原生类型重复验证合同。测试不切换包的 backend，也不 reload 模块。`AttnMask` 仅有 Python 实现。未安装原生扩展时跳过其直接实现测试。"
+
+#: ../../source/developer_guide/testing.md:75
+msgid ""
+"The self-attention metadata and ground-truth dispatcher suites also check import-time routing. "
+"Each file launches its own Python and C++ suites with `multiprocessing` spawn, setting "
+"`MAGI_ATTENTION_CPP_BACKEND` before the child imports the package. It restores the parent's "
+"environment immediately after startup and checks child failures and timeouts. There is no "
+"recursive pytest wrapper or separate CI coverage mode. Keep backend setup local to these tests."
+msgstr ""
+"Self-attention 元数据及 ground-truth dispatcher suite 还验证 import 时的路由。每个文件通过 `multiprocessing` spawn "
+"启动自己的 Python/C++ suite，在子进程 import 包之前设置 "
+"`MAGI_ATTENTION_CPP_BACKEND`。启动后立即恢复父进程环境，并检查子进程失败和超时。不递归启动 pytest，也不设置额外的 CI coverage 模式。Backend"
+" 设置保留在这些测试内部。"
+
+#: ../../source/developer_guide/testing.md:82
+msgid "Native kernel precompilation"
+msgstr "原生 kernel 预编译"
+
+#: ../../source/developer_guide/testing.md:84
+msgid ""
+"Test classes that exercise native FFA variants declare `precompile_kernel_specs()`, ideally using"
+" the same constants as their parameter matrix. Register their module in "
+"`magi_attention.testing.precompile` when adding or moving a suite. Inspect the requested kernels "
+"without compiling them:"
+msgstr ""
+"覆盖原生 FFA 变体的测试类声明 `precompile_kernel_specs()`，尽量与参数矩阵共用常量。新增或移动 suite 时，在 "
+"`magi_attention.testing.precompile` 中登记模块。以下命令只查看 kernel 清单，不启动编译："
+
+#: ../../source/developer_guide/testing.md:93
+msgid ""
+"This registry feeds the CI prebuild as well as manual precompilation. Keep it synchronized with "
+"the real test modules; do not include removed extension APIs."
+msgstr "该注册表同时服务 CI prebuild 和手动预编译。应与真实测试模块同步，不包含已删除扩展接口。"
+
+#: ../../source/developer_guide/testing.md:96
+msgid "Kernel Backend"
+msgstr "Kernel backend"
+
+#: ../../source/developer_guide/testing.md:98
+msgid ""
+"`test_pipeline.py` parameterizes over **all five kernel backends** (`ffa`, `sdpa`, `sdpa_ol`, "
+"`fa4`, `cutedsl`). Each `attn_config` is tagged with the set of backends it applies to, so "
+"incompatible (backend, config) pairs are automatically skipped."
+msgstr ""
+"`test_pipeline.py` 对 **五种 kernel backend**（`ffa`、`sdpa`、`sdpa_ol`、`fa4`、`cutedsl`）进行参数化。各 "
+"`attn_config` 标注适用 backend，自动跳过不兼容的组合。"
+
+#: ../../source/developer_guide/testing.md:100
+msgid ""
+"`ffa` / `fa4` / `cutedsl` -- run large-seqlen configs with fp16/bf16, using norm-based + "
+"mismatch-based tolerance checks."
+msgstr "`ffa` / `fa4` / `cutedsl`：使用 fp16/bf16 运行较长序列配置，以 norm 和 mismatch 容差判定。"
+
+#: ../../source/developer_guide/testing.md:101
+msgid "`sdpa` / `sdpa_ol` -- run small-seqlen configs with fp64, using exact (EPSILON) tolerance checks."
+msgstr "`sdpa` / `sdpa_ol`：使用 fp64 运行较短序列配置，以精确的 EPSILON 容差判定。"
+
+#: ../../source/developer_guide/testing.md:103
+msgid "The backend is controlled by `MAGI_ATTENTION_KERNEL_BACKEND` (see below)."
+msgstr "Backend 通过 `MAGI_ATTENTION_KERNEL_BACKEND` 控制，见下文。"
+
+#: ../../source/developer_guide/testing.md:105
+msgid "Test Case Filtering"
+msgstr "测试用例筛选"
+
+#: ../../source/developer_guide/testing.md:107
+msgid ""
+"You can use environment variables to precisely control which parameterized test cases are "
+"executed. All filter conditions use **AND** logic -- only test cases that satisfy all active "
+"filters will run."
+msgstr "可以使用环境变量精确筛选参数化测试用例。所有筛选条件按 **AND** 组合，只运行满足全部启用条件的用例。"
+
+#: ../../source/developer_guide/testing.md:109
+msgid "Environment Variables"
+msgstr "环境变量"
+
+#: ../../source/developer_guide/testing.md:111 ../../source/developer_guide/testing.md:194
+msgid "Environment Variable"
+msgstr "环境变量"
+
+#: ../../source/developer_guide/testing.md:111
+msgid "Parametrize Dimension"
+msgstr "参数维度"
+
+#: ../../source/developer_guide/testing.md:111
+msgid "Match Target"
+msgstr "匹配目标"
+
+#: ../../source/developer_guide/testing.md:111
+msgid "`MAGI_ATTENTION_TEST_WORLD_SIZE`"
+msgstr "`MAGI_ATTENTION_TEST_WORLD_SIZE`"
+
+#: ../../source/developer_guide/testing.md:113
+msgid "`world_size`"
+msgstr "`world_size`"
+
+#: ../../source/developer_guide/testing.md:113
+msgid "Comma-separated integers, e.g. `2` or `2,4`"
+msgstr "逗号分隔的整数，例如 `2` 或 `2,4`"
+
+#: ../../source/developer_guide/testing.md:113
+msgid "`MAGI_ATTENTION_TEST_ATTN_CONFIG`"
+msgstr "`MAGI_ATTENTION_TEST_ATTN_CONFIG`"
+
+#: ../../source/developer_guide/testing.md:114
+msgid "`attn_config`"
+msgstr "`attn_config`"
+
+#: ../../source/developer_guide/testing.md:114
+msgid "`NAME` field"
+msgstr "`NAME` 字段"
+
+#: ../../source/developer_guide/testing.md:114
+msgid "`MAGI_ATTENTION_TEST_NUM_HEADS`"
+msgstr "`MAGI_ATTENTION_TEST_NUM_HEADS`"
+
+#: ../../source/developer_guide/testing.md:115
+msgid "`num_heads`"
+msgstr "`num_heads`"
+
+#: ../../source/developer_guide/testing.md:115
+msgid "Underscore-separated, e.g. `8_8` for `(8, 8)`"
+msgstr "下划线分隔，例如 `(8, 8)` 对应 `8_8`"
+
+#: ../../source/developer_guide/testing.md:115
+msgid "`MAGI_ATTENTION_TEST_HEAD_DIM`"
+msgstr "`MAGI_ATTENTION_TEST_HEAD_DIM`"
+
+#: ../../source/developer_guide/testing.md:116
+msgid "`head_dim`"
+msgstr "`head_dim`"
+
+#: ../../source/developer_guide/testing.md:116
+msgid "String repr, e.g. `64`"
+msgstr "字符串表示，例如 `64`"
+
+#: ../../source/developer_guide/testing.md:116
+msgid "`MAGI_ATTENTION_TEST_DTYPE`"
+msgstr "`MAGI_ATTENTION_TEST_DTYPE`"
+
+#: ../../source/developer_guide/testing.md:117
+msgid "`dtype`"
+msgstr "`dtype`"
+
+#: ../../source/developer_guide/testing.md:117
+msgid "String repr, e.g. `torch.float16`"
+msgstr "字符串表示，例如 `torch.float16`"
+
+#: ../../source/developer_guide/testing.md:117
+msgid "`MAGI_ATTENTION_TEST_BACKEND`"
+msgstr "`MAGI_ATTENTION_TEST_BACKEND`"
+
+#: ../../source/developer_guide/testing.md:118
+msgid "`backend`"
+msgstr "`backend`"
+
+#: ../../source/developer_guide/testing.md:118
+msgid "Canonical `.value`, e.g. `ffa` / `sdpa` / `sdpa_ol` / `fa4` / `cutedsl`"
+msgstr "规范 `.value`，例如 `ffa` / `sdpa` / `sdpa_ol` / `fa4` / `cutedsl`"
+
+#: ../../source/developer_guide/testing.md:120
+msgid ""
+"For dict-typed parameters (e.g. `attn_config`), the filter matches against the `NAME` field "
+"value. For `Enum` parameters (e.g. `backend`), it matches the canonical `.value` (`ffa`), the "
+"member `.name` (`FFA`), and `str()` (`MagiAttentionKernelBackend.FFA`). For other types, the "
+"`str()` representation is used."
+msgstr ""
+"字典类型参数（如 `attn_config`）匹配 `NAME` 字段。Enum 类型参数（如 `backend`）匹配规范 `.value`（`ffa`）、成员 "
+"`.name`（`FFA`）以及 `str()`（`MagiAttentionKernelBackend.FFA`）。其他类型匹配 `str()` 表示。"
+
+#: ../../source/developer_guide/testing.md:122
+msgid ""
+"**Note:** `overlap_config` and `random_type_mapping` have been moved from `@parameterize` "
+"dimensions into `FlagCombGenerator` flags and are selected automatically by the heuristic "
+"strategy. The env vars `MAGI_ATTENTION_TEST_OVERLAP_CONFIG` and "
+"`MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` no longer take effect."
+msgstr ""
+"**注意：** `overlap_config` 和 `random_type_mapping` 已从 `@parameterize` 维度移入 `FlagCombGenerator` "
+"flags，由启发式策略选择。`MAGI_ATTENTION_TEST_OVERLAP_CONFIG` 和 `MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING` "
+"不再生效。"
+
+#: ../../source/developer_guide/testing.md:124
+msgid ""
+"**Note:** `num_heads`, `head_dims` and `dtype` are one `@parameterize` dimension (`shape_cfg`, 16"
+" triples). The list is split by world-size parity: odd world sizes run 8 triples and even world "
+"sizes run the other 8, so every triple runs on four world sizes. The "
+"`MAGI_ATTENTION_TEST_NUM_HEADS` / `MAGI_ATTENTION_TEST_HEAD_DIM` / `MAGI_ATTENTION_TEST_DTYPE` "
+"filters match the unpacked values and are unaffected."
+msgstr ""
+"**注意：** `num_heads`、`head_dims` 和 `dtype` 合为一个 `@parameterize` 维度（`shape_cfg`，16 个三元组）。按 world-"
+"size 奇偶分组：奇数 world size 运行 8 组，偶数运行另 8 组，每组在四个 world size 上运行。`MAGI_ATTENTION_TEST_NUM_HEADS` / "
+"`MAGI_ATTENTION_TEST_HEAD_DIM` / `MAGI_ATTENTION_TEST_DTYPE` 仍匹配解包后的值。"
+
+#: ../../source/developer_guide/testing.md:126
+msgid ""
+"Values are **comma-separated fnmatch pattern lists**, supporting `*`, `?` and other glob "
+"wildcards."
+msgstr "值采用**逗号分隔的 fnmatch 模式列表**，支持 `*`、`?` 等通配符。"
+
+#: ../../source/developer_guide/testing.md:128 ../../source/developer_guide/testing.md:169
+msgid "Usage Examples"
+msgstr "使用示例"
+
+#: ../../source/developer_guide/testing.md:165
+msgid "Flag Pinning (User-Preset Environment Variables)"
+msgstr "固定 flags（用户预设环境变量）"
+
+#: ../../source/developer_guide/testing.md:167
+msgid ""
+"If the user has already set a flag's environment variable before running tests, the test "
+"framework will **respect the user's setting** and lock that flag to the user-specified value. "
+"`FlagCombGenerator` will never override it."
+msgstr "如果运行前已设置某个 flag 的环境变量，测试框架会**尊重并锁定用户设置**，`FlagCombGenerator` 不会覆盖它。"
+
+#: ../../source/developer_guide/testing.md:192
+msgid "Supported Flag Environment Variables"
+msgstr "支持的 flag 环境变量"
+
+#: ../../source/developer_guide/testing.md:194
+msgid "Flag Name"
+msgstr "Flag 名称"
+
+#: ../../source/developer_guide/testing.md:194
+msgid "Value Type"
+msgstr "值类型"
+
+#: ../../source/developer_guide/testing.md:194
+msgid "`CUDA_DEVICE_MAX_CONNECTIONS`"
+msgstr "`CUDA_DEVICE_MAX_CONNECTIONS`"
+
+#: ../../source/developer_guide/testing.md:196
+msgid "`device_max_connections`"
+msgstr "`device_max_connections`"
+
+#: ../../source/developer_guide/testing.md:196
+msgid "Integer (e.g. `1` or `8`)"
+msgstr "整数，例如 `1` 或 `8`"
+
+#: ../../source/developer_guide/testing.md:196
+msgid "`MAGI_ATTENTION_KERNEL_BACKEND`"
+msgstr "`MAGI_ATTENTION_KERNEL_BACKEND`"
+
+#: ../../source/developer_guide/testing.md:197
+msgid "kernel backend"
+msgstr "kernel backend"
+
+#: ../../source/developer_guide/testing.md:197
+msgid "`ffa` / `sdpa` / `sdpa_ol` / `fa4` / `cutedsl`"
+msgstr "`ffa` / `sdpa` / `sdpa_ol` / `fa4` / `cutedsl`"
+
+#: ../../source/developer_guide/testing.md:197
+msgid "`MAGI_ATTENTION_DETERMINISTIC_MODE`"
+msgstr "`MAGI_ATTENTION_DETERMINISTIC_MODE`"
+
+#: ../../source/developer_guide/testing.md:198
+msgid "`deterministic_mode`"
+msgstr "`deterministic_mode`"
+
+#: ../../source/developer_guide/testing.md:198 ../../source/developer_guide/testing.md:199
+#: ../../source/developer_guide/testing.md:200 ../../source/developer_guide/testing.md:201
+#: ../../source/developer_guide/testing.md:202 ../../source/developer_guide/testing.md:203
+#: ../../source/developer_guide/testing.md:204 ../../source/developer_guide/testing.md:205
+msgid "`0` / `1`"
+msgstr "`0` / `1`"
+
+#: ../../source/developer_guide/testing.md:198
+msgid "`MAGI_ATTENTION_HIERARCHICAL_COMM`"
+msgstr "`MAGI_ATTENTION_HIERARCHICAL_COMM`"
+
+#: ../../source/developer_guide/testing.md:199
+msgid "`enable_hier_comm`"
+msgstr "`enable_hier_comm`"
+
+#: ../../source/developer_guide/testing.md:199
+msgid "`MAGI_ATTENTION_QO_COMM`"
+msgstr "`MAGI_ATTENTION_QO_COMM`"
+
+#: ../../source/developer_guide/testing.md:200
+msgid "`enable_qo_comm`"
+msgstr "`enable_qo_comm`"
+
+#: ../../source/developer_guide/testing.md:200
+msgid "`MAGI_ATTENTION_NATIVE_GRPCOLL`"
+msgstr "`MAGI_ATTENTION_NATIVE_GRPCOLL`"
+
+#: ../../source/developer_guide/testing.md:201
+msgid "`enable_native_grpcoll`"
+msgstr "`enable_native_grpcoll`"
+
+#: ../../source/developer_guide/testing.md:201
+msgid "`MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE`"
+msgstr "`MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE`"
+
+#: ../../source/developer_guide/testing.md:202
+msgid "`fwd_hp_reduce`"
+msgstr "`fwd_hp_reduce`"
+
+#: ../../source/developer_guide/testing.md:202
+msgid "`MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE`"
+msgstr "`MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE`"
+
+#: ../../source/developer_guide/testing.md:203
+msgid "`bwd_hp_reduce`"
+msgstr "`bwd_hp_reduce`"
+
+#: ../../source/developer_guide/testing.md:203
+msgid "`MAGI_ATTENTION_FLATTEN_HEAD_GROUPS`"
+msgstr "`MAGI_ATTENTION_FLATTEN_HEAD_GROUPS`"
+
+#: ../../source/developer_guide/testing.md:204
+msgid "`flatten_head_groups`"
+msgstr "`flatten_head_groups`"
+
+#: ../../source/developer_guide/testing.md:204
+msgid "`MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE`"
+msgstr "`MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE`"
+
+#: ../../source/developer_guide/testing.md:205
+msgid "`bwd_hide_tail_reduce`"
+msgstr "`bwd_hide_tail_reduce`"
+
+#: ../../source/developer_guide/testing.md:207
+msgid ""
+"**Note:** The legacy env vars `MAGI_ATTENTION_SDPA_BACKEND` and `MAGI_ATTENTION_FA4_BACKEND` are "
+"still supported for backward compatibility, but must **not** be set together with "
+"`MAGI_ATTENTION_KERNEL_BACKEND`."
+msgstr ""
+"**注意：** 保留旧环境变量 `MAGI_ATTENTION_SDPA_BACKEND` 和 `MAGI_ATTENTION_FA4_BACKEND` 的兼容性，但**不能**与 "
+"`MAGI_ATTENTION_KERNEL_BACKEND` 同时设置。"
+
+#: ../../source/developer_guide/testing.md:209
+msgid "Flag Combination Generator"
+msgstr "Flag 组合生成器"
+
+#: ../../source/developer_guide/testing.md:211
+msgid ""
+"Tests use `FlagCombGenerator` to automatically produce combinations of flags, including "
+"environment variable flags (e.g. `deterministic_mode`, `enable_qo_comm`) and test parameter flags"
+" (`overlap_config`, `random_type_mapping`)."
+msgstr ""
+"测试通过 `FlagCombGenerator` 自动生成 flags 组合，包括环境变量 flags（如 `deterministic_mode`、`enable_qo_comm`）及测试参数"
+" flags（`overlap_config`、`random_type_mapping`）。"
+
+#: ../../source/developer_guide/testing.md:213
+msgid ""
+"These flags are combined using a `heuristic` strategy instead of full Cartesian product, "
+"significantly reducing the total number of test combinations."
+msgstr "这些 flags 采用 `heuristic` 策略组合，避免完整笛卡尔积，减少测试组合数量。"
+
+#: ../../source/developer_guide/testing.md:215
+msgid "Context-Aware Filtering"
+msgstr "依上下文筛选"
+
+#: ../../source/developer_guide/testing.md:217
+msgid ""
+"`FlagCombGenerator.get_next_valid_comb(test_config, is_valid_fn)` filters out illegal flag "
+"combinations based on the current test context. Constraint rules include:"
+msgstr "`FlagCombGenerator.get_next_valid_comb(test_config, is_valid_fn)` 根据当前测试上下文筛除不合法的组合，约束包括："
+
+#: ../../source/developer_guide/testing.md:219
+msgid "`no_overlap` mode disallows `qo_comm=True`"
+msgstr "`no_overlap` 模式不允许 `qo_comm=True`"
+
+#: ../../source/developer_guide/testing.md:220
+msgid "`qo_comm=True` only allows `disable_mso` or `no_overlap` overlap configs"
+msgstr "`qo_comm=True` 仅允许 `disable_mso` 或 `no_overlap` overlap 配置"
+
+#: ../../source/developer_guide/testing.md:221
+msgid "`qo_comm=True` disallows `hier_comm=True` or `bwd_hide_tail_reduce=True`"
+msgstr "`qo_comm=True` 不允许 `hier_comm=True` 或 `bwd_hide_tail_reduce=True`"
+
+#: ../../source/developer_guide/testing.md:222
+msgid ""
+"`native_grpcoll=True` disallows `hier_comm=True`; with `head_dim != head_dim_v` it also requires "
+"`num_heads_kv * (head_dim + head_dim_v)` to be a multiple of the hidden-size alignment (256 for "
+"fp16/bf16)"
+msgstr ""
+"`native_grpcoll=True` 不允许 `hier_comm=True`；当 `head_dim != head_dim_v` 时，还要求 `num_heads_kv * "
+"(head_dim + head_dim_v)` 为 hidden-size alignment 的整数倍（fp16/bf16 为 256）"
+
+#: ../../source/developer_guide/testing.md:223
+msgid ""
+"`flatten_head_groups=True` requires `qo_comm=True`, and is incompatible with sink and "
+"`return_max_logits`"
+msgstr "`flatten_head_groups=True` 要求 `qo_comm=True`，并且不能使用 sink 或 `return_max_logits`"
+
+#: ../../source/developer_guide/testing.md:224
+msgid ""
+"`fa4` backend disallows `deterministic`, `fwd_hp_reduce`, `bwd_hp_reduce`, `qo_comm`, `sink`, "
+"`bwd_hide_tail_reduce`"
+msgstr ""
+"`fa4` backend 不允许 "
+"`deterministic`、`fwd_hp_reduce`、`bwd_hp_reduce`、`qo_comm`、`sink`、`bwd_hide_tail_reduce`"
+
+#: ../../source/developer_guide/testing.md:225
+msgid "`sdpa` / `sdpa_ol` backends disallow `native_grpcoll`"
+msgstr "`sdpa` / `sdpa_ol` backend 不允许 `native_grpcoll`"
+
+#: ../../source/developer_guide/testing.md:226
+msgid "etc."
+msgstr "等等。"
+
+#: ../../source/developer_guide/testing.md:228
+msgid ""
+"Invalid combinations are not wasted -- they are deferred and retried in future calls with "
+"different test contexts. If all possible combinations are invalid, a `RuntimeError` is raised "
+"immediately instead of hanging indefinitely."
+msgstr "不合法组合不会被浪费，而是延后到其他上下文重试。全部可能组合都不合法时立即抛出 `RuntimeError`，避免无限等待。"
+
+#: ../../source/developer_guide/testing.md:230
+msgid "OverlapConfig degree Semantics"
+msgstr "OverlapConfig degree 语义"
+
+#: ../../source/developer_guide/testing.md:232
+msgid "`OverlapConfig` uses the `degree` parameter to control overlap behavior:"
+msgstr "`OverlapConfig` 通过 `degree` 参数控制 overlap 行为："
+
+#: ../../source/developer_guide/testing.md:234
+msgid "degree"
+msgstr "degree"
+
+#: ../../source/developer_guide/testing.md:234
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/developer_guide/testing.md:234
+msgid "`0`"
+msgstr "`0`"
+
+#: ../../source/developer_guide/testing.md:236
+msgid "**no overlap** -- blocking communication + merged attn_arg, no LSE reduce precision loss"
+msgstr "**不 overlap**：阻塞通信并合并 attn_arg，不引入 LSE reduce 精度损失"
+
+#: ../../source/developer_guide/testing.md:236
+msgid "`1`"
+msgstr "`1`"
+
+#: ../../source/developer_guide/testing.md:237
+msgid "local + 1 remote stage, no chunking (no multi-stage overlap)"
+msgstr "本地加 1 个远端 stage，不分块（无多 stage overlap）"
+
+#: ../../source/developer_guide/testing.md:237
+msgid "`N (N>=2)`"
+msgstr "`N (N>=2)`"
+
+#: ../../source/developer_guide/testing.md:238
+msgid "local + N remote stages (static multi-stage overlap)"
+msgstr "本地加 N 个远端 stage（静态多 stage overlap）"
+
+#: ../../source/developer_guide/testing.md:238
+msgid "`None`"
+msgstr "`None`"
+
+#: ../../source/developer_guide/testing.md:239
+msgid "Dynamic mode (solver determines optimal degree automatically)"
+msgstr "动态模式，由 solver 自动选择最佳 degree"
+
+#: ../../source/developer_guide/testing.md:255
+msgid "Architecture-independent coverage"
+msgstr "架构无关覆盖"
+
+#: ../../source/developer_guide/testing.md:257
+msgid ""
+"Use `@pytest.mark.arch_independent` on reviewed CPU/Python contracts whose coverage does not "
+"depend on GPU architecture. Class markers apply to every method, so reconsider the marker before "
+"adding GPU cases to a marked class. Do not mark CUDA numerics, gradients, precision/RNG, "
+"compiler, or collective coverage merely because it is slow or shared by both CI platforms."
+msgstr ""
+"仅对已审核且覆盖不依赖 GPU 架构的 CPU/Python 合同使用 `@pytest.mark.arch_independent`。类 marker 作用于全部方法，向已标记类新增 GPU "
+"用例前需重新判断。不要仅因 CUDA 数值、梯度、精度/RNG、编译器或 collective 测试很慢，或两个 CI 平台都会运行，就将其标记。"
+
+#: ../../source/developer_guide/testing.md:263
+msgid ""
+"The root collection hook skips these items only when `TASK_CI_PLATFORM` is `b300` or `b300_fa4` "
+"and the actual device is Blackwell. Hopper CI owns the shared coverage. Without that CI profile, "
+"local Blackwell runs remain complete; `--skip-slow`, architecture restrictions, and optional-"
+"dependency skips retain their existing behavior. The marker changes execution, not collection."
+msgstr ""
+"根收集 hook 仅在 `TASK_CI_PLATFORM` 为 `b300` 或 `b300_fa4` 且实际设备是 Blackwell 时跳过这些 item，共享覆盖由 Hopper CI "
+"承担。没有对应 CI profile 时，本地 Blackwell 运行仍完整；`--skip-slow`、架构及可选依赖限制保持原行为。Marker 改变执行，不改变收集。"
+
+#: ../../source/developer_guide/testing.md:269
+msgid ""
+"The portable runner discovers the root hook when testing absolute paths from its temporary "
+"working directory with `--import-mode=append`; it continues to import the installed wheel. The "
+"tracked root `conftest.py` and tests already participate in the main package's trigger/portable "
+"input digests, so changing this policy invalidates previous validation without a cache schema "
+"change."
+msgstr ""
+"Portable runner 在临时工作目录使用绝对测试路径和 `--import-mode=append`，仍可发现根 hook 并导入已安装 wheel。已跟踪的根 "
+"`conftest.py` 和 tests 参与主包 trigger/portable 输入摘要，因此修改此策略会使原验证失效，无需改变 cache schema。"
+
+#: ../../source/developer_guide/testing.md:275
+msgid "Memory ledger reconciliation"
+msgstr "内存模型实测核对"
+
+#: ../../source/developer_guide/testing.md:277
+msgid ""
+"The analytical memory-budget tests run without launching a large attention case. For an explicit "
+"native FFA memory check on Hopper, use `python -m exps.attn.ffa_mem_budget --help` to inspect the"
+" opt-in experiment."
+msgstr ""
+"内存预算单测只验证解析模型，不启动大型 attention 用例。需要在 Hopper 上显式核对原生 FFA 的内存时，使用 `python -m "
+"exps.attn.ffa_mem_budget --help` 查看手动实验入口。"

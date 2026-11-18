@@ -16,6 +16,7 @@ We are committed to continually improving the performance and generality of Magi
 :caption: Contents
 
 user_guide/toc
+developer_guide/toc
 blog/toc
 
 ```
