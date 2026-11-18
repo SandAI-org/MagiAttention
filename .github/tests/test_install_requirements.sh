@@ -201,4 +201,39 @@ expect_text "$output" "Cannot read $workspace/missing_constraint.txt"
 run_install 1 "$project" FAKE_PIP_STATUS=1
 expect_no_upgrade
 
+# Every runner must patch its installed FA4, independently of wheel cache hits.
+# Stub external installation commands; execute the real install orchestration.
+lifecycle_bin="$workspace/lifecycle-bin"
+mkdir -p "$lifecycle_bin"
+cat > "$lifecycle_bin/bash" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$INSTALL_LIFECYCLE_LOG"
+if [[ "$1" == extensions/scripts/apply_patches.sh ]]; then
+    exit "${PATCH_STATUS:-0}"
+fi
+SH
+cat > "$lifecycle_bin/python" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$INSTALL_LIFECYCLE_LOG"
+SH
+cat > "$lifecycle_bin/pip" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$INSTALL_LIFECYCLE_LOG"
+SH
+chmod +x "$lifecycle_bin/"*
+for patch_status in 0 7; do
+    lifecycle_log="$workspace/lifecycle-$patch_status.log"
+    actual_status=0
+    (
+        cd "$repo_root"
+        env -u BASH_ENV -u ENV PATH="$lifecycle_bin:$PATH" \
+            INSTALL_LIFECYCLE_LOG="$lifecycle_log" PATCH_STATUS="$patch_status" \
+            /bin/bash .github/scripts/run_build_tests.sh install
+    ) > "$output" 2>&1 || actual_status=$?
+    [[ "$actual_status" == "$patch_status" ]]
+    [[ "$(tail -n 1 "$lifecycle_log")" == extensions/scripts/apply_patches.sh ]]
+    expect_line "$lifecycle_log" ".github/scripts/install_source_dependencies.py"
+    expect_text "$lifecycle_log" "install -r extensions/requirements.txt"
+done
+
 echo "install_requirements.sh tests passed"

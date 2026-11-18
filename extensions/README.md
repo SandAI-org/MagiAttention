@@ -50,6 +50,7 @@ Extensions to provide supplementary utilities based on MagiAttention.
   cd MagiAttention/extensions
 
   pip install --no-build-isolation .
+  bash scripts/apply_patches.sh
   ```
 
 
