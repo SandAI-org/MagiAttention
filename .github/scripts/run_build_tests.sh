@@ -26,8 +26,11 @@ install_dependencies() {
     python .github/scripts/install_source_dependencies.py
     pip install -r extensions/requirements.txt \
         --index-url "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple/}"
-    # Wheels do not apply patches to dependencies in a fresh runner environment.
-    PYTHON=python bash extensions/scripts/apply_patches.sh
+    # Extension tests use the upstream FA4 package. The b300_fa4 profile
+    # uses the FlashAttention submodule with an older, incompatible CuTeDSL.
+    if [[ "${CI_TEST_EXTENSIONS:?CI_TEST_EXTENSIONS is required}" == true ]]; then
+        PYTHON=python bash extensions/scripts/apply_patches.sh
+    fi
 }
 
 build() {

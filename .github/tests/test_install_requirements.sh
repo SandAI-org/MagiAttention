@@ -201,7 +201,7 @@ expect_text "$output" "Cannot read $workspace/missing_constraint.txt"
 run_install 1 "$project" FAKE_PIP_STATUS=1
 expect_no_upgrade
 
-# Every runner must patch its installed FA4, independently of wheel cache hits.
+# Profiles that test extensions must patch their installed FA4.
 # Stub external installation commands; execute the real install orchestration.
 lifecycle_bin="$workspace/lifecycle-bin"
 mkdir -p "$lifecycle_bin"
@@ -221,17 +221,28 @@ cat > "$lifecycle_bin/pip" <<'SH'
 printf '%s\n' "$*" >> "$INSTALL_LIFECYCLE_LOG"
 SH
 chmod +x "$lifecycle_bin/"*
-for patch_status in 0 7; do
-    lifecycle_log="$workspace/lifecycle-$patch_status.log"
+for scenario in true:0 true:7 false:7; do
+    test_extensions=${scenario%:*}
+    patch_status=${scenario#*:}
+    lifecycle_log="$workspace/lifecycle-$test_extensions-$patch_status.log"
     actual_status=0
     (
         cd "$repo_root"
         env -u BASH_ENV -u ENV PATH="$lifecycle_bin:$PATH" \
+            CI_TEST_EXTENSIONS="$test_extensions" \
             INSTALL_LIFECYCLE_LOG="$lifecycle_log" PATCH_STATUS="$patch_status" \
             /bin/bash .github/scripts/run_build_tests.sh install
     ) > "$output" 2>&1 || actual_status=$?
-    [[ "$actual_status" == "$patch_status" ]]
-    [[ "$(tail -n 1 "$lifecycle_log")" == extensions/scripts/apply_patches.sh ]]
+    if [[ "$test_extensions" == true ]]; then
+        [[ "$actual_status" == "$patch_status" ]]
+        [[ "$(tail -n 1 "$lifecycle_log")" == extensions/scripts/apply_patches.sh ]]
+    else
+        [[ "$actual_status" == 0 ]]
+        if grep -Fxq 'extensions/scripts/apply_patches.sh' "$lifecycle_log"; then
+            echo "FA4 patch ran with extensions tests disabled" >&2
+            exit 1
+        fi
+    fi
     expect_line "$lifecycle_log" ".github/scripts/install_source_dependencies.py"
     expect_text "$lifecycle_log" "install -r extensions/requirements.txt"
 done
