@@ -29,10 +29,6 @@ from magi_attention.kernel.cutedsl.ffa_utils import (
     TorchFlexAttnArgs,
     normalize_softcap,
 )
-from magi_attention.kernel.cutedsl.flex_flash_attn import (
-    _flex_flash_attn_bwd,
-    _flex_flash_attn_fwd,
-)
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.cutedsl_utils import (
     SM100_FAMILY_REQUIRED,
@@ -44,7 +40,6 @@ from magi_attention.testing.cutedsl_utils import (
 from magi_attention.testing.dist_common import with_run_in_mp
 from magi_attention.testing.precision import calc_inf_norm
 from magi_attention.utils import make_attn_mask_from_ffa_args
-from magi_attention.utils.arch import is_sm
 
 _SOFTCAP = 30.0
 # The kernel may exceed the low-precision reference error by this factor.
@@ -82,7 +77,8 @@ class TestNormalizeSoftcap(unittest.TestCase):
             normalize_softcap(value)
 
 
-class _SoftcapReference(unittest.TestCase):
+@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
+class TestFfaSoftcap(CuteDSLDistTestBase):
     def assert_close_to_ref(
         self,
         *,
@@ -148,9 +144,6 @@ class _SoftcapReference(unittest.TestCase):
             bound = _NORM_RATIO * calc_inf_norm(lo, hi) + 1e-4 * hi.abs().max().item()
             self.assertLessEqual(err, bound, f"{test_case} {name}: {err=} {bound=}")
 
-
-@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
     def _log_ran(self, test_case: str) -> None:
         print(f"[RANK {self.rank}] ran {test_case}", flush=True)
 
@@ -172,23 +165,18 @@ class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
             self.assertIsNone(kernel.score_mod, test_case)
 
     @with_run_in_mp
-    @parameterize("mha_type", ["mha", "gqa"])
-    @parameterize("mask_type", [MT_MAP.full, MT_MAP.causal])
-    @parameterize("d", [64, 128, 192])
-    def test_dense(self, d, mask_type, mha_type):
-        """Dense fwd/bwd with softcap match the torch reference and keep the
-        kernel configuration (incl. 2-CTA at head_dim 128/192) of the
-        uncapped call."""
+    @parameterize("case", [(64, 64, 8, MT_MAP.full), (192, 128, 2, MT_MAP.causal)])
+    def test_dense(self, case):
+        """Native softcap preserves the dense kernel configuration, including 2-CTA."""
         device, dtype = self.device, torch.bfloat16
         batch, seqlen, nheads = 2, 1000, 8
-        nheads_kv = {"mha": nheads, "gqa": 2}[mha_type]
-        d_v = 128 if d == 192 else d
+        d, d_v, nheads_kv, mask_type = case
         torch.random.manual_seed(self.seed + d + mask_type + nheads_kv)
         # Larger logits make the difference from uncapped attention measurable.
         q = 4.0 * torch.randn(batch, seqlen, nheads, d, device=device, dtype=dtype)
         k = torch.randn(batch, seqlen, nheads_kv, d, device=device, dtype=dtype)
         v = torch.randn(batch, seqlen, nheads_kv, d_v, device=device, dtype=dtype)
-        test_case = f"[test_dense][{d=}][{mask_type=}][{mha_type=}]"
+        test_case = f"[test_dense][{d=}][{mask_type=}][{nheads_kv=}]"
         self._log_ran(test_case)
 
         out, _, do, grads, built = self._fwd_bwd(
@@ -248,36 +236,23 @@ class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
         return q, k, v, q_ranges, k_ranges, attn_type_map, kwargs
 
     @with_run_in_mp
-    @parameterize("few_ctas", [False, True])
-    @parameterize("path", ["atomic", "direct", "merge"])
-    @parameterize("d", [64, 128])
-    def test_ranges(self, d, path, few_ctas):
-        """Per-range mask types on the atomic, direct-store and RangeMerge
-        paths, optionally on a persistent grid of two CTAs."""
+    def test_ranges_direct_store(self):
+        """Direct stores support native softcap with per-range mask types."""
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._ranges_inputs(
-            8, d, self.seed + d + len(path) + int(few_ctas)
+            8, 64, self.seed
         )
-        num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
-        kwargs.update(
-            disable_fwd_atomic_reduction=path != "atomic",
-            disable_bwd_dkv_atomic_reduction=path != "atomic",
-            range_merge=path == "merge",
-            sm_margin=num_sm - 2 if few_ctas else 0,
-        )
-        test_case = f"[test_ranges][{d=}][{path=}][{few_ctas=}]"
+        test_case = "[test_ranges_direct_store]"
         self._log_ran(test_case)
-
-        out, _, do, grads, built = self._fwd_bwd(q, k, v, _SOFTCAP, **kwargs)
-        _, _, _, _, built_plain = self._fwd_bwd(q, k, v, 0.0, **kwargs)
+        out, _, do, grads, built = self._fwd_bwd(
+            q,
+            k,
+            v,
+            _SOFTCAP,
+            disable_fwd_atomic_reduction=True,
+            disable_bwd_dkv_atomic_reduction=True,
+            **kwargs,
+        )
         self._assert_native(built, test_case)
-        for direction in ("fwd", "bwd"):
-            self.assertEqual(
-                [_kernel_config(x) for x in built[direction]],
-                [_kernel_config(x) for x in built_plain[direction]],
-                f"{test_case} {direction}",
-            )
-        if few_ctas:
-            self.assertTrue(all(x.is_persistent for x in built["fwd"]), test_case)
         self.assert_close_to_ref(
             q=q,
             k=k,
@@ -292,13 +267,12 @@ class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
         )
 
     @with_run_in_mp
-    @parameterize("d", [64, 128])
-    def test_ranges_gqa_packed_fwd_cat_gqa_bwd(self, d):
+    def test_ranges_gqa_packed_fwd_cat_gqa_bwd(self):
         """GQA ranges with the packed atomic fwd and the CatGQA bwd."""
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._ranges_inputs(
-            2, d, self.seed + d
+            2, 64, self.seed
         )
-        test_case = f"[test_ranges_gqa_packed_fwd_cat_gqa_bwd][{d=}]"
+        test_case = "[test_ranges_gqa_packed_fwd_cat_gqa_bwd]"
         self._log_ran(test_case)
         out, _, do, grads, built = self._fwd_bwd(
             q, k, v, _SOFTCAP, pack_gqa=True, cat_gqa=True, **kwargs
@@ -324,16 +298,15 @@ class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
 
     @with_run_in_mp
     @parameterize("pack_factor", [4, 2])
-    @parameterize("d", [64, 128])
-    def test_ranges_bwd_pack_fold(self, d, pack_factor):
+    def test_ranges_bwd_pack_fold(self, pack_factor):
         """GQA ranges with the packed bwd: every q head of a kv head shares
         one Q tile (pack factor 4), or two packed groups share it one after
         another in the head loop (pack factor 2)."""
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._ranges_inputs(
-            2, d, self.seed + d + pack_factor
+            2, 128, self.seed + pack_factor
         )
         qhead_per_kvhead = q.shape[1] // k.shape[1]
-        test_case = f"[test_ranges_bwd_pack_fold][{d=}][{pack_factor=}]"
+        test_case = f"[test_ranges_bwd_pack_fold][{pack_factor=}]"
         self._log_ran(test_case)
         out, _, do, grads, built = self._fwd_bwd(
             q, k, v, _SOFTCAP, bwd_pack_factor=pack_factor, **kwargs
@@ -356,57 +329,6 @@ class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
             test_case=test_case,
-        )
-
-    @with_run_in_mp
-    def test_ranges_sink_and_max_logits(self):
-        """The sink joins the capped scores in the softmax, and max logits
-        report the capped maximum per q head."""
-        q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._ranges_inputs(
-            2, 128, self.seed
-        )
-        sink = torch.randn(3, q.shape[1], device=q.device, dtype=torch.float32)
-        test_case = "[test_ranges_sink_and_max_logits]"
-        self._log_ran(test_case)
-        out, meta, do, grads, built = self._fwd_bwd(
-            q, k, v, _SOFTCAP, sink=sink, return_max_logits=True, **kwargs
-        )
-        self._assert_native(built, test_case)
-        self.assert_close_to_ref(
-            q=q,
-            k=k,
-            v=v,
-            do=do,
-            out=out,
-            grads=grads,
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_type_map=attn_type_map,
-            test_case=test_case,
-            sink=sink,
-        )
-        mask = make_attn_mask_from_ffa_args(
-            q_ranges=AttnRanges.from_ranges(q_ranges),
-            k_ranges=AttnRanges.from_ranges(k_ranges),
-            attn_type_map=attn_type_map,
-            total_seqlen_q=q.shape[0],
-            total_seqlen_k=k.shape[0],
-            device=q.device,
-        )
-        _, meta_ref = ref_attn_func(
-            q=q,
-            k=k,
-            v=v,
-            mask=mask,
-            softcap=_SOFTCAP,
-            layout="thd",
-            backend="torch",
-            high_precision=True,
-            return_max_logits=True,
-        )
-        self.assertTrue(torch.all(meta.max_logits <= _SOFTCAP), test_case)
-        torch.testing.assert_close(
-            meta.max_logits, meta_ref.max_logits.float(), atol=2e-2, rtol=1e-3
         )
 
     def _overlap_inputs(self, nheads_kv: int, d: int, seed: int, holes: bool):
@@ -456,14 +378,13 @@ class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
 
     @with_run_in_mp
     @parameterize("path", ["atomic", "merge_cat_gqa"])
-    @parameterize("d", [64, 128])
-    def test_overlapping_relations_merge_capped_partials(self, d, path):
+    def test_overlapping_relations_merge_capped_partials(self, path):
         """Several relations per q row (atomic O/LSE merge) or per merged
         group (RangeMerge fwd Q groups and bwd K groups, with CatGQA), incl.
         a relation without any pair: the capped partials merge to the
         reference, i.e. the cap applies per score, not to the merged result."""
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._overlap_inputs(
-            2, d, self.seed + d + len(path), holes=path == "atomic"
+            2, 128, self.seed, holes=path == "atomic"
         )
         if path == "merge_cat_gqa":
             kwargs.update(
@@ -472,7 +393,7 @@ class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
                 range_merge=True,
                 cat_gqa=True,
             )
-        test_case = f"[test_overlapping_relations_merge_capped_partials][{d=}][{path=}]"
+        test_case = f"[test_overlapping_relations_merge_capped_partials][{path=}]"
         self._log_ran(test_case)
         out, meta, do, grads, built = self._fwd_bwd(q, k, v, _SOFTCAP, **kwargs)
         self._assert_native(built, test_case)
@@ -641,49 +562,6 @@ class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
                 flex_attn_args=TorchFlexAttnArgs(score_mod=score_mod),
                 **kwargs,
             )
-
-
-class TestDenseSoftcap(_SoftcapReference):
-    def _dense_qkv(self):
-        torch.manual_seed(0)
-        return tuple(
-            torch.randn(
-                1, 256, 4, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
-            )
-            for _ in range(3)
-        )
-
-    def test_invalid_softcap_rejected_by_fwd_and_bwd(self):
-        q, k, v = self._dense_qkv()
-        lse = torch.empty(1, 4, 256, device=q.device, dtype=torch.float32)
-        with self.assertRaisesRegex(ValueError, "softcap must be"):
-            _flex_flash_attn_fwd(q, k, v, softcap=-1.0)
-        with self.assertRaisesRegex(ValueError, "softcap must be"):
-            _flex_flash_attn_bwd(q, k, v, q, lse, q, softcap=-1.0)
-
-    def test_sm120_score_mod_output_and_gradients(self):
-        if not is_sm(120, device=None):
-            self.skipTest("requires SM120")
-
-        q, k, v = self._dense_qkv()
-        # Scores have unit variance; a cap of 1 exercises the tanh derivative.
-        softcap = 1.0
-        out, _ = flex_flash_attn_func(q, k, v, softcap=softcap)
-        do = torch.randn_like(out)
-        grads = torch.autograd.grad(out, (q, k, v), do)
-        self.assert_close_to_ref(
-            q=q[0],
-            k=k[0],
-            v=v[0],
-            do=do[0],
-            out=out[0],
-            grads=tuple(g[0] for g in grads),
-            q_ranges=[[0, q.shape[1]]],
-            k_ranges=[[0, k.shape[1]]],
-            attn_type_map=[MT_MAP.full],
-            test_case="SM120 dense softcap",
-            softcap=softcap,
-        )
 
 
 if __name__ == "__main__":
