@@ -12,17 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+import pytest
 import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, TorchFlexAttnArgs
+from magi_attention.kernel.cutedsl.ffa_utils import (
+    MT_MAP,
+    TorchFlexAttnArgs,
+    normalize_softcap,
+)
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -61,6 +67,19 @@ def _kernel_config(kernel) -> tuple:
         getattr(kernel, "gqa_fold", None),
         getattr(kernel, "range_merge", None),
     )
+
+
+@pytest.mark.arch_independent
+class TestNormalizeSoftcap(unittest.TestCase):
+    def test_disabled_and_positive_values(self):
+        self.assertIsNone(normalize_softcap(None))
+        self.assertIsNone(normalize_softcap(0.0))
+        self.assertEqual(normalize_softcap(30), 30.0)
+
+    @parameterize("value", [-1.0, math.nan, math.inf, -math.inf])
+    def test_rejects_negative_and_nonfinite_values(self, value):
+        with self.assertRaisesRegex(ValueError, "softcap must be"):
+            normalize_softcap(value)
 
 
 class _SoftcapReference(unittest.TestCase):
