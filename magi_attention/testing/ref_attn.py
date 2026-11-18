@@ -535,8 +535,7 @@ def _ref_attn_torch_impl_mainprocess_offline(
         q @ kt * softmax_scale,
         lowest_precision=torch.float32,
     )
-    # softcap bounds the scaled score before masking so masked positions
-    # stay -inf and the max logit is the capped value
+    # Add the mask after tanh so excluded keys keep a score of -inf.
     if softcap != 0.0:
         s = softcap * torch.tanh(s / softcap)
     s += bias
@@ -677,8 +676,9 @@ def ref_attn_func(
             Defaults to ``None`` to not apply attention sink.
         softmax_scale (float | None, optional): the softmax scale factor.
             Defaults to ``None`` to use the default value of ``1/sqrt(head_dim)``.
-        softcap (float, optional): the softcap value.
-            Defaults to ``0.0``.
+        softcap (float, optional): Apply ``softcap * tanh(score / softcap)``
+            before masking. A nonzero cap requires ``backend="torch"`` and
+            ``online_softmax=False``. Defaults to ``0.0`` (disabled).
         layout (str, optional): the shape layout of q,k,v,o tensors.
             Defaults to "thd" like ``[total_seqlen, num_heads, head_dim]``.
         sink_layout (AttnSinkLayout, optional): the shape layout of the sink tensor.

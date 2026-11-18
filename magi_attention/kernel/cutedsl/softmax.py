@@ -728,13 +728,10 @@ def apply_score_mod_bwd_inner(
 
 @cute.jit
 def apply_softcap(acc_S: cute.Tensor, softcap_scale: Float32):
-    """Cap the raw scores in place: s <- tanh(s * softcap_scale).
+    """Store tanh(raw score * softmax_scale / softcap) before masking.
 
-    ``softcap_scale`` is ``softmax_scale / softcap``. The cap magnitude is not
-    applied here; it is folded into the exp2 scale (``softcap * log2(e)``), so
-    the softmax sees ``softcap * tanh(s * softmax_scale / softcap)`` at one
-    multiply per element. Must run before masking: a masked -inf must not pass
-    through tanh.
+    The exp2 scale supplies the outer factor of ``softcap``. Applying tanh
+    after masking would turn masked scores from -inf into -1.
     """
     for i in cutlass.range(0, cute.size(acc_S.shape), 2, unroll_full=True):
         s0, s1 = cute.arch.mul_packed_f32x2(
@@ -746,12 +743,10 @@ def apply_softcap(acc_S: cute.Tensor, softcap_scale: Float32):
 
 @cute.jit
 def apply_softcap_bwd(acc_S: cute.Tensor, dtanh: cute.Tensor, softcap_scale: Float32):
-    """Cap the raw scores in place as in the forward and keep ``1 - tanh^2``.
+    """Apply the forward transform and save its tanh derivative before P overwrites S.
 
-    d(capped)/d(raw) = softmax_scale * (1 - tanh^2). The epilogue already
-    multiplies dS by softmax_scale, so the mainloop multiplies dS by ``dtanh``
-    only. The scores are overwritten by P before dS is formed, so the
-    derivative has to be captured here.
+    The epilogue supplies ``softmax_scale``, so dS only needs the saved
+    ``1 - tanh^2`` factor.
     """
     for i in cutlass.range(0, cute.size(acc_S.shape), 2, unroll_full=True):
         s0, s1 = cute.arch.mul_packed_f32x2(

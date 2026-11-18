@@ -2199,12 +2199,12 @@ def flex_flash_attn_func(
         total_q/total_k — always safe, the loosest bound. Debug mode validates
         against the ranges (a sync).
 
-    softcap: tanh logit soft-capping value, ``softcap * tanh(s / softcap)``
-        on the scaled scores before masking. Native on SM100/SM110 for the
-        dense, per-range ``mask_types`` and RangeMerge paths, with the same
-        2-CTA and head_dim coverage as the uncapped kernels; the other
-        architectures route it through ``score_mod``. Mutually exclusive
-        with a user ``score_mod``.
+    softcap: A finite positive cap applies ``softcap * tanh(s / softcap)``
+        to each scaled score before masking. Zero or ``None`` disables it.
+        SM100/SM110 apply the cap natively for dense attention, per-range
+        ``mask_types``, and RangeMerge, with the same 2-CTA and head_dim
+        coverage as uncapped kernels. Other architectures use ``score_mod``.
+        An enabled cap cannot be combined with a user ``score_mod``.
 
     pack_gqa: fold the q heads of one kv head into the M dimension of the
         forward. ``None`` packs GQA except on the SM100/SM110 range

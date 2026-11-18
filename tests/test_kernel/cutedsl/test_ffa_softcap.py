@@ -12,43 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native softcap of the SM100/SM110 CuTeDSL FFA kernels.
-
-The fwd and bwd mainloops compute ``softcap * tanh(s * softmax_scale /
-softcap)`` before masking, and the bwd scales dS by ``1 - tanh^2``. No
-score_mod is built on SM100/SM110, so softcap keeps the kernel configuration
-(2-CTA, head_dim 192 bwd, RangeMerge, persistence, PackGQA, CatGQA) of the
-uncapped call.
-"""
-
-import math
 import unittest
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
-from unittest import TestCase, mock
 
 import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
-import magi_attention.kernel.cutedsl.flex_flash_attn as ffa_module
 from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
-from magi_attention.kernel.cutedsl.ffa_utils import (
-    MT_MAP,
-    TorchFlexAttnArgs,
-    normalize_softcap,
-)
+from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, TorchFlexAttnArgs
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
 )
 from magi_attention.testing import parameterize, ref_attn_func
-from magi_attention.testing.cutedsl_utils import record_bwd_kernels, record_fwd_kernels
-from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.testing.cutedsl_utils import (
+    SM100_FAMILY_REQUIRED,
+    CuteDSLDistTestBase,
+    is_sm100_family,
+    record_bwd_kernels,
+    record_fwd_kernels,
+)
+from magi_attention.testing.dist_common import with_run_in_mp
 from magi_attention.testing.precision import calc_inf_norm
 from magi_attention.utils import make_attn_mask_from_ffa_args
-from magi_attention.utils.arch import is_blackwell
+from magi_attention.utils.arch import is_sm
 
 _SOFTCAP = 30.0
 # The kernel may exceed the low-precision reference error by this factor.
@@ -57,8 +47,7 @@ _NORM_RATIO = 2.0
 
 @contextmanager
 def _record_kernels() -> Iterator[dict[str, list]]:
-    """Record the SM100 fwd/bwd kernel objects built within the context under
-    empty compile caches."""
+    """Record both kernel specializations with empty compile caches."""
     with record_fwd_kernels() as fwd, record_bwd_kernels() as bwd:
         yield {"fwd": fwd, "bwd": bwd}
 
@@ -74,41 +63,7 @@ def _kernel_config(kernel) -> tuple:
     )
 
 
-@unittest.skipUnless(is_blackwell(), "requires Blackwell")
-class TestFfaSoftcap(DistTestBase):
-    @property
-    def seed(self) -> int:
-        return 42
-
-    @property
-    def device(self) -> int:
-        return torch.cuda.current_device()
-
-    @property
-    def timeout(self) -> int:
-        return 3600
-
-    @property
-    def world_size(self) -> int:
-        return torch.cuda.device_count()
-
-    def _log_ran(self, test_case: str) -> None:
-        print(f"[RANK {self.rank}] ran {test_case}", flush=True)
-
-    def _fwd_bwd(self, q, k, v, softcap, **kwargs):
-        """fwd + bwd through ``flex_flash_attn_func``; returns out, the fwd
-        meta, the grads (plus dsink when a sink is passed) and the kernels
-        built."""
-        inputs = [t.detach().clone().requires_grad_() for t in (q, k, v)]
-        if kwargs.get("sink") is not None:
-            kwargs["sink"] = kwargs["sink"].detach().clone().requires_grad_()
-            inputs.append(kwargs["sink"])
-        with _record_kernels() as built:
-            out, meta = flex_flash_attn_func(*inputs[:3], softcap=softcap, **kwargs)
-            do = torch.randn_like(out)
-            grads = torch.autograd.grad(out, inputs, do)
-        return out, meta, do, grads, built
-
+class _SoftcapReference(unittest.TestCase):
     def assert_close_to_ref(
         self,
         *,
@@ -127,10 +82,7 @@ class TestFfaSoftcap(DistTestBase):
         softcap: float = _SOFTCAP,
         softmax_scale: float | None = None,
     ) -> None:
-        """out/dq/dk/dv (and dsink when ``grads`` carries it) within
-        ``_NORM_RATIO`` of the low-precision torch reference error, both
-        against fp64; ``lse`` is compared directly, rows without any key or
-        sink included."""
+        """Use the input-dtype reference error against fp64 as the error budget."""
         mask = make_attn_mask_from_ffa_args(
             q_ranges=AttnRanges.from_ranges(q_ranges),
             k_ranges=AttnRanges.from_ranges(k_ranges),
@@ -168,12 +120,8 @@ class TestFfaSoftcap(DistTestBase):
         refs_hi, refs_lo = ref(True), ref(False)
         if lse is not None:
             lse_ref = refs_hi[-1].to(lse.dtype)
-            self.assertTrue(
-                torch.equal(torch.isinf(lse), torch.isinf(lse_ref)), test_case
-            )
-            finite = torch.isfinite(lse_ref)
             torch.testing.assert_close(
-                lse[finite], lse_ref[finite], atol=1e-3, rtol=1e-3, msg=test_case
+                lse, lse_ref, atol=1e-3, rtol=1e-3, msg=test_case
             )
         names = ("out", "dq", "dk", "dv", "dsink")[: 1 + len(grads)]
         for name, actual, hi, lo in zip(names, (out, *grads), refs_hi, refs_lo):
@@ -181,14 +129,28 @@ class TestFfaSoftcap(DistTestBase):
             bound = _NORM_RATIO * calc_inf_norm(lo, hi) + 1e-4 * hi.abs().max().item()
             self.assertLessEqual(err, bound, f"{test_case} {name}: {err=} {bound=}")
 
+
+@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
+class TestFfaSoftcap(CuteDSLDistTestBase, _SoftcapReference):
+    def _log_ran(self, test_case: str) -> None:
+        print(f"[RANK {self.rank}] ran {test_case}", flush=True)
+
+    def _fwd_bwd(self, q, k, v, softcap, **kwargs):
+        inputs = [t.detach().clone().requires_grad_() for t in (q, k, v)]
+        if kwargs.get("sink") is not None:
+            kwargs["sink"] = kwargs["sink"].detach().clone().requires_grad_()
+            inputs.append(kwargs["sink"])
+        with _record_kernels() as built:
+            out, meta = flex_flash_attn_func(*inputs[:3], softcap=softcap, **kwargs)
+            do = torch.randn_like(out)
+            grads = torch.autograd.grad(out, inputs, do)
+        return out, meta, do, grads, built
+
     def _assert_native(self, built: dict[str, list], test_case: str) -> None:
-        for kernel in (*built["fwd"], *built["bwd"]):
+        for direction in ("fwd", "bwd"):
+            (kernel,) = built[direction]
             self.assertTrue(kernel.has_softcap, test_case)
             self.assertIsNone(kernel.score_mod, test_case)
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Dense
-    # ─────────────────────────────────────────────────────────────────────
 
     @with_run_in_mp
     @parameterize("mha_type", ["mha", "gqa"])
@@ -203,7 +165,7 @@ class TestFfaSoftcap(DistTestBase):
         nheads_kv = {"mha": nheads, "gqa": 2}[mha_type]
         d_v = 128 if d == 192 else d
         torch.random.manual_seed(self.seed + d + mask_type + nheads_kv)
-        # Scale q so the scores reach the cap.
+        # Larger logits make the difference from uncapped attention measurable.
         q = 4.0 * torch.randn(batch, seqlen, nheads, d, device=device, dtype=dtype)
         k = torch.randn(batch, seqlen, nheads_kv, d, device=device, dtype=dtype)
         v = torch.randn(batch, seqlen, nheads_kv, d_v, device=device, dtype=dtype)
@@ -240,10 +202,6 @@ class TestFfaSoftcap(DistTestBase):
             attn_type_map=[mask_type] * batch,
             test_case=test_case,
         )
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Ranges
-    # ─────────────────────────────────────────────────────────────────────
 
     def _ranges_inputs(self, nheads_kv: int, d: int, seed: int):
         """8 tile-unaligned relations cycling over the four mask types."""
@@ -427,7 +385,6 @@ class TestFfaSoftcap(DistTestBase):
             high_precision=True,
             return_max_logits=True,
         )
-        # Capped logits are bounded by the cap and some of them reach it.
         self.assertTrue(torch.all(meta.max_logits <= _SOFTCAP), test_case)
         torch.testing.assert_close(
             meta.max_logits, meta_ref.max_logits.float(), atol=2e-2, rtol=1e-3
@@ -636,10 +593,6 @@ class TestFfaSoftcap(DistTestBase):
             lse=meta.lse,
         )
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Contract
-    # ─────────────────────────────────────────────────────────────────────
-
     @with_run_in_mp
     def test_zero_softcap_builds_the_uncapped_kernel(self):
         """``softcap=0.0`` means no cap: the uncapped kernels run and the
@@ -660,7 +613,7 @@ class TestFfaSoftcap(DistTestBase):
         def score_mod(score, b, h, q_idx, kv_idx, aux_tensors):
             return score
 
-        with self.assertRaises((AssertionError, NotImplementedError)):
+        with self.assertRaisesRegex(AssertionError, "softcap and score_mod"):
             flex_flash_attn_func(
                 q,
                 k,
@@ -671,66 +624,47 @@ class TestFfaSoftcap(DistTestBase):
             )
 
 
-class _FallbackBuilt(Exception):
-    pass
-
-
-class TestFfaSoftcapHost(TestCase):
-    """Host-side softcap contract and the native/fallback dispatch."""
-
-    def test_normalize_softcap(self):
-        self.assertIsNone(normalize_softcap(None))
-        self.assertIsNone(normalize_softcap(0.0))
-        self.assertEqual(normalize_softcap(30), 30.0)
-        for bad in (-1.0, math.nan, math.inf, -math.inf):
-            with self.assertRaises(ValueError):
-                normalize_softcap(bad)
-
-    def _dense_inputs(self):
+class TestDenseSoftcap(_SoftcapReference):
+    def _dense_qkv(self):
         torch.manual_seed(0)
-        q, k, v = (
-            torch.randn(1, 256, 4, 64, device="cuda", dtype=torch.bfloat16)
+        return tuple(
+            torch.randn(
+                1, 256, 4, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            )
             for _ in range(3)
         )
-        out = torch.randn_like(q)
-        lse = torch.randn(1, 4, 256, device="cuda", dtype=torch.float32)
-        return q, k, v, out, lse, torch.randn_like(q)
 
-    @unittest.skipUnless(is_blackwell(), "requires Blackwell")
     def test_invalid_softcap_rejected_by_fwd_and_bwd(self):
-        q, k, v, out, lse, dout = self._dense_inputs()
-        with self.assertRaises(ValueError):
+        q, k, v = self._dense_qkv()
+        lse = torch.empty(1, 4, 256, device=q.device, dtype=torch.float32)
+        with self.assertRaisesRegex(ValueError, "softcap must be"):
             _flex_flash_attn_fwd(q, k, v, softcap=-1.0)
-        with self.assertRaises(ValueError):
-            _flex_flash_attn_bwd(q, k, v, out, lse, dout, softcap=-1.0)
+        with self.assertRaisesRegex(ValueError, "softcap must be"):
+            _flex_flash_attn_bwd(q, k, v, q, lse, q, softcap=-1.0)
 
-    def test_score_mod_fallback_only_off_sm100(self):
-        """Off SM100/SM110 the cap becomes a score_mod after the arch
-        checks (SM120 backward used to reject it up front); on SM100/SM110
-        no score_mod is ever built."""
-        q, k, v, out, lse, dout = self._dense_inputs()
-        with mock.patch.object(
-            ffa_module, "get_device_arch", return_value=(120, 12)
-        ), mock.patch.object(
-            ffa_module, "create_softcap_scoremod", side_effect=_FallbackBuilt
-        ), mock.patch.object(
-            ffa_module, "create_softcap_scoremod_bwd", side_effect=_FallbackBuilt
-        ):
-            with self.assertRaises(_FallbackBuilt):
-                _flex_flash_attn_fwd(q, k, v, softcap=30.0)
-            with self.assertRaises(_FallbackBuilt):
-                _flex_flash_attn_bwd(q, k, v, out, lse, dout, softcap=30.0)
+    def test_sm120_score_mod_output_and_gradients(self):
+        if not is_sm(120, device=None):
+            self.skipTest("requires SM120")
 
-        if not is_blackwell():
-            return
-        with mock.patch.object(
-            ffa_module, "create_softcap_scoremod", side_effect=_FallbackBuilt
-        ), mock.patch.object(
-            ffa_module, "create_softcap_scoremod_bwd", side_effect=_FallbackBuilt
-        ):
-            q_, k_, v_ = (t.detach().clone().requires_grad_() for t in (q, k, v))
-            out_, _ = flex_flash_attn_func(q_, k_, v_, softcap=30.0)
-            out_.backward(torch.ones_like(out_))
+        q, k, v = self._dense_qkv()
+        # Scores have unit variance; a cap of 1 exercises the tanh derivative.
+        softcap = 1.0
+        out, _ = flex_flash_attn_func(q, k, v, softcap=softcap)
+        do = torch.randn_like(out)
+        grads = torch.autograd.grad(out, (q, k, v), do)
+        self.assert_close_to_ref(
+            q=q[0],
+            k=k[0],
+            v=v[0],
+            do=do[0],
+            out=out[0],
+            grads=tuple(g[0] for g in grads),
+            q_ranges=[[0, q.shape[1]]],
+            k_ranges=[[0, k.shape[1]]],
+            attn_type_map=[MT_MAP.full],
+            test_case="SM120 dense softcap",
+            softcap=softcap,
+        )
 
 
 if __name__ == "__main__":

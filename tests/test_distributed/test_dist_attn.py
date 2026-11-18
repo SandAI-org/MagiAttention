@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import unittest
 from functools import partial
 
 import torch
@@ -32,6 +33,7 @@ from magi_attention.functional.dist_attn_runtime import DistAttnRuntime
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing.cutedsl_utils import SM100_FAMILY_REQUIRED, is_sm100_family
 from magi_attention.testing.dist_common import (
     DistTestBase,
     should_run_test_case,
@@ -40,6 +42,7 @@ from magi_attention.testing.dist_common import (
 from magi_attention.testing.flag_generator import FlagCombGenerator
 from magi_attention.testing.precision import EPSILON, assert_close
 from magi_attention.testing.utils import (
+    switch_env,
     switch_envvar_context,
     switch_envvars,
     switch_kernel_backend_context,
@@ -142,9 +145,7 @@ class TestDistAttn(DistTestBase):
     def _full_attn_runtime(
         self, nhq: int, nhk: int, head_dim: int, use_hier_comm: bool
     ) -> DistAttnRuntime:
-        """Full attention over 4 x 128 tokens: a host stage on the local KV and
-        one remote stage on the other three ranks' KV."""
-        # TODO: add more attn masks for dist attn
+        """Use 128 local KV tokens and fetch the other three ranks' KV in one stage."""
         calc_meta = CalcMeta(
             local_attn_arg=AttnArg(
                 q_ranges=AttnRanges.from_ranges([[0, 128]]),
@@ -409,26 +410,17 @@ class TestDistAttn(DistTestBase):
                 test_case="dsink",
             )
 
+    @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
     @skip_if_lt_x_gpu(4)
     @with_comms
+    @switch_env("MAGI_ATTENTION_KERNEL_BACKEND", MagiAttentionKernelBackend.CUTEDSL)
     @parameterize("seqlen_sink", [0, 4])
     def test_cutedsl_softcap(self, seqlen_sink: int):
-        """Non-zero softcap on the cutedsl backend with GQA: the host stage and
-        the remote stage both compute, merge with the same capped LSE, and a
-        sink is counted once (on the host stage)."""
-        if torch.cuda.get_device_capability()[0] not in (10, 11):
-            return
+        """Compare merged local and remote stages to GQA with the sink counted once."""
         softcap, nhq, nhk, head_dim, dtype = 30.0, 8, 4, 128, torch.bfloat16
-        switch_back = switch_envvars(
-            envvar_name_list=[self.kernel_backend_envvar],
-            enable_dict={self.kernel_backend_envvar: True},
-            enable_value_dict={
-                self.kernel_backend_envvar: MagiAttentionKernelBackend.CUTEDSL.value
-            },
-        )
         dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, False)
 
-        # Scale q so the scores reach the cap.
+        # Larger logits make the difference from uncapped attention measurable.
         local_q = (
             4.0 * torch.randn(128, nhq, head_dim, device=self.device, dtype=dtype)
         ).requires_grad_()
@@ -468,8 +460,6 @@ class TestDistAttn(DistTestBase):
             torch.cat(all_gather(t, group=self.nccl_group), dim=0)
             for t in (local_q, local_k, local_v)
         )
-        switch_back()
-
         total_out_ref, meta_ref = ref_attn_func(
             q=total_q,
             k=total_k,
