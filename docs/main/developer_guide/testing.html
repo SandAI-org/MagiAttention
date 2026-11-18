@@ -1,0 +1,1140 @@
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Testing &#8212; MagiAttention main documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=75c7c72ae941e8b558d8" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=75c7c72ae941e8b558d8" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=82a976d7" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=53070b4a" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="../_static/scripts/fontawesome.js?digest=75c7c72ae941e8b558d8"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=75c7c72ae941e8b558d8" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=75c7c72ae941e8b558d8" />
+
+    <script src="../_static/documentation_options.js?v=a8da1a53"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'developer_guide/testing';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.24.0';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/developer_guide/testing.html" />
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Blogs" href="../blog/toc.html" />
+    <link rel="prev" title="Contributing" href="contributing.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="light dark"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />
+  
+    
+    <script src="../_static/searchtools.js"></script>
+    <script src="../_static/language_data.js"></script>
+    <script src="../searchindex.js"></script>
+     
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button type="button" class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation" aria-expanded="false" aria-controls="pst-primary-sidebar-modal">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo-black.png" class="logo__image only-light" alt=""/>
+    <img src="../_static/logo-gold.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Developer Guide
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../blog/toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button type="button" class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button type="button" class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg me-1"></i>System Settings</button></li>
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg me-1"></i>Light</button></li>
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+      
+        <div class="navbar-item">
+
+
+<div
+  class="dropdown"
+  id="doc-language-switcher-root"
+  data-pagename="developer_guide/testing"
+  data-is-chinese="false"
+  data-zh-segment="zh_CN"
+>
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same site root.
+    // URL examples:
+    //   English: <site-root>/user_guide/install.html
+    //   Chinese: <site-root>/zh_CN/user_guide/install.html
+    //
+    // The site root is derived from the current page's own `pagename`
+    // (known at build time) instead of a hard-coded "/docs/" marker, so the
+    // switcher works identically when served online (e.g. under
+    // "/MagiAttention/docs/main/") and when the built HTML is downloaded and
+    // opened locally via file:// URLs.
+    //
+    // NOTE: build-time values (pagename / is_chinese) are passed through
+    // `data-*` attributes rather than inlined into JS, so this script stays
+    // valid, lint-clean JavaScript with no template syntax mixed in.
+    var root = document.getElementById("doc-language-switcher-root");
+    if (!root) return;
+
+    var ZH_SEGMENT = root.getAttribute("data-zh-segment") || "zh_CN";
+    var PAGENAME = root.getAttribute("data-pagename") || "";
+    var IS_CHINESE = root.getAttribute("data-is-chinese") === "true";
+
+    function currentRoot() {
+      // Strip the trailing "<pagename>.html" from the current URL to obtain
+      // the site root for the *current* language build (always ends with "/").
+      var url = window.location.href;
+      var hashIdx = url.indexOf("#");
+      if (hashIdx !== -1) url = url.slice(0, hashIdx);
+      var qIdx = url.indexOf("?");
+      if (qIdx !== -1) url = url.slice(0, qIdx);
+      var suffix = PAGENAME + ".html";
+      if (url.slice(-suffix.length) === suffix) {
+        return url.slice(0, url.length - suffix.length);
+      }
+      // Fallback: directory of the current file.
+      return url.slice(0, url.lastIndexOf("/") + 1);
+    }
+
+    function enRoot() {
+      // Normalise to the English (top-level) site root.
+      var currRoot = currentRoot();
+      var zhSuffix = ZH_SEGMENT + "/";
+      if (IS_CHINESE && currRoot.slice(-zhSuffix.length) === zhSuffix) {
+        return currRoot.slice(0, currRoot.length - zhSuffix.length);
+      }
+      return currRoot;
+    }
+
+    function resolvePath(targetLang) {
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var base = enRoot();  // English site root, ends with "/"
+      var target = (targetLang === "en") ? base : base + ZH_SEGMENT + "/";
+      return target + PAGENAME + ".html" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button type="button" class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button type="button" class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page" aria-expanded="false" aria-controls="pst-secondary-sidebar-modal">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal" tabindex="-1"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../user_guide/toc.html">
+    User Guide
+  </a>
+</li>
+
+
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="toc.html">
+    Developer Guide
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../blog/toc.html">
+    Blogs
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button type="button" class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg me-1"></i>System Settings</button></li>
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg me-1"></i>Light</button></li>
+    <li><button type="button" class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg me-1"></i>Dark</button></li>
+  </ul>
+</div></div>
+        
+          <div class="navbar-item">
+
+
+<div
+  class="dropdown"
+  id="doc-language-switcher-root"
+  data-pagename="developer_guide/testing"
+  data-is-chinese="false"
+  data-zh-segment="zh_CN"
+>
+  <button
+    class="btn btn-sm btn-outline-primary dropdown-toggle"
+    type="button"
+    id="doc-language-switcher"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    English
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="doc-language-switcher">
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="en">
+          English
+        </a>
+      </li>
+    
+      <li>
+        <a class="dropdown-item doc-lang-link" href="#" data-lang="zh_CN">
+          简体中文
+        </a>
+      </li>
+    
+  </ul>
+</div>
+<script>
+  (function () {
+    // English lives at the root (no language prefix).
+    // Chinese lives under zh_CN/ inside the same site root.
+    // URL examples:
+    //   English: <site-root>/user_guide/install.html
+    //   Chinese: <site-root>/zh_CN/user_guide/install.html
+    //
+    // The site root is derived from the current page's own `pagename`
+    // (known at build time) instead of a hard-coded "/docs/" marker, so the
+    // switcher works identically when served online (e.g. under
+    // "/MagiAttention/docs/main/") and when the built HTML is downloaded and
+    // opened locally via file:// URLs.
+    //
+    // NOTE: build-time values (pagename / is_chinese) are passed through
+    // `data-*` attributes rather than inlined into JS, so this script stays
+    // valid, lint-clean JavaScript with no template syntax mixed in.
+    var root = document.getElementById("doc-language-switcher-root");
+    if (!root) return;
+
+    var ZH_SEGMENT = root.getAttribute("data-zh-segment") || "zh_CN";
+    var PAGENAME = root.getAttribute("data-pagename") || "";
+    var IS_CHINESE = root.getAttribute("data-is-chinese") === "true";
+
+    function currentRoot() {
+      // Strip the trailing "<pagename>.html" from the current URL to obtain
+      // the site root for the *current* language build (always ends with "/").
+      var url = window.location.href;
+      var hashIdx = url.indexOf("#");
+      if (hashIdx !== -1) url = url.slice(0, hashIdx);
+      var qIdx = url.indexOf("?");
+      if (qIdx !== -1) url = url.slice(0, qIdx);
+      var suffix = PAGENAME + ".html";
+      if (url.slice(-suffix.length) === suffix) {
+        return url.slice(0, url.length - suffix.length);
+      }
+      // Fallback: directory of the current file.
+      return url.slice(0, url.lastIndexOf("/") + 1);
+    }
+
+    function enRoot() {
+      // Normalise to the English (top-level) site root.
+      var currRoot = currentRoot();
+      var zhSuffix = ZH_SEGMENT + "/";
+      if (IS_CHINESE && currRoot.slice(-zhSuffix.length) === zhSuffix) {
+        return currRoot.slice(0, currRoot.length - zhSuffix.length);
+      }
+      return currRoot;
+    }
+
+    function resolvePath(targetLang) {
+      var query = window.location.search || "";
+      var hash = window.location.hash || "";
+      var base = enRoot();  // English site root, ends with "/"
+      var target = (targetLang === "en") ? base : base + ZH_SEGMENT + "/";
+      return target + PAGENAME + ".html" + query + hash;
+    }
+
+    var links = document.querySelectorAll(".doc-lang-link");
+    for (var i = 0; i < links.length; i++) {
+      var targetLang = links[i].getAttribute("data-lang");
+      links[i].setAttribute("href", resolvePath(targetLang));
+    }
+  })();
+</script></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i><span class="visually-hidden">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i><span class="visually-hidden">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item pst-sidebar-collapse"><button type="button" id="pst-collapse-sidebar-button" aria-expanded="true" aria-controls="pst-primary-sidebar">
+  <svg class="pst-icon" role="img" aria-hidden="true" focusable="false" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+    <path fill="currentColor" d="M3 15.5C2.36232 15.5 1.74874 15.2564 1.28478 14.8189C0.820828 14.3815 0.541576 13.7832 0.504167 13.1467L0.5 13L0.5 3C0.499965 2.36232 0.743605 1.74874 1.18107 1.28478C1.61854 0.820828 2.21676 0.541576 2.85333 0.504167L3 0.5L13 0.5C13.6377 0.499965 14.2513 0.743605 14.7152 1.18107C15.1792 1.61854 15.4584 2.21676 15.4958 2.85333L15.5 3L15.5 13C15.5 13.6377 15.2564 14.2513 14.8189 14.7152C14.3815 15.1792 13.7832 15.4584 13.1467 15.4958L13 15.5L3 15.5ZM3 13.8333L10.5 13.8333L10.5 2.16667L3 2.16667C2.79589 2.16669 2.59889 2.24163 2.44636 2.37726C2.29383 2.5129 2.19638 2.69979 2.1725 2.9025L2.16667 3L2.16667 13C2.16669 13.2041 2.24163 13.4011 2.37726 13.5536C2.5129 13.7062 2.69979 13.8036 2.9025 13.8275L3 13.8333ZM6.65583 10.325L6.5775 10.2558L4.91083 8.58917C4.76735 8.44567 4.68116 8.25476 4.66843 8.05223C4.65569 7.84971 4.71729 7.6495 4.84167 7.48917L4.91083 7.41083L6.5775 5.74417C6.72747 5.59471 6.9287 5.50794 7.14032 5.50148C7.35194 5.49502 7.55809 5.56935 7.7169 5.70937C7.8757 5.8494 7.97525 6.04463 7.99533 6.25539C8.01541 6.46616 7.95451 6.67667 7.825 6.84417L7.75583 6.9225L6.67917 8L7.75583 9.0775C7.89931 9.22099 7.98551 9.41191 7.99824 9.61443C8.01097 9.81695 7.94938 10.0172 7.825 10.1775L7.75583 10.2558C7.61234 10.3993 7.42142 10.4855 7.2189 10.4982C7.01638 10.511 6.81617 10.4494 6.65583 10.325Z"/>
+  </svg>
+  <span class="pst-collapse-sidebar-label">Collapse Sidebar</span>
+  <span class="pst-expand-sidebar-label">Expand Sidebar</span>
+</button></div>
+        <div class="sidebar-primary-item">
+
+<nav class="bd-docs-nav bd-links"
+     aria-label="Section Navigation">
+  <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
+  <div class="bd-toc-item navbar-nav"><ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="contributing.html">Contributing</a></li>
+<li class="toctree-l1 current active"><a aria-current="page" class="current reference internal" href="#">Testing</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-house"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="toc.html" class="nav-link">Developer Guide</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Testing</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                   <section id="testing">
+<h1>Testing<a class="headerlink" href="#testing" title="Link to this heading">#</a></h1>
+<section id="test-organization">
+<h2>Test organization<a class="headerlink" href="#test-organization" title="Link to this heading">#</a></h2>
+<p>Tests follow the layer they exercise. Keep distributed integration separate from
+local contracts, even when both exercise the same public function.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Directory</p></th>
+<th class="head"><p>Responsibility</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_common</span></code></p></td>
+<td><p>Core values, protocols, and host range metadata</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_meta</span></code></p></td>
+<td><p>Containers, collections, and local solver contracts</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_utils</span></code></p></td>
+<td><p>Production utilities and environment option parsing</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_testing</span></code></p></td>
+<td><p>Test helpers and reference implementations</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_functional</span></code></p></td>
+<td><p>Attention wrappers, autograd, and local runtime contracts</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_kernel/cuda</span></code></p></td>
+<td><p>Native CUDA kernel contracts</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_kernel/cutedsl</span></code></p></td>
+<td><p>CuTeDSL kernels and architecture-specific behavior</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_kernel/triton</span></code></p></td>
+<td><p>Triton kernels, including range operations</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_distributed</span></code></p></td>
+<td><p>Process groups, collectives, and distributed API/runtime integration</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_api</span></code></p></td>
+<td><p>Local public API and mask construction contracts</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_pipeline.py</span></code></p></td>
+<td><p>End-to-end attention pipeline</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>A worker-based kernel sweep can still belong in <code class="docutils literal notranslate"><span class="pre">test_kernel</span></code>: spawning workers
+alone does not make the behavior under test a communication integration test.
+Inspect its test base and required world size before running it.</p>
+</section>
+<section id="running-a-focused-test">
+<h2>Running a focused test<a class="headerlink" href="#running-a-focused-test" title="Link to this heading">#</a></h2>
+<p>Run commands from the repository root with the dependencies from the
+<a class="reference internal" href="../user_guide/install.html"><span class="std std-doc">installation guide</span></a>. Select enough GPUs for the test’s
+world size. The following commands use one selected GPU for local tests:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">CUDA_VISIBLE_DEVICES</span><span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="nv">CUDA_MODULE_LOADING</span><span class="o">=</span>LAZY<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>-q<span class="w"> </span>tests/test_common
+<span class="nv">CUDA_VISIBLE_DEVICES</span><span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="nv">CUDA_MODULE_LOADING</span><span class="o">=</span>LAZY<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>-q<span class="w"> </span>tests/test_meta
+<span class="nv">CUDA_VISIBLE_DEVICES</span><span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="nv">CUDA_MODULE_LOADING</span><span class="o">=</span>LAZY<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>-q<span class="w"> </span>tests/test_functional/test_dist_attn_runtime.py
+<span class="nv">CUDA_VISIBLE_DEVICES</span><span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="nv">CUDA_MODULE_LOADING</span><span class="o">=</span>LAZY<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>-q<span class="w"> </span>tests/test_kernel/triton/test_range_ops
+</pre></div>
+</div>
+<p>Use <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">pytest</span> <span class="pre">--collect-only</span> <span class="pre">-q</span> <span class="pre">tests</span></code> to inspect collection without
+claiming execution. <code class="docutils literal notranslate"><span class="pre">magi_attention.testing.parameterize</span></code> runs combinations
+inside each test method, so the pytest item count is not the parameter count.
+Distributed tests use the library’s process launcher; do not also launch the
+same test with <code class="docutils literal notranslate"><span class="pre">torchrun</span></code> unless its entry point explicitly requires it.</p>
+</section>
+<section id="writing-tests">
+<h2>Writing tests<a class="headerlink" href="#writing-tests" title="Link to this heading">#</a></h2>
+<p>Use <code class="docutils literal notranslate"><span class="pre">unittest.TestCase</span></code> and <code class="docutils literal notranslate"><span class="pre">unittest.main()</span></code> for ordinary CPU or single-GPU
+contracts. Use the existing distributed test base and its <code class="docutils literal notranslate"><span class="pre">run_tests()</span></code> entry
+point when process-group or worker lifecycle is required. Prefer the library’s
+<code class="docutils literal notranslate"><span class="pre">parameterize</span></code>, environment-switching helpers, and tensor assertions; keep
+exact equality distinct from numerical tolerance checks.</p>
+<p>Use <code class="docutils literal notranslate"><span class="pre">magi_attention.utils.arch</span></code> for architecture conditions and the version
+helpers for dependency gates. Do not skip GPU tests merely because CUDA is
+unavailable: a required runtime failure should be visible. Keep architecture,
+version, rank-count, and explicit profiling restrictions meaningful.</p>
+<p>Helpers shared by independent tests belong in <code class="docutils literal notranslate"><span class="pre">magi_attention.testing</span></code>; small
+case-specific helpers stay in their test module. Do not import a test module
+from another test module. Keep profiling workloads explicitly opt-in.</p>
+</section>
+<section id="python-and-c-common-backends">
+<h2>Python and C++ common backends<a class="headerlink" href="#python-and-c-common-backends" title="Link to this heading">#</a></h2>
+<p>Common container tests select implementation types inside each file. The
+<code class="docutils literal notranslate"><span class="pre">TestAttnRange</span></code>, <code class="docutils literal notranslate"><span class="pre">TestAttnRanges</span></code>, rectangle, and protocol classes exercise Python;
+their <code class="docutils literal notranslate"><span class="pre">TestCpp*</span></code> subclasses repeat the contracts with native types. These tests
+do not change the package’s backend or reload modules. <code class="docutils literal notranslate"><span class="pre">AttnMask</span></code> is Python-only.
+An unavailable native extension skips its direct implementation tests.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>-q<span class="w"> </span>tests/test_common/test_attn_range.py::TestAttnRange
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>-q<span class="w"> </span>tests/test_common/test_attn_range.py::TestCppAttnRange
+</pre></div>
+</div>
+<p>The self-attention metadata and ground-truth dispatcher suites also check
+import-time routing. Each file launches its own Python and C++ suites with
+<code class="docutils literal notranslate"><span class="pre">multiprocessing</span></code> spawn, setting <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_CPP_BACKEND</span></code> before the child
+imports the package. It restores the parent’s environment immediately after
+startup and checks child failures and timeouts. There is no recursive pytest
+wrapper or separate CI coverage mode. Keep backend setup local to these tests.</p>
+</section>
+<section id="native-kernel-precompilation">
+<h2>Native kernel precompilation<a class="headerlink" href="#native-kernel-precompilation" title="Link to this heading">#</a></h2>
+<p>Test classes that exercise native FFA variants declare
+<code class="docutils literal notranslate"><span class="pre">precompile_kernel_specs()</span></code>, ideally using the same constants as their parameter
+matrix. Register their module in <code class="docutils literal notranslate"><span class="pre">magi_attention.testing.precompile</span></code> when adding
+or moving a suite. Inspect the requested kernels without compiling them:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>magi_attention.testing.precompile<span class="w"> </span>--list
+</pre></div>
+</div>
+<p>This registry feeds the CI prebuild as well as manual precompilation. Keep it
+synchronized with the real test modules; do not include removed extension APIs.</p>
+</section>
+<section id="kernel-backend">
+<h2>Kernel Backend<a class="headerlink" href="#kernel-backend" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">test_pipeline.py</span></code> parameterizes over <strong>all five kernel backends</strong> (<code class="docutils literal notranslate"><span class="pre">ffa</span></code>, <code class="docutils literal notranslate"><span class="pre">sdpa</span></code>, <code class="docutils literal notranslate"><span class="pre">sdpa_ol</span></code>, <code class="docutils literal notranslate"><span class="pre">fa4</span></code>, <code class="docutils literal notranslate"><span class="pre">cutedsl</span></code>). Each <code class="docutils literal notranslate"><span class="pre">attn_config</span></code> is tagged with the set of backends it applies to, so incompatible (backend, config) pairs are automatically skipped.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">ffa</span></code> / <code class="docutils literal notranslate"><span class="pre">fa4</span></code> / <code class="docutils literal notranslate"><span class="pre">cutedsl</span></code> – run large-seqlen configs with fp16/bf16, using norm-based + mismatch-based tolerance checks.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sdpa</span></code> / <code class="docutils literal notranslate"><span class="pre">sdpa_ol</span></code> – run small-seqlen configs with fp64, using exact (EPSILON) tolerance checks.</p></li>
+</ul>
+<p>The backend is controlled by <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND</span></code> (see below).</p>
+</section>
+<section id="test-case-filtering">
+<h2>Test Case Filtering<a class="headerlink" href="#test-case-filtering" title="Link to this heading">#</a></h2>
+<p>You can use environment variables to precisely control which parameterized test cases are executed. All filter conditions use <strong>AND</strong> logic – only test cases that satisfy all active filters will run.</p>
+<section id="environment-variables">
+<h3>Environment Variables<a class="headerlink" href="#environment-variables" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Environment Variable</p></th>
+<th class="head"><p>Parametrize Dimension</p></th>
+<th class="head"><p>Match Target</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_WORLD_SIZE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">world_size</span></code></p></td>
+<td><p>Comma-separated integers, e.g. <code class="docutils literal notranslate"><span class="pre">2</span></code> or <code class="docutils literal notranslate"><span class="pre">2,4</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_ATTN_CONFIG</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">attn_config</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">NAME</span></code> field</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_NUM_HEADS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">num_heads</span></code></p></td>
+<td><p>Underscore-separated, e.g. <code class="docutils literal notranslate"><span class="pre">8_8</span></code> for <code class="docutils literal notranslate"><span class="pre">(8,</span> <span class="pre">8)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_HEAD_DIM</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">head_dim</span></code></p></td>
+<td><p>String repr, e.g. <code class="docutils literal notranslate"><span class="pre">64</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_DTYPE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">dtype</span></code></p></td>
+<td><p>String repr, e.g. <code class="docutils literal notranslate"><span class="pre">torch.float16</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_BACKEND</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">backend</span></code></p></td>
+<td><p>Canonical <code class="docutils literal notranslate"><span class="pre">.value</span></code>, e.g. <code class="docutils literal notranslate"><span class="pre">ffa</span></code> / <code class="docutils literal notranslate"><span class="pre">sdpa</span></code> / <code class="docutils literal notranslate"><span class="pre">sdpa_ol</span></code> / <code class="docutils literal notranslate"><span class="pre">fa4</span></code> / <code class="docutils literal notranslate"><span class="pre">cutedsl</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>For dict-typed parameters (e.g. <code class="docutils literal notranslate"><span class="pre">attn_config</span></code>), the filter matches against the <code class="docutils literal notranslate"><span class="pre">NAME</span></code> field value. For <code class="docutils literal notranslate"><span class="pre">Enum</span></code> parameters (e.g. <code class="docutils literal notranslate"><span class="pre">backend</span></code>), it matches the canonical <code class="docutils literal notranslate"><span class="pre">.value</span></code> (<code class="docutils literal notranslate"><span class="pre">ffa</span></code>), the member <code class="docutils literal notranslate"><span class="pre">.name</span></code> (<code class="docutils literal notranslate"><span class="pre">FFA</span></code>), and <code class="docutils literal notranslate"><span class="pre">str()</span></code> (<code class="docutils literal notranslate"><span class="pre">MagiAttentionKernelBackend.FFA</span></code>). For other types, the <code class="docutils literal notranslate"><span class="pre">str()</span></code> representation is used.</p>
+<blockquote>
+<div><p><strong>Note:</strong> <code class="docutils literal notranslate"><span class="pre">overlap_config</span></code> and <code class="docutils literal notranslate"><span class="pre">random_type_mapping</span></code> have been moved from <code class="docutils literal notranslate"><span class="pre">&#64;parameterize</span></code> dimensions into <code class="docutils literal notranslate"><span class="pre">FlagCombGenerator</span></code> flags and are selected automatically by the heuristic strategy. The env vars <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_OVERLAP_CONFIG</span></code> and <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_RANDOM_TYPE_MAPPING</span></code> no longer take effect.</p>
+</div></blockquote>
+<blockquote>
+<div><p><strong>Note:</strong> <code class="docutils literal notranslate"><span class="pre">num_heads</span></code>, <code class="docutils literal notranslate"><span class="pre">head_dims</span></code> and <code class="docutils literal notranslate"><span class="pre">dtype</span></code> are one <code class="docutils literal notranslate"><span class="pre">&#64;parameterize</span></code> dimension (<code class="docutils literal notranslate"><span class="pre">shape_cfg</span></code>, 16 triples). The list is split by world-size parity: odd world sizes run 8 triples and even world sizes run the other 8, so every triple runs on four world sizes. The <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_NUM_HEADS</span></code> / <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_HEAD_DIM</span></code> / <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_TEST_DTYPE</span></code> filters match the unpacked values and are unaffected.</p>
+</div></blockquote>
+<p>Values are <strong>comma-separated fnmatch pattern lists</strong>, supporting <code class="docutils literal notranslate"><span class="pre">*</span></code>, <code class="docutils literal notranslate"><span class="pre">?</span></code> and other glob wildcards.</p>
+</section>
+<section id="usage-examples">
+<h3>Usage Examples<a class="headerlink" href="#usage-examples" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Run only world_size=2</span>
+<span class="nv">MAGI_ATTENTION_TEST_WORLD_SIZE</span><span class="o">=</span><span class="m">2</span><span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Run only world_size 2 and 4</span>
+<span class="nv">MAGI_ATTENTION_TEST_WORLD_SIZE</span><span class="o">=</span><span class="m">2</span>,4<span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Run only a specific attn_config</span>
+<span class="nv">MAGI_ATTENTION_TEST_ATTN_CONFIG</span><span class="o">=</span>full_attn_14k<span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Wildcard matching for multiple attn_configs</span>
+<span class="nv">MAGI_ATTENTION_TEST_ATTN_CONFIG</span><span class="o">=</span><span class="s2">&quot;full_attn_*&quot;</span><span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Run only head_dim=128</span>
+<span class="nv">MAGI_ATTENTION_TEST_HEAD_DIM</span><span class="o">=</span><span class="m">128</span><span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Run only MHA (8,8)</span>
+<span class="nv">MAGI_ATTENTION_TEST_NUM_HEADS</span><span class="o">=</span>8_8<span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Run only float16</span>
+<span class="nv">MAGI_ATTENTION_TEST_DTYPE</span><span class="o">=</span><span class="s2">&quot;*float16*&quot;</span><span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Run only sdpa_ol backend tests</span>
+<span class="nv">MAGI_ATTENTION_TEST_BACKEND</span><span class="o">=</span>sdpa_ol<span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Combined filters: full_attn configs + head_dim=64</span>
+<span class="nv">MAGI_ATTENTION_TEST_ATTN_CONFIG</span><span class="o">=</span><span class="s2">&quot;full_attn_*&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="nv">MAGI_ATTENTION_TEST_HEAD_DIM</span><span class="o">=</span><span class="m">64</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Comma-separated to match multiple values</span>
+<span class="nv">MAGI_ATTENTION_TEST_ATTN_CONFIG</span><span class="o">=</span><span class="s2">&quot;full_attn_14k,uneven_full_attn_10k&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>pytest<span class="w"> </span>tests/test_pipeline.py
+</pre></div>
+</div>
+</section>
+</section>
+<section id="flag-pinning-user-preset-environment-variables">
+<h2>Flag Pinning (User-Preset Environment Variables)<a class="headerlink" href="#flag-pinning-user-preset-environment-variables" title="Link to this heading">#</a></h2>
+<p>If the user has already set a flag’s environment variable before running tests, the test framework will <strong>respect the user’s setting</strong> and lock that flag to the user-specified value. <code class="docutils literal notranslate"><span class="pre">FlagCombGenerator</span></code> will never override it.</p>
+<section id="id1">
+<h3>Usage Examples<a class="headerlink" href="#id1" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Force all tests to use qo_comm=1</span>
+<span class="nv">MAGI_ATTENTION_QO_COMM</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Force deterministic mode</span>
+<span class="nv">MAGI_ATTENTION_DETERMINISTIC_MODE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Force native grpcoll + high precision reduce</span>
+<span class="nv">MAGI_ATTENTION_NATIVE_GRPCOLL</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="nv">MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Force CUDA_DEVICE_MAX_CONNECTIONS=1</span>
+<span class="nv">CUDA_DEVICE_MAX_CONNECTIONS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>pytest<span class="w"> </span>tests/test_pipeline.py
+
+<span class="c1"># Combine: pin flags + filter test cases</span>
+<span class="nv">MAGI_ATTENTION_QO_COMM</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="nv">MAGI_ATTENTION_TEST_ATTN_CONFIG</span><span class="o">=</span>full_attn_14k<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>pytest<span class="w"> </span>tests/test_pipeline.py
+</pre></div>
+</div>
+</section>
+<section id="supported-flag-environment-variables">
+<h3>Supported Flag Environment Variables<a class="headerlink" href="#supported-flag-environment-variables" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Environment Variable</p></th>
+<th class="head"><p>Flag Name</p></th>
+<th class="head"><p>Value Type</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">device_max_connections</span></code></p></td>
+<td><p>Integer (e.g. <code class="docutils literal notranslate"><span class="pre">1</span></code> or <code class="docutils literal notranslate"><span class="pre">8</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND</span></code></p></td>
+<td><p>kernel backend</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ffa</span></code> / <code class="docutils literal notranslate"><span class="pre">sdpa</span></code> / <code class="docutils literal notranslate"><span class="pre">sdpa_ol</span></code> / <code class="docutils literal notranslate"><span class="pre">fa4</span></code> / <code class="docutils literal notranslate"><span class="pre">cutedsl</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_DETERMINISTIC_MODE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">deterministic_mode</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_HIERARCHICAL_COMM</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">enable_hier_comm</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_QO_COMM</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">enable_qo_comm</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_NATIVE_GRPCOLL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">enable_native_grpcoll</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fwd_hp_reduce</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">bwd_hp_reduce</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FLATTEN_HEAD_GROUPS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">flatten_head_groups</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_BWD_HIDE_TAIL_REDUCE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">bwd_hide_tail_reduce</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<blockquote>
+<div><p><strong>Note:</strong> The legacy env vars <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_SDPA_BACKEND</span></code> and <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_FA4_BACKEND</span></code> are still supported for backward compatibility, but must <strong>not</strong> be set together with <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_KERNEL_BACKEND</span></code>.</p>
+</div></blockquote>
+</section>
+</section>
+<section id="flag-combination-generator">
+<h2>Flag Combination Generator<a class="headerlink" href="#flag-combination-generator" title="Link to this heading">#</a></h2>
+<p>Tests use <code class="docutils literal notranslate"><span class="pre">FlagCombGenerator</span></code> to automatically produce combinations of flags, including environment variable flags (e.g. <code class="docutils literal notranslate"><span class="pre">deterministic_mode</span></code>, <code class="docutils literal notranslate"><span class="pre">enable_qo_comm</span></code>) and test parameter flags (<code class="docutils literal notranslate"><span class="pre">overlap_config</span></code>, <code class="docutils literal notranslate"><span class="pre">random_type_mapping</span></code>).</p>
+<p>These flags are combined using a <code class="docutils literal notranslate"><span class="pre">heuristic</span></code> strategy instead of full Cartesian product, significantly reducing the total number of test combinations.</p>
+<section id="context-aware-filtering">
+<h3>Context-Aware Filtering<a class="headerlink" href="#context-aware-filtering" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">FlagCombGenerator.get_next_valid_comb(test_config,</span> <span class="pre">is_valid_fn)</span></code> filters out illegal flag combinations based on the current test context. Constraint rules include:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">no_overlap</span></code> mode disallows <code class="docutils literal notranslate"><span class="pre">qo_comm=True</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">qo_comm=True</span></code> only allows <code class="docutils literal notranslate"><span class="pre">disable_mso</span></code> or <code class="docutils literal notranslate"><span class="pre">no_overlap</span></code> overlap configs</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">qo_comm=True</span></code> disallows <code class="docutils literal notranslate"><span class="pre">hier_comm=True</span></code> or <code class="docutils literal notranslate"><span class="pre">bwd_hide_tail_reduce=True</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">native_grpcoll=True</span></code> disallows <code class="docutils literal notranslate"><span class="pre">hier_comm=True</span></code>; with <code class="docutils literal notranslate"><span class="pre">head_dim</span> <span class="pre">!=</span> <span class="pre">head_dim_v</span></code> it also requires <code class="docutils literal notranslate"><span class="pre">num_heads_kv</span> <span class="pre">*</span> <span class="pre">(head_dim</span> <span class="pre">+</span> <span class="pre">head_dim_v)</span></code> to be a multiple of the hidden-size alignment (256 for fp16/bf16)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">flatten_head_groups=True</span></code> requires <code class="docutils literal notranslate"><span class="pre">qo_comm=True</span></code>, and is incompatible with sink and <code class="docutils literal notranslate"><span class="pre">return_max_logits</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fa4</span></code> backend disallows <code class="docutils literal notranslate"><span class="pre">deterministic</span></code>, <code class="docutils literal notranslate"><span class="pre">fwd_hp_reduce</span></code>, <code class="docutils literal notranslate"><span class="pre">bwd_hp_reduce</span></code>, <code class="docutils literal notranslate"><span class="pre">qo_comm</span></code>, <code class="docutils literal notranslate"><span class="pre">sink</span></code>, <code class="docutils literal notranslate"><span class="pre">bwd_hide_tail_reduce</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sdpa</span></code> / <code class="docutils literal notranslate"><span class="pre">sdpa_ol</span></code> backends disallow <code class="docutils literal notranslate"><span class="pre">native_grpcoll</span></code></p></li>
+<li><p>etc.</p></li>
+</ul>
+<p>Invalid combinations are not wasted – they are deferred and retried in future calls with different test contexts. If all possible combinations are invalid, a <code class="docutils literal notranslate"><span class="pre">RuntimeError</span></code> is raised immediately instead of hanging indefinitely.</p>
+</section>
+</section>
+<section id="overlapconfig-degree-semantics">
+<h2>OverlapConfig degree Semantics<a class="headerlink" href="#overlapconfig-degree-semantics" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">OverlapConfig</span></code> uses the <code class="docutils literal notranslate"><span class="pre">degree</span></code> parameter to control overlap behavior:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>degree</p></th>
+<th class="head"><p>Meaning</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+<td><p><strong>no overlap</strong> – blocking communication + merged attn_arg, no LSE reduce precision loss</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+<td><p>local + 1 remote stage, no chunking (no multi-stage overlap)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">N</span> <span class="pre">(N&gt;=2)</span></code></p></td>
+<td><p>local + N remote stages (static multi-stage overlap)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">None</span></code></p></td>
+<td><p>Dynamic mode (solver determines optimal degree automatically)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># no overlap (highest precision)</span>
+<span class="n">OverlapConfig</span><span class="p">(</span><span class="n">degree</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+<span class="c1"># no multi-stage overlap</span>
+<span class="n">OverlapConfig</span><span class="p">(</span><span class="n">degree</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="c1"># 4-stage static overlap</span>
+<span class="n">OverlapConfig</span><span class="p">(</span><span class="n">degree</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">STATIC</span><span class="p">)</span>
+
+<span class="c1"># dynamic overlap</span>
+<span class="n">OverlapConfig</span><span class="p">(</span><span class="n">degree</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">DYNAMIC</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="architecture-independent-coverage">
+<h2>Architecture-independent coverage<a class="headerlink" href="#architecture-independent-coverage" title="Link to this heading">#</a></h2>
+<p>Use <code class="docutils literal notranslate"><span class="pre">&#64;pytest.mark.arch_independent</span></code> on reviewed CPU/Python contracts whose
+coverage does not depend on GPU architecture. Class markers apply to every
+method, so reconsider the marker before adding GPU cases to a marked class.
+Do not mark CUDA numerics, gradients, precision/RNG, compiler, or collective
+coverage merely because it is slow or shared by both CI platforms.</p>
+<p>The root collection hook skips these items only when <code class="docutils literal notranslate"><span class="pre">TASK_CI_PLATFORM</span></code> is
+<code class="docutils literal notranslate"><span class="pre">b300</span></code> or <code class="docutils literal notranslate"><span class="pre">b300_fa4</span></code> and the actual device is Blackwell. Hopper CI owns the
+shared coverage. Without that CI profile, local Blackwell runs remain complete;
+<code class="docutils literal notranslate"><span class="pre">--skip-slow</span></code>, architecture restrictions, and optional-dependency skips retain
+their existing behavior. The marker changes execution, not collection.</p>
+<p>The portable runner discovers the root hook when testing absolute paths from
+its temporary working directory with <code class="docutils literal notranslate"><span class="pre">--import-mode=append</span></code>; it continues to
+import the installed wheel. The tracked root <code class="docutils literal notranslate"><span class="pre">conftest.py</span></code> and tests already
+participate in the main package’s trigger/portable input digests, so changing
+this policy invalidates previous validation without a cache schema change.</p>
+</section>
+<section id="memory-ledger-reconciliation">
+<h2>Memory ledger reconciliation<a class="headerlink" href="#memory-ledger-reconciliation" title="Link to this heading">#</a></h2>
+<p>The analytical memory-budget tests run without launching a large attention case.
+For an explicit native FFA memory check on Hopper, use
+<code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">exps.attn.ffa_mem_budget</span> <span class="pre">--help</span></code> to inspect the opt-in experiment.</p>
+</section>
+</section>
+
+<div class="section ablog__blog_comments">
+   
+</div>
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal" tabindex="-1"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-organization">Test organization</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#running-a-focused-test">Running a focused test</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#writing-tests">Writing tests</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#python-and-c-common-backends">Python and C++ common backends</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#native-kernel-precompilation">Native kernel precompilation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-backend">Kernel Backend</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-case-filtering">Test Case Filtering</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-variables">Environment Variables</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#usage-examples">Usage Examples</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#flag-pinning-user-preset-environment-variables">Flag Pinning (User-Preset Environment Variables)</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Usage Examples</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#supported-flag-environment-variables">Supported Flag Environment Variables</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#flag-combination-generator">Flag Combination Generator</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#context-aware-filtering">Context-Aware Filtering</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overlapconfig-degree-semantics">OverlapConfig degree Semantics</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#architecture-independent-coverage">Architecture-independent coverage</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#memory-ledger-reconciliation">Memory ledger reconciliation</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="../_static/scripts/bootstrap.js?digest=75c7c72ae941e8b558d8"></script>
+<script defer src="../_static/scripts/pydata-sphinx-theme.js?digest=75c7c72ae941e8b558d8"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, SandAI.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 9.1.1.
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.24.0.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>
