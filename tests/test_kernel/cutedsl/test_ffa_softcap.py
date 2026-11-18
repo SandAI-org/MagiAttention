@@ -22,6 +22,7 @@ uncapped call.
 """
 
 import math
+import unittest
 from contextlib import contextmanager
 from typing import Iterator
 from unittest import TestCase, mock
@@ -36,7 +37,6 @@ from magi_attention.kernel.cutedsl import flex_flash_attn_func
 from magi_attention.kernel.cutedsl.ffa_utils import (
     MT_MAP,
     TorchFlexAttnArgs,
-    get_device_arch,
     normalize_softcap,
 )
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
@@ -48,6 +48,7 @@ from magi_attention.testing.cutedsl_utils import record_bwd_kernels, record_fwd_
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import calc_inf_norm
 from magi_attention.utils import make_attn_mask_from_ffa_args
+from magi_attention.utils.arch import is_blackwell
 
 _SOFTCAP = 30.0
 # The kernel may exceed the low-precision reference error by this factor.
@@ -73,6 +74,7 @@ def _kernel_config(kernel) -> tuple:
     )
 
 
+@unittest.skipUnless(is_blackwell(), "requires Blackwell")
 class TestFfaSoftcap(DistTestBase):
     @property
     def seed(self) -> int:
@@ -196,8 +198,6 @@ class TestFfaSoftcap(DistTestBase):
         """Dense fwd/bwd with softcap match the torch reference and keep the
         kernel configuration (incl. 2-CTA at head_dim 128/192) of the
         uncapped call."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         device, dtype = self.device, torch.bfloat16
         batch, seqlen, nheads = 2, 1000, 8
         nheads_kv = {"mha": nheads, "gqa": 2}[mha_type]
@@ -277,8 +277,6 @@ class TestFfaSoftcap(DistTestBase):
     def test_ranges(self, d, path, few_ctas):
         """Per-range mask types on the atomic, direct-store and RangeMerge
         paths, optionally on a persistent grid of two CTAs."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._ranges_inputs(
             8, d, self.seed + d + len(path) + int(few_ctas)
         )
@@ -320,8 +318,6 @@ class TestFfaSoftcap(DistTestBase):
     @parameterize("d", [64, 128])
     def test_ranges_gqa_packed_fwd_cat_gqa_bwd(self, d):
         """GQA ranges with the packed atomic fwd and the CatGQA bwd."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._ranges_inputs(
             2, d, self.seed + d
         )
@@ -356,8 +352,6 @@ class TestFfaSoftcap(DistTestBase):
         """GQA ranges with the packed bwd: every q head of a kv head shares
         one Q tile (pack factor 4), or two packed groups share it one after
         another in the head loop (pack factor 2)."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._ranges_inputs(
             2, d, self.seed + d + pack_factor
         )
@@ -391,8 +385,6 @@ class TestFfaSoftcap(DistTestBase):
     def test_ranges_sink_and_max_logits(self):
         """The sink joins the capped scores in the softmax, and max logits
         report the capped maximum per q head."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._ranges_inputs(
             2, 128, self.seed
         )
@@ -494,8 +486,6 @@ class TestFfaSoftcap(DistTestBase):
         group (RangeMerge fwd Q groups and bwd K groups, with CatGQA), incl.
         a relation without any pair: the capped partials merge to the
         reference, i.e. the cap applies per score, not to the merged result."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._overlap_inputs(
             2, d, self.seed + d + len(path), holes=path == "atomic"
         )
@@ -538,8 +528,6 @@ class TestFfaSoftcap(DistTestBase):
         """The cap is a runtime scalar: one fwd and one bwd kernel serve
         several cap values (and a non-default softmax_scale) in turn, each
         matching its reference, incl. returning to the first value."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._overlap_inputs(
             2, 128, self.seed, holes=False
         )
@@ -576,8 +564,6 @@ class TestFfaSoftcap(DistTestBase):
     def test_saturated_scores(self, d):
         """Scores whose u = softmax_scale * q.k / softcap sits at 0, +-1,
         +-3 and +-6, where 1 - tanh(u)^2 ranges from 1 down to ~2.5e-5."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         device, dtype = self.device, torch.bfloat16
         nrel, seqlen, nheads = 4, 256, 8
         softmax_scale = 1.0 / d**0.5
@@ -624,8 +610,6 @@ class TestFfaSoftcap(DistTestBase):
         """Atomic fwd with a sink on the overlap inputs: rows outside every q
         range and rows of a relation without any pair hold only the sink;
         O, LSE, dQ/dK/dV and dsink match the reference."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         q, k, v, q_ranges, k_ranges, attn_type_map, kwargs = self._overlap_inputs(
             2, 128, self.seed + 7, holes=True
         )
@@ -660,8 +644,6 @@ class TestFfaSoftcap(DistTestBase):
     def test_zero_softcap_builds_the_uncapped_kernel(self):
         """``softcap=0.0`` means no cap: the uncapped kernels run and the
         results match the default call bitwise."""
-        if get_device_arch()[1] not in (10, 11):
-            return
         q, k, v, _, _, _, kwargs = self._ranges_inputs(8, 64, self.seed)
         out, _, _, _, built = self._fwd_bwd(q, k, v, 0.0, **kwargs)
         self.assertFalse(
@@ -673,8 +655,6 @@ class TestFfaSoftcap(DistTestBase):
 
     @with_run_in_mp
     def test_softcap_rejects_a_user_score_mod(self):
-        if get_device_arch()[1] not in (10, 11):
-            return
         q, k, v, _, _, _, kwargs = self._ranges_inputs(8, 64, self.seed)
 
         def score_mod(score, b, h, q_idx, kv_idx, aux_tensors):
@@ -716,9 +696,8 @@ class TestFfaSoftcapHost(TestCase):
         lse = torch.randn(1, 4, 256, device="cuda", dtype=torch.float32)
         return q, k, v, out, lse, torch.randn_like(q)
 
+    @unittest.skipUnless(is_blackwell(), "requires Blackwell")
     def test_invalid_softcap_rejected_by_fwd_and_bwd(self):
-        if get_device_arch()[1] not in (10, 11):
-            self.skipTest("the cutedsl kernels require SM100/SM110 here")
         q, k, v, out, lse, dout = self._dense_inputs()
         with self.assertRaises(ValueError):
             _flex_flash_attn_fwd(q, k, v, softcap=-1.0)
@@ -742,7 +721,7 @@ class TestFfaSoftcapHost(TestCase):
             with self.assertRaises(_FallbackBuilt):
                 _flex_flash_attn_bwd(q, k, v, out, lse, dout, softcap=30.0)
 
-        if get_device_arch()[1] not in (10, 11):
+        if not is_blackwell():
             return
         with mock.patch.object(
             ffa_module, "create_softcap_scoremod", side_effect=_FallbackBuilt
